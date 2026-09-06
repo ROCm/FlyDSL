@@ -15,6 +15,8 @@ to GPU/ROCDL.
 
    .. grid-item-card:: Getting started
 
+      * :doc:`Product overview <product_overview>`
+
       * :doc:`Install FlyDSL <installation>`
 
       * :doc:`Quick start <quickstart>`

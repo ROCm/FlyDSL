@@ -166,6 +166,7 @@ bash scripts/build.sh -j64
 
 | **Topic** | **Description** | **Guide** |
 |---|---|---|
+| Product overview | What FlyDSL is, who it serves, hardware/kernel map, framework delivery | [Product Overview](docs/product_overview.md) |
 | Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
 | Layout System | FlyDSL layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
 | Kernel Authoring | Writing GPU kernels — `@flyc.kernel`, `@flyc.jit`, expression API, MlirModule, tiled copies, MFMA, shared memory | [Kernel Guide](docs/kernel_authoring_guide.md) |

@@ -79,6 +79,7 @@ FlyDSL/
 
 | Topic | Doc | Notes |
 |---|---|---|
+| Product overview | [`docs/product_overview.md`](docs/product_overview.md) | What FlyDSL is, layout differentiator, arch matrix, kernel catalog, AITER/vLLM/SGLang delivery |
 | Architecture & compiler pipeline | [`docs/architecture_guide.md`](docs/architecture_guide.md) | Project structure, AST tracing, MLIR pass pipeline, JIT/runtime |
 | Layout algebra | [`docs/layout_system_guide.md`](docs/layout_system_guide.md) | Shape/Stride/Layout/Coord APIs, products, divides, coordinate mapping |
 | CuTe layout reference | [`docs/cute_layout_algebra_guide.md`](docs/cute_layout_algebra_guide.md) | Mathematical background and FlyDSL mapping of CuTe concepts |

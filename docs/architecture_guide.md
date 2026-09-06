@@ -1,6 +1,6 @@
 # Architecture & compilation pipeline guide
 
-This guide covers the FlyDSL project structure, compilation stages, key abstractions, and environment configuration.
+This guide covers the FlyDSL project structure, compilation stages, key abstractions, and environment configuration. For product positioning, the hardware/kernel catalog, and how kernels reach AITER / vLLM / SGLang, see the [product overview](product_overview.md).
 
 ## Quick Reference
 

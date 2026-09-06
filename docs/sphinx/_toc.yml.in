@@ -11,6 +11,8 @@ defaults:
   maxdepth: 6
 subtrees:
   - entries:
+      - file: product_overview
+        title: Product overview
       - file: installation
         title: Install FlyDSL
       - file: quickstart
