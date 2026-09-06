@@ -5022,25 +5022,36 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
 
     def _stage_v_fp8_block_dma(self, tile_start, buf_id):
         traits = self.traits
-        v_tile_bytes = (traits.BLOCK_N // 8) * (traits.HEAD_DIM_V // 16) * 128
+        nbands = traits.HEAD_DIM_V // 16
+        v_tile_bytes = (traits.BLOCK_N // 8) * nbands * 128
         buf_off = buf_id * v_tile_bytes
         aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
-        groups = traits.BLOCK_N // 8
-        passes = -(-groups // traits.NUM_WAVES)
+        # The tile is BLOCK_N * nbands 16-byte slots, and one DMA instruction moves a
+        # whole wave of them. Hand out instructions, not row-groups: a wave's LDS
+        # destination is then always a full WARP_SIZE*16 span, so nothing has to be
+        # masked off inside a wave. buffer_load...lds strides the LDS write by lane
+        # regardless of exec, so an intra-wave mask would still write past the span.
+        per_dma = traits.WARP_SIZE * traits.VEC_KV * traits.ELEM_BYTES
+        slots_per_group = 8 * nbands
+        num_dma = (traits.BLOCK_N * nbands * 16) // per_dma
+        passes = -(-num_dma // traits.NUM_WAVES)
         for pas in range_constexpr(passes):
-            grp = self.wave_id_uni + fx.Index(pas * traits.NUM_WAVES)
-            lds_addr = aligned_base + fx.Index(buf_off) + grp * fx.Index(1024)
-            dest_n = fx.Int32(grp * fx.Index(8) + self.lane % fx.Index(8))
+            dma_id = self.wave_id_uni + fx.Index(pas * traits.NUM_WAVES)
+            slot = dma_id * fx.Index(traits.WARP_SIZE) + self.lane
+            lds_addr = aligned_base + fx.Index(buf_off) + dma_id * fx.Index(per_dma)
+            grp = slot // fx.Index(slots_per_group)
+            rem = slot % fx.Index(slots_per_group)
+            dest_n = fx.Int32(grp * fx.Index(8) + rem % fx.Index(8))
             w16 = dest_n % fx.Int32(16)
             c_add = (w16 >= fx.Int32(4)) & (w16 < fx.Int32(8))
             c_sub = (w16 >= fx.Int32(8)) & (w16 < fx.Int32(12))
             n = dest_n + c_add.select(fx.Int32(4), fx.Int32(0)) - c_sub.select(fx.Int32(4), fx.Int32(0))
-            d_block = self.lane // fx.Index(8)
+            d_block = rem // fx.Index(8)
             src_elem = self.v_gmem_elem_offset + fx.Index(n) * self.stride_v_n_v + d_block * fx.Index(16)
-            if const_expr(groups % traits.NUM_WAVES == 0 or pas < passes - 1):
+            if const_expr(num_dma % traits.NUM_WAVES == 0 or pas < passes - 1):
                 self.buffer_load_lds_128(self.v_div, lds_addr, src_elem, tile_start * self.stride_v_n_v)
             else:
-                self._load_v_group_if_in_tile(lds_addr, src_elem, tile_start, grp, groups)
+                self._load_v_group_if_in_tile(lds_addr, src_elem, tile_start, dma_id, num_dma)
 
     def _load_v_group_if_in_tile(self, lds_addr, src_elem, tile_start, grp, groups):
         soffset = tile_start * self.stride_v_n_v
@@ -5372,23 +5383,19 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
             all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
 
-            o0, o1, o2, o3 = (
-                as_mlir_value(v_o[0]),
-                as_mlir_value(v_o[1]),
-                as_mlir_value(v_o[2]),
-                as_mlir_value(v_o[3]),
-            )
+            o_out = [as_mlir_value(v_o[dc]) for dc in range_constexpr(self.traits.D_CHUNKS)]
             m_out = as_mlir_value(m_row)
             l_out = as_mlir_value(l_row)
             vp_out = self.v_p_to_vec32(v_p)
             if fx.Boolean(all_below):
                 pass
             else:
-                m_new, corr, (o0, o1, o2, o3) = self._lazy_correction(v_o, m_row, m_tile_max)
+                m_new, corr, scaled_accs = self._lazy_correction(v_o, m_row, m_tile_max)
+                o_out = [as_mlir_value(scaled_accs[dc]) for dc in range_constexpr(self.traits.D_CHUNKS)]
                 vp_out = self.v_p_to_vec32(self.scale_v_p(v_p, corr))
                 l_out = as_mlir_value(l_row * corr)
                 m_out = self.anchor_scalar_f32(m_new)
-            return ([o0, o1, o2, o3], m_out, l_out, self.v_vec32_to_p(vp_out))
+            return (o_out, m_out, l_out, self.v_vec32_to_p(vp_out))
 
         return _run(v_o, m_row, l_row, m_tile_max, v_p)
 
@@ -5402,21 +5409,17 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
             all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
 
-            o0, o1, o2, o3 = (
-                as_mlir_value(v_o[0]),
-                as_mlir_value(v_o[1]),
-                as_mlir_value(v_o[2]),
-                as_mlir_value(v_o[3]),
-            )
+            o_out = [as_mlir_value(v_o[dc]) for dc in range_constexpr(self.traits.D_CHUNKS)]
             m_out = as_mlir_value(m_row)
             l_out = as_mlir_value(l_row)
             if fx.Boolean(all_below):
                 pass
             else:
-                m_new, corr, (o0, o1, o2, o3) = self._lazy_correction(v_o, m_row, m_tile_max)
+                m_new, corr, scaled_accs = self._lazy_correction(v_o, m_row, m_tile_max)
+                o_out = [as_mlir_value(scaled_accs[dc]) for dc in range_constexpr(self.traits.D_CHUNKS)]
                 l_out = as_mlir_value(l_row * corr)
                 m_out = self.anchor_scalar_f32(m_new)
-            return ([o0, o1, o2, o3], m_out, l_out)
+            return (o_out, m_out, l_out)
 
         return _run(v_o, m_row, l_row, m_tile_max)
 
