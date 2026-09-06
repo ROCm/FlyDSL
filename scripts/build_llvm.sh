@@ -13,9 +13,10 @@ LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
-# Read LLVM commit hash from thirdparty/llvm-build-info.json (upstream entry)
+# Read LLVM commit hash and repository from thirdparty/llvm-build-info.json (upstream entry)
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
 LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
+LLVM_REMOTE_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['repository'])")
 LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
 LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
 LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
@@ -50,7 +51,7 @@ echo "LLVM Targets:   $LLVM_TARGETS_TO_BUILD"
 echo "LLVM Runtimes:  ${LLVM_ENABLE_RUNTIMES:-<none>}"
 
 # 1. Clone LLVM
-LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
+LLVM_REMOTE="${LLVM_REMOTE:-$LLVM_REMOTE_DEFAULT}"
 
 # A leftover partial ("promisor") clone is unusable here: every checkout, patch
 # and rev-parse would trigger per-blob lazy fetches against github.com. Unsetting
