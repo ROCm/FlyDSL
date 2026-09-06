@@ -31,7 +31,7 @@ external_projects_current_project = "flydsl"
 rocm_docs_generate_llms = True
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md", "biweekly"]
 
 # -- Options for HTML output -------------------------------------------------
 html_title = f"FlyDSL {version}"
