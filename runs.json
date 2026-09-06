@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-06T03:40:17Z",
+ "updated": "2026-09-06T04:47:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34012202245,
+   "pr": 1095,
+   "commit": "dd5eaffdf6d5bc6a3ab549fa5a9d134627d258fb",
+   "branch": "update_llvm_0.3.2",
+   "event": "pull_request",
+   "title": "[test only]",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34012202245",
+   "created_at": "2026-09-06T04:42:57Z",
+   "updated_at": "2026-09-06T04:45:56Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34012168430,
+   "pr": 1094,
+   "commit": "f72169e5aaa1e93c04b4a6b6faae8a35d1622c26",
+   "branch": "ci/pypi-moe-csv-hgemm",
+   "event": "pull_request",
+   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34012168430",
+   "created_at": "2026-09-06T04:42:09Z",
+   "updated_at": "2026-09-06T04:44:44Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34007399607,
    "pr": 1095,
@@ -2134,77 +2164,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 33520614777,
-   "pr": null,
-   "commit": "15553b3f10c1a55713f967eaf978c45c607e1cf2",
-   "branch": "main",
-   "event": "push",
-   "title": "Fly DSL test",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777",
-   "created_at": "2026-09-01T14:37:16Z",
-   "updated_at": "2026-09-01T16:40:41Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T15:00:35Z",
-     "completed_at": "2026-09-01T16:40:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777/job/99906117909",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T14:59:22Z",
-     "completed_at": "2026-09-01T16:12:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777/job/99906117944",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T15:00:20Z",
-     "completed_at": "2026-09-01T16:05:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777/job/99906117986",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-01T14:59:10Z",
-     "completed_at": "2026-09-01T15:12:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520614777/job/99906117998",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33520523624,
-   "pr": null,
-   "commit": "59653b21db362c0152df4f32f9c0ce1ca9b269fb",
-   "branch": "main",
-   "event": "push",
-   "title": "Fly DSL test",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33520523624",
-   "created_at": "2026-09-01T14:36:19Z",
-   "updated_at": "2026-09-01T14:38:00Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
