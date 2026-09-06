@@ -169,31 +169,24 @@ FP8_VARLEN_BATCHES = (1, 2, 3, 4)
 FP8_SPLITKV_SPLITS = (2, 4, 8, 16)
 FP8_SPLITKV_SEQLENS = (4096, 8192, 16384, 32768)
 
-FP8_EXTRA_CONFIGS = [
-    [FP8_VARLEN_Q_SEQLENS[b], None, None, 12, 12, 1, 192, 128]
-    for b in FP8_VARLEN_BATCHES
-] + [
-    [FP8_VARLEN_Q_SEQLENS[b], FP8_VARLEN_KV_SEQLENS[b], None, 12, 12, 1, 192, 128]
-    for b in FP8_VARLEN_BATCHES
-] + [
-    [seq, seq, b, 12, 12, 1, 192, 128]
-    for seq in (4096, 8192, 16384, 32768)
-    for b in ((1, 2) if seq == 32768 else (1, 2, 3, 4))
-] + [
-    [seq, seq, 1, 12, 12, sp, 192, 128]
-    for seq, sp in zip(FP8_SPLITKV_SEQLENS, FP8_SPLITKV_SPLITS)
-] + [
-    [8192, 8192, b, 12, 12, 4, 192, 128]
-    for b in (2, 3, 4)
-] + [
-    [8192, 8192, 1, 12, 12, sp, 128, 128]
-    for sp in FP8_SPLITKV_SPLITS
-] + [
-    [512, 16384, 1, 12, 12, 8, 192, 128],
-    [2614, 16384, 1, 12, 12, 8, 192, 128],
-    [1024, 32768, 1, 12, 12, 16, 192, 128],
-    [512, 16384, 4, 12, 12, 8, 192, 128],
-]
+FP8_EXTRA_CONFIGS = (
+    [[FP8_VARLEN_Q_SEQLENS[b], None, None, 12, 12, 1, 192, 128] for b in FP8_VARLEN_BATCHES]
+    + [[FP8_VARLEN_Q_SEQLENS[b], FP8_VARLEN_KV_SEQLENS[b], None, 12, 12, 1, 192, 128] for b in FP8_VARLEN_BATCHES]
+    + [
+        [seq, seq, b, 12, 12, 1, 192, 128]
+        for seq in (4096, 8192, 16384, 32768)
+        for b in ((1, 2) if seq == 32768 else (1, 2, 3, 4))
+    ]
+    + [[seq, seq, 1, 12, 12, sp, 192, 128] for seq, sp in zip(FP8_SPLITKV_SEQLENS, FP8_SPLITKV_SPLITS)]
+    + [[8192, 8192, b, 12, 12, 4, 192, 128] for b in (2, 3, 4)]
+    + [[8192, 8192, 1, 12, 12, sp, 128, 128] for sp in FP8_SPLITKV_SPLITS]
+    + [
+        [512, 16384, 1, 12, 12, 8, 192, 128],
+        [2614, 16384, 1, 12, 12, 8, 192, 128],
+        [1024, 32768, 1, 12, 12, 16, 192, 128],
+        [512, 16384, 4, 12, 12, 8, 192, 128],
+    ]
+)
 
 
 def _short_label(value):
@@ -5071,7 +5064,6 @@ def test_fp8_default_is_the_lazy_rescale():
     torch.testing.assert_close(default, lazy, rtol=0, atol=0)
 
 
-
 _FP8_HEADS = 12
 _FP8_D, _FP8_DV = 192, 128
 
@@ -5097,8 +5089,7 @@ def _assert_fp8_shape(causal, batch=1, seq_len=1, head_dim=_FP8_D, head_dim_v=_F
     )
     assert "err" not in r, r["err"]
     assert r["passed"], (
-        f"fp8 gate: max_err={r['max_err']:.3e} (< {FP8_MAX_ERR}), "
-        f"min_cos={r['min_cos']:.5f} (> {FP8_MIN_COS})"
+        f"fp8 gate: max_err={r['max_err']:.3e} (< {FP8_MAX_ERR}), " f"min_cos={r['min_cos']:.5f} (> {FP8_MIN_COS})"
     )
 
 

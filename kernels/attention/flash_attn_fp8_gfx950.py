@@ -27,8 +27,8 @@ from kernels.attention.flash_attn_utils import (
     DualwaveSplitKCombineHelper,
     _make_dualwave_swp_fp8_traits,
     _s_setprio,
-    _waitcnt_vm_n,
     _stagger_extra_barrier_if_one,
+    _waitcnt_vm_n,
     dualwave_splitk_workspace_elems,  # noqa: F401
 )
 from kernels.common.kernels_common import dtype_to_elem_type
@@ -108,7 +108,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
     BLOCK_M = traits.BLOCK_M
     BLOCK_SIZE = traits.BLOCK_SIZE
     HEAD_DIM = traits.HEAD_DIM
-    HEAD_DIM_V = traits.HEAD_DIM_V
     NUM_HEADS_Q = traits.NUM_HEADS_Q
     BATCH_INTERLEAVE_GROUP = traits.BATCH_INTERLEAVE_GROUP
     DEFAULT_STRIDE_Q_N = traits.DEFAULT_STRIDE_Q_N

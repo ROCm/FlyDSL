@@ -1242,27 +1242,17 @@ def flydsl_flash_attn_func(
             _arch = _gpu_arch(q.device)
             can_dualwave = D in (64, 128) and dtype_str in ("bf16", "f16") and _arch.startswith("gfx950")
             if debug_lazy and not can_dualwave:
-                raise NotImplementedError(
-                    "flydsl_flash_attn_func: debug_counts requires the gfx950 DUALWAVE_SWP path"
-                )
+                raise NotImplementedError("flydsl_flash_attn_func: debug_counts requires the gfx950 DUALWAVE_SWP path")
             if (has_bias or has_alibi or has_sink) and not can_dualwave:
                 _term = "bias" if has_bias else ("alibi_slopes" if has_alibi else "sink")
                 raise NotImplementedError(
                     f"flydsl_flash_attn_func: {_term} requires the gfx950 DUALWAVE_SWP path "
                     f"(D=64/128, bf16/f16, gfx950); got D={D}, dtype={dtype_str}, arch='{_arch or 'unknown'}'"
                 )
-            if (
-                debug_lazy
-                or has_bias
-                or has_alibi
-                or has_sink
-                or (can_dualwave and _dense_routes_to_dualwave(B, Sq))
-            ):
+            if debug_lazy or has_bias or has_alibi or has_sink or (can_dualwave and _dense_routes_to_dualwave(B, Sq)):
                 num_q_blocks = -(-int(Sq) // DUALWAVE_SWP_BLOCK_M)
                 if dualwave_swp_xcd_swizzle is None:
-                    xcd_swizzle = (
-                        not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE
-                    )
+                    xcd_swizzle = not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE
                 else:
                     xcd_swizzle = dualwave_swp_xcd_swizzle
                 exe = _build_dense_dualwave(

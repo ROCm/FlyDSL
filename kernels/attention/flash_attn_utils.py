@@ -1022,9 +1022,7 @@ def _init_dualwave_thread_mapping(ctx):
     elif const_expr(batch_interleave_group > 1):
         linear_head_batch = fx.Index(gpu.block_idx.x)
         ctx.h_idx = linear_head_batch % traits.NUM_HEADS_Q
-        ctx.batch_idx = (
-            fx.Index(gpu.block_idx.z) * batch_interleave_group + linear_head_batch // traits.NUM_HEADS_Q
-        )
+        ctx.batch_idx = fx.Index(gpu.block_idx.z) * batch_interleave_group + linear_head_batch // traits.NUM_HEADS_Q
         ctx.q_block_idx = fx.Index(gpu.block_idx.y)
     else:
         ctx.h_idx = fx.Index(gpu.block_idx.x)
@@ -1946,8 +1944,7 @@ def _make_dualwave_swp_fp8_traits(
         head_dim_v = head_dim
     if head_dim % 64 or head_dim_v % 32:
         raise RuntimeError(
-            f"fp8 flash attention needs head_dim % 64 == 0 and head_dim_v % 32 == 0, "
-            f"got {head_dim}/{head_dim_v}"
+            f"fp8 flash attention needs head_dim % 64 == 0 and head_dim_v % 32 == 0, " f"got {head_dim}/{head_dim_v}"
         )
     block_n = 64
     k_sub_n = 32
