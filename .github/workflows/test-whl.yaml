@@ -121,6 +121,8 @@ jobs:
           fi
           python3 -c "from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')"
           python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt
+          # test_moe_2stage.py calls DataFrame.to_markdown() after the CSV sweep.
+          python3 -m pip install tabulate
           # 7.14 PyTorch image: TheRock pip-ROCm. libamdhip64.so (unversioned) is
           # in rocm-sdk-devel after `rocm-sdk init`; core only has libamdhip64.so.N.
           python3 /flydsl/.github/scripts/find_rocm_path.py --ensure-devel
