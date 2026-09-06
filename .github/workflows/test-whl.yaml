@@ -135,7 +135,9 @@ jobs:
           set -euo pipefail
           # hipcc in this image lives under the venv; without ROCM_PATH aiter
           # treats /opt/venv as ROCm home and links -L/opt/venv/lib -lamdhip64.
-          if [ -z "${ROCM_PATH:-}" ]; then
+          # Initialize before any ${ROCM_PATH} expansion: set -u aborts otherwise.
+          ROCM_PATH="${ROCM_PATH:-}"
+          if [ -z "${ROCM_PATH}" ]; then
             if command -v rocm-sdk >/dev/null 2>&1; then
               _sdk="$(rocm-sdk path --root 2>/dev/null || true)"
               if [ -n "${_sdk}" ] && { [ -e "${_sdk}/lib/libamdhip64.so" ] || [ -e "${_sdk}/lib64/libamdhip64.so" ]; }; then
