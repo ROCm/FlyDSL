@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-06T08:20:10Z",
+ "updated": "2026-09-06T08:50:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "binding_fa_more_feature_support",
    "event": "pull_request",
    "title": "FlashAttention FP8: Added support for asymmetric head dimensions, variable sequence lengths (varlen), and KV splitting",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34018991361",
    "created_at": "2026-09-06T07:22:55Z",
-   "updated_at": "2026-09-06T07:41:38Z",
+   "updated_at": "2026-09-06T08:47:11Z",
    "actor": "binding7012",
    "jobs": [
     {
@@ -30,20 +30,22 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-06T07:41:37Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34018991361/job/101450159987"
+     "completed_at": "2026-09-06T08:29:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34018991361/job/101450159987",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-06T07:41:37Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34018991361/job/101450160025"
+     "completed_at": "2026-09-06T08:47:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34018991361/job/101450160025",
+     "log_fetch_failed": true
     }
    ]
   },
