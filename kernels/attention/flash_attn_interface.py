@@ -61,6 +61,67 @@ def _fp8_rescale_threshold(seqlen_kv: int) -> float:
     return 6.0 if seqlen_kv <= _FP8_LONG_SEQ else 4.0
 
 
+_FP8_AUTOSPLIT_MIN_TILES = 16
+_FP8_AUTOSPLIT_MIN_TILES_CAUSAL = 16
+_FP8_AUTOSPLIT_MAX_WS_BYTES = 1 << 30
+_FP8_BLOCK_N = 64
+_FP8_AUTOSPLIT_CANDIDATES = tuple(range(1, 17))
+_FP8_AUTOSPLIT_FIXED_TILES = 10.4
+_FP8_AUTOSPLIT_CAUSAL_SKEW = 0.75
+_FP8_AUTOSPLIT_DENSE_MARGIN = 0.85
+
+
+_FP8_NARROW_MAX_KV_TILES = 48
+_FP8_NARROW_MIN_TILES_2ROUND = 24
+_FP8_NARROW_MIN_WGS_CAUSAL = 150
+
+
+def _fp8_auto_block_m(batch: int, num_heads: int, seqlen_q: int, seqlen_kv: int, causal: bool, num_cu: int) -> int:
+    """Pick BLOCK_M (256 wide / 128 narrow) for an fp8 shape."""
+    kv_tiles = -(-seqlen_kv // _FP8_BLOCK_N)
+    if kv_tiles > _FP8_NARROW_MAX_KV_TILES:
+        return DUALWAVE_SWP_BLOCK_M
+    narrow = DUALWAVE_SWP_BLOCK_M // 2
+    wide_wgs = num_heads * -(-seqlen_q // DUALWAVE_SWP_BLOCK_M) * batch
+    narrow_wgs = num_heads * -(-seqlen_q // narrow) * batch
+    if causal:
+        return narrow if wide_wgs >= _FP8_NARROW_MIN_WGS_CAUSAL else DUALWAVE_SWP_BLOCK_M
+    if narrow_wgs <= num_cu:
+        return narrow
+    if wide_wgs <= num_cu and kv_tiles >= _FP8_NARROW_MIN_TILES_2ROUND:
+        return narrow
+    return DUALWAVE_SWP_BLOCK_M
+
+
+def _fp8_auto_kv_splits(
+    batch: int, num_heads: int, seqlen_q: int, seqlen_kv: int, causal: bool, num_cu: int, varlen: bool = False
+) -> int:
+    """Pick num_kv_splits by minimising `rounds(s) * (FIXED + tiles/s)`."""
+    wgs = num_heads * -(-seqlen_q // DUALWAVE_SWP_BLOCK_M) * batch
+    kv_tiles = -(-seqlen_kv // _FP8_BLOCK_N)
+
+    if not causal:
+        kept = 1.0
+    elif seqlen_q <= seqlen_kv:
+        kept = max(0.0, 1.0 - (seqlen_q - 1) / (2.0 * seqlen_kv))
+    else:
+        kept = 0.5 * seqlen_kv / seqlen_q
+    if kept < _FP8_AUTOSPLIT_CAUSAL_SKEW:
+        if wgs < num_cu and kv_tiles // 2 >= _FP8_AUTOSPLIT_MIN_TILES_CAUSAL:
+            return 2
+        return 1
+
+    def makespan(splits: int) -> float:
+        n = wgs * splits
+        return (-(-n // num_cu)) * (_FP8_AUTOSPLIT_FIXED_TILES + -(-kv_tiles // splits))
+
+    usable = [s for s in _FP8_AUTOSPLIT_CANDIDATES if s == 1 or kv_tiles // s >= _FP8_AUTOSPLIT_MIN_TILES]
+    best = min(usable, key=makespan)
+    if best == 1 or varlen:
+        return best
+    return best if makespan(best) <= _FP8_AUTOSPLIT_DENSE_MARGIN * makespan(1) else 1
+
+
 def _dtype_str(t: torch.Tensor) -> str:
     s = _DTYPE_MAP.get(t.dtype)
     if s is None:
@@ -179,6 +240,16 @@ def _build_dense_dualwave(
     )
 
 
+_FP8_BATCH_INTERLEAVE_GROUP = 2
+
+
+def _fp8_batch_interleave_group(batch: int, causal: bool, cross: bool, num_kv_splits: int) -> int:
+    if not causal or cross or num_kv_splits > 1:
+        return 1
+    g = _FP8_BATCH_INTERLEAVE_GROUP
+    return g if batch % g == 0 else 1
+
+
 @functools.lru_cache(maxsize=128)
 def _build_dense_fp8(
     num_heads: int,
@@ -190,13 +261,21 @@ def _build_dense_fp8(
     lazy_rescale: bool,
     setprio: bool,
     enable_stagger: bool,
+    head_dim: int = 128,
+    head_dim_v: int | None = None,
+    varlen: bool = False,
+    cross_seqlen: bool = False,
+    num_kv_splits: int = 1,
+    block_m: int = 256,
+    batch_interleave_group: int = 1,
 ):
-    """Build (and cache) the dense gfx950 fp8 launcher."""
+    """Build (and cache) the gfx950 fp8 launcher (dense, packed varlen, or split-K)."""
     from kernels.attention.flash_attn_fp8_gfx950 import build_flash_attn_dualwave_swp_fp8_module
 
     return build_flash_attn_dualwave_swp_fp8_module(
         num_heads=num_heads,
-        head_dim=128,
+        head_dim=head_dim,
+        head_dim_v=head_dim_v,
         causal=causal,
         dtype_str="fp8",
         num_kv_heads=num_kv_heads,
@@ -206,6 +285,11 @@ def _build_dense_fp8(
         dualwave_swp_lazy_rescale=lazy_rescale,
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
+        varlen=varlen,
+        cross_seqlen=cross_seqlen,
+        num_kv_splits=num_kv_splits,
+        block_m=block_m,
+        batch_interleave_group=batch_interleave_group,
     )
 
 
@@ -933,10 +1017,6 @@ def flydsl_flash_attn_func(
     varlen = cu_seqlens_q is not None
 
     if dtype_str == "fp8":
-        if varlen:
-            raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support varlen")
-        if num_kv_splits > 1:
-            raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support split-K")
         if debug_counts is not None:
             raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support debug_counts")
         if any(x is None for x in (q_descale, k_descale, v_descale)):
@@ -953,8 +1033,11 @@ def flydsl_flash_attn_func(
         raise ValueError("flydsl_flash_attn_func: cu_seqlens_kv required when cu_seqlens_q is given")
     if not varlen and cu_seqlens_kv is not None:
         raise ValueError("flydsl_flash_attn_func: cu_seqlens_q required when cu_seqlens_kv is given")
-    if varlen and num_kv_splits > 1:
-        raise ValueError("flydsl_flash_attn_func: varlen + split-K (num_kv_splits>1) is not supported")
+    if varlen and num_kv_splits > 1 and dtype_str != "fp8":
+        raise ValueError(
+            "flydsl_flash_attn_func: varlen + split-K (num_kv_splits>1) is bf16/f16-unsupported; "
+            "only the fp8 launcher builds a varlen split-K kernel"
+        )
 
     # ── shape inference ─────────────────────────────────────────────────────
     if varlen:
@@ -985,6 +1068,15 @@ def flydsl_flash_attn_func(
         raise ValueError(f"flydsl_flash_attn_func: num_heads ({H}) must be divisible by num_kv_heads ({num_kv_heads})")
     if D < 64 or D % 32 != 0:
         raise ValueError(f"flydsl_flash_attn_func: head_dim ({D}) must be >= 64 and a multiple of 32")
+
+    Dv = int(v.shape[-1])
+    if Dv != D and dtype_str != "fp8":
+        raise NotImplementedError(
+            f"flydsl_flash_attn_func: a V head_dim ({Dv}) different from the QK head_dim ({D}) "
+            f"is fp8-only, got dtype {dtype_str}"
+        )
+    if k.shape[-1] != D:
+        raise ValueError(f"flydsl_flash_attn_func: K head_dim ({k.shape[-1]}) must match Q head_dim ({D})")
 
     if has_bias:
         # Bias rows are indexed by q token, columns by the per-batch-local key.
@@ -1019,16 +1111,37 @@ def flydsl_flash_attn_func(
     if has_sink and sink.shape[0] != H:
         raise ValueError(f"flydsl_flash_attn_func: sink must be [num_heads={H}], got {tuple(sink.shape)}")
 
+    _fp8_block_m = DUALWAVE_SWP_BLOCK_M
+    if dtype_str == "fp8":
+        _skv_bm = (int(max_seqlen_kv) if cross else Sq) if varlen else int(Skv)
+        _fp8_block_m = _fp8_auto_block_m(B, H, Sq, _skv_bm, causal, _dense_light_cu(q.device))
+
+    if dtype_str == "fp8" and int(num_kv_splits) == 1 and Sq >= 384:
+        _skv_eff = (int(max_seqlen_kv) if cross else Sq) if varlen else int(Skv)
+        _auto = _fp8_auto_kv_splits(B, H, Sq, _skv_eff, causal, _dense_light_cu(q.device), varlen=varlen)
+        if _auto > 1 and dualwave_splitk_workspace_elems(B, H, Sq, _auto, head_dim=Dv) * 4 <= (
+            _FP8_AUTOSPLIT_MAX_WS_BYTES
+        ):
+            num_kv_splits = _auto
+
     splitk = num_kv_splits > 1
 
     # ── split-K eligibility guard (SKIP analogous to run_splitk_config) ────
     if splitk:
-        if D not in (64, 128) or dtype_str not in ("bf16", "f16") or Sq < 384:
-            raise ValueError(
-                f"flydsl_flash_attn_func: split-K requires D=64/128, dtype bf16/f16, seq_len>=384; "
-                f"got D={D}, dtype={dtype_str}, seq_len={Sq}"
-            )
-        ws_elems = dualwave_splitk_workspace_elems(B, H, Sq, int(num_kv_splits), head_dim=D)
+        if Sq < 384:
+            raise ValueError(f"flydsl_flash_attn_func: split-K requires seq_len>=384, got {Sq}")
+        if dtype_str != "fp8":
+            if D not in (64, 128) or dtype_str not in ("bf16", "f16"):
+                raise ValueError(
+                    f"flydsl_flash_attn_func: split-K requires D=64/128, dtype bf16/f16/fp8; "
+                    f"got D={D}, dtype={dtype_str}"
+                )
+            if Skv != Sq:
+                raise ValueError(
+                    f"flydsl_flash_attn_func: split-K (num_kv_splits>1) requires seq_len_kv == seq_len_q; "
+                    f"got seq_len_q={Sq}, seq_len_kv={Skv}"
+                )
+        ws_elems = dualwave_splitk_workspace_elems(B, H, Sq, int(num_kv_splits), head_dim=Dv)
 
     # ── build (cached) ──────────────────────────────────────────────────────
     debug_lazy = debug_counts is not None
@@ -1036,7 +1149,30 @@ def flydsl_flash_attn_func(
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
 
-        if splitk:
+        if dtype_str == "fp8":
+            _arch = _gpu_arch(q.device)
+            if not _arch.startswith("gfx950"):
+                raise ValueError(f"flydsl_flash_attn_func: fp8 requires gfx950, got '{_arch or 'unknown'}'")
+            _skv_hint = (int(max_seqlen_kv) if cross else Sq) if varlen else int(Skv)
+            exe = _build_dense_fp8(
+                num_heads=H,
+                num_kv_heads=num_kv_heads,
+                causal=causal,
+                rescale_threshold=_fp8_rescale_threshold(_skv_hint),
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                lazy_rescale=dualwave_swp_lazy_rescale,
+                setprio=dualwave_swp_setprio,
+                enable_stagger=dualwave_swp_enable_stagger,
+                head_dim=D,
+                head_dim_v=Dv,
+                varlen=varlen,
+                cross_seqlen=cross,
+                num_kv_splits=int(num_kv_splits),
+                block_m=_fp8_block_m,
+                batch_interleave_group=_fp8_batch_interleave_group(B, causal, cross, int(num_kv_splits)),
+            )
+        elif splitk:
             exe = _build_splitk(
                 num_heads=H,
                 num_kv_heads=num_kv_heads,
@@ -1104,98 +1240,74 @@ def flydsl_flash_attn_func(
                 )
         else:
             _arch = _gpu_arch(q.device)
-            if dtype_str == "fp8":
-                if not _arch.startswith("gfx950"):
-                    raise ValueError(f"flydsl_flash_attn_func: fp8 requires gfx950, got '{_arch or 'unknown'}'")
-                exe = _build_dense_fp8(
+            can_dualwave = D in (64, 128) and dtype_str in ("bf16", "f16") and _arch.startswith("gfx950")
+            if debug_lazy and not can_dualwave:
+                raise NotImplementedError(
+                    "flydsl_flash_attn_func: debug_counts requires the gfx950 DUALWAVE_SWP path"
+                )
+            if (has_bias or has_alibi or has_sink) and not can_dualwave:
+                _term = "bias" if has_bias else ("alibi_slopes" if has_alibi else "sink")
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func: {_term} requires the gfx950 DUALWAVE_SWP path "
+                    f"(D=64/128, bf16/f16, gfx950); got D={D}, dtype={dtype_str}, arch='{_arch or 'unknown'}'"
+                )
+            if (
+                debug_lazy
+                or has_bias
+                or has_alibi
+                or has_sink
+                or (can_dualwave and _dense_routes_to_dualwave(B, Sq))
+            ):
+                num_q_blocks = -(-int(Sq) // DUALWAVE_SWP_BLOCK_M)
+                if dualwave_swp_xcd_swizzle is None:
+                    xcd_swizzle = (
+                        not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE
+                    )
+                else:
+                    xcd_swizzle = dualwave_swp_xcd_swizzle
+                exe = _build_dense_dualwave(
                     num_heads=H,
                     num_kv_heads=num_kv_heads,
+                    head_dim=D,
                     causal=causal,
-                    rescale_threshold=_fp8_rescale_threshold(int(Skv)),
+                    dtype_str=dtype_str,
+                    cross_seqlen=cross,
                     waves_per_eu=waves_per_eu,
                     daz=daz,
                     lazy_rescale=dualwave_swp_lazy_rescale,
                     setprio=dualwave_swp_setprio,
+                    debug_lazy_counts=debug_lazy,
                     enable_stagger=dualwave_swp_enable_stagger,
+                    return_lse=return_lse,
+                    has_bias=has_bias,
+                    has_alibi=has_alibi,
+                    has_sink=has_sink,
+                    xcd_swizzle=xcd_swizzle,
                 )
             else:
-                can_dualwave = D in (64, 128) and dtype_str in ("bf16", "f16") and _arch.startswith("gfx950")
-                if debug_lazy and not can_dualwave:
-                    raise NotImplementedError(
-                        "flydsl_flash_attn_func: debug_counts requires the gfx950 DUALWAVE_SWP path"
-                    )
-                if (has_bias or has_alibi or has_sink) and not can_dualwave:
-                    _term = "bias" if has_bias else ("alibi_slopes" if has_alibi else "sink")
-                    raise NotImplementedError(
-                        f"flydsl_flash_attn_func: {_term} requires the gfx950 DUALWAVE_SWP path "
-                        f"(D=64/128, bf16/f16, gfx950); got D={D}, dtype={dtype_str}, arch='{_arch or 'unknown'}'"
-                    )
-                # bias/ALiBi force dualwave: the generic dense kernel folds in neither.
-                if (
-                    debug_lazy
-                    or has_bias
-                    or has_alibi
-                    or has_sink
-                    or (can_dualwave and _dense_routes_to_dualwave(B, Sq))
-                ):
-                    # Workgroups map to XCDs as linear_id % 8, and linear_id is
-                    # bx + by*H + bz*H*nqb, so with H % 8 == 0 a head-fast grid pins
-                    # head h to XCD h % 8. The ~256 resident workgroups span all H
-                    # heads within one batch, leaving each XCD to juggle H/8 K/V
-                    # streams against its L2 slice. The head-slow remap in
-                    # _init_dualwave_thread_mapping puts the resident window inside a
-                    # single head instead: 1 stream. Measured penalty for leaving it
-                    # off tracks H/8 (-6% at 8 streams, -3% at 4, nil at <=2), not the
-                    # hit rate and not traffic volume. Bijective, so output is
-                    # unchanged. NB: that function's own comment states the opposite
-                    # rationale ("scatter across all XCDs") and is wrong.
-                    num_q_blocks = -(-int(Sq) // DUALWAVE_SWP_BLOCK_M)
-                    if dualwave_swp_xcd_swizzle is None:
-                        xcd_swizzle = (
-                            not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE
-                        )
-                    else:
-                        xcd_swizzle = dualwave_swp_xcd_swizzle
-                    exe = _build_dense_dualwave(
-                        num_heads=H,
-                        num_kv_heads=num_kv_heads,
-                        head_dim=D,
-                        causal=causal,
-                        dtype_str=dtype_str,
-                        cross_seqlen=cross,
-                        waves_per_eu=waves_per_eu,
-                        daz=daz,
-                        lazy_rescale=dualwave_swp_lazy_rescale,
-                        setprio=dualwave_swp_setprio,
-                        debug_lazy_counts=debug_lazy,
-                        enable_stagger=dualwave_swp_enable_stagger,
-                        return_lse=return_lse,
-                        has_bias=has_bias,
-                        has_alibi=has_alibi,
-                        has_sink=has_sink,
-                        xcd_swizzle=xcd_swizzle,
-                    )
-                else:
-                    block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)
-                    exe = _build_dense(
-                        num_heads=H,
-                        num_kv_heads=num_kv_heads,
-                        head_dim=D,
-                        causal=causal,
-                        dtype_str=dtype_str,
-                        cross_seqlen=cross,
-                        block_m=block_m,
-                        flat_work_group_size=flat_work_group_size,
-                        path_tag=path_tag,
-                        waves_per_eu=waves_per_eu,
-                        daz=daz,
-                        return_lse=return_lse,
-                    )
+                block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)
+                exe = _build_dense(
+                    num_heads=H,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=D,
+                    causal=causal,
+                    dtype_str=dtype_str,
+                    cross_seqlen=cross,
+                    block_m=block_m,
+                    flat_work_group_size=flat_work_group_size,
+                    path_tag=path_tag,
+                    waves_per_eu=waves_per_eu,
+                    daz=daz,
+                    return_lse=return_lse,
+                )
 
         # ── allocate output ─────────────────────────────────────────────────
+        _out_shape = tuple(q.shape[:-1]) + (Dv,)
         if out is None:
             out_dtype = torch.bfloat16 if dtype_str == "fp8" else q.dtype
-            out = torch.empty(q.shape, dtype=out_dtype, device=q.device)
+            out = torch.empty(_out_shape, dtype=out_dtype, device=q.device)
+        elif tuple(out.shape) != _out_shape:
+            raise ValueError(f"flydsl_flash_attn_func: out must be {_out_shape}, got {tuple(out.shape)}")
         elif dtype_str == "fp8" and out.dtype != torch.bfloat16:
             raise ValueError(f"flydsl_flash_attn_func: fp8 output must be bf16, got {out.dtype}")
         elif dtype_str != "fp8" and out.dtype != q.dtype:
@@ -1226,7 +1338,18 @@ def flydsl_flash_attn_func(
             _bias_kw["alibi_slopes"] = alibi_slopes
         if has_sink:
             _bias_kw["sink"] = sink
-        if splitk:
+        if dtype_str == "fp8":
+            kwargs = dict(stream=launch_stream, q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
+            if splitk:
+                kwargs["workspace"] = torch.empty(ws_elems, dtype=torch.float32, device=q.device)
+            if varlen:
+                kwargs.update(cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv)
+                if cross:
+                    kwargs["seq_len_kv"] = int(max_seqlen_kv)
+            elif cross:
+                kwargs["seq_len_kv"] = Skv
+            exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
+        elif splitk:
             _ws = torch.empty(ws_elems, dtype=torch.float32, device=q.device)
             exe(q_flat, k_flat, v_flat, o_flat, B, Sq, workspace=_ws, lse=lse, stream=launch_stream, **_bias_kw)
         elif varlen:

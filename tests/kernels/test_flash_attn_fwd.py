@@ -152,6 +152,49 @@ EXTRA_CONFIGS = [
     [[127, 129, 255, 257], [257, 255, 129, 127], None, 64, 8, 1],
 ]
 
+FP8_VARLEN_Q_SEQLENS = {
+    1: [2614],
+    2: [1024, 1590],
+    3: [1024, 512, 1078],
+    4: [1024, 512, 256, 822],
+}
+FP8_VARLEN_KV_SEQLENS = {
+    1: [16384],
+    2: [8192, 8192],
+    3: [8192, 4096, 4096],
+    4: [8192, 4096, 2048, 2048],
+}
+FP8_VARLEN_BATCHES = (1, 2, 3, 4)
+
+FP8_SPLITKV_SPLITS = (2, 4, 8, 16)
+FP8_SPLITKV_SEQLENS = (4096, 8192, 16384, 32768)
+
+FP8_EXTRA_CONFIGS = [
+    [FP8_VARLEN_Q_SEQLENS[b], None, None, 12, 12, 1, 192, 128]
+    for b in FP8_VARLEN_BATCHES
+] + [
+    [FP8_VARLEN_Q_SEQLENS[b], FP8_VARLEN_KV_SEQLENS[b], None, 12, 12, 1, 192, 128]
+    for b in FP8_VARLEN_BATCHES
+] + [
+    [seq, seq, b, 12, 12, 1, 192, 128]
+    for seq in (4096, 8192, 16384, 32768)
+    for b in ((1, 2) if seq == 32768 else (1, 2, 3, 4))
+] + [
+    [seq, seq, 1, 12, 12, sp, 192, 128]
+    for seq, sp in zip(FP8_SPLITKV_SEQLENS, FP8_SPLITKV_SPLITS)
+] + [
+    [8192, 8192, b, 12, 12, 4, 192, 128]
+    for b in (2, 3, 4)
+] + [
+    [8192, 8192, 1, 12, 12, sp, 128, 128]
+    for sp in FP8_SPLITKV_SPLITS
+] + [
+    [512, 16384, 1, 12, 12, 8, 192, 128],
+    [2614, 16384, 1, 12, 12, 8, 192, 128],
+    [1024, 32768, 1, 12, 12, 16, 192, 128],
+    [512, 16384, 4, 12, 12, 8, 192, 128],
+]
+
 
 def _short_label(value):
     label = str(value)
@@ -159,7 +202,8 @@ def _short_label(value):
 
 
 def _extra_case_from_config(row):
-    seqlen_q, seqlen_kv, batch, nh, nh_kv, kv_splits = row
+    seqlen_q, seqlen_kv, batch, nh, nh_kv, kv_splits, *head_dims = row
+    dims = {"hd": head_dims[0], "hd_v": head_dims[1]} if head_dims else {}
     if seqlen_kv is None:
         return {
             "sq_label": _short_label(seqlen_q),
@@ -168,6 +212,7 @@ def _extra_case_from_config(row):
             "nh_kv": nh_kv,
             "kv_splits": kv_splits,
             "kwargs": {"varlen_seqlens_q": list(seqlen_q)},
+            **dims,
         }
     if batch is not None:
         return {
@@ -177,6 +222,7 @@ def _extra_case_from_config(row):
             "nh_kv": nh_kv,
             "kv_splits": kv_splits,
             "kwargs": {"batch": batch, "seqlen_q": seqlen_q, "seqlen_kv": seqlen_kv},
+            **dims,
         }
     return {
         "sq_label": _short_label(seqlen_q),
@@ -185,6 +231,7 @@ def _extra_case_from_config(row):
         "nh_kv": nh_kv,
         "kv_splits": kv_splits,
         "kwargs": {"varlen_seqlens_q": list(seqlen_q), "varlen_seqlens_kv": list(seqlen_kv)},
+        **dims,
     }
 
 
@@ -347,10 +394,11 @@ def pytorch_ref_attention_qkv_diff(q, k, v, causal=True, bias=None, alibi_slopes
         v_t = v_t.repeat_interleave(rep, dim=1)
     B, H, Sq, D = q_t.shape
     Skv = k_t.shape[2]
+    Dv = v_t.shape[3]
     delta = Skv - Sq
     scale = 1.0 / math.sqrt(D)
     k_trans = k_t.transpose(-1, -2).contiguous()
-    out = torch.empty((B, H, Sq, D), device=q_t.device, dtype=torch.float32)
+    out = torch.empty((B, H, Sq, Dv), device=q_t.device, dtype=torch.float32)
     chunk = max(1, min(Sq, (64 * 1024 * 1024) // max(B * H * Skv, 1)))
     key_idx = torch.arange(Skv, device=q_t.device).view(1, 1, 1, Skv)
     for s0 in range(0, Sq, chunk):
@@ -1102,6 +1150,11 @@ def run_attn_config(
     if splitk:
         if D not in (64, 128) or dtype_str not in ("bf16", "f16") or (seqlen_q is not None and seqlen_q < 384):
             return {"skip": True}
+        if not use_block_table and seqlen_kv is not None and seqlen_kv != seqlen_q:
+            return {
+                "skip": True,
+                "skip_reason": f"dense split-K requires seqlen_kv == seqlen_q, got {seqlen_kv} != {seqlen_q}",
+            }
 
     # ── bias addressing guard ────────────────────────────────────────────────
     if use_bias:
@@ -1618,6 +1671,26 @@ def _dequant_fp8(x_fp8, descale):
     return x_fp8.to(torch.float32) * descale.to(torch.float32)
 
 
+def _score_pairs(sq, skv, causal):
+    """(q, k) score elements actually computed for one sequence pair.
+
+    Non-causal is the full sq*skv rectangle. Causal is bottom-right aligned like
+    the kernel mask (row i attends keys [0, skv - sq + i]), so a cross-length pair
+    keeps the whole prefix. Matches sq*skv/2 when sq == skv, which is what the
+    self-attention TFLOPS numbers have always used.
+    """
+    if not causal:
+        return float(sq * skv)
+    if sq <= skv:
+        return 0.5 * sq * (2 * skv - sq)
+    return 0.5 * skv * skv
+
+
+def _fp8_flops(pairs, num_heads, head_dim, head_dim_v):
+    """FLOPs for `pairs` score elements: 2*pairs*D for QK^T plus 2*pairs*Dv for PV."""
+    return 2.0 * pairs * num_heads * (head_dim + head_dim_v)
+
+
 def run_fp8_config(
     batch,
     seq_len,
@@ -1630,30 +1703,41 @@ def run_fp8_config(
     verbose=True,
     num_kv_heads=None,
     num_kv_splits=1,
+    head_dim_v=None,
+    seqlen_kv=None,
+    varlen_seqlens_q=None,
+    varlen_seqlens_kv=None,
+    bench=True,
 ):
     """Run the FlyDSL fp8 (e4m3fn) forward path and validate vs a dequantized-input
     SDPA reference at the fixed fp8 gate (max_err < 5e-2 and min_cos > 0.98).
 
-    Unsupported fp8 configurations (non-gfx950, head_dim != 128, split-K) raise a
-    clear error that is surfaced as an ERROR row (never a silent SKIP). Returns a
-    run_config-compatible dict so it prints through the same summary table.
+    Shape options beyond dense self-attention:
+      - ``head_dim_v``: V (and therefore O) head dim, when it differs from the QK
+        ``head_dim`` -- e.g. QK D=192 with V Dv=128.
+      - ``seqlen_kv``: dense cross-attention, K/V longer or shorter than Q.
+      - ``varlen_seqlens_q`` / ``varlen_seqlens_kv``: packed varlen. Q is
+        ``[total_q, H, D]``, K/V are ``[total_kv, Hkv, *]`` and cu_seqlens are
+        derived from the per-sequence lengths. Passing only ``varlen_seqlens_q``
+        makes it self-attention.
+      - ``num_kv_splits`` > 1: forwarded to the split-K path.
+
+    Only configurations that can never be valid (wrong arch, indivisible head
+    counts, malformed lengths) are rejected here. Anything the kernel does not
+    implement yet reaches it and surfaces the launcher's own message as an ERROR
+    row -- never a silent SKIP, and never a stale gate in this harness that would
+    keep rejecting a shape after the kernel gains support for it.
+
+    Returns a run_config-compatible dict so it prints through the same summary
+    table. ``bench=False`` skips the timing pass and returns correctness only.
     """
     device = "cuda"
     results = {}
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
+    Dv = head_dim if head_dim_v is None else head_dim_v
 
-    # fp8 split-K is not implemented. Reject it explicitly rather than silently
-    # running a dense fp8 forward while the config row advertises kv_sp>1 (which
-    # would validate the wrong path).
-    if int(num_kv_splits) > 1:
-        results["err"] = f"fp8 split-K (num_kv_splits={num_kv_splits}) is not implemented (dense fp8 only)"
-        return results
-
-    # fp8 forward is gfx950-only and head_dim==128 only. Reject anything else
-    # up-front with a clear, specific error (surfaced as an ERROR row) rather
-    # than a SKIP that would mask a real failure.
     try:
         gpu_arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
     except Exception:
@@ -1661,30 +1745,80 @@ def run_fp8_config(
     if not gpu_arch.startswith("gfx950"):
         results["err"] = f"fp8 requires gfx950 (got '{gpu_arch or 'unknown'}')"
         return results
-    if head_dim != 128:
-        results["err"] = f"fp8 requires head_dim == 128 (got {head_dim})"
-        return results
     if num_heads % num_kv_heads != 0:
         results["err"] = f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
         return results
-    if seq_len < 1:
-        results["err"] = f"seq_len ({seq_len}) must be >= 1"
-        return results
 
-    B, S, H, D = batch, seq_len, num_heads, head_dim
+    varlen = varlen_seqlens_q is not None
+    if varlen:
+        vl_q = list(varlen_seqlens_q)
+        vl_kv = list(varlen_seqlens_kv) if varlen_seqlens_kv is not None else list(vl_q)
+        if len(vl_kv) != len(vl_q):
+            results["err"] = f"varlen_seqlens_kv ({len(vl_kv)}) must match varlen_seqlens_q ({len(vl_q)})"
+            return results
+        if min(vl_q + vl_kv) < 1:
+            results["err"] = f"varlen seqlens must be >= 1, got q={vl_q} kv={vl_kv}"
+            return results
+    else:
+        if seq_len < 1:
+            results["err"] = f"seq_len ({seq_len}) must be >= 1"
+            return results
+        if seqlen_kv is not None and seqlen_kv < 1:
+            results["err"] = f"seqlen_kv ({seqlen_kv}) must be >= 1"
+            return results
+        vl_q = vl_kv = None
+
+    H, D = num_heads, head_dim
     H_KV = num_kv_heads
     setup_seed(seed)
 
     # Host bf16 master tensors -> per-tensor e4m3fn + shape-[1] fp32 descales.
-    q_bf16 = torch.empty(B, S, H, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
-    k_bf16 = torch.empty(B, S, H_KV, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
-    v_bf16 = torch.empty(B, S, H_KV, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+    if varlen:
+        B = len(vl_q)
+        cuq = [0]
+        for s in vl_q:
+            cuq.append(cuq[-1] + s)
+        cukv = [0]
+        for s in vl_kv:
+            cukv.append(cukv[-1] + s)
+        total_q, total_kv = cuq[-1], cukv[-1]
+        cross = any(a != b for a, b in zip(vl_q, vl_kv))
+        cu_q_t = torch.tensor(cuq, dtype=torch.int32, device=device)
+        cu_kv_t = torch.tensor(cukv, dtype=torch.int32, device=device)
+        q_bf16 = torch.empty(total_q, H, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        k_bf16 = torch.empty(total_kv, H_KV, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        v_bf16 = torch.empty(total_kv, H_KV, Dv, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        o_shape = (total_q, H, Dv)
+        S, Skv = max(vl_q), max(vl_kv)
+        pairs = sum(_score_pairs(a, b, causal) for a, b in zip(vl_q, vl_kv))
+    else:
+        B, S = batch, seq_len
+        Skv = seq_len if seqlen_kv is None else seqlen_kv
+        cross = Skv != S
+        cu_q_t = cu_kv_t = None
+        q_bf16 = torch.empty(B, S, H, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        k_bf16 = torch.empty(B, Skv, H_KV, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        v_bf16 = torch.empty(B, Skv, H_KV, Dv, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        o_shape = (B, S, H, Dv)
+        pairs = B * _score_pairs(S, Skv, causal)
+
     q_fp8, q_descale = quantize_per_tensor_fp8(q_bf16)
     k_fp8, k_descale = quantize_per_tensor_fp8(k_bf16)
     v_fp8, v_descale = quantize_per_tensor_fp8(v_bf16)
 
-    o_bf16 = torch.zeros(B, S, H, D, dtype=torch.bfloat16, device=device)
+    o_bf16 = torch.zeros(*o_shape, dtype=torch.bfloat16, device=device)
     fp8_exec_kwargs = dict(q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
+    if varlen:
+        fp8_exec_kwargs.update(
+            cu_seqlens_q=cu_q_t,
+            cu_seqlens_kv=cu_kv_t,
+            max_seqlen_q=S,
+            cross_seqlen=cross,
+        )
+        if cross:
+            fp8_exec_kwargs["max_seqlen_kv"] = Skv
+    if int(num_kv_splits) > 1:
+        fp8_exec_kwargs["num_kv_splits"] = int(num_kv_splits)
 
     try:
         flydsl_flash_attn_func(
@@ -1709,20 +1843,30 @@ def run_fp8_config(
     o_flat = o_bf16.contiguous().view(-1)
 
     # Reference: dequantize the SAME e4m3fn Q/K/V (applying descales) and run the
-    # high-precision SDPA reference the bf16 path uses.
-    ref_4d = pytorch_ref_attention(
-        _dequant_fp8(q_fp8, q_descale),
-        _dequant_fp8(k_fp8, k_descale),
-        _dequant_fp8(v_fp8, v_descale),
-        causal=causal,
-    )
-    ref_flat = ref_4d.to(torch.float32).contiguous().view(-1)
+    q_ref = _dequant_fp8(q_fp8, q_descale)
+    k_ref = _dequant_fp8(k_fp8, k_descale)
+    v_ref = _dequant_fp8(v_fp8, v_descale)
+    if varlen:
+        ref_t = torch.empty(o_shape, dtype=torch.float32, device=device)
+        for b in range(B):
+            ref_fn = pytorch_ref_attention if (vl_q[b] == vl_kv[b] and D == Dv) else pytorch_ref_attention_qkv_diff
+            ref_t[cuq[b] : cuq[b + 1]] = ref_fn(
+                q_ref[cuq[b] : cuq[b + 1]].unsqueeze(0),
+                k_ref[cukv[b] : cukv[b + 1]].unsqueeze(0),
+                v_ref[cukv[b] : cukv[b + 1]].unsqueeze(0),
+                causal=causal,
+            ).squeeze(0)
+        ref_out = ref_t
+    else:
+        ref_fn = pytorch_ref_attention if (not cross and D == Dv) else pytorch_ref_attention_qkv_diff
+        ref_out = ref_fn(q_ref, k_ref, v_ref, causal=causal)
+    ref_flat = ref_out.to(torch.float32).contiguous().view(-1)
 
     o_f32 = o_flat.float()
     ref_f32 = ref_flat.float()
     max_err = (o_f32 - ref_f32).abs().max().item()
     mean_err = (o_f32 - ref_f32).abs().mean().item()
-    cos_sim = F.cosine_similarity(o_f32.reshape(-1, D), ref_f32.reshape(-1, D), dim=1)
+    cos_sim = F.cosine_similarity(o_f32.reshape(-1, Dv), ref_f32.reshape(-1, Dv), dim=1)
     min_cos = cos_sim.min().item()
     results["max_err"] = max_err
     results["mean_err"] = mean_err
@@ -1730,12 +1874,16 @@ def run_fp8_config(
     results["passed"] = max_err < FP8_MAX_ERR and min_cos > FP8_MIN_COS
 
     if verbose:
-        tag = f"B={B} S={S} H={H} D={D} fp8"
-        print(f"  [{tag}] --- compare_arrays ---")
+        shape_tag = f"varlen q={vl_q} kv={vl_kv}" if varlen else f"B={B} S={S} Skv={Skv}"
+        d_tag = f"D={D}" if D == Dv else f"D={D} Dv={Dv}"
+        print(f"  [{shape_tag} H={H} {d_tag} kv_sp={num_kv_splits} fp8] --- compare_arrays ---")
         compare_arrays(
             o_f32.detach().cpu().numpy(),
             ref_f32.detach().cpu().numpy(),
         )
+
+    if not bench:
+        return results
 
     try:
 
@@ -1768,10 +1916,8 @@ def run_fp8_config(
             torch.cuda.synchronize()
 
         _, us = run_perftest(kernel_fn, num_iters=iters, num_warmup=warmup)
-        s_eff = S / 2.0 if causal else float(S)
-        flops = 4.0 * S * s_eff * D * H * B
         results["us"] = us
-        results["tflops"] = flops / (us * 1e-6) / 1e12
+        results["tflops"] = _fp8_flops(pairs, H, D, Dv) / (us * 1e-6) / 1e12
     except Exception as e:
         # A failed timing path must not be reportable as a clean PASS-with-N/A row.
         # Keep the correctness numbers visible but mark the row not-passed so the
@@ -2508,13 +2654,13 @@ def _fmt_normal_row(cfg, path, status, r):
 
 
 _EXTRA_HDR = (
-    f"  {'Sq':<24} {'Skv':<24} {'H':>4} {'Hkv':>4} {'D':>4} " f"{'dtype':>6} {'causal':>8} {'Path':<{_PATH_W}s}"
+    f"  {'Sq':<24} {'Skv':<24} {'H':>4} {'Hkv':>4} {'D':>7} " f"{'dtype':>6} {'causal':>8} {'Path':<{_PATH_W}s}"
 )
 _EXTRA_W = len(_EXTRA_HDR)
 
 
 def _fmt_extra_prefix(sq, skv, nh, nh_kv, hd, dtype_key, causal_tag, path=""):
-    return f"  {sq:<24} {skv:<24} {nh:>4} {nh_kv:>4} {hd:>4} " f"{dtype_key:>6} {causal_tag:>8} {path:<{_PATH_W}s}"
+    return f"  {sq:<24} {skv:<24} {nh:>4} {nh_kv:>4} {hd:>7} " f"{dtype_key:>6} {causal_tag:>8} {path:<{_PATH_W}s}"
 
 
 def _fmt_extra_cmp_row(sq, skv, nh, nh_kv, hd, dtype_key, causal_tag, path, fly_r, ck_r):
@@ -2782,12 +2928,21 @@ def main():
     extra_cases = (
         [_extra_case_from_config(row) for row in EXTRA_CONFIGS] if args.extra and configs is DEFAULT_CONFIGS else []
     )
+    fp8_extra_cases = (
+        [_extra_case_from_config(row) for row in FP8_EXTRA_CONFIGS]
+        if args.extra and configs is DEFAULT_CONFIGS and "fp8" in dtypes_to_test
+        else []
+    )
+    if args.compare and fp8_extra_cases:
+        print("  note: fp8 extra shapes (D/Dv, varlen, split-K) run in normal mode only; skipped under --compare")
+        fp8_extra_cases = []
     run_configs = [
         (batch, seq_len, nh, nh_kv_default, hd, cfg_kv_splits)
         for batch, seq_len, nh, nh_kv_default, cfg_kv_splits in configs
         for hd in head_dims_to_test
     ]
     extra_run_cases = [(case, hd) for case in extra_cases for hd in head_dims_to_test]
+    extra_run_cases += [(case, case["hd"]) for case in fp8_extra_cases]
     paged_kv_paths = [(None, "")]
     if args.block_table:
         paged_kv_paths = [
@@ -3420,13 +3575,15 @@ def main():
                         nh_kv_eff = args.num_kv_heads if args.num_kv_heads is not None else case["nh_kv"]
                         kv_splits = case.get("kv_splits", 1)
                         kwargs = dict(case["kwargs"])
+                        hd_v = case.get("hd_v", hd)
+                        hd_label = hd if hd_v == hd else f"{hd}/{hd_v}"
                         for kv_cache_layout, path in paged_kv_paths:
                             pre = _fmt_extra_prefix(
                                 case["sq_label"],
                                 case["skv_label"],
                                 nh,
                                 nh_kv_eff,
-                                hd,
+                                hd_label,
                                 dtype_key,
                                 ctag,
                                 path=path,
@@ -3462,7 +3619,7 @@ def main():
                                                 case["skv_label"],
                                                 nh,
                                                 nh_kv_eff,
-                                                hd,
+                                                hd_label,
                                                 dtype_key,
                                                 ctag,
                                                 path,
@@ -3489,6 +3646,10 @@ def main():
                                         verbose=False,
                                         num_kv_heads=nh_kv_eff,
                                         num_kv_splits=kv_splits,
+                                        head_dim_v=hd_v,
+                                        seqlen_kv=kwargs.get("seqlen_kv"),
+                                        varlen_seqlens_q=kwargs.get("varlen_seqlens_q"),
+                                        varlen_seqlens_kv=kwargs.get("varlen_seqlens_kv"),
                                     )
                                 else:
                                     r = run_attn_config(
@@ -3523,7 +3684,7 @@ def main():
                                         case["skv_label"],
                                         nh,
                                         nh_kv_eff,
-                                        hd,
+                                        hd_label,
                                         dtype_key,
                                         ctag,
                                         path,
@@ -3541,7 +3702,7 @@ def main():
                                         case["skv_label"],
                                         nh,
                                         nh_kv_eff,
-                                        hd,
+                                        hd_label,
                                         dtype_key,
                                         ctag,
                                         path,
@@ -3559,7 +3720,7 @@ def main():
                                         case["skv_label"],
                                         nh,
                                         nh_kv_eff,
-                                        hd,
+                                        hd_label,
                                         dtype_key,
                                         ctag,
                                         path,
@@ -3582,7 +3743,7 @@ def main():
                                     case["skv_label"],
                                     nh,
                                     nh_kv_eff,
-                                    hd,
+                                    hd_label,
                                     dtype_key,
                                     ctag,
                                     path,
@@ -4598,6 +4759,27 @@ def test_sink_splitk_counted_once(num_kv_splits):
 
 
 @_requires_gfx950
+@pytest.mark.parametrize("Sq,Skv", [(512, 4096), (4096, 512)])
+@pytest.mark.parametrize("causal", [False, True])
+def test_splitk_rejects_cross_length_kv(Sq, Skv, causal):
+    """Dense split-K is self-attention only, and it used to fail without saying so.
+
+    `_build_splitk` never passes cross_seqlen, so the kernel derives its KV extent
+    from Sq: Sq=512/Skv=4096 returned garbage (cosine ~0.23 -- only the first Sq
+    keys are read) and Sq=4096/Skv=512 read past the KV buffer and faulted the GPU.
+    Both directions must now raise before any launch.
+    """
+    dtype = torch.bfloat16
+    B, H, D = 1, 8, 128
+    setup_seed(DEFAULT_SEED)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    with pytest.raises(ValueError, match="seq_len_kv == seq_len_q"):
+        flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_splits=4)
+
+
+@_requires_gfx950
 @pytest.mark.parametrize("Sq,Skv", [(512, 128), (512, 160)])
 def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
     """Causal cross-attention with Skv < Sq skips whole q blocks that see no key.
@@ -4887,3 +5069,130 @@ def test_fp8_default_is_the_lazy_rescale():
     lazy = (lazy[0] if isinstance(lazy, (tuple, list)) else lazy).float()
 
     torch.testing.assert_close(default, lazy, rtol=0, atol=0)
+
+
+
+_FP8_HEADS = 12
+_FP8_D, _FP8_DV = 192, 128
+
+
+def _assert_fp8_shape(causal, batch=1, seq_len=1, head_dim=_FP8_D, head_dim_v=_FP8_DV, **kwargs):
+    """Correctness-only run of one fp8 shape, asserted against the fp8 gate.
+
+    bench=False keeps the profiler and timing loop out of the unit run; the
+    benchmark numbers for these shapes come from the CLI harness.
+    """
+    r = run_fp8_config(
+        batch,
+        seq_len,
+        _FP8_HEADS,
+        head_dim,
+        causal,
+        warmup=0,
+        iters=1,
+        verbose=False,
+        bench=False,
+        head_dim_v=head_dim_v,
+        **kwargs,
+    )
+    assert "err" not in r, r["err"]
+    assert r["passed"], (
+        f"fp8 gate: max_err={r['max_err']:.3e} (< {FP8_MAX_ERR}), "
+        f"min_cos={r['min_cos']:.5f} (> {FP8_MIN_COS})"
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("batch,seq_len", [(1, 4096), (2, 4096), (3, 4096), (4, 4096), (1, 8192)])
+def test_fp8_head_dim_192_v_128_dense(causal, batch, seq_len):
+    """Dense self-attention with QK head_dim 192 and a 128-wide V.
+
+    Q/K are [B, S, 12, 192], V is [B, S, 12, 128], and the output follows V.
+    """
+    _assert_fp8_shape(causal, batch=batch, seq_len=seq_len)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("batch", FP8_VARLEN_BATCHES)
+def test_fp8_head_dim_192_v_128_varlen(causal, batch):
+    """Packed varlen self-attention over 2614 tokens, batch 1..4.
+
+    Q/K are [2614, 12, 192] and V is [2614, 12, 128] at every batch -- only the
+    cu_seqlens partition changes (batch 2 is [0, 1024, 2614]). Q and KV share the
+    per-sequence lengths, so only the V head dim differs here.
+    """
+    _assert_fp8_shape(causal, varlen_seqlens_q=FP8_VARLEN_Q_SEQLENS[batch])
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("batch", FP8_VARLEN_BATCHES)
+def test_fp8_head_dim_192_v_128_varlen_cross_length(causal, batch):
+    """Packed varlen cross-attention, batch 1..4: 2614 Q tokens vs 16384 KV tokens.
+
+    Q is [2614, 12, 192], K is [16384, 12, 192] and V is [16384, 12, 128] at every
+    batch; batch 2 is cu_seqlens_q [0, 1024, 2614] / cu_seqlens_kv [0, 8192, 16384].
+    Causal here is bottom-right aligned, which is what the reference applies too.
+    """
+    _assert_fp8_shape(
+        causal,
+        varlen_seqlens_q=FP8_VARLEN_Q_SEQLENS[batch],
+        varlen_seqlens_kv=FP8_VARLEN_KV_SEQLENS[batch],
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("num_kv_splits", FP8_SPLITKV_SPLITS)
+@pytest.mark.parametrize("head_dim,head_dim_v", [(128, 128), (192, 128)])
+def test_fp8_split_kv(causal, num_kv_splits, head_dim, head_dim_v):
+    """fp8 split-KV: the KV dimension split across workgroups plus a combine pass.
+
+    The 128/128 pair isolates the split from the new head-dim pair, so a failure
+    points at one feature or the other rather than both at once.
+    """
+    _assert_fp8_shape(
+        causal,
+        batch=1,
+        seq_len=8192,
+        head_dim=head_dim,
+        head_dim_v=head_dim_v,
+        num_kv_splits=num_kv_splits,
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("batch", (1, 2, 3, 4))
+def test_fp8_split_kv_batched(causal, batch):
+    """Split-KV over batches: the grid is B * num_kv_splits deep, so the batch is
+    what decides whether splitting still fills the GPU."""
+    _assert_fp8_shape(causal, batch=batch, seq_len=8192, num_kv_splits=4)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("seq_len,seqlen_kv,num_kv_splits", [(512, 16384, 8), (2614, 16384, 8), (1024, 32768, 16)])
+def test_fp8_split_kv_cross_length(causal, seq_len, seqlen_kv, num_kv_splits):
+    """Split-KV with short Q against long KV -- the shape split-KV exists for.
+
+    Sq < Skv in every case on purpose: with num_kv_splits > 1 the kernel ignores
+    cross_seqlen today, and Sq > Skv reads past the KV buffer (the bf16 path
+    faults the GPU), so that direction is left out rather than tested.
+    """
+    _assert_fp8_shape(causal, batch=1, seq_len=seq_len, seqlen_kv=seqlen_kv, num_kv_splits=num_kv_splits)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("seq_len,num_kv_splits", list(zip(FP8_SPLITKV_SEQLENS, FP8_SPLITKV_SPLITS)))
+def test_fp8_split_kv_long_sequence(causal, seq_len, num_kv_splits):
+    """Split count scaled with the KV length, 4k/2 through 32k/16.
+
+    32k also crosses the fp8 long-sequence bound where the rescale threshold
+    drops from 6 to 4 (see test_fp8_rescale_threshold_drops_past_the_long_sequence_bound),
+    so the split path is covered on both sides of that build variant.
+    """
+    _assert_fp8_shape(causal, batch=1, seq_len=seq_len, num_kv_splits=num_kv_splits)
