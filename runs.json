@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-06T02:44:21Z",
+ "updated": "2026-09-06T02:49:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -84,11 +84,11 @@
    "branch": "feat/rocdl-ordered-memory-primitives",
    "event": "pull_request",
    "title": "[DSL] Add ordered ROCDL memory primitives",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33893972835",
    "created_at": "2026-09-04T16:14:00Z",
-   "updated_at": "2026-09-06T01:33:47Z",
+   "updated_at": "2026-09-06T02:46:17Z",
    "actor": "big-yellow-duck",
    "jobs": [
     {
@@ -114,11 +114,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-06T01:33:46Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33893972835/job/101408336627"
+     "completed_at": "2026-09-06T02:46:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33893972835/job/101408336627",
+     "log_fetch_failed": true
     }
    ]
   },
