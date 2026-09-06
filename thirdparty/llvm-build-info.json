@@ -1,6 +1,6 @@
 {
   "upstream": {
-    "repository": "https://github.com/llvm/llvm-project.git",
-    "llvm_hash": "e2a39f504fee836e4def9581bed817ecc327b9dc"
+    "repository": "https://github.com/ROCm/llvm-project.git",
+    "llvm_hash": "e7327491232511552d9d2d721dc8c78f2bb199e7"
   }
 }
