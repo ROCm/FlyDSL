@@ -7,6 +7,10 @@
 Each of the 18 shapes runs in a fresh process so JIT / autotune state cannot
 leak. Writes ``fair_baseline.json`` next to this script.
 
+The ``*_def`` columns are the shipped default path (no ``tile`` argument, so
+``_pick_tile`` decides); ``*_best`` is the fastest of that pick and the tile
+candidates below.
+
 Usage::
 
     python tests/perf/qwenimage_vae_conv/bench_fair.py
@@ -60,6 +64,7 @@ FIELDS = [
     ("fly_def", float),
     ("gemm_def", float),
     ("tr_def", float),
+    ("tile_def", str),
     ("fly_best", float),
     ("gemm_best", float),
     ("tr_best", float),
@@ -126,7 +131,7 @@ def run_one(sid, cin, cout, hin, stride, padding, freq, path) -> None:
     import torch.nn.functional as F
     from torch.profiler import ProfilerActivity, profile
 
-    from kernels.conv.conv3d_implicit import DEFAULT_TILE, conv3d_implicit
+    from kernels.conv.conv3d_implicit import DEFAULT_TILE, _pick_tile, conv3d_implicit
 
     cin, cout, hin, stride, padding, freq = map(int, (cin, cout, hin, stride, padding, freq))
     candidates = [
@@ -158,11 +163,13 @@ def run_one(sid, cin, cout, hin, stride, padding, freq, path) -> None:
     def time(call):
         return gpu(torch, profile, ProfilerActivity, call)
 
-    check(fly(tuple(DEFAULT_TILE)))
-    t_def, per_def = time(lambda: fly(tuple(DEFAULT_TILE)))
+    # "default" is the shipped path: no tile argument, so _pick_tile decides.
+    check(fly(None))
+    t_def, per_def = time(lambda: fly(None))
     g_def, tr_def = split_fly(per_def)
-    best = (g_def, t_def, tr_def, tuple(DEFAULT_TILE))
-    for tile in candidates[1:]:
+    tile_def = _pick_tile(M, N, 1, x4.device)
+    best = (g_def, t_def, tr_def, tile_def)
+    for tile in candidates:
         try:
             check(fly(tile))
             t, per = time(lambda: fly(tile))
@@ -207,7 +214,7 @@ def run_one(sid, cin, cout, hin, stride, padding, freq, path) -> None:
     t_mio, _ = time(lambda: F.conv2d(x4, w4, bias=bbf, stride=stride, padding=padding))
     print(
         f"RESULT\t{sid}\t{cin}\t{cout}\t{hin}\t{stride}\t{freq}\t{path}\t{M}\t{N}\t{K}\t{flops:.6e}\t"
-        f"{t_def:.2f}\t{g_def:.2f}\t{tr_def:.2f}\t"
+        f"{t_def:.2f}\t{g_def:.2f}\t{tr_def:.2f}\t{'x'.join(str(v) for v in tile_def)}\t"
         f"{t_best:.2f}\t{g_best:.2f}\t{tr_best:.2f}\t{'x'.join(str(v) for v in tile_best)}\t"
         f"{t_mm:.2f}\t{t_im2col:.2f}\t{t_unfold_mm:.2f}\t{t_mio:.2f}"
     )
@@ -219,7 +226,8 @@ def drive() -> None:
     rows = []
     print(
         f"{'shape':18s} {'x':>3s} {'M':>8s} {'K':>5s} | {'hipBLASLt':>9s} {'FlyGEMM':>8s} {'比':>5s} "
-        f"{'BLASt T/s':>9s} {'Fly T/s':>8s} | {'im2col':>7s} {'unfold+mm':>10s} {'Fly 全':>7s} {'MIOpen':>8s} {'最优tile':>13s}"
+        f"{'BLASt T/s':>9s} {'Fly T/s':>8s} | {'im2col':>7s} {'unfold+mm':>10s} {'Fly 全':>7s} {'MIOpen':>8s} "
+        f"{'默认tile':>13s} {'最优tile':>13s}"
     )
     for sp in SHAPES:
         proc = subprocess.run(
@@ -240,7 +248,7 @@ def drive() -> None:
             f"{shp:18s} {r['freq']:3d} {r['M']:8d} {r['K']:5d} | {r['mm']:9.1f} {r['gemm_best']:8.1f} "
             f"{r['mm'] / r['gemm_best']:4.2f}x {r['flops'] / r['mm'] / 1e6:9.0f} "
             f"{r['flops'] / r['gemm_best'] / 1e6:8.0f} | {r['im2col']:7.1f} {r['unfold_mm']:10.1f} "
-            f"{r['fly_best']:7.1f} {r['mio']:8.1f} {r['tile']:>13s}",
+            f"{r['fly_best']:7.1f} {r['mio']:8.1f} {r['tile_def']:>13s} {r['tile']:>13s}",
             flush=True,
         )
 

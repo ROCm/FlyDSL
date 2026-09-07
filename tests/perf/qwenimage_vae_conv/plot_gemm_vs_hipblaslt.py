@@ -105,8 +105,8 @@ def main() -> None:
         handles=[
             Patch(facecolor=WIN, label="最优 tile，≥1 跑赢 hipBLASLt"),
             Patch(facecolor=LOSE, label="最优 tile，<1 落后"),
-            Patch(facecolor=DEF_WIN, label="默认 tile（赢，浅青绿）"),
-            Patch(facecolor=DEF_LOSE, label="默认 tile（输，浅红）"),
+            Patch(facecolor=DEF_WIN, label="默认路径自动选 tile（赢，浅青绿）"),
+            Patch(facecolor=DEF_LOSE, label="默认路径自动选 tile（输，浅红）"),
         ],
         loc="center right",
         bbox_to_anchor=(1.0, 0.34),
@@ -115,11 +115,17 @@ def main() -> None:
         edgecolor="none",
         fontsize=10,
     )
+    main_path = [r for r in rows if r["path"] == "1024"]
+
+    def weighted(key, sel=main_path):
+        return sum(r[key] * r["freq"] for r in sel) / 1e3
+
     fig.text(
         0.01,
         0.012,
         "条越厚调用越密。核均为 3×3；标签中 a×b×c 是等价 GEMM 的 M×N×K（M=输出空间，N=Cout，K=Cin·R·S）。"
-        "1024 路径加权 1.083×，高频且 GEMM-K≥1728 普遍落后。",
+        f"1024 路径加权 最优 tile {weighted('mm') / weighted('gemm_best'):.3f}×、"
+        f"默认路径 {weighted('mm') / weighted('gemm_def'):.3f}×。",
         color=NEUTRAL,
         fontsize=8,
     )
@@ -127,7 +133,7 @@ def main() -> None:
         0.01,
         -0.004,
         "非同类对比：hipBLASLt 读已物化的 M×K 矩阵，FlyDSL 从约 9 倍小的原张量 gather；"
-        "物化代价（1024 路径 23.77 ms）未计入 hipBLASLt。",
+        f"物化代价（1024 路径 {weighted('im2col'):.2f} ms）未计入 hipBLASLt。",
         color=NEUTRAL,
         fontsize=8,
     )
