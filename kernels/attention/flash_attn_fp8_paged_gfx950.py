@@ -5,7 +5,6 @@
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.attention.flash_attn_utils import (
@@ -991,6 +990,7 @@ def build_flash_attn_paged_fp8_module(
             "disable-machine-sink": True,
         },
     }
+    launch_flash_attn_dualwave_swp.compile_hints = dict(_dualwave_swp_compile_hints)
 
     def _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride):
         if not PAGED_BN128:
@@ -1076,30 +1076,29 @@ def build_flash_attn_paged_fp8_module(
             k_descale = O
         if v_descale is None:
             v_descale = O
-        with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
-            return _run_compiled(
-                launch_flash_attn_dualwave_swp,
-                Q,
-                K,
-                V,
-                O,
-                debug_counts,
-                cu_seqlens_q,
-                cu_seqlens_kv,
-                block_table,
-                block_table_stride,
-                q_descale,
-                k_descale,
-                v_descale,
-                batch_size,
-                seq_len,
-                seq_len_kv,
-                stride_q_n,
-                stride_o_n,
-                stride_kv_n,
-                head_dim_runtime,
-                fx.Stream(stream),
-            )
+        return _run_compiled(
+            launch_flash_attn_dualwave_swp,
+            Q,
+            K,
+            V,
+            O,
+            debug_counts,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            block_table,
+            block_table_stride,
+            q_descale,
+            k_descale,
+            v_descale,
+            batch_size,
+            seq_len,
+            seq_len_kv,
+            stride_q_n,
+            stride_o_n,
+            stride_kv_n,
+            head_dim_runtime,
+            fx.Stream(stream),
+        )
 
     def _compile(
         Q,
@@ -1152,30 +1151,29 @@ def build_flash_attn_paged_fp8_module(
             k_descale = O
         if v_descale is None:
             v_descale = O
-        with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
-            return flyc.compile(
-                launch_flash_attn_dualwave_swp,
-                Q,
-                K,
-                V,
-                O,
-                debug_counts,
-                cu_seqlens_q,
-                cu_seqlens_kv,
-                block_table,
-                block_table_stride,
-                q_descale,
-                k_descale,
-                v_descale,
-                batch_size,
-                seq_len,
-                seq_len_kv,
-                stride_q_n,
-                stride_o_n,
-                stride_kv_n,
-                head_dim_runtime,
-                fx.Stream(stream),
-            )
+        return flyc.compile(
+            launch_flash_attn_dualwave_swp,
+            Q,
+            K,
+            V,
+            O,
+            debug_counts,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            block_table,
+            block_table_stride,
+            q_descale,
+            k_descale,
+            v_descale,
+            batch_size,
+            seq_len,
+            seq_len_kv,
+            stride_q_n,
+            stride_o_n,
+            stride_kv_n,
+            head_dim_runtime,
+            fx.Stream(stream),
+        )
 
     _launch.compile = _compile
 
