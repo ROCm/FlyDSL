@@ -97,13 +97,9 @@ def main() -> None:
     ax.set_yticks(centers)
     ax.set_yticklabels([lab(r) for r in rows], fontsize=10)
     ax.set_ylim(centers[-1] + bar_h(rows[-1]["freq"]) / 2 + gap, -gap)
-    ax.set_xlabel(
-        "GEMM 加速比  hipBLASLt on-device µs / FlyDSL GEMM kernel on-device µs"
-    )
+    ax.set_xlabel("GEMM 加速比  hipBLASLt on-device µs / FlyDSL GEMM kernel on-device µs")
     ax.set_xlim(0, 3.35)
-    ax.set_title(
-        "口径 B：GEMM kernel 质量对标 hipBLASLt（条宽 = 调用次数；同 M/N/K，同 FLOP）"
-    )
+    ax.set_title("口径 B：GEMM kernel 质量对标 hipBLASLt（条宽 = 调用次数；同 M/N/K，同 FLOP）")
     fig.subplots_adjust(left=0.32)
     ax.legend(
         handles=[

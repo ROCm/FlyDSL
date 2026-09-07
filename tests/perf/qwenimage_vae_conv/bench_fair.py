@@ -102,10 +102,7 @@ def gpu(torch, profile, ProfilerActivity, call):
             torch.cuda.synchronize()
         per = {}
         for e in prof.key_averages():
-            if (
-                e.device_type != torch.autograd.DeviceType.CUDA
-                or e.self_device_time_total <= 0
-            ):
+            if e.device_type != torch.autograd.DeviceType.CUDA or e.self_device_time_total <= 0:
                 continue
             k = e.key.split("(")[0][:40]
             per[k] = per.get(k, 0.0) + e.self_device_time_total / ITERS
@@ -131,9 +128,7 @@ def run_one(sid, cin, cout, hin, stride, padding, freq, path) -> None:
 
     from kernels.conv.conv3d_implicit import DEFAULT_TILE, conv3d_implicit
 
-    cin, cout, hin, stride, padding, freq = map(
-        int, (cin, cout, hin, stride, padding, freq)
-    )
+    cin, cout, hin, stride, padding, freq = map(int, (cin, cout, hin, stride, padding, freq))
     candidates = [
         tuple(DEFAULT_TILE),
         (128, 256, 2, 4),
@@ -183,7 +178,7 @@ def run_one(sid, cin, cout, hin, stride, padding, freq, path) -> None:
         A = torch.randn((M, K), device="cuda", dtype=torch.bfloat16)
         Bm = torch.randn((K, N), device="cuda", dtype=torch.bfloat16)
         Cm = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
-        t_mm, _ = time(lambda: torch.mm(A, Bm, out=Cm))
+        t_mm, _ = time(lambda a=A, b=Bm, c=Cm: torch.mm(a, b, out=c))
         del A, Bm, Cm
         torch.cuda.empty_cache()
     except torch.OutOfMemoryError:
@@ -198,9 +193,9 @@ def run_one(sid, cin, cout, hin, stride, padding, freq, path) -> None:
     try:
         w2 = w4.reshape(cout, K).t().contiguous()
 
-        def unfold_mm():
+        def unfold_mm(wt=w2):
             a = F.unfold(x4, (R, S), padding=padding, stride=stride).squeeze(0).t()
-            return (a @ w2 + bbf).t().reshape(1, cout, p, p)
+            return (a @ wt + bbf).t().reshape(1, cout, p, p)
 
         check(unfold_mm())
         t_unfold_mm, _ = time(unfold_mm)
@@ -234,7 +229,7 @@ def drive() -> None:
             env=env,
             cwd=cwd,
         )
-        line = next((l for l in proc.stdout.splitlines() if l.startswith("RESULT")), None)
+        line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT")), None)
         if line is None:
             print(f"FAILED {sp[0]}\n{proc.stderr[-800:]}")
             continue
