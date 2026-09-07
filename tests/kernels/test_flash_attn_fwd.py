@@ -5095,7 +5095,6 @@ def _assert_fp8_shape(causal, batch=1, seq_len=1, head_dim=_FP8_D, head_dim_v=_F
     )
 
 
-# `1` pins the unsplit kernel, `None` is the shipped default (autotuned).
 FP8_SPLIT_MODES = [pytest.param(1, id="dense"), pytest.param(None, id="autosplit")]
 
 
@@ -5199,14 +5198,6 @@ def test_fp8_split_kv_long_sequence(causal, seq_len, num_kv_splits):
     _assert_fp8_shape(causal, batch=1, seq_len=seq_len, num_kv_splits=num_kv_splits)
 
 
-# ── regressions for the split-K combine row mapping ─────────────────────────
-
-
-def _fp8_combine_rows_per_block(head_dim_v):
-    """Output rows one combine workgroup covers: 256 threads / (head_dim_v/4) lanes."""
-    return 256 // (head_dim_v // 4)
-
-
 def _run_fp8_into_nan_out(q, k, v, head_dim_v, **kwargs):
     """Launch fp8 attention into a NaN-filled ``out`` so unwritten rows are countable."""
     fp8 = torch.float8_e4m3fn
@@ -5233,7 +5224,7 @@ def _run_fp8_into_nan_out(q, k, v, head_dim_v, **kwargs):
 def test_fp8_auto_split_kv_writes_every_row(batch, seq_len, num_heads):
     """Auto split-K must not drop the tail of the combine grid."""
     D = 128
-    assert (batch * num_heads * seq_len) % _fp8_combine_rows_per_block(D) != 0, "shape would not exercise the tail"
+    assert (batch * num_heads * seq_len) % (256 // (D // 4)) != 0, "shape would not exercise the tail"
     torch.manual_seed(0)
     q, k, v = (torch.randn(batch, seq_len, num_heads, D, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3))
     out = _run_fp8_into_nan_out(q, k, v, D, causal=False, num_kv_heads=num_heads)
@@ -5268,9 +5259,6 @@ def test_fp8_varlen_split_kv_respects_batch_boundaries(seq_len, num_heads, head_
     torch.testing.assert_close(split.float(), unsplit.float(), rtol=2e-2, atol=2e-2)
 
 
-# ── head-dim validation ────────────────────────────────────────────────────
-
-
 @_requires_gfx950
 @pytest.mark.parametrize("head_dim_v", [64, 96, 128, 160, 192])
 def test_fp8_supported_v_head_dims_run(head_dim_v):
@@ -5287,7 +5275,6 @@ def test_fp8_supported_v_head_dims_run(head_dim_v):
         (128, 224, "head_dim_v"),
         (128, 256, "head_dim_v"),
         (96, 96, "head_dim"),
-        # Within the head-dim rules but over the LDS budget.
         (256, 192, "LDS"),
         (320, 128, "LDS"),
         (384, 64, "LDS"),
@@ -5311,27 +5298,19 @@ def test_fp8_dense_ragged_seq_lens(seq_len):
     _assert_fp8_shape(True, batch=2, seq_len=seq_len, num_heads=4, head_dim=192, head_dim_v=128)
 
 
-# ── what the auto-heuristics pick ──────────────────────────────────────────
-
-
 _NUM_CU = 256
 
 
 @pytest.mark.parametrize(
     "batch,num_heads,seqlen_q,seqlen_kv,causal,expect",
     [
-        # Narrow only while the 128-row tile still fits the GPU in one round.
         (1, 8, 512, 512, True, 128),
         (1, 8, 2048, 2048, True, 128),
         (1, 8, 2048, 2048, False, 128),
-        # Same rule for causal and non-causal: once the GPU is full, stay wide.
-        # An inverted causal rule picks 128 for these three and loses ~20%.
         (8, 32, 2048, 2048, True, 256),
         (16, 32, 1024, 1024, True, 256),
         (32, 32, 512, 512, True, 256),
         (1, 8, 2048, 2048, True, 128),
-        # Long KV goes wide even at one workgroup per CU: the narrow tile inflates
-        # the workgroup estimate and talks the split autotuner out of a split.
         (1, 8, 4096, 4096, True, 256),
         (1, 8, 4096, 16384, True, 256),
         (2, 8, 4096, 4096, True, 256),
@@ -5356,11 +5335,8 @@ def test_fp8_auto_block_m_rule_does_not_depend_on_causal():
 @pytest.mark.parametrize(
     "batch,num_heads,seqlen,causal,expect",
     [
-        # Too few KV tiles per split to amortise the fixed per-workgroup cost.
         (1, 8, 512, False, 1),
-        # An under-filled GPU with enough KV tiles to share out.
         (1, 8, 4096, False, 2),
-        # The GPU is already full, so splitting only adds a combine pass.
         (32, 32, 8192, False, 1),
     ],
 )
@@ -5373,7 +5349,6 @@ def test_fp8_auto_kv_splits_picks(batch, num_heads, seqlen, causal, expect):
     "batch,causal,cross,num_kv_splits,expect",
     [
         (2, True, False, 1, 2),
-        # An odd batch cannot be folded 2-at-a-time; the kernel would drop one.
         (3, True, False, 1, 1),
         (2, False, False, 1, 1),
         (2, True, True, 1, 1),

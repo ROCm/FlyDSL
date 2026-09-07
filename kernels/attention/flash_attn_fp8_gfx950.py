@@ -56,12 +56,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
     _xcd_swizzle=False,
     batch_interleave_group=1,
 ):
-    """Build the gfx950 dual-wave fp8 flash-attention launcher.
-
-    ``head_dim`` is the QK reduction width and ``head_dim_v`` the V/output width.
-    ``varlen`` builds the packed variant (Q/O ``[total_q, H, D]``, K/V
-    ``[total_kv, H_kv, D]``, ranges from int32 ``cu_seqlens_q`` / ``cu_seqlens_kv``);
-    ``num_kv_splits > 1`` adds the partial store plus the combine pass."""
+    """Build the gfx950 dual-wave fp8 launcher (dense, packed varlen, or split-K)."""
     gpu_arch = get_hip_arch()
 
     if not gpu_arch.startswith("gfx950"):
@@ -111,7 +106,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
     _dualwave_swp_fp8_cache_tag = traits.cache_tag
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
 
-    # Q skips LDS for head_dim > 128; fx.Array rejects 0, so keep a 16-elem stub.
+    # fx.Array rejects a length of 0.
     _q_lds_elems = BLOCK_M * HEAD_DIM if traits.QLDS else 16
 
     @fx.struct
@@ -475,7 +470,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
             # One batch per y block keeps the combine kernel's O descriptor wave-uniform.
             combine_rows = NUM_HEADS_Q * sl_idx
             combine_blocks = (combine_rows + (COMBINE_ROWS_PER_BLOCK - 1)) // COMBINE_ROWS_PER_BLOCK
-            # Same O stride the main kernel used.
             if const_expr(traits.HEAD_DIM_V == HEAD_DIM):
                 stride_o_n = stride_q_n
             else:
@@ -528,7 +522,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
         # seq_len_kv defaults to seq_len (self-attention / equal Q,KV lengths).
         if seq_len_kv is None:
             seq_len_kv = seq_len
-        # The grid divides blockIdx.z by the group; a remainder drops whole batches.
         if BATCH_INTERLEAVE_GROUP > 1 and batch_size % BATCH_INTERLEAVE_GROUP:
             raise ValueError(
                 f"flash_attn_dualwave_swp fp8: batch_interleave_group={BATCH_INTERLEAVE_GROUP} requires "

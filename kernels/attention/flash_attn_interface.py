@@ -92,8 +92,7 @@ def _fp8_auto_kv_splits(
 ) -> int:
     """Pick num_kv_splits by minimising `rounds(s) * (FIXED + tiles/s)`.
 
-    ``block_m`` must be the tile `_fp8_auto_block_m` chose; it sets the workgroup
-    count and therefore whether splitting has idle CUs left to fill.
+    ``block_m`` must be the tile `_fp8_auto_block_m` chose; it sets the workgroup count.
     """
     wgs = num_heads * -(-seqlen_q // block_m) * batch
     kv_tiles = -(-seqlen_kv // _FP8_BLOCK_N)
@@ -930,7 +929,6 @@ def flydsl_flash_attn_func(
     # contiguous tensor is still contiguous, so one launch per entry divides the
     # flat dim by B at no copy. bf16 passes the natural 4-D shape and is exempt.
     if dtype_str == "fp8" and not paged_kv and max(q.numel(), k.numel(), v.numel()) >= _FP8_MAX_FLAT_ELEMS:
-        # Packed varlen has no batch axis to slice, so it can only be rejected.
         _packed = cu_seqlens_q is not None or cu_seqlens_kv is not None or q.dim() != 4
         if _packed or q.shape[0] == 1:
             raise NotImplementedError(
@@ -1080,7 +1078,6 @@ def flydsl_flash_attn_func(
     if k.shape[-1] != D:
         raise ValueError(f"flydsl_flash_attn_func: K head_dim ({k.shape[-1]}) must match Q head_dim ({D})")
     if tuple(v.shape[:-1]) != tuple(k.shape[:-1]):
-        # V's descriptor takes num_records from K's token count.
         raise ValueError(
             f"flydsl_flash_attn_func: V must match K in every dim but the last, got "
             f"v={tuple(v.shape)}, k={tuple(k.shape)}"

@@ -1044,7 +1044,7 @@ def _init_dualwave_thread_mapping(ctx):
         T.i32,
         (_tid_i32 // fx.Int32(traits.WARP_SIZE)).ir_value(),
     )
-    # Two stagger groups, whatever the wave count (bf16 keeps its old divisor of 4).
+    # Two stagger groups, whatever the wave count.
     ctx.stagger_i32 = arith.divsi(_wave_id_uni_i32, as_mlir_value(fx.Int32(traits.NUM_WAVES // 2)))
     ctx.wave_id_uni = fx.Index(_wave_id_uni_i32)
 
@@ -1778,11 +1778,7 @@ def _make_dualwave_swp_traits(
 
 @dataclass(frozen=True)
 class DualwaveSwpFp8Traits:
-    """Pure compile-time tile/layout constants for the gfx950 DUALWAVE_SWP fp8 kernel.
-
-    fp8 runs a single path: WIDE QK (32x32x64 mfma_scale) feeding an fp8 PV MMA
-    that consumes V straight out of the ``vt`` LDS scratch. ``ELEM_BYTES`` is 1
-    (Q/K/V are fp8); the bf16 output is ``OUT_ELEM_BYTES``."""
+    """Pure compile-time tile/layout constants for the gfx950 DUALWAVE_SWP fp8 kernel."""
 
     BLOCK_M: int
     BLOCK_N: int
@@ -1902,13 +1898,11 @@ def _make_dualwave_swp_fp8_traits(
     xcd_swizzle=False,
     batch_interleave_group=1,
 ):
-    """Build gfx950 DUALWAVE_SWP fp8 compile-time layout traits (dtype fixed to fp8).
+    """Build gfx950 DUALWAVE_SWP fp8 compile-time layout traits.
 
-    ``head_dim`` is the QK reduction width and ``head_dim_v`` the V (and output)
-    width; they differ for the 192/128 pair. ``head_dim`` must be a multiple of
-    64 -- the fp8 QK MFMA is 32x32x64, so it splits into head_dim//64 slices with
-    no padding. ``head_dim_v`` tiles in 32-wide D_CHUNKs and so only has to be a
-    multiple of 32, but the validated range is 64..192 (see below)."""
+    ``head_dim`` is the QK reduction width (a multiple of 64: the QK MFMA is
+    32x32x64) and ``head_dim_v`` the V/output width, tiled in 32-wide D_CHUNKs.
+    """
     if head_dim_v is None:
         head_dim_v = head_dim
     if head_dim % 64:
@@ -1973,7 +1967,7 @@ def _make_dualwave_swp_fp8_traits(
     dualwave_swp_k_buf_base = tuple(i * dualwave_swp_kv_per_buffer for i in range(num_prefetch_k))
     dualwave_swp_v_buf_base = tuple(smem_k_tile_elems + i * dualwave_swp_kv_per_buffer for i in range(num_prefetch_k))
 
-    # V scratch is typed bf16 (hence the /2); +128 covers the DMA base alignment.
+    # The +128 covers the alignment the DMA base is rounded up to.
     eb_bf = 2
     fp8_v_tile_bytes = (block_n // 8) * (head_dim_v // 16) * 128
     vt_bf16_total = num_prefetch_k * (fp8_v_tile_bytes // eb_bf) + 128
@@ -1982,7 +1976,6 @@ def _make_dualwave_swp_fp8_traits(
 
     qlds = head_dim <= 128
 
-    # Reject here; at launch this is a bare hipErrorIllegalState naming no shape.
     lds_bytes = lds_kv_total_size * elem_bytes + vt_bf16_total * eb_bf
     if qlds:
         lds_bytes += block_m * head_dim * elem_bytes
@@ -2062,10 +2055,9 @@ def _make_dualwave_swp_fp8_traits(
 def dualwave_fp8_dma_per_iter(traits):
     """Vector-memory instructions the least-loaded wave issues per main-loop iteration.
 
-    `_waitcnt_vm_n(N)` only retires the previous iteration's DMAs when N is at
-    most what this wave issues; overshooting makes the wait a no-op. K is
-    exec-masked so every wave issues each pass; V's trailing pass is behind a
-    wave-uniform branch, so its minimum is the floor. Two KV tiles per iteration.
+    `_waitcnt_vm_n(N)` is a no-op unless N is at most what this wave issues. K is
+    exec-masked so every wave issues each pass; V's trailing pass sits behind a
+    wave-uniform branch, so its minimum is the floor.
     """
     rows_per_wave = -(-traits.BLOCK_N // traits.NUM_WAVES)
     k_instr = sum(-(-(rows_per_wave * (chunk // traits.VEC_KV)) // traits.WARP_SIZE) for chunk in traits.K_BAND_CHUNK)
@@ -4776,12 +4768,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         return packs
 
     def _load_q_wide_global(self):
-        """Pull this lane's Q operands straight from global into VGPRs.
-
-        Used when Q is not staged through LDS (head_dim > 128, where the staging
-        buffer would not fit alongside the KV ring). Q is read exactly once, so
-        the only thing LDS bought was coalescing on that single pass.
-        """
+        """Pull this lane's Q operands straight from global into VGPRs (head_dim > 128)."""
         traits = self.traits
         d_base = self.lane_div_32 * 32
         packs = []
@@ -4844,10 +4831,9 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
     def load_k(self, tile_start, buf_id):
         """DMA one K tile into LDS, one pass per head-dim band.
 
-        A band's LDS line is this wave's 8 n-rows of `chunk` bytes, laid out
-        row-contiguous so the QK read can index it as (band, row, 64-byte slice).
-        The 64-byte tail band at head_dim 192 needs only 4 lanes per row, so its
-        pass runs on the low 32 lanes and moves no padding.
+        A band's LDS line is this wave's n-rows of `chunk` bytes, row-contiguous,
+        so the QK read indexes it as (band, row, 64-byte slice). The 64-byte tail
+        band at head_dim 192 runs on the low 32 lanes and moves no padding.
         """
         traits = self.traits
         eb = traits.ELEM_BYTES
@@ -5380,8 +5366,7 @@ class DualwaveSplitKCombineContext:
 
         blockIdx.y carries the batch: the O buffer resource is wave-scoped, so a
         per-thread batch_idx would hand a whole wave one batch's descriptor when a
-        batch boundary falls inside it. Rows the rounded-up x grid adds past the
-        batch, and threads past the block's own rows, fold into `row_valid`.
+        batch boundary falls inside it.
         """
         traits = self.traits
         self.tid = fx.Index(gpu.thread_idx.x)
