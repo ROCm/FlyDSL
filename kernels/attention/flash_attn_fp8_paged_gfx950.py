@@ -249,7 +249,7 @@ def build_flash_attn_paged_fp8_module(
         kv_gmem_to_lds.load_k(t0 * BN, t0 % fx.Index(NPF), page_id=page_t0)
         if const_expr(traits.QREG):
             q_loader.stage_q_to_lds()
-        rocdl.s_waitcnt(0)
+        fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
 
@@ -272,7 +272,7 @@ def build_flash_attn_paged_fp8_module(
             (t0 + 3) * BN,
             page_id=page_t3,
         )
-        rocdl.s_waitcnt(0)
+        fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
         rocdl.sched_barrier(0)
@@ -334,7 +334,7 @@ def build_flash_attn_paged_fp8_module(
             v_o, l_row = _subtile_tail(v_s_b, v_v_b, v_o, l_row, m_new)
             m_row = m_new
 
-            rocdl.s_waitcnt(0)
+            fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
@@ -427,7 +427,7 @@ def build_flash_attn_paged_fp8_module(
         @flyc.jit
         def _run_q_block():
             kv_gmem_to_lds.load_k(ctx.split_t0 * traits.BLOCK_N, 0)
-            rocdl.s_waitcnt(0)
+            fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
 
@@ -442,7 +442,7 @@ def build_flash_attn_paged_fp8_module(
             kv_gmem_to_lds.load_v(ctx.split_t0 * traits.BLOCK_N, 0)
             v_k = kv_lds_to_regs.load_k(0)
             rocdl.sched_barrier(0)
-            rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+            fx.rocdl.s_waitcnt(lgkmcnt=0)
             _waitcnt_vm_n(ctx.NUM_DMA_V)
 
             # OPEN the wave-group phase shift: one extra s_barrier on group B
@@ -489,7 +489,7 @@ def build_flash_attn_paged_fp8_module(
 
                 kv_gmem_to_lds.load_v((j_idx - 2) * traits.BLOCK_N, 1)
                 v_k = kv_lds_to_regs.load_k(1)
-                rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+                fx.rocdl.s_waitcnt(lgkmcnt=0)
                 _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
@@ -511,7 +511,7 @@ def build_flash_attn_paged_fp8_module(
                     v_v = kv_lds_to_regs.load_v_steps(0, 0, 2)
                 else:
                     v_v = kv_lds_to_regs.load_v(0)
-                rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+                fx.rocdl.s_waitcnt(lgkmcnt=0)
                 _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
@@ -541,7 +541,7 @@ def build_flash_attn_paged_fp8_module(
                     v_v_tail = kv_lds_to_regs.load_v_steps(0, 2, 2)
                     v_s_1 = softmax_helper.sub_m(v_s_1, m_row)
                     v_p_1 = softmax_helper.exp2(v_s_1, 0, 16)
-                    rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+                    fx.rocdl.s_waitcnt(lgkmcnt=0)
                     v_o = gemm_helper.pv_step_k(2, v_p_0, v_v_tail, v_o)
                     v_o = gemm_helper.pv_step_k(3, v_p_0, v_v_tail, v_o)
                 else:
@@ -565,7 +565,7 @@ def build_flash_attn_paged_fp8_module(
 
                 kv_gmem_to_lds.load_v((j_idx - 1) * traits.BLOCK_N, 0)
                 v_k = kv_lds_to_regs.load_k(0)
-                rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+                fx.rocdl.s_waitcnt(lgkmcnt=0)
                 _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
@@ -592,7 +592,7 @@ def build_flash_attn_paged_fp8_module(
                     j_idx - 1,
                     j_idx * traits.BLOCK_N,
                 )
-                rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+                fx.rocdl.s_waitcnt(lgkmcnt=0)
                 _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
@@ -615,7 +615,7 @@ def build_flash_attn_paged_fp8_module(
                     v_v_tail = kv_lds_to_regs.load_v_steps(1, 2, 2)
                     v_s_0 = softmax_helper.sub_m(v_s_0, m_row)
                     v_p_0 = softmax_helper.exp2(v_s_0, 0, 16)
-                    rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+                    fx.rocdl.s_waitcnt(lgkmcnt=0)
                     v_o = gemm_helper.pv_step_k(2, v_p_1, v_v_tail, v_o)
                     v_o = gemm_helper.pv_step_k(3, v_p_1, v_v_tail, v_o)
                 else:
@@ -646,7 +646,7 @@ def build_flash_attn_paged_fp8_module(
 
             kv_gmem_to_lds.load_v(max_m3 * traits.BLOCK_N, 1)
             v_k = kv_lds_to_regs.load_k(1)
-            rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+            fx.rocdl.s_waitcnt(lgkmcnt=0)
             _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -673,7 +673,7 @@ def build_flash_attn_paged_fp8_module(
                 max_m3,
                 max_m2 * traits.BLOCK_N,
             )
-            rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+            fx.rocdl.s_waitcnt(lgkmcnt=0)
             _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -685,7 +685,7 @@ def build_flash_attn_paged_fp8_module(
                 v_o = gemm_helper.pv_step_k(0, v_p_0, v_packs_e3, v_o)
                 v_o = gemm_helper.pv_step_k(1, v_p_0, v_packs_e3, v_o)
                 v_packs_e3 = kv_lds_to_regs.load_v_steps(0, 2, 2)
-                rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+                fx.rocdl.s_waitcnt(lgkmcnt=0)
                 v_o = gemm_helper.pv_step_k(2, v_p_0, v_packs_e3, v_o)
                 v_o = gemm_helper.pv_step_k(3, v_p_0, v_packs_e3, v_o)
             else:
@@ -709,7 +709,7 @@ def build_flash_attn_paged_fp8_module(
 
             kv_gmem_to_lds.load_v(max_m2 * traits.BLOCK_N, 0)
             v_k = kv_lds_to_regs.load_k(0)
-            rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+            fx.rocdl.s_waitcnt(lgkmcnt=0)
             _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -736,7 +736,7 @@ def build_flash_attn_paged_fp8_module(
                 max_m2,
                 max_m1 * traits.BLOCK_N,
             )
-            rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+            fx.rocdl.s_waitcnt(lgkmcnt=0)
             _waitcnt_vm_n(ctx.NUM_DMA_V)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -748,7 +748,7 @@ def build_flash_attn_paged_fp8_module(
                 v_o = gemm_helper.pv_step_k(0, v_p_1, v_packs_e7, v_o)
                 v_o = gemm_helper.pv_step_k(1, v_p_1, v_packs_e7, v_o)
                 v_packs_e7 = kv_lds_to_regs.load_v_steps(1, 2, 2)
-                rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+                fx.rocdl.s_waitcnt(lgkmcnt=0)
                 v_o = gemm_helper.pv_step_k(2, v_p_1, v_packs_e7, v_o)
                 v_o = gemm_helper.pv_step_k(3, v_p_1, v_packs_e7, v_o)
             else:
@@ -771,7 +771,7 @@ def build_flash_attn_paged_fp8_module(
 
             kv_gmem_to_lds.load_v(max_m1 * traits.BLOCK_N, 1)
             v_k = kv_lds_to_regs.load_k(1)
-            rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+            fx.rocdl.s_waitcnt(lgkmcnt=0)
             _waitcnt_vm_n(ctx.NUM_DMA_V)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -798,7 +798,7 @@ def build_flash_attn_paged_fp8_module(
                 max_m1,
                 ctx.split_t_end * traits.BLOCK_N,
             )
-            rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+            fx.rocdl.s_waitcnt(lgkmcnt=0)
             _waitcnt_vm_n(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -808,7 +808,7 @@ def build_flash_attn_paged_fp8_module(
                 v_o = gemm_helper.pv_step_k(0, v_p_0, v_packs_e11, v_o)
                 v_o = gemm_helper.pv_step_k(1, v_p_0, v_packs_e11, v_o)
                 v_packs_e11 = kv_lds_to_regs.load_v_steps(0, 2, 2)
-                rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+                fx.rocdl.s_waitcnt(lgkmcnt=0)
                 v_o = gemm_helper.pv_step_k(2, v_p_0, v_packs_e11, v_o)
                 v_o = gemm_helper.pv_step_k(3, v_p_0, v_packs_e11, v_o)
             else:
@@ -836,7 +836,7 @@ def build_flash_attn_paged_fp8_module(
                 v_packs_e13 = kv_lds_to_regs.load_v_steps(1, 0, 2)
             else:
                 v_packs_e13 = kv_lds_to_regs.load_v(1)
-            rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+            fx.rocdl.s_waitcnt(lgkmcnt=0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
@@ -845,7 +845,7 @@ def build_flash_attn_paged_fp8_module(
                 v_o = gemm_helper.pv_step_k(0, v_p_1, v_packs_e13, v_o)
                 v_o = gemm_helper.pv_step_k(1, v_p_1, v_packs_e13, v_o)
                 v_packs_e13 = kv_lds_to_regs.load_v_steps(1, 2, 2)
-                rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+                fx.rocdl.s_waitcnt(lgkmcnt=0)
                 v_o = gemm_helper.pv_step_k(2, v_p_1, v_packs_e13, v_o)
                 v_o = gemm_helper.pv_step_k(3, v_p_1, v_packs_e13, v_o)
             else:
