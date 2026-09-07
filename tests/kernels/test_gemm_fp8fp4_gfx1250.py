@@ -81,6 +81,21 @@ def _fp4_bytes(rows: int, K: int, const_val: float | None = None) -> torch.Tenso
     return torch.full((rows, K // 2), code | (code << 4), dtype=torch.uint8, device="cuda")
 
 
+def _e8m0_bytes(rows: int, cols: int, const_val: float | None = None, **exp) -> torch.Tensor:
+    """Random E8M0 scale bytes, or the legal constant closest to 1.0 within [low_exp, high_exp]."""
+    if const_val is None:
+        return gemm_common_utils.random_e8m0(rows, cols, device="cuda", **exp)
+    code = min(max(127, exp.get("low_exp", 127)), exp.get("high_exp", 132))
+    return torch.full((rows, cols), code, dtype=torch.uint8, device="cuda")
+
+
+def _f32_scale(n: int, scale_scale: float, const_val: float | None = None) -> torch.Tensor:
+    """Per-token/per-channel f32 scales: random in [0.5, 1.5) * scale_scale, or a constant fill."""
+    if const_val is None:
+        return (scale_scale * (0.5 + torch.rand(n, dtype=torch.float32, device="cuda"))).contiguous()
+    return torch.full((n,), scale_scale, dtype=torch.float32, device="cuda")
+
+
 def _with_strided_a(a: torch.Tensor, K: int, lda: int) -> torch.Tensor:
     """Return A backed by runtime lda when lda exceeds logical K."""
     if lda == K:
@@ -281,23 +296,23 @@ def _build_case(
             exp = dict(low_exp=127, high_exp=127)
         else:
             exp = {} if kind.fp4_w else dict(low_exp=126, high_exp=129)
-        a_scale = gemm_common_utils.random_e8m0(M, K // SCALE_BLOCK_32, device="cuda", **exp)
-        b_scale = gemm_common_utils.random_e8m0(N, K // SCALE_BLOCK_32, device="cuda", **exp)
+        a_scale = _e8m0_bytes(M, K // SCALE_BLOCK_32, const_val, **exp)
+        b_scale = _e8m0_bytes(N, K // SCALE_BLOCK_32, const_val, **exp)
         ref = _reference_mx32(a_f32, b_f32, a_scale, b_scale, M, N, K)
         as_gpu, bs_gpu = _preshuffle_scale_32x4(a_scale), _preshuffle_scale_32x4(b_scale)
         stride_ascale_k = 0
         tol = _a8w4_tolerances(a_scale, b_scale, K) if kind.fp4_w else (1e-2, 5e-2)
     elif kind.scale == SCALE_BLOCK_128:
         scale_k = K // SCALE_BLOCK_128
-        a_scale = gemm_common_utils.random_e8m0(M, scale_k, low_exp=126, high_exp=129, device="cuda")
-        b_scale = gemm_common_utils.random_e8m0(N // SCALE_BLOCK_128, scale_k, low_exp=126, high_exp=129, device="cuda")
+        a_scale = _e8m0_bytes(M, scale_k, const_val, low_exp=126, high_exp=129)
+        b_scale = _e8m0_bytes(N // SCALE_BLOCK_128, scale_k, const_val, low_exp=126, high_exp=129)
         ref = _reference_blockscale(a_f32, b_f32, a_scale, b_scale, M, N, K)
         as_gpu, bs_gpu = a_scale.T.contiguous(), b_scale  # A-scale is [K/128, M], row stride M
         stride_ascale_k = M
         tol = (1e-2, 5e-2)
     else:
-        as_gpu = (scale_scale * (0.5 + torch.rand(M, dtype=torch.float32, device="cuda"))).contiguous()
-        bs_gpu = (scale_scale * (0.5 + torch.rand(N, dtype=torch.float32, device="cuda"))).contiguous()
+        as_gpu = _f32_scale(M, scale_scale, const_val)
+        bs_gpu = _f32_scale(N, scale_scale, const_val)
         ref = _reference_ptpc(a_f32, b_f32, as_gpu, bs_gpu, M, N, K)
         stride_ascale_k = 0
         tol = (2e-2, max(5e-2, 2e-2 * float(ref.abs().max())))
@@ -722,7 +737,7 @@ def _per_run(groups: list, n_modes: int, n_shapes: int, name: str) -> list:
 
 
 def _parse_init_mode(value: str) -> float | None:
-    """'random' -> None (random fill); 'const,<float>' -> that constant A/B fill value."""
+    """'random' -> None (random fill); 'const,<float>' -> that constant A/B fill value (scales go constant too)."""
     if value == "random":
         return None
     kind, _, num = value.partition(",")
@@ -786,7 +801,7 @@ def _main():
         nargs="+",
         default=["random", "const,0.5"],
         metavar="MODE",
-        help="A/B fill(s) to run: 'random' and/or 'const,<float>' (default: both)",
+        help="A/B/scale fill(s) to run: 'random' and/or 'const,<float>' (default: both)",
     )
     args = parser.parse_args()
 
