@@ -4,7 +4,6 @@
 """Grouped contiguous-M MXFP8 x MXFP4 MoE GEMM for gfx1250 (TDM pipeline)."""
 
 import math
-from collections import namedtuple
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -182,9 +181,7 @@ def launch_moe_gemm_a8w4(
         N_SUPERS = (n64 + 31) // 32
         AS_ROW = (K // 128) * wmma_m_rep
 
-        c_outer_off, c_inner_off, c_stride = blk_m64, blk_n64, i32_n
-        SB_OUTER_STRIDE = K4
-        sb_batch_off = eb64 * (N_SUPERS * K4)
+        c_inner_off, c_stride = blk_n64, i32_n
         # Per-expert A-data OOB: bound to the owning expert's valid-row
         mn_oob = tile_map[(expert < n_experts).select(expert, n_experts - 1)] - blk_m
 
@@ -200,120 +197,64 @@ def launch_moe_gemm_a8w4(
         def buf_ptr(s):
             return base_ptr + s * PITCH
 
-        def global_view(base, off, shape, stride):
-            return fx.Tensor(fx.make_view(base + off, fx.make_layout(shape, stride)))
-
-        def lds_view(ptr, shape, stride):
-            return fx.Tensor(fx.make_view(ptr, fx.make_layout(shape, stride)))
-
-        def make_tdm_store(gt, outer, stride):
-            return fx.rocdl.make_tdm_atom(gt, [outer, None], strides=[stride, None], num_warps=num_waves)
-
         gA_base = fx.recast_iter(fx.Int8, arg_a)
         gB_base = fx.recast_iter(fx.Int8, arg_b)
-        gSA_base, gSB_base = fx.get_iter(arg_scale_a), fx.get_iter(arg_scale_b)
+        gSA_base = fx.recast_iter(fx.Int32, fx.get_iter(arg_scale_a))
+        gSB_base = fx.recast_iter(fx.Int32, fx.get_iter(arg_scale_b))
         b_outer_row = eb64 * B_BATCH_ROWS + blk_n64 // 16
-        a_off0 = blk_m64 * A_KROW
-        b_off0 = b_outer_row * Kp16
-        sb_off0 = (blk_n64 // 32) * SB_OUTER_STRIDE + sb_batch_off
+        sb_outer_super = eb64 * N_SUPERS + blk_n64 // 32
+        m_blk = blk_m // tile_m
+        a_m_ext = blk_m + mn_oob  # per-expert valid M rows (A / C boundary_check clamp)
         WS8 = num_waves >= 8
         WAVE_SPEC = num_waves >= 4 and tile_m >= 64 and tile_n >= 64
-        shared = fx.AddressSpace.Shared
-        p8_shared = fx.PointerType.get(elem_ty=fx.Int8.ir_type, address_space=shared, alignment=16)
-        p32_shared = fx.PointerType.get(elem_ty=fx.Int32.ir_type, address_space=shared, alignment=16)
         if const_expr(WAVE_SPEC):
             waves = [(0, 1), (2, 3), (4, 5) if WS8 else (0, 1), (6, 7) if WS8 else (2, 3)]
-            nw = 1
         else:
-            waves, nw = [(None,)] * 4, num_waves
-        base_i32 = fx.recast_iter(p32_shared, base_ptr)
+            waves = [None, None, None, None]
 
-        Job = namedtuple("Job", "atom gt on_i32 lds_off lds_row inner outer k_adv wave")
-        jobs = []
+        # Each load: tiled-TDM atom over the FULL tensor; num_warps splits the tile across the load's
+        # waves (WAVE_SPEC pairs, else all waves); coord rest = K-tiles (replaces imm_offset); LDS view
+        # carries an independent PIPE rest (num_buffers). Scales ride an i32-word LDS (recast Int32).
+        def _tiled_load(g_base, full_shape, g_stride, tile, blk_idx, lds_elem, lds_off, box_stride, pipe, wv, mask, clamp):
+            nw = len(wv) if wv is not None else num_waves
+            atom, coord = fx.rocdl.cdna5.make_tiled_tdm_atom(
+                fx.rocdl.TensorLoad(),
+                fx.Tensor(fx.make_view(g_base, fx.make_layout(full_shape, g_stride))),
+                fx.make_layout(tile, box_stride),
+                tile,
+                num_warps=nw,
+                init_boundary_check=clamp,
+            )
+            if const_expr(use_cluster):
+                atom = fx.atom_set_value(atom, "workgroup_mask", mask)
+            blk = fx.zipped_divide(coord, tile)[None, (fx.Int32(blk_idx), None)]
+            lds = fx.Tensor(
+                fx.make_view(
+                    fx.recast_iter(lds_elem, fx.add_offset(base_ptr, lds_off)),
+                    fx.make_layout((tile, num_buffers), (box_stride, pipe)),
+                )
+            )
+            wcrd = wave if wv is None else (wave - wv[0])
+            tAs, tAg = fx.rocdl.cdna5.tdm_partition(atom, wcrd, fx.make_layout(nw, 1), lds, blk)
+            return (atom, tAs, tAg, None if wv is None else wv[0] // 2)
 
-        def add_tdm_loads(
-            g_base, g_off, g_stride, oob, inner, outer, *, on_i32, lds_off, lds_row, k_adv, wv, mask, pad=None
-        ):
-            seg = outer // len(wv)
-            for i in range_constexpr(len(wv)):
-                gt = global_view(g_base, g_off + fx.Int64(i * seg) * g_stride, (seg, inner), (inner, 1))
-                ext = None if oob is None else oob - i * seg
-                pad_kw = dict(pad_interval=pad[0], pad_amount=pad[1]) if pad else {}
-                atom = fx.rocdl.make_tdm_atom(gt, [ext, None], strides=[g_stride, None], num_warps=nw, **pad_kw)
-                if const_expr(use_cluster):
-                    atom = fx.atom_set_value(atom, "workgroup_mask", mask)
-                jobs.append(Job(atom, gt, on_i32, lds_off + i * seg * lds_row, lds_row, inner, seg, k_adv, wv[i]))
-
-        add_tdm_loads(
-            gA_base,
-            a_off0,
-            A_KROW,
-            mn_oob,
-            A_ROW_B,
-            tile_m,
-            on_i32=False,
-            lds_off=0,
-            lds_row=A_LDS_ROW,
-            k_adv=A_ROW_B,
-            wv=waves[0],
-            mask=a_mask,
-            pad=(A_ROW_B, LDS_PAD_A),
-        )
-        add_tdm_loads(
-            gB_base,
-            b_off0,
-            Kp16,
-            None,
-            PACK_TK * 16,
-            tile_n // 16,
-            on_i32=False,
-            lds_off=STAGE_A,
-            lds_row=B_LDS_ROW,
-            k_adv=PACK_TK * 16,
-            wv=waves[1],
-            mask=b_mask,
-        )
-        add_tdm_loads(
-            gSA_base,
-            (blk_m64 // wmma_m_rep) * AS_ROW,
-            AS_ROW,
-            None,
-            AS_INNER,
-            AS_SUPERS,
-            on_i32=True,
-            lds_off=SA_OFF // 4,
-            lds_row=AS_INNER,
-            k_adv=AS_INNER * 4,
-            wv=waves[2],
-            mask=a_mask,
-        )
-        add_tdm_loads(
-            gSB_base,
-            sb_off0,
-            SB_OUTER_STRIDE,
-            None,
-            SC_INNER,
-            SB_SUPERS,
-            on_i32=True,
-            lds_off=SB_OFF // 4,
-            lds_row=SC_INNER,
-            k_adv=SC_INNER * 4,
-            wv=waves[3],
-            mask=b_mask,
-        )
+        loads = [
+            _tiled_load(gA_base, (a_m_ext, A_KROW), (A_KROW, 1), (tile_m, A_ROW_B), m_blk,
+                        fx.Int8, 0, (A_LDS_ROW, 1), PITCH, waves[0], a_mask, True),
+            _tiled_load(gB_base, (n_experts * B_BATCH_ROWS, Kp16), (Kp16, 1), (tile_n // 16, PACK_TK * 16),
+                        b_outer_row // (tile_n // 16), fx.Int8, STAGE_A, (B_LDS_ROW, 1), PITCH, waves[1], b_mask, False),
+            _tiled_load(gSA_base, ((i32_m + wmma_m_rep - 1) // wmma_m_rep, AS_ROW), (AS_ROW, 1), (AS_SUPERS, AS_INNER),
+                        m_blk, fx.Int32, SA_OFF, (AS_INNER, 1), PITCH // 4, waves[2], a_mask, False),
+            _tiled_load(gSB_base, (n_experts * N_SUPERS, K4), (K4, 1), (SB_SUPERS, SC_INNER),
+                        sb_outer_super // SB_SUPERS, fx.Int32, SB_OFF, (SC_INNER, 1), PITCH // 4, waves[3], b_mask, False),
+        ]
 
         def issue(s, kt):
-            pa = fx.recast_iter(p8_shared, buf_ptr(s))
-            so4 = s * (PITCH // 4)
-            for j in jobs:
-                base = base_i32 if j.on_i32 else pa
-                dst = lds_view(base + j.lds_off + (so4 if j.on_i32 else 0), (j.outer, j.inner), (j.lds_row, 1))
-                off = fx.Int64(kt * j.k_adv)
-                if const_expr(j.wave is None):
-                    fx.copy(j.atom, j.gt, dst, imm_offset=off)
-                else:
-                    if wave == j.wave:
-                        fx.copy(j.atom, j.gt, dst, imm_offset=off)
+            for atom, tAs, tAg, gpair in loads:
+                if const_expr(gpair is None):
+                    fx.copy(atom, tAg[None, 0, kt], tAs[None, 0, s])
+                elif wave // 2 == gpair:
+                    fx.copy(atom, tAg[None, 0, kt], tAs[None, 0, s])
 
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
@@ -496,11 +437,23 @@ def launch_moe_gemm_a8w4(
                 out_stride = c_stride
                 out_col_off = c_inner_off
             oc_store = oc
-            c_iter = fx.get_iter(arg_c)
-            c_off_rt = c_outer_off * fx.Int64(out_stride) + out_col_off
-            gtC = global_view(c_iter, c_off_rt, (tile_m, STORE_N), (STORE_N, 1))
-            atomC = make_tdm_store(gtC, mn_oob, out_stride)
-            fx.copy(atomC, lds_view(fx.recast_iter(oc_store, base_ptr), (tile_m, STORE_N), (STORE_N, 1)), gtC)
+            # C store: tiled-TDM store over the FULL (M, out_stride) tensor, split across all waves;
+            # keep the N-tile grid as the coordinate rest, select this block's M-tile / N-tile.
+            gC_full = fx.Tensor(
+                fx.make_view(fx.recast_iter(oc_store, fx.get_iter(arg_c)), fx.make_layout((a_m_ext, out_stride), (out_stride, 1)))
+            )
+            atomC, coordC = fx.rocdl.cdna5.make_tiled_tdm_atom(
+                fx.rocdl.TensorStore(), gC_full, fx.make_layout((tile_m, STORE_N), (STORE_N, 1)), (tile_m, STORE_N), num_warps=num_waves
+            )
+            blkC = fx.zipped_divide(coordC, (tile_m, STORE_N))[None, (fx.Int32(m_blk), None)]
+            sC_lds = fx.Tensor(
+                fx.make_view(
+                    fx.recast_iter(oc_store, base_ptr),
+                    fx.make_layout(((tile_m, STORE_N), 1), ((STORE_N, 1), tile_m * STORE_N)),
+                )
+            )
+            tCsC, tCgC = fx.rocdl.cdna5.tdm_partition(atomC, wave, fx.make_layout(num_waves, 1), sC_lds, blkC)
+            fx.copy(atomC, tCsC[None, 0, 0], tCgC[None, 0, fx.Int32(out_col_off // STORE_N)])
             tdm_ops.tensor_wait(0)
 
     m_tiles = (i32_m + (tile_m - 1)) // tile_m

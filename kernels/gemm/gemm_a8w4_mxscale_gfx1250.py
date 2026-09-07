@@ -113,8 +113,6 @@ def launch_gemm_a8w4_mxscale(
         blk_n = bid_y * tile_n
         blk_m64 = fx.Int64(blk_m)
         blk_n64 = fx.Int64(blk_n)
-        mn_oob = i32_m - blk_m  # valid M rows (A / C)
-        sa_oob = (i32_m + 31) // 32 - blk_m // 32  # valid M-supers (scale-A)
 
         arena = fx.SharedAllocator(static=False)
         arena.allocate(ARENA_B)
@@ -132,80 +130,88 @@ def launch_gemm_a8w4_mxscale(
         def _lv(ptr, shape, stride):
             return fx.Tensor(fx.make_view(ptr, fx.make_layout(shape, stride)))
 
-        def _tdm1(gt, outer, stride, mask=0):  # single-warp 2-D atom, dim0 clamped
-            atom = fx.rocdl.make_tdm_atom(
-                gt,
-                [outer, None],
-                strides=[stride, None],
-                num_warps=1,
-                early_timeout=True,
-            )
-            return fx.atom_set_value(atom, "workgroup_mask", mask)
-
         gA_base = fx.recast_iter(fx.Int8, arg_a)
         gB_base = fx.recast_iter(fx.Int8, arg_b)
-        gSA_base, gSB_base = fx.get_iter(arg_scale_a), fx.get_iter(arg_scale_b)
+        gSA_base = fx.recast_iter(fx.Int8, fx.get_iter(arg_scale_a))
+        gSB_base = fx.recast_iter(fx.Int8, fx.get_iter(arg_scale_b))
 
         W_A, W_B, W_SA, W_SB = 0, 1, 2 % num_waves, 3 % num_waves
-        a_off0 = blk_m64 * lda64
-        b_off0 = (blk_n64 // 16) * Kp16
-        sa_off0 = (blk_m64 // 32) * k64
-        sb_off0 = (blk_n64 // 32) * k64
+        WARP1 = fx.make_layout(1, 1)  # single-warp TDM partition for the per-wave loads
+        B_INNER = (i32_k // 2) * 16  # full packed-K bytes per N-group (== Kp16 as a shape)
 
-        gA = _gv(gA_base, a_off0, (tile_m, tile_k), (tile_k, 1))
-        atomA = fx.atom_set_value(
-            fx.rocdl.make_tdm_atom(
-                gA,
-                [mn_oob, None],
-                strides=[lda64, None],
-                num_warps=1,
-                pad_interval=tile_k,
-                pad_amount=LDS_PAD_A,
-                early_timeout=True,
-            ),
-            "workgroup_mask",
-            a_mask,
+        # New tiled-TDM API: build each atom over the FULL global tensor; the coordinate rest carries
+        # K-tiles (replaces imm_offset), the LDS view carries an independent PIPE rest (num_buffers).
+        # OOB comes from the tensor extent + boundary_check; A's LDS-row slack encodes the pad.
+        gA_full = _gv(gA_base, fx.Int64(0), (i32_m, i32_k), (lda64, 1))
+        atomA, coordA = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorLoad(), gA_full, fx.make_layout((tile_m, tile_k), (A_LDS_ROW, 1)), (tile_m, tile_k), num_warps=1
         )
-        gB = _gv(gB_base, b_off0, (tile_n // 16, PACK_TK * 16), (PACK_TK * 16, 1))
-        atomB = fx.atom_set_value(
-            fx.rocdl.make_tdm_atom(gB, [None, None], strides=[Kp16, None], num_warps=1, early_timeout=True),
-            "workgroup_mask",
-            b_mask,
+        atomA = fx.atom_set_value(atomA, "workgroup_mask", a_mask)
+        blkA = fx.zipped_divide(coordA, (tile_m, tile_k))[None, (bid_x, None)]
+        sA_lds = fx.Tensor(
+            fx.make_view(
+                fx.recast_iter(fx.Int8, base_ptr),
+                fx.make_layout(((tile_m, tile_k), num_buffers), ((A_LDS_ROW, 1), PITCH)),
+            )
         )
-        gSA = _gv(gSA_base, sa_off0, (SA_SUPERS, tile_k), (tile_k, 1))
-        atomSA = _tdm1(gSA, sa_oob, k64, a_mask)
-        gSB = _gv(gSB_base, sb_off0, (SB_SUPERS, tile_k), (tile_k, 1))
-        atomSB = _tdm1(gSB, None, k64, b_mask)
+        tAsA, tAgA = fx.rocdl.cdna5.tdm_partition(atomA, 0, WARP1, sA_lds, blkA)
 
-        def _wcopy(w, atom, gt, lv, imm_offset):
-            if wave == w:
-                fx.copy(atom, gt, lv, imm_offset=imm_offset)
+        gB_full = _gv(gB_base, fx.Int64(0), (i32_n // 16, B_INNER), (Kp16, 1))
+        atomB, coordB = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorLoad(),
+            gB_full,
+            fx.make_layout((tile_n // 16, PACK_TK * 16), (B_LDS_ROW, 1)),
+            (tile_n // 16, PACK_TK * 16),
+            num_warps=1,
+        )
+        atomB = fx.atom_set_value(atomB, "workgroup_mask", b_mask)
+        blkB = fx.zipped_divide(coordB, (tile_n // 16, PACK_TK * 16))[None, (bid_y, None)]
+        sB_lds = fx.Tensor(
+            fx.make_view(
+                fx.recast_iter(fx.Int8, fx.add_offset(base_ptr, STAGE_A)),
+                fx.make_layout(((tile_n // 16, PACK_TK * 16), num_buffers), ((B_LDS_ROW, 1), PITCH)),
+            )
+        )
+        tBsB, tBgB = fx.rocdl.cdna5.tdm_partition(atomB, 0, WARP1, sB_lds, blkB)
+
+        # SA/SB: (super, K) with K inner-contiguous; select the M/N super-tile, K advances via the rest.
+        gSA_full = _gv(gSA_base, fx.Int64(0), ((i32_m + 31) // 32, i32_k), (k64, 1))
+        atomSA, coordSA = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorLoad(), gSA_full, fx.make_layout((SA_SUPERS, tile_k), (tile_k, 1)), (SA_SUPERS, tile_k), num_warps=1
+        )
+        atomSA = fx.atom_set_value(atomSA, "workgroup_mask", a_mask)
+        blkSA = fx.zipped_divide(coordSA, (SA_SUPERS, tile_k))[None, (bid_x, None)]
+        sSA_lds = fx.Tensor(
+            fx.make_view(
+                fx.recast_iter(fx.Int8, fx.add_offset(base_ptr, SA_OFF)),
+                fx.make_layout(((SA_SUPERS, tile_k), num_buffers), ((tile_k, 1), PITCH)),
+            )
+        )
+        tSAsSA, tSAgSA = fx.rocdl.cdna5.tdm_partition(atomSA, 0, WARP1, sSA_lds, blkSA)
+
+        gSB_full = _gv(gSB_base, fx.Int64(0), ((i32_n + 31) // 32, i32_k), (k64, 1))
+        atomSB, coordSB = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorLoad(), gSB_full, fx.make_layout((SB_SUPERS, tile_k), (tile_k, 1)), (SB_SUPERS, tile_k), num_warps=1
+        )
+        atomSB = fx.atom_set_value(atomSB, "workgroup_mask", b_mask)
+        blkSB = fx.zipped_divide(coordSB, (SB_SUPERS, tile_k))[None, (bid_y, None)]
+        sSB_lds = fx.Tensor(
+            fx.make_view(
+                fx.recast_iter(fx.Int8, fx.add_offset(base_ptr, SB_OFF)),
+                fx.make_layout(((SB_SUPERS, tile_k), num_buffers), ((tile_k, 1), PITCH)),
+            )
+        )
+        tSBsSB, tSBgSB = fx.rocdl.cdna5.tdm_partition(atomSB, 0, WARP1, sSB_lds, blkSB)
 
         def issue(s, kt):
-            pa = _buf_ptr(s)
-            kt64 = fx.Int64(kt)
-            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), kt64 * fx.Int64(tile_k))
-            _wcopy(
-                W_B,
-                atomB,
-                gB,
-                _lv(fx.add_offset(pa, STAGE_A), (tile_n // 16, PACK_TK * 16), (B_LDS_ROW, 1)),
-                kt64 * fx.Int64(PACK_TK * 16),
-            )
-            _wcopy(
-                W_SA,
-                atomSA,
-                gSA,
-                _lv(fx.add_offset(pa, SA_OFF), (SA_SUPERS, tile_k), (tile_k, 1)),
-                kt64 * fx.Int64(tile_k),
-            )
-            _wcopy(
-                W_SB,
-                atomSB,
-                gSB,
-                _lv(fx.add_offset(pa, SB_OFF), (SB_SUPERS, tile_k), (tile_k, 1)),
-                kt64 * fx.Int64(tile_k),
-            )
+            if wave == W_A:
+                fx.copy(atomA, tAgA[None, kt], tAsA[None, s])
+            if wave == W_B:
+                fx.copy(atomB, tBgB[None, kt], tBsB[None, s])
+            if wave == W_SA:
+                fx.copy(atomSA, tSAgSA[None, kt], tSAsSA[None, s])
+            if wave == W_SB:
+                fx.copy(atomSB, tSBgSB[None, kt], tSBsSB[None, s])
 
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
@@ -334,16 +340,21 @@ def launch_gemm_a8w4_mxscale(
                 h = Vec(accs[wm * wmma_n_rep + wn]).to(oc)
                 fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * tile_n + col_rel) * 2)
         workgroup_barrier(use_cluster=False)
-        c_off_rt = blk_m64 * ldc64 + blk_n64
-        gtC = _gv(fx.get_iter(arg_c), c_off_rt, (tile_m, tile_n), (tile_n, 1))
-        atomC = fx.rocdl.make_tdm_atom(
-            gtC,
-            [mn_oob, None],
-            strides=[ldc64, None],
-            num_warps=num_waves,
-            early_timeout=False,
+        # C store: new tiled-TDM store over the FULL (M, N) tensor, split across all waves. Keep the
+        # N-tile grid as the coordinate rest (mode-0 stays the nested box); select bid_x/bid_y.
+        gC_full = _gv(fx.recast_iter(oc, fx.get_iter(arg_c)), fx.Int64(0), (i32_m, i32_n), (ldc64, 1))
+        atomC, coordC = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorStore(), gC_full, fx.make_layout((tile_m, tile_n), (tile_n, 1)), (tile_m, tile_n), num_warps=num_waves
         )
-        fx.copy(atomC, _lv(fx.recast_iter(oc, base_ptr), (tile_m, tile_n), (tile_n, 1)), gtC)
+        blkC = fx.zipped_divide(coordC, (tile_m, tile_n))[None, (bid_x, None)]
+        sC_lds = fx.Tensor(
+            fx.make_view(
+                fx.recast_iter(oc, base_ptr),
+                fx.make_layout(((tile_m, tile_n), 1), ((tile_n, 1), tile_m * tile_n)),
+            )
+        )
+        tCsC, tCgC = fx.rocdl.cdna5.tdm_partition(atomC, wave, fx.make_layout(num_waves, 1), sC_lds, blkC)
+        fx.copy(atomC, tCsC[None, 0, 0], tCgC[None, 0, bid_y])
         tdm_ops.tensor_wait(0)
 
     gx = (i32_m + (tile_m - 1)) // tile_m

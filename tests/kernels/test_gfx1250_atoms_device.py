@@ -59,30 +59,37 @@ WAVE_SIZE = 32
 
 
 def _compile_tdm_roundtrip(M: int, N: int, num_warps: int):
-    from flydsl.expr.rocdl import tdm_ops
-
     @flyc.kernel
     def tdm_roundtrip_kernel(A: fx.Tensor, C: fx.Tensor):
-        # 2D tile views over the flat global tensors (row-major (M, N):(N, 1)).
-        a2d = fx.make_view(fx.get_iter(A), fx.make_layout((M, N), (N, 1)))
-        c2d = fx.make_view(fx.get_iter(C), fx.make_layout((M, N), (N, 1)))
-
-        # One contiguous LDS tile of the same shape.
+        # One contiguous LDS tile of the whole (M, N) shape, carried with a size-1 rest so its
+        # mode-0 stays the nested box that tdm_partition cuts.
         lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, M * N]).peek()
-        lds2d = fx.make_view(lds.ptr, fx.make_layout((M, N), (N, 1)))
+        box = fx.make_layout((M, N), (N, 1))
+        smem = fx.Tensor(fx.make_view(lds.ptr, fx.make_layout(((M, N), 1), ((N, 1), M * N))))
 
-        # Global -> LDS. The base pointer comes from the global operand; the tile
-        # extents (full tile => no OOB clamp) and strides (None => static layout
-        # fallback) are atom state populated by make_tdm_atom.
-        load_atom = fx.rocdl.make_tdm_atom(a2d, [M, N], num_warps=num_warps)
-        fx.copy_atom_call(load_atom, a2d, lds2d)
-        tdm_ops.tensor_wait(0)
+        # Whole-tile Global->LDS->Global via the new tiled-TDM atoms; num_warps waves split the tile.
+        load_atom, coordA = fx.rocdl.cdna5.make_tiled_tdm_atom(fx.rocdl.TensorLoad(), A, box, (M, N), num_warps=num_warps)
+        store_atom, coordC = fx.rocdl.cdna5.make_tiled_tdm_atom(fx.rocdl.TensorStore(), C, box, (M, N), num_warps=num_warps)
+        blkA = fx.zipped_divide(coordA, (M, N))[None, (0, None)]
+        blkC = fx.zipped_divide(coordC, (M, N))[None, (0, None)]
+        wave = fx.Int32(fx.thread_idx.x) // WAVE_SIZE
+        wcrd = 0 if num_warps == 1 else wave
+        wlay = fx.make_layout(num_warps, 1)
+        tAs, tAg = fx.rocdl.cdna5.tdm_partition(load_atom, wcrd, wlay, smem, blkA)
+        tCs, tCg = fx.rocdl.cdna5.tdm_partition(store_atom, wcrd, wlay, smem, blkC)
+
+        # num_warps==1 leaves the copy tiles rank-2 ((ATOM,ITER), rest); num_warps>1 adds a warp mode.
+        if num_warps == 1:
+            fx.copy(load_atom, tAg[None, 0], tAs[None, 0])
+        else:
+            fx.copy(load_atom, tAg[None, 0, 0], tAs[None, 0, 0])
+        fx.rocdl.s_wait_tensorcnt(0)
         fx.barrier()
-
-        # LDS -> Global.
-        store_atom = fx.rocdl.make_tdm_atom(c2d, [M, N], num_warps=num_warps)
-        fx.copy_atom_call(store_atom, lds2d, c2d)
-        tdm_ops.tensor_wait(0)
+        if num_warps == 1:
+            fx.copy(store_atom, tCs[None, 0], tCg[None, 0])
+        else:
+            fx.copy(store_atom, tCs[None, 0, 0], tCg[None, 0, 0])
+        fx.rocdl.s_wait_tensorcnt(0)
 
     @flyc.jit
     def launch(A: fx.Tensor, C: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
