@@ -15,7 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.conv.conv3d_implicit import conv3d_implicit
+from kernels.conv.conv3d_implicit import _pick_tile, conv3d_implicit
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -123,6 +123,26 @@ def test_conv3d_tile_configs(tile):
 
     y = conv3d_implicit(x, weight, bias=bias, stride=stride, padding=padding, tile=tile)
     y_ref = F.conv3d(x, weight, bias=bias.to(torch.bfloat16), stride=stride, padding=padding)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+@_skip_non_cdna4
+@pytest.mark.parametrize("k,groups", [(96, 1), (192, 2)])
+def test_conv2d_auto_tile_n_tail(k, groups):
+    """K per group between TILE_MIN_N_FILL*TILE_N and TILE_N must keep the wide tile."""
+    torch.manual_seed(4400 + k)
+    c, h, w = 64 * groups, 256, 256
+    x = torch.randn((1, c, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c // groups, 3, 3), device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn((k,), device="cuda", dtype=torch.float32)
+
+    assert _pick_tile(h * w, k, groups, x.device)[1] == 128
+
+    y = conv3d_implicit(x, weight, bias=bias, padding=1, groups=groups)
+    y_ref = F.conv2d(x, weight, bias=bias.to(torch.bfloat16), padding=1, groups=groups)
     torch.cuda.synchronize()
 
     assert y.shape == y_ref.shape

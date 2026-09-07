@@ -53,6 +53,8 @@ TILE_LADDER = ((128, 128, 2, 4), (64, 64, 2, 2), (32, 32, 1, 2))
 
 TILE_MIN_WAVES_PER_CU = 6
 
+TILE_MIN_N_FILL = 0.75
+
 PADDING_MODES = ("zeros", "reflect", "replicate", "circular")
 
 CONV_COMPILE_HINTS = {}
@@ -954,7 +956,11 @@ def _num_cu(device):
 
 def _pick_tile(npq, k, groups, device):
     kg = k // groups
-    legal = [t for t in TILE_LADDER if t[1] <= kg] or [TILE_LADDER[-1]]
+    # A tile wider than kg is still worth its masked columns: it keeps more waves per
+    # block and halves the A traffic per output element. Below TILE_MIN_N_FILL the
+    # wasted columns take over; the wave-count check below demotes it again when the
+    # problem is too small to fill the device.
+    legal = [t for t in TILE_LADDER if kg >= t[1] * TILE_MIN_N_FILL] or [TILE_LADDER[-1]]
     target = TILE_MIN_WAVES_PER_CU * _num_cu(device)
     for tile_m, tile_n, wave_m, wave_n in legal:
         blocks = ((npq + tile_m - 1) // tile_m) * groups * ((kg + tile_n - 1) // tile_n)
