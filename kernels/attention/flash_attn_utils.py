@@ -31,15 +31,13 @@ from kernels.common.kernels_common import dtype_to_elem_type
 _LOG2E = host_math.log2(host_math.e)
 # gfx950 (MI350/MI355X): 8 XCDs, each with a private ~4 MB L2.
 NUM_XCD_GFX950 = 8
+# LDS a single gfx950 workgroup may request. Past this the request is rejected
+# at codegen ("local memory exceeds limit") or at launch (hipErrorIllegalState).
+LDS_BYTES_GFX950 = 160 * 1024
 MIN_Q_BLOCKS_XCD_SWIZZLE = 64
 # The dual-wave 8-wave CTA fixes the q-block height; callers need it to count
 # q-blocks before any traits object exists.
 DUALWAVE_SWP_BLOCK_M = 256
-# s_waitcnt bitfield encoding
-_VMCNT_LO_MASK = 0xF
-_LGKMCNT_EXPCNT_BASE = 0x3F70
-_VMCNT_HI_SHIFT = 14
-_VMCNT_HI_MASK = 0x3
 scf_if_dispatch = ReplaceIfWithDispatch.scf_if_dispatch
 
 
@@ -50,9 +48,13 @@ _LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "flydsl.dualwave_swp.lds">'
 
 
 def _waitcnt_vm_n(n):
-    """Emit s_waitcnt vmcnt(n) only (lgkmcnt=63, expcnt=7)."""
-    val = (n & _VMCNT_LO_MASK) | _LGKMCNT_EXPCNT_BASE | (((n >> 4) & _VMCNT_HI_MASK) << _VMCNT_HI_SHIFT)
-    rocdl.s_waitcnt(val)
+    """Wait until at most `n` vector-memory ops are outstanding; lgkmcnt/expcnt unconstrained.
+
+    The keyword form packs the per-arch bitfield (the counter field widths differ
+    between CDNA and RDNA), so the split vmcnt encoding does not have to be
+    open-coded here.
+    """
+    rocdl.s_waitcnt(vmcnt=n)
 
 
 def _s_waitcnt(val):
@@ -560,6 +562,12 @@ def _dualwave_lds_noalias_scopes(name, scope_names):
 
 
 def _cu_load(div, idx, cu_atom, cu_v1i32):
+    """Load cu_seqlens[idx] into an SGPR.
+
+    ``idx`` must be wave-uniform: the readfirstlane keeps lane 0's value for the
+    whole wave, so a per-lane index would silently give every lane lane 0's
+    answer. Every caller derives ``idx`` from a kernel argument or a block index.
+    """
     v = fly.copy_atom_call_ssa([cu_v1i32], cu_atom, fx.slice(div, (None, fx.Int32(idx))))
     return fx.Index(rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(Vec(v, (1,), fx.Int32)[0]))))
 
@@ -1048,6 +1056,9 @@ def _init_dualwave_thread_mapping(ctx):
         T.i32,
         (_tid_i32 // fx.Int32(traits.WARP_SIZE)).ir_value(),
     )
+    # Two stagger groups, whatever the wave count. This is shared with the bf16
+    # path, where NUM_WAVES is 8 and the divisor stays the 4 it always was; it
+    # only moves for the fp8 4-wave (block_m=128) build.
     ctx.stagger_i32 = arith.divsi(_wave_id_uni_i32, as_mlir_value(fx.Int32(traits.NUM_WAVES // 2)))
     ctx.wave_id_uni = fx.Index(_wave_id_uni_i32)
 
@@ -1783,9 +1794,9 @@ def _make_dualwave_swp_traits(
 class DualwaveSwpFp8Traits:
     """Pure compile-time tile/layout constants for the gfx950 DUALWAVE_SWP fp8 kernel.
 
-    fp8 runs a single path: WIDE QK (32x32x64 mfma_scale) feeding HIPREC PV (fp8 V
-    dequantized into a bf16 ``vt`` LDS scratch, then a bf16 PV MMA). The ``*_BF``
-    fields describe that bf16 vt layout; ``ELEM_BYTES`` is 1 (Q/K/V are fp8)."""
+    fp8 runs a single path: WIDE QK (32x32x64 mfma_scale) feeding an fp8 PV MMA
+    that consumes V straight out of the ``vt`` LDS scratch. ``ELEM_BYTES`` is 1
+    (Q/K/V are fp8); the bf16 output is ``OUT_ELEM_BYTES``."""
 
     BLOCK_M: int
     BLOCK_N: int
@@ -1814,12 +1825,6 @@ class DualwaveSwpFp8Traits:
     SPLITK: bool
     VARLEN: bool
     CROSS_SEQLEN: bool
-    FP8_PV: bool
-    FP8_PV_DIRECT: bool
-    BN128: bool
-    BN128_PF: bool
-    QREG: bool
-    VDMA: bool
     DEFAULT_STRIDE_Q_N: int
     DEFAULT_STRIDE_KV_N: int
     DEFAULT_STRIDE_V_N: int
@@ -1834,11 +1839,8 @@ class DualwaveSwpFp8Traits:
     DMA_BYTES: int
     ELEM_BYTES: int
     OUT_ELEM_BYTES: int
-    D_128B_SIZE: int
     VEC_KV: int
     LANE_SPLIT_KV: int
-    SMEM_N_RPT: int
-    SMEM_D_RPT: int
     SMEM_K_LINE_STRIDE: int
     SMEM_K_TILE_ELEMS: int
     NUM_PREFETCH_K: int
@@ -1846,23 +1848,9 @@ class DualwaveSwpFp8Traits:
     LDS_KV_TOTAL_SIZE: int
     DUALWAVE_SWP_K_BUF_BASE: tuple[int, int]
     DUALWAVE_SWP_V_BUF_BASE: tuple[int, int]
-    # bf16 vt scratch layout (HIPREC V dequant target + transpose read strides).
-    EB_BF: int
-    D128_BF: int
-    VEC_BF: int
-    SDRPT_BF: int
-    SNRPT_BF: int
-    VLS_BF: int
-    VT_BF16_ELEMS: int
+    # V scratch: fp8 V arrives already permuted into the PV MMA layout. Sized in
+    # bf16 elements because the LDS array is typed bf16.
     VT_BF16_TOTAL: int
-    URV_GRPK_BF: int
-    URV_GRP_N_BF: int
-    URV_LANE_LO_BF: int
-    URV_LANE_HI_BF: int
-    URV_STEPK_BF: int
-    URV_DC_AXIS0_BF: int
-    URV_DC_AXIS1_BF: int
-    URV_I5_BF: int
     DUALWAVE_SWP_RESCALE_THRESHOLD: float
     SCHED_MFMA_MASK: int
     SCHED_VALU_MASK: int
@@ -1900,17 +1888,15 @@ class DualwaveSwpFp8Traits:
             self.ELEM_BYTES,
             self.OUT_ELEM_BYTES,
             self.LANE_SPLIT_KV,
-            self.VT_BF16_ELEMS,
             self.VT_BF16_TOTAL,
-            self.FP8_PV,
-            self.FP8_PV_DIRECT,
             self.NUM_PREFETCH_K,
-            self.BN128,
-            self.BN128_PF,
-            self.QREG,
-            self.VDMA,
             self.XCD_SWIZZLE,
             self.BATCH_INTERLEAVE_GROUP,
+            # block_m is a build parameter now, and it moves the tile shape, the
+            # wave count, the LDS layout and the grid.
+            self.BLOCK_M,
+            self.BLOCK_SIZE,
+            self.NUM_WAVES,
         )
 
 
@@ -1937,14 +1923,22 @@ def _make_dualwave_swp_fp8_traits(
     """Build gfx950 DUALWAVE_SWP fp8 compile-time layout traits (dtype fixed to fp8).
 
     ``head_dim`` is the QK reduction width and ``head_dim_v`` the V (and output)
-    width; they differ for the 192/128 pair. Both must be multiples of 64 -- the
-    fp8 QK MFMA is 32x32x64, so head_dim splits into head_dim//64 slices with no
-    padding, and the V/O side tiles in 32-wide D_CHUNKs."""
+    width; they differ for the 192/128 pair. ``head_dim`` must be a multiple of
+    64 -- the fp8 QK MFMA is 32x32x64, so it splits into head_dim//64 slices with
+    no padding. ``head_dim_v`` tiles in 32-wide D_CHUNKs and so only has to be a
+    multiple of 32, but the validated range is 64..192 (see below)."""
     if head_dim_v is None:
         head_dim_v = head_dim
-    if head_dim % 64 or head_dim_v % 32:
+    if head_dim % 64:
+        raise RuntimeError(f"fp8 flash attention needs head_dim % 64 == 0, got head_dim={head_dim}")
+    # D_CHUNKS == head_dim_v // 32 must land in [2, 6]. Below 2, `_anchor_v_o`
+    # builds a single-element inline-asm struct and LLVM aborts the process;
+    # above 6 the kernel launches but miscomputes the high D_CHUNKs (measured at
+    # head_dim_v=224: min_cos 0.83, error confined to output columns 128..191).
+    if head_dim_v % 32 or not 64 <= head_dim_v <= 192:
         raise RuntimeError(
-            f"fp8 flash attention needs head_dim % 64 == 0 and head_dim_v % 32 == 0, " f"got {head_dim}/{head_dim_v}"
+            "fp8 flash attention needs 64 <= head_dim_v <= 192 and head_dim_v % 32 == 0, "
+            f"got head_dim_v={head_dim_v} (head_dim={head_dim})"
         )
     block_n = 64
     k_sub_n = 32
@@ -1969,18 +1963,11 @@ def _make_dualwave_swp_fp8_traits(
     # fp8: Q/K/V are 1B; O is bf16 (2B). ELEM_BYTES=1 drives the fp8 address math.
     elem_bytes = 1
     out_elem_bytes = 2
-    d_128b_size = 128 // elem_bytes
     vec_kv = 16 // elem_bytes
     lane_split_kv = 8
     smem_linear_wave = warp_size * 16 // elem_bytes
-    smem_n_per_wave = smem_linear_wave // d_128b_size
-    smem_n_rpt = block_n // smem_n_per_wave
-    smem_d_rpt = head_dim_v // d_128b_size
     smem_k_pad = 16 // elem_bytes
-    smem_v_pad = 64 // elem_bytes
     smem_k_line_stride = smem_linear_wave + smem_k_pad
-    smem_v_line_stride = smem_linear_wave + smem_v_pad
-    smem_v_tile_elems = smem_n_rpt * smem_d_rpt * smem_v_line_stride
 
     rows_per_wave_dma = -(-block_n // num_waves)
     k_band_chunk, k_band_base, k_band_line_stride, k_band_global_d = [], [], [], []
@@ -2000,44 +1987,41 @@ def _make_dualwave_swp_fp8_traits(
         for _o in range(0, chunk, 64):
             k_ws_band.append(_bi)
             k_ws_off.append(_o)
-    bn128 = True
-    bn128_pf = bn128
-    qreg = bn128_pf
-    vdma = bn128_pf
-    deep_ring = bn128
-    num_prefetch_k = (6 if bn128_pf else 4) if deep_ring else 2
-    if bn128_pf:
-        dualwave_swp_kv_per_buffer = smem_k_tile_elems
-    else:
-        dualwave_swp_kv_per_buffer = smem_k_tile_elems + smem_v_tile_elems
+    # The BN128 pipeline (two BLOCK_N=64 tiles per iteration, 6-deep K ring, V
+    # staged by DMA straight into its MMA layout) is the only fp8 pipeline left;
+    # split-K and varlen run on it too.
+    num_prefetch_k = 6
+    dualwave_swp_kv_per_buffer = smem_k_tile_elems
     lds_kv_total_size = num_prefetch_k * dualwave_swp_kv_per_buffer
     dualwave_swp_k_buf_base = tuple(i * dualwave_swp_kv_per_buffer for i in range(num_prefetch_k))
     dualwave_swp_v_buf_base = tuple(smem_k_tile_elems + i * dualwave_swp_kv_per_buffer for i in range(num_prefetch_k))
 
-    # bf16 vt scratch layout: HIPREC dequantizes fp8 V into these positions so the
-    # proven bf16 V transpose read (ds_read_tr16) + bf16 PV MMA are reused unchanged.
+    # V scratch: fp8 V is DMA'd in already permuted into the PV MMA layout. The
+    # array is typed bf16, hence the /2; the trailing 128 covers the 128-byte
+    # alignment the DMA base is rounded up to.
     eb_bf = 2
-    d128_bf = 128 // eb_bf
-    vec_bf = 16 // eb_bf
-    slw_bf = warp_size * 16 // eb_bf
-    snrpt_bf = block_n // (slw_bf // d128_bf)
-    sdrpt_bf = head_dim_v // d128_bf
-    vls_bf = slw_bf + 64 // eb_bf
-    vt_bf16_elems = snrpt_bf * sdrpt_bf * vls_bf
     fp8_v_tile_bytes = (block_n // 8) * (head_dim_v // 16) * 128
-    if bn128_pf:
-        vt_bf16_total = num_prefetch_k * (fp8_v_tile_bytes // eb_bf) + 128
-    else:
-        vt_bf16_total = (2 if deep_ring else num_prefetch_k) * vt_bf16_elems
+    vt_bf16_total = num_prefetch_k * (fp8_v_tile_bytes // eb_bf) + 128
 
     splitk = num_kv_splits > 1
 
     qlds = head_dim <= 128
 
-    fp8_pv = os.getenv("FLYDSL_FA_FP8_PV", "0") == "1"
-    fp8_pv_direct = bn128
-    if fp8_pv_direct:
-        fp8_pv = True
+    # SharedStorage is {K/V ring, bf16 V transpose scratch, staged Q}; the Q stub
+    # allocated when not QLDS is never read and the allocator drops it. The
+    # footprint is fixed by (head_dim, head_dim_v, block_m), so reject it here --
+    # otherwise it surfaces as "local memory exceeds limit" at codegen or a bare
+    # hipErrorIllegalState at launch, neither of which names a head dim.
+    lds_bytes = lds_kv_total_size * elem_bytes + vt_bf16_total * eb_bf
+    if qlds:
+        lds_bytes += block_m * head_dim * elem_bytes
+    if lds_bytes > LDS_BYTES_GFX950:
+        raise RuntimeError(
+            f"fp8 flash attention head_dim={head_dim}/head_dim_v={head_dim_v} at block_m={block_m} "
+            f"needs {lds_bytes} B of LDS, over the {LDS_BYTES_GFX950} B gfx950 workgroup limit. "
+            "The footprint grows by ~25 KB per +64 of head_dim and ~12 KB per +32 of head_dim_v; "
+            "head_dim + head_dim_v <= 384 is the supported envelope."
+        )
 
     return DualwaveSwpFp8Traits(
         BLOCK_M=block_m,
@@ -2067,12 +2051,6 @@ def _make_dualwave_swp_fp8_traits(
         SPLITK=splitk,
         VARLEN=bool(varlen),
         CROSS_SEQLEN=bool(cross_seqlen),
-        FP8_PV=fp8_pv,
-        FP8_PV_DIRECT=bool(fp8_pv_direct),
-        BN128=bool(bn128),
-        BN128_PF=bool(bn128_pf),
-        QREG=bool(qreg),
-        VDMA=bool(vdma),
         DEFAULT_STRIDE_Q_N=default_stride_q_n,
         DEFAULT_STRIDE_KV_N=default_stride_kv_n,
         DEFAULT_STRIDE_V_N=default_stride_v_n,
@@ -2087,11 +2065,8 @@ def _make_dualwave_swp_fp8_traits(
         DMA_BYTES=16,
         ELEM_BYTES=elem_bytes,
         OUT_ELEM_BYTES=out_elem_bytes,
-        D_128B_SIZE=d_128b_size,
         VEC_KV=vec_kv,
         LANE_SPLIT_KV=lane_split_kv,
-        SMEM_N_RPT=smem_n_rpt,
-        SMEM_D_RPT=smem_d_rpt,
         SMEM_K_LINE_STRIDE=smem_k_line_stride,
         SMEM_K_TILE_ELEMS=smem_k_tile_elems,
         NUM_PREFETCH_K=num_prefetch_k,
@@ -2099,22 +2074,7 @@ def _make_dualwave_swp_fp8_traits(
         LDS_KV_TOTAL_SIZE=lds_kv_total_size,
         DUALWAVE_SWP_K_BUF_BASE=dualwave_swp_k_buf_base,
         DUALWAVE_SWP_V_BUF_BASE=dualwave_swp_v_buf_base,
-        EB_BF=eb_bf,
-        D128_BF=d128_bf,
-        VEC_BF=vec_bf,
-        SDRPT_BF=sdrpt_bf,
-        SNRPT_BF=snrpt_bf,
-        VLS_BF=vls_bf,
-        VT_BF16_ELEMS=vt_bf16_elems,
         VT_BF16_TOTAL=vt_bf16_total,
-        URV_GRPK_BF=4 * vls_bf,
-        URV_GRP_N_BF=16,
-        URV_LANE_LO_BF=4,
-        URV_LANE_HI_BF=vls_bf,
-        URV_STEPK_BF=128,
-        URV_DC_AXIS0_BF=snrpt_bf * vls_bf,
-        URV_DC_AXIS1_BF=32,
-        URV_I5_BF=d128_bf,
         DUALWAVE_SWP_RESCALE_THRESHOLD=rescale_threshold,
         SCHED_MFMA_MASK=0x008,
         SCHED_VALU_MASK=0x002,
@@ -2126,6 +2086,34 @@ def _make_dualwave_swp_fp8_traits(
         XCD_SWIZZLE=bool(xcd_swizzle),
         BATCH_INTERLEAVE_GROUP=int(batch_interleave_group),
     )
+
+
+def dualwave_fp8_dma_per_iter(traits):
+    """Vector-memory instructions the *least* loaded wave issues per main-loop iteration.
+
+    `_waitcnt_vm_n(N)` only forces the previous iteration's DMAs to retire when N
+    is at most the count this wave actually issues; overshooting turns the wait
+    into a no-op and the end-of-iteration barrier then releases with LDS writes
+    still in flight. Waves that issue more than the minimum just over-wait, which
+    is safe.
+
+    K (`DualwaveFp8KvGmemToLdsLoader.load_k`): every wave issues one DMA per pass
+    per band, the tail band's partial pass included -- it is exec-masked, not
+    branched, so the instruction still issues.
+
+    V (`_stage_v_fp8_block_dma`): the trailing pass is guarded by a wave-uniform
+    `dma_id < num_dma`, so waves past the end issue nothing at all and the
+    minimum is the floor, not the ceiling.
+
+    The main loop consumes two KV tiles per iteration, hence the factor of two.
+    """
+    rows_per_wave = -(-traits.BLOCK_N // traits.NUM_WAVES)
+    k_instr = sum(-(-(rows_per_wave * (chunk // traits.VEC_KV)) // traits.WARP_SIZE) for chunk in traits.K_BAND_CHUNK)
+    num_dma_v = (traits.BLOCK_N * (traits.HEAD_DIM_V // 16) * 16) // (
+        traits.WARP_SIZE * traits.VEC_KV * traits.ELEM_BYTES
+    )
+    v_instr_min = num_dma_v // traits.NUM_WAVES
+    return 2 * k_instr + 2 * v_instr_min
 
 
 # Kernel context
@@ -4483,7 +4471,6 @@ class DualwaveFp8KernelContext:
         self.p_elem = fx.BFloat16
         self.v4bf16_type = Vec.make_type(4, fx.BFloat16)
         self.NUM_DMA_K = len(traits.K_BAND_CHUNK)
-        self.NUM_DMA_V = traits.SMEM_D_RPT
         self.c_neg_inf = fx.Float32(float("-inf"))
         self.c_neg_floor = fx.Float32(-3.0e38)
         self.c_zero_f = fx.Float32(0.0)
@@ -4504,6 +4491,13 @@ class DualwaveFp8KernelContext:
             self.stride_o_n_v = fx.Index(traits.DEFAULT_STRIDE_O_N)
 
     def init_causal_lpt_order(self):
+        """Issue causal q-blocks longest-first by reversing the q-block grid axis.
+
+        Causal work per q-block grows with the block index and workgroups dispatch in
+        flattened-id order, so the natural order issues the heaviest block last and the
+        makespan carries its tail. Must run after init_thread_mapping and before
+        init_sequence_lengths / init_tile_bounds / init_q_row read q_start.
+        """
         traits = self.traits
         num_q_blocks = (self.seq_len_v + traits.BLOCK_M - 1) // traits.BLOCK_M
         self.q_block_idx = num_q_blocks - fx.Index(1) - self.q_block_idx
@@ -4780,13 +4774,6 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             ],
         )
 
-    def _mfma_acc_bf16(self, a_v8, b_v8, c_v16):
-        return fly.mma_atom_call_ssa([self.v16f32_type], self.bf16_mma_atom, a_v8, b_v8, c_v16)
-
-    def _v8bf16_to_f32(self, v8):
-        f32 = Vec(llvm.FPExtOp(Vec.make_type(8, fx.Float32), as_mlir_value(v8)).result, (8,), fx.Float32)
-        return [f32[i] for i in range_constexpr(8)]
-
     def _pack_fp8_i32x8(self, f32_vals):
         c0 = llvm.mlir_poison(T.i32)
         words = []
@@ -4818,20 +4805,6 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             f32 += self._v8bf16_to_f32(v_v[step][dc])
         return self._pack_fp8_i32x8(f32)
 
-    def _pv_fp8(self, v_p, v_v, v_o):
-        p_fp8 = self._p_to_fp8_i32x8(v_p)
-        for dc in range_constexpr(self.traits.D_CHUNKS):
-            v_op = self._v_concat_i32x8(v_v, dc)
-            v_o[dc] = self._mfma_acc_fp8_wide(v_op, p_fp8, v_o[dc])
-        return v_o
-
-    def _pv_step_fp8(self, step, v_p, v_v, v_o):
-        if const_expr(step == 0):
-            self._pv_p_fp8_cache = self._p_to_fp8_i32x8(v_p)
-        v_op = self._v_concat_i32x8(v_v, step)
-        v_o[step] = self._mfma_acc_fp8_wide(v_op, self._pv_p_fp8_cache, v_o[step])
-        return v_o
-
     def _load_q_wide_lds(self):
         traits = self.traits
         q_row_in_block = self.ctx_ref.q_row_in_block
@@ -4846,7 +4819,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         """Pull this lane's Q operands straight from global into VGPRs.
 
         Used when Q is not staged through LDS (head_dim > 128, where the staging
-        buffer would not fit alongside the KV ring). QREG reads Q exactly once, so
+        buffer would not fit alongside the KV ring). Q is read exactly once, so
         the only thing LDS bought was coalescing on that single pass.
         """
         traits = self.traits
@@ -4874,28 +4847,13 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             q_w = q_all_wide[ws]
             v_s_lo = self._mfma_acc_fp8_wide(k_lo[ws], q_w, v_s_lo)
             v_s_hi = self._mfma_acc_fp8_wide(k_hi[ws], q_w, v_s_hi)
-        if const_expr(traits.QREG):
-            n_ds = const_expr(traits.HEAD_DIM // 64 * 4)
-            n_mfma = const_expr(traits.HEAD_DIM // 64 * 2)
-            rocdl.sched_group_barrier(traits.SCHED_DS_READ_MASK, n_ds // 2, 12)
-            rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, 1, 12)
-            rocdl.sched_group_barrier(traits.SCHED_DS_READ_MASK, n_ds // 2, 12)
-            rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, n_mfma - 1, 12)
+        n_ds = const_expr(traits.HEAD_DIM // 64 * 4)
+        n_mfma = const_expr(traits.HEAD_DIM // 64 * 2)
+        rocdl.sched_group_barrier(traits.SCHED_DS_READ_MASK, n_ds // 2, 12)
+        rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, 1, 12)
+        rocdl.sched_group_barrier(traits.SCHED_DS_READ_MASK, n_ds // 2, 12)
+        rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, n_mfma - 1, 12)
         return (v_s_lo, v_s_hi)
-
-    def pv_step_k(self, step, v_p, v_v, v_o):
-        if const_expr(self.traits.FP8_PV):
-            return self._pv_step_fp8(step, v_p, v_v, v_o)
-        # HIPREC PV: P and V are both v8 bf16, accumulated by a bf16 MMA.
-        v_p_lo, v_p_hi = v_p
-        v_pk = v_v[step]
-        if const_expr(step < 2):
-            p_pk = v_p_lo[step]
-        else:
-            p_pk = v_p_hi[step - 2]
-        for dc in range_constexpr(self.traits.D_CHUNKS):
-            v_o[dc] = self._mfma_acc_bf16(v_pk[dc], p_pk, v_o[dc])
-        return v_o
 
     def cast_p_fp8_direct(self, v_p):
         lo_partial_list, hi_full = v_p
@@ -4916,13 +4874,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         return v_o
 
     def pv(self, v_p, v_v, v_o):
-        if const_expr(self.traits.FP8_PV_DIRECT):
-            return self._pv_fp8_direct(v_p, v_v, v_o)
-        if const_expr(self.traits.FP8_PV):
-            return self._pv_fp8(v_p, v_v, v_o)
-        for step in range_constexpr(4):
-            v_o = self.pv_step_k(step, v_p, v_v, v_o)
-        return v_o
+        return self._pv_fp8_direct(v_p, v_v, v_o)
 
 
 class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
@@ -4973,49 +4925,7 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         _run()
 
     def load_v(self, tile_start, buf_id):
-        if const_expr(self.traits.FP8_PV):
-            self._stage_v_fp8_block(tile_start, buf_id)
-        else:
-            self._stage_vt_dequant_fp8(tile_start, buf_id)
-
-    def zero_v_fp8_lds(self):
-        traits = self.traits
-        v_tile_bytes = (traits.BLOCK_N // 8) * (traits.HEAD_DIM_V // 16) * 128
-        total = 2 * v_tile_bytes
-        aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
-        zero = Vec.from_elements([fx.Int32(0) for _ in range_constexpr(4)], fx.Int32)
-        per = total // (traits.BLOCK_SIZE)  # bytes per thread
-        for i in range_constexpr(per // 16):
-            off = aligned_base + self.tid * fx.Index(per) + fx.Index(i * 16)
-            p = buffer_ops.create_llvm_ptr(off, address_space=3)
-            llvm.StoreOp(as_mlir_value(zero), p, alignment=16)
-
-    def _stage_v_fp8_block(self, tile_start, buf_id):
-        traits = self.traits
-        if const_expr(traits.VDMA):
-            return self._stage_v_fp8_block_dma(tile_start, buf_id)
-        v_tile_bytes = (traits.BLOCK_N // 8) * (traits.HEAD_DIM_V // 16) * 128
-        buf_off = buf_id * v_tile_bytes
-        n = self.wave_id * fx.Index(8) + self.lane // fx.Index(8)
-        d_block = self.lane % fx.Index(8)
-        src_elem = (
-            self.v_gmem_elem_offset + n * self.stride_v_n_v + d_block * fx.Index(16) + tile_start * self.stride_v_n_v
-        )
-        v16 = fly.copy_atom_call_ssa(
-            [Vec.make_type(4, fx.Int32)], self.load_atom_128, fx.slice(self.v_div, (None, fx.Int32(src_elem)))
-        )
-        n_i = fx.Int32(n)
-        w16 = n_i % fx.Int32(16)
-        c_add = (w16 >= fx.Int32(4)) & (w16 < fx.Int32(8))
-        c_sub = (w16 >= fx.Int32(8)) & (w16 < fx.Int32(12))
-        dest_n = n_i + c_add.select(fx.Int32(4), fx.Int32(0)) - c_sub.select(fx.Int32(4), fx.Int32(0))
-        dest_wave = fx.Index(dest_n // fx.Int32(8))
-        dest_m = fx.Index(dest_n % fx.Int32(8))
-        block = dest_wave * fx.Index(8) + self.lane % fx.Index(8)
-        aligned_base = ((self.lds_vt_base_idx + fx.Index(127)) // fx.Index(128)) * fx.Index(128)
-        byte_off = aligned_base + fx.Index(buf_off) + block * fx.Index(128) + fx.Index(16) * dest_m
-        lds_ptr = buffer_ops.create_llvm_ptr(byte_off, address_space=3)
-        llvm.StoreOp(as_mlir_value(Vec(v16)), lds_ptr, alignment=16)
+        self._stage_v_fp8_block_dma(tile_start, buf_id)
 
     def _stage_v_fp8_block_dma(self, tile_start, buf_id):
         traits = self.traits
@@ -5061,38 +4971,6 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
 
         _run()
 
-    def _stage_vt_dequant_fp8(self, tile_start, buf_id):
-        # Dequantize fp8 V into the exact bf16 V staging positions. The two d-iters
-        # load 8 fp8 at D offsets 64 apart; a contiguous 16B load would gather wrong.
-        traits = self.traits
-        vt_buf = buf_id * traits.VT_BF16_ELEMS
-        n_in_tile = self.n_in_warp * traits.NUM_WAVES + self.wave_id
-        for d in range_constexpr(traits.SDRPT_BF):
-            global_d = self.d_bucket * traits.VEC_BF + (d * traits.D128_BF)
-            src_elem = (
-                self.v_gmem_elem_offset + n_in_tile * self.stride_v_n_v + global_d + tile_start * self.stride_v_n_v
-            )
-            v_i32x2 = fly.copy_atom_call_ssa(
-                [self.v2i32_type], self.v_fp8_load64_atom, fx.slice(self.v_div, (None, fx.Int32(src_elem)))
-            )
-            v_words = Vec(v_i32x2, (2,), fx.Int32)
-            bf = []
-            for w in range_constexpr(2):
-                word = as_mlir_value(fx.Int32(v_words[w]))
-                lo2 = Vec(rocdl.cvt_pk_f32_fp8(Vec.make_type(2, fx.Float32), word, False), (2,), fx.Float32)
-                hi2 = Vec(rocdl.cvt_pk_f32_fp8(Vec.make_type(2, fx.Float32), word, True), (2,), fx.Float32)
-                for e in (lo2[0], lo2[1], hi2[0], hi2[1]):
-                    bf.append(fx.Float32(e) * self.vd_fp8)
-            v8bf = self.bf16_trunc_pack_v8(bf)
-            byte_off = (
-                vt_buf
-                + self.wave_id_uni * traits.VLS_BF
-                + d * traits.SNRPT_BF * traits.VLS_BF
-                + self.lane * traits.VEC_BF
-            ) * traits.EB_BF
-            lds_ptr = buffer_ops.get_element_ptr(self.lds_vt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
-            llvm.StoreOp(as_mlir_value(v8bf), lds_ptr, alignment=16)
-
 
 class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
     def __init__(self, ctx):
@@ -5122,32 +5000,13 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
         return (_read_strip(n_lo), _read_strip(n_hi))
 
     def load_v(self, buf_id):
-        if const_expr(self.traits.FP8_PV):
-            return self._load_v_fp8_block(buf_id)
-        # Read all V packs from the bf16 vt scratch for buffer `buf_id`.
-        traits = self.traits
-        urv = (
-            self.lane_div_32 * traits.URV_GRPK_BF
-            + ((self.lane % 16) // 4) * traits.URV_LANE_HI_BF
-            + ((self.lane // 16) % 2) * traits.URV_GRP_N_BF
-            + (self.lane % 4) * traits.URV_LANE_LO_BF
-        )
-        packs = [[None] * traits.D_CHUNKS for _ in range(4)]
-        for dc in range_constexpr(traits.D_CHUNKS):
-            dc_off = (dc // 2) * traits.URV_DC_AXIS0_BF + (dc % 2) * traits.URV_DC_AXIS1_BF
-            for k_substep in range_constexpr(4):
-                imm_lo = (k_substep * traits.URV_STEPK_BF + dc_off) * traits.EB_BF
-                byte0 = (urv + buf_id * traits.VT_BF16_ELEMS) * traits.EB_BF + self.lds_vt_base_idx
-                a = _ds_read_tr16_b64_imm(self.v4bf16_type, fx.Int32(byte0), imm_lo)
-                b = _ds_read_tr16_b64_imm(self.v4bf16_type, fx.Int32(byte0), imm_lo + traits.URV_I5_BF * traits.EB_BF)
-                packs[k_substep][dc] = Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
-        return packs
+        return self._load_v_fp8_block(buf_id)
 
     def _load_v_fp8_block(self, buf_id):
         traits = self.traits
         v_tile_bytes = (traits.BLOCK_N // 8) * (traits.HEAD_DIM_V // 16) * 128
         buf_off = buf_id * v_tile_bytes
-        nbands = traits.HEAD_DIM_V // 16  # 8
+        nbands = traits.HEAD_DIM_V // 16
         rh = (self.lane % fx.Index(32)) // fx.Index(16)
         l16 = self.lane % fx.Index(16)
         lane_hi = self.lane // fx.Index(32)
@@ -5521,7 +5380,7 @@ class DualwaveSplitKCombineContext:
         WS=None,
         batch_size=None,
         seq_len=None,
-        stride_q_n=None,
+        stride_o_n=None,
         LSE=None,
         Sink=None,
         CuSeqQ=None,
@@ -5540,7 +5399,7 @@ class DualwaveSplitKCombineContext:
         self.CuSeqQ = CuSeqQ
         self.batch_size = batch_size
         self.seq_len = seq_len
-        self.stride_q_n = stride_q_n
+        self.stride_o_n = stride_o_n
 
     def init_types_and_constants(self):
         self.out_dtype_str = "bf16" if self.traits.DTYPE_STR == "fp8" else self.traits.DTYPE_STR
@@ -5553,20 +5412,34 @@ class DualwaveSplitKCombineContext:
 
     def init_runtime_indices(self):
         self.seq_len_v = fx.Index(self.seq_len)
-        self.stride_q_n_v = fx.Index(self.stride_q_n)
+        self.stride_o_n_v = fx.Index(self.stride_o_n)
         self.batch_size_v = fx.Index(self.batch_size)
 
     def init_thread_mapping(self, combine_rows_per_block, combine_lanes_per_row):
+        """Map (blockIdx.x, blockIdx.y, tid) to one (batch, head, token) output row.
+
+        blockIdx.y carries the batch so that `batch_idx` -- which the O buffer
+        resource is built from -- is block-uniform. A buffer resource is
+        wave-scoped, so deriving it per thread would give every lane of a wave
+        one batch's base pointer and num_records even when a batch boundary
+        falls inside the wave.
+
+        The x grid rounds up, and when combine_lanes_per_row does not divide the
+        block the trailing threads map past the block's own rows; both are folded
+        into `row_valid` by steering those threads to `rows_per_batch`.
+        """
         traits = self.traits
         self.tid = fx.Index(gpu.thread_idx.x)
         self.blk = fx.Index(gpu.block_idx.x)
-        self.row = self.blk * combine_rows_per_block + self.tid // combine_lanes_per_row
+        self.batch_idx = fx.Index(gpu.block_idx.y)
         self.col = (self.tid % combine_lanes_per_row) * 4
-        heads_per_batch = self.seq_len_v * traits.NUM_HEADS_Q
-        self.batch_idx = self.row // heads_per_batch
-        rem = self.row % heads_per_batch
-        self.q_head_idx = rem // self.seq_len_v
-        self.seq_idx = rem % self.seq_len_v
+        rows_per_batch = self.seq_len_v * traits.NUM_HEADS_Q
+        row_raw = self.blk * combine_rows_per_block + self.tid // combine_lanes_per_row
+        threads_in_use = fx.Index(combine_rows_per_block * combine_lanes_per_row)
+        self.row = (self.tid < threads_in_use).select(row_raw, rows_per_batch)
+        self.row_valid = self.row < rows_per_batch
+        self.q_head_idx = self.row // self.seq_len_v
+        self.seq_idx = self.row % self.seq_len_v
 
     def init_workspace(self):
         traits = self.traits
@@ -5588,12 +5461,14 @@ class DualwaveSplitKCombineContext:
             _cu_v1i32 = Vec.make_type(1, fx.Int32)
             q_tok_base = _cu_load(_cuq_div, self.batch_idx, _cu_atom, _cu_v1i32)
             q_tok_end = _cu_load(_cuq_div, self.batch_idx + fx.Index(1), _cu_atom, _cu_v1i32)
-            batch_byte_off = q_tok_base * self.stride_q_n_v * fx.Index(2)
-            nrec_bytes = (q_tok_end - q_tok_base) * self.stride_q_n_v * fx.Index(2)
+            batch_byte_off = q_tok_base * self.stride_o_n_v * fx.Index(2)
+            nrec_bytes = (q_tok_end - q_tok_base) * self.stride_o_n_v * fx.Index(2)
         else:
-            per_batch_elems = self.seq_len_v * self.stride_q_n_v
+            per_batch_elems = self.seq_len_v * self.stride_o_n_v
             batch_byte_off = self.batch_idx * per_batch_elems * fx.Index(2)
             nrec_bytes = per_batch_elems * fx.Index(2)
+        # Kept so out-of-range rows can steer their store past num_records.
+        self.o_nrec_bytes = nrec_bytes
         self.o_rsrc = buffer_ops.create_buffer_resource_from_addr(
             as_mlir_value(fx.Int64(fx.ptrtoint(fx.get_iter(self.O))) + fx.Int64(batch_byte_off)),
             num_records_bytes=as_mlir_value(fx.Int64(nrec_bytes)),
@@ -5730,15 +5605,19 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         lse_per_batch_bytes = lse_per_batch_elems * fx.Index(4)
         lse_rsrc = _make_ws_rsrc(lse_base_i64, self.batch_idx * lse_per_batch_bytes, lse_per_batch_bytes)
         lse_val = m_max * self.c_ln2_f + fx.log(den, fastmath=self.fm_fast)
-        lse_off = fx.Index((self.col == fx.Index(0)).select(self.local_ml_idx, lse_per_batch_elems))
+        lse_in_range = self.row_valid.select(self.local_ml_idx, lse_per_batch_elems)
+        lse_off = fx.Index((self.col == fx.Index(0)).select(lse_in_range, lse_per_batch_elems))
         buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), lse_rsrc, as_mlir_value(fx.Int32(lse_off)))
 
     def store_output(self, o_pack):
-        o_global = self.seq_idx * self.stride_q_n_v + self.q_head_idx * self.traits.HEAD_DIM_V + self.col
+        o_global = self.seq_idx * self.stride_o_n_v + self.q_head_idx * self.traits.HEAD_DIM_V + self.col
+        # Rows the rounded-up grid added past the end of the batch aim at
+        # num_records, which the buffer drops.
+        o_off = self.row_valid.select(o_global * fx.Index(2), self.o_nrec_bytes)
         buffer_ops.buffer_store(
             o_pack.ir_value(),
             self.o_rsrc,
-            as_mlir_value(fx.Int32(o_global * fx.Index(2))),
+            as_mlir_value(fx.Int32(o_off)),
             offset_is_bytes=True,
         )
 

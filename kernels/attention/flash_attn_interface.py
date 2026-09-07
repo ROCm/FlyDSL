@@ -61,43 +61,73 @@ def _fp8_rescale_threshold(seqlen_kv: int) -> float:
     return 6.0 if seqlen_kv <= _FP8_LONG_SEQ else 4.0
 
 
+# Split-K autotuning constants, all tuned at D=Dv=128. Measured across 26
+# shapes (B 1..32, S 512..16384, H 8/16/32) the picks land 1.4% off the
+# per-shape best of {1, 2, 4, 8, 16}; the visible misses are long causal
+# self-attention, which the CAUSAL_SKEW branch below limits to {1, 2}.
+# Fewer KV tiles per split than this and the fixed per-workgroup cost dominates.
 _FP8_AUTOSPLIT_MIN_TILES = 16
-_FP8_AUTOSPLIT_MIN_TILES_CAUSAL = 16
+# The combine pass allocates a fp32 workspace; past 1 GiB take the unsplit path.
 _FP8_AUTOSPLIT_MAX_WS_BYTES = 1 << 30
+# Matches DualwaveSwpFp8Traits.BLOCK_N; the heuristics run before traits exist.
 _FP8_BLOCK_N = 64
 _FP8_AUTOSPLIT_CANDIDATES = tuple(range(1, 17))
+# Per-workgroup cost in KV-tile units (Q gather, pipeline fill, O store).
 _FP8_AUTOSPLIT_FIXED_TILES = 10.4
+# Below this retained-score fraction the causal triangle is skewed enough that
+# the makespan model misprices splits; fall back to the 1-or-2 decision.
 _FP8_AUTOSPLIT_CAUSAL_SKEW = 0.75
+# Dense split-K must beat unsplit by this margin to pay for the combine launch.
 _FP8_AUTOSPLIT_DENSE_MARGIN = 0.85
 
 
-_FP8_NARROW_MAX_KV_TILES = 48
-_FP8_NARROW_MIN_TILES_2ROUND = 24
-_FP8_NARROW_MIN_WGS_CAUSAL = 150
-
-
 def _fp8_auto_block_m(batch: int, num_heads: int, seqlen_q: int, seqlen_kv: int, causal: bool, num_cu: int) -> int:
-    """Pick BLOCK_M (256 wide / 128 narrow) for an fp8 shape."""
-    kv_tiles = -(-seqlen_kv // _FP8_BLOCK_N)
-    if kv_tiles > _FP8_NARROW_MAX_KV_TILES:
-        return DUALWAVE_SWP_BLOCK_M
+    """Pick BLOCK_M (256 wide / 128 narrow) for an fp8 shape.
+
+    Take the narrow tile only when it still fits the GPU in one round, i.e. when
+    the wide tile would leave CUs idle. Neither the mask mode nor the KV length
+    enters: splitting causal off and picking narrow when the GPU is *already*
+    full is the wrong direction -- it doubles the workgroup count and halves the
+    work per group.
+
+    Scored against the per-shape best of {128, 256} on three measured sweeps
+    (block_m forced both ways, split-K off, 30-iteration medians):
+
+        table                    shapes   mean   worst
+        D=Dv=128 causal            72     0.08%   3.5%
+        D=Dv=128 non-causal        72     0.00%   0.0%
+        D=192/Dv=128 causal        30     0.96%  11.2%
+
+    A causal-only branch measured 13.5% mean / 37.5% worst on the first table.
+    Thresholds of num_cu/2 and 2*num_cu are both worse (1.2% and 3.1% mean).
+
+    The 192/128 residual is the known limitation: per-tile cost scales with
+    (head_dim + head_dim_v), so the wider pair keeps the narrow tile profitable
+    at higher occupancy than this shape-only rule admits.
+    """
     narrow = DUALWAVE_SWP_BLOCK_M // 2
-    wide_wgs = num_heads * -(-seqlen_q // DUALWAVE_SWP_BLOCK_M) * batch
     narrow_wgs = num_heads * -(-seqlen_q // narrow) * batch
-    if causal:
-        return narrow if wide_wgs >= _FP8_NARROW_MIN_WGS_CAUSAL else DUALWAVE_SWP_BLOCK_M
-    if narrow_wgs <= num_cu:
-        return narrow
-    if wide_wgs <= num_cu and kv_tiles >= _FP8_NARROW_MIN_TILES_2ROUND:
-        return narrow
-    return DUALWAVE_SWP_BLOCK_M
+    return narrow if narrow_wgs <= num_cu else DUALWAVE_SWP_BLOCK_M
 
 
 def _fp8_auto_kv_splits(
-    batch: int, num_heads: int, seqlen_q: int, seqlen_kv: int, causal: bool, num_cu: int, varlen: bool = False
+    batch: int,
+    num_heads: int,
+    seqlen_q: int,
+    seqlen_kv: int,
+    causal: bool,
+    num_cu: int,
+    varlen: bool = False,
+    block_m: int = DUALWAVE_SWP_BLOCK_M,
 ) -> int:
-    """Pick num_kv_splits by minimising `rounds(s) * (FIXED + tiles/s)`."""
-    wgs = num_heads * -(-seqlen_q // DUALWAVE_SWP_BLOCK_M) * batch
+    """Pick num_kv_splits by minimising `rounds(s) * (FIXED + tiles/s)`.
+
+    ``block_m`` must be the tile `_fp8_auto_block_m` already chose: it sets how
+    many workgroups the shape produces, and therefore whether splitting has any
+    idle CUs left to fill. Assuming the wide tile while the narrow one is built
+    halves the workgroup estimate and splits a GPU that is already full.
+    """
+    wgs = num_heads * -(-seqlen_q // block_m) * batch
     kv_tiles = -(-seqlen_kv // _FP8_BLOCK_N)
 
     if not causal:
@@ -107,7 +137,7 @@ def _fp8_auto_kv_splits(
     else:
         kept = 0.5 * seqlen_kv / seqlen_q
     if kept < _FP8_AUTOSPLIT_CAUSAL_SKEW:
-        if wgs < num_cu and kv_tiles // 2 >= _FP8_AUTOSPLIT_MIN_TILES_CAUSAL:
+        if wgs < num_cu and kv_tiles // 2 >= _FP8_AUTOSPLIT_MIN_TILES:
             return 2
         return 1
 
@@ -763,8 +793,11 @@ def flydsl_flash_attn_func(
     block_table: Optional[torch.Tensor] = None,
     seqlen_k: Optional[torch.Tensor] = None,
     kv_cache_layout: str = "linear",
-    # Split-K (gfx950 only, seq_len >= 384, D=64/128, bf16/f16).
-    num_kv_splits: int = 1,
+    # Split-K (gfx950 only, seq_len >= 384, D=64/128, bf16/f16). ``None`` lets
+    # fp8 pick a split count; an explicit ``1`` keeps the kernel unsplit.
+    num_kv_splits: Optional[int] = None,
+    # fp8 BLOCK_M override (128 or 256). ``None`` lets the interface pick.
+    fp8_block_m: Optional[int] = None,
     # Additive attention bias, folded into the scores after sm_scale and before
     # masking. gfx950 DUALWAVE_SWP only (dense / varlen / split-K / paged KV).
     bias: Optional[torch.Tensor] = None,
@@ -831,6 +864,11 @@ def flydsl_flash_attn_func(
             native paged-KV path, which supports ``bias`` but not
             ``alibi_slopes``, ``sink``, ``return_lse``, or fp8.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
+            ``None`` (the default) lets fp8 pick, which costs a second kernel
+            launch and a fp32 workspace of up to 1 GiB; pass ``1`` to keep the
+            kernel unsplit, or an explicit count to pin your own.
+        fp8_block_m: Pin the fp8 tile height to 128 or 256 instead of letting
+            the interface choose. fp8 only.
         bias: Additive attention bias with the same dtype as q, folded in as
             ``softmax(q @ k^T * sm_scale + bias)`` -- after the scale, before the
             causal/padding mask. Dense: ``[Sq, Skv]``, broadcast over batch and
@@ -899,6 +937,13 @@ def flydsl_flash_attn_func(
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share dtype; got {q.dtype}/{k.dtype}/{v.dtype}")
 
     dtype_str = _dtype_str(q)
+    # `None` means "choose for me"; an explicit 1 means "leave it alone", so a
+    # caller who already tuned their own split count does not silently get a
+    # second kernel launch and a fp32 workspace allocation. Only fp8 has an
+    # autotuner, so every other path just reads the normalised int.
+    _auto_splits = num_kv_splits is None
+    if _auto_splits:
+        num_kv_splits = 1
     if return_lse and dtype_str == "fp8":
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for fp8")
     paged_kv = any(x is not None for x in (block_table, seqlen_k))
@@ -925,21 +970,22 @@ def flydsl_flash_attn_func(
     # an over-long KV. Batch entries are independent and a leading slice of a
     # contiguous tensor is still contiguous, so one launch per entry divides the
     # flat dim by B at no copy. bf16 passes the natural 4-D shape and is exempt.
-    if (
-        dtype_str == "fp8"
-        and not paged_kv
-        and cu_seqlens_q is None
-        and cu_seqlens_kv is None
-        and q.dim() == 4
-        and max(q.numel(), k.numel(), v.numel()) >= _FP8_MAX_FLAT_ELEMS
-    ):
-        if q.shape[0] == 1:
-            # Out of batch to divide by. Launching would abort inside the C ABI
-            # with a struct.error naming neither the tensor nor the limit.
+    # Varlen inputs are packed on a single token axis, so there is no batch axis
+    # to slice; they can only be rejected.
+    if dtype_str == "fp8" and not paged_kv and max(q.numel(), k.numel(), v.numel()) >= _FP8_MAX_FLAT_ELEMS:
+        _packed = cu_seqlens_q is not None or cu_seqlens_kv is not None or q.dim() != 4
+        if _packed or q.shape[0] == 1:
+            # Nothing to divide by. Launching would abort inside the C ABI with a
+            # struct.error naming neither the tensor nor the limit.
+            _why = (
+                "varlen Q/K/V are packed on one token axis and cannot be split per batch entry"
+                if _packed
+                else "there is only one batch entry to divide by"
+            )
             raise NotImplementedError(
-                "flydsl_flash_attn_func: fp8 flattens Q/K/V/O and packs the dynamic dim as int32, so a "
-                f"single batch entry cannot exceed {_FP8_MAX_FLAT_ELEMS} elements; got q={q.numel()}, "
-                f"k={k.numel()}, v={v.numel()}. Shorten the sequence or use bf16."
+                "flydsl_flash_attn_func: fp8 flattens Q/K/V/O and packs the dynamic dim as int32, so no "
+                f"tensor may reach {_FP8_MAX_FLAT_ELEMS} elements; got q={q.numel()}, k={k.numel()}, "
+                f"v={v.numel()} and {_why}. Shorten the sequence or use bf16."
             )
         kw = dict(
             causal=causal,
@@ -948,7 +994,10 @@ def flydsl_flash_attn_func(
             max_seqlen_kv=max_seqlen_kv,
             cross_seqlen=cross_seqlen,
             kv_cache_layout=kv_cache_layout,
-            num_kv_splits=num_kv_splits,
+            # Hand the sub-launches back the sentinel, not the normalised 1, so
+            # each per-batch slice re-runs the autotuner for its own shape.
+            num_kv_splits=None if _auto_splits else num_kv_splits,
+            fp8_block_m=fp8_block_m,
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
@@ -965,7 +1014,12 @@ def flydsl_flash_attn_func(
             # afterwards would consume the parts on the ambient stream while the
             # kernels are still running on `stream`, and would hold two full
             # outputs at a size where one is already several GB.
-            out = torch.empty(q.shape, dtype=torch.bfloat16 if dtype_str == "fp8" else q.dtype, device=q.device)
+            # O is Dv wide, which is not q's last dim on the 192/128 pair.
+            out = torch.empty(
+                q.shape[:-1] + (v.shape[-1],),
+                dtype=torch.bfloat16 if dtype_str == "fp8" else q.dtype,
+                device=q.device,
+            )
         for i in range(q.shape[0]):
             sl = slice(i, i + 1)
             flydsl_flash_attn_func(q[sl].contiguous(), k[sl].contiguous(), v[sl].contiguous(), out=out[sl], **kw)
@@ -1077,6 +1131,13 @@ def flydsl_flash_attn_func(
         )
     if k.shape[-1] != D:
         raise ValueError(f"flydsl_flash_attn_func: K head_dim ({k.shape[-1]}) must match Q head_dim ({D})")
+    if tuple(v.shape[:-1]) != tuple(k.shape[:-1]):
+        # The V descriptor takes its num_records from K's token count, so a
+        # shorter V reads past the end without the buffer clamp catching it.
+        raise ValueError(
+            f"flydsl_flash_attn_func: V must match K in every dim but the last, got "
+            f"v={tuple(v.shape)}, k={tuple(k.shape)}"
+        )
 
     if has_bias:
         # Bias rows are indexed by q token, columns by the per-batch-local key.
@@ -1114,11 +1175,19 @@ def flydsl_flash_attn_func(
     _fp8_block_m = DUALWAVE_SWP_BLOCK_M
     if dtype_str == "fp8":
         _skv_bm = (int(max_seqlen_kv) if cross else Sq) if varlen else int(Skv)
-        _fp8_block_m = _fp8_auto_block_m(B, H, Sq, _skv_bm, causal, _dense_light_cu(q.device))
+        _fp8_block_m = (
+            _fp8_auto_block_m(B, H, Sq, _skv_bm, causal, _dense_light_cu(q.device))
+            if fp8_block_m is None
+            else int(fp8_block_m)
+        )
+    elif fp8_block_m is not None:
+        raise ValueError(f"flydsl_flash_attn_func: fp8_block_m applies to fp8 only, got dtype {dtype_str}")
 
-    if dtype_str == "fp8" and int(num_kv_splits) == 1 and Sq >= 384:
+    if dtype_str == "fp8" and _auto_splits and Sq >= 384:
         _skv_eff = (int(max_seqlen_kv) if cross else Sq) if varlen else int(Skv)
-        _auto = _fp8_auto_kv_splits(B, H, Sq, _skv_eff, causal, _dense_light_cu(q.device), varlen=varlen)
+        _auto = _fp8_auto_kv_splits(
+            B, H, Sq, _skv_eff, causal, _dense_light_cu(q.device), varlen=varlen, block_m=_fp8_block_m
+        )
         if _auto > 1 and dualwave_splitk_workspace_elems(B, H, Sq, _auto, head_dim=Dv) * 4 <= (
             _FP8_AUTOSPLIT_MAX_WS_BYTES
         ):
@@ -1249,7 +1318,19 @@ def flydsl_flash_attn_func(
                     f"flydsl_flash_attn_func: {_term} requires the gfx950 DUALWAVE_SWP path "
                     f"(D=64/128, bf16/f16, gfx950); got D={D}, dtype={dtype_str}, arch='{_arch or 'unknown'}'"
                 )
+            # bias/ALiBi force dualwave: the generic dense kernel folds in neither.
             if debug_lazy or has_bias or has_alibi or has_sink or (can_dualwave and _dense_routes_to_dualwave(B, Sq)):
+                # Workgroups map to XCDs as linear_id % 8, and linear_id is
+                # bx + by*H + bz*H*nqb, so with H % 8 == 0 a head-fast grid pins
+                # head h to XCD h % 8. The ~256 resident workgroups span all H
+                # heads within one batch, leaving each XCD to juggle H/8 K/V
+                # streams against its L2 slice. The head-slow remap in
+                # _init_dualwave_thread_mapping puts the resident window inside a
+                # single head instead: 1 stream. Measured penalty for leaving it
+                # off tracks H/8 (-6% at 8 streams, -3% at 4, nil at <=2), not the
+                # hit rate and not traffic volume. Bijective, so output is
+                # unchanged. NB: that function's own comment states the opposite
+                # rationale ("scatter across all XCDs") and is wrong.
                 num_q_blocks = -(-int(Sq) // DUALWAVE_SWP_BLOCK_M)
                 if dualwave_swp_xcd_swizzle is None:
                     xcd_swizzle = not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE

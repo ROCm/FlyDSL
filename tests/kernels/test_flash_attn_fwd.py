@@ -5068,7 +5068,7 @@ _FP8_HEADS = 12
 _FP8_D, _FP8_DV = 192, 128
 
 
-def _assert_fp8_shape(causal, batch=1, seq_len=1, head_dim=_FP8_D, head_dim_v=_FP8_DV, **kwargs):
+def _assert_fp8_shape(causal, batch=1, seq_len=1, head_dim=_FP8_D, head_dim_v=_FP8_DV, num_heads=_FP8_HEADS, **kwargs):
     """Correctness-only run of one fp8 shape, asserted against the fp8 gate.
 
     bench=False keeps the profiler and timing loop out of the unit run; the
@@ -5077,7 +5077,7 @@ def _assert_fp8_shape(causal, batch=1, seq_len=1, head_dim=_FP8_D, head_dim_v=_F
     r = run_fp8_config(
         batch,
         seq_len,
-        _FP8_HEADS,
+        num_heads,
         head_dim,
         causal,
         warmup=0,
@@ -5187,3 +5187,263 @@ def test_fp8_split_kv_long_sequence(causal, seq_len, num_kv_splits):
     so the split path is covered on both sides of that build variant.
     """
     _assert_fp8_shape(causal, batch=1, seq_len=seq_len, num_kv_splits=num_kv_splits)
+
+
+# ── regressions for the split-K combine row mapping ─────────────────────────
+
+
+def _fp8_combine_rows_per_block(head_dim_v):
+    """Output rows one combine workgroup covers: 256 threads / (head_dim_v/4) lanes."""
+    return 256 // (head_dim_v // 4)
+
+
+def _run_fp8_into_nan_out(q, k, v, head_dim_v, **kwargs):
+    """Launch fp8 attention into a NaN-filled ``out`` and return it.
+
+    A zero-initialised buffer hides rows the kernel never writes; NaN makes them
+    countable, which is the whole point of these two tests.
+    """
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    scales = [t.abs().amax().float().clamp(min=1e-12) / fp8_max for t in (q, k, v)]
+    qq, kq, vq = ((t.float() / s).to(fp8).contiguous() for t, s in zip((q, k, v), scales))
+    descales = [s.reshape(1).contiguous() for s in scales]
+    out = torch.full(q.shape[:-1] + (head_dim_v,), float("nan"), device=q.device, dtype=torch.bfloat16)
+    flydsl_flash_attn_func(
+        qq,
+        kq,
+        vq,
+        out=out,
+        q_descale=descales[0],
+        k_descale=descales[1],
+        v_descale=descales[2],
+        **kwargs,
+    )
+    return out
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("batch,seq_len,num_heads", [(1, 4097, 1), (1, 4097, 3), (1, 2050, 7), (1, 8193, 1)])
+def test_fp8_auto_split_kv_writes_every_row(batch, seq_len, num_heads):
+    """Auto split-K must not drop the tail of the combine grid.
+
+    ``batch * num_heads * seq_len`` is deliberately not a multiple of
+    COMBINE_ROWS_PER_BLOCK (8 at head_dim_v=128), which a floor-divided combine
+    grid leaves unwritten. No ``num_kv_splits`` is passed: the point is that a
+    caller who never asked for split-K still gets every row.
+    """
+    D = 128
+    assert (batch * num_heads * seq_len) % _fp8_combine_rows_per_block(D) != 0, "shape would not exercise the tail"
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(batch, seq_len, num_heads, D, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3))
+    out = _run_fp8_into_nan_out(q, k, v, D, causal=False, num_kv_heads=num_heads)
+    assert not torch.isnan(out).any(), f"{int(torch.isnan(out).any(-1).sum())} output rows were never written"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("seq_len,num_heads,head_dim_v", [(385, 1, 128), (385, 3, 128), (1155, 1, 128), (386, 1, 64)])
+def test_fp8_varlen_split_kv_respects_batch_boundaries(seq_len, num_heads, head_dim_v):
+    """varlen + split-K must not mix batches inside a combine wave.
+
+    A buffer resource is wave-scoped. When ``(max_seqlen_q * num_heads)`` is not a
+    multiple of the rows a wave covers, a batch boundary lands mid-wave; deriving
+    the O descriptor per thread then writes the row after the boundary with the
+    previous batch's descriptor, losing that row and corrupting the previous
+    batch's row 0.
+    """
+    rows_per_wave = 256 // head_dim_v
+    assert (seq_len * num_heads) % rows_per_wave != 0, "shape would not straddle a wave"
+    B, D = 8, 192
+    torch.manual_seed(0)
+    cu = torch.arange(0, (B + 1) * seq_len, seq_len, device="cuda", dtype=torch.int32)
+    total = B * seq_len
+    q = torch.randn(total, num_heads, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(total, num_heads, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    v = torch.randn(total, num_heads, head_dim_v, device="cuda", dtype=torch.bfloat16) * 0.1
+    kw = dict(
+        causal=False,
+        num_kv_heads=num_heads,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        max_seqlen_q=seq_len,
+        max_seqlen_kv=seq_len,
+        cross_seqlen=False,
+    )
+    split = _run_fp8_into_nan_out(q, k, v, head_dim_v, num_kv_splits=2, **kw)
+    assert not torch.isnan(split).any(), f"{int(torch.isnan(split).any(-1).sum())} output rows were never written"
+    unsplit = _run_fp8_into_nan_out(q, k, v, head_dim_v, num_kv_splits=1, **kw)
+    torch.testing.assert_close(split.float(), unsplit.float(), rtol=2e-2, atol=2e-2)
+
+
+# ── head-dim validation ────────────────────────────────────────────────────
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("head_dim_v", [64, 96, 128, 160, 192])
+def test_fp8_supported_v_head_dims_run(head_dim_v):
+    """Every head_dim_v the guard admits has to actually produce the right answer."""
+    _assert_fp8_shape(False, batch=1, seq_len=512, num_heads=4, head_dim=128, head_dim_v=head_dim_v)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize(
+    "head_dim,head_dim_v,match",
+    [
+        # D_CHUNKS < 2: `_anchor_v_o` emits a single-element inline-asm struct and
+        # LLVM aborts the process rather than failing the build.
+        (128, 32, "head_dim_v"),
+        # D_CHUNKS > 6: launches, but the high D_CHUNKs come back wrong.
+        (128, 224, "head_dim_v"),
+        (128, 256, "head_dim_v"),
+        # Fits neither the QK MFMA slicing nor a clean band split.
+        (96, 96, "head_dim"),
+        # Within the head-dim rules but over the 160 KiB LDS budget. 256/256 is
+        # the shape people ask about; it trips the head_dim_v rule first.
+        (256, 192, "LDS"),
+        (320, 128, "LDS"),
+        (384, 64, "LDS"),
+    ],
+)
+def test_fp8_rejected_head_dims_raise_before_launch(head_dim, head_dim_v, match):
+    """Unsupported head dims must name the shape, not abort or fault the GPU."""
+    B, S, H = 1, 512, 4
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, head_dim, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, S, H, head_dim, device="cuda", dtype=torch.bfloat16) * 0.1
+    v = torch.randn(B, S, H, head_dim_v, device="cuda", dtype=torch.bfloat16) * 0.1
+    with pytest.raises((RuntimeError, ValueError), match=match):
+        _run_fp8_into_nan_out(q, k, v, head_dim_v, causal=False, num_kv_heads=H)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("seq_len", [1, 385, 1000, 4097])
+def test_fp8_dense_ragged_seq_lens(seq_len):
+    """Dense fp8 on sequence lengths that are not multiples of the tile."""
+    _assert_fp8_shape(True, batch=2, seq_len=seq_len, num_heads=4, head_dim=192, head_dim_v=128)
+
+
+# ── what the auto-heuristics pick ──────────────────────────────────────────
+
+
+_NUM_CU = 256
+
+
+@pytest.mark.parametrize(
+    "batch,num_heads,seqlen_q,seqlen_kv,causal,expect",
+    [
+        # Narrow only while the 128-row tile still fits the GPU in one round.
+        (1, 8, 512, 512, True, 128),
+        (1, 8, 2048, 2048, True, 128),
+        (1, 8, 2048, 2048, False, 128),
+        # Same rule for causal and non-causal: once the GPU is full, stay wide.
+        # An inverted causal rule picks 128 for these three and loses ~20%.
+        (8, 32, 2048, 2048, True, 256),
+        (16, 32, 1024, 1024, True, 256),
+        (32, 32, 512, 512, True, 256),
+        # A long KV does not on its own force the wide tile: at one workgroup
+        # per CU the narrow tile still measured 12-21% faster here.
+        (1, 8, 4096, 4096, True, 128),
+        (1, 8, 4096, 16384, True, 128),
+        # ... but a second batch fills the GPU, and then it does not.
+        (2, 8, 4096, 4096, True, 256),
+    ],
+)
+def test_fp8_auto_block_m_picks(batch, num_heads, seqlen_q, seqlen_kv, causal, expect):
+    """Pin what `_fp8_auto_block_m` chooses.
+
+    Every correctness test passes whichever tile it picks, so an inverted
+    comparison here is invisible without an assertion on the choice itself.
+    """
+    got = flash_attn_interface._fp8_auto_block_m(batch, num_heads, seqlen_q, seqlen_kv, causal, _NUM_CU)
+    assert got == expect
+
+
+def test_fp8_auto_block_m_rule_does_not_depend_on_causal():
+    """The two mask modes share one rule; splitting them is what regressed before."""
+    for batch in (1, 2, 4, 8, 16, 32):
+        for num_heads in (8, 16, 32):
+            for seqlen in (512, 1024, 2048, 4096):
+                assert flash_attn_interface._fp8_auto_block_m(
+                    batch, num_heads, seqlen, seqlen, True, _NUM_CU
+                ) == flash_attn_interface._fp8_auto_block_m(batch, num_heads, seqlen, seqlen, False, _NUM_CU)
+
+
+@pytest.mark.parametrize(
+    "batch,num_heads,seqlen,causal,expect",
+    [
+        # Too few KV tiles per split to amortise the fixed per-workgroup cost.
+        (1, 8, 512, False, 1),
+        # An under-filled GPU with enough KV tiles to share out.
+        (1, 8, 4096, False, 2),
+        # The GPU is already full, so splitting only adds a combine pass.
+        (32, 32, 8192, False, 1),
+    ],
+)
+def test_fp8_auto_kv_splits_picks(batch, num_heads, seqlen, causal, expect):
+    got = flash_attn_interface._fp8_auto_kv_splits(batch, num_heads, seqlen, seqlen, causal, _NUM_CU)
+    assert got == expect
+
+
+@pytest.mark.parametrize(
+    "batch,causal,cross,num_kv_splits,expect",
+    [
+        (2, True, False, 1, 2),
+        # An odd batch cannot be folded 2-at-a-time; the kernel would drop one.
+        (3, True, False, 1, 1),
+        (2, False, False, 1, 1),
+        (2, True, True, 1, 1),
+        (2, True, False, 4, 1),
+    ],
+)
+def test_fp8_batch_interleave_group_picks(batch, causal, cross, num_kv_splits, expect):
+    got = flash_attn_interface._fp8_batch_interleave_group(batch, causal, cross, num_kv_splits)
+    assert got == expect
+
+
+def test_fp8_num_kv_splits_none_is_auto_and_one_is_off(monkeypatch):
+    """``None`` opts into the autotuner; an explicit ``1`` keeps the kernel unsplit."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip("dense fp8 attention is gfx950-only")
+    seen = []
+    orig = flash_attn_interface._build_dense_fp8
+
+    def spy(**kw):
+        seen.append(kw["num_kv_splits"])
+        return orig(**kw)
+
+    monkeypatch.setattr(flash_attn_interface, "_build_dense_fp8", spy)
+    # Small enough that the autotuner still has idle CUs to fill at the tile
+    # `_fp8_auto_block_m` picks; a shape it would leave unsplit proves nothing.
+    B, S, H, D = 1, 8192, 2, 128
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3))
+    for kwargs in ({}, {"num_kv_splits": 1}, {"num_kv_splits": 4}):
+        _run_fp8_into_nan_out(q, k, v, D, causal=True, num_kv_heads=H, **kwargs)
+    auto, off, pinned = seen
+    assert auto > 1, "the default should reach the autotuner"
+    assert off == 1, "an explicit num_kv_splits=1 must stay unsplit"
+    assert pinned == 4
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("seq_len,num_heads,head_dim", [(4097, 1, 128), (2050, 7, 128), (1025, 1, 64)])
+def test_bf16_split_kv_writes_every_row(seq_len, num_heads, head_dim):
+    """The bf16 combine grid shares the fp8 one's rounding, and the same bug.
+
+    ``num_heads * seq_len`` is not a multiple of COMBINE_ROWS_PER_BLOCK, so a
+    floor-divided grid leaves the tail of the last block unwritten. Unlike the
+    fp8 case this needs an explicit ``num_kv_splits`` -- bf16 has no autotuner --
+    which is why it went unnoticed.
+    """
+    B = 1
+    torch.manual_seed(0)
+    q, k, v = (
+        torch.randn(B, seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3)
+    )
+    out = torch.full_like(q, float("nan"))
+    flydsl_flash_attn_func(q, k, v, causal=False, num_kv_heads=num_heads, out=out, num_kv_splits=2)
+    assert not torch.isnan(out).any(), f"{int(torch.isnan(out).any(-1).sum())} output rows were never written"
+    unsplit = flydsl_flash_attn_func(q, k, v, causal=False, num_kv_heads=num_heads, num_kv_splits=1)
+    if isinstance(unsplit, (tuple, list)):
+        unsplit = unsplit[0]
+    torch.testing.assert_close(out.float(), unsplit.float(), rtol=2e-3, atol=2e-3)

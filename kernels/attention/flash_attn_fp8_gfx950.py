@@ -10,7 +10,6 @@ import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.attention.flash_attn_utils import (
@@ -29,6 +28,7 @@ from kernels.attention.flash_attn_utils import (
     _s_setprio,
     _stagger_extra_barrier_if_one,
     _waitcnt_vm_n,
+    dualwave_fp8_dma_per_iter,
     dualwave_splitk_workspace_elems,  # noqa: F401
 )
 from kernels.common.kernels_common import dtype_to_elem_type
@@ -56,23 +56,20 @@ def build_flash_attn_dualwave_swp_fp8_module(
     _xcd_swizzle=False,
     batch_interleave_group=1,
 ):
-    """Build the gfx950 D=128 dual-wave flash-attention launcher.
+    """Build the gfx950 dual-wave fp8 flash-attention launcher.
 
-    The dense path supports bf16/f16/fp8 QKV. ``varlen`` builds the packed
-    self-attention variant for bf16/f16: Q/O are ``[total_q, H, D]``, K/V are
-    ``[total_kv, H_kv, D]``, and per-batch ranges come from int32
-    ``cu_seqlens_q`` / ``cu_seqlens_kv``. fp8 currently stays dense-only."""
+    ``head_dim`` is the QK reduction width and ``head_dim_v`` the V/output width;
+    they differ for the 192/128 pair. ``varlen`` builds the packed variant: Q/O
+    are ``[total_q, H, D]``, K/V are ``[total_kv, H_kv, D]``, and per-batch ranges
+    come from int32 ``cu_seqlens_q`` / ``cu_seqlens_kv``. ``num_kv_splits > 1``
+    adds the split-KV partial store plus the combine pass. Head-dim and LDS
+    validation lives in ``_make_dualwave_swp_fp8_traits``."""
     gpu_arch = get_hip_arch()
 
     if not gpu_arch.startswith("gfx950"):
         raise RuntimeError(f"flash_attn_dualwave_swp requires gfx950+ (uses ds_read_tr16_b64), got {gpu_arch}")
     if head_dim_v is None:
         head_dim_v = head_dim
-    if head_dim % 64 or head_dim_v % 32:
-        raise RuntimeError(
-            f"flash_attn_dualwave_swp fp8 needs head_dim % 64 == 0 and head_dim_v % 32 == 0, "
-            f"got head_dim={head_dim}, head_dim_v={head_dim_v}"
-        )
     if dtype_str not in ("bf16", "f16", "fp8"):
         raise RuntimeError(f"flash_attn_dualwave_swp supports bf16/f16/fp8 only, got dtype={dtype_str}")
 
@@ -116,6 +113,9 @@ def build_flash_attn_dualwave_swp_fp8_module(
     _dualwave_swp_fp8_cache_tag = traits.cache_tag
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
 
+    # Q only goes through LDS when it fits (head_dim <= 128); otherwise it is read
+    # straight into VGPRs and this array is unused. fx.Array rejects a length of 0,
+    # so the stub is one 16-byte line, which the allocator then drops.
     _q_lds_elems = BLOCK_M * HEAD_DIM if traits.QLDS else 16
 
     @fx.struct
@@ -201,13 +201,10 @@ def build_flash_attn_dualwave_swp_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-        DMA_PER_ITER = const_expr(2 * ctx.NUM_DMA_K + 2)
+        DMA_PER_ITER = const_expr(dualwave_fp8_dma_per_iter(traits))
 
         def _iter_end_bar():
-            if const_expr(traits.VDMA):
-                _waitcnt_vm_n(DMA_PER_ITER)
-            else:
-                rocdl.s_waitcnt(0)
+            _waitcnt_vm_n(DMA_PER_ITER)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
@@ -254,7 +251,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
 
         def _load_q_regs():
             ctx.init_q_row()
-            return ctx.q_row, (gemm_helper.load_q_wide() if const_expr(traits.QREG) else None)
+            return ctx.q_row, gemm_helper.load_q_wide()
 
         if const_expr(not traits.QLDS):
             q_row, q_wide = _load_q_regs()
@@ -276,7 +273,8 @@ def build_flash_attn_dualwave_swp_fp8_module(
         kv_gmem_to_lds.load_k((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF))
         kv_gmem_to_lds.load_v((t0 + 2) * BN, (t0 + 2) % fx.Index(NPF))
         kv_gmem_to_lds.load_v((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF))
-        if const_expr(traits.QLDS or not traits.VDMA):
+        if const_expr(traits.QLDS):
+            # Q was staged through LDS, so the staging stores have to land too.
             rocdl.s_waitcnt(0)
         else:
             _waitcnt_vm_n(DMA_PER_ITER)
@@ -372,9 +370,10 @@ def build_flash_attn_dualwave_swp_fp8_module(
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
 
         inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
-        inv_l = ArithValue(fx.Float32(l_row) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
-        if const_expr(traits.FP8_PV):
-            inv_l = ArithValue(inv_l) * ctx.vd_fp8
+        # `select` yields a raw ir.Value; type it once here rather than re-wrapping per use.
+        inv_l = fx.Float32((fx.Float32(l_row) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f))
+        # The fp8 PV MMA consumed P and V unscaled, so V's descale lands here.
+        inv_l = inv_l * ctx.vd_fp8
         softmax_helper.scale_o(v_o, inv_l)
         rocdl.s_barrier()
         if const_expr(not SPLITK):
@@ -396,9 +395,9 @@ def build_flash_attn_dualwave_swp_fp8_module(
         CuSeqQ: fx.Tensor,
         batch_size: fx.Int32,
         seq_len: fx.Int32,
-        stride_q_n: fx.Int32,
+        stride_o_n: fx.Int32,
     ):
-        ctx = DualwaveSplitKCombineContext(traits, O, WS, batch_size, seq_len, stride_q_n, CuSeqQ=CuSeqQ)
+        ctx = DualwaveSplitKCombineContext(traits, O, WS, batch_size, seq_len, stride_o_n, CuSeqQ=CuSeqQ)
         ctx.init_types_and_constants()
         ctx.init_runtime_indices()
         ctx.init_thread_mapping(COMBINE_ROWS_PER_BLOCK, COMBINE_LANES_PER_ROW)
@@ -480,11 +479,19 @@ def build_flash_attn_dualwave_swp_fp8_module(
             stream=stream,
         )
         if const_expr(SPLITK):
-            combine_rows = bs_idx * NUM_HEADS_Q * sl_idx
-            flash_attn_splitk_combine_kernel(
-                O, DebugCounts, CuSeqQ, batch_size, seq_len, fx.Int32(DEFAULT_STRIDE_O_N)
-            ).launch(
-                grid=(combine_rows // COMBINE_ROWS_PER_BLOCK, 1, 1),
+            # Rounded up, and one batch per y block so the combine kernel's O
+            # descriptor stays wave-uniform; the tail rows mask themselves off.
+            combine_rows = NUM_HEADS_Q * sl_idx
+            combine_blocks = (combine_rows + (COMBINE_ROWS_PER_BLOCK - 1)) // COMBINE_ROWS_PER_BLOCK
+            # Must be the same O stride the main kernel used: it honours the
+            # caller's stride_q_n for O when the V head dim matches Q's, and only
+            # falls back to the derived one when they differ.
+            if const_expr(traits.HEAD_DIM_V == HEAD_DIM):
+                stride_o_n = stride_q_n
+            else:
+                stride_o_n = fx.Int32(DEFAULT_STRIDE_O_N)
+            flash_attn_splitk_combine_kernel(O, DebugCounts, CuSeqQ, batch_size, seq_len, stride_o_n).launch(
+                grid=(combine_blocks, bs_idx, 1),
                 block=(COMBINE_BLOCK, 1, 1),
                 stream=stream,
             )
@@ -531,6 +538,13 @@ def build_flash_attn_dualwave_swp_fp8_module(
         # seq_len_kv defaults to seq_len (self-attention / equal Q,KV lengths).
         if seq_len_kv is None:
             seq_len_kv = seq_len
+        # The grid folds BATCH_INTERLEAVE_GROUP batches into blockIdx.x and divides
+        # blockIdx.z by it, so a remainder means whole batches are never launched.
+        if BATCH_INTERLEAVE_GROUP > 1 and batch_size % BATCH_INTERLEAVE_GROUP:
+            raise ValueError(
+                f"flash_attn_dualwave_swp fp8: batch_interleave_group={BATCH_INTERLEAVE_GROUP} requires "
+                f"batch_size divisible by it, got batch_size={batch_size}"
+            )
         if SPLITK:
             if workspace is None:
                 raise ValueError("num_kv_splits > 1 requires a fp32 workspace (see dualwave_splitk_workspace_elems)")
@@ -651,6 +665,10 @@ def build_flash_attn_dualwave_swp_fp8_module(
         and num_heads % NUM_XCD_GFX950 == 0
     ):
         block_m = traits.BLOCK_M
+        # Same build, only the swizzle differs: every build parameter has to be
+        # forwarded, batch_interleave_group included. It is 1 on this branch
+        # today (the swizzle needs `not causal`, the interleave needs `causal`),
+        # but a silently short argument list is what breaks when that changes.
         launch_xcd = build_flash_attn_dualwave_swp_fp8_module(
             num_heads,
             head_dim,
@@ -669,6 +687,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
             num_kv_splits=num_kv_splits,
             varlen=varlen,
             cross_seqlen=cross_seqlen,
+            batch_interleave_group=batch_interleave_group,
             _xcd_swizzle=True,
         )
 
