@@ -1716,12 +1716,6 @@ def run_fp8_config(
       - ``num_kv_splits``: ``None`` autotunes, ``1`` pins the unsplit kernel,
         ``> 1`` forces that many KV splits.
 
-    Only configurations that can never be valid (wrong arch, indivisible head
-    counts, malformed lengths) are rejected here. Anything the kernel does not
-    implement yet reaches it and surfaces the launcher's own message as an ERROR
-    row -- never a silent SKIP, and never a stale gate in this harness that would
-    keep rejecting a shape after the kernel gains support for it.
-
     Returns a run_config-compatible dict so it prints through the same summary
     table. ``bench=False`` skips the timing pass and returns correctness only.
     """
@@ -4755,13 +4749,7 @@ def test_sink_splitk_counted_once(num_kv_splits):
 @pytest.mark.parametrize("Sq,Skv", [(512, 4096), (4096, 512)])
 @pytest.mark.parametrize("causal", [False, True])
 def test_splitk_rejects_cross_length_kv(Sq, Skv, causal):
-    """Dense split-K is self-attention only, and it used to fail without saying so.
-
-    `_build_splitk` never passes cross_seqlen, so the kernel derives its KV extent
-    from Sq: Sq=512/Skv=4096 returned garbage (cosine ~0.23 -- only the first Sq
-    keys are read) and Sq=4096/Skv=512 read past the KV buffer and faulted the GPU.
-    Both directions must now raise before any launch.
-    """
+    """Dense split-K is self-attention only, and it used to fail without saying so."""
     dtype = torch.bfloat16
     B, H, D = 1, 8, 128
     setup_seed(DEFAULT_SEED)
@@ -5129,12 +5117,7 @@ def test_fp8_head_dim_192_v_128_varlen(causal, batch, num_kv_splits):
 @pytest.mark.parametrize("batch", FP8_VARLEN_BATCHES)
 @pytest.mark.parametrize("num_kv_splits", FP8_SPLIT_MODES)
 def test_fp8_head_dim_192_v_128_varlen_cross_length(causal, batch, num_kv_splits):
-    """Packed varlen cross-attention, batch 1..4: 2614 Q tokens vs 16384 KV tokens.
-
-    Q is [2614, 12, 192], K is [16384, 12, 192] and V is [16384, 12, 128] at every
-    batch; batch 2 is cu_seqlens_q [0, 1024, 2614] / cu_seqlens_kv [0, 8192, 16384].
-    Causal here is bottom-right aligned, which is what the reference applies too.
-    """
+    """Packed varlen cross-attention, batch 1..4: 2614 Q tokens vs 16384 KV tokens."""
     _assert_fp8_shape(
         causal,
         varlen_seqlens_q=FP8_VARLEN_Q_SEQLENS[batch],
@@ -5176,12 +5159,7 @@ def test_fp8_split_kv_batched(causal, batch):
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("seq_len,seqlen_kv,num_kv_splits", [(512, 16384, 8), (2614, 16384, 8), (1024, 32768, 16)])
 def test_fp8_split_kv_cross_length(causal, seq_len, seqlen_kv, num_kv_splits):
-    """Split-KV with short Q against long KV -- the shape split-KV exists for.
-
-    Sq < Skv in every case on purpose: with num_kv_splits > 1 the kernel ignores
-    cross_seqlen today, and Sq > Skv reads past the KV buffer (the bf16 path
-    faults the GPU), so that direction is left out rather than tested.
-    """
+    """Split-KV with short Q against long KV -- the shape split-KV exists for."""
     _assert_fp8_shape(causal, batch=1, seq_len=seq_len, seqlen_kv=seqlen_kv, num_kv_splits=num_kv_splits)
 
 
@@ -5189,12 +5167,7 @@ def test_fp8_split_kv_cross_length(causal, seq_len, seqlen_kv, num_kv_splits):
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("seq_len,num_kv_splits", list(zip(FP8_SPLITKV_SEQLENS, FP8_SPLITKV_SPLITS)))
 def test_fp8_split_kv_long_sequence(causal, seq_len, num_kv_splits):
-    """Split count scaled with the KV length, 4k/2 through 32k/16.
-
-    32k also crosses the fp8 long-sequence bound where the rescale threshold
-    drops from 6 to 4 (see test_fp8_rescale_threshold_drops_past_the_long_sequence_bound),
-    so the split path is covered on both sides of that build variant.
-    """
+    """Split count scaled with the KV length, 4k/2 through 32k/16."""
     _assert_fp8_shape(causal, batch=1, seq_len=seq_len, num_kv_splits=num_kv_splits)
 
 

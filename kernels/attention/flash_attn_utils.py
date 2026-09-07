@@ -2053,12 +2053,6 @@ def _make_dualwave_swp_fp8_traits(
 
 
 def dualwave_fp8_dma_per_iter(traits):
-    """Vector-memory instructions the least-loaded wave issues per main-loop iteration.
-
-    `_waitcnt_vm_n(N)` is a no-op unless N is at most what this wave issues. K is
-    exec-masked so every wave issues each pass; V's trailing pass sits behind a
-    wave-uniform branch, so its minimum is the floor.
-    """
     rows_per_wave = -(-traits.BLOCK_N // traits.NUM_WAVES)
     k_instr = sum(-(-(rows_per_wave * (chunk // traits.VEC_KV)) // traits.WARP_SIZE) for chunk in traits.K_BAND_CHUNK)
     num_dma_v = (traits.BLOCK_N * (traits.HEAD_DIM_V // 16) * 16) // (
@@ -5362,12 +5356,6 @@ class DualwaveSplitKCombineContext:
         self.batch_size_v = fx.Index(self.batch_size)
 
     def init_thread_mapping(self, combine_rows_per_block, combine_lanes_per_row):
-        """Map (blockIdx.x, blockIdx.y, tid) to one (batch, head, token) output row.
-
-        blockIdx.y carries the batch: the O buffer resource is wave-scoped, so a
-        per-thread batch_idx would hand a whole wave one batch's descriptor when a
-        batch boundary falls inside it.
-        """
         traits = self.traits
         self.tid = fx.Index(gpu.thread_idx.x)
         self.blk = fx.Index(gpu.block_idx.x)

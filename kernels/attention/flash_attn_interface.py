@@ -1262,17 +1262,6 @@ def flydsl_flash_attn_func(
                 )
             # bias/ALiBi force dualwave: the generic dense kernel folds in neither.
             if debug_lazy or has_bias or has_alibi or has_sink or (can_dualwave and _dense_routes_to_dualwave(B, Sq)):
-                # Workgroups map to XCDs as linear_id % 8, and linear_id is
-                # bx + by*H + bz*H*nqb, so with H % 8 == 0 a head-fast grid pins
-                # head h to XCD h % 8. The ~256 resident workgroups span all H
-                # heads within one batch, leaving each XCD to juggle H/8 K/V
-                # streams against its L2 slice. The head-slow remap in
-                # _init_dualwave_thread_mapping puts the resident window inside a
-                # single head instead: 1 stream. Measured penalty for leaving it
-                # off tracks H/8 (-6% at 8 streams, -3% at 4, nil at <=2), not the
-                # hit rate and not traffic volume. Bijective, so output is
-                # unchanged. NB: that function's own comment states the opposite
-                # rationale ("scatter across all XCDs") and is wrong.
                 num_q_blocks = -(-int(Sq) // DUALWAVE_SWP_BLOCK_M)
                 if dualwave_swp_xcd_swizzle is None:
                     xcd_swizzle = not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE
