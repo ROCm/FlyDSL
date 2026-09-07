@@ -85,7 +85,6 @@ def build_flash_attn_paged_fp8_module(
     if paged_bn128 and (head_dim, value_head_dim) != (128, 128):
         raise RuntimeError("paged BN128 currently requires head_dim=value_head_dim=128")
     assert num_heads % num_kv_heads == 0
-    # All compile-time tile/layout constants live in the fp8 traits object.
     traits = _make_paged_dualwave_swp_fp8_traits(
         num_heads,
         num_kv_heads,
@@ -108,7 +107,6 @@ def build_flash_attn_paged_fp8_module(
         force_bn128=paged_bn128,
         batch_interleave_group=batch_interleave_group,
     )
-    # Builder-level aliases used by SharedStorage and the launch/compile wrappers.
     BLOCK_M = traits.BLOCK_M
     BLOCK_SIZE = traits.BLOCK_SIZE
     HEAD_DIM = traits.HEAD_DIM
@@ -376,8 +374,6 @@ def build_flash_attn_paged_fp8_module(
         stride_kv_n: fx.Int32,
         head_dim_runtime: fx.Int32,
     ):
-        # Per-kernel setup lives in the fp8 context; the inline pipeline helpers below
-        # bind the ctx fields to local names so the schedule reads unchanged.
         ctx = DualwaveFp8KernelContext(
             traits,
             Q,
@@ -420,8 +416,6 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_descale()
         ctx.init_tile_bounds()
 
-        # fp8 pipeline helpers (logic lives in flash_attn_utils; the kernel drives the
-        # software-pipeline schedule below and calls into these).
         q_loader = DualwaveFp8QLoader(ctx)
         gemm_helper = DualwaveFp8GemmHelper(ctx)
         softmax_helper = DualwaveFp8SoftmaxHelper(ctx)
@@ -433,7 +427,6 @@ def build_flash_attn_paged_fp8_module(
         # condition is uniform across the workgroup, so barriers stay balanced.
         @flyc.jit
         def _run_q_block():
-            # Prologue: load K tile split_t0 -> LDS buf0, wait, and sync the workgroup.
             kv_gmem_to_lds.load_k(ctx.split_t0 * traits.BLOCK_N, 0)
             rocdl.s_waitcnt(0)
             rocdl.sched_barrier(0)
@@ -446,7 +439,6 @@ def build_flash_attn_paged_fp8_module(
             q_row = ctx.q_row
             q_all_wide = q_loader.load_all_wide(ctx.q_row_in_block)
 
-            # Pipeline ahead: prefetch K tile1 (buf1) + V tile0 (buf0) as background
             kv_gmem_to_lds.load_k((ctx.split_t0 + 1) * traits.BLOCK_N, 1)
             kv_gmem_to_lds.load_v(ctx.split_t0 * traits.BLOCK_N, 0)
             v_k = kv_lds_to_regs.load_k(0)
@@ -461,7 +453,6 @@ def build_flash_attn_paged_fp8_module(
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
 
-            # Prologue scores + first softmax pass for KV tile 0
             v_s_0 = gemm_helper.qk(v_k, q_all_wide)
             rocdl.sched_barrier(0)
             v_s_0 = softmax_helper.causal_mask_prologue_if_needed(v_s_0)
@@ -474,18 +465,15 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Prefetch K tile 2 into buf0, keeping the K double-buffer one step ahead
             kv_gmem_to_lds.load_k((ctx.split_t0 + 2) * traits.BLOCK_N, 0)
 
-            # Loop-carried state (scf.for init args): m_row, l_row(=0), D_CHUNKS zero
             l_row_init = ctx.c_zero_f
             init_args = [m_row_pro, l_row_init]
             for _ in range_constexpr(traits.D_CHUNKS):
                 init_args.append(ctx.c_zero_v16f32)
             init_args.append(ctx.v_pair_to_vec32(v_p_0))
 
-            # ============================= Main loop =============================
-            # Software-pipelined inner loop
+            # Software-pipelined KV loop.
             loop_lb = fx.Index(3)
             loop_results = init_args
             for j, loop_args in range(
@@ -500,8 +488,6 @@ def build_flash_attn_paged_fp8_module(
                 v_p_0 = ctx.v_vec32_to_pair(loop_args[2 + traits.D_CHUNKS])
                 j_idx = j
 
-                # Cluster 0 (memory): prefetch next V (buf1), read resident K from LDS
-                # (v_k) for MMA0, wait + sync.
                 kv_gmem_to_lds.load_v((j_idx - 2) * traits.BLOCK_N, 1)
                 v_k = kv_lds_to_regs.load_k(1)
                 rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
@@ -510,8 +496,6 @@ def build_flash_attn_paged_fp8_module(
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
 
-                # Cluster 1 (compute): MMA0 -> v_s_1; finish v_p_0's 2nd-half exp2,
-                # sum into l_row, cast to bf16 for P*V.
                 v_s_1 = gemm_helper.qk(v_k, q_all_wide)
                 v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
                 l_row = softmax_helper.reduce_sum(l_row, v_p_0)
@@ -523,8 +507,6 @@ def build_flash_attn_paged_fp8_module(
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
 
-                # Cluster 2 (memory): prefetch next K (buf1), read this tile's V from
-                # LDS (v_v) for P*V, wait + sync.
                 kv_gmem_to_lds.load_k(j_idx * traits.BLOCK_N, 1)
                 if const_expr(traits.D_CHUNKS > 4):
                     v_v = kv_lds_to_regs.load_v_steps(0, 0, 2)
@@ -536,8 +518,6 @@ def build_flash_attn_paged_fp8_module(
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
 
-                # Cluster 3 (compute): first P*V step + row max of v_s_1, lazy
-                # rescale, remaining 3 P*V steps, sub row + 1st-half exp2 of v_s_1.
                 if const_expr(traits.DUALWAVE_SWP_SETPRIO):
                     rocdl.s_setprio(1)
                 v_o = gemm_helper.pv_step_k(0, v_p_0, v_v, v_o)
@@ -584,8 +564,6 @@ def build_flash_attn_paged_fp8_module(
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
 
-                # Cluster 4 (memory, mirror of C0): prefetch V (buf0), read K from
-                # buf0 into v_k, wait + sync.
                 kv_gmem_to_lds.load_v((j_idx - 1) * traits.BLOCK_N, 0)
                 v_k = kv_lds_to_regs.load_k(0)
                 rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
@@ -594,8 +572,6 @@ def build_flash_attn_paged_fp8_module(
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
 
-                # Cluster 5 (compute, mirror of C1): MMA0 -> v_s_0; finish v_p_1's
-                # 2nd-half exp2, sum into l_row, cast to bf16.
                 v_s_0 = gemm_helper.qk(v_k, q_all_wide)
                 v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
                 l_row = softmax_helper.reduce_sum(l_row, v_p_1)
@@ -607,8 +583,6 @@ def build_flash_attn_paged_fp8_module(
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
 
-                # Cluster 6 (memory): prefetch next K (buf0), read V packs (buf1),
-                # apply causal mask to v_s_0 (if causal), wait + sync.
                 kv_gmem_to_lds.load_k((j_idx + 1) * traits.BLOCK_N, 0)
                 if const_expr(traits.D_CHUNKS > 4):
                     v_packs_b = kv_lds_to_regs.load_v_steps(1, 0, 2)
@@ -625,8 +599,6 @@ def build_flash_attn_paged_fp8_module(
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
 
-                # Cluster 7 (compute, mirror of C3 for v_p_1/v_s_0): closes the iter,
-                # yield_args carries (m_row, l_row, v_o, packed v_p_0) to the next.
                 if const_expr(traits.DUALWAVE_SWP_SETPRIO):
                     rocdl.s_setprio(1)
                 v_v = v_packs_b
@@ -663,20 +635,16 @@ def build_flash_attn_paged_fp8_module(
                 yield_args = [m_row, l_row] + v_o + [ctx.v_pair_to_vec32(v_p_0)]
                 loop_results = yield yield_args
 
-            # Epilogue: drain the pipeline for the final tiles the loop left in
-            # flight. Mirrors the main-loop clusters but with no further
-            # prefetch-ahead. Unpack the loop-carried state:
+            # Drain the final three tiles without further prefetch-ahead.
             m_row = loop_results[0]
             l_row = loop_results[1]
             v_o = [loop_results[2 + i] for i in range_constexpr(traits.D_CHUNKS)]
             v_p_0 = ctx.v_vec32_to_pair(loop_results[2 + traits.D_CHUNKS])
 
-            # Tile indices for the last three tiles handled by the epilogue.
             max_m3 = ctx.split_t_end - 3
             max_m2 = ctx.split_t_end - 2
             max_m1 = ctx.split_t_end - 1
 
-            # Epilogue C0 (memory): prefetch V max_m3 (buf1), read K from buf1, sync.
             kv_gmem_to_lds.load_v(max_m3 * traits.BLOCK_N, 1)
             v_k = kv_lds_to_regs.load_k(1)
             rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
@@ -685,7 +653,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C1 (compute): MMA0 -> v_s_1; finish v_p_0 softmax (like C1).
             v_s_1 = gemm_helper.qk(v_k, q_all_wide)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
@@ -697,7 +664,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C2 (memory): prefetch K max_m1, read V packs (buf0), causal mask v_s_1, sync.
             kv_gmem_to_lds.load_k(max_m1 * traits.BLOCK_N, 1)
             if const_expr(traits.D_CHUNKS > 4):
                 v_packs_e3 = kv_lds_to_regs.load_v_steps(0, 0, 2)
@@ -714,7 +680,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C3 (compute): full P*V + unconditional rescale
             if const_expr(traits.DUALWAVE_SWP_SETPRIO):
                 rocdl.s_setprio(1)
             if const_expr(traits.D_CHUNKS > 4):
@@ -743,7 +708,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C4 (memory): prefetch V max_m2 (buf0), read K from buf0, sync.
             kv_gmem_to_lds.load_v(max_m2 * traits.BLOCK_N, 0)
             v_k = kv_lds_to_regs.load_k(0)
             rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
@@ -752,8 +716,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C5 (compute): MMA0 -> v_s_0; fold rescale_e3 into l_row, finish
-            # v_p_1 softmax.
             v_s_0 = gemm_helper.qk(v_k, q_all_wide)
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e3)
             v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
@@ -766,7 +728,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C6 (memory): read V packs (buf1), causal mask v_s_0, sync.
             if const_expr(traits.D_CHUNKS > 4):
                 v_packs_e7 = kv_lds_to_regs.load_v_steps(1, 0, 2)
             else:
@@ -782,7 +743,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C7 (compute, mirror of C3): full P*V + unconditional rescale.
             if const_expr(traits.DUALWAVE_SWP_SETPRIO):
                 rocdl.s_setprio(1)
             if const_expr(traits.D_CHUNKS > 4):
@@ -810,7 +770,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C8 (memory): prefetch V max_m1 (buf1), read K from buf1, sync.
             kv_gmem_to_lds.load_v(max_m1 * traits.BLOCK_N, 1)
             v_k = kv_lds_to_regs.load_k(1)
             rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
@@ -819,8 +778,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C9 (compute): MMA0 -> v_s_1 (last tile); fold rescale_e7 into
-            # l_row, finish v_p_0 softmax.
             v_s_1 = gemm_helper.qk(v_k, q_all_wide)
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e7)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
@@ -833,8 +790,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C10 (memory): read last V packs (buf0), causal mask v_s_1,
-            # drain all DMAs (vmcnt 0), sync.
             if const_expr(traits.D_CHUNKS > 4):
                 v_packs_e11 = kv_lds_to_regs.load_v_steps(0, 0, 2)
             else:
@@ -850,9 +805,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C11 (compute): full P*V + rescale for v_p_0, then complete the
-            # last tile's softmax in-place (both exp2 halves, sum, cast) since no
-            # further pass follows.
             if const_expr(traits.D_CHUNKS > 4):
                 v_o = gemm_helper.pv_step_k(0, v_p_0, v_packs_e11, v_o)
                 v_o = gemm_helper.pv_step_k(1, v_p_0, v_packs_e11, v_o)
@@ -881,7 +833,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C12 (memory): read the final V packs for the closing P*V.
             if const_expr(traits.D_CHUNKS > 4):
                 v_packs_e13 = kv_lds_to_regs.load_v_steps(1, 0, 2)
             else:
@@ -891,7 +842,6 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            # Epilogue C13 (compute): final P*V -> v_o holds the unnormalized output.
             if const_expr(traits.D_CHUNKS > 4):
                 v_o = gemm_helper.pv_step_k(0, v_p_1, v_packs_e13, v_o)
                 v_o = gemm_helper.pv_step_k(1, v_p_1, v_packs_e13, v_o)
@@ -1104,8 +1054,8 @@ def build_flash_attn_paged_fp8_module(
             seq_len_kv = seq_len
         if debug_counts is None:
             debug_counts = O
-        # Dense launches still pass valid tensors for the (unused) cu_seqlens slots;
-        # the kernel only reads them under const_expr(VARLEN). Use O as a placeholder.
+        # Non-varlen B=1 BN128 ignores the cu_seqlens slots; use O as a placeholder
+        # for direct launcher calls that omit them.
         if cu_seqlens_q is None:
             cu_seqlens_q = O
         if cu_seqlens_kv is None:
@@ -1118,8 +1068,8 @@ def build_flash_attn_paged_fp8_module(
             raise ValueError("paged fp8 flash_attn requires block_table")
         _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride)
         _validate_batch_interleave_launch(batch_size)
-        # Per-tensor fp8 descales (shape-[1] fp32). The kernel only reads them on
-        # the fp8 path; bf16/f16 launches pass O as an unused placeholder.
+        # Direct launcher calls must supply shape-[1] fp32 descales; O keeps the
+        # compiled signature valid when a placeholder is needed.
         if q_descale is None:
             q_descale = O
         if k_descale is None:
