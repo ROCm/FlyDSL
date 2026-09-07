@@ -909,9 +909,9 @@ def build_flash_attn_dualwave_swp_module(
         Sink: fx.Tensor,
         batch_size: fx.Int32,
         seq_len: fx.Int32,
-        stride_o_n: fx.Int32,
+        stride_q_n: fx.Int32,
     ):
-        ctx = DualwaveSplitKCombineContext(traits, O, WS, batch_size, seq_len, stride_o_n, LSE=LSE, Sink=Sink)
+        ctx = DualwaveSplitKCombineContext(traits, O, WS, batch_size, seq_len, stride_q_n, LSE=LSE, Sink=Sink)
         ctx.init_types_and_constants()
         ctx.init_runtime_indices()
         ctx.init_thread_mapping(COMBINE_ROWS_PER_BLOCK, COMBINE_LANES_PER_ROW)
@@ -1008,8 +1008,7 @@ def build_flash_attn_dualwave_swp_module(
             stream=stream,
         )
         if const_expr(traits.SPLITK):
-            # Rounded up, and one batch per y block so the combine kernel's O
-            # descriptor stays wave-uniform; the tail rows mask themselves off.
+            # One batch per y block keeps the combine kernel's O descriptor wave-uniform.
             combine_rows = traits.NUM_HEADS_Q * sl_idx
             combine_blocks = (combine_rows + (COMBINE_ROWS_PER_BLOCK - 1)) // COMBINE_ROWS_PER_BLOCK
             flash_attn_splitk_combine_kernel(O, DebugCounts, LSE, Sink, batch_size, seq_len, stride_q_n).launch(

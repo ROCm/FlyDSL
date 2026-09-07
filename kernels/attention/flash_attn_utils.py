@@ -31,8 +31,6 @@ from kernels.common.kernels_common import dtype_to_elem_type
 _LOG2E = host_math.log2(host_math.e)
 # gfx950 (MI350/MI355X): 8 XCDs, each with a private ~4 MB L2.
 NUM_XCD_GFX950 = 8
-# LDS a single gfx950 workgroup may request. Past this the request is rejected
-# at codegen ("local memory exceeds limit") or at launch (hipErrorIllegalState).
 LDS_BYTES_GFX950 = 160 * 1024
 MIN_Q_BLOCKS_XCD_SWIZZLE = 64
 # The dual-wave 8-wave CTA fixes the q-block height; callers need it to count
@@ -48,12 +46,7 @@ _LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "flydsl.dualwave_swp.lds">'
 
 
 def _waitcnt_vm_n(n):
-    """Wait until at most `n` vector-memory ops are outstanding; lgkmcnt/expcnt unconstrained.
-
-    The keyword form packs the per-arch bitfield (the counter field widths differ
-    between CDNA and RDNA), so the split vmcnt encoding does not have to be
-    open-coded here.
-    """
+    """Emit s_waitcnt vmcnt(n) only."""
     rocdl.s_waitcnt(vmcnt=n)
 
 
@@ -562,12 +555,7 @@ def _dualwave_lds_noalias_scopes(name, scope_names):
 
 
 def _cu_load(div, idx, cu_atom, cu_v1i32):
-    """Load cu_seqlens[idx] into an SGPR.
-
-    ``idx`` must be wave-uniform: the readfirstlane keeps lane 0's value for the
-    whole wave, so a per-lane index would silently give every lane lane 0's
-    answer. Every caller derives ``idx`` from a kernel argument or a block index.
-    """
+    """Load cu_seqlens[idx] into an SGPR. ``idx`` must be wave-uniform."""
     v = fly.copy_atom_call_ssa([cu_v1i32], cu_atom, fx.slice(div, (None, fx.Int32(idx))))
     return fx.Index(rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(Vec(v, (1,), fx.Int32)[0]))))
 
@@ -1056,9 +1044,7 @@ def _init_dualwave_thread_mapping(ctx):
         T.i32,
         (_tid_i32 // fx.Int32(traits.WARP_SIZE)).ir_value(),
     )
-    # Two stagger groups, whatever the wave count. This is shared with the bf16
-    # path, where NUM_WAVES is 8 and the divisor stays the 4 it always was; it
-    # only moves for the fp8 4-wave (block_m=128) build.
+    # Two stagger groups, whatever the wave count (bf16 keeps its old divisor of 4).
     ctx.stagger_i32 = arith.divsi(_wave_id_uni_i32, as_mlir_value(fx.Int32(traits.NUM_WAVES // 2)))
     ctx.wave_id_uni = fx.Index(_wave_id_uni_i32)
 
@@ -1848,8 +1834,6 @@ class DualwaveSwpFp8Traits:
     LDS_KV_TOTAL_SIZE: int
     DUALWAVE_SWP_K_BUF_BASE: tuple[int, int]
     DUALWAVE_SWP_V_BUF_BASE: tuple[int, int]
-    # V scratch: fp8 V arrives already permuted into the PV MMA layout. Sized in
-    # bf16 elements because the LDS array is typed bf16.
     VT_BF16_TOTAL: int
     DUALWAVE_SWP_RESCALE_THRESHOLD: float
     SCHED_MFMA_MASK: int
@@ -1892,8 +1876,6 @@ class DualwaveSwpFp8Traits:
             self.NUM_PREFETCH_K,
             self.XCD_SWIZZLE,
             self.BATCH_INTERLEAVE_GROUP,
-            # block_m is a build parameter now, and it moves the tile shape, the
-            # wave count, the LDS layout and the grid.
             self.BLOCK_M,
             self.BLOCK_SIZE,
             self.NUM_WAVES,
@@ -1931,10 +1913,8 @@ def _make_dualwave_swp_fp8_traits(
         head_dim_v = head_dim
     if head_dim % 64:
         raise RuntimeError(f"fp8 flash attention needs head_dim % 64 == 0, got head_dim={head_dim}")
-    # D_CHUNKS == head_dim_v // 32 must land in [2, 6]. Below 2, `_anchor_v_o`
-    # builds a single-element inline-asm struct and LLVM aborts the process;
-    # above 6 the kernel launches but miscomputes the high D_CHUNKs (measured at
-    # head_dim_v=224: min_cos 0.83, error confined to output columns 128..191).
+    # D_CHUNKS == head_dim_v // 32 must land in [2, 6]: below 2 `_anchor_v_o`
+    # aborts LLVM, above 6 the high D_CHUNKs come back wrong.
     if head_dim_v % 32 or not 64 <= head_dim_v <= 192:
         raise RuntimeError(
             "fp8 flash attention needs 64 <= head_dim_v <= 192 and head_dim_v % 32 == 0, "
@@ -1987,18 +1967,13 @@ def _make_dualwave_swp_fp8_traits(
         for _o in range(0, chunk, 64):
             k_ws_band.append(_bi)
             k_ws_off.append(_o)
-    # The BN128 pipeline (two BLOCK_N=64 tiles per iteration, 6-deep K ring, V
-    # staged by DMA straight into its MMA layout) is the only fp8 pipeline left;
-    # split-K and varlen run on it too.
     num_prefetch_k = 6
     dualwave_swp_kv_per_buffer = smem_k_tile_elems
     lds_kv_total_size = num_prefetch_k * dualwave_swp_kv_per_buffer
     dualwave_swp_k_buf_base = tuple(i * dualwave_swp_kv_per_buffer for i in range(num_prefetch_k))
     dualwave_swp_v_buf_base = tuple(smem_k_tile_elems + i * dualwave_swp_kv_per_buffer for i in range(num_prefetch_k))
 
-    # V scratch: fp8 V is DMA'd in already permuted into the PV MMA layout. The
-    # array is typed bf16, hence the /2; the trailing 128 covers the 128-byte
-    # alignment the DMA base is rounded up to.
+    # V scratch is typed bf16 (hence the /2); +128 covers the DMA base alignment.
     eb_bf = 2
     fp8_v_tile_bytes = (block_n // 8) * (head_dim_v // 16) * 128
     vt_bf16_total = num_prefetch_k * (fp8_v_tile_bytes // eb_bf) + 128
@@ -2007,11 +1982,7 @@ def _make_dualwave_swp_fp8_traits(
 
     qlds = head_dim <= 128
 
-    # SharedStorage is {K/V ring, bf16 V transpose scratch, staged Q}; the Q stub
-    # allocated when not QLDS is never read and the allocator drops it. The
-    # footprint is fixed by (head_dim, head_dim_v, block_m), so reject it here --
-    # otherwise it surfaces as "local memory exceeds limit" at codegen or a bare
-    # hipErrorIllegalState at launch, neither of which names a head dim.
+    # Reject here; at launch this is a bare hipErrorIllegalState naming no shape.
     lds_bytes = lds_kv_total_size * elem_bytes + vt_bf16_total * eb_bf
     if qlds:
         lds_bytes += block_m * head_dim * elem_bytes
@@ -2089,23 +2060,12 @@ def _make_dualwave_swp_fp8_traits(
 
 
 def dualwave_fp8_dma_per_iter(traits):
-    """Vector-memory instructions the *least* loaded wave issues per main-loop iteration.
+    """Vector-memory instructions the least-loaded wave issues per main-loop iteration.
 
-    `_waitcnt_vm_n(N)` only forces the previous iteration's DMAs to retire when N
-    is at most the count this wave actually issues; overshooting turns the wait
-    into a no-op and the end-of-iteration barrier then releases with LDS writes
-    still in flight. Waves that issue more than the minimum just over-wait, which
-    is safe.
-
-    K (`DualwaveFp8KvGmemToLdsLoader.load_k`): every wave issues one DMA per pass
-    per band, the tail band's partial pass included -- it is exec-masked, not
-    branched, so the instruction still issues.
-
-    V (`_stage_v_fp8_block_dma`): the trailing pass is guarded by a wave-uniform
-    `dma_id < num_dma`, so waves past the end issue nothing at all and the
-    minimum is the floor, not the ceiling.
-
-    The main loop consumes two KV tiles per iteration, hence the factor of two.
+    `_waitcnt_vm_n(N)` only retires the previous iteration's DMAs when N is at
+    most what this wave issues; overshooting makes the wait a no-op. K is
+    exec-masked so every wave issues each pass; V's trailing pass is behind a
+    wave-uniform branch, so its minimum is the floor. Two KV tiles per iteration.
     """
     rows_per_wave = -(-traits.BLOCK_N // traits.NUM_WAVES)
     k_instr = sum(-(-(rows_per_wave * (chunk // traits.VEC_KV)) // traits.WARP_SIZE) for chunk in traits.K_BAND_CHUNK)
@@ -5418,15 +5378,10 @@ class DualwaveSplitKCombineContext:
     def init_thread_mapping(self, combine_rows_per_block, combine_lanes_per_row):
         """Map (blockIdx.x, blockIdx.y, tid) to one (batch, head, token) output row.
 
-        blockIdx.y carries the batch so that `batch_idx` -- which the O buffer
-        resource is built from -- is block-uniform. A buffer resource is
-        wave-scoped, so deriving it per thread would give every lane of a wave
-        one batch's base pointer and num_records even when a batch boundary
-        falls inside the wave.
-
-        The x grid rounds up, and when combine_lanes_per_row does not divide the
-        block the trailing threads map past the block's own rows; both are folded
-        into `row_valid` by steering those threads to `rows_per_batch`.
+        blockIdx.y carries the batch: the O buffer resource is wave-scoped, so a
+        per-thread batch_idx would hand a whole wave one batch's descriptor when a
+        batch boundary falls inside it. Rows the rounded-up x grid adds past the
+        batch, and threads past the block's own rows, fold into `row_valid`.
         """
         traits = self.traits
         self.tid = fx.Index(gpu.thread_idx.x)
@@ -5467,7 +5422,6 @@ class DualwaveSplitKCombineContext:
             per_batch_elems = self.seq_len_v * self.stride_o_n_v
             batch_byte_off = self.batch_idx * per_batch_elems * fx.Index(2)
             nrec_bytes = per_batch_elems * fx.Index(2)
-        # Kept so out-of-range rows can steer their store past num_records.
         self.o_nrec_bytes = nrec_bytes
         self.o_rsrc = buffer_ops.create_buffer_resource_from_addr(
             as_mlir_value(fx.Int64(fx.ptrtoint(fx.get_iter(self.O))) + fx.Int64(batch_byte_off)),
@@ -5611,8 +5565,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
 
     def store_output(self, o_pack):
         o_global = self.seq_idx * self.stride_o_n_v + self.q_head_idx * self.traits.HEAD_DIM_V + self.col
-        # Rows the rounded-up grid added past the end of the batch aim at
-        # num_records, which the buffer drops.
+        # Out-of-range rows aim past num_records, which the buffer drops.
         o_off = self.row_valid.select(o_global * fx.Index(2), self.o_nrec_bytes)
         buffer_ops.buffer_store(
             o_pack.ir_value(),

@@ -1695,8 +1695,6 @@ def run_fp8_config(
     seed=DEFAULT_SEED,
     verbose=True,
     num_kv_heads=None,
-    # Mirror the library default so a benchmark measures what callers get; a
-    # correctness test that must not depend on the autotuner passes 1.
     num_kv_splits=None,
     head_dim_v=None,
     seqlen_kv=None,
@@ -1813,9 +1811,6 @@ def run_fp8_config(
         )
         if cross:
             fp8_exec_kwargs["max_seqlen_kv"] = Skv
-    # Forward faithfully: `None` asks the interface to autotune, `1` pins the
-    # unsplit kernel. Only forwarding `> 1` made an explicit 1 fall back to the
-    # default, i.e. to the autotuner -- the opposite of what the caller asked.
     fp8_exec_kwargs["num_kv_splits"] = None if num_kv_splits is None else int(num_kv_splits)
 
     try:
@@ -4881,9 +4876,6 @@ def test_fp8_lazy_rescale_keeps_the_running_max_monotonic():
         k_descale=k_s.reshape(1).contiguous(),
         v_descale=v_s.reshape(1).contiguous(),
         dualwave_swp_lazy_rescale=True,
-        # The subject is the main kernel's running max; leave the split
-        # autotuner out of it so the assertion cannot be answered by the
-        # combine pass instead.
         num_kv_splits=1,
     )
     out = (out[0] if isinstance(out, (tuple, list)) else out).float()
@@ -5061,8 +5053,6 @@ def test_fp8_default_is_the_lazy_rescale():
         q_descale=q_s.reshape(1).contiguous(),
         k_descale=k_s.reshape(1).contiguous(),
         v_descale=v_s.reshape(1).contiguous(),
-        # This compares two rescale modes of the dense kernel; the split
-        # autotuner is free to move underneath it and is not the subject.
         num_kv_splits=1,
     )
     qq, kk = (q / q_s).to(fp8), (k / k_s).to(fp8)
@@ -5105,11 +5095,7 @@ def _assert_fp8_shape(causal, batch=1, seq_len=1, head_dim=_FP8_D, head_dim_v=_F
     )
 
 
-# `num_kv_splits=None` is the shipped default and lets the autotuner pick, so a
-# test that passes nothing exercises whichever path the heuristic happens to
-# choose today. Every head-dim test below runs both: `1` pins the unsplit kernel
-# (deterministic coverage of what the test claims to be about) and `None` keeps
-# the path a caller actually gets.
+# `1` pins the unsplit kernel, `None` is the shipped default (autotuned).
 FP8_SPLIT_MODES = [pytest.param(1, id="dense"), pytest.param(None, id="autosplit")]
 
 
@@ -5222,11 +5208,7 @@ def _fp8_combine_rows_per_block(head_dim_v):
 
 
 def _run_fp8_into_nan_out(q, k, v, head_dim_v, **kwargs):
-    """Launch fp8 attention into a NaN-filled ``out`` and return it.
-
-    A zero-initialised buffer hides rows the kernel never writes; NaN makes them
-    countable, which is the whole point of these two tests.
-    """
+    """Launch fp8 attention into a NaN-filled ``out`` so unwritten rows are countable."""
     fp8 = torch.float8_e4m3fn
     fp8_max = torch.finfo(fp8).max
     scales = [t.abs().amax().float().clamp(min=1e-12) / fp8_max for t in (q, k, v)]
@@ -5249,13 +5231,7 @@ def _run_fp8_into_nan_out(q, k, v, head_dim_v, **kwargs):
 @_requires_gfx950
 @pytest.mark.parametrize("batch,seq_len,num_heads", [(1, 4097, 1), (1, 4097, 3), (1, 2050, 7), (1, 8193, 1)])
 def test_fp8_auto_split_kv_writes_every_row(batch, seq_len, num_heads):
-    """Auto split-K must not drop the tail of the combine grid.
-
-    ``batch * num_heads * seq_len`` is deliberately not a multiple of
-    COMBINE_ROWS_PER_BLOCK (8 at head_dim_v=128), which a floor-divided combine
-    grid leaves unwritten. No ``num_kv_splits`` is passed: the point is that a
-    caller who never asked for split-K still gets every row.
-    """
+    """Auto split-K must not drop the tail of the combine grid."""
     D = 128
     assert (batch * num_heads * seq_len) % _fp8_combine_rows_per_block(D) != 0, "shape would not exercise the tail"
     torch.manual_seed(0)
@@ -5267,14 +5243,7 @@ def test_fp8_auto_split_kv_writes_every_row(batch, seq_len, num_heads):
 @_requires_gfx950
 @pytest.mark.parametrize("seq_len,num_heads,head_dim_v", [(385, 1, 128), (385, 3, 128), (1155, 1, 128), (386, 1, 64)])
 def test_fp8_varlen_split_kv_respects_batch_boundaries(seq_len, num_heads, head_dim_v):
-    """varlen + split-K must not mix batches inside a combine wave.
-
-    A buffer resource is wave-scoped. When ``(max_seqlen_q * num_heads)`` is not a
-    multiple of the rows a wave covers, a batch boundary lands mid-wave; deriving
-    the O descriptor per thread then writes the row after the boundary with the
-    previous batch's descriptor, losing that row and corrupting the previous
-    batch's row 0.
-    """
+    """varlen + split-K must not mix batches inside a combine wave."""
     rows_per_wave = 256 // head_dim_v
     assert (seq_len * num_heads) % rows_per_wave != 0, "shape would not straddle a wave"
     B, D = 8, 192
@@ -5313,16 +5282,12 @@ def test_fp8_supported_v_head_dims_run(head_dim_v):
 @pytest.mark.parametrize(
     "head_dim,head_dim_v,match",
     [
-        # D_CHUNKS < 2: `_anchor_v_o` emits a single-element inline-asm struct and
-        # LLVM aborts the process rather than failing the build.
+        # D_CHUNKS < 2 aborts LLVM; D_CHUNKS > 6 miscomputes the high chunks.
         (128, 32, "head_dim_v"),
-        # D_CHUNKS > 6: launches, but the high D_CHUNKs come back wrong.
         (128, 224, "head_dim_v"),
         (128, 256, "head_dim_v"),
-        # Fits neither the QK MFMA slicing nor a clean band split.
         (96, 96, "head_dim"),
-        # Within the head-dim rules but over the 160 KiB LDS budget. 256/256 is
-        # the shape people ask about; it trips the head_dim_v rule first.
+        # Within the head-dim rules but over the LDS budget.
         (256, 192, "LDS"),
         (320, 128, "LDS"),
         (384, 64, "LDS"),
@@ -5364,25 +5329,16 @@ _NUM_CU = 256
         (8, 32, 2048, 2048, True, 256),
         (16, 32, 1024, 1024, True, 256),
         (32, 32, 512, 512, True, 256),
-        # Short KV and an under-filled GPU: narrow.
         (1, 8, 2048, 2048, True, 128),
-        # Long KV goes wide even at one workgroup per CU. Pinning block_m and
-        # letting the split count follow it, the wide tile measured 50.2us vs
-        # 56.7us here and 164.6us vs 216.3us at 4096/16384 -- the narrow tile
-        # inflates the workgroup estimate and talks the autotuner out of a split
-        # that pays. A sweep with split-K forced off says the opposite, which is
-        # why this rule must not be tuned with the two heuristics decoupled.
+        # Long KV goes wide even at one workgroup per CU: the narrow tile inflates
+        # the workgroup estimate and talks the split autotuner out of a split.
         (1, 8, 4096, 4096, True, 256),
         (1, 8, 4096, 16384, True, 256),
         (2, 8, 4096, 4096, True, 256),
     ],
 )
 def test_fp8_auto_block_m_picks(batch, num_heads, seqlen_q, seqlen_kv, causal, expect):
-    """Pin what `_fp8_auto_block_m` chooses.
-
-    Every correctness test passes whichever tile it picks, so an inverted
-    comparison here is invisible without an assertion on the choice itself.
-    """
+    """Pin what `_fp8_auto_block_m` chooses; correctness tests pass either way."""
     got = flash_attn_interface._fp8_auto_block_m(batch, num_heads, seqlen_q, seqlen_kv, causal, _NUM_CU)
     assert got == expect
 
@@ -5441,8 +5397,6 @@ def test_fp8_num_kv_splits_none_is_auto_and_one_is_off(monkeypatch):
         return orig(**kw)
 
     monkeypatch.setattr(flash_attn_interface, "_build_dense_fp8", spy)
-    # Small enough that the autotuner still has idle CUs to fill at the tile
-    # `_fp8_auto_block_m` picks; a shape it would leave unsplit proves nothing.
     B, S, H, D = 1, 8192, 2, 128
     torch.manual_seed(0)
     q, k, v = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3))
@@ -5457,13 +5411,7 @@ def test_fp8_num_kv_splits_none_is_auto_and_one_is_off(monkeypatch):
 @_requires_gfx950
 @pytest.mark.parametrize("seq_len,num_heads,head_dim", [(4097, 1, 128), (2050, 7, 128), (1025, 1, 64)])
 def test_bf16_split_kv_writes_every_row(seq_len, num_heads, head_dim):
-    """The bf16 combine grid shares the fp8 one's rounding, and the same bug.
-
-    ``num_heads * seq_len`` is not a multiple of COMBINE_ROWS_PER_BLOCK, so a
-    floor-divided grid leaves the tail of the last block unwritten. Unlike the
-    fp8 case this needs an explicit ``num_kv_splits`` -- bf16 has no autotuner --
-    which is why it went unnoticed.
-    """
+    """The bf16 combine grid shares the fp8 one's rounding, and the same bug."""
     B = 1
     torch.manual_seed(0)
     q, k, v = (
