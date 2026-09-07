@@ -1695,7 +1695,9 @@ def run_fp8_config(
     seed=DEFAULT_SEED,
     verbose=True,
     num_kv_heads=None,
-    num_kv_splits=1,
+    # Mirror the library default so a benchmark measures what callers get; a
+    # correctness test that must not depend on the autotuner passes 1.
+    num_kv_splits=None,
     head_dim_v=None,
     seqlen_kv=None,
     varlen_seqlens_q=None,
@@ -1713,7 +1715,8 @@ def run_fp8_config(
         ``[total_q, H, D]``, K/V are ``[total_kv, Hkv, *]`` and cu_seqlens are
         derived from the per-sequence lengths. Passing only ``varlen_seqlens_q``
         makes it self-attention.
-      - ``num_kv_splits`` > 1: forwarded to the split-K path.
+      - ``num_kv_splits``: ``None`` autotunes, ``1`` pins the unsplit kernel,
+        ``> 1`` forces that many KV splits.
 
     Only configurations that can never be valid (wrong arch, indivisible head
     counts, malformed lengths) are rejected here. Anything the kernel does not
@@ -1810,8 +1813,10 @@ def run_fp8_config(
         )
         if cross:
             fp8_exec_kwargs["max_seqlen_kv"] = Skv
-    if int(num_kv_splits) > 1:
-        fp8_exec_kwargs["num_kv_splits"] = int(num_kv_splits)
+    # Forward faithfully: `None` asks the interface to autotune, `1` pins the
+    # unsplit kernel. Only forwarding `> 1` made an explicit 1 fall back to the
+    # default, i.e. to the autotuner -- the opposite of what the caller asked.
+    fp8_exec_kwargs["num_kv_splits"] = None if num_kv_splits is None else int(num_kv_splits)
 
     try:
         flydsl_flash_attn_func(
@@ -4876,6 +4881,10 @@ def test_fp8_lazy_rescale_keeps_the_running_max_monotonic():
         k_descale=k_s.reshape(1).contiguous(),
         v_descale=v_s.reshape(1).contiguous(),
         dualwave_swp_lazy_rescale=True,
+        # The subject is the main kernel's running max; leave the split
+        # autotuner out of it so the assertion cannot be answered by the
+        # combine pass instead.
+        num_kv_splits=1,
     )
     out = (out[0] if isinstance(out, (tuple, list)) else out).float()
     torch.cuda.synchronize()
@@ -5052,6 +5061,9 @@ def test_fp8_default_is_the_lazy_rescale():
         q_descale=q_s.reshape(1).contiguous(),
         k_descale=k_s.reshape(1).contiguous(),
         v_descale=v_s.reshape(1).contiguous(),
+        # This compares two rescale modes of the dense kernel; the split
+        # autotuner is free to move underneath it and is not the subject.
+        num_kv_splits=1,
     )
     qq, kk = (q / q_s).to(fp8), (k / k_s).to(fp8)
 
@@ -5093,34 +5105,45 @@ def _assert_fp8_shape(causal, batch=1, seq_len=1, head_dim=_FP8_D, head_dim_v=_F
     )
 
 
+# `num_kv_splits=None` is the shipped default and lets the autotuner pick, so a
+# test that passes nothing exercises whichever path the heuristic happens to
+# choose today. Every head-dim test below runs both: `1` pins the unsplit kernel
+# (deterministic coverage of what the test claims to be about) and `None` keeps
+# the path a caller actually gets.
+FP8_SPLIT_MODES = [pytest.param(1, id="dense"), pytest.param(None, id="autosplit")]
+
+
 @_requires_gfx950
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("batch,seq_len", [(1, 4096), (2, 4096), (3, 4096), (4, 4096), (1, 8192)])
-def test_fp8_head_dim_192_v_128_dense(causal, batch, seq_len):
+@pytest.mark.parametrize("num_kv_splits", FP8_SPLIT_MODES)
+def test_fp8_head_dim_192_v_128_dense(causal, batch, seq_len, num_kv_splits):
     """Dense self-attention with QK head_dim 192 and a 128-wide V.
 
     Q/K are [B, S, 12, 192], V is [B, S, 12, 128], and the output follows V.
     """
-    _assert_fp8_shape(causal, batch=batch, seq_len=seq_len)
+    _assert_fp8_shape(causal, batch=batch, seq_len=seq_len, num_kv_splits=num_kv_splits)
 
 
 @_requires_gfx950
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("batch", FP8_VARLEN_BATCHES)
-def test_fp8_head_dim_192_v_128_varlen(causal, batch):
+@pytest.mark.parametrize("num_kv_splits", FP8_SPLIT_MODES)
+def test_fp8_head_dim_192_v_128_varlen(causal, batch, num_kv_splits):
     """Packed varlen self-attention over 2614 tokens, batch 1..4.
 
     Q/K are [2614, 12, 192] and V is [2614, 12, 128] at every batch -- only the
     cu_seqlens partition changes (batch 2 is [0, 1024, 2614]). Q and KV share the
     per-sequence lengths, so only the V head dim differs here.
     """
-    _assert_fp8_shape(causal, varlen_seqlens_q=FP8_VARLEN_Q_SEQLENS[batch])
+    _assert_fp8_shape(causal, varlen_seqlens_q=FP8_VARLEN_Q_SEQLENS[batch], num_kv_splits=num_kv_splits)
 
 
 @_requires_gfx950
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("batch", FP8_VARLEN_BATCHES)
-def test_fp8_head_dim_192_v_128_varlen_cross_length(causal, batch):
+@pytest.mark.parametrize("num_kv_splits", FP8_SPLIT_MODES)
+def test_fp8_head_dim_192_v_128_varlen_cross_length(causal, batch, num_kv_splits):
     """Packed varlen cross-attention, batch 1..4: 2614 Q tokens vs 16384 KV tokens.
 
     Q is [2614, 12, 192], K is [16384, 12, 192] and V is [16384, 12, 128] at every
@@ -5131,6 +5154,7 @@ def test_fp8_head_dim_192_v_128_varlen_cross_length(causal, batch):
         causal,
         varlen_seqlens_q=FP8_VARLEN_Q_SEQLENS[batch],
         varlen_seqlens_kv=FP8_VARLEN_KV_SEQLENS[batch],
+        num_kv_splits=num_kv_splits,
     )
 
 
@@ -5340,11 +5364,16 @@ _NUM_CU = 256
         (8, 32, 2048, 2048, True, 256),
         (16, 32, 1024, 1024, True, 256),
         (32, 32, 512, 512, True, 256),
-        # A long KV does not on its own force the wide tile: at one workgroup
-        # per CU the narrow tile still measured 12-21% faster here.
-        (1, 8, 4096, 4096, True, 128),
-        (1, 8, 4096, 16384, True, 128),
-        # ... but a second batch fills the GPU, and then it does not.
+        # Short KV and an under-filled GPU: narrow.
+        (1, 8, 2048, 2048, True, 128),
+        # Long KV goes wide even at one workgroup per CU. Pinning block_m and
+        # letting the split count follow it, the wide tile measured 50.2us vs
+        # 56.7us here and 164.6us vs 216.3us at 4096/16384 -- the narrow tile
+        # inflates the workgroup estimate and talks the autotuner out of a split
+        # that pays. A sweep with split-K forced off says the opposite, which is
+        # why this rule must not be tuned with the two heuristics decoupled.
+        (1, 8, 4096, 4096, True, 256),
+        (1, 8, 4096, 16384, True, 256),
         (2, 8, 4096, 4096, True, 256),
     ],
 )

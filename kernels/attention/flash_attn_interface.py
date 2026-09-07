@@ -81,30 +81,42 @@ _FP8_AUTOSPLIT_CAUSAL_SKEW = 0.75
 _FP8_AUTOSPLIT_DENSE_MARGIN = 0.85
 
 
+# Past this KV length the wide tile wins regardless of occupancy: the narrow tile
+# doubles the workgroup count without shortening any of them, and -- more
+# importantly -- it inflates the workgroup estimate `_fp8_auto_kv_splits` reads,
+# which then declines a split that would have paid. Dropping this early-out cost
+# 7.3% on packed 2614/16384 cross-attention (the narrow tile blocks a 5-way split
+# worth 231us vs 248us) while saving 0.2% on the split-K-off sweeps.
+_FP8_NARROW_MAX_KV_TILES = 48
+
+
 def _fp8_auto_block_m(batch: int, num_heads: int, seqlen_q: int, seqlen_kv: int, causal: bool, num_cu: int) -> int:
     """Pick BLOCK_M (256 wide / 128 narrow) for an fp8 shape.
 
-    Take the narrow tile only when it still fits the GPU in one round, i.e. when
-    the wide tile would leave CUs idle. Neither the mask mode nor the KV length
-    enters: splitting causal off and picking narrow when the GPU is *already*
-    full is the wrong direction -- it doubles the workgroup count and halves the
-    work per group.
+    Short KV: take the narrow tile only when it still fits the GPU in one round,
+    i.e. when the wide tile would leave CUs idle. The mask mode does not enter --
+    splitting causal off and picking narrow when the GPU is *already* full is the
+    wrong direction, since it doubles the workgroup count and halves the work per
+    group. Long KV: always wide, and let split-K supply the parallelism.
 
     Scored against the per-shape best of {128, 256} on three measured sweeps
     (block_m forced both ways, split-K off, 30-iteration medians):
 
         table                    shapes   mean   worst
-        D=Dv=128 causal            72     0.08%   3.5%
-        D=Dv=128 non-causal        72     0.00%   0.0%
-        D=192/Dv=128 causal        30     0.96%  11.2%
+        D=Dv=128 causal            72     0.25%  12.2%
+        D=Dv=128 non-causal        72     0.17%  11.9%
+        D=192/Dv=128 causal        30     1.67%  21.3%
 
     A causal-only branch measured 13.5% mean / 37.5% worst on the first table.
     Thresholds of num_cu/2 and 2*num_cu are both worse (1.2% and 3.1% mean).
 
-    The 192/128 residual is the known limitation: per-tile cost scales with
-    (head_dim + head_dim_v), so the wider pair keeps the narrow tile profitable
-    at higher occupancy than this shape-only rule admits.
+    Those sweeps pin split-K off, so they cannot see this choice feeding
+    `_fp8_auto_kv_splits`; the long-KV shapes where the two interact are covered
+    by the early-out above instead.
     """
+    kv_tiles = -(-seqlen_kv // _FP8_BLOCK_N)
+    if kv_tiles > _FP8_NARROW_MAX_KV_TILES:
+        return DUALWAVE_SWP_BLOCK_M
     narrow = DUALWAVE_SWP_BLOCK_M // 2
     narrow_wgs = num_heads * -(-seqlen_q // narrow) * batch
     return narrow if narrow_wgs <= num_cu else DUALWAVE_SWP_BLOCK_M
@@ -117,7 +129,6 @@ def _fp8_auto_kv_splits(
     seqlen_kv: int,
     causal: bool,
     num_cu: int,
-    varlen: bool = False,
     block_m: int = DUALWAVE_SWP_BLOCK_M,
 ) -> int:
     """Pick num_kv_splits by minimising `rounds(s) * (FIXED + tiles/s)`.
@@ -126,6 +137,13 @@ def _fp8_auto_kv_splits(
     many workgroups the shape produces, and therefore whether splitting has any
     idle CUs left to fill. Assuming the wide tile while the narrow one is built
     halves the workgroup estimate and splits a GPU that is already full.
+
+    varlen takes the same rule as dense. Exempting it from the margin check below
+    made it split *more* eagerly than dense, which measured worse on 4 of 7 packed
+    shapes (mean 5.3% off the per-shape best of {1,2,4,8,16} vs 3.3% with the
+    margin applied). Skipping varlen entirely is far worse still (35% mean, 233%
+    on one short-Q/long-KV shape) -- packed prefill against a long cache is
+    exactly what split-K is for.
     """
     wgs = num_heads * -(-seqlen_q // block_m) * batch
     kv_tiles = -(-seqlen_kv // _FP8_BLOCK_N)
@@ -147,8 +165,8 @@ def _fp8_auto_kv_splits(
 
     usable = [s for s in _FP8_AUTOSPLIT_CANDIDATES if s == 1 or kv_tiles // s >= _FP8_AUTOSPLIT_MIN_TILES]
     best = min(usable, key=makespan)
-    if best == 1 or varlen:
-        return best
+    if best == 1:
+        return 1
     return best if makespan(best) <= _FP8_AUTOSPLIT_DENSE_MARGIN * makespan(1) else 1
 
 
@@ -1185,9 +1203,7 @@ def flydsl_flash_attn_func(
 
     if dtype_str == "fp8" and _auto_splits and Sq >= 384:
         _skv_eff = (int(max_seqlen_kv) if cross else Sq) if varlen else int(Skv)
-        _auto = _fp8_auto_kv_splits(
-            B, H, Sq, _skv_eff, causal, _dense_light_cu(q.device), varlen=varlen, block_m=_fp8_block_m
-        )
+        _auto = _fp8_auto_kv_splits(B, H, Sq, _skv_eff, causal, _dense_light_cu(q.device), block_m=_fp8_block_m)
         if _auto > 1 and dualwave_splitk_workspace_elems(B, H, Sq, _auto, head_dim=Dv) * 4 <= (
             _FP8_AUTOSPLIT_MAX_WS_BYTES
         ):
