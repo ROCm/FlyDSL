@@ -186,18 +186,16 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_thread_mapping()
         if const_expr(PAGED_BN128_VARLEN):
             ctx.init_sequence_lengths()
-            if const_expr(traits.CAUSAL):
-                num_q_blocks = (ctx.seqlen_q_v + traits.BLOCK_M - 1) // traits.BLOCK_M
-                active_q_block = ctx.q_block_idx < num_q_blocks
-                reversed_q_block = num_q_blocks - fx.Index(1) - ctx.q_block_idx
-                ctx.q_block_idx = active_q_block.select(reversed_q_block, ctx.q_block_idx)
-                ctx.q_start = ctx.q_block_idx * traits.BLOCK_M
-                ctx.q_gmem_elem_offset = (
-                    ctx.q_tok_base + ctx.q_start
-                ) * ctx.stride_q_n_v + ctx.q_head_idx * traits.HEAD_DIM
+            num_q_blocks = (ctx.seqlen_q_v + traits.BLOCK_M - 1) // traits.BLOCK_M
+            active_q_block = ctx.q_block_idx < num_q_blocks
+            reversed_q_block = num_q_blocks - fx.Index(1) - ctx.q_block_idx
+            ctx.q_block_idx = active_q_block.select(reversed_q_block, ctx.q_block_idx)
+            ctx.q_start = ctx.q_block_idx * traits.BLOCK_M
+            ctx.q_gmem_elem_offset = (
+                ctx.q_tok_base + ctx.q_start
+            ) * ctx.stride_q_n_v + ctx.q_head_idx * traits.HEAD_DIM
         else:
-            if const_expr(traits.CAUSAL):
-                ctx.init_causal_lpt_order()
+            ctx.init_causal_lpt_order()
             ctx.init_sequence_lengths()
         ctx.init_descriptors()
         ctx.init_atoms_and_lds_ptrs()
@@ -237,9 +235,7 @@ def build_flash_attn_paged_fp8_module(
             return v_o, l_row
 
         def _mask_pair(v_s_a, v_s_b, j):
-            if const_expr(traits.CAUSAL):
-                return softmax_helper.causal_mask_pair_if_needed(v_s_a, v_s_b, j)
-            return v_s_a, v_s_b
+            return softmax_helper.causal_mask_pair_if_needed(v_s_a, v_s_b, j)
 
         def _correct_o(v_o, m_row, l_row, m_tile):
             if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
@@ -250,9 +246,7 @@ def build_flash_attn_paged_fp8_module(
 
         def _merge_tile_max(v_s_a, v_s_b):
             m_tile = softmax_helper.max2(softmax_helper.reduce_max(v_s_a), softmax_helper.reduce_max(v_s_b))
-            if const_expr(traits.CAUSAL):
-                m_tile = softmax_helper.floor_masked_max(m_tile)
-            return m_tile
+            return softmax_helper.floor_masked_max(m_tile)
 
         page_t0, page_t1 = ctx.load_page_id_pair(t0 * BN)
         kv_gmem_to_lds.load_k(t0 * BN, t0 % fx.Index(NPF), page_id=page_t0)
@@ -410,7 +404,7 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_lds(SharedStorage)
         ctx.init_thread_mapping()
         ctx.init_sequence_lengths()
-        if const_expr(traits.HEAD_DIM == 192 and traits.CAUSAL and traits.BATCH_INTERLEAVE_GROUP > 1):
+        if const_expr(traits.HEAD_DIM == 192 and traits.BATCH_INTERLEAVE_GROUP > 1):
             # Issue the longest active q-blocks first within each batch group.
             num_q_blocks = (ctx.seqlen_q_v + traits.BLOCK_M - 1) // traits.BLOCK_M
             active_q_block = ctx.q_block_idx < num_q_blocks
@@ -470,17 +464,10 @@ def build_flash_attn_paged_fp8_module(
             # Prologue scores + first softmax pass for KV tile 0
             v_s_0 = gemm_helper.qk(v_k, q_all_wide)
             rocdl.sched_barrier(0)
-            if const_expr(traits.CAUSAL):
-                v_s_0 = softmax_helper.causal_mask_prologue_if_needed(v_s_0)
-            else:
-                # Non-causal padding mask for the prologue tile too: for tiny seq_len
-                # tile 0 is the only real tile, so its keys >= seq_len must be masked
-                # here. Gated -> no-op once tile 0 is full (seq_len >= BLOCK_N).
-                v_s_0 = softmax_helper.seq_pad_mask_if_needed(v_s_0)
+            v_s_0 = softmax_helper.causal_mask_prologue_if_needed(v_s_0)
             m_row_pro = softmax_helper.reduce_max(v_s_0)
-            if const_expr(traits.CAUSAL):
-                # Floor fully-masked rows (-inf) to finite so exp2 yields 0, not NaN.
-                m_row_pro = softmax_helper.floor_masked_max(m_row_pro)
+            # Floor fully-masked rows (-inf) to finite so exp2 yields 0, not NaN.
+            m_row_pro = softmax_helper.floor_masked_max(m_row_pro)
             v_s_0 = softmax_helper.sub_m(v_s_0, m_row_pro)
             v_p_0 = softmax_helper.exp2(v_s_0, 0, 16)
             rocdl.sched_barrier(0)
@@ -556,7 +543,7 @@ def build_flash_attn_paged_fp8_module(
                 v_o = gemm_helper.pv_step_k(0, v_p_0, v_v, v_o)
                 # Cross-length causal can put a diagonal tile in v_s_1; mask it here.
                 # Self-attention skips this to keep the existing schedule.
-                if const_expr(traits.CAUSAL and traits.CROSS_SEQLEN):
+                if const_expr(traits.CROSS_SEQLEN):
                     v_s_1 = softmax_helper.causal_mask_prologue_if_needed(
                         v_s_1, j_idx - 2, (j_idx - 1) * traits.BLOCK_N
                     )
@@ -627,14 +614,11 @@ def build_flash_attn_paged_fp8_module(
                     v_packs_b = kv_lds_to_regs.load_v_steps(1, 0, 2)
                 else:
                     v_packs_b = kv_lds_to_regs.load_v(1)
-                if const_expr(traits.CAUSAL):
-                    v_s_0 = softmax_helper.causal_mask_prologue_if_needed(
-                        v_s_0,
-                        j_idx - 1,
-                        j_idx * traits.BLOCK_N,
-                    )
-                else:
-                    v_s_0 = softmax_helper.v_s_vec_to_lists(v_s_0)
+                v_s_0 = softmax_helper.causal_mask_prologue_if_needed(
+                    v_s_0,
+                    j_idx - 1,
+                    j_idx * traits.BLOCK_N,
+                )
                 rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
                 _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
                 rocdl.sched_barrier(0)
@@ -719,14 +703,11 @@ def build_flash_attn_paged_fp8_module(
                 v_packs_e3 = kv_lds_to_regs.load_v_steps(0, 0, 2)
             else:
                 v_packs_e3 = kv_lds_to_regs.load_v(0)
-            if const_expr(traits.CAUSAL):
-                v_s_1 = softmax_helper.causal_mask_prologue_if_needed(
-                    v_s_1,
-                    max_m3,
-                    max_m2 * traits.BLOCK_N,
-                )
-            else:
-                v_s_1 = softmax_helper.seq_pad_mask_if_needed(v_s_1, max_m3)
+            v_s_1 = softmax_helper.causal_mask_prologue_if_needed(
+                v_s_1,
+                max_m3,
+                max_m2 * traits.BLOCK_N,
+            )
             rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
             _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
             rocdl.sched_barrier(0)
@@ -790,14 +771,11 @@ def build_flash_attn_paged_fp8_module(
                 v_packs_e7 = kv_lds_to_regs.load_v_steps(1, 0, 2)
             else:
                 v_packs_e7 = kv_lds_to_regs.load_v(1)
-            if const_expr(traits.CAUSAL):
-                v_s_0 = softmax_helper.causal_mask_prologue_if_needed(
-                    v_s_0,
-                    max_m2,
-                    max_m1 * traits.BLOCK_N,
-                )
-            else:
-                v_s_0 = softmax_helper.seq_pad_mask_if_needed(v_s_0, max_m2)
+            v_s_0 = softmax_helper.causal_mask_prologue_if_needed(
+                v_s_0,
+                max_m2,
+                max_m1 * traits.BLOCK_N,
+            )
             rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
             _waitcnt_vm_n(ctx.NUM_DMA_V)
             rocdl.sched_barrier(0)
@@ -861,14 +839,11 @@ def build_flash_attn_paged_fp8_module(
                 v_packs_e11 = kv_lds_to_regs.load_v_steps(0, 0, 2)
             else:
                 v_packs_e11 = kv_lds_to_regs.load_v(0)
-            if const_expr(traits.CAUSAL):
-                v_s_1 = softmax_helper.causal_mask_prologue_if_needed(
-                    v_s_1,
-                    max_m1,
-                    ctx.split_t_end * traits.BLOCK_N,
-                )
-            else:
-                v_s_1 = softmax_helper.seq_pad_mask_if_needed(v_s_1, max_m1)
+            v_s_1 = softmax_helper.causal_mask_prologue_if_needed(
+                v_s_1,
+                max_m1,
+                ctx.split_t_end * traits.BLOCK_N,
+            )
             rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
             _waitcnt_vm_n(0)
             rocdl.sched_barrier(0)
