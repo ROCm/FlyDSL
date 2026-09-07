@@ -21,6 +21,8 @@ from .gemm_common_gfx1250 import (
     workgroup_barrier,
 )
 
+KPAIR_BY_BUFFERS = {3: 2, 4: 1}
+
 
 @flyc.jit
 def launch_gemm_a8w4_256x256(
@@ -45,19 +47,21 @@ def launch_gemm_a8w4_256x256(
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
     split_k: Constexpr[int] = 1,
+    a_preshuffle: Constexpr[bool] = False,
 ):
-    """N must divide 1024; M is unrestricted; K divides 256 and is at least 512 per split."""
+    """N must divide 1024; M is unrestricted (a multiple of 2 when ``a_preshuffle``);
+    K divides ``tile_k * KPAIR`` and is at least 512 per split."""
 
-    assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) == (
+    assert (tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n) == (
         256,
         256,
         128,
         2,
         2,
-        3,
         4,
         4,
-    ), "only the tuned 256x256x128, 2x2-wave, 3-buffer profile with a 4x4 cluster is supported"
+    ), "only the tuned 256x256x128, 2x2-wave profile with a 4x4 cluster is supported"
+    assert num_buffers in KPAIR_BY_BUFFERS, f"num_buffers must be one of {sorted(KPAIR_BY_BUFFERS)}, got {num_buffers}"
     cluster_sync_revs = 8
     m_run_max, m_run_min = 32, 8
     WMMA_M = WMMA_N = 16
@@ -75,15 +79,19 @@ def launch_gemm_a8w4_256x256(
     num_waves = m_warp * n_warp
     block = num_waves * WAVE
     # Each of the num_buffers slots holds KPAIR K-tiles side by side in every LDS row
-    KPAIR = 2
+    KPAIR = KPAIR_BY_BUFFERS[num_buffers]
     A_SEED_ORDER = (0, 2, 1, 3)
     UNROLL = KPAIR * num_buffers
     SUPER_K = tile_k * KPAIR
     LDS_PAD_A = 16
-    A_LDS_ROW = SUPER_K + LDS_PAD_A
+    A_PAIR = 2 if a_preshuffle else 1
+    assert not a_preshuffle or tile_m % 2 == 0, "a_preshuffle needs an even tile_m"
+    A_LDS_ROWS = tile_m // A_PAIR
+    A_TDM_ROW = A_PAIR * SUPER_K
+    A_LDS_ROW = A_TDM_ROW + LDS_PAD_A
     C_LDS_ROW = tile_n + 8
     B_LDS_ROW = PACK_TK * 16 * KPAIR
-    STAGE_A = tile_m * A_LDS_ROW
+    STAGE_A = A_LDS_ROWS * A_LDS_ROW
     STAGE_B = (tile_n // 16) * B_LDS_ROW
     STAGE_SA = SA_SUPERS * SUPER_K
     STAGE_SB = SB_SUPERS * SUPER_K
@@ -141,6 +149,7 @@ def launch_gemm_a8w4_256x256(
         blk_m64 = fx.Int64(blk_m)
         blk_n64 = fx.Int64(blk_n)
         mn_oob = i32_m - blk_m  # valid M rows (A / C)
+        a_oob = (mn_oob + 1) >> 1 if const_expr(a_preshuffle) else mn_oob
         sa_oob = (i32_m + 31) // 32 - blk_m // 32  # valid M-supers (scale-A)
 
         arena = fx.SharedAllocator(static=False)
@@ -162,20 +171,20 @@ def launch_gemm_a8w4_256x256(
         gB_base = fx.recast_iter(fx.Int8, arg_b)
 
         k_elem0 = kt_base * tile_k
-        a_off0 = blk_m64 * lda64 + k_elem0
+        a_off0 = blk_m64 * lda64 + k_elem0 * A_PAIR
         b_off0 = (blk_n64 // 16) * Kp16 + k_elem0 * 8
         sa_off0 = (blk_m64 // 32) * k64 + k_elem0
         sb_off0 = (blk_n64 // 32) * k64 + k_elem0
 
-        gA = _gv(gA_base, a_off0, (tile_m, tile_k), (tile_k, 1))
+        gA = _gv(gA_base, a_off0, (A_LDS_ROWS, A_PAIR * tile_k), (A_PAIR * tile_k, 1))
         gB = _gv(gB_base, b_off0, (tile_n // 16, PACK_TK * 16), (PACK_TK * 16, 1))
         gSA = _gv(arg_scale_a, sa_off0, (SA_SUPERS, tile_k), (tile_k, 1))
         gSB = _gv(arg_scale_b, sb_off0, (SB_SUPERS, tile_k), (tile_k, 1))
 
         def _build_tdm_desc(owner):
             if const_expr(owner == 0):
-                tensor, offset, shape, lds_stride = gA, PLANAR_A_BASE, (tile_m, SUPER_K), A_LDS_ROW
-                stride, mask, bound, pad, early = i32_lda, a_mask, mn_oob, LDS_PAD_A, False
+                tensor, offset, shape, lds_stride = gA, PLANAR_A_BASE, (A_LDS_ROWS, A_TDM_ROW), A_LDS_ROW
+                stride, mask, bound, pad, early = i32_lda * A_PAIR, a_mask, a_oob, LDS_PAD_A, False
             elif const_expr(owner == 1):
                 tensor, offset, shape, lds_stride = gB, PLANAR_B_BASE, (tile_n // 16, B_LDS_ROW), B_LDS_ROW
                 stride, mask, bound, pad, early = i32_k * 8, b_mask, None, 0, False
@@ -291,13 +300,19 @@ def launch_gemm_a8w4_256x256(
         # Keep fragment displacements as DS immediates inside the K loop.
         stage_a_addr, stage_b_addr, stage_sa_addr, stage_sb_addr = [], [], [], []
         sa_row, sb_col = wmb + lane, wnb + lane
-        a_byte = fx.Index((wmb + lane16) * A_LDS_ROW + kgrp * 16)
+        if const_expr(a_preshuffle):
+            a_pair = wave_m * (warp_tile_m // 2) + (lane16 >> 1)
+            a_byte = fx.Index(a_pair * A_LDS_ROW + (lane16 & 1) * WMMA_K + kgrp * 16)
+            a_par_step, a_frag_row_step = A_PAIR * tile_k, (16 // A_PAIR) * A_LDS_ROW
+        else:
+            a_byte = fx.Index((wmb + lane16) * A_LDS_ROW + kgrp * 16)
+            a_par_step, a_frag_row_step = tile_k, 16 * A_LDS_ROW
         b_byte = fx.Index((wnb // 16) * B_LDS_ROW + kgrp * 256 + lane16 * 16)
         sa_byte = fx.Index((sa_row // 32) * SUPER_K + (sa_row % 32) * 4)
         sb_byte = fx.Index((sb_col // 32) * SUPER_K + (sb_col % 32) * 4)
         for addr_stage in range_constexpr(UNROLL):
             slot, par = addr_stage // KPAIR, addr_stage % KPAIR
-            stage_a_addr.append(_planar_base(PLANAR_A_BASE, STAGE_A, slot) + a_byte + par * tile_k)
+            stage_a_addr.append(_planar_base(PLANAR_A_BASE, STAGE_A, slot) + a_byte + par * a_par_step)
             stage_b_addr.append(_planar_base(PLANAR_B_BASE, STAGE_B, slot) + b_byte + par * PACK_TK * 16)
             stage_sa_addr.append(_planar_base(PLANAR_SA_BASE, STAGE_SA, slot) + sa_byte + par * tile_k)
             stage_sb_addr.append(_planar_base(PLANAR_SB_BASE, STAGE_SB, slot) + sb_byte + par * tile_k)
@@ -306,7 +321,7 @@ def launch_gemm_a8w4_256x256(
         lds_load_b128, _ = make_lds_copy_ops(128)
 
         def _stage_load_a(stage, wm):
-            row_off = wm * 16 * A_LDS_ROW
+            row_off = wm * a_frag_row_step
             v = [lds_load_b128(stage_a_addr[stage], row_off + 32 * j) for j in range_constexpr(4)]
             return v[0].shuffle(v[1], list(range(8))).shuffle(v[2].shuffle(v[3], list(range(8))), list(range(16)))
 

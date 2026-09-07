@@ -801,3 +801,21 @@ def preshuffle_b_16x16(b: Tensor, rows: int, cols: int) -> Tensor:
     b = b.view(rows // 16, 16, cols // 16, 16)
     b = b.permute(0, 2, 1, 3).contiguous()
     return b.view(rows, cols)
+
+
+def preshuffle_a_2x128(a: Tensor) -> Tensor:
+    """Preshuffle A (FP8, one byte per element) into 2x128 byte tiles.
+
+    ``[M, lda] -> [M/2, lda/128, 2, 128]``, the layout the gfx1250 a8w8 kernels read
+    under ``a_preshuffle=True``. An odd M is zero-padded to a whole row pair; the
+    kernel's row bound still clamps the tail.
+    """
+    rows, cols = a.shape
+    assert cols % 128 == 0, f"cols must be a multiple of 128, got {cols}"
+    if rows % 2:
+        padded = torch.zeros((rows + 1, cols), dtype=a.dtype, device=a.device)
+        padded[:rows] = a
+        a = padded
+        rows += 1
+    out = a.view(rows // 2, 2, cols // 128, 128).permute(0, 2, 1, 3).contiguous()
+    return out.view(rows, cols)

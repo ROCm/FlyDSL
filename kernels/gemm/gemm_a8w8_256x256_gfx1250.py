@@ -49,9 +49,12 @@ def launch_gemm_a8w8_256x256(
     is_mxscale: Constexpr[bool],
     block_size: Constexpr[int],
     split_k: Constexpr[int] = 1,
+    a_preshuffle: Constexpr[bool] = False,
+    persistent_n_tiles: Constexpr[int] = 1,
 ):
-    """N must be a multiple of ``tile_n * cluster_n``; M is unrestricted;
-    K must be divisible by 128 and at least 512 per split."""
+    """N must be a multiple of ``tile_n * cluster_n``; M is unrestricted (a
+    multiple of 2 when ``a_preshuffle``); K must be divisible by 128 and at
+    least 512 per split."""
 
     assert (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers) in (
         (256, 256, 128, 2, 2, 4),
@@ -64,6 +67,8 @@ def launch_gemm_a8w8_256x256(
     assert (
         cluster_m >= 1 and cluster_n >= 1 and 1 < cluster_m * cluster_n <= 16
     ), f"cluster_m*cluster_n must be 2..16, got {cluster_m}x{cluster_n}"
+    assert persistent_n_tiles >= 1, f"persistent_n_tiles must be >= 1, got {persistent_n_tiles}"
+    assert persistent_n_tiles == 1 or split_k == 1, "persistent_n_tiles>1 requires split_k=1"
     cluster_sync_revs = 8
     m_run_max, m_run_min = 32, 8
     WMMA_M = WMMA_N = 16
@@ -89,10 +94,14 @@ def launch_gemm_a8w8_256x256(
     UNROLL = KPAIR * num_buffers
     SUPER_K = tile_k * KPAIR
     LDS_PAD_A = 16
-    A_LDS_ROW = SUPER_K + LDS_PAD_A
+    A_PAIR = 2 if a_preshuffle else 1
+    assert not a_preshuffle or tile_m % 2 == 0, "a_preshuffle needs an even tile_m"
+    A_LDS_ROWS = tile_m // A_PAIR
+    A_TDM_ROW = A_PAIR * SUPER_K
+    A_LDS_ROW = A_TDM_ROW + LDS_PAD_A
     C_LDS_ROW = tile_n + 8
     B_LDS_ROW = PACK_TK * 16 * KPAIR
-    STAGE_A = tile_m * A_LDS_ROW
+    STAGE_A = A_LDS_ROWS * A_LDS_ROW
     STAGE_B = (tile_n // 16) * B_LDS_ROW
     SC_K = K_WS * KPAIR
     # block128 stages SC_K K-blocks per slot; the TDM lands their rows contiguously.
@@ -111,10 +120,11 @@ def launch_gemm_a8w8_256x256(
         f"gemm_a8w8_mx{block_size}_compute_t{tile_m}x{tile_n}x{tile_k}"
         f"_mw{m_warp}_nw{n_warp}_nb{num_buffers}_sk{split_k}"
         f"_cm{cluster_m}_cn{cluster_n}"
+        + ("_apre" if a_preshuffle else "")
+        + (f"_ps{persistent_n_tiles}" if persistent_n_tiles > 1 else "")
     )
 
-    @flyc.kernel(name=kernel_name, known_block_size=[block, 1, 1])
-    def kernel_gemm_a8w8_256x256(
+    def _run_tile(
         arg_c: fx.Pointer,
         arg_a: fx.Pointer,
         arg_b: fx.Pointer,
@@ -126,8 +136,8 @@ def launch_gemm_a8w8_256x256(
         i32_stride_ascale_k: fx.Int32,
         i32_lda: fx.Int32,
         i32_ldc: fx.Int32,
+        tile_idx=0,
     ):
-
         K_TILES = i32_k // (tile_k * split_k)
         k64 = fx.Int64(i32_k)
         lda64 = fx.Int64(i32_lda)
@@ -136,6 +146,8 @@ def launch_gemm_a8w8_256x256(
 
         tid = fx.thread_idx.x
         bid_x, bid_y, bid_z = fx.block_idx
+        if const_expr(persistent_n_tiles > 1):
+            bid_y = bid_y + tile_idx * fx.grid_dim.y
         if const_expr(split_k > 1):
             m_chunks = fx.grid_dim.z // split_k
             split_idx = bid_z // m_chunks
@@ -158,6 +170,7 @@ def launch_gemm_a8w8_256x256(
         blk_m64 = fx.Int64(blk_m)
         blk_n64 = fx.Int64(blk_n)
         mn_oob = i32_m - blk_m  # valid M rows (A / C)
+        a_oob = (mn_oob + 1) >> 1 if const_expr(a_preshuffle) else mn_oob
         sa_oob = (i32_m + 31) // 32 - blk_m // 32  # valid M-supers (scale-A)
 
         arena = fx.SharedAllocator(static=False)
@@ -179,7 +192,7 @@ def launch_gemm_a8w8_256x256(
         gB_base = fx.recast_iter(fx.Int8, arg_b)
 
         k_elem0 = kt_base * tile_k
-        a_off0 = blk_m64 * lda64 + k_elem0
+        a_off0 = blk_m64 * lda64 + k_elem0 * A_PAIR
         b_off0 = (blk_n64 // 16) * Kp16 + k_elem0 * 16
         if const_expr(mx32):
             sa_off0 = (blk_m64 // 32) * k64 + k_elem0
@@ -189,7 +202,7 @@ def launch_gemm_a8w8_256x256(
             sa_off0 = blk_m64 + scale_k0 * fx.Int64(i32_stride_ascale_k)
             sb_off0 = (blk_n64 // 128) * (k64 // 128) + scale_k0
 
-        gA = _gv(gA_base, a_off0, (tile_m, tile_k), (tile_k, 1))
+        gA = _gv(gA_base, a_off0, (A_LDS_ROWS, A_PAIR * tile_k), (A_PAIR * tile_k, 1))
         gB = _gv(gB_base, b_off0, (tile_n // 16, PACK_TK * 16), (PACK_TK * 16, 1))
         if const_expr(mx32):
             SA_SHAPE, SB_SHAPE = (SA_SUPERS, SUPER_K), (SB_SUPERS, SUPER_K)
@@ -208,8 +221,8 @@ def launch_gemm_a8w8_256x256(
 
         def _build_tdm_desc(owner):
             if const_expr(owner == 0):
-                tensor, offset, shape, lds_stride = gA, PLANAR_A_BASE, (tile_m, SUPER_K), A_LDS_ROW
-                stride, mask, bound, pad, early = i32_lda, a_mask, mn_oob, LDS_PAD_A, True
+                tensor, offset, shape, lds_stride = gA, PLANAR_A_BASE, (A_LDS_ROWS, A_TDM_ROW), A_LDS_ROW
+                stride, mask, bound, pad, early = i32_lda * A_PAIR, a_mask, a_oob, LDS_PAD_A, True
             elif const_expr(owner == 1):
                 tensor, offset, shape, lds_stride = gB, PLANAR_B_BASE, (tile_n // 16, B_LDS_ROW), B_LDS_ROW
                 stride, mask, bound, pad, early = i32_k * 16, b_mask, None, 0, True
@@ -320,11 +333,20 @@ def launch_gemm_a8w8_256x256(
                 i, j = (pos // len(wt), pos % len(wt)) if n_index_fast else (pos % len(act), pos // len(act))
                 _mma_one(wm0 + i, wn0 + j, act[i], wt[j], sa_k, sb_k)
 
+        if const_expr(persistent_n_tiles > 1):
+            rocdl.sched_barrier(0)
+            tdm_ops.tensor_wait(0)
         cluster.cluster_barrier()
         # Keep fragment displacements as DS immediates inside the K loop.
         stage_a_addr, stage_b_addr, stage_sa_addr, stage_sb_addr = [], [], [], []
         sa_row, sb_col = wmb + lane, wnb + lane
-        a_byte = fx.Index((wmb + lane16) * A_LDS_ROW + kgrp * 16)
+        if const_expr(a_preshuffle):
+            a_pair = wave_m * (warp_tile_m // 2) + (lane16 >> 1)
+            a_byte = fx.Index(a_pair * A_LDS_ROW + (lane16 & 1) * WMMA_K + kgrp * 16)
+            a_par_step, a_frag_row_step = A_PAIR * tile_k, (16 // A_PAIR) * A_LDS_ROW
+        else:
+            a_byte = fx.Index((wmb + lane16) * A_LDS_ROW + kgrp * 16)
+            a_par_step, a_frag_row_step = tile_k, 16 * A_LDS_ROW
         b_byte = fx.Index((wnb // 16) * B_LDS_ROW + kgrp * 256 + lane16 * 16)
         if const_expr(mx32):
             sa_byte = fx.Index((sa_row // 32) * SUPER_K + (sa_row % 32) * 4)
@@ -336,7 +358,7 @@ def launch_gemm_a8w8_256x256(
             sb_byte = fx.Index((wnb // 128) * SC_K)  # contiguous, see above
         for addr_stage in range_constexpr(UNROLL):
             slot, par = addr_stage // KPAIR, addr_stage % KPAIR
-            stage_a_addr.append(_planar_base(PLANAR_A_BASE, STAGE_A, slot) + a_byte + par * tile_k)
+            stage_a_addr.append(_planar_base(PLANAR_A_BASE, STAGE_A, slot) + a_byte + par * a_par_step)
             stage_b_addr.append(_planar_base(PLANAR_B_BASE, STAGE_B, slot) + b_byte + par * PACK_TK * 16)
             # A's K blocks are whole rows apart, B's are single bytes apart.
             sc_par_a = par * tile_k if const_expr(mx32) else par * (STAGE_SA // SC_K)
@@ -351,7 +373,7 @@ def launch_gemm_a8w8_256x256(
 
         def _frag_geom(kind, stage):
             if const_expr(kind == "a"):
-                return stage_a_addr[stage], 16 * A_LDS_ROW, 32
+                return stage_a_addr[stage], a_frag_row_step, 32
             return stage_b_addr[stage], B_LDS_ROW, 512
 
         def _join(v):
@@ -631,7 +653,42 @@ def launch_gemm_a8w8_256x256(
             num_warps=num_waves,
         )
         fx.copy(atomC, _view(fx.recast_iter(oc, base_ptr), (tile_m, C_LDS_ROW), (C_LDS_ROW, 1)), gtC)
-        tdm_ops.tensor_wait(0)
+        if const_expr(persistent_n_tiles == 1):
+            tdm_ops.tensor_wait(0)
+
+    @flyc.kernel(name=kernel_name, known_block_size=[block, 1, 1])
+    def kernel_gemm_a8w8_256x256(
+        arg_c: fx.Pointer,
+        arg_a: fx.Pointer,
+        arg_b: fx.Pointer,
+        arg_scale_a: fx.Pointer,
+        arg_scale_b: fx.Pointer,
+        i32_m: fx.Int32,
+        i32_n: fx.Int32,
+        i32_k: fx.Int32,
+        i32_stride_ascale_k: fx.Int32,
+        i32_lda: fx.Int32,
+        i32_ldc: fx.Int32,
+    ):
+        tile_args = (
+            arg_c,
+            arg_a,
+            arg_b,
+            arg_scale_a,
+            arg_scale_b,
+            i32_m,
+            i32_n,
+            i32_k,
+            i32_stride_ascale_k,
+            i32_lda,
+            i32_ldc,
+        )
+        if const_expr(persistent_n_tiles == 1):
+            _run_tile(*tile_args)
+        else:
+            for tile_idx in range(fx.Int32(0), fx.Int32(persistent_n_tiles), fx.Int32(1)):
+                _run_tile(*tile_args, tile_idx)
+            tdm_ops.tensor_wait(0)
 
     gx = (i32_m + (tile_m - 1)) // tile_m
     gy = (N + (tile_n - 1)) // tile_n
@@ -643,7 +700,8 @@ def launch_gemm_a8w8_256x256(
     fits_cluster = (capped % fx.Int32(cluster_m)) == 0
     m_run = ((gx > m_run_max) & (pow2 >= m_run_min) & fits_cluster).select(capped, gx)
     m_chunks = gx // m_run
-    grid_arg = (m_run, gy, m_chunks * split_k)
+    gy_launch = gy // persistent_n_tiles if const_expr(persistent_n_tiles > 1) else gy
+    grid_arg = (m_run, gy_launch, m_chunks * split_k)
     # Runtime N/K shape checks belong to the caller.
     cluster_arg = (cluster_m, cluster_n, 1)
     kernel_gemm_a8w8_256x256(

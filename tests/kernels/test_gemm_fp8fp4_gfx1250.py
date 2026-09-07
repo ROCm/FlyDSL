@@ -25,6 +25,7 @@ import flydsl.expr as fx  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.gemm_a4w4_256x256_gfx1250 import launch_gemm_a4w4_256x256  # noqa: E402
+from kernels.gemm.gemm_a8w4_256x256_gfx1250 import KPAIR_BY_BUFFERS  # noqa: E402
 from kernels.gemm.gemm_a8w4_256x256_gfx1250 import launch_gemm_a8w4_256x256  # noqa: E402
 from kernels.gemm.gemm_a8w4_mxscale_gfx1250 import launch_gemm_a8w4_mxscale  # noqa: E402
 from kernels.gemm.gemm_a8w8_256x256_gfx1250 import launch_gemm_a8w8_256x256  # noqa: E402
@@ -255,12 +256,16 @@ def _build_case(
     c_guard_rows=0,
     split_k=1,
     b_preshuffle=True,
+    a_preshuffle=False,
+    persistent_n_tiles=1,
+    tail=(),
 ):
     """Build one case: inputs, the launch-argument factory, the reference and its tolerance.
 
     Every kernel here takes the same argument order; `kind` picks the operand dtypes and
     the scale layout. Only the A8W8 launchers take the extra stride_ascale_k argument and
-    the trailing is_mxscale / block_size pair.
+    the trailing is_mxscale / block_size pair; `tail` names the launcher's own trailing
+    Constexpr arguments after split_k.
     """
     a8w8 = not kind.fp4_w
     torch.manual_seed(0)
@@ -301,6 +306,8 @@ def _build_case(
 
     lda, ldc = K + lda_extra, N + ldc_extra
     a_gpu = _with_strided_a(a, K // 2 if kind.fp4_act else K, lda // 2 if kind.fp4_act else lda)
+    if a_preshuffle:
+        a_gpu = gemm_common_utils.preshuffle_a_2x128(a_gpu)
     packed_k = K // 2 if kind.fp4_w else K
     # Row-major B is only valid for mxscale_a8w4 (LDS pad path). Other kernels always preshuffle.
     use_preshuffle = b_preshuffle or kind is not _A8W4_MX
@@ -335,6 +342,7 @@ def _build_case(
             cluster_n,
             *mx_args,  # is_mxscale, block_size
             split_k,
+            *(dict(a_preshuffle=a_preshuffle, persistent_n_tiles=persistent_n_tiles)[t] for t in tail),
             *((b_preshuffle,) if kind is _A8W4_MX else ()),
         )
 
@@ -371,10 +379,20 @@ def _shape_checks(kind, N, K, tile_cfg):
     return checks
 
 
-def _mode(kind, launch, **rest):
-    """One _MODES entry; `kind` drives the builder, the byte count and the shape checks."""
-    build = functools.partial(_build_case, kind)
-    return dict(kind=kind, build=build, bytes_moved=functools.partial(_bytes_moved, kind), launch=launch, **rest)
+def _mode(kind, launch, *, tail=(), **rest):
+    """One _MODES entry; `kind` drives the builder, the byte count and the shape checks.
+
+    `tail` names the launcher's trailing Constexpr arguments after split_k, in order.
+    """
+    build = functools.partial(_build_case, kind, tail=tail)
+    return dict(
+        kind=kind,
+        build=build,
+        bytes_moved=functools.partial(_bytes_moved, kind),
+        launch=launch,
+        tail=tail,
+        **rest,
+    )
 
 
 _MODES = {
@@ -388,31 +406,36 @@ _MODES = {
     "ptpc_a8w8": _mode(
         _PTPC,
         launch_gemm_a8w8,
+        tail=("a_preshuffle",),
         supports_out_dtype=True,
         smoke=dict(N=256, K=512, tile=(128, 128, 128), warps=(2, 2), num_buffers=4),
     ),
     "blockscale_a8w8": _mode(
         _MX128,
         launch_gemm_a8w8,
+        tail=("a_preshuffle",),
         supports_out_dtype=False,
         smoke=dict(N=512, K=512, tile=(128, 256, 128), warps=(2, 2), num_buffers=2),
     ),
     "mxscale_a8w8": _mode(
         _MX32,
         launch_gemm_a8w8,
+        tail=("a_preshuffle",),
         supports_out_dtype=False,
         smoke=dict(N=512, K=512, tile=(128, 256, 128), warps=(2, 2), num_buffers=2),
     ),
     "mxscale_a8w4_256x256": _mode(
         _A8W4,
         launch_gemm_a8w4_256x256,
+        tail=("a_preshuffle",),
         supports_out_dtype=True,
         f16_kw={},  # the builder pins the scales to 1.0 for f16
         profile=dict(
-            tiles=[(256, 256, 128, 2, 2, 3)],
+            tiles=[(256, 256, 128, 2, 2, nb) for nb in sorted(KPAIR_BY_BUFFERS)],
             cluster=(4, 4),
             cluster_ok=lambda cm, cn: (cm, cn) == (4, 4),
-            k_mult=256,  # one TDM covers 2 K-tiles
+            # One TDM covers a whole slot, i.e. KPAIR K-tiles.
+            k_mult=lambda cfg: cfg[2] * KPAIR_BY_BUFFERS[cfg[5]],
             k_min=512,
         ),
         smoke=dict(N=1024, K=512, tile=(256, 256, 128), warps=(2, 2), num_buffers=3),
@@ -421,6 +444,7 @@ _MODES = {
     "mxscale_a4w4_256x256": _mode(
         _A4W4,
         launch_gemm_a4w4_256x256,
+        tail=("a_preshuffle",),
         supports_out_dtype=True,
         f16_kw={},
         profile=dict(
@@ -436,6 +460,7 @@ _MODES = {
     "mxscale_a8w8_256x256": _mode(
         _MX32,
         launch_gemm_a8w8_256x256,
+        tail=("a_preshuffle", "persistent_n_tiles"),
         supports_out_dtype=True,
         f16_kw=dict(const_val=0.25),  # keep the f16 accumulation in range at these K
         profile=dict(
@@ -451,6 +476,7 @@ _MODES = {
     "blockscale_a8w8_256x256": _mode(
         _MX128,
         launch_gemm_a8w8_256x256,
+        tail=("a_preshuffle", "persistent_n_tiles"),
         supports_out_dtype=True,
         f16_kw=dict(const_val=0.25),
         profile=dict(
@@ -477,7 +503,8 @@ def _tuned(mode):
 
 def _profile_checks(profile, N, K, tile_cfg, cluster, split_k):
     """A hand-scheduled kernel only accepts the tilings and clusters it was scheduled for."""
-    k_step = profile["k_mult"] * split_k
+    k_mult = profile["k_mult"]
+    k_step = (k_mult(tile_cfg) if callable(k_mult) else k_mult) * split_k
     return [
         (tile_cfg not in profile["tiles"], f"hand-scheduled for {profile['tiles']}, not {tile_cfg}"),
         (not profile["cluster_ok"](*cluster), f"not tuned for a {cluster[0]}x{cluster[1]} cluster"),
@@ -485,6 +512,35 @@ def _profile_checks(profile, N, K, tile_cfg, cluster, split_k):
         (K % k_step != 0, f"K={K} must be a multiple of {k_step} for a {split_k}-way split"),
         (K // split_k < profile["k_min"], f"K={K} leaves under {profile['k_min']} per split"),
     ]
+
+
+def _feature_checks(cfg, tile_cfg, N, K, kwargs):
+    """Shapes/configs the optional a_preshuffle and persistent-N-tile paths cannot serve."""
+    tile_m, tile_n = tile_cfg[0], tile_cfg[1]
+    lda = K + kwargs.get("lda_extra", 0)
+    lda_bytes = lda // 2 if cfg["kind"].fp4_act else lda
+    checks = []
+    if kwargs.get("a_preshuffle"):
+        checks += [
+            ("a_preshuffle" not in cfg["tail"], "the launcher takes no a_preshuffle"),
+            (tile_m % 2 != 0, f"a_preshuffle needs an even tile_m, got {tile_m}"),
+            # The shuffle tiles the padded byte row, so lda (not just K) must cover
+            # whole 128-byte tiles -- for a packed-FP4 A that is lda/2 bytes.
+            (lda_bytes % 128 != 0, f"a_preshuffle needs an lda of {lda_bytes} bytes to be a multiple of 128"),
+        ]
+    ps = kwargs.get("persistent_n_tiles", 1)
+    if ps > 1:
+        n_tiles = N // tile_n
+        checks += [
+            ("persistent_n_tiles" not in cfg["tail"], "the launcher takes no persistent_n_tiles"),
+            (kwargs.get("split_k", 1) != 1, "persistent_n_tiles>1 requires split_k=1"),
+            (n_tiles % ps != 0, f"N/tile_n={n_tiles} must be divisible by persistent_n_tiles={ps}"),
+            (
+                n_tiles % ps == 0 and (n_tiles // ps) % kwargs.get("cluster_n", 1) != 0,
+                f"N/tile_n/{ps} must stay a multiple of cluster_n",
+            ),
+        ]
+    return checks
 
 
 def _run_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, **kwargs):
@@ -498,6 +554,7 @@ def _run_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers
         kwargs.setdefault("cluster_n", profile["cluster"][1])
         cluster = (kwargs["cluster_m"], kwargs["cluster_n"])
         checks += _profile_checks(profile, N, K, tile_cfg, cluster, kwargs.get("split_k", 1))
+    checks += _feature_checks(cfg, tile_cfg, N, K, kwargs)
     for bad, msg in checks:
         if bad:
             pytest.skip(msg)
@@ -585,7 +642,7 @@ def test_256x256_shapes(mode, M, N, K, split_k):
 
 _TUNED_PROFILES = [
     (mode, tile)
-    for mode in ("mxscale_a8w8_256x256", "blockscale_a8w8_256x256")
+    for mode in ("mxscale_a8w8_256x256", "blockscale_a8w8_256x256", "mxscale_a8w4_256x256")
     for tile in _MODES[mode]["profile"]["tiles"]
 ]
 
@@ -593,8 +650,8 @@ _TUNED_PROFILES = [
 @pytest.mark.parametrize(
     "mode, tile", _TUNED_PROFILES, ids=[f"{m}-{'x'.join(map(str, t))}" for m, t in _TUNED_PROFILES]
 )
-def test_a8w8_256x256_tuned_profiles(mode, tile):
-    """Every tiling gemm_a8w8_256x256 claims to support is a separate hand-schedule."""
+def test_256x256_tuned_profiles(mode, tile):
+    """Every tiling a hand-scheduled 256-wide kernel claims to support is its own schedule."""
     _run_case(mode, 1024, 1024, 1024, *tile)
 
 
@@ -692,7 +749,7 @@ def _main():
 
     parser = argparse.ArgumentParser(
         description="Manual correctness/perf run for the gfx1250 GEMM kernels. Every mode runs every shape; "
-        "-tiles/-warps/-nb/-cluster take one value, one per mode, or one per (mode, shape) run.",
+        "-tiles/-warps/-nb/-cluster/-ps take one value, one per mode, or one per (mode, shape) run.",
     )
     parser.add_argument("-mode", nargs="+", choices=sorted(_MODES), required=True)
     parser.add_argument("-mnk", nargs="+", required=True, metavar="M,N,K", help="one or more shapes")
@@ -709,6 +766,22 @@ def _main():
         help="disable the 16x16 B preshuffle for mxscale_a8w4 (default: enabled)",
     )
     parser.add_argument(
+        "-ps",
+        nargs="+",
+        type=int,
+        default=[1],
+        help="persistent_n_tiles: N-tiles walked per workgroup (a8w8 256x256 only, default 1)",
+    )
+    parser.add_argument(
+        "--apre",
+        nargs="+",
+        type=int,
+        choices=[0, 1],
+        default=[0, 1],
+        metavar="0|1",
+        help="A-preshuffle variant(s) to run: 0 (row-major) and/or 1 (2x128-tiled A); default both",
+    )
+    parser.add_argument(
         "--init-mode",
         nargs="+",
         default=["random", "const,0.5"],
@@ -723,6 +796,7 @@ def _main():
     tiles = spread([_parse_csv_ints(v, 3, "tiles") for v in args.tiles], name="tiles")
     warps = spread([_parse_csv_ints(v, 2, "warps") for v in args.warps], name="warps")
     tile_cfgs = [(*t, *w, nb) for t, w, nb in zip(tiles, warps, spread(args.nb, name="nb"))]
+    ps_tiles = spread(args.ps, name="ps")
     # The hand-scheduled kernels reject a 1x1 cluster outright, so default to their own.
     clusters = (
         spread([_parse_csv_ints(v, 2, "cluster") for v in args.cluster], name="cluster")
@@ -731,33 +805,49 @@ def _main():
     )
 
     rows = []
-    for (mode, (M, N, K)), tile_cfg, (cluster_m, cluster_n) in zip(runs, tile_cfgs, clusters):
+    for (mode, (M, N, K)), tile_cfg, (cluster_m, cluster_n), ps in zip(runs, tile_cfgs, clusters, ps_tiles):
         cfg = _MODES[mode]
         out_dtype = args.out_dtype if cfg["supports_out_dtype"] else "bf16"
         config = "t{},{},{} w{},{} nb{} c{},{}".format(*tile_cfg, cluster_m, cluster_n)
+        if ps > 1:
+            config += f" ps{ps}"
         if mode == "mxscale_a8w4":
             config += f" b={'preshuffle' if args.b_preshuffle else 'row-major+pad'}"
-        for init in args.init_mode:
-            kwargs = {"cluster_m": cluster_m, "cluster_n": cluster_n, "const_val": _parse_init_mode(init)}
+        for apre in args.apre:
+            kwargs = {
+                "cluster_m": cluster_m,
+                "cluster_n": cluster_n,
+                "a_preshuffle": bool(apre),
+                "persistent_n_tiles": ps,
+            }
             if mode == "mxscale_a8w4":
                 kwargs["b_preshuffle"] = args.b_preshuffle
             if cfg["supports_out_dtype"]:
                 kwargs["out_dtype"] = args.out_dtype
-            c_gpu, make_args, compiled, error = _run_and_check(
-                cfg["build"], cfg["launch"], M, N, K, *tile_cfg, **kwargs
-            )
-            perf = ["-", "-", "-"]
-            if args.bench:
-                us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())), c_gpu, warmup=10, iters=100)
-                moved = cfg["bytes_moved"](M, N, K)
-                perf = [f"{us:.3f}", f"{_tflops(M, N, K, us):.2f}", f"{moved / (us * 1e-6) / 1e12:.3f}"]
-            result = "PASS" if error is None else "FAIL"
-            rows.append([mode, str(M), str(N), str(K), config, out_dtype, init, *perf, result])
-            if error is not None:
-                print(f"\n{mode} {M}x{N}x{K} {init}: {error}\n")
+            skip = next((msg for bad, msg in _feature_checks(cfg, tile_cfg, N, K, kwargs) if bad), None)
+            if skip is not None:
+                rows.append([mode, str(M), str(N), str(K), config, out_dtype, str(apre), "-", "-", "-", "-", "SKIP"])
+                print(f"\n{mode} {M}x{N}x{K} apre={apre}: skipped, {skip}\n")
+                continue
+            for init in args.init_mode:
+                kwargs["const_val"] = _parse_init_mode(init)
+                c_gpu, make_args, compiled, error = _run_and_check(
+                    cfg["build"], cfg["launch"], M, N, K, *tile_cfg, **kwargs
+                )
+                perf = ["-", "-", "-"]
+                if args.bench:
+                    us = _bench_us(
+                        lambda: compiled(*make_args(torch.cuda.current_stream())), c_gpu, warmup=10, iters=100
+                    )
+                    moved = cfg["bytes_moved"](M, N, K)
+                    perf = [f"{us:.3f}", f"{_tflops(M, N, K, us):.2f}", f"{moved / (us * 1e-6) / 1e12:.3f}"]
+                result = "PASS" if error is None else "FAIL"
+                rows.append([mode, str(M), str(N), str(K), config, out_dtype, str(apre), init, *perf, result])
+                if error is not None:
+                    print(f"\n{mode} {M}x{N}x{K} apre={apre} {init}: {error}\n")
 
     print()
-    headers = ["mode", "M", "N", "K", "config", "out", "init_mode", "latency us", "TFLOPS", "BW TB/s", "result"]
+    headers = ["mode", "M", "N", "K", "config", "out", "apre", "init_mode", "latency us", "TFLOPS", "BW TB/s", "result"]
     _print_table(headers, rows)
     if any(r[-1] == "FAIL" for r in rows):
         raise SystemExit(1)

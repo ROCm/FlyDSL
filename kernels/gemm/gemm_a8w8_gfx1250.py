@@ -49,9 +49,13 @@ def launch_gemm_a8w8(
     is_mxscale: Constexpr[bool],
     block_size: Constexpr[int],
     split_k: Constexpr[int] = 1,
+    a_preshuffle: Constexpr[bool] = False,
 ):
     mx32 = is_mxscale and block_size == 32
     mx128 = is_mxscale and block_size == 128
+    A_PAIR = 2 if a_preshuffle else 1
+    if a_preshuffle and tile_m % 2 != 0:
+        raise ValueError(f"[FlyDSL gfx1250] a_preshuffle needs an even tile_m, got {tile_m}")
     use_cluster = cluster_m > 1 or cluster_n > 1
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
@@ -66,9 +70,11 @@ def launch_gemm_a8w8(
     block = num_waves * WAVE
 
     LDS_PAD_A = 16
-    A_LDS_ROW = tile_k + LDS_PAD_A
+    A_LDS_ROWS = tile_m // A_PAIR
+    A_TDM_ROW = A_PAIR * tile_k
+    A_LDS_ROW = A_TDM_ROW + LDS_PAD_A
     B_LDS_ROW = tile_k * 16
-    STAGE_A = ((tile_m * A_LDS_ROW + 15) // 16) * 16
+    STAGE_A = ((A_LDS_ROWS * A_LDS_ROW + 15) // 16) * 16
     STAGE_B = (((tile_n // 16) * B_LDS_ROW + 15) // 16) * 16
     ALIGNED_N = tile_n % 128 == 0 or 128 % tile_n == 0
     _period = math.lcm(tile_n, 128)
@@ -98,7 +104,7 @@ def launch_gemm_a8w8(
     kernel_name = format_kernel_name(
         f"gemm_a8w8_{scale_tag}_t{tile_m}x{tile_n}x{tile_k}"
         f"_mw{m_warp}_nw{n_warp}_nb{num_buffers}_sk{split_k}"
-        f"_cm{cluster_m}_cn{cluster_n}"
+        f"_cm{cluster_m}_cn{cluster_n}" + ("_apre" if a_preshuffle else "")
     )
 
     @flyc.kernel(name=kernel_name, known_block_size=[block, 1, 1])
@@ -139,6 +145,7 @@ def launch_gemm_a8w8(
         blk_m64 = fx.Int64(blk_m)
         blk_n64 = fx.Int64(blk_n)
         mn_oob = i32_m - blk_m  # valid M rows (A / C, and mx128's per-row A-scale)
+        a_oob = (mn_oob + 1) >> 1 if const_expr(a_preshuffle) else mn_oob
         nb_oob = stride_ask64 = sa_oob = None
         if const_expr(mx32):
             sa_oob = (i32_m + 31) // 32 - blk_m // 32  # valid M super-rows (scale-A)
@@ -172,14 +179,14 @@ def launch_gemm_a8w8(
         b_off0 = blk_n64 // 16 * (k64 * 16)
 
         W_A, W_B = 0, 1
-        gA = _gv(gA_base, a_off0, (tile_m, tile_k), (tile_k, 1))
+        gA = _gv(gA_base, a_off0, (A_LDS_ROWS, A_TDM_ROW), (A_TDM_ROW, 1))
         atomA = fx.atom_set_value(
             fx.rocdl.make_tdm_atom(
                 gA,
-                [mn_oob, None],
-                strides=[lda64, None],
+                [a_oob, None],
+                strides=[lda64 * A_PAIR, None],
                 num_warps=1,
-                pad_interval=tile_k,
+                pad_interval=A_TDM_ROW,
                 pad_amount=LDS_PAD_A,
                 early_timeout=True,
             ),
@@ -239,7 +246,7 @@ def launch_gemm_a8w8(
         def issue(s, kt):
             pa = _buf_ptr(s)
             ktg = fx.Int64(kt) if kt_base is None else fx.Int64(kt) + kt_base
-            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), ktg * tile_k)
+            _wcopy(W_A, atomA, gA, _lv(pa, (A_LDS_ROWS, A_TDM_ROW), (A_LDS_ROW, 1)), ktg * A_TDM_ROW)
             _wcopy(
                 W_B,
                 atomB,
@@ -266,10 +273,21 @@ def launch_gemm_a8w8(
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
 
+        a_pair_base = (
+            fx.Int64((wave_m * (warp_tile_m // 2) + (lane16 >> 1)) * A_LDS_ROW + (lane16 & 1) * WMMA_K + kgrp * 16)
+            if const_expr(a_preshuffle)
+            else None
+        )
+
         def load_a(buf, wm, ks):
-            row = wmb + wm * 16 + lane16
-            b0 = fx.Int64(row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
-            v = [lds_load_b128(buf, b0 + 32 * j) for j in range_constexpr(4)]
+            if const_expr(a_preshuffle):
+                b0 = a_pair_base
+                off0 = wm * ((WMMA_M // 2) * A_LDS_ROW) + ks * (2 * WMMA_K)
+            else:
+                row = wmb + wm * 16 + lane16
+                b0 = fx.Int64(row * A_LDS_ROW + ks * WMMA_K + kgrp * 16)
+                off0 = 0
+            v = [lds_load_b128(buf, b0 + (off0 + 32 * j)) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
             return v01.shuffle(v23, list(range(16)))
