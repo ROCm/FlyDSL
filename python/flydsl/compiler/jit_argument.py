@@ -421,6 +421,18 @@ class MemRefJitArg(abc.ABC):
         return self
 
 
+def _detach_if_requires_grad(obj):
+    """Drop autograd before DLPack export.
+
+    ``tensor.__dlpack__()`` raises ``BufferError`` when ``requires_grad`` is
+    set. FlyDSL kernels are forward-only; ``detach()`` shares storage.
+    """
+    if not getattr(obj, "requires_grad", False):
+        return obj
+    detach = getattr(obj, "detach", None)
+    return detach() if detach is not None else obj
+
+
 class DLTensorJitArg(MemRefJitArg):
     """Generic dlpack-backed memref arg: works with *any* ``__dlpack__`` object
     (torch, numpy, jax, cupy, ...) through the DLPack protocol alone.
@@ -441,6 +453,7 @@ class DLTensorJitArg(MemRefJitArg):
         use_32bit_stride: bool = False,
         dynamic_layout: bool = True,
     ):
+        dltensor = _detach_if_requires_grad(dltensor)
         self.dltensor = dltensor
         try:
             dl = dltensor.__dlpack__(stream=-1)
@@ -474,6 +487,7 @@ class DLTensorJitArg(MemRefJitArg):
             if ad is not None:
                 return ad
             t = a.dltensor if hasattr(a, "dltensor") else a
+            t = _detach_if_requires_grad(t)
             return DLTensorAdaptor(t.__dlpack__(stream=-1) if with_stream else t.__dlpack__())
 
         if not self.is_layout_dynamic:
@@ -550,6 +564,7 @@ class TorchTensorJitArg(MemRefJitArg):
         use_32bit_stride: bool = False,
         dynamic_layout: bool = True,
     ):
+        tensor = _detach_if_requires_grad(tensor)
         self.torch_tensor = tensor
         super().__init__(
             element_bits=tensor.element_size() * 8,
@@ -641,7 +656,12 @@ def from_dlpack(
     assumed_align: Optional[int] = None,
     use_32bit_stride: bool = False,
 ) -> DLTensorJitArg:
-    return DLTensorJitArg(tensor, assumed_align, use_32bit_stride, dynamic_layout=False)
+    return DLTensorJitArg(
+        _detach_if_requires_grad(tensor),
+        assumed_align,
+        use_32bit_stride,
+        dynamic_layout=False,
+    )
 
 
 def from_torch_tensor(
@@ -650,7 +670,12 @@ def from_torch_tensor(
     assumed_align: Optional[int] = None,
     use_32bit_stride: bool = False,
 ) -> TorchTensorJitArg:
-    return TorchTensorJitArg(tensor, assumed_align, use_32bit_stride, dynamic_layout=False)
+    return TorchTensorJitArg(
+        _detach_if_requires_grad(tensor),
+        assumed_align,
+        use_32bit_stride,
+        dynamic_layout=False,
+    )
 
 
 def from_c_void_p(

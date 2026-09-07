@@ -205,3 +205,23 @@ class TestKernelParameter:
         _vecadd(w, b, c, SIZE, BLOCK_DIM, VEC_WIDTH)
         torch.cuda.synchronize()
         assert torch.allclose(c, w.detach() + b, atol=1e-5)
+
+    def test_from_dlpack_parameter_requires_grad_forward_only(self):
+        """aiter wraps with flyc.from_dlpack, which must export Parameter."""
+        w = torch.nn.Parameter(
+            torch.randn(SIZE, device="cuda", dtype=torch.float32),
+            requires_grad=True,
+        )
+        b = torch.randn(SIZE, device="cuda", dtype=torch.float32)
+        c = torch.empty_like(b)
+        _vecadd(
+            flyc.from_dlpack(w).mark_layout_dynamic(leading_dim=0, divisibility=VEC_WIDTH),
+            flyc.from_dlpack(b).mark_layout_dynamic(leading_dim=0, divisibility=VEC_WIDTH),
+            flyc.from_dlpack(c).mark_layout_dynamic(leading_dim=0, divisibility=VEC_WIDTH),
+            SIZE,
+            BLOCK_DIM,
+            VEC_WIDTH,
+        )
+        torch.cuda.synchronize()
+        assert torch.allclose(c, w.detach() + b, atol=1e-5)
+        assert w.requires_grad
