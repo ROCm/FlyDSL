@@ -110,7 +110,6 @@ def build_flash_attn_paged_fp8_module(
     BLOCK_SIZE = traits.BLOCK_SIZE
     HEAD_DIM = traits.HEAD_DIM
     NUM_HEADS_Q = traits.NUM_HEADS_Q
-    PAGED = traits.PAGED
     PAGED_BN128 = bool(paged_bn128)
     PAGED_BN128_VARLEN = bool(paged_bn128_varlen)
     BATCH_INTERLEAVE_GROUP = traits.BATCH_INTERLEAVE_GROUP
@@ -247,8 +246,7 @@ def build_flash_attn_paged_fp8_module(
 
         page_t0, page_t1 = ctx.load_page_id_pair(t0 * BN)
         kv_gmem_to_lds.load_k(t0 * BN, t0 % fx.Index(NPF), page_id=page_t0)
-        if const_expr(traits.QREG):
-            q_loader.stage_q_to_lds()
+        q_loader.stage_q_to_lds()
         fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
@@ -256,7 +254,7 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_q_row()
         q_row = ctx.q_row
 
-        q_wide = gemm_helper.load_q_wide() if const_expr(traits.QREG) else None
+        q_wide = gemm_helper.load_q_wide()
 
         page_t2, page_t3 = ctx.load_page_id_pair((t0 + 2) * BN)
         kv_gmem_to_lds.load_k((t0 + 1) * BN, (t0 + 1) % fx.Index(NPF), page_id=page_t1)
@@ -346,8 +344,7 @@ def build_flash_attn_paged_fp8_module(
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
 
         inv_l = softmax_helper.safe_l_inv(l_row)
-        if const_expr(traits.FP8_PV):
-            inv_l = inv_l * ctx.vd_fp8
+        inv_l = inv_l * ctx.vd_fp8
         softmax_helper.scale_o(v_o, inv_l)
         rocdl.s_barrier()
         output_store.store_final_o(v_o, q_row)
@@ -522,12 +519,7 @@ def build_flash_attn_paged_fp8_module(
                 v_o = gemm_helper.pv_step_k(0, v_p_0, v_v, v_o)
                 # Cross-length causal can put a diagonal tile in v_s_1; mask it here.
                 # Self-attention skips this to keep the existing schedule.
-                if const_expr(traits.CROSS_SEQLEN):
-                    v_s_1 = softmax_helper.causal_mask_prologue_if_needed(
-                        v_s_1, j_idx - 2, (j_idx - 1) * traits.BLOCK_N
-                    )
-                else:
-                    v_s_1 = softmax_helper.v_s_vec_to_lists(v_s_1)
+                v_s_1 = softmax_helper.causal_mask_prologue_if_needed(v_s_1, j_idx - 2, (j_idx - 1) * traits.BLOCK_N)
                 m_tile_max_a = softmax_helper.reduce_max(v_s_1)
 
                 _sched_barrier_pairs(traits, 4, 6, 2)
@@ -855,8 +847,7 @@ def build_flash_attn_paged_fp8_module(
             # HIPREC folds v_descale into the bf16 vt scratch. The direct FP8
             # D128 path keeps raw V and applies its descale once at the end.
             inv_l = softmax_helper.safe_l_inv(l_row)
-            if const_expr(traits.FP8_PV):
-                inv_l = inv_l * ctx.vd_fp8
+            inv_l = inv_l * ctx.vd_fp8
             softmax_helper.scale_o(v_o, inv_l)
 
             # CLOSE the phase shift: one extra s_barrier on group A (complement of
@@ -869,10 +860,7 @@ def build_flash_attn_paged_fp8_module(
 
             # 128b stores fuse this lane and its half-wave partner, so each pair
             # covers 8 contiguous columns instead of two 64b stores.
-            if const_expr(traits.VARLEN):
-                output_store.store_final_o_if_valid(v_o, q_row)
-            else:
-                output_store.store_final_o(v_o, q_row)
+            output_store.store_final_o_if_valid(v_o, q_row)
 
         if ctx.q_start < ctx.seqlen_q_v:
             _run_q_block()
@@ -1064,7 +1052,7 @@ def build_flash_attn_paged_fp8_module(
             block_table = O
         if block_table_stride is None:
             block_table_stride = 0
-        if PAGED and block_table is O:
+        if block_table is O:
             raise ValueError("paged fp8 flash_attn requires block_table")
         _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride)
         _validate_batch_interleave_launch(batch_size)
