@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-07T12:13:04Z",
+ "updated": "2026-09-07T12:40:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34122598270,
+   "pr": 1100,
+   "commit": "dbb90a822e1ca890adc7145b8ca886ad2a055dd1",
+   "branch": "feat-llvm-atomic",
+   "event": "pull_request",
+   "title": "[DSL] Expose atomic operations via llvm dialect",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34122598270",
+   "created_at": "2026-09-07T12:34:26Z",
+   "updated_at": "2026-09-07T12:36:33Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 34120310058,
    "pr": 1097,
@@ -14,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34120310058",
    "created_at": "2026-09-07T12:09:13Z",
-   "updated_at": "2026-09-07T12:10:26Z",
+   "updated_at": "2026-09-07T12:23:41Z",
    "actor": "binding7012",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-07T12:23:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34120310058/job/101740491384"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-07T12:23:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34120310058/job/101740491407"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-07T12:23:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34120310058/job/101740491411"
+    }
+   ]
   },
   {
    "run_id": 34117984736,
@@ -2039,21 +2082,6 @@
    "created_at": "2026-09-03T05:51:05Z",
    "updated_at": "2026-09-03T15:28:10Z",
    "actor": "tangzzycc",
-   "jobs": []
-  },
-  {
-   "run_id": 33719811519,
-   "pr": 1069,
-   "commit": "255da941345c16f19559e1f4932846c0fc57f9af",
-   "branch": "feature/qwenimage-vae-conv-tests",
-   "event": "pull_request",
-   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33719811519",
-   "created_at": "2026-09-03T05:39:57Z",
-   "updated_at": "2026-09-03T05:45:50Z",
-   "actor": "huizzhan",
    "jobs": []
   }
  ]
