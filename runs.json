@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-07T01:08:46Z",
+ "updated": "2026-09-07T03:35:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34079891096,
+   "pr": 1066,
+   "commit": "8d51c4e618dc3440e6f16aa88a9337ceebe3a8c7",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34079891096",
+   "created_at": "2026-09-07T03:30:45Z",
+   "updated_at": "2026-09-07T03:33:06Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
   {
    "run_id": 34029287657,
    "pr": 1095,
@@ -840,7 +855,7 @@
   },
   {
    "run_id": 33817239046,
-   "pr": 1066,
+   "pr": null,
    "commit": "840d79380e894565d5d6dd139676cb7b2f87b02f",
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
@@ -2068,21 +2083,6 @@
    "created_at": "2026-09-02T14:05:53Z",
    "updated_at": "2026-09-02T14:13:38Z",
    "actor": "huizzhan",
-   "jobs": []
-  },
-  {
-   "run_id": 33638486966,
-   "pr": null,
-   "commit": "a9d0b6b4869ecb6f1056ac1122c7620dc1482fe8",
-   "branch": "codex/rdna-dynamic-buffer-bounds-check",
-   "event": "pull_request",
-   "title": "[DSL] Add dynamic RDNA buffer bounds checking",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33638486966",
-   "created_at": "2026-09-02T13:53:11Z",
-   "updated_at": "2026-09-02T13:53:11Z",
-   "actor": "big-yellow-duck",
    "jobs": []
   }
  ]
