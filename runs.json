@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-07T09:11:55Z",
+ "updated": "2026-09-07T09:39:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34104420519",
    "created_at": "2026-09-07T09:09:24Z",
-   "updated_at": "2026-09-07T09:09:56Z",
+   "updated_at": "2026-09-07T09:35:48Z",
    "actor": "huizzhan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-07T09:26:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34104420519/job/101690907773"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-07T09:35:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34104420519/job/101690907820"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-07T09:26:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34104420519/job/101690907852"
+    }
+   ]
   },
   {
    "run_id": 34103076246,
@@ -25,39 +53,40 @@
    "branch": "binding_fa_more_feature_support",
    "event": "pull_request",
    "title": "FlashAttention FP8: Added support for asymmetric head dimensions, variable sequence lengths (varlen), and KV splitting",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34103076246",
    "created_at": "2026-09-07T08:54:18Z",
-   "updated_at": "2026-09-07T09:10:27Z",
+   "updated_at": "2026-09-07T09:10:53Z",
    "actor": "binding7012",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-07T09:10:27Z",
+     "started_at": "2026-09-07T09:10:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34103076246/job/101686357857"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-07T09:10:27Z",
+     "started_at": "2026-09-07T09:10:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34103076246/job/101686357878"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-07T09:10:27Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34103076246/job/101686357927"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-07T09:10:42Z",
+     "completed_at": "2026-09-07T09:35:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34103076246/job/101686357927",
+     "log_fetch_failed": true
     }
    ]
   },
