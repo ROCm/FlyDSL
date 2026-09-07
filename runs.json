@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-07T10:25:47Z",
+ "updated": "2026-09-07T10:28:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,20 +25,20 @@
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
    "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34104420519",
    "created_at": "2026-09-07T09:09:24Z",
-   "updated_at": "2026-09-07T09:35:48Z",
+   "updated_at": "2026-09-07T10:26:58Z",
    "actor": "huizzhan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-07T09:26:53Z",
-     "completed_at": null,
+     "completed_at": "2026-09-07T10:26:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34104420519/job/101690907773"
     },
     {
