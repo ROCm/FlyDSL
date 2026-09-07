@@ -1,8 +1,52 @@
 {
  "schema": 1,
- "updated": "2026-09-07T06:55:20Z",
+ "updated": "2026-09-07T08:03:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34095413159,
+   "pr": 1069,
+   "commit": "d25d855f0c6746d68c4b9c86de30290c3d387a5a",
+   "branch": "feature/qwenimage-vae-conv-tests",
+   "event": "pull_request",
+   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159",
+   "created_at": "2026-09-07T07:25:41Z",
+   "updated_at": "2026-09-07T07:39:36Z",
+   "actor": "huizzhan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-07T07:39:24Z",
+     "completed_at": "2026-09-07T07:52:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159/job/101661302279",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-07T07:39:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159/job/101661302289"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-07T07:39:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159/job/101661302373"
+    }
+   ]
+  },
   {
    "run_id": 34090795488,
    "pr": 1066,
@@ -10,13 +54,44 @@
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34090795488",
    "created_at": "2026-09-07T06:25:50Z",
-   "updated_at": "2026-09-07T06:27:47Z",
+   "updated_at": "2026-09-07T08:00:22Z",
    "actor": "sammysun0711",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-07T06:54:55Z",
+     "completed_at": "2026-09-07T07:20:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34090795488/job/101650124357",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-07T06:55:26Z",
+     "completed_at": "2026-09-07T07:47:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34090795488/job/101650124395",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-07T06:55:33Z",
+     "completed_at": "2026-09-07T08:00:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34090795488/job/101650124478",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 34085071039,
@@ -1356,7 +1431,7 @@
    "commit": "425f1c1cde816d13742a9ff8eb3a23d8f73ab73c",
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
-   "title": "[Flydsl] Add Qwen-Image VAE classic conv shapes to conv3d tests",
+   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33740426417",
@@ -1371,7 +1446,7 @@
    "commit": "124b9e2671c75ccb52d943f4bd9ddebc902dee5d",
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
-   "title": "[Flydsl] Add Qwen-Image VAE classic conv shapes to conv3d tests",
+   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33740358075",
@@ -1488,7 +1563,7 @@
    "commit": "bc7c60a3e1f96b31c619043a7092064865df2a38",
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
-   "title": "[Flydsl] Add Qwen-Image VAE classic conv shapes to conv3d tests",
+   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33723843587",
@@ -1645,7 +1720,7 @@
    "commit": "255da941345c16f19559e1f4932846c0fc57f9af",
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
-   "title": "[Flydsl] Add Qwen-Image VAE classic conv shapes to conv3d tests",
+   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33719811519",
@@ -2014,62 +2089,6 @@
      "started_at": "2026-09-03T01:09:17Z",
      "completed_at": "2026-09-03T02:29:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664949309/job/100484442495",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33664818179,
-   "pr": 1074,
-   "commit": "7c4d805c2385260151a363d1530755e0b501ad1a",
-   "branch": "codex/gfx120x-fp8-wmma-atom",
-   "event": "pull_request",
-   "title": "[Dialect] Add FP8 support to GFX120X WMMA atom",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664818179",
-   "created_at": "2026-09-02T18:02:58Z",
-   "updated_at": "2026-09-03T02:59:57Z",
-   "actor": "big-yellow-duck",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:35:59Z",
-     "completed_at": "2026-09-03T01:50:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664818179/job/100489877827",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:56:33Z",
-     "completed_at": "2026-09-03T02:59:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664818179/job/100489877892",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:36:13Z",
-     "completed_at": "2026-09-03T02:43:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664818179/job/100489877897",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:36:11Z",
-     "completed_at": "2026-09-03T02:51:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664818179/job/100489877913",
      "log_fetch_failed": true
     }
    ]
