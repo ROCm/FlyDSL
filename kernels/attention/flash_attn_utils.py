@@ -2345,7 +2345,6 @@ def _make_paged_dualwave_swp_fp8_traits(
     fp8_v_tile_bytes = (block_n // 8) * (head_dim // 16) * 128
     if fp8_v_bankpad:
         fp8_v_tile_bytes = value_head_dim * fp8_v_row_stride
-    if fp8_v_bankpad:
         vt_bf16_total = num_prefetch_k * (fp8_v_tile_bytes // eb_bf) + 128
     elif bn128_pf:
         vt_bf16_total = num_prefetch_k * (fp8_v_tile_bytes // eb_bf) + 128
@@ -5352,7 +5351,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
                 elem_type=T.i8,
             )
             halves.append(llvm.LoadOp(Vec.make_type(2, fx.Int64), ptr, alignment=16).result)
-        rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
+        fx.rocdl.s_waitcnt(lgkmcnt=0)
         return _concat_vectors(halves[0], halves[1]).bitcast(fx.Int32).ir_value()
 
     def _pv_step_fp8_segmented(self, step, v_p, buf_id, v_o):
