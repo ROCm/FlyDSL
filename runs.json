@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-07T11:44:02Z",
+ "updated": "2026-09-07T12:13:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34120310058,
+   "pr": 1097,
+   "commit": "aab5b3e7922f71277e87aef95c711f2e90395268",
+   "branch": "binding_fa_more_feature_support",
+   "event": "pull_request",
+   "title": "FlashAttention FP8: Added support for asymmetric head dimensions, variable sequence lengths (varlen), and KV splitting",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34120310058",
+   "created_at": "2026-09-07T12:09:13Z",
+   "updated_at": "2026-09-07T12:10:26Z",
+   "actor": "binding7012",
+   "jobs": []
+  },
   {
    "run_id": 34117984736,
    "pr": 1097,
@@ -10,13 +25,41 @@
    "branch": "binding_fa_more_feature_support",
    "event": "pull_request",
    "title": "FlashAttention FP8: Added support for asymmetric head dimensions, variable sequence lengths (varlen), and KV splitting",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34117984736",
    "created_at": "2026-09-07T11:42:17Z",
-   "updated_at": "2026-09-07T11:43:04Z",
+   "updated_at": "2026-09-07T12:09:47Z",
    "actor": "binding7012",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-07T12:01:28Z",
+     "completed_at": "2026-09-07T12:09:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34117984736/job/101734236405"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-07T12:01:12Z",
+     "completed_at": "2026-09-07T12:09:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34117984736/job/101734236478"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-07T12:01:28Z",
+     "completed_at": "2026-09-07T12:09:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34117984736/job/101734236619"
+    }
+   ]
   },
   {
    "run_id": 34113540527,
@@ -2012,62 +2055,6 @@
    "updated_at": "2026-09-03T05:45:50Z",
    "actor": "huizzhan",
    "jobs": []
-  },
-  {
-   "run_id": 33711964013,
-   "pr": 1091,
-   "commit": "4cd46ac962c36819579400916acbdc4b9db64430",
-   "branch": "ci/prepare-mlir-manylinux-cpu",
-   "event": "pull_request",
-   "title": "[CI] accelerate prepare-mlir: run the CPU builder in the manylinux image",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013",
-   "created_at": "2026-09-03T03:36:20Z",
-   "updated_at": "2026-09-03T05:40:47Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T04:20:15Z",
-     "completed_at": "2026-09-03T05:40:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013/job/100520905230",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T04:19:48Z",
-     "completed_at": "2026-09-03T05:34:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013/job/100520905254",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T04:19:36Z",
-     "completed_at": "2026-09-03T04:42:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013/job/100520905275",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T04:47:33Z",
-     "completed_at": "2026-09-03T05:30:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33711964013/job/100520905340",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
