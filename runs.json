@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-07T08:03:44Z",
+ "updated": "2026-09-07T08:30:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34100692188,
+   "pr": 1069,
+   "commit": "01dbd721b89076fff8b1eb0beb911400da9390c2",
+   "branch": "feature/qwenimage-vae-conv-tests",
+   "event": "pull_request",
+   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34100692188",
+   "created_at": "2026-09-07T08:27:35Z",
+   "updated_at": "2026-09-07T08:28:40Z",
+   "actor": "huizzhan",
+   "jobs": []
+  },
+  {
+   "run_id": 34099498909,
+   "pr": 1097,
+   "commit": "fe5f85c49e32860d5fd06384aaf0ba28a8efa328",
+   "branch": "binding_fa_more_feature_support",
+   "event": "pull_request",
+   "title": "FlashAttention FP8: Added support for asymmetric head dimensions, variable sequence lengths (varlen), and KV splitting",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34099498909",
+   "created_at": "2026-09-07T08:14:00Z",
+   "updated_at": "2026-09-07T08:17:01Z",
+   "actor": "binding7012",
+   "jobs": []
+  },
   {
    "run_id": 34095413159,
    "pr": 1069,
@@ -10,11 +40,11 @@
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
    "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159",
    "created_at": "2026-09-07T07:25:41Z",
-   "updated_at": "2026-09-07T07:39:36Z",
+   "updated_at": "2026-09-07T08:28:03Z",
    "actor": "huizzhan",
    "jobs": [
     {
@@ -30,19 +60,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-07T07:39:35Z",
-     "completed_at": null,
+     "completed_at": "2026-09-07T08:28:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159/job/101661302289"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-07T07:39:35Z",
-     "completed_at": null,
+     "completed_at": "2026-09-07T08:28:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159/job/101661302373"
     }
    ]
@@ -1977,118 +2007,6 @@
      "started_at": "2026-09-03T01:56:45Z",
      "completed_at": "2026-09-03T03:18:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33702148372/job/100494061964",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33701059511,
-   "pr": 1056,
-   "commit": "3d1eca73d59091366502cce770bf47a9bffe025d",
-   "branch": "feat/gfx950-paged-attention-vllm-kv-layouts",
-   "event": "pull_request",
-   "title": "Support vLLM paged KV cache layouts on the gfx950 attention kernel",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33701059511",
-   "created_at": "2026-09-03T00:48:28Z",
-   "updated_at": "2026-09-03T03:33:19Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T02:09:35Z",
-     "completed_at": "2026-09-03T02:57:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33701059511/job/100493917276",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:56:32Z",
-     "completed_at": "2026-09-03T03:33:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33701059511/job/100493917297",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:56:28Z",
-     "completed_at": "2026-09-03T03:06:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33701059511/job/100493917311",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:56:20Z",
-     "completed_at": "2026-09-03T02:12:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33701059511/job/100493917355",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33664949309,
-   "pr": null,
-   "commit": "8f94e564f978c59070b9bb76bb9d764b299402ed",
-   "branch": "codex/rdna-dynamic-buffer-bounds-check",
-   "event": "pull_request",
-   "title": "[DSL] Add dynamic RDNA buffer bounds checking",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664949309",
-   "created_at": "2026-09-02T18:04:13Z",
-   "updated_at": "2026-09-03T02:49:41Z",
-   "actor": "big-yellow-duck",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:09:09Z",
-     "completed_at": "2026-09-03T02:49:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664949309/job/100484442427",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:36:11Z",
-     "completed_at": "2026-09-03T02:45:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664949309/job/100484442432",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:08:58Z",
-     "completed_at": "2026-09-03T01:26:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664949309/job/100484442439",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T01:09:17Z",
-     "completed_at": "2026-09-03T02:29:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33664949309/job/100484442495",
      "log_fetch_failed": true
     }
    ]
