@@ -1983,8 +1983,8 @@ def _make_dualwave_swp_fp8_traits(
         raise RuntimeError(
             f"fp8 flash attention head_dim={head_dim}/head_dim_v={head_dim_v} at block_m={block_m} "
             f"needs {lds_bytes} B of LDS, over the {LDS_BYTES_GFX950} B gfx950 workgroup limit. "
-            "The footprint grows by ~25 KB per +64 of head_dim and ~12 KB per +32 of head_dim_v; "
-            "head_dim + head_dim_v <= 384 is the supported envelope."
+            "Largest head_dim_v that fits: 192 at head_dim 64/128/192, 160 at 256, 96 at 320; "
+            "head_dim 384 and above never fits."
         )
 
     return DualwaveSwpFp8Traits(
@@ -4539,8 +4539,6 @@ class DualwaveFp8KernelContext:
         self.o_store_reg_128 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
         # fp8 global->LDS DMA uses i8 destination typing; K/V LDS reads are byte-addressed.
         self.lds_ptr_ty = fx.PointerType.get(fx.Int8.ir_type, 2, traits.DMA_BYTES)
-        self.bf16_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, fx.BFloat16))
-        self.v_fp8_load64_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
 
     def init_descale(self):
         def _load_scale_scalar(tensor):
@@ -4730,13 +4728,6 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             words.append(fx.Int32(w))
         return Vec.from_elements(words, fx.Int32).ir_value()
 
-    def _p_to_fp8_i32x8(self, v_p):
-        p_lo, p_hi = v_p
-        f32 = []
-        for pk in (p_lo[0], p_lo[1], p_hi[0], p_hi[1]):
-            f32 += self._v8bf16_to_f32(pk)
-        return self._pack_fp8_i32x8(f32)
-
     def _v_concat_i32x8(self, v_v, dc):
         words = []
         for ks in range_constexpr(4):
@@ -4744,12 +4735,6 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             words.append(fx.Int32(v2[0]))
             words.append(fx.Int32(v2[1]))
         return Vec.from_elements(words, fx.Int32).ir_value()
-
-    def _v_to_fp8_i32x8(self, v_v, dc):
-        f32 = []
-        for step in range_constexpr(4):
-            f32 += self._v8bf16_to_f32(v_v[step][dc])
-        return self._pack_fp8_i32x8(f32)
 
     def _load_q_wide_lds(self):
         traits = self.traits

@@ -104,9 +104,10 @@ def _fp8_auto_kv_splits(
     else:
         kept = 0.5 * seqlen_kv / seqlen_q
     if kept < _FP8_AUTOSPLIT_CAUSAL_SKEW:
-        if wgs < num_cu and kv_tiles // 2 >= _FP8_AUTOSPLIT_MIN_TILES:
-            return 2
-        return 1
+        if kv_tiles // 2 < _FP8_AUTOSPLIT_MIN_TILES or wgs > num_cu:
+            return 1
+        interleaved = _fp8_batch_interleave_group(batch, causal, seqlen_q != seqlen_kv, 1) > 1
+        return 1 if wgs == num_cu and interleaved else 2
 
     def makespan(splits: int) -> float:
         n = wgs * splits
