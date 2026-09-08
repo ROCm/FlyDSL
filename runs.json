@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-09-08T09:42:21Z",
+ "updated": "2026-09-08T09:50:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34212084004,
+   "pr": 1104,
+   "commit": "49c8efd3122a665ae7a21a76f6334e8eabdeee27",
+   "branch": "ywx/mega_moe_r1_tune",
+   "event": "pull_request",
+   "title": " deepseekv3 r1 tune config",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34212084004",
+   "created_at": "2026-09-08T09:49:00Z",
+   "updated_at": "2026-09-08T09:49:10Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
+  {
+   "run_id": 34211977924,
+   "pr": 1104,
+   "commit": "59317635f83142c1729baba3104b8fb15ec3c2d7",
+   "branch": "ywx/mega_moe_r1_tune",
+   "event": "pull_request",
+   "title": " deepseekv3 r1 tune config",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34211977924",
+   "created_at": "2026-09-08T09:47:49Z",
+   "updated_at": "2026-09-08T09:49:02Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
+  {
+   "run_id": 34211830978,
+   "pr": 1105,
+   "commit": "ca69d0efd0611b31fb6bf2ddda258c341ccaec75",
+   "branch": "lhc/fold-index-cast-on-main",
+   "event": "pull_request",
+   "title": "[Fly] Fold redundant index cast pairs in layout lowering",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34211830978",
+   "created_at": "2026-09-08T09:46:13Z",
+   "updated_at": "2026-09-08T09:47:36Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 34209140893,
    "pr": 1104,
@@ -10,13 +55,41 @@
    "branch": "ywx/mega_moe_r1_tune",
    "event": "pull_request",
    "title": " deepseekv3 r1 tune config",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34209140893",
    "created_at": "2026-09-08T09:17:06Z",
-   "updated_at": "2026-09-08T09:19:12Z",
+   "updated_at": "2026-09-08T09:48:38Z",
    "actor": "Yaowu-Xiong",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-08T09:47:03Z",
+     "completed_at": "2026-09-08T09:47:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34209140893/job/102014153870"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-08T09:45:40Z",
+     "completed_at": "2026-09-08T09:48:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34209140893/job/102014153892"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-08T09:45:28Z",
+     "completed_at": "2026-09-08T09:47:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34209140893/job/102014153917"
+    }
+   ]
   },
   {
    "run_id": 34205726684,
@@ -2107,90 +2180,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 33760444736,
-   "pr": 931,
-   "commit": "ee54e1c29c4e63c8c719f6dd7ab41ce661f902dc",
-   "branch": "rchamber/flex_attention",
-   "event": "pull_request",
-   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736",
-   "created_at": "2026-09-03T13:19:11Z",
-   "updated_at": "2026-09-03T14:34:17Z",
-   "actor": "RichardChamberlain1",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T13:40:00Z",
-     "completed_at": "2026-09-03T13:56:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736/job/100671667462",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T13:40:14Z",
-     "completed_at": "2026-09-03T14:15:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736/job/100671667484",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-03T13:40:17Z",
-     "completed_at": "2026-09-03T14:31:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736/job/100671667493"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-03T13:40:09Z",
-     "completed_at": "2026-09-03T14:34:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33760444736/job/100671667523"
-    }
-   ]
-  },
-  {
-   "run_id": 33758073575,
-   "pr": 931,
-   "commit": "f99608a0abb1ba22353c4da5c7e0c45483179f0a",
-   "branch": "rchamber/flex_attention",
-   "event": "pull_request",
-   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33758073575",
-   "created_at": "2026-09-03T12:55:47Z",
-   "updated_at": "2026-09-03T12:57:38Z",
-   "actor": "RichardChamberlain1",
-   "jobs": []
-  },
-  {
-   "run_id": 33751770374,
-   "pr": 931,
-   "commit": "6ec190372dd7bf092b38d321bcc4fe6e06bbd416",
-   "branch": "rchamber/flex_attention",
-   "event": "pull_request",
-   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751770374",
-   "created_at": "2026-09-03T11:49:12Z",
-   "updated_at": "2026-09-03T11:51:27Z",
-   "actor": "RichardChamberlain1",
-   "jobs": []
   }
  ]
 }
