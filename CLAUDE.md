@@ -45,6 +45,7 @@ over speed; use judgment for trivial tasks.
 ```text
 FlyDSL/
 ├── .claude/skills/                 # Project-local Claude Code skills (kernel authoring, profiling, build); git-tracked
+├── .claude/workflows/              # Claude Code multi-agent workflow scripts invoked by those skills; git-tracked
 ├── python/
 │   ├── flydsl/                    # Python DSL core
 │   │   ├── expr/                  # DSL expression API; direct children are TARGET-NEUTRAL (typing, primitive, gpu, derived, struct, numeric, math, enum, arith, meta, extern; + utils/)
