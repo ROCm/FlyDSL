@@ -284,6 +284,8 @@ def build_flash_attn_paged_fp8_module(
         NPF_I = const_expr(fx.Index(NPF))
 
         def _ring_wrap(x):
+            if const_expr(NPF == 8):
+                return x & fx.Index(7)
             return (x >= NPF_I).select(x - NPF_I, x)
 
         init_args = [m_row, l_row] + v_o + [t0 % fx.Index(NPF), next_v_a, next_v_b]
