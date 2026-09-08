@@ -1080,8 +1080,8 @@ def flydsl_flash_attn_func(
         stream: CUDA/HIP stream to launch on.
 
     Returns:
-        Output tensor with the same shape as q except that paged asymmetric-V
-        attention uses V's final dimension. The dtype is bf16 for fp8 inputs,
+        Output tensor with q's leading dimensions and the V head width for
+        both dense and paged attention. The dtype is bf16 for fp8 inputs,
         otherwise the same dtype as q. When ``return_lse=True`` returns
         ``(out, lse)`` where ``lse`` is fp32 ``[B, num_heads, Sq]`` (varlen:
         ``[B, num_heads, max_seqlen_q]``, padded) holding the per-row
