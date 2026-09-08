@@ -1,0 +1,23 @@
+repos:
+  - repo: local
+    hooks:
+      - id: black
+        name: Format Python with Black
+        entry: python3 -m black
+        language: system
+        types: [python]
+        exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
+
+      - id: ruff
+        name: Fix Python lint with Ruff
+        entry: python3 -m ruff check --fix
+        language: system
+        types: [python]
+        exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
+
+      - id: clang-format
+        name: Format C/C++ with clang-format-18
+        entry: clang-format-18 -i
+        language: system
+        files: \.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|cu|cuh)$
+        exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
