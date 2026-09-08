@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-09-08T06:44:44Z",
+ "updated": "2026-09-08T07:16:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34196121600,
+   "pr": 1098,
+   "commit": "3938442ec626dfe95590bb70d4fe8d7ef3ac6ee4",
+   "branch": "feat/coop-reduce-scan",
+   "event": "pull_request",
+   "title": "refactor: migrate to extension api",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34196121600",
+   "created_at": "2026-09-08T06:46:00Z",
+   "updated_at": "2026-09-08T07:07:40Z",
+   "actor": "ppppqp",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T07:08:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34196121600/job/101969376282"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-08T07:07:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34196121600/job/101969376312"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T07:08:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34196121600/job/101969376356"
+    }
+   ]
+  },
   {
    "run_id": 34195756481,
    "pr": 1100,
@@ -14,9 +57,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34195756481",
    "created_at": "2026-09-08T06:41:13Z",
-   "updated_at": "2026-09-08T06:41:38Z",
+   "updated_at": "2026-09-08T07:01:55Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T07:01:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34195756481/job/101967778027"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T07:01:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34195756481/job/101967778039"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T07:01:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34195756481/job/101967778066"
+    }
+   ]
   },
   {
    "run_id": 34194391453,
@@ -83,11 +154,11 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34192512761",
    "created_at": "2026-09-08T05:55:33Z",
-   "updated_at": "2026-09-08T06:11:27Z",
+   "updated_at": "2026-09-08T07:15:01Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
@@ -103,20 +174,22 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-08T06:11:15Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34192512761/job/101956286264"
+     "completed_at": "2026-09-08T07:15:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34192512761/job/101956286264",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-08T06:11:26Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34192512761/job/101956286290"
+     "completed_at": "2026-09-08T06:59:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34192512761/job/101956286290",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -762,7 +835,7 @@
   },
   {
    "run_id": 34085071039,
-   "pr": 1098,
+   "pr": null,
    "commit": "3b8501176ed5202eeb7a64b5b57232d4894a634e",
    "branch": "feat/coop-reduce-scan",
    "event": "pull_request",
@@ -2090,21 +2163,6 @@
    "created_at": "2026-09-03T09:44:15Z",
    "updated_at": "2026-09-03T09:45:49Z",
    "actor": "RichardChamberlain1",
-   "jobs": []
-  },
-  {
-   "run_id": 33740426417,
-   "pr": 1069,
-   "commit": "425f1c1cde816d13742a9ff8eb3a23d8f73ab73c",
-   "branch": "feature/qwenimage-vae-conv-tests",
-   "event": "pull_request",
-   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33740426417",
-   "created_at": "2026-09-03T09:43:34Z",
-   "updated_at": "2026-09-03T09:46:04Z",
-   "actor": "huizzhan",
    "jobs": []
   }
  ]
