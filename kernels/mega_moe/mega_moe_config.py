@@ -358,10 +358,6 @@ def _a4_fixed8192_sync_patch(grid_mult: int) -> ConfigPatch:
         stage1={
             "sort_block_m": BLOCK_M_SMALL,
             "tile_n": TILE_N_BASE,
-            # Reached by V4-Pro and by R1 bs32 (which falls through here); other R1
-            # buckets return earlier via _R1_SMALL_BS_SYNC_PATCH. Keep COMPACT (4 waves):
-            # 8 waves regressed V4 e2e ~6% at BS16 (small-bs is all-to-all/sync bound,
-            # extra waves add sync, not throughput).
             "num_waves": COMPACT_NUM_WAVES,
             "grid_mult": grid_mult,
             "mfma_amajor": False,
@@ -790,10 +786,8 @@ def _select_tuning_patches(
         # V4-Pro-specific a4 tuning below (experts_per_rank=48). Other networks keep
         # the fp4 correctness/occupancy patches above plus their own tuning here.
         is_r1 = context.experts_per_rank == R1_EXPERTS_PER_RANK
-        # R1 bs32 deliberately falls through to the shared a4 fixed8192 tuning below
-        # (the pre-tune R1 path): it is measurably faster there (~0.286 vs ~0.31 e2e)
-        # because it picks up the fixed8192 dispatch_cu widening. Other small buckets
-        # keep the R1 sync patch.
+        # R1 bs32 falls through to the shared fixed8192 tuning (faster: DCU 64->128);
+        # other R1 small buckets use the sync patch.
         if not (is_r1 and context.bucket == TokenBucket.BS32):
             if is_r1 and context.bucket <= TokenBucket.BS128:
                 patches.append(_R1_SMALL_BS_SYNC_PATCH)
