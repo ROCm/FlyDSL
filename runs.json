@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-08T01:04:33Z",
+ "updated": "2026-09-08T02:33:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34179798578,
+   "pr": null,
+   "commit": "826efd049f192dcdb3c357c6921c95eada74e6f3",
+   "branch": "main",
+   "event": "push",
+   "title": "FlashAttention FP8: Added support for asymmetric head dimensions, var\u2026",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34179798578",
+   "created_at": "2026-09-08T02:21:57Z",
+   "updated_at": "2026-09-08T02:32:10Z",
+   "actor": "binding7012",
+   "jobs": []
+  },
   {
    "run_id": 34125495525,
    "pr": 1097,
@@ -95,7 +110,7 @@
   },
   {
    "run_id": 34120310058,
-   "pr": 1097,
+   "pr": null,
    "commit": "aab5b3e7922f71277e87aef95c711f2e90395268",
    "branch": "binding_fa_more_feature_support",
    "event": "pull_request",
@@ -139,7 +154,7 @@
   },
   {
    "run_id": 34117984736,
-   "pr": 1097,
+   "pr": null,
    "commit": "73216ef6bfb9199ee9a240a363a3574116156e3d",
    "branch": "binding_fa_more_feature_support",
    "event": "pull_request",
@@ -182,7 +197,7 @@
   },
   {
    "run_id": 34113540527,
-   "pr": 1097,
+   "pr": null,
    "commit": "86f36235f4e784212fcae97bf380a96c75817e75",
    "branch": "binding_fa_more_feature_support",
    "event": "pull_request",
@@ -318,7 +333,7 @@
   },
   {
    "run_id": 34103076246,
-   "pr": 1097,
+   "pr": null,
    "commit": "b4b888f22884b1f51976175b9721bc4760e731be",
    "branch": "binding_fa_more_feature_support",
    "event": "pull_request",
@@ -408,7 +423,7 @@
   },
   {
    "run_id": 34099498909,
-   "pr": 1097,
+   "pr": null,
    "commit": "fe5f85c49e32860d5fd06384aaf0ba28a8efa328",
    "branch": "binding_fa_more_feature_support",
    "event": "pull_request",
@@ -662,7 +677,7 @@
   },
   {
    "run_id": 34018991361,
-   "pr": 1097,
+   "pr": null,
    "commit": "20a76439a9fcce8b4d879fb281665a43ca74b9c2",
    "branch": "binding_fa_more_feature_support",
    "event": "pull_request",
@@ -708,7 +723,7 @@
   },
   {
    "run_id": 34018484175,
-   "pr": 1097,
+   "pr": null,
    "commit": "724675a91f670632fb6436d964c31443f61b342e",
    "branch": "binding_fa_more_feature_support",
    "event": "pull_request",
@@ -2085,62 +2100,6 @@
      "started_at": "2026-09-03T06:53:32Z",
      "completed_at": "2026-09-03T08:12:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721833438/job/100552851783",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33721690902,
-   "pr": 1092,
-   "commit": "c2ab05bfa13e9c1983e35e731414f447485d7488",
-   "branch": "ci/strip-mlir-install",
-   "event": "pull_request",
-   "title": "[CI] Strip the MLIR install before tarring it",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721690902",
-   "created_at": "2026-09-03T06:05:58Z",
-   "updated_at": "2026-09-03T08:13:02Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T06:50:25Z",
-     "completed_at": "2026-09-03T08:13:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721690902/job/100551998118",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T06:50:27Z",
-     "completed_at": "2026-09-03T07:37:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721690902/job/100551998214",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T06:49:59Z",
-     "completed_at": "2026-09-03T08:00:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721690902/job/100551998246",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T07:23:17Z",
-     "completed_at": "2026-09-03T07:43:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721690902/job/100551998250",
      "log_fetch_failed": true
     }
    ]
