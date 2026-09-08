@@ -114,7 +114,8 @@ echo "Configuring LLVM..."
 
 # Install dependencies for Python bindings
 echo "Installing Python dependencies..."
-pip install nanobind numpy pybind11
+NANOBIND_VERSION="${NANOBIND_VERSION:-2.12.0}"
+pip install "nanobind==${NANOBIND_VERSION}" numpy pybind11
 
 # Check for ninja
 GENERATOR="Unix Makefiles"
@@ -172,6 +173,26 @@ if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   if [[ ! -d "${LLVM_INSTALL_DIR}/lib/cmake/mlir" ]]; then
     echo "Error: install prefix missing lib/cmake/mlir: ${LLVM_INSTALL_DIR}" >&2
     exit 1
+  fi
+
+  # The install tree is ~80% bin/, and those binaries carry a symbol table the
+  # build does not need: stripping takes ~20% off the tarball, which the CI
+  # cache transfers on every job. Static archives are left alone - they gained
+  # nothing when measured, and stripping an archive can drop symbols the link
+  # still needs. Set LLVM_STRIP_INSTALL=0 to keep symbols for crash backtraces.
+  if [[ "${LLVM_STRIP_INSTALL:-1}" == "1" ]] && command -v strip >/dev/null 2>&1; then
+    echo "Stripping installed binaries and shared libraries..."
+    before_kb=$(du -sk "${LLVM_INSTALL_DIR}" | cut -f1)
+    # -type f skips the symlinks in bin/; non-ELF entries (the Python and Perl
+    # helper scripts) simply fail to strip and are skipped.
+    find "${LLVM_INSTALL_DIR}/bin" "${LLVM_INSTALL_DIR}/lib" \
+         "${LLVM_INSTALL_DIR}/python_packages" \
+         -type f ! -name '*.a' -print0 2>/dev/null |
+      while IFS= read -r -d '' f; do
+        strip --strip-unneeded "${f}" 2>/dev/null || true
+      done
+    after_kb=$(du -sk "${LLVM_INSTALL_DIR}" | cut -f1)
+    echo "Install tree: $((before_kb / 1024)) MB -> $((after_kb / 1024)) MB"
   fi
 
   echo "Creating tarball..."

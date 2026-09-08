@@ -1,4 +1,5 @@
 add_mlir_conversion_library(MLIRFlyToROCDL
+  FastMathOps.cpp
   FlyToROCDL.cpp
 
   DEPENDS
@@ -13,6 +14,7 @@ add_mlir_conversion_library(MLIRFlyToROCDL
   MLIRArithDialect
   MLIRIR
   MLIRLLVMDialect
+  MLIRMathDialect
   MLIRPass
   MLIRSCFDialect
   MLIRTransforms

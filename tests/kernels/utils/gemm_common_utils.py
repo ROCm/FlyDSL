@@ -801,3 +801,57 @@ def preshuffle_b_16x16(b: Tensor, rows: int, cols: int) -> Tensor:
     b = b.view(rows // 16, 16, cols // 16, 16)
     b = b.permute(0, 2, 1, 3).contiguous()
     return b.view(rows, cols)
+
+
+# ── a8w8 blockscale (coarse E8M0 grid) ───────────────────────────────────────
+# The MX path scales every 1x32 group; the blockscale path scales A per 1x128 and B per 128x128.
+def _pad_kblocks_e8m0(s, K):
+    """Pad the K-block axis out to 2*ceil(K/256) words with E8M0 1.0 (0x7F)."""
+    K1 = (K + 255) // 256
+    if s.shape[-1] < 2 * K1:
+        s = torch.nn.functional.pad(s, (0, 2 * K1 - s.shape[-1]), value=0x7F)
+    return s, K1
+
+
+def shuffle_scale_blockscale_a(a_scale, K):
+    """(rows, K//128) E8M0 -> the kernel's A blockscale buffer order."""
+    s = a_scale.view(torch.uint8).contiguous()
+    rows = s.shape[0]
+    if s.shape[-1] != K // 128:
+        raise ValueError(f"blockscale a_scale must be (rows, {K // 128}); got {tuple(a_scale.shape)}")
+    if rows % 32:
+        s = torch.nn.functional.pad(s, (0, 0, 0, (-rows) % 32), value=0x7F)
+        rows = s.shape[0]
+    s, K1 = _pad_kblocks_e8m0(s, K)
+    return s.view(rows // 32, 2, 16, K1, 2).permute(0, 3, 2, 4, 1).contiguous().view(-1).view(fp8_e8m0)
+
+
+def shuffle_scale_blockscale_b(b_scale, N, K):
+    """(N//128, K//128) E8M0 -> the kernel's B blockscale buffer order (each word duplicated)."""
+    s = b_scale.view(torch.uint8).contiguous()
+    if s.shape != (N // 128, K // 128):
+        raise ValueError(f"blockscale b_scale must be ({N // 128}, {K // 128}); got {tuple(b_scale.shape)}")
+    s, K1 = _pad_kblocks_e8m0(s, K)
+    return s.view(N // 128, K1, 2, 1).expand(N // 128, K1, 2, 2).contiguous().view(-1).view(fp8_e8m0)
+
+
+def per_block_f8_quant(x, block_m, block_k):
+    """Per-(block_m x block_k) FP8 (E4M3) quant, one E8M0 scale per block.
+
+    The blockscale grid the kernel expects: A uses (1, 128), B uses (128, 128).
+
+    Returns:
+      x_q:   (rows, K) float8_e4m3fn - the fp8 codes the kernel reads.
+      scale: (rows//block_m, K//block_k) e8m0 uint8 (unshuffled; caller applies
+             shuffle_scale_blockscale_a / shuffle_scale_blockscale_b).
+    """
+    rows, K = x.shape
+    if rows % block_m or K % block_k:
+        raise ValueError(f"({rows}, {K}) is not tiled by the ({block_m}, {block_k}) scale block")
+    fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
+    xb = x.contiguous().float().view(rows // block_m, block_m, K // block_k, block_k)
+    max_abs = xb.abs().amax(dim=(1, 3)).clamp_min(1e-30)
+    scale_e8m0 = f32_to_e8m0(max_abs / fp8_max)
+    scale_f32 = e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
+    x_q = (xb / scale_f32[:, None, :, None]).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
+    return x_q.view(rows, K).contiguous(), scale_e8m0.view(torch.uint8).contiguous()

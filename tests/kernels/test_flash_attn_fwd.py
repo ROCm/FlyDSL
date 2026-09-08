@@ -33,6 +33,7 @@ if not torch.cuda.is_available():
 import pytest  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.attention import flash_attn_interface  # noqa: E402
 from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module  # noqa: E402
 from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 from kernels.attention.flash_attn_utils import (  # noqa: E402
@@ -151,6 +152,42 @@ EXTRA_CONFIGS = [
     [[127, 129, 255, 257], [257, 255, 129, 127], None, 64, 8, 1],
 ]
 
+FP8_VARLEN_Q_SEQLENS = {
+    1: [2614],
+    2: [1024, 1590],
+    3: [1024, 512, 1078],
+    4: [1024, 512, 256, 822],
+}
+FP8_VARLEN_KV_SEQLENS = {
+    1: [16384],
+    2: [8192, 8192],
+    3: [8192, 4096, 4096],
+    4: [8192, 4096, 2048, 2048],
+}
+FP8_VARLEN_BATCHES = (1, 2, 3, 4)
+
+FP8_SPLITKV_SPLITS = (2, 4, 8, 16)
+FP8_SPLITKV_SEQLENS = (4096, 8192, 16384, 32768)
+
+FP8_EXTRA_CONFIGS = (
+    [[FP8_VARLEN_Q_SEQLENS[b], None, None, 12, 12, 1, 192, 128] for b in FP8_VARLEN_BATCHES]
+    + [[FP8_VARLEN_Q_SEQLENS[b], FP8_VARLEN_KV_SEQLENS[b], None, 12, 12, 1, 192, 128] for b in FP8_VARLEN_BATCHES]
+    + [
+        [seq, seq, b, 12, 12, 1, 192, 128]
+        for seq in (4096, 8192, 16384, 32768)
+        for b in ((1, 2) if seq == 32768 else (1, 2, 3, 4))
+    ]
+    + [[seq, seq, 1, 12, 12, sp, 192, 128] for seq, sp in zip(FP8_SPLITKV_SEQLENS, FP8_SPLITKV_SPLITS)]
+    + [[8192, 8192, b, 12, 12, 4, 192, 128] for b in (2, 3, 4)]
+    + [[8192, 8192, 1, 12, 12, sp, 128, 128] for sp in FP8_SPLITKV_SPLITS]
+    + [
+        [512, 16384, 1, 12, 12, 8, 192, 128],
+        [2614, 16384, 1, 12, 12, 8, 192, 128],
+        [1024, 32768, 1, 12, 12, 16, 192, 128],
+        [512, 16384, 4, 12, 12, 8, 192, 128],
+    ]
+)
+
 
 def _short_label(value):
     label = str(value)
@@ -158,7 +195,8 @@ def _short_label(value):
 
 
 def _extra_case_from_config(row):
-    seqlen_q, seqlen_kv, batch, nh, nh_kv, kv_splits = row
+    seqlen_q, seqlen_kv, batch, nh, nh_kv, kv_splits, *head_dims = row
+    dims = {"hd": head_dims[0], "hd_v": head_dims[1]} if head_dims else {}
     if seqlen_kv is None:
         return {
             "sq_label": _short_label(seqlen_q),
@@ -167,6 +205,7 @@ def _extra_case_from_config(row):
             "nh_kv": nh_kv,
             "kv_splits": kv_splits,
             "kwargs": {"varlen_seqlens_q": list(seqlen_q)},
+            **dims,
         }
     if batch is not None:
         return {
@@ -176,6 +215,7 @@ def _extra_case_from_config(row):
             "nh_kv": nh_kv,
             "kv_splits": kv_splits,
             "kwargs": {"batch": batch, "seqlen_q": seqlen_q, "seqlen_kv": seqlen_kv},
+            **dims,
         }
     return {
         "sq_label": _short_label(seqlen_q),
@@ -184,6 +224,7 @@ def _extra_case_from_config(row):
         "nh_kv": nh_kv,
         "kv_splits": kv_splits,
         "kwargs": {"varlen_seqlens_q": list(seqlen_q), "varlen_seqlens_kv": list(seqlen_kv)},
+        **dims,
     }
 
 
@@ -346,10 +387,11 @@ def pytorch_ref_attention_qkv_diff(q, k, v, causal=True, bias=None, alibi_slopes
         v_t = v_t.repeat_interleave(rep, dim=1)
     B, H, Sq, D = q_t.shape
     Skv = k_t.shape[2]
+    Dv = v_t.shape[3]
     delta = Skv - Sq
     scale = 1.0 / math.sqrt(D)
     k_trans = k_t.transpose(-1, -2).contiguous()
-    out = torch.empty((B, H, Sq, D), device=q_t.device, dtype=torch.float32)
+    out = torch.empty((B, H, Sq, Dv), device=q_t.device, dtype=torch.float32)
     chunk = max(1, min(Sq, (64 * 1024 * 1024) // max(B * H * Skv, 1)))
     key_idx = torch.arange(Skv, device=q_t.device).view(1, 1, 1, Skv)
     for s0 in range(0, Sq, chunk):
@@ -1101,6 +1143,11 @@ def run_attn_config(
     if splitk:
         if D not in (64, 128) or dtype_str not in ("bf16", "f16") or (seqlen_q is not None and seqlen_q < 384):
             return {"skip": True}
+        if not use_block_table and seqlen_kv is not None and seqlen_kv != seqlen_q:
+            return {
+                "skip": True,
+                "skip_reason": f"dense split-K requires seqlen_kv == seqlen_q, got {seqlen_kv} != {seqlen_q}",
+            }
 
     # ── bias addressing guard ────────────────────────────────────────────────
     if use_bias:
@@ -1617,6 +1664,26 @@ def _dequant_fp8(x_fp8, descale):
     return x_fp8.to(torch.float32) * descale.to(torch.float32)
 
 
+def _score_pairs(sq, skv, causal):
+    """(q, k) score elements actually computed for one sequence pair.
+
+    Non-causal is the full sq*skv rectangle. Causal is bottom-right aligned like
+    the kernel mask (row i attends keys [0, skv - sq + i]), so a cross-length pair
+    keeps the whole prefix. Matches sq*skv/2 when sq == skv, which is what the
+    self-attention TFLOPS numbers have always used.
+    """
+    if not causal:
+        return float(sq * skv)
+    if sq <= skv:
+        return 0.5 * sq * (2 * skv - sq)
+    return 0.5 * skv * skv
+
+
+def _fp8_flops(pairs, num_heads, head_dim, head_dim_v):
+    """FLOPs for `pairs` score elements: 2*pairs*D for QK^T plus 2*pairs*Dv for PV."""
+    return 2.0 * pairs * num_heads * (head_dim + head_dim_v)
+
+
 def run_fp8_config(
     batch,
     seq_len,
@@ -1628,31 +1695,37 @@ def run_fp8_config(
     seed=DEFAULT_SEED,
     verbose=True,
     num_kv_heads=None,
-    num_kv_splits=1,
+    num_kv_splits=None,
+    head_dim_v=None,
+    seqlen_kv=None,
+    varlen_seqlens_q=None,
+    varlen_seqlens_kv=None,
+    bench=True,
 ):
     """Run the FlyDSL fp8 (e4m3fn) forward path and validate vs a dequantized-input
     SDPA reference at the fixed fp8 gate (max_err < 5e-2 and min_cos > 0.98).
 
-    Unsupported fp8 configurations (non-gfx950, head_dim != 128, split-K) raise a
-    clear error that is surfaced as an ERROR row (never a silent SKIP). Returns a
-    run_config-compatible dict so it prints through the same summary table.
+    Shape options beyond dense self-attention:
+      - ``head_dim_v``: V (and therefore O) head dim, when it differs from the QK
+        ``head_dim`` -- e.g. QK D=192 with V Dv=128.
+      - ``seqlen_kv``: dense cross-attention, K/V longer or shorter than Q.
+      - ``varlen_seqlens_q`` / ``varlen_seqlens_kv``: packed varlen. Q is
+        ``[total_q, H, D]``, K/V are ``[total_kv, Hkv, *]`` and cu_seqlens are
+        derived from the per-sequence lengths. Passing only ``varlen_seqlens_q``
+        makes it self-attention.
+      - ``num_kv_splits``: ``None`` autotunes, ``1`` pins the unsplit kernel,
+        ``> 1`` forces that many KV splits.
+
+    Returns a run_config-compatible dict so it prints through the same summary
+    table. ``bench=False`` skips the timing pass and returns correctness only.
     """
     device = "cuda"
     results = {}
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
+    Dv = head_dim if head_dim_v is None else head_dim_v
 
-    # fp8 split-K is not implemented. Reject it explicitly rather than silently
-    # running a dense fp8 forward while the config row advertises kv_sp>1 (which
-    # would validate the wrong path).
-    if int(num_kv_splits) > 1:
-        results["err"] = f"fp8 split-K (num_kv_splits={num_kv_splits}) is not implemented (dense fp8 only)"
-        return results
-
-    # fp8 forward is gfx950-only and head_dim==128 only. Reject anything else
-    # up-front with a clear, specific error (surfaced as an ERROR row) rather
-    # than a SKIP that would mask a real failure.
     try:
         gpu_arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
     except Exception:
@@ -1660,30 +1733,79 @@ def run_fp8_config(
     if not gpu_arch.startswith("gfx950"):
         results["err"] = f"fp8 requires gfx950 (got '{gpu_arch or 'unknown'}')"
         return results
-    if head_dim != 128:
-        results["err"] = f"fp8 requires head_dim == 128 (got {head_dim})"
-        return results
     if num_heads % num_kv_heads != 0:
         results["err"] = f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
         return results
-    if seq_len < 1:
-        results["err"] = f"seq_len ({seq_len}) must be >= 1"
-        return results
 
-    B, S, H, D = batch, seq_len, num_heads, head_dim
+    varlen = varlen_seqlens_q is not None
+    if varlen:
+        vl_q = list(varlen_seqlens_q)
+        vl_kv = list(varlen_seqlens_kv) if varlen_seqlens_kv is not None else list(vl_q)
+        if len(vl_kv) != len(vl_q):
+            results["err"] = f"varlen_seqlens_kv ({len(vl_kv)}) must match varlen_seqlens_q ({len(vl_q)})"
+            return results
+        if min(vl_q + vl_kv) < 1:
+            results["err"] = f"varlen seqlens must be >= 1, got q={vl_q} kv={vl_kv}"
+            return results
+    else:
+        if seq_len < 1:
+            results["err"] = f"seq_len ({seq_len}) must be >= 1"
+            return results
+        if seqlen_kv is not None and seqlen_kv < 1:
+            results["err"] = f"seqlen_kv ({seqlen_kv}) must be >= 1"
+            return results
+        vl_q = vl_kv = None
+
+    H, D = num_heads, head_dim
     H_KV = num_kv_heads
     setup_seed(seed)
 
     # Host bf16 master tensors -> per-tensor e4m3fn + shape-[1] fp32 descales.
-    q_bf16 = torch.empty(B, S, H, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
-    k_bf16 = torch.empty(B, S, H_KV, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
-    v_bf16 = torch.empty(B, S, H_KV, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+    if varlen:
+        B = len(vl_q)
+        cuq = [0]
+        for s in vl_q:
+            cuq.append(cuq[-1] + s)
+        cukv = [0]
+        for s in vl_kv:
+            cukv.append(cukv[-1] + s)
+        total_q, total_kv = cuq[-1], cukv[-1]
+        cross = any(a != b for a, b in zip(vl_q, vl_kv))
+        cu_q_t = torch.tensor(cuq, dtype=torch.int32, device=device)
+        cu_kv_t = torch.tensor(cukv, dtype=torch.int32, device=device)
+        q_bf16 = torch.empty(total_q, H, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        k_bf16 = torch.empty(total_kv, H_KV, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        v_bf16 = torch.empty(total_kv, H_KV, Dv, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        o_shape = (total_q, H, Dv)
+        S, Skv = max(vl_q), max(vl_kv)
+        pairs = sum(_score_pairs(a, b, causal) for a, b in zip(vl_q, vl_kv))
+    else:
+        B, S = batch, seq_len
+        Skv = seq_len if seqlen_kv is None else seqlen_kv
+        cross = Skv != S
+        cu_q_t = cu_kv_t = None
+        q_bf16 = torch.empty(B, S, H, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        k_bf16 = torch.empty(B, Skv, H_KV, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        v_bf16 = torch.empty(B, Skv, H_KV, Dv, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+        o_shape = (B, S, H, Dv)
+        pairs = B * _score_pairs(S, Skv, causal)
+
     q_fp8, q_descale = quantize_per_tensor_fp8(q_bf16)
     k_fp8, k_descale = quantize_per_tensor_fp8(k_bf16)
     v_fp8, v_descale = quantize_per_tensor_fp8(v_bf16)
 
-    o_bf16 = torch.zeros(B, S, H, D, dtype=torch.bfloat16, device=device)
+    o_bf16 = torch.zeros(*o_shape, dtype=torch.bfloat16, device=device)
     fp8_exec_kwargs = dict(q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
+    if varlen:
+        fp8_exec_kwargs.update(
+            cu_seqlens_q=cu_q_t,
+            cu_seqlens_kv=cu_kv_t,
+            max_seqlen_q=S,
+            cross_seqlen=cross,
+        )
+        if cross:
+            fp8_exec_kwargs["max_seqlen_kv"] = Skv
+    fp8_exec_kwargs["num_kv_splits"] = None if num_kv_splits is None else int(num_kv_splits)
 
     try:
         flydsl_flash_attn_func(
@@ -1708,20 +1830,30 @@ def run_fp8_config(
     o_flat = o_bf16.contiguous().view(-1)
 
     # Reference: dequantize the SAME e4m3fn Q/K/V (applying descales) and run the
-    # high-precision SDPA reference the bf16 path uses.
-    ref_4d = pytorch_ref_attention(
-        _dequant_fp8(q_fp8, q_descale),
-        _dequant_fp8(k_fp8, k_descale),
-        _dequant_fp8(v_fp8, v_descale),
-        causal=causal,
-    )
-    ref_flat = ref_4d.to(torch.float32).contiguous().view(-1)
+    q_ref = _dequant_fp8(q_fp8, q_descale)
+    k_ref = _dequant_fp8(k_fp8, k_descale)
+    v_ref = _dequant_fp8(v_fp8, v_descale)
+    if varlen:
+        ref_t = torch.empty(o_shape, dtype=torch.float32, device=device)
+        for b in range(B):
+            ref_fn = pytorch_ref_attention if (vl_q[b] == vl_kv[b] and D == Dv) else pytorch_ref_attention_qkv_diff
+            ref_t[cuq[b] : cuq[b + 1]] = ref_fn(
+                q_ref[cuq[b] : cuq[b + 1]].unsqueeze(0),
+                k_ref[cukv[b] : cukv[b + 1]].unsqueeze(0),
+                v_ref[cukv[b] : cukv[b + 1]].unsqueeze(0),
+                causal=causal,
+            ).squeeze(0)
+        ref_out = ref_t
+    else:
+        ref_fn = pytorch_ref_attention if (not cross and D == Dv) else pytorch_ref_attention_qkv_diff
+        ref_out = ref_fn(q_ref, k_ref, v_ref, causal=causal)
+    ref_flat = ref_out.to(torch.float32).contiguous().view(-1)
 
     o_f32 = o_flat.float()
     ref_f32 = ref_flat.float()
     max_err = (o_f32 - ref_f32).abs().max().item()
     mean_err = (o_f32 - ref_f32).abs().mean().item()
-    cos_sim = F.cosine_similarity(o_f32.reshape(-1, D), ref_f32.reshape(-1, D), dim=1)
+    cos_sim = F.cosine_similarity(o_f32.reshape(-1, Dv), ref_f32.reshape(-1, Dv), dim=1)
     min_cos = cos_sim.min().item()
     results["max_err"] = max_err
     results["mean_err"] = mean_err
@@ -1729,12 +1861,16 @@ def run_fp8_config(
     results["passed"] = max_err < FP8_MAX_ERR and min_cos > FP8_MIN_COS
 
     if verbose:
-        tag = f"B={B} S={S} H={H} D={D} fp8"
-        print(f"  [{tag}] --- compare_arrays ---")
+        shape_tag = f"varlen q={vl_q} kv={vl_kv}" if varlen else f"B={B} S={S} Skv={Skv}"
+        d_tag = f"D={D}" if D == Dv else f"D={D} Dv={Dv}"
+        print(f"  [{shape_tag} H={H} {d_tag} kv_sp={num_kv_splits} fp8] --- compare_arrays ---")
         compare_arrays(
             o_f32.detach().cpu().numpy(),
             ref_f32.detach().cpu().numpy(),
         )
+
+    if not bench:
+        return results
 
     try:
 
@@ -1767,10 +1903,8 @@ def run_fp8_config(
             torch.cuda.synchronize()
 
         _, us = run_perftest(kernel_fn, num_iters=iters, num_warmup=warmup)
-        s_eff = S / 2.0 if causal else float(S)
-        flops = 4.0 * S * s_eff * D * H * B
         results["us"] = us
-        results["tflops"] = flops / (us * 1e-6) / 1e12
+        results["tflops"] = _fp8_flops(pairs, H, D, Dv) / (us * 1e-6) / 1e12
     except Exception as e:
         # A failed timing path must not be reportable as a clean PASS-with-N/A row.
         # Keep the correctness numbers visible but mark the row not-passed so the
@@ -2507,13 +2641,13 @@ def _fmt_normal_row(cfg, path, status, r):
 
 
 _EXTRA_HDR = (
-    f"  {'Sq':<24} {'Skv':<24} {'H':>4} {'Hkv':>4} {'D':>4} " f"{'dtype':>6} {'causal':>8} {'Path':<{_PATH_W}s}"
+    f"  {'Sq':<24} {'Skv':<24} {'H':>4} {'Hkv':>4} {'D':>7} " f"{'dtype':>6} {'causal':>8} {'Path':<{_PATH_W}s}"
 )
 _EXTRA_W = len(_EXTRA_HDR)
 
 
 def _fmt_extra_prefix(sq, skv, nh, nh_kv, hd, dtype_key, causal_tag, path=""):
-    return f"  {sq:<24} {skv:<24} {nh:>4} {nh_kv:>4} {hd:>4} " f"{dtype_key:>6} {causal_tag:>8} {path:<{_PATH_W}s}"
+    return f"  {sq:<24} {skv:<24} {nh:>4} {nh_kv:>4} {hd:>7} " f"{dtype_key:>6} {causal_tag:>8} {path:<{_PATH_W}s}"
 
 
 def _fmt_extra_cmp_row(sq, skv, nh, nh_kv, hd, dtype_key, causal_tag, path, fly_r, ck_r):
@@ -2781,12 +2915,21 @@ def main():
     extra_cases = (
         [_extra_case_from_config(row) for row in EXTRA_CONFIGS] if args.extra and configs is DEFAULT_CONFIGS else []
     )
+    fp8_extra_cases = (
+        [_extra_case_from_config(row) for row in FP8_EXTRA_CONFIGS]
+        if args.extra and configs is DEFAULT_CONFIGS and "fp8" in dtypes_to_test
+        else []
+    )
+    if args.compare and fp8_extra_cases:
+        print("  note: fp8 extra shapes (D/Dv, varlen, split-K) run in normal mode only; skipped under --compare")
+        fp8_extra_cases = []
     run_configs = [
         (batch, seq_len, nh, nh_kv_default, hd, cfg_kv_splits)
         for batch, seq_len, nh, nh_kv_default, cfg_kv_splits in configs
         for hd in head_dims_to_test
     ]
     extra_run_cases = [(case, hd) for case in extra_cases for hd in head_dims_to_test]
+    extra_run_cases += [(case, case["hd"]) for case in fp8_extra_cases]
     paged_kv_paths = [(None, "")]
     if args.block_table:
         paged_kv_paths = [
@@ -3419,13 +3562,15 @@ def main():
                         nh_kv_eff = args.num_kv_heads if args.num_kv_heads is not None else case["nh_kv"]
                         kv_splits = case.get("kv_splits", 1)
                         kwargs = dict(case["kwargs"])
+                        hd_v = case.get("hd_v", hd)
+                        hd_label = hd if hd_v == hd else f"{hd}/{hd_v}"
                         for kv_cache_layout, path in paged_kv_paths:
                             pre = _fmt_extra_prefix(
                                 case["sq_label"],
                                 case["skv_label"],
                                 nh,
                                 nh_kv_eff,
-                                hd,
+                                hd_label,
                                 dtype_key,
                                 ctag,
                                 path=path,
@@ -3461,7 +3606,7 @@ def main():
                                                 case["skv_label"],
                                                 nh,
                                                 nh_kv_eff,
-                                                hd,
+                                                hd_label,
                                                 dtype_key,
                                                 ctag,
                                                 path,
@@ -3488,6 +3633,10 @@ def main():
                                         verbose=False,
                                         num_kv_heads=nh_kv_eff,
                                         num_kv_splits=kv_splits,
+                                        head_dim_v=hd_v,
+                                        seqlen_kv=kwargs.get("seqlen_kv"),
+                                        varlen_seqlens_q=kwargs.get("varlen_seqlens_q"),
+                                        varlen_seqlens_kv=kwargs.get("varlen_seqlens_kv"),
                                     )
                                 else:
                                     r = run_attn_config(
@@ -3522,7 +3671,7 @@ def main():
                                         case["skv_label"],
                                         nh,
                                         nh_kv_eff,
-                                        hd,
+                                        hd_label,
                                         dtype_key,
                                         ctag,
                                         path,
@@ -3540,7 +3689,7 @@ def main():
                                         case["skv_label"],
                                         nh,
                                         nh_kv_eff,
-                                        hd,
+                                        hd_label,
                                         dtype_key,
                                         ctag,
                                         path,
@@ -3558,7 +3707,7 @@ def main():
                                         case["skv_label"],
                                         nh,
                                         nh_kv_eff,
-                                        hd,
+                                        hd_label,
                                         dtype_key,
                                         ctag,
                                         path,
@@ -3581,7 +3730,7 @@ def main():
                                     case["skv_label"],
                                     nh,
                                     nh_kv_eff,
-                                    hd,
+                                    hd_label,
                                     dtype_key,
                                     ctag,
                                     path,
@@ -4301,6 +4450,103 @@ def test_lse_fully_masked_rows():
     _assert_lse_matches(lse, ref, _ATOL_BF16)
 
 
+@pytest.mark.parametrize("lazy_rescale, atol", [(True, 0.06), (False, 0.05)])
+@pytest.mark.parametrize("S", [1024, 12288])
+@pytest.mark.parametrize("k_scale", [1.0, 200.0])
+def test_fp8_softmax_normalises(S, k_scale, lazy_rescale, atol):
+    """With V all ones the output is exactly 1.0, because softmax normalises.
+
+    Nothing about V or the PV product can move it, and 1.0 is representable in
+    e4m3, so any deviation is the softmax's own normalisation. `k_scale` widens
+    the score range: the failure this guards against is invisible on
+    near-uniform attention and severe on peaked attention.
+
+    Both rescale paths are checked, with different bounds, because the headroom
+    for lifting P differs. The lazy path leaves ``exp2`` free to reach
+    ``2**RESCALE_THRESHOLD`` and can use only the remainder, so it improves
+    without becoming exact; the eager path rebases every tile and gets all of
+    it. Before the fix these reached 0.64 and 0.50 respectively. The lazy bound
+    also pins the per-length threshold: pinned at 6 the widest case here reaches
+    0.09, and at bf16's 8 it reaches 0.23, both past the 0.06 allowed.
+    """
+    if get_rocm_arch() != "gfx950":
+        pytest.skip("dense fp8 attention is gfx950-only")
+
+    B, H, D = 2, 8, 128
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 * k_scale
+
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    q_s = q.abs().amax().float() / fp8_max
+    k_s = k.abs().amax().float() / fp8_max
+    v_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
+
+    out = flydsl_flash_attn_func(
+        (q / q_s).to(fp8),
+        (k / k_s).to(fp8),
+        v,
+        causal=False,
+        q_descale=q_s.reshape(1).contiguous(),
+        k_descale=k_s.reshape(1).contiguous(),
+        v_descale=v_s.reshape(1).contiguous(),
+        dualwave_swp_lazy_rescale=lazy_rescale,
+    )
+    if isinstance(out, (tuple, list)):
+        out = out[0]
+    out = out.float()
+
+    # e4m3 rounding of P leaves a per-row residue that the lift cannot remove.
+    torch.testing.assert_close(out, torch.ones_like(out), rtol=0, atol=atol)
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_fp8_out_tensor_is_filled_and_returned(monkeypatch, split):
+    """A caller-supplied ``out`` must come back filled, and be the same tensor.
+
+    ``split=True`` lowers the overflow bound so the batch-splitting path runs on
+    a small tensor: reaching it for real needs 2**31 elements, i.e. ~10 GB of
+    q/k/v/out, which is why it must be reachable another way to be covered at
+    all. Each launch writes into its own ``out[i:i+1]`` view, so returning a
+    concatenation would both copy several GB at the sizes that reach it and hand
+    back a different tensor than the caller passed. Splitting must also leave
+    the result unchanged, which is what comparing against the unsplit reference
+    checks.
+    """
+    if get_rocm_arch() != "gfx950":
+        pytest.skip("dense fp8 attention is gfx950-only")
+
+    B, S, H, D = 2, 1024, 8, 128
+    torch.manual_seed(0)
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    q, k, v = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3))
+    scales = [t.abs().amax().float() / fp8_max for t in (q, k, v)]
+    qq, kq, vq = ((t / s).to(fp8) for t, s in zip((q, k, v), scales))
+    descales = [s.reshape(1).contiguous() for s in scales]
+
+    ref = flydsl_flash_attn_func(
+        qq, kq, vq, causal=False, q_descale=descales[0], k_descale=descales[1], v_descale=descales[2]
+    )
+    if isinstance(ref, (tuple, list)):
+        ref = ref[0]
+
+    if split:
+        monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", qq.numel())
+
+    out = torch.empty(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    got = flydsl_flash_attn_func(
+        qq, kq, vq, causal=False, q_descale=descales[0], k_descale=descales[1], v_descale=descales[2], out=out
+    )
+    if isinstance(got, (tuple, list)):
+        got = got[0]
+
+    assert got.data_ptr() == out.data_ptr(), "out was not returned to the caller"
+    torch.testing.assert_close(out, ref, rtol=0, atol=0)
+
+
 def test_return_lse_false_returns_only_out():
     """Backwards-compat: default return_lse=False returns a bare tensor."""
     dtype = torch.bfloat16
@@ -4327,6 +4573,57 @@ def test_return_lse_rejects_fp8():
             v_descale=torch.ones(1, device="cuda"),
             return_lse=True,
         )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("H", [8, 16, 32, 64])
+def test_xcd_swizzle_is_bit_identical(H):
+    """The head-slow remap must not change a single bit of the output.
+
+    It only re-derives (head, q_block) from the same linear workgroup id, so it
+    is bijective by construction -- but a mistake in the derivation would show
+    up as a permuted or partially-recomputed output rather than as an error, so
+    this pins it. S clears the auto-dispatch threshold (num_q_blocks >= 64 at
+    BLOCK_M=256) so both settings run on the shapes the remap targets.
+    """
+    S = 64 * 256
+    dtype = torch.bfloat16
+    torch.manual_seed(H)
+    q = _rand_lse(1, S, H, 128, dtype=dtype)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    def run(flag):
+        return flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=flag).clone()
+
+    off, on = run(False), run(True)
+    torch.cuda.synchronize()
+    assert torch.equal(off, on)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("xcd_swizzle", [None, True])
+def test_xcd_swizzle_heads_not_multiple_of_xcd(xcd_swizzle):
+    """H % 8 != 0 must fall back rather than mis-map, however the flag is set.
+
+    The remap divides the linear workgroup id by the q-block count to recover
+    the head, which only lands each head on one XCD when the head count divides
+    evenly into the 8 XCDs. Two guards enforce that: the dispatch condition
+    below auto-selects against it, and _init_dualwave_thread_mapping re-checks
+    NUM_HEADS_Q % NUM_XCD_GFX950 independently -- so forcing the flag on is safe
+    and simply does not engage the remap. Both paths are checked here.
+    """
+    S, H = 64 * 256, 12
+    dtype = torch.bfloat16
+    torch.manual_seed(H)
+    q = _rand_lse(1, S, H, 128, dtype=dtype)
+    k, v = torch.randn_like(q), torch.randn_like(q)
+
+    out = flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=xcd_swizzle)
+    torch.cuda.synchronize()
+    ref = F.scaled_dot_product_attention(
+        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
+    ).transpose(1, 2)
+    torch.testing.assert_close(out.float(), ref, atol=_ATOL_BF16, rtol=0)
 
 
 if __name__ == "__main__":
@@ -4449,6 +4746,21 @@ def test_sink_splitk_counted_once(num_kv_splits):
 
 
 @_requires_gfx950
+@pytest.mark.parametrize("Sq,Skv", [(512, 4096), (4096, 512)])
+@pytest.mark.parametrize("causal", [False, True])
+def test_splitk_rejects_cross_length_kv(Sq, Skv, causal):
+    """Dense split-K is self-attention only, and it used to fail without saying so."""
+    dtype = torch.bfloat16
+    B, H, D = 1, 8, 128
+    setup_seed(DEFAULT_SEED)
+    q = torch.empty(B, Sq, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, Skv, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, Skv, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    with pytest.raises(ValueError, match="seq_len_kv == seq_len_q"):
+        flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_splits=4)
+
+
+@_requires_gfx950
 @pytest.mark.parametrize("Sq,Skv", [(512, 128), (512, 160)])
 def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
     """Causal cross-attention with Skv < Sq skips whole q blocks that see no key.
@@ -4481,3 +4793,582 @@ def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
     masked_lse = lse[:, :, :n_masked].float()
     assert (masked_lse - sink.view(1, H, 1)).abs().max().item() <= 1e-4, "all-masked rows must carry the sink LSE"
     assert out[:, :n_masked].abs().max().item() == 0.0, "all-masked rows must have zero output"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("k_scale", [8.0, 32.0, 64.0])
+def test_lazy_rescale_survives_a_wide_score_range(k_scale):
+    """A widened logit spread must not break the lazy rescale.
+
+    Every other test here uses near-uniform attention, which never reaches the
+    branch. The eager path is the reference; the two are mathematically the same.
+    """
+    B, S, H, D = 1, 4096, 8, 128
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    k = (torch.randn_like(q).float() * k_scale).to(torch.bfloat16)
+    v = torch.randn_like(q)
+
+    lazy = flydsl_flash_attn_func(q, k, v, causal=False)
+    eager = flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_lazy_rescale=False)
+    torch.cuda.synchronize()
+
+    assert torch.isfinite(eager).all(), f"the eager baseline is not finite at k_scale={k_scale}"
+    n_nan = int(torch.isnan(lazy).sum())
+    n_inf = int(torch.isinf(lazy).sum())
+    assert torch.isfinite(
+        lazy
+    ).all(), f"lazy rescale produced {n_nan} NaN and {n_inf} inf of {lazy.numel()} at k_scale={k_scale}"
+    ref = torch.nn.functional.scaled_dot_product_attention(
+        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
+    ).transpose(1, 2)
+    rel = lambda o: ((o.float() - ref).norm() / ref.norm()).item()  # noqa: E731
+    assert (
+        rel(lazy) <= rel(eager) * 1.05 + 1e-4
+    ), f"lazy rel L2 {rel(lazy):.3e} is worse than eager {rel(eager):.3e} at k_scale={k_scale}"
+
+
+@_requires_gfx950
+def test_fp8_lazy_rescale_keeps_the_running_max_monotonic():
+    """Successive downward rebases must not multiply into an overflow.
+
+    One row class reads a coordinate whose tile maxima descend, the other one that
+    ascends and so fires the wave-uniform branch every tile. V is all ones, so the
+    exact output is 1.0; the unfixed kernel returns 1,048,576 of 2,097,152 as NaN.
+    """
+    B, S, H, D = 1, 2048, 8, 128
+    BLOCK_N, STEP = 64, 32.0
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+
+    q = torch.zeros(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    q[:, 0::2, :, 0] = 1.0
+    q[:, 1::2, :, 1] = 1.0
+    tile = torch.arange(S, device="cuda") // BLOCK_N
+    k = torch.zeros(B, S, H, D, device="cuda", dtype=torch.float32)
+    k[:, :, :, 0] = (-STEP * tile).view(1, S, 1)
+    k[:, :, :, 1] = (STEP * tile).view(1, S, 1)
+    k = k.to(torch.bfloat16)
+
+    q_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    k_s = k.abs().amax().float() / fp8_max
+    v_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
+
+    out = flydsl_flash_attn_func(
+        (q / q_s).to(fp8),
+        (k / k_s).to(fp8),
+        v,
+        causal=False,
+        q_descale=q_s.reshape(1).contiguous(),
+        k_descale=k_s.reshape(1).contiguous(),
+        v_descale=v_s.reshape(1).contiguous(),
+        dualwave_swp_lazy_rescale=True,
+        num_kv_splits=1,
+    )
+    out = (out[0] if isinstance(out, (tuple, list)) else out).float()
+    torch.cuda.synchronize()
+    assert torch.isfinite(out).all(), f"{int(torch.isnan(out).sum())} NaN of {out.numel()}"
+    assert (out - 1).abs().max().item() < 0.01, f"max |o-1| = {(out - 1).abs().max().item():.4f}"
+
+
+@pytest.mark.l0_backend_agnostic
+def test_fp8_lazy_paths_do_not_roll_their_own_correction():
+    """The fp8 lazy rescales must not compute their own correction factor.
+
+    A per-step cap does not bound the product over many tiles, so the invariant is
+    structural: the correction comes from ``rescale_from_tile_max``.
+    """
+    from kernels.attention import flash_attn_utils as _fau
+
+    src = Path(_fau.__file__).read_text().splitlines()
+    start = next(i for i, ln in enumerate(src) if "class DualwaveFp8SoftmaxHelper" in ln)
+    end = next((i for i, ln in enumerate(src[start + 1 :], start + 1) if ln.startswith("class ")), len(src))
+    body = src[start:end]
+
+    def method(name):
+        i = next(k for k, ln in enumerate(body) if f"def {name}(" in ln)
+        stop = next((k for k in range(i + 1, len(body)) if body[k].startswith("    def ")), len(body))
+        return "\n".join(body[i:stop])
+
+    for name in ("lazy_rescale_o", "lazy_correct_o"):
+        chunk = method(name)
+        assert "exp2" not in chunk, f"{name} computes its own correction instead of taking the monotonic one"
+        assert "_lazy_correction" in chunk or "rescale_from_tile_max" in chunk, f"{name} has no correction source"
+    assert "rescale_from_tile_max" in method("_lazy_correction"), "the shared correction is not the monotonic one"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("case", ["b1_too_large", "per_slice_still_too_large", "kv_only_over_limit"])
+def test_fp8_flat_overflow_guard_covers_every_tensor(monkeypatch, case):
+    """The int32 flat-dim guard has to see K and V, and to give up loudly.
+
+    Splitting divides the flat dim by B, so it only helps while B > 1 and while
+    one entry fits. Cross-attention can also put the excess in K/V rather than
+    Q. Each case lowers the bound rather than allocating 2**31 elements.
+    """
+    torch.manual_seed(0)
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    H, D = 8, 128
+
+    def quant(t):
+        s = t.abs().amax().float() / fp8_max
+        return (t / s).to(fp8), s.reshape(1).contiguous()
+
+    B, Sq, Skv = (1, 1024, 1024) if case == "b1_too_large" else (2, 1024, 1024)
+    if case == "kv_only_over_limit":
+        Sq = 256
+    q = torch.randn(B, Sq, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, Skv, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    v = torch.randn_like(k)
+    qq, qs = quant(q)
+    kq, ks = quant(k)
+    vq, vs = quant(v)
+    kw = dict(causal=False, q_descale=qs, k_descale=ks, v_descale=vs)
+
+    if case == "kv_only_over_limit":
+        # Between q's count and k's, so only the K/V check can fire. B=2 splits.
+        ref = flydsl_flash_attn_func(qq, kq, vq, **kw)
+        ref = ref[0] if isinstance(ref, (tuple, list)) else ref
+        monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", kq.numel())
+        got = flydsl_flash_attn_func(qq, kq, vq, **kw)
+        got = got[0] if isinstance(got, (tuple, list)) else got
+        torch.testing.assert_close(got.float(), ref.float(), rtol=0, atol=0)
+        return
+
+    # b1_too_large has no batch to divide; per_slice_still_too_large has B=2 but
+    # a bound low enough that one entry is still over, so the recursion hits the
+    # same wall. Both must raise rather than launch.
+    bound = qq.numel() if case == "b1_too_large" else qq.numel() // 2
+    monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", bound)
+    with pytest.raises(NotImplementedError, match="int32"):
+        flydsl_flash_attn_func(qq, kq, vq, **kw)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("modifier", ["bias", "alibi_slopes", "sink"])
+def test_fp8_split_still_rejects_modifiers(monkeypatch, modifier):
+    """The flat-dim split must not swallow an unsupported modifier.
+
+    It runs before the fp8 modifier check and does not forward bias, alibi or
+    sink, so a call large enough to split used to return plain attention while
+    the same call one element smaller raised.
+    """
+    B, S, H, D = 2, 256, 8, 128
+    monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", B * S * H * D // 2)
+    fp8 = torch.float8_e4m3fn
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16).to(fp8)
+    k, v = q.clone(), q.clone()
+    scale = torch.ones(1, device="cuda")
+    kw = dict(causal=False, q_descale=scale, k_descale=scale, v_descale=scale)
+    arg = {
+        "bias": torch.zeros(S, S, device="cuda", dtype=torch.bfloat16),
+        "alibi_slopes": torch.zeros(H, device="cuda", dtype=torch.float32),
+        "sink": torch.zeros(H, device="cuda", dtype=torch.float32),
+    }[modifier]
+    with pytest.raises(NotImplementedError, match=f"{modifier} is not supported for fp8"):
+        flydsl_flash_attn_func(q, k, v, **{modifier: arg}, **kw)
+
+
+@_requires_gfx950
+def test_fp8_split_result_survives_a_non_current_stream(monkeypatch):
+    """The split must not be consumed on a stream that is not the one it ran on.
+
+    Every launch goes to ``stream``; building the result on the ambient stream
+    reads it while those kernels are still queued, and the damage survives a
+    later synchronize because the copy already happened.
+    """
+    B, S, H, D = 2, 512, 8, 128
+    fp8 = torch.float8_e4m3fn
+    torch.manual_seed(0)
+    q = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1).to(fp8)
+    k, v = q.clone(), q.clone()
+    scale = torch.ones(1, device="cuda")
+    kw = dict(causal=False, q_descale=scale, k_descale=scale, v_descale=scale)
+
+    ref = flydsl_flash_attn_func(q, k, v, **kw)
+    torch.cuda.synchronize()
+
+    # over the whole tensor, under one batch entry, so it splits and each launch fits
+    monkeypatch.setattr(flash_attn_interface, "_FP8_MAX_FLAT_ELEMS", B * S * H * D * 3 // 4)
+    side = torch.cuda.Stream()
+    filler = torch.randn(4096, 4096, device="cuda")
+    with torch.cuda.stream(side):
+        for _ in range(20):  # keep the stream busy so the attention starts late
+            filler = filler @ filler.T
+    got = flydsl_flash_attn_func(q, k, v, stream=side, **kw)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(got.float(), ref.float(), rtol=0, atol=0)
+
+
+def test_fp8_rescale_threshold_drops_past_the_long_sequence_bound():
+    """fp8 picks its rescale threshold from the KV length.
+
+    Below the bound 6 and 4 are equally accurate and 6 is cheaper; above it the
+    running max spans enough tiles that 4's extra two log2 units of P lift are
+    worth its ~0.3%. The kernel is not specialised on S, so this widens the
+    build cache to two variants -- keep it two.
+    """
+    f = flash_attn_interface._fp8_rescale_threshold
+    assert f(1024) == 6.0
+    assert f(flash_attn_interface._FP8_LONG_SEQ) == 6.0
+    assert f(flash_attn_interface._FP8_LONG_SEQ + 1) == 4.0
+    assert f(131072) == 4.0
+    assert set(f(s) for s in (1, 1024, 4096, 4097, 8192, 131072)) == {6.0, 4.0}
+
+
+@_requires_gfx950
+def test_fp8_default_is_the_lazy_rescale():
+    """Every other fp8 case passes the flag, so the default would go untested.
+
+    V is all ones, so the exact output is 1.0 and the two runs must also agree
+    bit for bit.
+    """
+    B, S, H, D = 1, 4096, 8, 128
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 * 200.0
+    q_s = q.abs().amax().float() / fp8_max
+    k_s = k.abs().amax().float() / fp8_max
+    v_s = torch.tensor(1.0 / fp8_max, device="cuda")
+    v = (torch.ones(B, S, H, D, device="cuda", dtype=torch.bfloat16) / v_s).to(fp8)
+    kw = dict(
+        causal=False,
+        q_descale=q_s.reshape(1).contiguous(),
+        k_descale=k_s.reshape(1).contiguous(),
+        v_descale=v_s.reshape(1).contiguous(),
+        num_kv_splits=1,
+    )
+    qq, kk = (q / q_s).to(fp8), (k / k_s).to(fp8)
+
+    default = flydsl_flash_attn_func(qq, kk, v, **kw)
+    lazy = flydsl_flash_attn_func(qq, kk, v, dualwave_swp_lazy_rescale=True, **kw)
+    torch.cuda.synchronize()
+    default = (default[0] if isinstance(default, (tuple, list)) else default).float()
+    lazy = (lazy[0] if isinstance(lazy, (tuple, list)) else lazy).float()
+
+    torch.testing.assert_close(default, lazy, rtol=0, atol=0)
+
+
+_FP8_HEADS = 12
+_FP8_D, _FP8_DV = 192, 128
+
+
+def _assert_fp8_shape(causal, batch=1, seq_len=1, head_dim=_FP8_D, head_dim_v=_FP8_DV, num_heads=_FP8_HEADS, **kwargs):
+    """Correctness-only run of one fp8 shape, asserted against the fp8 gate.
+
+    bench=False keeps the profiler and timing loop out of the unit run; the
+    benchmark numbers for these shapes come from the CLI harness.
+    """
+    r = run_fp8_config(
+        batch,
+        seq_len,
+        num_heads,
+        head_dim,
+        causal,
+        warmup=0,
+        iters=1,
+        verbose=False,
+        bench=False,
+        head_dim_v=head_dim_v,
+        **kwargs,
+    )
+    assert "err" not in r, r["err"]
+    assert r["passed"], (
+        f"fp8 gate: max_err={r['max_err']:.3e} (< {FP8_MAX_ERR}), " f"min_cos={r['min_cos']:.5f} (> {FP8_MIN_COS})"
+    )
+
+
+FP8_SPLIT_MODES = [pytest.param(1, id="dense"), pytest.param(None, id="autosplit")]
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("batch,seq_len", [(1, 4096), (2, 4096), (3, 4096), (4, 4096), (1, 8192)])
+@pytest.mark.parametrize("num_kv_splits", FP8_SPLIT_MODES)
+def test_fp8_head_dim_192_v_128_dense(causal, batch, seq_len, num_kv_splits):
+    """Dense self-attention with QK head_dim 192 and a 128-wide V.
+
+    Q/K are [B, S, 12, 192], V is [B, S, 12, 128], and the output follows V.
+    """
+    _assert_fp8_shape(causal, batch=batch, seq_len=seq_len, num_kv_splits=num_kv_splits)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("batch", FP8_VARLEN_BATCHES)
+@pytest.mark.parametrize("num_kv_splits", FP8_SPLIT_MODES)
+def test_fp8_head_dim_192_v_128_varlen(causal, batch, num_kv_splits):
+    """Packed varlen self-attention over 2614 tokens, batch 1..4.
+
+    Q/K are [2614, 12, 192] and V is [2614, 12, 128] at every batch -- only the
+    cu_seqlens partition changes (batch 2 is [0, 1024, 2614]). Q and KV share the
+    per-sequence lengths, so only the V head dim differs here.
+    """
+    _assert_fp8_shape(causal, varlen_seqlens_q=FP8_VARLEN_Q_SEQLENS[batch], num_kv_splits=num_kv_splits)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("batch", FP8_VARLEN_BATCHES)
+@pytest.mark.parametrize("num_kv_splits", FP8_SPLIT_MODES)
+def test_fp8_head_dim_192_v_128_varlen_cross_length(causal, batch, num_kv_splits):
+    """Packed varlen cross-attention, batch 1..4: 2614 Q tokens vs 16384 KV tokens."""
+    _assert_fp8_shape(
+        causal,
+        varlen_seqlens_q=FP8_VARLEN_Q_SEQLENS[batch],
+        varlen_seqlens_kv=FP8_VARLEN_KV_SEQLENS[batch],
+        num_kv_splits=num_kv_splits,
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("num_kv_splits", FP8_SPLITKV_SPLITS)
+@pytest.mark.parametrize("head_dim,head_dim_v", [(128, 128), (192, 128)])
+def test_fp8_split_kv(causal, num_kv_splits, head_dim, head_dim_v):
+    """fp8 split-KV: the KV dimension split across workgroups plus a combine pass.
+
+    The 128/128 pair isolates the split from the new head-dim pair, so a failure
+    points at one feature or the other rather than both at once.
+    """
+    _assert_fp8_shape(
+        causal,
+        batch=1,
+        seq_len=8192,
+        head_dim=head_dim,
+        head_dim_v=head_dim_v,
+        num_kv_splits=num_kv_splits,
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("batch", (1, 2, 3, 4))
+def test_fp8_split_kv_batched(causal, batch):
+    """Split-KV over batches: the grid is B * num_kv_splits deep, so the batch is
+    what decides whether splitting still fills the GPU."""
+    _assert_fp8_shape(causal, batch=batch, seq_len=8192, num_kv_splits=4)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("seq_len,seqlen_kv,num_kv_splits", [(512, 16384, 8), (2614, 16384, 8), (1024, 32768, 16)])
+def test_fp8_split_kv_cross_length(causal, seq_len, seqlen_kv, num_kv_splits):
+    """Split-KV with short Q against long KV -- the shape split-KV exists for."""
+    _assert_fp8_shape(causal, batch=1, seq_len=seq_len, seqlen_kv=seqlen_kv, num_kv_splits=num_kv_splits)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("seq_len,num_kv_splits", list(zip(FP8_SPLITKV_SEQLENS, FP8_SPLITKV_SPLITS)))
+def test_fp8_split_kv_long_sequence(causal, seq_len, num_kv_splits):
+    """Split count scaled with the KV length, 4k/2 through 32k/16."""
+    _assert_fp8_shape(causal, batch=1, seq_len=seq_len, num_kv_splits=num_kv_splits)
+
+
+def _run_fp8_into_nan_out(q, k, v, head_dim_v, **kwargs):
+    """Launch fp8 attention into a NaN-filled ``out`` so unwritten rows are countable."""
+    fp8 = torch.float8_e4m3fn
+    fp8_max = torch.finfo(fp8).max
+    scales = [t.abs().amax().float().clamp(min=1e-12) / fp8_max for t in (q, k, v)]
+    qq, kq, vq = ((t.float() / s).to(fp8).contiguous() for t, s in zip((q, k, v), scales))
+    descales = [s.reshape(1).contiguous() for s in scales]
+    out = torch.full(q.shape[:-1] + (head_dim_v,), float("nan"), device=q.device, dtype=torch.bfloat16)
+    flydsl_flash_attn_func(
+        qq,
+        kq,
+        vq,
+        out=out,
+        q_descale=descales[0],
+        k_descale=descales[1],
+        v_descale=descales[2],
+        **kwargs,
+    )
+    return out
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("batch,seq_len,num_heads", [(1, 4097, 1), (1, 4097, 3), (1, 2050, 7), (1, 8193, 1)])
+def test_fp8_auto_split_kv_writes_every_row(batch, seq_len, num_heads):
+    """Auto split-K must not drop the tail of the combine grid."""
+    D = 128
+    assert (batch * num_heads * seq_len) % (256 // (D // 4)) != 0, "shape would not exercise the tail"
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(batch, seq_len, num_heads, D, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3))
+    out = _run_fp8_into_nan_out(q, k, v, D, causal=False, num_kv_heads=num_heads)
+    assert not torch.isnan(out).any(), f"{int(torch.isnan(out).any(-1).sum())} output rows were never written"
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("seq_len,num_heads,head_dim_v", [(385, 1, 128), (385, 3, 128), (1155, 1, 128), (386, 1, 64)])
+def test_fp8_varlen_split_kv_respects_batch_boundaries(seq_len, num_heads, head_dim_v):
+    """varlen + split-K must not mix batches inside a combine wave."""
+    rows_per_wave = 256 // head_dim_v
+    assert (seq_len * num_heads) % rows_per_wave != 0, "shape would not straddle a wave"
+    B, D = 8, 192
+    torch.manual_seed(0)
+    cu = torch.arange(0, (B + 1) * seq_len, seq_len, device="cuda", dtype=torch.int32)
+    total = B * seq_len
+    q = torch.randn(total, num_heads, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(total, num_heads, D, device="cuda", dtype=torch.bfloat16) * 0.1
+    v = torch.randn(total, num_heads, head_dim_v, device="cuda", dtype=torch.bfloat16) * 0.1
+    kw = dict(
+        causal=False,
+        num_kv_heads=num_heads,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        max_seqlen_q=seq_len,
+        max_seqlen_kv=seq_len,
+        cross_seqlen=False,
+    )
+    split = _run_fp8_into_nan_out(q, k, v, head_dim_v, num_kv_splits=2, **kw)
+    assert not torch.isnan(split).any(), f"{int(torch.isnan(split).any(-1).sum())} output rows were never written"
+    unsplit = _run_fp8_into_nan_out(q, k, v, head_dim_v, num_kv_splits=1, **kw)
+    torch.testing.assert_close(split.float(), unsplit.float(), rtol=2e-2, atol=2e-2)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("head_dim_v", [64, 96, 128, 160, 192])
+def test_fp8_supported_v_head_dims_run(head_dim_v):
+    """Every head_dim_v the guard admits has to actually produce the right answer."""
+    _assert_fp8_shape(False, batch=1, seq_len=512, num_heads=4, head_dim=128, head_dim_v=head_dim_v)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize(
+    "head_dim,head_dim_v,match",
+    [
+        # D_CHUNKS < 2 aborts LLVM; D_CHUNKS > 6 miscomputes the high chunks.
+        (128, 32, "head_dim_v"),
+        (128, 224, "head_dim_v"),
+        (128, 256, "head_dim_v"),
+        (96, 96, "head_dim"),
+        (256, 192, "LDS"),
+        (320, 128, "LDS"),
+        (384, 64, "LDS"),
+    ],
+)
+def test_fp8_rejected_head_dims_raise_before_launch(head_dim, head_dim_v, match):
+    """Unsupported head dims must name the shape, not abort or fault the GPU."""
+    B, S, H = 1, 512, 4
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, head_dim, device="cuda", dtype=torch.bfloat16) * 0.1
+    k = torch.randn(B, S, H, head_dim, device="cuda", dtype=torch.bfloat16) * 0.1
+    v = torch.randn(B, S, H, head_dim_v, device="cuda", dtype=torch.bfloat16) * 0.1
+    with pytest.raises((RuntimeError, ValueError), match=match):
+        _run_fp8_into_nan_out(q, k, v, head_dim_v, causal=False, num_kv_heads=H)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("seq_len", [1, 385, 1000, 4097])
+def test_fp8_dense_ragged_seq_lens(seq_len):
+    """Dense fp8 on sequence lengths that are not multiples of the tile."""
+    _assert_fp8_shape(True, batch=2, seq_len=seq_len, num_heads=4, head_dim=192, head_dim_v=128)
+
+
+_NUM_CU = 256
+
+
+@pytest.mark.parametrize(
+    "batch,num_heads,seqlen_q,seqlen_kv,causal,expect",
+    [
+        (1, 8, 512, 512, True, 128),
+        (1, 8, 2048, 2048, True, 128),
+        (1, 8, 2048, 2048, False, 128),
+        (8, 32, 2048, 2048, True, 256),
+        (16, 32, 1024, 1024, True, 256),
+        (32, 32, 512, 512, True, 256),
+        (1, 8, 2048, 2048, True, 128),
+        (1, 8, 4096, 4096, True, 256),
+        (1, 8, 4096, 16384, True, 256),
+        (2, 8, 4096, 4096, True, 256),
+    ],
+)
+def test_fp8_auto_block_m_picks(batch, num_heads, seqlen_q, seqlen_kv, causal, expect):
+    """Pin what `_fp8_auto_block_m` chooses; correctness tests pass either way."""
+    got = flash_attn_interface._fp8_auto_block_m(batch, num_heads, seqlen_q, seqlen_kv, causal, _NUM_CU)
+    assert got == expect
+
+
+def test_fp8_auto_block_m_rule_does_not_depend_on_causal():
+    """The two mask modes share one rule; splitting them is what regressed before."""
+    for batch in (1, 2, 4, 8, 16, 32):
+        for num_heads in (8, 16, 32):
+            for seqlen in (512, 1024, 2048, 4096):
+                assert flash_attn_interface._fp8_auto_block_m(
+                    batch, num_heads, seqlen, seqlen, True, _NUM_CU
+                ) == flash_attn_interface._fp8_auto_block_m(batch, num_heads, seqlen, seqlen, False, _NUM_CU)
+
+
+@pytest.mark.parametrize(
+    "batch,num_heads,seqlen,causal,expect",
+    [
+        (1, 8, 512, False, 1),
+        (1, 8, 4096, False, 2),
+        (32, 32, 8192, False, 1),
+    ],
+)
+def test_fp8_auto_kv_splits_picks(batch, num_heads, seqlen, causal, expect):
+    got = flash_attn_interface._fp8_auto_kv_splits(batch, num_heads, seqlen, seqlen, causal, _NUM_CU)
+    assert got == expect
+
+
+@pytest.mark.parametrize(
+    "batch,causal,cross,num_kv_splits,expect",
+    [
+        (2, True, False, 1, 2),
+        (3, True, False, 1, 1),
+        (2, False, False, 1, 1),
+        (2, True, True, 1, 1),
+        (2, True, False, 4, 1),
+    ],
+)
+def test_fp8_batch_interleave_group_picks(batch, causal, cross, num_kv_splits, expect):
+    got = flash_attn_interface._fp8_batch_interleave_group(batch, causal, cross, num_kv_splits)
+    assert got == expect
+
+
+def test_fp8_num_kv_splits_none_is_auto_and_one_is_off(monkeypatch):
+    """``None`` opts into the autotuner; an explicit ``1`` keeps the kernel unsplit."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip("dense fp8 attention is gfx950-only")
+    seen = []
+    orig = flash_attn_interface._build_dense_fp8
+
+    def spy(**kw):
+        seen.append(kw["num_kv_splits"])
+        return orig(**kw)
+
+    monkeypatch.setattr(flash_attn_interface, "_build_dense_fp8", spy)
+    B, S, H, D = 1, 8192, 2, 128
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3))
+    for kwargs in ({}, {"num_kv_splits": 1}, {"num_kv_splits": 4}):
+        _run_fp8_into_nan_out(q, k, v, D, causal=True, num_kv_heads=H, **kwargs)
+    auto, off, pinned = seen
+    assert auto > 1, "the default should reach the autotuner"
+    assert off == 1, "an explicit num_kv_splits=1 must stay unsplit"
+    assert pinned == 4
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("seq_len,num_heads,head_dim", [(4097, 1, 128), (2050, 7, 128), (1025, 1, 64)])
+def test_bf16_split_kv_writes_every_row(seq_len, num_heads, head_dim):
+    """The bf16 combine grid shares the fp8 one's rounding, and the same bug."""
+    B = 1
+    torch.manual_seed(0)
+    q, k, v = (
+        torch.randn(B, seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(3)
+    )
+    out = torch.full_like(q, float("nan"))
+    flydsl_flash_attn_func(q, k, v, causal=False, num_kv_heads=num_heads, out=out, num_kv_splits=2)
+    assert not torch.isnan(out).any(), f"{int(torch.isnan(out).any(-1).sum())} output rows were never written"
+    unsplit = flydsl_flash_attn_func(q, k, v, causal=False, num_kv_heads=num_heads, num_kv_splits=1)
+    if isinstance(unsplit, (tuple, list)):
+        unsplit = unsplit[0]
+    torch.testing.assert_close(out.float(), unsplit.float(), rtol=2e-3, atol=2e-3)

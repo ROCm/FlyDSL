@@ -47,8 +47,8 @@ FlyDSL/
 ├── .claude/skills/                 # Project-local Claude Code skills (kernel authoring, profiling, build); git-tracked
 ├── python/
 │   ├── flydsl/                    # Python DSL core
-│   │   ├── expr/                  # DSL expression API; direct children are TARGET-NEUTRAL (typing, primitive, gpu, derived, struct, numeric, math, vector, arith, meta, extern; + utils/)
-│   │   │   └── rocdl/             # Target-specific ROCDL package (cdna4, cdna5, cluster, inline_asm, tdm_ops, universal); lazy-loaded via __init__'s _BACKEND_MODULES
+│   │   ├── expr/                  # DSL expression API; direct children are TARGET-NEUTRAL (typing, primitive, gpu, derived, struct, numeric, math, enum, arith, meta, extern; + utils/)
+│   │   │   └── rocdl/             # Target-specific ROCDL package (cdna3, cdna4, cdna5, rdna3, rdna4, cluster, inline_asm, tdm_ops, universal); lazy-loaded via __init__'s _BACKEND_MODULES
 │   │   ├── extension/             # Extension libraries on top of expr; lazy-loaded via expr/__init__'s _LIBRARY_MODULES
 │   │   ├── compiler/              # @flyc.kernel / @flyc.jit, AST rewriting, JIT cache, backends
 │   │   ├── runtime/               # Device runtime and GPU arch detection
@@ -67,7 +67,8 @@ FlyDSL/
 │   ├── system/                    # Cross-cutting compile/system tests
 │   ├── mlir/                      # FileCheck tests driven by scripts/run_tests.sh
 │   └── python/examples/           # AOT compile/cache pytest tests (aot_example.py)
-├── examples/                      # 01-vectorAdd, 02-tiledCopy, 03-tiledMma, 04-preshuffle_gemm
+├── examples/                      # numbered standalone scripts (01-vectorAdd ...)
+│   └── extension/<library>/       # one folder per extension library (extension/coop/)
 ├── scripts/                       # build, test, benchmark, wheel, debug helper scripts
 ├── docs/                          # Sphinx documentation source
 ├── thirdparty/                    # Vendored dlpack and tvm-ffi
@@ -160,6 +161,7 @@ helper code that is not part of the traced closure.
 - **Imports**: isort treats `flydsl` as first-party.
 - **C++**: LLVM style, `ColumnLimit: 100` in `.clang-format`; C++17 via top-level `CMakeLists.txt`.
 - **CI style gate**: `.github/workflows/pre-checks.yaml` runs a Python check (black + ruff, `.github/scripts/check_python_style.sh`) and a C++ check (`clang-format-18`, `.github/scripts/check_cpp_style.sh`) on every PR. Reproduce the Python gate locally with `scripts/check_python_style.sh`.
+- **Repository pre-checks**: the same workflow runs `scripts/check_repo.py`, one entry point for the non-style checks (currently the legacy-arithmetic guard and `check_docs_api.py`, which verifies that `fx.*` / `rocdl.*` symbols, repo paths, skill frontmatter, and skill cross-references in `CLAUDE.md` and `.claude/skills/` still resolve against the source). Reproduce all of them with `python3 scripts/check_repo.py`; `--list` shows them and `--only <name>` runs one. Register a new check there rather than adding a workflow step. Annotate a genuine documentation placeholder with a trailing `<!-- api-check: ignore -->`.
 - **Generated output**: never edit `build-fly/python_packages/`, generated `_mlir` bindings, or other build outputs directly.
 - **Third-party code**: avoid touching `thirdparty/` unless the task explicitly requires it.
 
@@ -169,7 +171,7 @@ helper code that is not part of the traced closure.
 |---|---|---|---|---|
 | `gfx942` | MI300X / MI308X | 64 | MFMA | CDNA3 baseline; preshuffle GEMM, PA decode, CDNA BufferCopy |
 | `gfx950` / `gfx95*` | MI350 / MI355X | 64 | MFMA | CDNA4 path; FP4, MFMA scale, wider LDS copy paths, 160KB LDS |
-| `gfx11*` | RDNA3 / RDNA3.5 (Strix Halo, e.g. gfx1151) | 32 | WMMA | No MFMA; f16/bf16 (and i8/i4) WMMA GEMM; legacy v16-operand WMMA ABI; **no native FP8** (kernels fail-fast); `kernels/rdna3_f16_gemm.py`. `is_rdna_arch()` returns True. |
+| `gfx11*` | RDNA3 / RDNA3.5 (Strix Halo, e.g. gfx1151) | 32 | WMMA | No MFMA; f16/bf16 (and i8/i4) WMMA GEMM; legacy v16-operand WMMA ABI; **no native FP8** (kernels fail-fast); `kernels/gemm/rdna3_f16_gemm.py`. `is_rdna_arch()` returns True. |
 | `gfx120*` | RDNA4 (gfx1201 = Radeon AI PRO R9700) | 32 | WMMA | RDNA path, wave32; new v8-operand WMMA ABI with the gfx11 16x16x16 shapes (`gfx120x.wmma` atom, `lib/Dialect/FlyROCDL/GFX120X/`); native FP8. `is_rdna_arch()` returns True. |
 | `gfx1250` | — | 32 | WMMA / TDM | FP8/FP4 GEMM, MoE, async/TDM copy helpers, 320KB LDS. |
 
@@ -177,14 +179,14 @@ helper code that is not part of the traced closure.
 
 This is routing guidance, not a complete kernel inventory. Search the current `kernels/` tree before edits; keep user-facing catalogs in `docs/prebuilt_kernels_guide.md`.
 
-- **Attention**: start paged-decode changes in `kernels/pa_decode_fp8.py` and `tests/kernels/test_pa.py`; sliding-window is a backend mode imported by `pa_decode_fp8.py`, not a separate public entry point.
+- **Attention**: start paged-decode changes in `kernels/attention/pa_decode_fp8.py` and `tests/kernels/test_pa.py`; sliding-window is a backend mode imported by `pa_decode_fp8.py`, not a separate public entry point.
 - **GEMM / MoE**: choose by architecture and dtype first (CDNA MFMA, RDNA wave32 WMMA, gfx1250 TDM/WMMA/MX-scale). `tests/kernels/test_rdna_gemm.py` shows gfx11* vs gfx120* dispatch; reuse topical `*_common.py` / `*_utils.py` helpers.
-- **Other kernels**: keep regression tests close to touched `kernels/` modules; preserve host-shim vs device-kernel boundaries for multi-GPU communication (`custom_all_reduce.py` wraps the lower-level implementation).
+- **Other kernels**: keep regression tests close to touched `kernels/` modules; preserve host-shim vs device-kernel boundaries for multi-GPU communication (`kernels/comm/custom_all_reduce.py` wraps the lower-level implementation).
 - **New families**: add focused `tests/kernels/test_*.py` coverage, update `docs/prebuilt_kernels_guide.md` for public APIs, and only add durable routing rules here when they prevent likely agent mistakes.
 
 ## Kernel Authoring Conventions
 
-- Prefer the layout API for new kernels: `fx.rocdl.make_buffer_tensor()` plus logical layout operations and `fx.copy_atom_call`. Raw `buffer_ops.create_buffer_resource()` / manual byte offsets are legacy.
+- Prefer the layout API for new kernels: `fx.rocdl.make_buffer_tensor()` plus logical layout operations and `fx.copy` / `fx.gemm` (prefer these over `copy_atom_call` / `mma_atom_call` even for a single atom). Raw `create_buffer_resource()` / manual byte offsets are legacy and now live in `kernels/common/buffer_ops.py` (moved out of `flydsl.expr` in #880).
 - Use `@flyc.kernel` for device kernels and `@flyc.jit` for launch wrappers; kernel modules are normally imported from `kernels.*`.
 - Use `range_constexpr` for compile-time unrolled Python loops. Use `range(start, stop, step, init=[...])` for `scf.for` loops with loop-carried values.
 - Keep `scf.for` state explicit and compact. Clear `SmemPtr._view_cache = None` after exiting `scf.for` when shared-memory views are recreated, to avoid MLIR dominance issues.
@@ -193,9 +195,9 @@ This is routing guidance, not a complete kernel inventory. Search the current `k
 - Nested helpers inside `@flyc.kernel` / `@flyc.jit` may read captured values, but should not mutate captured outer variables. Pass values explicitly and return updated state.
 - Avoid early `return` and branch-local `return` / `yield` in traced functions. Keep a single explicit exit path so MLIR result types stay well-defined.
 - Prefer arch-specific helper modules and constants over inline scattered `gfx*` conditionals.
-- **Helper placement.** Do not scatter small helpers across unrelated modules and do not duplicate an existing one; search for and reuse an existing helper first. Shared kernel helpers belong in `kernels/kernels_common.py` (wave size via `get_warp_size`, `dtype_to_elem_type`, `validate_moe_dtypes`, the `_if_then` SCF context manager, LLVM-ptr/stream helpers); domain-specific shared helpers go in the existing topical modules (`kernels/moe_common.py`, `layout_utils.py`, `pipeline_utils.py`, `fp8_gemm_utils.py`, `dpp_utils.py`, `mfma_epilogues.py`, `mfma_preshuffle_pipeline.py`). DSL-level numeric/arith and type helpers belong in `python/flydsl/expr/utils/arith.py` / `python/flydsl/expr/numeric.py`; compiler/runtime-wide utilities (env, logger, smem allocator) in `python/flydsl/utils/`. (PR #388 extracted shared `_if_then`/`validate_moe_dtypes` into `kernels_common.py`; PR #448 removed redundant numeric wrappers in favor of existing `fx.*` type methods.)
-- **`expr/` is target-neutral.** The direct child modules of `python/flydsl/expr/` (`typing`, `primitive`, `gpu`, `derived`, `struct`, `arith`, `math`, `vector`, `numeric`, `meta`, `extern`, `utils/`) must stay backend-agnostic: they may not import ROCDL/HIP bindings (`flydsl._mlir.dialects.rocdl`, `_mlirDialectsFlyROCDL`, `fly_rocdl`). `import flydsl.expr` must succeed without the FlyROCDL bindings; `tests/unit/test_expr_optional_rocdl.py` enforces this in CI. New target-specific (ROCDL/HIP, MFMA/WMMA, buffer/TDM/cluster) expr code goes in the `expr/rocdl/` package (`cdna4`, `cdna5`, `cluster`, `inline_asm`, `tdm_ops`, `universal`), never in a new top-level `expr/*.py`. The target-specific modules `buffer_ops`, `rocdl`, and `tdm_ops` are lazy-loaded from `expr/__init__.py` via `__getattr__` (`_BACKEND_MODULES`); add new backend modules to that lazy map rather than eager-importing them (PR #521).
-- **`expr/rocdl` is a package.** `expr/rocdl/` (`__init__.py` + `cluster.py`, `tdm_ops.py`, `cdna4.py`, `cdna5.py`, `universal.py`, `inline_asm.py`) holds all target-specific ROCDL/MFMA/WMMA/buffer/TDM/cluster code (`cdna5.py` holds the gfx1250 TDM copy atom, re-exported top-level like `universal`). `from flydsl.expr import rocdl` and `flydsl.expr.rocdl` bind to `expr/rocdl/__init__.py`. Import submodules explicitly, e.g. `from flydsl.expr.rocdl import cluster`; `flydsl.expr.tdm_ops` is a lazy alias for `flydsl.expr.rocdl.tdm_ops` (see `expr/__init__.py` `_BACKEND_MODULES`).
+- **Helper placement.** Do not scatter small helpers across unrelated modules and do not duplicate an existing one; search for and reuse an existing helper first. Shared kernel helpers belong in `kernels/common/kernels_common.py` (wave size via `get_warp_size`, `dtype_to_elem_type`, `validate_moe_dtypes`, the `_if_then` SCF context manager, LLVM-ptr/stream helpers); domain-specific shared helpers go in the existing topical modules (`kernels/moe/moe_common.py`, `kernels/common/layout_utils.py`, `kernels/gemm/fp8_gemm_utils.py`, `kernels/common/dpp_utils.py`, `kernels/common/mma/mfma_epilogues.py`, `kernels/common/mma/mfma_preshuffle_pipeline.py`). DSL-level numeric/arith and type helpers belong in `python/flydsl/expr/utils/arith.py` / `python/flydsl/expr/numeric.py`; compiler/runtime-wide utilities (env, logger, smem allocator) in `python/flydsl/utils/`. (PR #388 extracted shared `_if_then`/`validate_moe_dtypes` into `kernels_common.py`; PR #448 removed redundant numeric wrappers in favor of existing `fx.*` type methods.)
+- **`expr/` is target-neutral.** The direct child modules of `python/flydsl/expr/` (`typing`, `primitive`, `gpu`, `derived`, `struct`, `arith`, `math`, `enum`, `numeric`, `meta`, `extern`, `utils/`) must stay backend-agnostic: they may not import ROCDL/HIP bindings (`flydsl._mlir.dialects.rocdl`, `_mlirDialectsFlyROCDL`, `fly_rocdl`). `import flydsl.expr` must succeed without the FlyROCDL bindings; `tests/unit/test_expr_optional_rocdl.py` enforces this in CI. New target-specific (ROCDL/HIP, MFMA/WMMA, buffer/TDM/cluster) expr code goes in the `expr/rocdl/` package (`cdna3`, `cdna4`, `cdna5`, `rdna3`, `rdna4`, `cluster`, `inline_asm`, `tdm_ops`, `universal`), never in a new top-level `expr/*.py`. The target-specific modules `rocdl` and `tdm_ops` are lazy-loaded from `expr/__init__.py` via `__getattr__` (`_BACKEND_MODULES`); add new backend modules to that lazy map rather than eager-importing them (PR #521).
+- **`expr/rocdl` is a package.** `expr/rocdl/` (`__init__.py` + `cdna3.py`, `cdna4.py`, `cdna5.py`, `rdna3.py`, `rdna4.py`, `cluster.py`, `tdm_ops.py`, `universal.py`, `inline_asm.py`, `utils.py`, `enum.py`) holds all target-specific ROCDL/MFMA/WMMA/buffer/TDM/cluster code (`cdna5.py` holds the gfx1250 TDM copy atom, re-exported top-level like `universal`). `from flydsl.expr import rocdl` and `flydsl.expr.rocdl` bind to `expr/rocdl/__init__.py`. Import submodules explicitly, e.g. `from flydsl.expr.rocdl import cluster`; `flydsl.expr.tdm_ops` is a lazy alias for `flydsl.expr.rocdl.tdm_ops` (see `expr/__init__.py` `_BACKEND_MODULES`).
 - **`extension/` holds the libraries.** `python/flydsl/extension/` is for libraries built on top of the expr primitives.
 
 ## Testing Notes

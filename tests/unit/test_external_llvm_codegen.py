@@ -69,7 +69,8 @@ def test_rocm_external_pipeline_split_matches_full_pipeline():
 
     assert full == [*pre_binary, binary]
     assert pre_binary[-1] == "reconcile-unrealized-casts"
-    assert any(fragment.startswith("gpu.module(") for fragment in pre_binary)
+    gpu_pipeline = next(fragment for fragment in pre_binary if fragment.startswith("gpu.module("))
+    assert "convert-rocdl-fastmath-ops,convert-gpu-to-rocdl{" in gpu_pipeline
     assert binary.startswith("gpu-module-to-binary")
     assert "--amdgpu-waves-per-eu=2" in binary
     assert "--amdgpu-num-vgpr=128" in binary

@@ -2,6 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ctypes
+import enum
 import fcntl
 import hashlib
 import inspect
@@ -466,7 +467,7 @@ def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -
             val = cell.cell_contents
         except ValueError:
             continue
-        if isinstance(val, (int, float, bool, str, type(None), tuple)):
+        if isinstance(val, (int, float, bool, str, type(None), tuple, enum.Enum)):
             vals.append(f"{name}={val!r}")
         else:
             # Recurse into callable deps (KernelFunction, JitFunction, plain functions)
@@ -1235,22 +1236,23 @@ class JitFunction:
         warn_invalid_annotations(self._sig, context="@jit")
 
     def _ensure_cache_manager(self, owner_cls=None):
+        run_only = env.runtime.run_only
+        if not (env.runtime.enable_cache or run_only):
+            self._manager_owner_cls = owner_cls
+            self.manager_key = None
+            self.cache_manager = None
+            return
+
         if self.manager_key is not None and self._manager_owner_cls is owner_cls:
             return
         self._manager_owner_cls = owner_cls
         self.manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls)
 
-        run_only = env.runtime.run_only
         if run_only and env.debug.dump_ir:
             raise ValueError(
                 "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1: "
                 "run-only mode skips the MLIR pass pipeline that would produce IR dumps."
             )
-
-        need_cache = env.runtime.enable_cache or run_only
-        if not need_cache:
-            self.cache_manager = None
-            return
 
         cache_root = env.runtime.cache_dir
         if not cache_root:

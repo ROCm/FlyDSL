@@ -45,10 +45,10 @@ if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. All pytest-based tests (kernels + language + unit + system + examples)
+# 1. All pytest-based tests (kernels + language + unit + system + extension + examples)
 # ---------------------------------------------------------------------------
 echo "========================================================================"
-echo "Pytest: kernels + language + unit + system + examples"
+echo "Pytest: kernels + language + unit + system + extension + examples"
 echo "========================================================================"
 
 python3 -m pytest \
@@ -56,6 +56,7 @@ python3 -m pytest \
     tests/language/ \
     tests/unit/ \
     tests/system/ \
+    tests/extension/ \
     tests/python/examples/ \
     "${pytest_args[@]}"
 
@@ -70,9 +71,10 @@ echo "========================================================================"
 # Whitelist from tests/arch_compat.py (single source of truth for arch compat).
 _RDNA_EXAMPLE_WHITELIST=$(python3 -c "from tests.arch_compat import RDNA_COMPATIBLE_EXAMPLES; print(' '.join(RDNA_COMPATIBLE_EXAMPLES))" 2>/dev/null || echo "")
 _gpu_arch=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
-for example in "${REPO_ROOT}"/examples/*.py; do
+for example in "${REPO_ROOT}"/examples/*.py "${REPO_ROOT}"/examples/extension/*/*.py; do
     [ -f "${example}" ] || continue
-    name="$(basename "${example}")"
+    # Named by their path under examples/, so nested ones stay unambiguous.
+    name="${example#"${REPO_ROOT}"/examples/}"
     if [[ "${_gpu_arch}" != gfx9* ]] && ! echo "${_RDNA_EXAMPLE_WHITELIST}" | grep -qw "${name}"; then
         echo "  SKIP  ${name}  (not in RDNA whitelist, arch: ${_gpu_arch})"
         continue

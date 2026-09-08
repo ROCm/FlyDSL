@@ -16,10 +16,18 @@ with no GPU, no torch, and no compiled bindings.
 """
 
 import json
+from contextlib import contextmanager
 
 import pytest
 
-from flydsl.autotune import Autotuner, Config, _normalize_strides, autotune
+from flydsl.autotune import (
+    Autotuner,
+    Config,
+    _bench_batch_sizes,
+    _normalize_strides,
+    autotune,
+    do_bench,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -83,6 +91,132 @@ def _make_tuner(fn=None, **kw):
     )
 
 
+class _FakeBenchEvent:
+    def __init__(self, cuda, enable_timing):
+        assert enable_timing
+        self.cuda = cuda
+        self.timestamp = None
+
+    def record(self):
+        self.timestamp = self.cuda.clock
+        self.cuda.operations.append("event")
+
+    def synchronize(self):
+        self.cuda.event_synchronizes += 1
+
+    def elapsed_time(self, other):
+        return other.timestamp - self.timestamp
+
+
+class _FakeBenchCuda:
+    def __init__(self):
+        self.clock = 0.0
+        self.operations = []
+        self.device_synchronizes = 0
+        self.event_synchronizes = 0
+
+    def is_available(self):
+        return True
+
+    def synchronize(self):
+        self.device_synchronizes += 1
+
+    def _sleep(self, cycles):
+        assert cycles > 0
+        self.operations.append("backlog")
+        self.clock += 100.0
+
+    def Event(self, enable_timing):
+        return _FakeBenchEvent(self, enable_timing)
+
+
+class _FakeBenchTorch:
+    def __init__(self):
+        self.cuda = _FakeBenchCuda()
+
+
+# ── device benchmark timing ─────────────────────────────────────────────
+def test_bench_batch_sizes_preserve_the_requested_call_count():
+    assert _bench_batch_sizes(1) == [1]
+    assert _bench_batch_sizes(7) == [2, 2, 1, 1, 1]
+    assert sum(_bench_batch_sizes(25)) == 25
+    with pytest.raises(ValueError, match="positive integer"):
+        _bench_batch_sizes(0)
+
+
+def test_do_bench_uses_a_backlogged_batched_event_window(monkeypatch):
+    """The timer must enqueue a GPU backlog before each event window and must
+    synchronize per batch, not per kernel launch."""
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
+    fake_torch = _FakeBenchTorch()
+    monkeypatch.setattr(at, "torch", fake_torch)
+    calls = 0
+
+    def fn():
+        nonlocal calls
+        calls += 1
+        fake_torch.cuda.operations.append("kernel")
+        fake_torch.cuda.clock += 2.0
+
+    assert do_bench(fn, warmup=3, rep=7) == 2.0
+    assert calls == 10
+    assert fake_torch.cuda.device_synchronizes == 1
+    assert fake_torch.cuda.event_synchronizes == 5
+
+    timed = fake_torch.cuda.operations[3:]
+    assert timed == [
+        "backlog",
+        "event",
+        "kernel",
+        "kernel",
+        "event",
+        "backlog",
+        "event",
+        "kernel",
+        "kernel",
+        "event",
+        "backlog",
+        "event",
+        "kernel",
+        "event",
+        "backlog",
+        "event",
+        "kernel",
+        "event",
+        "backlog",
+        "event",
+        "kernel",
+        "event",
+    ]
+
+
+def test_do_bench_quantiles_summarize_batch_averages(monkeypatch):
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
+    fake_torch = _FakeBenchTorch()
+    monkeypatch.setattr(at, "torch", fake_torch)
+
+    def fn():
+        fake_torch.cuda.clock += 3.0
+
+    assert do_bench(fn, warmup=0, rep=5, quantiles=[0.0, 0.5, 0.9]) == [3.0, 3.0, 3.0]
+
+
+def test_do_bench_fails_closed_without_a_gpu_backlog(monkeypatch):
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
+    fake_torch = _FakeBenchTorch()
+    fake_torch.cuda._sleep = None
+    monkeypatch.setattr(at, "torch", fake_torch)
+
+    with pytest.raises(RuntimeError, match="GPU-side backlog"):
+        do_bench(lambda: None)
+
+
 # ── Config ───────────────────────────────────────────────────────────────
 def test_config_roundtrip():
     c = Config(BLOCK=128, num_warps=4, waves_per_eu=2, maxnreg=128)
@@ -108,7 +242,10 @@ def test_config_no_compiler_opts_when_unset():
 
 # ── stride normalization ─────────────────────────────────────────────────
 def test_normalize_strides_buckets():
-    assert _normalize_strides(FakeTensor((4, 8))) == ("s", 1)  # contiguous: inner=1, outer=other
+    assert _normalize_strides(FakeTensor((4, 8))) == (
+        "s",
+        1,
+    )  # contiguous: inner=1, outer=other
     assert _normalize_strides(FakeTensor((4, 8), strides=(0, 1))) == (0, 1)  # broadcast
     assert _normalize_strides(FakeTensor((4, 8), strides=(16, 2))) == ("s", "s")
 
@@ -238,7 +375,10 @@ def test_restore_value_restores_between_reps():
         fn=in_place_fn,
         configs=[Config(BLOCK=128)],
         restore_value=["a"],
-        do_bench_fn=lambda call, warmup, rep: ([call() for _ in range(warmup + rep)], 1.0)[1],
+        do_bench_fn=lambda call, warmup, rep: (
+            [call() for _ in range(warmup + rep)],
+            1.0,
+        )[1],
     )
     a = FakeTensor((4,), fill=7.0)
     out = FakeTensor((4,))
@@ -260,7 +400,10 @@ def test_restore_value_no_op_without_list():
     t = _make_tuner(
         fn=in_place_fn,
         configs=[Config(BLOCK=128)],
-        do_bench_fn=lambda call, warmup, rep: ([call() for _ in range(warmup + rep)], 1.0)[1],
+        do_bench_fn=lambda call, warmup, rep: (
+            [call() for _ in range(warmup + rep)],
+            1.0,
+        )[1],
     )
     t(FakeTensor((4,), fill=7.0), FakeTensor((4,)))
     assert seen[0] == 7.0 and seen[-1] != 7.0  # corrupted without restore
@@ -277,7 +420,10 @@ def test_reset_to_zero():
         fn=acc_fn,
         configs=[Config(BLOCK=128)],
         reset_to_zero=["out"],
-        do_bench_fn=lambda call, warmup, rep: ([call() for _ in range(warmup + rep)], 1.0)[1],
+        do_bench_fn=lambda call, warmup, rep: (
+            [call() for _ in range(warmup + rep)],
+            1.0,
+        )[1],
     )
     out = FakeTensor((4,), fill=5.0)
     t(FakeTensor((4,)), out)
@@ -386,6 +532,63 @@ def test_autotune_decorator_wraps_into_autotuner():
     assert tuned.configs is configs
     assert tuned.default is default
     assert tuned.artifact_name == "fake-kernel"
+
+
+def test_resolve_config_selects_without_launching(monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "0")
+    launches = []
+    tuner = _make_tuner(
+        fn=lambda a, out, BLOCK: launches.append(BLOCK),
+        configs=[Config(BLOCK=128)],
+        default=lambda *_args, **_kwargs: Config(BLOCK=64),
+        do_bench_fn=lambda *_args, **_kwargs: pytest.fail("default resolution benchmarked"),
+    )
+    args = (FakeTensor((8,)), FakeTensor((8,)))
+
+    config = tuner.resolve_config(*args)
+
+    assert config.kwargs["BLOCK"] == 64
+    assert launches == []
+
+
+def test_call_runs_exactly_the_config_returned_by_resolve(monkeypatch):
+    tuner = _make_tuner(fn=lambda a, out, BLOCK: None)
+    selected = Config(BLOCK=777)
+    observed = []
+    monkeypatch.setattr(tuner, "resolve_config", lambda *args, **kwargs: selected)
+    monkeypatch.setattr(
+        tuner,
+        "_run_config",
+        lambda config, args, kwargs: observed.append((config, args, kwargs)),
+    )
+    args = (FakeTensor((8,)), FakeTensor((8,)))
+
+    tuner(*args)
+
+    assert observed == [(selected, args, {})]
+
+
+def test_select_config_policy_must_return_a_measured_pair(monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    first = Config(BLOCK=64)
+    second = Config(BLOCK=128)
+    times = iter([2.0, 1.0])
+    tuner = _make_tuner(
+        configs=[first, second],
+        do_bench_fn=lambda call, warmup, rep: next(times),
+        select_config=lambda results: results[0],
+    )
+    args = (FakeTensor((8,)), FakeTensor((8,)))
+
+    assert tuner.resolve_config(*args) is first
+
+    invalid = _make_tuner(
+        configs=[first],
+        do_bench_fn=lambda call, warmup, rep: 1.0,
+        select_config=lambda results: (Config(BLOCK=999), 1.0),
+    )
+    with pytest.raises(ValueError, match="measured"):
+        invalid.resolve_config(*args)
 
 
 # ── two-track default/search ─────────────────────────────────────────────
@@ -592,7 +795,11 @@ def test_artifact_identity_uses_declared_key_and_device(artifact_dir, monkeypatc
     monkeypatch.setattr(
         at,
         "_device_descriptor",
-        lambda device=None: {"name": "Other GPU", "arch": "gfx-test", "compute_units": 2},
+        lambda device=None: {
+            "name": "Other GPU",
+            "arch": "gfx-test",
+            "compute_units": 2,
+        },
     )
     assert first != tuner._artifact_ref(args, {}, required=True)
     assert scratch_key != tuner._make_key(args, {})
@@ -664,7 +871,11 @@ def test_artifact_runtime_failure_is_not_masked_by_default(monkeypatch, tmp_path
 @pytest.mark.parametrize(
     "config, message",
     [
-        pytest.param(Config(BLOCK_THREADS=64, pre_hook=lambda kwargs: None), "pre_hook", id="pre-hook"),
+        pytest.param(
+            Config(BLOCK_THREADS=64, pre_hook=lambda kwargs: None),
+            "pre_hook",
+            id="pre-hook",
+        ),
         pytest.param(Config(BLOCK_THREADS=(64,)), "preserve their types", id="json-type-change"),
     ],
 )
@@ -751,6 +962,200 @@ def test_call_returns_none_when_fn_returns_none(monkeypatch):
     args = (FakeTensor((8,)), FakeTensor((1,)))
     assert tuner(*args) is None
     assert args[1]._data[0] == 64.0
+
+
+# ── validate_hook (untimed candidate correctness gate) ───────────────────
+def test_validate_hook_runs_once_per_candidate_outside_the_timed_reps(monkeypatch):
+    """Validation setup and checking must run once per candidate, but neither may
+    be folded into the timed repetitions."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    runs = []
+
+    def fn(a, out, BLOCK):
+        runs.append(("run", BLOCK))
+
+    @contextmanager
+    def validate(sig_args):
+        runs.append(("prepare", sig_args["BLOCK"]))
+        yield
+        runs.append(("validate", sig_args["BLOCK"]))
+        # The hook sees positional args by name, which pre_hook/post_hook cannot.
+        assert sig_args["a"].shape == (8,)
+
+    def bench(call, warmup, rep):
+        runs.append(("bench", warmup, rep))
+        for _ in range(warmup + rep):
+            call()
+        return 1.0
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        validate_hook=validate,
+        do_bench_fn=bench,
+        warmup=1,
+        rep=1,
+    )
+    tuner(FakeTensor((8,)), FakeTensor((8,)))
+
+    # Per candidate: untimed setup/run/check, then the timed repetitions.
+    assert runs[:6] == [
+        ("prepare", 64),
+        ("run", 64),
+        ("validate", 64),
+        ("bench", 1, 1),
+        ("run", 64),
+        ("run", 64),
+    ]
+    assert runs[6:12] == [
+        ("prepare", 128),
+        ("run", 128),
+        ("validate", 128),
+        ("bench", 1, 1),
+        ("run", 128),
+        ("run", 128),
+    ]
+
+
+def test_validate_hook_receives_defaulted_and_variadic_arguments(monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    observed = []
+
+    def fn(a, out, *extra, BLOCK, scale=2.0, stream=None, **metadata):
+        pass
+
+    @contextmanager
+    def validate(sig_args):
+        observed.append(sig_args)
+        yield
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64)],
+        validate_hook=validate,
+        do_bench_fn=lambda call, warmup, rep: 1.0,
+    )
+    a = FakeTensor((8,))
+    out = FakeTensor((8,))
+    marker = object()
+    tuner(a, out, marker, stream="stream-0", tag="softmax")
+
+    assert observed == [
+        {
+            "a": a,
+            "out": out,
+            "extra": (marker,),
+            "BLOCK": 64,
+            "scale": 2.0,
+            "stream": "stream-0",
+            "tag": "softmax",
+        }
+    ]
+
+
+def test_validate_hook_rejects_a_candidate_that_does_not_write_output(monkeypatch):
+    """A no-op candidate must not inherit a previous candidate's valid output."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    bench_calls = 0
+
+    def fn(a, out, BLOCK):
+        if BLOCK == 64:
+            out._data = [1.0] * len(out._data)
+
+    @contextmanager
+    def validate(sig_args):
+        sig_args["out"]._data = [float("nan")] * len(sig_args["out"]._data)
+        yield
+        if any(value != value for value in sig_args["out"]._data):
+            raise ValueError("candidate left output elements unwritten")
+
+    def bench(call, warmup, rep):
+        nonlocal bench_calls
+        bench_calls += 1
+        call()
+        return 1.0
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        validate_hook=validate,
+        do_bench_fn=bench,
+    )
+    args = (FakeTensor((8,)), FakeTensor((8,), fill=1.0))
+    tuner(*args)
+
+    key = tuner._make_key(args, {})
+    assert tuner.cache[key].kwargs["BLOCK"] == 64
+    assert bench_calls == 1
+    assert args[1]._data == [1.0] * 8
+
+
+def test_validate_hook_rejection_drops_only_that_candidate(monkeypatch):
+    """A candidate that launches but computes the wrong answer must not win."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+
+    @contextmanager
+    def validate(sig_args):
+        yield
+        if sig_args["BLOCK"] == 64:
+            raise ValueError("wrong numerics")
+
+    seen = []
+
+    def fn(a, out, BLOCK):
+        seen.append(BLOCK)
+
+    # The rejected candidate is also the fastest, so it would win without the gate.
+    def bench(call, warmup, rep):
+        call()
+        return {64: 0.1, 128: 1.0}[seen[-1]]
+
+    tuner = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        validate_hook=validate,
+        do_bench_fn=bench,
+    )
+    args = (FakeTensor((8,)), FakeTensor((8,)))
+    tuner(*args)
+    key = tuner._make_key(args, {})
+    assert tuner.cache[key].kwargs["BLOCK"] == 128
+
+
+def test_all_candidates_failing_chains_the_underlying_error(monkeypatch):
+    """Without the cause, a validation rejection is indistinguishable from a
+    compile failure once the loop has swallowed every exception."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+
+    @contextmanager
+    def validate(sig_args):
+        yield
+        raise ValueError(f"bad numerics for BLOCK={sig_args['BLOCK']}")
+
+    tuner = _make_tuner(
+        fn=lambda a, out, BLOCK: None,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        validate_hook=validate,
+        do_bench_fn=lambda call, warmup, rep: 1.0,
+    )
+    with pytest.raises(RuntimeError, match="All autotune configs failed") as excinfo:
+        tuner(FakeTensor((8,)), FakeTensor((8,)))
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert "BLOCK=128" in str(excinfo.value.__cause__)
+
+
+def test_no_validate_hook_leaves_the_timed_path_untouched(monkeypatch):
+    """Adopters that do not pass a gate must see exactly the previous behavior."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    runs = []
+
+    tuner = _make_tuner(
+        fn=lambda a, out, BLOCK: runs.append(BLOCK),
+        configs=[Config(BLOCK=64)],
+        do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1],
+    )
+    tuner(FakeTensor((8,)), FakeTensor((8,)))
+    assert runs == [64, 64]  # one bench call, one final _run_config
 
 
 if __name__ == "__main__":

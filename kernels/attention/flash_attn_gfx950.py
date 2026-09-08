@@ -85,6 +85,7 @@ def build_flash_attn_dualwave_swp_module(
     has_bias=False,
     has_alibi=False,
     has_sink=False,
+    _xcd_swizzle=False,
 ):
     """Build an DUALWAVE_SWP flash_attn launcher for D=64/128 bf16/f16 on gfx950.
 
@@ -146,6 +147,7 @@ def build_flash_attn_dualwave_swp_module(
         kv_cache_layout=kv_cache_layout,
         kv_vectorized=KV_VECTORIZED,
         return_lse=return_lse,
+        xcd_swizzle=_xcd_swizzle,
     )
     traits.BLOCK_N_OUT // traits.BLOCK_N
 
@@ -1006,9 +1008,11 @@ def build_flash_attn_dualwave_swp_module(
             stream=stream,
         )
         if const_expr(traits.SPLITK):
-            combine_rows = bs_idx * traits.NUM_HEADS_Q * sl_idx
+            # One batch per y block keeps the combine kernel's O descriptor wave-uniform.
+            combine_rows = traits.NUM_HEADS_Q * sl_idx
+            combine_blocks = (combine_rows + (COMBINE_ROWS_PER_BLOCK - 1)) // COMBINE_ROWS_PER_BLOCK
             flash_attn_splitk_combine_kernel(O, DebugCounts, LSE, Sink, batch_size, seq_len, stride_q_n).launch(
-                grid=(combine_rows // COMBINE_ROWS_PER_BLOCK, 1, 1),
+                grid=(combine_blocks, bs_idx, 1),
                 block=(COMBINE_BLOCK, 1, 1),
                 stream=stream,
             )

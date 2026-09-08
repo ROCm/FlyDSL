@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+from typing import TYPE_CHECKING
+
 # isort: skip_file
 from .numeric import *
 from .typing import *
@@ -23,8 +25,13 @@ _BACKEND_MODULES = {
 }
 
 _LIBRARY_MODULES = {
+    "coop": "..extension.coop",
     "random": "..extension.random",
 }
+
+if TYPE_CHECKING:
+    from ..extension import coop as coop
+    from ..extension import random as random
 
 
 # lazy load backend subpackages and extension libraries
