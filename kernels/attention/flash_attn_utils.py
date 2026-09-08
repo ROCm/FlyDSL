@@ -2181,7 +2181,7 @@ class PagedDualwaveSwpFp8Traits:
 
     @property
     def QLDS(self):
-        return self.QREG
+        return self.QREG and self.HEAD_DIM <= 128
 
     @property
     def cache_tag(self):
