@@ -1,8 +1,111 @@
 {
  "schema": 1,
- "updated": "2026-09-08T03:33:56Z",
+ "updated": "2026-09-08T06:12:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34192512761,
+   "pr": 848,
+   "commit": "7f2b9aa396459d9fb333786f05dc4fa88f399b7d",
+   "branch": "cjl/norm_perf",
+   "event": "pull_request",
+   "title": "[Perf] Optimize rmsnorm/layernorm",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34192512761",
+   "created_at": "2026-09-08T05:55:33Z",
+   "updated_at": "2026-09-08T05:58:00Z",
+   "actor": "cschenjunlin",
+   "jobs": []
+  },
+  {
+   "run_id": 34185269364,
+   "pr": 1069,
+   "commit": "4d847400db16eff0c853ff194ca66751fb4c5c1b",
+   "branch": "feature/qwenimage-vae-conv-tests",
+   "event": "pull_request",
+   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34185269364",
+   "created_at": "2026-09-08T03:57:10Z",
+   "updated_at": "2026-09-08T05:42:49Z",
+   "actor": "huizzhan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-08T04:25:11Z",
+     "completed_at": "2026-09-08T04:42:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34185269364/job/101934566252",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T05:42:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34185269364/job/101934566263"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-08T04:11:26Z",
+     "completed_at": "2026-09-08T05:32:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34185269364/job/101934566312"
+    }
+   ]
+  },
+  {
+   "run_id": 34184632260,
+   "pr": 1100,
+   "commit": "1119117edef41b5a5e55628280898961948e070e",
+   "branch": "feat-llvm-atomic",
+   "event": "pull_request",
+   "title": "[DSL] Expose atomic operations via llvm dialect",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34184632260",
+   "created_at": "2026-09-08T03:45:50Z",
+   "updated_at": "2026-09-08T05:42:42Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T05:42:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34184632260/job/101933370182"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-08T04:04:37Z",
+     "completed_at": "2026-09-08T05:24:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34184632260/job/101933370190"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-08T04:04:26Z",
+     "completed_at": "2026-09-08T04:24:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34184632260/job/101933370210",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 34179798578,
    "pr": null,
@@ -562,10 +665,10 @@
    "event": "pull_request",
    "title": "refactor: migrate to extension api",
    "status": "completed",
-   "conclusion": "action_required",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34085071039",
    "created_at": "2026-09-07T04:58:41Z",
-   "updated_at": "2026-09-07T04:58:41Z",
+   "updated_at": "2026-09-08T06:09:13Z",
    "actor": "ppppqp",
    "jobs": []
   },
@@ -2014,92 +2117,6 @@
      "started_at": "2026-09-03T07:43:55Z",
      "completed_at": "2026-09-03T08:10:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33725195926/job/100560201793",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33723843587,
-   "pr": 1069,
-   "commit": "bc7c60a3e1f96b31c619043a7092064865df2a38",
-   "branch": "feature/qwenimage-vae-conv-tests",
-   "event": "pull_request",
-   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33723843587",
-   "created_at": "2026-09-03T06:34:27Z",
-   "updated_at": "2026-09-03T06:39:34Z",
-   "actor": "huizzhan",
-   "jobs": []
-  },
-  {
-   "run_id": 33723568282,
-   "pr": null,
-   "commit": "83e04a9b8910e2c968fd96a50be61672b1353a41",
-   "branch": "ci/dedup-gfx950-runners",
-   "event": "pull_request",
-   "title": "[CI] Drop the duplicate gfx950 test runner and revert the nightly README badges",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33723568282",
-   "created_at": "2026-09-03T06:30:56Z",
-   "updated_at": "2026-09-03T06:51:46Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 33721833438,
-   "pr": null,
-   "commit": "9d94d71b09604358711e28814b21e66cc49861b8",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] accelerate prepare-mlir: run the CPU builder in the manylinux im\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721833438",
-   "created_at": "2026-09-03T06:07:54Z",
-   "updated_at": "2026-09-03T08:12:48Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T06:53:12Z",
-     "completed_at": "2026-09-03T08:05:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721833438/job/100552851731",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T07:00:11Z",
-     "completed_at": "2026-09-03T07:23:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721833438/job/100552851737",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T06:53:53Z",
-     "completed_at": "2026-09-03T07:38:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721833438/job/100552851747",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T06:53:32Z",
-     "completed_at": "2026-09-03T08:12:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33721833438/job/100552851783",
      "log_fetch_failed": true
     }
    ]
