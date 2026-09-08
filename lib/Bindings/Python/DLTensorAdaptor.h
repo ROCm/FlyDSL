@@ -154,7 +154,9 @@ public:
     case kDLInt:
       return IntegerType::get(ctx, dtype.bits);
     case kDLUInt:
-      return IntegerType::get(ctx, dtype.bits);
+      // Unsigned storage keeps its signedness in the element type so that the DSL can
+      // reconstruct the logical dtype; SSA values loaded from it are signless.
+      return IntegerType::get(ctx, dtype.bits, IntegerType::Unsigned);
     case kDLBfloat:
       return BFloat16Type::get(ctx);
     case kDLBool:

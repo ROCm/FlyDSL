@@ -516,7 +516,9 @@ _TORCH_DTYPE_TO_MLIR_BUILDER = {
     torch.float32: T.f32,
     torch.float64: T.f64,
     torch.bool: lambda: ir.IntegerType.get_signless(1),
-    torch.uint8: lambda: ir.IntegerType.get_signless(8),
+    # Unsigned tensors keep their signedness in the memref element type so the kernel sees
+    # ``Uint*`` rather than ``Int*``; signed integers stay signless (their canonical form).
+    torch.uint8: lambda: ir.IntegerType.get_unsigned(8),
     torch.int8: lambda: ir.IntegerType.get_signless(8),
     torch.int16: lambda: ir.IntegerType.get_signless(16),
     torch.int32: lambda: ir.IntegerType.get_signless(32),
@@ -617,7 +619,7 @@ class PointerJitArg:
     def __get_ir_types__(self):
         ir_type = self.element_type
         if isinstance(ir_type, type) and issubclass(ir_type, Numeric):
-            ir_type = self.element_type.ir_type
+            ir_type = self.element_type.storage_ir_type
         return [PointerType.get(ir_type, self.address_space, self.alignment)]
 
     def __cache_signature__(self):

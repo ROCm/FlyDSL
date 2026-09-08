@@ -103,7 +103,7 @@ def make_rmem_tensor(shape_or_layout, dtype):
     else:
         layout = shape_or_layout
 
-    tensorTy = fly.MemRefType.get(dtype.ir_type, layout.type, fly.AddressSpace.Register)
+    tensorTy = fly.MemRefType.get(dtype.storage_ir_type, layout.type, fly.AddressSpace.Register)
     return memref_alloca(tensorTy, layout=layout)
 
 
