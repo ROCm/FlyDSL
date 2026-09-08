@@ -1,8 +1,67 @@
 {
  "schema": 1,
- "updated": "2026-09-08T08:20:29Z",
+ "updated": "2026-09-08T09:31:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34209140893,
+   "pr": 1104,
+   "commit": "cc8fb695f489b4c15fe430419fa72ce104d32724",
+   "branch": "ywx/mega_moe_r1_tune",
+   "event": "pull_request",
+   "title": " deepseekv3 r1 tune config",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34209140893",
+   "created_at": "2026-09-08T09:17:06Z",
+   "updated_at": "2026-09-08T09:19:12Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
+  {
+   "run_id": 34205726684,
+   "pr": 1069,
+   "commit": "0c2daffda2c4aabd7d395783e83ff2fe575b13e9",
+   "branch": "feature/qwenimage-vae-conv-tests",
+   "event": "pull_request",
+   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34205726684",
+   "created_at": "2026-09-08T08:39:57Z",
+   "updated_at": "2026-09-08T08:56:31Z",
+   "actor": "huizzhan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T08:56:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34205726684/job/101999392985"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T08:56:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34205726684/job/101999393033"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-08T08:56:15Z",
+     "completed_at": "2026-09-08T09:22:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34205726684/job/101999393153",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 34201903501,
    "pr": 1103,
@@ -29,20 +88,22 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-08T08:14:24Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201903501/job/101987045594"
+     "completed_at": "2026-09-08T08:31:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201903501/job/101987045594",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-08T08:14:35Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201903501/job/101987045628"
+     "completed_at": "2026-09-08T09:19:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201903501/job/101987045628",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -2129,77 +2190,6 @@
    "updated_at": "2026-09-03T11:51:27Z",
    "actor": "RichardChamberlain1",
    "jobs": []
-  },
-  {
-   "run_id": 33751547157,
-   "pr": 931,
-   "commit": "1f2c3bd6dd6814c523f291fc6b37d1ef5f6291cb",
-   "branch": "rchamber/flex_attention",
-   "event": "pull_request",
-   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751547157",
-   "created_at": "2026-09-03T11:46:48Z",
-   "updated_at": "2026-09-03T11:48:29Z",
-   "actor": "RichardChamberlain1",
-   "jobs": []
-  },
-  {
-   "run_id": 33751132103,
-   "pr": 1032,
-   "commit": "8a5a5b309c6853ce3fc8c99839b6b28a921bdcd9",
-   "branch": "convolution",
-   "event": "pull_request",
-   "title": "[Kernel] Add dilation, padding_mode and groups to convolution kernel.",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751132103",
-   "created_at": "2026-09-03T11:42:12Z",
-   "updated_at": "2026-09-03T13:20:33Z",
-   "actor": "amd-nprotaso",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T12:06:34Z",
-     "completed_at": "2026-09-03T13:20:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751132103/job/100641667880",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T12:06:48Z",
-     "completed_at": "2026-09-03T13:14:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751132103/job/100641667916",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T12:06:28Z",
-     "completed_at": "2026-09-03T12:37:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751132103/job/100641667963",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T12:06:40Z",
-     "completed_at": "2026-09-03T12:39:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33751132103/job/100641668018",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
