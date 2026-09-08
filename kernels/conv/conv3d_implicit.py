@@ -95,9 +95,6 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
         lds_alloc = fx.SharedAllocator(static=False)
         lds = lds_alloc.allocate(fx.Array[elem_ty, TR_TILE * _TR_LDS_S, 16]).peek()
 
-        class BF16Ty:
-            ir_type = elem_ty.ir_type
-
         tid = fx.thread_idx.x
         s0 = fx.block_idx.x * TR_TILE
         c0 = fx.block_idx.y * TR_TILE
@@ -128,7 +125,7 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
 
         def lds_load_scalar(elem_offset):
             u8 = fx.recast_iter(fx.Uint8, lds.ptr)
-            return fx.ptr_load(u8 + fx.Int32(elem_offset * 2), result_type=BF16Ty)
+            return fx.ptr_load(u8 + fx.Int32(elem_offset * 2), result_type=elem_ty)
 
         # Read: coalesced vec8 along contiguous S -> LDS[c_local][s_local].
         for i in range_constexpr(_TR_ITERS):
@@ -362,8 +359,7 @@ def compile_conv3d_implicit(
 
         Vec = fx.Vector
 
-        class Vec8Ty:
-            ir_type = Vec.make_type(8, elem_ty)
+        vec8_ty = Vec.make_type(8, elem_ty)
 
         acc0 = Vec.filled(MFMA_C_VALUES, 0.0, fx.Float32)
         acc = [acc0 for _ in range_constexpr(N_ACC)]
@@ -379,7 +375,7 @@ def compile_conv3d_implicit(
 
         def lds_load_vec8(lds_array, elem_offset):
             u8_ptr = fx.recast_iter(fx.Uint8, lds_array.ptr)
-            return fx.ptr_load(u8_ptr + fx.Int32(elem_offset * 2), result_type=Vec8Ty)
+            return fx.ptr_load(u8_ptr + fx.Int32(elem_offset * 2), result_type=vec8_ty)
 
         def a_lds_off(stage, row, col):
             return (fx.Index(stage) * TILE_M + row) * TILE_K + col
