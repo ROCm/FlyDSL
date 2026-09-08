@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-08T06:12:18Z",
+ "updated": "2026-09-08T06:24:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34194391453,
+   "pr": 1069,
+   "commit": "3333b562496e010b630fcccaef5c03bc4c7f082b",
+   "branch": "feature/qwenimage-vae-conv-tests",
+   "event": "pull_request",
+   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194391453",
+   "created_at": "2026-09-08T06:22:40Z",
+   "updated_at": "2026-09-08T06:22:51Z",
+   "actor": "huizzhan",
+   "jobs": []
+  },
+  {
+   "run_id": 34194371074,
+   "pr": 1069,
+   "commit": "e45c6143d3ba0a7048080f5d143a453aeb5e1bd0",
+   "branch": "feature/qwenimage-vae-conv-tests",
+   "event": "pull_request",
+   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194371074",
+   "created_at": "2026-09-08T06:22:23Z",
+   "updated_at": "2026-09-08T06:22:41Z",
+   "actor": "huizzhan",
+   "jobs": []
+  },
   {
    "run_id": 34192512761,
    "pr": 848,
@@ -14,9 +44,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34192512761",
    "created_at": "2026-09-08T05:55:33Z",
-   "updated_at": "2026-09-08T05:58:00Z",
+   "updated_at": "2026-09-08T06:11:27Z",
    "actor": "cschenjunlin",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T06:10:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34192512761/job/101956286220"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T06:11:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34192512761/job/101956286264"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-08T06:11:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34192512761/job/101956286290"
+    }
+   ]
   },
   {
    "run_id": 34185269364,
@@ -25,11 +83,11 @@
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
    "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34185269364",
    "created_at": "2026-09-08T03:57:10Z",
-   "updated_at": "2026-09-08T05:42:49Z",
+   "updated_at": "2026-09-08T06:22:51Z",
    "actor": "huizzhan",
    "jobs": [
     {
@@ -45,10 +103,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-08T05:42:49Z",
-     "completed_at": null,
+     "completed_at": "2026-09-08T06:22:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34185269364/job/101934566263"
     },
     {
@@ -2018,108 +2076,6 @@
    "updated_at": "2026-09-03T09:43:37Z",
    "actor": "huizzhan",
    "jobs": []
-  },
-  {
-   "run_id": 33733599147,
-   "pr": 1015,
-   "commit": "06a7add0fdd24ff2e18030b92182e19af73098e1",
-   "branch": "phil/isa-resource-diff-arch-general",
-   "event": "pull_request",
-   "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33733599147",
-   "created_at": "2026-09-03T08:29:11Z",
-   "updated_at": "2026-09-03T10:01:25Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T08:50:58Z",
-     "completed_at": "2026-09-03T09:45:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33733599147/job/100585071901",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T08:51:00Z",
-     "completed_at": "2026-09-03T10:01:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33733599147/job/100585071928",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T08:51:05Z",
-     "completed_at": "2026-09-03T09:25:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33733599147/job/100585071999",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T08:51:05Z",
-     "completed_at": "2026-09-03T09:56:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33733599147/job/100585072207",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33725195926,
-   "pr": null,
-   "commit": "7e937bce1dc1c12e1f5d208e887bba49caea15fd",
-   "branch": "ci/dedup-gfx950-runners",
-   "event": "pull_request",
-   "title": "[CI] Drop the duplicate gfx950 test runner and revert the nightly README badges",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33725195926",
-   "created_at": "2026-09-03T06:51:25Z",
-   "updated_at": "2026-09-03T08:32:01Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T07:21:49Z",
-     "completed_at": "2026-09-03T08:32:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33725195926/job/100560201609",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T07:21:41Z",
-     "completed_at": "2026-09-03T07:56:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33725195926/job/100560201668",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T07:43:55Z",
-     "completed_at": "2026-09-03T08:10:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33725195926/job/100560201793",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
