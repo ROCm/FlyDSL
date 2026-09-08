@@ -1849,6 +1849,7 @@ class DualwaveSwpFp8Traits:
     QREG: bool = True
     FP8_PV: bool = True
     FP8_PV_DIRECT: bool = True
+    FP8_PV_SEGMENTED: bool = False
 
     @property
     def V_HEAD_DIM(self):
@@ -5369,6 +5370,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             v_o[dc] = self._mfma_acc_fp8_wide(v_op, self._pv_segmented_p_cache, v_o[dc])
             rocdl.sched_barrier(0)
         return v_o
+
     def _load_q_wide_lds(self):
         traits = self.traits
         q_row_in_block = self.ctx_ref.q_row_in_block
@@ -5430,6 +5432,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         for dc in range_constexpr(self.traits.D_CHUNKS):
             v_o[dc] = self._mfma_acc_bf16(v_pk[dc], p_pk, v_o[dc])
         return v_o
+
     def cast_p_fp8_direct(self, v_p):
         lo_partial_list, hi_full = v_p
         f32 = []
