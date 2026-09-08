@@ -24,7 +24,13 @@ const SWEEP_MAX = 8
 const MAX_FINDINGS = 12
 
 const SKILL = '.claude/skills/flydsl-code-review/SKILL.md'
-const TARGET = (typeof args === 'string' ? args : '').trim()
+// --comment is handled by the skill after this workflow returns (it posts the
+// findings via scripts/post_review.py). Strip it here so a caller that forwards
+// the raw argument string does not leave the Scope agent reading "--comment" as
+// a free-form review instruction.
+const TARGET = (typeof args === 'string' ? args : '')
+  .replace(/(^|\s)--comment(?=\s|$)/g, ' ')
+  .trim()
 
 // The angle prose lives in SKILL.md, not here. Each finder reads its own section
 // so the two never drift; workflow scripts have no filesystem access, but their

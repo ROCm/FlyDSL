@@ -341,13 +341,39 @@ result and is better than a padded one.
 
 ## Posting to GitHub (`--comment`)
 
-Only when `--comment` was passed. After producing the findings list, if the
-review target is a GitHub PR, post each finding as an inline PR comment via
-`mcp__github_inline_comment__create_inline_comment`, one call per finding.
-Include a suggestion block only when it fully fixes the issue. If that tool is
-not available in this session, fall back to
-`gh api repos/{owner}/{repo}/pulls/{pr}/comments`. If the target is not a PR,
-print the findings and note that `--comment` was ignored.
+Only when `--comment` was passed **and** the review target is a GitHub PR. If
+the target is not a PR, print the findings and say that `--comment` was ignored.
+
+Do not hand-roll the `gh api` calls. GitHub rejects an inline comment on any line
+that is not in the PR diff, so placement has to be decided against the actual
+patch. `.claude/skills/flydsl-code-review/scripts/post_review.py` does that: it
+parses each changed file's patch
+into the set of commentable RIGHT-side lines, posts what fits inline, and rolls
+everything else — untouched files, lines outside a hunk, findings with no line —
+into one summary comment so nothing is dropped.
+
+Write the findings to a JSON file, then:
+
+```bash
+python3 .claude/skills/flydsl-code-review/scripts/post_review.py \
+    --pr <number> --findings <file.json> --dry-run
+```
+
+Each finding is `{"file", "line", "summary", "failure_scenario", "verdict"}`;
+`file` may be absolute or repo-relative, and `line` may be omitted. A bare JSON
+array works, as does the workflow's result object with its `findings` key.
+
+**Always `--dry-run` first** and show the user the routing — how many land
+inline, how many defer, and on which lines. Drop `--dry-run` only after they
+confirm. Posting is not reversible: every comment notifies the PR's
+participants, and deleting one later does not unsend the mail.
+
+The script refuses to comment on a PR that is not open.
+
+Its dry-run path and line routing are tested, but **the live POST has never been
+exercised** — no comment has been posted with it. The first real use is also its
+first test, so run it against a PR you own before pointing it at someone else's.
+Delete this paragraph once it has posted successfully.
 
 This skill does not edit code. Report findings; fixing them is a separate request.
 
