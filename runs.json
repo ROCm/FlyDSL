@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-08T10:30:35Z",
+ "updated": "2026-09-08T10:58:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34218054970,
+   "pr": null,
+   "commit": "eb5592f35bf9c0cbc19586927573068df7ba832e",
+   "branch": "main",
+   "event": "push",
+   "title": "[DSL] Expose atomic operations via llvm dialect (#1100)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34218054970",
+   "created_at": "2026-09-08T10:56:21Z",
+   "updated_at": "2026-09-08T10:56:47Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34217970507,
+   "pr": null,
+   "commit": "e40d5e84b52cb6bc12b62eac8048ef00c2e36577",
+   "branch": "main",
+   "event": "push",
+   "title": "[Doc] Add api document for rand extention (#1103)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34217970507",
+   "created_at": "2026-09-08T10:55:21Z",
+   "updated_at": "2026-09-08T10:56:37Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34213236761,
    "pr": 1105,
@@ -38,11 +68,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-08T10:19:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34213236761/job/102022973076"
+     "completed_at": "2026-09-08T10:39:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34213236761/job/102022973076",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -272,7 +303,7 @@
   },
   {
    "run_id": 34201433843,
-   "pr": 1103,
+   "pr": null,
    "commit": "64416e20780f9f52c254e6295ba7abd16d3fa3d5",
    "branch": "pr/docs-random-extension-api",
    "event": "pull_request",
@@ -544,7 +575,7 @@
   },
   {
    "run_id": 34184632260,
-   "pr": 1100,
+   "pr": null,
    "commit": "1119117edef41b5a5e55628280898961948e070e",
    "branch": "feat-llvm-atomic",
    "event": "pull_request",
@@ -650,7 +681,7 @@
   },
   {
    "run_id": 34122598270,
-   "pr": 1100,
+   "pr": null,
    "commit": "dbb90a822e1ca890adc7145b8ca886ad2a055dd1",
    "branch": "feat-llvm-atomic",
    "event": "pull_request",
@@ -2085,77 +2116,6 @@
      "started_at": "2026-09-03T23:36:02Z",
      "completed_at": "2026-09-04T00:56:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/33817239046/job/100854890971",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33816237467,
-   "pr": null,
-   "commit": "5130cbc20fc3a6598b909bdc9aca3e750df07d5a",
-   "branch": "upstream/fa-paged-fp8-asymmetric-v",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33816237467",
-   "created_at": "2026-09-03T23:08:02Z",
-   "updated_at": "2026-09-03T23:09:37Z",
-   "actor": "sammysun0711",
-   "jobs": []
-  },
-  {
-   "run_id": 33792703329,
-   "pr": null,
-   "commit": "e11c3be083a2f66024e2e4254b170acb4c68687a",
-   "branch": "main",
-   "event": "push",
-   "title": "[DSL] Add dynamic RDNA buffer bounds checking (#1089)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33792703329",
-   "created_at": "2026-09-03T18:48:36Z",
-   "updated_at": "2026-09-03T20:15:26Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T19:04:26Z",
-     "completed_at": "2026-09-03T20:15:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33792703329/job/100777820284",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T19:04:15Z",
-     "completed_at": "2026-09-03T19:25:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33792703329/job/100777820317",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T19:04:42Z",
-     "completed_at": "2026-09-03T20:11:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33792703329/job/100777820417",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-03T19:04:36Z",
-     "completed_at": "2026-09-03T19:41:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33792703329/job/100777820489",
      "log_fetch_failed": true
     }
    ]
