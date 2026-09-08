@@ -42,6 +42,7 @@ BLOCK_SIZE = 256
 UNIT_SIZE = 32  # GEMM tile-M, aka block_size in CK
 WARP_SIZE = get_warp_size()
 
+
 @flyc.jit
 def _zero_moe_buf_grid_stride(moe_buf_rsrc, gid_v4, stride_v4, total_v4, oob_idx):
     """Grid-stride loop zeroing moe_buf via vectorized buffer_store."""
@@ -521,9 +522,7 @@ def _compile_moe_sorting_oneshot(
                     my_has_token = my_sub_valid & (my_x != c_zero_i32)
                     local_cnt = my_has_token.select(c_one_i32, c_zero_i32)
 
-                    local_cnt, _, batch_total = fx.coop.warp_scan_with_aggregate(
-                        local_cnt, fx.ReductionOp.ADD, width=8
-                    )
+                    local_cnt, _, batch_total = fx.coop.warp_scan_with_aggregate(local_cnt, fx.ReductionOp.ADD, width=8)
 
                     # Scatter this lane's token
                     slot = position + local_cnt - c_one_i32
@@ -629,9 +628,7 @@ def compile_moe_sorting_oneshot_fused(
     sub_unroll = 8
     cumsum_bufs = 2
     if r < (cumsum_bufs + sub_unroll):
-        raise ValueError(
-            f"LDS too small for E={E}: need at least " f"{(cumsum_bufs + sub_unroll) * smem_cols * 4} bytes"
-        )
+        raise ValueError(f"LDS too small for E={E}: need at least {(cumsum_bufs + sub_unroll) * smem_cols * 4} bytes")
     r_for_sub = ((r - cumsum_bufs) // sub_unroll) * sub_unroll
     r_token_min = ((max_tokens + sub_unroll - 1) // sub_unroll) * sub_unroll
     r_for_sub = min(r_for_sub, r_token_min)
@@ -838,9 +835,7 @@ def compile_moe_sorting_oneshot_fused(
                 ps_ix = ArithValue(safe_eid_ps).index_cast(T.index)
                 val = eid_ps_valid.select(_lds_load_raw(cumsum_mr, ps_ix), c_zero_i32)
 
-                val, _, chunk_total = fx.coop.warp_scan_with_aggregate(
-                    val, fx.ReductionOp.ADD, width=WARP_SIZE
-                )
+                val, _, chunk_total = fx.coop.warp_scan_with_aggregate(val, fx.ReductionOp.ADD, width=WARP_SIZE)
                 val = val + prev_chunk_total
 
                 _lds_store_raw(
@@ -887,9 +882,7 @@ def compile_moe_sorting_oneshot_fused(
                     m_ix = ArithValue(safe_eid_m).index_cast(T.index)
                     mval = eid_m_valid.select(_lds_load_raw(cumdup_mr, m_ix), c_zero_i32)
 
-                    mval, _, chunk_total_m = fx.coop.warp_scan_with_aggregate(
-                        mval, fx.ReductionOp.ADD, width=WARP_SIZE
-                    )
+                    mval, _, chunk_total_m = fx.coop.warp_scan_with_aggregate(mval, fx.ReductionOp.ADD, width=WARP_SIZE)
                     mval = mval + prev_chunk_total_m
                     _lds_store_raw(
                         cumdup_mr,
@@ -963,9 +956,7 @@ def compile_moe_sorting_oneshot_fused(
                     my_has_token = my_sub_valid & (my_x != c_zero_i32)
                     local_cnt = my_has_token.select(c_one_i32, c_zero_i32)
 
-                    local_cnt, _, batch_total = fx.coop.warp_scan_with_aggregate(
-                        local_cnt, fx.ReductionOp.ADD, width=8
-                    )
+                    local_cnt, _, batch_total = fx.coop.warp_scan_with_aggregate(local_cnt, fx.ReductionOp.ADD, width=8)
 
                     slot = position + local_cnt - c_one_i32
                     safe_x = my_has_token.select(my_x, c_one_i32)
@@ -1663,9 +1654,7 @@ def _compile_moe_sorting_multiphase(
             # separate functions, so variables must be defined in outer scope.
             local_idx_p23 = tid
             if has_mask:
-                p23_mask_inclusive = block_scan.inclusive(
-                    my_mask_val, fx.ReductionOp.ADD, storage=scan_storage
-                )
+                p23_mask_inclusive = block_scan.inclusive(my_mask_val, fx.ReductionOp.ADD, storage=scan_storage)
                 local_idx_p23 = p23_mask_inclusive - my_mask_val
 
             # Block 0, thread 0 writes num_valid_ids
