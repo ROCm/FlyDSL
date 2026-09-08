@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-08T07:16:38Z",
+ "updated": "2026-09-08T07:51:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34198616616,
+   "pr": 1102,
+   "commit": "f1b1251ed09b56ebf4f0c79765e168adee692e54",
+   "branch": "chore/pre-commit-formatter",
+   "event": "pull_request",
+   "title": "[Chore] pre commit formatter",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34198616616",
+   "created_at": "2026-09-08T07:17:43Z",
+   "updated_at": "2026-09-08T07:17:43Z",
+   "actor": "ppppqp",
+   "jobs": []
+  },
   {
    "run_id": 34196121600,
    "pr": 1098,
@@ -10,11 +25,11 @@
    "branch": "feat/coop-reduce-scan",
    "event": "pull_request",
    "title": "refactor: migrate to extension api",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34196121600",
    "created_at": "2026-09-08T06:46:00Z",
-   "updated_at": "2026-09-08T07:07:40Z",
+   "updated_at": "2026-09-08T07:24:44Z",
    "actor": "ppppqp",
    "jobs": [
     {
@@ -29,11 +44,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-08T07:07:40Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34196121600/job/101969376312"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-08T07:24:44Z",
+     "completed_at": "2026-09-08T07:47:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34196121600/job/101969376312",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -81,11 +97,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-08T07:01:41Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34195756481/job/101967778066"
+     "completed_at": "2026-09-08T07:24:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34195756481/job/101967778066",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -96,11 +113,11 @@
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
    "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194391453",
    "created_at": "2026-09-08T06:22:40Z",
-   "updated_at": "2026-09-08T06:39:23Z",
+   "updated_at": "2026-09-08T07:49:14Z",
    "actor": "huizzhan",
    "jobs": [
     {
@@ -115,20 +132,22 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-08T06:39:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194391453/job/101962348762"
+     "completed_at": "2026-09-08T07:49:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194391453/job/101962348762",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-08T06:39:19Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194391453/job/101962348810"
+     "completed_at": "2026-09-08T07:46:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194391453/job/101962348810",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -2147,21 +2166,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/33745734428",
    "created_at": "2026-09-03T10:42:17Z",
    "updated_at": "2026-09-03T10:44:01Z",
-   "actor": "RichardChamberlain1",
-   "jobs": []
-  },
-  {
-   "run_id": 33740490425,
-   "pr": 931,
-   "commit": "a18224d52a88c79114a831ab0f258f6485a8e36f",
-   "branch": "rchamber/flex_attention",
-   "event": "pull_request",
-   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33740490425",
-   "created_at": "2026-09-03T09:44:15Z",
-   "updated_at": "2026-09-03T09:45:49Z",
    "actor": "RichardChamberlain1",
    "jobs": []
   }
