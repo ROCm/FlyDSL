@@ -4603,6 +4603,7 @@ def test_paged_fp8_asymmetric_value_matches_torch(
     query_lengths,
     kv_lengths,
     block_table_rows,
+    num_kv_heads=1,
 ):
     """Packed causal FP8 page-64 attention supports native Q/K and V widths."""
     if len(query_lengths) == 1 and force_internal_copies and head_dim == 192:
@@ -4620,9 +4621,11 @@ def test_paged_fp8_asymmetric_value_matches_torch(
     num_pages = max(max(row) for row in block_table_rows) + 1
 
     query, query_descale = quantize_per_tensor_fp8(torch.randn(sum(query_lengths), 16, head_dim, device="cuda") * 0.2)
-    key, key_descale = quantize_per_tensor_fp8(torch.randn(num_pages, 1, head_dim // 16, 64, 16, device="cuda") * 0.2)
+    key, key_descale = quantize_per_tensor_fp8(
+        torch.randn(num_pages, num_kv_heads, head_dim // 16, 64, 16, device="cuda") * 0.2
+    )
     value, value_descale = quantize_per_tensor_fp8(
-        torch.randn(num_pages, 1, 4, value_head_dim, 16, device="cuda") * 0.2
+        torch.randn(num_pages, num_kv_heads, 4, value_head_dim, 16, device="cuda") * 0.2
     )
 
     if force_internal_copies:
@@ -4644,7 +4647,7 @@ def test_paged_fp8_asymmetric_value_matches_torch(
 
     call_kwargs = dict(
         causal=True,
-        num_kv_heads=1,
+        num_kv_heads=num_kv_heads,
         cu_seqlens_q=q_indptr,
         cu_seqlens_kv=kv_indptr,
         max_seqlen_q=max(query_lengths),
@@ -4707,12 +4710,13 @@ def test_paged_fp8_asymmetric_value_matches_torch(
         query_batch = query[q_indptr[batch_idx] : q_indptr[batch_idx + 1]].float() * query_descale
         physical_pages = block_table[batch_idx].long()
         key_batch = (
-            key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, 1, head_dim)[:kv_length].float() * key_descale
-        ).expand(-1, 16, -1)
+            key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, num_kv_heads, head_dim)[:kv_length].float()
+            * key_descale
+        ).repeat_interleave(16 // num_kv_heads, dim=1)
         value_batch = (
-            value[physical_pages].permute(0, 2, 4, 1, 3).reshape(-1, 1, value_head_dim)[:kv_length].float()
+            value[physical_pages].permute(0, 2, 4, 1, 3).reshape(-1, num_kv_heads, value_head_dim)[:kv_length].float()
             * value_descale
-        ).expand(-1, 16, -1)
+        ).repeat_interleave(16 // num_kv_heads, dim=1)
         logits = torch.einsum("qhd,khd->hqk", query_batch, key_batch) / math.sqrt(head_dim)
         query_positions = torch.arange(query_length, device="cuda")
         key_positions = torch.arange(kv_length, device="cuda")
@@ -4724,6 +4728,27 @@ def test_paged_fp8_asymmetric_value_matches_torch(
     assert actual.shape == (sum(query_lengths), 16, value_head_dim)
     assert bool(torch.isfinite(actual).all().item())
     torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("value_head_dim", [128, 192])
+@pytest.mark.parametrize("num_kv_heads", [2, 4])
+def test_paged_fp8_d192_bn128_multiple_kv_heads(value_head_dim, num_kv_heads):
+    """Compact K tiles and the V192 tail preserve head and ragged-page boundaries."""
+    test_paged_fp8_asymmetric_value_matches_torch(
+        head_dim=192,
+        value_head_dim=value_head_dim,
+        use_non_default_stream=False,
+        force_internal_copies=False,
+        query_lengths=[300, 256, 63],
+        kv_lengths=[512, 384, 256],
+        block_table_rows=[
+            [7, 0, 6, 1, 5, 2, 4, 3],
+            [13, 8, 12, 9, 11, 10, 0, 0],
+            [17, 14, 16, 15, 0, 0, 0, 0],
+        ],
+        num_kv_heads=num_kv_heads,
+    )
 
 
 @_requires_gfx950
