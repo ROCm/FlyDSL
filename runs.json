@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-08T07:51:12Z",
+ "updated": "2026-09-08T07:59:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34201903501,
+   "pr": 1103,
+   "commit": "eab0f52e6eb8ab5eca7f8a8cde3b444c416f9445",
+   "branch": "pr/docs-random-extension-api",
+   "event": "pull_request",
+   "title": "[Doc] Add api document for rand extention",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201903501",
+   "created_at": "2026-09-08T07:56:56Z",
+   "updated_at": "2026-09-08T07:57:22Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 34201433843,
+   "pr": 1103,
+   "commit": "64416e20780f9f52c254e6295ba7abd16d3fa3d5",
+   "branch": "pr/docs-random-extension-api",
+   "event": "pull_request",
+   "title": "[Doc] Add api document for rand extention",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201433843",
+   "created_at": "2026-09-08T07:51:17Z",
+   "updated_at": "2026-09-08T07:57:16Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 34198616616,
    "pr": 1102,
@@ -35,11 +65,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-08T07:08:05Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34196121600/job/101969376282"
+     "completed_at": "2026-09-08T07:57:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34196121600/job/101969376282",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -2138,36 +2169,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 33749691782,
-   "pr": 931,
-   "commit": "a414513e66b6d8aae1164959ef840b9195f3db67",
-   "branch": "rchamber/flex_attention",
-   "event": "pull_request",
-   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33749691782",
-   "created_at": "2026-09-03T11:26:27Z",
-   "updated_at": "2026-09-03T11:27:58Z",
-   "actor": "RichardChamberlain1",
-   "jobs": []
-  },
-  {
-   "run_id": 33745734428,
-   "pr": 931,
-   "commit": "4706f324dd6742d86f8892bf11598cd8c1d2e607",
-   "branch": "rchamber/flex_attention",
-   "event": "pull_request",
-   "title": "Add flex/flash-attention forward kernel on the layout API (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33745734428",
-   "created_at": "2026-09-03T10:42:17Z",
-   "updated_at": "2026-09-03T10:44:01Z",
-   "actor": "RichardChamberlain1",
-   "jobs": []
   }
  ]
 }
