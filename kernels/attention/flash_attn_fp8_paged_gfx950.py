@@ -81,8 +81,8 @@ def build_flash_attn_paged_fp8_module(
         raise ValueError(f"batch_interleave_group must be positive, got {batch_interleave_group}")
     if batch_interleave_group > 1 and (paged_bn128 or head_dim != 192):
         raise ValueError("batch interleaving is supported only by the generic paged D192 kernel")
-    if paged_bn128 and (head_dim, value_head_dim) not in ((128, 128), (192, 128)):
-        raise RuntimeError("paged BN128 currently requires value_head_dim=128")
+    if paged_bn128 and (head_dim, value_head_dim) not in ((128, 128), (192, 128), (192, 192)):
+        raise RuntimeError("paged BN128 requires supported FP8 head dimensions")
     assert num_heads % num_kv_heads == 0
     traits = _make_paged_dualwave_swp_fp8_traits(
         num_heads,
@@ -264,14 +264,18 @@ def build_flash_attn_paged_fp8_module(
         kv_gmem_to_lds.load_v((t0 + 1) * BN, (t0 + 1) % fx.Index(NPF), page_id=page_t1)
         kv_gmem_to_lds.load_k((t0 + 2) * BN, (t0 + 2) % fx.Index(NPF), page_id=page_t2)
         kv_gmem_to_lds.load_k((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF), page_id=page_t3)
-        next_v_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
-            (t0 + 2) * BN,
-            page_id=page_t2,
-        )
-        next_v_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
-            (t0 + 3) * BN,
-            page_id=page_t3,
-        )
+        if const_expr(traits.FP8_PV_SEGMENTED):
+            kv_gmem_to_lds.load_v((t0 + 2) * BN, (t0 + 2) % fx.Index(NPF), page_id=page_t2)
+            kv_gmem_to_lds.load_v((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF), page_id=page_t3)
+        else:
+            next_v_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
+                (t0 + 2) * BN,
+                page_id=page_t2,
+            )
+            next_v_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
+                (t0 + 3) * BN,
+                page_id=page_t3,
+            )
         fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
@@ -288,7 +292,9 @@ def build_flash_attn_paged_fp8_module(
                 return x & fx.Index(7)
             return (x >= NPF_I).select(x - NPF_I, x)
 
-        init_args = [m_row, l_row] + v_o + [t0 % fx.Index(NPF), next_v_a, next_v_b]
+        init_args = [m_row, l_row] + v_o + [t0 % fx.Index(NPF)]
+        if const_expr(not traits.FP8_PV_SEGMENTED):
+            init_args += [next_v_a, next_v_b]
         loop_results = init_args
         next_v_arg_idx = 3 + D_CHUNKS
         for j, loop_args in range(fx.Index(t0), t_end, fx.Index(2), init=init_args):
@@ -303,45 +309,70 @@ def build_flash_attn_paged_fp8_module(
             f_a_buf = _ring_wrap(a_buf + fx.Index(4))
             f_b_buf = _ring_wrap(a_buf + fx.Index(5))
 
-            next_v_a = loop_args[next_v_arg_idx]
-            next_v_b = loop_args[next_v_arg_idx + 1]
+            if const_expr(traits.FP8_PV_SEGMENTED):
+                v_k_a = kv_lds_to_regs.load_k(a_buf)
+                v_k_b = kv_lds_to_regs.load_k(b_buf)
+                v_s_a = gemm_helper.qk(v_k_a, q_wide)
+                v_s_b = gemm_helper.qk(v_k_b, q_wide)
 
-            v_k_a = kv_lds_to_regs.load_k(a_buf)
-            v_k_b = kv_lds_to_regs.load_k(b_buf)
-            v_v_a = kv_lds_to_regs.load_v(a_buf)
+                page_f_a, page_f_b = ctx.load_page_id_pair((j + fx.Index(4)) * BN)
+                kv_gmem_to_lds.load_k((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
+                kv_gmem_to_lds.load_k((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
+                kv_gmem_to_lds.load_v((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
+                kv_gmem_to_lds.load_v((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
 
-            page_f_a, page_f_b = ctx.load_page_id_pair((j + fx.Index(4)) * BN)
-            kv_gmem_to_lds.load_k((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
-            kv_gmem_to_lds.load_k((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
+                v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
+                m_tile = _merge_tile_max(v_s_a, v_s_b)
+                v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
+                v_o = softmax_helper.anchor_v_o(v_o)
 
-            v_s_a = gemm_helper.qk(v_k_a, q_wide)
-            kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_a, nn_a_buf)
-            v_f_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
-                (j + fx.Index(4)) * BN,
-                page_id=page_f_a,
-            )
-            v_f_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
-                (j + fx.Index(5)) * BN,
-                page_id=page_f_b,
-            )
-            v_s_b = gemm_helper.qk(v_k_b, q_wide)
-            kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_b, nn_b_buf)
-            v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
-            m_tile = _merge_tile_max(v_s_a, v_s_b)
-            v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
-            v_o = softmax_helper.anchor_v_o(v_o)
+                v_p_a, l_row = _softmax_part(v_s_a, l_row, m_new)
+                v_v_a = kv_lds_to_regs.load_v(a_buf)
+                v_o = _pv_part(v_p_a, v_v_a, v_o)
+                v_p_b, l_row = _softmax_part(v_s_b, l_row, m_new)
+                v_v_b = kv_lds_to_regs.load_v(b_buf)
+                v_o = _pv_part(v_p_b, v_v_b, v_o)
+                m_row = m_new
+                next_args = [m_row, l_row] + v_o + [nn_a_buf]
+            else:
+                next_v_a = loop_args[next_v_arg_idx]
+                next_v_b = loop_args[next_v_arg_idx + 1]
 
-            v_o, l_row = _subtile_tail(v_s_a, v_v_a, v_o, l_row, m_new)
-            v_v_b = kv_lds_to_regs.load_v(b_buf)
-            v_o, l_row = _subtile_tail(v_s_b, v_v_b, v_o, l_row, m_new)
-            m_row = m_new
+                v_k_a = kv_lds_to_regs.load_k(a_buf)
+                v_k_b = kv_lds_to_regs.load_k(b_buf)
+                v_v_a = kv_lds_to_regs.load_v(a_buf)
+
+                page_f_a, page_f_b = ctx.load_page_id_pair((j + fx.Index(4)) * BN)
+                kv_gmem_to_lds.load_k((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
+                kv_gmem_to_lds.load_k((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
+
+                v_s_a = gemm_helper.qk(v_k_a, q_wide)
+                kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_a, nn_a_buf)
+                v_f_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
+                    (j + fx.Index(4)) * BN,
+                    page_id=page_f_a,
+                )
+                v_f_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
+                    (j + fx.Index(5)) * BN,
+                    page_id=page_f_b,
+                )
+                v_s_b = gemm_helper.qk(v_k_b, q_wide)
+                kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_b, nn_b_buf)
+                v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
+                m_tile = _merge_tile_max(v_s_a, v_s_b)
+                v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
+                v_o = softmax_helper.anchor_v_o(v_o)
+
+                v_o, l_row = _subtile_tail(v_s_a, v_v_a, v_o, l_row, m_new)
+                v_v_b = kv_lds_to_regs.load_v(b_buf)
+                v_o, l_row = _subtile_tail(v_s_b, v_v_b, v_o, l_row, m_new)
+                m_row = m_new
+                next_args = [m_row, l_row] + v_o + [nn_a_buf, v_f_a, v_f_b]
 
             fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
-
-            next_args = [m_row, l_row] + v_o + [nn_a_buf, v_f_a, v_f_b]
             loop_results = yield next_args
         m_row = loop_results[0]
         l_row = loop_results[1]
