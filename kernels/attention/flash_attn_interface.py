@@ -779,7 +779,7 @@ def _flydsl_flash_attn_paged(
         )
         if paged_fp8:
             num_kv_pages = (skv + page_size - 1) // page_size
-            use_bn128 = fp8_head_dims == (128, 128) and num_kv_pages % 2 == 0
+            use_bn128 = fp8_head_dims in ((128, 128), (192, 128)) and num_kv_pages % 2 == 0
             paged_bn128_varlen = use_bn128 and B > 1
             paged_setprio = dualwave_swp_setprio and D != 192
             fp8_pv_segmented = _use_paged_fp8_segmented_pv(fp8_head_dims)
@@ -800,7 +800,9 @@ def _flydsl_flash_attn_paged(
                 paged_bn128_varlen=paged_bn128_varlen,
                 fp8_pv_segmented=fp8_pv_segmented,
                 batch_interleave_group=(
-                    _paged_fp8_batch_interleave_group(B, fp8_head_dims) if H == 16 and num_kv_heads == 1 else 1
+                    _paged_fp8_batch_interleave_group(B, fp8_head_dims)
+                    if not use_bn128 and H == 16 and num_kv_heads == 1
+                    else 1
                 ),
             )
         elif _paged_light_ok:

@@ -81,8 +81,8 @@ def build_flash_attn_paged_fp8_module(
         raise ValueError(f"batch_interleave_group must be positive, got {batch_interleave_group}")
     if batch_interleave_group > 1 and (paged_bn128 or head_dim != 192):
         raise ValueError("batch interleaving is supported only by the generic paged D192 kernel")
-    if paged_bn128 and (head_dim, value_head_dim) != (128, 128):
-        raise RuntimeError("paged BN128 currently requires head_dim=value_head_dim=128")
+    if paged_bn128 and (head_dim, value_head_dim) not in ((128, 128), (192, 128)):
+        raise RuntimeError("paged BN128 currently requires value_head_dim=128")
     assert num_heads % num_kv_heads == 0
     traits = _make_paged_dualwave_swp_fp8_traits(
         num_heads,
@@ -118,6 +118,7 @@ def build_flash_attn_paged_fp8_module(
     DEFAULT_STRIDE_KV_N = traits.DEFAULT_STRIDE_KV_N
     _dualwave_swp_fp8_cache_tag = traits.cache_tag
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
+    _q_lds_elems = BLOCK_M * HEAD_DIM if traits.QLDS else 16
 
     if PAGED_BN128:
 
@@ -125,7 +126,7 @@ def build_flash_attn_paged_fp8_module(
         class SharedStorage:
             kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
             vt: fx.Array[fx.BFloat16, traits.VT_BF16_TOTAL, 16]
-            q: fx.Array[_lds_elem_dtype, BLOCK_M * HEAD_DIM, 16]
+            q: fx.Array[_lds_elem_dtype, _q_lds_elems, 16]
 
     else:
 
@@ -246,7 +247,8 @@ def build_flash_attn_paged_fp8_module(
 
         page_t0, page_t1 = ctx.load_page_id_pair(t0 * BN)
         kv_gmem_to_lds.load_k(t0 * BN, t0 % fx.Index(NPF), page_id=page_t0)
-        q_loader.stage_q_to_lds()
+        if const_expr(traits.QLDS):
+            q_loader.stage_q_to_lds()
         fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
