@@ -25,6 +25,10 @@ subtrees:
         title: Composite types
       - file: language/storage_and_allocator
         title: Storage and allocator
+  - caption: Extension
+    entries:
+      - file: extension/rand
+        title: Random number generation
   - caption: Guides
     entries:
       - file: architecture_guide
