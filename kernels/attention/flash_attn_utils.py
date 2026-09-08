@@ -2181,7 +2181,7 @@ class PagedDualwaveSwpFp8Traits:
 
     @property
     def QLDS(self):
-        return self.QREG and self.HEAD_DIM <= 128
+        return False
 
     @property
     def cache_tag(self):
@@ -2309,6 +2309,8 @@ def _make_paged_dualwave_swp_fp8_traits(
     vdma = bn128_pf
     deep_ring = bn128
     num_prefetch_k = (6 if bn128_pf else 4) if deep_ring else 2
+    if paged and bn128 and head_dim == 128:
+        num_prefetch_k = 8
     if bn128_pf:
         dualwave_swp_kv_per_buffer = smem_k_tile_elems
     else:
