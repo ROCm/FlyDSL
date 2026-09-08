@@ -55,6 +55,21 @@ TILE_MIN_WAVES_PER_CU = 6
 
 TILE_MIN_N_FILL = 0.75
 
+# A 256-wide N tile only pays when it spans K/groups in ONE tile: it halves the M tiles
+# (and with them the A traffic per output element) for at most 1/(1-TILE_MIN_N_FILL) of
+# masked columns. Past 256 the second tile is mostly mask -- measured on gfx950, K/groups
+# = 384 is 1.5x slower on 256x256 than on three clean 128-wide tiles, while K/groups = 192
+# is 1.08-1.17x faster. Hence a closed range, not a "wider is better" ladder step.
+TILE_WIDE_N = (256, 256, 2, 4)
+TILE_WIDE_N_MIN_KG = int(TILE_WIDE_N[1] * TILE_MIN_N_FILL)
+
+# Grouped-M L2 swizzle. It only has something to reuse when the N grid has more than one
+# tile (with a single n-tile the regrouping is a no-op that still costs index math), and
+# it needs enough blocks in flight for the grouped weight tile to stay hot. Below this it
+# measured neutral-to-negative on every VAE shape.
+WGM_L2_SWIZZLE = 8
+WGM_MIN_BLOCKS_PER_CU = 4
+
 PADDING_MODES = ("zeros", "reflect", "replicate", "circular")
 
 CONV_COMPILE_HINTS = {}
@@ -954,19 +969,40 @@ def _num_cu(device):
         return 256
 
 
+def _blocks(npq, kg, groups, tile):
+    tile_m, tile_n = tile[0], tile[1]
+    return ((npq + tile_m - 1) // tile_m) * groups * ((kg + tile_n - 1) // tile_n)
+
+
 def _pick_tile(npq, k, groups, device):
     kg = k // groups
+    target = TILE_MIN_WAVES_PER_CU * _num_cu(device)
+
+    # Single-n-tile wide case first; see TILE_WIDE_N. The wave check keeps it off
+    # problems too small to fill the device, where the halved M grid would hurt.
+    if TILE_WIDE_N_MIN_KG <= kg <= TILE_WIDE_N[1]:
+        if _blocks(npq, kg, groups, TILE_WIDE_N) * TILE_WIDE_N[2] * TILE_WIDE_N[3] >= target:
+            return TILE_WIDE_N
+
     # A tile wider than kg is still worth its masked columns: it keeps more waves per
     # block and halves the A traffic per output element. Below TILE_MIN_N_FILL the
     # wasted columns take over; the wave-count check below demotes it again when the
     # problem is too small to fill the device.
     legal = [t for t in TILE_LADDER if kg >= t[1] * TILE_MIN_N_FILL] or [TILE_LADDER[-1]]
-    target = TILE_MIN_WAVES_PER_CU * _num_cu(device)
     for tile_m, tile_n, wave_m, wave_n in legal:
-        blocks = ((npq + tile_m - 1) // tile_m) * groups * ((kg + tile_n - 1) // tile_n)
-        if blocks * wave_m * wave_n >= target:
+        if _blocks(npq, kg, groups, (tile_m, tile_n)) * wave_m * wave_n >= target:
             return (tile_m, tile_n, wave_m, wave_n)
     return legal[-1]
+
+
+def _pick_wgm(npq, k, groups, tile, device):
+    """L2 swizzle grouping for the chosen tile; see WGM_L2_SWIZZLE."""
+    kg = k // groups
+    if (kg + tile[1] - 1) // tile[1] < 2:
+        return 1
+    if _blocks(npq, kg, groups, tile) < WGM_MIN_BLOCKS_PER_CU * _num_cu(device):
+        return 1
+    return WGM_L2_SWIZZLE
 
 
 def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE, groups=1):
@@ -1038,6 +1074,7 @@ def _conv3d_impl(
     splitk=None,
     stream=None,
     tile=None,
+    wgm=None,
     autotune=None,
     input_layout="NCDHW",
     output_layout="NCDHW",
@@ -1188,9 +1225,10 @@ def _conv3d_impl(
         _dispatch(exe, y, x_ndhwc, w_packed, bias_arg, stream=launch_stream)
         return y, sk
 
+    forced_wgm = None if wgm is None else max(1, int(wgm))
     if tile is not None:
         chosen_tile = tuple(tile)
-        chosen_wgm = 1
+        chosen_wgm = 1 if forced_wgm is None else forced_wgm
     elif autotune or (autotune is None and _autotune_enabled()):
         from kernels.conv.conv3d_autotune import BF16_CANDIDATES, WGM_VALUES, autotune_conv3d
 
@@ -1199,7 +1237,7 @@ def _conv3d_impl(
         chosen_tile, chosen_wgm = best
     else:
         chosen_tile = _pick_tile(npq, k, groups, x.device)
-        chosen_wgm = 1
+        chosen_wgm = _pick_wgm(npq, k, groups, chosen_tile, x.device) if forced_wgm is None else forced_wgm
 
     y, sk = _run(chosen_tile, chosen_wgm)
     if sk > 1:

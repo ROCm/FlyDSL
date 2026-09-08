@@ -15,7 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.conv.conv3d_implicit import _pick_tile, conv3d_implicit
+from kernels.conv.conv3d_implicit import _pick_tile, _pick_wgm, conv3d_implicit
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -147,6 +147,36 @@ def test_conv2d_auto_tile_n_tail(k, groups):
 
     assert y.shape == y_ref.shape
     assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+# Launch-config selection is plain integer math, so these assert the rules directly.
+@_skip_non_cdna4
+@pytest.mark.parametrize(
+    "npq,k,expected_n",
+    [
+        (262144, 192, 256),  # K/groups spans one 256-wide tile: take it
+        (65536, 192, 256),
+        (262144, 384, 128),  # two 256-wide tiles, the second mostly masked: don't
+        (262144, 96, 128),  # below TILE_MIN_N_FILL for 256
+        (256, 192, 32),  # too few blocks for the halved M grid; ladder demotes as before
+    ],
+)
+def test_pick_tile_wide_n_range(npq, k, expected_n):
+    assert _pick_tile(npq, k, 1, "cuda")[1] == expected_n
+
+
+@_skip_non_cdna4
+@pytest.mark.parametrize(
+    "npq,k,expected",
+    [
+        (65536, 384, 8),  # 3 n-tiles and enough blocks: swizzle pays
+        (16384, 384, 1),  # 3 n-tiles but only ~1.5 waves
+        (1048576, 96, 1),  # one n-tile: regrouping is a no-op that still costs math
+    ],
+)
+def test_pick_wgm(npq, k, expected):
+    tile = _pick_tile(npq, k, 1, "cuda")
+    assert _pick_wgm(npq, k, 1, tile, "cuda") == expected
 
 
 @_skip_non_cdna4
