@@ -110,7 +110,8 @@ def test_bare_atomic_add_return():
     assert counter_dev.cpu().item() == N
     # Every thread must observe a distinct pre-update value, i.e. a permutation of [0, N).
     tickets = out_dev.cpu().sort().values
-    assert torch.equal(tickets, torch.arange(N, dtype=torch.int32))
+    expected = torch.arange(N, dtype=torch.int32, device=tickets.device)
+    assert torch.equal(tickets, expected)
 
 
 @flyc.kernel

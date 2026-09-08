@@ -478,10 +478,12 @@ def atomic_cas(
         syncscope: LLVM scope or target-specific synchronization scope. ``None``
             selects LLVM's system scope.
         success_ordering: An ``fx.AtomicOrdering`` value used when the exchange
-            succeeds.
+            succeeds. LLVM requires ``Monotonic`` or a stronger ordering.
         failure_ordering: An ``fx.AtomicOrdering`` value used when the
-            comparison fails. It cannot be ``Release`` or ``AcqRel`` because a
-            failed exchange does not perform a write.
+            comparison fails. LLVM requires ``Monotonic`` or a stronger
+            ordering, but it cannot be stronger than ``success_ordering`` or be
+            ``Release`` or ``AcqRel`` because a failed exchange does not
+            perform a write.
         weak: Whether LLVM may allow a spurious comparison failure.
 
     Returns:
