@@ -32,6 +32,22 @@ import parse_bench
 JOB_RUNNER = re.compile(r"\(\s*(linux-flydsl-[A-Za-z0-9-]+)\s*\)")
 BENCH_RUNNERS = set(parse_bench.RUNNER_ARCH)  # only the single-GPU benchmark boxes
 
+# The linux-flydsl-mi35x-* labels pool MI350 and MI355 machines. Both are gfx950, so
+# the label alone cannot identify the host, but their throughput differs enough that
+# ingesting both into one series shows up as a phantom regression whenever the job
+# lands on the slower box. Only MI355 results enter history.json; the host is read
+# from the runner's own name ("Machine name" in the job's "Set up job" log), e.g.
+# linux-flydsl-mi355-1-g2mdh-runner-k8jws.
+MIXED_RUNNERS = {"linux-flydsl-mi35x-1", "linux-flydsl-mi35x-8"}
+BENCH_HOST_MODEL = "MI355"
+_HOST_MODEL = re.compile(r"mi35([05])", re.IGNORECASE)
+
+
+def host_model(runner_name: str) -> str | None:
+    """``"MI350"``/``"MI355"`` for a pooled runner, or None if its name doesn't say."""
+    m = _HOST_MODEL.search(runner_name or "")
+    return f"MI35{m.group(1)}" if m else None
+
 
 def gh(path: str, paginate: bool = False) -> object:
     """Call ``gh api <path>`` and return parsed JSON (dict/list)."""
@@ -149,6 +165,19 @@ def ingest_run(repo: str, run: dict, regression_pct: float) -> tuple[list[dict],
         job_status.append(js)
         if job.get("status") != "completed" or job.get("conclusion") != "success":
             continue  # only completed-successful jobs have parseable benchmark output
+        if runner in MIXED_RUNNERS:
+            model = host_model(job.get("runner_name") or "")
+            js["host_model"] = model
+            if model != BENCH_HOST_MODEL:
+                # An unidentifiable host is skipped too: a visible gap in the chart is
+                # recoverable, a series that silently mixes machine classes is not.
+                js["bench_skipped"] = f"host {model or 'unidentified'} != {BENCH_HOST_MODEL}"
+                print(
+                    f"  - {runner}: no bench records ({js['bench_skipped']}, "
+                    f"runner_name={job.get('runner_name')!r})",
+                    file=sys.stderr,
+                )
+                continue
         try:
             text = gh_text(f"repos/{repo}/actions/jobs/{job['id']}/logs")
         except RuntimeError as e:

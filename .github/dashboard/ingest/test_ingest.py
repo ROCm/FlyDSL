@@ -197,6 +197,77 @@ def test_runner_of_matches_known_box_and_rejects_unknown():
 
 
 # --------------------------------------------------------------------------- #
+# host_model / mixed mi35x pool
+# --------------------------------------------------------------------------- #
+def test_host_model_reads_the_machine_name():
+    assert ingest.host_model("linux-flydsl-mi355-1-g2mdh-runner-k8jws") == "MI355"
+    assert ingest.host_model("linux-flydsl-mi350-1-g2mdh-runner-k8jws") == "MI350"
+    assert ingest.host_model("linux-flydsl-mi35x-1-abcde-runner-fghij") is None
+    assert ingest.host_model("") is None
+
+
+def _mixed_job(runner_name):
+    return {
+        "id": 9,
+        "name": "test (linux-flydsl-mi35x-1)",
+        "status": "completed",
+        "conclusion": "success",
+        "runner_name": runner_name,
+    }
+
+
+def _ingest_one(monkeypatch, job, log="op shape dtype TB/s TFLOPS\n"):
+    monkeypatch.setattr(ingest, "run_jobs", lambda repo, run_id: [job])
+    monkeypatch.setattr(ingest, "resolve_pr", lambda repo, run: None)
+    monkeypatch.setattr(ingest, "gh_text", lambda path: log)
+    return ingest.ingest_run("ROCm/FlyDSL", {"id": 1, "head_sha": "abc"}, regression_pct=-3.0)
+
+
+def test_mi350_host_is_kept_in_runs_but_not_ingested(monkeypatch):
+    # The job must still appear on the live CI board; only its numbers are dropped.
+    monkeypatch.setattr(ingest, "gh_text", lambda path: (_ for _ in ()).throw(AssertionError("log fetched")))
+    recs, summary = _ingest_one(monkeypatch, _mixed_job("linux-flydsl-mi350-1-aaaaa-runner-bbbbb"))
+    assert recs == []
+    assert summary["jobs"][0]["host_model"] == "MI350"
+    assert "MI350" in summary["jobs"][0]["bench_skipped"]
+
+
+def test_unidentifiable_mixed_host_is_skipped(monkeypatch):
+    monkeypatch.setattr(ingest, "gh_text", lambda path: (_ for _ in ()).throw(AssertionError("log fetched")))
+    recs, summary = _ingest_one(monkeypatch, _mixed_job("linux-flydsl-mi35x-1-aaaaa-runner-bbbbb"))
+    assert recs == []
+    assert summary["jobs"][0]["host_model"] is None
+    assert "unidentified" in summary["jobs"][0]["bench_skipped"]
+
+
+def test_mi355_host_in_mixed_pool_is_ingested(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_parse(text, regression_pct):
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(ingest.parse_bench, "parse_log", fake_parse)
+    monkeypatch.setattr(ingest.parse_bench, "parse_aiter_compare", lambda text: [])
+    _, summary = _ingest_one(monkeypatch, _mixed_job("linux-flydsl-mi355-1-aaaaa-runner-bbbbb"))
+    assert calls["n"] == 1  # log was parsed, not skipped
+    assert summary["jobs"][0]["host_model"] == "MI355"
+    assert "bench_skipped" not in summary["jobs"][0]
+
+
+def test_unpooled_runner_is_not_host_filtered(monkeypatch):
+    # mi325-1 has a single machine class, so its name is never inspected.
+    calls = {"n": 0}
+    monkeypatch.setattr(ingest.parse_bench, "parse_log", lambda text, regression_pct: calls.update(n=1) or [])
+    monkeypatch.setattr(ingest.parse_bench, "parse_aiter_compare", lambda text: [])
+    job = _mixed_job("some-opaque-name")
+    job["name"] = "test (linux-flydsl-mi325-1)"
+    _, summary = _ingest_one(monkeypatch, job)
+    assert calls["n"] == 1
+    assert "host_model" not in summary["jobs"][0]
+
+
+# --------------------------------------------------------------------------- #
 # list_runs — default scans all branches (so PR runs are included)
 # --------------------------------------------------------------------------- #
 def test_list_runs_default_does_not_filter_by_branch(monkeypatch):
