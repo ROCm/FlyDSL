@@ -21,6 +21,28 @@ def divmod(a, b):
     return (a // b, a % b)
 
 
+def xcd_remap_pid(num_pid_m, num_pid_n, *, group_m, num_xcds=8):
+    """1D workgroup id -> ``(pid_m, pid_n)``, XCD-aware with M-grouped ordering."""
+    num_cus = 32 * num_xcds
+    swizzle_threshold = 4 * num_cus
+
+    wgid = fx.block_idx.x
+    num_wg = num_pid_m * num_pid_n
+    simple_m, simple_n = divmod(wgid, num_pid_n)
+
+    intra_xcd, xcd = divmod(wgid, num_xcds)
+    wgid_remap = xcd * (num_wg // num_xcds) + intra_xcd
+    num_wgid_in_group = group_m * num_pid_n
+    group_id, intra_group = divmod(wgid_remap, num_wgid_in_group)
+    first_pid_m = group_id * group_m
+    group_size_m = fx.min(num_pid_m - first_pid_m, group_m)
+    pid_n, intra_group_m = divmod(intra_group, group_size_m)
+    pid_m = first_pid_m + intra_group_m
+
+    use_simple = (num_wg < swizzle_threshold) | (num_wg % num_xcds != 0)
+    return (use_simple.select(simple_m, pid_m), use_simple.select(simple_n, pid_n))
+
+
 def preshuffle_b(b_t):
     """Permute row-major ``B_T`` ``(N, K)`` for ``b_preshuffled=True``."""
     n, k = b_t.shape[-2:]
@@ -139,6 +161,13 @@ class S2RLoader:
 
 
 class StoreC:
+    """Accumulator -> bf16 gmem epilogue.
+
+    ``A_scale`` / ``B_scale`` are the per-row / per-col FP32 scales applied here.
+    Pass ``None`` for both when the scaling already happened inside the MFMA
+    (MX block-scaled kernels); the epilogue then only converts acc -> bf16.
+    """
+
     def __init__(self, A_scale, B_scale, C, c_rows, c_cols, c_idx_fn, n_tiles_a, n_tiles_b):
         self.c_rows = c_rows
         self.c_cols = c_cols
@@ -146,24 +175,26 @@ class StoreC:
         self.c_idx_fn = c_idx_fn
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
+        self.scaled = A_scale is not None
+        assert (A_scale is None) == (B_scale is None), "pass both epilogue scales or neither"
         # Exact byte counts from compile-time shape (BF16 C output, FP32 scales).
         # ``num_records_bytes`` is required when ``max_size=False`` -- see
         # ``make_buffer_tensor`` docstring for the silent-OOB rationale.
         c_nbytes = c_rows * c_cols * 2  # BFloat16 = 2 bytes
-        sa_nbytes = c_rows * 4  # Float32 row-wise scale
-        sb_nbytes = c_cols * 4  # Float32 col-wise scale
         gC = fx.rocdl.make_buffer_tensor(C, max_size=False, num_records_bytes=c_nbytes)
-        gSA = fx.rocdl.make_buffer_tensor(A_scale, max_size=False, num_records_bytes=sa_nbytes)
-        gSB = fx.rocdl.make_buffer_tensor(B_scale, max_size=False, num_records_bytes=sb_nbytes)
         self.c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
-        self.sa_div = fx.logical_divide(gSA, fx.make_layout(1, 1))
-        self.sb_div = fx.logical_divide(gSB, fx.make_layout(1, 1))
-
-        self.scale_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-        self.scale_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+        if const_expr(self.scaled):
+            sa_nbytes = c_rows * 4  # Float32 row-wise scale
+            sb_nbytes = c_cols * 4  # Float32 col-wise scale
+            gSA = fx.rocdl.make_buffer_tensor(A_scale, max_size=False, num_records_bytes=sa_nbytes)
+            gSB = fx.rocdl.make_buffer_tensor(B_scale, max_size=False, num_records_bytes=sb_nbytes)
+            self.sa_div = fx.logical_divide(gSA, fx.make_layout(1, 1))
+            self.sb_div = fx.logical_divide(gSB, fx.make_layout(1, 1))
+            self.scale_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
+            self.scale_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+            self.reg_f32_4 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32)
+            self.reg_f32_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
         self.out_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.BFloat16)
-        self.reg_f32_4 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32)
-        self.reg_f32_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
         self.reg_bf16_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.BFloat16)
 
     def _load_scale_vec4(self, row):
@@ -179,12 +210,14 @@ class StoreC:
         fx.copy(self.out_atom_1, self.reg_bf16_1, fx.slice(self.c_div, (None, fx.Int32(c_index))))
 
     def store(self, c_frag, base_row, base_col):
-        a_scales = [
-            self._load_scale_vec4(base_row + i * 16 + (self.lane_id // 16) * 4) for i in range_constexpr(self.n_tiles_a)
-        ]
-        b_scales = [
-            self._load_scale_scalar(base_col + i * 16 + self.lane_id % 16) for i in range_constexpr(self.n_tiles_b)
-        ]
+        if const_expr(self.scaled):
+            a_scales = [
+                self._load_scale_vec4(base_row + i * 16 + (self.lane_id // 16) * 4)
+                for i in range_constexpr(self.n_tiles_a)
+            ]
+            b_scales = [
+                self._load_scale_scalar(base_col + i * 16 + self.lane_id % 16) for i in range_constexpr(self.n_tiles_b)
+            ]
         for ti in range_constexpr(self.n_tiles_a):
             row = base_row + ti * 16 + (self.lane_id // 16) * 4
             for tj in range_constexpr(self.n_tiles_b):
@@ -193,9 +226,12 @@ class StoreC:
                 oob = fx.Int32(self.c_rows * self.c_cols)
                 vec_f32 = Vec(c_frag[self.c_idx_fn(ti, tj)])
                 for i in range_constexpr(4):
-                    scaled = (vec_f32[i] * (a_scales[ti][i] * b_scales[tj])).to(fx.BFloat16)
+                    if const_expr(self.scaled):
+                        out = (vec_f32[i] * (a_scales[ti][i] * b_scales[tj])).to(fx.BFloat16)
+                    else:
+                        out = vec_f32[i].to(fx.BFloat16)
                     c_index = (row + i) * self.c_cols + col
-                    self._store_bf16(scaled, arith.select(col_valid, c_index, oob))
+                    self._store_bf16(out, arith.select(col_valid, c_index, oob))
 
 
 def wait_barrier(count):
