@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-09T03:13:33Z",
+ "updated": "2026-09-09T03:21:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -97,30 +97,32 @@
    "branch": "ywx/mega_moe_r1_tune",
    "event": "pull_request",
    "title": " deepseekv3 r1 tune config",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34300263128",
    "created_at": "2026-09-09T01:42:21Z",
-   "updated_at": "2026-09-09T02:13:59Z",
+   "updated_at": "2026-09-09T03:20:15Z",
    "actor": "Yaowu-Xiong",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T02:13:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34300263128/job/102309338789"
+     "completed_at": "2026-09-09T03:20:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34300263128/job/102309338789",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T02:02:16Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34300263128/job/102309338823"
+     "completed_at": "2026-09-09T03:20:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34300263128/job/102309338823",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
