@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-09T15:13:36Z",
+ "updated": "2026-09-09T15:29:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34367555883",
    "created_at": "2026-09-09T15:02:02Z",
-   "updated_at": "2026-09-09T15:11:28Z",
+   "updated_at": "2026-09-09T15:11:59Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,30 +25,31 @@
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
    "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34364102173",
    "created_at": "2026-09-09T14:30:52Z",
-   "updated_at": "2026-09-09T14:59:30Z",
+   "updated_at": "2026-09-09T15:19:22Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-09T14:59:30Z",
+     "started_at": "2026-09-09T15:19:21Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34364102173/job/102519108104"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T15:00:52Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34364102173/job/102519108169"
+     "completed_at": "2026-09-09T15:15:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34364102173/job/102519108169",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -275,13 +276,41 @@
    "branch": "fix/fused-rope-head-dim-96",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix fused RoPE for head dimension 96",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336723109",
    "created_at": "2026-09-09T09:47:55Z",
-   "updated_at": "2026-09-09T15:05:07Z",
+   "updated_at": "2026-09-09T15:17:32Z",
    "actor": "tangzzycc",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T15:18:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336723109/job/102525974532"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-09T15:17:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336723109/job/102525974628"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T15:19:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336723109/job/102525974648"
+    }
+   ]
   },
   {
    "run_id": 34336099587,
