@@ -213,20 +213,17 @@ def launch_gemm_bf16(
                     # B is the instruction's A operand: the accumulator's fast dim is N.
                     fx.gemm(wmma_atom, c_frags[idx], wt[wn], act[wm], c_frags[idx])
 
-        def compute_ktile(buf, prefetch_kt):
+        def prefetch(kt):
+            rocdl.sched_barrier(0)
+            issue(kt % num_buffers, kt)
+            rocdl.sched_barrier(0)
+
+        def compute_ktile(buf):
             cur = _load_ks(buf, 0)
             for ks in range_constexpr(K_WS):
                 nxt = _load_ks(buf, ks + 1) if const_expr(ks + 1 < K_WS) else None
                 rocdl.s_wait_dscnt(KS_DS if const_expr(nxt is not None) else 0)
-                if const_expr(ks == 0 and prefetch_kt is not None and wmma_m_rep > 1):
-                    rocdl.sched_barrier(0)
-                    issue(prefetch_kt % num_buffers, prefetch_kt)
-                    rocdl.sched_barrier(0)
                 _mma_ks(cur)
-                if const_expr(ks == 0 and prefetch_kt is not None and wmma_m_rep == 1):
-                    rocdl.sched_barrier(0)
-                    issue(prefetch_kt % num_buffers, prefetch_kt)
-                    rocdl.sched_barrier(0)
                 if const_expr(nxt is not None):
                     cur = nxt
             rocdl.sched_dsrd(KS_DS)  # prologue group
@@ -244,14 +241,15 @@ def launch_gemm_bf16(
         for kt in range(n_steady):
             buf = _bidx(_buf_ptr(kt % num_buffers))
             pipeline_fence(outstanding=TDM_PW * (num_buffers - 2), use_cluster=False)
-            compute_ktile(buf, kt + (num_buffers - 1))
+            prefetch(kt + (num_buffers - 1))
+            compute_ktile(buf)
             if const_expr(use_cluster) and kt % num_buffers == num_buffers - 1:
                 cluster.cluster_barrier()
         for j in range_constexpr(num_buffers - 1):
             kt = n_steady + j
             buf = _bidx(_buf_ptr(kt % num_buffers))
             pipeline_fence(outstanding=TDM_PW * (num_buffers - 2 - j), use_cluster=False)
-            compute_ktile(buf, None)
+            compute_ktile(buf)
 
         accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]
         pipeline_fence(outstanding=0, use_cluster=use_cluster)
