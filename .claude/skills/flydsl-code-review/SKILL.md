@@ -310,6 +310,42 @@ actual line); provably impossible from a type, constant, or invariant (show it);
 already handled in this diff (cite the guard); or pure style with no observable
 effect.
 
+### The bar for CONFIRMED
+
+The ladder above is built to stop you refuting real bugs. These two rules exist
+to stop the opposite failure, which is worse: a detailed, line-accurate,
+arithmetically confident causal chain whose last step is simply asserted. Detail
+is not evidence. Both rules cap the verdict at PLAUSIBLE when unmet — PLAUSIBLE
+is not a demotion, it is the honest label for an unfinished proof.
+
+**Run the arithmetic; do not narrate it.** If the argument depends on index
+arithmetic, offsets, strides, shapes, bounds, or bitfield widths, write a short
+script that enumerates the actual index ranges over every relevant loop and wave
+variable, run it, and paste its output into `evidence`. Prose arithmetic caps at
+PLAUSIBLE no matter how carefully it reads. Watch for unit confusion in
+particular — a 16-row tile index is not a 32-row super-row index, an element
+offset is not a byte offset, a dword count is not a byte count. Substituting one
+for the other produces a chain that is wrong only in its final number, which is
+exactly the error that survives review.
+
+**Walk the chain to an observable.** A defect that never reaches an output is
+not a defect. For any memory, numeric, or OOB candidate, name the specific
+stored element or returned value that carries the corruption, then show it is
+**not** discarded downstream — check masks, `col_valid`-style guards, buffer
+descriptor `num_records` bounds, and grid tails. Kernels here routinely compute
+garbage for rows past `c_m` and rely on the C descriptor to drop the stores;
+that is the design, not a bug. If every affected element turns out to be
+discarded, the verdict is REFUTED.
+
+### Challenge the CONFIRMED ones
+
+Every candidate a verifier marks CONFIRMED gets one more agent whose only job is
+to refute it, told to assume the prior verifier narrated its arithmetic instead
+of running it and to re-derive every number itself. If the challenger returns
+PLAUSIBLE or REFUTED, take the lower verdict. Only CONFIRMED pays for this —
+typically a handful of candidates, and a wrong CONFIRMED costs more credibility
+than six hedged findings.
+
 Keep candidates whose verdict is CONFIRMED or PLAUSIBLE.
 
 ## Step 4 — Sweep for gaps
@@ -368,12 +404,26 @@ inline, how many defer, and on which lines. Drop `--dry-run` only after they
 confirm. Posting is not reversible: every comment notifies the PR's
 participants, and deleting one later does not unsend the mail.
 
+**Re-derive every CONFIRMED finding yourself before posting.** Not "read the
+evidence and find it convincing" — independently reproduce the load-bearing
+step, running the arithmetic where there is arithmetic. This is the only check
+in the pipeline that does not depend on an agent doubting its own reasoning,
+which makes it the one that actually holds. On PR #1107 it was skipped and a
+false CONFIRMED reached the author's inbox: the chain quoted real lines and real
+constants but conflated a 16-row tile index with a 32-row super-row index, so
+the out-of-bounds reads it correctly identified all landed on rows the C
+descriptor discards. A fifteen-line enumeration would have caught it. State the
+re-derivation result alongside the dry-run routing so the user is approving a
+checked list, not a plausible one. PLAUSIBLE findings do not need this — they
+are labelled uncertain and cost the author little.
+
 The script refuses to comment on a PR that is not open.
 
-Its dry-run path and line routing are tested, but **the live POST has never been
-exercised** — no comment has been posted with it. The first real use is also its
-first test, so run it against a PR you own before pointing it at someone else's.
-Delete this paragraph once it has posted successfully.
+Expect the post to be denied even when `Bash(*)` is allowed: the permission
+classifier cannot evaluate what the script does and blocks it independently of
+the allow list. When that happens, ask the user to run the command themselves.
+Do not reach for `gh api` instead — that evades the same evaluation the block
+exists to force, and hand-computed line numbers are what the script is for.
 
 This skill does not edit code. Report findings; fixing them is a separate request.
 

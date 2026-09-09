@@ -6,6 +6,7 @@ export const meta = {
     { title: 'Scope', detail: 'resolve the diff command and changed files' },
     { title: 'Find', detail: 'one agent per review angle' },
     { title: 'Verify', detail: 'one independent verifier per candidate' },
+    { title: 'Challenge', detail: 'an adversarial second pass over CONFIRMED only' },
     { title: 'Sweep', detail: 'a fresh reviewer hunting only for gaps' },
     { title: 'Synthesize', detail: 'merge, rank, cap' },
   ],
@@ -112,7 +113,27 @@ const VERDICT_LADDER =
   'i32 overflow at a large shape.\n\n' +
   '**REFUTED only when constructible from the code:** factually wrong (quote the actual\n' +
   'line); provably impossible from a type, constant, or invariant (show it); already\n' +
-  'handled in this diff (cite the guard); or pure style with no observable effect.'
+  'handled in this diff (cite the guard); or pure style with no observable effect.\n\n' +
+  '### The bar for CONFIRMED\n\n' +
+  'The rules above stop you refuting real bugs. These two stop the opposite failure,\n' +
+  'which is worse: a detailed, line-accurate, arithmetically confident causal chain\n' +
+  'whose last step is simply asserted. Detail is not evidence. Both cap the verdict at\n' +
+  'PLAUSIBLE when unmet — PLAUSIBLE is not a demotion, it is the honest label for an\n' +
+  'unfinished proof.\n\n' +
+  '**Run the arithmetic; do not narrate it.** If the argument depends on index\n' +
+  'arithmetic, offsets, strides, shapes, bounds, or bitfield widths, write a short\n' +
+  'script that enumerates the actual index ranges over every relevant loop and wave\n' +
+  'variable, run it, and paste its output into evidence. Prose arithmetic caps at\n' +
+  'PLAUSIBLE no matter how carefully it reads. Watch for unit confusion: a 16-row tile\n' +
+  'index is not a 32-row super-row index, an element offset is not a byte offset, a\n' +
+  'dword count is not a byte count.\n\n' +
+  '**Walk the chain to an observable.** A defect that never reaches an output is not a\n' +
+  'defect. For any memory, numeric, or OOB candidate, name the specific stored element\n' +
+  'or returned value that carries the corruption, then show it is NOT discarded\n' +
+  'downstream — check masks, col_valid-style guards, buffer descriptor num_records\n' +
+  'bounds, and grid tails. Kernels here routinely compute garbage for rows past c_m and\n' +
+  'rely on the C descriptor to drop the stores; that is the design, not a bug. If every\n' +
+  'affected element is discarded, the verdict is REFUTED.'
 
 // ---------------------------------------------------------------- Scope
 
@@ -190,10 +211,52 @@ const dupes = []
 const budgetDropped = []
 let verifySlots = FINDER_VERIFY_BUDGET
 
+// Asymmetric second pass. PLAUSIBLE already carries its own uncertainty label,
+// so a wrong one is cheap; CONFIRMED is a promise that the failure is real, and
+// a wrong one costs more credibility than six hedged findings. A CONFIRMED
+// verdict on PR #1107 walked a line-accurate, arithmetically detailed chain to
+// a conclusion it never actually computed — the OOB read was real, but every
+// affected row was discarded downstream by the C descriptor bound. So only
+// CONFIRMED pays for a challenger, and disagreement downgrades rather than drops.
+function challengeConfirmed(c) {
+  const short = (c.file || '').split('/').pop()
+  return agent(
+    '## FlyDSL code-review challenger\n\n' + SCOPE_BLOCK + '\n' +
+    '## Finding marked CONFIRMED by an earlier verifier\n' +
+    'File: ' + c.file + (c.line != null ? ':' + c.line : '') + '\n' +
+    'Summary: ' + c.summary + '\n' +
+    'Failure scenario: ' + c.failure_scenario + '\n' +
+    'Prior evidence: ' + c.evidence + '\n\n' +
+    'Your job is to REFUTE it. Assume the prior verifier narrated its arithmetic\n' +
+    'instead of running it — that is the known failure mode. Specifically:\n\n' +
+    '1. Re-derive every index, offset, bound and shape yourself by writing and\n' +
+    '   RUNNING a script that enumerates the real ranges over every loop and wave\n' +
+    '   variable. Do not accept a number from the prior evidence. Watch for unit\n' +
+    '   confusion: tile index vs super-row index, elements vs bytes, dwords vs bytes.\n' +
+    '2. Walk the chain to an observable. Name the stored element or returned value\n' +
+    '   that carries the corruption, then check whether it is discarded downstream by\n' +
+    '   a mask, a col_valid-style guard, a buffer descriptor num_records bound, or a\n' +
+    '   grid tail. If every affected element is discarded, the finding is REFUTED.\n\n' +
+    'Return CONFIRMED only if it survives both checks on evidence you produced\n' +
+    'yourself. Return PLAUSIBLE if the mechanism holds but you could not complete the\n' +
+    'proof. Return REFUTED if you broke the chain — quote or paste what breaks it.\n\n' +
+    'Structured output only.',
+    { label: 'challenge:' + short, phase: 'Challenge', schema: VERDICT_SCHEMA }
+  ).then(v => {
+    if (!v || v.verdict === 'CONFIRMED') return c
+    log('challenge downgraded ' + short + (c.line != null ? ':' + c.line : '') + ' -> ' + v.verdict)
+    return { ...c, verdict: v.verdict, evidence: c.evidence + '\n\nChallenger (' + v.verdict + '): ' + v.evidence }
+  })
+}
+
 function verifyCandidate(c) {
   const short = (c.file || '').split('/').pop()
   return agent(VERIFIER_PROMPT(c), { label: 'verify:' + short, phase: 'Verify', schema: VERDICT_SCHEMA })
-    .then(v => (v ? { ...c, verdict: v.verdict, evidence: v.evidence } : null))
+    .then(v => {
+      if (!v) return null
+      const judged = { ...c, verdict: v.verdict, evidence: v.evidence }
+      return judged.verdict === 'CONFIRMED' ? challengeConfirmed(judged) : judged
+    })
 }
 
 function admit(candidates, kind) {
