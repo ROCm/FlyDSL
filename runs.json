@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-09T11:58:46Z",
+ "updated": "2026-09-09T12:12:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -80,11 +80,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T11:36:10Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34345094383/job/102448769045"
+     "completed_at": "2026-09-09T11:59:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34345094383/job/102448769045",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -113,11 +114,11 @@
    "branch": "feat/rocdl-ordered-memory-primitives",
    "event": "pull_request",
    "title": "[DSL] Add llvm load/store primitives",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577",
    "created_at": "2026-09-09T10:16:20Z",
-   "updated_at": "2026-09-09T11:13:23Z",
+   "updated_at": "2026-09-09T12:08:56Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -132,10 +133,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-09T11:13:22Z",
-     "completed_at": null,
+     "completed_at": "2026-09-09T12:08:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577/job/102432814012"
     },
     {
