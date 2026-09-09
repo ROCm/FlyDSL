@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-09T11:29:37Z",
+ "updated": "2026-09-09T11:34:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34346179765,
+   "pr": 1114,
+   "commit": "6592f41cc46f64a4ebd52315782f58cb91e2b50c",
+   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
+   "event": "pull_request",
+   "title": "[LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34346179765",
+   "created_at": "2026-09-09T11:33:22Z",
+   "updated_at": "2026-09-09T11:33:56Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
+  {
+   "run_id": 34346020943,
+   "pr": 1114,
+   "commit": "f706d8c7ec28da8c3305749e6bc68a833b7bfe0c",
+   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
+   "event": "pull_request",
+   "title": "[LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34346020943",
+   "created_at": "2026-09-09T11:31:35Z",
+   "updated_at": "2026-09-09T11:32:57Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 34345459347,
    "pr": 1114,
@@ -171,11 +201,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T09:58:04Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530918"
+     "completed_at": "2026-09-09T11:29:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530918",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -2028,67 +2059,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159/job/101661302373"
     }
    ]
-  },
-  {
-   "run_id": 34090795488,
-   "pr": null,
-   "commit": "a5478397f43328a5a8d970af202b61b348c08a28",
-   "branch": "upstream/fa-paged-fp8-asymmetric-v",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34090795488",
-   "created_at": "2026-09-07T06:25:50Z",
-   "updated_at": "2026-09-07T08:00:22Z",
-   "actor": "sammysun0711",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-07T06:54:55Z",
-     "completed_at": "2026-09-07T07:20:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34090795488/job/101650124357",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-07T06:55:26Z",
-     "completed_at": "2026-09-07T07:47:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34090795488/job/101650124395",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-07T06:55:33Z",
-     "completed_at": "2026-09-07T08:00:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34090795488/job/101650124478",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34085071039,
-   "pr": null,
-   "commit": "3b8501176ed5202eeb7a64b5b57232d4894a634e",
-   "branch": "feat/coop-reduce-scan",
-   "event": "pull_request",
-   "title": "refactor: migrate to extension api",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34085071039",
-   "created_at": "2026-09-07T04:58:41Z",
-   "updated_at": "2026-09-08T06:09:13Z",
-   "actor": "ppppqp",
-   "jobs": []
   }
  ]
 }
