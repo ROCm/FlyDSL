@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-09-09T06:44:32Z",
+ "updated": "2026-09-09T07:01:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34320514577,
+   "pr": 1066,
+   "commit": "621484fe1fb2fb425f6c045ddb2a42aac50d39ad",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34320514577",
+   "created_at": "2026-09-09T06:45:24Z",
+   "updated_at": "2026-09-09T06:58:07Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
+  {
+   "run_id": 34320441994,
+   "pr": 1109,
+   "commit": "ac825bc5f27fc8e4b1b83b0f2364a2863f394021",
+   "branch": "feat/rocdl-cvt-f32-fp8",
+   "event": "pull_request",
+   "title": "[DSL] Expose scalar FP8 conversion",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34320441994",
+   "created_at": "2026-09-09T06:44:29Z",
+   "updated_at": "2026-09-09T06:44:29Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
+  {
+   "run_id": 34320440579,
+   "pr": 1110,
+   "commit": "87c3e93e59e6582d726dd86116ff2a8ae6effaa0",
+   "branch": "fix/llvm-amdgpu-cvt-pk-f32-f8-true16",
+   "event": "pull_request",
+   "title": "[LLVM] Fix true16 lowering for packed FP8 conversions",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34320440579",
+   "created_at": "2026-09-09T06:44:28Z",
+   "updated_at": "2026-09-09T06:44:28Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 34311697347,
    "pr": 1096,
@@ -246,7 +291,7 @@
   },
   {
    "run_id": 34251853753,
-   "pr": 1066,
+   "pr": null,
    "commit": "f27b766c9751a9eaf351cbd816cd6f08e6c8f5af",
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
@@ -2022,82 +2067,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 33956112058,
-   "pr": 887,
-   "commit": "afd0f6d78d761c35c4013cfdd08c4ddb7ac620ca",
-   "branch": "dev/kyle/grouped_gemm",
-   "event": "pull_request",
-   "title": "gemm: add fp8 per-tensor grouped GEMM forward (M-grouped/MoE)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33956112058",
-   "created_at": "2026-09-05T08:44:58Z",
-   "updated_at": "2026-09-07T05:03:21Z",
-   "actor": "kyle-256",
-   "jobs": []
-  },
-  {
-   "run_id": 33893972835,
-   "pr": null,
-   "commit": "917133f653749665a101933ec6d49ecf34e48989",
-   "branch": "feat/rocdl-ordered-memory-primitives",
-   "event": "pull_request",
-   "title": "[DSL] Add ordered ROCDL memory primitives",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33893972835",
-   "created_at": "2026-09-04T16:14:00Z",
-   "updated_at": "2026-09-06T02:46:17Z",
-   "actor": "big-yellow-duck",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T01:33:33Z",
-     "completed_at": "2026-09-06T01:47:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33893972835/job/101408336556",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T01:33:42Z",
-     "completed_at": "2026-09-06T02:06:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33893972835/job/101408336608",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T01:33:46Z",
-     "completed_at": "2026-09-06T02:46:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33893972835/job/101408336627",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 33891677289,
-   "pr": null,
-   "commit": "3ea1a44210adaeec7a79362a37a18f6f51370234",
-   "branch": "feat/rocdl-ordered-memory-primitives",
-   "event": "pull_request",
-   "title": "[DSL] Add ordered ROCDL memory primitives",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33891677289",
-   "created_at": "2026-09-04T15:49:24Z",
-   "updated_at": "2026-09-04T15:49:24Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
   }
  ]
 }
