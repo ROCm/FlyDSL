@@ -6,10 +6,17 @@
 from ..._mlir import ir
 from ..._mlir.dialects import llvm
 from ..meta import dsl_loc_tracing
+from ..numeric import Float, Integer, Numeric
 from ..typing import Vector, as_ir_value
 from .enum import MemoryOrder
 
-__all__ = ["global_load", "global_store", "sleep"]
+__all__ = [
+    "atomic_fetch_add",
+    "global_load",
+    "global_store",
+    "memory_fence",
+    "sleep",
+]
 
 _ORDERINGS = {
     MemoryOrder.Unordered: llvm.AtomicOrdering.unordered,
@@ -40,6 +47,64 @@ def _global_ptr(address):
     if not isinstance(address.type, ir.IntegerType) or address.type.width != 64:
         raise TypeError("global-memory address must be an i64 value")
     return llvm.IntToPtrOp(llvm.PointerType.get(address_space=1), address).result
+
+
+def _atomic_ordering(memory_order):
+    if memory_order in (MemoryOrder.NotAtomic, MemoryOrder.Unordered):
+        raise ValueError(f"invalid atomic memory order: {memory_order}")
+    try:
+        return _ORDERINGS[memory_order]
+    except KeyError as exc:
+        raise ValueError(f"unsupported memory order: {memory_order!r}") from exc
+
+
+@dsl_loc_tracing
+def atomic_fetch_add(
+    address,
+    value,
+    *,
+    memory_order=MemoryOrder.Monotonic,
+    syncscope=None,
+    alignment=None,
+):
+    """Atomically add ``value`` at an i64 global address and return the old value."""
+    value = as_ir_value(value)
+    try:
+        dtype = Numeric.from_ir_type(value.type)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("atomic value must be a FlyDSL integer or floating-point scalar") from exc
+    if issubclass(dtype, Integer):
+        bin_op = llvm.AtomicBinOp.add
+    elif issubclass(dtype, Float):
+        bin_op = llvm.AtomicBinOp.fadd
+    else:
+        raise TypeError("atomic value must be a FlyDSL integer or floating-point scalar")
+    kwargs = {}
+    if syncscope is not None:
+        kwargs["syncscope"] = syncscope
+    if alignment is not None:
+        kwargs["alignment"] = alignment
+    result = llvm.AtomicRMWOp(
+        bin_op,
+        _global_ptr(address),
+        value,
+        _atomic_ordering(memory_order),
+        **kwargs,
+    ).result
+    return dtype(result)
+
+
+@dsl_loc_tracing
+def memory_fence(
+    memory_order=MemoryOrder.SequentiallyConsistent,
+    *,
+    syncscope=None,
+):
+    """Synchronize memory accesses by the calling thread at the requested scope."""
+    kwargs = {}
+    if syncscope is not None:
+        kwargs["syncscope"] = syncscope
+    llvm.FenceOp(_atomic_ordering(memory_order), **kwargs)
 
 
 @dsl_loc_tracing

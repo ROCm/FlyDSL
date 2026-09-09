@@ -54,6 +54,36 @@ def test_ordered_memory_and_sleep_ir():
     assert "s_sleep 1" in text
 
 
+def test_atomic_fetch_add_and_fence_ir():
+    def build(address):
+        old = fx.rocdl.atomic_fetch_add(
+            address,
+            fx.Int32(1),
+            memory_order=fx.rocdl.MemoryOrder.Monotonic,
+            syncscope=fx.rocdl.SyncScope.Agent,
+            alignment=4,
+        )
+        assert isinstance(old, fx.Int32)
+        fx.rocdl.memory_fence(
+            fx.rocdl.MemoryOrder.Acquire,
+            syncscope=fx.rocdl.SyncScope.Agent,
+        )
+
+    text = _build_module(build)
+    assert "llvm.atomicrmw add" in text and "monotonic" in text
+    assert "llvm.fence" in text and "acquire" in text
+    assert 'syncscope("agent")' in text
+
+
+def test_atomic_fetch_add_float_ir():
+    def build(address):
+        old = fx.rocdl.atomic_fetch_add(address, fx.Float32(1.0))
+        assert isinstance(old, fx.Float32)
+
+    text = _build_module(build)
+    assert "llvm.atomicrmw fadd" in text
+
+
 def test_vector_nontemporal_memory_ir():
     def build(address):
         value = fx.rocdl.global_load(
@@ -88,6 +118,20 @@ def test_memory_order_validation():
                 memory_order=fx.rocdl.MemoryOrder.Release,
             )
         )
+    with pytest.raises(ValueError, match="invalid atomic memory order"):
+        _build_module(
+            lambda address: fx.rocdl.atomic_fetch_add(
+                address,
+                fx.Int32(1),
+                memory_order=fx.rocdl.MemoryOrder.NotAtomic,
+            )
+        )
+    with pytest.raises(ValueError, match="invalid atomic memory order"):
+        _build_module(
+            lambda address: fx.rocdl.memory_fence(
+                fx.rocdl.MemoryOrder.Unordered,
+            )
+        )
     with pytest.raises(ValueError, match="syncscope requires"):
         _build_module(
             lambda address: fx.rocdl.global_load(
@@ -117,6 +161,8 @@ def test_global_load_rejects_raw_mlir_dtype():
 
 
 def test_memory_primitives_are_public_rocdl_exports():
+    assert fx.rocdl.atomic_fetch_add.__module__ == "flydsl.expr.rocdl.memory"
     assert fx.rocdl.global_load.__module__ == "flydsl.expr.rocdl.memory"
     assert fx.rocdl.global_store.__module__ == "flydsl.expr.rocdl.memory"
+    assert fx.rocdl.memory_fence.__module__ == "flydsl.expr.rocdl.memory"
     assert fx.rocdl.sleep.__module__ == "flydsl.expr.rocdl.memory"
