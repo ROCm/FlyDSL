@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-09T01:03:40Z",
+ "updated": "2026-09-09T01:48:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34300263128,
+   "pr": 1104,
+   "commit": "1bc0afe3a666c327ea5429302bc67a551eca73f8",
+   "branch": "ywx/mega_moe_r1_tune",
+   "event": "pull_request",
+   "title": " deepseekv3 r1 tune config",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34300263128",
+   "created_at": "2026-09-09T01:42:21Z",
+   "updated_at": "2026-09-09T01:45:39Z",
+   "actor": "Yaowu-Xiong",
+   "jobs": []
+  },
   {
    "run_id": 34251853753,
    "pr": 1066,
@@ -2064,52 +2079,6 @@
    "updated_at": "2026-09-04T12:17:31Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 33870854310,
-   "pr": 1093,
-   "commit": "b6ad26dd93eaaff83cc63e90aff57123884971a6",
-   "branch": "ci/dedup-gfx950-runners",
-   "event": "pull_request",
-   "title": "[CI] Drop the duplicate gfx950 test runner and revert the nightly README badges",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/33870854310",
-   "created_at": "2026-09-04T12:03:18Z",
-   "updated_at": "2026-09-04T13:33:46Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-04T12:23:32Z",
-     "completed_at": "2026-09-04T13:08:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33870854310/job/101021543495",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-04T12:23:23Z",
-     "completed_at": "2026-09-04T12:40:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33870854310/job/101021543548",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-04T12:23:33Z",
-     "completed_at": "2026-09-04T13:33:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/33870854310/job/101021543629",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
