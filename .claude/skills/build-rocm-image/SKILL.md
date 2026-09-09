@@ -1,6 +1,10 @@
 ---
 name: build-rocm-image
-description: Connect to a remote host via SSH and build a Docker image with rocprofv3, aiter, and FlyDSL. Use when user wants to build/rebuild the ROCm development image on a remote host. Usage: /build-rocm-image <hostname>
+description: >
+  Connect to a remote host via SSH and build a Docker image with rocprofv3, aiter,
+  and FlyDSL. Use when user wants to build/rebuild the ROCm development image on a
+  remote host.
+  Usage: /build-rocm-image <hostname>
 allowed-tools: Bash
 ---
 
@@ -12,7 +16,7 @@ Build a Docker image on a remote host with rocm gpu access based on `rocm/vllm-d
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `<HOST>` | Yes | The remote hostname to SSH into and build the image on. Example: `hjbog-srdc-39.amd.com` |
+| `<HOST>` | Yes | The remote hostname to SSH into and build the image on. Example: `gpu-host.example.com` |
 
 When this skill is invoked, the argument passed in is the target hostname. Replace all occurrences of `<HOST>` below with the provided hostname. If no hostname is provided, ask the user for it before proceeding.
 

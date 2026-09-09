@@ -2,7 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 # ruff: noqa: I001
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 from .autotune import Config as Config, autotune as autotune
 

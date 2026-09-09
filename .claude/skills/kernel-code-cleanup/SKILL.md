@@ -135,6 +135,7 @@ fx.copy(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA (§7b: pr
 | `arith.maximumf/minimumf(a,b)` | `fx.max(a, b)` / `fx.min(a, b)` |
 | `arith.maxsi/maxui/minsi/minui(a,b)` | `fx.max(a, b)` / `fx.min(a, b)` |
 | `arith.maxnumf(a,b)` | `fx.maxnumf(a, b)` — different NaN semantics from `fx.max` |
+| `arith.minnumf(a,b)` | `fx.minnumf(a, b)` — different NaN semantics from `fx.min` |
 | `arith.ceildivsi/ceildivui(a,b)` | `fx.ceildiv(a, b)` |
 
 Keep `arith.cmpf` / explicit `*FOp` only where no operator exists or fastmath is
@@ -291,7 +292,8 @@ dispatch()
 
 Raw intrinsics hardcode fragment types, the `[a, b, c, 0, 0, 0]` tuple, and the
 instruction. Build an atom and issue it; fragment layouts/packing are handled and
-the atom is arch-dispatched (MFMA on CDNA3/4, WMMA on gfx11/gfx1250).
+you pick the atom family by target: `MFMA` for CDNA3/CDNA4, `WMMA` for
+gfx11/gfx1250.
 
 ```python
 # Before

@@ -216,11 +216,11 @@ def FlyROCDL_MmaOpGFX11_WMMA : FlyROCDL_MmaOp<"MmaOpGFX11_WMMA", "gfx11.wmma", [
 //===----------------------------------------------------------------------===//
 //
 // RDNA4 shares the v8-operand WMMA register ABI with gfx1250 (each lane holds
-// K/2 A/B elements, accumulator rows blocked 8-per-lane-half) but keeps the
-// gfx11 16x16x16 instruction shapes and the 3-operand ROCDL intrinsic form.
-// gfx1250 is a different target: it has 16x16x32 and the mods/reuse operand
-// form, so it keeps its own `gfx1250.wmma` atom. Hence `gfx120x` rather than
-// `gfx12` in the name — this atom covers gfx1200 / gfx1201 only.
+// K/2 A/B elements, accumulator rows blocked 8-per-lane-half) but its supported
+// floating-point forms use 16x16x16 and the 3-operand ROCDL intrinsic form.
+// gfx1250 uses different floating-point shapes and the mods/reuse operand form,
+// so it keeps its own `gfx1250.wmma` atom. Hence `gfx120x` rather than `gfx12`
+// in the name — this atom covers gfx1200 / gfx1201 only.
 
 def FlyROCDL_MmaOpGFX120X_WMMA : FlyROCDL_MmaOp<"MmaOpGFX120X_WMMA", "gfx120x.wmma", []> {
   let parameters = (ins
@@ -231,7 +231,7 @@ def FlyROCDL_MmaOpGFX120X_WMMA : FlyROCDL_MmaOp<"MmaOpGFX120X_WMMA", "gfx120x.wm
     "Type":$elemTyB,
     "Type":$elemTyAcc,
     // Integer-WMMA controls, forwarded to the ROCDL iu8/iu4 intrinsic. Ignored
-    // (and required to be false) on the fp16/bf16 paths. Always printed.
+    // (and required to be false) on the floating-point paths. Always printed.
     "bool":$signA,
     "bool":$signB,
     "bool":$clamp
