@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-09T09:33:12Z",
+ "updated": "2026-09-09T09:44:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34336099587,
+   "pr": null,
+   "commit": "ed70142704e1a6d5563fb53e1607e3a4b85d7111",
+   "branch": "main",
+   "event": "push",
+   "title": "[Chore] pre commit formatter (#1102)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587",
+   "created_at": "2026-09-09T09:41:14Z",
+   "updated_at": "2026-09-09T09:41:53Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34333936963,
    "pr": 1112,
@@ -276,10 +291,10 @@
    "event": "pull_request",
    "title": "[Chore] pre commit formatter",
    "status": "completed",
-   "conclusion": "action_required",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34309400126",
    "created_at": "2026-09-09T04:02:14Z",
-   "updated_at": "2026-09-09T04:02:14Z",
+   "updated_at": "2026-09-09T09:41:13Z",
    "actor": "ppppqp",
    "jobs": []
   },
@@ -1048,10 +1063,10 @@
    "event": "pull_request",
    "title": "[Chore] pre commit formatter",
    "status": "completed",
-   "conclusion": "action_required",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34198616616",
    "created_at": "2026-09-08T07:17:43Z",
-   "updated_at": "2026-09-08T07:17:43Z",
+   "updated_at": "2026-09-09T09:41:13Z",
    "actor": "ppppqp",
    "jobs": []
   },
@@ -2074,52 +2089,6 @@
    "updated_at": "2026-09-06T07:13:11Z",
    "actor": "binding7012",
    "jobs": []
-  },
-  {
-   "run_id": 34017081000,
-   "pr": 1094,
-   "commit": "72f523abdc58f20d621e6eeec899ce4509ba196c",
-   "branch": "ci/pypi-moe-csv-hgemm",
-   "event": "pull_request",
-   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34017081000",
-   "created_at": "2026-09-06T06:39:55Z",
-   "updated_at": "2026-09-06T08:18:06Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T06:55:21Z",
-     "completed_at": "2026-09-06T07:12:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34017081000/job/101444480213",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T06:56:05Z",
-     "completed_at": "2026-09-06T07:47:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34017081000/job/101444480249",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T06:55:33Z",
-     "completed_at": "2026-09-06T08:18:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34017081000/job/101444480270",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
