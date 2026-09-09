@@ -479,7 +479,6 @@ def _build_paged_fp8(
     enable_stagger: bool,
     use_bn128: bool,
     paged_bn128_varlen: bool,
-    fp8_pv_segmented: bool,
     batch_interleave_group: int,
 ):
     """Build the gfx950 packed-varlen, vectorized page-64 FP8 launcher."""
@@ -504,7 +503,6 @@ def _build_paged_fp8(
         kv_cache_layout="vectorized",
         paged_bn128=use_bn128,
         paged_bn128_varlen=paged_bn128_varlen,
-        fp8_pv_segmented=fp8_pv_segmented,
         batch_interleave_group=batch_interleave_group,
     )
 
@@ -516,10 +514,6 @@ _PAGED_PAGE_SIZE = 64
 _PAGED_BT_LDS_SIZE = 2048
 _PAGED_FP8_BATCH_INTERLEAVE_MAX_GROUP = 8
 _PAGED_FP8_V192_BATCH_INTERLEAVE_MAX_BATCH = 16
-
-
-def _use_paged_fp8_segmented_pv(head_dims: tuple[int, int]) -> bool:
-    return head_dims == (192, 192)
 
 
 def _paged_fp8_batch_interleave_group(batch_size: int, head_dims: tuple[int, int]) -> int:
@@ -779,13 +773,12 @@ def _flydsl_flash_attn_paged(
         )
         if paged_fp8:
             num_kv_pages = (skv + page_size - 1) // page_size
-            use_bn128 = fp8_head_dims in ((128, 128), (192, 128), (192, 192)) and num_kv_pages % 2 == 0
+            use_bn128 = num_kv_pages % 2 == 0
             paged_bn128_varlen = use_bn128 and B > 1
             paged_setprio = dualwave_swp_setprio and D != 192
-            fp8_pv_segmented = _use_paged_fp8_segmented_pv(fp8_head_dims)
             # The BF16 phase shift exposes H2 staging and probability-pack
             # latency because segmented FP8 has only six wide P*V MFMAs.
-            paged_stagger = dualwave_swp_enable_stagger and not fp8_pv_segmented
+            paged_stagger = dualwave_swp_enable_stagger and value_head_dim == 128
             exe = _build_paged_fp8(
                 num_heads=H,
                 num_kv_heads=num_kv_heads,
@@ -798,7 +791,6 @@ def _flydsl_flash_attn_paged(
                 enable_stagger=paged_stagger,
                 use_bn128=use_bn128,
                 paged_bn128_varlen=paged_bn128_varlen,
-                fp8_pv_segmented=fp8_pv_segmented,
                 batch_interleave_group=(
                     _paged_fp8_batch_interleave_group(B, fp8_head_dims)
                     if not use_bn128 and H == 16 and num_kv_heads == 1

@@ -47,7 +47,6 @@ def build_flash_attn_paged_fp8_module(
     kv_cache_layout="linear",
     paged_bn128=False,
     paged_bn128_varlen=False,
-    fp8_pv_segmented=False,
     batch_interleave_group=1,
 ):
     """Build the gfx950 packed-varlen page-64 FP8 attention launcher."""
@@ -81,15 +80,12 @@ def build_flash_attn_paged_fp8_module(
         raise ValueError(f"batch_interleave_group must be positive, got {batch_interleave_group}")
     if batch_interleave_group > 1 and (paged_bn128 or head_dim != 192):
         raise ValueError("batch interleaving is supported only by the generic paged D192 kernel")
-    if paged_bn128 and (head_dim, value_head_dim) not in ((128, 128), (192, 128), (192, 192)):
-        raise RuntimeError("paged BN128 requires supported FP8 head dimensions")
     assert num_heads % num_kv_heads == 0
     traits = _make_paged_dualwave_swp_fp8_traits(
         num_heads,
         num_kv_heads,
         head_dim,
         value_head_dim=value_head_dim,
-        causal=causal,
         waves_per_eu=waves_per_eu,
         daz=daz,
         dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
@@ -97,13 +93,8 @@ def build_flash_attn_paged_fp8_module(
         dualwave_swp_setprio=dualwave_swp_setprio,
         dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
         dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
-        num_kv_splits=num_kv_splits,
-        varlen=varlen if paged_bn128_varlen else False if paged_bn128 else varlen,
-        cross_seqlen=cross_seqlen,
-        paged=paged,
-        kv_cache_layout=kv_cache_layout,
-        fp8_pv_segmented=fp8_pv_segmented,
-        force_bn128=paged_bn128,
+        varlen=not paged_bn128 or paged_bn128_varlen,
+        bn128=paged_bn128,
         batch_interleave_group=batch_interleave_group,
     )
     BLOCK_M = traits.BLOCK_M
@@ -118,22 +109,11 @@ def build_flash_attn_paged_fp8_module(
     DEFAULT_STRIDE_KV_N = traits.DEFAULT_STRIDE_KV_N
     _dualwave_swp_fp8_cache_tag = traits.cache_tag
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
-    _q_lds_elems = BLOCK_M * HEAD_DIM if traits.QLDS else 16
 
-    if PAGED_BN128:
-
-        @fx.struct
-        class SharedStorage:
-            kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
-            vt: fx.Array[fx.BFloat16, traits.VT_BF16_TOTAL, 16]
-            q: fx.Array[_lds_elem_dtype, _q_lds_elems, 16]
-
-    else:
-
-        @fx.struct
-        class SharedStorage:
-            kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
-            vt: fx.Array[fx.BFloat16, traits.VT_BF16_TOTAL, 16]
+    @fx.struct
+    class SharedStorage:
+        kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
+        vt: fx.Array[fx.BFloat16, traits.VT_BF16_TOTAL, 16]
 
     # BN128: two BLOCK_N=64 KV tiles per iteration, one merged softmax correction.
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
@@ -200,7 +180,6 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_descale()
         ctx.init_tile_bounds()
 
-        q_loader = DualwaveFp8QLoader(ctx)
         gemm_helper = DualwaveFp8GemmHelper(ctx)
         softmax_helper = DualwaveFp8SoftmaxHelper(ctx)
         kv_gmem_to_lds = DualwaveFp8KvGmemToLdsLoader(ctx)
@@ -247,8 +226,6 @@ def build_flash_attn_paged_fp8_module(
 
         page_t0, page_t1 = ctx.load_page_id_pair(t0 * BN)
         kv_gmem_to_lds.load_k(t0 * BN, t0 % fx.Index(NPF), page_id=page_t0)
-        if const_expr(traits.QLDS):
-            q_loader.stage_q_to_lds()
         fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()

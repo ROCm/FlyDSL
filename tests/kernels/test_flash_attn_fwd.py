@@ -5599,14 +5599,6 @@ def test_fp8_pv_head_dim_uses_two_generic_segments(value_head_dim, expected):
     assert _factor_fp8_pv_head_dim(value_head_dim, segment_capacity=128, alignment=32) == expected
 
 
-@pytest.mark.parametrize(
-    ("head_dims", "expected"),
-    [((128, 128), False), ((192, 128), False), ((192, 192), True)],
-)
-def test_paged_fp8_segmented_pv_dispatch(head_dims, expected):
-    assert flash_attn_interface._use_paged_fp8_segmented_pv(head_dims) is expected
-
-
 @_requires_gfx950
 def test_fp8_default_is_the_lazy_rescale():
     """Every other fp8 case passes the flag, so the default would go untested.
