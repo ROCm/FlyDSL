@@ -39,9 +39,9 @@ def _build_i64_module(build_fn):
             return str(module)
 
 
-def test_ordered_memory_and_sleep_ir():
+def test_ordered_memory_ir():
     def build(ptr):
-        value = fx.rocdl.global_load(
+        value = fx.global_load(
             ptr,
             fx.Int64,
             memory_order=fx.AtomicOrdering.Acquire,
@@ -49,7 +49,7 @@ def test_ordered_memory_and_sleep_ir():
         )
         assert isinstance(value, fx.Int64)
         assert (
-            fx.rocdl.global_store(
+            fx.global_store(
                 ptr,
                 value,
                 memory_order=fx.AtomicOrdering.Release,
@@ -57,21 +57,19 @@ def test_ordered_memory_and_sleep_ir():
             )
             is None
         )
-        assert fx.rocdl.sleep(1) is None
 
     text = _build_pointer_module(build, alignment=16)
     assert "llvm.load" in text and "acquire" in text
     assert "llvm.store" in text and "release" in text
     assert text.count("alignment = 16") == 2
     assert 'syncscope("one-as")' in text
-    assert "s_sleep 1" in text
 
 
 def test_nontemporal_memory_ir():
     def build(ptr):
-        value = fx.rocdl.global_load(ptr, fx.Int32, nontemporal=True)
+        value = fx.global_load(ptr, fx.Int32, nontemporal=True)
         assert isinstance(value, fx.Int32)
-        fx.rocdl.global_store(ptr, value, nontemporal=True)
+        fx.global_store(ptr, value, nontemporal=True)
 
     text = _build_pointer_module(build, dtype=fx.Int32, alignment=32)
     assert text.count("nontemporal") == 2
@@ -81,7 +79,7 @@ def test_nontemporal_memory_ir():
 def test_memory_order_validation():
     with pytest.raises(ValueError, match="invalid load memory order"):
         _build_pointer_module(
-            lambda ptr: fx.rocdl.global_load(
+            lambda ptr: fx.global_load(
                 ptr,
                 fx.Int64,
                 memory_order=fx.AtomicOrdering.Release,
@@ -89,7 +87,7 @@ def test_memory_order_validation():
         )
     with pytest.raises(ValueError, match="syncscope requires"):
         _build_pointer_module(
-            lambda ptr: fx.rocdl.global_load(
+            lambda ptr: fx.global_load(
                 ptr,
                 fx.Int64,
                 syncscope=fx.rocdl.SyncScope.OneAs,
@@ -97,7 +95,7 @@ def test_memory_order_validation():
         )
     with pytest.raises(ValueError, match="invalid store memory order"):
         _build_pointer_module(
-            lambda ptr: fx.rocdl.global_store(
+            lambda ptr: fx.global_store(
                 ptr,
                 fx.Int64(0),
                 memory_order=fx.AtomicOrdering.Acquire,
@@ -107,28 +105,30 @@ def test_memory_order_validation():
 
 def test_global_memory_rejects_non_fly_pointer():
     with pytest.raises(TypeError, match="fx.Pointer"):
-        _build_i64_module(lambda address: fx.rocdl.global_load(address, fx.Int64))
+        _build_i64_module(lambda address: fx.global_load(address, fx.Int64))
     with pytest.raises(TypeError, match="fx.Pointer"):
-        _build_i64_module(lambda address: fx.rocdl.global_store(address, fx.Int64(0)))
+        _build_i64_module(lambda address: fx.global_store(address, fx.Int64(0)))
 
 
 def test_global_memory_rejects_non_global_pointer():
     with pytest.raises(ValueError, match="global-address-space"):
         _build_pointer_module(
-            lambda ptr: fx.rocdl.global_load(ptr, fx.Int64),
+            lambda ptr: fx.global_load(ptr, fx.Int64),
             address_space=fx.AddressSpace.Shared,
         )
 
 
 def test_global_load_rejects_raw_mlir_dtype():
     with pytest.raises(TypeError, match="FlyDSL scalar type"):
-        _build_pointer_module(lambda ptr: fx.rocdl.global_load(ptr, ir.IntegerType.get_signless(32)))
+        _build_pointer_module(lambda ptr: fx.global_load(ptr, ir.IntegerType.get_signless(32)))
 
 
-def test_memory_primitives_are_public_rocdl_exports():
-    assert fx.rocdl.global_load.__module__ == "flydsl.expr.rocdl.memory"
-    assert fx.rocdl.global_store.__module__ == "flydsl.expr.rocdl.memory"
-    assert fx.rocdl.sleep.__module__ == "flydsl.expr.rocdl.memory"
+def test_memory_primitives_are_public_llvm_exports():
+    assert fx.global_load.__module__ == "flydsl.expr.llvm"
+    assert fx.global_store.__module__ == "flydsl.expr.llvm"
+    assert not hasattr(fx.rocdl, "global_load")
+    assert not hasattr(fx.rocdl, "global_store")
+    assert not hasattr(fx.rocdl, "sleep")
     assert not hasattr(fx.rocdl, "atomic_fetch_add")
     assert not hasattr(fx.rocdl, "memory_fence")
     assert not hasattr(fx.rocdl, "MemoryOrder")

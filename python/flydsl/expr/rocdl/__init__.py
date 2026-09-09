@@ -22,9 +22,6 @@ from . import cdna5 as cdna5
 from . import rdna3 as rdna3
 from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
-from .memory import global_load as global_load
-from .memory import global_store as global_store
-from .memory import sleep as sleep
 from .universal import *
 
 __all__ = [
@@ -36,10 +33,6 @@ __all__ = [
     "rdna4",
     # Enums
     "SyncScope",
-    # Global memory and synchronization
-    "global_load",
-    "global_store",
-    "sleep",
     # Re-exported from .universal
     "s_waitcnt",
     "asyncmark",

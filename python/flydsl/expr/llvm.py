@@ -5,10 +5,11 @@
 
 from .._mlir import ir
 from .._mlir.dialects import llvm as _llvm
+from .._mlir.dialects.fly import AddressSpace
 from .enum import AtomicOrdering
 from .meta import dsl_loc_tracing
 from .numeric import BFloat16, Float16, Float32, Float64, Int32, Int64, Integer, Uint32, Uint64, as_numeric
-from .typing import Numeric, Pointer, Vector, as_dsl_value, as_ir_value
+from .typing import Numeric, Pointer, Vector, as_dsl_value, as_ir_value, is_generic_address_space
 
 __all__ = [
     "atomic_add",
@@ -22,6 +23,8 @@ __all__ = [
     "atomic_cas",
     "atomic_fmin",
     "atomic_fmax",
+    "global_load",
+    "global_store",
     "memory_fence",
 ]
 
@@ -99,6 +102,70 @@ def _normalize_to_llvm_ptr(ptr):
     if not isinstance(ptr, ir.Value) or not isinstance(ptr.type, _llvm.PointerType):
         raise TypeError(f" pointer must be a fly.ptr or !llvm.ptr, got {ptr}")
     return ptr
+
+
+def _normalize_global_fly_ptr(ptr):
+    if not isinstance(ptr, Pointer):
+        raise TypeError(f"global memory operation requires an fx.Pointer, got {ptr!r}")
+    if not is_generic_address_space(ptr.address_space, AddressSpace.Global):
+        raise ValueError(f"global memory operation requires a global-address-space pointer, got {ptr.address_space}")
+    return ptr.llvm_ptr
+
+
+def _ordered_memory_kwargs(memory_order, syncscope):
+    if memory_order == AtomicOrdering.NotAtomic:
+        if syncscope is not None:
+            raise ValueError("syncscope requires an atomic memory order")
+        return {}
+    kwargs = {"ordering": _atomic_ordering(memory_order)}
+    if syncscope is not None:
+        kwargs["syncscope"] = syncscope
+    return kwargs
+
+
+@dsl_loc_tracing
+def global_load(
+    ptr,
+    dtype,
+    *,
+    memory_order=AtomicOrdering.NotAtomic,
+    syncscope=None,
+    nontemporal=False,
+):
+    """Load a scalar from a global ``fly.ptr``."""
+    llvm_ptr = _normalize_global_fly_ptr(ptr)
+    if memory_order == AtomicOrdering.Release:
+        raise ValueError(f"invalid load memory order: {memory_order}")
+    try:
+        result_type = dtype.ir_type
+    except AttributeError as exc:
+        raise TypeError("dtype must be a FlyDSL scalar type") from exc
+    kwargs = _ordered_memory_kwargs(memory_order, syncscope)
+    kwargs["alignment"] = ptr.alignment
+    if nontemporal:
+        kwargs["nontemporal"] = True
+    result = _llvm.LoadOp(result_type, llvm_ptr, **kwargs).result
+    return dtype(result)
+
+
+@dsl_loc_tracing
+def global_store(
+    ptr,
+    value,
+    *,
+    memory_order=AtomicOrdering.NotAtomic,
+    syncscope=None,
+    nontemporal=False,
+):
+    """Store a scalar to a global ``fly.ptr``."""
+    llvm_ptr = _normalize_global_fly_ptr(ptr)
+    if memory_order == AtomicOrdering.Acquire:
+        raise ValueError(f"invalid store memory order: {memory_order}")
+    kwargs = _ordered_memory_kwargs(memory_order, syncscope)
+    kwargs["alignment"] = ptr.alignment
+    if nontemporal:
+        kwargs["nontemporal"] = True
+    _llvm.StoreOp(as_ir_value(value), llvm_ptr, **kwargs)
 
 
 def _emit_atomic_rmw(bin_op, ptr, value, syncscope, ordering):
