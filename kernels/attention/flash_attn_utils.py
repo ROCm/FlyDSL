@@ -5537,6 +5537,14 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
     def __init__(self, ctx):
         super().__init__(ctx)
 
+    def reduce_max_pair(self, v_s_a, v_s_b):
+        values = [self.c_neg_inf]
+        for scores in (*v_s_a, *v_s_b):
+            values += [Vec(scores)[i] for i in range_constexpr(16)]
+        local_max = _tree_reduce(values, fx.maxnumf)
+        lhs, rhs = _reduction_pair(local_max)
+        return fx.maxnumf(lhs, rhs)
+
     def _attn_mask_vec2_imm(self, rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32):
         return _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32)
 
