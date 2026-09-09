@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-09T10:11:46Z",
+ "updated": "2026-09-09T10:30:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34339321577,
+   "pr": 1096,
+   "commit": "a47405d563031326dbc17c1e6f14339f17e8756a",
+   "branch": "feat/rocdl-ordered-memory-primitives",
+   "event": "pull_request",
+   "title": "[DSL] Add ordered ROCDL memory primitives",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577",
+   "created_at": "2026-09-09T10:16:20Z",
+   "updated_at": "2026-09-09T10:24:20Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 34337075328,
    "pr": 1112,
@@ -14,7 +29,7 @@
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34337075328",
    "created_at": "2026-09-09T09:51:42Z",
-   "updated_at": "2026-09-09T10:09:48Z",
+   "updated_at": "2026-09-09T10:27:38Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -50,11 +65,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T09:57:46Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530761"
+     "completed_at": "2026-09-09T10:15:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530761",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -195,11 +211,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T08:36:29Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481/job/102395887786"
+     "completed_at": "2026-09-09T10:17:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481/job/102395887786",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -313,7 +330,7 @@
   },
   {
    "run_id": 34311697347,
-   "pr": 1096,
+   "pr": null,
    "commit": "b0e5033916a619483f0173ebcdd2e19faae83f50",
    "branch": "feat/rocdl-ordered-memory-primitives",
    "event": "pull_request",
@@ -2041,52 +2058,6 @@
    "updated_at": "2026-09-06T11:08:50Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 34029081244,
-   "pr": 1094,
-   "commit": "21c84bbf96b39c52ac869f9a191336deaca2f593",
-   "branch": "ci/pypi-moe-csv-hgemm",
-   "event": "pull_request",
-   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34029081244",
-   "created_at": "2026-09-06T11:02:21Z",
-   "updated_at": "2026-09-06T12:39:03Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T11:21:57Z",
-     "completed_at": "2026-09-06T11:56:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34029081244/job/101477553649",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T11:21:10Z",
-     "completed_at": "2026-09-06T11:38:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34029081244/job/101477553686",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T11:24:41Z",
-     "completed_at": "2026-09-06T12:39:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34029081244/job/101477553714",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
