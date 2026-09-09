@@ -220,7 +220,7 @@ def build_flash_attn_paged_fp8_module(
             return v_o, m_new, softmax_helper.apply_l_rescale(l_row, corr)
 
         def _merge_tile_max(v_s_a, v_s_b):
-            m_tile = softmax_helper.max2(softmax_helper.reduce_max(v_s_a), softmax_helper.reduce_max(v_s_b))
+            m_tile = softmax_helper.reduce_max_pair(v_s_a, v_s_b)
             return softmax_helper.floor_masked_max(m_tile)
 
         page_t0, page_t1 = ctx.load_page_id_pair(t0 * BN)
