@@ -24,13 +24,18 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
+from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from flydsl.runtime.device import get_rocm_arch
 from kernels.attention.flash_attn_utils import (
+    _read_exec_i64,
     _stagger_extra_barrier_if_one,
     _stagger_extra_barrier_if_zero,
     _waitcnt_vm_n,
+    scf_if_dispatch,
 )
 
 if not hasattr(fx, "max"):
@@ -142,6 +147,19 @@ _FLASH_SCHED_LDS_VALU = 3
 # Keep the LDS burst on the near side of s_waitcnt. The scheduler may sink a
 # load past the wait, which would leave it uncovered.
 _FLASH_SCHED_PIN_LDS = True
+# C1 has two independent dataflows: QK[n] and sum(P[n-1]). Without a grouping
+# hint LLVM emits nearly all QK MFMAs before starting the deferred reduction.
+_FLASH_SCHED_QK_SUM = True
+# C3 runs PV[n-1] alongside the P[n] subtract/exp2/pack chain. Those do not feed
+# the PV accumulator, so they belong in the MFMA shadow rather than in the
+# EXP7/EXP8 runs LLVM otherwise leaves stranded between single MFMAs.
+_FLASH_SCHED_PV_SOFTMAX = True
+# Flash's wave-uniform lazy-rescale fast path. Keep the old max while every
+# lane's tile max is within this log2 headroom, then skip O/l rebasing.
+_FLASH_LAZY_O_RESCALE = True
+_FLASH_LAZY_RESCALE_THRESHOLD = 8.0
+# Match flash's priority window around the long PV + softmax cluster.
+_FLASH_SETPRIO_PV = True
 # s_waitcnt: lgkmcnt=0, vmcnt=63, expcnt=7. Drain LDS without killing in-flight DMA.
 _LGKMCNT_0_ONLY = 0xC07F
 FLEX_DTYPE_BF16 = 2
@@ -1278,6 +1296,43 @@ def flex_attn_fwd_gfx950_kernel(
             o_out.append((o_vec * scale_vec).ir_value())
         return o_out
 
+    def _scale_o_if_needed(o_accs_in, scale_scalar):
+        """Wave-uniform fast path for the overwhelmingly common corr == 1 case."""
+        if const_expr(not _FLASH_LAZY_O_RESCALE):
+            return _scale_o_vec(o_accs_in, scale_scalar)
+
+        @flyc.jit
+        def _run(o_accs, corr):
+            is_identity = fx.Float32(corr) == fx.Float32(1.0)
+            identity_lanes = rocdl.ballot(T.i64, as_mlir_value(is_identity))
+            all_identity = arith.cmpi(
+                arith.CmpIPredicate.eq,
+                as_mlir_value(identity_lanes),
+                _read_exec_i64(),
+            )
+            all_identity = llvm.intr_expect(
+                all_identity,
+                arith.constant(1, type=ir.IntegerType.get_signless(1)),
+            )
+            state = [as_mlir_value(o_accs[dc]) for dc in range(_n_d_chunks)]
+            names = tuple(f"_lazy_o{dc}" for dc in range(_n_d_chunks))
+
+            def _rescale(_n, *_st):
+                scaled = _scale_o_vec(o_accs, corr)
+                return [as_mlir_value(scaled[dc]) for dc in range(_n_d_chunks)]
+
+            return list(
+                scf_if_dispatch(
+                    all_identity,
+                    lambda *_a: None,
+                    _rescale,
+                    state_names=names,
+                    state_values=state,
+                )
+            )
+
+        return _run(o_accs_in, scale_scalar)
+
     _prescaled_q = const_expr(_is_32x32)
 
     def softmax_start(frag_S_in, m_i_in):
@@ -1459,6 +1514,23 @@ def flex_attn_fwd_gfx950_kernel(
                     rocdl.sched_group_barrier(0x002, valu, sync_id)
         if const_expr(_FLASH_SCHED_PIN_LDS):
             rocdl.sched_barrier(0)
+
+    def sched_interleave_qk_sum(groups, *, mfma, valu):
+        """Distribute the deferred P reduction through the independent QK GEMM."""
+        if const_expr(_FLASH_SCHED_QK_SUM):
+            for _ in range_constexpr(groups):
+                rocdl.sched_group_barrier(0x008, mfma, 2)
+                rocdl.sched_group_barrier(0x002, valu, 2)
+
+    def sched_interleave_pv_softmax(groups, *, mfma, valu=0, trans=0):
+        """Hide the P[n] softmax chain in the PV GEMM's MFMA shadow."""
+        if const_expr(_FLASH_SCHED_PV_SOFTMAX):
+            for _ in range_constexpr(groups):
+                rocdl.sched_group_barrier(0x008, mfma, 3)
+                if const_expr(valu):
+                    rocdl.sched_group_barrier(0x002, valu, 3)
+                if const_expr(trans):
+                    rocdl.sched_group_barrier(0x400, trans, 3)
 
     if const_expr(_is_32x32):
         _enable_stagger = True
@@ -1725,10 +1797,55 @@ def flex_attn_fwd_gfx950_kernel(
 
     def _flash_rescale_for_current(s_raw, m_i, l_i, o_accs, p_prev):
         """C2: update max for S[n]; defer O rescale until after PV[n-1]."""
-        corr_scalar, s_scaled, m_new = softmax_start(s_raw, m_i)
-        l_scaled = l_i[0] * corr_scalar
-        l_i_out = [l_scaled] + [l_i[r] for r in range_constexpr(1, npair)]
-        m_i_out = [m_new] + [m_i[r] for r in range_constexpr(1, npair)]
+        if const_expr(not _prescaled_q):
+            scale_vec = Vec.from_elements([scale_log2e], fx.Float32).broadcast_to(n_c)
+            scaled_vec = Vec.from_elements(s_raw, fx.Float32) * scale_vec
+            s_scaled = [scaled_vec[i] for i in range_constexpr(n_c)]
+        else:
+            s_scaled = [s_raw[i] for i in range_constexpr(n_c)]
+        tile_max = s_scaled[0]
+        for i in range_constexpr(1, n_c):
+            tile_max = _f32_max(tile_max, s_scaled[i])
+        tile_max = _permlane32_reduce(tile_max, "max")
+
+        @flyc.jit
+        def _lazy_state(m_row, l_row, tile_max_i):
+            below = (fx.Float32(tile_max_i) - fx.Float32(m_row)) <= fx.Float32(
+                _FLASH_LAZY_RESCALE_THRESHOLD
+            )
+            below_lanes = rocdl.ballot(T.i64, as_mlir_value(below))
+            all_below = arith.cmpi(
+                arith.CmpIPredicate.eq,
+                as_mlir_value(below_lanes),
+                _read_exec_i64(),
+            )
+            all_below = llvm.intr_expect(
+                all_below,
+                arith.constant(1, type=ir.IntegerType.get_signless(1)),
+            )
+            one = fx.Float32(1.0)
+            state = [as_mlir_value(l_row), as_mlir_value(m_row), as_mlir_value(one)]
+
+            def _rescale(_n, *_st):
+                m_new_i = _f32_max(m_row, tile_max_i)
+                corr_i = _hw_exp2(fx.Float32(m_row) - m_new_i)
+                return [
+                    as_mlir_value(fx.Float32(l_row) * corr_i),
+                    as_mlir_value(m_new_i),
+                    as_mlir_value(corr_i),
+                ]
+
+            return scf_if_dispatch(
+                all_below,
+                lambda *_a: None,
+                _rescale,
+                state_names=("_lazy_l", "_lazy_m", "_lazy_corr"),
+                state_values=state,
+            )
+
+        l_scaled, m_new, corr_scalar = _lazy_state(m_i[0], l_i[0], tile_max)
+        l_i_out = [fx.Float32(l_scaled)] + [l_i[r] for r in range_constexpr(1, npair)]
+        m_i_out = [fx.Float32(m_new)] + [m_i[r] for r in range_constexpr(1, npair)]
         return s_scaled, m_i_out, l_i_out, o_accs, p_prev, corr_scalar
 
     def _flash_make_deferred_p(s_scaled, m_i):
@@ -1779,11 +1896,11 @@ def flex_attn_fwd_gfx950_kernel(
         p_prev = _flash_finish_deferred_exp(p_mixed_prev)
         # Apply the max correction established by the prior tile after its
         # pending PV was accumulated, and before this tile's PV is added.
-        o_accs = _scale_o_vec(o_accs, corr_pending)
-        # One K read per exp2. Leaving the O-rescale multiplies unconstrained
-        # is worth ~4%: pinning them too spreads the burst far enough that the
-        # last read no longer completes before the lgkmcnt wait.
-        sched_interleave_lds_math(2 * _qk_k_reps, ds=1, trans=1, sync_id=0)
+        o_accs = _scale_o_if_needed(o_accs, corr_pending)
+        # Lazy rescale leaves eight independent exp2 operations in this region.
+        # Pair two K reads with each exp: asking for 16 EXP groups delays the
+        # last read and creates a ~44-cycle lgkmcnt tail.
+        sched_interleave_lds_math(_qk_k_reps, ds=2, trans=1, sync_id=0)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         _waitcnt_vm_n(_dma_ops_per_thread)
         dualwave_cluster_sync(0)
@@ -1793,6 +1910,9 @@ def flex_attn_fwd_gfx950_kernel(
         s_raw = [frag_S[i] for i in range_constexpr(n_c)]
         s_raw = _flash_apply_mods_and_mask(s_raw, kv_i32)
         l_i = _flash_add_deferred_sum(p_prev, l_i)
+        # One requested VALU expands to roughly two ISA ops, spreading the
+        # reduction across all 16 QK MFMAs without leaving an MFMA-only tail.
+        sched_interleave_qk_sum(16, mfma=1, valu=1)
         dualwave_cluster_sync(1)
 
         # C2: launch K[n+1], issue V[n-1] LDS, then max/rescale for S[n].
@@ -1803,24 +1923,29 @@ def flex_attn_fwd_gfx950_kernel(
         s_scaled, m_i, l_i, o_accs, p_prev, corr_scalar = _flash_rescale_for_current(
             s_raw, m_i, l_i, o_accs, p_prev
         )
-        # The max reduction is a serial chain, so C2 has far less arithmetic
-        # than V has reads; one PV pack per two max ops is as fine as it pays.
         sched_interleave_lds_math(_pv_packs * 2, ds=_n_d_chunks, valu=2, sync_id=1)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         _waitcnt_vm_n(_dma_ops_per_thread)
         dualwave_cluster_sync(2)
 
         # C3: consume P[n-1] at the old max, then lazily rescale the combined
-        # accumulator in the next C0. This removes a separate P rescale.
+        # accumulator in the next C0.
+        if const_expr(_FLASH_SETPRIO_PV):
+            rocdl.s_setprio(1)
         pv_gemm_register_packs(p_prev, v_prev, o_accs)
         p_mixed = _flash_make_deferred_p(s_scaled, m_i)
+        # Only the exp2 chain pays here. Pinning the subtracts and bf16 packs
+        # too costs ~1%, the same way it did for the O rescale in C0.
+        sched_interleave_pv_softmax(_pv_packs * _n_d_chunks, mfma=1, trans=1)
+        if const_expr(_FLASH_SETPRIO_PV):
+            rocdl.s_setprio(0)
         dualwave_cluster_sync(3)
         return m_i, l_i, o_accs, p_mixed, corr_scalar
 
     def _flash_deferred_epilogue(last_slot, m_i, l_i, o_accs, p_mixed, corr_pending):
         """Drain the final pending P/V tile."""
         p_last = _flash_finish_deferred_exp(p_mixed)
-        o_accs = _scale_o_vec(o_accs, corr_pending)
+        o_accs = _scale_o_if_needed(o_accs, corr_pending)
         dualwave_cluster_sync(0)
         l_i = _flash_add_deferred_sum(p_last, l_i)
         dualwave_cluster_sync(1)
