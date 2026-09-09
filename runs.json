@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-09T09:53:03Z",
+ "updated": "2026-09-09T10:00:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -9,12 +9,12 @@
    "commit": "15e9154afd12e23f9e9521ce43428c3dd05e0f86",
    "branch": "ci/mi35x-1-runner",
    "event": "pull_request",
-   "title": "[CI] Run 1-GPU tests on linux-flydsl-mi35x-1",
-   "status": "queued",
+   "title": "[CI] Move 1-GPU tests to linux-flydsl-mi35x-1 and filter MI350 from the perf dashboard",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34337075328",
    "created_at": "2026-09-09T09:51:42Z",
-   "updated_at": "2026-09-09T09:51:44Z",
+   "updated_at": "2026-09-09T09:54:54Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,13 +40,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Chore] pre commit formatter (#1102)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587",
    "created_at": "2026-09-09T09:41:14Z",
-   "updated_at": "2026-09-09T09:44:11Z",
+   "updated_at": "2026-09-09T09:57:25Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T09:57:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530761"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-09T09:57:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530878"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T09:58:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530918"
+    }
+   ]
   },
   {
    "run_id": 34333936963,
@@ -54,7 +82,7 @@
    "commit": "f1f77dd9f639f803012908e01b7eff42f274d85c",
    "branch": "ci/mi35x-1-runner",
    "event": "pull_request",
-   "title": "[CI] Run 1-GPU tests on linux-flydsl-mi35x-1",
+   "title": "[CI] Move 1-GPU tests to linux-flydsl-mi35x-1 and filter MI350 from the perf dashboard",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34333936963",
@@ -350,11 +378,11 @@
    "branch": "fix/benchmark-compiler-api",
    "event": "pull_request",
    "title": "[Bugfix][Benchmark] Fix compiler API usage in Softmax and RMSNorm benchmarks",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34308881988",
    "created_at": "2026-09-09T03:53:56Z",
-   "updated_at": "2026-09-09T08:36:33Z",
+   "updated_at": "2026-09-09T09:58:06Z",
    "actor": "tangzzycc",
    "jobs": [
     {
@@ -370,11 +398,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T08:36:32Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34308881988/job/102347897642"
+     "completed_at": "2026-09-09T09:58:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34308881988/job/102347897642",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
