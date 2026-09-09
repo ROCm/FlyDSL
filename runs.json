@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-09T11:01:52Z",
+ "updated": "2026-09-09T11:10:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -277,11 +277,11 @@
    "branch": "chore/pre-commit-formatter",
    "event": "pull_request",
    "title": "[Chore] pre commit formatter",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789",
    "created_at": "2026-09-09T07:30:55Z",
-   "updated_at": "2026-09-09T09:59:12Z",
+   "updated_at": "2026-09-09T11:08:44Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -297,11 +297,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T09:59:11Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789/job/102401249995"
+     "completed_at": "2026-09-09T11:08:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789/job/102401249995",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
