@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-09T03:34:49Z",
+ "updated": "2026-09-09T03:39:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,11 +53,11 @@
    "branch": "mxfp8_v1",
    "event": "pull_request",
    "title": "Mxfp8 8w 1*32 scale",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34301405426",
    "created_at": "2026-09-09T01:59:39Z",
-   "updated_at": "2026-09-09T02:31:04Z",
+   "updated_at": "2026-09-09T03:38:07Z",
    "actor": "solinzby1",
    "jobs": [
     {
@@ -83,11 +83,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T02:13:57Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34301405426/job/102311783456"
+     "completed_at": "2026-09-09T03:38:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34301405426/job/102311783456",
+     "log_fetch_failed": true
     }
    ]
   },
