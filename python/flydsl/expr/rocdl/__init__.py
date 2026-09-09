@@ -62,6 +62,7 @@ __all__ = [
     "sched_vmem",
     "sched_dsrd",
     "sched_dswr",
+    "cvt_f32_fp8",
 ]
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
@@ -712,6 +713,22 @@ def cvt_pk_f32_fp8(res, src, word_sel, **kw):
     from ..._mlir.dialects.rocdl import cvt_pk_f32_fp8 as _op
 
     return _op(res=res, src=_to_ir(src), word_sel=word_sel, **kw)
+
+
+@dsl_loc_tracing
+def cvt_f32_fp8(src, byte_sel, **kw):
+    """Decode one E4M3 FP8 byte selected from a packed i32 to ``Float32``."""
+    from ..._mlir.dialects.rocdl import cvt_f32_fp8 as _op
+    from ..numeric import Float32
+
+    return Float32(
+        _op(
+            res=Float32.ir_type,
+            src_a=_to_ir(src),
+            byte_sel=byte_sel,
+            **kw,
+        )
+    )
 
 
 @dsl_loc_tracing
