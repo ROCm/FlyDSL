@@ -35,17 +35,31 @@ BENCH_RUNNERS = set(parse_bench.RUNNER_ARCH)  # only the single-GPU benchmark bo
 # The linux-flydsl-mi35x-* labels pool MI350 and MI355 machines. Both are gfx950, so
 # the label alone cannot identify the host, but their throughput differs enough that
 # ingesting both into one series shows up as a phantom regression whenever the job
-# lands on the slower box. Only MI355 results enter history.json; the host is read
-# from the runner's own name ("Machine name" in the job's "Set up job" log), e.g.
-# linux-flydsl-mi355-1-g2mdh-runner-k8jws.
+# lands on the slower box. Only MI355 results enter history.json.
+#
+# The host is the "Machine name:" line the runner prints in its "Set up job" log. That
+# is NOT the API's jobs[].runner_name, which only ever echoes the pooled label:
+#
+#   Runner name:  'linux-flydsl-mi35x-1-lzq5m-runner-z5hnw'   <- the label, useless here
+#   Machine name: 'gbt350-odcdh1-b13-1'                       <- the physical box
+#
+# Containerized runners report the pod name for both (linux-flydsl-mi355-1-g2mdh-...),
+# which the same 35[05] match reads correctly.
 MIXED_RUNNERS = {"linux-flydsl-mi35x-1", "linux-flydsl-mi35x-8"}
 BENCH_HOST_MODEL = "MI355"
-_HOST_MODEL = re.compile(r"mi35([05])", re.IGNORECASE)
+_MACHINE_NAME = re.compile(r"Machine name:\s*'([^']*)'")
+_HOST_MODEL = re.compile(r"35([05])")
 
 
-def host_model(runner_name: str) -> str | None:
-    """``"MI350"``/``"MI355"`` for a pooled runner, or None if its name doesn't say."""
-    m = _HOST_MODEL.search(runner_name or "")
+def machine_name(log: str) -> str | None:
+    """The host the job ran on, from its "Set up job" banner."""
+    m = _MACHINE_NAME.search(log or "")
+    return m.group(1) or None if m else None
+
+
+def host_model(machine: str | None) -> str | None:
+    """``"MI350"``/``"MI355"`` for a machine name, or None if the name doesn't say."""
+    m = _HOST_MODEL.search(machine or "")
     return f"MI35{m.group(1)}" if m else None
 
 
@@ -165,19 +179,6 @@ def ingest_run(repo: str, run: dict, regression_pct: float) -> tuple[list[dict],
         job_status.append(js)
         if job.get("status") != "completed" or job.get("conclusion") != "success":
             continue  # only completed-successful jobs have parseable benchmark output
-        if runner in MIXED_RUNNERS:
-            model = host_model(job.get("runner_name") or "")
-            js["host_model"] = model
-            if model != BENCH_HOST_MODEL:
-                # An unidentifiable host is skipped too: a visible gap in the chart is
-                # recoverable, a series that silently mixes machine classes is not.
-                js["bench_skipped"] = f"host {model or 'unidentified'} != {BENCH_HOST_MODEL}"
-                print(
-                    f"  - {runner}: no bench records ({js['bench_skipped']}, "
-                    f"runner_name={job.get('runner_name')!r})",
-                    file=sys.stderr,
-                )
-                continue
         try:
             text = gh_text(f"repos/{repo}/actions/jobs/{job['id']}/logs")
         except RuntimeError as e:
@@ -186,6 +187,20 @@ def ingest_run(repo: str, run: dict, regression_pct: float) -> tuple[list[dict],
             js["log_fetch_failed"] = True
             print(f"  ! log fetch failed for job {job['id']}: {e}", file=sys.stderr)
             continue
+        if runner in MIXED_RUNNERS:
+            machine = machine_name(text)
+            model = host_model(machine)
+            js["machine"] = machine
+            js["host_model"] = model
+            if model != BENCH_HOST_MODEL:
+                # An unidentifiable host is skipped too: a visible gap in the chart is
+                # recoverable, a series that silently mixes machine classes is not.
+                js["bench_skipped"] = f"host {model or 'unidentified'} != {BENCH_HOST_MODEL}"
+                print(
+                    f"  - {runner}: no bench records ({js['bench_skipped']}, machine={machine!r})",
+                    file=sys.stderr,
+                )
+                continue
         recs = parse_bench.parse_log(text, regression_pct=regression_pct)
         recs += parse_bench.parse_aiter_compare(text)
         ts = job.get("completed_at") or run.get("updated_at")

@@ -199,24 +199,37 @@ def test_runner_of_matches_known_box_and_rejects_unknown():
 # --------------------------------------------------------------------------- #
 # host_model / mixed mi35x pool
 # --------------------------------------------------------------------------- #
+# A real "Set up job" banner: the Runner name is the pooled label, the Machine
+# name is the physical box. Only the latter identifies the hardware.
+SETUP_BANNER = (
+    "2026-09-09T11:13:28.0113052Z Current runner version: '2.337.0'\n"
+    "2026-09-09T11:13:28.0116996Z Runner name: 'linux-flydsl-mi35x-1-lzq5m-runner-z5hnw'\n"
+    "2026-09-09T11:13:28.0117633Z Runner group name: 'Default'\n"
+    "2026-09-09T11:13:28.0118194Z Machine name: '{machine}'\n"
+)
+
+
+def test_machine_name_prefers_machine_over_runner_name():
+    log = SETUP_BANNER.format(machine="gbt350-odcdh1-b13-1")
+    assert ingest.machine_name(log) == "gbt350-odcdh1-b13-1"
+    assert ingest.machine_name("no banner here") is None
+    assert ingest.machine_name("") is None
+
+
 def test_host_model_reads_the_machine_name():
+    assert ingest.host_model("gbt350-odcdh1-b13-1") == "MI350"
+    assert ingest.host_model("gbt355-odcdh1-b13-1") == "MI355"
+    # Containerized runners report the pod name for both fields; still readable.
     assert ingest.host_model("linux-flydsl-mi355-1-g2mdh-runner-k8jws") == "MI355"
-    assert ingest.host_model("linux-flydsl-mi350-1-g2mdh-runner-k8jws") == "MI350"
-    assert ingest.host_model("linux-flydsl-mi35x-1-abcde-runner-fghij") is None
-    assert ingest.host_model("") is None
+    assert ingest.host_model("linux-flydsl-mi35x-1-lzq5m-runner-z5hnw") is None
+    assert ingest.host_model(None) is None
 
 
-def _mixed_job(runner_name):
-    return {
-        "id": 9,
-        "name": "test (linux-flydsl-mi35x-1)",
-        "status": "completed",
-        "conclusion": "success",
-        "runner_name": runner_name,
-    }
+def _mixed_job(name="test (linux-flydsl-mi35x-1)"):
+    return {"id": 9, "name": name, "status": "completed", "conclusion": "success"}
 
 
-def _ingest_one(monkeypatch, job, log="op shape dtype TB/s TFLOPS\n"):
+def _ingest_one(monkeypatch, job, log):
     monkeypatch.setattr(ingest, "run_jobs", lambda repo, run_id: [job])
     monkeypatch.setattr(ingest, "resolve_pr", lambda repo, run: None)
     monkeypatch.setattr(ingest, "gh_text", lambda path: log)
@@ -225,18 +238,30 @@ def _ingest_one(monkeypatch, job, log="op shape dtype TB/s TFLOPS\n"):
 
 def test_mi350_host_is_kept_in_runs_but_not_ingested(monkeypatch):
     # The job must still appear on the live CI board; only its numbers are dropped.
-    monkeypatch.setattr(ingest, "gh_text", lambda path: (_ for _ in ()).throw(AssertionError("log fetched")))
-    recs, summary = _ingest_one(monkeypatch, _mixed_job("linux-flydsl-mi350-1-aaaaa-runner-bbbbb"))
+    monkeypatch.setattr(
+        ingest.parse_bench, "parse_log", lambda *a, **k: (_ for _ in ()).throw(AssertionError("parsed"))
+    )
+    recs, summary = _ingest_one(monkeypatch, _mixed_job(), SETUP_BANNER.format(machine="gbt350-odcdh1-b13-1"))
     assert recs == []
+    assert summary["jobs"][0]["machine"] == "gbt350-odcdh1-b13-1"
     assert summary["jobs"][0]["host_model"] == "MI350"
     assert "MI350" in summary["jobs"][0]["bench_skipped"]
 
 
 def test_unidentifiable_mixed_host_is_skipped(monkeypatch):
-    monkeypatch.setattr(ingest, "gh_text", lambda path: (_ for _ in ()).throw(AssertionError("log fetched")))
-    recs, summary = _ingest_one(monkeypatch, _mixed_job("linux-flydsl-mi35x-1-aaaaa-runner-bbbbb"))
+    monkeypatch.setattr(
+        ingest.parse_bench, "parse_log", lambda *a, **k: (_ for _ in ()).throw(AssertionError("parsed"))
+    )
+    recs, summary = _ingest_one(monkeypatch, _mixed_job(), SETUP_BANNER.format(machine="some-unlabelled-box"))
     assert recs == []
     assert summary["jobs"][0]["host_model"] is None
+    assert "unidentified" in summary["jobs"][0]["bench_skipped"]
+
+
+def test_missing_setup_banner_is_skipped(monkeypatch):
+    recs, summary = _ingest_one(monkeypatch, _mixed_job(), "op shape dtype TB/s TFLOPS\n")
+    assert recs == []
+    assert summary["jobs"][0]["machine"] is None
     assert "unidentified" in summary["jobs"][0]["bench_skipped"]
 
 
@@ -249,20 +274,19 @@ def test_mi355_host_in_mixed_pool_is_ingested(monkeypatch):
 
     monkeypatch.setattr(ingest.parse_bench, "parse_log", fake_parse)
     monkeypatch.setattr(ingest.parse_bench, "parse_aiter_compare", lambda text: [])
-    _, summary = _ingest_one(monkeypatch, _mixed_job("linux-flydsl-mi355-1-aaaaa-runner-bbbbb"))
+    _, summary = _ingest_one(monkeypatch, _mixed_job(), SETUP_BANNER.format(machine="gbt355-odcdh1-b13-1"))
     assert calls["n"] == 1  # log was parsed, not skipped
     assert summary["jobs"][0]["host_model"] == "MI355"
     assert "bench_skipped" not in summary["jobs"][0]
 
 
 def test_unpooled_runner_is_not_host_filtered(monkeypatch):
-    # mi325-1 has a single machine class, so its name is never inspected.
+    # mi325-1 has a single machine class, so its banner is never inspected.
     calls = {"n": 0}
     monkeypatch.setattr(ingest.parse_bench, "parse_log", lambda text, regression_pct: calls.update(n=1) or [])
     monkeypatch.setattr(ingest.parse_bench, "parse_aiter_compare", lambda text: [])
-    job = _mixed_job("some-opaque-name")
-    job["name"] = "test (linux-flydsl-mi325-1)"
-    _, summary = _ingest_one(monkeypatch, job)
+    job = _mixed_job(name="test (linux-flydsl-mi325-1)")
+    _, summary = _ingest_one(monkeypatch, job, SETUP_BANNER.format(machine="gbt350-odcdh1-b13-1"))
     assert calls["n"] == 1
     assert "host_model" not in summary["jobs"][0]
 
