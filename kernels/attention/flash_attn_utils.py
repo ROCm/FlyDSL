@@ -1037,12 +1037,18 @@ def _init_dualwave_thread_mapping(ctx):
         ctx.h_idx = linear_wg // num_q_blocks
         ctx.q_block_idx = linear_wg % num_q_blocks
     elif const_expr(batch_interleave_group > 1 and not traits.SPLITK):
-        # Keep a bounded batch group head-fast so the final causal q-block
+        # Keep a bounded batch group in grid X so the final causal q-block
         # occupies more CUs without abandoning K/V locality across all batches.
         linear_head_batch = fx.Index(gpu.block_idx.x)
-        ctx.h_idx = linear_head_batch % traits.NUM_HEADS_Q
-        batch_in_group = linear_head_batch // traits.NUM_HEADS_Q
-        ctx.batch_idx = fx.Int64(gpu.block_idx.z) * batch_interleave_group + batch_in_group
+        if const_expr(getattr(traits, "PAGED", False) and getattr(traits, "BN128", False)):
+            ctx.h_idx = linear_head_batch // batch_interleave_group
+            ctx.batch_idx = (
+                fx.Int64(gpu.block_idx.z) * batch_interleave_group + linear_head_batch % batch_interleave_group
+            )
+        else:
+            ctx.h_idx = linear_head_batch % traits.NUM_HEADS_Q
+            batch_in_group = linear_head_batch // traits.NUM_HEADS_Q
+            ctx.batch_idx = fx.Int64(gpu.block_idx.z) * batch_interleave_group + batch_in_group
         ctx.q_block_idx = fx.Index(gpu.block_idx.y)
     else:
         ctx.h_idx = fx.Index(gpu.block_idx.x)

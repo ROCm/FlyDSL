@@ -793,7 +793,7 @@ def _flydsl_flash_attn_paged(
                 paged_bn128_varlen=paged_bn128_varlen,
                 batch_interleave_group=(
                     _paged_fp8_batch_interleave_group(B, fp8_head_dims)
-                    if not use_bn128 and H == 16 and num_kv_heads == 1
+                    if H == 16 and num_kv_heads == 1 and (not use_bn128 or (fp8_head_dims == (192, 128) and B == 2))
                     else 1
                 ),
             )
