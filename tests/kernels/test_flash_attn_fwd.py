@@ -4800,7 +4800,7 @@ def test_paged_fp8_d192_batch_interleave_group(batch_size, head_dims, expected):
 
 @_requires_gfx950
 @pytest.mark.parametrize("value_head_dim", [128, 192])
-def test_paged_fp8_d192_batch_interleave_ragged_multiblock_matches_torch(value_head_dim):
+def test_paged_fp8_d192_ragged_multiblock_matches_torch(value_head_dim):
     """The D192 batch-interleaved grid preserves ragged causal q-block mapping."""
     test_paged_fp8_asymmetric_value_matches_torch(
         head_dim=192,
@@ -4932,6 +4932,29 @@ def test_paged_fp8_graph_replay_matches_torch(head_dim, value_head_dim):
     assert captured.data_ptr() == output.data_ptr()
     assert bool(torch.isfinite(output).all().item())
     torch.testing.assert_close(output, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("kv_length", [128, 192])
+def test_paged_fp8_explicit_compile_matches_torch(monkeypatch, head_dim, value_head_dim, kv_length):
+    """Explicit compilation honors the launch arguments for both paged schedules."""
+    build = flash_attn_interface._build_paged_fp8
+
+    def compile_launcher(**kwargs):
+        return build(**kwargs).compile
+
+    monkeypatch.setattr(flash_attn_interface, "_build_paged_fp8", compile_launcher)
+    pages = kv_length // 64
+    test_paged_fp8_asymmetric_value_matches_torch(
+        head_dim=head_dim,
+        value_head_dim=value_head_dim,
+        use_non_default_stream=True,
+        force_internal_copies=False,
+        query_lengths=[64, 32],
+        kv_lengths=[kv_length, kv_length - 32],
+        block_table_rows=[list(reversed(range(pages))), list(range(pages, 2 * pages))],
+    )
 
 
 @_requires_gfx950
