@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-09T11:37:47Z",
+ "updated": "2026-09-09T11:58:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34347387940,
+   "pr": 1114,
+   "commit": "d220621a7f938e00e34a0b86ce6ece08b75ca956",
+   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
+   "event": "pull_request",
+   "title": "[LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34347387940",
+   "created_at": "2026-09-09T11:47:27Z",
+   "updated_at": "2026-09-09T11:50:23Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
   {
    "run_id": 34346179765,
    "pr": 1114,
@@ -74,9 +89,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-09T11:35:21Z",
+     "started_at": "2026-09-09T11:36:29Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34345094383/job/102448769050"
     },
@@ -108,10 +123,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-09T10:40:58Z",
-     "completed_at": null,
+     "completed_at": "2026-09-09T11:55:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577/job/102432813997"
     },
     {
@@ -200,11 +215,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Chore] pre commit formatter (#1102)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587",
    "created_at": "2026-09-09T09:41:14Z",
-   "updated_at": "2026-09-09T10:40:59Z",
+   "updated_at": "2026-09-09T11:56:11Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -220,11 +235,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T10:40:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530878"
+     "completed_at": "2026-09-09T11:56:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530878",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -2041,50 +2057,6 @@
      "started_at": "2026-09-07T08:32:19Z",
      "completed_at": "2026-09-07T08:54:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34099498909/job/101675445034"
-    }
-   ]
-  },
-  {
-   "run_id": 34095413159,
-   "pr": 1069,
-   "commit": "d25d855f0c6746d68c4b9c86de30290c3d387a5a",
-   "branch": "feature/qwenimage-vae-conv-tests",
-   "event": "pull_request",
-   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159",
-   "created_at": "2026-09-07T07:25:41Z",
-   "updated_at": "2026-09-07T08:28:03Z",
-   "actor": "huizzhan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-07T07:39:24Z",
-     "completed_at": "2026-09-07T07:52:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159/job/101661302279",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-07T07:39:35Z",
-     "completed_at": "2026-09-07T08:28:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159/job/101661302289"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-07T07:39:35Z",
-     "completed_at": "2026-09-07T08:28:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34095413159/job/101661302373"
     }
    ]
   }
