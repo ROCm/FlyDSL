@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-09T10:35:10Z",
+ "updated": "2026-09-09T10:56:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "feat/rocdl-ordered-memory-primitives",
    "event": "pull_request",
    "title": "[DSL] Add llvm load/store primitives",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577",
    "created_at": "2026-09-09T10:16:20Z",
-   "updated_at": "2026-09-09T10:24:20Z",
+   "updated_at": "2026-09-09T10:39:45Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T10:40:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577/job/102432813997"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-09T10:39:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577/job/102432814012"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T10:40:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577/job/102432814096"
+    }
+   ]
   },
   {
    "run_id": 34337075328,
@@ -29,7 +57,7 @@
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34337075328",
    "created_at": "2026-09-09T09:51:42Z",
-   "updated_at": "2026-09-09T10:27:38Z",
+   "updated_at": "2026-09-09T10:55:01Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -55,11 +83,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Chore] pre commit formatter (#1102)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587",
    "created_at": "2026-09-09T09:41:14Z",
-   "updated_at": "2026-09-09T09:57:25Z",
+   "updated_at": "2026-09-09T10:40:59Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -75,9 +103,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-09T09:57:25Z",
+     "started_at": "2026-09-09T10:40:58Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530878"
     },
@@ -277,11 +305,12 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-09T08:56:08Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789/job/102401250078"
+     "completed_at": "2026-09-09T10:51:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789/job/102401250078",
+     "log_fetch_failed": true
     }
    ]
   },
