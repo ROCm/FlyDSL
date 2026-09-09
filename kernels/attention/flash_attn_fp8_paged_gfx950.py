@@ -438,9 +438,7 @@ def build_flash_attn_paged_fp8_module(
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
 
-            # Load this wave's raw fp8 Q rows for wide QK; q/k descale is applied to
-            # the fp32 logits after the MFMA. init_q_row sets q_row/q_row_i32/
-            # q_start_pos_i32 on ctx for the causal-mask helpers.
+            # Keep Q in registers; apply Q/K descales in softmax.
             ctx.init_q_row()
             q_row = ctx.q_row
             q_all_wide = gemm_helper.load_q_wide()
@@ -479,7 +477,6 @@ def build_flash_attn_paged_fp8_module(
                 init_args.append(ctx.c_zero_v16f32)
             init_args.append(ctx.v_pair_to_vec32(v_p_0))
 
-            # Software-pipelined KV loop.
             loop_lb = fx.Int64(3)
             loop_results = init_args
             for j, loop_args in range(
@@ -528,7 +525,6 @@ def build_flash_attn_paged_fp8_module(
                     rocdl.s_setprio(1)
                 v_o = gemm_helper.pv_step_k(0, v_p_0, v_v, v_o)
                 # Cross-length causal can put a diagonal tile in v_s_1; mask it here.
-                # Self-attention skips this to keep the existing schedule.
                 v_s_1 = softmax_helper.causal_mask_prologue_if_needed(v_s_1, j_idx - 2, (j_idx - 1) * traits.BLOCK_N)
                 m_tile_max_a = softmax_helper.reduce_max(v_s_1)
 
@@ -553,14 +549,11 @@ def build_flash_attn_paged_fp8_module(
                     v_p_1 = softmax_helper.exp2(v_s_1, 0, 16)
 
                 _sched_barrier_pairs(traits, 6, 6, 2)
-                # IGroupLP hint (group 2): 6 MFMA each paired with 3 EXP/TRANS (mask
-                # 0x400) so the new softmax exp2 stays near its MFMA window.
+                # Keep softmax EXP groups near their MFMA window.
                 _sched_barrier_exp_pairs(traits, 6, 3, 2)
                 if const_expr(traits.DUALWAVE_SWP_SETPRIO):
                     rocdl.s_setprio(0)
-                # sched_barrier(0): compiler scheduling fence (mask 0 = nothing
-                # crosses), pinning s_setprio(0) and the closing s_barrier at the
-                # cluster boundary. Emits no ISA; the real sync is s_barrier().
+                # Fence the closing priority/barrier pair at the cluster boundary.
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
@@ -853,16 +846,12 @@ def build_flash_attn_paged_fp8_module(
             else:
                 v_o = gemm_helper.pv(v_p_1, v_packs_e13, v_o)
 
-            # Normalize by l_row; zero rows become zero instead of NaN.
-            # HIPREC folds v_descale into the bf16 vt scratch. The direct FP8
-            # D128 path keeps raw V and applies its descale once at the end.
+            # Apply V descale once after normalizing the native FP8 P*V result.
             inv_l = softmax_helper.safe_l_inv(l_row)
             inv_l = inv_l * ctx.vd_fp8
             softmax_helper.scale_o(v_o, inv_l)
 
-            # CLOSE the phase shift: one extra s_barrier on group A (complement of
-            # the prologue's group-B barrier) realigns the two groups before the
-            # store. Disabled -> one plain barrier.
+            # Group A's extra barrier closes the prologue's phase shift before stores.
             if const_expr(traits.DUALWAVE_SWP_ENABLE_STAGGER):
                 _stagger_extra_barrier_if_zero(ctx.stagger_i32)  # group A: +1 s_barrier -> close the shift
             else:
@@ -1048,7 +1037,6 @@ def build_flash_attn_paged_fp8_module(
             stride_o_n = DEFAULT_STRIDE_O_N
         if head_dim_runtime is None:
             head_dim_runtime = HEAD_DIM
-        # seq_len_kv defaults to seq_len (self-attention / equal Q,KV lengths).
         if seq_len_kv is None:
             seq_len_kv = seq_len
         if debug_counts is None:

@@ -509,7 +509,7 @@ def _build_paged_fp8(
 
 # ── paged-KV native path ────────────────────────────────────────────────────
 
-# gfx950 dualwave paged-KV currently supports exactly one configuration.
+# Native page geometry and generic D192 batch-interleave tuning.
 _PAGED_PAGE_SIZE = 64
 _PAGED_BT_LDS_SIZE = 2048
 _PAGED_FP8_BATCH_INTERLEAVE_MAX_GROUP = 8
@@ -517,10 +517,10 @@ _PAGED_FP8_V192_BATCH_INTERLEAVE_MAX_BATCH = 16
 
 
 def _paged_fp8_batch_interleave_group(batch_size: int, head_dims: tuple[int, int]) -> int:
-    """Choose a divisor-sized batch group for the tuned MiMo D192 launch."""
+    """Choose a divisor-sized batch group for generic paged D192."""
     if head_dims[0] != 192 or batch_size <= 1:
         return 1
-    # V192 crosses back to the cache-locality-favored original grid above B=16.
+    # Generic V192 favors the original cache-local grid above B=16.
     if head_dims == (192, 192) and batch_size > _PAGED_FP8_V192_BATCH_INTERLEAVE_MAX_BATCH:
         return 1
     for group_size in (_PAGED_FP8_BATCH_INTERLEAVE_MAX_GROUP, 4, 2):
@@ -566,7 +566,7 @@ def _flydsl_flash_attn_paged(
     D128 or D192.
     - Dense 4D Q ``[B, Sq, H, D]``: split-K (num_kv_splits>1) supported (seq_len>=384).
     - Varlen packed Q ``[total_q, H, D]`` (cu_seqlens_q given): paged K/V looked up
-      per kv-tile via block_table; split-K not supported (matches dense varlen).
+      per kv-tile via block_table; paged split-K is not supported.
     """
     if kv_cache_layout not in ("linear", "vectorized"):
         raise NotImplementedError(
