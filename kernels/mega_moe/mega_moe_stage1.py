@@ -4,7 +4,7 @@
 
 from flydsl.runtime.device import get_rocm_arch  # re-exported for test overrides
 
-from .mega_moe_config import A8W4_DECODE_MTPRS, A8W4SMOOTH_DECODE_MTPRS
+from .mega_moe_config import A8W4_MTPRS, A8W4SMOOTH_DECODE_MTPRS
 
 __all__ = [
     "A8W4_ENTRY_COUNT_SHARDS",
@@ -59,7 +59,7 @@ def _stage1_quant_traits(quant_mode: str, inter_dim: int, tile_n: int):
     }
 
 
-def _validate_a8w4_decode_contract(
+def _validate_a8w4_contract(
     *, model_dim, inter_dim, experts_per_rank, fuse_npes, fuse_topk,
     fuse_mtpr, fuse_scale_dim, fixed_slot_dispatch, external_grouping,
     external_counting, payload_chunk_rows, payload_tile_ready, work_shards,
@@ -67,12 +67,12 @@ def _validate_a8w4_decode_contract(
     shape = (model_dim, inter_dim, experts_per_rank, fuse_npes, fuse_topk)
     if shape != (3584, 1280, 48, 8, 8) or fuse_scale_dim != 112:
         raise ValueError(
-            "A8W4 MX-scale Stage1 is decode-only for M13 "
+            "A8W4 MX-scale Stage1 is specialized for M13 "
             "(D=3584, I=1280, EPR=48, EP=8, topk=8, scale_dim=112)"
         )
-    if fuse_mtpr not in A8W4_DECODE_MTPRS:
+    if fuse_mtpr not in A8W4_MTPRS:
         raise ValueError(
-            f"A8W4 MX-scale decode requires MTPR in {A8W4_DECODE_MTPRS}, got {fuse_mtpr}"
+            f"A8W4 MX-scale requires MTPR in {A8W4_MTPRS}, got {fuse_mtpr}"
         )
     expected_fixed = fuse_mtpr <= 128
     if bool(fixed_slot_dispatch) != expected_fixed:
@@ -84,11 +84,11 @@ def _validate_a8w4_decode_contract(
     )
     if any(advanced):
         raise ValueError(
-            "A8W4 MX-scale decode does not support external grouping/counting, "
+            "A8W4 MX-scale does not support external grouping/counting, "
             "or chunked/tile-ready payloads"
         )
     if work_shards is not None:
-        raise ValueError("A8W4 MX-scale decode has no dynamic work-shard queue")
+        raise ValueError("A8W4 MX-scale has no dynamic work-shard queue")
 
 
 def _validate_a8w4smooth_decode(common, *, mxfp4_transport, smoothquant_mode):
@@ -181,7 +181,7 @@ def compile_mega_moe_stage1(
             raise ValueError("MXFP4 transport requires a SmoothQuant compute mode")
         if smoothquant_mode != "none":
             raise ValueError("fused SmoothQuant prepare is not an A8W4 MX-scale mode")
-        _validate_a8w4_decode_contract(
+        _validate_a8w4_contract(
             model_dim=model_dim, inter_dim=inter_dim,
             experts_per_rank=experts_per_rank, fuse_npes=fuse_npes,
             fuse_topk=fuse_topk, fuse_mtpr=fuse_mtpr,
@@ -303,7 +303,7 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
             raise ValueError("MXFP4 transport requires a SmoothQuant compute mode")
         if smoothquant_mode != "none":
             raise ValueError("fused SmoothQuant prepare is not an A8W4 MX-scale mode")
-        _validate_a8w4_decode_contract(
+        _validate_a8w4_contract(
             model_dim=model_dim, inter_dim=inter_dim,
             experts_per_rank=experts_per_rank, fuse_npes=fuse_npes,
             fuse_topk=fuse_topk, fuse_mtpr=fuse_mtpr,

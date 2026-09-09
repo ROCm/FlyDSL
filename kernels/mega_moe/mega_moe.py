@@ -15,7 +15,7 @@ from kernels.comm.flydsl_dispatch_combine_intranode_op import (
 
 from .dispatch import DISPATCH_TABLE_SIZE, DispatchSlot
 from .mega_moe_config import (
-    A8W4_DECODE_MTPRS,
+    A8W4_MTPRS,
     A8W4SMOOTH_DECODE_MTPRS,
     MegaMoEConfig,
     Stage1Config,
@@ -107,16 +107,16 @@ class MegaMoEV2:
                 topk,
             ) != (3584, 1280, 384, 8, 8):
                 raise ValueError(
-                    f"{quant} decode is specialized for M13 EP8 "
+                    f"{quant} is specialized for M13 EP8 "
                     "(D=3584,I=1280,E=384,EP=8,topk=8)"
                 )
-            decode_mtprs = (
-                A8W4_DECODE_MTPRS
+            supported_mtprs = (
+                A8W4_MTPRS
                 if quant == "a8w4"
                 else A8W4SMOOTH_DECODE_MTPRS
             )
-            if max_tok_per_rank not in decode_mtprs:
-                raise ValueError(f"{quant} decode requires MTPR in {decode_mtprs}")
+            if max_tok_per_rank not in supported_mtprs:
+                raise ValueError(f"{quant} requires MTPR in {supported_mtprs}")
         if weight_format not in _SUPPORTED_WEIGHT_FORMATS:
             raise ValueError(
                 f"unsupported weight_format={weight_format!r}; "
@@ -717,7 +717,7 @@ class MegaMoEV2:
             raise ValueError(f"run_tokens={cur_tok} > max_tok_per_rank={self.mtpr}")
         if self.quant == "a8w4" and cur_tok != self.mtpr:
             raise ValueError(
-                "A8W4 MX-scale decode requires tokens per rank to equal MTPR "
+                "A8W4 MX-scale requires tokens per rank to equal MTPR "
                 f"(tokens={cur_tok}, MTPR={self.mtpr})"
             )
         if x.dtype != torch.float8_e4m3fn or not x.is_contiguous():
@@ -1113,7 +1113,7 @@ class MegaMoEV2:
             raise ValueError(f"run_tokens={run_tokens} > max_tok_per_rank={self.mtpr}")
         if self.quant in ("a8w4", "a8w4smooth") and run_tokens != self.mtpr:
             raise ValueError(
-                f"{self.quant} decode requires tokens per rank to equal MTPR "
+                f"{self.quant} requires tokens per rank to equal MTPR "
                 f"(tokens={run_tokens}, MTPR={self.mtpr})"
             )
         if x_bf16.dtype != torch.bfloat16 or not x_bf16.is_contiguous():

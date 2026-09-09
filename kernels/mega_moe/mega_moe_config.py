@@ -14,6 +14,8 @@ from functools import cache
 
 TOKEN_BUCKETS = (1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768)
 A8W4_DECODE_MTPRS = (1, 4, 8, 16, 32, 64, 128, 256, 512)
+A8W4_PREFILL_MTPRS = (1024, 2048, 4096, 8192, 16384, 32768)
+A8W4_MTPRS = A8W4_DECODE_MTPRS + A8W4_PREFILL_MTPRS
 P2P_FP8_MIN_MTPR = 1024
 FIXED_SLOT_MAX_MTPR = 255
 A8W4SMOOTH_FIXED_SLOT_MAX_MTPR = 1024
@@ -507,21 +509,55 @@ def _apply_quant_and_shape_rules(
 ) -> tuple[Stage1Config, Stage2Config]:
     bucket = workload.bucket
 
-    if workload.quant_mode == "a8w4" and bucket == 128:
-        # M13 decode: 48 active M tiles x 10 N tiles.  TN256/W8 halves the
-        # consumer work from the older TN128 geometry while a two-grid launch
-        # still covers all 480 tiles without serial work per consumer CTA.
-        stage1 = replace(
-            stage1,
-            sort_block_m=32,
-            tile_n=256,
-            num_waves=8,
-            grid_mult=2,
-            num_dispatch_cu=_fit_dispatch_cu(224, workload),
-            b_nt=3,
-            waves_per_eu_hint=2,
-            swizzle_a=True,
-        )
+    if workload.quant_mode == "a8w4":
+        if bucket >= A8W4_PREFILL_MTPRS[0]:
+            # Native MX A8W4 has no generic W8 prefill protocol fields.
+            stage1 = replace(
+                stage1,
+                work_shards=None,
+                external_grouping=False,
+                external_counting=False,
+                payload_chunk_rows=0,
+                payload_tile_ready=False,
+            )
+
+        if bucket == 128:
+            # TN256/W8 covers all 480 M13 decode tiles with two grid waves.
+            stage1 = replace(
+                stage1,
+                sort_block_m=32,
+                tile_n=256,
+                num_waves=8,
+                grid_mult=2,
+                num_dispatch_cu=_fit_dispatch_cu(224, workload),
+                b_nt=3,
+                waves_per_eu_hint=2,
+                swizzle_a=True,
+            )
+        elif bucket == 1024:
+            stage1 = replace(
+                stage1,
+                grid_mult=1,
+                num_dispatch_cu=_fit_dispatch_cu(128, workload),
+            )
+            stage2 = replace(stage2, persist_cu=256)
+        elif bucket in (2048, 4096):
+            stage1 = replace(
+                stage1,
+                num_dispatch_cu=_fit_dispatch_cu(224, workload),
+            )
+        elif bucket == 8192:
+            stage1 = replace(
+                stage1,
+                num_dispatch_cu=_fit_dispatch_cu(128, workload),
+            )
+        elif bucket in (16384, 32768):
+            dispatch_cu = 112 if bucket == 16384 else 96
+            stage1 = replace(
+                stage1,
+                num_dispatch_cu=_fit_dispatch_cu(dispatch_cu, workload),
+            )
+            stage2 = replace(stage2, persist_cu=224)
 
     if workload.quant_mode == "a8w4smooth" and workload.fixed_slot and bucket <= 8:
         stage1 = replace(
@@ -616,13 +652,13 @@ def select_mega_moe_config(
         shape = (model_dim, inter_dim, experts_per_rank, world_size, topk)
         if shape != (3584, 1280, 48, 8, 8):
             raise ValueError(
-                "native A8W4 is decode-only for M13 "
+                "native A8W4 is specialized for M13 "
                 "(D=3584, I=1280, EPR=48, EP=8, topk=8)"
             )
-        if tokens != mtpr or mtpr not in A8W4_DECODE_MTPRS:
+        if tokens != mtpr or mtpr not in A8W4_MTPRS:
             raise ValueError(
                 "native A8W4 requires tokens=MTPR in "
-                f"{A8W4_DECODE_MTPRS}, got tokens={tokens}, MTPR={mtpr}"
+                f"{A8W4_MTPRS}, got tokens={tokens}, MTPR={mtpr}"
             )
     elif quant_mode == "a8w4smooth":
         if tokens != mtpr or mtpr not in A8W4SMOOTH_DECODE_MTPRS:

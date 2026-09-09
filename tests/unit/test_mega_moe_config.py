@@ -5,6 +5,7 @@ import pytest
 
 from kernels.mega_moe.mega_moe_config import (
     A8W4_DECODE_MTPRS,
+    A8W4_PREFILL_MTPRS,
     A8W4SMOOTH_DECODE_MTPRS,
     MAX_MTPR_CLASS,
     TOKEN_BUCKETS,
@@ -315,10 +316,23 @@ def test_mxfp4_transport_config_is_w8a8smooth_prefill_only():
     assert transport is established
 
 
-@pytest.mark.parametrize("mtpr", [1024, 2048, 32768])
-def test_native_a8w4_rejects_non_decode_capacity(mtpr):
+@pytest.mark.parametrize("tokens", A8W4_PREFILL_MTPRS)
+def test_native_a8w4_prefill_contract(tokens):
+    config = select_mega_moe_config(tokens, tokens, **M13_A8W4)
+
+    assert config.stage1.work_shards is None
+    assert not config.stage1.external_grouping
+    assert not config.stage1.external_counting
+    assert config.stage1.payload_chunk_rows == 0
+    assert not config.stage1.payload_tile_ready
+    assert config.p2p_quant == (
+        "none" if tokens == 1024 else "fp8_blockwise_1x32"
+    )
+
+
+def test_native_a8w4_requires_matching_tokens_and_capacity():
     with pytest.raises(ValueError, match="tokens=MTPR"):
-        select_mega_moe_config(512, mtpr, **M13_A8W4)
+        select_mega_moe_config(512, 1024, **M13_A8W4)
 
 
 @pytest.mark.parametrize("quant_mode", ["a8w4", "a8w4smooth"])
