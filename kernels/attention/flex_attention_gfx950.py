@@ -31,6 +31,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from flydsl.runtime.device import get_rocm_arch
 from kernels.attention.flash_attn_utils import (
+    _fused_o_128_dwords,
     _read_exec_i64,
     _stagger_extra_barrier_if_one,
     _stagger_extra_barrier_if_zero,
@@ -1848,15 +1849,36 @@ def flex_attn_fwd_gfx950_kernel(
         m_i_out = [fx.Float32(m_new)] + [m_i[r] for r in range_constexpr(1, npair)]
         return s_scaled, m_i_out, l_i_out, o_accs, p_prev, corr_scalar
 
+    def _pin_in_cluster(values):
+        """Give pure VALU results a use here so they cannot sink downstream.
+
+        MachineSink runs before the `sched_barrier` in `dualwave_cluster_sync`
+        is honoured, so it is free to move the exp2 chain across the cluster
+        boundary to shorten live ranges. It does exactly that in one of the two
+        unrolled copies of the KV loop, which dumps C3's 16 exp2 into the next
+        C0 on top of its own 16. An empty side-effecting asm consuming the
+        results anchors them in this block. Emit it after the
+        `sched_group_barrier` requests, since it also ends the scheduling
+        region.
+        """
+        vals = [as_mlir_value(v) for v in values]
+        llvm.inline_asm(
+            None,
+            vals,
+            "",
+            ",".join("v" for _ in vals),
+            has_side_effects=True,
+        )
+
     def _flash_make_deferred_p(s_scaled, m_i):
         """C3: begin P[n], leaving its second half for next C0."""
         m_new = m_i[0]
         shifted = [s_scaled[i] - m_new for i in range_constexpr(n_c)]
-        p_mixed = [
-            _hw_exp2(shifted[i]) if const_expr(i < _flash_p_half) else shifted[i]
-            for i in range_constexpr(n_c)
+        p_head = [_hw_exp2(shifted[i]) for i in range_constexpr(_flash_p_half)]
+        p_mixed = p_head + [
+            shifted[i] for i in range_constexpr(_flash_p_half, n_c)
         ]
-        return Vec.from_elements(p_mixed, fx.Float32).ir_value()
+        return Vec.from_elements(p_mixed, fx.Float32).ir_value(), p_head
 
     def _flash_deferred_prologue(kv_i32, m_i, l_i, o_accs):
         """Prime S/P for tile 0; K0/V0 are already resident in slot 0."""
@@ -1881,7 +1903,8 @@ def flex_attn_fwd_gfx950_kernel(
         _waitcnt_vm_n(_dma_ops_per_thread)
         dualwave_cluster_sync(2)
 
-        p_mixed = _flash_make_deferred_p(s_scaled, m_i)
+        p_mixed, p_head = _flash_make_deferred_p(s_scaled, m_i)
+        _pin_in_cluster(p_head)
         dualwave_cluster_sync(3)
         return m_i, l_i, o_accs, p_mixed, corr_scalar
 
@@ -1933,10 +1956,11 @@ def flex_attn_fwd_gfx950_kernel(
         if const_expr(_FLASH_SETPRIO_PV):
             rocdl.s_setprio(1)
         pv_gemm_register_packs(p_prev, v_prev, o_accs)
-        p_mixed = _flash_make_deferred_p(s_scaled, m_i)
+        p_mixed, p_head = _flash_make_deferred_p(s_scaled, m_i)
         # Only the exp2 chain pays here. Pinning the subtracts and bf16 packs
         # too costs ~1%, the same way it did for the O rescale in C0.
         sched_interleave_pv_softmax(_pv_packs * _n_d_chunks, mfma=1, trans=1)
+        _pin_in_cluster(p_head)
         if const_expr(_FLASH_SETPRIO_PV):
             rocdl.s_setprio(0)
         dualwave_cluster_sync(3)
@@ -2579,8 +2603,13 @@ def flex_attn_fwd_gfx950_kernel(
         fx.memref_store_vec(ml_vec, ws_ml_reg)
         fx.copy(_ws_ml_store_atom, ws_ml_reg, fx.slice(ws_ml_div, (None, fx.Int32(_ws_ml_base))))
     else:
-        _o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), _out_elem_dtype)
-        o_store_reg = fx.make_rmem_tensor(fx.make_layout(4, 1), _out_elem_dtype)
+        # Fuse the complementary 32-lane halves of each wave so every lane
+        # issues eight contiguous 128-bit writes instead of sixteen 64-bit
+        # writes.  The two halves own alternating 4-element D groups for the
+        # same query row, so permlane32 can assemble each contiguous 8-tuple
+        # without LDS or a workgroup synchronization.
+        _o_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), _out_elem_dtype)
+        o_store_reg = fx.make_rmem_tensor(fx.make_layout(8, 1), _out_elem_dtype)
         o_div = fx.logical_divide(
             fx.rocdl.make_buffer_tensor(
                 fx.Tensor(
@@ -2591,12 +2620,25 @@ def flex_attn_fwd_gfx950_kernel(
             fx.make_layout(1, 1),
         )
         o_base = o_off + _qrow * _o_row_stride
+        _lane_div_32 = fx.Index(local_tid // 32)
         for dc in range_constexpr(_n_d_chunks):
             o_vec = Vec(o_accs[dc])
-            for k in range_constexpr(4):
-                col = dc * 32 + _group_d_base + fx.Int32(k * 8)
-                elems = [o_vec[k * 4 + e] for e in range_constexpr(4)]
-                vbf = Vec.from_elements(elems, fx.Float32).to(_out_elem_dtype)
+            for g in range_constexpr(2):
+                dwords = []
+                for sg in range_constexpr(2):
+                    k = 2 * g + sg
+                    elems = [o_vec[k * 4 + e] for e in range_constexpr(4)]
+                    packed = Vec.from_elements(elems, fx.Float32).to(_out_elem_dtype).bitcast(fx.Int32)
+                    dwords.extend([packed[0], packed[1]])
+                fused = _fused_o_128_dwords(
+                    _lane_div_32,
+                    dwords[0],
+                    dwords[1],
+                    dwords[2],
+                    dwords[3],
+                )
+                vbf = Vec.from_elements([fx.Int32(w) for w in fused], fx.Int32).bitcast(_out_elem_dtype)
+                col = dc * 32 + fx.Int32((2 * g) * 8) + fx.Int32(local_tid // 32) * fx.Int32(8)
                 off = o_base + col
                 fx.memref_store_vec(vbf, o_store_reg)
                 fx.copy(_o_store_atom, o_store_reg, fx.slice(o_div, (None, fx.Int32(off))))
