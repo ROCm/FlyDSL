@@ -273,7 +273,8 @@ def build_flash_attn_paged_fp8_module(
             init_args += [next_v_a, next_v_b]
         loop_results = init_args
         next_v_arg_idx = 3 + D_CHUNKS
-        for j, loop_args in range(fx.Int64(t0), t_end, fx.Int64(2), init=init_args):
+
+        def _iterate(j, loop_args, do_mask):
             m_row = loop_args[0]
             l_row = loop_args[1]
             v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
@@ -297,7 +298,8 @@ def build_flash_attn_paged_fp8_module(
                 kv_gmem_to_lds.load_v((j + 4) * BN, f_a_buf, page_id=page_f_a)
                 kv_gmem_to_lds.load_v((j + 5) * BN, f_b_buf, page_id=page_f_b)
 
-                v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
+                if const_expr(do_mask):
+                    v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
                 m_tile = _merge_tile_max(v_s_a, v_s_b)
                 v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
                 v_o = softmax_helper.anchor_v_o(v_o)
@@ -334,7 +336,8 @@ def build_flash_attn_paged_fp8_module(
                 )
                 v_s_b = gemm_helper.qk(v_k_b, q_wide)
                 kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_b, nn_b_buf)
-                v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
+                if const_expr(do_mask):
+                    v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
                 m_tile = _merge_tile_max(v_s_a, v_s_b)
                 v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
                 v_o = softmax_helper.anchor_v_o(v_o)
@@ -349,7 +352,24 @@ def build_flash_attn_paged_fp8_module(
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
-            loop_results = yield next_args
+            return next_args
+
+        if const_expr(traits.HEAD_DIM == 192 and traits.HEAD_DIM_V == 128):
+            # The prefix boundary is wave-uniform, not CTA-uniform. Both loops
+            # must keep the same pair order and one rendezvous per pair.
+            prefix_end = fx.Int64(ctx.q_start_pos_i32 + ctx.delta_i32) // (2 * BN) * 2
+            prefix_end = fx.min(fx.Int64(t_end), fx.max(fx.Int64(t0), prefix_end))
+            for j, loop_args in range(fx.Int64(t0), prefix_end, fx.Int64(2), init=init_args):
+                next_args = _iterate(j, loop_args, False)
+                loop_results = yield next_args
+            tail_init = loop_results
+            for j, loop_args in range(prefix_end, fx.Int64(t_end), fx.Int64(2), init=tail_init):
+                next_args = _iterate(j, loop_args, True)
+                loop_results = yield next_args
+        else:
+            for j, loop_args in range(fx.Int64(t0), t_end, fx.Int64(2), init=init_args):
+                next_args = _iterate(j, loop_args, True)
+                loop_results = yield next_args
         m_row = loop_results[0]
         l_row = loop_results[1]
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
