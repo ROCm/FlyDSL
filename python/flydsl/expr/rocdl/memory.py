@@ -3,32 +3,30 @@
 
 """Ordered global-memory and synchronization operations for AMD GPUs."""
 
-from ..._mlir import ir
 from ..._mlir.dialects import llvm
+from ..enum import AtomicOrdering
 from ..meta import dsl_loc_tracing
-from ..numeric import Float, Integer, Numeric
-from ..typing import Vector, as_ir_value
-from .enum import MemoryOrder
+from ..primitive import AddressSpace
+from ..typing import Pointer, as_ir_value, is_generic_address_space
 
 __all__ = [
-    "atomic_fetch_add",
     "global_load",
     "global_store",
-    "memory_fence",
     "sleep",
 ]
 
 _ORDERINGS = {
-    MemoryOrder.Unordered: llvm.AtomicOrdering.unordered,
-    MemoryOrder.Monotonic: llvm.AtomicOrdering.monotonic,
-    MemoryOrder.Acquire: llvm.AtomicOrdering.acquire,
-    MemoryOrder.Release: llvm.AtomicOrdering.release,
-    MemoryOrder.SequentiallyConsistent: llvm.AtomicOrdering.seq_cst,
+    AtomicOrdering.Unordered: llvm.AtomicOrdering.unordered,
+    AtomicOrdering.Monotonic: llvm.AtomicOrdering.monotonic,
+    AtomicOrdering.Acquire: llvm.AtomicOrdering.acquire,
+    AtomicOrdering.Release: llvm.AtomicOrdering.release,
+    AtomicOrdering.AcqRel: llvm.AtomicOrdering.acq_rel,
+    AtomicOrdering.SeqCst: llvm.AtomicOrdering.seq_cst,
 }
 
 
 def _ordering_kwargs(memory_order, syncscope):
-    if memory_order == MemoryOrder.NotAtomic:
+    if memory_order == AtomicOrdering.NotAtomic:
         if syncscope is not None:
             raise ValueError("syncscope requires an atomic memory order")
         return {}
@@ -42,120 +40,58 @@ def _ordering_kwargs(memory_order, syncscope):
     return kwargs
 
 
-def _global_ptr(address):
-    address = as_ir_value(address)
-    if not isinstance(address.type, ir.IntegerType) or address.type.width != 64:
-        raise TypeError("global-memory address must be an i64 value")
-    return llvm.IntToPtrOp(llvm.PointerType.get(address_space=1), address).result
-
-
-def _atomic_ordering(memory_order):
-    if memory_order in (MemoryOrder.NotAtomic, MemoryOrder.Unordered):
-        raise ValueError(f"invalid atomic memory order: {memory_order}")
-    try:
-        return _ORDERINGS[memory_order]
-    except KeyError as exc:
-        raise ValueError(f"unsupported memory order: {memory_order!r}") from exc
-
-
-@dsl_loc_tracing
-def atomic_fetch_add(
-    address,
-    value,
-    *,
-    memory_order=MemoryOrder.Monotonic,
-    syncscope=None,
-    alignment=None,
-):
-    """Atomically add ``value`` at an i64 global address and return the old value."""
-    value = as_ir_value(value)
-    try:
-        dtype = Numeric.from_ir_type(value.type)
-    except (TypeError, ValueError) as exc:
-        raise TypeError("atomic value must be a FlyDSL integer or floating-point scalar") from exc
-    if issubclass(dtype, Integer):
-        bin_op = llvm.AtomicBinOp.add
-    elif issubclass(dtype, Float):
-        bin_op = llvm.AtomicBinOp.fadd
-    else:
-        raise TypeError("atomic value must be a FlyDSL integer or floating-point scalar")
-    kwargs = {}
-    if syncscope is not None:
-        kwargs["syncscope"] = syncscope
-    if alignment is not None:
-        kwargs["alignment"] = alignment
-    result = llvm.AtomicRMWOp(
-        bin_op,
-        _global_ptr(address),
-        value,
-        _atomic_ordering(memory_order),
-        **kwargs,
-    ).result
-    return dtype(result)
-
-
-@dsl_loc_tracing
-def memory_fence(
-    memory_order=MemoryOrder.SequentiallyConsistent,
-    *,
-    syncscope=None,
-):
-    """Synchronize memory accesses by the calling thread at the requested scope."""
-    kwargs = {}
-    if syncscope is not None:
-        kwargs["syncscope"] = syncscope
-    llvm.FenceOp(_atomic_ordering(memory_order), **kwargs)
+def _global_ptr(ptr):
+    if not isinstance(ptr, Pointer):
+        raise TypeError(f"global memory operation requires an fx.Pointer, got {ptr!r}")
+    if not is_generic_address_space(ptr.address_space, AddressSpace.Global):
+        raise ValueError(f"global memory operation requires a global-address-space pointer, got {ptr.address_space}")
+    return ptr.llvm_ptr
 
 
 @dsl_loc_tracing
 def global_load(
-    address,
+    ptr,
     dtype,
     *,
-    vector_width=1,
-    alignment=None,
-    memory_order=MemoryOrder.NotAtomic,
+    memory_order=AtomicOrdering.NotAtomic,
     syncscope=None,
     nontemporal=False,
 ):
-    """Load a scalar or flat vector from an i64 global-memory address."""
-    if not isinstance(vector_width, int) or vector_width < 1:
-        raise ValueError("vector_width must be a positive compile-time integer")
-    if memory_order == MemoryOrder.Release:
+    """Load a scalar from a global ``fly.ptr``."""
+    llvm_ptr = _global_ptr(ptr)
+    if memory_order == AtomicOrdering.Release:
         raise ValueError(f"invalid load memory order: {memory_order}")
     try:
-        element_type = dtype.ir_type
+        result_type = dtype.ir_type
     except AttributeError as exc:
         raise TypeError("dtype must be a FlyDSL scalar type") from exc
-    result_type = element_type if vector_width == 1 else ir.VectorType.get([vector_width], element_type)
     kwargs = _ordering_kwargs(memory_order, syncscope)
-    if alignment is not None:
-        kwargs["alignment"] = alignment
+    kwargs["alignment"] = ptr.alignment
     if nontemporal:
         kwargs["nontemporal"] = True
-    result = llvm.LoadOp(result_type, _global_ptr(address), **kwargs).result
-    return Vector(result) if vector_width > 1 else dtype(result)
+    result = llvm.LoadOp(result_type, llvm_ptr, **kwargs).result
+    return dtype(result)
 
 
 @dsl_loc_tracing
 def global_store(
-    address,
+    ptr,
     value,
     *,
-    alignment=None,
-    memory_order=MemoryOrder.NotAtomic,
+    memory_order=AtomicOrdering.NotAtomic,
     syncscope=None,
     nontemporal=False,
 ):
-    """Store a scalar or flat vector to an i64 global-memory address."""
-    if memory_order == MemoryOrder.Acquire:
+    """Store a scalar to a global ``fly.ptr``."""
+    llvm_ptr = _global_ptr(ptr)
+    if memory_order == AtomicOrdering.Acquire:
         raise ValueError(f"invalid store memory order: {memory_order}")
+    value = as_ir_value(value)
     kwargs = _ordering_kwargs(memory_order, syncscope)
-    if alignment is not None:
-        kwargs["alignment"] = alignment
+    kwargs["alignment"] = ptr.alignment
     if nontemporal:
         kwargs["nontemporal"] = True
-    llvm.StoreOp(as_ir_value(value), _global_ptr(address), **kwargs)
+    llvm.StoreOp(value, llvm_ptr, **kwargs)
 
 
 @dsl_loc_tracing
