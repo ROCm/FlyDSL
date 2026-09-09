@@ -5046,20 +5046,13 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         row_stride = traits.FP8_V_ROW_STRIDE
         tile_bytes = traits.HEAD_DIM_V * row_stride
         aligned_base = ((self.lds_vt_base_idx + fx.Int64(127)) // fx.Int64(128)) * fx.Int64(128)
-        tile_base = aligned_base + fx.Int64(buf_id * tile_bytes)
-        d_global = dc * traits.D_CHUNK
-        if const_expr(d_global < traits.FP8_V_H1):
-            segment_base = 0
-            d_local = d_global
-        else:
-            segment_base = traits.FP8_V_H1 * row_stride
-            d_local = d_global - traits.FP8_V_H1
-        token_base = self.lane_div_32 * fx.Int64(32)
-        d_row = fx.Int64(d_local) + self.lane_mod_32
-        row_base = tile_base + fx.Int64(segment_base) + d_row * fx.Int64(row_stride) + token_base
+        tile_index = fx.Uint32(aligned_base - self.lds_vt_base_idx) // 16
+        tile_index = tile_index + fx.Uint32(self.lane_mod_32) * (row_stride // 16) + fx.Uint32(self.lane_div_32) * 2
+        tile_index = tile_index + fx.Uint32(buf_id) * (tile_bytes // 16)
+        chunk_offset = dc * traits.D_CHUNK * row_stride // 16
         halves = []
         for half in range_constexpr(2):
-            view = fx.slice(self.v_lds_i32_tiles, (None, fx.Uint32(row_base + half * 16 - self.lds_vt_base_idx) // 16))
+            view = fx.slice(self.v_lds_i32_tiles, (None, tile_index + chunk_offset + half))
             halves.append(fx.memref_load_vec(view))
         fx.rocdl.s_waitcnt(lgkmcnt=0)
         return _concat_vectors(halves[0], halves[1]).bitcast(fx.Int32).ir_value()
