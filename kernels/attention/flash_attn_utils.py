@@ -406,7 +406,7 @@ def _sub_score_pair(v_s, row_max, fm_fast):
     return Vec.from_elements(lo_sub, fx.Float32).ir_value(), Vec.from_elements(hi_sub, fx.Float32).ir_value()
 
 
-def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast, bias=None):
+def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast, bias=None, scalar_fma=False):
     """Fused softmax-scale + row-max subtraction (optimization 1-A).
 
     Returns ``scale * (v_s - row_max_raw) + bias`` per element via a single FMA
@@ -424,10 +424,31 @@ def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast, bias=None):
         # exp2 lands on 2**bias * P instead of P, at no extra instruction: the
         # FMA's addend absorbs it.
         neg_scaled_max = neg_scaled_max + bias
-    scale_v = Vec.from_elements([scale], fx.Float32).broadcast_to(16)
-    nsm_v = Vec.from_elements([neg_scaled_max], fx.Float32).broadcast_to(16)
-    lo = fx.fma(Vec(s_lo), scale_v, nsm_v, fastmath=fm_fast)
-    hi = fx.fma(Vec(s_hi), scale_v, nsm_v, fastmath=fm_fast)
+    if const_expr(scalar_fma):
+        # Preserve scalar instruction selection for MFMA/VALU co-issue.
+
+        def _center(values):
+            centered = []
+            for i in range_constexpr(16):
+                centered.append(
+                    fx.Float32(
+                        llvm.inline_asm(
+                            T.f32,
+                            [Vec(values)[i].ir_value(), scale.ir_value(), neg_scaled_max.ir_value()],
+                            "v_fma_f32 $0, $1, $2, $3",
+                            "=v,v,v,v",
+                            has_side_effects=False,
+                        )
+                    )
+                )
+            return Vec.from_elements(centered, fx.Float32)
+
+        lo, hi = _center(s_lo), _center(s_hi)
+    else:
+        scale_v = Vec.from_elements([scale], fx.Float32).broadcast_to(16)
+        nsm_v = Vec.from_elements([neg_scaled_max], fx.Float32).broadcast_to(16)
+        lo = fx.fma(Vec(s_lo), scale_v, nsm_v, fastmath=fm_fast)
+        hi = fx.fma(Vec(s_hi), scale_v, nsm_v, fastmath=fm_fast)
     return as_mlir_value(lo), as_mlir_value(hi)
 
 
@@ -5676,7 +5697,18 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         if const_expr(self.traits.DUALWAVE_SWP_LAZY_RESCALE):
             headroom -= self.traits.DUALWAVE_SWP_RESCALE_THRESHOLD
         bias = fx.Float32(headroom) if headroom > 0.0 else None
-        return _scale_sub_score_pair(v_s, row_max, self.c_logit_scale, self.c_zero_f, self.fm_fast, bias)
+        # Batched D128 retains its tuned packed-FMA schedule.
+        return _scale_sub_score_pair(
+            v_s,
+            row_max,
+            self.c_logit_scale,
+            self.c_zero_f,
+            self.fm_fast,
+            bias,
+            scalar_fma=self.traits.PAGED
+            and self.traits.BN128
+            and (self.traits.HEAD_DIM != 128 or not self.traits.VARLEN),
+        )
 
     def exp2(self, v_s, start, length):
         return _exp2_score_slice(v_s, start, length)
