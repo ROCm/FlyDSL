@@ -18,13 +18,8 @@ import pytest
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import vector
-from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, tdm_ops
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.rocdl import cluster
-from flydsl.expr.typing import T
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 from kernels.common.gfx1250_cluster import compute_mcast_masks
 
 try:
@@ -63,20 +58,21 @@ VECS_PER_THREAD = ELEMS_PER_THREAD // VEC_WIDTH  # 8
 # ---------------------------------------------------------------------------
 
 
+@fx.struct
+class _McastStorage:
+    a: fx.Array[fx.BFloat16, TILE * TILE, 16]  # A tile (TILE x TILE bf16)
+    b: fx.Array[fx.BFloat16, TILE * TILE, 16]  # B tile
+
+
 def _compile_tdm_mcast_add(grid_m, grid_n, cluster_m, cluster_n):
     """Compile the TDM multicast add kernel for given grid and cluster dims."""
     use_cluster = cluster_m > 1 or cluster_n > 1
 
-    lds_a_offset = 0
-    lds_b_offset = ((TILE_BYTES + 127) // 128) * 128
-    total_lds = lds_b_offset + TILE_BYTES
-
-    smem_alloc = SmemAllocator(None, arch="gfx1250", global_sym_name="tdm_mcast_add_smem")
-    smem_alloc.ptr = total_lds
-
     stride_a = TILE
     stride_b = grid_n * TILE
     tile_elems = TILE * TILE
+    M = grid_m * TILE
+    N = grid_n * TILE
 
     @flyc.kernel
     def tdm_mcast_add_kernel(
@@ -84,10 +80,10 @@ def _compile_tdm_mcast_add(grid_m, grid_n, cluster_m, cluster_n):
         arg_b: fx.Tensor,
         arg_c: fx.Tensor,
     ):
-        # index-typed ids for TDM descriptors and LDS addressing
-        bx = gpu.block_id("x")
-        by = gpu.block_id("y")
-        tid = gpu.thread_id("x")
+        bx = fx.block_idx.x
+        by = fx.block_idx.y
+        tid = fx.Int32(fx.thread_idx.x)
+        wave = tid // WAVE_SIZE
 
         # --- Cluster multicast masks ---
         if const_expr(use_cluster):
@@ -97,59 +93,46 @@ def _compile_tdm_mcast_add(grid_m, grid_n, cluster_m, cluster_n):
             a_mcast_mask = 0
             b_mcast_mask = 0
 
-        # --- LDS setup ---
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            smem_alloc.finalized = False
-            smem_alloc.finalize()
-        smem_base = smem_alloc.get_base()
-        bf16_ty = T.bf16
-        smem_a = SmemPtr(smem_base, lds_a_offset, bf16_ty, shape=(TILE * TILE,))
-        smem_b = SmemPtr(smem_base, lds_b_offset, bf16_ty, shape=(TILE * TILE,))
-        lds_a_memref = get_op_result_or_value(smem_a.get())
-        lds_b_memref = get_op_result_or_value(smem_b.get())
+        # --- LDS: A and B tiles via the fly-native SharedAllocator (no builtin memref) ---
+        lds = fx.SharedAllocator().allocate(_McastStorage).peek()
+        a_ptr = lds.a.ptr
+        b_ptr = lds.b.ptr
 
-        # --- TDM descriptors ---
-        blk_m = bx * arith.index(TILE)
-        blk_n = by * arith.index(TILE)
-        k_base = arith.index(0)
+        box = fx.make_layout((TILE, TILE), (TILE, 1))
+        pipe_lds = fx.make_layout(((TILE, TILE), 1), ((TILE, 1), TILE * TILE))  # nested box + size-1 rest
+        wlay = fx.make_layout(NUM_WARPS, 1)
 
-        desc_a = tdm_ops.make_tensor_descriptor_2d(
-            global_ptr=arg_a,
-            lds_memref=lds_a_memref,
-            global_offset=(blk_m, k_base),
-            tensor_shape=(TILE, TILE),
-            strides=(stride_a, 1),
-            tile_shape=(TILE, TILE),
-            elem_bytes=ELEM_BYTES,
-            num_warps=NUM_WARPS,
-            workgroup_mask=a_mcast_mask,
+        # --- TDM loads via the tiled-TDM atom: NUM_WARPS waves split each tile; mcast via atom state.
+        # A: full (M, K)=(grid_m*TILE, TILE); this WG picks m-block bx (K grid is size 1, kept as rest).
+        gA = fx.Tensor(fx.make_view(fx.get_iter(arg_a), fx.make_layout((M, TILE), (stride_a, 1))))
+        atomA, coordA = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorLoad(), gA, box, (TILE, TILE), num_warps=NUM_WARPS
         )
-        desc_b = tdm_ops.make_tensor_descriptor_2d(
-            global_ptr=arg_b,
-            lds_memref=lds_b_memref,
-            global_offset=(k_base, blk_n),
-            tensor_shape=(TILE, TILE),
-            strides=(stride_b, 1),
-            tile_shape=(TILE, TILE),
-            elem_bytes=ELEM_BYTES,
-            num_warps=NUM_WARPS,
-            workgroup_mask=b_mcast_mask,
-        )
+        atomA = fx.atom_set_value(atomA, "workgroup_mask", a_mcast_mask)
+        blkA = fx.zipped_divide(coordA, (TILE, TILE))[None, (bx, None)]
+        sA = fx.Tensor(fx.make_view(a_ptr, pipe_lds))
+        tAs, tAg = fx.rocdl.cdna5.tdm_partition(atomA, wave, wlay, sA, blkA)
 
-        # --- Issue TDM loads and sync ---
-        tdm_ops.tensor_load_2d(desc_a)
-        tdm_ops.tensor_load_2d(desc_b)
-        tdm_ops.tensor_wait(0)
+        # B: full (K, N)=(TILE, grid_n*TILE); this WG picks n-block by (K grid size 1, kept as rest).
+        gB = fx.Tensor(fx.make_view(fx.get_iter(arg_b), fx.make_layout((TILE, N), (stride_b, 1))))
+        atomB, coordB = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorLoad(), gB, box, (TILE, TILE), num_warps=NUM_WARPS
+        )
+        atomB = fx.atom_set_value(atomB, "workgroup_mask", b_mcast_mask)
+        blkB = fx.zipped_divide(coordB, (TILE, TILE))[None, (None, by)]
+        sB = fx.Tensor(fx.make_view(b_ptr, pipe_lds))
+        tBs, tBg = fx.rocdl.cdna5.tdm_partition(atomB, wave, wlay, sB, blkB)
+
+        fx.copy(atomA, tAg[None, 0, 0], tAs[None, 0, 0])
+        fx.copy(atomB, tBg[None, 0, 0], tBs[None, 0, 0])
+        fx.rocdl.s_wait_tensorcnt(0)
         if const_expr(use_cluster):
             cluster.cluster_barrier()
         else:
-            gpu.barrier()
+            fx.barrier()
 
-        # --- Read from LDS, add, store to global via buffer store ---
-        # i32-typed ids for CuTE layout ops (fly.make_int_tuple requires i32/i64)
+        # --- Read A/B tiles from LDS (fly-native ptr_load), add, store to global via buffer copy ---
         bid = fx.block_idx.x * grid_n + fx.block_idx.y
-
         C = fx.rocdl.make_buffer_tensor(arg_c)
         tC = fx.logical_divide(C, fx.make_layout(tile_elems, 1))
         tC = fx.slice(tC, (None, bid))
@@ -158,16 +141,13 @@ def _compile_tdm_mcast_add(grid_m, grid_n, cluster_m, cluster_n):
         copyAtom = fx.make_copy_atom(fx.rocdl.BufferCopy(VEC_WIDTH * fx.BFloat16.width), fx.BFloat16)
         rC = fx.make_rmem_tensor(VEC_WIDTH, fx.BFloat16)
 
-        vec_ty = T.vec(VEC_WIDTH, bf16_ty)
-        base_elem = tid * arith.index(ELEMS_PER_THREAD)
-
+        base_elem = tid * ELEMS_PER_THREAD
         for v in range_constexpr(VECS_PER_THREAD):
-            elem_off = base_elem + arith.index(v * VEC_WIDTH)
-            va = vector.load(vec_ty, as_ir_value(lds_a_memref), [as_ir_value(elem_off)])
-            vb = vector.load(vec_ty, as_ir_value(lds_b_memref), [as_ir_value(elem_off)])
-            vc = arith.addf(va, vb)
-            fx.memref_store_vec(vc, rC)
-            store_idx = fx.thread_idx.x * VECS_PER_THREAD + v
+            elem_off = base_elem + v * VEC_WIDTH
+            va = fx.ptr_load(a_ptr + elem_off, result_type=fx.Vector.make_type(VEC_WIDTH, fx.BFloat16))
+            vb = fx.ptr_load(b_ptr + elem_off, result_type=fx.Vector.make_type(VEC_WIDTH, fx.BFloat16))
+            rC.store(va + vb)
+            store_idx = tid * VECS_PER_THREAD + v
             fx.copy_atom_call(copyAtom, rC, fx.slice(tC, (None, store_idx)))
 
     cluster_dims_str = f"{cluster_m},{cluster_n},1"

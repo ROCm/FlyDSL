@@ -310,28 +310,36 @@ def tdm_partition(
 ):
     """Cut an LDS tile and a coordinate tile into the calls the atom makes.
 
-    Both tiles come out shaped ``((ATOM), (ITER))`` -- mode 0 is one call's worth of
-    values and mode 1 counts the calls.
+    Both tiles come in shaped ``(TDM_box, rest...)``: mode 0 is the box one call's worth of
+    values sits in, and the trailing "rest" modes (e.g. ``PIPE`` on the LDS side, k-tiles on
+    the coordinate side) are independent and may differ between the two -- only mode 0 is
+    related, and its size (``size<0>``) is all that must match. Mode 0 is reshaped into
+    ``((ATOM), (ITER))`` (or ``((ATOM), (WARP), (ITER))`` before the warp slice) while the
+    rest passes through, so each tile comes out ``((ATOM), (ITER)), rest...``.
 
-    ``warp_coord`` / ``warp_layout`` say how the warps split the tile: each
-    issues one instruction over its own share, and the assembled tile belongs to
-    the whole workgroup. Pass ``0`` and ``make_layout(1)`` when a single warp
-    does the copy. There is no thread index and no per-lane slice, so within a
-    warp every lane sees the same partition.
+    ``warp_coord`` / ``warp_layout`` say how the warps split the box: each issues one
+    instruction over its own share, and the assembled box belongs to the whole workgroup.
+    Pass ``0`` and ``make_layout(1)`` when a single warp does the copy. There is no thread
+    index and no per-lane slice, so within a warp every lane sees the same partition.
     """
-    from ..primitive import composition, crd2idx, size
+    from ..primitive import composition, crd2idx, make_tile, size
     from ..typing import static
 
     n_warps = size(warp_layout).unpack()
 
+    # `layout_V` reshapes mode 0 only; the C++ side derives it from mode-0 of each tile.
     layout_V = static(fly_rocdl.tdm_partition_layout(atom.type, stensor.type, gtensor.type, n_warps))
-    if n_warps == 1:
-        return composition(stensor, layout_V), composition(gtensor, layout_V)
+    warp_id = crd2idx(warp_coord, warp_layout) if n_warps > 1 else None
 
-    # The multicast coordinate is sliced out of the middle mode: the warps take equal
-    # contiguous chunks of the LDS order, and this one is `warp_coord`'s.
-    warp_id = crd2idx(warp_coord, warp_layout)
-    return (
-        composition(stensor, layout_V)[None, warp_id, None],
-        composition(gtensor, layout_V)[None, warp_id, None],
-    )
+    def apply(tensor):
+        # Pad the tiler with a pass-through (`None`) per rest mode so `composition` only
+        # touches mode 0 and leaves every rest mode alone.
+        n_rest = tensor.layout.rank - 1
+        tiled = composition(tensor, make_tile(layout_V, *([None] * n_rest)))
+        if n_warps > 1:
+            # Slice the warp's chunk out of the middle of the (nested) mode 0, keeping
+            # ATOM/ITER and every rest mode.
+            tiled = tiled[tuple([(None, warp_id, None), *([None] * n_rest)])]
+        return tiled
+
+    return apply(stensor), apply(gtensor)

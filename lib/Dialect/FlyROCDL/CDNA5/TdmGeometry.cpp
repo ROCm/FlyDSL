@@ -917,7 +917,7 @@ SmallVector<int32_t> tileShape(const Geometry &geometry) {
 }
 
 //===----------------------------------------------------------------------===//
-// tma_partition
+// tdm_partition
 //===----------------------------------------------------------------------===//
 
 namespace {
@@ -945,16 +945,23 @@ FailureOr<LayoutAttr> partitionLayout(IntTupleAttr atomValShape, int32_t atomVal
   MLIRContext *ctx = smemLayout.getContext();
   AttrLayoutBuilder layoutBuilder(ctx);
 
-  FailureOr<int64_t> vSize = staticSize(smemLayout.getShape(), "the LDS tile's shape", emitError);
+  // Only mode-0 -- the TDM box one call fills -- is related. The remaining "rest" modes
+  // (e.g. PIPE on the LDS side, k-tiles on the coordinate side) pass through untouched and
+  // need not agree in size, so cut both operands by their mode-0 only.
+  LayoutAttr smemBox = smemLayout.rank() > 1 ? smemLayout.at(0) : smemLayout;
+  IntTupleAttr coordBox = coordShape.rank() > 1 ? coordShape.at(0) : coordShape;
+
+  FailureOr<int64_t> vSize =
+      staticSize(smemBox.getShape(), "the LDS tile's mode-0 shape", emitError);
   if (failed(vSize))
     return failure();
-  FailureOr<int64_t> gSize = staticSize(coordShape, "the coordinate tile's shape", emitError);
+  FailureOr<int64_t> gSize = staticSize(coordBox, "the coordinate tile's mode-0 shape", emitError);
   if (failed(gSize))
     return failure();
   if (*vSize != *gSize)
-    return emitError() << "the LDS tile holds " << *vSize << " values but the coordinate tile "
-                       << "holds " << *gSize
-                       << "; the two are cut by the same layout, so they must agree";
+    return emitError() << "the LDS tile's mode-0 holds " << *vSize << " values but the "
+                       << "coordinate tile's mode-0 holds " << *gSize
+                       << "; the two are cut by the same mode-0 layout, so they must agree";
   if (numWarps < 1)
     return emitError() << "the warp layout must have a positive size, got " << numWarps;
   if (*vSize % numWarps)
@@ -981,11 +988,11 @@ FailureOr<LayoutAttr> partitionLayout(IntTupleAttr atomValShape, int32_t atomVal
 
   // The inverse of the compact tile, composed directly: the pad has already been taken
   // back out, so it covers the tile exactly and needs no tiling up to the tile's size.
-  FailureOr<std::tuple<int32_t, int32_t, IntTupleAttr>> lds = analyzeLdsTile(smemLayout, emitError);
+  FailureOr<std::tuple<int32_t, int32_t, IntTupleAttr>> lds = analyzeLdsTile(smemBox, emitError);
   if (failed(lds))
     return failure();
   LayoutAttr invSmem =
-      layoutRightInverse(layoutBuilder, LayoutAttr::get(smemLayout.getShape(), std::get<2>(*lds)));
+      layoutRightInverse(layoutBuilder, LayoutAttr::get(smemBox.getShape(), std::get<2>(*lds)));
 
   auto flat = [&](int64_t extent, int64_t stride) {
     return LayoutAttr::get(IntTupleAttr::get(IntAttr::getStatic(ctx, extent)),
