@@ -65,30 +65,6 @@ DISPATCH_TABLE_SIZE = max(DispatchSlot) + 1
 
 
 @flyc.jit
-def _wave_inclusive_scan_i32(value, lane):
-    value_raw = value.ir_value()
-    zero_raw = fx.Int32(0).ir_value()
-    for shift, dpp in ((1, 0x111), (2, 0x112), (4, 0x114), (8, 0x118)):
-        remote = fx.rocdl.update_dpp(T.i32, zero_raw, value_raw, dpp, 0xF, 0xF, True)
-        value = (lane >= fx.Int32(shift)).select(value + fx.Int32(remote), value)
-        value_raw = value.ir_value()
-    source16 = (lane & fx.Int32(0x30)) - fx.Int32(1)
-    remote16 = fx.rocdl.ds_bpermute(T.i32, source16 * fx.Int32(4), value)
-    value = (lane >= fx.Int32(16)).select(value + fx.Int32(remote16), value)
-    source32 = (lane & fx.Int32(0x30)) - fx.Int32(17)
-    remote32 = fx.rocdl.ds_bpermute(T.i32, source32 * fx.Int32(4), value)
-    return (lane >= fx.Int32(32)).select(value + fx.Int32(remote32), value)
-
-
-@flyc.jit
-def _wave_reduce_max_i32(value, lane):
-    for distance in (1, 2, 4, 8, 16, 32):
-        peer = fx.Int32(fx.rocdl.ds_bpermute(T.i32, (lane ^ fx.Int32(distance)) * fx.Int32(4), value))
-        value = (peer > value).select(peer, value)
-    return value
-
-
-@flyc.jit
 def _increment_i32(rsrc, index):
     value = buffer_ops.buffer_load(rsrc, index, vec_width=1, dtype=fx.Int32)
     buffer_ops.buffer_store(value + fx.Int32(1), rsrc, index)
@@ -113,7 +89,7 @@ def _configure_payload_geometry(
             ge = fx.Int32(destination * fz_epr) + local_expert
             source_count = buffer_ops.buffer_load(local_hist, ge, vec_width=1, dtype=fx.Int32)
             max_source_count = (source_count > max_source_count).select(source_count, max_source_count)
-        max_source_count = _wave_reduce_max_i32(max_source_count, lane)
+        max_source_count = fx.coop.warp_reduce(max_source_count, fx.ReductionOp.MAX, width=64)
         if lane == fx.Int32(0):
             chunks = (max_source_count + fx.Int32(payload_chunk_rows - 1)) // fx.Int32(payload_chunk_rows)
             chunks = (chunks > fx.Int32(0)).select(chunks, fx.Int32(1))
@@ -323,15 +299,17 @@ def emit_direct_fixed_slot_finalize(
         count = buffer_ops.buffer_load(crfa(a_running), safe_expert, vec_width=1, dtype=fx.Int32)
         count = valid_expert.select(count, fx.Int32(0))
         overflow_flag = (count > fx.Int32(fz_cap)).select(fx.Int32(1), fx.Int32(0))
-        overflow_prefix = _wave_inclusive_scan_i32(overflow_flag, lane)
-        overflow_count = fx.Int32(fx.rocdl.readlane(T.i32, overflow_prefix, fz_epr - 1))
+        _, _, overflow_count = fx.coop.warp_scan_with_aggregate(
+            overflow_flag, fx.ReductionOp.ADD, width=64
+        )
         no_overflow = overflow_count == fx.Int32(0)
         safe_count = (count <= fx.Int32(fz_cap)).select(count, fx.Int32(0))
         num_expert_tiles = (safe_count + fx.Int32(fz_tile_m - 1)) // fx.Int32(fz_tile_m)
-        max_expert_tiles = _wave_reduce_max_i32(num_expert_tiles, lane)
-        inclusive_tiles = _wave_inclusive_scan_i32(num_expert_tiles, lane)
+        max_expert_tiles = fx.coop.warp_reduce(num_expert_tiles, fx.ReductionOp.MAX, width=64)
+        inclusive_tiles, _, total_tiles = fx.coop.warp_scan_with_aggregate(
+            num_expert_tiles, fx.ReductionOp.ADD, width=64
+        )
         metadata_base = inclusive_tiles - num_expert_tiles
-        total_tiles = fx.Int32(fx.rocdl.readlane(T.i32, inclusive_tiles, fz_epr - 1))
 
         if valid_expert:
             if no_overflow:
@@ -503,12 +481,14 @@ def emit_dispatch_plan(
                 source_counts.append(source_count)
                 total_count = total_count + source_count
             num_tiles = (total_count + fx.Int32(fz_tile_m - 1)) // fx.Int32(fz_tile_m)
-            chunk_max = _wave_reduce_max_i32(num_tiles, lane)
+            chunk_max = fx.coop.warp_reduce(num_tiles, fx.ReductionOp.MAX, width=64)
             max_expert_tiles = (chunk_max > max_expert_tiles).select(
                 chunk_max, max_expert_tiles
             )
             padded_rows = num_tiles * fx.Int32(fz_tile_m)
-            inclusive_rows = _wave_inclusive_scan_i32(padded_rows, lane)
+            inclusive_rows, _, chunk_rows = fx.coop.warp_scan_with_aggregate(
+                padded_rows, fx.ReductionOp.ADD, width=64
+            )
             local_row_base = row_carry + inclusive_rows - padded_rows
 
             sender_prefix = fx.Int32(0)
@@ -553,8 +533,7 @@ def emit_dispatch_plan(
                     fz_tile_m=fz_tile_m, invalid_source=fz_npes * fz_mtpr,
                 )
 
-            last_lane = min(63, fz_epr - expert_chunk * 64 - 1)
-            row_carry = row_carry + fx.Int32(fx.rocdl.readlane(T.i32, inclusive_rows, last_lane))
+            row_carry = row_carry + chunk_rows
 
         if lane == fx.Int32(0):
             buffer_ops.buffer_store(row_carry, r_nv, fx.Int32(0))
@@ -580,7 +559,7 @@ def emit_dispatch_plan(
             source_count = valid_ge.select(source_count, fx.Int32(0))
             lane_counts.append(source_count)
             lane_total = lane_total + source_count
-        lane_prefix = _wave_inclusive_scan_i32(lane_total, lane) - lane_total
+        lane_prefix = fx.coop.warp_exclusive_scan(lane_total, fx.ReductionOp.ADD, width=64)
         source_prefix = lane_prefix
         for item in range_constexpr(pairs_per_lane):
             ge = lane_base + fx.Int32(item)

@@ -1008,9 +1008,11 @@ def build_flash_attn_dualwave_swp_module(
             stream=stream,
         )
         if const_expr(traits.SPLITK):
-            combine_rows = bs_idx * traits.NUM_HEADS_Q * sl_idx
+            # One batch per y block keeps the combine kernel's O descriptor wave-uniform.
+            combine_rows = traits.NUM_HEADS_Q * sl_idx
+            combine_blocks = (combine_rows + (COMBINE_ROWS_PER_BLOCK - 1)) // COMBINE_ROWS_PER_BLOCK
             flash_attn_splitk_combine_kernel(O, DebugCounts, LSE, Sink, batch_size, seq_len, stride_q_n).launch(
-                grid=(combine_rows // COMBINE_ROWS_PER_BLOCK, 1, 1),
+                grid=(combine_blocks, bs_idx, 1),
                 block=(COMBINE_BLOCK, 1, 1),
                 stream=stream,
             )
