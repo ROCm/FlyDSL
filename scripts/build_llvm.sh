@@ -54,7 +54,7 @@ for k in info:
         fi
     fi
 fi
-LLVM_BUILD_ENTRY="${LLVM_BUILD_ENTRY:-upstream}"
+LLVM_BUILD_ENTRY="${LLVM_BUILD_ENTRY:-upstream-main-add-unclausevmem-patch}"
 LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['${LLVM_BUILD_ENTRY}']['llvm_hash'])")
 LLVM_CHERRY_PICKS=$(python3 -c "
 import json
@@ -174,7 +174,8 @@ if [ -n "${LLVM_CHERRY_PICKS}" ]; then
         fi
     done
     if ! git diff --cached --quiet; then
-        git commit -m "cherry-pick: gfx1250 unclaused VMEM prologue fixes (#215450, #216897)"
+        git -c user.name="FlyDSL CI" -c user.email="flydsl-ci@noreply" \
+            commit -m "cherry-pick: gfx1250 unclaused VMEM prologue fixes (#215450, #216897)"
     fi
 fi
 
