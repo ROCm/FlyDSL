@@ -1846,13 +1846,7 @@ class DualwaveSwpFp8Traits:
     BATCH_INTERLEAVE_GROUP: int = 1
     PAGED: bool = False
     KV_VECTORIZED: bool = False
-    QREG: bool = True
-    FP8_PV_DIRECT: bool = True
     FP8_PV_SEGMENTED: bool = False
-
-    @property
-    def V_HEAD_DIM(self):
-        return self.HEAD_DIM_V
 
     @property
     def cache_tag(self):
@@ -2079,7 +2073,7 @@ class PagedDualwaveSwpFp8Traits:
     """Layouts for native page-64 FP8 QK/PV with register-resident Q."""
 
     HEAD_DIM: int
-    V_HEAD_DIM: int
+    HEAD_DIM_V: int
     D_CHUNKS: int
     NUM_HEADS_Q: int
     NUM_HEADS_KV: int
@@ -2091,12 +2085,10 @@ class PagedDualwaveSwpFp8Traits:
     DUALWAVE_SWP_DEBUG_LAZY_COUNTS: bool
     DUALWAVE_SWP_ENABLE_STAGGER: bool
     VARLEN: bool
-    FP8_PV_DIRECT: bool
     FP8_PV_SEGMENTED: bool
     FP8_V_H1: int
     FP8_V_H2: int
     BN128: bool
-    QREG: bool
     DEFAULT_STRIDE_Q_N: int
     DEFAULT_STRIDE_KV_N: int
     SMEM_D_RPT: int
@@ -2141,17 +2133,13 @@ class PagedDualwaveSwpFp8Traits:
     QLDS: bool = False
 
     @property
-    def HEAD_DIM_V(self):
-        return self.V_HEAD_DIM
-
-    @property
     def cache_tag(self):
         return (
             "paged_fp8_native",
             self.NUM_HEADS_Q,
             self.NUM_HEADS_KV,
             self.HEAD_DIM,
-            self.V_HEAD_DIM,
+            self.HEAD_DIM_V,
             self.WAVES_PER_EU,
             self.DAZ,
             self.DUALWAVE_SWP_LAZY_RESCALE,
@@ -2212,7 +2200,7 @@ def _make_paged_dualwave_swp_fp8_traits(
 
     return PagedDualwaveSwpFp8Traits(
         HEAD_DIM=head_dim,
-        V_HEAD_DIM=value_head_dim,
+        HEAD_DIM_V=value_head_dim,
         D_CHUNKS=value_head_dim // 32,
         NUM_HEADS_Q=num_heads,
         NUM_HEADS_KV=num_kv_heads,
@@ -2225,12 +2213,10 @@ def _make_paged_dualwave_swp_fp8_traits(
         DUALWAVE_SWP_ENABLE_STAGGER=bool(dualwave_swp_enable_stagger),
         DUALWAVE_SWP_RESCALE_THRESHOLD=rescale_threshold,
         VARLEN=bool(varlen),
-        FP8_PV_DIRECT=bool(bn128),
         FP8_PV_SEGMENTED=fp8_v_h2 > 0,
         FP8_V_H1=fp8_v_h1,
         FP8_V_H2=fp8_v_h2,
         BN128=bool(bn128),
-        QREG=bool(bn128),
         DEFAULT_STRIDE_Q_N=num_heads * head_dim,
         DEFAULT_STRIDE_KV_N=num_kv_heads * head_dim,
         SMEM_D_RPT=smem_d_rpt,
@@ -4629,7 +4615,7 @@ class DualwaveFp8KernelContext:
         self.stride_o_n_v = fx.Int64(self.stride_o_n)
         self.stride_kv_n_v = fx.Index(self.stride_kv_n)
         if const_expr(traits.PAGED):
-            self.stride_v_n_v = fx.Int64(traits.NUM_HEADS_KV * traits.V_HEAD_DIM)
+            self.stride_v_n_v = fx.Int64(traits.NUM_HEADS_KV * traits.HEAD_DIM_V)
         elif traits.HEAD_DIM_V == traits.HEAD_DIM:
             self.stride_v_n_v = self.stride_kv_n_v
             self.stride_o_n_v = self.stride_q_n_v
@@ -4654,15 +4640,20 @@ class DualwaveFp8KernelContext:
         lds = fx.SharedAllocator().allocate(shared_storage).peek()
         self.lds = lds
         self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
-        if const_expr(self.traits.PAGED):
-            self.lds_kv_base_ptr = buffer_ops.create_llvm_ptr(self.lds_kv_base_idx, address_space=3)
-        else:
-            self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
+        self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
         self.lds_vt_base_idx = fx.Index(fx.ptrtoint(lds.vt.ptr))
+        self.lds_vt_base_ptr = lds.vt.ptr.llvm_ptr
         if const_expr(self.traits.PAGED):
-            self.lds_vt_base_ptr = buffer_ops.create_llvm_ptr(self.lds_vt_base_idx, address_space=3)
-        else:
-            self.lds_vt_base_ptr = lds.vt.ptr.llvm_ptr
+            self.k_lds_i32_tiles = fx.logical_divide(
+                fx.make_view(
+                    fx.recast_iter(fx.Int32, lds.kv.ptr), fx.make_layout(self.traits.LDS_KV_TOTAL_SIZE // 4, 1)
+                ),
+                fx.make_layout(4, 1),
+            )
+            self.v_lds_i32_tiles = fx.logical_divide(
+                fx.make_view(fx.recast_iter(fx.Int32, lds.vt.ptr), fx.make_layout(self.traits.VT_BF16_TOTAL // 2, 1)),
+                fx.make_layout(4, 1),
+            )
         if hasattr(lds, "q"):
             self.lds_q_base_idx = fx.Int64(fx.ptrtoint(lds.q.ptr))
             self.lds_q_base_ptr = lds.q.ptr.llvm_ptr
@@ -4738,17 +4729,10 @@ class DualwaveFp8KernelContext:
             # K/V are one-byte OCP FP8 pages.  Rebase one descriptor per tile
             # with 64-bit pointer arithmetic so serving-sized pools beyond the
             # 4-GiB boundary retain the exact physical page address.
-            self.buf_flags_i32 = fx.Int32(buffer_ops._get_buffer_flags())
-            self.k_base_iter = fx.get_iter(self.K)
-            self.v_base_iter = fx.get_iter(self.V)
-            k_page_elems = fx.Int64(traits.PAGE_SIZE * traits.NUM_HEADS_KV * traits.HEAD_DIM)
-            v_page_elems = fx.Int64(traits.PAGE_SIZE * traits.NUM_HEADS_KV * traits.V_HEAD_DIM)
-            self.k_page_byte_stride = k_page_elems * fx.Int64(traits.ELEM_BYTES)
-            self.v_page_byte_stride = v_page_elems * fx.Int64(traits.ELEM_BYTES)
-            self.k_page_nrec_bytes = fx.Int64(self.k_page_byte_stride)
-            self.v_page_nrec_bytes = fx.Int64(self.v_page_byte_stride)
-            self.k_page_layout = fx.make_layout(fx.Int32(k_page_elems), fx.Int32(1))
-            self.v_page_layout = fx.make_layout(fx.Int32(v_page_elems), fx.Int32(1))
+            self.k_base_iter = fx.recast_iter(fx.Int8, fx.get_iter(self.K))
+            self.v_base_iter = fx.recast_iter(fx.Int8, fx.get_iter(self.V))
+            self.k_page_bytes = traits.PAGE_SIZE * traits.NUM_HEADS_KV * traits.HEAD_DIM
+            self.v_page_bytes = traits.PAGE_SIZE * traits.NUM_HEADS_KV * traits.HEAD_DIM_V
             self.page_indices_div = fx.logical_divide(
                 fx.rocdl.make_buffer_tensor(self.BlockTable), fx.make_layout(1, 1)
             )
@@ -4756,29 +4740,14 @@ class DualwaveFp8KernelContext:
             self.page_v1i32 = Vec.make_type(1, fx.Int32)
             self.page_i32x2_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
             self.page_v2i32 = Vec.make_type(2, fx.Int32)
-            self.page_base = self.batch_idx * fx.Int64(self.block_table_stride)
+            self.page_base = fx.Int64(self.batch_idx) * fx.Int64(self.block_table_stride)
             self.k_div = None
             self.v_div = None
         else:
-            kv_nrec_bytes = as_mlir_value(self.kv_tok_end * self.stride_kv_n_v * eb)
-            v_nrec_bytes = as_mlir_value(self.kv_tok_end * self.stride_v_n_v * eb)
+            kv_nrec_bytes = (self.kv_tok_end * self.stride_kv_n_v * eb).ir_value()
+            v_nrec_bytes = (self.kv_tok_end * self.stride_v_n_v * eb).ir_value()
             self.k_div = _make_buf_div(self.K, kv_nrec_bytes)
             self.v_div = _make_buf_div(self.V, v_nrec_bytes)
-            self.buf_flags_i32 = None
-            self.k_base_iter = None
-            self.v_base_iter = None
-            self.k_page_byte_stride = None
-            self.v_page_byte_stride = None
-            self.k_page_nrec_bytes = None
-            self.v_page_nrec_bytes = None
-            self.k_page_layout = None
-            self.v_page_layout = None
-            self.page_indices_div = None
-            self.page_i32_atom = None
-            self.page_v1i32 = None
-            self.page_i32x2_atom = None
-            self.page_v2i32 = None
-            self.page_base = None
 
     def init_atoms_and_lds_ptrs(self):
         traits = self.traits
@@ -4918,26 +4887,26 @@ class DualwaveFp8KernelContext:
         return (self.q_tok_base + token_idx) * self.stride_q_n_v + self.q_head_idx * self.traits.HEAD_DIM + col
 
     def global_idx_o(self, token_idx, col):
-        return (self.q_tok_base + token_idx) * self.stride_o_n_v + self.q_head_idx * self.traits.V_HEAD_DIM + col
+        return (self.q_tok_base + token_idx) * self.stride_o_n_v + self.q_head_idx * self.traits.HEAD_DIM_V + col
 
     def load_page_id(self, tile_start):
         """Load this request's physical page for a 64-token logical KV tile."""
-        local_page = fx.Int64(tile_start) // fx.Int64(self.traits.PAGE_SIZE)
+        local_page = fx.Int64(tile_start) // self.traits.PAGE_SIZE
         # The software pipeline rounds to an even tile count and at least four
         # tiles.  Redirect those masked padding tiles to entry zero instead of
         # reading past the final request's page-index allocation.
         page_idx = self.page_base + local_page
-        safe_idx = fx.Int64((local_page < self.num_kv_tiles).select(page_idx, fx.Int64(0)))
+        safe_idx = (local_page < self.num_kv_tiles).select(page_idx, 0)
         v = fly.copy_atom_call_ssa(
             [self.page_v1i32],
             self.page_i32_atom,
             fx.slice(self.page_indices_div, (None, fx.Int32(safe_idx))),
         )
-        return fx.Int64(fx.Int32(rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(Vec(v, (1,), fx.Int32)[0])))))
+        return fx.Int64(rocdl.readfirstlane(T.i32, Vec(v, (1,), fx.Int32)[0].ir_value()))
 
     def load_page_id_pair(self, tile_start):
         """Load two adjacent physical page IDs for a BN128 tile pair."""
-        local_page = fx.Int32(fx.Int64(tile_start) // fx.Int64(self.traits.PAGE_SIZE))
+        local_page = fx.Int32(fx.Int64(tile_start) // self.traits.PAGE_SIZE)
         page_base = fx.Int32(self.page_base)
         num_kv_tiles = fx.Int32(self.num_kv_tiles)
         page_idx = page_base + local_page
@@ -4948,51 +4917,27 @@ class DualwaveFp8KernelContext:
             fx.slice(self.page_indices_div, (None, safe_idx)),
         )
         pages = Vec(v, (2,), fx.Int32)
-        page0 = rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(pages[0])))
-        page1 = rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(pages[1])))
-        return fx.Int64(fx.Int32(page0)), fx.Int64(fx.Int32(page1))
+        page0 = rocdl.readfirstlane(T.i32, pages[0].ir_value())
+        page1 = rocdl.readfirstlane(T.i32, pages[1].ir_value())
+        return fx.Int64(page0), fx.Int64(page1)
 
     def make_page_view(self, tensor_iter, page_id, *, is_value=False):
-        if const_expr(is_value):
-            page_byte_stride = self.v_page_byte_stride
-            page_nrec_bytes = self.v_page_nrec_bytes
-            page_layout = self.v_page_layout
-        else:
-            page_byte_stride = self.k_page_byte_stride
-            page_nrec_bytes = self.k_page_nrec_bytes
-            page_layout = self.k_page_layout
-        return _make_page_view(
-            tensor_iter,
-            tensor_iter.type,
-            tensor_iter.alignment,
-            page_id,
-            page_byte_stride,
-            page_nrec_bytes,
-            page_layout,
-            fx.Int8.ir_type,
-            self.buf_flags_i32,
-        )
+        page_bytes = self.v_page_bytes if is_value else self.k_page_bytes
+        # Rebase in 64 bits before constructing the bounded per-page resource.
+        page_ptr = fx.add_offset(tensor_iter, page_id * page_bytes)
+        page = fx.make_view(page_ptr, fx.make_layout(page_bytes, 1))
+        return fx.logical_divide(fx.rocdl.make_buffer_tensor(page, num_records_bytes=page_bytes), fx.make_layout(1, 1))
 
     def read_i32x8_lds(self, base_ptr, byte_row):
-        if const_expr(self.traits.PAGED):
-            words = []
-            for w in range_constexpr(8):
-                p = buffer_ops.get_element_ptr(
-                    base_ptr,
-                    byte_offset=fx.Int32(byte_row + w * 4),
-                    elem_type=T.i8,
-                )
-                words.append(fx.Int32(llvm.LoadOp(T.i32, p, alignment=1).result))
-            return Vec.from_elements(words, fx.Int32).ir_value()
         halves = []
         for h in range_constexpr(2):
             p = buffer_ops.get_element_ptr(base_ptr, byte_offset=fx.Int32(byte_row + h * 16), elem_type=T.i8)
             halves.append(Vec(llvm.LoadOp(Vec.make_type(4, fx.Int32), p, alignment=16).result))
         return halves[0].shuffle(halves[1], [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
 
-    def read_i32x4_lds(self, base_ptr, byte_row):
-        ptr = buffer_ops.get_element_ptr(base_ptr, byte_offset=fx.Int32(byte_row), elem_type=T.i8)
-        return llvm.LoadOp(self.v4i32_type, ptr, alignment=16).result
+    def read_i32x4_lds(self, byte_row):
+        tile = fx.slice(self.k_lds_i32_tiles, (None, fx.Uint32(byte_row) // 16))
+        return fx.memref_load_vec(tile).ir_value()
 
 
 class DualwaveFp8QLoader(DualwaveFp8KernelContext):
@@ -5016,15 +4961,8 @@ class DualwaveFp8QLoader(DualwaveFp8KernelContext):
         d_base = self.lane_div_32 * 32
         packs = []
         for ws in range_constexpr(traits.HEAD_DIM // 64):
-            q_col = ws * 64 + d_base
-            if const_expr(self.lds_q_base_ptr is None):
-                g_idx = self.q_gmem_elem_offset + q_row_in_block * self.stride_q_n_v + q_col
-                lo = Vec(self.buffer_load_128(g_idx), (4,), fx.Int32)
-                hi = Vec(self.buffer_load_128(g_idx + 16), (4,), fx.Int32)
-                packs.append(lo.shuffle(hi, [0, 1, 2, 3, 4, 5, 6, 7]).ir_value())
-            else:
-                byte_row = q_row_in_block * fx.Int64(traits.HEAD_DIM) + q_col
-                packs.append(self.read_i32x8_lds(self.lds_q_base_ptr, fx.Int32(byte_row)))
+            byte_row = q_row_in_block * fx.Index(traits.HEAD_DIM) + fx.Index(ws * 64) + d_base
+            packs.append(self.read_i32x8_lds(self.lds_q_base_ptr, fx.Int32(byte_row)))
         return packs
 
 
@@ -5105,7 +5043,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
     def _load_v_fp8_segmented_chunk(self, buf_id, dc):
         traits = self.traits
         row_stride = traits.FP8_V_ROW_STRIDE
-        tile_bytes = traits.V_HEAD_DIM * row_stride
+        tile_bytes = traits.HEAD_DIM_V * row_stride
         aligned_base = ((self.lds_vt_base_idx + fx.Int64(127)) // fx.Int64(128)) * fx.Int64(128)
         tile_base = aligned_base + fx.Int64(buf_id * tile_bytes)
         d_global = dc * traits.D_CHUNK
@@ -5120,12 +5058,8 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         row_base = tile_base + fx.Int64(segment_base) + d_row * fx.Int64(row_stride) + token_base
         halves = []
         for half in range_constexpr(2):
-            ptr = buffer_ops.get_element_ptr(
-                self.lds_vt_base_ptr,
-                byte_offset=fx.Int32(row_base + fx.Int64(half * 16) - self.lds_vt_base_idx),
-                elem_type=T.i8,
-            )
-            halves.append(llvm.LoadOp(Vec.make_type(2, fx.Int64), ptr, alignment=16).result)
+            view = fx.slice(self.v_lds_i32_tiles, (None, fx.Uint32(row_base + half * 16 - self.lds_vt_base_idx) // 16))
+            halves.append(fx.memref_load_vec(view))
         fx.rocdl.s_waitcnt(lgkmcnt=0)
         return _concat_vectors(halves[0], halves[1]).bitcast(fx.Int32).ir_value()
 
@@ -5182,7 +5116,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             q_w = q_all_wide[ws]
             v_s_lo = self._mfma_acc_fp8_wide(k_lo[ws], q_w, v_s_lo)
             v_s_hi = self._mfma_acc_fp8_wide(k_hi[ws], q_w, v_s_hi)
-        if const_expr(traits.QREG):
+        if const_expr(not traits.PAGED or traits.BN128):
             n_ds = const_expr(traits.HEAD_DIM // 64 * 4)
             n_mfma = const_expr(traits.HEAD_DIM // 64 * 2)
             rocdl.sched_group_barrier(traits.SCHED_DS_READ_MASK, n_ds // 2, 12)
@@ -5206,7 +5140,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
             p_base = pks * 8
             f32 += [hi_full[p_base + s] for s in range_constexpr(8)]
         packed = self._pack_fp8_i32x8(f32)
-        if const_expr(self.traits.PAGED and self.traits.FP8_PV_DIRECT):
+        if const_expr(self.traits.PAGED):
             words = Vec(packed, (8,), fx.Int32)
             return Vec.from_elements(
                 [words[i] for i in (0, 2, 1, 3, 4, 6, 5, 7)],
@@ -5222,7 +5156,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         return v_o
 
     def pv(self, v_p, v_v, v_o):
-        if const_expr(self.traits.FP8_PV_DIRECT):
+        if const_expr(not self.traits.PAGED or self.traits.BN128):
             return self._pv_fp8_direct(v_p, v_v, v_o)
         return self._pv_fp8(v_p, v_v, v_o)
 
@@ -5253,10 +5187,10 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
                         k_lds_byte_base
                         + (self.wave_id_uni * traits.SMEM_D_RPT + d) * traits.WARP_SIZE * traits.KV_VEC_SIZE
                     )
-                    lds_addr = rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(lds_addr)))
+                    lds_addr = rocdl.readfirstlane(T.i32, fx.Int32(lds_addr).ir_value())
                     self.buffer_load_lds_128(src_div, lds_addr, src_elem, 0)
 
-            if const_expr(traits.BN128 and traits.V_HEAD_DIM == 192):
+            if const_expr(traits.BN128 and traits.HEAD_DIM_V == 192):
 
                 @flyc.jit
                 def _load_compact():
@@ -5403,39 +5337,42 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         token_groups16 = traits.BLOCK_N // traits.KV_VEC_SIZE
         flat = self.tid
 
+        @flyc.jit
         def _stage_active():
-            n_group16 = self.lane_in_warp // fx.Int64(16)
-            d_local = self.wave_id * fx.Int64(16) + self.lane_in_warp % fx.Int64(16)
-            d_col = fx.Int64(d_offset) + d_local
-            src_elem = (
-                self.kv_head_idx * token_groups16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
-                + n_group16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
-                + d_col * traits.KV_VEC_SIZE
-            )
-            reordered = self._permute_v_fp8_vectorized(self.buffer_load_fp8x16(src_div, src_elem))
-            dest_group16 = (n_group16 % fx.Int64(2)) * fx.Int64(2) + n_group16 // fx.Int64(2)
-            aligned_base = ((self.lds_vt_base_idx + fx.Int64(127)) // fx.Int64(128)) * fx.Int64(128)
-            tile_bytes = traits.V_HEAD_DIM * traits.FP8_V_ROW_STRIDE
-            dst_byte = (
-                aligned_base
-                + fx.Int64(buf_id * tile_bytes)
-                + fx.Int64(d_offset * traits.FP8_V_ROW_STRIDE)
-                + d_local * fx.Int64(traits.FP8_V_ROW_STRIDE)
-                + dest_group16 * fx.Int64(16)
-            )
-            ptr = buffer_ops.get_element_ptr(
-                self.lds_vt_base_ptr,
-                byte_offset=fx.Int32(dst_byte - self.lds_vt_base_idx),
-                elem_type=T.i8,
-            )
-            llvm.StoreOp(as_mlir_value(reordered), ptr, alignment=16)
+            if flat < fx.Int64(segment_dim * token_groups16):
+                n_group16 = self.lane_in_warp // fx.Int64(16)
+                d_local = self.wave_id * fx.Int64(16) + self.lane_in_warp % fx.Int64(16)
+                d_col = fx.Int64(d_offset) + d_local
+                src_elem = (
+                    self.kv_head_idx * token_groups16 * traits.HEAD_DIM_V * traits.KV_VEC_SIZE
+                    + n_group16 * traits.HEAD_DIM_V * traits.KV_VEC_SIZE
+                    + d_col * traits.KV_VEC_SIZE
+                )
+                reordered = self._permute_v_fp8_vectorized(self.buffer_load_fp8x16(src_div, src_elem))
+                dest_group16 = (n_group16 % fx.Int64(2)) * fx.Int64(2) + n_group16 // fx.Int64(2)
+                aligned_base = ((self.lds_vt_base_idx + fx.Int64(127)) // fx.Int64(128)) * fx.Int64(128)
+                tile_bytes = traits.HEAD_DIM_V * traits.FP8_V_ROW_STRIDE
+                dst_byte = (
+                    aligned_base
+                    + fx.Int64(buf_id * tile_bytes)
+                    + fx.Int64(d_offset * traits.FP8_V_ROW_STRIDE)
+                    + d_local * fx.Int64(traits.FP8_V_ROW_STRIDE)
+                    + dest_group16 * fx.Int64(16)
+                )
+                self._store_v_fp8_lds(reordered, dst_byte - self.lds_vt_base_idx)
 
-        scf_if_dispatch(flat < fx.Int64(segment_dim * token_groups16), _stage_active)
+        _stage_active()
 
     def _stage_v_fp8_vectorized_bankpad(self, tile_start, buf_id, page_id=None):
         """Stage vectorized paged V in the bank-padded direct-FP8 layout."""
         src_i32x4 = self._load_v_fp8_vectorized_bankpad_source(tile_start, page_id=page_id)
         self._store_v_fp8_vectorized_bankpad(src_i32x4, buf_id)
+
+    def _store_v_fp8_lds(self, data, byte_offset):
+        dst = fx.slice(self.v_lds_i32_tiles, (None, fx.Uint32(byte_offset) // 16))
+        src = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
+        src.store(data)
+        fx.copy(fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32), src, dst)
 
     def _load_v_fp8_vectorized_bankpad_source(self, tile_start, page_id=None):
         """Issue vectorized V loads for the paged FP8 LDS layout."""
@@ -5446,13 +5383,13 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         token_groups16 = traits.BLOCK_N // traits.KV_VEC_SIZE
         # permlane16 requires a full EXEC mask. The first segment has exactly
         # one vector per CTA thread, so no per-lane bounds branch is needed.
-        prefix_dim = traits.FP8_V_H1 if traits.FP8_PV_SEGMENTED else traits.V_HEAD_DIM
+        prefix_dim = traits.FP8_V_H1 if traits.FP8_PV_SEGMENTED else traits.HEAD_DIM_V
         assert prefix_dim * token_groups16 == traits.BLOCK_SIZE
         n_group16 = self.lane_in_warp // fx.Int64(16)
         d_col = self.wave_id * fx.Int64(16) + self.lane_in_warp % fx.Int64(16)
         src_elem = (
-            self.kv_head_idx * token_groups16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
-            + n_group16 * traits.V_HEAD_DIM * traits.KV_VEC_SIZE
+            self.kv_head_idx * token_groups16 * traits.HEAD_DIM_V * traits.KV_VEC_SIZE
+            + n_group16 * traits.HEAD_DIM_V * traits.KV_VEC_SIZE
             + d_col * traits.KV_VEC_SIZE
         )
         source = self.buffer_load_fp8x16(src_div, src_elem)
@@ -5481,23 +5418,18 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
     def _store_v_fp8_vectorized_bankpad_segment(self, src_i32x4, buf_id, d_offset):
         traits = self.traits
         row_stride = traits.FP8_V_ROW_STRIDE
-        v_tile_bytes = traits.V_HEAD_DIM * row_stride
+        v_tile_bytes = traits.HEAD_DIM_V * row_stride
         aligned_base = ((self.lds_vt_base_idx + fx.Int64(127)) // fx.Int64(128)) * fx.Int64(128)
         dst_base = aligned_base + fx.Int64(buf_id * v_tile_bytes)
         n_group16 = self.lane_in_warp // fx.Int64(16)
         d_col = fx.Int64(d_offset) + self.wave_id * fx.Int64(16) + self.lane_in_warp % fx.Int64(16)
         reordered = self._permute_v_fp8_vectorized(src_i32x4)
         dest_group16 = (n_group16 % fx.Int64(2)) * fx.Int64(2) + n_group16 // fx.Int64(2)
-        if const_expr(traits.BN128 and traits.V_HEAD_DIM == 192):
+        if const_expr(traits.BN128 and traits.HEAD_DIM_V == 192):
             # XOR 16-byte groups instead of padding each row in the six-slot ring.
             dest_group16 = dest_group16 ^ ((d_col // fx.Int64(4)) % fx.Int64(4))
         dst_byte = dst_base + d_col * fx.Int64(row_stride) + dest_group16 * fx.Int64(16)
-        ptr = buffer_ops.get_element_ptr(
-            self.lds_vt_base_ptr,
-            byte_offset=fx.Int32(dst_byte - self.lds_vt_base_idx),
-            elem_type=T.i8,
-        )
-        llvm.StoreOp(as_mlir_value(reordered), ptr, alignment=16)
+        self._store_v_fp8_lds(reordered, dst_byte - self.lds_vt_base_idx)
 
 
 class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
@@ -5522,8 +5454,8 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
                     dg0 = ws * 4 + self.lane_div_32 * 2
                     off0 = (k_base + (dg0 * traits.BLOCK_N + key_sigma) * traits.KV_VEC_SIZE) * traits.ELEM_BYTES
                     off1 = (k_base + ((dg0 + 1) * traits.BLOCK_N + key_sigma) * traits.KV_VEC_SIZE) * traits.ELEM_BYTES
-                    lo = Vec(self.read_i32x4_lds(self.lds_kv_base_ptr, off0), (4,), fx.Int32)
-                    hi = Vec(self.read_i32x4_lds(self.lds_kv_base_ptr, off1), (4,), fx.Int32)
+                    lo = Vec(self.read_i32x4_lds(off0), (4,), fx.Int32)
+                    hi = Vec(self.read_i32x4_lds(off1), (4,), fx.Int32)
                     packs.append(lo.shuffle(hi, [0, 1, 2, 3, 4, 5, 6, 7]).ir_value())
                 return packs
 
@@ -5554,7 +5486,7 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
         """Read the D-major V tile into the FP8 MFMA A fragment."""
         traits = self.traits
         row_stride = traits.FP8_V_ROW_STRIDE
-        v_tile_bytes = traits.V_HEAD_DIM * row_stride
+        v_tile_bytes = traits.HEAD_DIM_V * row_stride
         aligned_base = ((self.lds_vt_base_idx + fx.Int64(127)) // fx.Int64(128)) * fx.Int64(128)
         tile_base = aligned_base + fx.Int64(buf_id * v_tile_bytes)
         token_base = self.lane_div_32 * fx.Int64(32)
@@ -5564,16 +5496,14 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
             row_base = tile_base + d_row * fx.Int64(row_stride)
             for half in range_constexpr(2):
                 token_offset = token_base + fx.Int64(half * 16)
-                if const_expr(traits.BN128 and traits.V_HEAD_DIM == 192):
+                if const_expr(traits.BN128 and traits.HEAD_DIM_V == 192):
                     token_offset = token_offset ^ (((d_row // fx.Int64(4)) % fx.Int64(4)) * fx.Int64(16))
-                ptr = buffer_ops.get_element_ptr(
-                    self.lds_vt_base_ptr,
-                    byte_offset=fx.Int32(row_base + token_offset - self.lds_vt_base_idx),
-                    elem_type=T.i8,
+                view = fx.slice(
+                    self.v_lds_i32_tiles, (None, fx.Uint32(row_base + token_offset - self.lds_vt_base_idx) // 16)
                 )
-                pair = Vec(llvm.LoadOp(Vec.make_type(2, fx.Int64), ptr, alignment=16).result, (2,), fx.Int64)
-                packs[half * 2][dc] = as_mlir_value(fx.Int64(pair[0]))
-                packs[half * 2 + 1][dc] = as_mlir_value(fx.Int64(pair[1]))
+                pair = fx.memref_load_vec(view).bitcast(fx.Int64)
+                packs[half * 2][dc] = pair[0].ir_value()
+                packs[half * 2 + 1][dc] = pair[1].ir_value()
         return packs
 
     def load_v_steps(self, buf_id, first_step, num_steps):
@@ -5847,28 +5777,26 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return _run(v_o, m_row, l_row, m_tile_max, v_p)
 
     def _lazy_rescale_o_paged(self, v_o, m_row, l_row, m_tile_max, v_p):
-        traits = self.traits
-
         @flyc.jit
         def _run(v_o, m_row, l_row, m_tile_max, v_p):
             m_diff = m_tile_max - m_row
             m_diff_scaled = m_diff * self.c_logit_scale
             below = fx.Float32(m_diff_scaled) <= self.c_rescale_thr_f
-            ballot = rocdl.ballot(T.i64, as_mlir_value(below))
-            all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
-            all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
+            ballot = fx.Int64(rocdl.ballot(T.i64, below.ir_value()))
+            all_below = ballot == fx.Int64(_read_exec_i64())
+            all_below = fx.Boolean(llvm.intr_expect(all_below.ir_value(), fx.Boolean(True).ir_value()))
 
-            o_out = [as_mlir_value(v_o[dc]) for dc in range(traits.D_CHUNKS)]
+            o_out = list(v_o)
             vp_out = self.v_p_to_vec32(v_p)
-            l_out = as_mlir_value(l_row)
-            m_out = as_mlir_value(m_row)
-            if fx.Boolean(all_below):
+            l_out = l_row
+            m_out = m_row
+            if all_below:
                 pass
             else:
                 m_new, corr, scaled_accs = self._lazy_correction(v_o, m_row, m_tile_max)
-                o_out = [as_mlir_value(scaled_accs[dc]) for dc in range(traits.D_CHUNKS)]
+                o_out = scaled_accs
                 vp_out = self.v_p_to_vec32(self.scale_v_p(v_p, corr))
-                l_out = as_mlir_value(l_row * corr)
+                l_out = l_row * corr
                 m_out = self.anchor_scalar_f32(m_new)
             return (o_out, m_out, l_out, self.v_vec32_to_p(vp_out))
 
