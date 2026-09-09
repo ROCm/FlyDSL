@@ -165,7 +165,7 @@ def build_flash_attn_paged_fp8_module(
             ctx.init_sequence_lengths()
             num_q_blocks = (ctx.seqlen_q_v + traits.BLOCK_M - 1) // traits.BLOCK_M
             active_q_block = ctx.q_block_idx < num_q_blocks
-            reversed_q_block = num_q_blocks - fx.Index(1) - ctx.q_block_idx
+            reversed_q_block = num_q_blocks - 1 - ctx.q_block_idx
             ctx.q_block_idx = active_q_block.select(reversed_q_block, ctx.q_block_idx)
             ctx.q_start = ctx.q_block_idx * traits.BLOCK_M
             ctx.q_gmem_elem_offset = (
@@ -188,7 +188,7 @@ def build_flash_attn_paged_fp8_module(
 
         BN = traits.BLOCK_N
         D_CHUNKS = traits.D_CHUNKS
-        NPF = const_expr(traits.NUM_PREFETCH_K)
+        NPF = traits.NUM_PREFETCH_K
         t0 = ctx.split_t0
         t_end = ctx.split_t_end
 
@@ -225,7 +225,7 @@ def build_flash_attn_paged_fp8_module(
             return softmax_helper.floor_masked_max(m_tile)
 
         page_t0, page_t1 = ctx.load_page_id_pair(t0 * BN)
-        kv_gmem_to_lds.load_k(t0 * BN, t0 % fx.Index(NPF), page_id=page_t0)
+        kv_gmem_to_lds.load_k(t0 * BN, t0 % NPF, page_id=page_t0)
         fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
@@ -236,14 +236,14 @@ def build_flash_attn_paged_fp8_module(
         q_wide = gemm_helper.load_q_wide()
 
         page_t2, page_t3 = ctx.load_page_id_pair((t0 + 2) * BN)
-        kv_gmem_to_lds.load_k((t0 + 1) * BN, (t0 + 1) % fx.Index(NPF), page_id=page_t1)
-        kv_gmem_to_lds.load_v(t0 * BN, t0 % fx.Index(NPF), page_id=page_t0)
-        kv_gmem_to_lds.load_v((t0 + 1) * BN, (t0 + 1) % fx.Index(NPF), page_id=page_t1)
-        kv_gmem_to_lds.load_k((t0 + 2) * BN, (t0 + 2) % fx.Index(NPF), page_id=page_t2)
-        kv_gmem_to_lds.load_k((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF), page_id=page_t3)
+        kv_gmem_to_lds.load_k((t0 + 1) * BN, (t0 + 1) % NPF, page_id=page_t1)
+        kv_gmem_to_lds.load_v(t0 * BN, t0 % NPF, page_id=page_t0)
+        kv_gmem_to_lds.load_v((t0 + 1) * BN, (t0 + 1) % NPF, page_id=page_t1)
+        kv_gmem_to_lds.load_k((t0 + 2) * BN, (t0 + 2) % NPF, page_id=page_t2)
+        kv_gmem_to_lds.load_k((t0 + 3) * BN, (t0 + 3) % NPF, page_id=page_t3)
         if const_expr(traits.FP8_PV_SEGMENTED):
-            kv_gmem_to_lds.load_v((t0 + 2) * BN, (t0 + 2) % fx.Index(NPF), page_id=page_t2)
-            kv_gmem_to_lds.load_v((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF), page_id=page_t3)
+            kv_gmem_to_lds.load_v((t0 + 2) * BN, (t0 + 2) % NPF, page_id=page_t2)
+            kv_gmem_to_lds.load_v((t0 + 3) * BN, (t0 + 3) % NPF, page_id=page_t3)
         else:
             next_v_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
                 (t0 + 2) * BN,
@@ -262,29 +262,29 @@ def build_flash_attn_paged_fp8_module(
         l_row = ctx.c_zero_f
         v_o = [ctx.c_zero_v16f32 for _ in range_constexpr(D_CHUNKS)]
 
-        NPF_I = const_expr(fx.Index(NPF))
+        NPF_I = fx.Int64(NPF)
 
         def _ring_wrap(x):
             if const_expr(NPF == 8):
-                return x & fx.Index(7)
+                return x & 7
             return (x >= NPF_I).select(x - NPF_I, x)
 
-        init_args = [m_row, l_row] + v_o + [t0 % fx.Index(NPF)]
+        init_args = [m_row, l_row] + v_o + [fx.Int64(t0) % NPF]
         if const_expr(not traits.FP8_PV_SEGMENTED):
             init_args += [next_v_a, next_v_b]
         loop_results = init_args
         next_v_arg_idx = 3 + D_CHUNKS
-        for j, loop_args in range(fx.Index(t0), t_end, fx.Index(2), init=init_args):
+        for j, loop_args in range(fx.Int64(t0), t_end, fx.Int64(2), init=init_args):
             m_row = loop_args[0]
             l_row = loop_args[1]
             v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
 
-            a_buf = loop_args[2 + D_CHUNKS]
-            b_buf = _ring_wrap(a_buf + fx.Index(1))
-            nn_a_buf = _ring_wrap(a_buf + fx.Index(2))
-            nn_b_buf = _ring_wrap(a_buf + fx.Index(3))
-            f_a_buf = _ring_wrap(a_buf + fx.Index(4))
-            f_b_buf = _ring_wrap(a_buf + fx.Index(5))
+            a_buf = fx.Int64(loop_args[2 + D_CHUNKS])
+            b_buf = _ring_wrap(a_buf + 1)
+            nn_a_buf = _ring_wrap(a_buf + 2)
+            nn_b_buf = _ring_wrap(a_buf + 3)
+            f_a_buf = _ring_wrap(a_buf + 4)
+            f_b_buf = _ring_wrap(a_buf + 5)
 
             if const_expr(traits.FP8_PV_SEGMENTED):
                 v_k_a = kv_lds_to_regs.load_k(a_buf)
@@ -292,11 +292,11 @@ def build_flash_attn_paged_fp8_module(
                 v_s_a = gemm_helper.qk(v_k_a, q_wide)
                 v_s_b = gemm_helper.qk(v_k_b, q_wide)
 
-                page_f_a, page_f_b = ctx.load_page_id_pair((j + fx.Index(4)) * BN)
-                kv_gmem_to_lds.load_k((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
-                kv_gmem_to_lds.load_k((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
-                kv_gmem_to_lds.load_v((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
-                kv_gmem_to_lds.load_v((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
+                page_f_a, page_f_b = ctx.load_page_id_pair((j + 4) * BN)
+                kv_gmem_to_lds.load_k((j + 4) * BN, f_a_buf, page_id=page_f_a)
+                kv_gmem_to_lds.load_k((j + 5) * BN, f_b_buf, page_id=page_f_b)
+                kv_gmem_to_lds.load_v((j + 4) * BN, f_a_buf, page_id=page_f_a)
+                kv_gmem_to_lds.load_v((j + 5) * BN, f_b_buf, page_id=page_f_b)
 
                 v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
                 m_tile = _merge_tile_max(v_s_a, v_s_b)
@@ -319,18 +319,18 @@ def build_flash_attn_paged_fp8_module(
                 v_k_b = kv_lds_to_regs.load_k(b_buf)
                 v_v_a = kv_lds_to_regs.load_v(a_buf)
 
-                page_f_a, page_f_b = ctx.load_page_id_pair((j + fx.Index(4)) * BN)
-                kv_gmem_to_lds.load_k((j + fx.Index(4)) * BN, f_a_buf, page_id=page_f_a)
-                kv_gmem_to_lds.load_k((j + fx.Index(5)) * BN, f_b_buf, page_id=page_f_b)
+                page_f_a, page_f_b = ctx.load_page_id_pair((j + 4) * BN)
+                kv_gmem_to_lds.load_k((j + 4) * BN, f_a_buf, page_id=page_f_a)
+                kv_gmem_to_lds.load_k((j + 5) * BN, f_b_buf, page_id=page_f_b)
 
                 v_s_a = gemm_helper.qk(v_k_a, q_wide)
                 kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_a, nn_a_buf)
                 v_f_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
-                    (j + fx.Index(4)) * BN,
+                    (j + 4) * BN,
                     page_id=page_f_a,
                 )
                 v_f_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
-                    (j + fx.Index(5)) * BN,
+                    (j + 5) * BN,
                     page_id=page_f_b,
                 )
                 v_s_b = gemm_helper.qk(v_k_b, q_wide)
@@ -412,7 +412,7 @@ def build_flash_attn_paged_fp8_module(
             # Issue the longest active q-blocks first within each batch group.
             num_q_blocks = (ctx.seqlen_q_v + traits.BLOCK_M - 1) // traits.BLOCK_M
             active_q_block = ctx.q_block_idx < num_q_blocks
-            reversed_q_block = num_q_blocks - fx.Index(1) - ctx.q_block_idx
+            reversed_q_block = num_q_blocks - 1 - ctx.q_block_idx
             ctx.q_block_idx = active_q_block.select(reversed_q_block, ctx.q_block_idx)
             ctx.q_start = ctx.q_block_idx * traits.BLOCK_M
             ctx.q_gmem_elem_offset = (
@@ -482,12 +482,12 @@ def build_flash_attn_paged_fp8_module(
             init_args.append(ctx.v_pair_to_vec32(v_p_0))
 
             # Software-pipelined KV loop.
-            loop_lb = fx.Index(3)
+            loop_lb = fx.Int64(3)
             loop_results = init_args
             for j, loop_args in range(
                 loop_lb,
-                ctx.split_t_end - fx.Index(1),
-                fx.Index(2),
+                ctx.split_t_end - 1,
+                fx.Int64(2),
                 init=init_args,
             ):
                 m_row = loop_args[0]
@@ -902,8 +902,8 @@ def build_flash_attn_paged_fp8_module(
     ):
         # Make shape/mode traits visible to the JIT cache key.
         _ = _dualwave_swp_fp8_cache_tag
-        bs_idx = fx.Index(batch_size)
-        sl_idx = fx.Index(seq_len)
+        bs_idx = fx.Int64(batch_size)
+        sl_idx = fx.Int64(seq_len)
         num_q_blocks = (sl_idx + BLOCK_M - 1) // BLOCK_M
         grid_z = bs_idx
 
