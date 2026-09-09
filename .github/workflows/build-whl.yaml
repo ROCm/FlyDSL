@@ -103,7 +103,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-build-info.json', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
+          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-build-info.json', 'flydsl/thirdparty/llvm-*.patch', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'

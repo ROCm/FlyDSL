@@ -182,16 +182,21 @@ jobs:
             echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
             exit 0
           fi
-          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+          changed=false
+          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch thirdparty/llvm-amdgpu-cvt-pk-f32-f8-true16.patch scripts/build_llvm.sh; do
             if ! git -C flydsl-test show "FETCH_HEAD:${f}" >"base-pin/${f}"; then
-              echo "Base commit has no ${f}; treating LLVM pin as unchanged."
-              echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
-              exit 0
+              if [ "${f}" = "thirdparty/llvm-build-info.json" ]; then
+                echo "Base commit has no ${f}; treating LLVM pin as unchanged."
+                echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+                exit 0
+              fi
+              echo "LLVM input is new relative to base: ${f}"
+              rm -f "base-pin/${f}"
+              changed=true
             fi
           done
-          changed=false
-          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
-            if ! diff -q "flydsl-test/${f}" "base-pin/${f}" >/dev/null; then
+          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch thirdparty/llvm-amdgpu-cvt-pk-f32-f8-true16.patch scripts/build_llvm.sh; do
+            if [ ! -f "base-pin/${f}" ] || ! diff -q "flydsl-test/${f}" "base-pin/${f}" >/dev/null; then
               echo "LLVM input differs from base: ${f}"
               changed=true
             fi
