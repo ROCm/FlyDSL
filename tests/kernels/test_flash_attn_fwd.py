@@ -4814,6 +4814,19 @@ def test_paged_fp8_d192_ragged_multiblock_matches_torch(value_head_dim):
 
 
 @_requires_gfx950
+def test_paged_fp8_bn128_batch2_ragged_multiblock_matches_torch():
+    test_paged_fp8_asymmetric_value_matches_torch(
+        head_dim=192,
+        value_head_dim=128,
+        use_non_default_stream=True,
+        force_internal_copies=False,
+        query_lengths=[513, 257],
+        kv_lengths=[1024, 768],
+        block_table_rows=[list(reversed(range(16))), list(reversed(range(16, 28))) + [0] * 4],
+    )
+
+
+@_requires_gfx950
 @pytest.mark.parametrize(
     ("head_dim", "value_head_dim"),
     [(128, 128), (192, 128), (192, 192)],
