@@ -92,6 +92,7 @@ ensure_style_tools() {
   fi
 
   if [ "${INSTALL_TOOLS}" = true ]; then
+    python3 -m pip install --upgrade "pip>=25.1"
     python3 -m pip install --upgrade --group style
     return
   fi

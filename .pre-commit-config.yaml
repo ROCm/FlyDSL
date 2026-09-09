@@ -14,3 +14,10 @@ repos:
         language: system
         types: [python]
         exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
+
+      - id: black-final
+        name: Normalize Ruff fixes with Black
+        entry: python3 -m black
+        language: system
+        types: [python]
+        exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
