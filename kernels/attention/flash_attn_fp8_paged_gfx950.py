@@ -12,7 +12,6 @@ from kernels.attention.flash_attn_utils import (
     DualwaveFp8KernelContext,
     DualwaveFp8KvGmemToLdsLoader,
     DualwaveFp8KvLdsToVgprLoader,
-    DualwaveFp8QLoader,
     DualwaveFp8SoftmaxHelper,
     DualwaveFp8StoreHelper,
     _make_paged_dualwave_swp_fp8_traits,
@@ -105,7 +104,7 @@ def build_flash_attn_paged_fp8_module(
     PAGED_BN128_VARLEN = bool(paged_bn128_varlen)
     BATCH_INTERLEAVE_GROUP = traits.BATCH_INTERLEAVE_GROUP
     DEFAULT_STRIDE_Q_N = traits.DEFAULT_STRIDE_Q_N
-    DEFAULT_STRIDE_O_N = traits.NUM_HEADS_Q * traits.V_HEAD_DIM
+    DEFAULT_STRIDE_O_N = traits.NUM_HEADS_Q * traits.HEAD_DIM_V
     DEFAULT_STRIDE_KV_N = traits.DEFAULT_STRIDE_KV_N
     _dualwave_swp_fp8_cache_tag = traits.cache_tag
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
@@ -424,7 +423,6 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_descale()
         ctx.init_tile_bounds()
 
-        q_loader = DualwaveFp8QLoader(ctx)
         gemm_helper = DualwaveFp8GemmHelper(ctx)
         softmax_helper = DualwaveFp8SoftmaxHelper(ctx)
         kv_gmem_to_lds = DualwaveFp8KvGmemToLdsLoader(ctx)
@@ -445,7 +443,7 @@ def build_flash_attn_paged_fp8_module(
             # q_start_pos_i32 on ctx for the causal-mask helpers.
             ctx.init_q_row()
             q_row = ctx.q_row
-            q_all_wide = q_loader.load_all_wide(ctx.q_row_in_block)
+            q_all_wide = gemm_helper.load_q_wide()
 
             kv_gmem_to_lds.load_k((ctx.split_t0 + 1) * traits.BLOCK_N, 1)
             kv_gmem_to_lds.load_v(ctx.split_t0 * traits.BLOCK_N, 0)
