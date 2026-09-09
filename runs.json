@@ -1,8 +1,198 @@
 {
  "schema": 1,
- "updated": "2026-09-09T07:01:05Z",
+ "updated": "2026-09-09T09:33:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34333936963,
+   "pr": 1112,
+   "commit": "f1f77dd9f639f803012908e01b7eff42f274d85c",
+   "branch": "ci/mi35x-1-runner",
+   "event": "pull_request",
+   "title": "[CI] Run 1-GPU tests on linux-flydsl-mi35x-1",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34333936963",
+   "created_at": "2026-09-09T09:18:12Z",
+   "updated_at": "2026-09-09T09:20:33Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34331895613,
+   "pr": 1062,
+   "commit": "1520d5c6b908c642a2e630ec9bdc05f2853ee8fe",
+   "branch": "smem-capacity-decouple",
+   "event": "pull_request",
+   "title": "smem cleanup: move capacity helpers off legacy allocator, migrate tes\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34331895613",
+   "created_at": "2026-09-09T08:56:31Z",
+   "updated_at": "2026-09-09T09:15:16Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-09T09:15:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34331895613/job/102407881058"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-09T09:16:12Z",
+     "completed_at": "2026-09-09T09:23:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34331895613/job/102407881089"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T09:26:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34331895613/job/102407881241"
+    }
+   ]
+  },
+  {
+   "run_id": 34329841264,
+   "pr": 1111,
+   "commit": "c4fa5d319af7ff14e394c98f55e294b1757ddee5",
+   "branch": "ghu/megamoe-engineering-skill",
+   "event": "pull_request",
+   "title": "[DO NOT MERGE] Add MegaMoE engineering skill",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34329841264",
+   "created_at": "2026-09-09T08:34:17Z",
+   "updated_at": "2026-09-09T08:56:03Z",
+   "actor": "GwilliamHu",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-09T08:53:19Z",
+     "completed_at": "2026-09-09T09:06:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34329841264/job/102401141859",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T08:56:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34329841264/job/102401141871"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T08:54:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34329841264/job/102401141995"
+    }
+   ]
+  },
+  {
+   "run_id": 34328099481,
+   "pr": 1106,
+   "commit": "3c040983b20564c93b0fa3f344c5bf9980f23230",
+   "branch": "add-flydsl-code-review-skill",
+   "event": "pull_request",
+   "title": "[Skills] Add flydsl-code-review skill and workflow",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481",
+   "created_at": "2026-09-09T08:15:12Z",
+   "updated_at": "2026-09-09T08:54:14Z",
+   "actor": "zhiding512",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T08:36:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481/job/102395887786"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-09T08:36:19Z",
+     "completed_at": "2026-09-09T08:50:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481/job/102395887820",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T08:54:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481/job/102395887946"
+    }
+   ]
+  },
+  {
+   "run_id": 34324239789,
+   "pr": 1102,
+   "commit": "28be96867f8b7cd848e546a5c6273bfe169ff801",
+   "branch": "chore/pre-commit-formatter",
+   "event": "pull_request",
+   "title": "[Chore] pre commit formatter",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789",
+   "created_at": "2026-09-09T07:30:55Z",
+   "updated_at": "2026-09-09T08:53:24Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-09T09:07:29Z",
+     "completed_at": "2026-09-09T09:26:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789/job/102401249916",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-09T08:53:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789/job/102401249995"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-09T08:56:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789/job/102401250078"
+    }
+   ]
+  },
   {
    "run_id": 34320514577,
    "pr": 1066,
@@ -80,7 +270,7 @@
   },
   {
    "run_id": 34309400126,
-   "pr": 1102,
+   "pr": null,
    "commit": "37f9a52807ce2bdb0c9e24fa7425daf8db970581",
    "branch": "chore/pre-commit-formatter",
    "event": "pull_request",
@@ -115,11 +305,11 @@
    "branch": "fix/benchmark-compiler-api",
    "event": "pull_request",
    "title": "[Bugfix][Benchmark] Fix compiler API usage in Softmax and RMSNorm benchmarks",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34308881988",
    "created_at": "2026-09-09T03:53:56Z",
-   "updated_at": "2026-09-09T05:21:22Z",
+   "updated_at": "2026-09-09T08:36:33Z",
    "actor": "tangzzycc",
    "jobs": [
     {
@@ -135,9 +325,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-09T05:21:22Z",
+     "started_at": "2026-09-09T08:36:32Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34308881988/job/102347897642"
     },
@@ -1927,143 +2117,6 @@
      "started_at": "2026-09-06T06:55:33Z",
      "completed_at": "2026-09-06T08:18:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34017081000/job/101444480270",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34012202245,
-   "pr": null,
-   "commit": "dd5eaffdf6d5bc6a3ab549fa5a9d134627d258fb",
-   "branch": "update_llvm_0.3.2",
-   "event": "pull_request",
-   "title": "[test only]",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34012202245",
-   "created_at": "2026-09-06T04:42:57Z",
-   "updated_at": "2026-09-06T04:45:56Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 34012168430,
-   "pr": 1094,
-   "commit": "f72169e5aaa1e93c04b4a6b6faae8a35d1622c26",
-   "branch": "ci/pypi-moe-csv-hgemm",
-   "event": "pull_request",
-   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34012168430",
-   "created_at": "2026-09-06T04:42:09Z",
-   "updated_at": "2026-09-06T06:24:29Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T05:00:20Z",
-     "completed_at": "2026-09-06T05:19:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34012168430/job/101431592754",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T05:25:06Z",
-     "completed_at": "2026-09-06T06:01:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34012168430/job/101431592797",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T05:01:16Z",
-     "completed_at": "2026-09-06T06:24:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34012168430/job/101431592826",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34007399607,
-   "pr": null,
-   "commit": "1fd32c34be22d5a39056699cf50a18e55f205fb0",
-   "branch": "update_llvm_0.3.2",
-   "event": "pull_request",
-   "title": "[test only]",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34007399607",
-   "created_at": "2026-09-06T02:47:58Z",
-   "updated_at": "2026-09-06T02:50:12Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 34007015315,
-   "pr": null,
-   "commit": "257bb15b28b487b3b82a5f913819bf1199f0c5a8",
-   "branch": "update_llvm_0.3.2",
-   "event": "pull_request",
-   "title": "[test only]",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34007015315",
-   "created_at": "2026-09-06T02:38:51Z",
-   "updated_at": "2026-09-06T02:41:05Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 34005159974,
-   "pr": 1094,
-   "commit": "c1f85fa9015e67fb1c4dcdc547803771178cd585",
-   "branch": "ci/pypi-moe-csv-hgemm",
-   "event": "pull_request",
-   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34005159974",
-   "created_at": "2026-09-06T01:56:02Z",
-   "updated_at": "2026-09-06T03:37:34Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T02:22:42Z",
-     "completed_at": "2026-09-06T02:56:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34005159974/job/101413993705",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T02:22:42Z",
-     "completed_at": "2026-09-06T03:37:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34005159974/job/101413993720",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-06T02:22:32Z",
-     "completed_at": "2026-09-06T02:39:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34005159974/job/101413993749",
      "log_fetch_failed": true
     }
    ]
