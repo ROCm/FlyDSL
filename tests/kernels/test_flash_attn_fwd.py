@@ -4559,6 +4559,30 @@ def test_return_lse_false_returns_only_out():
     assert out.shape == q.shape
 
 
+def _paged_fp8_torch_reference(query, key, value, block_table, query_lengths, kv_lengths, descales):
+    """Independent PyTorch reference for packed page-64 FP8 inputs."""
+    q_scale, k_scale, v_scale = descales
+    head_dim = query.shape[-1]
+    num_kv_heads = key.shape[1]
+    value_head_dim = value.shape[3]
+    expected = []
+    q_offset = 0
+    for batch_idx, (query_length, kv_length) in enumerate(zip(query_lengths, kv_lengths)):
+        query_batch = query[q_offset : q_offset + query_length].float() * q_scale
+        q_offset += query_length
+        physical_pages = block_table[batch_idx].long()
+        key_batch = (
+            key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, num_kv_heads, head_dim)[:kv_length].float() * k_scale
+        )
+        value_batch = (
+            value[physical_pages].permute(0, 2, 4, 1, 3).reshape(-1, num_kv_heads, value_head_dim)[:kv_length].float()
+            * v_scale
+        )
+        result = pytorch_ref_attention_qkv_diff(query_batch[None], key_batch[None], value_batch[None])
+        expected.append(result[0].to(torch.bfloat16))
+    return torch.cat(expected)
+
+
 def test_return_lse_rejects_fp8():
     dtype = torch.bfloat16
     q = _rand_lse(2, 128, 4, 128, dtype=dtype)
@@ -4705,26 +4729,15 @@ def test_paged_fp8_asymmetric_value_matches_torch(
         torch.cuda.synchronize()
         torch.testing.assert_close(actual, copy_reference, rtol=0, atol=0)
 
-    expected = []
-    for batch_idx, (query_length, kv_length) in enumerate(zip(query_lengths, kv_lengths)):
-        query_batch = query[q_indptr[batch_idx] : q_indptr[batch_idx + 1]].float() * query_descale
-        physical_pages = block_table[batch_idx].long()
-        key_batch = (
-            key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, num_kv_heads, head_dim)[:kv_length].float()
-            * key_descale
-        ).repeat_interleave(16 // num_kv_heads, dim=1)
-        value_batch = (
-            value[physical_pages].permute(0, 2, 4, 1, 3).reshape(-1, num_kv_heads, value_head_dim)[:kv_length].float()
-            * value_descale
-        ).repeat_interleave(16 // num_kv_heads, dim=1)
-        logits = torch.einsum("qhd,khd->hqk", query_batch, key_batch) / math.sqrt(head_dim)
-        query_positions = torch.arange(query_length, device="cuda")
-        key_positions = torch.arange(kv_length, device="cuda")
-        causal_mask = key_positions[None, :] <= (kv_length - query_length + query_positions)[:, None]
-        logits.masked_fill_(~causal_mask[None, :, :], float("-inf"))
-        expected.append(torch.einsum("hqk,khd->qhd", torch.softmax(logits, dim=-1), value_batch).to(torch.bfloat16))
-
-    expected = torch.cat(expected)
+    expected = _paged_fp8_torch_reference(
+        query,
+        key,
+        value,
+        block_table,
+        query_lengths,
+        kv_lengths,
+        (query_descale, key_descale, value_descale),
+    )
     assert actual.shape == (sum(query_lengths), 16, value_head_dim)
     assert bool(torch.isfinite(actual).all().item())
     torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
@@ -4842,20 +4855,15 @@ def test_paged_fp8_long_context_random_pages_matches_torch(head_dim, value_head_
     )
     torch.cuda.synchronize()
 
-    physical_pages = block_table[0].long()
-    query_ref = query.float() * query_descale
-    key_ref = (
-        key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, 1, head_dim)[:kv_length].float() * key_descale
-    ).expand(-1, 16, -1)
-    value_ref = (
-        value[physical_pages].permute(0, 2, 4, 1, 3).reshape(-1, 1, value_head_dim)[:kv_length].float() * value_descale
-    ).expand(-1, 16, -1)
-    logits = torch.einsum("qhd,khd->hqk", query_ref, key_ref) / math.sqrt(head_dim)
-    query_positions = torch.arange(query_length, device="cuda")
-    key_positions = torch.arange(kv_length, device="cuda")
-    causal_mask = key_positions[None, :] <= (kv_length - query_length + query_positions)[:, None]
-    logits.masked_fill_(~causal_mask[None, :, :], float("-inf"))
-    expected = torch.einsum("hqk,khd->qhd", torch.softmax(logits, dim=-1), value_ref).to(torch.bfloat16)
+    expected = _paged_fp8_torch_reference(
+        query,
+        key,
+        value,
+        block_table,
+        [query_length],
+        [kv_length],
+        (query_descale, key_descale, value_descale),
+    )
 
     assert bool(torch.isfinite(actual).all().item())
     torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
@@ -4911,20 +4919,15 @@ def test_paged_fp8_graph_replay_matches_torch(head_dim, value_head_dim):
     graph.replay()
     torch.cuda.synchronize()
 
-    physical_pages = block_table[0].long()
-    query_ref = query.float() * query_descale
-    key_ref = (
-        key[physical_pages].permute(0, 3, 1, 2, 4).reshape(-1, 1, head_dim)[:kv_length].float() * key_descale
-    ).expand(-1, 16, -1)
-    value_ref = (
-        value[physical_pages].permute(0, 2, 4, 1, 3).reshape(-1, 1, value_head_dim)[:kv_length].float() * value_descale
-    ).expand(-1, 16, -1)
-    logits = torch.einsum("qhd,khd->hqk", query_ref, key_ref) / math.sqrt(head_dim)
-    query_positions = torch.arange(query_length, device="cuda")
-    key_positions = torch.arange(kv_length, device="cuda")
-    causal_mask = key_positions[None, :] <= (kv_length - query_length + query_positions)[:, None]
-    logits.masked_fill_(~causal_mask[None, :, :], float("-inf"))
-    expected = torch.einsum("hqk,khd->qhd", torch.softmax(logits, dim=-1), value_ref).to(torch.bfloat16)
+    expected = _paged_fp8_torch_reference(
+        query,
+        key,
+        value,
+        block_table,
+        [query_length],
+        [kv_length],
+        (query_descale, key_descale, value_descale),
+    )
 
     assert captured.data_ptr() == output.data_ptr()
     assert bool(torch.isfinite(output).all().item())
