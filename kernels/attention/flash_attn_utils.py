@@ -4535,9 +4535,9 @@ class DualwaveStoreHelper(DualwaveKernelContext):
 class DualwaveFp8KernelContext:
     """Shared per-kernel state for the gfx950 dualwave fp8 attention helpers.
 
-    Mirrors ``DualwaveKernelContext`` but for the fp8 single path: raw fp8 Q/K/V
-    (i8 buffer views), per-tensor Q/K/V descale scalars applied to the fp32 logits,
-    and a bf16 ``vt`` LDS scratch for HIPREC PV."""
+    Q/K/V remain byte-typed for DMA. Descales apply to accumulated QK scores
+    and the final P*V output; the ``vt`` allocation holds packed FP8 V bytes.
+    """
 
     def __init__(
         self,
@@ -4644,6 +4644,8 @@ class DualwaveFp8KernelContext:
         self.lds_vt_base_idx = fx.Index(fx.ptrtoint(lds.vt.ptr))
         self.lds_vt_base_ptr = lds.vt.ptr.llvm_ptr
         if const_expr(self.traits.PAGED):
+            # The 16-byte tile stride preserves wide LDS loads; i64-element
+            # views can instead lower to slower paired 64-bit reads.
             self.k_lds_i32_tiles = fx.logical_divide(
                 fx.make_view(
                     fx.recast_iter(fx.Int32, lds.kv.ptr), fx.make_layout(self.traits.LDS_KV_TOTAL_SIZE // 4, 1)
@@ -4859,9 +4861,8 @@ class DualwaveFp8KernelContext:
         return _v_vec32_to_pair(v)
 
     def bf16_trunc_pack_v8(self, f32_vals):
-        # HIPREC carries P/V as v8 bf16 regardless of the fp8 element dtype: pack
-        # 8 f32 -> 4 cvt_pk_bf16 dwords. (The generic _bf16_trunc_pack_v8 branches on
-        # DTYPE_STR and would take the fp16 path for fp8, so keep this bf16-only pack.)
+        # Generic paged softmax carries P in BF16 between correction steps.
+        # The dtype-dispatched pack would incorrectly select FP16 for FP8 input.
         pairs = []
         for j in range_constexpr(4):
             pairs.append(rocdl.cvt_pk_bf16_f32(f32_vals[j * 2], f32_vals[j * 2 + 1]))
@@ -5090,7 +5091,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         return packs
 
     def _load_q_wide_global(self):
-        """Pull this lane's Q operands straight from global into VGPRs (head_dim > 128)."""
+        """Pull this lane's Q operands straight from global into VGPRs."""
         traits = self.traits
         d_base = self.lane_div_32 * 32
         packs = []
@@ -5166,11 +5167,10 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         super().__init__(ctx)
 
     def load_k(self, tile_start, buf_id, page_id=None):
-        """DMA one K tile into LDS, one pass per head-dim band.
+        """DMA K using the vectorized page layout or dense head-dimension bands.
 
-        A band's LDS line is this wave's n-rows of `chunk` bytes, row-contiguous,
-        so the QK read indexes it as (band, row, 64-byte slice). The 64-byte tail
-        band at head_dim 192 runs on the low 32 lanes and moves no padding.
+        Dense bands are row-contiguous within each wave. Their D192 tail
+        uses the low 32 lanes; paged tiles retain the physical D-group mapping.
         """
         traits = self.traits
         eb = traits.ELEM_BYTES
@@ -5306,6 +5306,7 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
 
     def _permute_v_fp8_vectorized(self, src_i32x4):
         src_words = Vec(src_i32x4, (4,), fx.Int32)
+        # permlane16_swap returns an LLVM pair; unpack it at this intrinsic boundary.
         pair_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
         pair_lo = rocdl.permlane16_swap(
             pair_ty,
@@ -5784,6 +5785,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             below = fx.Float32(m_diff_scaled) <= self.c_rescale_thr_f
             ballot = fx.Int64(rocdl.ballot(T.i64, below.ir_value()))
             all_below = ballot == fx.Int64(_read_exec_i64())
+            # Most tiles reuse the running maximum; retain the likely-branch hint.
             all_below = fx.Boolean(llvm.intr_expect(all_below.ir_value(), fx.Boolean(True).ir_value()))
 
             o_out = list(v_o)

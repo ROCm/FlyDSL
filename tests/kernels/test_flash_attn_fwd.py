@@ -4801,7 +4801,7 @@ def test_paged_fp8_d192_batch_interleave_group(batch_size, head_dims, expected):
 @_requires_gfx950
 @pytest.mark.parametrize("value_head_dim", [128, 192])
 def test_paged_fp8_d192_ragged_multiblock_matches_torch(value_head_dim):
-    """The D192 batch-interleaved grid preserves ragged causal q-block mapping."""
+    """Paged D192 preserves ragged causal q-block mapping."""
     test_paged_fp8_asymmetric_value_matches_torch(
         head_dim=192,
         value_head_dim=value_head_dim,
