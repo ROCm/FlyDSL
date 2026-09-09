@@ -1038,6 +1038,7 @@ def build_flash_attn_paged_fp8_module(
         k_descale=None,
         v_descale=None,
         stream=None,
+        _compile_only=False,
     ):
         if stride_kv_n is None:
             stride_kv_n = DEFAULT_STRIDE_KV_N
@@ -1062,7 +1063,7 @@ def build_flash_attn_paged_fp8_module(
             block_table = O
         if block_table_stride is None:
             block_table_stride = 0
-        if block_table is O:
+        if block_table is O and not _compile_only:
             raise ValueError("paged fp8 flash_attn requires block_table")
         _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride)
         _validate_batch_interleave_launch(batch_size)
@@ -1074,7 +1075,8 @@ def build_flash_attn_paged_fp8_module(
             k_descale = O
         if v_descale is None:
             v_descale = O
-        return _run_compiled(
+        dispatch = flyc.compile if _compile_only else _run_compiled
+        return dispatch(
             launch_flash_attn_dualwave_swp,
             Q,
             K,
@@ -1098,80 +1100,8 @@ def build_flash_attn_paged_fp8_module(
             fx.Stream(stream),
         )
 
-    def _compile(
-        Q,
-        K,
-        V,
-        O,  # noqa: E741
-        batch_size,
-        seq_len,
-        stride_kv_n=None,
-        stride_q_n=None,
-        stride_o_n=None,
-        head_dim_runtime=None,
-        debug_counts=None,
-        *,
-        seq_len_kv=None,
-        cu_seqlens_q=None,
-        cu_seqlens_kv=None,
-        block_table=None,
-        block_table_stride=None,
-        q_descale=None,
-        k_descale=None,
-        v_descale=None,
-        stream=None,
-    ):
-        if stride_kv_n is None:
-            stride_kv_n = DEFAULT_STRIDE_KV_N
-        if stride_q_n is None:
-            stride_q_n = DEFAULT_STRIDE_Q_N
-        if stride_o_n is None:
-            stride_o_n = DEFAULT_STRIDE_O_N
-        if head_dim_runtime is None:
-            head_dim_runtime = HEAD_DIM
-        if seq_len_kv is None:
-            seq_len_kv = seq_len
-        if debug_counts is None:
-            debug_counts = O
-        if cu_seqlens_q is None:
-            cu_seqlens_q = O
-        if cu_seqlens_kv is None:
-            cu_seqlens_kv = O
-        if block_table is None:
-            block_table = O
-        if block_table_stride is None:
-            block_table_stride = 0
-        _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride)
-        _validate_batch_interleave_launch(batch_size)
-        if q_descale is None:
-            q_descale = O
-        if k_descale is None:
-            k_descale = O
-        if v_descale is None:
-            v_descale = O
-        return flyc.compile(
-            launch_flash_attn_dualwave_swp,
-            Q,
-            K,
-            V,
-            O,
-            debug_counts,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            block_table,
-            block_table_stride,
-            q_descale,
-            k_descale,
-            v_descale,
-            batch_size,
-            seq_len,
-            seq_len_kv,
-            stride_q_n,
-            stride_o_n,
-            stride_kv_n,
-            head_dim_runtime,
-            fx.Stream(stream),
-        )
+    def _compile(*args, **kwargs):
+        return _launch(*args, _compile_only=True, **kwargs)
 
     _launch.compile = _compile
 
