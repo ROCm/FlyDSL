@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-10T03:56:15Z",
+ "updated": "2026-09-10T04:19:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -35,11 +35,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T03:23:00Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431684585/job/102732396063"
+     "completed_at": "2026-09-10T03:55:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431684585/job/102732396063",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -102,11 +103,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-10T03:29:08Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431173982/job/102733738319"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-10T03:55:56Z",
+     "completed_at": "2026-09-10T04:07:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431173982/job/102733738319",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -156,11 +158,11 @@
    "branch": "ci/mi35x-1-runner",
    "event": "pull_request",
    "title": "[CI] Move 1-GPU tests to linux-flydsl-mi35x-1 and filter MI350 from the perf dashboard",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34367555883",
    "created_at": "2026-09-09T15:02:02Z",
-   "updated_at": "2026-09-10T02:45:57Z",
+   "updated_at": "2026-09-10T04:18:31Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -186,11 +188,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T02:45:56Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34367555883/job/102531656566"
+     "completed_at": "2026-09-10T04:18:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34367555883/job/102531656566",
+     "log_fetch_failed": true
     }
    ]
   },
