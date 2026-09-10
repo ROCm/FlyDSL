@@ -30,6 +30,7 @@ from flydsl._mlir.dialects import vector
 from flydsl.expr import arith, as_ir_value, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, T
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "topk_gating_softmax_kernel"
@@ -39,18 +40,20 @@ WARPS_PER_BLOCK = 4
 BLOCK_THREADS = WARPS_PER_BLOCK * WARP_SIZE  # 256 on gfx95x
 
 
-def _pick_layout(num_experts: int):
+def _pick_layout(num_experts: int, max_vpt: int = 16):
     """Pick (VPT, THREADS_PER_TOKEN) for the multi-token-per-block fast path.
 
     Constraints:
       - ``VPT`` is a power of 2 in [1, 16]
       - ``THREADS_PER_TOKEN = num_experts // VPT`` is a power of 2 <= WARP_SIZE
-      - prefer the largest ``VPT`` (fewest loads, widest atom)
+      - prefer the largest ``VPT <= max_vpt`` (fewest loads, widest atom)
 
     For ``num_experts=128`` on a 64-wide wave this picks ``(VPT=16, TPT=8)``
     (TOKENS_PER_BLOCK=32). vLLM's ``topkGatingSoftmax`` uses VPT=8 / TPT=16
     """
     for vpt in [16, 8, 4, 2, 1]:
+        if vpt > max_vpt:
+            continue
         if num_experts % vpt != 0:
             continue
         tpt = num_experts // vpt
@@ -62,18 +65,18 @@ def _pick_layout(num_experts: int):
     return None, None
 
 
-def _compute_topk_gating_layout(num_experts: int, topk: int, dtype_str: str):
+def _compute_topk_gating_layout(num_experts: int, topk: int, dtype_str: str, *, max_vpt: int = 16):
     """Resolve the full layout dict (VPT, THREADS_PER_TOKEN, TOKENS_PER_BLOCK,
     ATOM_BITS, ELEMS_PER_ATOM, ATOMS_PER_THREAD, elem_bits) for the multi-
     token-per-block gating softmax kernel.
 
-    Shared by the standalone kernel in this module and the fused oneshot
-    kernel in ``kernels/moe_sorting_kernel.py`` so the two paths can never
-    disagree on the layout.
+    Shared by the standalone kernel and the fused oneshot sorting kernel.
+    The default preserves the fused layout; standalone small-batch dispatch
+    can request a lower ``max_vpt`` without changing the fused path.
     """
     elem_bits = 32 if dtype_str == "f32" else 16
 
-    VPT, THREADS_PER_TOKEN = _pick_layout(num_experts)
+    VPT, THREADS_PER_TOKEN = _pick_layout(num_experts, max_vpt)
     if VPT is None:
         raise ValueError(
             f"num_experts={num_experts} is not supported by the multi-token-per-block "
@@ -389,11 +392,13 @@ def _emit_topk_gating_softmax_body(
                 _store_scalar_i32(tei_div, Int32(k_idx), tei_val)
 
 
-def build_topk_gating_softmax_module(
+def _build_topk_gating_softmax_module(
     num_experts: int,
     topk: int,
     dtype_str: str = "bf16",
     renormalize: bool = True,
+    *,
+    max_vpt: int = 16,
 ):
     """Build a fused TopK gating softmax kernel.
 
@@ -407,7 +412,7 @@ def build_topk_gating_softmax_module(
         A @flyc.jit launcher function with signature
         ``(gating, weights, indices, tei, num_tokens, *, stream)``.
     """
-    layout = _compute_topk_gating_layout(num_experts, topk, dtype_str)
+    layout = _compute_topk_gating_layout(num_experts, topk, dtype_str, max_vpt=max_vpt)
     elem_bits = layout["elem_bits"]
     VPT = layout["VPT"]
     THREADS_PER_TOKEN = layout["THREADS_PER_TOKEN"]
@@ -682,5 +687,42 @@ def build_topk_gating_softmax_module(
             block=(BLOCK_THREADS, 1, 1),
             stream=stream,
         )
+
+    return launch_topk_gating_softmax
+
+
+def build_topk_gating_softmax_module(
+    num_experts: int,
+    topk: int,
+    dtype_str: str = "bf16",
+    renormalize: bool = True,
+):
+    """Build fused softmax + top-K selection with optional renormalization.
+
+    Returns a JIT launcher accepting gating logits, weights, expert indices,
+    token-expert indices, token count, and stream. For gfx95, 128/256 experts,
+    and top-K in {4, 6, 8}, batches of at most 2048 tokens use eight values per
+    thread to shorten the serial selection chain. Larger batches retain the
+    wider layout to avoid increasing total wave work. The token count remains
+    dynamic: the same compiled launcher supports both layouts.
+    """
+    wide = _build_topk_gating_softmax_module(num_experts, topk, dtype_str, renormalize)
+    if not get_rocm_arch().startswith("gfx95") or num_experts not in (128, 256) or topk not in (4, 6, 8):
+        return wide
+    narrow = _build_topk_gating_softmax_module(num_experts, topk, dtype_str, renormalize, max_vpt=8)
+
+    @flyc.jit
+    def launch_topk_gating_softmax(
+        GatingOutput: fx.Tensor,
+        TopkWeights: fx.Tensor,
+        TopkIndices: fx.Tensor,
+        TokenExpertIndices: fx.Tensor,
+        num_tokens_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        if num_tokens_in <= fx.Int32(2048):
+            narrow(GatingOutput, TopkWeights, TopkIndices, TokenExpertIndices, num_tokens_in, stream)
+        else:
+            wide(GatingOutput, TopkWeights, TopkIndices, TokenExpertIndices, num_tokens_in, stream)
 
     return launch_topk_gating_softmax

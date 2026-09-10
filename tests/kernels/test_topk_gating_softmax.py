@@ -209,6 +209,97 @@ def run_test(num_tokens, num_experts, topk, dtype_str, renormalize=True):
     return passed, flydsl_gpu_us
 
 
+def _dispatch_contract_input(capacity, num_experts, dtype):
+    """Exactly representable logits with ties across both 8- and 16-value lanes."""
+    rows = torch.arange(capacity, dtype=torch.int64)[:, None]
+    cols = torch.arange(num_experts, dtype=torch.int64)[None, :]
+    logits = ((rows * 17 + cols * 7) % 13 - 6).to(torch.float32)
+    logits[0::4] = 0  # Every expert ties: the first K indices must win.
+    logits[1::4] = -4
+    boundary_experts = [i for i in (7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255) if i < num_experts]
+    logits[1::4, boundary_experts] = 4
+    # The kernel selects after f32 softmax. All but the final expert underflow
+    # to zero, so the remaining winners must be the lowest unused indices.
+    logits[2::4] = -1000
+    logits[2::4, -1] = 0
+    return logits.to(dtype)
+
+
+_DISPATCH_CONTRACT_CONFIGS = [
+    (num_experts, topk, dtype_str, (e_idx + k_idx + d_idx) % 2 == 0)
+    for e_idx, num_experts in enumerate((128, 256))
+    for k_idx, topk in enumerate((4, 6, 8))
+    for d_idx, dtype_str in enumerate(("bf16", "f16", "f32"))
+]
+
+
+@pytest.mark.parametrize("num_experts,topk,dtype_str,renormalize", _DISPATCH_CONTRACT_CONFIGS)
+def test_topk_runtime_dispatch_contract(num_experts, topk, dtype_str, renormalize):
+    """Keep the public launcher correct across its runtime batch boundary.
+
+    Reuse one launcher and identically shaped tensors while changing the token
+    count. This catches stale specialization of the runtime scalar, including
+    switching back to the short-batch path. No performance loop is involved.
+    """
+    capacity = 2049
+    quantized_input = _dispatch_contract_input(capacity, num_experts, _torch_dtype(dtype_str))
+    # Stable sorting expresses the kernel's explicit lowest-index tie rule.
+    # The discrete inputs avoid ambiguous approximate-exp boundary rankings.
+    probabilities = torch.softmax(quantized_input.float(), dim=-1)
+    expected_indices = torch.argsort(probabilities, dim=-1, descending=True, stable=True)[:, :topk]
+    expected_weights = probabilities.gather(1, expected_indices)
+    if renormalize:
+        expected_weights /= expected_weights.sum(dim=-1, keepdim=True).clamp_min(1e-20)
+    expected_indices = expected_indices.to(torch.int32)
+
+    gating = quantized_input.to(device="cuda")
+    frozen_input = gating.clone()
+    weights = torch.empty((capacity, topk), dtype=torch.float32, device="cuda")
+    indices = torch.empty((capacity, topk), dtype=torch.int32, device="cuda")
+    tei = torch.empty((capacity, topk), dtype=torch.int32, device="cuda")
+    launch_fn = build_topk_gating_softmax_module(num_experts, topk, dtype_str, renormalize)
+
+    def launch(num_tokens):
+        launch_fn(gating, weights, indices, tei, num_tokens, stream=torch.cuda.current_stream())
+
+    def poison_outputs():
+        weights.fill_(float("nan"))
+        indices.fill_(-1)
+        tei.fill_(-1)
+
+    def check_outputs(num_tokens):
+        torch.cuda.synchronize()
+        assert torch.equal(gating, frozen_input), "gating input was modified"
+        got_weights, got_indices, got_tei = (tensor.cpu() for tensor in (weights, indices, tei))
+        torch.testing.assert_close(got_weights[:num_tokens], expected_weights[:num_tokens], atol=2e-6, rtol=2e-5)
+        assert torch.equal(got_indices[:num_tokens], expected_indices[:num_tokens]), "expert order/ties differ"
+        expected_tei = (
+            torch.arange(topk, dtype=torch.int32)[None, :] * num_tokens
+            + torch.arange(num_tokens, dtype=torch.int32)[:, None]
+        )
+        assert torch.equal(got_tei[:num_tokens], expected_tei)
+        # The dynamic token count can be smaller than the allocated tensor.
+        assert bool(torch.isnan(got_weights[num_tokens:]).all()), "wrote weights beyond num_tokens"
+        assert bool((got_indices[num_tokens:] == -1).all()), "wrote indices beyond num_tokens"
+        assert bool((got_tei[num_tokens:] == -1).all()), "wrote TEI beyond num_tokens"
+
+    for num_tokens in (1, 17, 2048, 2049, 2048):
+        poison_outputs()
+        launch(num_tokens)
+        check_outputs(num_tokens)
+
+    # torch.cuda.graph selects a capture stream. A launch on a stale/default
+    # stream produces an empty or invalid graph; poisoning after capture makes
+    # this observable instead of accepting the output of the eager warmup.
+    for num_tokens in (2048, 2049):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            launch(num_tokens)
+        poison_outputs()
+        graph.replay()
+        check_outputs(num_tokens)
+
+
 def test_all():
     print("=" * 80)
     print("Running TopK Gating Softmax Tests")
