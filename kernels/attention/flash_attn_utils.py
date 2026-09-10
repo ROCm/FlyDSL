@@ -4731,6 +4731,7 @@ class DualwaveFp8KernelContext:
         self.v_gmem_elem_offset = self.kv_tok_base * self.stride_v_n_v + self.kv_head_idx * traits.HEAD_DIM_V
 
     def init_varlen_causal_lpt_order(self):
+        """Reverse active query blocks without making padded workgroups valid."""
         num_q_blocks = (self.seqlen_q_v + self.traits.BLOCK_M - 1) // self.traits.BLOCK_M
         active_q_block = self.q_block_idx < num_q_blocks
         reversed_q_block = num_q_blocks - 1 - self.q_block_idx
@@ -5019,6 +5020,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         return self._pack_p_fp8(f32)
 
     def _pack_p_fp8(self, f32):
+        # P words must follow vectorized K's four-token groups for paged P*V.
         packed = self._pack_fp8_i32x8(f32)
         if const_expr(self.traits.PAGED):
             words = Vec(packed, (8,), fx.Int32)
@@ -5358,6 +5360,7 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
         )
 
     def _stage_v_fp8_vectorized_segment(self, tile_start, buf_id, d_offset, segment_dim, page_id):
+        # Sharing the prefix store's address expression increases tail VGPR spills.
         traits = self.traits
         src_div = self.make_page_view(self.v_base_iter, page_id, is_value=True)
         token_groups16 = traits.BLOCK_N // traits.KV_VEC_SIZE
@@ -5503,6 +5506,7 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
 
     def load_v(self, buf_id):
         if const_expr(self.traits.FP8_PV_SEGMENTED and not self.traits.BN128):
+            # P*V reads segmented chunks on demand; carry only their LDS slot.
             return fx.Int64(buf_id)
         if const_expr(self.traits.PAGED):
             return self._load_v_fp8_vectorized_bankpad(buf_id)
@@ -5580,11 +5584,8 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         s_lo, s_hi = v_s
         kv_tile_start = tile_idx * traits.BLOCK_N
         kv_start_i32 = fx.Int32(kv_tile_start)
-        # The wide fp8 MFMA exposes eight score elements per half-wave group,
-        # but after vectorized-K sigma their physical key ids are arranged in
-        # 4-token groups (0..3, 8..11, ...), exactly like the dense mapping.
-        # Keep this local to the fp8 path; the bf16 vectorized kernel has a
-        # different operand/output layout.
+        # Vectorized-K sigma arranges wide FP8 scores in four-token groups
+        # (0..3, 8..11, ...), matching dense FP8 but not vectorized BF16.
         lane_off_i32 = fx.Int32(self.lane_div_32) * fx.Int32(4)
         # q_row_i32 is set by init_q_row (called after helper construction), so read
         # it from the live ctx.

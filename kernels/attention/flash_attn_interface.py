@@ -509,7 +509,7 @@ def _build_paged_fp8(
 
 # ── paged-KV native path ────────────────────────────────────────────────────
 
-# Native page geometry and generic D192 batch-interleave tuning.
+# Native page geometry and batch-interleave limits.
 _PAGED_PAGE_SIZE = 64
 _PAGED_BT_LDS_SIZE = 2048
 _PAGED_FP8_BATCH_INTERLEAVE_MAX_GROUP = 8
@@ -517,7 +517,7 @@ _PAGED_FP8_V192_BATCH_INTERLEAVE_MAX_BATCH = 16
 
 
 def _paged_fp8_batch_interleave_group(batch_size: int, head_dims: tuple[int, int], *, paired: bool = False) -> int:
-    """Choose a divisor-sized group for paged D192 or small paired D128 batches."""
+    """Choose a batch divisor for the generic or paired-page schedule."""
     if paired:
         if head_dims == (128, 128) and batch_size in (2, 3, 5):
             return batch_size
@@ -835,13 +835,10 @@ def _flydsl_flash_attn_paged(
                 kv_cache_layout=kv_cache_layout,
                 has_bias=bias is not None,
             )
-        # The ambient current stream is already ordered correctly. Enter a
-        # stream context only when the caller explicitly requests a different
-        # stream for wrapper-owned casts, copies, and allocations.
+        # Wrapper-owned copies must follow an explicit launch stream; the ambient
+        # current stream needs no extra context.
         stream_context = contextlib.nullcontext() if stream is None else torch.cuda.stream(launch_stream)
         with stream_context:
-            # Keep wrapper-owned casts and copies ordered with an explicit
-            # non-current launch stream.
             block_table_i32 = (
                 (block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32))
                 .contiguous()
@@ -995,7 +992,7 @@ def flydsl_flash_attn_func(
            Varlen: ``[total_q, H, D]`` (packed, cu_seqlens_q required).
         k: Key tensor. Dense: ``[B, Skv, Hkv, D]``.
            Varlen: ``[total_kv, Hkv, D]``.
-        v: Value tensor, same shape as k.
+        v: Value tensor with k's leading dimensions and its own head width.
            Paged KV cache: physical K/V cache tensors. Supported
            ``kv_cache_layout`` values:
            - ``linear``: 4D paged K/V, ``[NumBlocks, PageSize, NumKVHeads, HeadDim]``.
@@ -1004,7 +1001,7 @@ def flydsl_flash_attn_func(
            - ``vectorized``: aiter-style 5D K/V, where
              ``K = [NumBlocks, NumKVHeads, HeadDim / kVectorSize, PageSize, kVectorSize]``
              and
-             ``V = [NumBlocks, NumKVHeads, PageSize / kVectorSize, HeadDim, kVectorSize]``.
+             ``V = [NumBlocks, NumKVHeads, PageSize / kVectorSize, ValueHeadDim, kVectorSize]``.
              Here ``kVectorSize = 16 / element_size`` (bf16/fp16: 8, fp8: 16);
              page_size and head_dim must be divisible by it.
         causal: Bottom-right aligned causal mask when True.
