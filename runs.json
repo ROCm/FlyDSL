@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-10T21:25:44Z",
+ "updated": "2026-09-10T23:46:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34543447535,
+   "pr": 1119,
+   "commit": "85739cbadd2901b3ff1ded7c050ddedc301947d6",
+   "branch": "codex/topk-gating-mi355",
+   "event": "pull_request",
+   "title": "[Perf] Tune small-batch TopK gating on gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34543447535",
+   "created_at": "2026-09-10T23:43:59Z",
+   "updated_at": "2026-09-10T23:44:46Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 34540667903,
+   "pr": null,
+   "commit": "1a640143e61b71c7d4482b4c57327a7a54738573",
+   "branch": "codex/topk-gating-mi355",
+   "event": "pull_request",
+   "title": "[Perf] Tune small-batch TopK gating on gfx950",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34540667903",
+   "created_at": "2026-09-10T23:06:55Z",
+   "updated_at": "2026-09-10T23:44:24Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-10T23:31:51Z",
+     "completed_at": "2026-09-10T23:44:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34540667903/job/103088001920"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-10T23:31:05Z",
+     "completed_at": "2026-09-10T23:43:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34540667903/job/103088001941"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-10T23:31:05Z",
+     "completed_at": "2026-09-10T23:43:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34540667903/job/103088002339"
+    }
+   ]
+  },
   {
    "run_id": 34526885255,
    "pr": 1118,
@@ -20,11 +78,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T20:54:02Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849926"
+     "completed_at": "2026-09-10T22:05:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849926",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -38,9 +97,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-10T20:53:11Z",
+     "started_at": "2026-09-10T23:32:00Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849971"
     }
@@ -1743,36 +1802,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34320441994",
    "created_at": "2026-09-09T06:44:29Z",
    "updated_at": "2026-09-09T06:44:29Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 34320440579,
-   "pr": null,
-   "commit": "87c3e93e59e6582d726dd86116ff2a8ae6effaa0",
-   "branch": "fix/llvm-amdgpu-cvt-pk-f32-f8-true16",
-   "event": "pull_request",
-   "title": "[LLVM] Fix true16 lowering for packed FP8 conversions",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34320440579",
-   "created_at": "2026-09-09T06:44:28Z",
-   "updated_at": "2026-09-09T06:44:28Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 34311697347,
-   "pr": null,
-   "commit": "b0e5033916a619483f0173ebcdd2e19faae83f50",
-   "branch": "feat/rocdl-ordered-memory-primitives",
-   "event": "pull_request",
-   "title": "[DSL] Add llvm load/store primitives",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34311697347",
-   "created_at": "2026-09-09T04:37:33Z",
-   "updated_at": "2026-09-09T04:37:33Z",
    "actor": "big-yellow-duck",
    "jobs": []
   }
