@@ -3,51 +3,74 @@ name: flydsl-code-review
 description: >
   Review a FlyDSL diff, branch, commit range, or PR for correctness bugs and
   convention violations using the repository's existing skills and policy docs.
-  Runs nine independent review angles, verifies every candidate with an
-  independent verifier, and reports a ranked, capped findings list. Pass --comment
-  to post findings as inline PR comments. Use when asked to review a diff, review
-  a PR, or check changes before pushing.
-allowed-tools: Read Bash Grep Glob Agent Workflow
+  Uses one resumable runner to pin the reviewed tree, run nine independent review
+  angles, verify every candidate, and preserve the evidence in a structured result.
+  Pass --comment to publish a completed PR review. Use when asked to review a diff,
+  review a PR, or check changes before pushing.
+allowed-tools: Read Bash
 ---
 
 # FlyDSL Code Review
 
 Find real defects in a change, then prove each one before reporting it.
 
-The structure is: **many independent finders, one independent verifier per
-candidate, then rank and cap.** Finders are cheap and biased toward surfacing;
-verifiers are the filter. Do not merge those two jobs — a finder that quietly
-discards its own half-believed candidates bypasses verification entirely, and
-that is the single largest cause of missed bugs.
+The sole execution entry is `.claude/skills/flydsl-code-review/scripts/run_review.py`. It runs independent finders,
+one verifier per candidate, a challenger for every CONFIRMED, and a fresh sweep.
+Code constructs the final ranked report directly from those records. The sections
+below supply its review method; they are not an alternative manual execution path.
 
 ## Invocation
 
 ```text
-/flydsl-code-review                       # current branch vs upstream
+/flydsl-code-review                       # current branch vs main, including local changes
 /flydsl-code-review HEAD~3                # a ref or ref range
 /flydsl-code-review 1100                  # a PR number
 /flydsl-code-review kernels/attention/    # restrict to a path
 /flydsl-code-review focus on the LDS changes   # free-form instruction
-/flydsl-code-review --comment             # also post to the PR
+/flydsl-code-review 1100 --comment         # also publish the completed PR review
 ```
 
-Any argument that is not `--comment` is the review target. Honor it verbatim:
-a path or free-form instruction narrows scope and focus, and findings the
-instruction asks you to skip must not be surfaced.
+Pass the target and options to the runner; handle `--comment` after it returns.
+Honor user scope restrictions verbatim. Use `--instructions` for free-form focus,
+`--path` for paths, and explicit `--base`/`--head` for a frozen comparison.
 
-## Step 1 — Gather the diff
+## Step 1 — Run the review
 
-Run `git diff @{upstream}...HEAD`. If there is no upstream, fall back to
-`git diff main...HEAD`, then `git diff HEAD~1`. If the range diff is empty or
-there are uncommitted changes, also run `git diff HEAD` and include the working
-tree — this review usually runs before the commit.
+Invoke the runner with Bash from the repository root:
 
-If a PR number, branch, ref range, or path was passed, review that instead. Use
-`gh pr diff <n>` for a PR.
+```bash
+python3 .claude/skills/flydsl-code-review/scripts/run_review.py 1100
+python3 .claude/skills/flydsl-code-review/scripts/run_review.py --base HEAD~3 --head HEAD
+python3 .claude/skills/flydsl-code-review/scripts/run_review.py --path kernels/attention --instructions 'focus on LDS'
+python3 .claude/skills/flydsl-code-review/scripts/run_review.py --resume /tmp/flydsl-review-<run-directory>
+```
 
-That diff is the review scope. Read the enclosing function for each hunk: bugs
-on unchanged lines of a touched function are in scope, because the change either
-re-exposes them or failed to fix them.
+Do not invoke Workflow or improvise an inline Agent sequence. The runner requires
+Python 3.10+, Git, and Claude Code CLI with `--json-schema`; PR targets also need
+authenticated `gh`. If it cannot run, report INCOMPLETE with the actual error.
+
+The runner prints its run ID and directory immediately. Its default directory is
+under `/tmp`; use `--run-dir <new-empty-directory>` outside the checkout for
+longer-lived artifacts.
+It copies the required Git objects into an independent checkout, fixes base,
+merge-base and head OIDs, and hashes the diff. Default branch/path reviews include
+local tracked and untracked changes in a synthetic commit there. Explicit refs
+and PRs review committed trees. Every agent reads that checkout and fixed diff;
+read the enclosing functions as well as changed lines. No phase rereads a moving
+PR diff or the caller's working tree.
+
+Defaults are 3 concurrent agents, 600 seconds per agent and 1800 seconds per
+phase including queue time. Override with `--concurrency`, `--agent-timeout` and
+`--phase-timeout`. Ctrl-C/SIGTERM cancels child process groups. Completed stages
+and all attempt logs are checkpointed in `state.json`; `--resume` retries only
+incomplete stages with the saved scope, model and configuration. Changed runner
+or skill content requires a new run. Model and effort use the CLI defaults unless
+the user supplies `--model`/`--effort`; do not silently select a different model.
+
+Read `result.json` after the runner exits. Exit 0 means COMPLETE; exit 1 means
+INCOMPLETE. A missing result, running process, task notification or partial
+transcript is not a completed review. Preserve the run directory when reporting
+an interruption so the user can resume it.
 
 ## Reusing existing skills
 
@@ -70,19 +93,12 @@ Verifiers and challengers must read that source and check its applicability.
 
 ## Step 2 — Run the nine angles
 
-If the Workflow tool is available, run the fan-out as a workflow instead of
-inline — it pipelines verification against finding, so verifiers start before
-the last finder returns:
-
-```text
-Workflow({name: 'flydsl-code-review', args: '<target>'})
-```
-
-Otherwise run the angles inline with the Agent tool. Nine independent finders,
-**up to 6 candidates each**, one angle per agent. Do not let one angle's
+The runner starts nine independent finders, **up to 6 candidates each**, one
+angle per agent. It collects every result before admission. Do not let one angle's
 conclusions suppress another's: if two angles flag the same line for different
-reasons, record both. Each candidate needs a `file`, a `line`, a one-line
-`summary`, and a concrete `failure_scenario`.
+reasons, record both. Each candidate needs a repository-relative `file`, a positive
+integer `line` (or null), a one-line `summary`, a specific `mechanism`/root cause,
+`severity` (P0–P3), and a concrete `failure_scenario`.
 
 Angles A–F hunt correctness bugs. Angles G–I hunt convention violations and
 cleanup; for those, `failure_scenario` states the concrete cost (what breaks in
@@ -232,10 +248,14 @@ Do not flag general "needs more tests" — only these specific contract breaks.
 
 ## Step 3 — Verify every candidate
 
-Dedup candidates pointing at the same line and mechanism, keeping the one with
-the most concrete failure scenario. For each remaining candidate run **one
-independent verifier** with the Agent tool. Give it the diff, the relevant
-files, and the candidate. It returns exactly one verdict:
+The runner deduplicates only on the same normalized file, exact line and mechanism,
+preserving all source observations. Different mechanisms on nearby or identical
+lines remain distinct. It verifies every remaining candidate, without a shared
+admission budget, in a deterministic order that puts correctness first.
+
+Each assigned **independent verifier** reads the fixed diff, relevant files and
+the candidate's source observations, then returns exactly one verdict. A verifier
+judges its assigned candidate; it does not launch other agents.
 
 - **CONFIRMED** — can name the inputs, state, or target that trigger it and the
   resulting wrong output, crash, hang, or CI failure. Quote the line.
@@ -284,18 +304,20 @@ discarded, the verdict is REFUTED.
 
 ### Challenge the CONFIRMED ones
 
-Every candidate a verifier marks CONFIRMED gets one more agent whose only job is
+The runner gives every candidate marked CONFIRMED one more agent whose only job is
 to refute it, told to assume the prior verifier narrated its arithmetic instead
 of running it and to re-derive every number itself. If the challenger returns
 PLAUSIBLE or REFUTED, take the lower verdict. Only CONFIRMED pays for this —
 typically a handful of candidates, and a wrong CONFIRMED costs more credibility
 than six hedged findings.
 
-Keep candidates whose verdict is CONFIRMED or PLAUSIBLE.
+Keep candidates whose verdict is CONFIRMED or PLAUSIBLE. A failed or absent
+challenger leaves the candidate unresolved, not CONFIRMED. Both verifier and
+challenger evidence are retained, including when they agree.
 
 ## Step 4 — Sweep for gaps
 
-Run one more finder as a fresh reviewer holding the verified list. Re-read the
+The runner starts one more finder holding the verified list. Re-read the
 diff and the enclosing functions looking **only** for defects not already
 listed — do not re-derive or re-confirm anything on it.
 
@@ -308,64 +330,57 @@ nothing new, return nothing — do not pad.
 
 ## Step 5 — Report
 
-Merge findings that describe the same root cause and combine their evidence.
-Rank most-severe first. **Correctness findings (A–F) always outrank convention
-findings (G–I) when the cap forces a cut.** CONFIRMED outranks PLAUSIBLE within
-each group. Keep at most **12**.
+Synthesis is deterministic code. It retains candidate IDs, kinds, severities,
+source observations, verdicts and evidence; a model cannot add an unverified
+finding or upgrade a verdict while rewriting the report. **Correctness findings
+(A–F) always outrank convention findings (G–I) when the cap forces a cut.**
+CONFIRMED outranks PLAUSIBLE within each group, then severity and stable location
+break ties. Keep at most **12** across confirmed findings and plausible risks.
 
-For each finding: the file and line, one sentence on what is wrong, the concrete
-failure scenario, and the verdict. Cite the line. Lead with a two-to-three
-sentence summary of the review.
+The artifact's `findings` contains CONFIRMED only; `risks` contains PLAUSIBLE,
+reported separately and not as merge blockers. `reported_ids` preserves their
+combined rank. The full candidate list, refutations, stage attempts, failures,
+usage and OIDs remain in the artifact even when the display cap excludes them.
+Cost is labelled as a lower bound if any attempt lacks a usage record.
 
-If nothing survives verification, say so plainly. An empty review is a valid
-result and is better than a padded one.
+Any failed, timed-out, denied, skipped or unresolved required stage yields
+`status: INCOMPLETE`, stage failure labels and unresolved candidate IDs. Valid
+partial findings are retained as `partial_findings`, never as a clean review or
+a publishable result. Only a completed run may report that nothing survived.
 
 ## Posting to GitHub (`--comment`)
 
-Only when `--comment` was passed **and** the review target is a GitHub PR. If
-the target is not a PR, print the findings and say that `--comment` was ignored.
-
-Do not hand-roll the `gh api` calls. GitHub rejects an inline comment on any line
-that is not in the PR diff, so placement has to be decided against the actual
-patch. `.claude/skills/flydsl-code-review/scripts/post_review.py` does that: it
-parses each changed file's patch
-into the set of commentable RIGHT-side lines, posts what fits inline, and rolls
-everything else — untouched files, lines outside a hunk, findings with no line —
-into one summary comment so nothing is dropped.
-
-Write the findings to a JSON file, then:
+Only publish when the user requests it and the artifact identifies a GitHub PR.
+Use `.claude/skills/flydsl-code-review/scripts/post_review.py` with the runner's complete `result.json`; do not
+extract a findings array, rewrite the artifact, or hand-roll API calls.
 
 ```bash
 python3 .claude/skills/flydsl-code-review/scripts/post_review.py \
-    --pr <number> --findings <file.json> --dry-run
+    --findings /tmp/flydsl-review-<run-directory>/result.json --dry-run
 ```
 
-Each finding is `{"file", "line", "summary", "failure_scenario", "verdict"}`;
-`file` may be absolute or repo-relative, and `line` may be omitted. A bare JSON
-array works, as does the workflow's result object with its `findings` key.
+Show the dry-run payload and routing. Independently recheck the load-bearing
+step of each CONFIRMED finding before publication, executing arithmetic where
+needed; retain the artifact's verdict and evidence. Publish the checked payload
+only with the user's authorization, using the same command without `--dry-run`.
+Existing explicit authorization applies; do not ask for it again unnecessarily.
 
-**Always `--dry-run` first** and show the user the routing — how many land
-inline, how many defer, and on which lines. Drop `--dry-run` only after they
-confirm. Posting is not reversible: every comment notifies the PR's
-participants, and deleting one later does not unsend the mail.
+The publisher reconstructs findings from the saved verifier records and rejects
+incomplete, malformed or altered results. Repository, PR, base and head come from
+that artifact; optional `--repo`, `--pr` and `--expected-head` assert equality.
+It checks both PR OIDs again after reading the patches and immediately before
+posting. A moved or closed PR requires a new review.
 
-**Re-derive every CONFIRMED finding yourself before posting.** Not "read the
-evidence and find it convincing" — independently reproduce the load-bearing
-step, running the arithmetic where there is arithmetic. This is the only check
-in the pipeline that does not depend on an agent doubting its own reasoning,
-which makes it the one that actually holds. On PR #1107 it was skipped and a
-false CONFIRMED reached the author's inbox: the chain quoted real lines and real
-constants but conflated a 16-row tile index with a 32-row super-row index, so
-the out-of-bounds reads it correctly identified all landed on rows the C
-descriptor discards. A fifteen-line enumeration would have caught it. State the
-re-derivation result alongside the dry-run routing so the user is approving a
-checked list, not a plausible one. PLAUSIBLE findings do not need this — they
-are labelled uncertain and cost the author little.
+All inline findings and deferred text go in one `POST /pulls/{pr}/reviews` with
+`event: COMMENT` and the reviewed `commit_id`. Plausible risks stay in a separate
+section of the review body. Deferred findings retain the verdict, scenario and
+verifier/challenger evidence. The body includes candidate IDs, run ID, reviewed
+OIDs, diff hash and usage metrics.
 
-The script refuses to comment on a PR that is not open.
-
-Expect the post to be denied even when `Bash(*)` is allowed: the permission
-classifier cannot evaluate what the script does and blocks it independently of
-the allow list. When that happens, ask the user to run the command themselves.
-Do not reach for `gh api` instead — that evades the same evaluation the block
-exists to force, and hand-computed line numbers are what the script is for.
+A deterministic finding-set marker prevents sequential retries from duplicating
+an existing review. After a lost POST response the script checks for that marker;
+it never retries the POST automatically or switches to individual comments.
+GitHub has no conditional review-write API: a push racing the final check may
+make the review outdated, but cannot change its pinned commit. Stop and report
+any publication error with the artifact path. A denied write is not permission
+to use another posting route.
