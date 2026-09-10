@@ -44,11 +44,72 @@ def _fp8_scale_for_leader(is_leader, local_max):
     return e8m0
 
 
+@flyc.jit
+def _fp8_scale(local_max):
+    working_bits = (local_max * fx.Int32(0x3B124925).bitcast(fx.Float32)).bitcast(fx.Int32)
+    e8m0 = (working_bits + fx.Int32(0x7FFFFF)).shrui(fx.Int32(23))
+    return (e8m0 > fx.Int32(0xFF)).select(fx.Int32(0xFF), e8m0)
+
+
+def _quantize_fp8_payload(v8, weight):
+    weighted = fx.Vector.from_elements([v8[i] * weight for i in range_constexpr(8)], fx.Float32)
+    vals = [weighted[i] for i in range_constexpr(8)]
+    local_max = fabs_f32(vals[0])
+    for q in range_constexpr(1, 8):
+        local_max = local_max.maximumf(fabs_f32(vals[q]))
+    max_bits = local_max.bitcast(fx.Int32)
+    for dpp_ctrl in (0xB1, 0x4E):
+        remote_bits = rocdl.update_dpp(
+            T.i32,
+            max_bits.ir_value(),
+            max_bits.ir_value(),
+            dpp_ctrl,
+            0xF,
+            0xF,
+            True,
+        )
+        local_max = local_max.maximumf(fx.Int32(remote_bits).bitcast(fx.Float32))
+        max_bits = local_max.bitcast(fx.Int32)
+    e8m0 = _fp8_scale(local_max)
+    block_scale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
+    pk_ty = T.vec(2, T.i16)
+    packed_lo = fx.Vector.filled(2, 0, fx.Int16).ir_value()
+    packed_hi = fx.Vector.filled(2, 0, fx.Int16).ir_value()
+    for pair in range_constexpr(4):
+        if pair < 2:
+            packed_lo = rocdl.cvt_scalef32_pk_fp8_f32(
+                pk_ty,
+                packed_lo,
+                vals[pair * 2].ir_value(),
+                vals[pair * 2 + 1].ir_value(),
+                block_scale.ir_value(),
+                pair,
+            )
+        else:
+            packed_hi = rocdl.cvt_scalef32_pk_fp8_f32(
+                pk_ty,
+                packed_hi,
+                vals[pair * 2].ir_value(),
+                vals[pair * 2 + 1].ir_value(),
+                block_scale.ir_value(),
+                pair - 2,
+            )
+    payload = fx.Vector.from_elements(
+        [
+            fx.Vector(packed_lo).bitcast(fx.Int32)[0],
+            fx.Vector(packed_hi).bitcast(fx.Int32)[0],
+        ],
+        fx.Int32,
+    )
+    return payload, e8m0
+
+
 # fmt: off
 def p2p_scatter_epilog(lds_acc_base, accm, m_row, n_block_idx, wave, lane, *, N_OUT, BM, BN, SBM, npes, topk,
     log2_max_tok, mask_max_tok, recv_cap, comb_inp_nbytes, lds_packed_off, lds_weight_off,
     lds_peer_off, g2_bf16_lds=False, p2p_quant_type="none", int8_mode=False,
-    arg_ascale=0, arg_bscale=0, arg_stids=0, arg_eids=0):
+    arg_ascale=0, arg_bscale=0, arg_stids=0, arg_eids=0, scatter_vec=8,
+    fp8_epilog_opt=False):
 # fmt: on
     """CShuffle one GEMM2 tile into weighted BF16 rows and scatter them to peers."""
     kMChunks = BM // 16
@@ -66,8 +127,26 @@ def p2p_scatter_epilog(lds_acc_base, accm, m_row, n_block_idx, wave, lane, *, N_
     quant_fp8 = p2p_quant_type == "fp8_blockwise_1x32"
     if p2p_quant_type not in ("none", "fp8_blockwise_1x32"):
         raise ValueError(f"unsupported p2p_quant_type={p2p_quant_type!r}")
+    optimize_fp8_epilog = quant_fp8 and fp8_epilog_opt
     out_elem_bytes = 1 if quant_fp8 else 2
     token_nbytes = N_OUT + N_OUT // 32 if quant_fp8 else N_OUT * out_elem_bytes
+    quant_store_cache_modifier = (
+        0
+        if optimize_fp8_epilog
+        and (recv_cap <= npes * 32 or recv_cap == npes * 128)
+        else 2
+    )
+
+    def load_f32_v8(index):
+        return fx.Vector(
+            lds_vec_load(
+                lds_acc_base,
+                index * fx.Int32(4),
+                fx.Vector.make_type(8, fx.Float32),
+                fx.Float32,
+                align=16,
+            )
+        )
     if const_expr(int8_mode):
         sx_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_ascale)
         sw_rsrc = buffer_ops.create_buffer_resource_from_addr(arg_bscale)
@@ -129,18 +208,69 @@ def p2p_scatter_epilog(lds_acc_base, accm, m_row, n_block_idx, wave, lane, *, N_
                 else:
                     lds_base_fptr[idx] = fx.Float32(value)
 
+    if const_expr(optimize_fp8_epilog):
+        # Hide metadata LDS latency under the final CShuffle stores.
+        prefetched_p = fx.ptr_load(
+            lds_typed_ptr(
+                fx.Int32(lds_packed_off) + wave * fx.Int32(4),
+                T.i32,
+                align=4,
+            )
+        )
+        prefetched_weight = fx.ptr_load(
+            lds_typed_ptr(
+                fx.Int32(lds_weight_off) + wave * fx.Int32(4),
+                T.f32,
+                align=4,
+            )
+        )
+
     fx.barrier()
 
     for row_iter in range_constexpr(BM // 4):
         row = wave + fx.Int32(row_iter * 4)
         row_byte_off = row * fx.Int32(4)
-        p = fx.ptr_load(
-            lds_typed_ptr(fx.Int32(lds_packed_off) + row_byte_off, T.i32, align=4)
-        )
-        if const_expr(not g2_bf16_lds):
-            weight = fx.ptr_load(
-                lds_typed_ptr(fx.Int32(lds_weight_off) + row_byte_off, T.f32, align=4)
+        if const_expr(optimize_fp8_epilog):
+            active = lane < fx.Int32(BN // 8)
+            col = active.select(lane * fx.Int32(8), fx.Int32(0))
+            idx0 = row * fx.Int32(BN) + col
+            p = prefetched_p
+            weight = prefetched_weight
+            if row_iter + 1 < BM // 4:
+                next_row = wave + fx.Int32((row_iter + 1) * 4)
+                prefetched_p = fx.ptr_load(
+                    lds_typed_ptr(
+                        fx.Int32(lds_packed_off) + next_row * fx.Int32(4),
+                        T.i32,
+                        align=4,
+                    )
+                )
+                prefetched_weight = fx.ptr_load(
+                    lds_typed_ptr(
+                        fx.Int32(lds_weight_off) + next_row * fx.Int32(4),
+                        T.f32,
+                        align=4,
+                    )
+                )
+            rocdl.sched_barrier(0)
+            v8 = load_f32_v8(idx0)
+            rocdl.sched_barrier(0)
+        else:
+            p = fx.ptr_load(
+                lds_typed_ptr(
+                    fx.Int32(lds_packed_off) + row_byte_off,
+                    T.i32,
+                    align=4,
+                )
             )
+            if const_expr(not g2_bf16_lds):
+                weight = fx.ptr_load(
+                    lds_typed_ptr(
+                        fx.Int32(lds_weight_off) + row_byte_off,
+                        T.f32,
+                        align=4,
+                    )
+                )
         p = rocdl.readfirstlane(T.i32, p.ir_value())
         if const_expr(not g2_bf16_lds):
             weight = rocdl.readfirstlane(T.f32, weight.ir_value())
@@ -164,99 +294,107 @@ def p2p_scatter_epilog(lds_acc_base, accm, m_row, n_block_idx, wave, lane, *, N_
         row_off = row_base + n_block_idx * fx.Int32(BN * out_elem_bytes)
 
         # Inactive lanes read safe LDS and issue a bounded OOB store.
-        active = lane < fx.Int32(BN // 8)
-        col = active.select(lane * fx.Int32(8), fx.Int32(0))
-        idx0 = row * fx.Int32(BN) + col
+        if const_expr(not optimize_fp8_epilog):
+            active = lane < fx.Int32(BN // scatter_vec)
+            col = active.select(lane * fx.Int32(scatter_vec), fx.Int32(0))
+            idx0 = row * fx.Int32(BN) + col
         if const_expr(g2_bf16_lds):
             pk = fx.Vector(
                 lds_vec_load(
                     lds_acc_base,
                     idx0 * fx.Int32(2),
-                    fx.Vector.make_type(8, fx.BFloat16),
+                    fx.Vector.make_type(scatter_vec, fx.BFloat16),
                     fx.BFloat16,
                     align=16,
                 )
             )
         else:
-            v8 = fx.Vector(
-                lds_vec_load(
-                    lds_acc_base,
-                    idx0 * fx.Int32(4),
-                    fx.Vector.make_type(8, fx.Float32),
+            if const_expr(not optimize_fp8_epilog):
+                v8 = fx.Vector(
+                    lds_vec_load(
+                        lds_acc_base,
+                        idx0 * fx.Int32(4),
+                        fx.Vector.make_type(scatter_vec, fx.Float32),
+                        fx.Float32,
+                        align=16,
+                    )
+                )
+                weighted_v8 = fx.Vector.from_elements(
+                    [v8[i] * weight for i in range_constexpr(scatter_vec)],
                     fx.Float32,
-                    align=16,
                 )
-            )
-            weighted_v8 = fx.Vector.from_elements([v8[i] * weight for i in range_constexpr(8)], fx.Float32)
-            if const_expr(not quant_fp8):
-                pk = weighted_v8.to(fx.BFloat16)
+                if const_expr(not quant_fp8):
+                    pk = weighted_v8.to(fx.BFloat16)
         if const_expr(quant_fp8):
-            vals = [fx.Float32(weighted_v8[i]) for i in range_constexpr(8)]
-            local_max = fabs_f32(vals[0])
-            for q in range_constexpr(1, 8):
-                local_max = local_max.maximumf(fabs_f32(vals[q]))
-            max_bits = local_max.bitcast(fx.Int32)
-            for xor_lane in (1, 2):
-                remote_bits = rocdl.ds_bpermute(
-                    T.i32,
-                    (lane ^ fx.Int32(xor_lane)) * fx.Int32(4),
-                    max_bits,
-                )
-                remote_max = fx.Int32(remote_bits).bitcast(fx.Float32)
-                local_max = local_max.maximumf(remote_max)
+            if const_expr(optimize_fp8_epilog):
+                payload, e8m0 = _quantize_fp8_payload(v8, weight)
+                scale_group_lanes = 4
+            else:
+                vals = [
+                    fx.Float32(weighted_v8[i])
+                    for i in range_constexpr(scatter_vec)
+                ]
+                local_max = fabs_f32(vals[0])
+                for q in range_constexpr(1, scatter_vec):
+                    local_max = local_max.maximumf(fabs_f32(vals[q]))
                 max_bits = local_max.bitcast(fx.Int32)
-            leader_lane = lane & fx.Int32(~3)
-            is_scale_leader = (lane & fx.Int32(3)) == fx.Int32(0)
-            leader_e8m0 = _fp8_scale_for_leader(is_scale_leader, local_max)
-            e8m0 = fx.Int32(
-                rocdl.ds_bpermute(
-                    T.i32,
-                    leader_lane * fx.Int32(4),
-                    leader_e8m0,
+                for xor_lane in (1, 2):
+                    if xor_lane < 32 // scatter_vec:
+                        remote_bits = rocdl.ds_bpermute(
+                            T.i32,
+                            (lane ^ fx.Int32(xor_lane)) * fx.Int32(4),
+                            max_bits,
+                        )
+                        remote_max = fx.Int32(remote_bits).bitcast(fx.Float32)
+                        local_max = local_max.maximumf(remote_max)
+                        max_bits = local_max.bitcast(fx.Int32)
+                scale_group_lanes = 32 // scatter_vec
+                leader_lane = lane & fx.Int32(~(scale_group_lanes - 1))
+                leader_e8m0 = _fp8_scale_for_leader(
+                    (lane & fx.Int32(scale_group_lanes - 1)) == fx.Int32(0),
+                    local_max,
                 )
-            )
-            block_scale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
-            pk_ty = T.vec(2, T.i16)
-            packed_lo = fx.Vector.filled(2, 0, fx.Int16).ir_value()
-            packed_hi = fx.Vector.filled(2, 0, fx.Int16).ir_value()
-            for pair in range_constexpr(4):
-                if pair < 2:
-                    packed_lo = rocdl.cvt_scalef32_pk_fp8_f32(
-                        pk_ty,
-                        packed_lo,
-                        vals[pair * 2].ir_value(),
-                        vals[pair * 2 + 1].ir_value(),
-                        block_scale.ir_value(),
-                        pair,
+                e8m0 = fx.Int32(
+                    rocdl.ds_bpermute(
+                        T.i32,
+                        leader_lane * fx.Int32(4),
+                        leader_e8m0,
                     )
-                else:
-                    packed_hi = rocdl.cvt_scalef32_pk_fp8_f32(
-                        pk_ty,
-                        packed_hi,
-                        vals[pair * 2].ir_value(),
-                        vals[pair * 2 + 1].ir_value(),
-                        block_scale.ir_value(),
-                        pair - 2,
+                )
+                block_scale = (e8m0 << fx.Int32(23)).bitcast(fx.Float32)
+                pk_ty = T.vec(2, T.i16)
+                packed_words = []
+                for word in range_constexpr(scatter_vec // 4):
+                    packed_word = fx.Vector.filled(2, 0, fx.Int16).ir_value()
+                    for pair in range_constexpr(2):
+                        value = word * 4 + pair * 2
+                        packed_word = rocdl.cvt_scalef32_pk_fp8_f32(
+                            pk_ty,
+                            packed_word,
+                            vals[value].ir_value(),
+                            vals[value + 1].ir_value(),
+                            block_scale.ir_value(),
+                            pair,
+                        )
+                    packed_words.append(
+                        fx.Vector(packed_word).bitcast(fx.Int32)[0]
                     )
-            payload = fx.Vector.from_elements(
-                [
-                    fx.Vector(packed_lo).bitcast(fx.Int32)[0],
-                    fx.Vector(packed_hi).bitcast(fx.Int32)[0],
-                ],
-                fx.Int32,
-            )
-            scale_leader = active & ((lane & fx.Int32(3)) == fx.Int32(0))
+                payload = fx.Vector.from_elements(packed_words, fx.Int32)
+            is_scale_leader = (
+                lane & fx.Int32(scale_group_lanes - 1)
+            ) == fx.Int32(0)
+            scale_leader = active & is_scale_leader
             payload_off = (valid & active).select(
                 row_off + col,
                 fx.Int32(comb_inp_nbytes),
             )
-            # Adjacent active lanes issue contiguous 8-byte stores without ds_bpermute gathers.
+            # Adjacent active lanes issue contiguous stores without gathers.
             buffer_ops.buffer_store(
                 payload.ir_value(),
                 rsrc_dst,
                 payload_off,
                 offset_is_bytes=True,
-                cache_modifier=2,
+                cache_modifier=quant_store_cache_modifier,
             )
 
             @flyc.jit
@@ -266,7 +404,7 @@ def p2p_scatter_epilog(lds_acc_base, accm, m_row, n_block_idx, wave, lane, *, N_
                         row_base
                         + fx.Int32(N_OUT)
                         + n_block_idx * fx.Int32(BN // 32)
-                        + lane // fx.Int32(4),
+                        + lane // fx.Int32(scale_group_lanes),
                         fx.Int32(comb_inp_nbytes),
                     )
                     buffer_ops.buffer_store(
@@ -274,7 +412,7 @@ def p2p_scatter_epilog(lds_acc_base, accm, m_row, n_block_idx, wave, lane, *, N_
                         rsrc_dst,
                         scale_off,
                         offset_is_bytes=True,
-                        cache_modifier=2,
+                        cache_modifier=quant_store_cache_modifier,
                     )
 
             store_scale_if_leader()
@@ -311,7 +449,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
     SBM: int | None = None,
     persist: bool = False, cu_num: int = 0, has_pad: bool = False, g2_bhoist=None, g2_ascale_pf=None,
     g2_spart=None, persist_strided: bool = False, g2_bf16_lds: bool = False, p2p_quant_type: str = "none",
-    fixed_slot_dispatch: bool = False, skew_cu: int = 0, quant_mode: str = "a8w4"):
+    fixed_slot_dispatch: bool = False, skew_cu: int = 0, quant_mode: str = "a8w4",
+    fp8_epilog_opt: bool = False, scatter_vec: int = 8):
 # fmt: on
     """Compile fused GEMM2 and weighted cross-rank P2P scatter."""
     arch = str(get_rocm_arch() or "")
@@ -329,6 +468,12 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         raise ValueError(f"unsupported p2p_quant_type={p2p_quant_type!r}")
     if p2p_quant_type == "fp8_blockwise_1x32" and g2_bf16_lds:
         raise ValueError("fp8_blockwise_1x32 requires f32 CShuffle input (g2_bf16_lds=False)")
+    if fp8_epilog_opt and p2p_quant_type != "fp8_blockwise_1x32":
+        raise ValueError("fp8_epilog_opt requires fp8_blockwise_1x32 P2P")
+    if scatter_vec not in (8, 16) or BN % scatter_vec or 32 % scatter_vec:
+        raise ValueError("scatter_vec must be 8 or 16 and divide BN and 32")
+    if fp8_epilog_opt and scatter_vec != 8:
+        raise ValueError("fp8_epilog_opt requires scatter_vec=8")
     if quant_mode not in ("a8w4", "a8w4smooth", "w8a8smooth"):
         raise ValueError(f"unsupported quant_mode={quant_mode!r}")
     int8_mode = quant_mode in ("a8w4smooth", "w8a8smooth")
@@ -381,6 +526,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         f"_sk{skew_cu}"
         f"_bh{int(g2_bhoist)}apf{int(g2_ascale_pf)}sp{g2_group_num}x{g2_m01}"
         f"_bf16lds{int(g2_bf16_lds)}_{p2p_quant_type}"
+        f"_epopt{int(fp8_epilog_opt)}"
+        f"_sv{scatter_vec}"
         f"_{quant_mode}"
         f"_sidlds{int(int8_mode)}"
         f"_abov{int(int8_mode)}"
@@ -484,7 +631,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 comb_inp_nbytes=_comb_inp_nbytes, lds_packed_off=lds_packed_off,
                 lds_weight_off=lds_weight_off, lds_peer_off=lds_peer_off, g2_bf16_lds=g2_bf16_lds,
                 p2p_quant_type=p2p_quant_type, int8_mode=int8_mode, arg_ascale=arg_ascale,
-                arg_bscale=arg_bscale, arg_stids=arg_stids, arg_eids=arg_eids)
+                arg_bscale=arg_bscale, arg_stids=arg_stids, arg_eids=arg_eids,
+                fp8_epilog_opt=fp8_epilog_opt, scatter_vec=scatter_vec)
             # fmt: on
 
         cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
@@ -606,7 +754,8 @@ def run_mega_moe_stage2(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cu
     HIDDEN_MAX, INTER_MAX, cu_num, BN=256, BK=256, use_nt=True, g2_bhoist=True,
     g2_ascale_pf=True, g2_spart=402, persist=False, persist_cu=0, persist_strided=False,
     g2_bf16_lds=False, p2p_quant_type="none", fixed_slot_dispatch=False, skew_cu=0,
-    quant_mode="a8w4", qscale_w=None, qzero_w=None):
+    quant_mode="a8w4", qscale_w=None, qzero_w=None, fp8_epilog_opt=False,
+    scatter_vec=8):
     # fmt: on
     """Compile or reuse one fused Stage2 configuration and launch it."""
     launch_cu_num = min(cu_num, persist_cu) if persist and persist_cu > 0 else cu_num
@@ -617,7 +766,8 @@ def run_mega_moe_stage2(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cu
         cu_num=launch_cu_num, g2_bhoist=g2_bhoist, g2_ascale_pf=g2_ascale_pf,
         g2_spart=g2_spart, persist_strided=persist_strided, g2_bf16_lds=g2_bf16_lds,
         p2p_quant_type=p2p_quant_type, fixed_slot_dispatch=fixed_slot_dispatch, skew_cu=skew_cu,
-        quant_mode=quant_mode,
+        quant_mode=quant_mode, fp8_epilog_opt=fp8_epilog_opt,
+        scatter_vec=scatter_vec,
     )
     max_m_blocks = (row_capacity + BM - 1) // BM
     grid_blocks = launch_cu_num if persist else max_m_blocks

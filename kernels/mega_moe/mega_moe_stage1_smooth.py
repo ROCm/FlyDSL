@@ -108,6 +108,28 @@ def compile_mega_moe_stage1(
     traits = _stage1_quant_traits(quant_mode, inter_dim, tile_n)
     is_int8 = traits["is_int8"]
     packed_int4 = traits["packed_int4"]
+    native_mx_prefill = quant_mode == "a8w4"
+    if native_mx_prefill and not (
+        (
+            model_dim,
+            inter_dim,
+            experts_per_rank,
+            fuse_npes,
+            fuse_topk,
+            fuse_scale_dim,
+        )
+        == (3584, 1280, 48, 8, 8, 112)
+        and int(fuse_mtpr) >= 1024
+        and not fixed_slot_dispatch
+        and external_grouping
+        and external_counting
+        and int(payload_chunk_rows) == 0
+        and not payload_tile_ready
+    ):
+        raise ValueError(
+            "native A8W4 prefill requires compact external grouping/counting"
+        )
+    first_stripe_prefetch = native_mx_prefill and int(fuse_mtpr) == 4096
     if mxfp4_transport and quant_mode != "w8a8smooth":
         raise ValueError(
             "MXFP4 Stage1 transport is only supported by w8a8smooth prefill"
@@ -284,6 +306,8 @@ def compile_mega_moe_stage1(
         f"_pc{payload_chunk_rows}"
         f"_ptr{int(payload_tile_ready)}"
         f"_mx4t{int(mxfp4_transport)}_qcount_reset_release"
+        f"_wur{int(native_mx_prefill)}"
+        f"{'_fsp1' if first_stripe_prefetch else ''}"
         f"_sqm{smoothquant_mode}"
         f"iscs{int(int8_static_schedule)}"
         f"_pbc{payload_block_cap}"
@@ -590,6 +614,7 @@ def compile_mega_moe_stage1(
                         producer_slot=producer_slot, parity=payload_parity, expected=payload_expected,
                         producers_per_destination=producers_per_destination, payload_chunk_rows=payload_chunk_rows,
                         payload_tile_ready=payload_tile_ready,
+                        native_mx_pipeline=native_mx_prefill,
                     )
         if const_expr(direct_fixed_slot):
             if compact_owner:

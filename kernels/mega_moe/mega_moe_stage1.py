@@ -91,6 +91,43 @@ def _validate_a8w4_contract(
         raise ValueError("A8W4 MX-scale has no dynamic work-shard queue")
 
 
+def _use_compact_native_a8w4_protocol(
+    *,
+    model_dim,
+    inter_dim,
+    experts_per_rank,
+    fuse_npes,
+    fuse_topk,
+    fuse_mtpr,
+    fuse_scale_dim,
+    fixed_slot_dispatch,
+    external_grouping,
+    external_counting,
+    payload_chunk_rows,
+    payload_tile_ready,
+    work_shards,
+):
+    """Recognize the production compact M13 native A8W4 prefill protocol."""
+    if not (
+        (
+            model_dim,
+            inter_dim,
+            experts_per_rank,
+            fuse_npes,
+            fuse_topk,
+            fuse_scale_dim,
+        )
+        == (3584, 1280, 48, 8, 8, 112)
+        and int(fuse_mtpr) >= 1024
+        and not bool(fixed_slot_dispatch)
+        and work_shards is not None
+        and int(work_shards) in (1, 2, 4, 8)
+        and bool(external_grouping)
+    ):
+        return False
+    return bool(external_counting) and int(payload_chunk_rows) == 0 and not bool(payload_tile_ready)
+
+
 def _validate_a8w4smooth_decode(common, *, mxfp4_transport, smoothquant_mode):
     """Pin the only supported A8W4 Smooth contract before JIT specialization."""
     if mxfp4_transport:
@@ -181,6 +218,35 @@ def compile_mega_moe_stage1(
             raise ValueError("MXFP4 transport requires a SmoothQuant compute mode")
         if smoothquant_mode != "none":
             raise ValueError("fused SmoothQuant prepare is not an A8W4 MX-scale mode")
+        compact_prefill = _use_compact_native_a8w4_protocol(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts_per_rank=experts_per_rank,
+            fuse_npes=fuse_npes,
+            fuse_topk=fuse_topk,
+            fuse_mtpr=fuse_mtpr,
+            fuse_scale_dim=fuse_scale_dim,
+            fixed_slot_dispatch=fixed_slot_dispatch,
+            external_grouping=external_grouping,
+            external_counting=external_counting,
+            payload_chunk_rows=payload_chunk_rows,
+            payload_tile_ready=payload_tile_ready,
+            work_shards=work_shards,
+        )
+        if compact_prefill:
+            from .mega_moe_stage1_smooth import (
+                compile_mega_moe_stage1 as compile_advanced,
+            )
+
+            return compile_advanced(
+                **common,
+                work_shards=work_shards,
+                external_grouping=external_grouping,
+                external_counting=external_counting,
+                payload_chunk_rows=payload_chunk_rows,
+                payload_tile_ready=payload_tile_ready,
+                quant_mode="a8w4",
+            )
         _validate_a8w4_contract(
             model_dim=model_dim, inter_dim=inter_dim,
             experts_per_rank=experts_per_rank, fuse_npes=fuse_npes,
@@ -303,6 +369,36 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
             raise ValueError("MXFP4 transport requires a SmoothQuant compute mode")
         if smoothquant_mode != "none":
             raise ValueError("fused SmoothQuant prepare is not an A8W4 MX-scale mode")
+        compact_prefill = _use_compact_native_a8w4_protocol(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts_per_rank=experts_per_rank,
+            fuse_npes=fuse_npes,
+            fuse_topk=fuse_topk,
+            fuse_mtpr=fuse_mtpr,
+            fuse_scale_dim=fuse_scale_dim,
+            fixed_slot_dispatch=fixed_slot_dispatch,
+            external_grouping=external_grouping,
+            external_counting=external_counting,
+            payload_chunk_rows=payload_chunk_rows,
+            payload_tile_ready=payload_tile_ready,
+            work_shards=work_shards,
+        )
+        if compact_prefill:
+            from .mega_moe_stage1_smooth import (
+                run_mega_moe_stage1 as run_advanced,
+            )
+
+            return run_advanced(
+                *positional,
+                **common,
+                work_shards=work_shards,
+                external_grouping=external_grouping,
+                external_counting=external_counting,
+                payload_chunk_rows=payload_chunk_rows,
+                payload_tile_ready=payload_tile_ready,
+                quant_mode="a8w4",
+            )
         _validate_a8w4_contract(
             model_dim=model_dim, inter_dim=inter_dim,
             experts_per_rank=experts_per_rank, fuse_npes=fuse_npes,

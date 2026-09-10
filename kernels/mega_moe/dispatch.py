@@ -163,6 +163,124 @@ def _copy_token_row(source_rsrc, destination_rsrc, lane, *, fz_safe_end_i32, fz_
 
 
 @flyc.jit
+def _load_m13_native_mx_first_stripe(addr_in_tok, source_token, lane):
+    """Load one M13 MX row's first 1-KiB stripe."""
+    source_addr = addr_in_tok + fx.Int64(source_token) * fx.Int64(3584)
+    source_addr = fx.Int64(
+        fx.rocdl.readfirstlane(T.i64, fx.Int64(source_addr).ir_value())
+    )
+    return buffer_ops.buffer_load(
+        buffer_ops.create_buffer_resource_from_addr(source_addr),
+        lane * fx.Int32(4),
+        vec_width=4,
+        dtype=fx.Int32,
+    )
+
+
+@flyc.jit
+def _copy_m13_native_mx_route(
+    r_wts,
+    wts_remote_rsrc,
+    srcmap_remote_rsrc,
+    scale_source_rsrc,
+    scale_remote_rsrc,
+    addr_in_tok,
+    token_remote,
+    wk,
+    source_token,
+    topk_slot,
+    destination_row,
+    lane,
+    prefetched_value0=None,
+    *,
+    fz_rank,
+    fz_mtpr,
+    first_stripe_prefetch=False,
+):
+    """Pipeline independent local row reads before their XGMI stores."""
+    weight_bits = fx.Int32(
+        buffer_ops.buffer_load(r_wts, wk, vec_width=1, is_scalar=True)
+    )
+    scale_offset = lane * fx.Int32(4)
+    scale = fx.Vector.from_elements(
+        [fx.Int32(0), fx.Int32(0), fx.Int32(0), fx.Int32(0)],
+        fx.Int32,
+    )
+    if scale_offset < fx.Int32(28):
+        scale = buffer_ops.buffer_load(
+            scale_source_rsrc,
+            source_token * fx.Int32(28) + scale_offset,
+            vec_width=4,
+            dtype=fx.Int32,
+        )
+
+    source_addr = addr_in_tok + fx.Int64(source_token) * fx.Int64(3584)
+    destination_addr = token_remote + fx.Int64(destination_row) * fx.Int64(3584)
+    source_addr = fx.Int64(
+        fx.rocdl.readfirstlane(T.i64, fx.Int64(source_addr).ir_value())
+    )
+    destination_addr = fx.Int64(
+        fx.rocdl.readfirstlane(T.i64, fx.Int64(destination_addr).ir_value())
+    )
+    crfa = buffer_ops.create_buffer_resource_from_addr
+    source_rsrc = crfa(source_addr)
+    destination_rsrc = crfa(destination_addr)
+    lane_offset = lane * fx.Int32(4)
+    if const_expr(first_stripe_prefetch):
+        value0 = prefetched_value0
+    else:
+        value0 = buffer_ops.buffer_load(
+            source_rsrc, lane_offset, vec_width=4, dtype=fx.Int32
+        )
+    value1 = buffer_ops.buffer_load(
+        source_rsrc,
+        lane_offset + fx.Int32(256),
+        vec_width=4,
+        dtype=fx.Int32,
+    )
+    value2 = buffer_ops.buffer_load(
+        source_rsrc,
+        lane_offset + fx.Int32(512),
+        vec_width=4,
+        dtype=fx.Int32,
+    )
+    value3 = value0
+    if lane_offset < fx.Int32(128):
+        value3 = buffer_ops.buffer_load(
+            source_rsrc,
+            lane_offset + fx.Int32(768),
+            vec_width=4,
+            dtype=fx.Int32,
+        )
+
+    buffer_ops.buffer_store(value0, destination_rsrc, lane_offset)
+    buffer_ops.buffer_store(
+        value1, destination_rsrc, lane_offset + fx.Int32(256)
+    )
+    buffer_ops.buffer_store(
+        value2, destination_rsrc, lane_offset + fx.Int32(512)
+    )
+    if lane_offset < fx.Int32(128):
+        buffer_ops.buffer_store(
+            value3, destination_rsrc, lane_offset + fx.Int32(768)
+        )
+    if scale_offset < fx.Int32(28):
+        buffer_ops.buffer_store(
+            scale,
+            scale_remote_rsrc,
+            destination_row * fx.Int32(28) + scale_offset,
+        )
+    if lane == fx.Int32(0):
+        source_encoding = (
+            fx.Int32(fz_rank * fz_mtpr) + source_token
+        ) | (topk_slot << fx.Int32(24))
+        buffer_ops.buffer_store(weight_bits, wts_remote_rsrc, destination_row)
+        buffer_ops.buffer_store(
+            source_encoding, srcmap_remote_rsrc, destination_row
+        )
+
+
+@flyc.jit
 def fused_prepare(
     source_addr,
     destination_addr,
@@ -1297,14 +1415,40 @@ def emit_dispatch_payload(
     producer_slot, parity, expected, producers_per_destination,
     payload_chunk_rows=0,
     payload_tile_ready=False,
+    native_mx_pipeline=False,
 ):
 # fmt: on
     """Produce independently publishable expert payloads from a compact plan."""
     crfa = buffer_ops.create_buffer_resource_from_addr
     rdisp = crfa(addr_disp)
+    native_m13_pipeline = (
+        native_mx_pipeline
+        and fz_copy_payload
+        and fz_enable_scales
+        and not fz_route_payload
+        and not fz_mxfp4_smooth_pload
+        and smoothquant_mode == "none"
+        and fz_nbytes == 3584
+        and fz_n_i32 == 896
+        and fz_scale_n_i32 == 28
+        and fz_mtpr >= 1024
+    )
+    first_stripe_prefetch = native_m13_pipeline and fz_mtpr == 4096
+
+    def wave_uniform_i64(value):
+        value = fx.Int64(value)
+        if const_expr(native_m13_pipeline):
+            return fx.Int64(
+                fx.rocdl.readfirstlane(T.i64, value.ir_value())
+            )
+        return value
 
     def dp(i):
-        return buffer_ops.buffer_load(rdisp, fx.Int32(i), vec_width=1, dtype=fx.Int64)
+        return wave_uniform_i64(
+            buffer_ops.buffer_load(
+                rdisp, fx.Int32(i), vec_width=1, dtype=fx.Int64
+            )
+        )
 
     p_rx = dp(DispatchSlot.P2P_TOKEN)
     p_sc = dp(DispatchSlot.P2P_SCALE)
@@ -1390,6 +1534,9 @@ def emit_dispatch_payload(
                 crfa(remote_ready_rows), fx.Int32(0), vec_width=1, dtype=fx.Int32
             )
     fx.barrier()
+    native_scale_source_rsrc = None
+    if const_expr(native_m13_pipeline):
+        native_scale_source_rsrc = crfa(addr_in_sc)
     while task_active:
         if const_expr(payload_chunk_rows == 0):
             chunk_id = fx.Int32(0)
@@ -1423,22 +1570,128 @@ def emit_dispatch_payload(
             row_begin = fx.Int32(0)
             row_end = source_count
         if const_expr(hoist_remote_resources):
-            wts_remote_rsrc = crfa(buffer_ops.buffer_load(crfa(p_wts), destination, vec_width=1, dtype=fx.Int64))
-            srcmap_remote_rsrc = crfa(buffer_ops.buffer_load(crfa(p_sm), destination, vec_width=1, dtype=fx.Int64))
-            token_remote = buffer_ops.buffer_load(crfa(p_rx), destination, vec_width=1, dtype=fx.Int64)
-            if const_expr(fz_enable_scales and fz_copy_payload):
-                scale_remote_rsrc = crfa(buffer_ops.buffer_load(crfa(p_sc), destination, vec_width=1, dtype=fx.Int64))
-            if const_expr(fz_mxfp4_smooth_pload):
-                row_scale_remote_rsrc = crfa(
+            wts_remote_rsrc = crfa(
+                wave_uniform_i64(
                     buffer_ops.buffer_load(
-                        crfa(p_row_scale), destination, vec_width=1, dtype=fx.Int64
+                        crfa(p_wts), destination, vec_width=1, dtype=fx.Int64
                     )
                 )
-        for row in range(row_begin + row0, row_end, row_stride):
-            wk_lane = fx.Int32(0)
-            if lane == fx.Int32(0):
-                wk_lane = buffer_ops.buffer_load(r_pair, source_base + row, vec_width=1, dtype=fx.Int32)
-            wk = fx.Int32(fx.rocdl.readfirstlane(T.i32, wk_lane))
+            )
+            srcmap_remote_rsrc = crfa(
+                wave_uniform_i64(
+                    buffer_ops.buffer_load(
+                        crfa(p_sm), destination, vec_width=1, dtype=fx.Int64
+                    )
+                )
+            )
+            token_remote = wave_uniform_i64(
+                buffer_ops.buffer_load(
+                    crfa(p_rx), destination, vec_width=1, dtype=fx.Int64
+                )
+            )
+            if const_expr(fz_enable_scales and fz_copy_payload):
+                scale_remote_rsrc = crfa(
+                    wave_uniform_i64(
+                        buffer_ops.buffer_load(
+                            crfa(p_sc), destination,
+                            vec_width=1, dtype=fx.Int64,
+                        )
+                    )
+                )
+            if const_expr(fz_mxfp4_smooth_pload):
+                row_scale_remote_rsrc = crfa(
+                    wave_uniform_i64(
+                        buffer_ops.buffer_load(
+                            crfa(p_row_scale), destination,
+                            vec_width=1, dtype=fx.Int64,
+                        )
+                    )
+                )
+        regular_row_end = row_end
+        if const_expr(first_stripe_prefetch):
+            first_row = row_begin + row0
+            if first_row < row_end:
+                first_wk = fx.Int32(
+                    buffer_ops.buffer_load(
+                        r_pair,
+                        source_base + first_row,
+                        vec_width=1,
+                        is_scalar=True,
+                    )
+                )
+                first_source_token = first_wk // fx.Int32(fz_k)
+                first_value0 = _load_m13_native_mx_first_stripe(
+                    addr_in_tok, first_source_token, lane
+                )
+                for row_iv, route_state in range(
+                    first_row,
+                    row_end,
+                    row_stride,
+                    init=[first_wk, first_value0],
+                ):
+                    row = fx.Int32(row_iv)
+                    wk = fx.Int32(route_state[0])
+                    value0 = route_state[1]
+                    next_row = row + row_stride
+                    next_wk = wk
+                    next_value0 = value0
+                    if next_row < row_end:
+                        next_wk = fx.Int32(
+                            buffer_ops.buffer_load(
+                                r_pair,
+                                source_base + next_row,
+                                vec_width=1,
+                                is_scalar=True,
+                            )
+                        )
+                    source_token = wk // fx.Int32(fz_k)
+                    topk_slot = wk % fx.Int32(fz_k)
+                    _copy_m13_native_mx_route(
+                        r_wts,
+                        wts_remote_rsrc,
+                        srcmap_remote_rsrc,
+                        native_scale_source_rsrc,
+                        scale_remote_rsrc,
+                        addr_in_tok,
+                        token_remote,
+                        wk,
+                        source_token,
+                        topk_slot,
+                        destination_base + row,
+                        lane,
+                        value0,
+                        fz_rank=fz_rank,
+                        fz_mtpr=fz_mtpr,
+                        first_stripe_prefetch=True,
+                    )
+                    if next_row < row_end:
+                        next_source_token = next_wk // fx.Int32(fz_k)
+                        next_value0 = _load_m13_native_mx_first_stripe(
+                            addr_in_tok, next_source_token, lane
+                        )
+                    _route_result = yield [next_wk, next_value0]
+            regular_row_end = row_begin
+
+        for row in range(row_begin + row0, regular_row_end, row_stride):
+            if const_expr(native_m13_pipeline):
+                wk = fx.Int32(
+                    buffer_ops.buffer_load(
+                        r_pair,
+                        source_base + row,
+                        vec_width=1,
+                        is_scalar=True,
+                    )
+                )
+            else:
+                wk_lane = fx.Int32(0)
+                if lane == fx.Int32(0):
+                    wk_lane = buffer_ops.buffer_load(
+                        r_pair,
+                        source_base + row,
+                        vec_width=1,
+                        dtype=fx.Int32,
+                    )
+                wk = fx.Int32(fx.rocdl.readfirstlane(T.i32, wk_lane))
             source_token = wk // fx.Int32(fz_k)
             topk_slot = wk % fx.Int32(fz_k)
             source_row = (
@@ -1449,6 +1702,24 @@ def emit_dispatch_payload(
                 else source_token
             )
             destination_row = destination_base + row
+
+            if const_expr(native_m13_pipeline):
+                _copy_m13_native_mx_route(
+                    r_wts,
+                    wts_remote_rsrc,
+                    srcmap_remote_rsrc,
+                    native_scale_source_rsrc,
+                    scale_remote_rsrc,
+                    addr_in_tok,
+                    token_remote,
+                    wk,
+                    source_token,
+                    topk_slot,
+                    destination_row,
+                    lane,
+                    fz_rank=fz_rank,
+                    fz_mtpr=fz_mtpr,
+                )
 
             def _copy_route_header():
                 weight = buffer_ops.buffer_load(r_wts, wk, vec_width=1, dtype=fx.Float32)
@@ -1463,13 +1734,15 @@ def emit_dispatch_payload(
                     srcmap_remote = buffer_ops.buffer_load(crfa(p_sm), destination, vec_width=1, dtype=fx.Int64)
                     buffer_ops.buffer_store(source_encoding, crfa(srcmap_remote), destination_row)
 
-            if lane == fx.Int32(0):
-                _copy_route_header()
+            if const_expr(not native_m13_pipeline):
+                if lane == fx.Int32(0):
+                    _copy_route_header()
 
             if const_expr(
                 fz_enable_scales
                 and fz_copy_payload
                 and smoothquant_mode == "none"
+                and not native_m13_pipeline
             ):
                 scale_lane = lane
                 if const_expr(fz_scale_n_i32 % 4 == 0):
@@ -1506,7 +1779,7 @@ def emit_dispatch_payload(
                         buffer_ops.buffer_store(
                             scale, row_scale_remote, destination_row * fx.Int32(fz_scale_n_i32) + scale_lane
                         )
-            if const_expr(fz_copy_payload):
+            if const_expr(fz_copy_payload and not native_m13_pipeline):
                 if const_expr(hoist_remote_resources):
                     destination_token_addr = token_remote
                 else:

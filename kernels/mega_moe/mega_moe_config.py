@@ -64,6 +64,8 @@ class Stage2Config:
     ascale_prefetch: bool = True
     spatial_partition: int = 402
     bf16_lds: bool = False
+    fp8_epilog_opt: bool = False
+    scatter_vec: int = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +83,10 @@ class MegaMoEConfig:
             raise ValueError(f"unsupported p2p_quant={self.p2p_quant!r}")
         if self.p2p_quant != "none" and self.stage2.bf16_lds:
             raise ValueError("FP8 P2P requires Stage2 bf16_lds=False")
+        if self.stage2.fp8_epilog_opt and self.p2p_quant != "fp8_blockwise_1x32":
+            raise ValueError("FP8 epilogue scheduling requires FP8 P2P")
+        if self.stage2.scatter_vec not in (8, 16):
+            raise ValueError("Stage2 scatter width must be 8 or 16")
 
 
 def nearest_token_bucket(tokens: int) -> int:
@@ -511,14 +517,48 @@ def _apply_quant_and_shape_rules(
 
     if workload.quant_mode == "a8w4":
         if bucket >= A8W4_PREFILL_MTPRS[0]:
-            # Native MX A8W4 has no generic W8 prefill protocol fields.
+            # M13 native MX A8W4 prefill reuses the compact producer/consumer
+            # protocol: grouping and counting finish before payload producers
+            # retire into GEMM1 consumers.  Payload publication remains
+            # route-major; chunk/tile-ready bookkeeping is unnecessary here.
+            work_shards = 8 if bucket <= 8192 else 1
+            stage2_cu = {
+                1024: 256,
+                2048: 240,
+                4096: 240,
+                8192: 224,
+                16384: 256,
+                32768: 256,
+            }[bucket]
             stage1 = replace(
                 stage1,
-                work_shards=None,
-                external_grouping=False,
-                external_counting=False,
+                sort_block_m=64 if bucket == 1024 else 128,
+                tile_n=512,
+                num_waves=4 if bucket == 1024 else 8,
+                grid_mult=1,
+                num_dispatch_cu=_fit_dispatch_cu(
+                    120 if bucket == 1024 else 64,
+                    workload,
+                ),
+                b_nt=0,
+                waves_per_eu_hint=1,
+                pipe_weights=False,
+                work_shards=work_shards,
+                external_grouping=True,
+                external_counting=True,
                 payload_chunk_rows=0,
                 payload_tile_ready=False,
+            )
+            stage2 = replace(
+                stage2,
+                block_m=32,
+                block_n=256,
+                block_k=256,
+                persist_cu=stage2_cu,
+                persist_strided=bucket <= 4096,
+                skew_cu=0,
+                fp8_epilog_opt=2048 <= bucket <= 16384,
+                scatter_vec=16 if bucket == 32768 else 8,
             )
 
         if bucket == 128:
@@ -534,30 +574,6 @@ def _apply_quant_and_shape_rules(
                 waves_per_eu_hint=2,
                 swizzle_a=True,
             )
-        elif bucket == 1024:
-            stage1 = replace(
-                stage1,
-                grid_mult=1,
-                num_dispatch_cu=_fit_dispatch_cu(128, workload),
-            )
-            stage2 = replace(stage2, persist_cu=256)
-        elif bucket in (2048, 4096):
-            stage1 = replace(
-                stage1,
-                num_dispatch_cu=_fit_dispatch_cu(224, workload),
-            )
-        elif bucket == 8192:
-            stage1 = replace(
-                stage1,
-                num_dispatch_cu=_fit_dispatch_cu(128, workload),
-            )
-        elif bucket in (16384, 32768):
-            dispatch_cu = 112 if bucket == 16384 else 96
-            stage1 = replace(
-                stage1,
-                num_dispatch_cu=_fit_dispatch_cu(dispatch_cu, workload),
-            )
-            stage2 = replace(stage2, persist_cu=224)
 
     if workload.quant_mode == "a8w4smooth" and workload.fixed_slot and bucket <= 8:
         stage1 = replace(

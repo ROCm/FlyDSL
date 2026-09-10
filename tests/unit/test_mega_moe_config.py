@@ -319,15 +319,39 @@ def test_mxfp4_transport_config_is_w8a8smooth_prefill_only():
 @pytest.mark.parametrize("tokens", A8W4_PREFILL_MTPRS)
 def test_native_a8w4_prefill_contract(tokens):
     config = select_mega_moe_config(tokens, tokens, **M13_A8W4)
+    expected = {
+        # SBM, waves, dispatch CUs, shards, Stage2 CUs, strided, epilogue, scatter
+        1024: (64, 4, 120, 8, 256, True, False, 8),
+        2048: (128, 8, 64, 8, 240, True, True, 8),
+        4096: (128, 8, 64, 8, 240, True, True, 8),
+        8192: (128, 8, 64, 8, 224, False, True, 8),
+        16384: (128, 8, 64, 1, 256, False, True, 8),
+        32768: (128, 8, 64, 1, 256, False, False, 16),
+    }[tokens]
+    stage1 = config.stage1
+    stage2 = config.stage2
 
-    assert config.stage1.work_shards is None
-    assert not config.stage1.external_grouping
-    assert not config.stage1.external_counting
-    assert config.stage1.payload_chunk_rows == 0
-    assert not config.stage1.payload_tile_ready
-    assert config.p2p_quant == (
-        "none" if tokens == 1024 else "fp8_blockwise_1x32"
-    )
+    assert (
+        stage1.sort_block_m,
+        stage1.num_waves,
+        stage1.num_dispatch_cu,
+        stage1.work_shards,
+        stage2.persist_cu,
+        stage2.persist_strided,
+        stage2.fp8_epilog_opt,
+        stage2.scatter_vec,
+    ) == expected
+    assert stage1.tile_n == 512
+    assert stage1.grid_mult == 1
+    assert stage1.b_nt == 0
+    assert stage1.waves_per_eu_hint == 1
+    assert not stage1.pipe_weights
+    assert stage1.external_grouping
+    assert stage1.external_counting
+    assert stage1.payload_chunk_rows == 0
+    assert not stage1.payload_tile_ready
+    assert (stage2.block_m, stage2.block_n, stage2.block_k) == (32, 256, 256)
+    assert config.p2p_quant == ("none" if tokens == 1024 else "fp8_blockwise_1x32")
 
 
 def test_native_a8w4_requires_matching_tokens_and_capacity():

@@ -60,7 +60,9 @@ def _dispatch_quant_config(
 
 
 def _combine_launch_geometry(quant: str, mtpr: int):
-    """Return low-overhead combine geometry for tiny A8W4 decode buckets."""
+    """Return measured M13 combine geometry where the default is suboptimal."""
+    if quant == "a8w4" and mtpr >= 1024:
+        return 256, 8
     if quant != "a8w4smooth" or mtpr > 8:
         return None, None
     return (32 if mtpr == 4 else 64), 4
@@ -182,6 +184,7 @@ class MegaMoEV2:
         self.epr = int(experts // world_size)
         self.topk = int(topk)
         self.mtpr = int(max_tok_per_rank)
+        self._native_a8w4_prefill = self.quant == "a8w4" and self.mtpr >= 1024
         self.swiglu_limit = float(swiglu_limit)
         if self.swiglu_limit < 0:
             raise ValueError("swiglu_limit must be non-negative")
@@ -457,12 +460,53 @@ class MegaMoEV2:
                     my_base=op._sym((total_experts,), torch.int32),
                     payload_ready=op._sym((2 * self.epr,), torch.int32),
                 )
+                if self._native_a8w4_prefill:
+                    workspace.update(
+                        work_head=torch.zeros(
+                            8 * 16, dtype=torch.int32, device=self.dev
+                        ),
+                        payload_chunk_done=torch.zeros(
+                            total_experts, dtype=torch.int32, device=self.dev
+                        ),
+                        tile_expected=torch.zeros(
+                            metadata_blocks, dtype=torch.int32, device=self.dev
+                        ),
+                        active_payload_blocks=torch.zeros(
+                            1, dtype=torch.int32, device=self.dev
+                        ),
+                        payload_blocks_per_destination=torch.zeros(
+                            self.world_size, dtype=torch.int32, device=self.dev
+                        ),
+                        group_done=torch.zeros(
+                            self._s1_num_cu, dtype=torch.int32, device=self.dev
+                        ),
+                        dest_counter=torch.zeros(
+                            self.world_size, dtype=torch.int32, device=self.dev
+                        ),
+                        tile_ready=op._sym(
+                            (metadata_blocks,), torch.int32
+                        ),
+                        payload_ready_rows=op._sym((1,), torch.int32),
+                        recv_num=op._sym((self.world_size,), torch.int32),
+                        row_scale=op._sym((self._s1_nvm,), torch.float32),
+                    )
+                    workspace["recv_num"].fill_(-1)
             ms.shmem_barrier_all()
             for name in ("count_done", "plan_ready", "launch_ready"):
                 workspace[f"p2p_{name}"] = op._p2p_table(workspace[name])
             if not self._s1_fixed_slot:
                 for name in ("bigcnt", "my_base", "payload_ready"):
                     workspace[f"p2p_{name}"] = op._p2p_table(workspace[name])
+                if self._native_a8w4_prefill:
+                    for name in (
+                        "tile_ready",
+                        "payload_ready_rows",
+                        "recv_num",
+                        "row_scale",
+                    ):
+                        workspace[f"p2p_{name}"] = op._p2p_table(
+                            workspace[name]
+                        )
             self._s1_dispatch_workspace = workspace
             return
 
@@ -599,6 +643,20 @@ class MegaMoEV2:
                 DispatchSlot.LAUNCH_READY: "launch_ready",
                 DispatchSlot.P2P_LAUNCH_READY: "p2p_launch_ready",
                 DispatchSlot.MAX_EXPERT_TILES: "max_expert_tiles",
+                DispatchSlot.WORK_HEAD: "work_head",
+                DispatchSlot.PAYLOAD_CHUNK_DONE: "payload_chunk_done",
+                DispatchSlot.TILE_READY: "tile_ready",
+                DispatchSlot.P2P_TILE_READY: "p2p_tile_ready",
+                DispatchSlot.TILE_EXPECTED: "tile_expected",
+                DispatchSlot.ACTIVE_PAYLOAD_BLOCKS: "active_payload_blocks",
+                DispatchSlot.PAYLOAD_READY_ROWS: "payload_ready_rows",
+                DispatchSlot.P2P_PAYLOAD_READY_ROWS: "p2p_payload_ready_rows",
+                DispatchSlot.PAYLOAD_BLOCKS_PER_DESTINATION: "payload_blocks_per_destination",
+                DispatchSlot.DEST_COUNTER: "dest_counter",
+                DispatchSlot.RECV_NUM: "recv_num",
+                DispatchSlot.P2P_RECV_NUM: "p2p_recv_num",
+                DispatchSlot.ROW_SCALE: "row_scale",
+                DispatchSlot.P2P_ROW_SCALE: "p2p_row_scale",
             }
             for slot, name in slots.items():
                 tensor = workspace.get(name)
@@ -754,6 +812,31 @@ class MegaMoEV2:
             async_a_copy=config.async_a_copy, num_dispatch_cu=config.num_dispatch_cu,
             use_tile_resource=config.use_tile_resource,
             waves_per_eu_hint=config.waves_per_eu_hint, b_nt=config.b_nt,
+            work_shards=(
+                config.work_shards
+                if self._native_a8w4_prefill
+                else None
+            ),
+            external_grouping=(
+                config.external_grouping
+                if self._native_a8w4_prefill
+                else None
+            ),
+            external_counting=(
+                config.external_counting
+                if self._native_a8w4_prefill
+                else None
+            ),
+            payload_chunk_rows=(
+                config.payload_chunk_rows
+                if self._native_a8w4_prefill
+                else 0
+            ),
+            payload_tile_ready=(
+                config.payload_tile_ready
+                if self._native_a8w4_prefill
+                else False
+            ),
             swiglu_limit=self.swiglu_limit)
         # fmt: on
         self._s1_active_tile_m = config.sort_block_m
@@ -1199,10 +1282,14 @@ class MegaMoEV2:
             self._g2v2_inter, self._g2v2_hidden, s_fx, BM=stage2.block_m,
             SBM=config.stage1.sort_block_m, BN=stage2.block_n, BK=stage2.block_k,
             use_nt=stage2.use_nt, g2_bhoist=stage2.b_hoist,
-            g2_ascale_pf=stage2.ascale_prefetch, g2_spart=stage2.spatial_partition,
+            g2_ascale_pf=stage2.ascale_prefetch,
+            g2_spart=stage2.spatial_partition,
             persist=stage2.persist, persist_cu=stage2.persist_cu,
             persist_strided=stage2.persist_strided, skew_cu=stage2.skew_cu,
-            g2_bf16_lds=stage2.bf16_lds, **invariants)
+            g2_bf16_lds=stage2.bf16_lds,
+            fp8_epilog_opt=stage2.fp8_epilog_opt,
+            scatter_vec=stage2.scatter_vec,
+            **invariants)
         # fmt: on
         self._g2_active_block_m = stage2.block_m
         return comb_op.combine_no_stage1(
