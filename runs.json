@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-10T10:17:06Z",
+ "updated": "2026-09-10T10:26:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -163,11 +163,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T09:04:31Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493/job/102810647242"
+     "completed_at": "2026-09-10T10:18:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493/job/102810647242",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -204,10 +205,10 @@
    "event": "pull_request",
    "title": "[DSL] Support per-launcher ROCm wave-size hints",
    "status": "completed",
-   "conclusion": "action_required",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34456354808",
    "created_at": "2026-09-10T08:39:36Z",
-   "updated_at": "2026-09-10T08:39:36Z",
+   "updated_at": "2026-09-10T10:25:00Z",
    "actor": "big-yellow-duck",
    "jobs": []
   },
