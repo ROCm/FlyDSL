@@ -1057,10 +1057,9 @@ def _init_dualwave_thread_mapping(ctx):
         ctx.bz_idx = fx.Index(gpu.block_idx.z)
         ctx.batch_idx = ctx.bz_idx // traits.NUM_KV_SPLITS
         ctx.split_idx = ctx.bz_idx % traits.NUM_KV_SPLITS
-    elif const_expr(batch_interleave_group <= 1):
-        ctx.batch_idx = fx.Int64(gpu.block_idx.z)
-        ctx.split_idx = None
     else:
+        if const_expr(batch_interleave_group <= 1):
+            ctx.batch_idx = fx.Int64(gpu.block_idx.z)
         ctx.split_idx = None
     ctx.tid = fx.Index(gpu.thread_idx.x)
 
@@ -4731,6 +4730,16 @@ class DualwaveFp8KernelContext:
         self.kv_gmem_elem_offset = self.kv_tok_base * self.stride_kv_n_v + self.kv_head_idx * traits.HEAD_DIM
         self.v_gmem_elem_offset = self.kv_tok_base * self.stride_v_n_v + self.kv_head_idx * traits.HEAD_DIM_V
 
+    def init_varlen_causal_lpt_order(self):
+        num_q_blocks = (self.seqlen_q_v + self.traits.BLOCK_M - 1) // self.traits.BLOCK_M
+        active_q_block = self.q_block_idx < num_q_blocks
+        reversed_q_block = num_q_blocks - 1 - self.q_block_idx
+        self.q_block_idx = active_q_block.select(reversed_q_block, self.q_block_idx)
+        self.q_start = self.q_block_idx * self.traits.BLOCK_M
+        self.q_gmem_elem_offset = (
+            self.q_tok_base + self.q_start
+        ) * self.stride_q_n_v + self.q_head_idx * self.traits.HEAD_DIM
+
     def init_descriptors(self):
         traits = self.traits
         eb = traits.ELEM_BYTES
@@ -5007,6 +5016,9 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         f32 = []
         for pk in (p_lo[0], p_lo[1], p_hi[0], p_hi[1]):
             f32 += self._v8bf16_to_f32(pk)
+        return self._pack_p_fp8(f32)
+
+    def _pack_p_fp8(self, f32):
         packed = self._pack_fp8_i32x8(f32)
         if const_expr(self.traits.PAGED):
             words = Vec(packed, (8,), fx.Int32)
@@ -5160,14 +5172,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         for pks in range_constexpr(self.traits.PV_K_STEPS):
             p_base = pks * 8
             f32 += [hi_full[p_base + s] for s in range_constexpr(8)]
-        packed = self._pack_fp8_i32x8(f32)
-        if const_expr(self.traits.PAGED):
-            words = Vec(packed, (8,), fx.Int32)
-            return Vec.from_elements(
-                [words[i] for i in (0, 2, 1, 3, 4, 6, 5, 7)],
-                fx.Int32,
-            ).ir_value()
-        return packed
+        return self._pack_p_fp8(f32)
 
     def _pv_fp8_direct(self, p_fp8, v_v, v_o):
         v_o = _anchor_v_o(self.traits, v_o)
@@ -5526,14 +5531,6 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
                 packs[half * 2][dc] = pair[0].ir_value()
                 packs[half * 2 + 1][dc] = pair[1].ir_value()
         return packs
-
-    def load_v_steps(self, buf_id, first_step, num_steps):
-        """Carry the segmented V buffer for the generic on-demand P*V steps."""
-        if const_expr(not self.traits.FP8_PV_SEGMENTED):
-            raise RuntimeError("load_v_steps requires segmented paged FP8 V")
-        if const_expr(first_step < 0 or num_steps < 1 or first_step + num_steps > 4):
-            raise RuntimeError("invalid V K-step range")
-        return fx.Int64(buf_id)
 
     def _load_v_fp8_block(self, buf_id):
         traits = self.traits
