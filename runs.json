@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-09-10T06:56:49Z",
+ "updated": "2026-09-10T07:02:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34447490149,
+   "pr": 1115,
+   "commit": "f0cba0ff81e94d0c6b9ad483d989637a75864d09",
+   "branch": "fix/manylinux-disable-rocm-repo",
+   "event": "pull_request",
+   "title": "[CI] Avoid unused ROCm repository refresh in manylinux build",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149",
+   "created_at": "2026-09-10T06:56:09Z",
+   "updated_at": "2026-09-10T06:59:25Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 34447381492,
    "pr": 1047,
    "commit": "2480f877aa7f74a24d1ce857b48ba92ff0699cf5",
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
-   "title": "feat(skills): add FlyDSL review checks with refreshed evidence",
-   "status": "queued",
+   "title": "feat(skills): add supplemental FlyDSL review checks",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447381492",
    "created_at": "2026-09-10T06:54:47Z",
-   "updated_at": "2026-09-10T06:54:53Z",
+   "updated_at": "2026-09-10T06:57:16Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -112,7 +127,7 @@
    "commit": "5058488653c485fa98d158546a4c89d45daa3ad7",
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
-   "title": "feat(skills): add FlyDSL review checks with refreshed evidence",
+   "title": "feat(skills): add supplemental FlyDSL review checks",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34443874091",
@@ -171,7 +186,7 @@
    "commit": "a58abc79476b833747b0026bb0c43e059543da53",
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
-   "title": "feat(skills): add FlyDSL review checks with refreshed evidence",
+   "title": "feat(skills): add supplemental FlyDSL review checks",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34439021827",
@@ -186,7 +201,7 @@
    "commit": "5c6ba71861bb3d5c0f95745eb491a03b59662ce4",
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
-   "title": "feat(skills): add FlyDSL review checks with refreshed evidence",
+   "title": "feat(skills): add supplemental FlyDSL review checks",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34438138626",
@@ -278,11 +293,11 @@
    "branch": "phil/isa-resource-diff-arch-general",
    "event": "pull_request",
    "title": "[Tools] Add architecture-general ISA resource diff tool",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431173982",
    "created_at": "2026-09-10T02:53:05Z",
-   "updated_at": "2026-09-10T05:05:07Z",
+   "updated_at": "2026-09-10T06:59:57Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -307,11 +322,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T05:05:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431173982/job/102733738338"
+     "completed_at": "2026-09-10T06:59:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431173982/job/102733738338",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1775,21 +1791,6 @@
    "created_at": "2026-09-08T07:51:17Z",
    "updated_at": "2026-09-08T07:57:16Z",
    "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 34198616616,
-   "pr": null,
-   "commit": "f1b1251ed09b56ebf4f0c79765e168adee692e54",
-   "branch": "chore/pre-commit-formatter",
-   "event": "pull_request",
-   "title": "[Chore] pre commit formatter",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34198616616",
-   "created_at": "2026-09-08T07:17:43Z",
-   "updated_at": "2026-09-09T09:41:13Z",
-   "actor": "ppppqp",
    "jobs": []
   }
  ]
