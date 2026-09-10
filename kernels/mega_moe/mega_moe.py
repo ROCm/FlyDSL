@@ -773,11 +773,6 @@ class MegaMoEV2:
         cur_tok = int(x.shape[0])
         if cur_tok > self.mtpr:
             raise ValueError(f"run_tokens={cur_tok} > max_tok_per_rank={self.mtpr}")
-        if self.quant == "a8w4" and cur_tok != self.mtpr:
-            raise ValueError(
-                "A8W4 MX-scale requires tokens per rank to equal MTPR "
-                f"(tokens={cur_tok}, MTPR={self.mtpr})"
-            )
         if x.dtype != torch.float8_e4m3fn or not x.is_contiguous():
             raise ValueError("x must be contiguous float8_e4m3fn")
         if tuple(x.shape) != (cur_tok, self.model_dim):
@@ -834,6 +829,11 @@ class MegaMoEV2:
             ),
             payload_tile_ready=(
                 config.payload_tile_ready
+                if self._native_a8w4_prefill
+                else False
+            ),
+            native_first_stripe_prefetch=(
+                config.native_first_stripe_prefetch
                 if self._native_a8w4_prefill
                 else False
             ),
@@ -1194,11 +1194,6 @@ class MegaMoEV2:
         run_tokens = int(x_bf16.shape[0])
         if run_tokens > self.mtpr:
             raise ValueError(f"run_tokens={run_tokens} > max_tok_per_rank={self.mtpr}")
-        if self.quant in ("a8w4", "a8w4smooth") and run_tokens != self.mtpr:
-            raise ValueError(
-                f"{self.quant} requires tokens per rank to equal MTPR "
-                f"(tokens={run_tokens}, MTPR={self.mtpr})"
-            )
         if x_bf16.dtype != torch.bfloat16 or not x_bf16.is_contiguous():
             raise ValueError("x_bf16 must be contiguous bfloat16")
         if wts.dtype != torch.float32 or not wts.is_contiguous():

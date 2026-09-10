@@ -48,6 +48,7 @@ class Stage1Config:
     external_counting: bool = False
     payload_chunk_rows: int = 0
     payload_tile_ready: bool = False
+    native_first_stripe_prefetch: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +150,10 @@ class _Workload:
     @property
     def int_smooth(self) -> bool:
         return self.quant_mode in ("a8w4smooth", "w8a8smooth")
+
+    @property
+    def native_a8w4_prefill(self) -> bool:
+        return self.quant_mode == "a8w4" and self.mtpr_class >= 1024
 
     @property
     def routes_per_rank(self) -> int:
@@ -516,6 +521,18 @@ def _apply_quant_and_shape_rules(
     bucket = workload.bucket
 
     if workload.quant_mode == "a8w4":
+        if workload.native_a8w4_prefill:
+            # The compact protocol is selected by capacity, not by the live
+            # token bucket.  This keeps its workspace and publication ABI
+            # invariant while the actual token count selects only geometry.
+            stage1 = replace(
+                stage1,
+                external_grouping=True,
+                external_counting=True,
+                payload_chunk_rows=0,
+                payload_tile_ready=False,
+                native_first_stripe_prefetch=bucket == 4096,
+            )
         if bucket >= A8W4_PREFILL_MTPRS[0]:
             # M13 native MX A8W4 prefill reuses the compact producer/consumer
             # protocol: grouping and counting finish before payload producers
@@ -671,16 +688,15 @@ def select_mega_moe_config(
                 "native A8W4 is specialized for M13 "
                 "(D=3584, I=1280, EPR=48, EP=8, topk=8)"
             )
-        if tokens != mtpr or mtpr not in A8W4_MTPRS:
+        if mtpr not in A8W4_MTPRS:
             raise ValueError(
-                "native A8W4 requires tokens=MTPR in "
-                f"{A8W4_MTPRS}, got tokens={tokens}, MTPR={mtpr}"
+                f"native A8W4 requires MTPR in {A8W4_MTPRS}, got MTPR={mtpr}"
             )
     elif quant_mode == "a8w4smooth":
-        if tokens != mtpr or mtpr not in A8W4SMOOTH_DECODE_MTPRS:
+        if mtpr not in A8W4SMOOTH_DECODE_MTPRS:
             raise ValueError(
-                "a8w4smooth decode requires tokens=MTPR in "
-                f"{A8W4SMOOTH_DECODE_MTPRS}"
+                "a8w4smooth requires MTPR in "
+                f"{A8W4SMOOTH_DECODE_MTPRS}, got MTPR={mtpr}"
             )
         if (
             experts_per_rank,

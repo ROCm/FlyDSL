@@ -178,19 +178,20 @@ def test_non_smooth_a8w4_bounded_profiles_match_production_tuning():
     assert [config.stage1.grid_mult for config in configs] == [2]
 
 
-def test_a8w4smooth_is_decode_only():
+def test_a8w4smooth_capacity_is_bounded():
     generic512 = select_mega_moe_config(512, 512, **M13_A8W4)
     tuned512 = select_mega_moe_config(512, 512, **M13_A8W4SMOOTH)
     assert generic512.stage2.persist_cu == 240
     assert tuned512.stage2.persist_cu == 240
 
     select_mega_moe_config(1024, 1024, **M13_A8W4SMOOTH)
+    select_mega_moe_config(513, 1024, **M13_A8W4SMOOTH)
 
     for mtpr in (2048, 4096, 32768):
-        with pytest.raises(ValueError, match="tokens=MTPR"):
+        with pytest.raises(ValueError, match="requires MTPR"):
             select_mega_moe_config(min(512, mtpr), mtpr, **M13_A8W4SMOOTH)
 
-    with pytest.raises(ValueError, match="tokens=MTPR"):
+    with pytest.raises(ValueError, match="requires MTPR"):
         select_mega_moe_config(2, 2, **M13_A8W4SMOOTH)
 
 
@@ -350,13 +351,66 @@ def test_native_a8w4_prefill_contract(tokens):
     assert stage1.external_counting
     assert stage1.payload_chunk_rows == 0
     assert not stage1.payload_tile_ready
+    assert stage1.native_first_stripe_prefetch is (tokens == 4096)
     assert (stage2.block_m, stage2.block_n, stage2.block_k) == (32, 256, 256)
     assert config.p2p_quant == ("none" if tokens == 1024 else "fp8_blockwise_1x32")
 
 
-def test_native_a8w4_requires_matching_tokens_and_capacity():
-    with pytest.raises(ValueError, match="tokens=MTPR"):
-        select_mega_moe_config(512, 1024, **M13_A8W4)
+@pytest.mark.parametrize("tokens", TOKEN_BUCKETS)
+def test_native_a8w4_prefill_supports_max_capacity(tokens):
+    config = select_mega_moe_config(tokens, 32768, **M13_A8W4)
+
+    assert config.stage1.external_grouping
+    assert config.stage1.external_counting
+    assert config.stage1.native_first_stripe_prefetch is (tokens == 4096)
+    assert config.p2p_quant == "fp8_blockwise_1x32"
+    assert config.stage1.use_tile_resource
+
+
+def test_native_a8w4_prefill_protocol_follows_capacity_not_live_tokens():
+    bf16_capacity = select_mega_moe_config(256, 1024, **M13_A8W4)
+    fp8_capacity = select_mega_moe_config(256, 2048, **M13_A8W4)
+
+    for config in (bf16_capacity, fp8_capacity):
+        assert config.stage1.external_grouping
+        assert config.stage1.external_counting
+        assert config.stage1.payload_chunk_rows == 0
+        assert not config.stage1.payload_tile_ready
+    assert bf16_capacity.p2p_quant == "none"
+    assert fp8_capacity.p2p_quant == "fp8_blockwise_1x32"
+
+
+@pytest.mark.parametrize(
+    "tokens,mtpr",
+    [(3, 4), (127, 128), (511, 512)],
+)
+def test_native_a8w4_decode_capacity_does_not_require_equality(tokens, mtpr):
+    config = select_mega_moe_config(tokens, mtpr, **M13_A8W4)
+
+    assert not config.stage1.external_grouping
+    assert not config.stage1.external_counting
+    assert config.p2p_quant == "none"
+
+
+@pytest.mark.parametrize("tokens", [3, 127, 513])
+def test_native_a8w4_prefill_accepts_arbitrary_live_tokens(tokens):
+    config = select_mega_moe_config(tokens, 1024, **M13_A8W4)
+
+    assert config.stage1.external_grouping
+    assert config.stage1.external_counting
+    assert config.p2p_quant == "none"
+
+
+@pytest.mark.parametrize(
+    "tokens,mtpr,match",
+    [
+        (4096, 2048, "exceeds mtpr"),
+        (16, 24, "positive power of two"),
+    ],
+)
+def test_native_a8w4_rejects_invalid_runtime_capacity(tokens, mtpr, match):
+    with pytest.raises(ValueError, match=match):
+        select_mega_moe_config(tokens, mtpr, **M13_A8W4)
 
 
 @pytest.mark.parametrize("quant_mode", ["a8w4", "a8w4smooth"])

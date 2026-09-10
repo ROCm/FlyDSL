@@ -150,6 +150,7 @@ def test_stage1_cache_key_contains_quant_mode_and_qparams():
     parameters = inspect.signature(compile_mega_moe_stage1).parameters
     assert parameters["quant_mode"].default == "a8w4"
     assert "quant_mode" in parameters
+    assert "native_first_stripe_prefetch" in parameters
     assert {
         "compact_src",
         "compact_experts",
@@ -164,6 +165,44 @@ def test_stage1_cache_key_contains_quant_mode_and_qparams():
             ).run_mega_moe_stage1
         ).parameters
     )
+
+
+def test_native_prefetch_flag_reaches_advanced_compiler(monkeypatch):
+    captured = {}
+    sentinel = object()
+
+    def fake_compile(**kwargs):
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(smooth_stage1_module, "compile_mega_moe_stage1", fake_compile)
+    launcher = compile_mega_moe_stage1(
+        model_dim=3584,
+        inter_dim=1280,
+        rank=0,
+        experts_per_rank=48,
+        fuse_npes=8,
+        fuse_topk=8,
+        fuse_cap=262144,
+        fuse_mtpr=32768,
+        fuse_scale_dim=112,
+        fixed_slot_dispatch=False,
+        sort_block_m=128,
+        tile_n=512,
+        tile_k=256,
+        num_waves=8,
+        grid_mult=1,
+        num_cu=256,
+        num_dispatch_cu=64,
+        work_shards=8,
+        external_grouping=True,
+        external_counting=True,
+        native_first_stripe_prefetch=True,
+        quant_mode="a8w4",
+    )
+
+    assert launcher is sentinel
+    assert captured["native_first_stripe_prefetch"] is True
 
 
 def test_int8_stage1_output_exposes_stage2_metadata():

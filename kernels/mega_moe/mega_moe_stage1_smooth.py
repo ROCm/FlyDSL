@@ -99,6 +99,7 @@ def compile_mega_moe_stage1(
     waves_per_eu_hint: int = 2, num_cu: int = 256, num_dispatch_cu: int = 32, b_nt: int = -1,
     work_shards: int | None = None, external_grouping: bool | None = None,
     external_counting: bool | None = None, payload_chunk_rows: int = 0, payload_tile_ready: bool = False,
+    native_first_stripe_prefetch: bool = False,
     swiglu_limit: float = 0.0, quant_mode: str = "a8w4", mxfp4_transport: bool = False,
     smoothquant_mode: str = "none",
 ):
@@ -129,7 +130,9 @@ def compile_mega_moe_stage1(
         raise ValueError(
             "native A8W4 prefill requires compact external grouping/counting"
         )
-    first_stripe_prefetch = native_mx_prefill and int(fuse_mtpr) == 4096
+    if native_first_stripe_prefetch and not native_mx_prefill:
+        raise ValueError("native first-stripe prefetch requires A8W4 prefill")
+    first_stripe_prefetch = native_mx_prefill and native_first_stripe_prefetch
     if mxfp4_transport and quant_mode != "w8a8smooth":
         raise ValueError(
             "MXFP4 Stage1 transport is only supported by w8a8smooth prefill"
@@ -615,6 +618,7 @@ def compile_mega_moe_stage1(
                         producers_per_destination=producers_per_destination, payload_chunk_rows=payload_chunk_rows,
                         payload_tile_ready=payload_tile_ready,
                         native_mx_pipeline=native_mx_prefill,
+                        native_first_stripe_prefetch=first_stripe_prefetch,
                     )
         if const_expr(direct_fixed_slot):
             if compact_owner:
@@ -965,6 +969,7 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
     use_tile_resource=True, waves_per_eu_hint=2,
     b_nt=-1, work_shards=None, external_grouping=None, external_counting=None,
     payload_chunk_rows=0, payload_tile_ready=False, swiglu_limit=0.0,
+    native_first_stripe_prefetch=False,
     quant_mode="a8w4", compact_src=None, compact_experts=None, compact_weights=None,
     qscale_w=None, qzero_w=None, mxfp4_transport=False, transport_smooth=None,
     addr_quant_count=0, smoothquant_mode="none"):
@@ -979,6 +984,7 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
         b_nt=b_nt, work_shards=work_shards, external_grouping=external_grouping,
         external_counting=external_counting, payload_chunk_rows=payload_chunk_rows,
         payload_tile_ready=payload_tile_ready,
+        native_first_stripe_prefetch=native_first_stripe_prefetch,
         swiglu_limit=swiglu_limit,
         quant_mode=quant_mode,
         mxfp4_transport=mxfp4_transport,

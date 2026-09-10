@@ -195,6 +195,7 @@ def compile_mega_moe_stage1(
     waves_per_eu_hint: int = 2, num_cu: int = 256, num_dispatch_cu: int = 32, b_nt: int = -1,
     work_shards: int | None = None, external_grouping: bool | None = None,
     external_counting: bool | None = None, payload_chunk_rows: int = 0, payload_tile_ready: bool = False,
+    native_first_stripe_prefetch: bool = False,
     swiglu_limit: float = 0.0,
     quant_mode: str = "a8w4", mxfp4_transport: bool = False,
     smoothquant_mode: str = "none",
@@ -245,6 +246,7 @@ def compile_mega_moe_stage1(
                 external_counting=external_counting,
                 payload_chunk_rows=payload_chunk_rows,
                 payload_tile_ready=payload_tile_ready,
+                native_first_stripe_prefetch=native_first_stripe_prefetch,
                 quant_mode="a8w4",
             )
         _validate_a8w4_contract(
@@ -339,6 +341,7 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
     use_tile_resource=True, waves_per_eu_hint=2,
     b_nt=-1, work_shards=None, external_grouping=None, external_counting=None,
     payload_chunk_rows=0, payload_tile_ready=False,
+    native_first_stripe_prefetch=False,
     swiglu_limit=0.0,
     quant_mode="a8w4", compact_src=None, compact_experts=None, compact_weights=None,
     qscale_w=None, qzero_w=None, mxfp4_transport=False, transport_smooth=None,
@@ -397,6 +400,7 @@ def run_mega_moe_stage1(out, x, w, scale_x, scale_w, sorted_token_ids, expert_id
                 external_counting=external_counting,
                 payload_chunk_rows=payload_chunk_rows,
                 payload_tile_ready=payload_tile_ready,
+                native_first_stripe_prefetch=native_first_stripe_prefetch,
                 quant_mode="a8w4",
             )
         _validate_a8w4_contract(

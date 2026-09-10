@@ -1416,6 +1416,7 @@ def emit_dispatch_payload(
     payload_chunk_rows=0,
     payload_tile_ready=False,
     native_mx_pipeline=False,
+    native_first_stripe_prefetch=False,
 ):
 # fmt: on
     """Produce independently publishable expert payloads from a compact plan."""
@@ -1433,7 +1434,9 @@ def emit_dispatch_payload(
         and fz_scale_n_i32 == 28
         and fz_mtpr >= 1024
     )
-    first_stripe_prefetch = native_m13_pipeline and fz_mtpr == 4096
+    first_stripe_prefetch = (
+        native_m13_pipeline and native_first_stripe_prefetch
+    )
 
     def wave_uniform_i64(value):
         value = fx.Int64(value)

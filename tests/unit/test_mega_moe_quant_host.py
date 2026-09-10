@@ -114,6 +114,21 @@ def test_a8w4_constructor_contract_is_unchanged():
     assert params["dispatch_quant"].default is None
 
 
+def test_smooth_forward_does_not_require_live_tokens_to_equal_capacity():
+    moe = object.__new__(MegaMoEV2)
+    moe.mtpr = 8
+    moe.quant = "a8w4smooth"
+    moe._is_int8_smooth = True
+    sentinel = object()
+    moe._forward_int8 = lambda *args, **kwargs: sentinel
+
+    x = torch.empty((3, 16), dtype=torch.bfloat16)
+    weights = torch.empty((3, 2), dtype=torch.float32)
+    expert_ids = torch.empty((3, 2), dtype=torch.int32)
+
+    assert moe.forward(x, weights, expert_ids) is sentinel
+
+
 def test_lqq_conversion_shape_and_layout_formula():
     assert exported_convert_aiter_lqq_to_megamoe is convert_aiter_lqq_to_megamoe
     experts, rows, k_dim = 1, 16, 256
