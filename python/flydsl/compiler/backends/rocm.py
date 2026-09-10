@@ -11,6 +11,8 @@ from .base import BaseBackend, GPUTarget
 class RocmBackend(BaseBackend):
     """ROCm / AMDGPU compile backend (HIP runtime, ROCDL lowering)."""
 
+    supports_wave_size_hint = True
+
     @staticmethod
     def supports_target(target: GPUTarget) -> bool:
         return target.backend == "rocm"
@@ -47,10 +49,25 @@ class RocmBackend(BaseBackend):
         """Format {key: value, ...} as 'key=value key2=value2' for MLIR pass options."""
         return " ".join(f"{k}={v}" for k, v in opts.items())
 
+    def _wave_options(self, compile_hints: dict) -> Tuple[int, str]:
+        default = get_warp_size(self.target.arch)
+        wave_size = compile_hints.get("wave_size", default)
+        if isinstance(wave_size, bool) or not isinstance(wave_size, int):
+            raise TypeError(f"wave_size must be 32 or 64, got {wave_size!r}")
+        if wave_size not in (32, 64):
+            raise ValueError(f"wave_size must be 32 or 64, got {wave_size}")
+        if wave_size != default and not self.target.arch.startswith(("gfx10", "gfx11", "gfx12")):
+            raise ValueError(f"{self.target.arch} does not support wave_size={wave_size}")
+        if "wave_size" not in compile_hints:
+            return wave_size, ""
+        other_size = 64 if wave_size == 32 else 32
+        return wave_size, f"+wavefrontsize{wave_size},-wavefrontsize{other_size}"
+
     def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         chip = self.target.arch
         waves_per_eu = compile_hints.get("waves_per_eu")
         maxnreg = compile_hints.get("maxnreg")
+        wave_size, wave_features = self._wave_options(compile_hints)
 
         bin_cli_opts = []
         if env.debug.enable_debug_info:
@@ -67,12 +84,12 @@ class RocmBackend(BaseBackend):
             "correct-sqrt": "true",
             "daz": "false",
             "fast": "true" if compile_hints.get("fast_fp_math") else "false",
-            "features": "",
+            "features": wave_features,
             "finite-only": "false",
             "module": "",
             "triple": "amdgcn-amd-amdhsa",
             "unsafe-math": "true" if compile_hints.get("unsafe_fp_math") else "false",
-            "wave64": "true" if get_warp_size(chip) == 64 else "false",
+            "wave64": "true" if wave_size == 64 else "false",
         }
 
         pre_binary_fragments = [
@@ -135,7 +152,12 @@ class RocmBackend(BaseBackend):
                 func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
     def gpu_module_targets(self) -> List[str]:
+        from ..kernel_function import CompilationContext
+
         chip = self.target.arch
+        _, features = self._wave_options(CompilationContext.get_compile_hints())
+        if features:
+            return [f'#rocdl.target<chip = "{chip}", features = "{features}">']
         return [f'#rocdl.target<chip = "{chip}">']
 
     # -- cache / fingerprint ---------------------------------------------

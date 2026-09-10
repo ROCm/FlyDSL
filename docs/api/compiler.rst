@@ -96,6 +96,32 @@ descriptors with layout metadata:
    )
    launch(tA, B, n, stream=torch.cuda.Stream())
 
+Explicit ROCm wave size
+----------------------
+
+An explicitly wave64-authored RDNA kernel can select its code-generation mode
+without changing process-global backend functions:
+
+.. code-block:: python
+
+   launch.compile_hints["wave_size"] = 64
+   executable = flyc.compile(launch, *args)
+
+The hint accepts integer ``32`` or ``64``. CDNA targets reject wave32. An omitted
+hint preserves the architecture default. Both GPU module target annotations and
+the final lowering pipeline use the same mode; the hint is included in the JIT
+cache identity and its compilation context is thread-local.
+
+The ROCm backend exposes ``supports_wave_size_hint = True`` for callers that
+must remain compatible with older compiler versions without this hint.
+
+This is a module-wide code-generation choice, not an automatic layout rewrite.
+Every kernel in the launcher must be authored for the selected wave size. In
+particular, the existing high-level RDNA4 ``WMMA`` atom describes wave32 operands;
+wave64 WMMA experiments must supply the matching low-level ROCDL operand and
+accumulator types instead. The architecture's default layout helpers are not
+changed by this hint.
+
 ROCDL operations
 -----------------
 
