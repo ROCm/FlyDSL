@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-09-10T06:13:22Z",
+ "updated": "2026-09-10T06:44:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34446206959,
+   "pr": 1110,
+   "commit": "c52a13f9259c4ead2aa44b5656b7315a86267d85",
+   "branch": "fix/llvm-amdgpu-cvt-pk-f32-f8-true16",
+   "event": "pull_request",
+   "title": "[LLVM] Fix true16 lowering for packed FP8 conversions",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34446206959",
+   "created_at": "2026-09-10T06:39:43Z",
+   "updated_at": "2026-09-10T06:39:43Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
+  {
+   "run_id": 34446193317,
+   "pr": 1109,
+   "commit": "84faa9e93c90f1a3632fa3307f0dbc8c2085eb14",
+   "branch": "feat/rocdl-cvt-f32-fp8",
+   "event": "pull_request",
+   "title": "[DSL] Expose scalar FP8 conversion",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34446193317",
+   "created_at": "2026-09-10T06:39:31Z",
+   "updated_at": "2026-09-10T06:39:31Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
+  {
+   "run_id": 34444700300,
+   "pr": null,
+   "commit": "65e5d8efac9e8732e28f3b412d5cd868f2361258",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Move 1-GPU tests to linux-flydsl-mi35x-1 and filter MI350 from t\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34444700300",
+   "created_at": "2026-09-10T06:19:30Z",
+   "updated_at": "2026-09-10T06:41:49Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T06:41:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34444700300/job/102771926651"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-10T06:42:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34444700300/job/102771926700"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T06:41:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34444700300/job/102771926704"
+    }
+   ]
+  },
   {
    "run_id": 34443879046,
    "pr": 1056,
@@ -25,17 +98,45 @@
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
    "title": "feat(skills): add FlyDSL review checks with refreshed evidence",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34443874091",
    "created_at": "2026-09-10T06:07:50Z",
-   "updated_at": "2026-09-10T06:10:32Z",
+   "updated_at": "2026-09-10T06:30:40Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T06:30:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34443874091/job/102769349110"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T06:30:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34443874091/job/102769349140"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-10T06:31:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34443874091/job/102769349147"
+    }
+   ]
   },
   {
    "run_id": 34442185204,
-   "pr": 1109,
+   "pr": null,
    "commit": "6c7c52b065e769c1ee7304997949c8cb86e1f6a0",
    "branch": "feat/rocdl-cvt-f32-fp8",
    "event": "pull_request",
@@ -397,7 +498,7 @@
   },
   {
    "run_id": 34345094383,
-   "pr": 1112,
+   "pr": null,
    "commit": "325f33fb723bcf11451058530548a270ab66b451",
    "branch": "ci/mi35x-1-runner",
    "event": "pull_request",
@@ -486,7 +587,7 @@
   },
   {
    "run_id": 34337075328,
-   "pr": 1112,
+   "pr": null,
    "commit": "15e9154afd12e23f9e9521ce43428c3dd05e0f86",
    "branch": "ci/mi35x-1-runner",
    "event": "pull_request",
@@ -619,7 +720,7 @@
   },
   {
    "run_id": 34333936963,
-   "pr": 1112,
+   "pr": null,
    "commit": "f1f77dd9f639f803012908e01b7eff42f274d85c",
    "branch": "ci/mi35x-1-runner",
    "event": "pull_request",
@@ -844,7 +945,7 @@
   },
   {
    "run_id": 34320440579,
-   "pr": 1110,
+   "pr": null,
    "commit": "87c3e93e59e6582d726dd86116ff2a8ae6effaa0",
    "branch": "fix/llvm-amdgpu-cvt-pk-f32-f8-true16",
    "event": "pull_request",
@@ -1720,112 +1821,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34195756481,
-   "pr": 1100,
-   "commit": "61f2011d2b75569f79aa66a05976276550ebe7d1",
-   "branch": "feat-llvm-atomic",
-   "event": "pull_request",
-   "title": "[DSL] Expose atomic operations via llvm dialect",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34195756481",
-   "created_at": "2026-09-08T06:41:13Z",
-   "updated_at": "2026-09-08T08:15:40Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T07:01:54Z",
-     "completed_at": "2026-09-08T08:06:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34195756481/job/101967778027",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T07:01:55Z",
-     "completed_at": "2026-09-08T08:15:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34195756481/job/101967778039",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T07:01:41Z",
-     "completed_at": "2026-09-08T07:24:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34195756481/job/101967778066",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34194391453,
-   "pr": 1069,
-   "commit": "3333b562496e010b630fcccaef5c03bc4c7f082b",
-   "branch": "feature/qwenimage-vae-conv-tests",
-   "event": "pull_request",
-   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194391453",
-   "created_at": "2026-09-08T06:22:40Z",
-   "updated_at": "2026-09-08T07:49:14Z",
-   "actor": "huizzhan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-08T06:39:09Z",
-     "completed_at": "2026-09-08T06:42:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194391453/job/101962348725"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T06:39:22Z",
-     "completed_at": "2026-09-08T07:49:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194391453/job/101962348762",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T06:39:19Z",
-     "completed_at": "2026-09-08T07:46:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194391453/job/101962348810",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34194371074,
-   "pr": 1069,
-   "commit": "e45c6143d3ba0a7048080f5d143a453aeb5e1bd0",
-   "branch": "feature/qwenimage-vae-conv-tests",
-   "event": "pull_request",
-   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34194371074",
-   "created_at": "2026-09-08T06:22:23Z",
-   "updated_at": "2026-09-08T06:22:41Z",
-   "actor": "huizzhan",
-   "jobs": []
   }
  ]
 }
