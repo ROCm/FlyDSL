@@ -174,10 +174,17 @@ const SCOPE_BLOCK =
 
 // ---------------------------------------------------------------- Prompts
 
+const SHARED_RULES_PROMPT =
+  'Read `' + SKILL + '`, section `## Reusing existing skills`, and follow its\n' +
+  'instructions for review scope, source evidence, and reporting. Read the source\n' +
+  'sections linked from the relevant review angle or cited by a candidate before\n' +
+  'applying their rules, including conditions and exceptions.\n\n'
+
 const FINDER_PROMPT = a =>
   '## FlyDSL code-review finder — ' + a.label + '\n\n' + SCOPE_BLOCK + '\n' +
   'Read `' + SKILL + '`, section `' + a.section + '`. That section is your assigned\n' +
-  'review angle. Run the diff command above and review ONLY through that lens —\n' +
+  'review angle.\n\n' + SHARED_RULES_PROMPT +
+  'Run the diff command above and review ONLY through that lens —\n' +
   'other angles are covered by other agents running in parallel.\n\n' +
   'Read the enclosing function for each hunk: bugs on unchanged lines of a touched\n' +
   'function are in scope.\n\n' +
@@ -194,6 +201,7 @@ const FINDER_PROMPT = a =>
 
 const VERIFIER_PROMPT = c =>
   '## FlyDSL code-review verifier\n\n' + SCOPE_BLOCK + '\n' +
+  SHARED_RULES_PROMPT +
   '## Candidate finding\n' +
   'File: ' + c.file + (c.line != null ? ':' + c.line : '') + '\n' +
   'Summary: ' + c.summary + '\n' +
@@ -222,6 +230,7 @@ function challengeConfirmed(c) {
   const short = (c.file || '').split('/').pop()
   return agent(
     '## FlyDSL code-review challenger\n\n' + SCOPE_BLOCK + '\n' +
+    SHARED_RULES_PROMPT +
     '## Finding marked CONFIRMED by an earlier verifier\n' +
     'File: ' + c.file + (c.line != null ? ':' + c.line : '') + '\n' +
     'Summary: ' + c.summary + '\n' +
@@ -300,6 +309,7 @@ const knownBlock = verified.length > 0
   : '(none)'
 const sweep = await agent(
   '## FlyDSL code-review sweep — gaps only\n\n' + SCOPE_BLOCK + '\n' +
+  SHARED_RULES_PROMPT +
   '## Already-found candidates (do NOT re-derive or re-confirm these)\n' + knownBlock + '\n\n' +
   'Re-read the diff and the enclosing functions looking ONLY for defects not already\n' +
   'listed. Focus on what the first pass tends to miss: a bug in unchanged lines of a\n' +

@@ -2,14 +2,11 @@
 name: flydsl-code-review
 description: >
   Review a FlyDSL diff, branch, commit range, or PR for correctness bugs and
-  convention violations. Fans out nine independent review angles tuned to this
-  repo's real failure modes (trace-time vs runtime semantics, buffer addressing
-  and OOB, LDS/barrier lifetime, arch and MMA atom contracts, removed behavior,
-  cross-layer Python/C++/FileCheck drift, repo conventions and API stability,
-  reuse and altitude, test and doc contracts), verifies every candidate with an
-  independent verifier, and reports a ranked, capped findings list. Pass
-  --comment to post findings as inline PR comments. Use when asked to review a
-  diff, review a PR, or check changes before pushing.
+  convention violations using the repository's existing skills and policy docs.
+  Runs nine independent review angles, verifies every candidate with an
+  independent verifier, and reports a ranked, capped findings list. Pass --comment
+  to post findings as inline PR comments. Use when asked to review a diff, review
+  a PR, or check changes before pushing.
 allowed-tools: Read Bash Grep Glob Agent Workflow
 ---
 
@@ -52,6 +49,25 @@ That diff is the review scope. Read the enclosing function for each hunk: bugs
 on unchanged lines of a touched function are in scope, because the change either
 re-exposes them or failed to fix them.
 
+## Reusing existing skills
+
+The linked skills and policy docs own the technical rules. Each angle below
+selects the relevant sources; read their applicable sections at the reviewed
+revision before judging a candidate. Follow their conditions, exceptions, and
+semantic constraints rather than treating the angle's topic labels as rules.
+If linked guidance disagrees, check the policy and implementation at that
+revision before reporting.
+
+Reuse their analysis or check-only procedures within the scope from Step 1,
+leaving the reviewed files unchanged. Authoring, migration, formatting fixes, and
+intrusive debugging are separate tasks. Use this skill's candidate format,
+verification, and final report instead of concatenating standalone skill reports.
+A scoped review does not establish a full API audit's PASS or STABLE-ONLY result.
+
+For a finding based on a shared rule, cite the source file and section in
+`failure_scenario`, alongside the code evidence and concrete consequence.
+Verifiers and challengers must read that source and check its applicability.
+
 ## Step 2 — Run the nine angles
 
 If the Workflow tool is available, run the fan-out as a workflow instead of
@@ -76,95 +92,58 @@ CI, what is duplicated, what becomes arch-fragile) rather than a crash.
 
 ## Angle A — trace-time vs runtime semantics
 
-`@flyc.kernel` and `@flyc.jit` bodies are traced, not executed. The recurring
-defect is code that assumes Python semantics where the value is an SSA value, or
-vice versa.
+Read the **flydsl-kernel-authoring** skill
+([SKILL.md](../flydsl-kernel-authoring/SKILL.md)), §3: **Control Flow**,
+**Runtime vs Compile-Time Conditions**, **Frontend Semantic Restrictions**, and
+**Runtime Loops with Loop-Carried Values**. The **debug-flydsl-kernel** skill
+([SKILL.md](../debug-flydsl-kernel/SKILL.md)), §6 **Compilation Errors**, supplies
+concrete failure patterns.
 
-- `for i in range(N)` where `i` then indexes a Python list, tuple, or dict.
-  `i` is a runtime SSA value; this needs `range_constexpr(N)`. Conversely,
-  `range(start, stop, step, init=[...])` is the `scf.for` form — runtime bounds
-  must be typed (`fx.Int64` / `fx.Int32`) or the rewriter unrolls the loop and
-  silently drops `init=`.
-- `const_expr(...)` wrapping a runtime value. `gpu.thread_id`, lane id, and warp
-  id are always runtime SSA even when the block size is a known constant.
-  `const_expr` is only for compile-time decisions.
-- A value defined only inside one branch of an `if`/`else` and used after the
-  branch. MLIR result types become ill-defined. It must be hoisted or returned
-  as a single merged value.
-- Early `return`, or a branch-local `return` / `yield`, inside a traced
-  function. There must be one explicit exit path.
-- A nested helper inside `@flyc.kernel` / `@flyc.jit` that mutates a captured
-  outer variable. Reading captures is fine; mutation is not. State must be
-  passed in and returned.
-- Loop-carried state wrapped in a raw value instead of a concrete type
-  (`fx.Int32`, `fx.Float32`, `fx.Vector`). Unwrap only at hard low-level
-  boundaries.
+Trace values from their definitions to uses across branches, helpers, and loop
+boundaries. Identify where the changed code violates those frontend contracts.
 
 ## Angle B — memory addressing and out-of-bounds
 
-Do interval arithmetic, not eyeballing. For each load and store in the diff,
-derive `start = base + offset_expr`, `end = start + vec_width - 1`, and the
-legal range of the object being addressed. Substitute the known ranges: lane and
-thread ids, `range_constexpr(N)` giving `i in [0, N-1]`, vector widths, tensor
-shapes and strides. If `max(end)` exceeds the object's last element, or
-`min(start)` precedes its base, the OOB is proven, not suspected.
+Use the **oob-detection** skill ([SKILL.md](../oob-detection/SKILL.md)), §1
+**Classify the OOB** and §2 **Static Interval Analysis**, plus §4's layout and
+integer-overflow guidance. For raw buffer access, read the offset contract in the
+**kernel-code-cleanup** skill ([SKILL.md](../kernel-code-cleanup/SKILL.md)), §2.
 
-- `buffer_load` / `buffer_store` offsets are in **elements**, not bytes. A `//4`
-  or `* 4` near an offset is the fingerprint of a manual byte-to-element
-  conversion that is either wrong or should not exist.
-- Logical OOB: the address stays inside the allocation but crosses a row, head,
-  tile, or lane-owned slot. A physical bounds check will not catch this.
-- LDS index exceeding the allocated shared-memory extent.
-- Stride or layout mismatch between writer and reader — output written to an
-  absolute index where a relative slot was meant, or a 4D layout addressed as 5D.
-- An offset that overflows `i32` before being widened.
-
-A mask or clamp only narrows the interval if it **dominates** the access. A
-`select` computed after the load does not.
-
-The **oob-detection** skill has the full method and worked examples.
+Apply the analysis to changed accesses and their corresponding writer/reader
+layouts. Connect the failing range to an observable result under Step 3.
 
 ## Angle C — synchronization, LDS, and value lifetime
 
-- `gpu.barrier()` reached by only some threads of a workgroup — inside a runtime
-  conditional, or after an early exit. FlyDSL does not support divergent
-  barriers; this hangs the GPU.
-- An LDS read following an LDS write with no barrier or `s_waitcnt` between
-  them. This is required every time, not only across loop iterations.
-- Manual `s_waitcnt` bitfield encoding (a hex literal, or a hand-rolled
-  `_encode_waitcnt`). Counter field widths differ by architecture — `lgkmcnt`
-  tops out at 15 on CDNA3 and 63 on RDNA — so a hardcoded mask is silently wrong
-  on the other target. Use `fx.rocdl.s_waitcnt(vmcnt=..., lgkmcnt=...)`.
-- A legacy `SmemPtr` view reused after an `scf.for` without clearing
-  `_view_cache`. The cached view no longer dominates its use, and MLIR rejects it.
-- `SharedAllocator` mode against the launch. In the default `static=True` mode
-  the compiler sizes LDS and `launch(smem=...)` must be left unset; only
-  `static=False` infers from `allocated_bytes`, and an explicit `smem` must be
-  at least that large.
-- LDS budget: 160KB on gfx950, 320KB on gfx1250, 64KB elsewhere. A tile-size or
-  double-buffer change that grows the allocation past the target's limit fails
-  at launch, not at compile time.
+Read the sources relevant to the changed synchronization or storage:
+
+- **debug-flydsl-kernel** skill ([SKILL.md](../debug-flydsl-kernel/SKILL.md)),
+  §7.2 **Barrier deadlock**.
+- **lds-optimization** skill ([SKILL.md](../lds-optimization/SKILL.md)),
+  **LDS Instruction Model**, for dependency and cross-wave synchronization.
+- **flydsl-tile-programming** skill ([SKILL.md](../flydsl-tile-programming/SKILL.md)),
+  **Step 5: Add Synchronization**, for target-specific wait operations.
+- **kernel-code-cleanup** skill ([SKILL.md](../kernel-code-cleanup/SKILL.md)),
+  §3c and §4, for wait-counter migration constraints and shared-view lifetime.
+- **flydsl-kernel-authoring** skill ([SKILL.md](../flydsl-kernel-authoring/SKILL.md)),
+  §5 **Shared Memory (LDS)**, and [CLAUDE.md](../../../CLAUDE.md)'s
+  **GPU Architecture Support** and **Kernel Authoring Conventions**, for
+  allocation, launch, and capacity contracts.
+
+Trace producer/consumer ordering and value lifetime across branches, loops,
+pipeline stages, and the launch boundary.
 
 ## Angle D — architecture and atom contracts
 
-- Wave size assumed. 64 on CDNA (`gfx942`, `gfx950`), 32 on RDNA (`gfx11*`,
-  `gfx120*`, `gfx1250`). A literal `64`, a `>> 6`, or a `& 63` in lane math is a
-  candidate. `get_warp_size` in `kernels/common/kernels_common.py` is the helper.
-- MFMA path taken on an RDNA target, or WMMA shapes assumed on CDNA. Note the
-  WMMA ABI split: `gfx11*` uses the legacy v16-operand form, `gfx120*` and
-  `gfx1250` the v8-operand form.
-- FP8 used on `gfx11*`, which has no native FP8 — this must fail fast, not
-  silently degrade.
-- Hardcoded LLVM address-space numbers (`address_space=1`, `address_space=3`, an
-  `IntToPtrOp` with `<1>` or `<3>`). Use `fx.to_llvm_ptr(...)`, which maps the
-  pointer's semantic address space per backend.
-- Inline `gfx*` string comparisons scattered through kernel logic instead of an
-  arch-specific helper module or constant.
-- MMA operand contract: the accumulator comes **first** in
-  `fx.gemm(mma, d, a, b, c)`, and LHS maps to M while RHS maps to N. Swapped
-  operands compile cleanly and produce a transposed or wrong result. Fragments
-  must be built with `fx.make_fragment_like` or the `make_fragment_*` helpers.
-- TV layouts passed to `fx.make_layout_tv` must be static plain Python ints.
+Read [CLAUDE.md](../../../CLAUDE.md)'s **GPU Architecture Support** and the
+**flydsl-kernel-authoring** skill ([SKILL.md](../flydsl-kernel-authoring/SKILL.md)),
+§6 **MFMA Integration**, for target capabilities and operand contracts. Reuse the
+**kernel-code-cleanup** skill ([SKILL.md](../kernel-code-cleanup/SKILL.md)),
+§3b and §§6–7, for pointer boundaries, fragments, and TV layouts.
+
+When the diff implements backend atoms, also apply the **add-target-atom-op**
+skill ([SKILL.md](../add-target-atom-op/SKILL.md)), §1 **Inherent Design**.
+Check lane math, dtype support, dispatch, and operand/layout assumptions against
+every target the changed code claims to support.
 
 ## Angle E — removed-behavior auditor
 
@@ -181,106 +160,71 @@ deleted rather than updated; a test case deleted because it started failing.
 
 Two directions.
 
-**Horizontal.** For each function the diff changes, Grep for its callers and
-check whether the change breaks any call site: a new precondition, a changed
-return shape or tuple arity, a new exception, a changed default, a new ordering
-dependency. Then check callees — does another change in the same diff make an
-existing call unsafe?
+**Horizontal.** For each changed function, search its callers and callees for
+assumptions the diff invalidates, including interactions between changed
+functions. Report concrete broken call sites; Angle G owns public-API stability
+classification.
 
-**Vertical.** FlyDSL changes span layers that must move together:
+**Vertical.** Trace changed operations through definitions, lowering, bindings,
+and consumers. Use the **flydsl-kernel-authoring** skill
+([SKILL.md](../flydsl-kernel-authoring/SKILL.md)), §1 **Architecture and
+Compilation**, as the layer map. For atom changes, use the **add-target-atom-op**
+skill ([SKILL.md](../add-target-atom-op/SKILL.md)), §2 **The Files You Will
+Touch** and the applicable recipe's integration and verification steps.
 
-- a Python DSL surface in `python/flydsl/expr/`,
-- the op definition in `include/flydsl/` and its implementation in `lib/`,
-- the lowering in `lib/Dialect/FlyROCDL/`,
-- FileCheck expectations in `tests/mlir/`,
-- kernels in `kernels/` that call it.
-
-A changed op signature, attribute, or lowering with an unchanged `.mlir`
-expectation is a break. A new atom added for one subtarget but not registered
-for the others it claims to support is a break. Check that every layer the
-change touches moved with it.
+Check that the affected layers, supported targets, and FileCheck expectations
+remain consistent with the changed behavior.
 
 ## Angle G — repo conventions and API stability
 
-These are the rules CI or a maintainer will enforce; each is checkable from the
-diff.
-
-- **Legacy kernel constructs and arithmetic.** Read the **kernel-code-cleanup** skill
-  at `.claude/skills/kernel-code-cleanup/SKILL.md`. Reuse its replacement tables
-  and §10 **Find** / **Triage** procedure within the review scope. The reviewing
-  Agent searches for legacy usage, traces imports and aliases, and reads the
-  affected functions. Include the resolved API, call site, suggested replacement,
-  and semantic constraints in each finding. Follow its review-only path; leave
-  migration and formatting to a separately requested fix.
-  Preserve §3's NaN semantics: `maximumf` → `fx.max`, while `maxnumf` →
-  `fx.maxnumf` (likewise for minimum). Changing that behavior is a correctness
-  finding.
-- **`expr/` target neutrality.** Direct children of `python/flydsl/expr/`
-  (`typing`, `primitive`, `gpu`, `derived`, `struct`, `arith`, `math`, `enum`,
-  `numeric`, `meta`, `extern`, `utils/`) may not import `rocdl`,
-  `_mlirDialectsFlyROCDL`, or `fly_rocdl`. Target-specific code belongs in
-  `python/flydsl/expr/rocdl/`, and a new backend module must be added to the
-  lazy `_BACKEND_MODULES` map in `python/flydsl/expr/__init__.py` rather than
-  eager-imported. `tests/unit/test_expr_optional_rocdl.py` enforces this.
-- **Direct upstream MLIR dialect operations** — `arith`, `scf`, `vector`,
-  `llvm`, `memref`, `math`, `gpu`, `func`, `builtin` imported from
-  `flydsl._mlir.dialects` or `mlir.dialects`. Unstable surface.
-- **Writes to underscore-prefixed attributes** of a FlyDSL object, including
-  `setattr` and `__dict__` forms. This bypasses validation or mutates shared
-  state across calls. Rank it above other convention findings.
-- **Environment variable spellings** not present in `python/flydsl/utils/env.py`.
-- **New repo pre-checks** must be registered in `scripts/check_repo.py`'s
-  `CHECKS` list, not added as a separate CI workflow step.
+- **Kernel conventions.** Read the **kernel-code-cleanup** skill
+  ([SKILL.md](../kernel-code-cleanup/SKILL.md)), **Cautions** and §10's review-only
+  **Find / Triage** procedure. Apply the relevant replacement tables and their
+  semantic constraints, including §3, to the resolved usages.
+- **API stability.** Read the **api-stability** skill
+  ([SKILL.md](../api-stability/SKILL.md)). Apply §1 **Producer review** to public
+  surface changes and §2 **Consumer review** to FlyDSL usage in the review scope.
+  Use its classifications, severity rules, and evidence requirements. Keep
+  stability judgments distinct from kernel-migration preferences.
+- **Formatting and lint.** For a style question or suspected style-gate failure,
+  use the **format-code** skill ([SKILL.md](../format-code/SKILL.md)),
+  **Check only**. Report which part of the review scope the check actually covers.
+- **Other repo conventions.** Read [CLAUDE.md](../../../CLAUDE.md)'s **Kernel
+  Authoring Conventions** and **Environment Variables**. For pre-check changes,
+  check registration against `scripts/check_repo.py` and
+  `.github/workflows/pre-checks.yaml`.
 
 CI independently enforces a subset of the arithmetic rules on added kernel
 lines with `scripts/check_typed_arithmetic_usage.py`, invoked through
 `scripts/check_repo.py`. Its AST scan is optional corroboration for a CI-failure
 claim; it is not a required review step.
 
-For a change to `python/flydsl/`'s public surface, judge breaking-change status
-against `docs/api_stability.md`; the **api-stability** skill covers that review
-in depth.
-
 ## Angle H — reuse, simplification, and altitude
 
-- **Reuse.** New code re-implementing something the repo already has. Grep the
-  shared modules before believing a helper is new: `kernels/common/kernels_common.py`
-  (wave size, dtype mapping, MoE dtype validation, the `_if_then` SCF context
-  manager, LLVM-ptr and stream helpers), `kernels/moe/moe_common.py`,
-  `kernels/common/layout_utils.py`, `kernels/gemm/fp8_gemm_utils.py`,
-  `kernels/common/dpp_utils.py`, `kernels/common/mma/`. Name the existing helper
-  to call instead.
-- **Placement.** A shared helper added to an unrelated kernel module instead of
-  its topical home; a DSL-level numeric or type helper added under `kernels/`
-  instead of `python/flydsl/expr/utils/arith.py` or
-  `python/flydsl/expr/numeric.py`; a compiler or runtime utility outside
-  `python/flydsl/utils/`.
-- **Simplification.** Redundant or derivable state, copy-paste with a small
-  variation, dead code the diff leaves behind, an abstraction introduced for a
-  single call site.
-- **Altitude.** A special case layered onto shared infrastructure where
-  generalizing the underlying mechanism is the real fix. A new `gfx*` branch
-  added to a function that already has three is the common shape here — the
-  bandaid works and the next architecture will need a fourth.
-- **Launch overhead.** A hot path calling a `@flyc.jit` wrapper per iteration
-  re-runs argument marshalling and cache lookup every call; `_run_compiled` in
-  `kernels/common/tensor_shim.py` is the fast path.
+Use [CLAUDE.md](../../../CLAUDE.md)'s **Kernel Authoring Conventions**, especially
+**Helper placement**, for reuse and module ownership. Read the
+**kernel-code-cleanup** skill ([SKILL.md](../kernel-code-cleanup/SKILL.md)),
+§8 **Trim comments and dead code** and §9 **Cut launch overhead**, for cleanup
+criteria and performance suggestions.
+
+Search for an existing implementation before proposing reuse; name the helper
+and its home. Assess redundant state, copy-paste, and new abstractions against
+their actual call sites. For a special case added to shared infrastructure,
+identify whether the underlying mechanism should handle it generally and state
+the concrete maintenance or performance cost.
 
 ## Angle I — test and documentation contract
 
-Marker rules are in `tests/README.md` and `tests/pytest.ini`.
+Read `tests/README.md` and `tests/pytest.ini` for tier, backend, and marker
+contracts, and [CLAUDE.md](../../../CLAUDE.md)'s **Testing Notes** and **Kernel
+Entry Points** for multi-GPU requirements and new-kernel test/documentation
+coverage. Check new or moved tests against their actual dependencies and device
+requirements.
 
-- A new or moved test under `tests/kernels/` that lacks both `l2_device` and
-  `rocm_lower`.
-- `rocm_lower` applied without a tier marker alongside it.
-- A test marked `l0_backend_agnostic` that imports or exercises `rocdl`,
-  `fly_rocdl`, or `_mlirDialectsFlyROCDL` — it is misclassified and will fail on
-  a non-ROCm host.
-- A multi-GPU test without the `multi_gpu` marker, or one that does not skip
-  below its required GPU count.
-- A new kernel family or public kernel API with no `tests/kernels/test_*.py`
-  coverage, or absent from `docs/prebuilt_kernels_guide.md`.
-- A changed op or lowering with no corresponding `tests/mlir/` FileCheck update.
+For changed atoms, use the **add-target-atom-op** skill
+([SKILL.md](../add-target-atom-op/SKILL.md))'s applicable verification steps.
+For other changed ops or lowerings, inspect the corresponding FileCheck coverage
+described in `tests/README.md`.
 
 Do not flag general "needs more tests" — only these specific contract breaks.
 
@@ -425,13 +369,3 @@ classifier cannot evaluate what the script does and blocks it independently of
 the allow list. When that happens, ask the user to run the command themselves.
 Do not reach for `gh api` instead — that evades the same evaluation the block
 exists to force, and hand-computed line numbers are what the script is for.
-
-This skill does not edit code. Report findings; fixing them is a separate request.
-
-## Related skills
-
-Reviewing is not debugging. When a finding needs a reproduction rather than an
-argument, hand off: the **debug-flydsl-kernel** skill for isolating a wrong
-result, the **oob-detection** skill for proving a bounds violation, the
-**kernel-code-cleanup** skill for migrating legacy constructs, and the
-**api-stability** skill for a full breaking-change audit.
