@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-10T13:29:26Z",
+ "updated": "2026-09-10T15:30:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34492588995,
+   "pr": 1116,
+   "commit": "3674e077b89c1899f1d6669535f3ef109ae5526a",
+   "branch": "yanbo/cleancode",
+   "event": "pull_request",
+   "title": "clean atomic add",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34492588995",
+   "created_at": "2026-09-10T14:58:36Z",
+   "updated_at": "2026-09-10T15:02:01Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
   {
    "run_id": 34481829789,
    "pr": 1066,
@@ -10,13 +25,43 @@
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34481829789",
    "created_at": "2026-09-10T13:18:35Z",
-   "updated_at": "2026-09-10T13:21:11Z",
+   "updated_at": "2026-09-10T13:43:45Z",
    "actor": "sammysun0711",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-10T14:06:59Z",
+     "completed_at": "2026-09-10T14:55:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34481829789/job/102895102364",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T13:43:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34481829789/job/102895102458"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-10T13:45:00Z",
+     "completed_at": "2026-09-10T15:09:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34481829789/job/102895102557",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 34474967700,
@@ -35,20 +80,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T12:22:23Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34474967700/job/102867730476"
+     "completed_at": "2026-09-10T13:33:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34474967700/job/102867730476",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-10T12:21:43Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34474967700/job/102867730568"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-10T13:44:26Z",
+     "completed_at": "2026-09-10T14:32:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34474967700/job/102867730568",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -205,13 +252,41 @@
    "branch": "main",
    "event": "push",
    "title": "[DSL] Add llvm load/store primitives (#1096)",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706",
    "created_at": "2026-09-10T09:15:02Z",
-   "updated_at": "2026-09-10T09:31:48Z",
+   "updated_at": "2026-09-10T14:23:22Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T14:23:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706/job/102909585591"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-10T14:24:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706/job/102909585592"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T14:23:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706/job/102909586387"
+    }
+   ]
   },
   {
    "run_id": 34459276491,
@@ -1639,21 +1714,6 @@
    "created_at": "2026-09-09T04:36:23Z",
    "updated_at": "2026-09-09T04:36:23Z",
    "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 34309400126,
-   "pr": null,
-   "commit": "37f9a52807ce2bdb0c9e24fa7425daf8db970581",
-   "branch": "chore/pre-commit-formatter",
-   "event": "pull_request",
-   "title": "[Chore] pre commit formatter",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34309400126",
-   "created_at": "2026-09-09T04:02:14Z",
-   "updated_at": "2026-09-09T09:41:13Z",
-   "actor": "ppppqp",
    "jobs": []
   }
  ]
