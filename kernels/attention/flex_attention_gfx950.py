@@ -620,6 +620,17 @@ def flex_attn_fwd_gfx950_kernel(
     kv_head = h_idx // param.gqa_group
 
     q_start = (q_tile * num_groups + group) * block_m
+    # Match flash-attention's bottom-right causal alignment for contiguous
+    # cross-seqlen inputs.  When Skv < Sq, the first Sq-Skv query rows are
+    # fully masked; the launcher removes whole dead workgroups and the output
+    # store below zeros any dead rows in the first partially-live workgroup.
+    # Paged KV keeps its existing top-left convention until it has a per-batch
+    # active guard (context lengths may differ across batches).
+    _bottom_right_causal = int(param.mask_type) == MASK_CAUSAL and not _paged
+    if const_expr(_bottom_right_causal):
+        _causal_q_shift = seqlen_kv - seqlen_q
+    else:
+        _causal_q_shift = fx.Int32(0)
 
     if const_expr(_paged):
         _ctx_len_it = fx.recast_iter(fx.Int32, fx.get_iter(context_lens))
@@ -1271,7 +1282,7 @@ def flex_attn_fwd_gfx950_kernel(
     _mod_apply_mask = flex_mod.apply_mask
     b_i32 = _idx_to_i32(b_idx)
     h_i32 = _idx_to_i32(h_idx)
-    q_idx_mod = _idx_to_i32(q_start) + fx.Int32(local_tid % 32)
+    q_idx_mod = _idx_to_i32(q_start) + fx.Int32(local_tid % 32) + _causal_q_shift
     lane_group_off = fx.Int32((local_tid // 32) * 4)
     kv_offsets = [8 * (e // 4) + (e % 4) for e in range(n_c)]
 
@@ -1301,12 +1312,26 @@ def flex_attn_fwd_gfx950_kernel(
             apply_score_mods(frag_S_in, kv_tile_idx)
         if const_expr(mod_has_mask):
             if const_expr(int(param.mask_type) == MASK_CAUSAL):
-                # Skip the per-element mask on tiles entirely below this group's
-                # first query row (wave-uniform: q_start, not per-lane q_idx).
+                # Skip when the whole group is strictly after this KV tile.
                 s_out = [frag_S_in[e] for e in range_constexpr(n_c)]
                 needs_mask = flex_mod.tile_needs_mask(
-                    kv_tile_idx, _idx_to_i32(q_start), block_n
+                    kv_tile_idx, _idx_to_i32(q_start) + _causal_q_shift, block_n
                 )
+                if needs_mask:
+                    s_out = _mask_scores(s_out, kv_tile_idx)
+                for e in range_constexpr(n_c):
+                    frag_S_in[e] = s_out[e]
+            elif const_expr(int(param.mask_type) == MASK_SLIDING_WINDOW):
+                # Interior band tiles need no mask. Use q_start for the causal
+                # edge and the last row in the group for the left window edge.
+                s_out = [frag_S_in[e] for e in range_constexpr(n_c)]
+                q_lo = _idx_to_i32(q_start)
+                q_hi = q_lo + fx.Int32(int(block_m) - 1)
+                kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
+                kv_tile_start = kv_tile_idx * fx.Int32(block_n)
+                too_far = kv_tile_end > q_lo
+                out_of_window = (q_hi - kv_tile_start) > fx.Int32(int(param.mask_window))
+                needs_mask = too_far | out_of_window
                 if needs_mask:
                     s_out = _mask_scores(s_out, kv_tile_idx)
                 for e in range_constexpr(n_c):
@@ -1629,7 +1654,7 @@ def flex_attn_fwd_gfx950_kernel(
             return fx.Int32(0)
 
     # KV tile range: clamp to the mask's valid range to skip fully-masked tiles.
-    _q_min_wg = _idx_to_i32(q_tile) * fx.Int32(num_groups * block_m)
+    _q_min_wg = _idx_to_i32(q_tile) * fx.Int32(num_groups * block_m) + _causal_q_shift
     _q_max_wg = _q_min_wg + fx.Int32(num_groups * block_m - 1)
     _kv_lo, _kv_hi = flex_mod.kv_range(_q_min_wg, _q_max_wg, n_kv_tiles, block_n)
     if const_expr(_SPLITK):
@@ -2651,9 +2676,19 @@ def flex_attn_fwd_gfx950_kernel(
             fx.make_layout(1, 1),
         )
         o_base = o_off + _qrow * _o_row_stride
+        _causal_row_active = (
+            _idx_to_i32(q_start) + _qrow + _causal_q_shift
+        ) >= fx.Int32(0)
         _lane_div_32 = fx.Index(local_tid // 32)
         for dc in range_constexpr(_n_d_chunks):
             o_vec = Vec(o_accs[dc])
+            if const_expr(_bottom_right_causal):
+                o_vec = Vec.from_elements(
+                    [
+                        _causal_row_active.select(o_vec[e], fx.Float32(0.0))
+                        for e in range_constexpr(16)
+                    ]
+                )
             for g in range_constexpr(2):
                 dwords = []
                 for sg in range_constexpr(2):
@@ -2818,7 +2853,21 @@ def launch_flex_attn_gfx950(
         grid_z = b
     _causal_grid = int(param.mask_type) in (MASK_CAUSAL, MASK_PREFIX_LM)
     if const_expr(_causal_grid):
-        _grid = (hq, num_q_tiles, grid_z)
+        if const_expr(int(param.mask_type) == MASK_CAUSAL and not _paged):
+            # Bottom-right causal has max(Sq-Skv, 0) fully-masked leading
+            # query rows.  Drop every workgroup wholly contained in that
+            # prefix.  Kernel-side reverse mapping still starts from the last
+            # full-grid q_tile, so reducing grid.y naturally selects the live
+            # tail without another kernel argument.
+            _dead_q_rows = seqlen_q - seqlen_kv
+            _dead_q_rows = (_dead_q_rows > fx.Int32(0)).select(
+                _dead_q_rows, fx.Int32(0)
+            )
+            _first_live_q_tile = _dead_q_rows // fx.Int32(rows_per_wg)
+            _active_q_tiles = num_q_tiles - _first_live_q_tile
+            _grid = (hq, _active_q_tiles, grid_z)
+        else:
+            _grid = (hq, num_q_tiles, grid_z)
     else:
         _grid = (num_q_tiles, hq, grid_z)
 

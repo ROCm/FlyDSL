@@ -73,6 +73,23 @@ def _sdpa_ref(q, k, v, scale, *, attn_mask=None, is_causal=False):
     return out.permute(0, 2, 1, 3).contiguous()
 
 
+def _bottom_right_causal_mask(Sq, Skv, device):
+    qi = torch.arange(Sq, device=device).unsqueeze(1)
+    ki = torch.arange(Skv, device=device).unsqueeze(0)
+    return ki <= qi + (Skv - Sq)
+
+
+def _bottom_right_causal_ref(q, k, v, scale):
+    Sq, Skv = q.shape[1], k.shape[1]
+    return _sdpa_ref(
+        q,
+        k,
+        v,
+        scale,
+        attn_mask=_bottom_right_causal_mask(Sq, Skv, q.device),
+    )
+
+
 def _check(out, ref, *, max_err_tol=8e-2, cos_tol=0.98, label=""):
     max_err = (out.float() - ref.float()).abs().max().item()
     cos = F.cosine_similarity(out.float().reshape(-1), ref.float().reshape(-1), dim=0).item()
@@ -147,7 +164,7 @@ _MOD_SHAPES = [
 def test_flex_attention_layout_causal(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
     out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_CAUSAL)
-    ref = _sdpa_ref(q, k, v, scale, is_causal=True)
+    ref = _bottom_right_causal_ref(q, k, v, scale)
     _check(out, ref, label=f"causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}")
 
 
