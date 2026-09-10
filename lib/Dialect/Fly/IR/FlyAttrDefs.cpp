@@ -9,6 +9,13 @@
 
 namespace mlir::fly {
 
+LogicalResult RegisterClassAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                                        StringRef target, StringRef name) {
+  if (target.empty() || name.empty())
+    return emitError() << "register class target and name must be nonempty";
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // AlignAttr
 //===----------------------------------------------------------------------===//

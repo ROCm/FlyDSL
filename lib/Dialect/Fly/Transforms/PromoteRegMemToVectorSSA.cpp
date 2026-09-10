@@ -130,6 +130,11 @@ public:
   }
 
 private:
+  struct Placement {
+    RegisterClassAttr regClass;
+    int64_t start;
+  };
+  DenseMap<MakePtrOp, Placement> placements;
   DenseMap<MakePtrOp, RegAllocaInfo> regAllocaInfos;
   SmallVector<MakePtrOp> allocaOrder;
 
@@ -139,10 +144,12 @@ private:
     regAllocaInfos.clear();
     allocaOrder.clear();
 
+    placements.clear();
     funcOp.walk([&](MakePtrOp makePtrOp) {
       if (!isRegValue(makePtrOp))
         return;
-      auto allocSizeAttr = makePtrOp.getDictAttrs()->getAs<IntegerAttr>("allocSize");
+      auto dict = makePtrOp.getDictAttrs();
+      auto allocSizeAttr = dict ? dict->getAs<IntegerAttr>("allocSize") : IntegerAttr{};
       if (!allocSizeAttr || allocSizeAttr.getInt() <= 0)
         return;
 
@@ -155,6 +162,40 @@ private:
                         VectorType::get({allocSizeAttr.getInt()}, ssaElemTy)});
       allocaOrder.push_back(makePtrOp);
     });
+
+    SmallVector<SetRegisterOp> declarations;
+    bool invalidPlacement = false;
+    funcOp.walk([&](SetRegisterOp op) {
+      Value storage = op.getStorage();
+      if (auto view = storage.getDefiningOp<MakeViewOp>())
+        storage = view.getIter();
+      if (!isa<PointerType>(storage.getType())) {
+        op.emitOpError("expected storage lowered to a register pointer or make_view");
+        invalidPlacement = true;
+        return;
+      }
+      auto root = resolveRegOffset(storage);
+      if (!root || !root->second || *root->second != 0 || !regAllocaInfos.count(root->first)) {
+        op.emitOpError("requires the base of a static register allocation with positive allocSize");
+        invalidPlacement = true;
+        return;
+      }
+      if (op->getBlock() != root->first->getBlock()) {
+        op.emitOpError("must be declared in the same block as its allocation");
+        invalidPlacement = true;
+        return;
+      }
+      auto [it, inserted] = placements.try_emplace(
+          root->first, Placement{op.getRegClassAttr(), op.getStartAttr().getInt()});
+      if (!inserted && (it->second.regClass != op.getRegClassAttr() ||
+                        it->second.start != op.getStartAttr().getInt())) {
+        op.emitOpError("conflicting declarations for the same register allocation");
+        invalidPlacement = true;
+      }
+      declarations.push_back(op);
+    });
+    if (invalidPlacement)
+      return failure();
 
     funcOp.walk([&](RecastIterOp recastOp) {
       if (recastOp->use_empty())
@@ -181,6 +222,13 @@ private:
         regAllocaInfos.erase(root->first);
     });
 
+    for (MakePtrOp root : allocaOrder) {
+      if (!regAllocaInfos.count(root) && placements.count(root))
+        return root.emitOpError("explicit register storage requires static offsets and "
+                                "cannot cross recast_iter in this prototype");
+    }
+    for (auto op : declarations)
+      op.erase();
     bool hasExcludedRoots = allocaOrder.size() != regAllocaInfos.size();
     llvm::erase_if(allocaOrder, [&](MakePtrOp r) { return !regAllocaInfos.count(r); });
 
@@ -352,6 +400,19 @@ private:
     return bitcastScalarViaVector(builder, loc, value, originalTy);
   }
 
+  Value bindRegister(OpBuilder &builder, Location loc, Value value, RegAccessInfo access) {
+    auto it = placements.find(access.makePtrOp);
+    if (it == placements.end())
+      return value;
+    const auto &info = regAllocaInfos.find(access.makePtrOp)->second;
+    int64_t bitOffset = int64_t(access.offset) * access.elemTy.getIntOrFloatBitWidth();
+    int64_t storageBits = int64_t(info.allocSize) * info.elemTy.getIntOrFloatBitWidth();
+    return RegisterValueOp::create(builder, loc, value.getType(), value, it->second.regClass,
+                                   builder.getI64IntegerAttr(it->second.start),
+                                   builder.getI64IntegerAttr(bitOffset),
+                                   builder.getI64IntegerAttr(storageBits));
+  }
+
   LogicalResult rewritePtrStore(PtrStoreOp storeOp, OpBuilder &builder, IRMapping &mapping,
                                 RegMem2VectorSSAMap &state) {
     auto access = getRegAccessInfo(storeOp.getPtr(), storeOp.getValue().getType());
@@ -369,6 +430,7 @@ private:
     const RegAllocaInfo *info = getAllocaInfo(access->makePtrOp);
     assert(info && "missing alloca info for register ptr.store");
     storedValue = bitcastToSSAElem(builder, loc, storedValue, info->vectorSSATy.getElementType());
+    storedValue = bindRegister(builder, loc, storedValue, *access);
 
     if (isa<IntegerType, FloatType>(storedValue.getType())) {
       assert(access->width == 1 && "expected scalar type with width 1");
@@ -413,6 +475,7 @@ private:
           ArrayRef<int64_t>{access->width}, ArrayRef<int64_t>{1});
     }
     extracted = bitcastFromSSAElem(builder, loc, extracted, resultType);
+    extracted = bindRegister(builder, loc, extracted, *access);
     mapping.map(loadOp, extracted);
     return success();
   }
