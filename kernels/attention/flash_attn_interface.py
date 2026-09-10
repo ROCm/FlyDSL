@@ -516,8 +516,10 @@ _PAGED_FP8_BATCH_INTERLEAVE_MAX_GROUP = 8
 _PAGED_FP8_V192_BATCH_INTERLEAVE_MAX_BATCH = 16
 
 
-def _paged_fp8_batch_interleave_group(batch_size: int, head_dims: tuple[int, int]) -> int:
-    """Choose a divisor-sized batch group for generic paged D192."""
+def _paged_fp8_batch_interleave_group(batch_size: int, head_dims: tuple[int, int], *, paired: bool = False) -> int:
+    """Choose a divisor-sized group for paged D192 or small paired D128 batches."""
+    if paired and head_dims == (128, 128) and batch_size in (2, 3, 5):
+        return batch_size
     if head_dims[0] != 192 or batch_size <= 1:
         return 1
     # Generic V192 favors the original cache-local grid above B=16.
@@ -792,8 +794,14 @@ def _flydsl_flash_attn_paged(
                 use_bn128=use_bn128,
                 paged_bn128_varlen=paged_bn128_varlen,
                 batch_interleave_group=(
-                    _paged_fp8_batch_interleave_group(B, fp8_head_dims)
-                    if H == 16 and num_kv_heads == 1 and (not use_bn128 or (fp8_head_dims == (192, 128) and B == 2))
+                    _paged_fp8_batch_interleave_group(B, fp8_head_dims, paired=use_bn128)
+                    if H == 16
+                    and num_kv_heads == 1
+                    and (
+                        not use_bn128
+                        or (fp8_head_dims == (192, 128) and B == 2)
+                        or (fp8_head_dims == (128, 128) and B in (2, 3, 5))
+                    )
                     else 1
                 ),
             )

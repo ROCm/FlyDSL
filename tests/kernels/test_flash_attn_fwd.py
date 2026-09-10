@@ -4694,7 +4694,9 @@ def test_paged_fp8_asymmetric_value_matches_torch(
         )
         torch.cuda.synchronize()
 
-    stream = torch.cuda.Stream() if use_non_default_stream else None
+    # HIP streams can share a hardware queue. The blocked-default-stream check
+    # needs a distinct priority pool so queue sharing cannot serialize the test.
+    stream = torch.cuda.Stream(priority=-1 if force_internal_copies else 0) if use_non_default_stream else None
     if stream is not None:
         torch.cuda.synchronize()
     if force_internal_copies and stream is not None:
@@ -4779,16 +4781,21 @@ def test_paged_fp8_d128_bn128_ragged_multiblock_matches_torch():
 
 
 @_requires_gfx950
+@pytest.mark.parametrize("batch_size", [2, 3, 5])
 @pytest.mark.parametrize("num_kv_heads", [1, 2])
 @pytest.mark.parametrize("mode", ["bounded", "escape", "mixed-waves", "negative"])
-def test_paged_fp8_d128_query_bound_preserves_rescaling(mode, num_kv_heads):
+def test_paged_fp8_d128_query_bound_preserves_rescaling(mode, num_kv_heads, batch_size):
     """A query bound may prune max checks only for every active lane of a wave."""
     torch.manual_seed(29)
-    query_lengths, kv_lengths = [300, 65], [1024, 512]
-    query_offsets, kv_offsets = [0, 300, 365], [0, 1024, 1536]
+    query_lengths = [300, 65, 257, 33, 127][:batch_size]
+    kv_lengths = [1024, 512, 768, 256, 384][:batch_size]
+    query_offsets, kv_offsets = [0], [0]
+    for query_length, kv_length in zip(query_lengths, kv_lengths):
+        query_offsets.append(query_offsets[-1] + query_length)
+        kv_offsets.append(kv_offsets[-1] + kv_length)
     num_pages = sum(kv_lengths) // 64
     physical_pages = torch.randperm(num_pages, device="cuda")
-    table = torch.zeros(2, 16, device="cuda", dtype=torch.int32)
+    table = torch.zeros(batch_size, 16, device="cuda", dtype=torch.int32)
     query = torch.zeros(sum(query_lengths), 16, 128, device="cuda")
     key = torch.zeros(num_pages, num_kv_heads, 8, 64, 16, device="cuda")
     head_sign = torch.where(torch.arange(num_kv_heads, device="cuda") % 2 == 0, 1.0, -1.0)
@@ -4862,6 +4869,36 @@ def test_paged_fp8_d128_query_bound_preserves_rescaling(mode, num_kv_heads):
 )
 def test_paged_fp8_d192_batch_interleave_group(batch_size, head_dims, expected):
     assert flash_attn_interface._paged_fp8_batch_interleave_group(batch_size, head_dims) == expected
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 3, 4, 5, 7, 8, 16, 33])
+def test_paged_fp8_d128_small_batch_interleave_group(batch_size):
+    choose = flash_attn_interface._paged_fp8_batch_interleave_group
+    assert choose(batch_size, (128, 128), paired=False) == 1
+    expected = batch_size if batch_size in (2, 3, 5) else 1
+    assert choose(batch_size, (128, 128), paired=True) == expected
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("batch_size", [3, 5])
+def test_paged_fp8_d128_interleaved_ragged_side_copies(batch_size):
+    query_lengths = [513, 257, 65, 300, 33][:batch_size]
+    kv_lengths = [1024, 768, 256, 512, 128][:batch_size]
+    physical_pages = list(reversed(range(sum(kv_lengths) // 64)))
+    page_offset, rows = 0, []
+    for length in kv_lengths:
+        count = length // 64
+        rows.append(physical_pages[page_offset : page_offset + count] + [0] * (16 - count))
+        page_offset += count
+    test_paged_fp8_asymmetric_value_matches_torch(
+        head_dim=128,
+        value_head_dim=128,
+        use_non_default_stream=True,
+        force_internal_copies=True,
+        query_lengths=query_lengths,
+        kv_lengths=kv_lengths,
+        block_table_rows=rows,
+    )
 
 
 @_requires_gfx950
