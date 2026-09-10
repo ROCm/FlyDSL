@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-10T12:39:41Z",
+ "updated": "2026-09-10T13:29:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34481829789,
+   "pr": 1066,
+   "commit": "787efd7a045cf2e434cf67b5474809c6dba70080",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34481829789",
+   "created_at": "2026-09-10T13:18:35Z",
+   "updated_at": "2026-09-10T13:21:11Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
   {
    "run_id": 34474967700,
    "pr": 1106,
@@ -68,11 +83,11 @@
    "branch": "jli/gfx1250/llvm-unclausevmem-patch",
    "event": "pull_request",
    "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34463722679",
    "created_at": "2026-09-10T10:00:15Z",
-   "updated_at": "2026-09-10T12:22:32Z",
+   "updated_at": "2026-09-10T13:26:54Z",
    "actor": "Boss2002n",
    "jobs": [
     {
@@ -98,11 +113,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T12:22:31Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34463722679/job/102837577427"
+     "completed_at": "2026-09-10T13:26:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34463722679/job/102837577427",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1552,7 +1568,7 @@
   },
   {
    "run_id": 34320514577,
-   "pr": 1066,
+   "pr": null,
    "commit": "621484fe1fb2fb425f6c045ddb2a42aac50d39ad",
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
@@ -1638,21 +1654,6 @@
    "created_at": "2026-09-09T04:02:14Z",
    "updated_at": "2026-09-09T09:41:13Z",
    "actor": "ppppqp",
-   "jobs": []
-  },
-  {
-   "run_id": 34309183548,
-   "pr": null,
-   "commit": "c5712bfceba10f1996a7318b791bddcb20cacc90",
-   "branch": "feat/rocdl-ordered-memory-primitives",
-   "event": "pull_request",
-   "title": "[DSL] Add llvm load/store primitives",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34309183548",
-   "created_at": "2026-09-09T03:58:54Z",
-   "updated_at": "2026-09-09T03:58:54Z",
-   "actor": "big-yellow-duck",
    "jobs": []
   }
  ]
