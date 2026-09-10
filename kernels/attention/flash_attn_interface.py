@@ -913,6 +913,11 @@ def flydsl_flash_attn_func(
            - ``linear``: 4D paged K/V, ``[NumBlocks, PageSize, NumKVHeads, HeadDim]``,
              page_size any multiple of the 64-token KV tile. K/V may be views into a
              wider packed cache row as long as pages stay ``PageSize`` rows apart.
+             Consumed without a copy only when heads are packed NHD (``Hkv == 1``
+             or ``head_stride == HeadDim``); a GQA cache laid out HND, mismatched
+             K/V strides, or a page pitch past the descriptor bound is repacked
+             via ``.contiguous()``. Not a general zero-copy promise for an
+             arbitrary vLLM cache.
            - ``linear3d``: page_size=1 special case,
              ``[NumBlocks, NumKVHeads, HeadDim]``.
            - ``vectorized``: aiter-style 5D K/V, where
@@ -920,7 +925,8 @@ def flydsl_flash_attn_func(
              and
              ``V = [NumBlocks, NumKVHeads, PageSize / kVectorSize, HeadDim, kVectorSize]``.
              Here ``kVectorSize = 16 / element_size`` (bf16/fp16: 8, fp8: 16);
-             page_size and head_dim must be divisible by it.
+             page_size and head_dim must be divisible by it, and ``page_size`` is
+             64 only (one KV tile per page); larger pages are rejected.
         causal: Bottom-right aligned causal mask when True.
         num_kv_heads: KV head count for GQA/MQA; defaults to q num_heads (MHA).
         cu_seqlens_q: Int32 ``[B+1]`` cumulative Q token counts (varlen).
