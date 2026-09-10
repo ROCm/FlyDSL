@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-09-10T08:40:51Z",
+ "updated": "2026-09-10T08:50:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34457182493,
+   "pr": 1106,
+   "commit": "1e18661d01d05f54e0ab4b83e13944f6f35f8b19",
+   "branch": "add-flydsl-code-review-skill",
+   "event": "pull_request",
+   "title": "[Skills] Add flydsl-code-review skill and workflow",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493",
+   "created_at": "2026-09-10T08:48:41Z",
+   "updated_at": "2026-09-10T08:49:10Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
+  {
+   "run_id": 34457180157,
+   "pr": 1104,
+   "commit": "4e5f9fe1de484e87e837fa4da7a2ac8319338697",
+   "branch": "ywx/mega_moe_r1_tune",
+   "event": "pull_request",
+   "title": " deepseekv3 r1 tune config",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457180157",
+   "created_at": "2026-09-10T08:48:40Z",
+   "updated_at": "2026-09-10T08:49:37Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34456354808,
+   "pr": 1117,
+   "commit": "879f5e61021e57bf9921c445018fd929fc873b13",
+   "branch": "feat/rocm-wave-size-hint",
+   "event": "pull_request",
+   "title": "[DSL] Support per-launcher ROCm wave-size hints",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34456354808",
+   "created_at": "2026-09-10T08:39:36Z",
+   "updated_at": "2026-09-10T08:39:36Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 34456021082,
    "pr": 1056,
@@ -85,38 +130,38 @@
    "branch": "add-flydsl-code-review-skill",
    "event": "pull_request",
    "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34451734527",
    "created_at": "2026-09-10T07:47:24Z",
-   "updated_at": "2026-09-10T08:10:08Z",
+   "updated_at": "2026-09-10T08:49:10Z",
    "actor": "zhiding512",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-10T08:10:08Z",
-     "completed_at": null,
+     "completed_at": "2026-09-10T08:48:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34451734527/job/102795075498"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-10T08:10:59Z",
-     "completed_at": null,
+     "completed_at": "2026-09-10T08:49:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34451734527/job/102795075536"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-10T08:10:08Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-10T08:39:52Z",
+     "completed_at": "2026-09-10T08:48:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34451734527/job/102795075600"
     }
    ]
@@ -1712,112 +1757,6 @@
      "started_at": "2026-09-08T12:42:55Z",
      "completed_at": "2026-09-08T12:50:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34218133598/job/102064420383"
-    }
-   ]
-  },
-  {
-   "run_id": 34218054970,
-   "pr": null,
-   "commit": "eb5592f35bf9c0cbc19586927573068df7ba832e",
-   "branch": "main",
-   "event": "push",
-   "title": "[DSL] Expose atomic operations via llvm dialect (#1100)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34218054970",
-   "created_at": "2026-09-08T10:56:21Z",
-   "updated_at": "2026-09-08T12:51:09Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T11:18:37Z",
-     "completed_at": "2026-09-08T12:38:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34218054970/job/102040200986",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T11:18:25Z",
-     "completed_at": "2026-09-08T12:51:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34218054970/job/102040201021",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-08T11:17:55Z",
-     "completed_at": "2026-09-08T11:32:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34218054970/job/102040201119"
-    }
-   ]
-  },
-  {
-   "run_id": 34217970507,
-   "pr": null,
-   "commit": "e40d5e84b52cb6bc12b62eac8048ef00c2e36577",
-   "branch": "main",
-   "event": "push",
-   "title": "[Doc] Add api document for rand extention (#1103)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34217970507",
-   "created_at": "2026-09-08T10:55:21Z",
-   "updated_at": "2026-09-08T10:56:37Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 34213236761,
-   "pr": null,
-   "commit": "30628e58e9a37d4192ebfa54786c5b026adaa1ef",
-   "branch": "lhc/fold-index-cast-on-main",
-   "event": "pull_request",
-   "title": "[Perf][Dialect] Fold redundant index cast pairs in layout lowering",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34213236761",
-   "created_at": "2026-09-08T10:01:47Z",
-   "updated_at": "2026-09-08T11:57:28Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T10:16:29Z",
-     "completed_at": "2026-09-08T11:57:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34213236761/job/102022972975",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T10:16:28Z",
-     "completed_at": "2026-09-08T11:41:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34213236761/job/102022973046",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T10:19:47Z",
-     "completed_at": "2026-09-08T10:39:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34213236761/job/102022973076",
-     "log_fetch_failed": true
     }
    ]
   }
