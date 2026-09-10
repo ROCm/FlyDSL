@@ -4975,7 +4975,7 @@ class DualwaveFp8KernelContext:
 
     def read_i32x4_lds(self, byte_row):
         tile = fx.slice(self.k_lds_i32_tiles, (None, fx.Uint32(byte_row) // 16))
-        return fx.memref_load_vec(tile).ir_value()
+        return fx.generic_load(fx.get_iter(tile), dtype=fx.Int32, count=4).ir_value()
 
 
 class DualwaveFp8QLoader(DualwaveFp8KernelContext):
@@ -5094,7 +5094,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
         halves = []
         for half in range_constexpr(2):
             view = fx.slice(self.v_lds_i32_tiles, (None, tile_index + chunk_offset + half))
-            halves.append(fx.memref_load_vec(view))
+            halves.append(fx.generic_load(fx.get_iter(view), dtype=fx.Int32, count=4))
         fx.rocdl.s_waitcnt(lgkmcnt=0)
         return _concat_vectors(halves[0], halves[1]).bitcast(fx.Int32).ir_value()
 
@@ -5399,9 +5399,7 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
 
     def _store_v_fp8_lds(self, data, byte_offset):
         dst = fx.slice(self.v_lds_i32_tiles, (None, fx.Uint32(byte_offset) // 16))
-        src = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
-        src.store(data)
-        fx.copy(fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32), src, dst)
+        fx.generic_store(fx.get_iter(dst), data)
 
     def _load_v_fp8_vectorized_bankpad_source(self, tile_start, page_id=None):
         """Issue vectorized V loads for the paged FP8 LDS layout."""
@@ -5531,7 +5529,7 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
                 view = fx.slice(
                     self.v_lds_i32_tiles, (None, fx.Uint32(row_base + token_offset - self.lds_vt_base_idx) // 16)
                 )
-                pair = fx.memref_load_vec(view).bitcast(fx.Int64)
+                pair = fx.generic_load(fx.get_iter(view), dtype=fx.Int32, count=4).bitcast(fx.Int64)
                 packs[half * 2][dc] = pair[0].ir_value()
                 packs[half * 2 + 1][dc] = pair[1].ir_value()
         return packs
