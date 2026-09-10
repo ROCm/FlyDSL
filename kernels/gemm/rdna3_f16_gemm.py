@@ -44,20 +44,44 @@ WMMA_N = 16
 WMMA_K = 16
 WAVE_SIZE = 32
 
-# The k-padding both operands pay to break LDS bank conflicts. Also the default
-# for a_k_pad/b_k_pad below, so a caller sizing a tile against the LDS budget can
-# assume it without the two drifting apart.
+# K-padding for the "pad" LDS layout; "kblock" needs none.
 K_PAD = 8
+
+
+def _sched_plan(reg_m, reg_n, reg_k, g2s_chunks):
+    """Issue-order hints for the k-tile body as (group, count) pairs."""
+    per_rk_wmma = reg_m * reg_n
+    per_rk_dsrd = 2 * (reg_m + reg_n)  # each v16 operand is two 128-bit reads
+    chunk = max(1, reg_n)
+
+    plan = [("vmem", g2s_chunks), ("dsrd", per_rk_dsrd)]
+    dsrd_left = per_rk_dsrd * (reg_k - 1)
+    dsrd_step = chunk
+    dswr_left = g2s_chunks
+    dswr_chunk = max(1, g2s_chunks // 2)
+    for _ in range(reg_k):
+        issued = 0
+        while issued < per_rk_wmma:
+            n = min(chunk, per_rk_wmma - issued)
+            plan.append(("mfma", n))
+            issued += n
+            if dsrd_left:
+                take = min(dsrd_step, dsrd_left)
+                plan.append(("dsrd", take))
+                dsrd_left -= take
+            elif dswr_left:
+                take = min(dswr_chunk, dswr_left)
+                plan.append(("dswr", take))
+                dswr_left -= take
+    if dswr_left:
+        plan.append(("dswr", dswr_left))
+    return tuple(plan)
 
 
 def _group_width(grid_m, group_m):
     """Largest grouping width <= group_m that divides grid_m.
 
-    ``_swizzle_tile_id`` derives bid_m from a fixed group width, so a grid_m that
-    is not a multiple of it makes the final group address tiles past the end of
-    the grid. That is reachable at the default 128x128 tile: on gfx1100 it writes
-    a wrong C at M of 1152, 1280 and 1664, and faults outright at 1536 and 2560,
-    depending on whether the address past the grid happens to be mapped.
+    ``_swizzle_tile_id`` requires a group width that divides grid_m.
     """
     return max(d for d in range(1, min(group_m, grid_m) + 1) if grid_m % d == 0)
 
@@ -83,19 +107,34 @@ def create_wmma_gemm_module(
     out_dtype="bf16",
     *,
     rounding="rn",  # "rn" (round to nearest) or "rs" (stochastic rounding)
-    # 128x128x32. That tile is right once the problem is large enough to fill the
-    # grid, but it cuts only 4 workgroups at 256x256 on a 96-CU part, so most CUs
-    # idle. Choosing a tile from the shape is worth up to 3.0x there and lives in
-    # rdna3_f16_gemm_autotune, which drives these arguments.
     reg_m=4,
     reg_n=4,
     reg_k=2,
     waves_m=2,
     waves_n=2,
     group_m=8,
-    a_k_pad=K_PAD,
-    b_k_pad=K_PAD,
+    lds_layout="pad",
+    sched_hint=False,
+    stagger=0,
+    persistent_wgs=0,
+    lda=None,
+    ldb=None,
+    ldc=None,
 ):
+    ld_a = K if lda is None else int(lda)
+    ld_b = K if ldb is None else int(ldb)
+    ld_c = N if ldc is None else int(ldc)
+    if ld_a < K or ld_b < K or ld_c < N:
+        raise ValueError(
+            f"leading dimensions must cover the operands: lda={ld_a}, ldb={ld_b} " f"need K={K}, ldc={ld_c} needs N={N}"
+        )
+    vec_elems = 16 // (2 if in_dtype in ("bf16", "f16") else 4)
+    if ld_a % vec_elems or ld_b % vec_elems:
+        raise ValueError(
+            f"lda={ld_a} and ldb={ld_b} must be multiples of {vec_elems} to keep "
+            f"each row 16-byte aligned for the 128-bit copy"
+        )
+
     gpu_arch = str(get_rocm_arch() or "")
     if not gpu_arch.startswith("gfx11"):
         raise RuntimeError(
@@ -109,7 +148,7 @@ def create_wmma_gemm_module(
     NUM_WAVES = waves_m * waves_n  # 4
     THREADS_PER_BLOCK = NUM_WAVES * WAVE_SIZE  # 128
 
-    assert reg_k >= 2 and reg_k % 2 == 0
+    assert reg_k >= 1
     assert rounding in ("rn", "rs"), f"rounding must be 'rn' or 'rs', got {rounding!r}"
     if rounding == "rs":
         assert out_dtype == "bf16", "stochastic rounding currently supports bf16 output only"
@@ -121,19 +160,32 @@ def create_wmma_gemm_module(
     # ``row = tid // THRS_K, col = (tid % THRS_K) * LOAD_VEC``.
     THRS_K = BLOCK_K // LOAD_VEC
     THRS_M = THREADS_PER_BLOCK // THRS_K
+    G2S_CHUNKS = (BLOCK_M + BLOCK_N) * BLOCK_K // THREADS_PER_BLOCK // LOAD_VEC
+    SCHED_PLAN = _sched_plan(reg_m, reg_n, reg_k, G2S_CHUNKS) if sched_hint else ()
     assert THRS_K * THRS_M == THREADS_PER_BLOCK
     assert BLOCK_M % THRS_M == 0 and BLOCK_N % THRS_M == 0
 
-    BLOCK_K_PAD_A = BLOCK_K + a_k_pad  # 40
-    BLOCK_K_PAD_B = BLOCK_K + b_k_pad  # 40
-    LDS_A_SIZE = BLOCK_M * BLOCK_K_PAD_A
-    LDS_B_SIZE = BLOCK_N * BLOCK_K_PAD_B
+    # "pad": row-major with K_PAD; "kblock": k-major, no pad (fits 256x256x32 in 64 KB).
+    assert lds_layout in ("pad", "kblock")
+    if lds_layout == "kblock":
+        assert BLOCK_K % LOAD_VEC == 0
+    k_pad = 0 if lds_layout == "kblock" else K_PAD
+    ROW_STRIDE_A = BLOCK_K + k_pad
+    ROW_STRIDE_B = BLOCK_K + k_pad
+    LDS_A_SIZE = BLOCK_M * ROW_STRIDE_A
+    LDS_B_SIZE = BLOCK_N * ROW_STRIDE_B
     LDS_ONE_BUF = LDS_A_SIZE + LDS_B_SIZE
     LDS_TOTAL = 2 * LDS_ONE_BUF
 
     assert M % BLOCK_M == 0
     assert N % BLOCK_N == 0
     assert K % BLOCK_K == 0
+
+    if lds_layout == "pad" and (BLOCK_K + k_pad) % LOAD_VEC:
+        raise ValueError(
+            f"K_PAD={k_pad} leaves an LDS row of {BLOCK_K + k_pad} elements, "
+            f"which is not a multiple of the {LOAD_VEC}-element vector store"
+        )
 
     num_k_tiles = K // BLOCK_K
     if num_k_tiles < 2:
@@ -143,6 +195,20 @@ def create_wmma_gemm_module(
     grid_n = N // BLOCK_N
 
     group_width = _group_width(grid_m, group_m)
+
+    assert stagger >= 0
+    stagger_step = int(stagger) if num_k_tiles & (num_k_tiles - 1) == 0 else 0
+
+    num_tiles = grid_m * grid_n
+    persist_wgs = int(persistent_wgs)
+    if persist_wgs not in (0, num_tiles):
+        raise ValueError(
+            f"persistent_wgs must be 0 (plain grid) or num_tiles={num_tiles} "
+            f"(whole-tile persistent), got {persist_wgs}"
+        )
+    persist_rot_step = int(stagger) if persist_wgs else 0
+    if persist_wgs:
+        stagger_step = 0
 
     is_bf16 = in_dtype == "bf16"
 
@@ -198,46 +264,40 @@ def create_wmma_gemm_module(
         # in the K dimension — each lane carries all 16 K-elements.
         lane16 = lane % 16
 
-        bid_m, bid_n = _swizzle_tile_id(pid, grid_n, group_width)
+        if const_expr(stagger_step):
+            k_first = fx.Int32(pid) * stagger_step % num_k_tiles
+        else:
+            k_first = 0
+
+        def _k_tile(step, rot=None, n_iter=None):
+            """Global k-tile index for the ``step``-th tile of one output-tile visit."""
+            if const_expr(stagger_step):
+                return (k_first + fx.Int32(step)) % num_k_tiles
+            if const_expr(persist_rot_step):
+                kk = rot + fx.Int32(step)
+                return (kk >= n_iter).select(kk - n_iter, kk)
+            return step
 
         wave_m = wave_id // waves_n
         wave_n = wave_id % waves_n
 
-        # Wave wm owns the contiguous row band [wm*reg_m*16, +reg_m*16). A
-        # tiled_mma stamps its wave grid across the tile instead, putting repeat
-        # rm at row (rm*waves_m + wm)*16; measured on gfx1100 that interleaving
-        # costs 62% at 3072x3072x1024 (269 -> 436 us) while gaining 3-8% on the
-        # medium shapes, so a tiled_mma standing in for this loop has to carry a
-        # permutation that restores the banding rather than adopt the default.
-
-        # Result partition. The tiled_mma carries a permutation that reproduces
-        # the wave banding above, so the accumulators land where the hand-rolled
-        # ``g_row = base + 2*si + klane`` store used to put them.
-        tC = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_c), fx.make_tile(BLOCK_M, BLOCK_N))[
-            None, None, bid_m, bid_n
-        ]
-        thr_mma = tiled_mma.thr_slice(tid)
-        frag_C = thr_mma.make_fragment_C(tC)
-        copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy(out_elem_cls.width), out_elem_cls)
-        thr_r2g_C = fx.make_tiled_copy_C(copy_out, tiled_mma).get_slice(tid)
-        pC_g = thr_r2g_C.partition_S(tC)
-        if const_expr(out_elem_cls is fx.Float32):
-            frag_C_out = frag_C
-        else:
-            frag_C_out = fx.make_fragment_like(frag_C, out_elem_cls.ir_type)
-        frag_C_retile = thr_r2g_C.retile(frag_C_out)
-
         # ============================================================
         # GMEM -> registers -> LDS, through the tiled copy
         # ============================================================
-        tA = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_a), fx.make_tile(BLOCK_M, BLOCK_K))[None, None, bid_m, None]
-        tB = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_bt), fx.make_tile(BLOCK_N, BLOCK_K))[
-            None, None, bid_n, None
-        ]
-
         thr_g2s = tiled_copy_g2s.get_slice(tid)
-        pA_g = thr_g2s.partition_S(tA)
-        pB_g = thr_g2s.partition_S(tB)
+        thr_mma = tiled_mma.thr_slice(tid)
+        copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy(out_elem_cls.width), out_elem_cls)
+        thr_r2g_C = fx.make_tiled_copy_C(copy_out, tiled_mma).get_slice(tid)
+
+        def _tile_operands(bid_m, bid_n):
+            """The A and B row bands this tile reads, partitioned per thread."""
+            tA = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_a), fx.make_tile(BLOCK_M, BLOCK_K))[
+                None, None, bid_m, None
+            ]
+            tB = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_bt), fx.make_tile(BLOCK_N, BLOCK_K))[
+                None, None, bid_n, None
+            ]
+            return thr_g2s.partition_S(tA), thr_g2s.partition_S(tB)
 
         buf_copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_dtype)
         uni_copy = fx.make_copy_atom(fx.UniversalCopy128b(), elem_dtype)
@@ -248,19 +308,32 @@ def create_wmma_gemm_module(
         # allocation instead, which is what the flat _v8_store did by hand.
         def _lds_dst(buf_offset, base, rows, row_stride):
             ptr = fx.add_offset(lds_ptr, fx.make_int_tuple(buf_offset + base))
-            view = fx.make_view(fx.recast_iter(elem_dtype, ptr), fx.make_layout((rows, BLOCK_K), (row_stride, 1)))
+            if const_expr(lds_layout == "kblock"):
+                layout = fx.make_layout(
+                    (rows, (LOAD_VEC, BLOCK_K // LOAD_VEC)),
+                    (LOAD_VEC, (1, rows * LOAD_VEC)),
+                )
+            else:
+                layout = fx.make_layout((rows, BLOCK_K), (row_stride, 1))
+            view = fx.make_view(fx.recast_iter(elem_dtype, ptr), layout)
             return thr_g2s.partition_D(view)[None, None, None]
 
         def _pA_s(buf_offset):
-            return _lds_dst(buf_offset, 0, BLOCK_M, BLOCK_K_PAD_A)
+            return _lds_dst(buf_offset, 0, BLOCK_M, ROW_STRIDE_A)
 
         def _pB_s(buf_offset):
-            return _lds_dst(buf_offset, LDS_A_SIZE, BLOCK_N, BLOCK_K_PAD_B)
+            return _lds_dst(buf_offset, LDS_A_SIZE, BLOCK_N, ROW_STRIDE_B)
+
+        def _lds_elem(rows, row_stride, row, col):
+            """Element index of (row, col) inside one A- or B-tile of the buffer."""
+            if const_expr(lds_layout == "kblock"):
+                return (col // LOAD_VEC * rows + row) * LOAD_VEC + col % LOAD_VEC
+            return row * row_stride + col
 
         frag_copy_A = fx.make_fragment_like(_pA_s(0))
         frag_copy_B = fx.make_fragment_like(_pB_s(0))
 
-        def _gmem_load(k_tile):
+        def _gmem_load(pA_g, pB_g, k_tile):
             fx.copy(buf_copy, pA_g[None, None, None, k_tile], frag_copy_A)
             fx.copy(buf_copy, pB_g[None, None, None, k_tile], frag_copy_B)
 
@@ -283,8 +356,8 @@ def create_wmma_gemm_module(
             col_hi = 16 * rk + 8
             for rn in range_constexpr(reg_n):
                 row = wave_n * (reg_n * WMMA_N) + 16 * rn + lane16
-                lds_idx_lo = buf_offset + LDS_A_SIZE + row * BLOCK_K_PAD_B + col_lo
-                lds_idx_hi = buf_offset + LDS_A_SIZE + row * BLOCK_K_PAD_B + col_hi
+                lds_idx_lo = buf_offset + LDS_A_SIZE + _lds_elem(BLOCK_N, ROW_STRIDE_B, row, col_lo)
+                lds_idx_hi = buf_offset + LDS_A_SIZE + _lds_elem(BLOCK_N, ROW_STRIDE_B, row, col_hi)
                 v_lo = _v8_load(lds_idx_lo // 8)
                 v_hi = _v8_load(lds_idx_hi // 8)
                 vecs.append(v_lo.shuffle(v_hi, _concat16_mask))
@@ -294,8 +367,8 @@ def create_wmma_gemm_module(
             col_lo = 16 * rk
             col_hi = 16 * rk + 8
             row = wave_m * (reg_m * WMMA_M) + 16 * rm_val + lane16
-            lds_idx_lo = buf_offset + row * BLOCK_K_PAD_A + col_lo
-            lds_idx_hi = buf_offset + row * BLOCK_K_PAD_A + col_hi
+            lds_idx_lo = buf_offset + _lds_elem(BLOCK_M, ROW_STRIDE_A, row, col_lo)
+            lds_idx_hi = buf_offset + _lds_elem(BLOCK_M, ROW_STRIDE_A, row, col_hi)
             v_lo = _v8_load(lds_idx_lo // 8)
             v_hi = _v8_load(lds_idx_hi // 8)
             return v_lo.shuffle(v_hi, _concat16_mask)
@@ -310,11 +383,13 @@ def create_wmma_gemm_module(
                 has_side_effects=True,
             )
 
-        def _do_compute_rk(accs_in, rk, buf_offset):
+        def _do_compute_rk(accs_in, rk, buf_offset, b_vecs):
             new_accs = list(accs_in)
-            b_vecs = _load_b_from_lds(rk, buf_offset)
+            a_next = _load_a_single_from_lds(rk, 0, buf_offset)
             for rm in range_constexpr(reg_m):
-                a_vec = _load_a_single_from_lds(rk, rm, buf_offset)
+                a_vec = a_next
+                if const_expr(rm + 1 < reg_m):
+                    a_next = _load_a_single_from_lds(rk, rm + 1, buf_offset)
                 for rn in range_constexpr(reg_n):
                     idx = rm * reg_n + rn
                     new_accs[idx] = _wmma_op(
@@ -324,75 +399,130 @@ def create_wmma_gemm_module(
                     )
             return new_accs
 
-        zero_acc = fx.full(8, 0.0, fx.Float32)
-        accs = [zero_acc for _ in range_constexpr(reg_m * reg_n)]
+        def _compute_k_tile(accs_in, buf_offset):
+            """All reg_k WMMA steps over one LDS buffer."""
+            new_accs = list(accs_in)
+            for rk in range_constexpr(reg_k):
+                new_accs = _do_compute_rk(new_accs, rk, buf_offset, _load_b_from_lds(rk, buf_offset))
+            return new_accs
 
+        def _sched_k_tile():
+            emit = {
+                "vmem": rocdl.sched_vmem,
+                "mfma": rocdl.sched_mfma,
+                "dsrd": rocdl.sched_dsrd,
+                "dswr": rocdl.sched_dswr,
+            }
+            for group, count in SCHED_PLAN:
+                emit[group](count)
+
+        zero_acc = fx.full(8, 0.0, fx.Float32)
+        n_acc = reg_m * reg_n
         c_lds_buf_stride = LDS_ONE_BUF
 
-        # --- PROLOGUE ---
-        _gmem_load(fx.Int32(0))
-        _lds_store(0)
-        _barrier()
-
-        n_acc = reg_m * reg_n
-        init_state = list(accs)
-
-        for iv, state in range(0, num_k_tiles - 1, 1, init=init_state):
-            s_accs = list(state[:n_acc])
-
-            read_off = iv % 2 * c_lds_buf_stride
-            write_off = (1 - iv % 2) * c_lds_buf_stride
-
-            _gmem_load(iv + 1)
-
-            for rk in range_constexpr(reg_k):
-                s_accs = _do_compute_rk(s_accs, rk, read_off)
-
+        def _one_k_tile(pA_g, pB_g, s_accs, read_off, write_off, load_tile):
+            """Prefetch the next k-tile, consume this one, hand over, barrier."""
+            _gmem_load(pA_g, pB_g, load_tile)
+            s_accs = _compute_k_tile(s_accs, read_off)
             _lds_store(write_off)
+            if const_expr(sched_hint):
+                _sched_k_tile()
+            _barrier()
+            return s_accs
+
+        def _accumulate(pA_g, pB_g, rot=None):
+            """Run the double-buffered pipeline over all k-tiles of one output tile."""
+            if const_expr(persist_wgs):
+                _barrier()
+            _gmem_load(pA_g, pB_g, _k_tile(fx.Int32(0), rot, num_k_tiles))
+            _lds_store(0)
             _barrier()
 
-            results = yield list(s_accs)
+            init_state = [zero_acc for _ in range_constexpr(n_acc)]
 
-        accs = list(results[:n_acc])
+            for iv, state in range(0, num_k_tiles - 1, 1, init=init_state):
+                s_accs = list(state[:n_acc])
+                s_accs = _one_k_tile(
+                    pA_g,
+                    pB_g,
+                    s_accs,
+                    iv % 2 * c_lds_buf_stride,
+                    (1 - iv % 2) * c_lds_buf_stride,
+                    _k_tile(iv + 1, rot, num_k_tiles),
+                )
+                results = yield list(s_accs)
 
-        last_read_off = ((num_k_tiles - 1) % 2) * c_lds_buf_stride
-        for rk in range_constexpr(reg_k):
-            accs = _do_compute_rk(accs, rk, last_read_off)
+            return _compute_k_tile(list(results[:n_acc]), ((num_k_tiles - 1) % 2) * c_lds_buf_stride)
 
         # ============================================================
         # Store results to GMEM through the tiled copy
         # ============================================================
-        # The gfx11 v8f32 accumulator (lane L holds D[2*si + L/16][L%16]) and the
-        # wave banding are both encoded in the tiled_mma, so the row arithmetic
-        # that used to live here is gone. What remains is the value transform,
-        # which no copy atom can express.
-        #
-        # frag_C flattens as si + 8*(rm + reg_m*rn), so each run of 8 elements is
-        # exactly one atom's accumulator, and one Philox draw still covers one run.
-        ordered_accs = [accs[rm * reg_n + rn] for rn in range_constexpr(reg_n) for rm in range_constexpr(reg_m)]
-        if const_expr(rounding == "rs"):
-            # The 4 random words cover all 8 values, each taking a distinct
-            # 16-bit slice (low/high of a word), so the f32 -> bf16 store is
-            # unbiased in expectation without a per-element draw. Keying on the
-            # thread's slot rather than the output coordinate keeps the draw
-            # independent of where the tiled copy lands the fragment.
-            out_elems = []
-            for g, acc in enumerate(ordered_accs):
-                base_off = (pid * THREADS_PER_BLOCK + tid) * acc_size + 8 * g
-                words = fx.random.randint4x(fx.Uint32(sr_seed), fx.Uint32(base_off))
-                for si in range_constexpr(8):
-                    word = words[si // 2]
-                    rbits = word if si % 2 == 0 else (word >> fx.Uint32(16))
-                    out_elems.append(cvt_sr_f32_to_bf16(acc[si], rbits))
-        elif const_expr(out_elem_cls is fx.Float32):
-            out_elems = [acc[si] for acc in ordered_accs for si in range_constexpr(8)]
-        else:
-            out_elems = [acc[si].to(out_elem_cls) for acc in ordered_accs for si in range_constexpr(8)]
+        def _store_C(accs, bid_m, bid_n, seed_slot):
+            # The gfx11 v8f32 accumulator (lane L holds D[2*si + L/16][L%16]) and
+            # the wave banding are both encoded in the tiled_mma, so the row
+            # arithmetic that used to live here is gone. What remains is the
+            # value transform, which no copy atom can express.
+            #
+            # frag_C flattens as si + 8*(rm + reg_m*rn), so each run of 8 elements
+            # is exactly one atom's accumulator, and one Philox draw still covers
+            # one run.
+            tC = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_c), fx.make_tile(BLOCK_M, BLOCK_N))[
+                None, None, bid_m, bid_n
+            ]
+            frag_C = thr_mma.make_fragment_C(tC)
+            pC_g = thr_r2g_C.partition_S(tC)
+            if const_expr(out_elem_cls is fx.Float32):
+                frag_C_out = frag_C
+            else:
+                frag_C_out = fx.make_fragment_like(frag_C, out_elem_cls.ir_type)
+            frag_C_retile = thr_r2g_C.retile(frag_C_out)
 
-        frag_C_out.store(
-            vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), [as_ir_value(e) for e in out_elems])
-        )
-        fx.copy(copy_out, frag_C_retile, pC_g)
+            ordered_accs = [accs[rm * reg_n + rn] for rn in range_constexpr(reg_n) for rm in range_constexpr(reg_m)]
+            if const_expr(rounding == "rs"):
+                # The 4 random words cover all 8 values, each taking a distinct
+                # 16-bit slice (low/high of a word), so the f32 -> bf16 store is
+                # unbiased in expectation without a per-element draw. Keying on
+                # the thread's slot rather than the output coordinate keeps the
+                # draw independent of where the tiled copy lands the fragment.
+                out_elems = []
+                for g, acc in enumerate(ordered_accs):
+                    base_off = (seed_slot * THREADS_PER_BLOCK + tid) * acc_size + 8 * g
+                    words = fx.random.randint4x(fx.Uint32(sr_seed), fx.Uint32(base_off))
+                    for si in range_constexpr(8):
+                        word = words[si // 2]
+                        rbits = word if si % 2 == 0 else (word >> fx.Uint32(16))
+                        out_elems.append(cvt_sr_f32_to_bf16(acc[si], rbits))
+            elif const_expr(out_elem_cls is fx.Float32):
+                out_elems = [acc[si] for acc in ordered_accs for si in range_constexpr(8)]
+            else:
+                out_elems = [acc[si].to(out_elem_cls) for acc in ordered_accs for si in range_constexpr(8)]
+
+            frag_C_out.store(
+                vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), [as_ir_value(e) for e in out_elems])
+            )
+            fx.copy(copy_out, frag_C_retile, pC_g)
+
+        if const_expr(not persist_wgs):
+            bid_m, bid_n = _swizzle_tile_id(pid, grid_n, group_width)
+            pA_g, pB_g = _tile_operands(bid_m, bid_n)
+            accs = _accumulate(pA_g, pB_g)
+            _store_C(accs, bid_m, bid_n, pid)
+        else:
+            pid32 = fx.Int32(pid)
+            t_first = pid32 * num_tiles // persist_wgs
+            t_last = (pid32 + 1) * num_tiles // persist_wgs - 1
+
+            for t, _carry in range(t_first, t_last + 1, 1, init=[fx.Int32(0)]):
+                t32 = fx.Int32(t)
+                bid_m, bid_n = _swizzle_tile_id(t32, grid_n, group_width)
+                pA_g, pB_g = _tile_operands(bid_m, bid_n)
+                if const_expr(persist_rot_step):
+                    rot = pid32 * persist_rot_step % fx.Int32(num_k_tiles)
+                else:
+                    rot = None
+                accs = _accumulate(pA_g, pB_g, rot)
+                _store_C(accs, bid_m, bid_n, t32)
+                _ = yield [fx.Int32(0)]
 
     @flyc.jit
     def launch_gemm(
@@ -402,11 +532,6 @@ def create_wmma_gemm_module(
         stream: fx.Stream,
         sr_seed: fx.Int32 = 0,
     ):
-        # 16x16x16 v16 WMMA atom (gfx11.wmma) over a waves_m x waves_n wave grid.
-        # The permutation spans the whole block tile and remaps the natural
-        # (atom, wave, repeat) coordinate so wave wm keeps the contiguous band
-        # [wm*reg_m*16, +reg_m*16); the default stamping interleaves the repeats
-        # instead, which measured 62% slower at 3072x3072x1024.
         mma_atom = fx.make_mma_atom(fx.rocdl.WMMA(WMMA_M, WMMA_N, WMMA_K, elem_dtype, fx.Float32))
         tiled_mma = fx.make_tiled_mma(
             mma_atom,
@@ -428,12 +553,12 @@ def create_wmma_gemm_module(
             fx.make_tile(THRS_M, BLOCK_K),
         )
 
-        arg_a_2d = fx.make_view(fx.get_iter(arg_a), fx.make_layout((M, K), (K, 1)))
-        arg_bt_2d = fx.make_view(fx.get_iter(arg_bt), fx.make_layout((N, K), (K, 1)))
-        arg_c_2d = fx.make_view(fx.get_iter(arg_c), fx.make_layout((M, N), (N, 1)))
+        arg_a_2d = fx.make_view(fx.get_iter(arg_a), fx.make_layout((M, K), (ld_a, 1)))
+        arg_bt_2d = fx.make_view(fx.get_iter(arg_bt), fx.make_layout((N, K), (ld_b, 1)))
+        arg_c_2d = fx.make_view(fx.get_iter(arg_c), fx.make_layout((M, N), (ld_c, 1)))
 
         c1 = 1
-        total_blocks = grid_m * grid_n
+        total_blocks = persist_wgs if persist_wgs else grid_m * grid_n
         bk = THREADS_PER_BLOCK
 
         launcher = wmma_gemm_kernel(arg_c_2d, arg_a_2d, arg_bt_2d, tiled_mma, tiled_copy_g2s, sr_seed)
@@ -443,4 +568,7 @@ def create_wmma_gemm_module(
             stream=stream,
         )
 
-    return launch_gemm, BLOCK_M, BLOCK_N, BLOCK_K
+    def launch(arg_c, arg_a, arg_bt, stream, sr_seed=0):
+        return launch_gemm(arg_c, arg_a, arg_bt, stream, sr_seed)
+
+    return launch, BLOCK_M, BLOCK_N, BLOCK_K

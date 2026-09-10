@@ -7,7 +7,7 @@ from typing import Any, Callable
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, scf, vector
+from flydsl._mlir.dialects import llvm, vector
 from flydsl.expr import (
     arith,
     const_expr,
@@ -246,33 +246,28 @@ class SplitKProtocol:
     @flyc.jit
     def wait_until_initialized(self):
         if self.tid == 0:
-            init_cur = arith.constant(0, type=T.i32)
-            wait_loop = scf.WhileOp([T.i32], [init_cur])
-            before = ir.Block.create_at_start(wait_loop.before, [T.i32])
-            after = ir.Block.create_at_start(wait_loop.after, [T.i32])
-            with ir.InsertionPoint(before):
-                cur = before.arguments[0]
-                need_wait = arith.CmpIOp(
-                    arith.CmpIPredicate.eq,
-                    cur,
-                    arith.constant(0, type=T.i32),
-                ).result
-                scf.ConditionOp(need_wait, [cur])
-            with ir.InsertionPoint(after):
-                signal_ptr = get_llvm_ptr(
-                    self.signal_ptr,
-                    self.signal_idx,
-                    4,
-                    ir.Type.parse("!llvm.ptr<1>"),
+            signal_ptr = get_llvm_ptr(
+                self.signal_ptr,
+                self.signal_idx,
+                4,
+                ir.Type.parse("!llvm.ptr<1>"),
+            )
+
+            def _load_signal():
+                return fx.Int32(
+                    llvm.LoadOp(
+                        T.i32,
+                        signal_ptr,
+                        alignment=4,
+                        ordering=llvm.AtomicOrdering.monotonic,
+                        syncscope="agent",
+                    ).result
                 )
-                cur = llvm.LoadOp(
-                    T.i32,
-                    signal_ptr,
-                    alignment=4,
-                    ordering=llvm.AtomicOrdering.monotonic,
-                    syncscope="agent",
-                ).result
-                scf.YieldOp([cur])
+
+            # spin until signal != 0; reload stays in the loop body
+            cur = _load_signal()
+            while cur == fx.Int32(0):
+                cur = _load_signal()
         rocdl.sched_barrier(0)
         gpu.barrier()
 

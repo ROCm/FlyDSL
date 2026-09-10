@@ -365,7 +365,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
     # ---- Buffer resources ----
     query_rsrc = buffer_ops.create_buffer_resource(query)
-    kv_rsrc = buffer_ops.create_buffer_resource(kv_buffer)
+    kv_rsrc = fx.rocdl.get_buffer_rsrc(buffer_ops.create_buffer_resource(kv_buffer))
     kv_page_indices_rsrc = buffer_ops.create_buffer_resource(kv_page_indices)
     work_indptr_rsrc = buffer_ops.create_buffer_resource(work_indptr)
     work_info_set_rsrc = buffer_ops.create_buffer_resource(work_info_set)

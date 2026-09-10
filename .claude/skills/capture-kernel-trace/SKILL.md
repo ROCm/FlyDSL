@@ -6,7 +6,7 @@ description: >
   kernel_include_regex, runs rocprofv3 -i input.yaml with FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1,
   and downloads the latest ui_output_agent_* directory for analysis.
   Usage: /capture-kernel-trace <test_script.py> [kernel_name_pattern]
-tools: Bash,Read,Write,Edit,Grep,Glob
+allowed-tools: Bash,Read,Write,Edit,Grep,Glob
 ---
 
 # Capture Kernel Trace
@@ -25,10 +25,13 @@ If no test script is provided, ask the user.
 
 ## Connection Info
 
-**Check MEMORY.md for the user's current remote access configuration.** If not found, ask the user for:
+**Ask the user for their remote access configuration** (or reuse what they gave
+earlier in the session):
 - SSH host and user
 - Docker container name (if applicable)
 - FlyDSL install path on remote (default: project root)
+
+For a purely local GPU, skip the SSH/Docker wrappers throughout this skill.
 
 SSH command pattern (adjust per environment):
 ```bash
