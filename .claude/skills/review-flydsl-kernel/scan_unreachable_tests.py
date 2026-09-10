@@ -1,115 +1,313 @@
 #!/usr/bin/env python3
-"""Find tests a PR adds that the script entry point cannot reach.
+"""Find added tests without a statically visible script entry path.
 
-Several test files here run two ways: pytest collects `test_*`, and `run_benchmark.sh` runs the
-same file as a script, where only what `__main__` calls happens. Add a pytest test to such a file
-and it silently does not run in the script path, so the file reports coverage it does not have.
+Read the head source and a unified diff; never import or execute reviewed code.
+Check module-level test_* definitions and methods in Test* classes whose def
+line is added by the diff, using qualified names and line numbers. Signature
+edits can therefore produce candidates; edits only to an existing body do not.
+Follow direct calls to unambiguous
+module functions from an exact ``__name__ == "__main__"`` guard, and recognize
+pytest.main([__file__]) (including import aliases and harmless reporting flags).
 
-coderfeli on #481: "These new variant tests are pytest-only today. run_benchmark.sh executes this
-file as a script, but __main__ only calls test_all(), so the fused/quant variants are not
-exercised in that path."
-
-Only tests ADDED by the diff are reported. Pre-existing unreachable tests are the norm in this
-repo -- an earlier version of this script flagged 6 of 7 untouched tests in one file -- and they
-are not the PR's debt.
+This is a review aid, not a Python interpreter: dynamic dispatch, pytest
+selectors/unknown arguments, runtime branches, decorators, configuration and
+plugins need review. A visible path does not guarantee runtime execution.
+Exit 0: no candidates; 1: coverage candidates/manual review; 2: invalid input.
 
 usage: scan_unreachable_tests.py --diff <diff-file> [worktree-root]
 """
+
+import argparse
 import ast
 import re
 import sys
+from collections import Counter
+from pathlib import Path
+
+_HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_REPORTING_FLAGS = {
+    "-q",
+    "-qq",
+    "--quiet",
+    "-v",
+    "-vv",
+    "--verbose",
+    "-s",
+    "-ra",
+    "-rA",
+    "--disable-warnings",
+    "--tb=short",
+    "--tb=long",
+    "--tb=no",
+    "--color=yes",
+    "--color=no",
+    "--color=auto",
+    "--capture=no",
+}
 
 
-def calls_in(node):
-    out = set()
-    for n in ast.walk(node):
-        if isinstance(n, ast.Call):
-            f = n.func
-            if isinstance(f, ast.Name):
-                out.add(f.id)
-            elif isinstance(f, ast.Attribute):
-                out.add(f.attr)
-    return out
+def added_lines_from_diff(diff):
+    """Map Python head paths to (added line numbers, expected head lines)."""
+    files = {}
+    path = None
+    old_left = new_left = 0
+    next_line = None
+    saw_header = False
+    has_head = False
+    for line in diff.splitlines():
+        if old_left or new_left:
+            prefix = line[:1]
+            if line == "\\ No newline at end of file":
+                continue
+            if prefix not in {"+", "-", " "}:
+                raise ValueError("incomplete or malformed diff hunk")
+            if prefix != "+":
+                old_left -= 1
+            if prefix != "-":
+                new_left -= 1
+                if path is not None:
+                    added, expected = files[path]
+                    expected[next_line] = line[1:]
+                    if prefix == "+":
+                        added.add(next_line)
+                next_line += 1
+            if old_left < 0 or new_left < 0:
+                raise ValueError("diff hunk exceeds its declared line counts")
+            continue
+        if line.startswith("diff --git "):
+            path = None
+            saw_header = True
+            has_head = False
+        elif line.startswith("+++ "):
+            name = line[4:].split("\t", 1)[0]
+            saw_header = True
+            has_head = True
+            if name == "/dev/null":
+                path = None
+            elif name.startswith("b/"):
+                candidate = Path(name[2:])
+                if candidate.is_absolute() or ".." in candidate.parts:
+                    raise ValueError(f"unsafe head path: {name}")
+                path = candidate if candidate.suffix == ".py" else None
+                if path is not None:
+                    files.setdefault(path, (set(), {}))
+            else:
+                raise ValueError(f"expected unquoted b/ head path, got: {name}")
+        elif line.startswith("@@"):
+            match = _HUNK.match(line)
+            if not match or not has_head:
+                raise ValueError("malformed unified diff hunk header")
+            old_left = int(match[2]) if match[2] is not None else 1
+            next_line = int(match[3])
+            new_left = int(match[4]) if match[4] is not None else 1
+        elif line.startswith("--- ") or line == "\\ No newline at end of file":
+            continue
+        elif line.startswith(("+", "-", " ")):
+            raise ValueError("diff content outside a hunk")
+    if old_left or new_left:
+        raise ValueError("incomplete diff hunk")
+    if diff.strip() and not saw_header:
+        raise ValueError("expected a unified diff")
+    return files
 
 
-def analyse(path):
-    """-> ({tests, reached, unreachable}, None) or (None, reason)."""
-    try:
-        tree = ast.parse(open(path).read())
-    except (OSError, SyntaxError) as e:
-        return None, f"cannot parse: {e}"
+def scope_nodes(statements):
+    """Walk one scope, without treating uncalled nested definitions as calls."""
+    for node in statements:
+        yield node
+        if not isinstance(node, (*_FUNCTIONS, ast.ClassDef, ast.Lambda)):
+            yield from scope_nodes(ast.iter_child_nodes(node))
 
-    funcs = {n.name: n for n in tree.body
-             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    tests = {name for name in funcs if name.startswith("test_")}
-    if not tests:
-        return None, "no test functions"
 
-    main_body = []
-    for n in tree.body:
-        if isinstance(n, ast.If) and "__main__" in ast.dump(n.test):
-            main_body.extend(n.body)
+def bound_names(nodes, include_functions=True):
+    names = set()
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, ast.ClassDef) or include_functions and isinstance(node, _FUNCTIONS):
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+    return names
+
+
+def pytest_aliases(nodes, inherited=None, parameters=()):
+    aliases = dict(inherited or {})
+    imports = {}
+    non_imports = [node for node in nodes if not isinstance(node, (ast.Import, ast.ImportFrom))]
+    shadowed = bound_names(non_imports) | set(parameters)
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "pytest":
+                    imports[alias.asname or "pytest"] = "module"
+                else:
+                    shadowed.add(alias.asname or alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if node.module == "pytest" and not node.level and alias.name == "main":
+                    imports[alias.asname or "main"] = "main"
+                else:
+                    shadowed.add(alias.asname or alias.name)
+    # Assignments/parameters/other imports cannot be assumed to retain an alias.
+    for name in bound_names(nodes) | set(parameters):
+        aliases.pop(name, None)
+    aliases.update({name: kind for name, kind in imports.items() if name not in shadowed})
+    return aliases
+
+
+def is_main_guard(node):
+    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+        return False
+    test = node.test
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    left, right = test.left, test.comparators[0]
+    return any(
+        isinstance(name, ast.Name)
+        and name.id == "__name__"
+        and isinstance(value, ast.Constant)
+        and value.value == "__main__"
+        for name, value in ((left, right), (right, left))
+    )
+
+
+def test_definitions(body, prefix=""):
+    for node in body:
+        if isinstance(node, _FUNCTIONS) and node.name.startswith("test_"):
+            yield (prefix + node.name, node.lineno)
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            yield from test_definitions(node.body, prefix + node.name + ".")
+
+
+def full_file_pytest(call):
+    """Accept an explicit whole-file target with only known reporting flags."""
+    if len(call.args) == 1 and not call.keywords:
+        args = call.args[0]
+    elif not call.args and len(call.keywords) == 1 and call.keywords[0].arg == "args":
+        args = call.keywords[0].value
+    else:
+        return False
+    if not isinstance(args, (ast.List, ast.Tuple)):
+        return False
+    file_count = 0
+    for arg in args.elts:
+        if isinstance(arg, ast.Name) and arg.id == "__file__":
+            file_count += 1
+        elif not isinstance(arg, ast.Constant) or arg.value not in _REPORTING_FLAGS:
+            return False
+    return file_count == 1
+
+
+def analyse(tree):
+    tests = set(test_definitions(tree.body))
+    test_names = Counter(name for name, _ in tests)
+    pytest_tests = {test for test in tests if test_names[test[0]] == 1}
+    main_body = [stmt for node in tree.body if is_main_guard(node) for stmt in node.body]
     if not main_body:
-        return None, "no __main__ block -- pytest-only file, not dual-entry"
+        return tests, set(), False, False
 
-    reached, frontier = set(), set()
-    for stmt in main_body:
-        frontier |= calls_in(stmt)
-    while frontier:
-        name = frontier.pop()
-        if name in reached:
-            continue
-        reached.add(name)
-        if name in funcs:
-            frontier |= calls_in(funcs[name]) - reached
+    module_nodes = list(scope_nodes(tree.body))
+    definitions = [node for node in tree.body if isinstance(node, _FUNCTIONS)]
+    counts = Counter(node.name for node in definitions)
+    rebound = bound_names(module_nodes, include_functions=False)
+    funcs = {node.name: node for node in definitions if counts[node.name] == 1 and node.name not in rebound}
+    module_aliases = pytest_aliases(module_nodes)
+    reached, visited = set(), set()
+    unknown_pytest = False
+    pending = [(main_body, ())]
+    while pending:
+        body, parameters = pending.pop()
+        nodes = list(scope_nodes(body))
+        shadowed = bound_names(nodes) | set(parameters)
+        aliases = pytest_aliases(nodes, module_aliases, parameters)
+        for node in nodes:
+            if not isinstance(node, ast.Call):
+                continue
+            target = node.func
+            is_pytest = (
+                isinstance(target, ast.Name)
+                and aliases.get(target.id) == "main"
+                or isinstance(target, ast.Attribute)
+                and target.attr == "main"
+                and isinstance(target.value, ast.Name)
+                and aliases.get(target.value.id) == "module"
+            )
+            if is_pytest:
+                if full_file_pytest(node) and "__file__" not in rebound | shadowed:
+                    reached.update(pytest_tests)
+                else:
+                    unknown_pytest = True
+            if not isinstance(target, ast.Name) or target.id in shadowed or target.id not in funcs:
+                continue
+            func = funcs[target.id]
+            # Calling async/generator functions does not execute their bodies.
+            # Await/iteration is outside the direct synchronous call graph.
+            if (
+                isinstance(func, ast.AsyncFunctionDef)
+                or func.name in visited
+                or any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in scope_nodes(func.body))
+            ):
+                continue
+            visited.add(func.name)
+            reached.add((func.name, func.lineno))
+            args = func.args
+            parameters = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+            parameters += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+            pending.append((func.body, parameters))
+    return tests, reached, True, unknown_pytest
 
-    return {"tests": sorted(tests),
-            "reached": sorted(tests & reached),
-            "unreachable": sorted(tests - reached)}, None
 
-
-def added_tests_from_diff(diff_path):
-    out, cur = {}, None
-    for line in open(diff_path):
-        if line.startswith("+++ b/"):
-            cur = line[6:].strip()
-        elif line.startswith("+") and not line.startswith("+++") and cur and cur.endswith(".py"):
-            m = re.match(r"\+\s*(?:async\s+)?def\s+(test_\w+)", line)
-            if m:
-                out.setdefault(cur, []).append(m.group(1))
-    return out
-
-
-def main():
-    argv = sys.argv[1:]
-    if len(argv) < 2 or argv[0] != "--diff":
-        print(__doc__)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--diff", required=True, type=Path)
+    parser.add_argument("root", nargs="?", type=Path, default=Path("."))
+    args = parser.parse_args(argv)
+    try:
+        root = args.root.resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError(f"worktree root is not a directory: {root}")
+        files = added_lines_from_diff(args.diff.read_text())
+        results = []
+        for rel, (added, expected) in files.items():
+            path = (root / rel).resolve(strict=True)
+            if not path.is_relative_to(root):
+                raise ValueError(f"head path is outside worktree root: {rel}")
+            source = path.read_text()
+            lines = source.splitlines()
+            for line, content in expected.items():
+                if line < 1 or line > len(lines) or lines[line - 1] != content:
+                    raise ValueError(f"{rel}:{line}: diff does not match head source")
+            tests, reached, dual_entry, unknown = analyse(ast.parse(source, filename=str(rel)))
+            new_tests = {test for test in tests if test[1] in added}
+            if new_tests:
+                results.append((rel, new_tests, reached, dual_entry, unknown))
+    except (OSError, UnicodeError, SyntaxError, ValueError) as error:
+        print(f"  input error: {error}", file=sys.stderr)
         return 2
-    root = (argv[2] if len(argv) > 2 else ".").rstrip("/")
 
-    added = added_tests_from_diff(argv[1])
-    if not added:
-        print("  no test functions added by this diff")
-        return 0
-
-    flagged = 0
-    for rel, names in added.items():
-        res, why = analyse(f"{root}/{rel}")
-        if res is None:
-            print(f"  {rel}: {why}")
+    flagged = False
+    for rel, new_tests, reached, dual_entry, unknown in results:
+        if not dual_entry:
+            print(f"  {rel}: no supported __main__ guard; script coverage not assessed")
             continue
-        bad = [n for n in names if n in res["unreachable"]]
-        if not bad:
-            print(f"  {rel}: {len(names)} added test(s) reachable from __main__")
+        missing = new_tests - reached
+        if not missing:
+            print(f"  {rel}: {len(new_tests)} added test definition line(s) have a statically visible __main__ path")
             continue
-        flagged += 1
-        print(f"  {rel}: {len(bad)} of {len(names)} ADDED test(s) unreachable from the script "
-              f"entry point")
-        for t in bad:
-            print(f"      {t}")
-        print(f"      __main__ reaches: {', '.join(res['reached']) or '(no tests)'}")
-        print("      -> pytest runs these; `python3 <file>` does not. Wire them in, or state "
-              "which job executes them.")
+        flagged = True
+        print(f"  {rel}: {len(missing)} of {len(new_tests)} ADDED test definition line(s) need manual review")
+        for name, line in sorted(missing, key=lambda test: test[1]):
+            print(f"      {name}:{line}: no statically supported entry path found")
+        if unknown:
+            print("      pytest invocation uses selectors or unknown arguments; whole-file coverage is unknown")
+        print("      -> Check script wiring or identify the pytest job that exercises these tests.")
+    if not results:
+        print("  no test definitions added by this diff")
     return 1 if flagged else 0
 
 

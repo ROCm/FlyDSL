@@ -1,126 +1,125 @@
 ---
 name: review-flydsl-kernel
-description: FlyDSL review rules distilled from this repo's own maintainer history. Two rules, both shipped as diff scanners: legacy DSL spellings maintainers repeatedly ask to be replaced, and tests a PR adds that the script entry point never runs. Loaded by review-pr when a PR touches FlyDSL kernels.
-argument-hint: <PR number>
+description: >-
+  Review FlyDSL kernel PRs using maintainer review evidence, added-line legacy
+  spelling candidates, and test entry-point checks. Use for kernel reviews or
+  review-comment follow-up; scanner output needs source-level adjudication.
+argument-hint: <PR number or URL>
 ---
 
 # FlyDSL kernel review
 
-## What is in here, and what is not
+Run this skill directly with a PR number or URL. It supplies two static candidate
+scanners and focused review questions; it does not require a separate review skill
+to invoke them. Review-only requests authorize inspection, not edits or publication.
 
-Two rules. Both are the most repeated objections in this repository's review history, both ship
-as scanners rather than prose, and both were kept because they passed the same test:
+## Run the checks
 
-| rule | corpus support | evidence it earns its place |
+1. Read the PR description, review threads, and repository guidance. Record the
+   base and head OIDs with `gh pr view <PR> --repo ROCm/FlyDSL --json baseRefOid,headRefOid`.
+   Fetch the objects and use their merge base for the comparison. Preserve the
+   user's checkout; prepare a detached worktree at that exact head.
+2. Use a unique directory for each review's artifacts. From the repository that
+   contains this skill, with `base` set to the merge base and `head` to the recorded
+   head OID:
+
+   ```bash
+   skill_dir="$PWD/.claude/skills/review-flydsl-kernel"
+   review_dir=$(mktemp -d /tmp/flydsl-review.XXXXXX)
+   git worktree add --detach "$review_dir/head" "$head"
+   git diff --no-ext-diff --unified=3 "$base" "$head" > "$review_dir/pr.diff"
+   python3 "$skill_dir/scan_legacy_spelling.py" --diff "$review_dir/pr.diff"
+   python3 "$skill_dir/scan_unreachable_tests.py" --diff "$review_dir/pr.diff" "$review_dir/head"
+   ```
+
+   Run both scanners even if the first returns candidates. Both use exit **0** for
+   no candidates in the supported scope, **1** for candidates needing review, and
+   **2** for invalid arguments, input, or tool failure. An error is an incomplete
+   check, never a clean result. The spelling scanner also accepts
+   `python3 <skill-dir>/scan_legacy_spelling.py ROCm/FlyDSL <PR>`; use the local
+   diff form when the evidence must stay pinned to an OID.
+3. Read each candidate in the head source and compare with the base. Check the
+   current API and actual test command before promoting it to a finding. Apply
+   the relevant questions in [review-evidence.md](references/review-evidence.md)
+   when the diff changes dispatch, numerical flags, or kernel interfaces.
+4. Report concrete triggers, consequences, locations, and actions. Prioritize
+   wrong results over style; group spelling instances into one finding. State
+   which checks ran and which behavior remains unverified. Before an authorized
+   GitHub reply or review, re-check the head OID and any intervening discussion.
+
+These scanners only parse text; they do not execute the reviewed Python. Runtime
+validation needs a checkout-compatible FlyDSL build, explicit device selection,
+and tests proportionate to the changed behavior. Static output establishes neither
+kernel correctness nor performance.
+
+## F1 — Legacy spelling candidates
+
+`scan_legacy_spelling.py` checks **added lines in kernel Python files**. It excludes
+the low-level implementation in `kernels/common/buffer_ops.py`, imports, and
+comments/string literals it can identify in the diff. It does not scan compiler
+internals, tests, documentation, or its own implementation.
+
+| Scanned spelling | Inspect before recommending a replacement | Review evidence |
 |---|---|---|
-| F1 legacy spelling | 46 of 479 comments | scanner flags 10 of the 12 files a maintainer raised it on |
-| F5 added test unreachable from the script entry point | coderfeli #481, #318 | the one family `review-pr` alone missed in a controlled seeded test (4/5 → 5/5); its scanner reproduces #481's objection exactly |
+| `ir.*`, `_mlir.*`, `ArithValue`, explicit unwraps | Prefer typed `fx.Float32` / `fx.Int32` values where the consumer accepts them; raw MLIR boundaries may need unwrapping. | coderfeli #202 #250 #300 #326 #426 #850 |
+| `scf.IfOp` / `scf.ForOp` and related builders | Prefer traced Python control flow when it preserves the SSA results, carried state, and side effects. | coderfeli #33 #433 #540 #582 |
+| `buffer_ops.*` | Prefer layout-aware copies/copy atoms when they express the same masking and addressing. | coderfeli #404 #416 #894 #1032 |
+| `SmemAllocator` | Prefer `fx.SharedAllocator` for new kernels; verify static/dynamic LDS launch semantics. | sjfeng1999 #549 #567 |
+| `make_ptr` | Use `fx.recast_iter` **only for retyping an existing pointer**; constructing a pointer is legitimate. | sjfeng1999 #288 #745 |
 
-Four further families were distilled from the same corpus — default arguments aliasing another
-buffer, duplicated code paths, config living inside the kernel file, unvalidated casts at the ABI
-boundary. They are **not here**: seeded into real kernels and reviewed with and without this
-skill, `review-pr` alone caught all four. Rules that change nothing cost reviewer attention and
-dilute the five finding slots. They can return with evidence.
+The scanner recognizes spellings, not import identity or semantic equivalence.
+Aliases and multiline expressions can escape it. A diff hunk starting inside an
+existing multiline string lacks its opening delimiter; inspect the complete source
+before accepting that match. A candidate is not proof of deprecation or a defect.
+Use `docs/api_stability.md` and the **api-stability** skill for compatibility claims.
 
-That is the standard for anything added below.
+Two historical objections require separate checks:
 
----
+- **Arithmetic:** run the existing `scripts/check_typed_arithmetic_usage.py`
+  with `--base <base> --head <head>` **from the head worktree**. It checks the
+  current typed-arithmetic policy. Inspect NaN and fastmath semantics before
+  replacing operations; the historical suggestion to prefer raw `arith` builders
+  is not a current blanket rule.
+- **Hand-written partitioning:** compare the mapping with the existing tiled-copy
+  partition methods (sjfeng1999 #564). This is a manual layout-equivalence check;
+  no spelling regex covers it.
 
-## Provenance
+## F5 — Added tests and script entry points
 
-Mined from all 865 PRs in this repo; 163 carry human review, 479 comments in total.
+`scan_unreachable_tests.py` compares test definitions whose `def` line is added
+by the diff with the head file's statically visible `__main__` call paths. It
+identifies module tests and `Test*` methods by qualified name and source location.
+It follows direct local calls and recognizes an unfiltered
+`pytest.main([__file__])` entry point, including common import aliases. Selected
+or dynamic pytest invocations require manual review.
 
-| reviewer | comments | PRs | active |
-|---|---|---|---|
-| coderfeli | 273 | 101 | 2026-01-05 → 2026-08-20 |
-| sjfeng1999 | 57 | 32 | 2026-03-20 → 2026-08-20 |
-| xudoyuan | 20 | 13 | 2026-03-12 → 2026-08-14 |
-| yanguahe | 11 | 5 | 2026-06-18 → 2026-08-17 |
+The scanner reports potential gaps and uncertain paths, not proof that a test ran.
+Conditions, callbacks, fixtures, plugins, and external dispatch need inspection.
+Files without a supported script guard are outside this check. Editing an existing
+test's signature can also add a `def` line; compare with the base before calling it
+new coverage debt. Changes only inside an existing test body are outside scope.
 
-Eight months of consistent taste from the top two is what makes any of this encodable. The
-corpus stops at 2026-08-20; re-mine before trusting the counts.
+Before filing a coverage finding, identify the command in `scripts/run_tests.sh`,
+`scripts/run_benchmark.sh`, or the relevant workflow that is supposed to execute
+the test. Pytest correctness coverage and script benchmark coverage are distinct.
+An added pytest test does not automatically belong in a benchmark entry point.
+Historical example: coderfeli #481 identified fused/quant tests missing from the
+specific script path under discussion.
 
----
+## Maintain the evidence
 
-## F1 — Legacy spelling where the current one exists ⚠️
+The original August 20 corpus and the September 10 refresh, with source links,
+scope, and limitations, are in [review-evidence.md](references/review-evidence.md).
+Historical frequencies are not current API policy or measured review accuracy.
 
-**46 of the 479 comments are this one objection** — by a wide margin the largest family, and the
-one thing a maintainer should never have to type again.
-
-Do not review this from memory. Step 1 of `review-pr` runs the scanner and prints the candidates;
-work that list.
+Add guidance only when a cited review changes a concrete decision. A new scanner
+needs a reproducible positive case, a clean control, and evidence it adds coverage
+beyond existing checks. Keep one-off concerns as scoped review questions until
+that evidence exists. Run the scanner regression suites without a GPU:
 
 ```bash
-.claude/skills/review-flydsl-kernel/scan_legacy_spelling.py <owner/repo> <PR>
-.claude/skills/review-flydsl-kernel/scan_legacy_spelling.py --diff /path/to.diff
+python3 tests/unit/test_review_legacy_spelling.py
+python3 tests/unit/test_review_unreachable_tests.py
 ```
 
-| legacy | current | maintainers |
-|---|---|---|
-| `ir.*` / `_mlir.*` / `ArithValue` / manual wrap-unwrap | internal fx types (`fx.Float32`, `fx.Int32`, `expr/numeric.py`) | coderfeli #202 #250 #300 #326 #426 #850 |
-| `scf.IfOp` / `scf.ForOp` | ordinary Python `if` / `for` | coderfeli #33 #433 #540 #582 |
-| `buffer_ops.*` | `fx.copy` / a copy atom | coderfeli #404 #416 #894 #1032 |
-| `arith` wrapper | raw op, with the `fastmath` hint | coderfeli #433 #848 #894 |
-| `SmemAllocator` | `SharedAllocator` (old interface is going away) | sjfeng1999 #549 #567 |
-| `make_ptr` to retype a pointer | `recast_iter` | sjfeng1999 #288 #745 |
-| hand-rolled partition | `tiledCopy.partition_src/dst` | sjfeng1999 #564 |
-
-**FP self-check.** Fire only when the legacy spelling is on an **added** line. Pre-existing usage
-elsewhere in a touched file is not this PR's debt — say so and move on. The scanner already
-restricts itself to added lines; do not widen it by hand.
-
-**Severity.** ⚠️ by default. It is not a correctness defect, and it does not get one of the five
-finding slots ahead of something that produces a wrong number. Group all instances into a single
-finding rather than one per site.
-
-→ `⚠️ [file:line] uses [legacy] where [current] exists — [maintainer] has asked for this on [PR]`
-
----
-
-## F5 — A test this PR adds that the script entry point cannot reach ⚠️
-
-Several test files here run two ways: pytest collects `test_*`, and `scripts/run_benchmark.sh`
-runs the same file as a script, where only what `__main__` calls happens. A pytest test added to
-such a file does not run in the script path — the file reports coverage it does not have.
-
-> coderfeli on #481: *"These new variant tests are pytest-only today. run_benchmark.sh executes
-> this file as a script, but `__main__` only calls `test_all()`, so the fused/quant variants are
-> not exercised in that path."*
-
-```bash
-.claude/skills/review-flydsl-kernel/scan_unreachable_tests.py --diff <diff> <worktree-root>
-```
-
-It parses the file, resolves what `__main__` reaches transitively, and reports **only tests the
-diff adds**. Replaying #481 it names exactly the three the maintainer named.
-
-**FP self-check.** Pre-existing unreachable tests are the norm here — most files are pytest-first
-with a one-line `__main__`, and a first version of this scanner fired on 6 of 7 untouched tests
-in one file. Only added tests count. A file with no `__main__` at all is pytest-only by design
-and is not a finding.
-
-This is the static half of a problem `validate-kernel-pr` covers from the other side: F5 catches
-a test that will not run, its shape grid catches shapes a test that does run never reaches.
-
-→ `⚠️ [file] adds [tests] that `__main__` does not reach — wire them in, or say which job runs them`
-
----
-
-## Why these are scanners and not paragraphs
-
-A rule that depends on the reviewer remembering to look does not fire. This was measured, not
-assumed: on aiter, a rule covering 32-bit overflow was rewritten from a variable-name list to a
-structural criterion, and across four controlled arms over 14 PRs it caught **0 of 3** of the
-defects it targeted — including after the instruction was relocated into the step the agent
-reliably executes, with the session transcript confirming the scan ran and its output was in
-context. The scanner found all three offline.
-
-Prefer a check that runs over a rule that must be recalled.
-
-## Adding a rule here
-
-1. It must come from a real review comment in this repo, cited by PR number.
-2. Record how often the objection actually occurred. Once is a note; 46 times earns a scanner.
-3. **Show it changes an outcome.** Seed the pattern into a real kernel, review it with and
-   without the rule, and keep it only if the rule catches something `review-pr` alone does not.
-   Four of the first six families failed that test and are not in this file.
+The same tests are collected under `tests/unit/` by `scripts/run_tests.sh`.
