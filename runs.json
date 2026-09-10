@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-10T09:13:53Z",
+ "updated": "2026-09-10T09:16:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34459592706,
+   "pr": null,
+   "commit": "39b271c562923b737631546ec61aa168fef804ad",
+   "branch": "main",
+   "event": "push",
+   "title": "[DSL] Add llvm load/store primitives (#1096)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706",
+   "created_at": "2026-09-10T09:15:02Z",
+   "updated_at": "2026-09-10T09:15:26Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34459276491,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "fix(ci): skip unused ROCm repository (#1115)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459276491",
    "created_at": "2026-09-10T09:11:36Z",
-   "updated_at": "2026-09-10T09:11:37Z",
+   "updated_at": "2026-09-10T09:15:03Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -68,9 +83,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-10T09:03:49Z",
+     "started_at": "2026-09-10T09:13:50Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493/job/102810647259"
     }
@@ -141,11 +156,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T08:53:09Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34456021082/job/102807298108"
+     "completed_at": "2026-09-10T09:13:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34456021082/job/102807298108",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1690,52 +1706,6 @@
      "started_at": "2026-09-08T13:48:43Z",
      "completed_at": "2026-09-08T14:01:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34232546188/job/102087457924",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34229847254,
-   "pr": 1106,
-   "commit": "5b0c1ce9f9e73f18235ee06ccf49dd1a6ef4000a",
-   "branch": "add-flydsl-code-review-skill",
-   "event": "pull_request",
-   "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34229847254",
-   "created_at": "2026-09-08T13:05:28Z",
-   "updated_at": "2026-09-08T15:11:58Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T13:27:37Z",
-     "completed_at": "2026-09-08T15:11:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34229847254/job/102080207877",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T13:48:45Z",
-     "completed_at": "2026-09-08T14:53:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34229847254/job/102080207974",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T13:27:09Z",
-     "completed_at": "2026-09-08T13:48:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34229847254/job/102080208007",
      "log_fetch_failed": true
     }
    ]
