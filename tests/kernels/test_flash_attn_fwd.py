@@ -4627,6 +4627,26 @@ def test_paged_fp8_asymmetric_value_matches_torch(
     query_lengths,
     kv_lengths,
     block_table_rows,
+):
+    _check_paged_fp8_matches_torch(
+        head_dim,
+        value_head_dim,
+        use_non_default_stream,
+        force_internal_copies,
+        query_lengths,
+        kv_lengths,
+        block_table_rows,
+    )
+
+
+def _check_paged_fp8_matches_torch(
+    head_dim,
+    value_head_dim,
+    use_non_default_stream,
+    force_internal_copies,
+    query_lengths,
+    kv_lengths,
+    block_table_rows,
     num_kv_heads=1,
 ):
     """Packed causal FP8 page-64 attention supports native Q/K and V widths."""
@@ -4750,7 +4770,7 @@ def test_paged_fp8_asymmetric_value_matches_torch(
 @pytest.mark.parametrize("num_kv_heads", [2, 4])
 def test_paged_fp8_d192_bn128_multiple_kv_heads(value_head_dim, num_kv_heads):
     """Compact K tiles and the V192 tail preserve head and ragged-page boundaries."""
-    test_paged_fp8_asymmetric_value_matches_torch(
+    _check_paged_fp8_matches_torch(
         head_dim=192,
         value_head_dim=value_head_dim,
         use_non_default_stream=False,
@@ -4767,11 +4787,12 @@ def test_paged_fp8_d192_bn128_multiple_kv_heads(value_head_dim, num_kv_heads):
 
 
 @_requires_gfx950
-def test_paged_fp8_d128_bn128_ragged_multiblock_matches_torch():
+@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+def test_paged_fp8_bn128_ragged_multiblock_matches_torch(head_dim, value_head_dim):
     """The multi-batch BN128 path handles distinct causal offsets and inactive q-blocks."""
-    test_paged_fp8_asymmetric_value_matches_torch(
-        head_dim=128,
-        value_head_dim=128,
+    _check_paged_fp8_matches_torch(
+        head_dim=head_dim,
+        value_head_dim=value_head_dim,
         use_non_default_stream=False,
         force_internal_copies=False,
         query_lengths=[512, 128],
@@ -4872,11 +4893,15 @@ def test_paged_fp8_d192_batch_interleave_group(batch_size, head_dims, expected):
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 3, 4, 5, 7, 8, 16, 33])
-def test_paged_fp8_d128_small_batch_interleave_group(batch_size):
+@pytest.mark.parametrize("head_dims", [(128, 128), (192, 128), (192, 192)])
+def test_paged_fp8_paired_batch_interleave_group(batch_size, head_dims):
     choose = flash_attn_interface._paged_fp8_batch_interleave_group
-    assert choose(batch_size, (128, 128), paired=False) == 1
-    expected = batch_size if batch_size in (2, 3, 5) else 1
-    assert choose(batch_size, (128, 128), paired=True) == expected
+    if head_dims == (128, 128):
+        assert choose(batch_size, head_dims, paired=False) == 1
+        expected = batch_size if batch_size in (2, 3, 5) else 1
+    else:
+        expected = 2 if head_dims == (192, 128) and batch_size == 2 else 1
+    assert choose(batch_size, head_dims, paired=True) == expected
 
 
 @_requires_gfx950
@@ -4890,7 +4915,7 @@ def test_paged_fp8_d128_interleaved_ragged_side_copies(batch_size):
         count = length // 64
         rows.append(physical_pages[page_offset : page_offset + count] + [0] * (16 - count))
         page_offset += count
-    test_paged_fp8_asymmetric_value_matches_torch(
+    _check_paged_fp8_matches_torch(
         head_dim=128,
         value_head_dim=128,
         use_non_default_stream=True,
@@ -4902,23 +4927,8 @@ def test_paged_fp8_d128_interleaved_ragged_side_copies(batch_size):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("value_head_dim", [128, 192])
-def test_paged_fp8_d192_ragged_multiblock_matches_torch(value_head_dim):
-    """Paged D192 preserves ragged causal q-block mapping."""
-    test_paged_fp8_asymmetric_value_matches_torch(
-        head_dim=192,
-        value_head_dim=value_head_dim,
-        use_non_default_stream=False,
-        force_internal_copies=False,
-        query_lengths=[512, 128],
-        kv_lengths=[1024, 512],
-        block_table_rows=[list(range(15, -1, -1)), list(range(23, 15, -1)) + [0] * 8],
-    )
-
-
-@_requires_gfx950
 def test_paged_fp8_bn128_batch2_ragged_multiblock_matches_torch():
-    test_paged_fp8_asymmetric_value_matches_torch(
+    _check_paged_fp8_matches_torch(
         head_dim=192,
         value_head_dim=128,
         use_non_default_stream=True,
@@ -5062,7 +5072,7 @@ def test_paged_fp8_explicit_compile_matches_torch(monkeypatch, head_dim, value_h
 
     monkeypatch.setattr(flash_attn_interface, "_build_paged_fp8", compile_launcher)
     pages = kv_length // 64
-    test_paged_fp8_asymmetric_value_matches_torch(
+    _check_paged_fp8_matches_torch(
         head_dim=head_dim,
         value_head_dim=value_head_dim,
         use_non_default_stream=True,
