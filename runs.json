@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-09-10T18:32:00Z",
+ "updated": "2026-09-10T21:25:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34526885255,
+   "pr": 1118,
+   "commit": "2354e515c1108f30d8985a0233c40888196c5384",
+   "branch": "fix/manylinux-build-network",
+   "event": "pull_request",
+   "title": "[CI] Use host networking for manylinux image builds",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255",
+   "created_at": "2026-09-10T20:31:24Z",
+   "updated_at": "2026-09-10T20:53:11Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-10T20:54:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849926"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T20:53:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849949"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T20:53:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849971"
+    }
+   ]
+  },
   {
    "run_id": 34492588995,
    "pr": 1116,
@@ -1730,21 +1773,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34311697347",
    "created_at": "2026-09-09T04:37:33Z",
    "updated_at": "2026-09-09T04:37:33Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 34311621349,
-   "pr": null,
-   "commit": "8b710151997ca2270517f9e441462573436ccdef",
-   "branch": "feat/rocdl-ordered-memory-primitives",
-   "event": "pull_request",
-   "title": "[DSL] Add llvm load/store primitives",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34311621349",
-   "created_at": "2026-09-09T04:36:23Z",
-   "updated_at": "2026-09-09T04:36:23Z",
    "actor": "big-yellow-duck",
    "jobs": []
   }
