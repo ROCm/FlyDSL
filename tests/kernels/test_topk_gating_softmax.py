@@ -214,14 +214,20 @@ def _dispatch_contract_input(capacity, num_experts, dtype):
     rows = torch.arange(capacity, dtype=torch.int64)[:, None]
     cols = torch.arange(num_experts, dtype=torch.int64)[None, :]
     logits = ((rows * 17 + cols * 7) % 13 - 6).to(torch.float32)
-    logits[0::4] = 0  # Every expert ties: the first K indices must win.
-    logits[1::4] = -4
+    logits[0::6] = 0  # Every expert ties: the first K indices must win.
+    logits[1::6] = -4
     boundary_experts = [i for i in (7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255) if i < num_experts]
-    logits[1::4, boundary_experts] = 4
+    logits[1::6, boundary_experts] = 4
     # The kernel selects after f32 softmax. All but the final expert underflow
     # to zero, so the remaining winners must be the lowest unused indices.
-    logits[2::4] = -1000
-    logits[2::4, -1] = 0
+    logits[2::6] = cols.to(torch.float32) - 1000
+    logits[2::6, -1] = 0
+    # All eight winners can belong to the final lane, including lane 63.
+    logits[4::6] = -4
+    logits[4::6, -8:] = torch.arange(1, 9, dtype=torch.float32)
+    # Distinct f32 logits round to equal softmax probabilities. Selecting
+    # logits instead would incorrectly reverse the lowest-index tie order.
+    logits[5::6] = cols.to(torch.float32) * 1e-10
     return logits.to(dtype)
 
 
