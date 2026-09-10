@@ -17,6 +17,11 @@ MLIR_CAPI_EXPORTED int flydslSetLLVMOptionInt(const char *name, int value, int *
 MLIR_CAPI_EXPORTED int flydslSetLLVMOptionStr(const char *name, const char *value, char **oldValue);
 MLIR_CAPI_EXPORTED void flydslFreeLLVMOptionStr(char *str);
 
+/// Query the size and member count of a symbolic LLVM MC register class.
+/// Returns false when the target or class is unavailable in this build.
+MLIR_CAPI_EXPORTED bool flydslGetRegisterClassLayout(const char *target, const char *name,
+                                                     unsigned *bits, unsigned *count);
+
 #ifdef __cplusplus
 }
 #endif

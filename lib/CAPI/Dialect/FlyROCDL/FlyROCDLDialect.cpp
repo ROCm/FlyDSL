@@ -22,4 +22,5 @@ void flydsl_register_rocdl_passes(void) {
   mlirRegisterConvertROCDLFastMathOpsPass();
   mlirRegisterFlyToROCDLConversionPass();
   mlirRegisterFlyROCDLClusterAttrPass();
+  mlir::registerSerializeRegisterKernelsPass();
 }

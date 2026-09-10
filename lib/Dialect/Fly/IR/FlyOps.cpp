@@ -6,6 +6,7 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Support/LogicalResult.h"
+#include "llvm/Support/MathExtras.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
@@ -2010,3 +2011,45 @@ FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
 }
 
 #undef FLY_INFER_RETURN_TYPES
+
+LogicalResult SetRegisterOp::verify() {
+  Attribute addressSpace;
+  if (auto ptr = dyn_cast<PointerType>(getStorage().getType()))
+    addressSpace = ptr.getAddressSpace();
+  else if (auto memref = dyn_cast<fly::MemRefType>(getStorage().getType()))
+    addressSpace = memref.getAddressSpace();
+  if (!addressSpace || !isGenericAddressSpace<AddressSpace::Register>(addressSpace))
+    return emitOpError("requires a register-memory pointer or tensor");
+  if (getStartAttr() && getStartAttr().getInt() < 0)
+    return emitOpError("start must be a nonnegative register class index");
+  if (getRegisterAlignment() <= 0 || !llvm::isPowerOf2_64(getRegisterAlignment()))
+    return emitOpError("registerAlignment must be a positive power of two");
+  if (getStartAttr() && getStartAttr().getInt() % getRegisterAlignment())
+    return emitOpError("start must satisfy registerAlignment");
+  return success();
+}
+
+LogicalResult RegisterValueOp::verify() {
+  if ((getStartAttr() && getStartAttr().getInt() < 0) || getBitOffsetAttr().getInt() < 0 ||
+      getStorageBitsAttr().getInt() <= 0)
+    return emitOpError("requires nonnegative start/bitOffset and positive storageBits");
+  if (getRegisterAlignment() <= 0 || !llvm::isPowerOf2_64(getRegisterAlignment()))
+    return emitOpError("registerAlignment must be a positive power of two");
+  if (getStartAttr() && getStartAttr().getInt() % getRegisterAlignment())
+    return emitOpError("start must satisfy registerAlignment");
+  Type type = getValue().getType();
+  int64_t count = 1;
+  if (auto vector = dyn_cast<VectorType>(type)) {
+    if (vector.isScalable())
+      return emitOpError("requires a fixed-size scalar or vector slice");
+    count = vector.getNumElements();
+    type = vector.getElementType();
+  }
+  if (!type.isIntOrFloat())
+    return emitOpError("requires an integer or floating-point scalar or vector slice");
+  int64_t bits = count * type.getIntOrFloatBitWidth();
+  if (getBitOffsetAttr().getInt() > getStorageBitsAttr().getInt() ||
+      bits > getStorageBitsAttr().getInt() - getBitOffsetAttr().getInt())
+    return emitOpError("slice exceeds register storage size");
+  return success();
+}

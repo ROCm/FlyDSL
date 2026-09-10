@@ -991,6 +991,13 @@ struct PyMmaOpUniversalFMAType : PyConcreteType<PyMmaOpUniversalFMAType> {
 NB_MODULE(_mlirDialectsFly, m) {
   m.doc() = "MLIR Python FlyDSL Extension";
 
+  m.def("_get_register_class_layout", [](const std::string &target, const std::string &name) {
+    unsigned bits = 0, count = 0;
+    if (!flydslGetRegisterClassLayout(target.c_str(), name.c_str(), &bits, &count))
+      throw nb::value_error(("unknown LLVM register class: " + target + ":" + name).c_str());
+    return nb::make_tuple(bits, count);
+  });
+
   // -------------------------------------------------------------------------
   // DLTensorAdaptor (standalone, not an MLIR type)
   // -------------------------------------------------------------------------

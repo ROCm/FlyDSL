@@ -8,6 +8,7 @@ from .numeric import *
 from .typing import *
 from .enum import *
 from .primitive import *
+from .register import *
 from .gpu import *
 from .derived import *
 from .struct import *

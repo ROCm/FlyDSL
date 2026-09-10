@@ -9,6 +9,16 @@ BLOCK_N = 128
 BLOCK_K = 64
 STAGES_A = 2
 
+# Explicit per-thread register storage, numbered in 32-bit registers.
+# A occupies 64 AGPRs; the two B stages occupy 32 AGPRs; C occupies 64 VGPRs.
+# The default uses LLVM's selected classes directly. --agpr-accumulator also
+# requests AGPR C, relying on LLVM's native rewrite and checked exact placement.
+EXPLICIT_REGISTERS = False
+MMA_REG_A = (fx.rocdl.AGPR, 0)
+MMA_REG_B = (fx.rocdl.AGPR, 64)
+MMA_REG_C = (fx.rocdl.VGPR, 64)
+MMA_REG_ALIGNMENT = 4
+
 M, N, K = 4096, 4096, 4096
 
 
@@ -60,6 +70,17 @@ def gemm_kernel(
     mma_frag_A = thr_mma.make_fragment_A(sA[None, None, 0])  # (VA, VM, VN)
     mma_frag_B = thr_mma.make_fragment_B(gB_k, stages=2)  # (VB, VM, VK, 2)
     mma_frag_C = thr_mma.make_fragment_C(gC)  # (VC, VM, VN)
+
+    if fx.const_expr(EXPLICIT_REGISTERS):
+        fx.set_register(
+            mma_frag_A, register_class=MMA_REG_A[0], start=MMA_REG_A[1], register_alignment=MMA_REG_ALIGNMENT
+        )
+        fx.set_register(
+            mma_frag_B, register_class=MMA_REG_B[0], start=MMA_REG_B[1], register_alignment=MMA_REG_ALIGNMENT
+        )
+        fx.set_register(
+            mma_frag_C, register_class=MMA_REG_C[0], start=MMA_REG_C[1], register_alignment=MMA_REG_ALIGNMENT
+        )
 
     mma_frag_A_retile = thr_copy_s2r_A.retile(mma_frag_A)
     mma_frag_B_retile = thr_copy_g2r_B.retile(mma_frag_B)
@@ -184,27 +205,62 @@ def preshuffle_gemm(
     )
 
 
-A = torch.randn(M, K, dtype=torch.float16).cuda()
-B = torch.randn(N, K, dtype=torch.float16).cuda()
-C = torch.zeros(M, N, dtype=torch.float16).cuda()
+def main():
+    from flydsl.utils import env
 
-preshuffle_B = shuffle_weight(B, layout=(16, 16))
+    compile_only = env.compile.compile_only
+    device = "cpu" if compile_only else "cuda"
+    A = torch.randn(M, K, dtype=torch.float16, device=device)
+    B = torch.randn(N, K, dtype=torch.float16, device=device)
+    C = torch.zeros(M, N, dtype=torch.float16, device=device)
 
-tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=1, divisibility=16)
-tC = flyc.from_dlpack(C).mark_layout_dynamic(leading_dim=1, divisibility=16)
+    preshuffle_B = shuffle_weight(B, layout=(16, 16))
 
-preshuffle_gemm(tA, preshuffle_B, tC, stream=torch.cuda.current_stream())
+    tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=1, divisibility=16)
+    tC = flyc.from_dlpack(C).mark_layout_dynamic(leading_dim=1, divisibility=16)
 
-torch.cuda.synchronize()
-expected = (A @ B.T).to(torch.float32)
-actual = C.to(torch.float32)
-diff = (actual - expected).abs()
-tol = 1e-3 + 1e-3 * expected.abs()
-max_violation = (diff - tol).max().item()
-is_correct = max_violation <= 0
+    preshuffle_gemm(tA, preshuffle_B, tC, stream=None if compile_only else torch.cuda.current_stream())
 
-print("Result correct:", is_correct)
-if not is_correct:
-    print("Max violation:", max_violation)
-    print("Expected:", expected)
-    print("Got:", C)
+    if compile_only:
+        print("Compiled GEMM successfully; explicit registers:", EXPLICIT_REGISTERS)
+        return
+
+    torch.cuda.synchronize()
+    expected = (A @ B.T).to(torch.float32)
+    actual = C.to(torch.float32)
+    diff = (actual - expected).abs()
+    tol = 1e-3 + 1e-3 * expected.abs()
+    max_violation = (diff - tol).max().item()
+    is_correct = max_violation <= 0
+
+    print("Result correct:", is_correct)
+    if not is_correct:
+        print("Max violation:", max_violation)
+        print("Expected:", expected)
+        print("Got:", C)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Preshuffled GEMM with optional register placement")
+    parser.add_argument("--explicit-registers", action="store_true", help="Place A/B in AGPRs and C in VGPRs")
+    parser.add_argument("--agpr-accumulator", action="store_true", help="Place A/B in AGPRs and C in a128:a191")
+    parser.add_argument("--auto-registers", action="store_true", help="Let LLVM choose A/B/C register numbers")
+    parser.add_argument(
+        "--register-alignment",
+        type=int,
+        choices=[1, 2, 4],
+        default=1,
+        help="Align register allocation origins in 32-bit register units",
+    )
+    args = parser.parse_args()
+    EXPLICIT_REGISTERS = args.explicit_registers or args.agpr_accumulator or args.auto_registers
+    MMA_REG_ALIGNMENT = args.register_alignment
+    if args.agpr_accumulator:
+        MMA_REG_C = (fx.rocdl.AGPR, 128)
+    if args.auto_registers:
+        MMA_REG_A = (MMA_REG_A[0], None)
+        MMA_REG_B = (MMA_REG_B[0], None)
+        MMA_REG_C = (MMA_REG_C[0], None)
+    main()
