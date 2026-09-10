@@ -7,6 +7,8 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
+from flydsl.runtime.device import get_rocm_arch
+from kernels.common.kernels_common import get_warp_size
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -26,20 +28,7 @@ LDS_LIMIT_BYTES = 160 * 1024
 
 
 class ScalePreshuffledS2R:
-    """Coalesced reader for ``shuffle_scale_w4``-packed E8M0 -- no LDS staging.
-
-    That layout flattens to ``i32[(n1 * K1 + k1) * 64 + lane]`` with
-    ``lane = k_lane * 16 + n_lane``, i.e. one dword per lane and **64 consecutive
-    dwords per wave** (256 B, fully coalesced), against the raw layout's 64
-    separate cache lines. The lane split is the same one this kernel already
-    uses: ``n_lane = lane % 16`` is the operand row and ``k_lane = lane // 16``
-    the MX block inside the K-step.
-
-    The four bytes of that dword are two 16-row tiles (``n_pack``) x two K-steps
-    (``k_pack``), both compile-time indices here, so the byte is selected by the
-    atom's ``opsel`` and no shift is emitted. One load therefore feeds four
-    MFMAs, and consecutive tiles of a pair share it.
-    """
+    """Coalesced reader for ``shuffle_scale_w4``-packed E8M0 -- no LDS staging."""
 
     def __init__(self, scale_arg, rows, K, n_tiles):
         assert n_tiles % 2 == 0, "shuffle_scale_w4 pairs tiles two at a time"
@@ -151,6 +140,10 @@ def compile_mxfp8_gemm_8w(
     xcd_swizzle: int = 0,
 ):
     """Build the MXFP8 launcher."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx950"), f"MXFP8 8-wave GEMM requires gfx950 (CDNA4), got {arch}"
+    assert get_warp_size() == 64, f"MXFP8 8-wave GEMM assumes wave64, got {get_warp_size()}"
+
     # A 256x256 tile already spends 128 KB of the 160 KB LDS; every other
     # BLOCK_M/BLOCK_N either overflows it or breaks the 2-threads-per-scale-row
     # staging split. Kept as an assert rather than dead generality.
@@ -227,10 +220,6 @@ def compile_mxfp8_gemm_8w(
 
         A0_gl_offset = (block_m * BLOCK_M) * K
         A1_gl_offset = (block_m * BLOCK_M + LDS_BLOCK_M) * K
-        # ``preshuffle_b`` keeps a row's identity (it only reorders K within a
-        # 16-row x 64-K brick), so a row's base offset is still row * K and the
-        # raw per-row E8M0 scale needs no host-side change; only the K step and
-        # the in-tile K order differ.
         B_K_STEP = (2 * 1024) if b_preshuffled else BLOCK_K
         B0_gl_offset = (block_n * BLOCK_N) * K
         B1_gl_offset = (block_n * BLOCK_N + LDS_BLOCK_N) * K
@@ -256,27 +245,31 @@ def compile_mxfp8_gemm_8w(
         # 16-row tile index of each wave's first row, per LDS half.
         a_base16 = [(block_m * BLOCK_M + h * LDS_BLOCK_M + wave_m * A_GRP_ROWS) // 16 for h in range_constexpr(2)]
         b_base16 = [(block_n * BLOCK_N + h * LDS_BLOCK_N + wave_n * B_GRP_ROWS) // 16 for h in range_constexpr(2)]
+        SCALE_LOADS_PER_PAIR = 2 * (N_TILES_A // 2) + 2 * (N_TILES_B // 2)
+        assert SCALE_LOADS_PER_PAIR == 6, (
+            f"scale prefetch issues {SCALE_LOADS_PER_PAIR} VMEM loads per K-pair, not the 6 the "
+            "wait_barrier counts below were validated against; re-check them against the ISA"
+        )
 
-        sc_pf = {}
+        def scale_prefetch(sc, k0):
+            if const_expr(k0 >= K_ITERS or k0 // 2 in sc):
+                return sc
+            words = {
+                w: (a_sc if w[0] == "a" else b_sc).read((a_base16 if w[0] == "a" else b_base16)[int(w[1])], k0)
+                for w in ("a0", "a1", "b0", "b1")
+            }
+            return {**sc, k0 // 2: words}
 
-        def scale_prefetch(k0):
-            """Issue the scale loads for the K-pair starting at ``k0``."""
-            if const_expr(k0 < K_ITERS and k0 // 2 not in sc_pf):
-                sc_pf[k0 // 2] = {
-                    w: (a_sc if w[0] == "a" else b_sc).read((a_base16 if w[0] == "a" else b_base16)[int(w[1])], k0)
-                    for w in ("a0", "a1", "b0", "b1")
-                }
-
-        def scale_read(k, which):
+        def scale_read(sc, k, which):
             """The prefetched E8M0 operands for K-step ``k``."""
-            return sc_pf[k // 2][which]
+            return sc[k // 2][which]
 
         c00_frag = [mfma.zero_value] * N_ACCUMS
         c01_frag = [mfma.zero_value] * N_ACCUMS
         c10_frag = [mfma.zero_value] * N_ACCUMS
         c11_frag = [mfma.zero_value] * N_ACCUMS
 
-        scale_prefetch(0)
+        sc_pf = scale_prefetch({}, 0)
 
         b_g2s.load(b_cur0, B0_gl_offset + 0 * B_K_STEP)
         a_g2s.load(a_cur0, A0_gl_offset + 0 * BLOCK_K)
@@ -296,9 +289,9 @@ def compile_mxfp8_gemm_8w(
 
         for k in range_constexpr(K_ITERS - 2):
             if const_expr(k % 2 == 1):
-                scale_prefetch(k + 1)
-            sa0 = scale_read(k, "a0")
-            sb0 = scale_read(k, "b0")
+                sc_pf = scale_prefetch(sc_pf, k + 1)
+            sa0 = scale_read(sc_pf, k, "a0")
+            sb0 = scale_read(sc_pf, k, "b0")
             b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
             a0_frag = a_s2r.load(a_cur0)
             a_g2s.load(a_next1, A1_gl_offset + (k + 1) * BLOCK_K)
@@ -306,14 +299,14 @@ def compile_mxfp8_gemm_8w(
 
             c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
 
-            sb1 = scale_read(k, "b1")
+            sb1 = scale_read(sc_pf, k, "b1")
             b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
             b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * B_K_STEP)
             rocdl.s_barrier()
 
             c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, sa0, sb1, k_pack=k % 2)
 
-            sa1 = scale_read(k, "a1")
+            sa1 = scale_read(sc_pf, k, "a1")
             a1_frag = a_s2r.load(a_cur1)
             a_g2s.load(a_cur0, A0_gl_offset + (k + 2) * BLOCK_K)
             rocdl.s_barrier()
@@ -333,21 +326,21 @@ def compile_mxfp8_gemm_8w(
 
         # Step k = K_ITERS - 2
         k = K_ITERS - 2
-        sa0 = scale_read(k, "a0")
-        sb0 = scale_read(k, "b0")
+        sa0 = scale_read(sc_pf, k, "a0")
+        sb0 = scale_read(sc_pf, k, "b0")
         b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
         a0_frag = a_s2r.load(a_cur0)
         rocdl.s_barrier()
 
         c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
 
-        sb1 = scale_read(k, "b1")
+        sb1 = scale_read(sc_pf, k, "b1")
         b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
         rocdl.s_barrier()
 
         c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, sa0, sb1, k_pack=k % 2)
 
-        sa1 = scale_read(k, "a1")
+        sa1 = scale_read(sc_pf, k, "a1")
         a1_frag = a_s2r.load(a_cur1)
         # Main loop prefetches a_next1 one step behind; issue the final
         # K_ITERS - 1 tile here, otherwise c10 / c11 read stale A1 data.
@@ -368,20 +361,20 @@ def compile_mxfp8_gemm_8w(
 
         # Step k = K_ITERS - 1
         k = K_ITERS - 1
-        sa0 = scale_read(k, "a0")
-        sb0 = scale_read(k, "b0")
+        sa0 = scale_read(sc_pf, k, "a0")
+        sb0 = scale_read(sc_pf, k, "b0")
         a0_frag = a_s2r.load(a_cur0)
         wait_barrier(0)
 
         c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
 
-        sb1 = scale_read(k, "b1")
+        sb1 = scale_read(sc_pf, k, "b1")
         b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
         rocdl.s_barrier()
 
         c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, sa0, sb1, k_pack=k % 2)
 
-        sa1 = scale_read(k, "a1")
+        sa1 = scale_read(sc_pf, k, "a1")
         a1_frag = a_s2r.load(a_cur1)
         rocdl.s_barrier()
 

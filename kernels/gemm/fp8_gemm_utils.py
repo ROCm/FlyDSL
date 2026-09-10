@@ -161,13 +161,6 @@ class S2RLoader:
 
 
 class StoreC:
-    """Accumulator -> bf16 gmem epilogue.
-
-    ``A_scale`` / ``B_scale`` are the per-row / per-col FP32 scales applied here.
-    Pass ``None`` for both when the scaling already happened inside the MFMA
-    (MX block-scaled kernels); the epilogue then only converts acc -> bf16.
-    """
-
     def __init__(self, A_scale, B_scale, C, c_rows, c_cols, c_idx_fn, n_tiles_a, n_tiles_b):
         self.c_rows = c_rows
         self.c_cols = c_cols

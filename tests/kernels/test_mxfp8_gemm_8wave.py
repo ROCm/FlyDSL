@@ -71,7 +71,6 @@ def _run_mxfp8_gemm(
     c_ref = _ref_mxfp8(a_q, b_q, a_scale, b_scale)
     c_out = torch.zeros((M, N), dtype=OUT_DTYPE, device=device)
 
-    # preshuffle_b only reorders K inside a 16x64 brick, so b_scale is unchanged.
     b_in = preshuffle_b(b_q.view(torch.int8)).view(torch.float8_e4m3fn) if b_preshuffled else b_q
     a_scale_in = gemm_common_utils.shuffle_scale_w4(a_scale, 1, False)
     b_scale_in = gemm_common_utils.shuffle_scale_w4(b_scale, 1, False)
@@ -112,10 +111,8 @@ def _run_mxfp8_gemm(
         (256, 256, 512, 0),
         (256, 256, 768, 0),
         (1024, 1024, 2048, 0),
-        # xcd_swizzle only reaches the remap itself at 8192^3: xcd_remap_pid falls
-        # back to row-major below 4*32*num_xcds workgroups, so the 1024 case covers
-        # the fallback select and the 8192 one covers the remap.
         (1024, 1024, 2048, 4),
+        (8192, 8192, 512, 4),
         (2048, 2048, 4096, 0),
         pytest.param(8192, 8192, 8192, 0, marks=pytest.mark.large_shape),
         pytest.param(8192, 8192, 8192, 4, marks=pytest.mark.large_shape),
