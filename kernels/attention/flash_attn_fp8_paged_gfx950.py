@@ -86,8 +86,10 @@ def build_flash_attn_paged_fp8_module(
     batch_interleave_group = int(batch_interleave_group)
     if batch_interleave_group < 1:
         raise ValueError(f"batch_interleave_group must be positive, got {batch_interleave_group}")
-    if batch_interleave_group > 1 and (head_dim != 192 or (paged_bn128 and not paged_bn128_varlen)):
-        raise ValueError("batch interleaving requires paged D192 and packed-varlen mode for BN128")
+    if batch_interleave_group > 1 and (
+        (head_dim == 128 and not paged_bn128) or (paged_bn128 and not paged_bn128_varlen)
+    ):
+        raise ValueError("batch interleaving requires generic D192 or packed-varlen BN128")
     assert num_heads % num_kv_heads == 0
     traits = _make_paged_dualwave_swp_fp8_traits(
         num_heads,
@@ -1072,7 +1074,7 @@ def build_flash_attn_paged_fp8_module(
     def _validate_batch_interleave_launch(batch_size):
         if int(batch_size) % BATCH_INTERLEAVE_GROUP != 0:
             raise ValueError(
-                "paged D192 batch size must be divisible by its interleave group: "
+                "paged FP8 batch size must be divisible by its interleave group: "
                 f"batch_size={int(batch_size)}, group={BATCH_INTERLEAVE_GROUP}"
             )
 
