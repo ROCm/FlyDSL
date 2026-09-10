@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-10T09:35:05Z",
+ "updated": "2026-09-10T09:41:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "jli/gfx1250/llvm-unclausevmem-patch",
    "event": "pull_request",
    "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34460203091",
    "created_at": "2026-09-10T09:21:41Z",
-   "updated_at": "2026-09-10T09:24:09Z",
+   "updated_at": "2026-09-10T09:38:51Z",
    "actor": "Boss2002n",
    "jobs": []
   },
@@ -25,13 +25,41 @@
    "branch": "mxfp8_v1",
    "event": "pull_request",
    "title": "Mxfp8 8w 1*32 scale",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459649023",
    "created_at": "2026-09-10T09:15:37Z",
-   "updated_at": "2026-09-10T09:18:08Z",
+   "updated_at": "2026-09-10T09:34:09Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-10T09:34:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459649023/job/102819675507"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-10T09:38:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459649023/job/102819675564"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T09:34:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459649023/job/102819675626"
+    }
+   ]
   },
   {
    "run_id": 34459592706,
@@ -85,19 +113,19 @@
    "branch": "add-flydsl-code-review-skill",
    "event": "pull_request",
    "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493",
    "created_at": "2026-09-10T08:48:41Z",
-   "updated_at": "2026-09-10T09:03:49Z",
+   "updated_at": "2026-09-10T09:34:59Z",
    "actor": "zhiding512",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-10T09:03:49Z",
+     "started_at": "2026-09-10T09:34:58Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493/job/102810647216"
     },
@@ -113,11 +141,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T09:13:50Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493/job/102810647259"
+     "completed_at": "2026-09-10T09:37:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493/job/102810647259",
+     "log_fetch_failed": true
     }
    ]
   },
