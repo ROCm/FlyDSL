@@ -25,6 +25,15 @@ from kernels.common.kernels_common import dtype_to_elem_type
 from kernels.common.tensor_shim import _run_compiled
 
 
+def _query_bound_is_safe(ctx, upper_bound, maximum):
+    # A proof must reject unordered comparisons and preserve overflow behavior.
+    with fx.fastmath(None):
+        safe = ((upper_bound - maximum) * ctx.c_logit_scale <= ctx.c_rescale_thr_f) & (ctx.c_logit_scale > 0)
+    unsafe = safe == fx.Boolean(False)
+    unsafe_lanes = fx.Int64(rocdl.ballot(fx.Int64.ir_type, unsafe.ir_value()))
+    return unsafe_lanes == 0
+
+
 def build_flash_attn_paged_fp8_module(
     num_heads,
     head_dim,
@@ -188,6 +197,9 @@ def build_flash_attn_paged_fp8_module(
         BN = traits.BLOCK_N
         D_CHUNKS = traits.D_CHUNKS
         NPF = traits.NUM_PREFETCH_K
+        BOUNDED_MAX = (
+            traits.HEAD_DIM == 128 and traits.DUALWAVE_SWP_LAZY_RESCALE and not traits.DUALWAVE_SWP_DEBUG_LAZY_COUNTS
+        )
         t0 = ctx.split_t0
         t_end = ctx.split_t_end
 
@@ -234,6 +246,18 @@ def build_flash_attn_paged_fp8_module(
 
         q_wide = gemm_helper.load_q_wide()
 
+        upper_bound = ctx.c_zero_f
+        if const_expr(BOUNDED_MAX):
+            # E4M3FN finite keys satisfy |K_i| <= 448. Bound every score by
+            # 2 * 448 * sum(abs(Q_i)); factor two dominates FP32 summation error.
+            max_key = fx.Vector.filled(8, 0x7E7E7E7E, fx.Int32)
+            bound_tile = ctx.c_zero_v16f32
+            for ws in range_constexpr(2):
+                absolute_query = fx.Vector(q_wide[ws]) & fx.Int32(0x7F7F7F7F)
+                bound_tile = gemm_helper._mfma_acc_fp8_wide(max_key, absolute_query, bound_tile)
+            with fx.fastmath(None):
+                upper_bound = fx.Float32(softmax_helper.anchor_scalar_f32(fx.Vector(bound_tile)[0] * fx.Float32(2.0)))
+
         page_t2, page_t3 = ctx.load_page_id_pair((t0 + 2) * BN)
         kv_gmem_to_lds.load_k((t0 + 1) * BN, (t0 + 1) % NPF, page_id=page_t1)
         kv_gmem_to_lds.load_v(t0 * BN, t0 % NPF, page_id=page_t0)
@@ -274,7 +298,7 @@ def build_flash_attn_paged_fp8_module(
         loop_results = init_args
         next_v_arg_idx = 3 + D_CHUNKS
 
-        def _iterate(j, loop_args, do_mask):
+        def _iterate(j, loop_args, do_mask, skip_max=False, initialize=False):
             m_row = loop_args[0]
             l_row = loop_args[1]
             v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
@@ -338,8 +362,14 @@ def build_flash_attn_paged_fp8_module(
                 kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_b, nn_b_buf)
                 if const_expr(do_mask):
                     v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
-                m_tile = _merge_tile_max(v_s_a, v_s_b)
-                v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
+                m_new = m_row
+                if const_expr(initialize):
+                    # Zero O/l need no rescaling; avoid folding -inf through fast math.
+                    with fx.fastmath(None):
+                        m_new = _merge_tile_max(v_s_a, v_s_b)
+                elif const_expr(not skip_max):
+                    m_tile = _merge_tile_max(v_s_a, v_s_b)
+                    v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
                 v_o = softmax_helper.anchor_v_o(v_o)
 
                 v_o, l_row = _subtile_tail(v_s_a, v_v_a, v_o, l_row, m_new)
@@ -354,7 +384,24 @@ def build_flash_attn_paged_fp8_module(
             rocdl.sched_barrier(0)
             return next_args
 
-        if const_expr(traits.HEAD_DIM == 192 and traits.HEAD_DIM_V == 128):
+        if const_expr(BOUNDED_MAX):
+            first_end = fx.min(fx.Int64(t_end), fx.Int64(t0) + 2)
+            for j, loop_args in range(fx.Int64(t0), first_end, fx.Int64(2), init=init_args):
+                next_args = _iterate(j, loop_args, True, initialize=True)
+                loop_results = yield next_args
+            sealed = _query_bound_is_safe(ctx, upper_bound, fx.Float32(loop_results[0]))
+            fast_end = sealed.select(fx.Int64(t_end), first_end)
+            first_state = loop_results
+            # Waves can choose different loops, but pair order and barrier count agree.
+            for j, loop_args in range(first_end, fast_end, fx.Int64(2), init=first_state):
+                next_args = _iterate(j, loop_args, True, skip_max=True)
+                loop_results = yield next_args
+            slow_start = sealed.select(fx.Int64(t_end), first_end)
+            slow_state = loop_results
+            for j, loop_args in range(slow_start, fx.Int64(t_end), fx.Int64(2), init=slow_state):
+                next_args = _iterate(j, loop_args, True)
+                loop_results = yield next_args
+        elif const_expr(traits.HEAD_DIM == 192 and traits.HEAD_DIM_V == 128):
             # The prefix boundary is wave-uniform, not CTA-uniform. Both loops
             # must keep the same pair order and one rendezvous per pair.
             prefix_end = fx.Int64(ctx.q_start_pos_i32 + ctx.delta_i32) // (2 * BN) * 2
@@ -949,7 +996,11 @@ def build_flash_attn_paged_fp8_module(
                 head_dim_runtime,
                 value_attrs=kernel_attrs,
             ).launch(
-                grid=(NUM_HEADS_Q * BATCH_INTERLEAVE_GROUP, num_q_blocks, grid_z // BATCH_INTERLEAVE_GROUP),
+                grid=(
+                    NUM_HEADS_Q * BATCH_INTERLEAVE_GROUP,
+                    num_q_blocks,
+                    grid_z // BATCH_INTERLEAVE_GROUP,
+                ),
                 block=(BLOCK_SIZE, 1, 1),
                 stream=stream,
             )

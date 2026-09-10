@@ -4778,6 +4778,72 @@ def test_paged_fp8_d128_bn128_ragged_multiblock_matches_torch():
     )
 
 
+@_requires_gfx950
+@pytest.mark.parametrize("num_kv_heads", [1, 2])
+@pytest.mark.parametrize("mode", ["bounded", "escape", "mixed-waves", "negative"])
+def test_paged_fp8_d128_query_bound_preserves_rescaling(mode, num_kv_heads):
+    """A query bound may prune max checks only for every active lane of a wave."""
+    torch.manual_seed(29)
+    query_lengths, kv_lengths = [300, 65], [1024, 512]
+    query_offsets, kv_offsets = [0, 300, 365], [0, 1024, 1536]
+    num_pages = sum(kv_lengths) // 64
+    physical_pages = torch.randperm(num_pages, device="cuda")
+    table = torch.zeros(2, 16, device="cuda", dtype=torch.int32)
+    query = torch.zeros(sum(query_lengths), 16, 128, device="cuda")
+    key = torch.zeros(num_pages, num_kv_heads, 8, 64, 16, device="cuda")
+    head_sign = torch.where(torch.arange(num_kv_heads, device="cuda") % 2 == 0, 1.0, -1.0)
+    page_offset = 0
+    for batch, (query_length, kv_length) in enumerate(zip(query_lengths, kv_lengths)):
+        rows = torch.arange(query_length, device="cuda")
+        coefficients = torch.ones(query_length, device="cuda")
+        if mode == "mixed-waves":
+            coefficients = torch.where((rows // 32) % 2 == 0, 1.0, 4.0)
+        query[query_offsets[batch] : query_offsets[batch + 1], :, 0] = coefficients[:, None]
+        pages = kv_length // 64
+        selected = physical_pages[page_offset : page_offset + pages]
+        table[batch, :pages] = selected.to(torch.int32)
+        pair = torch.arange(pages, device="cuda") // 2
+        levels = torch.where(pair % 2 == 1, 1.0, -1.0)
+        levels[:2] = 0.0
+        if mode == "negative":
+            levels[:] = -1.0
+        key[selected, :, 0, :, 0] = levels[:, None, None] * head_sign[None, :, None] * 448.0
+        page_offset += pages
+
+    query = query.to(torch.float8_e4m3fn)
+    key = key.to(torch.float8_e4m3fn)
+    value, value_descale = quantize_per_tensor_fp8(
+        torch.randn(num_pages, num_kv_heads, 4, 128, 16, device="cuda") * 0.2 + 0.25
+    )
+    peak_log2 = {"bounded": 3.0, "escape": 16.0, "mixed-waves": 3.0, "negative": 2.5}[mode]
+    query_descale = torch.ones(1, device="cuda")
+    key_descale = torch.tensor([peak_log2 * math.sqrt(128) / (448.0 * math.log2(math.e))], device="cuda")
+    actual = flydsl_flash_attn_func(
+        query,
+        key,
+        value,
+        causal=True,
+        num_kv_heads=num_kv_heads,
+        cu_seqlens_q=torch.tensor(query_offsets, device="cuda", dtype=torch.int32),
+        cu_seqlens_kv=torch.tensor(kv_offsets, device="cuda", dtype=torch.int32),
+        max_seqlen_q=max(query_lengths),
+        max_seqlen_kv=max(kv_lengths),
+        cross_seqlen=True,
+        block_table=table,
+        seqlen_k=torch.tensor(kv_lengths, device="cuda", dtype=torch.int32),
+        kv_cache_layout="vectorized",
+        q_descale=query_descale,
+        k_descale=key_descale,
+        v_descale=value_descale,
+    )
+    torch.cuda.synchronize()
+    expected = _paged_fp8_torch_reference(
+        query, key, value, table, query_lengths, kv_lengths, (query_descale, key_descale, value_descale)
+    )
+    assert bool(torch.isfinite(actual).all().item())
+    torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=5.0e-3)
+
+
 @pytest.mark.parametrize(
     ("batch_size", "head_dims", "expected"),
     [
