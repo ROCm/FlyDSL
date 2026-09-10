@@ -14,7 +14,7 @@ selectors/unknown arguments, runtime branches, decorators, configuration and
 plugins need review. A visible path does not guarantee runtime execution.
 Exit 0: no candidates; 1: coverage candidates/manual review; 2: invalid input.
 
-usage: scan_unreachable_tests.py --diff <diff-file> [worktree-root]
+usage: scan_unreachable_tests.py --diff <diff-file> --head <worktree-root>
 """
 
 import argparse
@@ -265,10 +265,10 @@ def analyse(tree):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--diff", required=True, type=Path)
-    parser.add_argument("root", nargs="?", type=Path, default=Path("."))
+    parser.add_argument("--head", required=True, type=Path, metavar="DIR")
     args = parser.parse_args(argv)
     try:
-        root = args.root.resolve(strict=True)
+        root = args.head.resolve(strict=True)
         if not root.is_dir():
             raise ValueError(f"worktree root is not a directory: {root}")
         files = added_lines_from_diff(args.diff.read_text())

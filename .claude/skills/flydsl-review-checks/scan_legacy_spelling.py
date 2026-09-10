@@ -13,7 +13,6 @@ Exit status: 0 = no candidates, 1 = candidates, 2 = input or tool failure.
 import argparse
 import io
 import re
-import subprocess
 import sys
 import tokenize
 from pathlib import Path
@@ -51,17 +50,6 @@ RULES = [
     ),
 ]
 HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$")
-
-
-def get_diff(args):
-    if args.diff is not None:
-        return args.diff.read_text(encoding="utf-8")
-    return subprocess.run(
-        ["gh", "pr", "diff", str(args.pr), "--repo", args.repo],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
 
 
 def kernel_hunks(diff):
@@ -168,24 +156,11 @@ def scan(diff):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("repo", nargs="?", help="GitHub OWNER/REPO")
-    parser.add_argument("pr", nargs="?", type=int, help="positive pull request number")
-    parser.add_argument("--diff", type=Path, metavar="FILE", help="read an offline unified git diff")
+    parser.add_argument("--diff", required=True, type=Path, metavar="FILE")
     args = parser.parse_args(argv)
-    if args.diff is not None:
-        if args.repo is not None or args.pr is not None:
-            parser.error("--diff FILE cannot be combined with OWNER/REPO or PR")
-    elif args.repo is None or args.pr is None:
-        parser.error("provide OWNER/REPO and PR, or --diff FILE")
-    elif not re.fullmatch(r"[\w.-]+/[\w.-]+", args.repo) or args.pr <= 0:
-        parser.error("provide a valid OWNER/REPO and a positive PR number")
 
     try:
-        hits = scan(get_diff(args))
-    except subprocess.CalledProcessError as exc:
-        detail = exc.stderr.strip() or "no diagnostic from gh"
-        print(f"error: gh pr diff failed (exit {exc.returncode}): {detail}", file=sys.stderr)
-        return 2
+        hits = scan(args.diff.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

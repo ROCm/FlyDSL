@@ -21,7 +21,7 @@ else:
     pytestmark = pytest.mark.l0_backend_agnostic
 
 
-_SCANNER = Path(__file__).resolve().parents[2] / ".claude/skills/review-flydsl-kernel/scan_unreachable_tests.py"
+_SCANNER = Path(__file__).resolve().parents[2] / ".claude/skills/flydsl-review-checks/scan_unreachable_tests.py"
 
 
 class TestReviewUnreachableTests(unittest.TestCase):
@@ -49,7 +49,14 @@ class TestReviewUnreachableTests(unittest.TestCase):
             )
         )
         return subprocess.run(
-            [sys.executable, str(_SCANNER), "--diff", str(self.diff), str(root or self.root)],
+            [
+                sys.executable,
+                str(_SCANNER),
+                "--diff",
+                str(self.diff),
+                "--head",
+                str(root or self.root),
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -373,7 +380,14 @@ class TestReviewUnreachableTests(unittest.TestCase):
         self.assert_status(result, 0)
         self.source.unlink()
         result = subprocess.run(
-            [sys.executable, str(_SCANNER), "--diff", str(self.diff), str(self.root)],
+            [
+                sys.executable,
+                str(_SCANNER),
+                "--diff",
+                str(self.diff),
+                "--head",
+                str(self.root),
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -381,7 +395,14 @@ class TestReviewUnreachableTests(unittest.TestCase):
         self.assert_status(result, 2)
         self.diff.unlink()
         result = subprocess.run(
-            [sys.executable, str(_SCANNER), "--diff", str(self.diff), str(self.root)],
+            [
+                sys.executable,
+                str(_SCANNER),
+                "--diff",
+                str(self.diff),
+                "--head",
+                str(self.root),
+            ],
             capture_output=True,
             text=True,
             check=False,

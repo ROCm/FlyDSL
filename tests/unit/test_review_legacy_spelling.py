@@ -6,8 +6,6 @@
 """Offline CLI regressions; also runnable without pytest or a FlyDSL build."""
 
 import importlib.util
-import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -21,7 +19,7 @@ except ImportError:
 else:
     pytestmark = pytest.mark.l0_backend_agnostic
 
-SCRIPT = Path(__file__).resolve().parents[2] / ".claude/skills/review-flydsl-kernel/scan_legacy_spelling.py"
+SCRIPT = Path(__file__).resolve().parents[2] / ".claude/skills/flydsl-review-checks/scan_legacy_spelling.py"
 SPEC = importlib.util.spec_from_file_location("scan_legacy_spelling", SCRIPT)
 SCANNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SCANNER)
@@ -43,69 +41,18 @@ class LegacySpellingTests(unittest.TestCase):
         self.patch = self.root / "input.diff"
         self.patch.write_text("", encoding="utf-8")
 
-    def cli(self, *args, env=None):
-        return subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], capture_output=True, text=True, env=env)
+    def cli(self, *args):
+        return subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], capture_output=True, text=True)
 
     def scan_cli(self, diff):
         self.patch.write_text(diff, encoding="utf-8")
         return self.cli("--diff", self.patch)
 
-    def fake_gh(self, diff="", exit_code=0, stderr=""):
-        self.patch.write_text(diff, encoding="utf-8")
-        gh = self.root / "gh"
-        gh.write_text(
-            f"#!{sys.executable}\n"
-            "import json, os, pathlib, sys\n"
-            "pathlib.Path(os.environ['GH_ARGS']).write_text(json.dumps(sys.argv[1:]))\n"
-            "sys.stdout.write(pathlib.Path(os.environ['GH_DIFF']).read_text())\n"
-            "sys.stderr.write(os.environ['GH_ERROR'])\n"
-            "sys.exit(int(os.environ['GH_EXIT']))\n",
-            encoding="utf-8",
-        )
-        gh.chmod(0o755)
-        return dict(
-            os.environ,
-            PATH=f"{self.root}{os.pathsep}{os.environ.get('PATH', '')}",
-            GH_ARGS=str(self.root / "args.json"),
-            GH_DIFF=str(self.patch),
-            GH_ERROR=stderr,
-            GH_EXIT=str(exit_code),
-        )
-
-    def test_fetch_failure_is_not_clean(self):
-        env = self.fake_gh(added_diff("value = ir.Type()"), 17, "repository unavailable\n")
-        result = self.cli("ROCm/FlyDSL", "1047", env=env)
-        self.assertEqual(result.returncode, 2)
-        self.assertEqual(result.stdout, "")
-        self.assertIn("exit 17", result.stderr)
-        self.assertIn("repository unavailable", result.stderr)
-
-    def test_successful_fetch_passes_the_requested_repo_and_pr(self):
-        result = self.cli("ROCm/FlyDSL", "1047", env=self.fake_gh(added_diff("value = ir.Type()")))
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(
-            json.loads((self.root / "args.json").read_text()), ["pr", "diff", "1047", "--repo", "ROCm/FlyDSL"]
-        )
-        self.assertIn("kernels/example.py:1:", result.stdout)
-
-    def test_missing_gh_is_input_or_tool_failure(self):
-        result = self.cli("ROCm/FlyDSL", "1047", env=dict(os.environ, PATH=str(self.root)))
-        self.assertEqual(result.returncode, 2)
-        self.assertEqual(result.stdout, "")
-        self.assertIn("gh", result.stderr)
-        self.assertNotIn("Traceback", result.stderr)
-
     def test_invalid_arguments_report_usage(self):
         for args in [
             (),
-            ("ROCm/FlyDSL",),
             ("--diff",),
-            ("--diff", self.patch, "ROCm/FlyDSL", "1047"),
-            ("FlyDSL", "1047"),
-            ("ROCm/FlyDSL", "0"),
-            ("ROCm/FlyDSL", "-1"),
-            ("ROCm/FlyDSL", "abc"),
-            ("ROCm/FlyDSL", "1047", "extra"),
+            ("--diff", self.patch, "extra"),
         ]:
             with self.subTest(args=args):
                 result = self.cli(*args)
@@ -148,7 +95,7 @@ class LegacySpellingTests(unittest.TestCase):
         for path in [
             "python/flydsl/expr/example.py",
             "tests/example.py",
-            ".claude/skills/review-flydsl-kernel/scan_legacy_spelling.py",
+            ".claude/skills/flydsl-review-checks/scan_legacy_spelling.py",
             "kernels/common/buffer_ops.py",
             "kernels/example.md",
         ]:
