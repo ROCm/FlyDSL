@@ -173,14 +173,7 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_thread_mapping()
         if const_expr(PAGED_BN128_VARLEN):
             ctx.init_sequence_lengths()
-            num_q_blocks = (ctx.seqlen_q_v + traits.BLOCK_M - 1) // traits.BLOCK_M
-            active_q_block = ctx.q_block_idx < num_q_blocks
-            reversed_q_block = num_q_blocks - 1 - ctx.q_block_idx
-            ctx.q_block_idx = active_q_block.select(reversed_q_block, ctx.q_block_idx)
-            ctx.q_start = ctx.q_block_idx * traits.BLOCK_M
-            ctx.q_gmem_elem_offset = (
-                ctx.q_tok_base + ctx.q_start
-            ) * ctx.stride_q_n_v + ctx.q_head_idx * traits.HEAD_DIM
+            ctx.init_varlen_causal_lpt_order()
         else:
             ctx.init_causal_lpt_order()
             ctx.init_sequence_lengths()
@@ -213,18 +206,12 @@ def build_flash_attn_paged_fp8_module(
             v_p = gemm_helper.cast_p_fp8_direct(v_p)
             return v_p, l_row
 
-        def _pv_part(v_p, v_v, v_o):
-            # Keep the post-MFMA accumulators in SSA. Pinning them after each
-            # subtile lengthens the paged schedule without reducing registers.
-            return gemm_helper.pv(v_p, v_v, v_o)
-
         def _subtile_tail(v_s, v_v, v_o, l_row, m_new):
             v_p, l_row = _softmax_part(v_s, l_row, m_new)
-            v_o = _pv_part(v_p, v_v, v_o)
+            # Keep the post-MFMA accumulators in SSA. Pinning them after each
+            # subtile lengthens the paged schedule without reducing registers.
+            v_o = gemm_helper.pv(v_p, v_v, v_o)
             return v_o, l_row
-
-        def _mask_pair(v_s_a, v_s_b, j):
-            return softmax_helper.causal_mask_pair_if_needed(v_s_a, v_s_b, j)
 
         def _correct_o(v_o, m_row, l_row, m_tile):
             if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
@@ -325,17 +312,17 @@ def build_flash_attn_paged_fp8_module(
                 kv_gmem_to_lds.load_v((j + 5) * BN, f_b_buf, page_id=page_f_b)
 
                 if const_expr(do_mask):
-                    v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
+                    v_s_a, v_s_b = softmax_helper.causal_mask_pair_if_needed(v_s_a, v_s_b, j)
                 m_tile = _merge_tile_max(v_s_a, v_s_b)
                 v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
                 v_o = softmax_helper.anchor_v_o(v_o)
 
                 v_p_a, l_row = _softmax_part(v_s_a, l_row, m_new)
                 v_v_a = kv_lds_to_regs.load_v(a_buf)
-                v_o = _pv_part(v_p_a, v_v_a, v_o)
+                v_o = gemm_helper.pv(v_p_a, v_v_a, v_o)
                 v_p_b, l_row = _softmax_part(v_s_b, l_row, m_new)
                 v_v_b = kv_lds_to_regs.load_v(b_buf)
-                v_o = _pv_part(v_p_b, v_v_b, v_o)
+                v_o = gemm_helper.pv(v_p_b, v_v_b, v_o)
                 m_row = m_new
                 next_args = [m_row, l_row] + v_o + [nn_a_buf]
             else:
@@ -363,7 +350,7 @@ def build_flash_attn_paged_fp8_module(
                 v_s_b = gemm_helper.qk(v_k_b, q_wide)
                 kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_b, nn_b_buf)
                 if const_expr(do_mask):
-                    v_s_a, v_s_b = _mask_pair(v_s_a, v_s_b, j)
+                    v_s_a, v_s_b = softmax_helper.causal_mask_pair_if_needed(v_s_a, v_s_b, j)
                 m_new = m_row
                 if const_expr(initialize):
                     # Zero O/l need no rescaling; avoid folding -inf through fast math.
@@ -478,14 +465,7 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_sequence_lengths()
         if const_expr(traits.HEAD_DIM == 192 and traits.BATCH_INTERLEAVE_GROUP > 1):
             # Issue the longest active q-blocks first within each batch group.
-            num_q_blocks = (ctx.seqlen_q_v + traits.BLOCK_M - 1) // traits.BLOCK_M
-            active_q_block = ctx.q_block_idx < num_q_blocks
-            reversed_q_block = num_q_blocks - 1 - ctx.q_block_idx
-            ctx.q_block_idx = active_q_block.select(reversed_q_block, ctx.q_block_idx)
-            ctx.q_start = ctx.q_block_idx * traits.BLOCK_M
-            ctx.q_gmem_elem_offset = (
-                ctx.q_tok_base + ctx.q_start
-            ) * ctx.stride_q_n_v + ctx.q_head_idx * traits.HEAD_DIM
+            ctx.init_varlen_causal_lpt_order()
         ctx.init_descriptors()
         ctx.init_atoms_and_lds_ptrs()
         ctx.init_dma_thread_offsets()
@@ -580,10 +560,7 @@ def build_flash_attn_paged_fp8_module(
                 rocdl.sched_barrier(0)
 
                 kv_gmem_to_lds.load_k(j_idx * traits.BLOCK_N, 1)
-                if const_expr(traits.D_CHUNKS > 4):
-                    v_v = kv_lds_to_regs.load_v_steps(0, 0, 2)
-                else:
-                    v_v = kv_lds_to_regs.load_v(0)
+                v_v = kv_lds_to_regs.load_v(0)
                 fx.rocdl.s_waitcnt(lgkmcnt=0)
                 _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
                 rocdl.sched_barrier(0)
@@ -605,12 +582,11 @@ def build_flash_attn_paged_fp8_module(
                     v_o, m_row, l_row, v_p_0 = softmax_helper.rescale_o(v_o, m_row, l_row, m_tile_max_a, v_p_0)
                 v_o = gemm_helper.pv_step_k(1, v_p_0, v_v, v_o)
                 if const_expr(traits.D_CHUNKS > 4):
-                    v_v_tail = kv_lds_to_regs.load_v_steps(0, 2, 2)
                     v_s_1 = softmax_helper.sub_m(v_s_1, m_row)
                     v_p_1 = softmax_helper.exp2(v_s_1, 0, 16)
                     fx.rocdl.s_waitcnt(lgkmcnt=0)
-                    v_o = gemm_helper.pv_step_k(2, v_p_0, v_v_tail, v_o)
-                    v_o = gemm_helper.pv_step_k(3, v_p_0, v_v_tail, v_o)
+                    v_o = gemm_helper.pv_step_k(2, v_p_0, v_v, v_o)
+                    v_o = gemm_helper.pv_step_k(3, v_p_0, v_v, v_o)
                 else:
                     v_o = gemm_helper.pv_step_k(2, v_p_0, v_v, v_o)
                     v_o = gemm_helper.pv_step_k(3, v_p_0, v_v, v_o)
@@ -647,10 +623,7 @@ def build_flash_attn_paged_fp8_module(
                 rocdl.sched_barrier(0)
 
                 kv_gmem_to_lds.load_k((j_idx + 1) * traits.BLOCK_N, 0)
-                if const_expr(traits.D_CHUNKS > 4):
-                    v_packs_b = kv_lds_to_regs.load_v_steps(1, 0, 2)
-                else:
-                    v_packs_b = kv_lds_to_regs.load_v(1)
+                v_v = kv_lds_to_regs.load_v(1)
                 v_s_0 = softmax_helper.causal_mask_prologue_if_needed(
                     v_s_0,
                     j_idx - 1,
@@ -664,7 +637,6 @@ def build_flash_attn_paged_fp8_module(
 
                 if const_expr(traits.DUALWAVE_SWP_SETPRIO):
                     rocdl.s_setprio(1)
-                v_v = v_packs_b
                 v_o = gemm_helper.pv_step_k(0, v_p_1, v_v, v_o)
                 m_tile_max_b = softmax_helper.reduce_max(v_s_0)
                 _sched_barrier_pairs(traits, 4, 6, 4)
@@ -673,15 +645,13 @@ def build_flash_attn_paged_fp8_module(
                     v_o, m_row, l_row, v_p_1 = softmax_helper.lazy_rescale_o(v_o, m_row, l_row, m_tile_max_b, v_p_1)
                 else:
                     v_o, m_row, l_row, v_p_1 = softmax_helper.rescale_o(v_o, m_row, l_row, m_tile_max_b, v_p_1)
-                v_v = v_packs_b
                 v_o = gemm_helper.pv_step_k(1, v_p_1, v_v, v_o)
                 if const_expr(traits.D_CHUNKS > 4):
-                    v_v_tail = kv_lds_to_regs.load_v_steps(1, 2, 2)
                     v_s_0 = softmax_helper.sub_m(v_s_0, m_row)
                     v_p_0 = softmax_helper.exp2(v_s_0, 0, 16)
                     fx.rocdl.s_waitcnt(lgkmcnt=0)
-                    v_o = gemm_helper.pv_step_k(2, v_p_1, v_v_tail, v_o)
-                    v_o = gemm_helper.pv_step_k(3, v_p_1, v_v_tail, v_o)
+                    v_o = gemm_helper.pv_step_k(2, v_p_1, v_v, v_o)
+                    v_o = gemm_helper.pv_step_k(3, v_p_1, v_v, v_o)
                 else:
                     v_o = gemm_helper.pv_step_k(2, v_p_1, v_v, v_o)
                     v_o = gemm_helper.pv_step_k(3, v_p_1, v_v, v_o)
@@ -728,10 +698,7 @@ def build_flash_attn_paged_fp8_module(
             rocdl.sched_barrier(0)
 
             kv_gmem_to_lds.load_k(max_m1 * traits.BLOCK_N, 1)
-            if const_expr(traits.D_CHUNKS > 4):
-                v_packs_e3 = kv_lds_to_regs.load_v_steps(0, 0, 2)
-            else:
-                v_packs_e3 = kv_lds_to_regs.load_v(0)
+            v_packs_e3 = kv_lds_to_regs.load_v(0)
             v_s_1 = softmax_helper.causal_mask_prologue_if_needed(
                 v_s_1,
                 max_m3,
@@ -748,7 +715,6 @@ def build_flash_attn_paged_fp8_module(
             if const_expr(traits.D_CHUNKS > 4):
                 v_o = gemm_helper.pv_step_k(0, v_p_0, v_packs_e3, v_o)
                 v_o = gemm_helper.pv_step_k(1, v_p_0, v_packs_e3, v_o)
-                v_packs_e3 = kv_lds_to_regs.load_v_steps(0, 2, 2)
                 fx.rocdl.s_waitcnt(lgkmcnt=0)
                 v_o = gemm_helper.pv_step_k(2, v_p_0, v_packs_e3, v_o)
                 v_o = gemm_helper.pv_step_k(3, v_p_0, v_packs_e3, v_o)
@@ -791,10 +757,7 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            if const_expr(traits.D_CHUNKS > 4):
-                v_packs_e7 = kv_lds_to_regs.load_v_steps(1, 0, 2)
-            else:
-                v_packs_e7 = kv_lds_to_regs.load_v(1)
+            v_packs_e7 = kv_lds_to_regs.load_v(1)
             v_s_0 = softmax_helper.causal_mask_prologue_if_needed(
                 v_s_0,
                 max_m2,
@@ -811,7 +774,6 @@ def build_flash_attn_paged_fp8_module(
             if const_expr(traits.D_CHUNKS > 4):
                 v_o = gemm_helper.pv_step_k(0, v_p_1, v_packs_e7, v_o)
                 v_o = gemm_helper.pv_step_k(1, v_p_1, v_packs_e7, v_o)
-                v_packs_e7 = kv_lds_to_regs.load_v_steps(1, 2, 2)
                 fx.rocdl.s_waitcnt(lgkmcnt=0)
                 v_o = gemm_helper.pv_step_k(2, v_p_1, v_packs_e7, v_o)
                 v_o = gemm_helper.pv_step_k(3, v_p_1, v_packs_e7, v_o)
@@ -853,10 +815,7 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            if const_expr(traits.D_CHUNKS > 4):
-                v_packs_e11 = kv_lds_to_regs.load_v_steps(0, 0, 2)
-            else:
-                v_packs_e11 = kv_lds_to_regs.load_v(0)
+            v_packs_e11 = kv_lds_to_regs.load_v(0)
             v_s_1 = softmax_helper.causal_mask_prologue_if_needed(
                 v_s_1,
                 max_m1,
@@ -871,7 +830,6 @@ def build_flash_attn_paged_fp8_module(
             if const_expr(traits.D_CHUNKS > 4):
                 v_o = gemm_helper.pv_step_k(0, v_p_0, v_packs_e11, v_o)
                 v_o = gemm_helper.pv_step_k(1, v_p_0, v_packs_e11, v_o)
-                v_packs_e11 = kv_lds_to_regs.load_v_steps(0, 2, 2)
                 fx.rocdl.s_waitcnt(lgkmcnt=0)
                 v_o = gemm_helper.pv_step_k(2, v_p_0, v_packs_e11, v_o)
                 v_o = gemm_helper.pv_step_k(3, v_p_0, v_packs_e11, v_o)
@@ -896,10 +854,7 @@ def build_flash_attn_paged_fp8_module(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
 
-            if const_expr(traits.D_CHUNKS > 4):
-                v_packs_e13 = kv_lds_to_regs.load_v_steps(1, 0, 2)
-            else:
-                v_packs_e13 = kv_lds_to_regs.load_v(1)
+            v_packs_e13 = kv_lds_to_regs.load_v(1)
             fx.rocdl.s_waitcnt(lgkmcnt=0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -908,7 +863,6 @@ def build_flash_attn_paged_fp8_module(
             if const_expr(traits.D_CHUNKS > 4):
                 v_o = gemm_helper.pv_step_k(0, v_p_1, v_packs_e13, v_o)
                 v_o = gemm_helper.pv_step_k(1, v_p_1, v_packs_e13, v_o)
-                v_packs_e13 = kv_lds_to_regs.load_v_steps(1, 2, 2)
                 fx.rocdl.s_waitcnt(lgkmcnt=0)
                 v_o = gemm_helper.pv_step_k(2, v_p_1, v_packs_e13, v_o)
                 v_o = gemm_helper.pv_step_k(3, v_p_1, v_packs_e13, v_o)
@@ -1029,13 +983,9 @@ def build_flash_attn_paged_fp8_module(
                 value_attrs=kernel_attrs,
             ).launch(
                 grid=(
-                    (
-                        NUM_HEADS_Q * traits.BATCH_INTERLEAVE_GROUP,
-                        num_q_blocks,
-                        grid_z // traits.BATCH_INTERLEAVE_GROUP,
-                    )
-                    if const_expr(traits.BATCH_INTERLEAVE_GROUP > 1)
-                    else (NUM_HEADS_Q, num_q_blocks, grid_z)
+                    NUM_HEADS_Q * BATCH_INTERLEAVE_GROUP,
+                    num_q_blocks,
+                    grid_z // BATCH_INTERLEAVE_GROUP,
                 ),
                 block=(BLOCK_SIZE, 1, 1),
                 stream=stream,
@@ -1068,7 +1018,7 @@ def build_flash_attn_paged_fp8_module(
             )
         if block_table_stride < num_kv_pages:
             raise ValueError(
-                "paged BN128 block table has too few entries: " f"need {num_kv_pages}, got stride {block_table_stride}"
+                f"paged BN128 block table has too few entries: need {num_kv_pages}, got stride {block_table_stride}"
             )
 
     def _validate_batch_interleave_launch(batch_size):
