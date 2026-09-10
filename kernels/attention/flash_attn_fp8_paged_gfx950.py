@@ -478,8 +478,7 @@ def build_flash_attn_paged_fp8_module(
         kv_lds_to_regs = DualwaveFp8KvLdsToVgprLoader(ctx)
         output_store = DualwaveFp8StoreHelper(ctx)
 
-        # Skip packed-varlen q-blocks beyond this request's query length. The
-        # condition is uniform across the workgroup, so barriers stay balanced.
+        # The active-query guard is workgroup-uniform, keeping barriers balanced.
         @flyc.jit
         def _run_q_block():
             kv_gmem_to_lds.load_k(ctx.split_t0 * traits.BLOCK_N, 0)
@@ -499,9 +498,9 @@ def build_flash_attn_paged_fp8_module(
             fx.rocdl.s_waitcnt(lgkmcnt=0)
             _waitcnt_vm_n(ctx.NUM_DMA_V)
 
-            # OPEN the wave-group phase shift: one extra s_barrier on group B
+            # Group B's extra barrier opens the wave-group phase shift.
             if const_expr(traits.DUALWAVE_SWP_ENABLE_STAGGER):
-                _stagger_extra_barrier_if_one(ctx.stagger_i32)  # group B: +1 s_barrier -> open the shift
+                _stagger_extra_barrier_if_one(ctx.stagger_i32)
             else:
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
@@ -876,7 +875,7 @@ def build_flash_attn_paged_fp8_module(
 
             # Group A's extra barrier closes the prologue's phase shift before stores.
             if const_expr(traits.DUALWAVE_SWP_ENABLE_STAGGER):
-                _stagger_extra_barrier_if_zero(ctx.stagger_i32)  # group A: +1 s_barrier -> close the shift
+                _stagger_extra_barrier_if_zero(ctx.stagger_i32)
             else:
                 rocdl.s_barrier()
 
