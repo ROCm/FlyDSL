@@ -3,9 +3,12 @@
 
 """Low-level cross-card (P2P) communication primitives for communication kernels.
 
-These wrap LLVM-dialect global memory ops with explicit memory ordering and
-syncscope -- which the high-level FlyDSL APIs (buffer_ops / Pointer) do not
-expose -- so dispatch/combine can publish and observe data across cards.
+The atomics and fences forward to the ``fx`` LLVM-dialect API, adding the
+inttoptr into the global address space that it does not do itself. The ordered
+loads/stores still build the dialect ops directly, which remains the only way
+to attach memory ordering and syncscope to them -- neither buffer_ops nor
+Pointer exposes it. Either way, dispatch/combine can publish and observe data
+across cards.
 
 Also hosts :class:`GeometryTuningTable`, the per-shape launch-geometry lookup
 shared by the dispatch/combine ops.
@@ -68,12 +71,12 @@ def store_i64_global_system(addr_i64, val):
 
 def fence_acquire(syncscope):
     """Emit an acquire fence for the selected AMDGPU memory scope."""
-    _llvm_d.FenceOp(_llvm_d.AtomicOrdering.acquire, syncscope=syncscope)
+    fx.memory_fence(syncscope=syncscope, ordering=fx.AtomicOrdering.Acquire)
 
 
 def fence_release(syncscope):
     """Emit a release fence for the selected AMDGPU memory scope."""
-    _llvm_d.FenceOp(_llvm_d.AtomicOrdering.release, syncscope=syncscope)
+    fx.memory_fence(syncscope=syncscope, ordering=fx.AtomicOrdering.Release)
 
 
 def fence_system_acquire():
@@ -104,16 +107,11 @@ def load_i64_global(addr_i64):
 
 
 def atomic_add_global_at(addr_i64, val, syncscope="one-as"):
-    """Monotonic global fetch-add with configurable agent/system visibility."""
-    ptr = _to_ptr_global(addr_i64)
-    kwargs = {} if syncscope is None else {"syncscope": syncscope}
-    return _llvm_d.AtomicRMWOp(
-        _llvm_d.AtomicBinOp.add,
-        ptr,
-        arith.unwrap(val),
-        _llvm_d.AtomicOrdering.monotonic,
-        **kwargs,
-    ).res
+    """Monotonic global fetch-add with configurable agent/system visibility.
+
+    Returns the pre-update value as a DSL scalar of ``val``'s type.
+    """
+    return fx.atomic_add(_to_ptr_global(addr_i64), val, syncscope=syncscope)
 
 
 def atomic_add_agent(addr_i64, val):
@@ -127,16 +125,11 @@ def atomic_add_system(addr_i64, val):
 
 
 def atomic_xchg_global_at(addr_i64, val, syncscope="agent"):
-    """Monotonic global exchange with configurable agent/system visibility."""
-    ptr = _to_ptr_global(addr_i64)
-    kwargs = {} if syncscope is None else {"syncscope": syncscope}
-    return _llvm_d.AtomicRMWOp(
-        _llvm_d.AtomicBinOp.xchg,
-        ptr,
-        arith.unwrap(val),
-        _llvm_d.AtomicOrdering.monotonic,
-        **kwargs,
-    ).res
+    """Monotonic global exchange with configurable agent/system visibility.
+
+    Returns the pre-update value as a DSL scalar of ``val``'s type.
+    """
+    return fx.atomic_xchg(_to_ptr_global(addr_i64), val, syncscope=syncscope)
 
 
 @dataclass
