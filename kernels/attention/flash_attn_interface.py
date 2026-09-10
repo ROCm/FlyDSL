@@ -518,8 +518,10 @@ _PAGED_FP8_V192_BATCH_INTERLEAVE_MAX_BATCH = 16
 
 def _paged_fp8_batch_interleave_group(batch_size: int, head_dims: tuple[int, int], *, paired: bool = False) -> int:
     """Choose a divisor-sized group for paged D192 or small paired D128 batches."""
-    if paired and head_dims == (128, 128) and batch_size in (2, 3, 5):
-        return batch_size
+    if paired:
+        if head_dims == (128, 128) and batch_size in (2, 3, 5):
+            return batch_size
+        return 2 if head_dims == (192, 128) and batch_size == 2 else 1
     if head_dims[0] != 192 or batch_size <= 1:
         return 1
     # Generic V192 favors the original cache-local grid above B=16.
@@ -750,7 +752,7 @@ def _flydsl_flash_attn_paged(
 
     if out is not None:
         if out.device != q.device:
-            raise ValueError(f"flydsl_flash_attn_func: paged output must be on {q.device}, " f"got {out.device}")
+            raise ValueError(f"flydsl_flash_attn_func: paged output must be on {q.device}, got {out.device}")
         if out.shape != expected_out_shape or not out.is_contiguous():
             raise ValueError(
                 f"flydsl_flash_attn_func: paged output must be contiguous with shape {expected_out_shape}, "
@@ -774,8 +776,7 @@ def _flydsl_flash_attn_paged(
             and (not arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
         )
         if paged_fp8:
-            num_kv_pages = (skv + page_size - 1) // page_size
-            use_bn128 = num_kv_pages % 2 == 0
+            use_bn128 = max_kv_pages % 2 == 0
             paged_bn128_varlen = use_bn128 and B > 1
             paged_setprio = dualwave_swp_setprio and D != 192
             # The BF16 phase shift exposes H2 staging and probability-pack
@@ -795,13 +796,7 @@ def _flydsl_flash_attn_paged(
                 paged_bn128_varlen=paged_bn128_varlen,
                 batch_interleave_group=(
                     _paged_fp8_batch_interleave_group(B, fp8_head_dims, paired=use_bn128)
-                    if H == 16
-                    and num_kv_heads == 1
-                    and (
-                        not use_bn128
-                        or (fp8_head_dims == (192, 128) and B == 2)
-                        or (fp8_head_dims == (128, 128) and B in (2, 3, 5))
-                    )
+                    if H == 16 and num_kv_heads == 1
                     else 1
                 ),
             )
