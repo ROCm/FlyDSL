@@ -205,13 +205,16 @@ change touches moved with it.
 These are the rules CI or a maintainer will enforce; each is checkable from the
 diff.
 
-- **Banned arithmetic spellings in `kernels/`.** `arith.maximumf`, `minimumf`,
-  `maxsi`, `maxui`, `minsi`, `minui`, `ceildivsi`, `ceildivui` must be
-  `fx.max` / `fx.min` / `fx.ceildiv`; `arith.maxnumf` and `minnumf` must be
-  `fx.maxnumf` / `fx.minnumf`. These last two are **not** interchangeable with
-  `fx.max` / `fx.min` — the NaN semantics differ, so a swap is a correctness
-  bug, not a style fix. `scripts/check_typed_arithmetic_usage.py` gates added
-  lines in `kernels/`.
+- **Legacy kernel constructs and arithmetic.** Read the **kernel-code-cleanup** skill
+  at `.claude/skills/kernel-code-cleanup/SKILL.md`. Reuse its replacement tables
+  and §10 **Find** / **Triage** procedure within the review scope. The reviewing
+  Agent searches for legacy usage, traces imports and aliases, and reads the
+  affected functions. Include the resolved API, call site, suggested replacement,
+  and semantic constraints in each finding. Follow its review-only path; leave
+  migration and formatting to a separately requested fix.
+  Preserve §3's NaN semantics: `maximumf` → `fx.max`, while `maxnumf` →
+  `fx.maxnumf` (likewise for minimum). Changing that behavior is a correctness
+  finding.
 - **`expr/` target neutrality.** Direct children of `python/flydsl/expr/`
   (`typing`, `primitive`, `gpu`, `derived`, `struct`, `arith`, `math`, `enum`,
   `numeric`, `meta`, `extern`, `utils/`) may not import `rocdl`,
@@ -219,13 +222,6 @@ diff.
   `python/flydsl/expr/rocdl/`, and a new backend module must be added to the
   lazy `_BACKEND_MODULES` map in `python/flydsl/expr/__init__.py` rather than
   eager-imported. `tests/unit/test_expr_optional_rocdl.py` enforces this.
-- **Legacy constructs in new code.** `copy_atom_call` / `mma_atom_call` (both
-  the loop and single-atom forms; the `*_ssa` variants are a different
-  primitive and stay), `kernels/common/buffer_ops.py` raw buffer intrinsics,
-  `fx.Index` (maps to MLIR `index`, platform-defined width — widening a counter
-  that must stay `i32` is a correctness bug), raw `rocdl.mfma_*`, `SmemAllocator`
-  / `SmemPtr`, and redundant double-wrapping like `fx.Int32(fx.Int32(x))`.
-  The **kernel-code-cleanup** skill has the full replacement table.
 - **Direct upstream MLIR dialect operations** — `arith`, `scf`, `vector`,
   `llvm`, `memref`, `math`, `gpu`, `func`, `builtin` imported from
   `flydsl._mlir.dialects` or `mlir.dialects`. Unstable surface.
@@ -235,6 +231,11 @@ diff.
 - **Environment variable spellings** not present in `python/flydsl/utils/env.py`.
 - **New repo pre-checks** must be registered in `scripts/check_repo.py`'s
   `CHECKS` list, not added as a separate CI workflow step.
+
+CI independently enforces a subset of the arithmetic rules on added kernel
+lines with `scripts/check_typed_arithmetic_usage.py`, invoked through
+`scripts/check_repo.py`. Its AST scan is optional corroboration for a CI-failure
+claim; it is not a required review step.
 
 For a change to `python/flydsl/`'s public surface, judge breaking-change status
 against `docs/api_stability.md`; the **api-stability** skill covers that review

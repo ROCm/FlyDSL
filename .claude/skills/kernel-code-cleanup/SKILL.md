@@ -441,9 +441,14 @@ def _run_compiled(exe, *args):             # in-tree
 
 ## 10. Procedure
 
-1. **Find** legacy usage:
+For review-only requests, use **Find** and **Triage**, then report the location,
+resolved API, suggested replacement, and relevant semantic constraints. Stop
+before migration or formatting. Use the caller's review scope.
+
+1. **Find** legacy usage, starting with these searches:
    ```bash
    grep -nE "ArithValue|_to_raw|arith\.(unwrap|index|index_cast)|fx\.Index\(" <file>
+   grep -nE "maximumf|minimumf|maxnumf|minnumf|maxsi|maxui|minsi|minui|ceildivsi|ceildivui" <file>
    grep -nE "buffer_ops\.(create_buffer_resource|buffer_load|buffer_store)" <file>
    grep -nE "_mlir\.dialects import.*(arith|scf|vector|llvm|memref|math)" <file>
    grep -nE "\b(scf\.(For|If)Op|vector\.(extract|bitcast|splat)|llvm\.(load|store|mlir))" <file>
@@ -453,8 +458,17 @@ def _run_compiled(exe, *args):             # in-tree
    grep -nE "create_llvm_ptr|_create_llvm_ptr|get_llvm_ptr|IntToPtrOp" <file>
    grep -nE "s_waitcnt\(|_encode_waitcnt|_s_waitcnt|CNT_[0-9A-Z_]*=|0x[Cc]07[Ff]" <file>
    ```
-2. **Triage:** do mechanical swaps (operators, casts, `vector.extract/bitcast`)
-   first; structural ones (control flow, `buffer_ops` offsets, MMA loops) next.
+   Treat these searches as leads. Read the imports and enclosing functions,
+   follow module aliases and direct imports to their calls, and account for
+   local rebinding. `from flydsl.expr.arith import maximumf as old_max` makes
+   `old_max(a, b)` a candidate even though the call uses a different name.
+   An empty search is not evidence that the review scope is clean.
+2. **Triage:** classify operator/cast/`vector.extract/bitcast` replacements as
+   mechanical, and control flow, `buffer_ops` offsets, or MMA loops as structural.
+   Match resolved calls against the tables above and check operand types,
+   signedness, and explicit `fastmath` flags. Preserve §3's distinct NaN behavior
+   for `maximumf`/`minimumf` and `maxnumf`/`minnumf`; recommend a replacement only
+   when those semantics are preserved.
 3. **Migrate in small commits**, one family at a time, matching local style.
 4. **Verify:**
    ```bash
