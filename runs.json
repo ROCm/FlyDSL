@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-10T01:02:20Z",
+ "updated": "2026-09-10T01:08:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34424152627,
+   "pr": 1114,
+   "commit": "e87126a55edf857e06f2412799cd0928d056025c",
+   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
+   "event": "pull_request",
+   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34424152627",
+   "created_at": "2026-09-10T01:06:57Z",
+   "updated_at": "2026-09-10T01:07:42Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 34424095622,
+   "pr": 1114,
+   "commit": "e87126a55edf857e06f2412799cd0928d056025c",
+   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
+   "event": "pull_request",
+   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34424095622",
+   "created_at": "2026-09-10T01:06:07Z",
+   "updated_at": "2026-09-10T01:07:13Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
   {
    "run_id": 34367555883,
    "pr": 1112,
@@ -54,7 +84,7 @@
    "commit": "14cefed484569f871cc32396e11d7c9e3d75dfaf",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34364102173",
@@ -100,7 +130,7 @@
    "commit": "9ac1ef7fdbca9759d369c098b1f7b60b37444099",
    "branch": "jli/gfx1250/llvm-unclausevmem-patch",
    "event": "pull_request",
-   "title": "[LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
+   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34363950506",
@@ -115,7 +145,7 @@
    "commit": "d220621a7f938e00e34a0b86ce6ece08b75ca956",
    "branch": "jli/gfx1250/llvm-unclausevmem-patch",
    "event": "pull_request",
-   "title": "[LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
+   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34347387940",
@@ -130,7 +160,7 @@
    "commit": "6592f41cc46f64a4ebd52315782f58cb91e2b50c",
    "branch": "jli/gfx1250/llvm-unclausevmem-patch",
    "event": "pull_request",
-   "title": "[LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
+   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34346179765",
@@ -145,7 +175,7 @@
    "commit": "f706d8c7ec28da8c3305749e6bc68a833b7bfe0c",
    "branch": "jli/gfx1250/llvm-unclausevmem-patch",
    "event": "pull_request",
-   "title": "[LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
+   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34346020943",
@@ -160,7 +190,7 @@
    "commit": "ec4ab67f529f98188d6b327731d15712830aad70",
    "branch": "jli/gfx1250/llvm-unclausevmem-patch",
    "event": "pull_request",
-   "title": "[LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
+   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34345459347",
@@ -742,7 +772,7 @@
    "commit": "bc7f6e8962721c68f9102da1c2bfa3b1eba6e8df",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
-   "title": "[WIP][Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34302568647",
@@ -1970,97 +2000,6 @@
      "started_at": "2026-09-07T11:05:10Z",
      "completed_at": "2026-09-07T11:42:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34113540527/job/101718684569"
-    }
-   ]
-  },
-  {
-   "run_id": 34110047720,
-   "pr": 1099,
-   "commit": "9bb41ae7c0a4630b02bf19a5e5ec7ab197b67fbc",
-   "branch": "xyt/detach",
-   "event": "pull_request",
-   "title": "[Bugfix] Detach requires_grad tensors before DLPack export",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34110047720",
-   "created_at": "2026-09-07T10:10:32Z",
-   "updated_at": "2026-09-07T11:37:40Z",
-   "actor": "xytpai",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-07T10:29:41Z",
-     "completed_at": "2026-09-07T11:06:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34110047720/job/101709207722",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-07T10:29:41Z",
-     "completed_at": "2026-09-07T11:37:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34110047720/job/101709207757",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-07T10:29:31Z",
-     "completed_at": "2026-09-07T10:53:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34110047720/job/101709207773",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34104420519,
-   "pr": 1069,
-   "commit": "4c237b4a9ab7fa24356e4457a5828c8722c4f7e3",
-   "branch": "feature/qwenimage-vae-conv-tests",
-   "event": "pull_request",
-   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34104420519",
-   "created_at": "2026-09-07T09:09:24Z",
-   "updated_at": "2026-09-07T10:26:58Z",
-   "actor": "huizzhan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-07T09:26:53Z",
-     "completed_at": "2026-09-07T10:26:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34104420519/job/101690907773"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-07T09:35:47Z",
-     "completed_at": "2026-09-07T10:03:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34104420519/job/101690907820",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-07T09:26:48Z",
-     "completed_at": "2026-09-07T10:12:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34104420519/job/101690907852",
-     "log_fetch_failed": true
     }
    ]
   }
