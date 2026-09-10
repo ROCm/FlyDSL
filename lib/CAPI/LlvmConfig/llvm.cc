@@ -7,10 +7,16 @@
 
 #include "LlvmConfig/llvm.h"
 
+#include "llvm/MC/MCRegisterInfo.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
 
 using namespace llvm;
@@ -37,6 +43,31 @@ bool isBoolOption(cl::Option *opt) { return opt->getValueExpectedFlag() != cl::V
 // ---------------------------------------------------------------------------
 
 extern "C" {
+
+bool flydslGetRegisterClassLayout(const char *target, const char *name, unsigned *bits,
+                                  unsigned *count) {
+  static std::once_flag initialized;
+  std::call_once(initialized, [] {
+    InitializeAllTargetInfos();
+    InitializeAllTargetMCs();
+  });
+  Triple triple(std::string(target) + "-unknown-unknown");
+  std::string error;
+  const Target *backend = TargetRegistry::lookupTarget(triple, error);
+  if (!backend)
+    return false;
+  std::unique_ptr<MCRegisterInfo> registers(backend->createMCRegInfo(triple));
+  if (!registers)
+    return false;
+  for (const MCRegisterClass &rc : registers->regclasses()) {
+    if (StringRef(registers->getRegClassName(&rc)) == name) {
+      *bits = rc.getSizeInBits();
+      *count = rc.getNumRegs();
+      return true;
+    }
+  }
+  return false;
+}
 
 __attribute__((visibility("default"))) int flydslSetLLVMOptionBool(const char *name, bool value,
                                                                    bool *oldValue) {

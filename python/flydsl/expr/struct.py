@@ -141,8 +141,14 @@ def _storage_layout(schema: type) -> tuple[int, int, dict[str, int]]:
         return result
 
 
+def _unwrap_align(type_spec):
+    while getattr(type_spec, "__dsl_align_wrapper__", False):
+        type_spec = type_spec.dtype
+    return type_spec
+
+
 def _coerce_value_type(schema: type, field: FieldDef, value: Any) -> Any:
-    type_spec = field.type_spec
+    type_spec = _unwrap_align(field.type_spec)
     coerce_fn = getattr(type_spec, "__coerce__", None)
     if coerce_fn is not None:
         try:
@@ -281,6 +287,7 @@ def _carrier_for_field(eff_type: Any, value: Any) -> Any:
 
 
 def _construct_field_from_ir(type_spec: Any, values):
+    type_spec = _unwrap_align(type_spec)
     ctor = getattr(type_spec, "__construct_from_ir_values__", None)
     if ctor is None:
         raise TypeError(f"struct field type {_type_name(type_spec)} does not implement __construct_from_ir_values__")
@@ -288,6 +295,7 @@ def _construct_field_from_ir(type_spec: Any, values):
 
 
 def _ir_value_count_from_type(type_spec: Any) -> int:
+    type_spec = _unwrap_align(type_spec)
     if is_struct_type(type_spec):
         return sum(_ir_value_count_from_type(eff) for _, eff in _effective_field_defs(type_spec))
     types_fn = getattr(type_spec, "__get_ir_types__", None)
@@ -664,6 +672,30 @@ class Storage:
                 object.__setattr__(self, "_ptr", ptr)
                 object.__setattr__(self, "_prebuilt", prebuilt or {})
 
+            def __extract_to_ir_values__(self):
+                ptr = object.__getattribute__(self, "_ptr")
+                values = [] if ptr is None else [ptr]
+                for child in object.__getattribute__(self, "_prebuilt").values():
+                    values.extend(child.__extract_to_ir_values__())
+                return values
+
+            @classmethod
+            def __construct_from_ir_values__(cls, values, exemplar=None):
+                if exemplar is None:
+                    if len(values) != 1:
+                        raise ValueError("Storage expects one pointer without an exemplar")
+                    return cls(values[0])
+                has_ptr = object.__getattribute__(exemplar, "_ptr") is not None
+                cursor = int(has_ptr)
+                prebuilt = {}
+                for name, child in object.__getattribute__(exemplar, "_prebuilt").items():
+                    count = len(child.__extract_to_ir_values__())
+                    prebuilt[name] = type(child).__construct_from_ir_values__(values[cursor : cursor + count], child)
+                    cursor += count
+                if cursor != len(values):
+                    raise ValueError(f"Storage expected {cursor} IR values, got {len(values)}")
+                return cls(values[0] if has_ptr else None, prebuilt=prebuilt)
+
             def peek(self):
                 dsl_type = type(self)._target_type
                 prebuilt = object.__getattribute__(self, "_prebuilt")
@@ -707,6 +739,7 @@ class Storage:
                 if name in prebuilt:
                     return prebuilt[name]
                 dsl_type = type(self)._target_type
+                dsl_type = _unwrap_align(dsl_type)
                 if is_composite_type(dsl_type):
                     try:
                         field_def = _resolve_field(dsl_type, name)

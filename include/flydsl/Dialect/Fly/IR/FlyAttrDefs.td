@@ -288,4 +288,20 @@ def Fly_ExplicitModuleAttr : Fly_Attr<"ExplicitModule", "explicit_module", [
   let assemblyFormat = "``";
 }
 
+
+// Symbolic reference: LLVM class IDs are target- and version-local.
+def Fly_RegisterClassAttr : Fly_Attr<"RegisterClass", "register_class", []> {
+  let summary = "Reference an LLVM target register class by architecture and name";
+  let description = [{
+    `target` is the LLVM triple architecture (for example `amdgcn`). `name`
+    names a TargetRegisterClass (for example `VGPR_32`). The backend resolves
+    the name using TargetRegisterInfo. No LLVM numeric class ID is serialized.
+    Placement indices address the ordered members of that class, not LLVM's
+    global physical register IDs. Backend support is checked during lowering.
+  }];
+  let parameters = (ins StringRefParameter<>:$target, StringRefParameter<>:$name);
+  let assemblyFormat = "`<` $target `,` $name `>`";
+  let genVerifyDecl = 1;
+}
+
 #endif // FLY_ATTRDEFS

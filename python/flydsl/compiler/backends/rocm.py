@@ -110,7 +110,8 @@ class RocmBackend(BaseBackend):
 
     def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:
         pre_binary_fragments, binary_fragment = self._pipeline_parts(compile_hints=compile_hints)
-        return [*pre_binary_fragments, binary_fragment]
+        checked_fragment = binary_fragment.replace("gpu-module-to-binary", "fly-serialize-register-kernels", 1)
+        return [*pre_binary_fragments, checked_fragment, binary_fragment]
 
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         return self._pipeline_parts(compile_hints=compile_hints)

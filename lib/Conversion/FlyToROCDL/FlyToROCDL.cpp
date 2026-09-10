@@ -14,6 +14,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/bit.h"
 
@@ -36,6 +37,10 @@ namespace mlir {
 using namespace mlir;
 using namespace mlir::fly;
 using namespace mlir::fly_rocdl;
+
+namespace mlir::fly {
+void registerRegisterPlacementCodegen();
+}
 
 namespace {
 
@@ -857,6 +862,79 @@ public:
   }
 };
 
+class RegisterValueLowering : public OpConversionPattern<RegisterValueOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(RegisterValueOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto regClass = op.getRegClass();
+    if (regClass.getTarget() != "amdgcn")
+      return op.emitOpError("Fly-to-ROCDL register placement requires target amdgcn");
+    auto module = op->getParentOfType<gpu::GPUModuleOp>();
+    if (!module)
+      return op.emitOpError("register placement lowering requires a gpu.module");
+    if (auto targets = module.getTargetsAttr())
+      for (Attribute attr : targets)
+        if (auto target = dyn_cast<ROCDL::ROCDLTargetAttr>(attr); target && target.getO() == 0)
+          return op.emitOpError(
+              "explicit register placement requires optimized SelectionDAG codegen");
+    if (regClass.getName() != "AGPR_32" && regClass.getName() != "VGPR_32" &&
+        regClass.getName() != "SGPR_32")
+      return op.emitOpError(
+          "unsupported AMDGPU register class; expected AGPR_32, VGPR_32 or SGPR_32");
+    Type sliceType = adaptor.getValue().getType();
+    int64_t elements = 1;
+    if (auto vector = dyn_cast<VectorType>(sliceType)) {
+      elements = vector.getNumElements();
+      sliceType = vector.getElementType();
+    }
+    if (elements * sliceType.getIntOrFloatBitWidth() % 32 || op.getBitOffset() % 32 ||
+        op.getStorageBits() % 32)
+      return op.emitOpError("AMDGPU register placement requires whole 32-bit registers; "
+                            "pack subword elements into aligned vector slices");
+    mlir::fly::registerRegisterPlacementCodegen();
+    auto type = adaptor.getValue().getType();
+    std::string typeName;
+    llvm::raw_string_ostream(typeName) << type;
+    for (char &c : typeName)
+      if (!llvm::isAlnum(c))
+        c = '_';
+    // Hex-encode the symbolic reference to avoid symbol-name collisions.
+    std::string name = "__flydsl_register_value_";
+    const char *hex = "0123456789abcdef";
+    for (unsigned char c : (regClass.getTarget() + ":" + regClass.getName()).str()) {
+      name += hex[c >> 4];
+      name += hex[c & 15];
+    }
+    name += "_" + typeName;
+    auto i64 = rewriter.getI64Type();
+    auto signature = LLVM::LLVMFunctionType::get(type, {type, i64, i64, i64});
+    auto metadata = rewriter.getArrayAttr(
+        {rewriter.getArrayAttr({rewriter.getStringAttr("flydsl-register-target"),
+                                rewriter.getStringAttr(regClass.getTarget())}),
+         rewriter.getArrayAttr({rewriter.getStringAttr("flydsl-register-class"),
+                                rewriter.getStringAttr(regClass.getName())})});
+    if (Operation *existing = SymbolTable::lookupSymbolIn(module, name)) {
+      auto func = dyn_cast<LLVM::LLVMFuncOp>(existing);
+      if (!func || func.getFunctionType() != signature || !func.getBody().empty() ||
+          func.getPassthroughAttr() != metadata)
+        return op.emitOpError("register placement marker symbol conflicts with existing symbol: ")
+               << name;
+    } else {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+      auto func = LLVM::LLVMFuncOp::create(rewriter, op.getLoc(), name, signature);
+      func.setPassthroughAttr(metadata);
+    }
+    auto start = LLVM::ConstantOp::create(rewriter, op.getLoc(), i64, op.getStartAttr());
+    auto offset = LLVM::ConstantOp::create(rewriter, op.getLoc(), i64, op.getBitOffsetAttr());
+    auto size = LLVM::ConstantOp::create(rewriter, op.getLoc(), i64, op.getStorageBitsAttr());
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, TypeRange{type}, name,
+                                              ValueRange{adaptor.getValue(), start, offset, size});
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -878,6 +956,7 @@ public:
     target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeComposedLayoutOp>();
 
     FlyTypeConverter typeConverter;
+    patterns.add<RegisterValueLowering>(typeConverter, context);
 
     // Ensure function signatures are type-converted; otherwise conversions may rely on
     // inserted unrealized casts that remain live.

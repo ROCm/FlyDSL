@@ -2010,3 +2010,37 @@ FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
 }
 
 #undef FLY_INFER_RETURN_TYPES
+
+LogicalResult SetRegisterOp::verify() {
+  Attribute addressSpace;
+  if (auto ptr = dyn_cast<PointerType>(getStorage().getType()))
+    addressSpace = ptr.getAddressSpace();
+  else if (auto memref = dyn_cast<fly::MemRefType>(getStorage().getType()))
+    addressSpace = memref.getAddressSpace();
+  if (!addressSpace || !isGenericAddressSpace<AddressSpace::Register>(addressSpace))
+    return emitOpError("requires a register-memory pointer or tensor");
+  if (getStartAttr().getInt() < 0)
+    return emitOpError("start must be a nonnegative register class index");
+  return success();
+}
+
+LogicalResult RegisterValueOp::verify() {
+  if (getStartAttr().getInt() < 0 || getBitOffsetAttr().getInt() < 0 ||
+      getStorageBitsAttr().getInt() <= 0)
+    return emitOpError("requires nonnegative start/bitOffset and positive storageBits");
+  Type type = getValue().getType();
+  int64_t count = 1;
+  if (auto vector = dyn_cast<VectorType>(type)) {
+    if (vector.isScalable())
+      return emitOpError("requires a fixed-size scalar or vector slice");
+    count = vector.getNumElements();
+    type = vector.getElementType();
+  }
+  if (!type.isIntOrFloat())
+    return emitOpError("requires an integer or floating-point scalar or vector slice");
+  int64_t bits = count * type.getIntOrFloatBitWidth();
+  if (getBitOffsetAttr().getInt() > getStorageBitsAttr().getInt() ||
+      bits > getStorageBitsAttr().getInt() - getBitOffsetAttr().getInt())
+    return emitOpError("slice exceeds register storage size");
+  return success();
+}

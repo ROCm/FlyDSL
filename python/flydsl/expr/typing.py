@@ -1445,9 +1445,66 @@ class Vector(ArithValue):
     Wraps a flat ``vector<NxTy>`` ir.Value with shape and dtype metadata.
     Arithmetic operators are inherited from ArithValue; scalar operands
     are auto-broadcast via ``_coerce_other``.
+
+    ``Vector[dtype, shape]`` describes a fixed-size Storable vector. Its layout
+    is packed, with element alignment; use ``Align`` for stronger alignment.
     """
 
+    _storage_types = {}
+
+    @classmethod
+    def __class_getitem__(cls, params):
+        if not isinstance(params, tuple) or len(params) != 2:
+            raise TypeError("Vector expects Vector[dtype, shape]")
+        dtype, shape = params
+        if not isclass(dtype) or not issubclass(dtype, Numeric):
+            raise TypeError("Vector storage dtype must be a Numeric type")
+        dtype.__dsl_size_of__()  # Reject sub-byte types, as scalar storage does.
+        shape = cls._canonical_shape(shape)
+        dims = cls._flatten_static(shape)
+        if not dims or any(isinstance(d, bool) or not isinstance(d, int) or d <= 0 for d in dims):
+            raise ValueError("Vector storage shape must contain positive static integer dimensions")
+        key = (dtype, shape)
+        if key not in Vector._storage_types:
+            Vector._storage_types[key] = type(
+                f"Vector[{dtype.__name__}, {shape}]",
+                (Vector,),
+                {"_storage_dtype": dtype, "_storage_shape": shape, "__module__": __name__},
+            )
+        return Vector._storage_types[key]
+
+    @classmethod
+    def __dsl_size_of__(cls):
+        if not hasattr(cls, "_storage_dtype"):
+            raise TypeError("unspecialized Vector is not Storable; use Vector[dtype, shape]")
+        return cls._storage_dtype.__dsl_size_of__() * cls._numel_from_shape(cls._storage_shape)
+
+    @classmethod
+    def __dsl_align_of__(cls):
+        cls.__dsl_size_of__()
+        return cls._storage_dtype.__dsl_align_of__()
+
+    @classmethod
+    def __peek_from_ptr__(cls, ptr):
+        cls.__dsl_size_of__()
+        typed_ptr = recast_iter(cls._storage_dtype, ptr)
+        return cls(ptr_load(typed_ptr, cls.make_type(cls._storage_shape, cls._storage_dtype)))
+
+    @classmethod
+    def __poke_into_ptr__(cls, ptr, value):
+        cls.__dsl_size_of__()
+        value = cls.__coerce__(value)
+        ptr_store(value, recast_iter(cls._storage_dtype, ptr))
+
     def __init__(self, value, shape=None, dtype=None):
+        if hasattr(type(self), "_storage_dtype"):
+            expected_shape = type(self)._storage_shape
+            expected_dtype = type(self)._storage_dtype
+            if shape is not None and self._canonical_shape(shape) != expected_shape:
+                raise ValueError("shape does not match the Vector storage type")
+            if dtype is not None and dtype is not expected_dtype:
+                raise ValueError("dtype does not match the Vector storage type")
+            shape, dtype = expected_shape, expected_dtype
         if not isinstance(value, ir.Value) and hasattr(value, "ir_value"):
             value = value.ir_value()
         vty = ir.VectorType(value.type)
@@ -1472,6 +1529,9 @@ class Vector(ArithValue):
 
     @classmethod
     def __coerce__(cls, value):
+        if hasattr(cls, "_storage_dtype") and isinstance(value, Vector):
+            if value.shape != cls._storage_shape or value.dtype is not cls._storage_dtype:
+                raise TypeError("value does not match the Vector storage shape/dtype")
         if isinstance(value, cls):
             return value
         try:
