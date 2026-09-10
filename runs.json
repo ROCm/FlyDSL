@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-10T10:26:39Z",
+ "updated": "2026-09-10T10:36:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -144,21 +144,22 @@
    "branch": "add-flydsl-code-review-skill",
    "event": "pull_request",
    "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493",
    "created_at": "2026-09-10T08:48:41Z",
-   "updated_at": "2026-09-10T09:34:59Z",
+   "updated_at": "2026-09-10T10:33:58Z",
    "actor": "zhiding512",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T09:34:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493/job/102810647216"
+     "completed_at": "2026-09-10T10:33:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457182493/job/102810647216",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
