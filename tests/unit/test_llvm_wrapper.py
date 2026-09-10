@@ -288,7 +288,9 @@ class TestAtomicDevice:
         )
         torch.cuda.synchronize()
         assert counter.item() == n
-        assert torch.equal(tickets.cpu().sort().values, torch.arange(n, dtype=torch.int32))
+        tickets = tickets.cpu().sort().values
+        expected = torch.arange(n, dtype=tickets.dtype, device=tickets.device)
+        assert torch.equal(tickets, expected)
 
     def test_atomic_unsigned_min(self):
         values = torch.tensor([-1, -(2**31), 7, 23], device="cuda", dtype=torch.int32)
