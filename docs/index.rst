@@ -21,13 +21,17 @@ to GPU/ROCDL.
 
       * :doc:`API stability <api_stability>`
 
-   .. grid-item-card:: Guides
+   .. grid-item-card:: Language
 
       * :doc:`Arithmetic types <language/arithmetic_types>`
-
       * :doc:`Composite types <language/composite_types>`
-
       * :doc:`Storage and allocator <language/storage_and_allocator>`
+
+   .. grid-item-card:: Extension
+
+      * :doc:`Random number generation <extension/rand>`
+
+   .. grid-item-card:: Guides
 
       * :doc:`Architecture and compilation pipeline <architecture_guide>`
 
@@ -60,4 +64,3 @@ to GPU/ROCDL.
       * :doc:`Basic usage <tutorials/basic_usage>`
 
       * :doc:`Kernel development <tutorials/kernel_development>`
-

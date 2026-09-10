@@ -165,7 +165,10 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
 def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     """Create an arch-appropriate WMMA atom.
 
-    Supported kwargs (integer paths only — iu8 / iu4):
+    Supported kwargs:
+        elem_ty_b: optional B operand type for mixed-type instructions; defaults
+            to ``elem_ty_ab``. RDNA4 accepts every FP8(E4M3FN)/BF8(E5M2)
+            combination.
         sign_a (bool, default False): treat A operand as signed.
         sign_b (bool, default False): treat B operand as signed.
         clamp  (bool, default False): saturate integer accumulator.
@@ -175,7 +178,9 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     intrinsic has no such operands. Future WMMA ops for new architectures
     should extend kwargs here rather than growing the positional signature.
     """
-    ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    ty_a = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    elem_ty_b = kwargs.pop("elem_ty_b", None)
+    ty_b = ty_a if elem_ty_b is None else (elem_ty_b.ir_type if hasattr(elem_ty_b, "ir_type") else elem_ty_b)
     if elem_ty_acc is None:
         ty_acc = ir.F32Type.get()
     else:
@@ -191,14 +196,14 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
 
     arch = get_rocm_arch() or ""
     if arch.startswith("gfx11"):
-        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
+        return MmaOpGFX11_WMMAType.get(m, n, k, ty_a, ty_b, ty_acc, **kwargs)
     if arch.startswith("gfx1250"):
         return MmaOpGFX1250_WMMAType.get(
             m,
             n,
             k,
-            ty_ab,
-            ty_ab,
+            ty_a,
+            ty_b,
             ty_acc,
             sign_a=bool(kwargs.get("sign_a", False)),
             sign_b=bool(kwargs.get("sign_b", False)),
@@ -209,8 +214,8 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
             m,
             n,
             k,
-            ty_ab,
-            ty_ab,
+            ty_a,
+            ty_b,
             ty_acc,
             sign_a=bool(kwargs.get("sign_a", False)),
             sign_b=bool(kwargs.get("sign_b", False)),
@@ -225,14 +230,18 @@ def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):
     """Construct a new buffer-resource (``BufferDesc``) pointer from a global
     pointer, for hardware OOB-checked loads / stores.
 
-    ``num_records_bytes`` is the descriptor byte count.  When ``None``
-    (default) it falls back to the max size ``0xFFFFFFFF``.
+    ``num_records_bytes`` is the descriptor byte count. When supplied, RDNA
+    selects descriptor ``OOB_SELECT=3`` so a raw buffer access outside that
+    bound is suppressed. When ``None`` (default), the descriptor uses the max
+    size ``0xFFFFFFFF`` and preserves the historical unchecked
+    ``OOB_SELECT=2`` behavior.
     """
     if not is_generic_address_space(ptr.address_space, AddressSpace.Global):
         raise ValueError(f"make_buffer_ptr requires a global-address-space pointer, got {ptr.address_space}")
 
     elem_ty = ptr.element_type
 
+    check_bounds = num_records_bytes is not None
     if num_records_bytes is None:
         num_records_bytes = Int64(0xFFFFFFFF)
     elif not isinstance(num_records_bytes, Int64):
@@ -245,7 +254,7 @@ def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):
     flags = (7 << 12) | (4 << 15)
     if is_rdna_arch(arch):
         flags |= 1 << 24  # reserved bit, must be 1 on RDNA
-        flags |= 2 << 28  # OOB_SELECT = 2 (no bounds checking)
+        flags |= (3 if check_bounds else 2) << 28
 
     buf_ptr_ty = PointerType.get(
         elem_ty=elem_ty.ir_type,
@@ -274,10 +283,11 @@ def make_buffer_tensor(
     (CDNA buffer copy); layout is unchanged. For the gfx1250 TDM DMA use
     :func:`make_tdm_atom` instead — TDM needs a raw VA, not a buffer resource.
 
-    ``max_size=True`` (default) sets the descriptor to ``0xFFFFFFFF``.
-    Pass ``num_records_bytes`` when the byte count is a compile-time
-    constant (folds to a constant in IR).  Otherwise with ``max_size=False``
-    it is derived at runtime from ``cosize(layout) * elem_bytes``.
+    ``max_size=True`` (default) leaves RDNA bounds checking disabled and sets
+    the descriptor size to ``0xFFFFFFFF``. Pass ``num_records_bytes`` to enable
+    checking against an explicit byte count. Otherwise, with
+    ``max_size=False``, the byte count is derived at runtime from
+    ``cosize(layout) * elem_bytes`` and checking is enabled.
     """
     elem_ty = tensor.element_type
 

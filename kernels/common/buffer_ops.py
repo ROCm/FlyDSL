@@ -6,6 +6,8 @@
 This module provides high-level Python wrappers for AMD CDNA3/CDNA4 buffer operations.
 Buffer operations use a scalar base pointer and per-thread offsets for efficient memory access.
 
+``create_buffer_resource`` returns a byte-addressed buffer-descriptor pointer
+
 Example:
     >>> from kernels.common import buffer_ops
     >>> from flydsl.expr import arith
@@ -24,11 +26,12 @@ Example:
     >>> buffer_ops.buffer_store(data, rsrc, offset)
 """
 
-from typing import Optional, Union
+from __future__ import annotations
 
+import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import arith as std_arith
-from flydsl._mlir.dialects import llvm, rocdl
+from flydsl._mlir.dialects import llvm
 from flydsl._mlir.extras import types as T
 from flydsl.expr.meta import dsl_loc_tracing
 from flydsl.runtime.device import is_rdna_arch
@@ -36,6 +39,8 @@ from flydsl.runtime.device import is_rdna_arch
 
 def _get_buffer_flags(arch=None):
     """Get AMD buffer resource descriptor (V#) flags word (bits 127:96).
+
+     ``flash_attn_utils`` builds a couple of descriptors by hand and still calls it.
 
     Constructs the 32-bit flags field for rocdl.make.buffer.rsrc, following the
     same logic as LLVM's AMDGPUToROCDL makeBufferRsrc():
@@ -72,15 +77,17 @@ def _get_buffer_flags(arch=None):
 
 
 __all__ = [
-    "create_llvm_ptr",
-    "get_element_ptr",
-    "create_buffer_resource",
-    "create_buffer_resource_from_addr",
+    "BufferResourceDescriptor",
     "buffer_load",
     "buffer_store",
-    "BufferResourceDescriptor",
+    "create_buffer_resource",
+    "create_buffer_resource_from_addr",
+    "create_llvm_ptr",
     "extract_base_index",
+    "get_element_ptr",
 ]
+
+_MAX_NUM_RECORDS = 0xFFFFFFFF
 
 
 def _unwrap_value(value):
@@ -90,6 +97,7 @@ def _unwrap_value(value):
     - FlyDSL ArithValue (has ._value)
     - flyc DSL Numeric like fx.Int32 (has .ir_value() method)
     - flyc ArithValue (is already ir.Value subclass)
+    - a bare single-result OpView (has .result), e.g. ``arith.TruncIOp(...)``
     """
     # DSL Numeric (Int32, Float32, etc.) — use ir_value() to materialize
     if hasattr(value, "ir_value") and not isinstance(value, ir.Value):
@@ -99,6 +107,8 @@ def _unwrap_value(value):
     while depth < max_depth and not isinstance(value, ir.Value):
         if hasattr(value, "_value"):
             value = value._value
+        elif hasattr(value, "result"):
+            value = value.result
         elif hasattr(value, "value"):
             value = value.value
         else:
@@ -119,24 +129,6 @@ def _create_i32_constant(value: int) -> ir.Value:
 
 
 @dsl_loc_tracing
-def _create_i16_constant(value: int) -> ir.Value:
-    """Create i16 constant using standard MLIR arith dialect."""
-    i16_type = T.i16()
-    attr = ir.IntegerAttr.get(i16_type, value)
-    op = std_arith.ConstantOp(i16_type, attr)
-    return _unwrap_value(op.result)
-
-
-@dsl_loc_tracing
-def _create_i64_constant(value: int) -> ir.Value:
-    """Create i64 constant using standard MLIR arith dialect."""
-    i64_type = T.i64()
-    attr = ir.IntegerAttr.get(i64_type, value)
-    op = std_arith.ConstantOp(i64_type, attr)
-    return _unwrap_value(op.result)
-
-
-@dsl_loc_tracing
 def _ptr8_to_v4i32(ptr8_val) -> ir.Value:
     """Reinterpret a buffer resource (!llvm.ptr<8>) as a <4 x i32> vector.
 
@@ -149,13 +141,41 @@ def _ptr8_to_v4i32(ptr8_val) -> ir.Value:
     return llvm.bitcast(v4i32_ty, i128_val)
 
 
+def _as_num_records(num_records_bytes) -> fx.Int64 | None:
+    """Normalize a descriptor byte count to ``fx.Int64`` for ``make_buffer_ptr``."""
+    if num_records_bytes is None:
+        return None
+    if isinstance(num_records_bytes, int):
+        num_records_bytes = max(0, min(int(num_records_bytes), _MAX_NUM_RECORDS))
+    return fx.Int64(num_records_bytes)
+
+
+@dsl_loc_tracing
+def _byte_buffer_ptr(global_ptr, num_records_bytes, base_byte_offset=None):
+    """Wrap a global pointer in a byte-addressed buffer-resource pointer."""
+    ptr = fx.recast_iter(fx.Int8, global_ptr)
+    if base_byte_offset is not None:
+        if isinstance(base_byte_offset, ir.Value) and not isinstance(base_byte_offset.type, ir.IndexType):
+            base_byte_offset = fx.Int32(base_byte_offset)
+        ptr = ptr + base_byte_offset
+    return fx.rocdl.make_buffer_ptr(ptr, num_records_bytes=_as_num_records(num_records_bytes))
+
+
+@dsl_loc_tracing
+def _add_soffset_bytes(byte_offset: ir.Value, soffset_bytes) -> ir.Value:
+    """Fold ``soffset_bytes`` into the byte offset."""
+    if soffset_bytes is None:
+        return byte_offset
+    soffset = fx.Int32(soffset_bytes).ir_value()
+    return _unwrap_value(std_arith.AddIOp(byte_offset, soffset).result)
+
+
 @dsl_loc_tracing
 def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
     """Create an LLVM pointer from an integer or index value."""
     value = _unwrap_value(value)
     if isinstance(value.type, ir.IndexType):
-        i64_type = T.i64()
-        value = _unwrap_value(std_arith.IndexCastOp(i64_type, value).result)
+        value = fx.Int64(value).ir_value()
     ptr_type = ir.Type.parse(f"!llvm.ptr<{address_space}>")
     return llvm.IntToPtrOp(ptr_type, value).result
 
@@ -181,15 +201,15 @@ def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
     ptr_type = ir.Type.parse(f"!llvm.ptr<{address_space}>")
     ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw)
     i64_val = llvm.PtrToIntOp(ir.IntegerType.get_signless(64), ptr).result
-    return _unwrap_value(std_arith.IndexCastOp(ir.IndexType.get(), i64_val).result)
+    return fx.Index(i64_val).ir_value()
 
 
 @dsl_loc_tracing
 def get_element_ptr(
     base_ptr,
-    byte_offset: Union[int, ir.Value, None] = None,
+    byte_offset: int | ir.Value | None = None,
     static_byte_offset: int = 0,
-    elem_type: Optional[ir.Type] = None,
+    elem_type: ir.Type | None = None,
     no_wrap_flags=None,
 ) -> ir.Value:
     """Build an LLVM GEP from a base pointer plus byte offsets."""
@@ -212,8 +232,7 @@ def get_element_ptr(
     else:
         offset_val = _unwrap_value(byte_offset)
         if isinstance(offset_val.type, ir.IndexType):
-            i64_type = T.i64()
-            offset_val = _unwrap_value(std_arith.IndexCastOp(i64_type, offset_val).result)
+            offset_val = fx.Int64(offset_val).ir_value()
         elif not isinstance(offset_val.type, ir.IntegerType):
             raise TypeError("byte_offset must be int, index, or integer-typed MLIR value; " f"got {offset_val.type}")
 
@@ -236,6 +255,28 @@ def get_element_ptr(
     ).result
 
 
+def _num_records_from_memref_type(memref_val) -> int | None:
+    try:
+        mt = ir.MemRefType(_unwrap_value(memref_val).type)
+        shape = list(mt.shape)
+        if any(int(d) < 0 for d in shape):
+            return None
+        # Compute element size in bytes (scalar element type).
+        elem_bits = getattr(mt.element_type, "width", None)
+        if elem_bits is None:
+            return None
+        elem_bytes = int(elem_bits) // 8
+        if elem_bytes <= 0:
+            return None
+        num_elems = 1
+        for d in shape:
+            num_elems *= int(d)
+        return int(num_elems) * int(elem_bytes)
+    # best-effort size probe: any failure just means "unknown"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class BufferResourceDescriptor:
     """AMD Buffer Resource Descriptor
 
@@ -244,12 +285,10 @@ class BufferResourceDescriptor:
     - stride: Stride for structured buffers (typically 0 for contiguous)
     - num_records: Buffer size in bytes
     - flags: Data format and access flags
-
-    The descriptor is stored in a special LLVM pointer type (!llvm.ptr<8>)
     """
 
-    def __init__(self, rsrc: ir.Value):
-        """Initialize with ROCDL resource descriptor value."""
+    def __init__(self, rsrc):
+        """Initialize with the buffer-descriptor pointer."""
         self.rsrc = rsrc
 
     @staticmethod
@@ -259,9 +298,9 @@ class BufferResourceDescriptor:
         stride: int = 0,
         max_size: bool = True,
         data_format: str = "f32",
-        num_records_bytes: Optional[Union[int, ir.Value]] = None,
-        base_byte_offset: Optional[Union[int, ir.Value]] = None,
-    ) -> "BufferResourceDescriptor":
+        num_records_bytes: int | ir.Value | None = None,
+        base_byte_offset: int | ir.Value | None = None,
+    ) -> BufferResourceDescriptor:
         """Create buffer resource descriptor from memref.
 
         Args:
@@ -279,89 +318,22 @@ class BufferResourceDescriptor:
         Example:
             >>> rsrc = BufferResourceDescriptor.from_memref(A)
         """
-        # Extract raw pointer from fly.memref.
-        raw_val = _unwrap_value(memref_val)
-        from flydsl._mlir.dialects import fly as _fly
-
-        ptr_type = ir.Type.parse("!llvm.ptr")
-        base_ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw_val)
-        if base_byte_offset is not None:
-            base_ptr = get_element_ptr(base_ptr, byte_offset=base_byte_offset)
-
-        # Create buffer resource descriptor
-        flags_val = _get_buffer_flags()
-        flags = _create_i32_constant(flags_val)
-        stride_val = _create_i16_constant(stride)
-
-        def _num_records_from_memref_type() -> Optional[int]:
-            """Best-effort: derive logical buffer size (in bytes) from static memref type."""
-            try:
-                mt = ir.MemRefType(_unwrap_value(memref_val).type)
-                shape = list(mt.shape)
-                if any(int(d) < 0 for d in shape):
-                    return None
-                # Compute element size in bytes (scalar element type).
-                elem_t = mt.element_type
-                elem_bits = getattr(elem_t, "width", None)
-                if elem_bits is None:
-                    return None
-                elem_bytes = int(elem_bits) // 8
-                if elem_bytes <= 0:
-                    return None
-                num_elems = 1
-                for d in shape:
-                    num_elems *= int(d)
-                return int(num_elems) * int(elem_bytes)
-            except Exception:
-                return None
-
-        if num_records_bytes is not None:
-            # Caller-provided size in BYTES (preferred for exact hardware OOB behavior).
-            if isinstance(num_records_bytes, int):
-                nbytes = int(num_records_bytes)
-                if nbytes <= 0:
-                    nbytes = 0
-                # Descriptor uses i32 bytes; clamp to the max representable.
-                if nbytes > 0xFFFFFFFF:
-                    nbytes = 0xFFFFFFFF
-                num_records = _create_i64_constant(nbytes)
-            else:
-                v = _unwrap_value(num_records_bytes)
-                i64_type = T.i64()
-                if not isinstance(v.type, ir.IntegerType) or v.type.width != 64:
-                    if isinstance(v.type, ir.IndexType):
-                        op = std_arith.IndexCastOp(i64_type, v)
-                    else:
-                        op = std_arith.ExtSIOp(i64_type, v)
-                    v = _unwrap_value(op.result)
-                num_records = v
-        elif max_size:
-            # Use max for flexibility (hardware will check actual bounds)
-            # Note: FlyDSL's rocdl.make.buffer.rsrc requires i32, not i64
-            num_records = _create_i64_constant(0xFFFFFFFF)  # FALLBACK_MAX_SIZE
-        else:
-            # Use the logical memref size (in bytes) for hardware OOB checking.
-            nbytes = _num_records_from_memref_type()
-            if nbytes is None:
-                # Fall back to max-size if we can't infer statically.
-                num_records = _create_i64_constant(0xFFFFFFFF)
-            else:
-                if nbytes > 0xFFFFFFFF:
-                    nbytes = 0xFFFFFFFF
-                num_records = _create_i64_constant(int(nbytes))
-
-        # Create resource descriptor (returns !llvm.ptr<8>)
-        rsrc_type = ir.Type.parse("!llvm.ptr<8>")
-        rsrc = rocdl.MakeBufferRsrcOp(rsrc_type, base_ptr, stride_val, num_records, flags).result
-
-        return BufferResourceDescriptor(rsrc)
+        return BufferResourceDescriptor(
+            create_buffer_resource(
+                memref_val,
+                stride,
+                max_size,
+                num_records_bytes=num_records_bytes,
+                base_byte_offset=base_byte_offset,
+            )
+        )
 
 
 @dsl_loc_tracing
 def create_buffer_resource_from_addr(
     addr_i64: ir.Value,
     *,
-    num_records_bytes: Optional[Union[int, ir.Value]] = None,
+    num_records_bytes: int | ir.Value | None = None,
 ) -> ir.Value:
     """Create AMD buffer resource descriptor from a raw i64 device address.
 
@@ -375,32 +347,15 @@ def create_buffer_resource_from_addr(
         num_records_bytes: Optional buffer size in bytes for hardware OOB checking.
 
     Returns:
-        ROCDL buffer resource descriptor (!llvm.ptr<8>).
+        Byte-addressed buffer-descriptor pointer (``!fly.ptr<i8, BufferDesc>``).
 
     Example:
         >>> rsrc = create_buffer_resource_from_addr(raw_addr_i64)
         >>> data = buffer_load(rsrc, i32_zero, vec_width=4, dtype=T.i32)
     """
-    addr_i64 = _unwrap_value(addr_i64)
-    ptr_type = ir.Type.parse("!llvm.ptr")
-    base_ptr = llvm.IntToPtrOp(ptr_type, addr_i64).result
-    flags = _create_i32_constant(_get_buffer_flags())
-    stride = _create_i16_constant(0)
-    if num_records_bytes is None:
-        num_records = _create_i64_constant(0xFFFFFFFF)
-    elif isinstance(num_records_bytes, int):
-        nbytes = max(0, min(int(num_records_bytes), 0xFFFFFFFF))
-        num_records = _create_i64_constant(nbytes)
-    else:
-        num_records = _unwrap_value(num_records_bytes)
-        i64_type = T.i64()
-        if not isinstance(num_records.type, ir.IntegerType) or num_records.type.width != 64:
-            if isinstance(num_records.type, ir.IndexType):
-                num_records = _unwrap_value(std_arith.IndexCastOp(i64_type, num_records).result)
-            else:
-                num_records = _unwrap_value(std_arith.ExtSIOp(i64_type, num_records).result)
-    rsrc_type = ir.Type.parse("!llvm.ptr<8>")
-    return rocdl.MakeBufferRsrcOp(rsrc_type, base_ptr, stride, num_records, flags).result
+    ptr_ty = fx.PointerType.get(T.i8(), address_space=fx.AddressSpace.Global, alignment=16)
+    base_ptr = fx.inttoptr(ptr_ty, fx.Int64(_unwrap_value(addr_i64)))
+    return _byte_buffer_ptr(base_ptr, num_records_bytes)
 
 
 @dsl_loc_tracing
@@ -409,36 +364,35 @@ def create_buffer_resource(
     stride: int = 0,
     max_size: bool = True,
     *,
-    num_records_bytes: Optional[Union[int, ir.Value]] = None,
-    base_byte_offset: Optional[Union[int, ir.Value]] = None,
+    num_records_bytes: int | ir.Value | None = None,
+    base_byte_offset: int | ir.Value | None = None,
 ) -> ir.Value:
     """Create AMD buffer resource descriptor from memref.
 
-    This is a simplified wrapper around BufferResourceDescriptor.from_memref()
-    that returns the raw ROCDL resource value.
-
     Args:
         memref_val: Memref value
-        stride: Buffer stride (0 for contiguous)
+        stride: Buffer stride (0 for contiguous); only 0 is supported
         max_size: Use maximum buffer size
         num_records_bytes: Override buffer size in bytes.
         base_byte_offset: Optional byte offset added to the descriptor base pointer.
 
     Returns:
-        ROCDL buffer resource descriptor (!llvm.ptr<8>)
+        Byte-addressed buffer-descriptor pointer (``!fly.ptr<i8, BufferDesc>``), for
+        :func:`buffer_load` / :func:`buffer_store`. Pass it through
+        :func:`flydsl.expr.rocdl.get_buffer_rsrc` to recover the raw ``!llvm.ptr<8>``
+        resource that raw ROCDL intrinsics and inline asm expect.
 
     Example:
         >>> rsrc = create_buffer_resource(A)
         >>> data = buffer_load(rsrc, offset)
     """
-    desc = BufferResourceDescriptor.from_memref(
-        memref_val,
-        stride,
-        max_size,
-        num_records_bytes=num_records_bytes,
-        base_byte_offset=base_byte_offset,
-    )
-    return desc.rsrc
+    if stride != 0:
+        raise ValueError(f"create_buffer_resource: only stride=0 (contiguous) is supported, got {stride}")
+
+    if num_records_bytes is None and not max_size:
+        num_records_bytes = _num_records_from_memref_type(memref_val)
+
+    return _byte_buffer_ptr(fx.get_iter(memref_val), num_records_bytes, base_byte_offset)
 
 
 @dsl_loc_tracing
@@ -447,9 +401,9 @@ def buffer_load(
     offset: ir.Value,
     vec_width: int = 4,
     dtype=None,
-    mask: Optional[ir.Value] = None,
+    mask: ir.Value | None = None,
     cache_modifier: int = 0,
-    soffset_bytes: Optional[Union[int, ir.Value]] = None,
+    soffset_bytes: int | ir.Value | None = None,
     is_scalar: bool = False,
 ) -> ir.Value:
     """AMD buffer load operation.
@@ -458,7 +412,7 @@ def buffer_load(
     Uses hardware-level bounds checking and vectorization.
 
     Args:
-        rsrc: Buffer resource descriptor (!llvm.ptr<8>)
+        rsrc: Buffer descriptor pointer from :func:`create_buffer_resource`
         offset: Offset in elements (i32 type)
         vec_width: Vector width (1, 2, or 4)
         dtype: Element data type (None for f32, or ir.F32Type, etc.)
@@ -506,9 +460,7 @@ def buffer_load(
     offset = _unwrap_value(offset)
 
     # Convert offset to i32 if needed
-    if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
-        op = std_arith.IndexCastOp(T.i32(), offset)
-        offset = _unwrap_value(op.result)
+    offset = fx.Int32(offset).ir_value()
 
     # IMPORTANT: Buffer load offset is in BYTES, not elements!
     # For vec4xf32, each element is 4 bytes, so multiply offset by 4
@@ -530,10 +482,11 @@ def buffer_load(
     else:
         result_type = ir.VectorType.get([vec_width], dtype)
 
-    # Scalar/uniform load path: emit s.buffer.load with a v4i32 resource and the
-    # byte offset computed above. Returns i32 (vec_width 1) or v4i32 (vec_width 4).
+    # Scalar/uniform load path: s.buffer.load is an SMEM instruction with no CopyOp type,
+    # so it stays on the raw intrinsic and needs the raw v4i32 resource. Returns i32
+    # (vec_width 1) or v4i32 (vec_width 4).
     if is_scalar:
-        rsrc_v4 = _ptr8_to_v4i32(rsrc)
+        rsrc_v4 = _ptr8_to_v4i32(fx.rocdl.get_buffer_rsrc(rsrc))
         cache_policy = _create_i32_constant(cache_modifier)
         suffix = "i32" if vec_width == 1 else "v4i32"
         return llvm.call_intrinsic(
@@ -544,23 +497,16 @@ def buffer_load(
             [],
         )
 
-    # Create instruction offset and aux flags
-    if soffset_bytes is None:
-        soffset = _create_i32_constant(0)
-    else:
-        if isinstance(soffset_bytes, int):
-            soffset = _create_i32_constant(soffset_bytes)
-        else:
-            soffset = _unwrap_value(soffset_bytes)
-            if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
-                op = std_arith.IndexCastOp(T.i32(), soffset)
-                soffset = _unwrap_value(op.result)
-    aux_attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), cache_modifier) if cache_modifier else None
-
-    # Emit buffer load
-    load_op = rocdl.RawPtrBufferLoadOp(result_type, rsrc, offset, soffset, aux=aux_attr)
-
-    return load_op.result
+    offset = _add_soffset_bytes(offset, soffset_bytes)
+    src = fx.make_view(rsrc + fx.Int32(offset), fx.make_layout(vec_width * element_bytes, 1))
+    atom = fx.make_copy_atom(fx.rocdl.BufferCopy(vec_width * dtype.width, cache_modifier), fx.Int8)
+    reg = fx.make_rmem_tensor(fx.make_layout(vec_width, 1), fx.Numeric.from_ir_type(dtype))
+    fx.copy(atom, src, reg)
+    loaded = fx.memref_load_vec(reg)
+    result = _unwrap_value(loaded[0] if vec_width == 1 else loaded)
+    if result.type != result_type:
+        result = _unwrap_value(std_arith.BitcastOp(result_type, result).result)
+    return result
 
 
 @dsl_loc_tracing
@@ -568,19 +514,20 @@ def buffer_store(
     data: ir.Value,
     rsrc: ir.Value,
     offset: ir.Value,
-    mask: Optional[ir.Value] = None,
+    mask: ir.Value | None = None,
     cache_modifier: int = 0,
     *,
-    soffset_bytes: Optional[Union[int, ir.Value]] = None,
+    soffset_bytes: int | ir.Value | None = None,
     offset_is_bytes: bool = False,
 ):
     """AMD buffer store operation.
 
     Store data to global memory using buffer descriptor and offset.
 
+
     Args:
         data: Data to store (scalar or vector)
-        rsrc: Buffer resource descriptor (!llvm.ptr<8>)
+        rsrc: Buffer descriptor pointer from :func:`create_buffer_resource`
         offset: Offset in elements (i32 type)
         mask: Optional mask for predicated store (i1 type)
         cache_modifier: Cache control flags (0 for default)
@@ -591,7 +538,8 @@ def buffer_store(
         >>> # Store with mask
         >>> buffer_store(data, rsrc, offset, mask=valid)
     """
-    # Unwrap all inputs (accept DSL Numeric values via ir_value())
+    # Unwrap all inputs (accept DSL Numeric values via ir_value()). `rsrc` stays a DSL
+    # pointer: the copy atom needs the !fly.ptr<i8, BufferDesc> fat pointer, not a value.
     if hasattr(data, "ir_value"):
         data = data.ir_value()
     if isinstance(offset, int):
@@ -599,25 +547,25 @@ def buffer_store(
     elif hasattr(offset, "ir_value"):
         offset = offset.ir_value()
     data = _unwrap_value(data)
-    rsrc = _unwrap_value(rsrc)
     offset = _unwrap_value(offset)
 
     # Convert offset to i32 if needed
-    if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
-        op = std_arith.IndexCastOp(T.i32(), offset)
-        offset = _unwrap_value(op.result)
+    offset = fx.Int32(offset).ir_value()
 
-    # IMPORTANT: RawPtrBufferStoreOp offset is in BYTES.
+    # Get element size from data type
+    data_type = data.type
+    if hasattr(data_type, "element_type"):  # Vector type
+        element_type = data_type.element_type
+        vec_width = data_type.shape[0]
+    else:  # Scalar type
+        element_type = data_type
+        vec_width = 1
+    element_bytes = element_type.width // 8
+
+    # IMPORTANT: the buffer store offset is in BYTES.
     # For backward compat, `buffer_store()` accepts element offsets by default
     # and scales them to bytes. Set `offset_is_bytes=True` to skip scaling.
     if not offset_is_bytes:
-        # Get element size from data type
-        data_type = data.type
-        if hasattr(data_type, "element_type"):  # Vector type
-            element_type = data_type.element_type
-        else:  # Scalar type
-            element_type = data_type
-        element_bytes = element_type.width // 8
         bytes_const = _create_i32_constant(element_bytes)
         op = std_arith.MulIOp(offset, bytes_const)
         offset = _unwrap_value(op.result)
@@ -629,18 +577,9 @@ def buffer_store(
         op = std_arith.SelectOp(mask, offset, max_offset)
         offset = _unwrap_value(op.result)
 
-    # Create instruction offset (soffset) and aux flags
-    if soffset_bytes is None:
-        soffset = _create_i32_constant(0)
-    else:
-        if isinstance(soffset_bytes, int):
-            soffset = _create_i32_constant(int(soffset_bytes))
-        else:
-            soffset = _unwrap_value(soffset_bytes)
-            if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
-                op = std_arith.IndexCastOp(T.i32(), soffset)
-                soffset = _unwrap_value(op.result)
-    aux_attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), cache_modifier) if cache_modifier else None
-
-    # Emit buffer store
-    rocdl.RawPtrBufferStoreOp(data, rsrc, offset, soffset, aux=aux_attr)
+    offset = _add_soffset_bytes(offset, soffset_bytes)
+    dst = fx.make_view(rsrc + fx.Int32(offset), fx.make_layout(vec_width * element_bytes, 1))
+    atom = fx.make_copy_atom(fx.rocdl.BufferCopy(vec_width * element_type.width, cache_modifier), fx.Int8)
+    reg = fx.make_rmem_tensor(fx.make_layout(vec_width, 1), fx.Numeric.from_ir_type(element_type))
+    fx.memref_store_vec(data, reg)
+    fx.copy(atom, reg, dst)
