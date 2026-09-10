@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-09-10T07:17:36Z",
+ "updated": "2026-09-10T07:51:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34451734527,
+   "pr": 1106,
+   "commit": "157409858881b9cd4d24b5b4d43d74c77c64c77d",
+   "branch": "add-flydsl-code-review-skill",
+   "event": "pull_request",
+   "title": "[Skills] Add flydsl-code-review skill and workflow",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34451734527",
+   "created_at": "2026-09-10T07:47:24Z",
+   "updated_at": "2026-09-10T07:49:24Z",
+   "actor": "zhiding512",
+   "jobs": []
+  },
+  {
+   "run_id": 34451120983,
+   "pr": 1096,
+   "commit": "c10fcfd4c1f4e47d08096c58682b8b6f749baf78",
+   "branch": "feat/rocdl-ordered-memory-primitives",
+   "event": "pull_request",
+   "title": "[DSL] Add llvm load/store primitives",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34451120983",
+   "created_at": "2026-09-10T07:40:17Z",
+   "updated_at": "2026-09-10T07:50:09Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
+  {
+   "run_id": 34450912686,
+   "pr": 1001,
+   "commit": "00fa384ff4cd905d7f860e68932fd8cde8242505",
+   "branch": "jli/gfx1250/fix-mma-atom",
+   "event": "pull_request",
+   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34450912686",
+   "created_at": "2026-09-10T07:37:47Z",
+   "updated_at": "2026-09-10T07:39:56Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 34447490149,
    "pr": 1115,
@@ -10,37 +55,37 @@
    "branch": "fix/manylinux-disable-rocm-repo",
    "event": "pull_request",
    "title": "[CI] Avoid unused ROCm repository refresh in manylinux build",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149",
    "created_at": "2026-09-10T06:56:09Z",
-   "updated_at": "2026-09-10T07:14:57Z",
+   "updated_at": "2026-09-10T07:35:33Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-10T07:14:57Z",
+     "started_at": "2026-09-10T07:15:27Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149/job/102780161994"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-10T07:14:57Z",
+     "started_at": "2026-09-10T07:35:32Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149/job/102780162093"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-10T07:14:57Z",
+     "started_at": "2026-09-10T07:16:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149/job/102780162123"
     }
@@ -241,43 +286,44 @@
   },
   {
    "run_id": 34433591609,
-   "pr": 1096,
+   "pr": null,
    "commit": "bce668e267d3e1df8ae6e4e39b169c739e50f898",
    "branch": "feat/rocdl-ordered-memory-primitives",
    "event": "pull_request",
    "title": "[DSL] Add llvm load/store primitives",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34433591609",
    "created_at": "2026-09-10T03:30:30Z",
-   "updated_at": "2026-09-10T07:10:23Z",
+   "updated_at": "2026-09-10T07:49:53Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-10T07:10:23Z",
-     "completed_at": null,
+     "completed_at": "2026-09-10T07:49:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34433591609/job/102778983832"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T07:10:29Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34433591609/job/102778983892"
+     "completed_at": "2026-09-10T07:34:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34433591609/job/102778983892",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-10T07:11:09Z",
-     "completed_at": null,
+     "completed_at": "2026-09-10T07:49:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34433591609/job/102778983899"
     }
    ]
@@ -466,7 +512,7 @@
   },
   {
    "run_id": 34364102173,
-   "pr": 1001,
+   "pr": null,
    "commit": "14cefed484569f871cc32396e11d7c9e3d75dfaf",
    "branch": "jli/gfx1250/fix-mma-atom",
    "event": "pull_request",
@@ -1742,113 +1788,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34209140893/job/102014153917"
     }
    ]
-  },
-  {
-   "run_id": 34205726684,
-   "pr": 1069,
-   "commit": "0c2daffda2c4aabd7d395783e83ff2fe575b13e9",
-   "branch": "feature/qwenimage-vae-conv-tests",
-   "event": "pull_request",
-   "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34205726684",
-   "created_at": "2026-09-08T08:39:57Z",
-   "updated_at": "2026-09-08T10:27:16Z",
-   "actor": "huizzhan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T08:56:30Z",
-     "completed_at": "2026-09-08T10:07:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34205726684/job/101999392985",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T08:56:28Z",
-     "completed_at": "2026-09-08T10:27:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34205726684/job/101999393033",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T08:56:15Z",
-     "completed_at": "2026-09-08T09:22:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34205726684/job/101999393153",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34201903501,
-   "pr": 1103,
-   "commit": "eab0f52e6eb8ab5eca7f8a8cde3b444c416f9445",
-   "branch": "pr/docs-random-extension-api",
-   "event": "pull_request",
-   "title": "[Doc] Add api document for rand extention",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201903501",
-   "created_at": "2026-09-08T07:56:56Z",
-   "updated_at": "2026-09-08T09:39:51Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T08:14:34Z",
-     "completed_at": "2026-09-08T09:39:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201903501/job/101987045555",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T08:14:24Z",
-     "completed_at": "2026-09-08T08:31:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201903501/job/101987045594",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-08T08:14:35Z",
-     "completed_at": "2026-09-08T09:19:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201903501/job/101987045628",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34201433843,
-   "pr": null,
-   "commit": "64416e20780f9f52c254e6295ba7abd16d3fa3d5",
-   "branch": "pr/docs-random-extension-api",
-   "event": "pull_request",
-   "title": "[Doc] Add api document for rand extention",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34201433843",
-   "created_at": "2026-09-08T07:51:17Z",
-   "updated_at": "2026-09-08T07:57:16Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
