@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-10T08:21:00Z",
+ "updated": "2026-09-10T08:34:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34454499640",
    "created_at": "2026-09-10T08:19:03Z",
-   "updated_at": "2026-09-10T08:19:27Z",
+   "updated_at": "2026-09-10T08:29:58Z",
    "actor": "yanboshao",
    "jobs": []
   },
@@ -40,11 +40,11 @@
    "branch": "mxfp8_v1",
    "event": "pull_request",
    "title": "Mxfp8 8w 1*32 scale",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34453416060",
    "created_at": "2026-09-10T08:06:47Z",
-   "updated_at": "2026-09-10T08:09:10Z",
+   "updated_at": "2026-09-10T08:33:07Z",
    "actor": "solinzby1",
    "jobs": []
   },
@@ -200,21 +200,22 @@
    "branch": "fix/manylinux-disable-rocm-repo",
    "event": "pull_request",
    "title": "[CI] Avoid unused ROCm repository refresh in manylinux build",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149",
    "created_at": "2026-09-10T06:56:09Z",
-   "updated_at": "2026-09-10T07:35:33Z",
+   "updated_at": "2026-09-10T08:33:19Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T07:15:27Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149/job/102780161994"
+     "completed_at": "2026-09-10T08:24:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149/job/102780161994",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -229,11 +230,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T07:16:16Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149/job/102780162123"
+     "completed_at": "2026-09-10T08:33:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149/job/102780162123",
+     "log_fetch_failed": true
     }
    ]
   },
