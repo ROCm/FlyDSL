@@ -5,7 +5,7 @@
 
 from .._mlir import ir
 from .._mlir.dialects import llvm as _llvm
-from .enum import AtomicOrdering
+from .enum import AtomicOrdering, SyncScope
 from .meta import dsl_loc_tracing
 from .numeric import BFloat16, Float16, Float32, Float64, Int32, Int64, Integer, Uint32, Uint64, as_numeric
 from .typing import Numeric, Pointer, Vector, as_dsl_value, as_ir_value
@@ -22,6 +22,8 @@ __all__ = [
     "atomic_cas",
     "atomic_fmin",
     "atomic_fmax",
+    "generic_load",
+    "generic_store",
     "memory_fence",
 ]
 
@@ -84,7 +86,7 @@ def _atomic_operand(value, ptr):
     return as_numeric(value)
 
 
-def _atomic_ordering(ordering):
+def _atomic_ordering(ordering) -> _llvm.AtomicOrdering:
     """Map ``ordering`` onto the LLVM ordering."""
     if isinstance(ordering, _llvm.AtomicOrdering):
         return ordering
@@ -93,15 +95,17 @@ def _atomic_ordering(ordering):
     raise TypeError(f"ordering must be an fx.AtomicOrdering, got {ordering!r}")
 
 
-def _normalize_to_llvm_ptr(ptr):
+def _normalize_to_llvm_ptr(ptr, *, fly_ptr_only=False) -> ir.Value:
+    if fly_ptr_only and not isinstance(ptr, Pointer):
+        raise TypeError(f"requires an fx.Pointer, got {ptr!r}")
     if isinstance(ptr, Pointer):
         ptr = ptr.llvm_ptr
     if not isinstance(ptr, ir.Value) or not isinstance(ptr.type, _llvm.PointerType):
-        raise TypeError(f" pointer must be a fly.ptr or !llvm.ptr, got {ptr}")
+        raise TypeError(f"pointer must be a fly.ptr or !llvm.ptr, got {ptr}")
     return ptr
 
 
-def _emit_atomic_rmw(bin_op, ptr, value, syncscope, ordering):
+def _emit_atomic_rmw(bin_op, ptr, value, syncscope, ordering, alignment=None):
     value = _atomic_operand(value, ptr)
     value_type = value.dtype
 
@@ -126,14 +130,167 @@ def _emit_atomic_rmw(bin_op, ptr, value, syncscope, ordering):
     if isinstance(value, Vector) and bin_op not in _VECTOR_FORMS:
         raise TypeError(f"atomic {op} takes no vector operand, got {value.type}")
 
+    if alignment is None:
+        alignment = ptr.alignment if isinstance(ptr, Pointer) else None
     result = _llvm.atomicrmw(
         bin_op,
         _normalize_to_llvm_ptr(ptr),
         as_ir_value(value),
         _atomic_ordering(ordering),
         syncscope=syncscope or None,
+        alignment=alignment,
     )
     return as_dsl_value(result, value)
+
+
+@dsl_loc_tracing
+def generic_load(
+    ptr: Pointer,
+    *,
+    dtype: type[Numeric] | type[Vector] | None = None,
+    count: int | None = None,
+    memory_order: AtomicOrdering = AtomicOrdering.NotAtomic,
+    syncscope: SyncScope | str | None = None,
+    nontemporal: bool = False,
+    volatile: bool = False,
+) -> Numeric | Vector:
+    """Load a scalar or vector through a pointer.
+
+    Args:
+        ptr: Generic-, global-, or shared-address-space ``fx.Pointer`` to load
+            from. Its alignment is attached to the generated LLVM load.
+        dtype: scalar or concrete vector result type. When omitted, the
+            pointer's element type is used.
+        count: Number of scalar elements to load. ``None`` and ``1`` produce a
+            scalar when ``dtype`` is scalar; values greater than ``1`` produce
+            a flat vector. Must be ``None`` when ``dtype`` is a vector type.
+        memory_order: Atomic ordering for the load. Defaults to
+            ``fx.AtomicOrdering.NotAtomic``.
+        syncscope: Optional LLVM or target-specific synchronization scope.
+            Requires an atomic ``memory_order``.
+        nontemporal: Whether to mark the load as non-temporal.
+        volatile: Whether to mark the load as volatile.
+
+    Returns:
+        A scalar or vector matching the requested ``dtype`` and
+        ``count`` combination.
+
+    Raises:
+        TypeError: If ``ptr`` is not an ``fx.Pointer`` or ``dtype`` is not a
+            supported scalar or vector type.
+        ValueError: If ``count`` is invalid or the atomic ordering options are
+            incompatible.
+
+    Examples:
+        The supported scalar and vector forms are::
+
+            scalar = fx.generic_load(ptr)                             # pointer element type
+            scalar = fx.generic_load(ptr, dtype=fx.Float32)           # explicit scalar type
+            scalar = fx.generic_load(ptr, dtype=fx.Float32, count=1)  # explicit scalar count
+            vector = fx.generic_load(ptr, count=4)                    # inferred float32x4
+            vector = fx.generic_load(ptr, dtype=fx.Float32, count=4)  # explicit element type
+            vector = fx.generic_load(ptr, dtype=fx.Float32x4)         # concrete vector type
+    """
+    llvm_ptr = _normalize_to_llvm_ptr(ptr, fly_ptr_only=True)
+    llvm_ordering = _atomic_ordering(memory_order)
+    if llvm_ordering in (_llvm.AtomicOrdering.release, _llvm.AtomicOrdering.acq_rel):
+        raise ValueError(f"invalid load memory order: {memory_order}")
+    if llvm_ordering == _llvm.AtomicOrdering.not_atomic and syncscope is not None:
+        raise ValueError("syncscope requires an atomic memory order")
+
+    if count is not None and (not isinstance(count, int) or isinstance(count, bool) or count < 1):
+        raise ValueError(f"count must be a positive integer or None, got {count!r}")
+
+    if dtype is None:
+        dtype = ptr.element_type
+
+    vector_shape = None
+    if isinstance(dtype, type) and issubclass(dtype, Numeric):
+        if count is None or count == 1:
+            result_type = dtype.ir_type
+        else:
+            result_type = Vector.make_type(count, dtype)
+            vector_shape = (count,)
+    elif isinstance(dtype, type) and issubclass(dtype, Vector):
+        if count is not None:
+            raise ValueError("count must be None when dtype is a vector type")
+        try:
+            result_type = dtype.ir_type
+        except AttributeError as exc:
+            raise TypeError("dtype must be a concrete vector type") from exc
+    else:
+        raise TypeError("dtype must be a scalar or vector type")
+
+    kwargs = {}
+    if llvm_ordering != _llvm.AtomicOrdering.not_atomic:
+        kwargs["ordering"] = llvm_ordering
+    if syncscope is not None:
+        kwargs["syncscope"] = syncscope
+    kwargs["alignment"] = ptr.alignment
+    if nontemporal:
+        kwargs["nontemporal"] = True
+    if volatile:
+        kwargs["volatile_"] = True
+
+    result = _llvm.LoadOp(result_type, llvm_ptr, **kwargs).result
+
+    if vector_shape is not None:
+        return Vector(result, vector_shape, dtype)
+    return dtype(result)
+
+
+@dsl_loc_tracing
+def generic_store(
+    ptr: Pointer,
+    value,
+    *,
+    memory_order: AtomicOrdering = AtomicOrdering.NotAtomic,
+    syncscope: SyncScope | str | None = None,
+    nontemporal: bool = False,
+    volatile: bool = False,
+) -> None:
+    """Store a scalar or vector through a pointer.
+
+    Args:
+        ptr: Generic-, global-, or shared-address-space ``fx.Pointer`` to store
+            through. Its alignment is attached to the generated LLVM store.
+        value: scalar or vector value to store.
+        memory_order: Atomic ordering for the store. Defaults to
+            ``fx.AtomicOrdering.NotAtomic``.
+        syncscope: Optional LLVM or target-specific synchronization scope.
+            Requires an atomic ``memory_order``.
+        nontemporal: Whether to mark the store as non-temporal.
+        volatile: Whether to mark the store as volatile.
+
+    Raises:
+        TypeError: If ``ptr`` is not an ``fx.Pointer``.
+        ValueError: If the atomic ordering options are incompatible.
+
+    Examples:
+        Store scalar and vector values using the pointer's alignment::
+
+            fx.generic_store(ptr, scalar)
+            fx.generic_store(ptr, vector, volatile=True)
+    """
+    llvm_ptr = _normalize_to_llvm_ptr(ptr, fly_ptr_only=True)
+    llvm_ordering = _atomic_ordering(memory_order)
+    if llvm_ordering in (_llvm.AtomicOrdering.acquire, _llvm.AtomicOrdering.acq_rel):
+        raise ValueError(f"invalid store memory order: {memory_order}")
+    if llvm_ordering == _llvm.AtomicOrdering.not_atomic and syncscope is not None:
+        raise ValueError("syncscope requires an atomic memory order")
+
+    kwargs = {}
+    if llvm_ordering != _llvm.AtomicOrdering.not_atomic:
+        kwargs["ordering"] = llvm_ordering
+    if syncscope is not None:
+        kwargs["syncscope"] = syncscope
+    kwargs["alignment"] = ptr.alignment
+    if nontemporal:
+        kwargs["nontemporal"] = True
+    if volatile:
+        kwargs["volatile_"] = True
+
+    _llvm.StoreOp(as_ir_value(value), llvm_ptr, **kwargs)
 
 
 @dsl_loc_tracing
@@ -141,8 +298,8 @@ def atomic_add(
     ptr: Pointer,
     value,
     *,
-    syncscope=None,
-    ordering=AtomicOrdering.Monotonic,
+    syncscope: SyncScope | str | None = None,
+    ordering: AtomicOrdering = AtomicOrdering.Monotonic,
 ):
     """Atomically add ``value`` and return the previous value.
 
@@ -167,7 +324,13 @@ def atomic_add(
 
 
 @dsl_loc_tracing
-def atomic_sub(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.Monotonic):
+def atomic_sub(
+    ptr: Pointer,
+    value,
+    *,
+    syncscope: SyncScope | str | None = None,
+    ordering: AtomicOrdering = AtomicOrdering.Monotonic,
+):
     """Atomically subtract ``value`` and return the previous value.
 
     Args:
@@ -189,7 +352,13 @@ def atomic_sub(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.M
 
 
 @dsl_loc_tracing
-def atomic_min(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.Monotonic):
+def atomic_min(
+    ptr: Pointer,
+    value,
+    *,
+    syncscope: SyncScope | str | None = None,
+    ordering: AtomicOrdering = AtomicOrdering.Monotonic,
+):
     """Atomically take the minimum and return the previous value.
 
     Args:
@@ -211,7 +380,13 @@ def atomic_min(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.M
 
 
 @dsl_loc_tracing
-def atomic_max(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.Monotonic):
+def atomic_max(
+    ptr: Pointer,
+    value,
+    *,
+    syncscope: SyncScope | str | None = None,
+    ordering: AtomicOrdering = AtomicOrdering.Monotonic,
+):
     """Atomically take the maximum and return the previous value.
 
     Args:
@@ -233,7 +408,13 @@ def atomic_max(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.M
 
 
 @dsl_loc_tracing
-def atomic_and(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.Monotonic):
+def atomic_and(
+    ptr: Pointer,
+    value,
+    *,
+    syncscope: SyncScope | str | None = None,
+    ordering: AtomicOrdering = AtomicOrdering.Monotonic,
+):
     """Atomically apply bitwise AND and return the previous value.
 
     Args:
@@ -255,7 +436,13 @@ def atomic_and(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.M
 
 
 @dsl_loc_tracing
-def atomic_or(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.Monotonic):
+def atomic_or(
+    ptr: Pointer,
+    value,
+    *,
+    syncscope: SyncScope | str | None = None,
+    ordering: AtomicOrdering = AtomicOrdering.Monotonic,
+):
     """Atomically apply bitwise OR and return the previous value.
 
     Args:
@@ -277,7 +464,13 @@ def atomic_or(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.Mo
 
 
 @dsl_loc_tracing
-def atomic_xor(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.Monotonic):
+def atomic_xor(
+    ptr: Pointer,
+    value,
+    *,
+    syncscope: SyncScope | str | None = None,
+    ordering: AtomicOrdering = AtomicOrdering.Monotonic,
+):
     """Atomically apply bitwise XOR and return the previous value.
 
     Args:
@@ -299,7 +492,13 @@ def atomic_xor(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.M
 
 
 @dsl_loc_tracing
-def atomic_xchg(ptr: Pointer, value, *, syncscope=None, ordering=AtomicOrdering.Monotonic):
+def atomic_xchg(
+    ptr: Pointer,
+    value,
+    *,
+    syncscope: SyncScope | str | None = None,
+    ordering: AtomicOrdering = AtomicOrdering.Monotonic,
+):
     """Atomically replace the pointed-to value and return the previous value.
 
     Args:
@@ -341,6 +540,8 @@ def _emit_float_minmax(minimum, ptr, value, is_positive, syncscope, ordering):
         raise TypeError(
             f"atomic value type {value.dtype.__name__} must match pointer element type {ptr.element_type.__name__}"
         )
+    alignment = ptr.alignment if isinstance(ptr, Pointer) else None
+
     ptr = _normalize_to_llvm_ptr(ptr)
     if value.dtype not in (Float32, Float64):
         raise TypeError(f"atomic_fmin / atomic_fmax take an fx.Float32 or fx.Float64 value, got {value!r}")
@@ -352,7 +553,7 @@ def _emit_float_minmax(minimum, ptr, value, is_positive, syncscope, ordering):
     unsigned_op = _llvm.AtomicBinOp.max if minimum else _llvm.AtomicBinOp.min
 
     def emit(bin_op, dtype):
-        return as_ir_value(_emit_atomic_rmw(bin_op, ptr, dtype(bits), syncscope, ordering))
+        return as_ir_value(_emit_atomic_rmw(bin_op, ptr, dtype(bits), syncscope, ordering, alignment))
 
     if is_positive is None:
         zero = _llvm.mlir_constant(ir.IntegerAttr.get(int_type.ir_type, 0))
@@ -375,9 +576,9 @@ def atomic_fmax(
     ptr: Pointer,
     value,
     *,
-    is_positive=None,
-    syncscope=None,
-    ordering=AtomicOrdering.Monotonic,
+    is_positive: bool | None = None,
+    syncscope: SyncScope | str | None = None,
+    ordering: AtomicOrdering = AtomicOrdering.Monotonic,
 ):
     """Atomically take the float maximum through the integer atomics.
 
@@ -417,9 +618,9 @@ def atomic_fmin(
     ptr: Pointer,
     value,
     *,
-    is_positive=None,
-    syncscope=None,
-    ordering=AtomicOrdering.Monotonic,
+    is_positive: bool | None = None,
+    syncscope: SyncScope | str | None = None,
+    ordering: AtomicOrdering = AtomicOrdering.Monotonic,
 ):
     """Atomically take the float minimum through the integer atomics.
 
@@ -460,10 +661,10 @@ def atomic_cas(
     cmp,
     val,
     *,
-    syncscope=None,
-    success_ordering=AtomicOrdering.Monotonic,
-    failure_ordering=AtomicOrdering.Monotonic,
-    weak=False,
+    syncscope: SyncScope | str | None = None,
+    success_ordering: AtomicOrdering = AtomicOrdering.Monotonic,
+    failure_ordering: AtomicOrdering = AtomicOrdering.Monotonic,
+    weak: bool = False,
 ):
     """Atomically compare and exchange, returning ``(old_value, success)``.
 
@@ -516,6 +717,7 @@ def atomic_cas(
         _atomic_ordering(success_ordering),
         _atomic_ordering(failure_ordering),
         syncscope=syncscope or None,
+        alignment=ptr.alignment if isinstance(ptr, Pointer) else None,
         weak=weak,
     )
     old = _llvm.extractvalue(cmp.dtype.ir_type, pair, [0])
