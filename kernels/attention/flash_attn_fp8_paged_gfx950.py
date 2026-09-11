@@ -15,11 +15,6 @@ from kernels.attention.flash_attn_utils import (
     DualwaveFp8SoftmaxHelper,
     DualwaveFp8StoreHelper,
     _make_paged_dualwave_swp_fp8_traits,
-    _sched_barrier_exp_pairs,
-    _sched_barrier_pairs,
-    _stagger_extra_barrier_if_one,
-    _stagger_extra_barrier_if_zero,
-    _waitcnt_vm_n,
 )
 from kernels.common.kernels_common import dtype_to_elem_type
 from kernels.common.tensor_shim import _run_compiled
@@ -57,13 +52,17 @@ def build_flash_attn_paged_fp8_module(
     paged_bn128_varlen=False,
     batch_interleave_group=1,
 ):
-    """Build the gfx950 packed-varlen page-64 FP8 attention launcher."""
+    """Build the gfx950 packed-varlen page-64 FP8 attention launcher.
+
+    Priority/stagger options are accepted for caller compatibility; this
+    paired-page pipeline uses neither wave-priority nor staggered phases.
+    """
     gpu_arch = get_hip_arch()
     if value_head_dim is None:
         value_head_dim = head_dim
 
     if not gpu_arch.startswith("gfx950"):
-        raise RuntimeError(f"flash_attn_dualwave_swp requires gfx950+ (uses ds_read_tr16_b64), got {gpu_arch}")
+        raise RuntimeError(f"paged FP8 flash attention requires gfx950, got {gpu_arch}")
     if (
         not paged
         or dtype_str != "fp8"
@@ -89,7 +88,7 @@ def build_flash_attn_paged_fp8_module(
     if batch_interleave_group > 1 and (
         (head_dim == 128 and not paged_bn128) or (paged_bn128 and not paged_bn128_varlen)
     ):
-        raise ValueError("batch interleaving requires generic D192 or packed-varlen BN128")
+        raise ValueError("batch interleaving requires general D192 or packed-varlen paired page IDs")
     assert num_heads % num_kv_heads == 0
     traits = _make_paged_dualwave_swp_fp8_traits(
         num_heads,
@@ -100,19 +99,17 @@ def build_flash_attn_paged_fp8_module(
         daz=daz,
         dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
         rescale_threshold=rescale_threshold,
-        dualwave_swp_setprio=dualwave_swp_setprio,
         dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
-        dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
         varlen=not paged_bn128 or paged_bn128_varlen,
-        bn128=paged_bn128,
+        paired_page_ids=paged_bn128,
         batch_interleave_group=batch_interleave_group,
     )
     BLOCK_M = traits.BLOCK_M
     BLOCK_SIZE = traits.BLOCK_SIZE
     HEAD_DIM = traits.HEAD_DIM
     NUM_HEADS_Q = traits.NUM_HEADS_Q
-    PAGED_BN128 = bool(paged_bn128)
-    PAGED_BN128_VARLEN = bool(paged_bn128_varlen)
+    PAIRED_PAGE_IDS = bool(paged_bn128)
+    USE_CU_SEQLENS = not paged_bn128 or paged_bn128_varlen
     BATCH_INTERLEAVE_GROUP = traits.BATCH_INTERLEAVE_GROUP
     DEFAULT_STRIDE_Q_N = traits.DEFAULT_STRIDE_Q_N
     DEFAULT_STRIDE_O_N = traits.NUM_HEADS_Q * traits.HEAD_DIM_V
@@ -143,7 +140,7 @@ def build_flash_attn_paged_fp8_module(
         seq_len: fx.Int32,
         seq_len_kv: fx.Int32,
         stride_q_n: fx.Int32,
-        stride_kv_n: fx.Int32,
+        stride_o_n: fx.Int32,
         head_dim_runtime: fx.Int32,
     ):
         ctx = DualwaveFp8KernelContext(
@@ -161,9 +158,9 @@ def build_flash_attn_paged_fp8_module(
             seq_len,
             seq_len_kv,
             stride_q_n,
-            stride_kv_n,
+            DEFAULT_STRIDE_KV_N,
             head_dim_runtime,
-            stride_o_n=DEFAULT_STRIDE_O_N,
+            stride_o_n=DEFAULT_STRIDE_O_N if PAIRED_PAGE_IDS else stride_o_n,
             BlockTable=BlockTable,
             block_table_stride=block_table_stride,
         )
@@ -171,7 +168,7 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_runtime_indices()
         ctx.init_lds(SharedStorage)
         ctx.init_thread_mapping()
-        if const_expr(PAGED_BN128_VARLEN):
+        if const_expr(USE_CU_SEQLENS):
             ctx.init_sequence_lengths()
             ctx.init_varlen_causal_lpt_order()
         else:
@@ -416,476 +413,6 @@ def build_flash_attn_paged_fp8_module(
         rocdl.s_barrier()
         output_store.store_final_o(v_o, q_row)
 
-    @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
-    def flash_attn_dualwave_swp_fp8_gfx950_kernel(
-        Q: fx.Tensor,
-        K: fx.Tensor,
-        V: fx.Tensor,
-        O: fx.Tensor,  # noqa: E741
-        DebugCounts: fx.Tensor,
-        CuSeqQ: fx.Tensor,
-        CuSeqKv: fx.Tensor,
-        BlockTable: fx.Tensor,
-        block_table_stride: fx.Int32,
-        QDescale: fx.Tensor,
-        KDescale: fx.Tensor,
-        VDescale: fx.Tensor,
-        seq_len: fx.Int32,
-        seq_len_kv: fx.Int32,
-        stride_q_n: fx.Int32,
-        stride_o_n: fx.Int32,
-        stride_kv_n: fx.Int32,
-        head_dim_runtime: fx.Int32,
-    ):
-        ctx = DualwaveFp8KernelContext(
-            traits,
-            Q,
-            K,
-            V,
-            O,
-            DebugCounts,
-            CuSeqQ,
-            CuSeqKv,
-            QDescale,
-            KDescale,
-            VDescale,
-            seq_len,
-            seq_len_kv,
-            stride_q_n,
-            stride_kv_n,
-            head_dim_runtime,
-            stride_o_n=stride_o_n,
-            BlockTable=BlockTable,
-            block_table_stride=block_table_stride,
-        )
-        ctx.init_types_and_constants()
-        ctx.init_runtime_indices()
-        ctx.init_lds(SharedStorage)
-        ctx.init_thread_mapping()
-        ctx.init_sequence_lengths()
-        if const_expr(traits.HEAD_DIM == 192 and traits.BATCH_INTERLEAVE_GROUP > 1):
-            # Issue the longest active q-blocks first within each batch group.
-            ctx.init_varlen_causal_lpt_order()
-        ctx.init_descriptors()
-        ctx.init_atoms_and_lds_ptrs()
-        ctx.init_dma_thread_offsets()
-        ctx.init_descale()
-        ctx.init_tile_bounds()
-
-        gemm_helper = DualwaveFp8GemmHelper(ctx)
-        softmax_helper = DualwaveFp8SoftmaxHelper(ctx)
-        kv_gmem_to_lds = DualwaveFp8KvGmemToLdsLoader(ctx)
-        kv_lds_to_regs = DualwaveFp8KvLdsToVgprLoader(ctx)
-        output_store = DualwaveFp8StoreHelper(ctx)
-
-        # The active-query guard is workgroup-uniform, keeping barriers balanced.
-        @flyc.jit
-        def _run_q_block():
-            kv_gmem_to_lds.load_k(ctx.split_t0 * traits.BLOCK_N, 0)
-            fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-
-            # Keep Q in registers; apply Q/K descales in softmax.
-            ctx.init_q_row()
-            q_row = ctx.q_row
-            q_all_wide = gemm_helper.load_q_wide()
-
-            kv_gmem_to_lds.load_k((ctx.split_t0 + 1) * traits.BLOCK_N, 1)
-            kv_gmem_to_lds.load_v(ctx.split_t0 * traits.BLOCK_N, 0)
-            v_k = kv_lds_to_regs.load_k(0)
-            rocdl.sched_barrier(0)
-            fx.rocdl.s_waitcnt(lgkmcnt=0)
-            _waitcnt_vm_n(ctx.NUM_DMA_V)
-
-            # Group B's extra barrier opens the wave-group phase shift.
-            if const_expr(traits.DUALWAVE_SWP_ENABLE_STAGGER):
-                _stagger_extra_barrier_if_one(ctx.stagger_i32)
-            else:
-                rocdl.sched_barrier(0)
-                rocdl.s_barrier()
-
-            v_s_0 = gemm_helper.qk(v_k, q_all_wide)
-            rocdl.sched_barrier(0)
-            v_s_0 = softmax_helper.causal_mask_prologue_if_needed(v_s_0)
-            m_row_pro = softmax_helper.reduce_max(v_s_0)
-            # Floor fully-masked rows (-inf) to finite so exp2 yields 0, not NaN.
-            m_row_pro = softmax_helper.floor_masked_max(m_row_pro)
-            v_s_0 = softmax_helper.sub_m(v_s_0, m_row_pro)
-            v_p_0 = softmax_helper.exp2(v_s_0, 0, 16)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            kv_gmem_to_lds.load_k((ctx.split_t0 + 2) * traits.BLOCK_N, 0)
-
-            l_row_init = ctx.c_zero_f
-            init_args = [m_row_pro, l_row_init]
-            for _ in range_constexpr(traits.D_CHUNKS):
-                init_args.append(ctx.c_zero_v16f32)
-            init_args.append(ctx.v_pair_to_vec32(v_p_0))
-
-            loop_lb = fx.Int64(3)
-            loop_results = init_args
-            for j, loop_args in range(
-                loop_lb,
-                ctx.split_t_end - 1,
-                fx.Int64(2),
-                init=init_args,
-            ):
-                m_row = loop_args[0]
-                l_row = loop_args[1]
-                v_o = [loop_args[2 + i] for i in range_constexpr(traits.D_CHUNKS)]
-                v_p_0 = ctx.v_vec32_to_pair(loop_args[2 + traits.D_CHUNKS])
-                j_idx = j
-
-                kv_gmem_to_lds.load_v((j_idx - 2) * traits.BLOCK_N, 1)
-                v_k = kv_lds_to_regs.load_k(1)
-                fx.rocdl.s_waitcnt(lgkmcnt=0)
-                _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
-                rocdl.sched_barrier(0)
-                rocdl.s_barrier()
-                rocdl.sched_barrier(0)
-
-                v_s_1 = gemm_helper.qk(v_k, q_all_wide)
-                v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
-                l_row = softmax_helper.reduce_sum(l_row, v_p_0)
-                v_p_0 = softmax_helper.cast_p(v_p_0)
-                v_p_0 = softmax_helper.anchor_v_p(v_p_0)
-                _sched_barrier_exp_pairs(traits, 6, 3, 1)
-                _sched_barrier_pairs(traits, 10, 5, 1)
-                rocdl.sched_barrier(0)
-                rocdl.s_barrier()
-                rocdl.sched_barrier(0)
-
-                kv_gmem_to_lds.load_k(j_idx * traits.BLOCK_N, 1)
-                v_v = kv_lds_to_regs.load_v(0)
-                fx.rocdl.s_waitcnt(lgkmcnt=0)
-                _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
-                rocdl.sched_barrier(0)
-                rocdl.s_barrier()
-                rocdl.sched_barrier(0)
-
-                if const_expr(traits.DUALWAVE_SWP_SETPRIO):
-                    rocdl.s_setprio(1)
-                v_o = gemm_helper.pv_step_k(0, v_p_0, v_v, v_o)
-                # Cross-length causal can put a diagonal tile in v_s_1; mask it here.
-                v_s_1 = softmax_helper.causal_mask_prologue_if_needed(v_s_1, j_idx - 2, (j_idx - 1) * traits.BLOCK_N)
-                m_tile_max_a = softmax_helper.reduce_max(v_s_1)
-
-                _sched_barrier_pairs(traits, 4, 6, 2)
-
-                if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
-                    v_o, m_row, l_row, v_p_0 = softmax_helper.lazy_rescale_o(v_o, m_row, l_row, m_tile_max_a, v_p_0)
-                else:
-                    v_o, m_row, l_row, v_p_0 = softmax_helper.rescale_o(v_o, m_row, l_row, m_tile_max_a, v_p_0)
-                v_o = gemm_helper.pv_step_k(1, v_p_0, v_v, v_o)
-                if const_expr(traits.D_CHUNKS > 4):
-                    v_s_1 = softmax_helper.sub_m(v_s_1, m_row)
-                    v_p_1 = softmax_helper.exp2(v_s_1, 0, 16)
-                    fx.rocdl.s_waitcnt(lgkmcnt=0)
-                    v_o = gemm_helper.pv_step_k(2, v_p_0, v_v, v_o)
-                    v_o = gemm_helper.pv_step_k(3, v_p_0, v_v, v_o)
-                else:
-                    v_o = gemm_helper.pv_step_k(2, v_p_0, v_v, v_o)
-                    v_o = gemm_helper.pv_step_k(3, v_p_0, v_v, v_o)
-                    v_s_1 = softmax_helper.sub_m(v_s_1, m_row)
-                    v_p_1 = softmax_helper.exp2(v_s_1, 0, 16)
-
-                _sched_barrier_pairs(traits, 6, 6, 2)
-                # Keep softmax EXP groups near their MFMA window.
-                _sched_barrier_exp_pairs(traits, 6, 3, 2)
-                if const_expr(traits.DUALWAVE_SWP_SETPRIO):
-                    rocdl.s_setprio(0)
-                # Fence the closing priority/barrier pair at the cluster boundary.
-                rocdl.sched_barrier(0)
-                rocdl.s_barrier()
-                rocdl.sched_barrier(0)
-
-                kv_gmem_to_lds.load_v((j_idx - 1) * traits.BLOCK_N, 0)
-                v_k = kv_lds_to_regs.load_k(0)
-                fx.rocdl.s_waitcnt(lgkmcnt=0)
-                _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
-                rocdl.sched_barrier(0)
-                rocdl.s_barrier()
-                rocdl.sched_barrier(0)
-
-                v_s_0 = gemm_helper.qk(v_k, q_all_wide)
-                v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
-                l_row = softmax_helper.reduce_sum(l_row, v_p_1)
-                v_p_1 = softmax_helper.cast_p(v_p_1)
-                v_p_1 = softmax_helper.anchor_v_p(v_p_1)
-                _sched_barrier_exp_pairs(traits, 6, 3, 3)
-                _sched_barrier_pairs(traits, 10, 5, 3)
-                rocdl.sched_barrier(0)
-                rocdl.s_barrier()
-                rocdl.sched_barrier(0)
-
-                kv_gmem_to_lds.load_k((j_idx + 1) * traits.BLOCK_N, 0)
-                v_v = kv_lds_to_regs.load_v(1)
-                v_s_0 = softmax_helper.causal_mask_prologue_if_needed(
-                    v_s_0,
-                    j_idx - 1,
-                    j_idx * traits.BLOCK_N,
-                )
-                fx.rocdl.s_waitcnt(lgkmcnt=0)
-                _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
-                rocdl.sched_barrier(0)
-                rocdl.s_barrier()
-                rocdl.sched_barrier(0)
-
-                if const_expr(traits.DUALWAVE_SWP_SETPRIO):
-                    rocdl.s_setprio(1)
-                v_o = gemm_helper.pv_step_k(0, v_p_1, v_v, v_o)
-                m_tile_max_b = softmax_helper.reduce_max(v_s_0)
-                _sched_barrier_pairs(traits, 4, 6, 4)
-
-                if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
-                    v_o, m_row, l_row, v_p_1 = softmax_helper.lazy_rescale_o(v_o, m_row, l_row, m_tile_max_b, v_p_1)
-                else:
-                    v_o, m_row, l_row, v_p_1 = softmax_helper.rescale_o(v_o, m_row, l_row, m_tile_max_b, v_p_1)
-                v_o = gemm_helper.pv_step_k(1, v_p_1, v_v, v_o)
-                if const_expr(traits.D_CHUNKS > 4):
-                    v_s_0 = softmax_helper.sub_m(v_s_0, m_row)
-                    v_p_0 = softmax_helper.exp2(v_s_0, 0, 16)
-                    fx.rocdl.s_waitcnt(lgkmcnt=0)
-                    v_o = gemm_helper.pv_step_k(2, v_p_1, v_v, v_o)
-                    v_o = gemm_helper.pv_step_k(3, v_p_1, v_v, v_o)
-                else:
-                    v_o = gemm_helper.pv_step_k(2, v_p_1, v_v, v_o)
-                    v_o = gemm_helper.pv_step_k(3, v_p_1, v_v, v_o)
-                    v_s_0 = softmax_helper.sub_m(v_s_0, m_row)
-                    v_p_0 = softmax_helper.exp2(v_s_0, 0, 16)
-                _sched_barrier_pairs(traits, 6, 5, 4)
-                _sched_barrier_exp_pairs(traits, 6, 3, 4)
-                if const_expr(traits.DUALWAVE_SWP_SETPRIO):
-                    rocdl.s_setprio(0)
-                rocdl.sched_barrier(0)
-                rocdl.s_barrier()
-                rocdl.sched_barrier(0)
-
-                yield_args = [m_row, l_row] + v_o + [ctx.v_pair_to_vec32(v_p_0)]
-                loop_results = yield yield_args
-
-            # Drain the final three tiles without further prefetch-ahead.
-            m_row = loop_results[0]
-            l_row = loop_results[1]
-            v_o = [loop_results[2 + i] for i in range_constexpr(traits.D_CHUNKS)]
-            v_p_0 = ctx.v_vec32_to_pair(loop_results[2 + traits.D_CHUNKS])
-
-            max_m3 = ctx.split_t_end - 3
-            max_m2 = ctx.split_t_end - 2
-            max_m1 = ctx.split_t_end - 1
-
-            kv_gmem_to_lds.load_v(max_m3 * traits.BLOCK_N, 1)
-            v_k = kv_lds_to_regs.load_k(1)
-            fx.rocdl.s_waitcnt(lgkmcnt=0)
-            _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            v_s_1 = gemm_helper.qk(v_k, q_all_wide)
-            v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
-            l_row = softmax_helper.reduce_sum(l_row, v_p_0)
-            v_p_0 = softmax_helper.cast_p(v_p_0)
-            v_p_0 = softmax_helper.anchor_v_p(v_p_0)
-            _sched_barrier_exp_pairs(traits, 6, 3, 5)
-            _sched_barrier_pairs(traits, 10, 5, 5)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            kv_gmem_to_lds.load_k(max_m1 * traits.BLOCK_N, 1)
-            v_packs_e3 = kv_lds_to_regs.load_v(0)
-            v_s_1 = softmax_helper.causal_mask_prologue_if_needed(
-                v_s_1,
-                max_m3,
-                max_m2 * traits.BLOCK_N,
-            )
-            fx.rocdl.s_waitcnt(lgkmcnt=0)
-            _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            if const_expr(traits.DUALWAVE_SWP_SETPRIO):
-                rocdl.s_setprio(1)
-            if const_expr(traits.D_CHUNKS > 4):
-                v_o = gemm_helper.pv_step_k(0, v_p_0, v_packs_e3, v_o)
-                v_o = gemm_helper.pv_step_k(1, v_p_0, v_packs_e3, v_o)
-                fx.rocdl.s_waitcnt(lgkmcnt=0)
-                v_o = gemm_helper.pv_step_k(2, v_p_0, v_packs_e3, v_o)
-                v_o = gemm_helper.pv_step_k(3, v_p_0, v_packs_e3, v_o)
-            else:
-                v_o = gemm_helper.pv(v_p_0, v_packs_e3, v_o)
-            m_tile_max_e3 = softmax_helper.reduce_max(v_s_1)
-            row_max_e3, rescale_e3 = softmax_helper.rescale_from_tile_max(m_row, m_tile_max_e3)
-            m_row = row_max_e3
-            v_s_1 = softmax_helper.sub_m(v_s_1, row_max_e3)
-            v_p_1 = softmax_helper.exp2(v_s_1, 0, 16)
-            _sched_barrier_pairs(traits, 10, 5, 6)
-            _sched_barrier_exp_pairs(traits, 6, 3, 6)
-            rocdl.sched_barrier(0)
-            softmax_helper.scale_o(v_o, rescale_e3)
-            v_o = softmax_helper.anchor_v_o(v_o)
-
-            if const_expr(traits.DUALWAVE_SWP_SETPRIO):
-                rocdl.s_setprio(0)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            kv_gmem_to_lds.load_v(max_m2 * traits.BLOCK_N, 0)
-            v_k = kv_lds_to_regs.load_k(0)
-            fx.rocdl.s_waitcnt(lgkmcnt=0)
-            _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            v_s_0 = gemm_helper.qk(v_k, q_all_wide)
-            l_row = softmax_helper.apply_l_rescale(l_row, rescale_e3)
-            v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
-            l_row = softmax_helper.reduce_sum(l_row, v_p_1)
-            v_p_1 = softmax_helper.cast_p(v_p_1)
-            v_p_1 = softmax_helper.anchor_v_p(v_p_1)
-            _sched_barrier_exp_pairs(traits, 6, 3, 7)
-            _sched_barrier_pairs(traits, 10, 5, 7)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            v_packs_e7 = kv_lds_to_regs.load_v(1)
-            v_s_0 = softmax_helper.causal_mask_prologue_if_needed(
-                v_s_0,
-                max_m2,
-                max_m1 * traits.BLOCK_N,
-            )
-            fx.rocdl.s_waitcnt(lgkmcnt=0)
-            _waitcnt_vm_n(ctx.NUM_DMA_V)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            if const_expr(traits.DUALWAVE_SWP_SETPRIO):
-                rocdl.s_setprio(1)
-            if const_expr(traits.D_CHUNKS > 4):
-                v_o = gemm_helper.pv_step_k(0, v_p_1, v_packs_e7, v_o)
-                v_o = gemm_helper.pv_step_k(1, v_p_1, v_packs_e7, v_o)
-                fx.rocdl.s_waitcnt(lgkmcnt=0)
-                v_o = gemm_helper.pv_step_k(2, v_p_1, v_packs_e7, v_o)
-                v_o = gemm_helper.pv_step_k(3, v_p_1, v_packs_e7, v_o)
-            else:
-                v_o = gemm_helper.pv(v_p_1, v_packs_e7, v_o)
-            m_tile_max_e7 = softmax_helper.reduce_max(v_s_0)
-            row_max_e7, rescale_e7 = softmax_helper.rescale_from_tile_max(m_row, m_tile_max_e7)
-            m_row = row_max_e7
-            v_s_0 = softmax_helper.sub_m(v_s_0, row_max_e7)
-            v_p_0 = softmax_helper.exp2(v_s_0, 0, 16)
-            _sched_barrier_pairs(traits, 10, 5, 8)
-            _sched_barrier_exp_pairs(traits, 6, 3, 8)
-            rocdl.sched_barrier(0)
-            softmax_helper.scale_o(v_o, rescale_e7)
-            v_o = softmax_helper.anchor_v_o(v_o)
-            if const_expr(traits.DUALWAVE_SWP_SETPRIO):
-                rocdl.s_setprio(0)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            kv_gmem_to_lds.load_v(max_m1 * traits.BLOCK_N, 1)
-            v_k = kv_lds_to_regs.load_k(1)
-            fx.rocdl.s_waitcnt(lgkmcnt=0)
-            _waitcnt_vm_n(ctx.NUM_DMA_V)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            v_s_1 = gemm_helper.qk(v_k, q_all_wide)
-            l_row = softmax_helper.apply_l_rescale(l_row, rescale_e7)
-            v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
-            l_row = softmax_helper.reduce_sum(l_row, v_p_0)
-            v_p_0 = softmax_helper.cast_p(v_p_0)
-            v_p_0 = softmax_helper.anchor_v_p(v_p_0)
-            _sched_barrier_exp_pairs(traits, 6, 3, 9)
-            _sched_barrier_pairs(traits, 10, 5, 9)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            v_packs_e11 = kv_lds_to_regs.load_v(0)
-            v_s_1 = softmax_helper.causal_mask_prologue_if_needed(
-                v_s_1,
-                max_m1,
-                ctx.split_t_end * traits.BLOCK_N,
-            )
-            fx.rocdl.s_waitcnt(lgkmcnt=0)
-            _waitcnt_vm_n(0)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            if const_expr(traits.D_CHUNKS > 4):
-                v_o = gemm_helper.pv_step_k(0, v_p_0, v_packs_e11, v_o)
-                v_o = gemm_helper.pv_step_k(1, v_p_0, v_packs_e11, v_o)
-                fx.rocdl.s_waitcnt(lgkmcnt=0)
-                v_o = gemm_helper.pv_step_k(2, v_p_0, v_packs_e11, v_o)
-                v_o = gemm_helper.pv_step_k(3, v_p_0, v_packs_e11, v_o)
-            else:
-                v_o = gemm_helper.pv(v_p_0, v_packs_e11, v_o)
-            m_tile_max_e11 = softmax_helper.reduce_max(v_s_1)
-            row_max_e11, rescale_e11 = softmax_helper.rescale_from_tile_max(m_row, m_tile_max_e11)
-            m_row = row_max_e11
-            v_s_1 = softmax_helper.sub_m(v_s_1, row_max_e11)
-            v_p_1 = softmax_helper.exp2(v_s_1, 0, 16)
-            _sched_barrier_pairs(traits, 9, 6, 10)
-            _sched_barrier_exp_pairs(traits, 7, 3, 10)
-            rocdl.sched_barrier(0)
-            v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
-            l_row = softmax_helper.apply_l_rescale(l_row, rescale_e11)
-            l_row = softmax_helper.reduce_sum(l_row, v_p_1)
-            v_p_1 = softmax_helper.cast_p(v_p_1)
-            v_p_1 = softmax_helper.anchor_v_p(v_p_1)
-            rocdl.sched_barrier(0)
-            softmax_helper.scale_o(v_o, rescale_e11)
-            v_o = softmax_helper.anchor_v_o(v_o)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            v_packs_e13 = kv_lds_to_regs.load_v(1)
-            fx.rocdl.s_waitcnt(lgkmcnt=0)
-            rocdl.sched_barrier(0)
-            rocdl.s_barrier()
-            rocdl.sched_barrier(0)
-
-            if const_expr(traits.D_CHUNKS > 4):
-                v_o = gemm_helper.pv_step_k(0, v_p_1, v_packs_e13, v_o)
-                v_o = gemm_helper.pv_step_k(1, v_p_1, v_packs_e13, v_o)
-                fx.rocdl.s_waitcnt(lgkmcnt=0)
-                v_o = gemm_helper.pv_step_k(2, v_p_1, v_packs_e13, v_o)
-                v_o = gemm_helper.pv_step_k(3, v_p_1, v_packs_e13, v_o)
-            else:
-                v_o = gemm_helper.pv(v_p_1, v_packs_e13, v_o)
-
-            # Apply V descale once after normalizing the native FP8 P*V result.
-            inv_l = softmax_helper.safe_l_inv(l_row)
-            inv_l = inv_l * ctx.vd_fp8
-            softmax_helper.scale_o(v_o, inv_l)
-
-            # Group A's extra barrier closes the prologue's phase shift before stores.
-            if const_expr(traits.DUALWAVE_SWP_ENABLE_STAGGER):
-                _stagger_extra_barrier_if_zero(ctx.stagger_i32)
-            else:
-                rocdl.s_barrier()
-
-            # 128b stores fuse this lane and its half-wave partner, so each pair
-            # covers 8 contiguous columns instead of two 64b stores.
-            output_store.store_final_o_if_valid(v_o, q_row)
-
-        if ctx.q_start < ctx.seqlen_q_v:
-            _run_q_block()
-
     @flyc.jit
     def launch_flash_attn_dualwave_swp(
         Q: fx.Tensor,
@@ -930,65 +457,34 @@ def build_flash_attn_paged_fp8_module(
             "rocdl.flat_work_group_size": f"{BLOCK_SIZE},{BLOCK_SIZE}",
             "passthrough": passthrough_entries,
         }
-        if const_expr(PAGED_BN128):
-            flash_attn_paged_fp8_bn128_kernel(
-                Q,
-                K,
-                V,
-                O,
-                DebugCounts,
-                CuSeqQ,
-                CuSeqKv,
-                BlockTable,
-                block_table_stride,
-                QDescale,
-                KDescale,
-                VDescale,
-                seq_len,
-                seq_len_kv,
-                stride_q_n,
-                stride_kv_n,
-                head_dim_runtime,
-                value_attrs=kernel_attrs,
-            ).launch(
-                grid=(
-                    NUM_HEADS_Q * BATCH_INTERLEAVE_GROUP,
-                    num_q_blocks,
-                    grid_z // BATCH_INTERLEAVE_GROUP,
-                ),
-                block=(BLOCK_SIZE, 1, 1),
-                stream=stream,
-            )
-        else:
-            flash_attn_dualwave_swp_fp8_gfx950_kernel(
-                Q,
-                K,
-                V,
-                O,
-                DebugCounts,
-                CuSeqQ,
-                CuSeqKv,
-                BlockTable,
-                block_table_stride,
-                QDescale,
-                KDescale,
-                VDescale,
-                seq_len,
-                seq_len_kv,
-                stride_q_n,
-                stride_o_n,
-                stride_kv_n,
-                head_dim_runtime,
-                value_attrs=kernel_attrs,
-            ).launch(
-                grid=(
-                    NUM_HEADS_Q * BATCH_INTERLEAVE_GROUP,
-                    num_q_blocks,
-                    grid_z // BATCH_INTERLEAVE_GROUP,
-                ),
-                block=(BLOCK_SIZE, 1, 1),
-                stream=stream,
-            )
+        flash_attn_paged_fp8_bn128_kernel(
+            Q,
+            K,
+            V,
+            O,
+            DebugCounts,
+            CuSeqQ,
+            CuSeqKv,
+            BlockTable,
+            block_table_stride,
+            QDescale,
+            KDescale,
+            VDescale,
+            seq_len,
+            seq_len_kv,
+            stride_q_n,
+            stride_o_n,
+            head_dim_runtime,
+            value_attrs=kernel_attrs,
+        ).launch(
+            grid=(
+                NUM_HEADS_Q * BATCH_INTERLEAVE_GROUP,
+                num_q_blocks,
+                grid_z // BATCH_INTERLEAVE_GROUP,
+            ),
+            block=(BLOCK_SIZE, 1, 1),
+            stream=stream,
+        )
 
     _dualwave_swp_compile_hints = {
         "fast_fp_math": True,
@@ -1002,13 +498,13 @@ def build_flash_attn_paged_fp8_module(
     launch_flash_attn_dualwave_swp.compile_hints = dict(_dualwave_swp_compile_hints)
 
     def _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride):
-        if not PAGED_BN128:
+        if not PAIRED_PAGE_IDS:
             return
         batch_size = int(batch_size)
         seq_len_kv = int(seq_len_kv)
         block_table_stride = int(block_table_stride)
         num_kv_pages = (seq_len_kv + traits.PAGE_SIZE - 1) // traits.PAGE_SIZE
-        if (not PAGED_BN128_VARLEN and batch_size != 1) or num_kv_pages < 2 or num_kv_pages % 2 != 0:
+        if (not USE_CU_SEQLENS and batch_size != 1) or num_kv_pages < 2 or num_kv_pages % 2 != 0:
             raise ValueError(
                 "paged BN128 requires batch_size=1 unless compiled for packed varlen, "
                 "and a positive even number "
