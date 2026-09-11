@@ -110,10 +110,10 @@ jobs:
           && needs.detect-changes.outputs.code_changed != 'true' }}
     name: test
     strategy:
+      # Must match the 'test' matrix below.
       matrix:
         runners: [
           'linux-flydsl-mi325-1',
-          'linux-flydsl-mi355-1',
           'linux-flydsl-mi35x-1',
           'linux-flydsl-navi-2',
         ]
@@ -296,7 +296,8 @@ jobs:
           ROCM_VERSION=7.2
           IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-cp310-cp314"
           if ! docker pull "${IMAGE}"; then
-            docker build \
+            # Use the runner's network for dnf/pip during the build, too.
+            docker build --network=host \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
               -t "${IMAGE}" \
               - < flydsl-test/.github/workflows/Dockerfile.manylinux_2_28
@@ -497,10 +498,13 @@ jobs:
       # Temporary quarantine for linux-flydsl-navi-2 GPU 1; see #858.
       CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || '' }}
     strategy:
+      # Must match the 'test-skip' matrix above, and must keep emitting the
+      # checks required by the 'main' ruleset. linux-flydsl-mi35x-1 covers both
+      # MI350 and MI355 machines; the MI355-only linux-flydsl-mi355-1 label is
+      # absent on purpose since it is the same gfx950 target.
       matrix:
         runners: [
           'linux-flydsl-mi325-1',
-          'linux-flydsl-mi355-1',
           'linux-flydsl-mi35x-1',
           'linux-flydsl-navi-2',
         ]
@@ -797,7 +801,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Multi-GPU communication operator tests: ONLY for 8-GPU runners.
-  # Runs on linux-flydsl-mi325-8, linux-flydsl-mi355-8, and linux-flydsl-mi35x-8 independently.
+  # Runs on linux-flydsl-mi325-8 and linux-flydsl-mi355-8 independently
+  # (linux-flydsl-mi35x-8 is omitted: same gfx950 target as mi355-8).
   # Triggered when PR has label "multi-gpu" (added by a maintainer), or when
   # the workflow is manually dispatched.
   # fail-fast: false ensures both runners always complete even if one fails.
@@ -826,7 +831,6 @@ jobs:
         runners: [
           'linux-flydsl-mi325-8',
           'linux-flydsl-mi355-8',
-          'linux-flydsl-mi35x-8',
         ]
       fail-fast: false
     runs-on: ${{ matrix.runners }}

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright (c) 2026 FlyDSL Project Contributors -->
+
 # Storage and Allocator
 
 Allocating memory does not hand you a value — it hands you an *address*, and the type is what says

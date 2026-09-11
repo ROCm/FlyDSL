@@ -18,6 +18,11 @@ an optimization plan.
 All analysis is done programmatically via `hotspot_analyzer.py` + `code.json`.
 Do **not** use GUI tools.
 
+> If the question is only "did my change increase register pressure, spills, or
+> LDS?", use `/isa-resource-diff` first — it is compile-only, needs no GPU or
+> profiler run, and answers in seconds. Come here when you need to know *why* a
+> kernel is slow rather than *what resources it uses*.
+
 ## Arguments
 
 | Argument | Description |

@@ -1917,8 +1917,8 @@ def test_moe_gemm2_num_valid_ids_guard_int8smooth():
 # When invoked with args (e.g. `python test_moe_gemm_2stage.py --in_dtype fp8
 # -dim 8192,8192 -t 32768 ...`) this file becomes a benchmark harness for the
 # moe_gemm_2stage package: it times stage1, and stage2 in both atomic and reduce
-# modes, printing the log lines that scripts/run_benchmark.sh already parses
-# (see _emit_moe_s2_rows and the stage1 grep block in that script). With no args
+# modes, printing ``FlyDSL MoE stage{1,2}[...]`` lines with ``TFLOPS=`` / ``TB/s=``
+# fields that scripts/run_benchmark.sh parses via _emit_moe_rows. With no args
 # it falls back to pytest so `pytest` and direct invocation both keep working.
 # ---------------------------------------------------------------------------
 
@@ -2126,9 +2126,9 @@ def _bench_stage1(args, *, dtype_tag):
     tflops = flops / (us * 1e-6) / 1e12
     tbps = tb / (us * 1e-6) / 1e12
     print(
-        f"FlyDSL MoE stage1[{dtype_tag}]: cos={cos:.5f} | "
-        f"t{tokens}-d{model_dim}x{inter_dim}-e{experts}k{topk} | "
-        f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+        f"FlyDSL MoE stage1[{dtype_tag}]: cos={cos:.5f} "
+        f"t{tokens}-d{model_dim}x{inter_dim}-e{experts}k{topk} "
+        f"{us:.1f} us TFLOPS={tflops:.2f} TB/s={tbps:.3f}"
     )
 
 
@@ -2235,8 +2235,8 @@ def _bench_stage2(args, *, dtype_tag, accumulate):
     mode = "atomic" if accumulate else "reduce"
     shape = f"t{tokens}-d{model_dim}x{inter_dim}-e{experts}k{topk}"
     print(
-        f"FlyDSL MoE stage2 [moe_gemm2] {dtype_tag} {mode} | {shape} | "
-        f"cos={cos:.5f} | {us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+        f"FlyDSL MoE stage2[{dtype_tag}] {mode}: {shape} cos={cos:.5f} "
+        f"{us:.1f} us TFLOPS={tflops:.2f} TB/s={tbps:.3f}"
     )
 
 

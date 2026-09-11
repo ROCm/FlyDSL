@@ -696,7 +696,7 @@ def _gemm1_body_a16w4(
                     y = _silu_mul_batch([g], [u])[0]
                 yb = y.to(fx.BFloat16)
                 out_idx = sorted_row * inter_i32 + col_g_list[ni]
-                buffer_ops.buffer_store(yb, _raw(out_rsrc), _raw(out_idx), mask=valid)
+                buffer_ops.buffer_store(yb, out_rsrc, _raw(out_idx), mask=valid)
 
 
 def gemm1_a16w4_grid(BM, *, INTER, TILE_N, max_m_blocks):

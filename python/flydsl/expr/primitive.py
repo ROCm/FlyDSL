@@ -17,7 +17,6 @@ from .._mlir.dialects import arith as _arith
 from .._mlir.dialects import fly
 from .._mlir.dialects.fly import (
     AddressSpace,
-    AtomicOp,
     BasisType,
     CachePolicy,
     ComposedLayoutType,
@@ -42,7 +41,7 @@ from .._mlir.dialects.fly import (
     has_none,
 )
 from .._mlir.extras import types as T
-from .enum import SyncScope
+from .enum import AtomicOp, SyncScope
 from .meta import dsl_loc_tracing, dsl_wrap_result
 
 __all__ = [
@@ -1214,18 +1213,18 @@ def apply_swizzle(ptr, swizzle):
 
 
 @dsl_loc_tracing
-@dsl_wrap_result
 def ptr_load(ptr, result_type=None):
     """Load one value (scalar or vector) from *ptr*; dtype defaults to ptr's element type.
 
     Examples:
         v = ptr_load(ptr)
     """
+    from .typing import as_dsl_value
+
     if result_type is None:
         result_type = ptr.element_type
-    if not isinstance(result_type, ir.Type):
-        result_type = result_type.ir_type
-    return fly.ptr_load(result_type, ptr)
+    ir_result_type = result_type if isinstance(result_type, ir.Type) else result_type.ir_type
+    return as_dsl_value(fly.ptr_load(ir_result_type, ptr), result_type)
 
 
 @dsl_loc_tracing

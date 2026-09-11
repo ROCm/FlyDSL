@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright (c) 2026 FlyDSL Project Contributors -->
+
 # Composite Types
 
 A composite gives one name to several DSL values. There are exactly two forms — `@fx.struct`, a
