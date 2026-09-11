@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-11T12:40:34Z",
+ "updated": "2026-09-11T15:15:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34614690334,
+   "pr": 1123,
+   "commit": "eaa041569024b58e1d94ff51871825574504ad77",
+   "branch": "codex/minimax-mxfp8-moe-8wave",
+   "event": "pull_request",
+   "title": "Add grouped eight-wave MXFP8 MoE prefill kernels",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34614690334",
+   "created_at": "2026-09-11T15:11:58Z",
+   "updated_at": "2026-09-11T15:12:42Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34610405845,
+   "pr": 1123,
+   "commit": "98c47b5810c510e4f7666cdbdbff95e642efc7d5",
+   "branch": "codex/minimax-mxfp8-moe-8wave",
+   "event": "pull_request",
+   "title": "Add grouped eight-wave MXFP8 MoE prefill kernels",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34610405845",
+   "created_at": "2026-09-11T14:29:15Z",
+   "updated_at": "2026-09-11T15:12:34Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-11T15:07:51Z",
+     "completed_at": "2026-09-11T15:12:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34610405845/job/103312100995"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-11T15:07:35Z",
+     "completed_at": "2026-09-11T15:11:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34610405845/job/103312101020"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-11T15:07:44Z",
+     "completed_at": "2026-09-11T15:12:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34610405845/job/103312101033"
+    }
+   ]
+  },
   {
    "run_id": 34590686084,
    "pr": 1122,
@@ -10,11 +68,11 @@
    "branch": "matthias.reject-lds-dma-on-gfx11",
    "event": "pull_request",
    "title": "Reject global->LDS direct loads on gfx11",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34590686084",
    "created_at": "2026-09-11T10:44:36Z",
-   "updated_at": "2026-09-11T11:00:40Z",
+   "updated_at": "2026-09-11T15:08:16Z",
    "actor": "mgehre-amd",
    "jobs": [
     {
@@ -40,9 +98,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-11T11:00:40Z",
+     "started_at": "2026-09-11T15:08:15Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34590686084/job/103239042606"
     }
@@ -1889,67 +1947,6 @@
    "updated_at": "2026-09-10T01:07:50Z",
    "actor": "jli-melchior",
    "jobs": []
-  },
-  {
-   "run_id": 34424095622,
-   "pr": 1114,
-   "commit": "e87126a55edf857e06f2412799cd0928d056025c",
-   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
-   "event": "pull_request",
-   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34424095622",
-   "created_at": "2026-09-10T01:06:07Z",
-   "updated_at": "2026-09-10T01:07:13Z",
-   "actor": "Boss2002n",
-   "jobs": []
-  },
-  {
-   "run_id": 34367555883,
-   "pr": 1112,
-   "commit": "5795b61b5383480859b17e7a3f20c4fc226565a7",
-   "branch": "ci/mi35x-1-runner",
-   "event": "pull_request",
-   "title": "[CI] Move 1-GPU tests to linux-flydsl-mi35x-1 and filter MI350 from the perf dashboard",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34367555883",
-   "created_at": "2026-09-09T15:02:02Z",
-   "updated_at": "2026-09-10T04:18:31Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T15:34:30Z",
-     "completed_at": "2026-09-09T15:48:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34367555883/job/102531656486",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T15:33:15Z",
-     "completed_at": "2026-09-09T16:47:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34367555883/job/102531656518",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T02:45:56Z",
-     "completed_at": "2026-09-10T04:18:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34367555883/job/102531656566",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
