@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-11T16:27:01Z",
+ "updated": "2026-09-11T16:32:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34622262193,
+   "pr": 1123,
+   "commit": "adab80586372fcd41c6cbd87aa6c2bc9ba4c8a66",
+   "branch": "codex/minimax-mxfp8-moe-8wave",
+   "event": "pull_request",
+   "title": "Add grouped eight-wave MXFP8 MoE prefill kernels",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34622262193",
+   "created_at": "2026-09-11T16:29:16Z",
+   "updated_at": "2026-09-11T16:31:16Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34614690334,
    "pr": 1123,
@@ -10,29 +25,29 @@
    "branch": "codex/minimax-mxfp8-moe-8wave",
    "event": "pull_request",
    "title": "Add grouped eight-wave MXFP8 MoE prefill kernels",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34614690334",
    "created_at": "2026-09-11T15:11:58Z",
-   "updated_at": "2026-09-11T15:46:03Z",
+   "updated_at": "2026-09-11T16:30:54Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-11T15:46:50Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T16:30:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34614690334/job/103324862246"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-11T15:46:03Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T16:29:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34614690334/job/103324862301"
     },
     {
@@ -1962,21 +1977,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34424152627,
-   "pr": 1114,
-   "commit": "e87126a55edf857e06f2412799cd0928d056025c",
-   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
-   "event": "pull_request",
-   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34424152627",
-   "created_at": "2026-09-10T01:06:57Z",
-   "updated_at": "2026-09-10T01:07:50Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
