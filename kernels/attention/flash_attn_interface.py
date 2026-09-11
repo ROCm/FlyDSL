@@ -34,6 +34,7 @@ from kernels.attention.flash_attn_utils import (
     DUALWAVE_SWP_BLOCK_M,
     MIN_Q_BLOCKS_XCD_SWIZZLE,
     NUM_XCD_GFX950,
+    PAGED_FP8_BUFFER_LIMIT_BYTES,
     bias_addressing_error,
     dualwave_splitk_workspace_elems,
 )
@@ -478,8 +479,11 @@ def _build_paged_fp8(
     use_bn128: bool,
     paged_bn128_varlen: bool,
     batch_interleave_group: int,
+    page_size: int = 64,
+    kv_cache_layout: str = "vectorized",
+    cache_buffered: bool = False,
 ):
-    """Build the gfx950 packed-varlen, vectorized page-64 FP8 launcher."""
+    """Build the gfx950 packed-varlen paged FP8 launcher for a physical cache ABI."""
     from kernels.attention.flash_attn_fp8_paged_gfx950 import build_flash_attn_paged_fp8_module
 
     return build_flash_attn_paged_fp8_module(
@@ -496,10 +500,12 @@ def _build_paged_fp8(
         varlen=True,
         cross_seqlen=True,
         paged=True,
-        kv_cache_layout="vectorized",
+        kv_cache_layout=kv_cache_layout,
         paged_bn128=use_bn128,
         paged_bn128_varlen=paged_bn128_varlen,
         batch_interleave_group=batch_interleave_group,
+        page_size=page_size,
+        cache_buffered=cache_buffered,
     )
 
 
@@ -559,18 +565,18 @@ def _flydsl_flash_attn_paged(
 ) -> torch.Tensor:
     """Native paged-KV attention on the gfx950 dualwave kernel.
 
-    Supported config ONLY (anything else raises): linear/vectorized cache layout
-    with page size 64 and vLLM ``block_table`` / ``seqlen_k`` metadata. BF16/F16
-    support D64/D128. gfx950 FP8 additionally supports packed-varlen causal
-    Q/K D128 with V/output D128, or Q/K D192 with vectorized V/output
-    D128 or D192.
+    BF16/F16 support page-64 linear/vectorized caches and D64/D128. gfx950
+    FP8 supports packed-varlen causal QK/V widths 128/128, 192/128, 192/192,
+    with vectorized page-16/64/1024 caches or linear/linear3d page-1 caches.
+    All paths use vLLM ``block_table`` / ``seqlen_k`` metadata.
     - Dense 4D Q ``[B, Sq, H, D]``: split-K (num_kv_splits>1) supported (seq_len>=384).
     - Varlen packed Q ``[total_q, H, D]`` (cu_seqlens_q given): paged K/V looked up
       per kv-tile via block_table; paged split-K is not supported.
     """
-    if kv_cache_layout not in ("linear", "vectorized"):
+    if kv_cache_layout not in ("linear", "linear3d", "vectorized"):
         raise NotImplementedError(
-            f"flydsl_flash_attn_func: native paged KV supports kv_cache_layout in ('linear','vectorized'), "
+            "flydsl_flash_attn_func: native paged KV supports kv_cache_layout in "
+            "('linear','linear3d','vectorized'), "
             f"got {kv_cache_layout!r}"
         )
     if block_table is None or seqlen_k is None:
@@ -580,7 +586,10 @@ def _flydsl_flash_attn_paged(
         # aiter 5D: K [NumBlocks, Hkv, D/kVS, PageSize, kVS], V [NumBlocks, Hkv, PageSize/kVS, D, kVS].
         if k.dim() != 5 or v.dim() != 5:
             raise ValueError(f"flydsl_flash_attn_func: vectorized paged K/V must be 5D, got K{k.dim()}D V{v.dim()}D")
-    elif k.dim() != 4:
+    elif kv_cache_layout == "linear3d":
+        if k.dim() != 3 or v.dim() != 3:
+            raise ValueError("flydsl_flash_attn_func: linear3d paged K/V must be 3D [NumBlocks,Hkv,D]")
+    elif k.dim() != 4 or v.dim() != 4:
         raise ValueError(
             f"flydsl_flash_attn_func: linear paged K/V must be 4D [NumBlocks,PageSize,Hkv,D], got {k.dim()}D"
         )
@@ -611,6 +620,8 @@ def _flydsl_flash_attn_paged(
         kvs = 16 // k.element_size()
         Hkv = int(k.shape[1])
         page_size = int(k.shape[3])
+        if page_size % kvs:
+            raise ValueError(f"flydsl_flash_attn_func: vectorized page size must be divisible by kVS={kvs}")
         k_head_dim = int(k.shape[2]) * int(k.shape[4])  # (D/kVS) * kVS
         if int(k.shape[4]) != kvs:
             raise ValueError(f"flydsl_flash_attn_func: vectorized K last dim ({k.shape[4]}) must equal kVS={kvs}")
@@ -620,6 +631,13 @@ def _flydsl_flash_attn_paged(
             raise ValueError(
                 f"flydsl_flash_attn_func: vectorized V tail must be {expected_v_tail}, got {tuple(v.shape[1:])}"
             )
+    elif kv_cache_layout == "linear3d":
+        page_size = 1
+        Hkv = int(k.shape[1])
+        k_head_dim = int(k.shape[2])
+        value_head_dim = int(v.shape[2])
+        if int(v.shape[1]) != Hkv:
+            raise ValueError("flydsl_flash_attn_func: linear3d K/V must have matching KV head counts")
     else:
         page_size = int(k.shape[1])
         Hkv = int(k.shape[2])
@@ -629,25 +647,32 @@ def _flydsl_flash_attn_paged(
             raise ValueError(
                 f"flydsl_flash_attn_func: linear V must match K page/head axes, got K{tuple(k.shape)} V{tuple(v.shape)}"
             )
-    if page_size != _PAGED_PAGE_SIZE:
+    supported_page_sizes = (1, 16, 64, 1024) if paged_fp8 else (_PAGED_PAGE_SIZE,)
+    if page_size not in supported_page_sizes:
         raise NotImplementedError(
-            f"flydsl_flash_attn_func: native paged KV supports page_size={_PAGED_PAGE_SIZE} only, got {page_size}"
+            f"flydsl_flash_attn_func: native paged KV supports page sizes {supported_page_sizes}, got {page_size}"
         )
     if k_head_dim != D:
         raise ValueError(f"flydsl_flash_attn_func: paged K head_dim ({k_head_dim}) must match q head_dim ({D})")
     if paged_fp8:
+        if k.shape[0] != v.shape[0]:
+            raise ValueError("flydsl_flash_attn_func: paged FP8 K/V must have matching physical page counts")
+        if num_kv_heads is not None and num_kv_heads != Hkv:
+            raise ValueError("flydsl_flash_attn_func: num_kv_heads must match the paged FP8 cache")
         if not arch.startswith("gfx950"):
             raise ValueError(f"flydsl_flash_attn_func: paged FP8 requires gfx950, got '{arch or 'unknown'}'")
         fp8_head_dims = (D, value_head_dim)
+        native_layout = (vectorized and page_size != 1) or (not vectorized and page_size == 1)
         if not (
             causal
             and varlen
             and cross_seqlen is not False
-            and vectorized
+            and native_layout
             and fp8_head_dims in ((128, 128), (192, 128), (192, 192))
         ):
             raise NotImplementedError(
-                "flydsl_flash_attn_func: paged FP8 requires causal packed-varlen vectorized KV, "
+                "flydsl_flash_attn_func: paged FP8 requires causal packed-varlen KV, "
+                "vectorized page-16/64/1024 or linear/linear3d page-1 caches, "
                 f"Q/K-V D128-D128, D192-D128, or D192-D192; got causal={causal}, varlen={varlen}, "
                 f"layout={kv_cache_layout!r}, Q/K D{D}, V D{value_head_dim}"
             )
@@ -736,6 +761,11 @@ def _flydsl_flash_attn_paged(
             f"got shape={tuple(seqlen_k.shape)} dtype={seqlen_k.dtype} device={seqlen_k.device}"
         )
     block_table_stride = int(block_table.shape[1])
+    if paged_fp8 and (block_table.shape[0] != B or block_table_stride < max_kv_pages):
+        raise ValueError(
+            f"flydsl_flash_attn_func: paged FP8 block_table must have {B} rows and at least {max_kv_pages} "
+            f"physical page entries per row, got {tuple(block_table.shape)}"
+        )
     expected_out_shape = (*q.shape[:-1], value_head_dim)
     q_flat_elems = q.numel()
     out_flat_elems = q_flat_elems // D * value_head_dim
@@ -772,7 +802,7 @@ def _flydsl_flash_attn_paged(
             and (not arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
         )
         if paged_fp8:
-            use_bn128 = max_kv_pages % 2 == 0
+            use_bn128 = page_size == 64 and max_kv_pages % 2 == 0
             paged_bn128_varlen = use_bn128 and B > 1
             exe = _build_paged_fp8(
                 num_heads=H,
@@ -788,6 +818,12 @@ def _flydsl_flash_attn_paged(
                     _paged_fp8_batch_interleave_group(B, fp8_head_dims, paired=use_bn128)
                     if H == 16 and num_kv_heads == 1
                     else 1
+                ),
+                page_size=page_size,
+                kv_cache_layout=kv_cache_layout,
+                cache_buffered=(
+                    page_size in (1, 16)
+                    and max(k.numel() * k.element_size(), v.numel() * v.element_size()) <= PAGED_FP8_BUFFER_LIMIT_BYTES
                 ),
             )
         elif _paged_light_ok:
@@ -837,7 +873,7 @@ def _flydsl_flash_attn_paged(
             if out is None:
                 out_dtype = torch.bfloat16 if paged_fp8 else q.dtype
                 out = torch.empty(expected_out_shape, dtype=out_dtype, device=q.device)
-            # Keep serving-sized physical K/V caches rank-5 because flattening
+            # Keep serving-sized physical K/V caches in their native rank because flattening
             # their dynamic memref shape can exceed signed int32. The FP8
             # schedule consumes Q/O as flat token-major buffers, matching its
             # explicit runtime strides.
@@ -987,7 +1023,7 @@ def flydsl_flash_attn_func(
            ``kv_cache_layout`` values:
            - ``linear``: 4D paged K/V, ``[NumBlocks, PageSize, NumKVHeads, HeadDim]``.
            - ``linear3d``: page_size=1 special case,
-             ``[NumBlocks, NumKVHeads, HeadDim]``.
+             ``[NumBlocks, NumKVHeads, HeadDim]`` (gfx950 FP8 only).
            - ``vectorized``: aiter-style 5D K/V, where
              ``K = [NumBlocks, NumKVHeads, HeadDim / kVectorSize, PageSize, kVectorSize]``
              and
@@ -1006,8 +1042,9 @@ def flydsl_flash_attn_func(
         block_table / seqlen_k: vLLM-style 2D block table metadata. Enables the
             native paged-KV path, which supports ``bias`` but not
             ``alibi_slopes``, ``sink``, or ``return_lse``. gfx950 FP8 supports
-            causal packed-varlen vectorized page-64 D128/V128 and
-            D192/V128-or-V192 paths.
+            causal packed-varlen D128/V128 and D192/V128-or-V192 paths,
+            with vectorized page sizes 16/64/1024 or linear/linear3d page 1.
+            BF16/F16 native paged paths require page size 64.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
             ``None`` lets fp8 autotune it; ``1`` keeps the kernel unsplit.
         fp8_block_m: Pin the fp8 tile height to 128 or 256. fp8 only.
