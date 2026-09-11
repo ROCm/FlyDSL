@@ -26,6 +26,7 @@ to GPU/ROCDL.
       * :doc:`Arithmetic types <language/arithmetic_types>`
       * :doc:`Composite types <language/composite_types>`
       * :doc:`Storage and allocator <language/storage_and_allocator>`
+      * :doc:`DSL protocols <language/dsl_protocols>`
 
    .. grid-item-card:: Extension
 

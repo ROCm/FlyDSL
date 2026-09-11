@@ -138,7 +138,8 @@ launch(data, stream=fx.Stream(stream))
 
 ### 2.5 Custom argument types
 
-Register new Python types for the JIT boundary:
+Register a raw Python type with a `JitArgument` adapter and the `DslType` that
+will appear inside the traced function:
 
 ```python
 from flydsl.compiler import JitArgumentRegistry
@@ -151,9 +152,15 @@ class MyCustomAdaptor:
     def __get_ir_types__(self):
         return [...]  # MLIR types for this argument
 
-    def __get_c_pointers__(self):
-        return [...]  # ctypes pointers for invocation
+    def __cache_signature__(self):
+        return (...)  # every property that can change generated code
+
+    def __c_abi_spec__(self):
+        return [...]  # ordered (ctypes storage type, fill(argument, storage)) slots
 ```
+
+The adapter's C-ABI slots may outnumber its MLIR types (for example, a dynamic
+memref has data and layout slots).
 
 ---
 
