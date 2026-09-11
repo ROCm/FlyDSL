@@ -1,0 +1,324 @@
+:root {
+  --pst-font-size-base: 0.875rem;
+}
+
+@media screen and (min-width: 440px) {
+  :root {
+    --pst-font-size-base: 1rem;
+  }
+}
+
+@media screen and (min-width: 2000px) {
+  :root {
+    --pst-font-size-base: 1.25rem;
+  }
+}
+
+.mx-40 {
+  margin-left: 1rem !important;
+  margin-right: 1rem !important;
+}
+
+.my-25 {
+  margin-top: 0.25rem !important;
+  margin-bottom: 0.25rem !important;
+}
+
+.py-45 {
+  padding-bottom: 1.625rem !important;
+  padding-top: 1.625rem !important;
+}
+
+.hover-opacity {
+  transition: 0.28s;
+}
+
+.hover-opacity:hover {
+  opacity: 0.7;
+}
+
+.klavika-font {
+  font-family: Klavika, arial, sans-serif;
+  font-size: 1.375rem;
+}
+
+/* for the light theme */
+html[data-theme="light"] {
+  --link-color: #0051c6;
+}
+
+/* for the dark theme */
+html[data-theme="dark"] {
+  --link-color: #2899ff;
+  .line{
+    color: #fff;
+  };
+}
+
+div#site-navigation {
+  height: fit-content;
+  min-height: calc(100vh - 190px);
+}
+
+div.content-container {
+  overflow-y: clip;
+}
+
+.hovertext {
+  position: relative;
+  /* border-bottom: 1px dotted black; */
+}
+
+.hovertext:before {
+  content: attr(data-hover);
+  visibility: hidden;
+  opacity: 0;
+  width: 140px;
+  background-color: black;
+  color: #fff;
+  text-align: center;
+  border-radius: 5px;
+  padding: 5px 0;
+  transition: opacity 0.5s ease-in-out;
+
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  top: 110%;
+}
+
+.hovertext:hover:before {
+  opacity: 1;
+  visibility: visible;
+}
+
+div#rdc-watermark-container {
+  pointer-events: none;
+  position: fixed;
+  height: 100vh;
+  width: 100vw;
+  top: 0;
+  left: 0;
+  z-index: 2000;
+}
+
+img#rdc-watermark {
+  pointer-events: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform-origin: center;
+  transform: translate(-50%, -50%) rotate(-45deg);
+  opacity: 10%;
+  z-index: 2000;
+  max-width: 100%;
+  max-height: calc(100% - 200px);
+  object-fit: contain;
+  width: 45%;
+  opacity: 20%;
+}
+
+ul.bd-breadcrumbs {
+  margin-bottom: 0;
+  margin-top: 1px;
+  margin-left: 1rem;
+}
+
+ul.bd-breadcrumbs li.breadcrumb-item {
+  align-items: baseline;
+  align-self: baseline;
+}
+
+.bd-sidebar-primary {
+  top: 3.5rem;
+  height: calc(100vh - 3.5rem);
+}
+
+.sbt-scroll-pixel-helper {
+  top: 3.5rem !important;
+}
+
+@media (min-width: 576px) and (max-width: 959.98px) {
+  .bd-sidebar-primary {
+    top: 5.5rem;
+    height: calc(100vh - 5.5rem);
+  }
+}
+
+@media(min-width: 960px) {
+  .bd-sidebar-primary {
+    top: 0;
+    height: 100vh;
+  }
+}
+
+@media(min-width: 576px) {
+  .sbt-scroll-pixel-helper {
+    top: 5.5rem !important;
+  }
+}
+
+@media(min-width: 1200px) {
+  .sbt-scroll-pixel-helper {
+    top: 9.5rem !important;
+  }
+}
+
+.header-article-items__start {
+  display: flex;
+}
+
+.bd-header-article .article-header-buttons {
+  align-items: start;
+}
+
+.bd-sidebar-primary .sidebar-header-items {
+  display: flex;
+  flex-direction: column;
+}
+
+.bd-container .primary-toggle>span {
+  transform-origin: 50%, 50%;
+  transition: transform 0.3s ease-in-out;
+  transform: rotate(0);
+}
+
+input#__primary:checked ~ .bd-container .primary-toggle>span {
+  transform: rotate(180deg);
+}
+
+a#ot-sdk-btn {
+  background: none !important;
+  border: none !important;
+  padding: 0 !important;
+  color: #9d9fa2 !important;
+}
+
+.bd-sidebar-primary.bd-sidebar.noprint {
+  gap: 0px !important;
+}
+
+.navbar-brand.logo {
+  align-items: flex-start !important;
+  padding: 0px !important;
+  font-size: 1rem !important;
+}
+
+.navbar-brand .logo__title {
+  text-align: left !important;
+}
+
+/* Fix for sidebar width mismatch between Bootstrap and the Sphinx Book Theme */
+@media (min-width: 960px) {
+  input#__primary:checked ~ .bd-container .bd-sidebar-primary {
+    margin-left: -20%;
+    visibility: hidden;
+    opacity: 0;
+  }
+  .bd-sidebar-primary {
+    flex-basis: 20%;
+  }
+
+  .bd-container .primary-toggle>span {
+    transform: rotate(180deg);
+  }
+
+  input#__primary:checked ~ .bd-container .primary-toggle>span {
+    transform: rotate(0);
+  }
+}
+
+.sd-card-body.rocm-card-banner {
+  padding-top: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.sd-card-body.rocm-card-banner>* {
+  margin-left: 1rem;
+  margin-right: 1rem;
+  --rocm-color-card-banner-bg: 0 0 0;
+  --rocm-color-card-banner-text: white;
+}
+
+.sd-card-body.rocm-card-banner .sd-card-title {
+  margin: 0 0 0 0;
+  padding: 1rem 1rem 1rem;
+  font-family: sans-serif;
+  background-color: var(--rocm-color-card-banner-bg);
+  background-image: linear-gradient(to right,
+                      rgb(var(--rocm-color-card-banner-bg) / 80%) 1rem,
+                      rgb(var(--rocm-color-card-banner-bg) / 15%) 10rem,
+                      transparent 16rem),
+                    linear-gradient(to top,
+                      transparent,
+                      rgb(var(--rocm-color-card-banner-bg) / 20%) 25% 60%,
+                      transparent),
+                      url(images/banner-violet.jpg);
+  background-size: cover;
+  background-position: bottom left;
+  color: var(--rocm-color-card-banner-text);
+}
+
+.sd-card-body.rocm-card-banner .sd-card-title * {
+  color: var(--rocm-color-card-banner-text);
+}
+
+.sd-card-body.rocm-card-banner>.sd-card-title a:hover {
+  color: var(--rocm-color-card-banner-text);
+}
+
+/* Hue rotation classes */
+/* .rocm-hue-1 doesn't apply any transform */
+
+.sd-card-body.rocm-hue-2 .sd-card-title {
+  filter: hue-rotate(-50deg);
+}
+
+.sd-card-body.rocm-hue-3 .sd-card-title {
+  filter: hue-rotate(-75deg);
+}
+
+.sd-card-body.rocm-hue-4 .sd-card-title {
+  filter: hue-rotate(-100deg);
+}
+
+.sd-card-body.rocm-hue-5 .sd-card-title {
+  filter: hue-rotate(-125deg);
+}
+
+.sd-card-body.rocm-hue-6 .sd-card-title {
+  filter: hue-rotate(-150deg);
+}
+
+.sd-card-body.rocm-hue-7 .sd-card-title {
+  filter: hue-rotate(-175deg);
+}
+
+.sd-card-body.rocm-hue-8 .sd-card-title {
+  filter: hue-rotate(-200deg);
+}
+
+.sd-card-body.rocm-hue-9 .sd-card-title {
+  filter: hue-rotate(-225deg);
+}
+
+.sd-card-body.rocm-hue-10 .sd-card-title {
+  filter: hue-rotate(-250deg);
+}
+
+.sd-card-body.rocm-hue-11 .sd-card-title {
+  filter: hue-rotate(-275deg);
+}
+
+.sd-card-body.rocm-hue-12 .sd-card-title {
+  filter: hue-rotate(-300deg);
+}
+
+article :not(p) img {
+  margin-bottom: 1rem;
+}
+
+#rocm-banner {
+  color: #80dfff;
+}
