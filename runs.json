@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-11T07:35:48Z",
+ "updated": "2026-09-11T07:41:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34575338851,
+   "pr": null,
+   "commit": "68345e187d2e517c1643911b248216d123afe01b",
+   "branch": "main",
+   "event": "push",
+   "title": "fix(ci): use host networking for manylinux image builds (#1118)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851",
+   "created_at": "2026-09-11T07:38:36Z",
+   "updated_at": "2026-09-11T07:39:26Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34574857685,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Perf][Dialect] Fold redundant index cast pairs in layout lowering (#\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34574857685",
    "created_at": "2026-09-11T07:32:26Z",
-   "updated_at": "2026-09-11T07:33:39Z",
+   "updated_at": "2026-09-11T07:38:41Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1837,52 +1852,6 @@
      "started_at": "2026-09-09T15:19:40Z",
      "completed_at": "2026-09-09T16:37:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336723109/job/102525974648"
-    }
-   ]
-  },
-  {
-   "run_id": 34336099587,
-   "pr": null,
-   "commit": "ed70142704e1a6d5563fb53e1607e3a4b85d7111",
-   "branch": "main",
-   "event": "push",
-   "title": "[Chore] pre commit formatter (#1102)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587",
-   "created_at": "2026-09-09T09:41:14Z",
-   "updated_at": "2026-09-09T11:56:11Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T09:57:46Z",
-     "completed_at": "2026-09-09T10:15:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530761",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T10:40:58Z",
-     "completed_at": "2026-09-09T11:56:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530878",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T09:58:04Z",
-     "completed_at": "2026-09-09T11:29:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336099587/job/102420530918",
-     "log_fetch_failed": true
     }
    ]
   }
