@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-11T09:55:49Z",
+ "updated": "2026-09-11T10:02:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34586826461,
+   "pr": 1121,
+   "commit": "bbbf40aa2d9b8cccd28af9394b192826ccdc6e07",
+   "branch": "pr/ci-skip-noncode-gpu",
+   "event": "pull_request",
+   "title": "[CI] Skip GPU tests for more non-code path changes",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586826461",
+   "created_at": "2026-09-11T09:57:46Z",
+   "updated_at": "2026-09-11T09:59:22Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 34586527365,
    "pr": 1120,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586527365",
    "created_at": "2026-09-11T09:54:01Z",
-   "updated_at": "2026-09-11T09:54:41Z",
+   "updated_at": "2026-09-11T09:58:13Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -201,11 +216,11 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645",
    "created_at": "2026-09-11T08:02:27Z",
-   "updated_at": "2026-09-11T08:34:33Z",
+   "updated_at": "2026-09-11T10:00:08Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
@@ -231,11 +246,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T08:30:21Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645/job/103199137680"
+     "completed_at": "2026-09-11T10:00:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645/job/103199137680",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1869,21 +1885,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34363950506,
-   "pr": 1114,
-   "commit": "9ac1ef7fdbca9759d369c098b1f7b60b37444099",
-   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
-   "event": "pull_request",
-   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34363950506",
-   "created_at": "2026-09-09T14:29:33Z",
-   "updated_at": "2026-09-09T14:52:13Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
