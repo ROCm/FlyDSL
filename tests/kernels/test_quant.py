@@ -24,14 +24,11 @@ import pytest
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, gpu, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.numeric import Float16, Float32, Int8
 from flydsl.expr.typing import Int32, ReductionOp, T, Vector, full
 from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from tests.test_common import run_perftest
 
 try:
@@ -85,24 +82,21 @@ def build_quant_module(N):
     Returns (launch_fn, config) where launch_fn(Input, Output, Scales, M)
     runs the quantization kernel.
     """
-    arch = get_rocm_arch()
-
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     num_tiles = (N + tile_cols - 1) // tile_cols
     RED_SLOTS = max(1, BLOCK_THREADS // WARP_SIZE)
 
-    allocator = SmemAllocator(None, arch=arch)
-    red_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = red_offset + RED_SLOTS * 4  # f32 scratch
+    @fx.struct
+    class SharedStorage:
+        s_red: fx.Array[fx.Float32, RED_SLOTS, 16]
 
     @flyc.kernel
     def quant_kernel(Input: fx.Tensor, Output: fx.Tensor, Scales: fx.Tensor):
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
 
-        base_ptr = allocator.get_base()
-        s_red = SmemPtr(base_ptr, red_offset, T.f32, shape=(RED_SLOTS,))
-        s_red.get()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
 
         # ── Wave / block reduction (max) ─────────────────────────────────
         def wave_reduce_max(x):
@@ -125,25 +119,21 @@ def build_quant_module(N):
             w = wave_reduce_max(val)
 
             if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
-                wave_idx = arith.index_cast(T.index, wave)
-                SmemPtr.store(s_red, w, [wave_idx])
+                fx.memref_store(w, s_red, fx.Int32(wave))
             gpu.barrier()
 
             if arith.cmpi(arith.CmpIPredicate.eq, wave, Int32(0)):
                 in_range = lane < RED_SLOTS
                 lane_safe = arith.select(in_range, lane, Int32(0))
-                lane_safe_idx = arith.index_cast(T.index, lane_safe)
-                v = SmemPtr.load(s_red, [lane_safe_idx])
+                v = fx.memref_load(s_red, fx.Int32(lane_safe))
                 ww = arith.select(in_range, v, c_zero_f)
                 ww = wave_reduce_max(ww)
 
                 if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
-                    c0_idx = arith.constant(0, index=True)
-                    SmemPtr.store(s_red, ww, [c0_idx])
+                    fx.memref_store(ww, s_red, fx.Int32(0))
             gpu.barrier()
 
-            c0_idx = arith.constant(0, index=True)
-            return SmemPtr.load(s_red, [c0_idx])
+            return fx.memref_load(s_red, fx.Int32(0))
 
         # ── Layout API: buffer-backed tensors ────────────────────────────
         Input_buf = fx.rocdl.make_buffer_tensor(Input)
@@ -248,11 +238,6 @@ def build_quant_module(N):
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
-
         idx_m = arith.index_cast(T.index, m_in)
         launcher = quant_kernel(Input, Output, Scales)
         launcher.launch(

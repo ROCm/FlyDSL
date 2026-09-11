@@ -205,8 +205,7 @@ for iv, state in range(fx.Int64(0), fx.Int64(N - 1), fx.Int64(1), init=init_stat
     pf_next = issue_bt_k_loads(next_partition(iv + 1))
     results = yield _pack(flatten(pf_next['kv']), pf_next['part_start'], ...)
 
-# Epilogue: clear SmemPtr caches, compute last partition, write output
-smem_ptr._view_cache = None
+# Epilogue: compute last partition, write output
 kv, part_start, bt, rmax, rsum, acc = _unpack(results)
 compute_qk_softmax_pv(kv, part_start, bt, rmax, rsum, acc)
 write_output(rmax, rsum, acc)
@@ -234,13 +233,12 @@ K loads needed).
    reach for, not about avoiding the base class. If a
    low-level helper explicitly expects raw `ir.Value`, unwrap at that boundary.
 
-3. **Clear `SmemPtr._view_cache` before epilogue.** `SmemPtr.get()` caches the
-   view it creates. If called inside the runtime loop body, the cached
-   view is defined in the loop scope. Using it in the epilogue (outside the loop)
-   causes an SSA dominance error. Fix:
-   ```python
-   my_smem_ptr._view_cache = None
-   ```
+3. **Build LDS views at the top of the kernel, not inside the runtime loop.**
+   Allocate shared memory with `fx.SharedAllocator().allocate(...).peek()` and
+   build each `.view()` once up front. A view created inside the `scf.for` body
+   is defined in the loop scope; using it in the epilogue (outside the loop)
+   causes an SSA dominance error. Building it once at the top makes it dominate
+   both the loop and the epilogue.
 
 ## Applicable Patterns
 
