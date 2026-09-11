@@ -17,7 +17,6 @@ from kernels.attention.flash_attn_utils import (
     DualwaveFp8StoreHelper,
     _make_paged_dualwave_swp_fp8_traits,
 )
-from kernels.common.kernels_common import dtype_to_elem_type
 from kernels.common.tensor_shim import _run_compiled
 
 
@@ -128,11 +127,10 @@ def build_flash_attn_paged_fp8_module(
     DEFAULT_STRIDE_O_N = traits.NUM_HEADS_Q * traits.HEAD_DIM_V
     DEFAULT_STRIDE_KV_N = traits.DEFAULT_STRIDE_KV_N
     _dualwave_swp_fp8_cache_tag = traits.cache_tag
-    _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
 
     @fx.struct
     class SharedStorage:
-        kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
+        kv: fx.Array[fx.Float8E4M3FN, traits.LDS_KV_TOTAL_SIZE, 16]
         vt: fx.Array[fx.BFloat16, traits.VT_BF16_TOTAL, 16]
 
     # BN128: two BLOCK_N=64 KV tiles per iteration, one merged softmax correction.
@@ -205,6 +203,7 @@ def build_flash_attn_paged_fp8_module(
         BOUNDED_MAX = (
             traits.HEAD_DIM == 128 and traits.DUALWAVE_SWP_LAZY_RESCALE and not traits.DUALWAVE_SWP_DEBUG_LAZY_COUNTS
         )
+        STREAM_PAGE16_V128 = traits.PAGE_SIZE == 16 and traits.HEAD_DIM == 192 and traits.HEAD_DIM_V == 128
         t0 = ctx.split_t0
         t_end = ctx.split_t_end
 
@@ -340,14 +339,17 @@ def build_flash_attn_paged_fp8_module(
                 next_v_b = loop_args[next_v_arg_idx + 1]
 
                 v_k_a = kv_lds_to_regs.load_k(a_buf)
-                v_k_b = kv_lds_to_regs.load_k(b_buf)
-                v_v_a = kv_lds_to_regs.load_v(a_buf)
+                if const_expr(not STREAM_PAGE16_V128):
+                    v_k_b = kv_lds_to_regs.load_k(b_buf)
+                    v_v_a = kv_lds_to_regs.load_v(a_buf)
 
                 page_f_a, page_f_b = ctx.load_page_id_pair((j + 4) * BN)
                 kv_gmem_to_lds.load_k((j + 4) * BN, f_a_buf, page_id=page_f_a)
                 kv_gmem_to_lds.load_k((j + 5) * BN, f_b_buf, page_id=page_f_b)
 
                 v_s_a = gemm_helper.qk(v_k_a, q_wide)
+                if const_expr(STREAM_PAGE16_V128):
+                    v_k_b = kv_lds_to_regs.load_k(b_buf)
                 kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_a, nn_a_buf)
                 v_f_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
                     (j + 4) * BN,
@@ -359,6 +361,10 @@ def build_flash_attn_paged_fp8_module(
                 )
                 v_s_b = gemm_helper.qk(v_k_b, q_wide)
                 kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_b, nn_b_buf)
+                if const_expr(STREAM_PAGE16_V128):
+                    # The current V slot is distinct from both next-V stores.
+                    # Delay its fragment until K operands have been consumed.
+                    v_v_a = kv_lds_to_regs.load_v(a_buf)
                 if const_expr(do_mask):
                     v_s_a, v_s_b = softmax_helper.causal_mask_pair_if_needed(v_s_a, v_s_b, j)
                 m_new = m_row
@@ -445,7 +451,6 @@ def build_flash_attn_paged_fp8_module(
         seq_len_kv: fx.Int32,
         stride_q_n: fx.Int32,
         stride_o_n: fx.Int32,
-        stride_kv_n: fx.Int32,
         head_dim_runtime: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
@@ -499,7 +504,7 @@ def build_flash_attn_paged_fp8_module(
             stream=stream,
         )
 
-    _dualwave_swp_compile_hints = {
+    launch_flash_attn_dualwave_swp.compile_hints = {
         "fast_fp_math": True,
         "unsafe_fp_math": True,
         "llvm_options": {
@@ -508,7 +513,6 @@ def build_flash_attn_paged_fp8_module(
             "disable-machine-sink": True,
         },
     }
-    launch_flash_attn_dualwave_swp.compile_hints = dict(_dualwave_swp_compile_hints)
 
     def _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride):
         if not PAIRED_PAGE_IDS:
@@ -565,8 +569,7 @@ def build_flash_attn_paged_fp8_module(
             and max(K.numel() * K.element_size(), V.numel() * V.element_size()) > PAGED_FP8_BUFFER_LIMIT_BYTES
         ):
             raise ValueError("paged FP8 whole-cache buffer descriptor exceeds its byte limit")
-        if stride_kv_n is None:
-            stride_kv_n = DEFAULT_STRIDE_KV_N
+        # stride_kv_n is accepted for compatibility; native cache layouts fix it.
         if stride_q_n is None:
             stride_q_n = DEFAULT_STRIDE_Q_N
         if stride_o_n is None:
@@ -619,7 +622,6 @@ def build_flash_attn_paged_fp8_module(
             seq_len_kv,
             stride_q_n,
             stride_o_n,
-            stride_kv_n,
             head_dim_runtime,
             fx.Stream(stream),
         )
