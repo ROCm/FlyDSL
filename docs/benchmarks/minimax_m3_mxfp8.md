@@ -3,9 +3,8 @@
 The validated TP8, 32k-token path takes **2.231 ms including GPU sorting**, versus
 **2.887 ms for AITER on identical inputs**: **1.29x throughput, 22.7% less GPU time**.
 GEMM1 reaches **1,898,166 GFLOPS** and GEMM2 **987,738 GFLOPS**, counting only useful
-routed GEMM operations. The large-K dense control reaches about 2.82 million
-GFLOPS; the K=512 dense control reaches 964,300 GFLOPS. The MoE down projection is
-therefore close to the short-K dense control, while a gap remains to large-K GEMM.
+routed GEMM operations. The geometry-matched balance control below reaches 2,148 TFLOPS; grouped GEMM1
+with SwiGLU reaches 2,123 TFLOPS on the same M/N/K geometry.
 
 Measured 2026-09-11 on gfx950, 256 CUs, ROCm 7.2.4, PyTorch 2.10.0. Exact versions,
 commits, and the selected AITER CSV rows are in
@@ -78,10 +77,10 @@ python op_tests/test_moe_2stage.py --no-flydsl-csv -q 9 -t 32768 \
 ```
 
 The CSV's historical TP8 times are 884.5 us + 1347.9 us. They are not this
-machine's reproduced times. Removing `--kernel` also exercises AITER's full
-reference path; that original-BF16 reference gave logits diff 0.006332 in this
-session because it does not model activation quantization. It is not used as
-an exact MXFP8 correctness oracle here.
+machine's reproduced times. The paired AITER integration corrects the full reference to quantize activations
+at both stages; its four final 16k/32k CSV cases pass the unchanged normalized
+accuracy check with differences of about 4e-6. The earlier BF16 pass-through
+reference omitted activation quantization and is superseded.
 
 From the FlyDSL root:
 
@@ -127,8 +126,9 @@ intermediate tensors were compared across five identical launches while debuggin
 The full TP8 output differs from AITER by 1.179e-5 under the same logits metric.
 This is numerical validation, not a model-quality evaluation.
 
-The 21 MoE tests cover expert permutations, empty experts, ragged XCD grids,
+The 25 MoE tests cover expert permutations, empty experts, ragged XCD grids,
 logical K tails, quantization, routing maps, long-K gathered input with padding,
+dynamic valid rows, physical B stride 384, both GEMM1 tiles, missing routes,
 and repeated execution. The 16 existing dense tests also pass. AITER's initial
 output is cloned before timing its stage2 wrapper: the atomic variant otherwise
 mutates the correctness sample during repeated microbenchmark launches.
@@ -214,3 +214,58 @@ The delivered launcher requires gfx950, N and expert-padded M aligned to 256,
 32-value scale blocks, the documented weight packing, and the MiniMax activation.
 The benchmark prepares storage for a fixed routing input; dynamic serving
 workspace management and automatic AITER dispatch integration are separate work.
+
+
+## Native AITER integration and geometry-matched follow-up
+
+The paired AITER branch integrates this core with standard packed weights,
+GPU-resident valid row counts, native CSV dispatch, and AOT precompilation.
+The standalone measurements above use prepared workspaces; the integrated
+adapter creates its workspaces through the normal AITER stage interface.
+On identical seed-42 random input, the native results are:
+
+| Tokens | I per rank | Original (us) | Eight-wave (us) | Speedup | GEMM1/GEMM2 swizzle |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 16384 | 384 | 1567.5 | 1314.3 | 1.193x | 3 / 0 |
+| 32768 | 384 | 2851.6 | 2347.5 | 1.215x | 1 / 3 |
+| 16384 | 768 | 2182.1 | 1908.2 | 1.144x | 3 / 0 |
+| 32768 | 768 | 4505.6 | 3437.1 | 1.311x | 1 / 3 |
+
+The [full native sweep](minimax_m3_mxfp8/integrated_sweep.json) checks every
+candidate against the original AITER path and verifies full-output repeatability.
+The selected tile is 256x256 for all four rows. The grouped launcher now also
+supports a GPU valid-row bound, independent B stride (`b_k=384` for TP8), and
+128x512 as a tuning candidate. Static and dense launcher argument lists are
+unchanged. AITER's two graph tests and eight independent-cache AOT/run-only
+stage checks pass.
+
+For balance mode, each expert receives mean M=1270.08 (padded to 1280),
+N=768 and K=6144. Expert count is a batch dimension, not a multiplier of N/K.
+GEMM1 + SwiGLU measures 728.2 us / 2123.2 TFLOPS; the grouped kernel without
+activation measures 710.0 us / 2177.7 TFLOPS. This control writes twice the
+BF16 columns, so the difference is not pure activation latency. A dense control
+with the same total M/N/K but sharing one expert's weight measures 719.7 us /
+2148.3 TFLOPS. A single-expert dense launch achieves only 228.1 useful TFLOPS
+because its 15 CTAs cannot fill 256 CUs. See
+[equivalent_tp8.json](minimax_m3_mxfp8/equivalent_tp8.json).
+
+```bash
+python scripts/bench_mxfp8_moe_8wave.py --balanced --check --equivalent-gemm \
+  --output /tmp/equivalent_tp8.json
+python scripts/bench_mxfp8_moe_8wave.py --balanced --check --stage1-tile 128x512
+```
+
+128x512 is slower here: TP8 GEMM1 1252.8 us / 1234 TFLOPS versus 727.0 us /
+2127 TFLOPS for 256x256 in the direct tile comparison. N768 occupies two N512
+tiles, with 25% of computed columns unused, and LDS rises to 160 KiB. At I768
+(N1536, no N tail), it still loses: 1848.7 versus 1370.8 us.
+
+Fresh [native ATT/PMC evidence](minimax_m3_mxfp8/native_profile.json) confirms
+the same remaining bottlenecks: barrier attribution 30.82% / 29.39%, VM wait
+17.43% / 16.82%, L2 hits 66.2% / 60.4%, and 128 KiB LDS for GEMM1/GEMM2.
+The main further opportunities are short-K GEMM2 state reduction, less traffic
+between GEMM2 and top-k reduction, and better overlap of scale/payload loads.
+The native capture's debug locations coalesce some control flow onto the CTA
+guard, so ISA waitcnt producer edges provide the precise dependency evidence.
+The same roofline, bandwidth calibration, and stall-attribution limitations
+above apply. The core has not been changed to remove required barriers.

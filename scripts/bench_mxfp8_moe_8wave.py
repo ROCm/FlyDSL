@@ -130,9 +130,12 @@ def main():
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--reference-tokens", type=int, default=128)
     parser.add_argument("--swizzle", type=int, default=1)
+    parser.add_argument("--stage1-tile", choices=("256x256", "128x512"), default="256x256")
+    parser.add_argument("--balanced", action="store_true")
     parser.add_argument("--stage2-swizzle", type=int, default=3)
     parser.add_argument("--profile-stage", type=int, choices=(1, 2))
     parser.add_argument("--sweep-swizzle", action="store_true")
+    parser.add_argument("--equivalent-gemm", action="store_true", help="Compare expert geometry, gather and activation")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     with args.config.open() as f:
@@ -150,6 +153,10 @@ def main():
     score = torch.randn(m, experts, device=device, dtype=torch.bfloat16)
     selected, topk_ids = score.float().topk(topk, dim=-1)
     weights = selected.softmax(-1)
+    if args.balanced:
+        topk_ids = (torch.arange(m * topk, device=device).reshape(m, topk) % experts).long()
+        weights = torch.full((m, topk), 1.0 / topk, device=device)
+    tile_m, tile_n = map(int, args.stage1_tile.split("x"))
     row_map, inverse, eids, route = make_routing(topk_ids, weights, experts)
     rows = row_map.numel()
     kp = (inter + 255) // 256 * 256
@@ -175,7 +182,7 @@ def main():
         stream,
     )
     stage1 = bind(
-        compile_mxfp8_moe_gemm_8w(K=h, stage=1, xcd_swizzle=args.swizzle, gather_a=True),
+        compile_mxfp8_moe_gemm_8w(K=h, stage=1, xcd_swizzle=args.swizzle, gather_a=True, tile_m=tile_m, tile_n=tile_n),
         aq1.flatten(),
         b1.flatten(),
         act.flatten(),
@@ -276,6 +283,8 @@ def main():
         swizzle=args.swizzle,
         stage2_swizzle=args.stage2_swizzle,
         seed=42,
+        stage1_tile=args.stage1_tile,
+        balanced=args.balanced,
         routing_in_pipeline=False,
     )
     if args.check:
@@ -306,6 +315,66 @@ def main():
             sorted_forward()
             assert torch.equal(output[sample_ids], snapshot), "MoE output changed across identical launches"
         result.update(check_reference(x, w1, w2, topk_ids, weights, output, args.reference_tokens))
+
+    if args.equivalent_gemm:
+        from kernels.gemm.mxfp8_gemm_8wave import compile_mxfp8_gemm_8w
+
+        raw = torch.empty(rows, 2 * inter, device=device, dtype=torch.bfloat16)
+        gathered = aq1[row_map.clamp_min(0).long()].contiguous()
+        gathered[row_map < 0] = 0
+        controls = {}
+        for label, gather, a in (
+            ("grouped_gather_no_activation", True, aq1),
+            ("grouped_contiguous_no_activation", False, gathered),
+        ):
+            fn = bind(
+                compile_mxfp8_moe_gemm_8w(K=h, stage=1, activation=False, gather_a=gather, xcd_swizzle=args.swizzle),
+                a.flatten(),
+                b1.flatten(),
+                raw.flatten(),
+                sa1.flatten(),
+                sb1.flatten(),
+                eids,
+                row_map,
+                rows,
+                2 * inter,
+                stream,
+            )
+            _, us = run_perftest(fn, num_iters=20, num_warmup=3)
+            controls[label] = dict(us=us, useful_tflops=4 * m * topk * h * inter / us / 1e6)
+        # A single expert has too few CTAs to fill this GPU. It is a geometry
+        # control, not an estimate of batched-MoE throughput.
+        em = ((m * topk + experts - 1) // experts + 255) // 256 * 256
+        for label, dm in (("single_expert_dense", em), ("dense_shared_weight_all_rows", rows)):
+            dc = torch.empty(dm, 2 * inter, device=device, dtype=torch.bfloat16)
+            fn = bind(
+                compile_mxfp8_gemm_8w(K=h, b_preshuffled=True, xcd_swizzle=args.swizzle),
+                gathered[:dm].flatten(),
+                b1.flatten()[: 2 * inter * h],
+                dc.flatten(),
+                sa1.flatten()[: dm * (h // 32)],
+                sb1.flatten()[: 2 * inter * (h // 32)],
+                dm,
+                2 * inter,
+                stream,
+            )
+            _, us = run_perftest(fn, num_iters=20, num_warmup=3)
+            useful_m = m * topk / experts if label == "single_expert_dense" else m * topk
+            controls[label] = dict(
+                M=dm,
+                N=2 * inter,
+                K=h,
+                us=us,
+                useful_tflops=4 * useful_m * h * inter / us / 1e6,
+                padded_tflops=4 * dm * h * inter / us / 1e6,
+            )
+        controls["expert_shape"] = dict(batch=experts, mean_M=m * topk / experts, padded_M=em, N=2 * inter, K=h)
+        controls["notes"] = (
+            "Grouped controls keep all expert weights and routing. Disabling activation writes twice as many BF16 columns; "
+            "the timing delta is not isolated activation latency. Single-expert dense has an underfilled grid. "
+            "Tall dense shares one expert's weight over all rows, so it is a weight-reuse control, not equivalent MoE work."
+        )
+        result["equivalent_gemm"] = controls
 
     if args.aiter:
         import importlib

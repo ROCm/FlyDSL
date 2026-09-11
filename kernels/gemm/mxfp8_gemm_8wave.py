@@ -142,6 +142,9 @@ def compile_mxfp8_gemm_8w(
     store_factory=None,
     logical_k: int | None = None,
     gather_a: bool = False,
+    expert_block_m: int | None = None,
+    b_k: int | None = None,
+    dynamic_rows: bool = False,
 ):
     """Build the MXFP8 launcher.
 
@@ -150,19 +153,24 @@ def compile_mxfp8_gemm_8w(
     takes ``expert_ids`` and ``row_map`` after the two scale tensors; the dense
     API is unchanged. ``gather_a`` reads A using the sorted-to-source row map.
     ``store_factory`` lets MoE reuse the compute pipeline with a fused epilogue.
+    ``b_k`` separates the packed weight stride from the padded A/scale stride.
+    ``dynamic_rows`` adds a GPU valid-row tensor after ``row_map``; c_m remains
+    the allocation/grid upper bound and inactive CTAs never read expert IDs.
     """
     arch = str(get_rocm_arch())
     assert arch.startswith("gfx950"), f"MXFP8 8-wave GEMM requires gfx950 (CDNA4), got {arch}"
     assert get_warp_size() == 64, f"MXFP8 8-wave GEMM assumes wave64, got {get_warp_size()}"
 
-    # A 256x256 tile already spends 128 KB of the 160 KB LDS; every other
-    # BLOCK_M/BLOCK_N either overflows it or breaks the 2-threads-per-scale-row
-    # staging split. Kept as an assert rather than dead generality.
-    assert BLOCK_M == 256 and BLOCK_N == 256, "MXFP8 8-wave is specialized to a 256x256 block tile"
+    assert (BLOCK_M, BLOCK_N) in ((256, 256), (128, 512)), "supported tiles: 256x256 and 128x512"
+    expert_block_m = BLOCK_M if expert_block_m is None else expert_block_m
+    assert expert_block_m % BLOCK_M == 0
     assert K % 256 == 0, f"K must be a multiple of 256 (MX scale chunk staging), got {K}"
 
     logical_k = K if logical_k is None else logical_k
     assert 256 <= logical_k <= K and logical_k % BLOCK_K == 0
+    b_k = K if b_k is None else b_k
+    assert logical_k <= b_k <= K and b_k % 64 == 0
+    assert not dynamic_rows or grouped
     K_ITERS = logical_k // BLOCK_K
     # Scale words are addressed by K-pair, so K must contain a whole number of
     # them (K % 256 above already guarantees it).
@@ -175,7 +183,6 @@ def compile_mxfp8_gemm_8w(
     LDS_BLOCK_N = BLOCK_N // 2
     N_LDS_STEPS_A = LDS_BLOCK_M // 64
     N_LDS_STEPS_B = LDS_BLOCK_N // 64
-    N_LDS_ROUNDS = max(N_LDS_STEPS_A, N_LDS_STEPS_B)
 
     a_lds_size = LDS_BLOCK_M * BLOCK_K
     b_lds_size = LDS_BLOCK_N * BLOCK_K
@@ -206,6 +213,7 @@ def compile_mxfp8_gemm_8w(
         B_scale: fx.Tensor,
         expert_ids: fx.Tensor,
         row_map: fx.Tensor,
+        valid_rows: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
     ):
@@ -232,228 +240,232 @@ def compile_mxfp8_gemm_8w(
         else:
             block_m, block_n = divmod(fx.block_idx.x, n_blocks)
 
-        b_row = block_n * BLOCK_N
-        if const_expr(grouped):
-            expert = rocdl.readfirstlane(fx.Int32.ir_type, expert_ids[block_m])
-            b_row += fx.Int32(expert) * c_n
+        active = fx.Int32(1)
+        if const_expr(dynamic_rows):
+            active = block_m * BLOCK_M < rocdl.readfirstlane(fx.Int32.ir_type, valid_rows[0])
+        if active:
+            b_row = block_n * BLOCK_N
+            if const_expr(grouped):
+                expert = rocdl.readfirstlane(fx.Int32.ir_type, expert_ids[block_m // (expert_block_m // BLOCK_M)])
+                b_row += fx.Int32(expert) * c_n
 
-        A0_gl_offset = (block_m * BLOCK_M) * K
-        A1_gl_offset = (block_m * BLOCK_M + LDS_BLOCK_M) * K
-        B_K_STEP = (2 * 1024) if b_preshuffled else BLOCK_K
-        B0_gl_offset = b_row * K
-        B1_gl_offset = (b_row + LDS_BLOCK_N) * K
+            A0_gl_offset = (block_m * BLOCK_M) * K
+            A1_gl_offset = (block_m * BLOCK_M + LDS_BLOCK_M) * K
+            B_K_STEP = (2 * 1024) if b_preshuffled else BLOCK_K
+            B0_gl_offset = b_row * b_k
+            B1_gl_offset = (b_row + LDS_BLOCK_N) * b_k
 
-        gA = make_fp8_buffer_tensor(A, F8_IR_t)
-        gB = make_fp8_buffer_tensor(B_T, F8_IR_t)
-        a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
-        b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
+            gA = make_fp8_buffer_tensor(A, F8_IR_t)
+            gB = make_fp8_buffer_tensor(B_T, F8_IR_t)
+            a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
+            b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
-        gl_off_a = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=False)
-        gl_off_b = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=b_preshuffled)
+            gl_off_a = compute_global_swizzle(lane_id, wave_id, K, N_LDS_STEPS_A, preshuffled=False)
+            gl_off_b = compute_global_swizzle(lane_id, wave_id, b_k, N_LDS_STEPS_B, preshuffled=b_preshuffled)
 
-        gl_off_a1 = gl_off_a
-        if const_expr(gather_a):
-            offsets = []
-            for half in range_constexpr(2):
-                part = []
-                for offset in gl_off_a:
-                    row = block_m * BLOCK_M + half * LDS_BLOCK_M + offset // K
-                    source_row = row_map[row]
-                    part.append(source_row * K + offset % K)
-                offsets.append(part)
-            gl_off_a, gl_off_a1 = offsets
-            A0_gl_offset = A1_gl_offset = fx.Int32(0)
+            gl_off_a1 = gl_off_a
+            if const_expr(gather_a):
+                offsets = []
+                for half in range_constexpr(2):
+                    part = []
+                    for offset in gl_off_a:
+                        row = block_m * BLOCK_M + half * LDS_BLOCK_M + offset // K
+                        source_row = row_map[row]
+                        part.append(source_row * K + offset % K)
+                    offsets.append(part)
+                gl_off_a, gl_off_a1 = offsets
+                A0_gl_offset = A1_gl_offset = fx.Int32(0)
 
-        mfma = MxMfma(N_TILES_A, N_TILES_B)
+            mfma = MxMfma(N_TILES_A, N_TILES_B)
 
-        a_g2s = G2SLoader(a_div, gl_off_a, N_LDS_STEPS_A, F8_IR_t, wave_id)
-        a1_g2s = G2SLoader(a_div, gl_off_a1, N_LDS_STEPS_A, F8_IR_t, wave_id)
-        b_g2s = G2SLoader(b_div, gl_off_b, N_LDS_STEPS_B, F8_IR_t, wave_id)
-        a_s2r = S2RLoader(wave_m, N_TILES_A)
-        b_s2r = S2RLoader(wave_n, N_TILES_B)
-        if const_expr(store_factory is None):
-            store_c = StoreC(None, None, C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B)
-        else:
-            scratch = [
-                a_cur0.ptr,
-                a_cur1.ptr,
-                a_next0.ptr,
-                a_next1.ptr,
-                b_cur0.ptr,
-                b_cur1.ptr,
-                b_next0.ptr,
-                b_next1.ptr,
-            ]
-            store_c = store_factory(C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B, scratch)
+            a_g2s = G2SLoader(a_div, gl_off_a, N_LDS_STEPS_A, F8_IR_t, wave_id)
+            a1_g2s = G2SLoader(a_div, gl_off_a1, N_LDS_STEPS_A, F8_IR_t, wave_id)
+            b_g2s = G2SLoader(b_div, gl_off_b, N_LDS_STEPS_B, F8_IR_t, wave_id)
+            a_s2r = S2RLoader(wave_m, N_TILES_A)
+            b_s2r = S2RLoader(wave_n, N_TILES_B)
+            if const_expr(store_factory is None):
+                store_c = StoreC(None, None, C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B)
+            else:
+                scratch = [
+                    a_cur0.ptr,
+                    a_cur1.ptr,
+                    a_next0.ptr,
+                    a_next1.ptr,
+                    b_cur0.ptr,
+                    b_cur1.ptr,
+                    b_next0.ptr,
+                    b_next1.ptr,
+                ]
+                store_c = store_factory(C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B, scratch)
 
-        a_sc = ScalePreshuffledS2R(A_scale, c_m, K, N_TILES_A)
-        b_scale_rows = fx.size(B_scale.shape).unpack() // (K // 32) if grouped else c_n
-        b_sc = ScalePreshuffledS2R(B_scale, b_scale_rows, K, N_TILES_B)
-        # 16-row tile index of each wave's first row, per LDS half.
-        a_base16 = [(block_m * BLOCK_M + h * LDS_BLOCK_M + wave_m * A_GRP_ROWS) // 16 for h in range_constexpr(2)]
-        b_base16 = [(b_row + h * LDS_BLOCK_N + wave_n * B_GRP_ROWS) // 16 for h in range_constexpr(2)]
-        SCALE_LOADS_PER_PAIR = 2 * (N_TILES_A // 2) + 2 * (N_TILES_B // 2)
-        assert SCALE_LOADS_PER_PAIR == 6, (
-            f"scale prefetch issues {SCALE_LOADS_PER_PAIR} VMEM loads per K-pair, not the 6 the "
-            "wait_barrier counts below were validated against; re-check them against the ISA"
-        )
+            a_sc = ScalePreshuffledS2R(A_scale, c_m, K, N_TILES_A)
+            b_scale_rows = fx.size(B_scale.shape).unpack() // (K // 32) if grouped else c_n
+            b_sc = ScalePreshuffledS2R(B_scale, b_scale_rows, K, N_TILES_B)
+            # 16-row tile index of each wave's first row, per LDS half.
+            a_base16 = [(block_m * BLOCK_M + h * LDS_BLOCK_M + wave_m * A_GRP_ROWS) // 16 for h in range_constexpr(2)]
+            b_base16 = [(b_row + h * LDS_BLOCK_N + wave_n * B_GRP_ROWS) // 16 for h in range_constexpr(2)]
+            SCALE_LOADS_PER_PAIR = 2 * (N_TILES_A // 2) + 2 * (N_TILES_B // 2)
+            assert SCALE_LOADS_PER_PAIR == 6, (
+                f"scale prefetch issues {SCALE_LOADS_PER_PAIR} VMEM loads per K-pair, not the 6 the "
+                "wait_barrier counts below were validated against; re-check them against the ISA"
+            )
 
-        def scale_prefetch(sc, k0):
-            if const_expr(k0 >= K_ITERS or k0 // 2 in sc):
-                return sc
-            words = {
-                w: (a_sc if w[0] == "a" else b_sc).read((a_base16 if w[0] == "a" else b_base16)[int(w[1])], k0)
-                for w in ("a0", "a1", "b0", "b1")
-            }
-            return {**sc, k0 // 2: words}
+            def scale_prefetch(sc, k0):
+                if const_expr(k0 >= K_ITERS or k0 // 2 in sc):
+                    return sc
+                words = {
+                    w: (a_sc if w[0] == "a" else b_sc).read((a_base16 if w[0] == "a" else b_base16)[int(w[1])], k0)
+                    for w in ("a0", "a1", "b0", "b1")
+                }
+                return {**sc, k0 // 2: words}
 
-        def scale_read(sc, k, which):
-            """The prefetched E8M0 operands for K-step ``k``."""
-            return sc[k // 2][which]
+            def scale_read(sc, k, which):
+                """The prefetched E8M0 operands for K-step ``k``."""
+                return sc[k // 2][which]
 
-        c00_frag = [mfma.zero_value] * N_ACCUMS
-        c01_frag = [mfma.zero_value] * N_ACCUMS
-        c10_frag = [mfma.zero_value] * N_ACCUMS
-        c11_frag = [mfma.zero_value] * N_ACCUMS
+            c00_frag = [mfma.zero_value] * N_ACCUMS
+            c01_frag = [mfma.zero_value] * N_ACCUMS
+            c10_frag = [mfma.zero_value] * N_ACCUMS
+            c11_frag = [mfma.zero_value] * N_ACCUMS
 
-        sc_pf = scale_prefetch({}, 0)
+            sc_pf = scale_prefetch({}, 0)
 
-        b_g2s.load(b_cur0, B0_gl_offset + 0 * B_K_STEP)
-        a_g2s.load(a_cur0, A0_gl_offset + 0 * BLOCK_K)
-        b_g2s.load(b_cur1, B1_gl_offset + 0 * B_K_STEP)
-        a1_g2s.load(a_cur1, A1_gl_offset + 0 * BLOCK_K)
+            b_g2s.load(b_cur0, B0_gl_offset + 0 * B_K_STEP)
+            a_g2s.load(a_cur0, A0_gl_offset + 0 * BLOCK_K)
+            b_g2s.load(b_cur1, B1_gl_offset + 0 * B_K_STEP)
+            a1_g2s.load(a_cur1, A1_gl_offset + 0 * BLOCK_K)
 
-        if wave_m == 1:
-            rocdl.s_barrier()
+            if wave_m == 1:
+                rocdl.s_barrier()
 
-        wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
+            wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
 
-        b_g2s.load(b_next0, B0_gl_offset + 1 * B_K_STEP)
-        a_g2s.load(a_next0, A0_gl_offset + 1 * BLOCK_K)
-        b_g2s.load(b_next1, B1_gl_offset + 1 * B_K_STEP)
+            b_g2s.load(b_next0, B0_gl_offset + 1 * B_K_STEP)
+            a_g2s.load(a_next0, A0_gl_offset + 1 * BLOCK_K)
+            b_g2s.load(b_next1, B1_gl_offset + 1 * B_K_STEP)
 
-        wait_barrier(N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
+            wait_barrier(N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
 
-        for k in range_constexpr(K_ITERS - 2):
-            if const_expr(k % 2 == 1):
-                sc_pf = scale_prefetch(sc_pf, k + 1)
+            for k in range_constexpr(K_ITERS - 2):
+                if const_expr(k % 2 == 1):
+                    sc_pf = scale_prefetch(sc_pf, k + 1)
+                sa0 = scale_read(sc_pf, k, "a0")
+                sb0 = scale_read(sc_pf, k, "b0")
+                b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
+                a0_frag = a_s2r.load(a_cur0)
+                a1_g2s.load(a_next1, A1_gl_offset + (k + 1) * BLOCK_K)
+                rocdl.s_barrier()
+
+                c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
+
+                sb1 = scale_read(sc_pf, k, "b1")
+                b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
+                b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * B_K_STEP)
+                rocdl.s_barrier()
+
+                c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, sa0, sb1, k_pack=k % 2)
+
+                sa1 = scale_read(sc_pf, k, "a1")
+                a1_frag = a_s2r.load(a_cur1)
+                a_g2s.load(a_cur0, A0_gl_offset + (k + 2) * BLOCK_K)
+                rocdl.s_barrier()
+
+                c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, sa1, sb0, k_pack=k % 2)
+
+                b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * B_K_STEP)
+                # Complete the A prefetches before rotating grouped/gathered LDS
+                # buffers, leaving only the final B half (two loads) outstanding.
+                # The dense vmcnt(6) allowance races on expert/padding boundaries.
+                wait_barrier(N_LDS_STEPS_B if grouped else 2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
+
+                c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, sa1, sb1, k_pack=k % 2)
+
+                # Swap cur and next
+                a_cur0, a_next0 = a_next0, a_cur0
+                a_cur1, a_next1 = a_next1, a_cur1
+                b_cur0, b_next0 = b_next0, b_cur0
+                b_cur1, b_next1 = b_next1, b_cur1
+
+            # Step k = K_ITERS - 2
+            # Odd logical K (e.g. 384 with physical stride 512) needs the final
+            # scale pair even though the main loop never reaches its odd prefetch.
+            sc_pf = scale_prefetch(sc_pf, K_ITERS - 1)
+            k = K_ITERS - 2
             sa0 = scale_read(sc_pf, k, "a0")
             sb0 = scale_read(sc_pf, k, "b0")
             b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
             a0_frag = a_s2r.load(a_cur0)
-            a1_g2s.load(a_next1, A1_gl_offset + (k + 1) * BLOCK_K)
             rocdl.s_barrier()
 
             c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
 
             sb1 = scale_read(sc_pf, k, "b1")
             b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
-            b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * B_K_STEP)
             rocdl.s_barrier()
 
             c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, sa0, sb1, k_pack=k % 2)
 
             sa1 = scale_read(sc_pf, k, "a1")
             a1_frag = a_s2r.load(a_cur1)
-            a_g2s.load(a_cur0, A0_gl_offset + (k + 2) * BLOCK_K)
+            # Main loop prefetches a_next1 one step behind; issue the final
+            # K_ITERS - 1 tile here, otherwise c10 / c11 read stale A1 data.
+            a1_g2s.load(a_next1, A1_gl_offset + (K_ITERS - 1) * BLOCK_K)
             rocdl.s_barrier()
 
             c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, sa1, sb0, k_pack=k % 2)
 
-            b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * B_K_STEP)
-            # Complete the A prefetches before rotating grouped/gathered LDS
-            # buffers, leaving only the final B half (two loads) outstanding.
-            # The dense vmcnt(6) allowance races on expert/padding boundaries.
-            wait_barrier(N_LDS_STEPS_B if grouped else 2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
+            b0_frag = b_s2r.load(b_next0, preshuffled=b_preshuffled)
+            rocdl.s_barrier()
 
             c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, sa1, sb1, k_pack=k % 2)
-
             # Swap cur and next
             a_cur0, a_next0 = a_next0, a_cur0
             a_cur1, a_next1 = a_next1, a_cur1
             b_cur0, b_next0 = b_next0, b_cur0
             b_cur1, b_next1 = b_next1, b_cur1
 
-        # Step k = K_ITERS - 2
-        # Odd logical K (e.g. 384 with physical stride 512) needs the final
-        # scale pair even though the main loop never reaches its odd prefetch.
-        sc_pf = scale_prefetch(sc_pf, K_ITERS - 1)
-        k = K_ITERS - 2
-        sa0 = scale_read(sc_pf, k, "a0")
-        sb0 = scale_read(sc_pf, k, "b0")
-        b0_frag = b_s2r.load(b_cur0, preshuffled=b_preshuffled)
-        a0_frag = a_s2r.load(a_cur0)
-        rocdl.s_barrier()
+            # Step k = K_ITERS - 1
+            k = K_ITERS - 1
+            sa0 = scale_read(sc_pf, k, "a0")
+            sb0 = scale_read(sc_pf, k, "b0")
+            a0_frag = a_s2r.load(a_cur0)
+            wait_barrier(0)
 
-        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
+            c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
 
-        sb1 = scale_read(sc_pf, k, "b1")
-        b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
-        rocdl.s_barrier()
+            sb1 = scale_read(sc_pf, k, "b1")
+            b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
+            rocdl.s_barrier()
 
-        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, sa0, sb1, k_pack=k % 2)
+            c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, sa0, sb1, k_pack=k % 2)
 
-        sa1 = scale_read(sc_pf, k, "a1")
-        a1_frag = a_s2r.load(a_cur1)
-        # Main loop prefetches a_next1 one step behind; issue the final
-        # K_ITERS - 1 tile here, otherwise c10 / c11 read stale A1 data.
-        a1_g2s.load(a_next1, A1_gl_offset + (K_ITERS - 1) * BLOCK_K)
-        rocdl.s_barrier()
+            sa1 = scale_read(sc_pf, k, "a1")
+            a1_frag = a_s2r.load(a_cur1)
+            rocdl.s_barrier()
 
-        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, sa1, sb0, k_pack=k % 2)
+            rocdl.s_setprio(1)
+            c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, sa1, sb0, k_pack=k % 2, set_prio=False)
+            c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, sa1, sb1, k_pack=k % 2, set_prio=False)
+            rocdl.s_setprio(0)
+            rocdl.s_barrier()
 
-        b0_frag = b_s2r.load(b_next0, preshuffled=b_preshuffled)
-        rocdl.s_barrier()
+            # Accumulators are already scaled by the MFMA: convert and store.
+            if const_expr(store_factory is not None):
+                # The main loop deliberately staggers the two M wave groups by one
+                # barrier. Rejoin them before an epilogue shares LDS across waves.
+                if wave_m == 0:
+                    rocdl.s_barrier()
+            wave_n_offset = wave_n * (N_TILES_B * 16)
+            wave_m_offset = wave_m * (N_TILES_A * 16)
+            base_row = block_m * BLOCK_M + wave_m_offset
+            base_col = block_n * BLOCK_N + wave_n_offset
 
-        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, sa1, sb1, k_pack=k % 2)
-        # Swap cur and next
-        a_cur0, a_next0 = a_next0, a_cur0
-        a_cur1, a_next1 = a_next1, a_cur1
-        b_cur0, b_next0 = b_next0, b_cur0
-        b_cur1, b_next1 = b_next1, b_cur1
-
-        # Step k = K_ITERS - 1
-        k = K_ITERS - 1
-        sa0 = scale_read(sc_pf, k, "a0")
-        sb0 = scale_read(sc_pf, k, "b0")
-        a0_frag = a_s2r.load(a_cur0)
-        wait_barrier(0)
-
-        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
-
-        sb1 = scale_read(sc_pf, k, "b1")
-        b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
-        rocdl.s_barrier()
-
-        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, sa0, sb1, k_pack=k % 2)
-
-        sa1 = scale_read(sc_pf, k, "a1")
-        a1_frag = a_s2r.load(a_cur1)
-        rocdl.s_barrier()
-
-        rocdl.s_setprio(1)
-        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, sa1, sb0, k_pack=k % 2, set_prio=False)
-        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, sa1, sb1, k_pack=k % 2, set_prio=False)
-        rocdl.s_setprio(0)
-        rocdl.s_barrier()
-
-        # Accumulators are already scaled by the MFMA: convert and store.
-        if const_expr(store_factory is not None):
-            # The main loop deliberately staggers the two M wave groups by one
-            # barrier. Rejoin them before an epilogue shares LDS across waves.
-            if wave_m == 0:
-                rocdl.s_barrier()
-        wave_n_offset = wave_n * (N_TILES_B * 16)
-        wave_m_offset = wave_m * (N_TILES_A * 16)
-        base_row = block_m * BLOCK_M + wave_m_offset
-        base_col = block_n * BLOCK_N + wave_n_offset
-
-        store_c.store(c00_frag, base_row + 0, base_col + 0)
-        store_c.store(c01_frag, base_row + 0, base_col + LDS_BLOCK_N)
-        store_c.store(c10_frag, base_row + LDS_BLOCK_M, base_col + 0)
-        store_c.store(c11_frag, base_row + LDS_BLOCK_M, base_col + LDS_BLOCK_N)
-        if const_expr(store_factory is not None):
-            store_c.finish(block_m * BLOCK_M, block_n * BLOCK_N)
+            store_c.store(c00_frag, base_row + 0, base_col + 0)
+            store_c.store(c01_frag, base_row + 0, base_col + LDS_BLOCK_N)
+            store_c.store(c10_frag, base_row + LDS_BLOCK_M, base_col + 0)
+            store_c.store(c11_frag, base_row + LDS_BLOCK_M, base_col + LDS_BLOCK_N)
+            if const_expr(store_factory is not None):
+                store_c.finish(block_m * BLOCK_M, block_n * BLOCK_N)
 
     @flyc.jit
     def launch_gemm(
@@ -473,6 +485,7 @@ def compile_mxfp8_gemm_8w(
             C,
             A_scale,
             B_scale,
+            A,
             A,
             A,
             c_m,
@@ -501,9 +514,40 @@ def compile_mxfp8_gemm_8w(
             B_scale,
             expert_ids,
             row_map,
+            A,
             c_m,
             c_n,
             value_attrs={"rocdl.waves_per_eu": 2, "rocdl.flat_work_group_size": "512,512"},
         ).launch(grid=(ceildiv(c_m, BLOCK_M) * ceildiv(c_n, BLOCK_N), 1, 1), block=(512, 1, 1), stream=stream)
 
+    @flyc.jit
+    def launch_dynamic_gemm(
+        A: fx.Tensor,
+        B_T: fx.Tensor,
+        C: fx.Tensor,
+        A_scale: fx.Tensor,
+        B_scale: fx.Tensor,
+        expert_ids: fx.Tensor,
+        row_map: fx.Tensor,
+        valid_rows: fx.Tensor,
+        c_m: fx.Int32,
+        c_n: fx.Int32,
+        stream: fx.Stream,
+    ):
+        kernel_gemm(
+            A,
+            B_T,
+            C,
+            A_scale,
+            B_scale,
+            expert_ids,
+            row_map,
+            valid_rows,
+            c_m,
+            c_n,
+            value_attrs={"rocdl.waves_per_eu": 2, "rocdl.flat_work_group_size": "512,512"},
+        ).launch(grid=(ceildiv(c_m, BLOCK_M) * ceildiv(c_n, BLOCK_N), 1, 1), block=(512, 1, 1), stream=stream)
+
+    if dynamic_rows:
+        return launch_dynamic_gemm
     return launch_grouped_gemm if grouped else launch_gemm

@@ -203,3 +203,70 @@ def test_mxfp8_moe_unpack_routes():
     torch.testing.assert_close(row_map[: routes.numel()], routes // topk)
     assert (row_map[routes.numel() :] == -1).all()
     torch.testing.assert_close(inverse[routes.long()], torch.arange(routes.numel(), device="cuda", dtype=torch.int32))
+
+
+@pytest.mark.parametrize(
+    "stage,k,n,tile", [(2, 384, 256, (256, 256)), (1, 512, 768, (256, 256)), (1, 512, 768, (128, 512))]
+)
+def test_dynamic_rows_and_weight_stride(stage, k, n, tile):
+    torch.manual_seed(54)
+    rows, active = 1024, 512
+    kp = (k + 255) // 256 * 256
+    a = torch.randn(rows, k, device="cuda") * 0.1
+    aq, sa = quantize_mxfp8(torch.nn.functional.pad(a, (0, kp - k)))
+    b, sb, bref = prepare_weights(torch.randn(2, n, k, device="cuda") * 0.1, stage)
+    # AITER stores B with physical K384, while A/scales are padded to K512.
+    b = b.view(2, n // 16, kp // 64, 4, 16, 16)[:, :, : k // 64].contiguous().flatten()
+    ids = torch.tensor([1, 0], device="cuda", dtype=torch.int32)
+    valid = torch.tensor([active], device="cuda", dtype=torch.int32)
+    out = torch.full((rows, n // 2 if stage == 1 else n), 42.0, device="cuda", dtype=torch.bfloat16)
+    args = (
+        aq.view(torch.int8).flatten(),
+        b,
+        out.flatten(),
+        shuffle_scale_w4(sa, 1, False).flatten(),
+        sb.flatten(),
+        ids,
+        ids,
+        valid,
+        rows,
+        n,
+        torch.cuda.current_stream(),
+    )
+    fn = flyc.compile(
+        compile_mxfp8_moe_gemm_8w(
+            K=kp, logical_k=k, b_k=k, stage=stage, dynamic_rows=True, tile_m=tile[0], tile_n=tile[1], swiglu_limit=5.0
+        ),
+        *args
+    )
+    fn(*args)
+    af = aq.float() * e8m0_to_f32(sa).repeat_interleave(32, -1)
+    ref = torch.cat([af[:256] @ bref[1].T, af[256:512] @ bref[0].T])
+    if stage == 1:
+        gate, up = ref.chunk(2, -1)
+        gate = gate.clamp(max=5)
+        ref = gate * torch.sigmoid(1.702 * gate) * (up.clamp(-5, 5) + 1)
+    torch.testing.assert_close(out[:active], ref.bfloat16(), rtol=0.02, atol=0.015)
+    assert (out[active:] == 42).all()
+    snapshot = out.clone()
+    for _ in range(3):
+        fn(*args)
+        assert torch.equal(out, snapshot)
+    valid.zero_()
+    out.fill_(42)
+    fn(*args)
+    assert (out == 42).all()
+
+
+def test_sorted_reduce_missing_routes():
+    tokens, n, topk = 31, 256, 5
+    x = torch.randn(tokens * topk, n, device="cuda", dtype=torch.bfloat16)
+    inverse = torch.randperm(tokens * topk, device="cuda").int().reshape(tokens, topk)
+    inverse[:, 0] = -1
+    weights = torch.rand(tokens * topk, device="cuda")
+    out = torch.empty(tokens, n, device="cuda", dtype=torch.bfloat16)
+    args = (x.flatten(), out.flatten(), inverse.flatten(), weights, tokens, torch.cuda.current_stream())
+    flyc.compile(compile_mxfp8_moe_reduce(N=n, topk=topk, sorted_weights=True), *args)(*args)
+    ix = inverse[:, 1:].long()
+    ref = (x[ix].float() * weights[ix, None]).sum(1).bfloat16()
+    torch.testing.assert_close(out, ref, rtol=0.01, atol=0.015)
