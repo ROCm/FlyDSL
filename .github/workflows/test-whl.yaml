@@ -8,10 +8,10 @@ on:
         type: string
         required: true
       aiter_ref:
-        description: 'aiter branch/tag for the current CSV/HGEMM run (default main). Compared against flydsl== from aiter main requirements.txt.'
+        description: 'aiter branch/tag for the CSV/HGEMM stage. Empty (the default) skips the stage entirely; callers opt in by passing a ref. Compared against flydsl== from aiter main requirements.txt.'
         type: string
         required: false
-        default: 'main'
+        default: ''
 
 jobs:
   test:
@@ -103,11 +103,13 @@ jobs:
             cat *.log || true
           fi
 
-      # gfx950: aiter CSV MoE (kimik3/dsv4/glm5 from aiter main) + HGEMM.
+      # aiter CSV MoE (kimik3/dsv4/glm5 from aiter main) + HGEMM.
       # Current: wheel under test (PyPI tag / nightly) + aiter at aiter_ref.
       # Baseline: flydsl== pinned in aiter main requirements.txt, same aiter + CSV.
+      # Opt-in (caller passes aiter_ref) and restricted to gfx950 runners: the CSVs
+      # are FP4/A4W4 workloads that moe_gemm_2stage rejects outside gfx94*/gfx95*.
       - name: Prepare aiter
-        if: ${{ !contains(matrix.runners, 'mi325') }}
+        if: ${{ inputs.aiter_ref != '' && contains(matrix.runners, 'mi35') }}
         env:
           AITER_REF: ${{ inputs.aiter_ref }}
         run: |
@@ -130,8 +132,8 @@ jobs:
 
       - name: Run aiter CSV MoE and HGEMM
         id: aiter
-        if: ${{ !contains(matrix.runners, 'mi325') }}
-        timeout-minutes: 360
+        if: ${{ inputs.aiter_ref != '' && contains(matrix.runners, 'mi35') }}
+        timeout-minutes: 120
         env:
           AITER_REF: ${{ inputs.aiter_ref }}
         run: |
@@ -146,10 +148,18 @@ jobs:
           export LIBRARY_PATH="${ROCM_PATH}/lib:${ROCM_PATH}/lib64:${LIBRARY_PATH:-}"
           export LD_LIBRARY_PATH="${ROCM_PATH}/lib:${ROCM_PATH}/lib64:${LD_LIBRARY_PATH:-}"
           # hipcc in this image rejects --offload-arch=native and then compiles
-          # every gfx*; pin to the live GPU (these jobs are gfx950-only).
+          # every gfx*; pin to the live GPU.
           if [ -z "${GPU_ARCHS:-}" ]; then
             GPU_ARCHS="$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-z]+' || true)"
-            GPU_ARCHS="${GPU_ARCHS:-gfx950}"
+          fi
+          if [ -z "${GPU_ARCHS:-}" ]; then
+            GPU_ARCHS="$(rocm_agent_enumerator -name 2>/dev/null | grep -m1 -oE 'gfx[0-9a-z]+' || true)"
+          fi
+          if [ -z "${GPU_ARCHS:-}" ]; then
+            # Guessing here silently compiles for the wrong arch; make it visible.
+            echo "could not detect GPU arch (rocminfo and rocm_agent_enumerator unavailable)" >&2
+            echo "set GPU_ARCHS explicitly to run this stage" >&2
+            exit 1
           fi
           export GPU_ARCHS
           echo "aiter JIT env ROCM_PATH=${ROCM_PATH} GPU_ARCHS=${GPU_ARCHS}"
@@ -179,6 +189,13 @@ jobs:
             python3 /tmp/aiter/op_tests/test_moe_2stage.py --no-legacy --csv-filter flydsl_
           }
 
+          # The baseline pin below replaces the wheel under test in this container.
+          # Restore it on every exit path, not just the happy one.
+          restore_wheel() {
+            python3 -m pip install --force-reinstall --no-deps --no-index --find-links=/dist flydsl
+          }
+          trap restore_wheel EXIT
+
           echo "=== current wheel CSV MoE (aiter ${REF}) ==="
           run_moe_csv /tmp/tuned_op_bench_current.csv /tmp/flydsl_cache_current
           PYTHONPATH="/tmp/aiter:${PYTHONPATH_BASE}" AITER_REPO=/tmp/aiter python3 /tmp/aiter/op_tests/test_flydsl_hgemm.py
@@ -191,9 +208,8 @@ jobs:
             /tmp/tuned_op_bench_main.csv \
             /tmp/tuned_op_bench_current.csv \
             --baseline-label "flydsl==${PIN}" \
-            --current-label "flydsl-wheel (aiter ${REF})"
-
-          python3 -m pip install --force-reinstall --no-deps --no-index --find-links=/dist flydsl
+            --current-label "flydsl-wheel (aiter ${REF})" \
+            --fail-on-regress
           BASH
 
       - name: Show aiter logs
@@ -213,8 +229,10 @@ jobs:
           SUMMARY_AITER_OUTCOME: ${{ steps.aiter.outcome }}
           SUMMARY_TEST_LOG: /tmp/test_output.log
           SUMMARY_BENCH_LOG: /tmp/bench_output.log
-          SUMMARY_AITER_LOG: /tmp/aiter_output.log
-        run: python3 flydsl/scripts/generate_summary.py test
+          # Host /tmp survives between jobs and only the aiter leg truncates this
+          # file, so pass it only when the step actually ran on this leg.
+          SUMMARY_AITER_LOG: ${{ (steps.aiter.outcome == 'success' || steps.aiter.outcome == 'failure') && '/tmp/aiter_output.log' || '' }}
+        run: python3 flydsl/.github/scripts/generate_summary.py test
 
       - name: Clean up
         if: always()

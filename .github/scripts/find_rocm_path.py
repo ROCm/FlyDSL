@@ -37,12 +37,25 @@ def _module_root(name: str) -> Path | None:
     return Path(spec.submodule_search_locations[0])
 
 
+def _soname_version(path: Path) -> tuple[int, ...]:
+    """Numeric soname suffix, e.g. libamdhip64.so.7.2 -> (7, 2)."""
+    suffix = path.name[len("libamdhip64.so") :].lstrip(".")
+    parts: list[int] = []
+    for piece in suffix.split("."):
+        if not piece.isdigit():
+            break
+        parts.append(int(piece))
+    return tuple(parts)
+
+
 def _hip64_libs(root: Path) -> list[Path]:
     hits: list[Path] = []
     for sub in ("lib", "lib64"):
-        hits.extend(sorted(Path(root, sub).glob("libamdhip64.so")))
-        hits.extend(sorted(Path(root, sub).glob("libamdhip64.so.*")))
-    return hits
+        hits.extend(Path(root, sub).glob("libamdhip64.so"))
+        hits.extend(Path(root, sub).glob("libamdhip64.so.*"))
+    # Highest ABI major first; sonames must be ordered numerically, not as strings
+    # (".so.10" sorts before ".so.7" lexicographically).
+    return sorted(hits, key=_soname_version, reverse=True)
 
 
 def _unversioned(root: Path) -> Path | None:
@@ -111,6 +124,11 @@ def _ensure_unversioned(root: Path) -> Path:
     versioned = libs[0]
     in_place = versioned.parent / "libamdhip64.so"
     try:
+        # A dangling link (left by an earlier `rocm-sdk init` against a since-removed
+        # version) is invisible to _unversioned's exists() check but still occupies
+        # the name, so symlink_to would raise FileExistsError.
+        if in_place.is_symlink() and not in_place.exists():
+            in_place.unlink()
         in_place.symlink_to(versioned.name)
         print(f"created {in_place} -> {versioned.name}", file=sys.stderr)
         return root
@@ -120,13 +138,22 @@ def _ensure_unversioned(root: Path) -> Path:
     if LINK_ROOT.exists():
         shutil.rmtree(LINK_ROOT)
     LINK_ROOT.mkdir(parents=True)
-    for sub in ("lib", "lib64", "include", "bin", "hip", "llvm", "share"):
+    # "lib" is deliberately excluded: aliasing it onto root/lib would put the
+    # recovery symlink back in the directory whose unwritability got us here.
+    for sub in ("lib64", "include", "bin", "hip", "llvm", "share"):
         src = root / sub
         if src.exists():
             (LINK_ROOT / sub).symlink_to(src)
     libdir = LINK_ROOT / "lib"
-    libdir.mkdir(exist_ok=True)
-    (libdir / "libamdhip64.so").symlink_to(versioned.resolve())
+    libdir.mkdir()
+    src_lib = root / "lib"
+    if src_lib.is_dir():
+        for entry in src_lib.iterdir():
+            (libdir / entry.name).symlink_to(entry)
+    link = libdir / "libamdhip64.so"
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(versioned.resolve())
     print(f"wrapper ROCM_PATH={LINK_ROOT} libamdhip64.so -> {versioned}", file=sys.stderr)
     return LINK_ROOT
 

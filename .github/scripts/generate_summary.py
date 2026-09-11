@@ -6,9 +6,9 @@
 """Generate GitHub Actions job summaries for FlyDSL CI.
 
 Usage:
-    python3 scripts/generate_summary.py build
-    python3 scripts/generate_summary.py test
-    python3 scripts/generate_summary.py promote
+    python3 .github/scripts/generate_summary.py build
+    python3 .github/scripts/generate_summary.py test
+    python3 .github/scripts/generate_summary.py promote
 
 Each mode reads its inputs from environment variables and appends
 Markdown to $GITHUB_STEP_SUMMARY.
@@ -95,7 +95,8 @@ def test_summary(summary: Path) -> None:
         ["Run tests", f"`{tests_outcome}`"],
         ["Run benchmarks", f"`{bench_outcome}`"],
     ]
-    if aiter_outcome:
+    # A gated-off step reports the literal string "skipped", which is truthy.
+    if aiter_outcome and aiter_outcome != "skipped":
         step_rows.append(["Aiter CSV MoE / HGEMM", f"`{aiter_outcome}`"])
     _table(
         summary,
@@ -106,7 +107,7 @@ def test_summary(summary: Path) -> None:
     _write_test_results(summary, test_log)
     _write_bench_results(summary, bench_log)
     aiter_log = os.environ.get("SUMMARY_AITER_LOG", "")
-    if aiter_log:
+    if aiter_log and aiter_outcome and aiter_outcome != "skipped":
         _write_aiter_compare(summary, aiter_log)
 
 
@@ -142,13 +143,7 @@ def _write_bench_results(summary: Path, log_path: str) -> None:
 
     perf_block = _extract_perf_table(text)
     if perf_block:
-        _out(summary, "### Benchmark Results")
-        _out(summary)
-        _out(summary, "```")
-        for line in perf_block[:30]:
-            _out(summary, line)
-        _out(summary, "```")
-        _out(summary)
+        _write_block(summary, "### Benchmark Results", perf_block, 30)
 
     for pattern in (r"^Total:.*", r"^Success:.*", r"^Failed:.*"):
         match = _first_match(pattern, text)
@@ -157,40 +152,87 @@ def _write_bench_results(summary: Path, log_path: str) -> None:
     _out(summary)
 
 
-def _extract_perf_table(text: str) -> list[str]:
-    """Return lines between the 'op' header and 'Benchmark Summary'."""
+def _capture_block(text, start_pred, end_pred, inclusive_end=False) -> list[str]:
+    """Return the lines from the first start_pred match to the first end_pred match.
+
+    Without an end_pred the capture would run to the end of the log, so every
+    caller must supply one.
+    """
     lines: list[str] = []
     capturing = False
     for line in text.splitlines():
-        if not capturing and line.startswith("op "):
+        if not capturing and start_pred(line):
             capturing = True
         if capturing:
-            if "Benchmark Summary" in line:
+            if end_pred(line):
+                if inclusive_end:
+                    lines.append(line)
                 break
             lines.append(line)
     return lines
+
+
+def _trim(lines: list[str], limit: int, tail_pred=None) -> list[str]:
+    """Cap lines at limit, marking what was dropped.
+
+    With tail_pred, the block starting at the first match is always kept: the
+    aiter sweep is far longer than the cap and its verdict is the last thing in
+    the block, so plain head truncation would silently drop it.
+    """
+    if len(lines) <= limit:
+        return lines
+    tail: list[str] = []
+    if tail_pred is not None:
+        idx = next((i for i, line in enumerate(lines) if tail_pred(line)), None)
+        if idx is not None and len(lines) - idx < limit - 1:
+            tail = lines[idx:]
+    head = lines[: max(limit - len(tail) - 1, 0)]
+    dropped = len(lines) - len(head) - len(tail)
+    return head + [f"... {dropped} line(s) omitted; see the step log ..."] + tail
+
+
+def _write_block(summary: Path, title: str, lines: list[str], limit: int, tail_pred=None) -> None:
+    _out(summary, title)
+    _out(summary)
+    _out(summary, "```")
+    for line in _trim(lines, limit, tail_pred):
+        _out(summary, line)
+    _out(summary, "```")
+    _out(summary)
+
+
+def _extract_perf_table(text: str) -> list[str]:
+    """Return lines between the 'op' header and 'Benchmark Summary'."""
+    return _capture_block(
+        text,
+        lambda line: line.startswith("op "),
+        lambda line: "Benchmark Summary" in line,
+    )
 
 
 def _write_aiter_compare(summary: Path, log_path: str) -> None:
     log = Path(log_path)
     if not log.is_file():
         return
-    lines = []
-    capturing = False
-    for line in log.read_text(errors="replace").splitlines():
-        if line.startswith("=== Tuned op bench:"):
-            capturing = True
-        if capturing:
-            lines.append(line)
+    text = log.read_text(errors="replace")
+    # compare_benchmark.py ends its report with the "SKIPPED:" counter; without
+    # that sentinel the capture would swallow the trailing pip output too.
+    lines = _capture_block(
+        text,
+        lambda line: line.startswith("=== Tuned op bench:"),
+        lambda line: line.startswith("  SKIPPED:"),
+        inclusive_end=True,
+    )
+    title = "### Aiter CSV: wheel vs aiter-main flydsl pin"
     if not lines:
+        # The banner comes from aiter's compare_benchmark.py, which is unpinned.
+        # Say so rather than dropping the table from an otherwise green summary.
+        _out(summary, title)
+        _out(summary)
+        _out(summary, "No comparison block found in the aiter log (banner may have changed upstream).")
+        _out(summary)
         return
-    _out(summary, "### Aiter CSV: wheel vs aiter-main flydsl pin")
-    _out(summary)
-    _out(summary, "```")
-    for line in lines[:80]:
-        _out(summary, line)
-    _out(summary, "```")
-    _out(summary)
+    _write_block(summary, title, lines, 80, tail_pred=lambda line: line.startswith("Summary:"))
 
 
 # ── Promote summary ─────────────────────────────────────────────────────────
