@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-11T08:52:05Z",
+ "updated": "2026-09-11T08:56:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34581453400,
+   "pr": null,
+   "commit": "acf7e67b7d22847e345938ca54fcc137bd7b2a1f",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job (#1094)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34581453400",
+   "created_at": "2026-09-11T08:53:59Z",
+   "updated_at": "2026-09-11T08:54:43Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34580089132,
    "pr": 1094,
@@ -35,7 +50,7 @@
   },
   {
    "run_id": 34579648475,
-   "pr": 1094,
+   "pr": null,
    "commit": "769e4b83d06fa9cbd268c8d1b983953ff9e8065c",
    "branch": "ci/pypi-moe-csv-hgemm",
    "event": "pull_request",
@@ -50,7 +65,7 @@
   },
   {
    "run_id": 34577222538,
-   "pr": 1094,
+   "pr": null,
    "commit": "eaa2f4fad6e5663f21c04ac7b0373d0856b399e5",
    "branch": "ci/pypi-moe-csv-hgemm",
    "event": "pull_request",
@@ -141,29 +156,29 @@
    "branch": "main",
    "event": "push",
    "title": "fix(ci): use host networking for manylinux image builds (#1118)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851",
    "created_at": "2026-09-11T07:38:36Z",
-   "updated_at": "2026-09-11T08:27:08Z",
+   "updated_at": "2026-09-11T08:54:35Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-11T08:27:07Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T08:54:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192019617"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-11T08:04:27Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T08:54:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192019681"
     },
     {
@@ -1808,21 +1823,6 @@
    "created_at": "2026-09-09T11:33:22Z",
    "updated_at": "2026-09-09T11:35:08Z",
    "actor": "Boss2002n",
-   "jobs": []
-  },
-  {
-   "run_id": 34346020943,
-   "pr": 1114,
-   "commit": "f706d8c7ec28da8c3305749e6bc68a833b7bfe0c",
-   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
-   "event": "pull_request",
-   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34346020943",
-   "created_at": "2026-09-09T11:31:35Z",
-   "updated_at": "2026-09-09T11:32:57Z",
-   "actor": "jli-melchior",
    "jobs": []
   }
  ]
