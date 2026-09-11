@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-11T18:54:00Z",
+ "updated": "2026-09-11T19:11:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34637167614,
+   "pr": 1125,
+   "commit": "a205f72077d5be6963c7dc378e13f36e4b9e70ab",
+   "branch": "perf/gemm-bf16-cross-tile-carry",
+   "event": "pull_request",
+   "title": "[Perf] gemm_bf16 gfx1250: cross-tile carry to hide K-tile prologue ds\u2026",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34637167614",
+   "created_at": "2026-09-11T19:07:59Z",
+   "updated_at": "2026-09-11T19:09:36Z",
+   "actor": "amd-hhashemi",
+   "jobs": []
+  },
   {
    "run_id": 34627358715,
    "pr": 1106,
@@ -1991,21 +2006,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34431527406,
-   "pr": null,
-   "commit": "ce788b3bd1cfb8baa2dbe8b27691d11f6724f57e",
-   "branch": "lhc/fold-index-cast-on-main",
-   "event": "pull_request",
-   "title": "[Perf][Dialect] Fold redundant index cast pairs in layout lowering",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431527406",
-   "created_at": "2026-09-10T02:58:43Z",
-   "updated_at": "2026-09-10T03:01:04Z",
-   "actor": "Phil-amd",
-   "jobs": []
   }
  ]
 }
