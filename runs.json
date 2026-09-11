@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-11T06:43:44Z",
+ "updated": "2026-09-11T07:35:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34574857685,
+   "pr": null,
+   "commit": "2aff2aaa49e8d2921fd483a069e1f2c069e0b696",
+   "branch": "main",
+   "event": "push",
+   "title": "[Perf][Dialect] Fold redundant index cast pairs in layout lowering (#\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34574857685",
+   "created_at": "2026-09-11T07:32:26Z",
+   "updated_at": "2026-09-11T07:33:39Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34569038398,
    "pr": null,
@@ -10,39 +25,40 @@
    "branch": "main",
    "event": "push",
    "title": "Mxfp8 8w 1*32 scale (#1107)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34569038398",
    "created_at": "2026-09-11T06:13:36Z",
-   "updated_at": "2026-09-11T06:36:56Z",
+   "updated_at": "2026-09-11T07:32:58Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-11T06:39:36Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T07:32:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34569038398/job/103171919400"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-11T06:36:55Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T07:32:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34569038398/job/103171919423"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T06:37:16Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34569038398/job/103171919453"
+     "completed_at": "2026-09-11T07:11:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34569038398/job/103171919453",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -73,10 +89,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-11T05:59:38Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T06:52:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34567151160/job/103164056362"
     },
     {
@@ -97,19 +113,19 @@
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557441921",
    "created_at": "2026-09-11T03:10:35Z",
-   "updated_at": "2026-09-11T03:33:03Z",
+   "updated_at": "2026-09-11T07:09:17Z",
    "actor": "sammysun0711",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-11T03:33:03Z",
+     "started_at": "2026-09-11T07:09:17Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557441921/job/103137249850"
     },
@@ -191,10 +207,10 @@
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-11T06:25:34Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T07:07:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103152917683"
     }
    ]
@@ -1869,21 +1885,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34333936963,
-   "pr": null,
-   "commit": "f1f77dd9f639f803012908e01b7eff42f274d85c",
-   "branch": "ci/mi35x-1-runner",
-   "event": "pull_request",
-   "title": "[CI] Move 1-GPU tests to linux-flydsl-mi35x-1 and filter MI350 from the perf dashboard",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34333936963",
-   "created_at": "2026-09-09T09:18:12Z",
-   "updated_at": "2026-09-09T09:51:44Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
