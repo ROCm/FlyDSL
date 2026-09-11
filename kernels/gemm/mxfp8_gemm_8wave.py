@@ -284,7 +284,7 @@ def compile_mxfp8_gemm_8w(
             a_s2r = S2RLoader(wave_m, N_TILES_A)
             b_s2r = S2RLoader(wave_n, N_TILES_B)
             if const_expr(store_factory is None):
-                store_c = StoreC(None, None, C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B)
+                store_c = StoreC(None, None, C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B).store
             else:
                 scratch = [
                     a_cur0.ptr,
@@ -460,12 +460,10 @@ def compile_mxfp8_gemm_8w(
             base_row = block_m * BLOCK_M + wave_m_offset
             base_col = block_n * BLOCK_N + wave_n_offset
 
-            store_c.store(c00_frag, base_row + 0, base_col + 0)
-            store_c.store(c01_frag, base_row + 0, base_col + LDS_BLOCK_N)
-            store_c.store(c10_frag, base_row + LDS_BLOCK_M, base_col + 0)
-            store_c.store(c11_frag, base_row + LDS_BLOCK_M, base_col + LDS_BLOCK_N)
-            if const_expr(store_factory is not None):
-                store_c.finish(block_m * BLOCK_M, block_n * BLOCK_N)
+            store_c(c00_frag, base_row + 0, base_col + 0)
+            store_c(c01_frag, base_row + 0, base_col + LDS_BLOCK_N)
+            store_c(c10_frag, base_row + LDS_BLOCK_M, base_col + 0)
+            store_c(c11_frag, base_row + LDS_BLOCK_M, base_col + LDS_BLOCK_N)
 
     @flyc.jit
     def launch_gemm(

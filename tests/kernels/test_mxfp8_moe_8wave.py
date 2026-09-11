@@ -196,6 +196,7 @@ def test_mxfp8_moe_unpack_routes():
     routes = torch.randperm(tokens * topk, device="cuda", dtype=torch.int32)
     packed = torch.full((rows,), (topk << 24) | tokens, device="cuda", dtype=torch.int32)
     packed[: routes.numel()] = ((routes % topk) << 24) | (routes // topk)
+    packed[-1] = -(1 << 24) | 1  # Invalid slot 255 with an otherwise valid token.
     row_map = torch.empty_like(packed)
     inverse = torch.full_like(routes, -1)
     args = (packed, row_map, inverse, rows, tokens, torch.cuda.current_stream())
@@ -258,12 +259,16 @@ def test_dynamic_rows_and_weight_stride(stage, k, n, tile):
     assert (out == 42).all()
 
 
-def test_sorted_reduce_missing_routes():
+@pytest.mark.parametrize("large_buffer", [False, True])
+def test_sorted_reduce_missing_routes(large_buffer):
     tokens, n, topk = 31, 256, 5
-    x = torch.randn(tokens * topk, n, device="cuda", dtype=torch.bfloat16)
-    inverse = torch.randperm(tokens * topk, device="cuda").int().reshape(tokens, topk)
+    rows = (1 << 31) // (n * 2) + tokens * topk if large_buffer else tokens * topk
+    x = torch.full((rows, n), float("nan"), device="cuda", dtype=torch.bfloat16)
+    inverse = (torch.randperm(tokens * topk, device="cuda") + rows - tokens * topk).int().reshape(tokens, topk)
     inverse[:, 0] = -1
-    weights = torch.rand(tokens * topk, device="cuda")
+    ix = inverse[:, 1:].long()
+    x[ix] = torch.randn(*ix.shape, n, device="cuda", dtype=torch.bfloat16)
+    weights = torch.rand(rows, device="cuda")
     out = torch.empty(tokens, n, device="cuda", dtype=torch.bfloat16)
     args = (x.flatten(), out.flatten(), inverse.flatten(), weights, tokens, torch.cuda.current_stream())
     flyc.compile(compile_mxfp8_moe_reduce(N=n, topk=topk, sorted_weights=True), *args)(*args)
