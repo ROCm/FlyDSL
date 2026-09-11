@@ -475,8 +475,6 @@ def _build_paged_fp8(
     waves_per_eu: int,
     daz: bool,
     lazy_rescale: bool,
-    setprio: bool,
-    enable_stagger: bool,
     use_bn128: bool,
     paged_bn128_varlen: bool,
     batch_interleave_group: int,
@@ -494,8 +492,6 @@ def _build_paged_fp8(
         waves_per_eu=waves_per_eu,
         daz=daz,
         dualwave_swp_lazy_rescale=lazy_rescale,
-        dualwave_swp_setprio=setprio,
-        dualwave_swp_enable_stagger=enable_stagger,
         num_kv_splits=1,
         varlen=True,
         cross_seqlen=True,
@@ -778,10 +774,6 @@ def _flydsl_flash_attn_paged(
         if paged_fp8:
             use_bn128 = max_kv_pages % 2 == 0
             paged_bn128_varlen = use_bn128 and B > 1
-            paged_setprio = dualwave_swp_setprio and D != 192
-            # The BF16 phase shift exposes H2 staging and probability-pack
-            # latency because segmented FP8 has only six wide P*V MFMAs.
-            paged_stagger = dualwave_swp_enable_stagger and value_head_dim == 128
             exe = _build_paged_fp8(
                 num_heads=H,
                 num_kv_heads=num_kv_heads,
@@ -790,8 +782,6 @@ def _flydsl_flash_attn_paged(
                 waves_per_eu=waves_per_eu,
                 daz=daz,
                 lazy_rescale=dualwave_swp_lazy_rescale,
-                setprio=paged_setprio,
-                enable_stagger=paged_stagger,
                 use_bn128=use_bn128,
                 paged_bn128_varlen=paged_bn128_varlen,
                 batch_interleave_group=(

@@ -4648,6 +4648,7 @@ def _check_paged_fp8_matches_torch(
     kv_lengths,
     block_table_rows,
     num_kv_heads=1,
+    lazy_rescale=True,
 ):
     """Packed causal FP8 page-64 attention supports native Q/K and V widths."""
     if len(query_lengths) == 1 and force_internal_copies and head_dim == 192:
@@ -4702,6 +4703,7 @@ def _check_paged_fp8_matches_torch(
         q_descale=query_descale,
         k_descale=key_descale,
         v_descale=value_descale,
+        dualwave_swp_lazy_rescale=lazy_rescale,
     )
     copy_reference = None
     if force_internal_copies:
@@ -4763,6 +4765,38 @@ def _check_paged_fp8_matches_torch(
     assert actual.shape == (sum(query_lengths), 16, value_head_dim)
     assert bool(torch.isfinite(actual).all().item())
     torch.testing.assert_close(actual, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("num_kv_heads", [1, 2, 4])
+@pytest.mark.parametrize("lazy_rescale", [True, False])
+def test_paged_fp8_odd_page_ragged_multiblock_matches_torch(head_dim, value_head_dim, num_kv_heads, lazy_rescale):
+    _check_paged_fp8_matches_torch(
+        head_dim=head_dim,
+        value_head_dim=value_head_dim,
+        use_non_default_stream=True,
+        force_internal_copies=False,
+        query_lengths=[300, 257, 33],
+        kv_lengths=[513, 385, 129],
+        block_table_rows=[list(reversed(range(9))), list(reversed(range(9, 16))) + [0] * 2, [18, 16, 17] + [0] * 6],
+        num_kv_heads=num_kv_heads,
+        lazy_rescale=lazy_rescale,
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+def test_paged_fp8_single_partial_page_matches_torch(head_dim, value_head_dim):
+    _check_paged_fp8_matches_torch(
+        head_dim=head_dim,
+        value_head_dim=value_head_dim,
+        use_non_default_stream=False,
+        force_internal_copies=False,
+        query_lengths=[17],
+        kv_lengths=[63],
+        block_table_rows=[[0]],
+    )
 
 
 @_requires_gfx950
