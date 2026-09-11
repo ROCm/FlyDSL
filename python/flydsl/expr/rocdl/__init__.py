@@ -23,6 +23,7 @@ from . import rdna3 as rdna3
 from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
 from .universal import *
+from .utils import require_lds_dma_support
 
 __all__ = [
     # Targets
@@ -812,6 +813,7 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux=N
     from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
+    require_lds_dma_support("raw_ptr_buffer_load_lds")
     if aux is not None and not isinstance(aux, _ir.Attribute):
         if isinstance(aux, int):
             aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)
