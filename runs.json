@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-11T01:01:18Z",
+ "updated": "2026-09-11T02:20:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34554086152,
+   "pr": null,
+   "commit": "8e725c6ca483f3b89e554e3c75927a7cc4b7f9a7",
+   "branch": "main",
+   "event": "push",
+   "title": "[Feature] Add architecture-general ISA resource diff tool (#1015)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34554086152",
+   "created_at": "2026-09-11T02:18:08Z",
+   "updated_at": "2026-09-11T02:19:01Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34546203897,
    "pr": 1105,
@@ -38,11 +53,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T00:42:39Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897/job/103103511906"
+     "completed_at": "2026-09-11T02:12:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897/job/103103511906",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -72,10 +88,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-11T00:43:37Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T01:25:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34543447535/job/103094097134"
     },
     {
@@ -274,11 +290,11 @@
    "branch": "add-flydsl-code-review-skill",
    "event": "pull_request",
    "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34474967700",
    "created_at": "2026-09-10T12:07:36Z",
-   "updated_at": "2026-09-10T12:21:43Z",
+   "updated_at": "2026-09-11T02:04:45Z",
    "actor": "zhiding512",
    "jobs": [
     {
@@ -304,9 +320,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-10T12:21:43Z",
+     "started_at": "2026-09-11T02:04:44Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34474967700/job/102867730747"
     }
@@ -456,20 +472,20 @@
    "branch": "main",
    "event": "push",
    "title": "[DSL] Add llvm load/store primitives (#1096)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706",
    "created_at": "2026-09-10T09:15:02Z",
-   "updated_at": "2026-09-10T14:23:22Z",
+   "updated_at": "2026-09-11T02:18:10Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-10T14:23:22Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T02:18:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706/job/102909585591"
     },
     {
@@ -1846,21 +1862,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34320514577,
-   "pr": null,
-   "commit": "621484fe1fb2fb425f6c045ddb2a42aac50d39ad",
-   "branch": "upstream/fa-paged-fp8-asymmetric-v",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34320514577",
-   "created_at": "2026-09-09T06:45:24Z",
-   "updated_at": "2026-09-09T06:58:07Z",
-   "actor": "sammysun0711",
-   "jobs": []
   }
  ]
 }
