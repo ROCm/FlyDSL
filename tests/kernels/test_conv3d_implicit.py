@@ -15,7 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.conv.conv3d_implicit import conv3d_implicit
+from kernels.conv.conv3d_implicit import _pick_tile, _pick_wgm, conv3d_implicit
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -127,6 +127,56 @@ def test_conv3d_tile_configs(tile):
 
     assert y.shape == y_ref.shape
     assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+@_skip_non_cdna4
+@pytest.mark.parametrize("k,groups", [(96, 1), (192, 2)])
+def test_conv2d_auto_tile_n_tail(k, groups):
+    """K per group between TILE_MIN_N_FILL*TILE_N and TILE_N must keep the wide tile."""
+    torch.manual_seed(4400 + k)
+    c, h, w = 64 * groups, 256, 256
+    x = torch.randn((1, c, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c // groups, 3, 3), device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn((k,), device="cuda", dtype=torch.float32)
+
+    assert _pick_tile(h * w, k, groups, x.device)[1] == 128
+
+    y = conv3d_implicit(x, weight, bias=bias, padding=1, groups=groups)
+    y_ref = F.conv2d(x, weight, bias=bias.to(torch.bfloat16), padding=1, groups=groups)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+# Launch-config selection is plain integer math, so these assert the rules directly.
+@_skip_non_cdna4
+@pytest.mark.parametrize(
+    "npq,k,expected_n",
+    [
+        (262144, 192, 256),  # K/groups spans one 256-wide tile: take it
+        (65536, 192, 256),
+        (262144, 384, 128),  # two 256-wide tiles, the second mostly masked: don't
+        (262144, 96, 128),  # below TILE_MIN_N_FILL for 256
+        (256, 192, 32),  # too few blocks for the halved M grid; ladder demotes as before
+    ],
+)
+def test_pick_tile_wide_n_range(npq, k, expected_n):
+    assert _pick_tile(npq, k, 1, "cuda")[1] == expected_n
+
+
+@_skip_non_cdna4
+@pytest.mark.parametrize(
+    "npq,k,expected",
+    [
+        (65536, 384, 8),  # 3 n-tiles and enough blocks: swizzle pays
+        (16384, 384, 1),  # 3 n-tiles but only ~1.5 waves
+        (1048576, 96, 1),  # one n-tile: regrouping is a no-op that still costs math
+    ],
+)
+def test_pick_wgm(npq, k, expected):
+    tile = _pick_tile(npq, k, 1, "cuda")
+    assert _pick_wgm(npq, k, 1, tile, "cuda") == expected
 
 
 @_skip_non_cdna4
@@ -253,4 +303,96 @@ def test_conv1d_vs_torch(s, stride, padding):
     torch.cuda.synchronize()
 
     assert y.shape == y_ref.shape
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+# ---- Qwen-Image VAE classic conv (T2I T=1) ---------------------------------
+# CausalConv3d 3x3x3 degenerates to conv2d with weight[:, :, 2, :, :].
+# Shapes below are the 1024x1024 spatial ladder plus the two hottest layers of
+# the 1328x1328 default resolution, taken from forward-hook traces of
+# AutoencoderKLQwenImage rather than from the config alone: the decoder halves
+# its channel count inside the UpBlock loop (in_dim // 2) before each stage, so
+# its ResBlock channel pairs coincide with the encoder ones instead of
+# continuing 384 -> 192 -> 96 -> 48.
+
+
+_QWENIMAGE_T1_RES3 = [
+    pytest.param(3, 96, 1024, 1024, id="enc_conv_in"),
+    pytest.param(96, 96, 1024, 1024, id="enc_e0_res__dec_d3_res"),
+    pytest.param(96, 192, 512, 512, id="enc_e1_res1"),
+    pytest.param(192, 192, 512, 512, id="enc_e1_res2__dec_d2_res"),
+    pytest.param(192, 384, 256, 256, id="enc_e2_res1__dec_d1_res1"),
+    pytest.param(384, 384, 256, 256, id="enc_e2_res2__dec_d1_res"),
+    pytest.param(384, 384, 128, 128, id="enc_e3_mid__dec_mid_d0"),
+    pytest.param(384, 32, 128, 128, id="enc_conv_out"),
+    pytest.param(16, 384, 128, 128, id="dec_conv_in"),
+    pytest.param(96, 3, 1024, 1024, id="dec_conv_out"),
+    pytest.param(384, 384, 166, 166, id="dec_bottleneck_1328"),
+    pytest.param(96, 96, 1328, 1328, id="dec_d3_res_hot_1328"),
+]
+
+# Resample downsample2d: ZeroPad2d((0, 1, 0, 1)) then Conv2d(k=3, s=2, p=0).
+_QWENIMAGE_DOWN2D = [
+    pytest.param(96, 1024, 1024, id="enc_e0_downsample"),
+    pytest.param(192, 512, 512, id="enc_e1_downsample_spatial"),
+    pytest.param(384, 256, 256, id="enc_e2_downsample_spatial"),
+]
+
+# Resample upsample2d/3d: nearest-exact x2 happens outside the kernel, so the
+# conv runs at the already-doubled resolution with Conv2d(dim, dim // 2, k=3,
+# s=1, p=1).
+_QWENIMAGE_UP2D = [
+    pytest.param(384, 192, 256, 256, id="dec_d0_upsample"),
+    pytest.param(384, 192, 512, 512, id="dec_d1_upsample"),
+    pytest.param(192, 96, 1024, 1024, id="dec_d2_upsample"),
+]
+
+
+@_skip_non_cdna4
+@pytest.mark.parametrize("c_in,c_out,h,w", _QWENIMAGE_T1_RES3)
+def test_qwenimage_vae_t1_res3_bf16(c_in, c_out, h, w):
+    torch.manual_seed(8800 + c_in + c_out + h + w)
+    x2 = torch.randn((1, c_in, h, w), device="cuda", dtype=torch.bfloat16)
+    weight5 = torch.randn((c_out, c_in, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
+    weight2 = weight5[:, :, 2, :, :]
+    bias = torch.randn((c_out,), device="cuda", dtype=torch.float32)
+
+    y = conv3d_implicit(x2, weight2, bias=bias, stride=1, padding=1)
+    y_ref = F.conv2d(x2, weight2, bias=bias.to(torch.bfloat16), stride=1, padding=1)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape == (1, c_out, h, w)
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+@_skip_non_cdna4
+@pytest.mark.parametrize("c,h,w", _QWENIMAGE_DOWN2D)
+def test_qwenimage_vae_downsample2d_bf16(c, h, w):
+    torch.manual_seed(9100 + c + h + w)
+    x2 = torch.randn((1, c, h, w), device="cuda", dtype=torch.bfloat16)
+    x_pad = F.pad(x2, (0, 1, 0, 1))
+    weight = torch.randn((c, c, 3, 3), device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn((c,), device="cuda", dtype=torch.float32)
+
+    y = conv3d_implicit(x_pad, weight, bias=bias, stride=2, padding=0)
+    y_ref = F.conv2d(x_pad, weight, bias=bias.to(torch.bfloat16), stride=2, padding=0)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+@_skip_non_cdna4
+@pytest.mark.parametrize("c_in,c_out,h,w", _QWENIMAGE_UP2D)
+def test_qwenimage_vae_upsample2d_bf16(c_in, c_out, h, w):
+    torch.manual_seed(9400 + c_in + c_out + h + w)
+    x2 = torch.randn((1, c_in, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((c_out, c_in, 3, 3), device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn((c_out,), device="cuda", dtype=torch.float32)
+
+    y = conv3d_implicit(x2, weight, bias=bias, stride=1, padding=1)
+    y_ref = F.conv2d(x2, weight, bias=bias.to(torch.bfloat16), stride=1, padding=1)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape == (1, c_out, h, w)
     assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
