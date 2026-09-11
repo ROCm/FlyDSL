@@ -123,13 +123,29 @@ public:
       Value bVal = mmaOp.getB();
       Value cVal = mmaOp.getC();
 
+      auto mmaAtomTy = cast<MmaAtomType>(mmaOp.getMmaAtom().getType());
+
+      auto narrowToMmaWidth = [&](Value &val, LayoutAttr mmaLayout) {
+        auto regVecTy = dyn_cast<VectorType>(val.getType());
+        if (!regVecTy)
+          return;
+        LayoutBuilder<LayoutAttr> lb(builder.getContext());
+        int32_t mmaCosize = layoutCosize(lb, mmaLayout).getLeafAsInt().getValue();
+        if (regVecTy.getNumElements() > mmaCosize) {
+          val = vector::ExtractStridedSliceOp::create(builder, loc, val, /*offsets=*/{0},
+                                                      /*sizes=*/{mmaCosize}, /*strides=*/{1});
+        }
+      };
+
       if (aEligible) {
         Value aIter = aVal.getDefiningOp<MakeViewOp>().getIter();
         aVal = PtrLoadOp::create(builder, loc, RegMem2SSAType(aTy, true), aIter).getResult();
+        narrowToMmaWidth(aVal, cast<LayoutAttr>(mmaAtomTy.getThrValLayoutA()));
       }
       if (bEligible) {
         Value bIter = bVal.getDefiningOp<MakeViewOp>().getIter();
         bVal = PtrLoadOp::create(builder, loc, RegMem2SSAType(bTy, true), bIter).getResult();
+        narrowToMmaWidth(bVal, cast<LayoutAttr>(mmaAtomTy.getThrValLayoutB()));
       }
       if (cEligible) {
         Value cIter = cVal.getDefiningOp<MakeViewOp>().getIter();

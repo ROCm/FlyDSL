@@ -3,6 +3,7 @@
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
@@ -160,12 +161,32 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   Type accElemTy = getElemTyAcc();
   VectorType accTy = VectorType::get({accVecSize}, accElemTy);
 
-  if (a.getType() != abTyA)
-    a = LLVM::BitcastOp::create(builder, loc, abTyA, a);
-  if (b.getType() != abTyB)
-    b = LLVM::BitcastOp::create(builder, loc, abTyB, b);
-  if (c.getType() != accTy)
-    c = LLVM::BitcastOp::create(builder, loc, accTy, c);
+  auto matchWidth = [&](Value &val, Type targetTy) {
+    if (val.getType() == targetTy)
+      return;
+    auto srcVecTy = dyn_cast<VectorType>(val.getType());
+    auto dstVecTy = dyn_cast<VectorType>(targetTy);
+    if (srcVecTy && dstVecTy) {
+      int64_t srcBits =
+          srcVecTy.getNumElements() * srcVecTy.getElementType().getIntOrFloatBitWidth();
+      int64_t dstBits =
+          dstVecTy.getNumElements() * dstVecTy.getElementType().getIntOrFloatBitWidth();
+      if (srcBits > dstBits && srcBits % dstBits == 0) {
+        int64_t fullCount = srcBits / dstVecTy.getElementType().getIntOrFloatBitWidth();
+        auto wideTy = VectorType::get({fullCount}, dstVecTy.getElementType());
+        if (wideTy != srcVecTy)
+          val = LLVM::BitcastOp::create(builder, loc, wideTy, val);
+        val = vector::ExtractStridedSliceOp::create(builder, loc, val, /*offsets=*/{0},
+                                                    /*sizes=*/{dstVecTy.getNumElements()},
+                                                    /*strides=*/{1});
+        return;
+      }
+    }
+    val = LLVM::BitcastOp::create(builder, loc, targetTy, val);
+  };
+  matchWidth(a, abTyA);
+  matchWidth(b, abTyB);
+  matchWidth(c, accTy);
 
 #define DISPATCH_MFMA_SSA(M_, K_, PRED, OP)                                                        \
   if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
