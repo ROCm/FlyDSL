@@ -21,7 +21,8 @@ produced (typically an `i8` one) and carries `T` alongside it, in Python. Field 
 overlays, and typed loads/stores are all computed from that trace-time `T`, never from the MLIR
 pointer type.
 
-The layout rules a `Storage` navigates come from the `Storable` protocol. Composites acquire them by
+The layout rules a `Storage` navigates come from the
+[`Storable` protocol](dsl_protocols.md#storable). Composites acquire them by
 [closure over their fields](composite_types.md#closure-over-the-protocols) — grouping is a
 composite's job, addressing is this page's.
 
@@ -39,8 +40,8 @@ The correspondence with C++ is close enough to use as a lookup table:
 
 Three things follow from `allocate` returning an address rather than a value:
 
-- **the memory has no contents yet** — `peek()` is a load you ask for, not something allocation did
-  for you;
+- **allocation does not initialize memory** — `peek()` delegates to `T`'s `Storable` access
+  contract to obtain a value; allocation itself does not perform that access;
 - **not every `T` has a value form** — a `@fx.union` never does, so it exists only as
   `Storage[Union]` and is reached one variant at a time;
 - **a composite is not one SSA value** — `Storage[T]` navigates its fields by offset, which is
@@ -55,8 +56,8 @@ reaches the type's fields — which is why they, along with `replace` and any `_
 
 ## What a `Storage` can point at
 
-`T` must be `Storable`: able to state a static size and alignment, and to be read from (and usually
-written to) a traced pointer.
+`T` must implement the `Storable` contract: a static size and alignment, plus typed access through
+a traced pointer. This applies equally to built-in and user-defined types. Builtin support includes:
 
 | `T` | Size | Alignment |
 |---|---|---|
@@ -64,9 +65,9 @@ written to) a traced pointer.
 | `fx.Array[E, N]` / `fx.Array[E, N, A]` | `N` elements of `E` | `A`, defaulting to the element byte size |
 | a composite whose non-`Constexpr` fields are all `Storable` | see *Byte layout* | see *Byte layout* |
 
-Everything else is deliberately excluded, and asking for its size is a `TypeError`:
-sub-byte numerics including `fx.Boolean` and `fx.Int4`, plus `fx.Vector`, `fx.Pointer`, and
-`fx.Tensor`. One such field is enough to make the whole composite non-storable.
+Builtin types without this contract include sub-byte numerics such as `fx.Boolean` and `fx.Int4`,
+plus `fx.Vector`, `fx.Pointer`, and `fx.Tensor`; asking for their storage size is a `TypeError`.
+One such field is enough to make the whole composite non-storable.
 
 ### `fx.Array[E, N, A]`
 

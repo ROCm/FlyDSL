@@ -32,7 +32,7 @@ The following methods apply to both `Numeric` and `Vector`, and are elementwise 
 | Method | Meaning | Example |
 |--------|---------|---------|
 | `Type(x)` | construct or cast — the type class is its own constructor. A `Vector` alias type (`Float32x4`, …) broadcasts a scalar across every lane | `Int32(5)`, `Float32(thread_idx.x)`; `Float32x4(1.0)` → all four lanes `1.0` |
-| Arithmetic — `+` `-` `*` `/` `//` `%` `**`, unary `+x` `-x` `abs(x)`, `divmod(x, y)` | result type follows *Type interoperability* | `Int32(3) + Int32(4)` → `Int32(7)`; `vec * 2.0` |
+| Arithmetic — `+` `-` `*` `/` `//` `%` `**`, unary `+x` `-x` `abs(x)`, `divmod(x, y)`, `fx.min(x, ...)`, `fx.max(x, ...)` | result type follows *Type interoperability* | `Int32(3) + Int32(4)` → `Int32(7)`; `vec * 2.0` |
 | Bitwise/shift — `&` `\|` `^` `<<` `>>`, unary `~x` | integer-only | `Int32(6) & Int32(3)` → `Int32(2)` |
 | Comparison — `<` `<=` `>` `>=` `==` `!=` | result is `Boolean` | `a < b` |
 | `x.bitcast(dtype)` | reinterpret the bits: `Numeric` equal width; `Vector` equal *total* width, recomputing the lane count | `Float32(1.0).bitcast(Int32)`; `Float32x4(0.0).bitcast(Int8)` → `Int8x16` |
