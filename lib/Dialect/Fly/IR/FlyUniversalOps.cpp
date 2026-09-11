@@ -250,6 +250,12 @@ FailureOr<Value> CopyOpUniversalAtomicType::emitAtomCallSSA(OpBuilder &builder, 
   auto binOp = convertAtomicOp(getAtomicOp().getValue(), isFloat);
   if (!binOp)
     return failure();
+
+  if (isa<VectorType>(src.getType())) {
+    emitError(loc, "vectorized atomic ops are unsupported, need a scalar-sized copy atom");
+    return failure();
+  }
+
   LLVM::AtomicRMWOp::create(builder, loc, *binOp, dstPtr, src, LLVM::AtomicOrdering::monotonic,
                             getSyncscope());
   return src;
