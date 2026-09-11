@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-11T07:41:09Z",
+ "updated": "2026-09-11T08:24:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34577222538,
+   "pr": 1094,
+   "commit": "eaa2f4fad6e5663f21c04ac7b0373d0856b399e5",
+   "branch": "ci/pypi-moe-csv-hgemm",
+   "event": "pull_request",
+   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577222538",
+   "created_at": "2026-09-11T08:02:31Z",
+   "updated_at": "2026-09-11T08:07:29Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34577216645,
+   "pr": 848,
+   "commit": "21c0eae44a93f88851b44395bcfbac68d633ce5f",
+   "branch": "cjl/norm_perf",
+   "event": "pull_request",
+   "title": "[Perf] Optimize rmsnorm/layernorm",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645",
+   "created_at": "2026-09-11T08:02:27Z",
+   "updated_at": "2026-09-11T08:10:10Z",
+   "actor": "cschenjunlin",
+   "jobs": []
+  },
   {
    "run_id": 34575338851,
    "pr": null,
@@ -10,13 +40,41 @@
    "branch": "main",
    "event": "push",
    "title": "fix(ci): use host networking for manylinux image builds (#1118)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851",
    "created_at": "2026-09-11T07:38:36Z",
-   "updated_at": "2026-09-11T07:39:26Z",
+   "updated_at": "2026-09-11T08:01:19Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-11T08:01:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192019617"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-11T08:04:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192019681"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-11T08:01:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192020057"
+    }
+   ]
   },
   {
    "run_id": 34574857685,
@@ -84,11 +142,11 @@
    "branch": "codex/topk-gating-mi355",
    "event": "pull_request",
    "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34567151160",
    "created_at": "2026-09-11T05:44:54Z",
-   "updated_at": "2026-09-11T05:58:45Z",
+   "updated_at": "2026-09-11T08:10:45Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -113,9 +171,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-11T05:58:45Z",
+     "started_at": "2026-09-11T08:10:44Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34567151160/job/103164056403"
     }
@@ -128,21 +186,22 @@
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557441921",
    "created_at": "2026-09-11T03:10:35Z",
-   "updated_at": "2026-09-11T07:09:17Z",
+   "updated_at": "2026-09-11T08:21:54Z",
    "actor": "sammysun0711",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T07:09:17Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557441921/job/103137249850"
+     "completed_at": "2026-09-11T08:21:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557441921/job/103137249850",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -1765,93 +1824,6 @@
      "completed_at": "2026-09-09T10:57:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577/job/102432814096",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34337075328,
-   "pr": null,
-   "commit": "15e9154afd12e23f9e9521ce43428c3dd05e0f86",
-   "branch": "ci/mi35x-1-runner",
-   "event": "pull_request",
-   "title": "[CI] Move 1-GPU tests to linux-flydsl-mi35x-1 and filter MI350 from the perf dashboard",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34337075328",
-   "created_at": "2026-09-09T09:51:42Z",
-   "updated_at": "2026-09-09T11:21:24Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-09T11:13:25Z",
-     "completed_at": "2026-09-09T11:15:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34337075328/job/102442361818"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-09T11:13:02Z",
-     "completed_at": "2026-09-09T11:21:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34337075328/job/102442361893"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-09T11:13:11Z",
-     "completed_at": "2026-09-09T11:21:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34337075328/job/102442362095"
-    }
-   ]
-  },
-  {
-   "run_id": 34336723109,
-   "pr": 1113,
-   "commit": "f4fa09f694871a815084ddbb56116afd4843a118",
-   "branch": "fix/fused-rope-head-dim-96",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fused RoPE for head dimension 96",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336723109",
-   "created_at": "2026-09-09T09:47:55Z",
-   "updated_at": "2026-09-09T16:39:17Z",
-   "actor": "tangzzycc",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T15:18:46Z",
-     "completed_at": "2026-09-09T15:34:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336723109/job/102525974532",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-09T15:34:03Z",
-     "completed_at": "2026-09-09T16:39:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336723109/job/102525974628"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-09T15:19:40Z",
-     "completed_at": "2026-09-09T16:37:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34336723109/job/102525974648"
     }
    ]
   }
