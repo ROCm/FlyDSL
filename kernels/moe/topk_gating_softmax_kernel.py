@@ -30,6 +30,7 @@ from flydsl._mlir.dialects import vector
 from flydsl.expr import arith, as_ir_value, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, T
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "topk_gating_softmax_kernel"
@@ -39,18 +40,20 @@ WARPS_PER_BLOCK = 4
 BLOCK_THREADS = WARPS_PER_BLOCK * WARP_SIZE  # 256 on gfx95x
 
 
-def _pick_layout(num_experts: int):
+def _pick_layout(num_experts: int, max_vpt: int = 16):
     """Pick (VPT, THREADS_PER_TOKEN) for the multi-token-per-block fast path.
 
     Constraints:
       - ``VPT`` is a power of 2 in [1, 16]
       - ``THREADS_PER_TOKEN = num_experts // VPT`` is a power of 2 <= WARP_SIZE
-      - prefer the largest ``VPT`` (fewest loads, widest atom)
+      - prefer the largest ``VPT <= max_vpt`` (fewest loads, widest atom)
 
     For ``num_experts=128`` on a 64-wide wave this picks ``(VPT=16, TPT=8)``
     (TOKENS_PER_BLOCK=32). vLLM's ``topkGatingSoftmax`` uses VPT=8 / TPT=16
     """
     for vpt in [16, 8, 4, 2, 1]:
+        if vpt > max_vpt:
+            continue
         if num_experts % vpt != 0:
             continue
         tpt = num_experts // vpt
@@ -62,18 +65,18 @@ def _pick_layout(num_experts: int):
     return None, None
 
 
-def _compute_topk_gating_layout(num_experts: int, topk: int, dtype_str: str):
+def _compute_topk_gating_layout(num_experts: int, topk: int, dtype_str: str, *, max_vpt: int = 16):
     """Resolve the full layout dict (VPT, THREADS_PER_TOKEN, TOKENS_PER_BLOCK,
     ATOM_BITS, ELEMS_PER_ATOM, ATOMS_PER_THREAD, elem_bits) for the multi-
     token-per-block gating softmax kernel.
 
-    Shared by the standalone kernel in this module and the fused oneshot
-    kernel in ``kernels/moe_sorting_kernel.py`` so the two paths can never
-    disagree on the layout.
+    Shared by the standalone kernel and the fused oneshot sorting kernel.
+    The default preserves the fused layout; standalone small-batch dispatch
+    can request a lower ``max_vpt`` without changing the fused path.
     """
     elem_bits = 32 if dtype_str == "f32" else 16
 
-    VPT, THREADS_PER_TOKEN = _pick_layout(num_experts)
+    VPT, THREADS_PER_TOKEN = _pick_layout(num_experts, max_vpt)
     if VPT is None:
         raise ValueError(
             f"num_experts={num_experts} is not supported by the multi-token-per-block "
@@ -389,11 +392,14 @@ def _emit_topk_gating_softmax_body(
                 _store_scalar_i32(tei_div, Int32(k_idx), tei_val)
 
 
-def build_topk_gating_softmax_module(
+def _build_topk_gating_softmax_module(
     num_experts: int,
     topk: int,
     dtype_str: str = "bf16",
     renormalize: bool = True,
+    *,
+    max_vpt: int = 16,
+    ballot_argmax: bool = False,
 ):
     """Build a fused TopK gating softmax kernel.
 
@@ -407,7 +413,7 @@ def build_topk_gating_softmax_module(
         A @flyc.jit launcher function with signature
         ``(gating, weights, indices, tei, num_tokens, *, stream)``.
     """
-    layout = _compute_topk_gating_layout(num_experts, topk, dtype_str)
+    layout = _compute_topk_gating_layout(num_experts, topk, dtype_str, max_vpt=max_vpt)
     elem_bits = layout["elem_bits"]
     VPT = layout["VPT"]
     THREADS_PER_TOKEN = layout["THREADS_PER_TOKEN"]
@@ -416,6 +422,7 @@ def build_topk_gating_softmax_module(
     ATOM_BITS = layout["ATOM_BITS"]
     ELEMS_PER_ATOM = layout["ELEMS_PER_ATOM"]
     ATOMS_PER_THREAD = layout["ATOMS_PER_THREAD"]
+    USE_DPP = max_vpt == 8 and ballot_argmax
 
     # No shared memory used — every reduction stays inside a sub-warp lane group.
 
@@ -464,8 +471,18 @@ def build_topk_gating_softmax_module(
             width_i32 = c_tpt
             w = x
             for _sh in range_constexpr(int(math.log2(THREADS_PER_TOKEN))):
-                off = fx.Int32(THREADS_PER_TOKEN // (2 << _sh))
-                peer = w.shuffle_xor(off, width_i32)
+                offset = THREADS_PER_TOKEN // (2 << _sh)
+                off = fx.Int32(offset)
+                peer = w
+                if USE_DPP and offset in (1, 2):
+                    # Quad permutations preserve the fixed XOR1/2 lane map
+                    # without a DS instruction and its dependency wait.
+                    ctrl = 0xB1 if offset == 1 else 0x4E
+                    bits = fx.Float32(w).bitcast(fx.Int32)
+                    peer_bits = fx.rocdl.update_dpp(T.i32, as_ir_value(bits), as_ir_value(bits), ctrl, 0xF, 0xF, True)
+                    peer = fx.Int32(peer_bits).bitcast(fx.Float32)
+                else:
+                    peer = w.shuffle_xor(off, width_i32)
                 if mode == "max":
                     w = fx.max(w, peer)
                 else:
@@ -473,24 +490,32 @@ def build_topk_gating_softmax_module(
             return w
 
         def group_reduce_argmax(val, idx):
-            """Butterfly argmax within a THREADS_PER_TOKEN sub-warp group.
-
-            All lanes in the group end with the same (max_val, max_idx).
-            Ties are broken by the lower expert index.
-            """
-            width_i32 = c_tpt
-            wv, wi = val, idx
-            for _sh in range_constexpr(int(math.log2(THREADS_PER_TOKEN))):
-                off = fx.Int32(THREADS_PER_TOKEN // (2 << _sh))
-                peer_v = wv.shuffle_xor(off, width_i32)
-                peer_i = wi.shuffle_xor(off, width_i32)
-                is_greater = peer_v > wv
-                is_equal = ArithValue(peer_v) == ArithValue(wv)
-                peer_lower_idx = peer_i < wi
-                take_peer = is_greater | (is_equal & peer_lower_idx)
-                wv = take_peer.select(peer_v, wv)
-                wi = take_peer.select(peer_i, wi)
-            return wv, wi
+            """Reduce probability, then identify its lowest-index lane."""
+            winner_val, winner_idx = val, idx
+            if ballot_argmax:
+                # A lane owns a contiguous, increasing expert interval. The
+                # lowest lane among equal maxima therefore owns the lowest
+                # expert index, including ties caused by probability underflow.
+                winner_val = group_reduce(val, "max")
+                contenders = fx.Int64(fx.rocdl.ballot(T.i64, ArithValue(val) == ArithValue(winner_val)))
+                group_base = lane - expert_lane
+                group_bits = contenders.shrui(fx.Int64(group_base)) & fx.Int64((1 << THREADS_PER_TOKEN) - 1)
+                winner_lane = group_base + fx.Int32(fx.cttz(group_bits))
+                winner_idx = fx.gpu.shuffle_idx(idx, winner_lane, c_warp)
+            else:
+                width_i32 = c_tpt
+                winner_val, winner_idx = val, idx
+                for _sh in range_constexpr(int(math.log2(THREADS_PER_TOKEN))):
+                    off = fx.Int32(THREADS_PER_TOKEN // (2 << _sh))
+                    peer_v = winner_val.shuffle_xor(off, width_i32)
+                    peer_i = winner_idx.shuffle_xor(off, width_i32)
+                    is_greater = peer_v > winner_val
+                    is_equal = ArithValue(peer_v) == ArithValue(winner_val)
+                    peer_lower_idx = peer_i < winner_idx
+                    take_peer = is_greater | (is_equal & peer_lower_idx)
+                    winner_val = take_peer.select(peer_v, winner_val)
+                    winner_idx = take_peer.select(peer_i, winner_idx)
+            return winner_val, winner_idx
 
         # ── Buffer-backed views ──────────────────────────────────────────
         GatingOutput_buf = fx.rocdl.make_buffer_tensor(GatingOutput)
@@ -604,15 +629,29 @@ def build_topk_gating_softmax_module(
         selected_sum = c_zero_f
 
         for k_idx in range_constexpr(topk):
-            # Per-thread argmax over its VPT slots.
+            # A balanced local tournament shortens the dependent compare /
+            # select chain. Equal probabilities retain the left (lower-index)
+            # leaf, exactly like the original increasing-index linear scan.
             thread_best_val = c_neg_inf
             thread_best_idx = fx.Int32(-1)
-            for v in range_constexpr(VPT):
-                pv = prob_list[v]
-                ci = col_idx_list[v]
-                is_better = pv > thread_best_val
-                thread_best_val = is_better.select(pv, thread_best_val)
-                thread_best_idx = is_better.select(ci, thread_best_idx)
+            if ballot_argmax:
+                best_vals = list(prob_list)
+                best_indices = list(col_idx_list)
+                for level in range_constexpr(int(math.log2(VPT))):
+                    stride = 1 << level
+                    for v in range_constexpr(0, VPT, 2 * stride):
+                        take_right = best_vals[v + stride] > best_vals[v]
+                        best_vals[v] = take_right.select(best_vals[v + stride], best_vals[v])
+                        best_indices[v] = take_right.select(best_indices[v + stride], best_indices[v])
+                thread_best_val = best_vals[0]
+                thread_best_idx = best_indices[0]
+            else:
+                for v in range_constexpr(VPT):
+                    pv = prob_list[v]
+                    ci = col_idx_list[v]
+                    is_better = pv > thread_best_val
+                    thread_best_val = is_better.select(pv, thread_best_val)
+                    thread_best_idx = is_better.select(ci, thread_best_idx)
 
             # Sub-warp argmax → all THREADS_PER_TOKEN lanes hold the winner.
             global_best_val, global_best_idx = group_reduce_argmax(thread_best_val, thread_best_idx)
@@ -682,5 +721,42 @@ def build_topk_gating_softmax_module(
             block=(BLOCK_THREADS, 1, 1),
             stream=stream,
         )
+
+    return launch_topk_gating_softmax
+
+
+def build_topk_gating_softmax_module(
+    num_experts: int,
+    topk: int,
+    dtype_str: str = "bf16",
+    renormalize: bool = True,
+):
+    """Build fused softmax + top-K selection with optional renormalization.
+
+    Returns a JIT launcher accepting gating logits, weights, expert indices,
+    token-expert indices, token count, and stream. For gfx95, 128/256 experts,
+    and top-K in {4, 6, 8}, batches of at most 2048 tokens use eight values per
+    thread to shorten the serial selection chain. Larger batches retain the
+    wider layout to avoid increasing total wave work. The token count remains
+    dynamic: the same compiled launcher supports both layouts.
+    """
+    wide = _build_topk_gating_softmax_module(num_experts, topk, dtype_str, renormalize)
+    if not get_rocm_arch().startswith("gfx95") or num_experts not in (128, 256) or topk not in (4, 6, 8):
+        return wide
+    narrow = _build_topk_gating_softmax_module(num_experts, topk, dtype_str, renormalize, max_vpt=8, ballot_argmax=True)
+
+    @flyc.jit
+    def launch_topk_gating_softmax(
+        GatingOutput: fx.Tensor,
+        TopkWeights: fx.Tensor,
+        TopkIndices: fx.Tensor,
+        TokenExpertIndices: fx.Tensor,
+        num_tokens_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        if num_tokens_in <= fx.Int32(2048):
+            narrow(GatingOutput, TopkWeights, TopkIndices, TokenExpertIndices, num_tokens_in, stream)
+        else:
+            wide(GatingOutput, TopkWeights, TopkIndices, TokenExpertIndices, num_tokens_in, stream)
 
     return launch_topk_gating_softmax
