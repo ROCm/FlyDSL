@@ -211,8 +211,9 @@ def run_test(num_tokens, num_experts, topk, dtype_str, renormalize=True):
 
 def _dispatch_contract_input(capacity, num_experts, dtype):
     """Exactly representable logits with ties across both 8- and 16-value lanes."""
-    rows = torch.arange(capacity, dtype=torch.int64)[:, None]
-    cols = torch.arange(num_experts, dtype=torch.int64)[None, :]
+    # Other test modules set the default device to CUDA during collection.
+    rows = torch.arange(capacity, dtype=torch.int64, device="cpu")[:, None]
+    cols = torch.arange(num_experts, dtype=torch.int64, device="cpu")[None, :]
     logits = ((rows * 17 + cols * 7) % 13 - 6).to(torch.float32)
     logits[0::6] = 0  # Every expert ties: the first K indices must win.
     logits[1::6] = -4
@@ -224,7 +225,7 @@ def _dispatch_contract_input(capacity, num_experts, dtype):
     logits[2::6, -1] = 0
     # All eight winners can belong to the final lane, including lane 63.
     logits[4::6] = -4
-    logits[4::6, -8:] = torch.arange(1, 9, dtype=torch.float32)
+    logits[4::6, -8:] = torch.arange(1, 9, dtype=torch.float32, device="cpu")
     # Distinct f32 logits round to equal softmax probabilities. Selecting
     # logits instead would incorrectly reverse the lowest-index tie order.
     logits[5::6] = cols.to(torch.float32) * 1e-10
@@ -280,8 +281,8 @@ def test_topk_runtime_dispatch_contract(num_experts, topk, dtype_str, renormaliz
         torch.testing.assert_close(got_weights[:num_tokens], expected_weights[:num_tokens], atol=2e-6, rtol=2e-5)
         assert torch.equal(got_indices[:num_tokens], expected_indices[:num_tokens]), "expert order/ties differ"
         expected_tei = (
-            torch.arange(topk, dtype=torch.int32)[None, :] * num_tokens
-            + torch.arange(num_tokens, dtype=torch.int32)[:, None]
+            torch.arange(topk, dtype=torch.int32, device="cpu")[None, :] * num_tokens
+            + torch.arange(num_tokens, dtype=torch.int32, device="cpu")[:, None]
         )
         assert torch.equal(got_tei[:num_tokens], expected_tei)
         # The dynamic token count can be smaller than the allocated tensor.
@@ -304,6 +305,12 @@ def test_topk_runtime_dispatch_contract(num_experts, topk, dtype_str, renormaliz
         poison_outputs()
         graph.replay()
         check_outputs(num_tokens)
+
+
+def test_topk_contract_with_cuda_default_device():
+    """Exercise the full-suite device context even when this module runs alone."""
+    with torch.device("cuda"):
+        test_topk_runtime_dispatch_contract(128, 6, "bf16", True)
 
 
 def test_all():
