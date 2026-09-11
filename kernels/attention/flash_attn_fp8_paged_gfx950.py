@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""gfx950 page-64 FP8 flash attention with independent value dimensions."""
+"""gfx950 paged FP8 flash attention with independent value dimensions."""
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.attention.flash_attn_utils import (
+    PAGED_FP8_BUFFER_LIMIT_BYTES,
     DualwaveFp8GemmHelper,
     DualwaveFp8KernelContext,
     DualwaveFp8KvGmemToLdsLoader,
@@ -51,8 +52,10 @@ def build_flash_attn_paged_fp8_module(
     paged_bn128=False,
     paged_bn128_varlen=False,
     batch_interleave_group=1,
+    page_size=64,
+    cache_buffered=False,
 ):
-    """Build the gfx950 packed-varlen page-64 FP8 attention launcher.
+    """Build the gfx950 packed-varlen paged FP8 attention launcher.
 
     Priority/stagger options are accepted for caller compatibility; this
     paired-page pipeline uses neither wave-priority nor staggered phases.
@@ -63,6 +66,9 @@ def build_flash_attn_paged_fp8_module(
 
     if not gpu_arch.startswith("gfx950"):
         raise RuntimeError(f"paged FP8 flash attention requires gfx950, got {gpu_arch}")
+    native_cache_layout = (page_size == 1 and kv_cache_layout in ("linear", "linear3d")) or (
+        page_size in (16, 64, 1024) and kv_cache_layout == "vectorized"
+    )
     if (
         not paged
         or dtype_str != "fp8"
@@ -70,18 +76,22 @@ def build_flash_attn_paged_fp8_module(
         or not varlen
         or not cross_seqlen
         or (head_dim, value_head_dim) not in ((128, 128), (192, 128), (192, 192))
-        or kv_cache_layout != "vectorized"
+        or not native_cache_layout
         or int(num_kv_splits) != 1
     ):
         raise RuntimeError(
             "paged FP8 flash_attn requires gfx950, causal packed-varlen cross-attention, "
-            "page-64 vectorized KV, (head_dim,value_head_dim) in "
+            "page-16/64/1024 vectorized or page-1 linear/linear3d KV, (head_dim,value_head_dim) in "
             "{(128,128),(192,128),(192,192)}, "
             "and num_kv_splits=1"
         )
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
+    if paged_bn128 and page_size != 64:
+        raise ValueError("paired page-ID loads require physical page size 64")
+    if cache_buffered and page_size not in (1, 16):
+        raise ValueError("whole-cache buffer descriptors are reserved for page sizes 1/16")
     batch_interleave_group = int(batch_interleave_group)
     if batch_interleave_group < 1:
         raise ValueError(f"batch_interleave_group must be positive, got {batch_interleave_group}")
@@ -103,6 +113,9 @@ def build_flash_attn_paged_fp8_module(
         varlen=not paged_bn128 or paged_bn128_varlen,
         paired_page_ids=paged_bn128,
         batch_interleave_group=batch_interleave_group,
+        page_size=page_size,
+        kv_cache_layout=kv_cache_layout,
+        cache_buffered=cache_buffered,
     )
     BLOCK_M = traits.BLOCK_M
     BLOCK_SIZE = traits.BLOCK_SIZE
@@ -547,6 +560,11 @@ def build_flash_attn_paged_fp8_module(
         stream=None,
         _compile_only=False,
     ):
+        if (
+            cache_buffered
+            and max(K.numel() * K.element_size(), V.numel() * V.element_size()) > PAGED_FP8_BUFFER_LIMIT_BYTES
+        ):
+            raise ValueError("paged FP8 whole-cache buffer descriptor exceeds its byte limit")
         if stride_kv_n is None:
             stride_kv_n = DEFAULT_STRIDE_KV_N
         if stride_q_n is None:
