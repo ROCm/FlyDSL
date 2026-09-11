@@ -44,10 +44,10 @@ _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn:
 # Short varlen/paged cases use the lightweight generic path.
 _VARLEN_LIGHT_MAX_SEQ = 256
 _DENSE_LIGHT_CU_FALLBACK = 256
-_DENSE_DUALWAVE_MIN_SEQ = 256
+_DENSE_DUALWAVE_MIN_SEQ = 8192
 _DENSE_DUALWAVE_LARGE_BATCH = 8
 _DENSE_DUALWAVE_MIN_SEQ_LARGE_BATCH = 192
-_DENSE_M256_MIN_TOKENS = 4096
+_DENSE_M256_MIN_TOKENS = 8192
 
 
 def _dtype_str(t: torch.Tensor) -> str:
@@ -104,6 +104,7 @@ def _build_dense(
     waves_per_eu: int,
     daz: bool,
     return_lse: bool = False,
+    reverse_q_tiles: bool = False,
 ):
     """Build (and cache) one dense generic launcher variant."""
     from kernels.attention.flash_attn_generic import build_flash_attn_func_module
@@ -121,6 +122,7 @@ def _build_dense(
         waves_per_eu=waves_per_eu,
         daz=daz,
         return_lse=return_lse,
+        reverse_q_tiles=reverse_q_tiles,
     )
 
 
@@ -130,6 +132,7 @@ def _build_dense_dualwave(
     num_kv_heads: int,
     head_dim: int,
     causal: bool,
+    window_left: int,
     dtype_str: str,
     cross_seqlen: bool,
     waves_per_eu: int,
@@ -143,6 +146,8 @@ def _build_dense_dualwave(
     has_alibi: bool = False,
     has_sink: bool = False,
     xcd_swizzle: bool = False,
+    prebar_max: bool = False,
+    reverse_q_blocks: bool = False,
 ):
     """Build (and cache) the dense gfx950 DUALWAVE_SWP launcher."""
     from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
@@ -151,6 +156,7 @@ def _build_dense_dualwave(
         num_heads=num_heads,
         head_dim=head_dim,
         causal=causal,
+        window_left=window_left,
         dtype_str=dtype_str,
         num_kv_heads=num_kv_heads,
         cross_seqlen=cross_seqlen,
@@ -165,6 +171,8 @@ def _build_dense_dualwave(
         has_alibi=has_alibi,
         has_sink=has_sink,
         _xcd_swizzle=xcd_swizzle,
+        dualwave_swp_prebar_max=prebar_max,
+        _reverse_q_blocks=reverse_q_blocks,
     )
 
 
@@ -202,6 +210,7 @@ def _build_varlen(
     num_kv_heads: int,
     head_dim: int,
     causal: bool,
+    window_left: int,
     dtype_str: str,
     cross_seqlen: bool,
     waves_per_eu: int,
@@ -222,6 +231,7 @@ def _build_varlen(
         num_heads=num_heads,
         head_dim=head_dim,
         causal=causal,
+        window_left=window_left,
         dtype_str=dtype_str,
         num_kv_heads=num_kv_heads,
         varlen=True,
@@ -320,6 +330,7 @@ def _build_paged(
     num_kv_heads: int,
     head_dim: int,
     causal: bool,
+    window_left: int,
     dtype_str: str,
     cross_seqlen: bool,
     waves_per_eu: int,
@@ -327,6 +338,11 @@ def _build_paged(
     lazy_rescale: bool,
     setprio: bool,
     enable_stagger: bool,
+    block_table_stage_width: int,
+    skip_causal_mainloop_c3_mask: bool,
+    specialize_causal_mainloop_c6_mask: bool,
+    paged_num_q_blocks: int,
+    skip_steady_rescale: bool,
     num_kv_splits: int = 1,
     varlen: bool = False,
     kv_cache_layout: str = "linear",
@@ -352,6 +368,7 @@ def _build_paged(
         num_heads=num_heads,
         head_dim=head_dim,
         causal=causal,
+        window_left=window_left,
         dtype_str=dtype_str,
         num_kv_heads=num_kv_heads,
         paged=True,
@@ -364,6 +381,11 @@ def _build_paged(
         dualwave_swp_lazy_rescale=lazy_rescale,
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
+        block_table_stage_width=block_table_stage_width,
+        skip_causal_mainloop_c3_mask=skip_causal_mainloop_c3_mask,
+        specialize_causal_mainloop_c6_mask=specialize_causal_mainloop_c6_mask,
+        paged_num_q_blocks=paged_num_q_blocks,
+        skip_steady_rescale=skip_steady_rescale,
         return_lse=return_lse,
         has_bias=has_bias,
     )
@@ -382,6 +404,7 @@ def _flydsl_flash_attn_paged(
     v: torch.Tensor,
     *,
     causal: bool,
+    window_left: int,
     num_kv_heads: Optional[int],
     bias: Optional[torch.Tensor],
     block_table: Optional[torch.Tensor],
@@ -397,7 +420,7 @@ def _flydsl_flash_attn_paged(
     waves_per_eu: int,
     daz: bool,
     dualwave_swp_lazy_rescale: bool,
-    dualwave_swp_setprio: bool,
+    dualwave_swp_setprio: Optional[bool],
     dualwave_swp_enable_stagger: bool,
     stream,
 ) -> torch.Tensor:
@@ -476,6 +499,8 @@ def _flydsl_flash_attn_paged(
     # workgroups + a combine pass. Fills the GPU for low-occupancy shapes (small B / few
     # heads), where single-split paged underutilizes the device.
     splitk = num_kv_splits > 1
+    if splitk and window_left >= 0:
+        raise NotImplementedError("flydsl_flash_attn_func: sliding window is not supported with paged split-K")
     if splitk and (D not in (64, 128) or dtype_str not in ("bf16", "f16") or Sq < 384):
         raise ValueError(
             f"flydsl_flash_attn_func: paged split-K requires D=64/128, dtype bf16/f16, seq_len>=384; "
@@ -533,8 +558,21 @@ def _flydsl_flash_attn_paged(
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
         # Short paged attention uses generic light; unsupported cases stay on dualwave.
         _arch = _gpu_arch(q.device)
+        if dualwave_swp_setprio is None:
+            dualwave_swp_setprio = not (
+                _arch.startswith("gfx950")
+                and varlen
+                and vectorized
+                and causal
+                and cross
+                and dtype_str == "bf16"
+                and D == 64
+                and H == 32
+                and num_kv_heads == 4
+            )
         _paged_light_ok = (
             (num_kv_splits <= 1)
+            and window_left < 0
             and bias is None  # the light paged kernel has no bias path
             and D in (64, 128)
             and dtype_str in ("bf16", "f16")
@@ -563,6 +601,7 @@ def _flydsl_flash_attn_paged(
                 num_kv_heads=num_kv_heads,
                 head_dim=D,
                 causal=causal,
+                window_left=window_left,
                 dtype_str=dtype_str,
                 cross_seqlen=cross,
                 waves_per_eu=waves_per_eu,
@@ -570,6 +609,49 @@ def _flydsl_flash_attn_paged(
                 lazy_rescale=dualwave_swp_lazy_rescale,
                 setprio=dualwave_swp_setprio,
                 enable_stagger=dualwave_swp_enable_stagger,
+                block_table_stage_width=1 if max_pages_per_split <= 512 else 2 if max_pages_per_split <= 1024 else 4,
+                skip_causal_mainloop_c3_mask=(
+                    causal and B == 1 and not varlen and not splitk and (skv - Sq) % (2 * page_size) == 0
+                ),
+                specialize_causal_mainloop_c6_mask=(
+                    causal
+                    and B == 1
+                    and not varlen
+                    and not splitk
+                    and skv > Sq
+                    and Sq % 256 == 0
+                    and skv % page_size == 0
+                    and (skv - Sq) % (2 * page_size) == 0
+                ),
+                paged_num_q_blocks=(
+                    (Sq + 255) // 256
+                    if (
+                        causal
+                        and B == 1
+                        and H == 32
+                        and num_kv_heads == 4
+                        and D == 64
+                        and dtype_str == "bf16"
+                        and kv_cache_layout == "vectorized"
+                        and page_size == 64
+                        and skv == 131072
+                        and not varlen
+                        and not splitk
+                    )
+                    else 0
+                ),
+                skip_steady_rescale=(
+                    causal
+                    and B == 1
+                    and H == 32
+                    and num_kv_heads == 4
+                    and D == 64
+                    and dtype_str == "bf16"
+                    and kv_cache_layout == "vectorized"
+                    and page_size == 64
+                    and not varlen
+                    and not splitk
+                ),
                 num_kv_splits=int(num_kv_splits),
                 varlen=varlen,
                 kv_cache_layout=kv_cache_layout,
@@ -649,6 +731,7 @@ def flydsl_flash_attn_func(
     v: torch.Tensor,
     *,
     causal: bool = True,
+    window_size: Optional[tuple[int, int]] = None,
     num_kv_heads: Optional[int] = None,
     # Varlen (packed cu_seqlens): pass both to enable the varlen path.
     cu_seqlens_q: Optional[torch.Tensor] = None,
@@ -690,7 +773,7 @@ def flydsl_flash_attn_func(
     waves_per_eu: int = 2,
     daz: bool = True,
     dualwave_swp_lazy_rescale: bool = True,
-    dualwave_swp_setprio: bool = True,
+    dualwave_swp_setprio: Optional[bool] = None,
     dualwave_swp_enable_stagger: bool = True,
     # Re-derive (head, q_block) with head as the slow axis so one head's q-blocks
     # stay on one XCD instead of every XCD re-streaming that head's K/V. None
@@ -722,6 +805,9 @@ def flydsl_flash_attn_func(
              Here ``kVectorSize = 16 / element_size`` (bf16/fp16: 8, fp8: 16);
              page_size and head_dim must be divisible by it.
         causal: Bottom-right aligned causal mask when True.
+        window_size: Optional ``(left, right)`` sliding window. The initial
+            gfx950 implementation supports causal ``(left, 0)`` windows and
+            skips KV tiles wholly before the left boundary.
         num_kv_heads: KV head count for GQA/MQA; defaults to q num_heads (MHA).
         cu_seqlens_q: Int32 ``[B+1]`` cumulative Q token counts (varlen).
         cu_seqlens_kv: Int32 ``[B+1]`` cumulative KV token counts (varlen).
@@ -780,7 +866,7 @@ def flydsl_flash_attn_func(
         waves_per_eu: Kernel occupancy hint.
         daz: Enable denormals-are-zero.
         dualwave_swp_lazy_rescale: Enable lazy online softmax rescale.
-        dualwave_swp_setprio: Enable s_setprio scheduling hints.
+        dualwave_swp_setprio: Enable s_setprio scheduling hints. ``None`` selects a path-specific default.
         dualwave_swp_enable_stagger: Enable wave-group phase stagger.
         debug_counts: Float32[2] tensor; when given, counts lazy-rescale branches
             (debug_counts[0] = all-below-true, debug_counts[1] = all-below-false).
@@ -802,8 +888,22 @@ def flydsl_flash_attn_func(
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share dtype; got {q.dtype}/{k.dtype}/{v.dtype}")
 
     dtype_str = _dtype_str(q)
+    if window_size is None:
+        window_left = -1
+    else:
+        if len(window_size) != 2:
+            raise ValueError("flydsl_flash_attn_func: window_size must be a (left, right) pair")
+        window_left, window_right = (int(window_size[0]), int(window_size[1]))
+        if not causal or window_left < 0 or window_right != 0:
+            raise NotImplementedError(
+                "flydsl_flash_attn_func: initial SWA support requires causal=True, left>=0, right=0"
+            )
+        if num_kv_splits > 1:
+            raise NotImplementedError("flydsl_flash_attn_func: sliding window does not support split-K")
     if return_lse and dtype_str == "fp8":
         raise NotImplementedError("flydsl_flash_attn_func: return_lse is not supported for fp8")
+    if window_left >= 0 and dtype_str == "fp8":
+        raise NotImplementedError("flydsl_flash_attn_func: sliding window is not supported for fp8")
     paged_kv = any(x is not None for x in (block_table, seqlen_k))
     if dtype_str == "fp8" and paged_kv:
         raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support paged KV")
@@ -845,6 +945,7 @@ def flydsl_flash_attn_func(
             k,
             v,
             causal=causal,
+            window_left=window_left,
             num_kv_heads=num_kv_heads,
             bias=bias,
             block_table=block_table,
@@ -865,7 +966,11 @@ def flydsl_flash_attn_func(
             stream=stream,
         )
 
+    if dualwave_swp_setprio is None:
+        dualwave_swp_setprio = True
+
     varlen = cu_seqlens_q is not None
+    route_full_window_to_generic = False
 
     if dtype_str == "fp8":
         if varlen:
@@ -913,6 +1018,41 @@ def flydsl_flash_attn_func(
         Skv = k.shape[1]
         Hkv = k.shape[2]
         cross = Sq != Skv if cross_seqlen is None else bool(cross_seqlen)
+
+        route_full_window_to_generic = (
+            B == 1
+            and Sq == Skv
+            and Sq in (1024, 2048, 4096)
+            and H == 32
+            and Hkv == 4
+            and D == 64
+            and dtype_str == "bf16"
+            and causal
+            and not cross
+            and window_left == Skv
+            and num_kv_splits == 1
+            and not has_bias
+            and not has_alibi
+            and not has_sink
+            and not return_lse
+            and debug_counts is None
+        )
+        if route_full_window_to_generic:
+            window_left = -1
+
+        # The capped 8K left window is equivalent to unwindowed causal attention.
+        if (
+            B == 1
+            and Sq == Skv == 8192
+            and H == 32
+            and Hkv == 4
+            and D == 64
+            and dtype_str == "bf16"
+            and causal
+            and not cross
+            and window_left >= Skv
+        ):
+            window_left = -1
 
     if num_kv_heads is None:
         num_kv_heads = Hkv
@@ -994,6 +1134,7 @@ def flydsl_flash_attn_func(
             _arch = _gpu_arch(q.device)
             _prefer_light = (
                 (not debug_lazy)
+                and window_left < 0
                 # The light (generic) kernel folds in neither bias nor ALiBi.
                 and (not has_bias)
                 and (not has_alibi)
@@ -1024,6 +1165,7 @@ def flydsl_flash_attn_func(
                     num_kv_heads=num_kv_heads,
                     head_dim=D,
                     causal=causal,
+                    window_left=window_left,
                     dtype_str=dtype_str,
                     cross_seqlen=cross,
                     waves_per_eu=waves_per_eu,
@@ -1070,7 +1212,8 @@ def flydsl_flash_attn_func(
                     or has_bias
                     or has_alibi
                     or has_sink
-                    or (can_dualwave and _dense_routes_to_dualwave(B, Sq))
+                    or window_left >= 0
+                    or (can_dualwave and _dense_routes_to_dualwave(B, Sq) and not route_full_window_to_generic)
                 ):
                     # Workgroups map to XCDs as linear_id % 8, and linear_id is
                     # bx + by*H + bz*H*nqb, so with H % 8 == 0 a head-fast grid pins
@@ -1090,11 +1233,29 @@ def flydsl_flash_attn_func(
                         )
                     else:
                         xcd_swizzle = dualwave_swp_xcd_swizzle
+                    reverse_q_blocks = (
+                        B == 1
+                        and Sq == Skv == 8192
+                        and H == 32
+                        and num_kv_heads == 4
+                        and D == 64
+                        and dtype_str == "bf16"
+                        and causal
+                        and not cross
+                        and window_size is not None
+                        and window_left in (-1, 4096)
+                        and not debug_lazy
+                        and not has_bias
+                        and not has_alibi
+                        and not has_sink
+                        and not return_lse
+                    )
                     exe = _build_dense_dualwave(
                         num_heads=H,
                         num_kv_heads=num_kv_heads,
                         head_dim=D,
                         causal=causal,
+                        window_left=window_left,
                         dtype_str=dtype_str,
                         cross_seqlen=cross,
                         waves_per_eu=waves_per_eu,
@@ -1108,9 +1269,51 @@ def flydsl_flash_attn_func(
                         has_alibi=has_alibi,
                         has_sink=has_sink,
                         xcd_swizzle=xcd_swizzle,
+                        prebar_max=(
+                            _arch.startswith("gfx950")
+                            and B == 1
+                            and Sq == 8192
+                            and H == 32
+                            and num_kv_heads == 4
+                            and D == 64
+                            and dtype_str == "bf16"
+                            and causal
+                            and not cross
+                            and q.is_contiguous()
+                            and k.is_contiguous()
+                            and v.is_contiguous()
+                            and not return_lse
+                            and not has_bias
+                            and not has_alibi
+                            and not has_sink
+                            and not debug_lazy
+                            and window_size is None
+                        ),
+                        reverse_q_blocks=reverse_q_blocks,
                     )
                 else:
-                    block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)
+                    if route_full_window_to_generic and Sq == 4096:
+                        block_m, flat_work_group_size, path_tag = 64, 128, "N32"
+                    else:
+                        block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)
+                    if route_full_window_to_generic and Sq < 4096:
+                        path_tag = "N32QKDSRD"
+                    elif (
+                        _arch.startswith("gfx950")
+                        and B == 1
+                        and Sq in (1024, 2048, 4096)
+                        and H == 32
+                        and num_kv_heads == 4
+                        and D == 64
+                        and dtype_str == "bf16"
+                        and causal
+                        and not cross
+                        and q.is_contiguous()
+                        and k.is_contiguous()
+                        and v.is_contiguous()
+                        and not return_lse
+                    ):
+                        path_tag = "N32HALFPPACKMSPLIT"
                     exe = _build_dense(
                         num_heads=H,
                         num_kv_heads=num_kv_heads,
@@ -1124,6 +1327,7 @@ def flydsl_flash_attn_func(
                         waves_per_eu=waves_per_eu,
                         daz=daz,
                         return_lse=return_lse,
+                        reverse_q_tiles=route_full_window_to_generic and Sq == 4096,
                     )
 
         # ── allocate output ─────────────────────────────────────────────────

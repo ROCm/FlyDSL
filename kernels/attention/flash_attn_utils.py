@@ -256,6 +256,24 @@ def _anchor_scalar_f32(x):
     )
 
 
+def _anchor_vector(x):
+    """Pin a vector at the current source position (no-op asm)."""
+    x_ir = as_mlir_value(x)
+    return llvm.inline_asm(x_ir.type, [x_ir], "", "=v,0", has_side_effects=True)
+
+
+def _anchor_i32(x):
+    """Pin an i32 VGPR value at the current source position (no-op asm)."""
+    x_ir = as_mlir_value(fx.Int32(x))
+    return llvm.inline_asm(x_ir.type, [x_ir], "", "=v,0", has_side_effects=True)
+
+
+def _anchor_scalar_int(x):
+    """Pin an integer SGPR value at the current source position (no-op asm)."""
+    x_ir = as_mlir_value(x)
+    return llvm.inline_asm(x_ir.type, [x_ir], "", "=s,0", has_side_effects=True)
+
+
 def _anchor_v_o(traits, v_o):
     """Pin v_o accumulators at the current source position."""
     acc_irs = [as_mlir_value(v_o[dc]) for dc in range_constexpr(traits.D_CHUNKS)]
@@ -557,12 +575,8 @@ def _cu_load(div, idx, cu_atom, cu_v1i32):
     return fx.Index(Vec(v, (1,), fx.Int32)[0])
 
 
-def _make_page_view(
-    base_iter, base_iter_ty, align, page_id, page_byte_stride, page_nrec_bytes, page_layout, elem_ir, buf_flags_i32
-):
-    base_i64 = fx.Int64(fx.ptrtoint(base_iter))
-    off_i64 = fx.Int64(page_id * page_byte_stride)
-    shifted = fx.inttoptr(base_iter_ty, base_i64 + off_i64)
+def _make_page_view(base_iter_ty, align, page_byte_address, page_nrec_bytes, page_layout, elem_ir, buf_flags_i32):
+    shifted = fx.inttoptr(base_iter_ty, fx.Int64(page_byte_address))
     buf_ptr_ty = fx.PointerType.get(elem_ty=elem_ir, address_space=_TargetAddressSpace.BufferDesc, alignment=align)
     buf_ptr = fx.make_ptr(
         buf_ptr_ty,
@@ -824,8 +838,8 @@ def _vec_v_src_elem(traits, d, wave_id_uni, lane_in_warp, kv_head_idx):
 
 
 def _paged_bt_byte_offset(tile_idx, split_t0):
-    """Byte offset of `tile_idx`'s page-id entry in the LDS block-table cache."""
-    return fx.Int32((tile_idx - split_t0) * fx.Index(4))
+    """Byte offset of `tile_idx`'s K-page-address entry in the LDS block-table cache."""
+    return fx.Int32((tile_idx - split_t0) * fx.Index(8))
 
 
 def _q_pack_col(traits, ks, lane_div_32):
@@ -1045,6 +1059,14 @@ def _init_dualwave_thread_mapping(ctx):
     ctx.kv_head_idx = ctx.h_kv_idx
 
 
+def _init_dualwave_causal_lpt_order(ctx):
+    """Issue causal q-blocks longest-first by reversing the q-block grid axis."""
+    traits = ctx.traits
+    num_q_blocks = (ctx.seq_len_v + traits.BLOCK_M - 1) // traits.BLOCK_M
+    ctx.q_block_idx = num_q_blocks - fx.Index(1) - ctx.q_block_idx
+    ctx.q_start = ctx.q_block_idx * traits.BLOCK_M
+
+
 def _init_dualwave_q_row(ctx):
     """Set q_row / q_row_i32 / q_start_pos_i32 on a dualwave-style context."""
     traits = ctx.traits
@@ -1091,6 +1113,7 @@ class FlashAttnGenericTraits:
     CK_LDS_SEQ: tuple[int, ...]
     USE_HW_TR: bool
     USE_K16: bool
+    HALF_FUSE_P_PACKS: bool
     USE_PERMLANE_OSTORE: bool
     K_STEP_QK: int
     K_STEPS_QK: int
@@ -1140,6 +1163,7 @@ class FlashAttnGenericTraits:
     K_VEC_N_STRIDE: int
     K_VEC_HI_N_OFFSET: int
     QK_PREFETCH_DEPTH: int
+    GROUP_QK_DSRD: bool
     RETURN_LSE: bool = False
 
     @property
@@ -1177,6 +1201,7 @@ class FlashAttnGenericTraits:
             self.CK_LDS_SEQ,
             self.USE_HW_TR,
             self.USE_K16,
+            self.HALF_FUSE_P_PACKS,
             self.USE_PERMLANE_OSTORE,
             self.K_STEP_QK,
             self.K_STEPS_QK,
@@ -1226,6 +1251,7 @@ class FlashAttnGenericTraits:
             self.K_VEC_N_STRIDE,
             self.K_VEC_HI_N_OFFSET,
             self.QK_PREFETCH_DEPTH,
+            self.GROUP_QK_DSRD,
             self.RETURN_LSE,
         )
 
@@ -1264,8 +1290,12 @@ def _make_flash_attn_generic_traits(
     block_size = flat_work_group_size
     rows_per_wave = block_m // num_waves
 
-    if path_tag.upper() in ("N32", "N128"):
-        path = path_tag.upper()
+    path_tag_upper = path_tag.upper()
+    half_fuse_p_packs = path_tag_upper in ("N32HALFPPACK", "N32HALFPPACKMSPLIT")
+    if path_tag_upper in ("N32", "N32QKDSRD", "N128"):
+        path = "N32" if path_tag_upper == "N32QKDSRD" else path_tag_upper
+    elif half_fuse_p_packs:
+        path = "N32"
     elif dtype_str in ("f16", "bf16") and causal and head_dim == 128:
         path = "N128"
     else:
@@ -1426,6 +1456,7 @@ def _make_flash_attn_generic_traits(
         CK_LDS_SEQ=ck_lds_seq,
         USE_HW_TR=use_hw_tr,
         USE_K16=use_k16,
+        HALF_FUSE_P_PACKS=half_fuse_p_packs,
         USE_PERMLANE_OSTORE=use_permlane_ostore,
         K_STEP_QK=k_step_qk,
         K_STEPS_QK=k_steps_qk,
@@ -1475,6 +1506,7 @@ def _make_flash_attn_generic_traits(
         K_VEC_N_STRIDE=k_vec_n_stride,
         K_VEC_HI_N_OFFSET=k_vec_hi_n_offset,
         QK_PREFETCH_DEPTH=qk_prefetch_depth,
+        GROUP_QK_DSRD=path_tag_upper == "N32QKDSRD",
         RETURN_LSE=bool(return_lse),
     )
 
@@ -1503,6 +1535,7 @@ class DualwaveSwpTraits:
     NUM_HEADS_KV: int
     GQA_GROUP_SIZE: int
     CAUSAL: bool
+    WINDOW_LEFT: int
     DTYPE_STR: str
     WAVES_PER_EU: int
     DAZ: bool
@@ -1515,6 +1548,8 @@ class DualwaveSwpTraits:
     PAGED: bool
     VARLEN: bool
     CROSS_SEQLEN: bool
+    SKIP_CAUSAL_MAINLOOP_C3_MASK: bool
+    SPECIALIZE_CAUSAL_MAINLOOP_C6_MASK: bool
     KV_CACHE_LAYOUT: str
     KV_VECTORIZED: bool
     DEFAULT_STRIDE_Q_N: int
@@ -1550,6 +1585,7 @@ class DualwaveSwpTraits:
     V_LDS_TO_REG_DCHUNK_IN_PAIR_STRIDE: int
     V_LDS_TO_REG_TRANSPOSE_PAIR_STRIDE: int
     PAGED_BT_LDS_SIZE: int
+    BLOCK_TABLE_STAGE_WIDTH: int
     DUALWAVE_SWP_RESCALE_THRESHOLD: float
     KV_VEC_SIZE: int
     VEC_V_ROW_STRIDE: int
@@ -1569,6 +1605,7 @@ class DualwaveSwpTraits:
             self.NUM_HEADS_KV,
             self.HEAD_DIM,
             self.CAUSAL,
+            self.WINDOW_LEFT,
             self.DTYPE_STR,
             self.WAVES_PER_EU,
             self.DAZ,
@@ -1581,8 +1618,11 @@ class DualwaveSwpTraits:
             self.PAGED,
             self.VARLEN,
             self.CROSS_SEQLEN,
+            self.SKIP_CAUSAL_MAINLOOP_C3_MASK,
+            self.SPECIALIZE_CAUSAL_MAINLOOP_C6_MASK,
             self.KV_CACHE_LAYOUT,
             self.KV_VECTORIZED,
+            self.BLOCK_TABLE_STAGE_WIDTH,
             self.RETURN_LSE,
             self.XCD_SWIZZLE,
         )
@@ -1593,6 +1633,7 @@ def _make_dualwave_swp_traits(
     num_kv_heads,
     head_dim,
     causal=True,
+    window_left=-1,
     dtype_str="bf16",
     waves_per_eu=2,
     daz=True,
@@ -1606,6 +1647,9 @@ def _make_dualwave_swp_traits(
     paged=False,
     kv_cache_layout="linear",
     kv_vectorized=None,
+    block_table_stage_width=4,
+    skip_causal_mainloop_c3_mask=False,
+    specialize_causal_mainloop_c6_mask=False,
     return_lse=False,
     xcd_swizzle=False,
 ):
@@ -1679,6 +1723,8 @@ def _make_dualwave_swp_traits(
     paged = bool(paged)
     varlen = bool(varlen)
     cross_seqlen = bool(cross_seqlen)
+    if block_table_stage_width not in (1, 2, 4):
+        raise ValueError(f"block_table_stage_width must be 1, 2, or 4, got {block_table_stage_width}")
 
     return DualwaveSwpTraits(
         BLOCK_M=block_m,
@@ -1701,6 +1747,7 @@ def _make_dualwave_swp_traits(
         NUM_HEADS_KV=num_kv_heads,
         GQA_GROUP_SIZE=gqa_group_size,
         CAUSAL=causal,
+        WINDOW_LEFT=int(window_left),
         DTYPE_STR=dtype_str,
         WAVES_PER_EU=waves_per_eu,
         DAZ=bool(daz),
@@ -1713,6 +1760,8 @@ def _make_dualwave_swp_traits(
         PAGED=paged,
         VARLEN=varlen,
         CROSS_SEQLEN=cross_seqlen,
+        SKIP_CAUSAL_MAINLOOP_C3_MASK=bool(skip_causal_mainloop_c3_mask),
+        SPECIALIZE_CAUSAL_MAINLOOP_C6_MASK=bool(specialize_causal_mainloop_c6_mask),
         KV_CACHE_LAYOUT=kv_cache_layout,
         KV_VECTORIZED=kv_vectorized,
         DEFAULT_STRIDE_Q_N=default_stride_q_n,
@@ -1748,6 +1797,7 @@ def _make_dualwave_swp_traits(
         V_LDS_TO_REG_DCHUNK_IN_PAIR_STRIDE=v_lds_to_reg_dchunk_in_pair_stride,
         V_LDS_TO_REG_TRANSPOSE_PAIR_STRIDE=v_lds_to_reg_transpose_pair_stride,
         PAGED_BT_LDS_SIZE=2048,
+        BLOCK_TABLE_STAGE_WIDTH=block_table_stage_width,
         DUALWAVE_SWP_RESCALE_THRESHOLD=8.0,
         KV_VEC_SIZE=kv_vec_size,
         VEC_V_ROW_STRIDE=vec_v_row_stride,
@@ -2369,6 +2419,7 @@ class GenericKvGmemToLdsLoader:
     def _tile_page_id(self, tile_start):
         return self.page_ids.page_id(tile_start)
 
+    @flyc.jit
     def coop_load_k(self, tile_start, buf_id=0):
         """Cooperative K load (row-major, XOR-swizzled)."""
         ctx = self.ctx
@@ -2498,6 +2549,7 @@ class GenericKvGmemToLdsLoader:
             vecs.append(self.load_f16xN(ctx.v_ptr, self.global_idx(row_idx, ctx.load_col_base)))
         return vecs
 
+    @flyc.jit
     def coop_store_v_lds(self, vecs, buf_id=0):
         """Write V vectors to LDS; vectorized mode uses no-major rows."""
         ctx = self.ctx
@@ -2753,7 +2805,7 @@ class GenericKvLdsToVgprLoader:
         for p in range_constexpr(depth):
             lo[p] = fx.ptr_load(ctx.lds_kv + fx.Int64(_idx(p, False)), result_type=ctx.mfma_pack_type).ir_value()
             hi[p] = fx.ptr_load(ctx.lds_kv + fx.Int64(_idx(p, True)), result_type=ctx.mfma_pack_type).ir_value()
-        if const_expr(traits.ENABLE_GFX942_VEC_K or traits.ENABLE_GFX942_KV_GPFETCH):
+        if const_expr(traits.ENABLE_GFX942_VEC_K or traits.ENABLE_GFX942_KV_GPFETCH or traits.GROUP_QK_DSRD):
             rocdl.sched_group_barrier(rocdl.mask_dsrd, depth * 2, 0)
         self._k_idx = _idx
         self._k_depth = depth
@@ -2993,6 +3045,7 @@ class GenericSoftmaxHelper:
 
     def online_softmax(self, m_running, l_running, s_raw_lo, s_raw_hi):
         ctx = self.ctx
+        traits = ctx.traits
         m_new_raw, corr, neg_scaled_max = self.online_softmax_stats(m_running, s_raw_lo, s_raw_hi)
 
         p_vals_lo = []
@@ -3003,11 +3056,15 @@ class GenericSoftmaxHelper:
             p_lo = self._exp2(diff_lo)
             p_vals_lo.append(p_lo)
             local_sum = local_sum + p_lo
+        if const_expr(traits.HALF_FUSE_P_PACKS):
+            p_vals_lo = self.build_p_packs(p_vals_lo)
         for r in range_constexpr(16):
             diff_hi = fx.fma(s_raw_hi[r], ctx.c_sm_scale_log2e, neg_scaled_max, fastmath=ctx.fm_fast)
             p_hi = self._exp2(diff_hi)
             p_vals_hi.append(p_hi)
             local_sum = local_sum + p_hi
+        if const_expr(traits.HALF_FUSE_P_PACKS):
+            p_vals_hi = self.build_p_packs(p_vals_hi)
 
         tile_sum = local_sum + self.reduction_peer(local_sum)
         l_new = corr * l_running + tile_sum
@@ -3346,6 +3403,24 @@ class DualwaveKernelContext:
     def init_thread_mapping(self):
         _init_dualwave_thread_mapping(self)
 
+    def init_alternating_batch_order(self):
+        launch_batch = self.batch_idx
+        batch_pair = launch_batch // fx.Index(2)
+        from_high_end = launch_batch % fx.Index(2) == fx.Index(0)
+        num_batches = fx.Index(gpu.grid_dim.z)
+        self.batch_idx = fx.Index(from_high_end.select(num_batches - fx.Index(1) - batch_pair, batch_pair))
+
+    def init_causal_lpt_order(self, preserve_inactive=False):
+        if const_expr(preserve_inactive):
+            traits = self.traits
+            num_q_blocks = (self.seqlen_q_v + traits.BLOCK_M - 1) // traits.BLOCK_M
+            reversed_q_block = num_q_blocks - fx.Index(1) - self.q_block_idx
+            active_q_block = self.q_block_idx < num_q_blocks
+            self.q_block_idx = fx.Index(active_q_block.select(reversed_q_block, self.q_block_idx))
+            self.q_start = self.q_block_idx * traits.BLOCK_M
+        else:
+            _init_dualwave_causal_lpt_order(self)
+
     def init_sequence_lengths(self, CuSeqQ=None, CuSeqKv=None):
         if CuSeqQ is None:
             CuSeqQ = self.CuSeqQ
@@ -3439,7 +3514,12 @@ class DualwaveKernelContext:
         if const_expr(traits.PAGED):
             self.k_div = None
             self.v_div = None
-            page_elems = fx.Index(traits.BLOCK_N) * self.stride_kv_n_v
+            self.k_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(k_tensor)))
+            self.v_from_k_byte_offset = fx.Int64(fx.ptrtoint(fx.get_iter(v_tensor))) - self.k_base_i64
+            if const_expr(traits.KV_VECTORIZED):
+                page_elems = fx.Index(traits.BLOCK_N * traits.NUM_HEADS_KV * traits.HEAD_DIM)
+            else:
+                page_elems = fx.Index(traits.BLOCK_N) * self.stride_kv_n_v
             self.page_byte_stride = page_elems * fx.Index(traits.BF16_BYTES)
             self.page_nrec_bytes = fx.Int64(self.page_byte_stride)
             self.page_layout = fx.make_layout(fx.Int32(page_elems), fx.Int32(1))
@@ -3467,6 +3547,8 @@ class DualwaveKernelContext:
             self.page_byte_stride = None
             self.page_nrec_bytes = None
             self.page_layout = None
+            self.k_base_i64 = None
+            self.v_from_k_byte_offset = None
         self.debug_counts_rsrc = (
             _make_raw_buffer_rsrc(self.DebugCounts) if traits.DUALWAVE_SWP_DEBUG_LAZY_COUNTS else None
         )
@@ -3556,6 +3638,20 @@ class DualwaveKernelContext:
         self.max_num_tiles = ((self.max_num_tiles + fx.Index(1)) // fx.Index(2)) * fx.Index(2)
         self.max_num_tiles = fx.Index((self.max_num_tiles < fx.Index(4)).select(fx.Index(4), self.max_num_tiles))
 
+        if const_expr(traits.WINDOW_LEFT >= 0):
+            window_start_i32 = fx.Int32(self.q_start) + self.delta_i32 - fx.Int32(traits.WINDOW_LEFT)
+            window_start_i32 = fx.Int32((window_start_i32 > fx.Int32(0)).select(window_start_i32, fx.Int32(0)))
+            first_tile_i32 = window_start_i32 // fx.Int32(self.kv_tile_size)
+            # The software pipeline advances in pairs and needs at least four tiles.
+            first_tile_i32 = (first_tile_i32 // fx.Int32(2)) * fx.Int32(2)
+            first_tile = fx.Index(first_tile_i32)
+            latest_first = fx.Index(
+                (self.max_num_tiles > fx.Index(4)).select(self.max_num_tiles - fx.Index(4), fx.Index(0))
+            )
+            self.window_first_tile = fx.Index((first_tile < latest_first).select(first_tile, latest_first))
+        else:
+            self.window_first_tile = fx.Index(0)
+
         if const_expr(traits.SPLITK):
             chunk = ((self.max_num_tiles + (traits.NUM_KV_SPLITS - 1)) // traits.NUM_KV_SPLITS + 1) // 2 * 2
             chunk = fx.Index((chunk < fx.Index(6)).select(fx.Index(6), chunk))
@@ -3569,7 +3665,7 @@ class DualwaveKernelContext:
             )
             self.split_nonempty = self.split_t0 + fx.Index(4) <= self.max_num_tiles
         else:
-            self.split_t0 = 0
+            self.split_t0 = self.window_first_tile
             self.split_t_end = self.max_num_tiles
 
     def compute_active_guard(self):
@@ -3606,7 +3702,6 @@ class DualwavePageIdLoader(DualwaveKernelContext):
         super().__init__(ctx)
 
     def load_block_table_to_lds(self):
-        traits = self.traits
         tid = self.tid
         split_t0 = self.split_t0
         split_t_end = self.split_t_end
@@ -3617,24 +3712,136 @@ class DualwavePageIdLoader(DualwaveKernelContext):
         bt_div = self.bt_div
         bt_atom = self.bt_atom
         bt_v1i32 = self.bt_v1i32
+        page_byte_stride = self.page_byte_stride
+        k_base_i64 = self.k_base_i64
+        load_atom_128 = self.load_atom_128
+        bt_v4i32 = self.q_load_i32x4_type
+        load_atom_64 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
+        bt_v2i32 = Vec.make_type(2, fx.Int32)
 
         @flyc.jit
         def _load_block_table_to_lds():
             segment_tiles = split_t_end - split_t0
-            for pass_id in range_constexpr(traits.PAGED_BT_LDS_SIZE // traits.BLOCK_SIZE):
-                local_tile = tid + fx.Index(pass_id * traits.BLOCK_SIZE)
+            if const_expr(self.traits.BLOCK_TABLE_STAGE_WIDTH == 1):
+                local_tile = tid
                 if local_tile < segment_tiles:
                     tile_idx = split_t0 + local_tile
-                    byte_off = as_mlir_value(fx.Int32(local_tile * fx.Index(4)))
+                    byte_off = as_mlir_value(fx.Int32(local_tile * fx.Index(8)))
                     dst = buffer_ops.get_element_ptr(lds_bt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
-                    llvm.StoreOp(as_mlir_value(fx.Int32(0)), dst)
                     if tile_idx < num_kv_tiles:
                         row_idx = batch_idx * block_table_stride_v + tile_idx
                         v = fly.copy_atom_call_ssa([bt_v1i32], bt_atom, fx.slice(bt_div, (None, fx.Int32(row_idx))))
-                        page_id_i32 = as_mlir_value(fx.Int32(Vec(v, (1,), fx.Int32)[0]))
-                        llvm.StoreOp(page_id_i32, dst)
+                        page_id = fx.Int64(Vec(v, (1,), fx.Int32)[0])
+                        page_address = as_mlir_value(k_base_i64 + page_id * fx.Int64(page_byte_stride))
+                        llvm.StoreOp(page_address, dst)
+                    else:
+                        llvm.StoreOp(as_mlir_value(k_base_i64), dst)
+            elif const_expr(self.traits.BLOCK_TABLE_STAGE_WIDTH == 2):
+                local_tile = tid * fx.Index(2)
+                if local_tile < segment_tiles:
+                    tile_idx = split_t0 + local_tile
+                    byte_off = as_mlir_value(fx.Int32(local_tile * fx.Index(8)))
+                    dst = buffer_ops.get_element_ptr(lds_bt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
+                    if tile_idx + fx.Index(1) < num_kv_tiles:
+                        row_idx = batch_idx * block_table_stride_v + tile_idx
+                        v = fly.copy_atom_call_ssa(
+                            [bt_v2i32], load_atom_64, fx.slice(bt_div, (None, fx.Int32(row_idx)))
+                        )
+                        page_ids = Vec(v, (2,), fx.Int32)
+                        page_addresses = Vec.from_elements(
+                            [
+                                k_base_i64 + fx.Int64(page_ids[elem]) * fx.Int64(page_byte_stride)
+                                for elem in range_constexpr(2)
+                            ],
+                            fx.Int64,
+                        )
+                        llvm.StoreOp(as_mlir_value(page_addresses), dst, alignment=16)
+                    else:
+                        for elem in range_constexpr(2):
+                            elem_tile_idx = tile_idx + fx.Index(elem)
+                            elem_byte_off = as_mlir_value(fx.Int32((local_tile + fx.Index(elem)) * fx.Index(8)))
+                            elem_dst = buffer_ops.get_element_ptr(
+                                lds_bt_base_ptr, byte_offset=elem_byte_off, elem_type=T.i8
+                            )
+                            if elem_tile_idx < num_kv_tiles:
+                                row_idx = batch_idx * block_table_stride_v + elem_tile_idx
+                                v = fly.copy_atom_call_ssa(
+                                    [bt_v1i32], bt_atom, fx.slice(bt_div, (None, fx.Int32(row_idx)))
+                                )
+                                page_id = fx.Int64(Vec(v, (1,), fx.Int32)[0])
+                                page_address = as_mlir_value(k_base_i64 + page_id * fx.Int64(page_byte_stride))
+                                llvm.StoreOp(page_address, elem_dst)
+                            else:
+                                llvm.StoreOp(as_mlir_value(k_base_i64), elem_dst)
+            else:
+                local_tile = tid * fx.Index(4)
+                if local_tile < segment_tiles:
+                    tile_idx = split_t0 + local_tile
+                    byte_off = as_mlir_value(fx.Int32(local_tile * fx.Index(8)))
+                    dst = buffer_ops.get_element_ptr(lds_bt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
+                    full_vec = tile_idx + fx.Index(3) < num_kv_tiles
+                    if full_vec:
+                        row_idx = batch_idx * block_table_stride_v + tile_idx
+                        v = fly.copy_atom_call_ssa(
+                            [bt_v4i32], load_atom_128, fx.slice(bt_div, (None, fx.Int32(row_idx)))
+                        )
+                        page_ids = Vec(v, (4,), fx.Int32)
+                        page_addresses = Vec.from_elements(
+                            [
+                                k_base_i64 + fx.Int64(page_ids[elem]) * fx.Int64(page_byte_stride)
+                                for elem in range_constexpr(4)
+                            ],
+                            fx.Int64,
+                        )
+                        llvm.StoreOp(as_mlir_value(page_addresses), dst, alignment=16)
+                    elif (split_t_end <= num_kv_tiles) & (tile_idx + fx.Index(1) < num_kv_tiles):
+                        row_idx = batch_idx * block_table_stride_v + tile_idx
+                        v = fly.copy_atom_call_ssa(
+                            [bt_v2i32], load_atom_64, fx.slice(bt_div, (None, fx.Int32(row_idx)))
+                        )
+                        page_ids = Vec(v, (2,), fx.Int32)
+                        page_addresses = Vec.from_elements(
+                            [
+                                k_base_i64 + fx.Int64(page_ids[elem]) * fx.Int64(page_byte_stride)
+                                for elem in range_constexpr(2)
+                            ],
+                            fx.Int64,
+                        )
+                        llvm.StoreOp(as_mlir_value(page_addresses), dst, alignment=16)
+                    else:
+                        for elem in range_constexpr(4):
+                            elem_local_tile = local_tile + fx.Index(elem)
+                            if elem_local_tile < segment_tiles:
+                                elem_tile_idx = tile_idx + fx.Index(elem)
+                                elem_byte_off = as_mlir_value(fx.Int32(elem_local_tile * fx.Index(8)))
+                                elem_dst = buffer_ops.get_element_ptr(
+                                    lds_bt_base_ptr, byte_offset=elem_byte_off, elem_type=T.i8
+                                )
+                                if elem_tile_idx < num_kv_tiles:
+                                    row_idx = batch_idx * block_table_stride_v + elem_tile_idx
+                                    v = fly.copy_atom_call_ssa(
+                                        [bt_v1i32], bt_atom, fx.slice(bt_div, (None, fx.Int32(row_idx)))
+                                    )
+                                    page_id = fx.Int64(Vec(v, (1,), fx.Int32)[0])
+                                    page_address = as_mlir_value(k_base_i64 + page_id * fx.Int64(page_byte_stride))
+                                    llvm.StoreOp(page_address, elem_dst)
+                                else:
+                                    llvm.StoreOp(as_mlir_value(k_base_i64), elem_dst)
 
         _load_block_table_to_lds()
+
+    def zero_block_table_padding(self):
+        """Clear the rounded-up page-ID tail after wide global-to-LDS staging."""
+        local_tile = self.num_kv_tiles - self.split_t0 + self.tid
+
+        @flyc.jit
+        def _zero_block_table_padding():
+            if local_tile < self.split_t_end - self.split_t0:
+                byte_off = as_mlir_value(fx.Int32(local_tile * fx.Index(4)))
+                dst = buffer_ops.get_element_ptr(self.lds_bt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
+                llvm.StoreOp(as_mlir_value(fx.Int32(0)), dst)
+
+        _zero_block_table_padding()
 
     def load_page_id_lds(self, tile_idx):
         src = buffer_ops.get_element_ptr(
@@ -3642,12 +3849,32 @@ class DualwavePageIdLoader(DualwaveKernelContext):
             byte_offset=as_mlir_value(_paged_bt_byte_offset(tile_idx, split_t0=self.split_t0)),
             elem_type=T.i8,
         )
-        return llvm.LoadOp(T.i32, src).result
+        return llvm.LoadOp(T.i64, src).result
+
+    def load_page_id_pair_lds(self, tile_idx):
+        src = buffer_ops.get_element_ptr(
+            self.lds_bt_base_ptr,
+            byte_offset=as_mlir_value(_paged_bt_byte_offset(tile_idx, split_t0=self.split_t0)),
+            elem_type=T.i8,
+        )
+        return llvm.LoadOp(Vec.make_type(2, fx.Int64), src, alignment=8).result
 
     def finish_page_id(self, v):
         rocdl.s_waitcnt(self.traits.LGKMCNT_0_ONLY)
-        v = rocdl.readfirstlane(T.i32, v)
-        return fx.Index(fx.Int32(v))
+        v = rocdl.readfirstlane(T.i64, v)
+        return fx.Index(fx.Int64(v))
+
+    def finish_page_id_pair(self, v):
+        rocdl.s_waitcnt(self.traits.LGKMCNT_0_ONLY)
+        pair = Vec(v, (2,), fx.Int64)
+        lo = rocdl.readfirstlane(T.i64, pair[0])
+        hi = rocdl.readfirstlane(T.i64, pair[1])
+        return fx.Index(fx.Int64(lo)), fx.Index(fx.Int64(hi))
+
+    def v_page_operand(self, k_page_address):
+        if const_expr(self.traits.WINDOW_LEFT >= 0):
+            return k_page_address
+        return fx.Index(fx.Int64(k_page_address) + self.v_from_k_byte_offset)
 
     def async_load_tile_page_id(self, tile_idx, page_id_override=None):
         if const_expr(self.traits.PAGED):
@@ -3729,14 +3956,32 @@ class DualwaveGemmHelper(DualwaveKernelContext):
     def __init__(self, ctx):
         super().__init__(ctx)
 
-    def qk(self, v_k, q_all_scaled_bf16):
+    def qk(self, v_k, q_all_scaled_bf16, group_halves=False, pair_halves=False):
         k_lo, k_hi = v_k
         v_s_lo = self.c_zero_v16f32
         v_s_hi = self.c_zero_v16f32
-        for ks in range_constexpr(self.traits.K_STEPS_QK):
-            q_pack = _get_q_pack(self.traits, q_all_scaled_bf16, ks)
-            v_s_lo = _mfma_acc(k_lo[ks], q_pack, v_s_lo, self.mma_atom, self.mfma_acc_vec_type)
-            v_s_hi = _mfma_acc(k_hi[ks], q_pack, v_s_hi, self.mma_atom, self.mfma_acc_vec_type)
+        if const_expr(group_halves):
+            for ks in range_constexpr(self.traits.K_STEPS_QK):
+                q_pack = _get_q_pack(self.traits, q_all_scaled_bf16, ks)
+                v_s_lo = _mfma_acc(k_lo[ks], q_pack, v_s_lo, self.mma_atom, self.mfma_acc_vec_type)
+            for ks in range_constexpr(self.traits.K_STEPS_QK):
+                q_pack = _get_q_pack(self.traits, q_all_scaled_bf16, ks)
+                v_s_hi = _mfma_acc(k_hi[ks], q_pack, v_s_hi, self.mma_atom, self.mfma_acc_vec_type)
+        elif const_expr(pair_halves):
+            for pair in range_constexpr(self.traits.K_STEPS_QK // 2):
+                ks0 = pair * 2
+                ks1 = ks0 + 1
+                q_pack0 = _get_q_pack(self.traits, q_all_scaled_bf16, ks0)
+                q_pack1 = _get_q_pack(self.traits, q_all_scaled_bf16, ks1)
+                v_s_lo = _mfma_acc(k_lo[ks0], q_pack0, v_s_lo, self.mma_atom, self.mfma_acc_vec_type)
+                v_s_lo = _mfma_acc(k_lo[ks1], q_pack1, v_s_lo, self.mma_atom, self.mfma_acc_vec_type)
+                v_s_hi = _mfma_acc(k_hi[ks0], q_pack0, v_s_hi, self.mma_atom, self.mfma_acc_vec_type)
+                v_s_hi = _mfma_acc(k_hi[ks1], q_pack1, v_s_hi, self.mma_atom, self.mfma_acc_vec_type)
+        else:
+            for ks in range_constexpr(self.traits.K_STEPS_QK):
+                q_pack = _get_q_pack(self.traits, q_all_scaled_bf16, ks)
+                v_s_lo = _mfma_acc(k_lo[ks], q_pack, v_s_lo, self.mma_atom, self.mfma_acc_vec_type)
+                v_s_hi = _mfma_acc(k_hi[ks], q_pack, v_s_hi, self.mma_atom, self.mfma_acc_vec_type)
         return (v_s_lo, v_s_hi)
 
     def pv_step_k(self, step, v_p, v_v, v_o):
@@ -3930,12 +4175,77 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
 
         return _causal_mask_prologue_if_needed(v_s, tile_idx, kv_end_pos, q_start_pos_i32, q_row_i32)
 
+    def causal_mask_final_tile_if_needed(self, v_s, tile_idx, final_tile_idx):
+        """Mask only the final steady-state tile under a workgroup-uniform gate."""
+
+        @flyc.jit
+        def _causal_mask_final_tile_if_needed(v_s, tile_idx, final_tile_idx):
+            s_lo, s_hi = v_s
+            if tile_idx == final_tile_idx:
+                lo_list, hi_list = self.v_s_vec_to_lists(v_s)
+                self._causal_mask_inplace((lo_list, hi_list), tile_idx)
+                s_lo, s_hi = _score_lists_to_vecs((lo_list, hi_list))
+            return s_lo, s_hi
+
+        return _causal_mask_final_tile_if_needed(v_s, tile_idx, final_tile_idx)
+
     def causal_mask_split_prologue_if_needed(self, v_s, offset_tiles=0, end_offset_tiles=1):
         return self.causal_mask_prologue_if_needed(
             v_s,
             self.split_tile(offset_tiles),
             kv_end_tile=self.split_tile(end_offset_tiles),
         )
+
+    def window_mask_inplace(self, v_s_lists, tile_idx, q_row_i32=None, first_tile=False):
+        if q_row_i32 is None:
+            q_row_i32 = self.ctx_ref.q_row_i32
+        s_lo, s_hi = v_s_lists
+        col_base = _seq_pad_col_base(self.traits, tile_idx, lane_div_32=self.lane_div_32)
+        first_valid = fx.Int32(q_row_i32 + self.delta_i32 - fx.Int32(self.traits.WINDOW_LEFT))
+        rel_lo_i32 = fx.Int32(col_base - first_valid + fx.Int32(32))
+        if const_expr(first_tile):
+            tile_end_i32 = fx.Int32((tile_idx + fx.Index(1)) * self.traits.BLOCK_N)
+            fully_below = tile_end_i32 <= first_valid
+            # The packed-mask thresholds are all non-negative.  Rebasing the
+            # low/high relations to -33/-1 masks both halves without a branch.
+            rel_lo_i32 = fully_below.select(fx.Int32(-33), rel_lo_i32)
+        rel_hi_i32 = fx.Int32(rel_lo_i32 + fx.Int32(32))
+        neg_inf_i32 = fx.Int32(self.traits.NEG_INF_F32_BITS)
+        window_thresholds = [(32 - x, 32 - y) for x, y in _causal_pair_thresholds(self.traits.KV_VECTORIZED)]
+        _apply_dualwave_causal_mask_pair(s_lo, rel_lo_i32, neg_inf_i32, window_thresholds)
+        _apply_dualwave_causal_mask_pair(s_hi, rel_hi_i32, neg_inf_i32, window_thresholds)
+
+    def window_mask_if_needed(self, v_s, tile_idx, q_row_i32=None, first_tile=False):
+        if const_expr(self.traits.WINDOW_LEFT < 0):
+            return v_s
+        lo_list, hi_list = self.v_s_vec_to_lists(v_s)
+        self.window_mask_inplace((lo_list, hi_list), tile_idx, q_row_i32=q_row_i32, first_tile=first_tile)
+        return _score_lists_to_vecs((lo_list, hi_list))
+
+    def window_mask_leading_if_needed(self, v_s, tile_idx, tile_offset=None):
+        if const_expr(self.traits.WINDOW_LEFT < 0):
+            return v_s
+        # split_t0 is pair-aligned below the first valid column for the first
+        # row.  Pair alignment plus the 256-row block means only these leading
+        # six tiles can intersect any row's lower window boundary.
+        leading_tile_count = 2 + (self.traits.BLOCK_M + self.traits.BLOCK_N - 1) // self.traits.BLOCK_N
+        if tile_offset is None:
+            guard_idx = tile_idx
+            leading_tile_end = self.split_tile(leading_tile_count)
+        else:
+            guard_idx = tile_offset
+            leading_tile_end = fx.Int32(leading_tile_count)
+
+        @flyc.jit
+        def _window_mask_leading_if_needed(v_s, tile_idx, guard_idx, leading_tile_end):
+            s_lo, s_hi = v_s
+            if guard_idx < leading_tile_end:
+                lo_list, hi_list = self.v_s_vec_to_lists(v_s)
+                self.window_mask_inplace((lo_list, hi_list), tile_idx)
+                s_lo, s_hi = _score_lists_to_vecs((lo_list, hi_list))
+            return s_lo, s_hi
+
+        return _window_mask_leading_if_needed(v_s, tile_idx, guard_idx, leading_tile_end)
 
     def seq_pad_mask_inplace(self, v_s_lists, tile_idx):
         s_lo, s_hi = v_s_lists
@@ -3979,21 +4289,84 @@ class DualwaveKvGmemToLdsLoader(DualwaveKernelContext):
             _lds_ptr_ty=self.lds_ptr_ty,
         )
 
-    def _kv_src_div(self, tensor, dense_div, page_id, name):
+    def prepare_vectorized_k_dma(self, buf_id):
+        """Prepare page-independent K DMA operands before a page-address wait."""
+        ctx = self.ctx_ref
+        prepared = None
+        if const_expr(self.traits.KV_VECTORIZED):
+            dma_operands = tuple(
+                (
+                    _anchor_i32(ctx.k_dma_m0[buf_id][d]),
+                    _anchor_i32(
+                        _vec_k_src_elem(
+                            self.traits,
+                            d,
+                            wave_id_uni=self.wave_id_uni,
+                            lane_in_warp=self.lane_in_warp,
+                            kv_head_idx=self.kv_head_idx,
+                        )
+                    ),
+                )
+                for d in range_constexpr(self.num_dma_k)
+            )
+            descriptor_fields = None
+            if const_expr(self.traits.PAGED):
+                descriptor_fields = (
+                    fx.Int64(_anchor_scalar_int(self.page_nrec_bytes)),
+                    fx.Int32(_anchor_scalar_int(self.buf_flags_i32)),
+                )
+            prepared = dma_operands, descriptor_fields
+        return prepared
+
+    def prepare_vectorized_v_dma(self, buf_id):
+        """Prepare page-independent V DMA operands before a page-address wait."""
+        ctx = self.ctx_ref
+        prepared = None
+        if const_expr(self.traits.KV_VECTORIZED):
+            dma_operands = tuple(
+                (
+                    _anchor_i32(ctx.v_dma_m0[buf_id][d]),
+                    _anchor_i32(
+                        _vec_v_src_elem(
+                            self.traits,
+                            d,
+                            wave_id_uni=self.wave_id_uni,
+                            lane_in_warp=self.lane_in_warp,
+                            kv_head_idx=self.kv_head_idx,
+                        )
+                    ),
+                )
+                for d in range_constexpr(self.num_dma_v)
+            )
+            descriptor_fields = None
+            if const_expr(self.traits.PAGED):
+                descriptor_fields = (
+                    fx.Int64(_anchor_scalar_int(self.page_nrec_bytes)),
+                    fx.Int32(_anchor_scalar_int(self.buf_flags_i32)),
+                )
+            prepared = dma_operands, descriptor_fields
+        return prepared
+
+    def _kv_src_div(self, tensor, dense_div, page_id, page_address_delta, name, descriptor_fields=None):
         if const_expr(self.traits.PAGED):
             if const_expr(page_id is None):
                 raise ValueError(f"{name} requires page_id when PAGED=True")
             base_iter = fx.get_iter(tensor)
+            page_address = fx.Int64(page_id)
+            if const_expr(page_address_delta is not None):
+                page_address = page_address + page_address_delta
+            page_nrec_bytes = self.page_nrec_bytes
+            buf_flags_i32 = self.buf_flags_i32
+            if const_expr(descriptor_fields is not None):
+                page_nrec_bytes, buf_flags_i32 = descriptor_fields
             return _make_page_view(
-                base_iter,
                 base_iter.type,
                 base_iter.alignment,
-                page_id,
-                self.page_byte_stride,
-                self.page_nrec_bytes,
+                page_address,
+                page_nrec_bytes,
                 self.page_layout,
                 self.elem_ir,
-                self.buf_flags_i32,
+                buf_flags_i32,
             )
         return dense_div
 
@@ -4014,8 +4387,12 @@ class DualwaveKvGmemToLdsLoader(DualwaveKernelContext):
                 soffset,
             )
 
-    def load_k(self, tile_start, buf_id, page_id=None):
+    def load_k(self, tile_start, buf_id, page_id=None, prepared_dma=None):
         ctx = self.ctx_ref
+        dma_operands = None
+        descriptor_fields = None
+        if const_expr(prepared_dma is not None):
+            dma_operands, descriptor_fields = prepared_dma
         src_base, soffset = _kv_tile_addr(
             self.traits,
             tile_start,
@@ -4023,32 +4400,46 @@ class DualwaveKvGmemToLdsLoader(DualwaveKernelContext):
             kv_head_elem_offset=self.kv_head_elem_offset,
             stride_kv_n_v=self.stride_kv_n_v,
         )
-        src_div = self._kv_src_div(self.K, self.k_div, page_id, "DualwaveKvGmemToLdsLoader.load_k")
+        src_div = self._kv_src_div(
+            self.K,
+            self.k_div,
+            page_id,
+            None,
+            "DualwaveKvGmemToLdsLoader.load_k",
+            descriptor_fields=descriptor_fields,
+        )
         if const_expr(self.traits.KV_VECTORIZED):
             for d in range_constexpr(self.num_dma_k):
+                lds_addr = ctx.k_dma_m0[buf_id][d]
+                src_elem = _vec_k_src_elem(
+                    self.traits,
+                    d,
+                    wave_id_uni=self.wave_id_uni,
+                    lane_in_warp=self.lane_in_warp,
+                    kv_head_idx=self.kv_head_idx,
+                )
+                if const_expr(prepared_dma is not None):
+                    lds_addr, src_elem = dma_operands[d]
                 self._issue_kv_dma(
                     src_div,
-                    ctx.k_dma_m0[buf_id][d],
-                    _vec_k_src_elem(
-                        self.traits,
-                        d,
-                        wave_id_uni=self.wave_id_uni,
-                        lane_in_warp=self.lane_in_warp,
-                        kv_head_idx=self.kv_head_idx,
-                    ),
+                    lds_addr,
+                    src_elem,
                     soffset,
                 )
         else:
             self._async_load_kv_linear(ctx.k_dma_m0, buf_id, src_div, src_base, soffset, self.num_dma_k)
 
-    def load_k_tile(self, tile_idx, buf_id, page_id=None):
-        self.load_k(self.tile_start(tile_idx), buf_id, page_id=page_id)
+    def load_k_tile(self, tile_idx, buf_id, page_id=None, prepared_dma=None):
+        self.load_k(self.tile_start(tile_idx), buf_id, page_id=page_id, prepared_dma=prepared_dma)
 
-    def load_k_split(self, offset_tiles, buf_id, page_id=None):
-        self.load_k_tile(self.split_tile(offset_tiles), buf_id, page_id=page_id)
+    def load_k_split(self, offset_tiles, buf_id, page_id=None, prepared_dma=None):
+        self.load_k_tile(self.split_tile(offset_tiles), buf_id, page_id=page_id, prepared_dma=prepared_dma)
 
-    def load_v(self, tile_start, buf_id, page_id=None):
+    def load_v(self, tile_start, buf_id, page_id=None, prepared_dma=None, descriptor_fields=None):
         ctx = self.ctx_ref
+        dma_operands = None
+        if const_expr(prepared_dma is not None):
+            dma_operands, descriptor_fields = prepared_dma
         src_base, soffset = _kv_tile_addr(
             self.traits,
             tile_start,
@@ -4056,29 +4447,49 @@ class DualwaveKvGmemToLdsLoader(DualwaveKernelContext):
             kv_head_elem_offset=self.kv_head_elem_offset,
             stride_kv_n_v=self.stride_kv_n_v,
         )
-        src_div = self._kv_src_div(self.V, self.v_div, page_id, "DualwaveKvGmemToLdsLoader.load_v")
+        page_address_delta = None
+        if const_expr(self.traits.PAGED and self.traits.WINDOW_LEFT >= 0):
+            page_address_delta = self.v_from_k_byte_offset
+        src_div = self._kv_src_div(
+            self.V,
+            self.v_div,
+            page_id,
+            page_address_delta,
+            "DualwaveKvGmemToLdsLoader.load_v",
+            descriptor_fields=descriptor_fields,
+        )
         if const_expr(self.traits.KV_VECTORIZED):
             for d in range_constexpr(self.num_dma_v):
+                lds_addr = ctx.v_dma_m0[buf_id][d]
+                src_elem = _vec_v_src_elem(
+                    self.traits,
+                    d,
+                    wave_id_uni=self.wave_id_uni,
+                    lane_in_warp=self.lane_in_warp,
+                    kv_head_idx=self.kv_head_idx,
+                )
+                if const_expr(prepared_dma is not None):
+                    lds_addr, src_elem = dma_operands[d]
                 self._issue_kv_dma(
                     src_div,
-                    ctx.v_dma_m0[buf_id][d],
-                    _vec_v_src_elem(
-                        self.traits,
-                        d,
-                        wave_id_uni=self.wave_id_uni,
-                        lane_in_warp=self.lane_in_warp,
-                        kv_head_idx=self.kv_head_idx,
-                    ),
+                    lds_addr,
+                    src_elem,
                     soffset,
                 )
         else:
             self._async_load_kv_linear(ctx.v_dma_m0, buf_id, src_div, src_base, soffset, self.num_dma_v)
 
-    def load_v_tile(self, tile_idx, buf_id, page_id=None):
-        self.load_v(self.tile_start(tile_idx), buf_id, page_id=page_id)
+    def load_v_tile(self, tile_idx, buf_id, page_id=None, prepared_dma=None, descriptor_fields=None):
+        self.load_v(
+            self.tile_start(tile_idx),
+            buf_id,
+            page_id=page_id,
+            prepared_dma=prepared_dma,
+            descriptor_fields=descriptor_fields,
+        )
 
-    def load_v_split(self, offset_tiles, buf_id, page_id=None):
-        self.load_v_tile(self.split_tile(offset_tiles), buf_id, page_id=page_id)
+    def load_v_split(self, offset_tiles, buf_id, page_id=None, prepared_dma=None):
+        self.load_v_tile(self.split_tile(offset_tiles), buf_id, page_id=page_id, prepared_dma=prepared_dma)
 
 
 class DualwaveKvLdsToVgprLoader(DualwaveKernelContext):
@@ -4420,10 +4831,7 @@ class DualwaveFp8KernelContext:
         makespan carries its tail. Must run after init_thread_mapping and before
         init_sequence_lengths / init_tile_bounds / init_q_row read q_start.
         """
-        traits = self.traits
-        num_q_blocks = (self.seq_len_v + traits.BLOCK_M - 1) // traits.BLOCK_M
-        self.q_block_idx = num_q_blocks - fx.Index(1) - self.q_block_idx
-        self.q_start = self.q_block_idx * traits.BLOCK_M
+        _init_dualwave_causal_lpt_order(self)
 
     def init_lds(self, shared_storage):
         lds = fx.SharedAllocator().allocate(shared_storage).peek()

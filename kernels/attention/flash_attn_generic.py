@@ -61,6 +61,7 @@ def build_flash_attn_func_module_primary(
     kv_cache_layout="linear",
     skip_kv_pad_mask=None,
     return_lse=False,
+    reverse_q_tiles=False,
 ):
     """Build a generic f16/bf16 flash-attention launcher.
 
@@ -100,6 +101,7 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=skip_kv_pad_mask,
             return_lse=return_lse,
+            reverse_q_tiles=reverse_q_tiles,
         )
         _launcher_m256 = build_flash_attn_func_module_primary(
             num_heads,
@@ -123,6 +125,7 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=skip_kv_pad_mask,
             return_lse=return_lse,
+            reverse_q_tiles=reverse_q_tiles,
         )
         _bs_threshold = 2048 * num_heads if gpu_arch.startswith("gfx942") else 4096 * num_heads
 
@@ -207,7 +210,8 @@ def build_flash_attn_func_module_primary(
         skip_kv_pad_mask=skip_kv_pad_mask,
         return_lse=return_lse,
     )
-    _flash_attn_generic_cache_tag = traits.cache_tag
+    _split_causal_mask_loop = path_tag.upper() == "N32HALFPPACKMSPLIT"
+    _flash_attn_generic_cache_tag = (traits.cache_tag, _split_causal_mask_loop)
 
     def _extract_seq_len(args, kwargs):
         """Return the launch-time seq_len as int, or None if not statically known."""
@@ -269,6 +273,9 @@ def build_flash_attn_func_module_primary(
         ctx.init_lds_view(SharedStorage)
         ctx.init_thread_mapping()
         ctx.init_block_mapping()
+        if const_expr(traits.CAUSAL and not traits.VARLEN and not traits.PAGED):
+            ctx.q_tile_idx = ctx.num_q_tiles - fx.Index(1) - ctx.q_tile_idx
+            ctx.q_start = ctx.q_tile_idx * traits.BLOCK_M
         ctx.init_sequence_lengths(CuSeqQ, CuSeqKv)
         ctx.init_load_mapping()
 
@@ -313,8 +320,7 @@ def build_flash_attn_func_module_primary(
             for _kb in range_constexpr(traits.NUM_BATCHES_KV):
                 init_args.append(_k0_vecs[_kb])
 
-        loop_results = init_args
-        for kv_block_start, inner_iter_args in range(0, kv_upper, traits.BLOCK_N_OUT, init=init_args):
+        def _run_kv_block(kv_block_start, inner_iter_args, mask_scores):
             m_running = inner_iter_args[0]
             l_running = inner_iter_args[1]
             o_accs = [inner_iter_args[2 + i] for i in range_constexpr(traits.D_CHUNKS)]
@@ -422,7 +428,8 @@ def build_flash_attn_func_module_primary(
 
                 # ==== Online softmax over 64 KV positions ====
                 s_raw_lo, s_raw_hi = softmax_helper.split_scores(s_acc_lo, s_acc_hi)
-                s_raw_lo, s_raw_hi = softmax_helper.apply_kv_mask(s_raw_lo, s_raw_hi, kv_start)
+                if const_expr(mask_scores):
+                    s_raw_lo, s_raw_hi = softmax_helper.apply_kv_mask(s_raw_lo, s_raw_hi, kv_start)
                 if const_expr(traits.ENABLE_GFX942_KV_GPFETCH and traits.DTYPE_STR == "bf16" and not traits.USE_K16):
                     m_new_raw, corr, neg_scaled_max = softmax_helper.online_softmax_stats(m_running, s_raw_lo, s_raw_hi)
                     o_accs, corr_vec = softmax_helper.rescale_o_accs(o_accs, corr)
@@ -482,8 +489,12 @@ def build_flash_attn_func_module_primary(
                         v_base,
                     )
                 else:
-                    p_packs_lo = softmax_helper.build_p_packs(p_vals_lo)
-                    p_packs_hi = softmax_helper.build_p_packs(p_vals_hi)
+                    if const_expr(traits.HALF_FUSE_P_PACKS):
+                        p_packs_lo = p_vals_lo
+                        p_packs_hi = p_vals_hi
+                    else:
+                        p_packs_lo = softmax_helper.build_p_packs(p_vals_lo)
+                        p_packs_hi = softmax_helper.build_p_packs(p_vals_hi)
                     o_accs = gemm_helper.gemm2_pv(kv_lds_to_vgpr, o_accs, p_packs_lo, p_packs_hi, v_base, corr_vec)
 
                 m_running = m_new_raw
@@ -498,7 +509,17 @@ def build_flash_attn_func_module_primary(
             if const_expr(_pipe_k):
                 for _kb in range_constexpr(traits.NUM_BATCHES_KV):
                     _yield_args.append(_next_k_vecs[_kb])
-            loop_results = yield _yield_args
+            return _yield_args
+
+        loop_results = init_args
+        if const_expr(_split_causal_mask_loop):
+            for kv_block_start, inner_iter_args in range(0, ctx.q_start, traits.BLOCK_N_OUT, init=init_args):
+                loop_results = yield _run_kv_block(kv_block_start, inner_iter_args, False)
+            for kv_block_start, inner_iter_args in range(ctx.q_start, kv_upper, traits.BLOCK_N_OUT, init=loop_results):
+                loop_results = yield _run_kv_block(kv_block_start, inner_iter_args, True)
+        else:
+            for kv_block_start, inner_iter_args in range(0, kv_upper, traits.BLOCK_N_OUT, init=init_args):
+                loop_results = yield _run_kv_block(kv_block_start, inner_iter_args, True)
 
         # ---- Normalize and store O (128-bit buffer_store_dwordx4) ----
         store_helper.finalize_o(loop_results)
@@ -665,6 +686,7 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=True,
             return_lse=return_lse,
+            reverse_q_tiles=reverse_q_tiles,
         )
         _launch_mask = build_flash_attn_func_module_primary(
             num_heads,
@@ -688,6 +710,7 @@ def build_flash_attn_func_module_primary(
             kv_cache_layout=kv_cache_layout,
             skip_kv_pad_mask=False,
             return_lse=return_lse,
+            reverse_q_tiles=reverse_q_tiles,
         )
 
         def _pad_dispatch(*args, **kwargs):
