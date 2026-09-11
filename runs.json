@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-11T08:24:13Z",
+ "updated": "2026-09-11T08:34:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34579648475,
+   "pr": 1094,
+   "commit": "769e4b83d06fa9cbd268c8d1b983953ff9e8065c",
+   "branch": "ci/pypi-moe-csv-hgemm",
+   "event": "pull_request",
+   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34579648475",
+   "created_at": "2026-09-11T08:31:58Z",
+   "updated_at": "2026-09-11T08:33:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34577222538,
    "pr": 1094,
@@ -10,13 +25,41 @@
    "branch": "ci/pypi-moe-csv-hgemm",
    "event": "pull_request",
    "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577222538",
    "created_at": "2026-09-11T08:02:31Z",
-   "updated_at": "2026-09-11T08:07:29Z",
+   "updated_at": "2026-09-11T08:32:33Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-11T08:23:50Z",
+     "completed_at": "2026-09-11T08:31:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577222538/job/103197861567"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-11T08:26:33Z",
+     "completed_at": "2026-09-11T08:32:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577222538/job/103197861596"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-11T08:24:08Z",
+     "completed_at": "2026-09-11T08:32:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577222538/job/103197862038"
+    }
+   ]
   },
   {
    "run_id": 34577216645,
@@ -25,13 +68,41 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645",
    "created_at": "2026-09-11T08:02:27Z",
-   "updated_at": "2026-09-11T08:10:10Z",
+   "updated_at": "2026-09-11T08:28:47Z",
    "actor": "cschenjunlin",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-11T08:32:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645/job/103199137555"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-11T08:28:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645/job/103199137678"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-11T08:30:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645/job/103199137680"
+    }
+   ]
   },
   {
    "run_id": 34575338851,
@@ -40,19 +111,19 @@
    "branch": "main",
    "event": "push",
    "title": "fix(ci): use host networking for manylinux image builds (#1118)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851",
    "created_at": "2026-09-11T07:38:36Z",
-   "updated_at": "2026-09-11T08:01:19Z",
+   "updated_at": "2026-09-11T08:27:08Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-11T08:01:19Z",
+     "started_at": "2026-09-11T08:27:07Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192019617"
     },
@@ -68,11 +139,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T08:01:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192020057"
+     "completed_at": "2026-09-11T08:23:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192020057",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1780,50 +1852,6 @@
      "started_at": "2026-09-09T15:01:39Z",
      "completed_at": "2026-09-09T15:07:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34345094383/job/102448769054"
-    }
-   ]
-  },
-  {
-   "run_id": 34339321577,
-   "pr": null,
-   "commit": "a47405d563031326dbc17c1e6f14339f17e8756a",
-   "branch": "feat/rocdl-ordered-memory-primitives",
-   "event": "pull_request",
-   "title": "[DSL] Add llvm load/store primitives",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577",
-   "created_at": "2026-09-09T10:16:20Z",
-   "updated_at": "2026-09-09T12:08:56Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-09T10:40:58Z",
-     "completed_at": "2026-09-09T11:55:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577/job/102432813997"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-09T11:13:22Z",
-     "completed_at": "2026-09-09T12:08:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577/job/102432814012"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T10:40:47Z",
-     "completed_at": "2026-09-09T10:57:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34339321577/job/102432814096",
-     "log_fetch_failed": true
     }
    ]
   }
