@@ -21,17 +21,21 @@ def divmod(a, b):
     return (a // b, a % b)
 
 
-def xcd_remap_pid(num_pid_m, num_pid_n, *, group_m, num_xcds=8):
+def xcd_remap_pid(num_pid_m, num_pid_n, *, group_m, num_xcds=8, allow_ragged=False):
     """1D workgroup id -> ``(pid_m, pid_n)``, XCD-aware with M-grouped ordering."""
     num_cus = 32 * num_xcds
     swizzle_threshold = 4 * num_cus
 
     wgid = fx.block_idx.x
-    num_wg = num_pid_m * num_pid_n
+    num_wg = fx.Int32(num_pid_m * num_pid_n)
     simple_m, simple_n = divmod(wgid, num_pid_n)
 
     intra_xcd, xcd = divmod(wgid, num_xcds)
     wgid_remap = xcd * (num_wg // num_xcds) + intra_xcd
+    if const_expr(allow_ragged):
+        # The first num_wg % num_xcds XCDs get one extra CTA. This is a
+        # bijection even for expert-padded MoE grids that are not divisible by 8.
+        wgid_remap += fx.min(xcd, num_wg % num_xcds)
     num_wgid_in_group = group_m * num_pid_n
     group_id, intra_group = divmod(wgid_remap, num_wgid_in_group)
     first_pid_m = group_id * group_m
@@ -39,7 +43,9 @@ def xcd_remap_pid(num_pid_m, num_pid_n, *, group_m, num_xcds=8):
     pid_n, intra_group_m = divmod(intra_group, group_size_m)
     pid_m = first_pid_m + intra_group_m
 
-    use_simple = (num_wg < swizzle_threshold) | (num_wg % num_xcds != 0)
+    use_simple = num_wg < swizzle_threshold
+    if const_expr(not allow_ragged):
+        use_simple = use_simple | (num_wg % num_xcds != 0)
     return (use_simple.select(simple_m, pid_m), use_simple.select(simple_n, pid_n))
 
 

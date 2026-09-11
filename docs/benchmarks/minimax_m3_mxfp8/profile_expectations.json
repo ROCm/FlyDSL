@@ -1,0 +1,12 @@
+{
+  "stage1": {
+    "top_stall_class": "barrier",
+    "min_mapped_pct": 95,
+    "require_dispatch": true
+  },
+  "stage2": {
+    "top_stall_class": "barrier",
+    "min_mapped_pct": 95,
+    "require_dispatch": true
+  }
+}
