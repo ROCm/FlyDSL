@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-11T19:11:43Z",
+ "updated": "2026-09-11T20:46:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34645855663,
+   "pr": 1119,
+   "commit": "66346338b4ebc555997ace801a5d6f16cfaf23b2",
+   "branch": "codex/topk-gating-mi355",
+   "event": "pull_request",
+   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645855663",
+   "created_at": "2026-09-11T20:45:05Z",
+   "updated_at": "2026-09-11T20:45:21Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 34645835867,
+   "pr": null,
+   "commit": "7a91b26d0ca2c27f9883e6ddc1ddbad1259ffdbe",
+   "branch": "codex/topk-gating-mi355",
+   "event": "pull_request",
+   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645835867",
+   "created_at": "2026-09-11T20:44:52Z",
+   "updated_at": "2026-09-11T20:45:07Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 34637167614,
    "pr": 1125,
@@ -54,11 +84,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T17:50:33Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34627358715/job/103363889019"
+     "completed_at": "2026-09-11T19:18:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34627358715/job/103363889019",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -664,7 +695,7 @@
   },
   {
    "run_id": 34567151160,
-   "pr": 1119,
+   "pr": null,
    "commit": "c417b2819c609a877c1c6f6cbee59a917c45fb1a",
    "branch": "codex/topk-gating-mi355",
    "event": "pull_request",
@@ -1830,7 +1861,7 @@
   },
   {
    "run_id": 34443874091,
-   "pr": 1047,
+   "pr": null,
    "commit": "5058488653c485fa98d158546a4c89d45daa3ad7",
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
@@ -1889,7 +1920,7 @@
   },
   {
    "run_id": 34439021827,
-   "pr": 1047,
+   "pr": null,
    "commit": "a58abc79476b833747b0026bb0c43e059543da53",
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
@@ -1904,7 +1935,7 @@
   },
   {
    "run_id": 34438138626,
-   "pr": 1047,
+   "pr": null,
    "commit": "5c6ba71861bb3d5c0f95745eb491a03b59662ce4",
    "branch": "skill/review-flydsl-kernel",
    "event": "pull_request",
@@ -1916,96 +1947,6 @@
    "updated_at": "2026-09-10T04:44:35Z",
    "actor": "jhinpan",
    "jobs": []
-  },
-  {
-   "run_id": 34433591609,
-   "pr": null,
-   "commit": "bce668e267d3e1df8ae6e4e39b169c739e50f898",
-   "branch": "feat/rocdl-ordered-memory-primitives",
-   "event": "pull_request",
-   "title": "[DSL] Add llvm load/store primitives",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34433591609",
-   "created_at": "2026-09-10T03:30:30Z",
-   "updated_at": "2026-09-10T07:49:53Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-10T07:10:23Z",
-     "completed_at": "2026-09-10T07:49:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34433591609/job/102778983832"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T07:10:29Z",
-     "completed_at": "2026-09-10T07:34:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34433591609/job/102778983892",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-10T07:11:09Z",
-     "completed_at": "2026-09-10T07:49:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34433591609/job/102778983899"
-    }
-   ]
-  },
-  {
-   "run_id": 34431684585,
-   "pr": null,
-   "commit": "7bf4895032976e1d26bac5eaa0f441e76d0bdf7a",
-   "branch": "lhc/fold-index-cast-on-main",
-   "event": "pull_request",
-   "title": "[Perf][Dialect] Fold redundant index cast pairs in layout lowering",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431684585",
-   "created_at": "2026-09-10T03:01:02Z",
-   "updated_at": "2026-09-10T06:08:27Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T03:23:00Z",
-     "completed_at": "2026-09-10T03:55:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431684585/job/102732396063",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T04:21:03Z",
-     "completed_at": "2026-09-10T06:08:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431684585/job/102732396076",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T03:24:26Z",
-     "completed_at": "2026-09-10T05:54:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34431684585/job/102732396096",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
