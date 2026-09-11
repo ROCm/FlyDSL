@@ -1,8 +1,52 @@
 {
  "schema": 1,
- "updated": "2026-09-11T10:45:13Z",
+ "updated": "2026-09-11T12:05:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34590686084,
+   "pr": 1122,
+   "commit": "72b404f1ce79b779c1a3629ad74fe7489906029e",
+   "branch": "matthias.reject-lds-dma-on-gfx11",
+   "event": "pull_request",
+   "title": "Reject global->LDS direct loads on gfx11",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34590686084",
+   "created_at": "2026-09-11T10:44:36Z",
+   "updated_at": "2026-09-11T11:00:40Z",
+   "actor": "mgehre-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-11T11:01:08Z",
+     "completed_at": "2026-09-11T11:22:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34590686084/job/103239042491",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-11T11:02:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34590686084/job/103239042498"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-11T11:00:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34590686084/job/103239042606"
+    }
+   ]
+  },
   {
    "run_id": 34586826461,
    "pr": 1121,
@@ -10,28 +54,29 @@
    "branch": "pr/ci-skip-noncode-gpu",
    "event": "pull_request",
    "title": "[CI] Skip GPU tests for more non-code path changes",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586826461",
    "created_at": "2026-09-11T09:57:46Z",
-   "updated_at": "2026-09-11T10:15:33Z",
+   "updated_at": "2026-09-11T11:02:22Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T10:18:24Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586826461/job/103227562572"
+     "completed_at": "2026-09-11T11:55:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586826461/job/103227562572",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-11T10:15:33Z",
+     "started_at": "2026-09-11T11:02:22Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586826461/job/103227562585"
     },
@@ -54,30 +99,32 @@
    "branch": "pr/docs-dsl-protocols",
    "event": "pull_request",
    "title": "[Doc] Introduction for DSL procotols",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586527365",
    "created_at": "2026-09-11T09:54:01Z",
-   "updated_at": "2026-09-11T10:42:37Z",
+   "updated_at": "2026-09-11T12:03:38Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T10:42:36Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586527365/job/103226137108"
+     "completed_at": "2026-09-11T12:03:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586527365/job/103226137108",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T10:13:26Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586527365/job/103226137142"
+     "completed_at": "2026-09-11T11:54:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586527365/job/103226137142",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1898,52 +1945,6 @@
      "started_at": "2026-09-10T02:45:56Z",
      "completed_at": "2026-09-10T04:18:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34367555883/job/102531656566",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34364102173,
-   "pr": null,
-   "commit": "14cefed484569f871cc32396e11d7c9e3d75dfaf",
-   "branch": "jli/gfx1250/fix-mma-atom",
-   "event": "pull_request",
-   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34364102173",
-   "created_at": "2026-09-09T14:30:52Z",
-   "updated_at": "2026-09-09T16:40:42Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T15:19:21Z",
-     "completed_at": "2026-09-09T16:40:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34364102173/job/102519108104",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T15:00:52Z",
-     "completed_at": "2026-09-09T15:15:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34364102173/job/102519108169",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T15:01:39Z",
-     "completed_at": "2026-09-09T16:13:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34364102173/job/102519108215",
      "log_fetch_failed": true
     }
    ]
