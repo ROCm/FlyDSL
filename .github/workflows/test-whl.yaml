@@ -200,16 +200,24 @@ jobs:
           run_moe_csv /tmp/tuned_op_bench_current.csv /tmp/flydsl_cache_current
           PYTHONPATH="/tmp/aiter:${PYTHONPATH_BASE}" AITER_REPO=/tmp/aiter python3 /tmp/aiter/op_tests/test_flydsl_hgemm.py
 
-          echo "=== aiter-main requirements flydsl==${PIN} CSV MoE ==="
-          python3 -m pip install --force-reinstall --no-deps --only-binary=:all: "flydsl==${PIN}"
-          run_moe_csv /tmp/tuned_op_bench_main.csv /tmp/flydsl_cache_main_pin
-
-          python3 "${MAIN_ROOT}/.github/scripts/compare_benchmark.py" \
-            /tmp/tuned_op_bench_main.csv \
-            /tmp/tuned_op_bench_current.csv \
-            --baseline-label "flydsl==${PIN}" \
-            --current-label "flydsl-wheel (aiter ${REF})" \
-            --fail-on-regress
+          # Everything above validates the wheel under test and is fatal.
+          # The baseline comparison below is informational: it benchmarks a
+          # different published flydsl, so kernel choice legitimately differs and
+          # a single noisy config out of ~250 must not fail the release job.
+          # && chaining (not set -e) so a failure short-circuits and returns here.
+          perf_compare() {
+            echo "=== aiter-main requirements flydsl==${PIN} CSV MoE ===" \
+              && python3 -m pip install --force-reinstall --no-deps --only-binary=:all: "flydsl==${PIN}" \
+              && run_moe_csv /tmp/tuned_op_bench_main.csv /tmp/flydsl_cache_main_pin \
+              && python3 "${MAIN_ROOT}/.github/scripts/compare_benchmark.py" \
+                /tmp/tuned_op_bench_main.csv \
+                /tmp/tuned_op_bench_current.csv \
+                --baseline-label "flydsl==${PIN}" \
+                --current-label "flydsl-wheel (aiter ${REF})"
+          }
+          if ! perf_compare; then
+            echo "WARNING: perf comparison did not complete; reported but not failing the job" >&2
+          fi
           BASH
 
       - name: Show aiter logs

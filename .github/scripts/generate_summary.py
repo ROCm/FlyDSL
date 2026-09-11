@@ -95,9 +95,17 @@ def test_summary(summary: Path) -> None:
         ["Run tests", f"`{tests_outcome}`"],
         ["Run benchmarks", f"`{bench_outcome}`"],
     ]
+    aiter_log = os.environ.get("SUMMARY_AITER_LOG", "")
     # A gated-off step reports the literal string "skipped", which is truthy.
-    if aiter_outcome and aiter_outcome != "skipped":
+    aiter_ran = bool(aiter_outcome) and aiter_outcome != "skipped"
+    if aiter_ran:
         step_rows.append(["Aiter CSV MoE / HGEMM", f"`{aiter_outcome}`"])
+        # The comparison is informational and cannot fail the step, so put the
+        # verdict in the status table rather than only in the block below.
+        regress = _aiter_regress_count(aiter_log) if aiter_log else None
+        if regress is not None:
+            note = "none" if regress == 0 else f"**{regress}** (see table below)"
+            step_rows.append(["Aiter perf regressions vs pin", note])
     _table(
         summary,
         ["Step", "Status"],
@@ -106,8 +114,7 @@ def test_summary(summary: Path) -> None:
 
     _write_test_results(summary, test_log)
     _write_bench_results(summary, bench_log)
-    aiter_log = os.environ.get("SUMMARY_AITER_LOG", "")
-    if aiter_log and aiter_outcome and aiter_outcome != "skipped":
+    if aiter_log and aiter_ran:
         _write_aiter_compare(summary, aiter_log)
 
 
@@ -208,6 +215,15 @@ def _extract_perf_table(text: str) -> list[str]:
         lambda line: line.startswith("op "),
         lambda line: "Benchmark Summary" in line,
     )
+
+
+def _aiter_regress_count(log_path: str) -> int | None:
+    """REGRESS count from compare_benchmark.py's summary block, if it ran."""
+    log = Path(log_path)
+    if not log.is_file():
+        return None
+    match = _first_match(r"^  REGRESS:\s+\d+", log.read_text(errors="replace"))
+    return int(match.split()[-1]) if match else None
 
 
 def _write_aiter_compare(summary: Path, log_path: str) -> None:
