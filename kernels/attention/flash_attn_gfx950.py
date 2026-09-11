@@ -81,6 +81,8 @@ def build_flash_attn_dualwave_swp_module(
     cross_seqlen=False,
     paged=False,
     kv_cache_layout="linear",
+    causal_lpt=True,
+    page_size=None,
     return_lse=False,
     has_bias=False,
     has_alibi=False,
@@ -91,7 +93,8 @@ def build_flash_attn_dualwave_swp_module(
 
     Supports dense self-attention, varlen packed QKV, and paged-KV cache modes.
     Varlen uses cu_seqlens_q/kv with per-batch self-attention ranges.
-    Paged mode keeps Q/O dense and maps KV tiles through BlockTable pages.
+    Paged mode keeps Q/O dense and maps KV tiles through BlockTable pages;
+    ``page_size`` defaults to the kernel's BLOCK_N and may be any multiple of it.
     Varlen, paged, and split-K are mutually constrained by the caller.
     has_bias adds a dense elementwise attention bias and works on both the dense
     and varlen paths; see the HAS_BIAS block below for the per-mode shapes.
@@ -146,6 +149,8 @@ def build_flash_attn_dualwave_swp_module(
         paged=paged,
         kv_cache_layout=kv_cache_layout,
         kv_vectorized=KV_VECTORIZED,
+        causal_lpt=causal_lpt,
+        page_size=page_size,
         return_lse=return_lse,
         xcd_swizzle=_xcd_swizzle,
     )
@@ -232,6 +237,8 @@ def build_flash_attn_dualwave_swp_module(
         ctx.init_runtime_indices()
         ctx.init_lds(SharedStorage)
         ctx.init_thread_mapping()
+        if const_expr(traits.CAUSAL_LPT):
+            ctx.init_causal_lpt_order()
         ctx.init_sequence_lengths()
         ctx.init_descriptors()
         ctx.init_workspace()
