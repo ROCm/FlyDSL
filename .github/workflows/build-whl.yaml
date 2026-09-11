@@ -166,7 +166,7 @@ jobs:
         run: |
           SUMMARY_LLVM_COMMIT="$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-build-info.json'))['upstream']['llvm_hash'])")"
           export SUMMARY_LLVM_COMMIT
-          python3 flydsl/scripts/generate_summary.py build
+          python3 flydsl/.github/scripts/generate_summary.py build
 
       - name: Configure AWS credentials
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}

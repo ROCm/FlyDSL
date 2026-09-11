@@ -7,6 +7,11 @@ on:
         description: 'Docker base image for testing'
         type: string
         required: true
+      aiter_ref:
+        description: 'aiter branch/tag for the CSV/HGEMM stage. Empty (the default) skips the stage entirely; callers opt in by passing a ref. Compared against flydsl== from aiter main requirements.txt.'
+        type: string
+        required: false
+        default: ''
 
 jobs:
   test:
@@ -98,6 +103,130 @@ jobs:
             cat *.log || true
           fi
 
+      # aiter CSV MoE (kimik3/dsv4/glm5 from aiter main) + HGEMM.
+      # Current: wheel under test (PyPI tag / nightly) + aiter at aiter_ref.
+      # Baseline: flydsl== pinned in aiter main requirements.txt, same aiter + CSV.
+      # Opt-in (caller passes aiter_ref) and restricted to gfx950 runners: the CSVs
+      # are FP4/A4W4 workloads that moe_gemm_2stage rejects outside gfx94*/gfx95*.
+      - name: Prepare aiter
+        if: ${{ inputs.aiter_ref != '' && contains(matrix.runners, 'mi35') }}
+        env:
+          AITER_REF: ${{ inputs.aiter_ref }}
+        run: |
+          docker exec -e AITER_REF -i flydsl_test bash <<'BASH'
+          set -euo pipefail
+          REF="${AITER_REF:-main}"
+          rm -rf /tmp/aiter /tmp/aiter-main
+          git clone --depth 1 --recursive --shallow-submodules --branch "${REF}" https://github.com/ROCm/aiter.git /tmp/aiter
+          if [ "${REF}" != "main" ]; then
+            git clone --depth 1 --recursive --shallow-submodules --branch main https://github.com/ROCm/aiter.git /tmp/aiter-main
+          fi
+          python3 -c "from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')"
+          python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt
+          # test_moe_2stage.py calls DataFrame.to_markdown() after the CSV sweep.
+          python3 -m pip install tabulate
+          # 7.14 PyTorch image: TheRock pip-ROCm. libamdhip64.so (unversioned) is
+          # in rocm-sdk-devel after `rocm-sdk init`; core only has libamdhip64.so.N.
+          python3 /flydsl/.github/scripts/find_rocm_path.py --ensure-devel
+          BASH
+
+      - name: Run aiter CSV MoE and HGEMM
+        id: aiter
+        if: ${{ inputs.aiter_ref != '' && contains(matrix.runners, 'mi35') }}
+        timeout-minutes: 120
+        env:
+          AITER_REF: ${{ inputs.aiter_ref }}
+        run: |
+          set -euo pipefail
+          docker exec -e AITER_REF -i flydsl_test bash <<'BASH' 2>&1 | tee /tmp/aiter_output.log
+          set -euo pipefail
+          # hipcc in this image lives under the venv; without ROCM_PATH aiter
+          # treats /opt/venv as ROCm home and links -L/opt/venv/lib -lamdhip64.
+          ROCM_PATH="$(python3 /flydsl/.github/scripts/find_rocm_path.py)"
+          export ROCM_PATH
+          export ROCM_HOME="${ROCM_HOME:-$ROCM_PATH}"
+          export LIBRARY_PATH="${ROCM_PATH}/lib:${ROCM_PATH}/lib64:${LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="${ROCM_PATH}/lib:${ROCM_PATH}/lib64:${LD_LIBRARY_PATH:-}"
+          # hipcc in this image rejects --offload-arch=native and then compiles
+          # every gfx*; pin to the live GPU.
+          if [ -z "${GPU_ARCHS:-}" ]; then
+            GPU_ARCHS="$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-z]+' || true)"
+          fi
+          if [ -z "${GPU_ARCHS:-}" ]; then
+            GPU_ARCHS="$(rocm_agent_enumerator -name 2>/dev/null | grep -m1 -oE 'gfx[0-9a-z]+' || true)"
+          fi
+          if [ -z "${GPU_ARCHS:-}" ]; then
+            # Guessing here silently compiles for the wrong arch; make it visible.
+            echo "could not detect GPU arch (rocminfo and rocm_agent_enumerator unavailable)" >&2
+            echo "set GPU_ARCHS explicitly to run this stage" >&2
+            exit 1
+          fi
+          export GPU_ARCHS
+          echo "aiter JIT env ROCM_PATH=${ROCM_PATH} GPU_ARCHS=${GPU_ARCHS}"
+          REF="${AITER_REF:-main}"
+          PYTHONPATH_BASE="${PYTHONPATH:-}"
+          MAIN_ROOT=/tmp/aiter
+          if [ -d /tmp/aiter-main ]; then
+            MAIN_ROOT=/tmp/aiter-main
+          fi
+          CFG="${MAIN_ROOT}/aiter/configs/model_configs"
+          FMOE="${CFG}/kimik3_a8w4_tuned_fmoe.csv:${CFG}/dsv4_fp8fp4_tuned_fmoe.csv:${CFG}/glm5_fp4_tuned_fmoe.csv"
+          PIN="$(awk -F== '/^flydsl==/{print $2; exit}' "${MAIN_ROOT}/requirements.txt" | awk -F';' '{print $1}' | tr -d '[:space:]')"
+          if [ -z "${PIN}" ]; then
+            echo "aiter main requirements.txt has no flydsl== pin" >&2
+            exit 1
+          fi
+
+          run_moe_csv() {
+            out="$1"
+            cache="$2"
+            rm -f "${out}"
+            export PYTHONPATH="/tmp/aiter:${PYTHONPATH_BASE}"
+            export AITER_REPO=/tmp/aiter
+            export AITER_CONFIG_FMOE="${FMOE}"
+            export AITER_TUNED_OP_BENCH_CSV="${out}"
+            export FLYDSL_RUNTIME_CACHE_DIR="${cache}"
+            python3 /tmp/aiter/op_tests/test_moe_2stage.py --no-legacy --csv-filter flydsl_
+          }
+
+          # The baseline pin below replaces the wheel under test in this container.
+          # Restore it on every exit path, not just the happy one.
+          restore_wheel() {
+            python3 -m pip install --force-reinstall --no-deps --no-index --find-links=/dist flydsl
+          }
+          trap restore_wheel EXIT
+
+          echo "=== current wheel CSV MoE (aiter ${REF}) ==="
+          run_moe_csv /tmp/tuned_op_bench_current.csv /tmp/flydsl_cache_current
+          PYTHONPATH="/tmp/aiter:${PYTHONPATH_BASE}" AITER_REPO=/tmp/aiter python3 /tmp/aiter/op_tests/test_flydsl_hgemm.py
+
+          # Everything above validates the wheel under test and is fatal.
+          # The baseline comparison below is informational: it benchmarks a
+          # different published flydsl, so kernel choice legitimately differs and
+          # a single noisy config out of ~250 must not fail the release job.
+          # && chaining (not set -e) so a failure short-circuits and returns here.
+          perf_compare() {
+            echo "=== aiter-main requirements flydsl==${PIN} CSV MoE ===" \
+              && python3 -m pip install --force-reinstall --no-deps --only-binary=:all: "flydsl==${PIN}" \
+              && run_moe_csv /tmp/tuned_op_bench_main.csv /tmp/flydsl_cache_main_pin \
+              && python3 "${MAIN_ROOT}/.github/scripts/compare_benchmark.py" \
+                /tmp/tuned_op_bench_main.csv \
+                /tmp/tuned_op_bench_current.csv \
+                --baseline-label "flydsl==${PIN}" \
+                --current-label "flydsl-wheel (aiter ${REF})"
+          }
+          if ! perf_compare; then
+            echo "WARNING: perf comparison did not complete; reported but not failing the job" >&2
+          fi
+          BASH
+
+      - name: Show aiter logs
+        if: failure()
+        run: |
+          if [ -f /tmp/aiter_output.log ]; then
+            tail -n 200 /tmp/aiter_output.log
+          fi
+
       - name: Test summary
         if: always()
         env:
@@ -105,9 +234,13 @@ jobs:
           SUMMARY_INSTALL_OUTCOME: ${{ steps.install.outcome }}
           SUMMARY_TESTS_OUTCOME: ${{ steps.tests.outcome }}
           SUMMARY_BENCHMARKS_OUTCOME: ${{ steps.benchmarks.outcome }}
+          SUMMARY_AITER_OUTCOME: ${{ steps.aiter.outcome }}
           SUMMARY_TEST_LOG: /tmp/test_output.log
           SUMMARY_BENCH_LOG: /tmp/bench_output.log
-        run: python3 flydsl/scripts/generate_summary.py test
+          # Host /tmp survives between jobs and only the aiter leg truncates this
+          # file, so pass it only when the step actually ran on this leg.
+          SUMMARY_AITER_LOG: ${{ (steps.aiter.outcome == 'success' || steps.aiter.outcome == 'failure') && '/tmp/aiter_output.log' || '' }}
+        run: python3 flydsl/.github/scripts/generate_summary.py test
 
       - name: Clean up
         if: always()
