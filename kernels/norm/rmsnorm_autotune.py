@@ -4,11 +4,8 @@
 """Two-track RMSNorm autotuning through the normal direct JIT path."""
 
 from flydsl.autotune import Config, autotune
-from kernels.norm.rmsnorm_common import (
-    BLOCK_THREADS,
-    resolve_rmsnorm_weight_dtype,
-)
-from kernels.norm.rmsnorm_kernel import SMALL_N_THRESHOLD, rmsnorm_direct
+from kernels.norm.rmsnorm_common import resolve_rmsnorm_weight_dtype
+from kernels.norm.rmsnorm_kernel import SMALL_N_THRESHOLD, default_block_threads, rmsnorm_direct
 
 _SEARCH_CONFIGS = (
     Config(BLOCK_THREADS=128),
@@ -21,8 +18,10 @@ _SEARCH_CONFIGS = (
 )
 
 
-def _default_config(*_args, **_kwargs):
-    return Config(BLOCK_THREADS=BLOCK_THREADS)
+def _default_config(*_args, **kwargs):
+    # Mirror the untuned launcher so opting into autotuning without a search
+    # does not fall back to a narrower block than the plain path would pick.
+    return Config(BLOCK_THREADS=default_block_threads(kwargs.get("N", 0)))
 
 
 def _search_configs(
