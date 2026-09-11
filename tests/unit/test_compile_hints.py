@@ -235,6 +235,24 @@ class TestCacheKeyIncludesTarget:
         assert isinstance(target_entry, GPUTarget)
         assert target_entry == get_backend().target
 
+    def test_jit_can_select_an_explicit_arch(self):
+        from flydsl.compiler.backends import get_backend
+
+        @flyc.jit(arch="gfx1100")
+        def gfx1100_launch():
+            pass
+
+        @flyc.jit(arch="gfx1151")
+        def gfx1151_launch():
+            pass
+
+        gfx1100_launch._ensure_sig()
+        gfx1151_launch._ensure_sig()
+
+        assert gfx1100_launch._backend_target == get_backend(arch="gfx1100").target
+        assert gfx1151_launch._backend_target == get_backend(arch="gfx1151").target
+        assert gfx1100_launch._backend_target != gfx1151_launch._backend_target
+
     def test_different_arch_gives_different_key(self, monkeypatch):
         """Monkeypatch ARCH env var → different GPUTarget → different cache key.
 
