@@ -12,7 +12,7 @@ import math
 import posixpath
 import re
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PER_ANGLE = 6
 SWEEP_MAX = 8
 MAX_FINDINGS = 12
@@ -26,6 +26,10 @@ ANGLES = (
     ("conventions", "convention", "Angle G — repo conventions and API stability"),
     ("reuse", "convention", "Angle H — reuse, simplification, and altitude"),
     ("test-doc", "convention", "Angle I — test and documentation contract"),
+)
+PREFLIGHTS = (
+    ("preflight:conventions", "scan_legacy_spelling.py"),
+    ("preflight:test-doc", "scan_unreachable_tests.py"),
 )
 VERDICTS = ("CONFIRMED", "PLAUSIBLE", "REFUTED")
 SEVERITIES = ("P0", "P1", "P2", "P3")
@@ -85,6 +89,14 @@ def validate_output(output: dict, *, candidate_limit: int | None = None, snapsho
 def stage_output(stages: dict, label: str) -> dict | None:
     stage = stages.get(label, {})
     return stage.get("output") if stage.get("status") == "COMPLETE" else None
+
+
+def validate_preflight(output: dict) -> dict:
+    if not isinstance(output, dict) or type(output.get("exit_code")) is not int or output["exit_code"] not in (0, 1):
+        raise ValueError("completed preflight must have scanner exit code 0 or 1")
+    if not all(isinstance(output.get(key), str) for key in ("stdout", "stderr")):
+        raise ValueError("completed preflight must retain scanner stdout and stderr")
+    return output
 
 
 def collect_candidates(stages: dict) -> list[dict]:
@@ -152,6 +164,7 @@ def rank_findings(candidates: list[dict]) -> list[dict]:
 def required_stages(scope: dict | None, candidates: list[dict]) -> list[str]:
     labels = ["scope"]
     if scope and scope.get("files"):
+        labels += [label for label, _ in PREFLIGHTS]
         labels += ["find:" + label for label, _, _ in ANGLES]
         labels += ["verify:" + c["id"] for c in candidates]
         labels += [
@@ -195,6 +208,13 @@ def build_report(state: dict) -> dict:
         for label in required
         if stage_output(stages, label) is None
     ]
+    for label, _ in PREFLIGHTS:
+        output = stage_output(stages, label)
+        if label in required and output is not None:
+            try:
+                validate_preflight(output)
+            except ValueError as exc:
+                failed.append({"stage": label, "reason": str(exc)})
     # Integrity checks and cancellation can fail outside an agent stage.
     failed += [
         {"stage": label, "reason": stage.get("error", "stage failed")}

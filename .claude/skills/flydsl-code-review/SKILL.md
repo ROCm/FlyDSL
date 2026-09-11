@@ -3,8 +3,8 @@ name: flydsl-code-review
 description: >
   Review a FlyDSL diff, branch, commit range, or PR for correctness bugs and
   convention violations using the repository's existing skills and policy docs.
-  Uses one resumable runner to pin the reviewed tree, run nine independent review
-  angles, verify every candidate, and preserve the evidence in a structured result.
+  Uses one resumable runner to pin the reviewed tree, run deterministic checks
+  and nine independent review angles, verify every candidate, and preserve the evidence.
   Pass --comment to publish a completed PR review. Use when asked to review a diff,
   review a PR, or check changes before pushing.
 allowed-tools: Read Bash
@@ -14,7 +14,7 @@ allowed-tools: Read Bash
 
 Find real defects in a change, then prove each one before reporting it.
 
-The sole execution entry is `.claude/skills/flydsl-code-review/scripts/run_review.py`. It runs independent finders,
+The sole execution entry is `.claude/skills/flydsl-code-review/scripts/run_review.py`. It runs a deterministic preflight, independent finders,
 one verifier per candidate, a challenger for every CONFIRMED, and a fresh sweep.
 Code constructs the final ranked report directly from those records. The sections
 below supply its review method; they are not an alternative manual execution path.
@@ -63,14 +63,47 @@ Defaults are 3 concurrent agents, 600 seconds per agent and 1800 seconds per
 phase including queue time. Override with `--concurrency`, `--agent-timeout` and
 `--phase-timeout`. Ctrl-C/SIGTERM cancels child process groups. Completed stages
 and all attempt logs are checkpointed in `state.json`; `--resume` retries only
-incomplete stages with the saved scope, model and configuration. Changed runner
-or skill content requires a new run. Model and effort use the CLI defaults unless
+incomplete stages with the saved scope, model and configuration. Changed runner,
+scanner or skill content requires a new run. Model and effort use the CLI defaults unless
 the user supplies `--model`/`--effort`; do not silently select a different model.
 
 Read `result.json` after the runner exits. Exit 0 means COMPLETE; exit 1 means
 INCOMPLETE. A missing result, running process, task notification or partial
 transcript is not a completed review. Preserve the run directory when reporting
 an interruption so the user can resume it.
+
+## Deterministic preflight
+
+After pinning a nonempty diff, the runner runs two source scanners from its own
+`scripts/` directory against that diff and checkout. Both are required stages:
+exit `0` means no leads in the supported scope, `1` means leads need inspection,
+and any error or timeout makes the review INCOMPLETE. The artifact retains each
+scanner's output, exit status and run history; resume reuses completed checks.
+Neither scanner executes or imports the reviewed code.
+
+- **Angle G:** `scan_legacy_spelling.py` checks added `kernels/**/*.py` lines,
+  excluding `kernels/common/buffer_ops.py`, for raw IR/unwraps, SCF builders,
+  `buffer_ops.*`, `SmemAllocator` and `make_ptr`. It filters visible comments,
+  string literals and imports, but does not resolve API identity. Ordinary
+  pointer construction and raw IR at implementation boundaries can be valid.
+- **Angle I:** `scan_unreachable_tests.py` matches added test definition lines
+  against the head AST, follows direct local calls from `__main__`, and recognizes
+  unfiltered `pytest.main([__file__])` with common aliases. Before reporting a gap,
+  identify the actual test or benchmark command: pytest coverage and a script's
+  direct call path are different contracts.
+
+The corresponding finder receives the full raw output. Inspect the complete
+source and the applicable policy at the reviewed revision before promoting a
+lead to a candidate. Group repeated spellings with the same corrective action;
+the six-candidate limit applies to the resulting defect candidates. Raw leads
+are retained for inspection, not individually certified as bugs or as clean.
+All promoted candidates go through the same independent verifier and challenge
+rules as other candidates. An empty scan never skips the semantic review.
+
+Aliases, partial diff lexical context, dynamic dispatch, runtime branches,
+pytest selectors, fixtures, decorators and plugins can require manual review.
+See [preflight-evidence.md](references/preflight-evidence.md) for the selection
+evidence and its limits; these checks do not establish review precision or recall.
 
 ## Reusing existing skills
 
