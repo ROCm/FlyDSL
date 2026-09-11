@@ -102,6 +102,20 @@ def _a16wi4_scale_ng_from_legacy(scale_w_groups, scale_w_perrow, experts, N, K):
     return a16wi4_scale_to_kernel_layout(sc_ng).view(-1).contiguous()
 
 
+def _groupwise_int4_quant(w: torch.Tensor, group: int = A16WI4_GROUP) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Quantize ``[rows, K]`` to signed int4 (stored as int8 in [-8, 7]) + per-group scale.
+
+    Returns ``(w_q_i8 [rows, K] int8, scale [rows, K//group] fp32)``.
+    """
+    rows, k = w.shape
+    assert k % group == 0, f"K={k} is not divisible by group={group}"
+    blocks = w.float().view(rows, k // group, group)
+    amax = blocks.abs().amax(dim=-1).clamp_min(1e-12)
+    scale = amax / 7.0
+    q = (blocks / scale.unsqueeze(-1)).round().clamp(-8, 7).to(torch.int8)
+    return q.view(rows, k), scale
+
+
 # Optional: use aiter's exact routing/sorting implementation (matches `aiter/op_tests/test_moe_2stage.py`).
 # Some environments ship aiter python but miss required JIT .so dependencies; we fall back gracefully.
 try:
@@ -351,39 +365,38 @@ def build_routing_buffers(
 def _print_mxfp_moe_perf(
     stage, us, label, tokens, topk, model_dim, inter_dim, experts, *, a_dtype="fp4", use_reduce=False
 ):
-    """Emit the stage1/stage2 timing line the benchmark harness (run_benchmark.sh) greps for.
+    """Emit stage1/stage2 timing lines for ``scripts/run_benchmark.sh``.
 
-    Emits the inline ``FlyDSL MoE stage{1,2}`` prints so the fused a4w4/a8w4
-    path reports through the same table rows.
+    Machine fields are ``TFLOPS=`` / ``TB/s=`` (same shape as MLA decode) so the
+    harness can parse without scraping prose. Stage2 tags the mode as
+    ``atomic`` or ``reduce`` immediately after the dtype bracket.
     """
     active = min(experts, tokens * topk)  # only routed experts move weights/scales
+    a_bits = {"fp8": 8, "a16": 16}.get(a_dtype, 4)
     if stage == 1:
         flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
-        a_bits = 8 if a_dtype == "fp8" else 4  # MX-FP8 activation for a8w4, else MX-FP4
         x_elems = tokens * model_dim
         w_elems = active * (2 * inter_dim) * model_dim
-        # A + W1 (MX-FP4) + per-1x32 E8M0 scales + sorted fp4 intermediate out.
+        # A + W1 (4-bit packed) + per-1x32 scales + sorted intermediate out.
         nbytes = (x_elems * a_bits) // 8 + (w_elems * 4) // 8 + x_elems // 32 + w_elems // 32
-        nbytes += tokens * topk * inter_dim // 2
+        nbytes += tokens * topk * inter_dim * (2 if a_dtype == "a16" else 0.5)
     else:
         flops = 2 * tokens * topk * model_dim * inter_dim
         a2_elems = tokens * topk * inter_dim
         w2_elems = active * model_dim * inter_dim
-        # A2 (MX-FP4) + W2 (MX-FP4) + per-1x32 E8M0 scales + bf16 out.
-        nbytes = a2_elems // 2 + (w2_elems * 4) // 8 + a2_elems // 32 + w2_elems // 32
+        a2_bytes = a2_elems * (2 if a_dtype == "a16" else 0.5)
+        nbytes = a2_bytes + (w2_elems * 4) // 8 + a2_elems // 32 + w2_elems // 32
         nbytes += tokens * model_dim * 2
     tflops = float("nan") if us <= 0 else flops / (us / 1e6) / 1e12
     tbps = float("nan") if us <= 0 else nbytes / 1e12 / (us / 1e6)
     if stage == 1:
-        print(
-            f"FlyDSL MoE stage1[{label}]: "
-            f"{us:.1f} us, {tflops:.2f} TFLOPS(logical, M={tokens*topk}), {tbps:.3f} TB/s"
-        )
+        print(f"FlyDSL MoE stage1[{label}]: {us:.1f} us " f"M_eff={tokens * topk} TFLOPS={tflops:.2f} TB/s={tbps:.3f}")
     else:
+        mode = "reduce" if use_reduce else "atomic"
         print(
-            f"FlyDSL MoE stage2 [mxfp_moe] {label} {'reduce' if use_reduce else 'atomic'} | "
-            f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
-            f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+            f"FlyDSL MoE stage2[{label}] {mode}: {us:.1f} us "
+            f"{model_dim}x{inter_dim} E={experts} K={topk} M_eff={tokens * topk} "
+            f"TFLOPS={tflops:.2f} TB/s={tbps:.3f}"
         )
 
 
@@ -408,19 +421,23 @@ def _run_a16w4_moe_e2e(
     skip_ref,
     gcu,
     w_dtype="mxfp4",
+    num_iters=0,
+    num_warmup=0,
+    in_dtype_label=None,
 ):
-    """End-to-end a16w4/a16w16 (bf16 A x mxfp4-or-raw-bf16 W1/W2) correctness.
+    """End-to-end a16w4/a16wi4/a16w16 (bf16 A x mxfp4/int4/bf16 W1/W2) correctness.
 
     A stays raw bf16 (no quant, no A-scale). ``w_dtype="mxfp4"`` (a16w4): W1/W2 are
-    mxfp4 (standard shuffle + e8m0 scale). ``w_dtype="bf16"`` (a16w16): W1/W2 are RAW
-    bf16 preshuffled N-major (``shuffle_weight`` (16,16)); no scale, no upconvert --
-    the loaded bf16 IS the MMA operand (should be ~1.0 cos, unquantized). Stage1
-    (gate+up GEMM + SiLU) writes a *bf16* ``[sorted_size, inter]`` intermediate by
-    sorted position, consumed drop-in by stage2 (down-proj, atomic epilog).
+    mxfp4 (standard shuffle + e8m0 scale). ``w_dtype="int4"`` (a16wi4 / legacy
+    int4_bf16): packed signed-int4 + groupwise bf16 scale. ``w_dtype="bf16"``
+    (a16w16): RAW bf16 preshuffled N-major. Stage1 writes a bf16
+    ``[sorted_size, inter]`` intermediate consumed by atomic stage2.
     """
     dev = x_fp32.device
     N_OUT = 2 * inter_dim
     _is_bf16_w = w_dtype == "bf16"
+    _is_int4_w = w_dtype == "int4"
+    w1_scale_groups = w2_scale_groups = None
 
     if _is_bf16_w:
         # Raw bf16 W: N-major shuffle_weight, no scale (dummy scale pointer).
@@ -430,9 +447,21 @@ def _run_a16w4_moe_e2e(
         w2_shuf = shuffle_weight(w2_ref, layout=(16, 16)).contiguous()
         w1_scale_1d = torch.zeros(1, dtype=torch.uint8, device=dev)
         w2_scale_1d = torch.zeros(1, dtype=torch.uint8, device=dev)
-        # bf16-dense reference weights (E, ...): scale=None -> identity dequant.
         w1_ref_e = w1_ref.view(experts, N_OUT, model_dim)
         w2_ref_e = w2_ref.view(experts, model_dim, inter_dim)
+        w1_scale_ref = w2_scale_ref = None
+    elif _is_int4_w:
+        w1_q, w1_sc = _groupwise_int4_quant(w1_fp32.reshape(experts * N_OUT, model_dim))
+        w2_q, w2_sc = _groupwise_int4_quant(w2_fp32.reshape(experts * model_dim, inter_dim))
+        w1_shuf = _a16wi4_pack_shuffle_w(w1_q)
+        w2_shuf = _a16wi4_pack_shuffle_w(w2_q)
+        # [E*N, G] -> [E, G, N] Opt-0 layout for the kernel + torch ref.
+        w1_scale_groups = w1_sc.view(experts, N_OUT, model_dim // A16WI4_GROUP).permute(0, 2, 1).contiguous()
+        w2_scale_groups = w2_sc.view(experts, model_dim, inter_dim // A16WI4_GROUP).permute(0, 2, 1).contiguous()
+        w1_scale_1d = _a16wi4_scale_ng_from_legacy(w1_scale_groups, None, experts, N_OUT, model_dim)
+        w2_scale_1d = _a16wi4_scale_ng_from_legacy(w2_scale_groups, None, experts, model_dim, inter_dim)
+        w1_ref_e = w1_q.view(experts, N_OUT, model_dim)
+        w2_ref_e = w2_q.view(experts, model_dim, inter_dim)
         w1_scale_ref = w2_scale_ref = None
     else:
         # W1/W2 -> mxfp4 + standard preshuffle + e8m0 scale shuffle (A is raw bf16).
@@ -452,64 +481,81 @@ def _run_a16w4_moe_e2e(
     cumsum = num_valid_ids.to(torch.int32).contiguous()
     m_indices = sorted_token_ids.to(torch.int32).contiguous()
     x_bf16 = x_fp32.to(torch.bfloat16).contiguous()
+    if _is_int4_w and _A16WI4_TILE_N_OVERRIDE:
+        g1_tile_n = int(_A16WI4_TILE_N_OVERRIDE)
+    elif _is_bf16_w:
+        g1_tile_n = 256 if inter_dim % 256 == 0 else 128
+    else:
+        g1_tile_n = None
+    use_csv = w_dtype == "mxfp4"  # mxfp4 may consume the aiter per-token CSV; int4/bf16 do not
+    label = in_dtype_label or ("a16w16" if _is_bf16_w else ("int4_bf16" if _is_int4_w else "a16w4"))
 
     # stage1 -> bf16 [sorted_size, inter] (by sorted position)
     inter_sorted = torch.zeros(sorted_size, inter_dim, dtype=torch.bfloat16, device=dev)
-    flydsl_a16w4_gemm1(
-        a_bf16=x_bf16,
-        w1_u8=w1_shuf,
-        w1_scale_u8=w1_scale_1d,
-        sorted_expert_ids=sorted_expert_ids,
-        cumsum_tensor=cumsum,
-        m_indices=m_indices,
-        inter_sorted_bf16=inter_sorted,
-        n_tokens=tokens,
-        NE=experts,
-        D_HIDDEN=model_dim,
-        D_INTER=inter_dim,
-        topk=topk,
-        # aiter tile-config interface. For mxfp4 (a16w4), leave tile_n/tile_k unset
-        # so the CSV-driven per-token config (use_csv_config default) selects aiter's
-        # tuned geometry (small M -> tile_n=64 + k_wave) when a CSV row matches, else
-        # the adaptive default. a16w16 (raw bf16 W) has no CSV rows, so pin the
-        # adaptive tile explicitly and disable the CSV path. NOTE: waves_per_eu is
-        # sourced from the CSV for mxfp4 (aiter's 3/4 is tuned for the tile_n=64
-        # body, which does not spill -- verified 175/236 VGPR, 0 spill).
-        tile_m=BM,
-        tile_n=None if _is_bf16_w is False else (256 if inter_dim % 256 == 0 else 128),
-        tile_k=256,
-        w_dtype=w_dtype,
-        use_csv_config=not _is_bf16_w,
-    )
+
+    def _g1_launch():
+        flydsl_a16w4_gemm1(
+            a_bf16=x_bf16,
+            w1_u8=w1_shuf,
+            w1_scale_u8=w1_scale_1d,
+            sorted_expert_ids=sorted_expert_ids,
+            cumsum_tensor=cumsum,
+            m_indices=m_indices,
+            inter_sorted_bf16=inter_sorted,
+            n_tokens=tokens,
+            NE=experts,
+            D_HIDDEN=model_dim,
+            D_INTER=inter_dim,
+            topk=topk,
+            tile_m=BM,
+            tile_n=g1_tile_n,
+            tile_k=256,
+            w_dtype=w_dtype,
+            use_csv_config=use_csv,
+        )
+
+    if num_iters > 0:
+        _, us1 = run_perftest(_g1_launch, num_iters=int(num_iters), num_warmup=int(num_warmup))
+        _print_mxfp_moe_perf(1, us1, label, tokens, topk, model_dim, inter_dim, experts, a_dtype="a16")
+    else:
+        _g1_launch()
 
     # stage2 -> bf16 [tokens, model_dim] (atomic routing-weighted scatter)
     out_buf = torch.zeros(tokens * model_dim, dtype=torch.bfloat16, device=dev)
-    flydsl_a16w4_gemm2(
-        inter_sorted_bf16=inter_sorted,
-        w2_u8=w2_shuf,
-        w2_scale_u8=w2_scale_1d,
-        sorted_expert_ids=sorted_expert_ids,
-        cumsum_tensor=cumsum,
-        sorted_token_ids=sorted_token_ids,
-        sorted_weights=sorted_weights,
-        flat_out=out_buf,
-        M_logical=tokens,
-        max_sorted=sorted_size,
-        NE=experts,
-        D_HIDDEN=model_dim,
-        D_INTER=inter_dim,
-        topk=topk,
-        tile_m=BM,
-        tile_n=256,
-        tile_k=256,
-        w_dtype=w_dtype,
-        use_csv_config=not _is_bf16_w,
-    )
+
+    def _g2_launch():
+        flydsl_a16w4_gemm2(
+            inter_sorted_bf16=inter_sorted,
+            w2_u8=w2_shuf,
+            w2_scale_u8=w2_scale_1d,
+            sorted_expert_ids=sorted_expert_ids,
+            cumsum_tensor=cumsum,
+            sorted_token_ids=sorted_token_ids,
+            sorted_weights=sorted_weights,
+            flat_out=out_buf,
+            M_logical=tokens,
+            max_sorted=sorted_size,
+            NE=experts,
+            D_HIDDEN=model_dim,
+            D_INTER=inter_dim,
+            topk=topk,
+            tile_m=BM,
+            tile_n=None if _is_int4_w else 256,
+            tile_k=256,
+            w_dtype=w_dtype,
+            use_csv_config=use_csv,
+        )
+
+    if num_iters > 0:
+        _, us2 = run_perftest(_g2_launch, num_iters=int(num_iters), num_warmup=int(num_warmup))
+        _print_mxfp_moe_perf(2, us2, label, tokens, topk, model_dim, inter_dim, experts, a_dtype="a16")
+        out_buf.zero_()
+    _g2_launch()
     torch.cuda.synchronize()
     out = out_buf.view(tokens, model_dim).float()
 
     if not skip_ref:
-        # bf16 A (scale=None) x {mxfp4|raw-bf16} W; no re-quant of the stage1 intermediate.
+        # bf16 A (scale=None) x {mxfp4|int4|raw-bf16} W; no re-quant of the stage1 intermediate.
         ref1 = torch_moe_gemm1(
             x_bf16,
             w1_ref_e,
@@ -519,6 +565,8 @@ def _run_a16w4_moe_e2e(
             topk_weights,
             inter_dim=inter_dim,
             doweight_stage1=False,
+            group_size=A16WI4_GROUP if _is_int4_w else -1,
+            scale_w1_groups=w1_scale_groups,
         )
         ref2 = torch_moe_gemm2(
             ref1.to(torch.bfloat16),
@@ -529,6 +577,8 @@ def _run_a16w4_moe_e2e(
             topk_weights,
             model_dim=model_dim,
             doweight_stage2=True,
+            group_size=A16WI4_GROUP if _is_int4_w else -1,
+            scale_w2_groups=w2_scale_groups,
         )
         # a16w4 (bf16 A x mxfp4 W) is numerically faithful (e2e cos ~0.9999); enforce
         # a strict, asserted gate so regressions are caught. NOTE: rtol/atol must be
@@ -602,6 +652,9 @@ def _run_mxfp_moe_e2e(
             skip_ref=skip_ref,
             gcu=gcu,
             w_dtype=w_dtype,
+            num_iters=num_iters,
+            num_warmup=num_warmup,
+            in_dtype_label=in_dtype_label,
         )
         return
 
@@ -1277,13 +1330,14 @@ def test_moe_gemm_2stage(
         pytest.skip("reduce mode does not support out_dtype='f32' (non-accumulating gemm2 forbids it).")
     if group_size > 0 and in_dtype != "int4_bf16":
         pytest.skip("groupwise scale only applies to int4_bf16 (W4A16)")
-    if in_dtype in ("fp4", "a8w4", "a16w4"):
+    if in_dtype == "int4_bf16" and not _A16WMIX_GFX:
+        pytest.skip(f"int4_bf16 requires gfx942 or gfx950+, got {ARCH}")
+    if in_dtype in ("fp4", "a8w4", "a16w4", "int4_bf16"):
         if bool(use_valid_mask):
             pytest.skip(f"{in_dtype} does not support valid_mask")
         if out_s not in ("f16", "fp16", "half"):
             pytest.skip(f"{in_dtype} only supports f16 output")
-        if group_size > 0:
-            pytest.skip(f"{in_dtype} does not support groupwise scale")
+    if in_dtype in ("fp4", "a8w4"):
         # Per-1x32 scale layout requires K >= 256 and tile_k >= 256 on both stages.
         if model_dim < 256 or tile_k1 < 256:
             pytest.skip(f"{in_dtype} requires model_dim >= 256 and tile_k >= 256, got {model_dim}, {tile_k1}")
@@ -1296,21 +1350,23 @@ def test_moe_gemm_2stage(
         # the accumulator is empty, so require model_dim > 512 (FP4-S is skipped).
         if model_dim <= 512:
             pytest.skip(f"fused mxfp_moe gemm1 requires model_dim > 512, got {model_dim}")
-    if in_dtype == "a16w4":
-        # a16w4 constraints (kernels/moe/mxfp_moe/host.py flydsl_a16w4_gemm1/2):
+    if in_dtype in ("a16w4", "int4_bf16"):
+        # a16w4 / a16wi4 constraints (flydsl_a16w4_gemm1/2):
         #   gemm1 D_INTER % TILE_N(64) == 0 and 2*D_INTER % 256 == 0;
-        #   gemm2 model_dim % TILE_N(256) == 0 and D_INTER % TILE_K(256) == 0;
+        #   gemm2 model_dim % 256 == 0 and D_INTER % 256 == 0;
         #   gemm2 is atomic-epilog only (BM in {16,32,64}) -> no reduce mode, no BM==128.
+        # Do not inherit the fused mxfp tile_m>=32 / model_dim>512 gates: W4A16
+        # bench shapes use tile_m=16, and a16 ignores CLI tile_k.
         if bool(use_reduce):
-            pytest.skip("a16w4 gemm2 is atomic-epilog only (no reduce mode)")
+            pytest.skip(f"{in_dtype} gemm2 is atomic-epilog only (no reduce mode)")
         if inter_dim % 64 != 0 or (2 * inter_dim) % 256 != 0:
-            pytest.skip(f"a16w4 gemm1 requires inter_dim % 64 == 0 and 2*inter_dim % 256 == 0, got {inter_dim}")
+            pytest.skip(f"{in_dtype} gemm1 requires inter_dim % 64 == 0 and 2*inter_dim % 256 == 0, got {inter_dim}")
         if model_dim % 256 != 0 or inter_dim % 256 != 0:
             pytest.skip(
-                f"a16w4 gemm2 requires model_dim % 256 == 0 and inter_dim % 256 == 0, got {model_dim},{inter_dim}"
+                f"{in_dtype} gemm2 requires model_dim % 256 == 0 and inter_dim % 256 == 0, got {model_dim},{inter_dim}"
             )
         if tile_m not in (16, 32, 64):
-            pytest.skip(f"a16w4 gemm2 atomic epilog requires tile_m in (16,32,64), got {tile_m}")
+            pytest.skip(f"{in_dtype} gemm2 atomic epilog requires tile_m in (16,32,64), got {tile_m}")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -1353,18 +1409,19 @@ def test_moe_gemm_2stage(
     if compare_aiter_ck is None:
         compare_aiter_ck = False
 
-    if in_dtype in ("fp4", "a8w4", "a16w4"):
-        # a4w4 / a8w4 / a16w4 drive the fused mxfp_moe pipeline end-to-end. a4w4/a8w4
-        # do device-side fp4 re-quant (sorted fp4 intermediate); a16w4 keeps A raw
-        # bf16 and a bf16 intermediate (a_dtype="a16" -> _run_a16w4_moe_e2e branch).
-        _a_dtype = {"a8w4": "fp8", "a16w4": "a16"}.get(in_dtype, "fp4")
+    if in_dtype in ("fp4", "a8w4", "a16w4", "int4_bf16"):
+        # a4w4 / a8w4 drive the fused mxfp_moe pipeline (device-side fp4 re-quant).
+        # a16w4 / int4_bf16 keep A raw bf16 and a bf16 intermediate
+        # (a_dtype="a16" -> _run_a16w4_moe_e2e; int4_bf16 uses w_dtype="int4").
+        _a_dtype = {"a8w4": "fp8", "a16w4": "a16", "int4_bf16": "a16"}.get(in_dtype, "fp4")
+        _w_dtype = "int4" if in_dtype == "int4_bf16" else "mxfp4"
         # a4w4/a8w4 hit the broken (and memory-unsafe) fused mxfp4 pipeline: the
         # shared gemm2 down-proj is broken and, for a8w4, the fp8-gemm1 A-path too
         # (independently verified e2e cos ~0.12 / ~0.07). The strict e2e gate would
         # fail; running the kernel and unwinding under pytest teardown also cascades
         # an illegal-address crash into other tests. When a real reference would be
         # checked (skip_ref=False), xfail *without* executing the broken kernel so
-        # CI stays honest and stable. a16w4 stays strict-asserted-and-passing.
+        # CI stays honest and stable. a16w4 / int4_bf16 stay strict-asserted.
         if in_dtype in ("fp4", "a8w4") and not bool(skip_ref):
             _xfail_reason = (
                 "pre-existing mxfp4 fused gemm2 + fp8-gemm1 A-path bug, e2e cos ~0.1; "
@@ -1378,7 +1435,7 @@ def test_moe_gemm_2stage(
             # in script mode.
             if os.environ.get("PYTEST_CURRENT_TEST"):
                 pytest.xfail(_xfail_reason)
-            print(f"[xfail/skip] {in_dtype}: {_xfail_reason}")
+            print(f"Skipped: {in_dtype}: {_xfail_reason}")
             return
         _run_mxfp_moe_e2e(
             tokens=tokens,
@@ -1399,6 +1456,7 @@ def test_moe_gemm_2stage(
             num_iters=num_iters,
             num_warmup=num_warmup,
             in_dtype_label=in_dtype,
+            w_dtype=_w_dtype,
         )
         return
 
@@ -1666,14 +1724,16 @@ if __name__ == "__main__":
         in_dtypes = ["a16w4", "fp4", "a8w4"]
     for dt in in_dtypes:
         if dt in ("fp4", "a8w4", "a16w4") and "gfx95" not in ARCH:
-            print(f"Skipping {dt}: requires gfx950+, got {ARCH}")
+            print(f"Skipped: {dt}: requires gfx950+, got {ARCH}")
+            continue
+        if dt == "int4_bf16" and not _A16WMIX_GFX:
+            print(f"Skipped: {dt}: requires gfx942 or gfx950+, got {ARCH}")
             continue
         # mxfp_moe (fp4/a8w4) stage2 mode is coupled to tile_m: atomic for tile_m<128,
-        # reduce (nonatomic) only at tile_m==128. a16w4 gemm2 is atomic-only. Run the
-        # one applicable mode rather than the fp8-style atomic/reduce sweep.
+        # reduce (nonatomic) only at tile_m==128. a16w4 / int4_bf16 gemm2 is atomic-only.
         if dt in ("fp4", "a8w4"):
             dt_reduce_flags = [int(args.tile_m) == 128]
-        elif dt == "a16w4":
+        elif dt in ("a16w4", "int4_bf16"):
             dt_reduce_flags = [False]
         else:
             dt_reduce_flags = reduce_flags

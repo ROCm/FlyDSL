@@ -45,7 +45,20 @@ def _ptr(t):
     return flyc.from_c_void_p(fx.Uint8, t.contiguous().data_ptr())
 
 
-def _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, a_dtype, waves_per_eu=0, b_dtype="fp4", xcd_swizzle=0):
+def _mxfp4_launcher(
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    out_dtype,
+    a_dtype,
+    waves_per_eu=0,
+    b_dtype="fp4",
+    xcd_swizzle=0,
+    k_batch=1,
+    blockscale="none",
+):
     """Adapt the batched launch_gemm to the (c, a, b, sa, sb, bias, M, N, stream) call shape
     the tests use. launch_gemm is a thin @flyc.jit that caches per Constexpr config."""
 
@@ -76,6 +89,8 @@ def _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, a_dtype, waves_per_
             -1,
             int(waves_per_eu or 0),
             xcd_swizzle,
+            k_batch,
+            blockscale,
         )
 
     return _launch
@@ -1037,3 +1052,113 @@ def test_preshuffle_preload_validation(bad):
         compile_preshuffle_gemm(
             N=1024, K=2048, tile_m=128, tile_n=256, tile_k=64, in_dtype="bf16", out_dtype="bf16", preload=bad
         )
+
+
+# ── A8W8 blockscale: coarse E8M0 grid (A per 1x128, B per 128x128) ──────────
+
+SCALE_BLOCK_128 = 128
+
+
+def _blk_jitter(shape, device):
+    """Random power-of-2 magnitude per scale block, so block E8M0 scales actually differ."""
+    return torch.exp2(torch.randint(-2, 3, shape, device=device, dtype=torch.float32))
+
+
+@pytest.mark.parametrize("out_dtype", ["bf16"])
+@pytest.mark.parametrize("M, N, K, tile_m, tile_n, tile_k", [(64, 8192, 8192, 64, 128, 128)])
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+def test_mfma_a8w8_preshuffle_blockscale(
+    out_dtype,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    *,
+    bench_iters: int = DEFAULT_BENCH_ITERS,
+    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    waves_per_eu: int = 0,
+):
+    """A8W8 blockscale GEMM driven from randn fp32 operands (test_mfma_a8_flyc_preshuffle
+    init style). Only the quant grid differs from the MX path: one E8M0 scale per 1x128 of
+    A and per 128x128 of B, instead of per 1x32 of each."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"FP8 MX GEMM requires gfx950, got {get_rocm_arch()}")
+    # blockscale is a8w8-only and needs N%128==0 (aiter host enforces the same).
+    assert N % SCALE_BLOCK_128 == 0 and K % SCALE_BLOCK_128 == 0
+
+    print("=" * 80)
+    print(f"MFMA A8W8 blockscale GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
+    print("=" * 80)
+
+    _wpe = int(waves_per_eu) if waves_per_eu else 0
+    _wpe = None if _wpe <= 0 else _wpe
+    launch_fn = _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, "fp8", _wpe, b_dtype="fp8", blockscale="ab")
+    print(f"✓ Compiled (waves_per_eu={_wpe})")
+
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    scale_k = K // SCALE_BLOCK_128
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)
+    # Per-block magnitude jitter. Plain randn makes every block max nearly identical, so all
+    # blocks quantize to the same E8M0 and a mis-indexed scale reads a value that happens to
+    # be right. Real tensors vary per block - that is why blockscale quant exists.
+    a_fp32 = (a_fp32.view(M, scale_k, SCALE_BLOCK_128) * _blk_jitter((M, scale_k, 1), device)).view(M, K)
+    b_fp32 = (
+        b_fp32.view(N // SCALE_BLOCK_128, SCALE_BLOCK_128, scale_k, SCALE_BLOCK_128)
+        * _blk_jitter((N // SCALE_BLOCK_128, 1, scale_k, 1), device)
+    ).view(N, K)
+
+    a_q, scale_a = gemm_common_utils.per_block_f8_quant(a_fp32, 1, SCALE_BLOCK_128)
+    b_q, scale_b = gemm_common_utils.per_block_f8_quant(b_fp32, SCALE_BLOCK_128, SCALE_BLOCK_128)
+
+    # Reference: dequant each operand at its own block granularity, then plain fp32 mm.
+    a_deq = a_q.float().view(M, scale_k, SCALE_BLOCK_128) * gemm_common_utils.e8m0_to_f32(scale_a).unsqueeze(-1)
+    b_sc_rows = gemm_common_utils.e8m0_to_f32(scale_b).repeat_interleave(SCALE_BLOCK_128, dim=0)
+    b_deq = b_q.float().view(N, scale_k, SCALE_BLOCK_128) * b_sc_rows.unsqueeze(-1)
+    c_ref = torch.mm(a_deq.view(M, K), b_deq.view(N, K).T)
+
+    # gfx950 packing: B preshuffled 16x16, scales into the kernel's compact blockscale order.
+    b_shuffled = gemm_common_utils.shuffle_weight_w4(b_q, 16, False, False)
+    scale_a_shuffled = gemm_common_utils.shuffle_scale_blockscale_a(scale_a, K)
+    scale_b_shuffled = gemm_common_utils.shuffle_scale_blockscale_b(scale_b, N, K)
+
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
+    c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
+    _dummy_bias = torch.empty(0, dtype=torch_out_dtype, device=device)
+
+    def launch_kernel(c, a, b, sa, sb):
+        launch_fn(
+            c.contiguous().view(-1),
+            a.view(torch.uint8).contiguous().view(-1),
+            b.view(torch.uint8).contiguous().view(-1),
+            sa.view(torch.uint8).contiguous().view(-1),
+            sb.view(torch.uint8).contiguous().view(-1),
+            _dummy_bias,
+            M,
+            N,
+            torch.cuda.current_stream(),
+        )
+
+    _, us = run_perftest(
+        launch_kernel,
+        c_out,
+        a_q,
+        b_shuffled,
+        scale_a_shuffled,
+        scale_b_shuffled,
+        num_iters=max(2, int(bench_iters)),
+        num_warmup=int(bench_warmup),
+    )
+    torch.cuda.synchronize()
+
+    assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+
+    # A and B: 1 byte/code; scales: M + N//128 rows of K//128 bytes.
+    bytes_moved = M * K + N * K + M * N * 2 + (M + N // SCALE_BLOCK_128) * scale_k
+    tflops = (2 * M * N * K) / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"[flyc] A8W8 blockscale Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")

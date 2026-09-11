@@ -1053,6 +1053,10 @@ class Tensor(BuiltinDslType):
     def stride(self) -> IntTuple:
         return self.layout.stride
 
+    @property
+    def iter(self):
+        return get_iter(self)
+
     @dsl_loc_tracing
     def __getitem__(self, coord):
         if not isinstance(coord, IntTuple):

@@ -42,7 +42,8 @@ jobs:
           IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-cp310-cp314"
           if ! docker pull "${IMAGE}"; then
             # The Dockerfile is self-contained, so avoid sending the full repo as build context.
-            docker build \
+            # Use the runner's network for dnf/pip during the build, too.
+            docker build --network=host \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
               -t "${IMAGE}" \
               - < flydsl/.github/workflows/Dockerfile.manylinux_2_28
