@@ -1,22 +1,93 @@
 {
  "schema": 1,
- "updated": "2026-09-10T23:46:03Z",
+ "updated": "2026-09-11T01:01:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34546203897,
+   "pr": 1105,
+   "commit": "cec2ca39d832239b33e64ac19835d6639181509c",
+   "branch": "lhc/fold-index-cast-on-main",
+   "event": "pull_request",
+   "title": "[Perf][Dialect] Fold redundant index cast pairs in layout lowering",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897",
+   "created_at": "2026-09-11T00:22:17Z",
+   "updated_at": "2026-09-11T00:42:11Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-11T00:42:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897/job/103103511784"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-11T00:42:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897/job/103103511839"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-11T00:42:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897/job/103103511906"
+    }
+   ]
+  },
   {
    "run_id": 34543447535,
    "pr": 1119,
    "commit": "85739cbadd2901b3ff1ded7c050ddedc301947d6",
    "branch": "codex/topk-gating-mi355",
    "event": "pull_request",
-   "title": "[Perf] Tune small-batch TopK gating on gfx950",
-   "status": "in_progress",
+   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34543447535",
    "created_at": "2026-09-10T23:43:59Z",
-   "updated_at": "2026-09-10T23:44:46Z",
+   "updated_at": "2026-09-10T23:58:56Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-10T23:59:51Z",
+     "completed_at": "2026-09-11T00:48:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34543447535/job/103094097079"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-11T00:43:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34543447535/job/103094097134"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-10T23:58:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34543447535/job/103094097185"
+    }
+   ]
   },
   {
    "run_id": 34540667903,
@@ -24,7 +95,7 @@
    "commit": "1a640143e61b71c7d4482b4c57327a7a54738573",
    "branch": "codex/topk-gating-mi355",
    "event": "pull_request",
-   "title": "[Perf] Tune small-batch TopK gating on gfx950",
+   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34540667903",
@@ -97,11 +168,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-10T23:32:00Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849971"
+     "completed_at": "2026-09-11T00:17:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849971",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1056,7 +1128,7 @@
   },
   {
    "run_id": 34431684585,
-   "pr": 1105,
+   "pr": null,
    "commit": "7bf4895032976e1d26bac5eaa0f441e76d0bdf7a",
    "branch": "lhc/fold-index-cast-on-main",
    "event": "pull_request",
@@ -1788,21 +1860,6 @@
    "created_at": "2026-09-09T06:45:24Z",
    "updated_at": "2026-09-09T06:58:07Z",
    "actor": "sammysun0711",
-   "jobs": []
-  },
-  {
-   "run_id": 34320441994,
-   "pr": null,
-   "commit": "ac825bc5f27fc8e4b1b83b0f2364a2863f394021",
-   "branch": "feat/rocdl-cvt-f32-fp8",
-   "event": "pull_request",
-   "title": "[DSL] Expose scalar FP8 conversion",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34320441994",
-   "created_at": "2026-09-09T06:44:29Z",
-   "updated_at": "2026-09-09T06:44:29Z",
-   "actor": "big-yellow-duck",
    "jobs": []
   }
  ]
