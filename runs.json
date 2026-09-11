@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-11T02:42:50Z",
+ "updated": "2026-09-11T03:09:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34557181309,
+   "pr": 1116,
+   "commit": "8d0dcaba93a7516a2b89b7c1f014ab25e975b2a9",
+   "branch": "yanbo/cleancode",
+   "event": "pull_request",
+   "title": "clean atomic add",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309",
+   "created_at": "2026-09-11T03:06:30Z",
+   "updated_at": "2026-09-11T03:07:31Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
   {
    "run_id": 34554086152,
    "pr": null,
@@ -44,9 +59,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-11T00:42:11Z",
+     "started_at": "2026-09-11T02:46:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897/job/103103511839"
     },
@@ -155,11 +170,11 @@
    "branch": "fix/manylinux-build-network",
    "event": "pull_request",
    "title": "[CI] Use host networking for manylinux image builds",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255",
    "created_at": "2026-09-10T20:31:24Z",
-   "updated_at": "2026-09-10T20:53:11Z",
+   "updated_at": "2026-09-11T03:07:17Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -175,9 +190,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-10T20:53:11Z",
+     "started_at": "2026-09-11T03:07:17Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849949"
     },
@@ -200,20 +215,20 @@
    "branch": "yanbo/cleancode",
    "event": "pull_request",
    "title": "clean atomic add",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34492588995",
    "created_at": "2026-09-10T14:58:36Z",
-   "updated_at": "2026-09-11T02:40:32Z",
+   "updated_at": "2026-09-11T03:06:49Z",
    "actor": "yanboshao",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-11T02:40:31Z",
-     "completed_at": null,
+     "completed_at": "2026-09-11T03:06:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34492588995/job/102934833195"
     },
     {
@@ -1815,52 +1830,6 @@
      "started_at": "2026-09-09T08:54:14Z",
      "completed_at": "2026-09-09T10:31:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481/job/102395887946",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34324239789,
-   "pr": 1102,
-   "commit": "28be96867f8b7cd848e546a5c6273bfe169ff801",
-   "branch": "chore/pre-commit-formatter",
-   "event": "pull_request",
-   "title": "[Chore] pre commit formatter",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789",
-   "created_at": "2026-09-09T07:30:55Z",
-   "updated_at": "2026-09-09T11:08:44Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T09:07:29Z",
-     "completed_at": "2026-09-09T09:26:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789/job/102401249916",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T09:59:11Z",
-     "completed_at": "2026-09-09T11:08:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789/job/102401249995",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T08:56:08Z",
-     "completed_at": "2026-09-09T10:51:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34324239789/job/102401250078",
      "log_fetch_failed": true
     }
    ]
