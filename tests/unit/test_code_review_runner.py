@@ -338,8 +338,11 @@ def install_fake_cli(tmp_path, monkeypatch, body):
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
 
 
-@pytest.mark.parametrize("mode", ["success", "no_footer", "denied", "null_output"])
-def test_cli_requires_success_footer_and_no_permission_denials(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("shape", ["object", "transcript"])
+@pytest.mark.parametrize(
+    "mode", ["success", "no_footer", "invalid_json", "denied", "null_output", "error", "bad_subtype", "nonzero_exit"]
+)
+def test_cli_requires_success_footer_and_no_permission_denials(tmp_path, monkeypatch, mode, shape):
     envelope = {
         "type": "result",
         "subtype": "success",
@@ -353,16 +356,40 @@ def test_cli_requires_success_footer_and_no_permission_denials(tmp_path, monkeyp
         envelope["permission_denials"] = [{"tool_name": "Bash"}]
     if mode == "null_output":
         envelope["structured_output"] = None
+    if mode == "error":
+        envelope["is_error"] = True
+    if mode == "bad_subtype":
+        envelope["subtype"] = "error_max_turns"
+    payload = {"type": "assistant", "message": "No terminal result"} if mode == "no_footer" else envelope
+    if shape == "transcript":
+        messages = [{"type": "system", "subtype": "init"}]
+        if mode != "no_footer":
+            # An earlier successful record must not hide the final result's
+            # failure, denial, malformed output, or usage.
+            messages.append(
+                {
+                    **envelope,
+                    "subtype": "success",
+                    "is_error": False,
+                    "permission_denials": [],
+                    "structured_output": found(),
+                    "total_cost_usd": 99,
+                }
+            )
+        payload = [*messages, payload, {"type": "assistant", "message": "Trailing transcript message"}]
+    stdout = "" if mode == "invalid_json" else json.dumps(payload)
     install_fake_cli(
-        tmp_path, monkeypatch, "print(" + repr("" if mode == "no_footer" else json.dumps(envelope)) + ")\n"
+        tmp_path, monkeypatch, f"import sys\nprint({stdout!r})\nsys.exit({1 if mode == 'nonzero_exit' else 0})\n"
     )
     task = {"prompt": "test", "schema": runner.output_schema(6), "limit": 6}
     attempt = runner.cli_agent(
         task, configuration(), tmp_path, tmp_path / "attempt", time.monotonic() + 3, threading.Event()
     )
     assert attempt["status"] == ("COMPLETE" if mode == "success" else "INCOMPLETE")
-    if mode != "no_footer":
+    if mode not in {"no_footer", "invalid_json"}:
         assert attempt["usage"]["total_cost_usd"] == 0.25
+    else:
+        assert attempt["usage"] == {}
 
 
 def test_timeout_cancels_agent_and_its_tool_process(tmp_path, monkeypatch):
@@ -437,6 +464,7 @@ def complete_report():
         "files": ["kernel.py"],
     }
     stages = {"scope": done(scope), "sweep": done(found()), "synthesize": done({})}
+    stages.update({label: done({"exit_code": 0, "stdout": "", "stderr": ""}) for label, _ in common.PREFLIGHTS})
     stages.update({"find:" + label: done(found()) for label, _, _ in common.ANGLES})
     stages["find:trace-time"] = done(
         found(candidate(10), candidate(90, "second defect"), candidate(11, "uncertain race"))
@@ -526,6 +554,121 @@ def test_publisher_rejects_changed_provenance(complete_report, field):
     report["findings"][0][field] = "tampered"
     with pytest.raises(ValueError, match="verified records"):
         common.validate_report(report)
+
+
+def test_preflight_routes_raw_leads_without_promoting_them(tmp_path, source_repo):
+    root, base, _ = source_repo
+    (root / "kernels").mkdir()
+    (root / "kernels/example.py").write_text("scratch = SmemAllocator()\n")
+    (root / "test_example.py").write_text('def test_unwired():\n    pass\n\nif __name__ == "__main__":\n    pass\n')
+    runner.git(root, "add", ".")
+    runner.git(root, "commit", "--quiet", "-m", "add preflight leads")
+    prompts = {}
+
+    def backend(task, *_):
+        prompts[task["label"]] = task["prompt"]
+        return {**done(found()), "usage": {"total_cost_usd": 0}}
+
+    review = new_run(tmp_path, (root, base, runner.revision(root, "HEAD")), backend)
+    report = review.run()
+    assert report["status"] == "COMPLETE"
+    for label, _ in common.PREFLIGHTS:
+        assert report["stages"][label]["output"]["exit_code"] == 1
+        assert len(report["stages"][label]["runs"]) == 1
+    assert "kernels/example.py:1" in prompts["find:conventions"]
+    assert "test_unwired:1" in prompts["find:test-doc"]
+    assert "test_unwired:1" not in prompts["find:conventions"]
+    assert "kernels/example.py:1" not in prompts["find:addressing"]
+    assert report["findings"] == report["risks"] == report["candidates"] == []
+    assert report["metrics"]["agent_attempts"] == 10
+    assert report["metrics"]["cost_is_complete"] is True
+    common.validate_report(report)
+
+
+@pytest.mark.parametrize("failure", [2, 17, "timeout"])
+def test_preflight_failure_is_incomplete_and_resume_retries_only_failed_scanner(
+    tmp_path, source_repo, monkeypatch, failure
+):
+    command_result = runner.command_result
+
+    def failed_scanner(*argv, **options):
+        if len(argv) > 1 and Path(argv[1]).name == "scan_legacy_spelling.py":
+            if failure == "timeout":
+                raise TimeoutError("scanner deadline exceeded")
+            return subprocess.CompletedProcess(argv, failure, "partial scanner output", "scanner input error")
+        return command_result(*argv, **options)
+
+    monkeypatch.setattr(runner, "command_result", failed_scanner)
+    backend = Backend()
+    review = new_run(tmp_path, source_repo, backend)
+    report = review.run()
+    assert report["status"] == "INCOMPLETE"
+    assert report["findings"] == []
+    assert backend.calls == []
+    assert report["stages"]["preflight:conventions"]["status"] == "INCOMPLETE"
+    assert report["stages"]["preflight:test-doc"]["status"] == "COMPLETE"
+    if failure != "timeout":
+        attempt = report["stages"]["preflight:conventions"]["runs"][0]
+        assert attempt["exit_code"] == failure
+        assert attempt["stdout"] == "partial scanner output"
+        assert attempt["stderr"] == "scanner input error"
+    with pytest.raises(ValueError, match="INCOMPLETE"):
+        publisher.publish(report, dry_run=False)
+
+    monkeypatch.setattr(runner, "command_result", command_result)
+    state = json.loads((review.run_dir / "state.json").read_text())
+    resumed = runner.ReviewRun(review.run_dir, state, backend).run()
+    assert resumed["status"] == "COMPLETE"
+    assert len(resumed["stages"]["preflight:conventions"]["runs"]) == 2
+    assert len(resumed["stages"]["preflight:test-doc"]["runs"]) == 1
+    assert resumed["metrics"]["cost_is_complete"] is True
+
+
+def test_saved_diff_cannot_diverge_from_agent_scope_on_resume(tmp_path, source_repo):
+    backend = Backend()
+    review = new_run(tmp_path, source_repo, backend)
+    assert review.run()["status"] == "COMPLETE"
+    (review.run_dir / "diff.patch").write_text("")
+    calls = len(backend.calls)
+    state = json.loads((review.run_dir / "state.json").read_text())
+    resumed = runner.ReviewRun(review.run_dir, state, backend).run()
+    assert resumed["status"] == "INCOMPLETE"
+    assert "saved diff.patch" in resumed["stages"]["run"]["error"]
+    assert len(backend.calls) == calls
+
+
+@pytest.mark.parametrize("label", [label for label, _ in common.PREFLIGHTS])
+def test_publisher_requires_both_preflight_stages(complete_report, label):
+    del complete_report["stages"][label]
+    with pytest.raises(ValueError, match="required stages"):
+        common.validate_report(complete_report)
+
+
+def test_publisher_requires_current_preflight_artifact_version(complete_report):
+    complete_report["schema_version"] = 1
+    with pytest.raises(ValueError, match="versioned runner result"):
+        common.validate_report(complete_report)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        {},
+        {"exit_code": 2, "stdout": "", "stderr": "scanner input failed"},
+        {"exit_code": -9, "stdout": "", "stderr": "killed"},
+        {"exit_code": False, "stdout": "", "stderr": ""},
+        {"exit_code": 0, "stderr": ""},
+        {"exit_code": 1, "stdout": [], "stderr": ""},
+    ],
+)
+def test_malformed_preflight_cannot_be_published(monkeypatch, complete_report, output):
+    complete_report["stages"]["preflight:conventions"]["output"] = output
+    api = GitHub(complete_report)
+    monkeypatch.setattr(publisher, "gh", api)
+    with pytest.raises(ValueError, match="required stages"):
+        publisher.publish(complete_report, dry_run=False)
+    assert api.posts == []
+    assert common.build_report(complete_report)["status"] == "INCOMPLETE"
 
 
 def test_missing_stage_is_not_complete_even_with_empty_findings(complete_report):

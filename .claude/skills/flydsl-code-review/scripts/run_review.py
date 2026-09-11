@@ -37,6 +37,7 @@ from pathlib import Path
 from review_common import (
     ANGLES,
     PER_ANGLE,
+    PREFLIGHTS,
     SCHEMA_VERSION,
     SEVERITIES,
     SWEEP_MAX,
@@ -49,6 +50,7 @@ from review_common import (
     normalize_path,
     stage_output,
     validate_output,
+    validate_preflight,
 )
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -65,13 +67,13 @@ def atomic_json(path: Path, value: dict) -> None:
     temporary.replace(path)
 
 
-def command(
+def command_result(
     *argv: str,
     cwd: Path,
     stdin: str | None = None,
     deadline: float | None = None,
     cancelled: threading.Event | None = None,
-) -> str:
+) -> subprocess.CompletedProcess:
     deadline = min(deadline or float("inf"), time.monotonic() + 120)
     if (cancelled and cancelled.is_set()) or time.monotonic() >= deadline:
         raise TimeoutError("command cancelled or phase deadline exceeded")
@@ -96,9 +98,14 @@ def command(
                 first = False
     finally:
         stop_process(process)
-    if process.returncode:
-        raise RuntimeError(f"{shlex.join(argv)}: {stderr.strip()}")
-    return stdout
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+def command(*argv: str, **options) -> str:
+    result = command_result(*argv, **options)
+    if result.returncode:
+        raise RuntimeError(f"{shlex.join(argv)}: {result.stderr.strip()}")
+    return result.stdout
 
 
 def git(root: Path, *args: str, **options) -> str:
@@ -255,6 +262,8 @@ def check_snapshot(run_dir: Path, scope: dict, **control) -> None:
     )
     if hashlib.sha256(diff.encode()).hexdigest() != scope["diff_sha256"]:
         raise ValueError("pinned diff hash changed")
+    if hashlib.sha256((run_dir / "diff.patch").read_bytes()).hexdigest() != scope["diff_sha256"]:
+        raise ValueError("saved diff.patch does not match the pinned diff")
 
 
 def section(text: str, title: str) -> str:
@@ -366,6 +375,17 @@ def cli_agent(
                 # Also reap tool descendants if the CLI exited without waiting for them.
                 stop_process(process)
         envelope = json.loads(stdout_path.read_text())
+        # Verbose CLI settings emit a transcript array instead of one result.
+        # The last result owns the verdict and usage, including a failed result.
+        if isinstance(envelope, list):
+            envelope = next(
+                (
+                    record
+                    for record in reversed(envelope)
+                    if isinstance(record, dict) and record.get("type") == "result"
+                ),
+                None,
+            )
         if not isinstance(envelope, dict) or envelope.get("type") != "result":
             raise ValueError("CLI returned no terminal result record")
         attempt["usage"] = {
@@ -433,6 +453,61 @@ class ReviewRun:
 
     def task(self, label: str, prompt: str, limit: int | None = None) -> dict:
         return {"label": label, "prompt": self.context() + prompt, "limit": limit, "schema": output_schema(limit)}
+
+    def preflight(self) -> bool:
+        """Run trusted scanners over the pinned data; their matches are only leads."""
+        stages = self.state["stages"]
+        scope = self.state["scope"]
+        deadline = time.monotonic() + self.config["phase_timeout"]
+        for label, script in PREFLIGHTS:
+            fingerprint = digest(
+                {"head": scope["head_oid"], "diff": scope["diff_sha256"], "script": (SCRIPTS / script).read_text()}
+            )
+            stage = stages.setdefault(label, {"runs": []})
+            if stage.get("status") == "COMPLETE":
+                validate_preflight(stage.get("output"))
+                if stage.get("input_sha256") != fingerprint:
+                    raise ValueError(f"cached input changed for {label}; start a new run")
+                continue
+            for prior in stage["runs"]:
+                if prior["status"] == "RUNNING":
+                    prior.update(status="INCOMPLETE", error="parent stopped before recording the scanner result")
+            stage.update(status="RUNNING", output=None, input_sha256=fingerprint)
+            stage.pop("error", None)
+            record = {"status": "RUNNING"}
+            stage["runs"].append(record)
+            self.save()
+            argv = [sys.executable, str(SCRIPTS / script), "--diff", str(self.run_dir / "diff.patch")]
+            if label == "preflight:test-doc":
+                argv += ["--head", str(self.snapshot)]
+            print(f"{label}: scanning pinned diff", file=sys.stderr, flush=True)
+            started = time.monotonic()
+            try:
+                result = command_result(*argv, cwd=self.snapshot, deadline=deadline, cancelled=self.cancelled)
+                record.update(exit_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+                if result.returncode not in (0, 1):
+                    raise ValueError(f"scanner exited {result.returncode}: {result.stderr.strip()}")
+                record["status"] = "COMPLETE"
+                stage["output"] = {key: record[key] for key in ("exit_code", "stdout", "stderr")}
+            except (OSError, ValueError, TimeoutError) as exc:
+                record.update(status="INCOMPLETE", error=str(exc))
+                stage["error"] = str(exc)
+            record["wall_time_seconds"] = time.monotonic() - started
+            stage["status"] = record["status"]
+            self.save()
+        return all(stage_output(stages, label) is not None for label, _ in PREFLIGHTS)
+
+    def preflight_context(self, angle: str) -> str:
+        output = stage_output(self.state["stages"], "preflight:" + angle)
+        if output is None:
+            return ""
+        return (
+            "\nDeterministic preflight observations (unverified leads, not findings):\n"
+            + canonical(output)
+            + "\n"
+            + section(self.skill, "Deterministic preflight")
+            + "\n"
+        )
 
     def phase(self, name: str, tasks: list[dict]) -> bool:
         print(f"{name}: {len(tasks)} stage(s)", file=sys.stderr, flush=True)
@@ -555,11 +630,14 @@ class ReviewRun:
             cancelled=self.cancelled,
         )
         if self.state["scope"]["files"]:
+            if not self.preflight():
+                return
             finders = [
                 self.task(
                     "find:" + label,
                     "Review only this angle:\n"
                     + section(self.skill, title)
+                    + self.preflight_context(label)
                     + f"\nReturn up to {PER_ANGLE} candidates with a specific mechanism/root cause, "
                     "severity (P0 critical, P1 high, P2 normal, P3 low), exact file/line and failure scenario. "
                     "Pass every candidate with a nameable failure scenario to independent verification. "
@@ -570,7 +648,7 @@ class ReviewRun:
             ]
             if not self.phase("Find", finders):
                 return
-            # No completion-order admission and no verification budget: verify all <=54 candidates.
+            # No completion-order admission or verification budget: verify every finder candidate.
             candidates = collect_candidates({k: v for k, v in stages.items() if k != "sweep"})
             if not self.verify(candidates):
                 return
@@ -616,7 +694,8 @@ class ReviewRun:
 
 
 def implementation_hash() -> str:
-    return digest([p.read_text() for p in (Path(__file__), SCRIPTS / "review_common.py", SKILL)])
+    paths = [Path(__file__), SCRIPTS / "review_common.py", SKILL, *(SCRIPTS / script for _, script in PREFLIGHTS)]
+    return digest([p.read_text() for p in paths])
 
 
 def positive(value: str) -> int:
