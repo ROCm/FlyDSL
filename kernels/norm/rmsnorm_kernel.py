@@ -59,6 +59,24 @@ FWD_MULTI_ROW_THRESHOLD = 8192
 FWD_THROUGHPUT_MIN_ROWS = 8 * WARP_SIZE
 FWD_THROUGHPUT_MAX_VEC_ITERS = 8
 DEFAULT_BLOCK_THREADS = BLOCK_THREADS
+WIDE_ROW_MIN_N = 8192
+WIDE_ROW_BLOCK_THREADS = 512
+
+# Both CDNA3 and CDNA4 share a 256MB last-level cache. Non-temporal streaming
+# only pays off once input plus output stop fitting in it; below that it throws
+# away reuse the cache would have served. The two policies measure as a tie at
+# 1.125x LLC and streaming wins outright past it, uniformly across row widths.
+LLC_BYTES = 256 * 1024 * 1024
+NT_MIN_WORKING_SET = LLC_BYTES * 9 // 8
+
+
+def default_block_threads(N: int, arch=None) -> int:
+    """Wide rows hold fewer resident vectors per thread at 512 than at 256."""
+    if arch is None:
+        arch = get_rocm_arch()
+    if str(arch).startswith("gfx95") and N >= WIDE_ROW_MIN_N:
+        return WIDE_ROW_BLOCK_THREADS
+    return DEFAULT_BLOCK_THREADS
 
 
 def _quant_dtype_to_elem_type(dtype_str: str):
@@ -78,13 +96,16 @@ def build_rmsnorm_module(
     dtype_str: str,
     store_rstd: bool = False,
     eps: float = EPS,
-    BLOCK_THREADS: int = BLOCK_THREADS,
+    BLOCK_THREADS: int | None = None,
     weight_dtype_str: str | None = None,
     _enable_throughput_dispatch: bool = True,
+    _force_nt: bool | None = None,
 ):
     weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
+    if BLOCK_THREADS is None:
+        BLOCK_THREADS = default_block_threads(N, arch)
 
     # BLOCK_THREADS controls storage, tiling, and launch geometry.
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
@@ -97,13 +118,21 @@ def build_rmsnorm_module(
     NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
     _kernel_kwargs = {} if BLOCK_THREADS <= 256 else {"known_block_size": [BLOCK_THREADS, 1, 1]}
 
-    # On gfx942, stream large BF16 rows non-temporally so shared gamma remains
-    # cache-resident. Wide-row output stores are streaming as well.
-    USE_GFX942_BF16_FAST_PATH = (
-        str(arch).startswith("gfx942") and dtype_str == "bf16" and weight_dtype_str == "bf16" and N >= 4096
-    )
+    # Stream large BF16 rows non-temporally. x stays in registers across both
+    # passes, so x and y are each touched once and neither gains from being
+    # cached; letting x fills allocate in the memory-side cache only evicts y's
+    # pending stores. gfx942 streams unconditionally; gfx95x defers the choice
+    # to a runtime row-count dispatch below.
+    BF16_ROWS = dtype_str == "bf16" and weight_dtype_str == "bf16"
+    USE_GFX942_BF16_FAST_PATH = str(arch).startswith("gfx942") and BF16_ROWS and N >= 4096
+    # Whether streaming wins is set by the working set, not the row width, so on
+    # gfx95x the runtime dispatch below covers every row the plain kernel handles.
+    use_nt_dispatch = str(arch).startswith("gfx95") and BF16_ROWS and N > SMALL_N_THRESHOLD and _force_nt is None
+    USE_NT = USE_GFX942_BF16_FAST_PATH or bool(_force_nt)
     PRELOAD_GAMMA = USE_GFX942_BF16_FAST_PATH and VEC_TILES >= BLOCK_THREADS and VEC_TILES % BLOCK_THREADS == 0
-    INPUT_CACHE_MODIFIER = 2 if USE_GFX942_BF16_FAST_PATH else 0
+    INPUT_CACHE_MODIFIER = 2 if USE_NT else 0
+    # Streaming the stores too costs 6-8% on gfx95x; letting them settle in LLC
+    # drains them to HBM in better-scheduled bursts. gfx942 keeps its own tuning.
     OUTPUT_CACHE_MODIFIER = (
         2 if USE_GFX942_BF16_FAST_PATH and VEC_TILES > WARP_SIZE * FWD_THROUGHPUT_MAX_VEC_ITERS else 0
     )
@@ -187,6 +216,73 @@ def build_rmsnorm_module(
                     launch_throughput()
                 else:
                     launch_default()
+
+            dispatch()
+
+        return launch_rmsnorm
+
+    if use_nt_dispatch:
+        # Keep M runtime-only: compile both cache policies into one launcher
+        # rather than selecting a different cached build for each row count.
+        _nt_kwargs = dict(
+            store_rstd=store_rstd,
+            eps=eps,
+            BLOCK_THREADS=BLOCK_THREADS,
+            weight_dtype_str=weight_dtype_str,
+            _enable_throughput_dispatch=False,
+        )
+        cached_launch = build_rmsnorm_module(N, dtype_str, _force_nt=False, **_nt_kwargs)
+        streaming_launch = build_rmsnorm_module(N, dtype_str, _force_nt=True, **_nt_kwargs)
+        NT_MIN_ROWS = NT_MIN_WORKING_SET // (N * 4)
+
+        if store_rstd:
+
+            @flyc.jit
+            def launch_rmsnorm(
+                Input: fx.Tensor,
+                Gamma: fx.Tensor,
+                Output: fx.Tensor,
+                Rstd: fx.Tensor,
+                m_in: fx.Int32,
+                stream: fx.Stream = fx.Stream(None),
+            ):
+                def launch_streaming():
+                    streaming_launch(Input, Gamma, Output, Rstd, m_in, stream)
+
+                def launch_cached():
+                    cached_launch(Input, Gamma, Output, Rstd, m_in, stream)
+
+                @flyc.jit
+                def dispatch():
+                    if m_in > fx.Int32(NT_MIN_ROWS):
+                        launch_streaming()
+                    else:
+                        launch_cached()
+
+                dispatch()
+
+            return launch_rmsnorm
+
+        @flyc.jit
+        def launch_rmsnorm(
+            Input: fx.Tensor,
+            Gamma: fx.Tensor,
+            Output: fx.Tensor,
+            m_in: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            def launch_streaming():
+                streaming_launch(Input, Gamma, Output, m_in, stream)
+
+            def launch_cached():
+                cached_launch(Input, Gamma, Output, m_in, stream)
+
+            @flyc.jit
+            def dispatch():
+                if m_in > fx.Int32(NT_MIN_ROWS):
+                    launch_streaming()
+                else:
+                    launch_cached()
 
             dispatch()
 
@@ -399,7 +495,7 @@ def build_rmsnorm_module(
                     _store_scalar(copy_atom_s, elem_dtype, out_div, idx, y_e)
 
     if N <= SMALL_N_THRESHOLD:
-        return _build_rmsnorm_large_m_small_n_module(
+        return _build_rmsnorm_small_n_module(
             N,
             dtype_str,
             store_rstd,
@@ -473,7 +569,7 @@ def rmsnorm_direct(
     launch(Input, Gamma, Output, m_in, stream)
 
 
-def _build_rmsnorm_large_m_small_n_module(
+def _build_rmsnorm_small_n_module(
     N: int,
     dtype_str: str,
     store_rstd: bool = False,
@@ -658,7 +754,7 @@ def _build_rmsnorm_large_m_small_n_module(
     if store_rstd:
 
         @flyc.jit
-        def launch_rmsnorm_large_m_small_n(
+        def launch_rmsnorm_small_n(
             Input: fx.Tensor,
             Gamma: fx.Tensor,
             Output: fx.Tensor,
@@ -691,10 +787,10 @@ def _build_rmsnorm_large_m_small_n_module(
 
             dispatch()
 
-        return launch_rmsnorm_large_m_small_n
+        return launch_rmsnorm_small_n
 
     @flyc.jit
-    def launch_rmsnorm_large_m_small_n(
+    def launch_rmsnorm_small_n(
         Input: fx.Tensor,
         Gamma: fx.Tensor,
         Output: fx.Tensor,
@@ -727,7 +823,7 @@ def _build_rmsnorm_large_m_small_n_module(
 
         dispatch()
 
-    return launch_rmsnorm_large_m_small_n
+    return launch_rmsnorm_small_n
 
 
 def build_fused_add_rmsnorm_module(
