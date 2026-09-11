@@ -4825,6 +4825,83 @@ def test_paged_fp8_cache_buffer_matches_wide_fallback(
 
 
 @_requires_gfx950
+@pytest.mark.large_shape
+def test_paged_fp8_page16_scalar_offset_near_buffer_limit(monkeypatch):
+    """Exercise scalar K DMA offsets near 2 GiB, not just small-cache offsets."""
+    from kernels.attention.flash_attn_utils import PAGED_FP8_BUFFER_LIMIT_BYTES
+
+    page_size = 16
+    head_dim = value_head_dim = 192
+    page_bytes = page_size * head_dim
+    num_pages = PAGED_FP8_BUFFER_LIMIT_BYTES // page_bytes
+    cache_bytes = num_pages * page_bytes
+    assert cache_bytes <= PAGED_FP8_BUFFER_LIMIT_BYTES
+    assert (num_pages - 4) * page_bytes > 2**31 - 8 * page_bytes
+    torch.cuda.empty_cache()
+    free_bytes, _ = torch.cuda.mem_get_info()
+    if free_bytes < 2 * cache_bytes + 2 * 2**30:
+        pytest.skip("near-limit cache-offset regression requires 6 GiB of free GPU memory")
+
+    key_shape, value_shape = _paged_fp8_cache_shapes(num_pages, 1, head_dim, value_head_dim, page_size, "vectorized")
+    key = torch.empty(key_shape, device="cuda", dtype=FP8_DTYPE)
+    value = torch.empty(value_shape, device="cuda", dtype=FP8_DTYPE)
+    for logical_page in range(4):
+        physical_page = num_pages - 4 + logical_page
+        key[physical_page].fill_(logical_page)
+        value[physical_page].fill_(logical_page + 1)
+    query = torch.ones((32, 16, head_dim), device="cuda", dtype=FP8_DTYPE)
+    block_table = torch.arange(num_pages - 4, num_pages, device="cuda", dtype=torch.int32)[None]
+    cu_q = torch.tensor([0, 32], device="cuda", dtype=torch.int32)
+    cu_kv = torch.tensor([0, 64], device="cuda", dtype=torch.int32)
+    seqlen_k = torch.tensor([64], device="cuda", dtype=torch.int32)
+    scale = torch.ones((1,), device="cuda", dtype=torch.float32)
+
+    def call():
+        return flydsl_flash_attn_func(
+            query,
+            key,
+            value,
+            causal=True,
+            num_kv_heads=1,
+            cu_seqlens_q=cu_q,
+            cu_seqlens_kv=cu_kv,
+            max_seqlen_q=32,
+            max_seqlen_kv=64,
+            cross_seqlen=True,
+            block_table=block_table,
+            seqlen_k=seqlen_k,
+            kv_cache_layout="vectorized",
+            q_descale=scale,
+            k_descale=scale,
+            v_descale=scale,
+        )
+
+    buffered = call()
+    build = flash_attn_interface._build_paged_fp8
+    calls = []
+
+    def build_wide(**options):
+        assert options["cache_buffered"], "both near-limit caches still fit the bounded specialization"
+        options["cache_buffered"] = False
+        calls.append(options)
+        return build(**options)
+
+    monkeypatch.setattr(flash_attn_interface, "_build_paged_fp8", build_wide)
+    wide = call()
+    torch.cuda.synchronize()
+    assert calls
+    torch.testing.assert_close(buffered, wide, rtol=0, atol=0)
+    logical_key = torch.arange(4, device="cuda", dtype=torch.float32).repeat_interleave(16)
+    logical_value = logical_key + 1
+    expected = pytorch_ref_attention_qkv_diff(
+        query[None].float(),
+        logical_key[None, :, None, None].expand(1, 64, 1, head_dim),
+        logical_value[None, :, None, None].expand(1, 64, 1, value_head_dim),
+    )[0].to(torch.bfloat16)
+    torch.testing.assert_close(buffered, expected, rtol=2.0e-2, atol=2.0e-2)
+
+
+@_requires_gfx950
 @pytest.mark.parametrize("page_size", [1, 16])
 @pytest.mark.parametrize("oversized", ["key", "value"])
 def test_paged_fp8_cache_buffer_rejects_oversized_direct_launch(page_size, oversized):
@@ -4863,7 +4940,37 @@ def test_paged_fp8_cache_buffer_rejects_oversized_direct_launch(page_size, overs
 
 @_requires_gfx950
 @pytest.mark.parametrize("active_rows", [1, 15, 16, 17, 63, 64])
-def test_paged_fp8_page1_transpose_is_byte_exact(active_rows):
+def test_paged_fp8_page1_shared_page_ids_are_byte_exact(active_rows):
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.attention.flash_attn_utils import _page1_k_page_ids
+
+    @flyc.kernel
+    def permute_ids(source: fx.Tensor, output: fx.Tensor):
+        lane = fx.Int32(fx.thread_idx.x)
+        value = fx.generic_load(fx.add_offset(fx.get_iter(source), lane), dtype=fx.Int32)
+        permuted = _page1_k_page_ids(value)
+        fx.generic_store(fx.add_offset(fx.get_iter(output), lane), fx.Int32(permuted))
+
+    @flyc.jit
+    def launch(source: fx.Tensor, output: fx.Tensor):
+        permute_ids(source, output).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+    torch.manual_seed(314)
+    source = torch.randint(0, 2**30, (64,), device="cuda", dtype=torch.int32)
+    source[active_rows:].zero_()
+    output = torch.empty_like(source)
+    launch(source, output)
+    torch.cuda.synchronize()
+    lane = torch.arange(64, device="cuda")
+    sigma = (lane & 3) | ((lane & 8) >> 1) | ((lane & 4) << 1) | (lane & ~15)
+    torch.testing.assert_close(output, source.index_select(0, sigma), rtol=0, atol=0)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("active_rows", [1, 15, 16, 17, 63, 64])
+@pytest.mark.parametrize("stages", [2, 4])
+def test_paged_fp8_page1_transpose_is_byte_exact(active_rows, stages):
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from kernels.attention.flash_attn_utils import _transpose_v_fp8_16x16
@@ -4872,7 +4979,7 @@ def test_paged_fp8_page1_transpose_is_byte_exact(active_rows):
     def transpose_bytes(source: fx.Tensor, output: fx.Tensor):
         lane = fx.Int32(fx.thread_idx.x)
         values = fx.generic_load(fx.add_offset(fx.get_iter(source), lane * 4), dtype=fx.Int32, count=4)
-        transposed = _transpose_v_fp8_16x16(values, lane)
+        transposed = _transpose_v_fp8_16x16(values, lane, stages=stages)
         fx.generic_store(fx.add_offset(fx.get_iter(output), lane * 4), transposed)
 
     @flyc.jit
@@ -4885,8 +4992,80 @@ def test_paged_fp8_page1_transpose_is_byte_exact(active_rows):
     output = torch.empty_like(source)
     launch(source.view(torch.int32), output.view(torch.int32))
     torch.cuda.synchronize()
-    expected = source.reshape(4, 16, 16).transpose(1, 2)
-    torch.testing.assert_close(output.reshape(4, 16, 16), expected, rtol=0, atol=0)
+    if stages == 2:
+        expected = source.reshape(16, 4, 4, 4).permute(0, 3, 2, 1)
+    else:
+        expected = source.reshape(4, 16, 16).transpose(1, 2)
+    torch.testing.assert_close(output, expected.reshape(64, 16), rtol=0, atol=0)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("value_dim", [128, 192])
+@pytest.mark.parametrize("active_rows", [1, 15, 16, 17, 63, 64])
+def test_paged_fp8_page1_word_scatter_matches_lds_layout(value_dim, active_rows):
+    from types import SimpleNamespace
+
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.attention.flash_attn_utils import DualwaveFp8KvGmemToLdsLoader, _transpose_v_fp8_16x16
+
+    stride = 80 if value_dim == 128 else 64
+
+    @flyc.kernel
+    def scatter(source: fx.Tensor, output: fx.Tensor):
+        tid = fx.Int32(fx.thread_idx.x)
+        lane = tid % 64
+        wave = tid // 64
+        offset = lane * (value_dim // 4) + wave * 4
+        prefix = fx.generic_load(fx.add_offset(fx.get_iter(source), offset), dtype=fx.Int32, count=4)
+        words = _transpose_v_fp8_16x16(prefix, lane, stages=2)
+        if value_dim == 192:
+            tail_offset = (wave < 4).select(offset + 32, 0)
+            tail = fx.generic_load(fx.add_offset(fx.get_iter(source), tail_offset), dtype=fx.Int32, count=4)
+            tail_words = _transpose_v_fp8_16x16(tail, lane, stages=2)
+            words = words.shuffle(tail_words, [0, 1, 2, 3, 4, 5, 6, 7])
+        # Use a guarded global buffer to inspect every byte/address produced by
+        # the same store helper used for LDS, including untouched row padding.
+        ctx = SimpleNamespace(
+            traits=SimpleNamespace(
+                HEAD_DIM_V=value_dim,
+                FP8_V_ROW_STRIDE=stride,
+                FP8_PV_SEGMENTED=value_dim == 192,
+                FP8_V_H1=128,
+                FP8_V_H2=value_dim - 128,
+                KV_VEC_SIZE=16,
+            ),
+            lane_in_warp=fx.Int64(lane),
+            wave_id=fx.Int64(wave),
+            wave_id_uni=fx.Int64(wave),
+            lds_vt_base_idx=fx.Int64(0),
+            v_lds_i32_tiles=output,
+        )
+        DualwaveFp8KvGmemToLdsLoader._store_v_fp8_page1(ctx, words.ir_value(), fx.Int64(0))
+
+    @flyc.jit
+    def launch(source: fx.Tensor, output: fx.Tensor):
+        scatter(source, output).launch(grid=(1, 1, 1), block=(512, 1, 1))
+
+    torch.manual_seed(777)
+    source = torch.randint(0, 256, (64, value_dim), device="cuda", dtype=torch.uint8)
+    source[active_rows:].zero_()
+    storage = torch.full((value_dim * stride + 128,), 0xAB, dtype=torch.uint8, device="cuda")
+    output = storage[64:-64]
+    launch(source.view(torch.int32).reshape(-1), output.view(torch.int32))
+    torch.cuda.synchronize()
+    expected = torch.full_like(storage, 0xAB)
+    expected_tile = expected[64:-64].reshape(value_dim, stride)
+    token = torch.arange(64, device="cuda")
+    page = token // 16
+    word = (token % 16) // 4
+    offset = (page % 2) * 4 + (page // 2) * 16 + (word % 2) * 32 + (word // 2) * 8 + token % 4
+    rows = torch.arange(value_dim, device="cuda")[:, None]
+    offsets = offset[None, :].expand(value_dim, -1)
+    if value_dim == 192:
+        offsets = offsets ^ (((rows // 4) % 4) * 16)
+    expected_tile[rows, offsets] = source.T
+    torch.testing.assert_close(storage, expected, rtol=0, atol=0)
 
 
 @_requires_gfx950
@@ -6047,14 +6226,25 @@ def test_fp8_rescale_threshold_drops_past_the_long_sequence_bound():
     assert set(f(s) for s in (1, 1024, 4096, 4097, 8192, 131072)) == {6.0, 4.0}
 
 
-@pytest.mark.parametrize(
-    ("value_head_dim", "expected"),
-    [(128, (128, 0)), (160, (128, 32)), (192, (128, 64)), (224, (128, 96)), (256, (128, 128))],
-)
-def test_fp8_pv_head_dim_uses_two_generic_segments(value_head_dim, expected):
-    from kernels.attention.flash_attn_utils import _factor_fp8_pv_head_dim
+@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("page_size", [1, 16, 64, 1024])
+def test_paged_fp8_traits_match_supported_value_segments(head_dim, value_head_dim, page_size):
+    from kernels.attention.flash_attn_utils import LDS_BYTES_GFX950, _make_paged_dualwave_swp_fp8_traits
 
-    assert _factor_fp8_pv_head_dim(value_head_dim, segment_capacity=128, alignment=32) == expected
+    traits = _make_paged_dualwave_swp_fp8_traits(
+        16,
+        1,
+        head_dim,
+        value_head_dim,
+        rescale_threshold=8.0,
+        page_size=page_size,
+        kv_cache_layout="linear3d" if page_size == 1 else "vectorized",
+        cache_buffered=page_size in (1, 16),
+    )
+    assert (traits.FP8_V_H1, traits.FP8_V_H2) == (128, value_head_dim - 128)
+    assert traits.FP8_PV_SEGMENTED == (value_head_dim == 192)
+    assert traits.VT_BF16_TOTAL * 2 >= traits.NUM_PREFETCH_K * value_head_dim * traits.FP8_V_ROW_STRIDE
+    assert traits.LDS_KV_TOTAL_SIZE + traits.VT_BF16_TOTAL * 2 <= LDS_BYTES_GFX950
 
 
 @_requires_gfx950
