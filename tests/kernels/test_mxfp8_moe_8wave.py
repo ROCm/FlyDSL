@@ -207,7 +207,8 @@ def test_mxfp8_moe_unpack_routes():
 
 
 @pytest.mark.parametrize(
-    "stage,k,n,tile", [(2, 384, 256, (256, 256)), (1, 512, 768, (256, 256)), (1, 512, 768, (128, 512))]
+    "stage,k,n,tile",
+    [(2, 384, 256, (256, 256)), (2, 384, 768, (128, 512)), (1, 512, 768, (256, 256)), (1, 512, 768, (128, 512))],
 )
 def test_dynamic_rows_and_weight_stride(stage, k, n, tile):
     torch.manual_seed(54)
