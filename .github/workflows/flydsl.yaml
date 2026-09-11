@@ -43,11 +43,13 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Detect whether the change touches code. Docs-only / non-code changes (docs,
-  # markdown, root docs, images, non-workflow .github files) set code_changed to
-  # 'false', and the heavy test / multi-gpu jobs below are skipped at the job
-  # level (a skipped required check still counts as passing for branch
-  # protection), so no GPU runner is used. workflow_dispatch always forces a
-  # full run, and a detection failure fails safe to running the tests.
+  # markdown, images, license, git/style/agent metadata, and non-workflow
+  # .github files) set code_changed to 'false', and the heavy test / multi-gpu
+  # jobs below are skipped at the job level (a skipped required check still
+  # counts as passing for branch protection), so no GPU runner is used.
+  # workflow_dispatch always forces a full run, and a detection failure fails
+  # safe to running the tests. Workflow YAML under .github/workflows is still
+  # treated as code so GPU job wiring itself is re-tested.
   # ---------------------------------------------------------------------------
   detect-changes:
     runs-on: ubuntu-latest
@@ -80,7 +82,16 @@ jobs:
               - '!**/*.gif'
               - '!**/*.svg'
               - '!**/*.webp'
+              - '!.gitignore'
+              - '!.clang-format'
+              - '!.pre-commit-config.yaml'
+              - '!.claude/**'
+              - '!.cursor/**'
+              - '!.codex/**'
               - '!.github/ISSUE_TEMPLATE/**'
+              - '!.github/dashboard/**'
+              - '!.github/runner-config.yml'
+              - '!.github/scripts/**'
 
   check-signal:
     if: ${{ github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'multi-gpu' }}
