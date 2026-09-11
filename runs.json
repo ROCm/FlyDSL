@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-11T03:09:35Z",
+ "updated": "2026-09-11T03:21:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34557441921,
+   "pr": 1066,
+   "commit": "50aea3f82b2f87131c66d0695752d75b3570886a",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557441921",
+   "created_at": "2026-09-11T03:10:35Z",
+   "updated_at": "2026-09-11T03:12:46Z",
+   "actor": "sammysun0711",
+   "jobs": []
+  },
   {
    "run_id": 34557181309,
    "pr": 1116,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309",
    "created_at": "2026-09-11T03:06:30Z",
-   "updated_at": "2026-09-11T03:07:31Z",
+   "updated_at": "2026-09-11T03:08:38Z",
    "actor": "yanboshao",
    "jobs": []
   },
@@ -170,11 +185,11 @@
    "branch": "fix/manylinux-build-network",
    "event": "pull_request",
    "title": "[CI] Use host networking for manylinux image builds",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255",
    "created_at": "2026-09-10T20:31:24Z",
-   "updated_at": "2026-09-11T03:07:17Z",
+   "updated_at": "2026-09-11T03:19:59Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -190,11 +205,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T03:07:17Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849949"
+     "completed_at": "2026-09-11T03:19:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34526885255/job/103044849949",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -255,7 +271,7 @@
   },
   {
    "run_id": 34481829789,
-   "pr": 1066,
+   "pr": null,
    "commit": "787efd7a045cf2e434cf67b5474809c6dba70080",
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
@@ -1785,52 +1801,6 @@
      "started_at": "2026-09-09T08:54:27Z",
      "completed_at": "2026-09-09T10:32:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34329841264/job/102401141995"
-    }
-   ]
-  },
-  {
-   "run_id": 34328099481,
-   "pr": 1106,
-   "commit": "3c040983b20564c93b0fa3f344c5bf9980f23230",
-   "branch": "add-flydsl-code-review-skill",
-   "event": "pull_request",
-   "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481",
-   "created_at": "2026-09-09T08:15:12Z",
-   "updated_at": "2026-09-09T10:31:39Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T08:36:29Z",
-     "completed_at": "2026-09-09T10:17:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481/job/102395887786",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T08:36:19Z",
-     "completed_at": "2026-09-09T08:50:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481/job/102395887820",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-09T08:54:14Z",
-     "completed_at": "2026-09-09T10:31:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34328099481/job/102395887946",
-     "log_fetch_failed": true
     }
    ]
   }
