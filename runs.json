@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-11T12:05:20Z",
+ "updated": "2026-09-11T12:22:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -54,11 +54,11 @@
    "branch": "pr/ci-skip-noncode-gpu",
    "event": "pull_request",
    "title": "[CI] Skip GPU tests for more non-code path changes",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586826461",
    "created_at": "2026-09-11T09:57:46Z",
-   "updated_at": "2026-09-11T11:02:22Z",
+   "updated_at": "2026-09-11T12:20:16Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -74,11 +74,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-11T11:02:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586826461/job/103227562585"
+     "completed_at": "2026-09-11T12:20:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34586826461/job/103227562585",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
