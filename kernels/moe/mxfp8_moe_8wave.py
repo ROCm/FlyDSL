@@ -72,7 +72,7 @@ def _store_factory(*, activation=False, transpose=False, mask_n=False, swiglu_li
                         offset = (base_row + row + i) * cols + base_col + col
                         if const_expr(mask_n):
                             offset = (base_col + col < cols).select(offset, rows * cols)
-                        fx.copy(atom, reg, fx.slice(out, (None, offset // 8)))
+                        fx.copy(atom, reg, fx.slice(out, (None, offset >> 3)))
             else:
                 for step in range_constexpr(tile_m * tile_n // (64 * 8)):
                     linear = lane * 8 + step * 64 * 8
@@ -82,7 +82,7 @@ def _store_factory(*, activation=False, transpose=False, mask_n=False, swiglu_li
                     offset = (base_row + row) * cols + base_col + col
                     if const_expr(mask_n):
                         offset = (base_col + col < cols).select(offset, rows * cols)
-                    fx.copy(atom, reg, fx.slice(out, (None, offset // 8)))
+                    fx.copy(atom, reg, fx.slice(out, (None, offset >> 3)))
 
         return store
 

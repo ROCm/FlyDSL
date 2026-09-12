@@ -260,6 +260,32 @@ def test_dynamic_rows_and_weight_stride(stage, k, n, tile):
     assert (out == 42).all()
 
 
+def test_dynamic_rows_ragged_xcd_graph():
+    rows, n, k = 131072, 768, 256
+    a = torch.full((rows * k,), 0x38, device="cuda", dtype=torch.int8)
+    b = torch.cat([torch.full((n * k,), bits, device="cuda", dtype=torch.int8) for bits in (0x38, 0x40)])
+    sa = torch.full((rows * k // 32,), 127, device="cuda", dtype=torch.uint8)
+    sb = torch.full((2 * n * k // 32,), 127, device="cuda", dtype=torch.uint8)
+    ids = torch.arange(rows // 256, device="cuda", dtype=torch.int32) % 2
+    valid = torch.tensor([345 * 256], device="cuda", dtype=torch.int32)
+    out = torch.full((rows, n), 42.0, device="cuda", dtype=torch.bfloat16)
+    args = (a, b, out.flatten(), sa, sb, ids, ids, valid, rows, n, torch.cuda.current_stream())
+    fn = flyc.compile(compile_mxfp8_moe_gemm_8w(K=k, stage=2, dynamic_rows=True, xcd_swizzle=3), *args)
+    fn(*args)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        fn(*args[:-1], torch.cuda.current_stream())
+    # 345 * 3 CTAs exercises the ragged XCD path; the same graph then shrinks
+    # below its swizzle threshold and to an empty route set.
+    for active in (345 * 256, 512, 0):
+        valid.fill_(active)
+        out.fill_(42)
+        graph.replay()
+        expected = ((torch.arange(active, device="cuda") // 256 % 2 + 1) * k).bfloat16()
+        assert torch.equal(out[:active], expected[:, None].expand(-1, n))
+        assert (out[active:] == 42).all()
+
+
 @pytest.mark.parametrize("large_buffer", [False, True])
 def test_sorted_reduce_missing_routes(large_buffer):
     tokens, n, topk = 31, 256, 5
