@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-12T12:49:56Z",
+ "updated": "2026-09-12T13:24:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34696227243,
+   "pr": 1123,
+   "commit": "7799d4d62f6d0d1d67f00e4d6298cc555311da36",
+   "branch": "codex/minimax-mxfp8-moe-8wave",
+   "event": "pull_request",
+   "title": "Add grouped MXFP8/A8W4 MoE GEMMs and fused GEMM1 quantization",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34696227243",
+   "created_at": "2026-09-12T13:21:57Z",
+   "updated_at": "2026-09-12T13:22:24Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34695147133,
+   "pr": 1066,
+   "commit": "e41c748722557c21d5290ecb7ae1dbe7669741fc",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133",
+   "created_at": "2026-09-12T12:59:01Z",
+   "updated_at": "2026-09-12T13:20:08Z",
+   "actor": "sammysun0711",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-12T13:20:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842356"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-12T13:20:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842365"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-12T13:20:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842377"
+    }
+   ]
+  },
   {
    "run_id": 34694422124,
    "pr": 1128,
@@ -10,13 +68,41 @@
    "branch": "codex/scaled-tiled-gemm",
    "event": "pull_request",
    "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34694422124",
    "created_at": "2026-09-12T12:42:48Z",
-   "updated_at": "2026-09-12T12:48:10Z",
+   "updated_at": "2026-09-12T13:08:56Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-12T13:08:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34694422124/job/103558460140"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-12T13:09:37Z",
+     "completed_at": "2026-09-12T13:12:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34694422124/job/103558460168"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-12T13:20:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34694422124/job/103558460210"
+    }
+   ]
   },
   {
    "run_id": 34693306560,
@@ -40,29 +126,30 @@
    "branch": "codex/minimax-mxfp8-moe-8wave",
    "event": "pull_request",
    "title": "Add grouped MXFP8/A8W4 MoE GEMMs and fused GEMM1 quantization",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691668348",
    "created_at": "2026-09-12T11:40:39Z",
-   "updated_at": "2026-09-12T12:19:00Z",
+   "updated_at": "2026-09-12T13:22:24Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-12T12:18:59Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691668348/job/103551441654"
+     "completed_at": "2026-09-12T13:08:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691668348/job/103551441654",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-12T12:11:31Z",
-     "completed_at": null,
+     "completed_at": "2026-09-12T13:22:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691668348/job/103551441671"
     },
     {
@@ -83,11 +170,11 @@
    "branch": "codex/vector-api-migration",
    "event": "pull_request",
    "title": "Migrate vector consumers to expr APIs and remove unused kernel helpers",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691576163",
    "created_at": "2026-09-12T11:38:29Z",
-   "updated_at": "2026-09-12T12:11:10Z",
+   "updated_at": "2026-09-12T13:09:35Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -102,18 +189,18 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-12T12:11:10Z",
+     "started_at": "2026-09-12T13:09:34Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691576163/job/103551441888"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-12T12:11:10Z",
+     "started_at": "2026-09-12T13:08:58Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691576163/job/103551441898"
     }
@@ -1034,7 +1121,7 @@
   },
   {
    "run_id": 34557441921,
-   "pr": 1066,
+   "pr": null,
    "commit": "50aea3f82b2f87131c66d0695752d75b3570886a",
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
@@ -2001,67 +2088,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34447490149,
-   "pr": 1115,
-   "commit": "f0cba0ff81e94d0c6b9ad483d989637a75864d09",
-   "branch": "fix/manylinux-disable-rocm-repo",
-   "event": "pull_request",
-   "title": "[CI] Avoid unused ROCm repository refresh in manylinux build",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149",
-   "created_at": "2026-09-10T06:56:09Z",
-   "updated_at": "2026-09-10T08:33:19Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T07:15:27Z",
-     "completed_at": "2026-09-10T08:24:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149/job/102780161994",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T07:35:32Z",
-     "completed_at": "2026-09-10T07:56:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149/job/102780162093",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T07:16:16Z",
-     "completed_at": "2026-09-10T08:33:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447490149/job/102780162123",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34447381492,
-   "pr": 1047,
-   "commit": "2480f877aa7f74a24d1ce857b48ba92ff0699cf5",
-   "branch": "skill/review-flydsl-kernel",
-   "event": "pull_request",
-   "title": "feat(skills): add supplemental FlyDSL review checks",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34447381492",
-   "created_at": "2026-09-10T06:54:47Z",
-   "updated_at": "2026-09-10T07:14:47Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
