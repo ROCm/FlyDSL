@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-12T14:40:02Z",
+ "updated": "2026-09-12T15:22:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,9 +20,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-12T13:46:09Z",
+     "started_at": "2026-09-12T15:19:23Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34696227243/job/103562972473"
     },
@@ -53,30 +53,32 @@
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133",
    "created_at": "2026-09-12T12:59:01Z",
-   "updated_at": "2026-09-12T14:37:45Z",
+   "updated_at": "2026-09-12T15:19:00Z",
    "actor": "sammysun0711",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-12T14:37:45Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842356"
+     "completed_at": "2026-09-12T15:18:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842356",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-12T13:46:31Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842365"
+     "completed_at": "2026-09-12T14:39:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842365",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
