@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Grouped MXFP8 correctness, including expert permutations and K padding."""
+"""Grouped MXFP8/A8W4 correctness, including expert permutations and K padding."""
 
 import pytest
 import torch
@@ -16,7 +16,13 @@ from kernels.moe.mxfp8_moe_8wave import (
     compile_mxfp8_moe_reduce,
     compile_mxfp8_moe_unpack_routes,
 )
-from tests.kernels.utils.gemm_common_utils import e8m0_to_f32, per_1x32_f8_quant, shuffle_scale_w4
+from tests.kernels.utils.gemm_common_utils import (
+    e8m0_to_f32,
+    mxfp4_to_f32,
+    per_1x32_f4_quant,
+    per_1x32_f8_quant,
+    shuffle_scale_w4,
+)
 
 pytestmark = [
     pytest.mark.l2_device,
@@ -34,23 +40,33 @@ def quantize_mxfp8(x):
     return q, (exponent + 127).to(torch.uint8).reshape(*x.shape[:-1], x.shape[-1] // 32)
 
 
-def prepare_weights(weight, stage):
+def prepare_weights(weight, stage, b_dtype="fp8"):
     """Test-only packing: logical GGUU weights -> the kernel's storage contract."""
     experts, n, k = weight.shape
     k_pad = (k + 255) // 256 * 256
     weight = torch.nn.functional.pad(weight, (0, k_pad - k))
-    q, s = quantize_mxfp8(weight)
-    ref = q.float() * e8m0_to_f32(s).repeat_interleave(32, -1)
+    if b_dtype == "fp4":
+        q, s, _ = per_1x32_f4_quant(weight)
+        q = q.view(torch.uint8)
+        s = s.view(torch.uint8).view(experts, n, -1)
+        ref = mxfp4_to_f32(q) * e8m0_to_f32(s).repeat_interleave(32, -1)
+    else:
+        q, s = quantize_mxfp8(weight)
+        ref = q.float() * e8m0_to_f32(s).repeat_interleave(32, -1)
+    packed_k = k_pad // (2 if b_dtype == "fp4" else 1)
     if stage == 1:
-        q = q.view(experts, 2, n // 32, 16, k_pad).permute(0, 2, 1, 3, 4).contiguous().view_as(q)
-    packed = torch.stack([preshuffle_b(w.view(torch.int8)).reshape(n, k_pad) for w in q])
+        q = q.view(experts, 2, n // 32, 16, packed_k).permute(0, 2, 1, 3, 4).contiguous().view_as(q)
+    packed = torch.stack([preshuffle_b(w.view(torch.int8)).reshape(n, packed_k) for w in q])
     scales = shuffle_scale_w4(s.reshape(experts * n, -1), experts, stage == 1)
     return packed, scales, ref
 
 
-@pytest.mark.parametrize("stage,k,n", [(2, 384, 256), (2, 512, 768), (2, 768, 512), (1, 512, 768), (1, 6144, 768)])
+@pytest.mark.parametrize(
+    "stage,k,n", [(2, 256, 256), (2, 384, 256), (2, 512, 768), (2, 768, 512), (1, 512, 768), (1, 6144, 768)]
+)
 @pytest.mark.parametrize("swizzle", [0, 4])
-def test_mxfp8_moe_8wave(stage, k, n, swizzle):
+@pytest.mark.parametrize("b_dtype", ["fp8", "fp4"])
+def test_mxfp8_moe_8wave(stage, k, n, swizzle, b_dtype):
     torch.manual_seed(42)
     experts = 3
     # More than one tile per expert, an expert with no routes, and a deliberately
@@ -62,7 +78,7 @@ def test_mxfp8_moe_8wave(stage, k, n, swizzle):
     a[257:512] = 0
     a = torch.nn.functional.pad(a, (0, k_pad - k))
     aq, sa = per_1x32_f8_quant(a)
-    b, sb, bref = prepare_weights(torch.randn(experts, n, k, device="cuda") * 0.1, stage)
+    b, sb, bref = prepare_weights(torch.randn(experts, n, k, device="cuda") * 0.1, stage, b_dtype)
     c = torch.full((m, n // 2 if stage == 1 else n), float("nan"), device="cuda", dtype=torch.bfloat16)
     args = (
         aq.view(torch.int8).flatten(),
@@ -76,7 +92,17 @@ def test_mxfp8_moe_8wave(stage, k, n, swizzle):
         n,
         torch.cuda.current_stream(),
     )
-    compiled = flyc.compile(compile_mxfp8_moe_gemm_8w(K=k_pad, logical_k=k, stage=stage, xcd_swizzle=swizzle), *args)
+    compiled = flyc.compile(
+        compile_mxfp8_moe_gemm_8w(
+            K=k_pad,
+            logical_k=k,
+            stage=stage,
+            xcd_swizzle=swizzle,
+            b_dtype=b_dtype,
+            activation_type="silu" if b_dtype == "fp4" else "swiglu",
+        ),
+        *args
+    )
     compiled(*args)
     snapshot = c.clone()
     for _ in range(3):
@@ -86,8 +112,11 @@ def test_mxfp8_moe_8wave(stage, k, n, swizzle):
     ref = torch.cat([af[i * 256 : (i + 1) * 256] @ bref[e].T for i, e in enumerate(ids.tolist())])
     if stage == 1:
         gate, up = ref.chunk(2, dim=-1)
-        gate = gate.clamp(max=7)
-        ref = gate * torch.sigmoid(1.702 * gate) * (up.clamp(-7, 7) + 1)
+        if b_dtype == "fp4":
+            ref = torch.nn.functional.silu(gate) * up
+        else:
+            gate = gate.clamp(max=7)
+            ref = gate * torch.sigmoid(1.702 * gate) * (up.clamp(-7, 7) + 1)
     torch.testing.assert_close(c, ref.bfloat16(), rtol=0.02, atol=0.015)
 
 
@@ -210,15 +239,17 @@ def test_mxfp8_moe_unpack_routes():
     "stage,k,n,tile",
     [(2, 384, 256, (256, 256)), (2, 384, 768, (128, 512)), (1, 512, 768, (256, 256)), (1, 512, 768, (128, 512))],
 )
-def test_dynamic_rows_and_weight_stride(stage, k, n, tile):
+@pytest.mark.parametrize("b_dtype", ["fp8", "fp4"])
+def test_dynamic_rows_and_weight_stride(stage, k, n, tile, b_dtype):
     torch.manual_seed(54)
     rows, active = 1024, 512
     kp = (k + 255) // 256 * 256
     a = torch.randn(rows, k, device="cuda") * 0.1
     aq, sa = quantize_mxfp8(torch.nn.functional.pad(a, (0, kp - k)))
-    b, sb, bref = prepare_weights(torch.randn(2, n, k, device="cuda") * 0.1, stage)
+    b, sb, bref = prepare_weights(torch.randn(2, n, k, device="cuda") * 0.1, stage, b_dtype)
     # AITER stores B with physical K384, while A/scales are padded to K512.
-    b = b.view(2, n // 16, kp // 64, 4, 16, 16)[:, :, : k // 64].contiguous().flatten()
+    pack = 2 if b_dtype == "fp4" else 1
+    b = b.view(2, n // 16, kp // (64 * pack), 4, 16, 16)[:, :, : k // (64 * pack)].contiguous().flatten()
     ids = torch.tensor([1, 0], device="cuda", dtype=torch.int32)
     valid = torch.tensor([active], device="cuda", dtype=torch.int32)
     out = torch.full((rows, n // 2 if stage == 1 else n), 42.0, device="cuda", dtype=torch.bfloat16)
@@ -237,7 +268,16 @@ def test_dynamic_rows_and_weight_stride(stage, k, n, tile):
     )
     fn = flyc.compile(
         compile_mxfp8_moe_gemm_8w(
-            K=kp, logical_k=k, b_k=k, stage=stage, dynamic_rows=True, tile_m=tile[0], tile_n=tile[1], swiglu_limit=5.0
+            K=kp,
+            logical_k=k,
+            b_k=k,
+            stage=stage,
+            dynamic_rows=True,
+            tile_m=tile[0],
+            tile_n=tile[1],
+            swiglu_limit=5.0,
+            b_dtype=b_dtype,
+            activation_type="silu" if b_dtype == "fp4" else "swiglu",
         ),
         *args
     )
@@ -247,7 +287,10 @@ def test_dynamic_rows_and_weight_stride(stage, k, n, tile):
     if stage == 1:
         gate, up = ref.chunk(2, -1)
         gate = gate.clamp(max=5)
-        ref = gate * torch.sigmoid(1.702 * gate) * (up.clamp(-5, 5) + 1)
+        if b_dtype == "fp4":
+            ref = torch.nn.functional.silu(gate) * up.clamp(-5, 5)
+        else:
+            ref = gate * torch.sigmoid(1.702 * gate) * (up.clamp(-5, 5) + 1)
     torch.testing.assert_close(out[:active], ref.bfloat16(), rtol=0.02, atol=0.015)
     assert (out[active:] == 42).all()
     snapshot = out.clone()
