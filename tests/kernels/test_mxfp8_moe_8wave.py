@@ -141,6 +141,70 @@ def test_mxfp8_moe_quant(k, gather):
     torch.testing.assert_close(scale, shuffle_scale_w4(rs, 1, False), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("n", [512, 768])
+def test_a8w4_fused_stage1_quant_dynamic_graph(n):
+    """Fused FP8/scales exactly match BF16 activation followed by quantization."""
+    torch.manual_seed(813)
+    tokens, k, rows = 129, 512, 1024
+    inter = n // 2
+    kp = (inter + 255) // 256 * 256
+    x = torch.randn(tokens, k, device="cuda", dtype=torch.bfloat16) * 0.1
+    aq, source_scale = quantize_mxfp8(x)
+    row_map = torch.randint(tokens, (rows,), device="cuda", dtype=torch.int32)
+    row_map[129:256] = -1
+    row_map[257:512] = -1
+    sa = source_scale[row_map.clamp_min(0).long()]
+    sa[row_map < 0] = 127
+    sa = shuffle_scale_w4(sa, 1, False)
+    b, sb, _ = prepare_weights(torch.randn(3, n, k, device="cuda") * 0.1, 1, "fp4")
+    eids = torch.tensor([2, 2, 0], device="cuda", dtype=torch.int32)
+    valid = torch.tensor([768], device="cuda", dtype=torch.int32)
+    act = torch.empty(rows, inter, device="cuda", dtype=torch.bfloat16)
+    expected = torch.full((rows * (kp + kp // 32),), 42, device="cuda", dtype=torch.int8)
+    actual = torch.full_like(expected, 42)
+    q = expected[: rows * kp]
+    scale = expected[rows * kp :].view(torch.uint8)
+    args = (
+        aq.view(torch.int8).flatten(),
+        b.flatten(),
+        act.flatten(),
+        sa.flatten(),
+        sb.flatten(),
+        eids,
+        row_map,
+        valid,
+        rows,
+        n,
+        torch.cuda.current_stream(),
+    )
+    options = dict(K=k, stage=1, gather_a=True, dynamic_rows=True, b_dtype="fp4", activation_type="silu")
+    bf16_gemm = flyc.compile(compile_mxfp8_moe_gemm_8w(**options), *args)
+    fused_args = (*args[:2], actual, *args[3:])
+    fused_gemm = flyc.compile(compile_mxfp8_moe_gemm_8w(**options, fuse_quant=True), *fused_args)
+    quant_args = (act.flatten(), q, scale, row_map, rows, valid, torch.cuda.current_stream())
+    quant = flyc.compile(compile_mxfp8_moe_quant(K=inter, gather=False, dynamic_rows=True), *quant_args)
+
+    def run():
+        stream = torch.cuda.current_stream()
+        bf16_gemm(*args[:-1], stream)
+        quant(*quant_args[:-1], stream)
+        fused_gemm(*fused_args[:-1], stream)
+
+    run()
+    assert torch.equal(actual, expected)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for active in (768, 512, 0, 768):
+        valid.fill_(active)
+        expected.fill_(42)
+        actual.fill_(42)
+        graph.replay()
+        assert torch.equal(actual, expected)
+        assert (actual[: rows * kp].view(rows, kp)[active:] == 42).all()
+        assert (actual[rows * kp :].view(rows, kp // 32)[active:] == 42).all()
+
+
 def test_mxfp8_moe_reduce():
     m, n, topk = 31, 256, 5
     inverse = torch.randperm(m * topk, device="cuda").to(torch.int32).reshape(m, topk)
