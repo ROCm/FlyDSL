@@ -64,9 +64,8 @@ func.func @test_wmma_scale_call_fp8(
   // CHECK-DAG: %[[A_VAL:.*]] = llvm.load %{{.*}} : !llvm.ptr<5> -> vector<16xi32>
   // CHECK-DAG: %[[B_VAL:.*]] = llvm.load %{{.*}} : !llvm.ptr<5> -> vector<16xi32>
   // CHECK-DAG: %[[C_VAL:.*]] = llvm.load %{{.*}} : !llvm.ptr<5> -> vector<8xf32>
-  // CHECK-DAG: %[[SA_VAL:.*]] = llvm.extractvalue %[[A2]][0]
-  // CHECK-DAG: %[[SB_VAL:.*]] = llvm.extractvalue %[[A2]][1]
-  // CHECK: %[[RES:.*]] = rocdl.wmma.scale.f32.16x16x128.f8f6f4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]], %[[SA_VAL]], %[[SB_VAL]], fmtA = fp8_e4m3, fmtB = fp8_e4m3, modC = none, scaleAType = row0, fmtScaleA = e8, scaleBType = row0, fmtScaleB = e8 : (vector<16xi32>, vector<16xi32>, vector<8xf32>, i32, i32) -> vector<8xf32>
+  // CHECK-NOT: llvm.extractvalue
+  // CHECK: %[[RES:.*]] = rocdl.wmma.scale.f32.16x16x128.f8f6f4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]], %[[SA]], %[[SB]], fmtA = fp8_e4m3, fmtB = fp8_e4m3, modC = none, scaleAType = row0, fmtScaleA = e8, scaleBType = row0, fmtScaleB = e8 : (vector<16xi32>, vector<16xi32>, vector<8xf32>, i32, i32) -> vector<8xf32>
   // CHECK: llvm.store %[[RES]], %{{.*}} : vector<8xf32>, !llvm.ptr<5>
   fly.mma_atom_call(%atom_ab, %d, [%a], [%b], %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false, blockSize = 32>>, !fly.memref<f32, register, 8:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f32, register, 8:1>) -> ()
   return
@@ -168,9 +167,8 @@ func.func @test_wmma_scale16_call_fp8(
   // CHECK: %[[A2:.*]] = llvm.insertvalue %[[SB]], %[[A1]][1]
   %atom_ab = fly.atom.set_value(%atom_a, "scale_b", %scale_b) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false, blockSize = 16>>, i64) -> !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false, blockSize = 16>>
 
-  // CHECK-DAG: %[[SA_VAL:.*]] = llvm.extractvalue %[[A2]][0]
-  // CHECK-DAG: %[[SB_VAL:.*]] = llvm.extractvalue %[[A2]][1]
-  // CHECK: rocdl.wmma.scale16.f32.16x16x128.f8f6f4 %{{.*}}, %{{.*}}, %{{.*}}, %[[SA_VAL]], %[[SB_VAL]], fmtA = fp8_e4m3, fmtB = fp8_e4m3, modC = none, scaleAType = row0, fmtScaleA = e8, scaleBType = row0, fmtScaleB = e8 : (vector<16xi32>, vector<16xi32>, vector<8xf32>, i64, i64) -> vector<8xf32>
+  // CHECK-NOT: llvm.extractvalue
+  // CHECK: rocdl.wmma.scale16.f32.16x16x128.f8f6f4 %{{.*}}, %{{.*}}, %{{.*}}, %[[SA]], %[[SB]], fmtA = fp8_e4m3, fmtB = fp8_e4m3, modC = none, scaleAType = row0, fmtScaleA = e8, scaleBType = row0, fmtScaleB = e8 : (vector<16xi32>, vector<16xi32>, vector<8xf32>, i64, i64) -> vector<8xf32>
   fly.mma_atom_call(%atom_ab, %d, [%a], [%b], %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false, blockSize = 16>>, !fly.memref<f32, register, 8:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f32, register, 8:1>) -> ()
   return
 }

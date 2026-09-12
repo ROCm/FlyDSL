@@ -36,6 +36,9 @@ bool isEligibleToPromote(Type ty) {
     return false;
   LayoutBuilder<LayoutAttr> builder(memRefTy.getContext());
   auto coalesced = layoutCoalesce(builder, layoutAttr);
+  // Coalescing can retain singleton tuple nesting, e.g. (2):(1).
+  while (!coalesced.isLeaf() && coalesced.rank() == 1)
+    coalesced = coalesced.at(0);
   if (!coalesced.isLeaf())
     return false;
   return coalesced.getStride().isLeafStaticValue(1) || coalesced.getShape().isLeafStaticValue(1);

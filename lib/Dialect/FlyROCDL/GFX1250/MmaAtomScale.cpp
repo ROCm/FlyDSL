@@ -240,23 +240,13 @@ MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Ty
   if (c.getType() != accTy)
     c = LLVM::BitcastOp::create(builder, loc, accTy, c);
 
-  Value scaleA = LLVM::ExtractValueOp::create(
-      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});
-  Value scaleB = LLVM::ExtractValueOp::create(
-      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
   Type scaleType = builder.getIntegerType(getBlockSize() == 16 ? 64 : 32);
-  if (aValues.size() == 2) {
-    auto scale = loadMmaScale(builder, loc, aTyArgs[1], aValues[1], scaleType);
-    if (failed(scale))
-      return failure();
-    scaleA = *scale;
-  }
-  if (bValues.size() == 2) {
-    auto scale = loadMmaScale(builder, loc, bTyArgs[1], bValues[1], scaleType);
-    if (failed(scale))
-      return failure();
-    scaleB = *scale;
-  }
+  auto scaleA = getMmaScale(builder, loc, aTyArgs, aValues, scaleType, atomVal,
+                            *getFieldIndex(AtomStateField::ScaleA));
+  auto scaleB = getMmaScale(builder, loc, bTyArgs, bValues, scaleType, atomVal,
+                            *getFieldIndex(AtomStateField::ScaleB));
+  if (failed(scaleA) || failed(scaleB))
+    return failure();
 
   // fmtScaleA / fmtScaleB default to 0 (E8M0). modC / reuseA / reuseB come from
   // the atom's compile-time params. block-16 selects the V_WMMA_SCALE16 form
@@ -270,12 +260,12 @@ MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Ty
   if (m == 32 && n == 16 && k == 128) {
     if (block16)
       return ROCDL::wmma_scale16_f32_32x16x128_f4::create(
-                 builder, loc, accTy, a, b, modC, c, scaleAType, fmtScale0, scaleA, scaleBType,
-                 fmtScale0, scaleB, getReuseA(), getReuseB())
+                 builder, loc, accTy, a, b, modC, c, scaleAType, fmtScale0, *scaleA, scaleBType,
+                 fmtScale0, *scaleB, getReuseA(), getReuseB())
           .getResult();
     return ROCDL::wmma_scale_f32_32x16x128_f4::create(builder, loc, accTy, a, b, modC, c,
-                                                      scaleAType, fmtScale0, scaleA, scaleBType,
-                                                      fmtScale0, scaleB, getReuseA(), getReuseB())
+                                                      scaleAType, fmtScale0, *scaleA, scaleBType,
+                                                      fmtScale0, *scaleB, getReuseA(), getReuseB())
         .getResult();
   }
 
@@ -289,12 +279,12 @@ MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Ty
 
   if (block16)
     return ROCDL::wmma_scale16_f32_16x16x128_f8f6f4::create(
-               builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, scaleA,
-               scaleBType, fmtScale0, scaleB, getReuseA(), getReuseB())
+               builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, *scaleA,
+               scaleBType, fmtScale0, *scaleB, getReuseA(), getReuseB())
         .getResult();
   return ROCDL::wmma_scale_f32_16x16x128_f8f6f4::create(
-             builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, scaleA,
-             scaleBType, fmtScale0, scaleB, getReuseA(), getReuseB())
+             builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, *scaleA,
+             scaleBType, fmtScale0, *scaleB, getReuseA(), getReuseB())
       .getResult();
 }
 

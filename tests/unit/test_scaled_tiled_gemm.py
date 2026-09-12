@@ -29,7 +29,17 @@ def _walk(op):
                 yield from _walk(child.operation)
 
 
-def _build_gemm(rank, traversal=None, invalid_scale=None, scale_mode="tensor", packed=False):
+def _build_gemm(
+    rank,
+    traversal=None,
+    invalid_scale=None,
+    scale_mode="tensor",
+    packed=False,
+    *,
+    call=fx.gemm,
+    metadata_operands=(),
+    metadata_v=(2,),
+):
     m, n, k = (1, 1, 1) if rank == 1 else (2, 3, 2 if rank == 3 else 1)
     module = ir.Module.create()
     with ir.InsertionPoint(module.body):
@@ -84,15 +94,16 @@ def _build_gemm(rank, traversal=None, invalid_scale=None, scale_mode="tensor", p
                     a_group = a
                 if scale_mode == "state":
                     kwargs.update(scale_a=117, scale_b=fx.Int32(120))
-                if scale_mode == "tuple":
-                    a_group, b_group = tuple(a_group), tuple(b_group)
+                elif scale_mode == "override_state":
+                    kwargs.update(scale_a=110, scale_b=fx.Int32(111))
                 for operand, group, shape, tiles in (("a", a_group, a_shape, m), ("b", b_group, b_shape, n)):
-                    if scale_mode in (f"triple_{operand}", "triple_both"):
-                        metadata = fx.make_rmem_tensor(2 if rank == 1 else (2,) + shape[1:], fx.Int16)
+                    if operand in metadata_operands:
+                        metadata = fx.make_rmem_tensor(metadata_v if rank == 1 else (metadata_v,) + shape[1:], fx.Int16)
                         for kt, tile, element in itertools.product(range(k), range(tiles), range(2)):
                             metadata[(element, tile, kt)[:rank]] = fx.Int16(200 + element + 2 * (tile + tiles * kt))
                         group.append(metadata)
-                call = fx.mma_atom_call if scale_mode == "direct" else fx.gemm
+                if scale_mode == "tuple":
+                    a_group, b_group = tuple(a_group), tuple(b_group)
                 call(mma, d, a_group, b_group, c, **kwargs)
                 gpu.ReturnOp([d.load().ir_value()])
     return module, (m, n, k)
@@ -168,11 +179,12 @@ def test_scaled_gemm_rejects_invalid_fragments(invalid, diagnostic):
             PassManager.parse(PIPELINE).run(module.operation)
 
 
-@pytest.mark.parametrize("mode", ["tensor", "direct", "state"])
+@pytest.mark.parametrize("call", [fx.gemm, fx.mma_atom_call])
+@pytest.mark.parametrize("mode", ["tensor", "state", "override_state"])
 @pytest.mark.parametrize("promote", [False, True])
-def test_atom_operand_groups_and_legacy_scalar_state(mode, promote):
+def test_atom_operand_groups_and_scalar_state(call, mode, promote):
     with ir.Context(), ir.Location.unknown():
-        module, _ = _build_gemm(1, scale_mode=mode, packed=True)
+        module, _ = _build_gemm(1, scale_mode=mode, packed=True, call=call)
         pipeline = (
             PIPELINE
             if promote
@@ -187,11 +199,11 @@ def test_atom_operand_groups_and_legacy_scalar_state(mode, promote):
             assert all(value.owner.name == "llvm.load" for value in calls[0].operands[3:])
 
 
-@pytest.mark.parametrize("rank", [1, 2, 3])
-@pytest.mark.parametrize("mode", ["triple_a", "triple_b", "triple_both"])
-def test_three_tensor_operand_groups_survive_expansion_and_ssa(rank, mode):
+@pytest.mark.parametrize("rank,metadata_v", [(1, 2), (1, (2,)), (1, ((2,),)), (2, 2), (3, 2)])
+@pytest.mark.parametrize("metadata_operands", [("a",), ("b",), ("a", "b")])
+def test_three_tensor_operand_groups_survive_expansion_and_ssa(rank, metadata_v, metadata_operands):
     with ir.Context(), ir.Location.unknown():
-        module, (m, n, k) = _build_gemm(rank, scale_mode=mode)
+        module, (m, n, k) = _build_gemm(rank, metadata_operands=metadata_operands, metadata_v=metadata_v)
         # Check the public builder and textual IR preserve the group boundaries.
         module = ir.Module.parse(str(module))
         assert module.operation.verify()
@@ -201,7 +213,7 @@ def test_three_tensor_operand_groups_survive_expansion_and_ssa(rank, mode):
         assert not any(op.name in ("fly.gemm", "scf.for", "scf.while") for op in _walk(module.operation))
         for call in calls:
             for operand, group, tiles, base in (("a", call.a, m, 117), ("b", call.b, n, 120)):
-                has_metadata = mode in (f"triple_{operand}", "triple_both")
+                has_metadata = operand in metadata_operands
                 assert len(group) == (3 if has_metadata else 2)
                 if has_metadata:
                     scale = ir.IntegerAttr(group[1].owner.attributes["value"]).value
@@ -301,6 +313,7 @@ def test_gfx1250_scale_operand_types(block_size, representation):
                 assert value.owner.operands[0] == argument
 
 
+@pytest.mark.parametrize("scale_source", ["operand", "state"])
 @pytest.mark.parametrize(
     "shift,opsel,folded",
     [
@@ -315,8 +328,13 @@ def test_gfx1250_scale_operand_types(block_size, representation):
         (32, 0, None),
     ],
 )
-def test_scale_byte_shift_uses_mfma_selector(shift, opsel, folded):
+def test_scale_byte_shift_uses_mfma_selector(shift, opsel, folded, scale_source):
     atom = f"!fly.mma_atom<!fly_rocdl.cdna4.mfma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = {opsel}, opselB = {opsel}>>"
+    call = (
+        f"fly.mma_atom_call_ssa(%atom, [%a, %as], [%b, %bs], %c) : ({atom}, vector<8xi32>, i32, vector<8xi32>, i32, vector<4xf32>) -> vector<4xf32>"
+        if scale_source == "operand"
+        else f"fly.mma_atom_call_ssa(%atom_ab, [%a], [%b], %c) : ({atom}, vector<8xi32>, vector<8xi32>, vector<4xf32>) -> vector<4xf32>"
+    )
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.parse(f"""
         func.func @test(%a: vector<8xi32>, %b: vector<8xi32>, %c: vector<4xf32>, %sa: i32, %sb: i32) -> vector<4xf32> {{
@@ -326,7 +344,7 @@ def test_scale_byte_shift_uses_mfma_selector(shift, opsel, folded):
           %atom = fly.make_mma_atom : {atom}
           %atom_a = fly.atom.set_value(%atom, "scale_a", %as) : ({atom}, i32) -> {atom}
           %atom_ab = fly.atom.set_value(%atom_a, "scale_b", %bs) : ({atom}, i32) -> {atom}
-          %r = fly.mma_atom_call_ssa(%atom_ab, [%a], [%b], %c) : ({atom}, vector<8xi32>, vector<8xi32>, vector<4xf32>) -> vector<4xf32>
+          %r = {call}
           return %r : vector<4xf32>
         }}""")
         PassManager.parse("builtin.module(convert-fly-to-rocdl)").run(module.operation)
