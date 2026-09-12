@@ -1051,9 +1051,28 @@ def copy_atom_call(copy_atom, src, dst, *, pred=None):
     return fly.copy_atom_call(copy_atom, src, dst, pred=pred)
 
 
+def _normalize_mma_operand(operand, name):
+    from .typing import Tensor
+
+    tensors = list(operand) if isinstance(operand, (list, tuple)) else [operand]
+    if not tensors:
+        raise ValueError(f"'{name}' must contain at least one Tensor")
+    for index, tensor in enumerate(tensors):
+        if not isinstance(tensor, Tensor):
+            raise TypeError(f"'{name}' operand {index} must be a Tensor, got {type(tensor).__name__}")
+    return tensors
+
+
 @dsl_loc_tracing
-def mma_atom_call(mma_atom, d, a, b, c):
-    return fly.mma_atom_call(mma_atom, d, _normalize_mma_operand(a, "a"), _normalize_mma_operand(b, "b"), c)
+def mma_atom_call(mma_atom, d, a, b, c, **kwargs):
+    """Apply one MMA atom to Tensor or list/tuple operands, with optional atom state."""
+    return fly.mma_atom_call(
+        mma_atom if not kwargs else mma_atom.set_value(kwargs),
+        d,
+        _normalize_mma_operand(a, "a"),
+        _normalize_mma_operand(b, "b"),
+        c,
+    )
 
 
 @dsl_loc_tracing
@@ -1109,18 +1128,6 @@ def copy(copy_atom, src, dst, *, pred=None, **kwargs):
     return fly.copy(copy_atom.set_value(kwargs), src, dst, pred=pred)
 
 
-def _normalize_mma_operand(operand, name):
-    from .typing import Tensor
-
-    tensors = list(operand) if isinstance(operand, (list, tuple)) else [operand]
-    if not tensors:
-        raise ValueError(f"'{name}' must contain at least one Tensor")
-    for index, tensor in enumerate(tensors):
-        if not isinstance(tensor, Tensor):
-            raise TypeError(f"'{name}' operand {index} must be a Tensor, got {type(tensor).__name__}")
-    return tensors
-
-
 @dsl_loc_tracing
 def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, **kwargs):
     """Multiply register tiles, fully unrolling their static M/N/K dimensions.
@@ -1143,7 +1150,7 @@ def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, *
     if traversal_order is not None and traversal_layout is not None:
         raise ValueError("Only one of 'traversal_order' or 'traversal_layout' can be specified, not both")
     return fly.gemm(
-        mma_atom if (not kwargs) else mma_atom.set_value(kwargs),
+        mma_atom if not kwargs else mma_atom.set_value(kwargs),
         d,
         _normalize_mma_operand(a, "a"),
         _normalize_mma_operand(b, "b"),

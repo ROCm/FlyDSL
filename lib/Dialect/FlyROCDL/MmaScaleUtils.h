@@ -11,10 +11,16 @@
 
 namespace mlir::fly_rocdl {
 
-// Auxiliary scale fragments reach target lowering as either a promoted vector
-// or a pointer. Their representation is a property of the scaled MMA, not GEMM.
-inline FailureOr<Value> loadMmaScale(OpBuilder &builder, Location loc, Type originalType,
-                                     Value value, Type scaleType) {
+// Read an explicit scale fragment, falling back to atom state when omitted.
+inline FailureOr<Value> getMmaScale(OpBuilder &builder, Location loc, TypeRange operandTypes,
+                                    ValueRange operands, Type scaleType, Value atomState,
+                                    int64_t stateIndex) {
+  if (operands.size() == 1)
+    return builder.createOrFold<LLVM::ExtractValueOp>(loc, atomState,
+                                                      ArrayRef<int64_t>{stateIndex});
+
+  Type originalType = operandTypes[1];
+  Value value = operands[1];
   Type elementType = originalType;
   int64_t size = 1;
   if (auto memref = dyn_cast<fly::MemRefType>(originalType)) {

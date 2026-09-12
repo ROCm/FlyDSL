@@ -264,39 +264,29 @@ MmaOpCDNA4_MFMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type
   if (c.getType() != accTy)
     c = LLVM::BitcastOp::create(builder, loc, accTy, c);
 
-  Value scaleA = builder.createOrFold<LLVM::ExtractValueOp>(
-      loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});
-  Value scaleB = builder.createOrFold<LLVM::ExtractValueOp>(
-      loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
   Type scaleType = builder.getI32Type();
-  if (aValues.size() == 2) {
-    auto scale = loadMmaScale(builder, loc, aTyArgs[1], aValues[1], scaleType);
-    if (failed(scale))
-      return failure();
-    scaleA = *scale;
-  }
-  if (bValues.size() == 2) {
-    auto scale = loadMmaScale(builder, loc, bTyArgs[1], bValues[1], scaleType);
-    if (failed(scale))
-      return failure();
-    scaleB = *scale;
-  }
+  auto scaleA = getMmaScale(builder, loc, aTyArgs, aValues, scaleType, atomVal,
+                            *getFieldIndex(AtomStateField::ScaleA));
+  auto scaleB = getMmaScale(builder, loc, bTyArgs, bValues, scaleType, atomVal,
+                            *getFieldIndex(AtomStateField::ScaleB));
+  if (failed(scaleA) || failed(scaleB))
+    return failure();
 
   auto cbsz = static_cast<ROCDL::MatrixFormat>(*aTypeCode);
   auto blgp = static_cast<ROCDL::MatrixFormat>(*bTypeCode);
   uint32_t opselA = getOpselA();
   uint32_t opselB = getOpselB();
-  foldScaleByteShift(scaleA, opselA);
-  foldScaleByteShift(scaleB, opselB);
+  foldScaleByteShift(*scaleA, opselA);
+  foldScaleByteShift(*scaleB, opselB);
 
   if (m == 16 && n == 16 && k == 128) {
     return ROCDL::mfma_scale_f32_16x16x128_f8f6f4::create(builder, loc, accTy, a, b, c, cbsz, blgp,
-                                                          opselA, scaleA, opselB, scaleB)
+                                                          opselA, *scaleA, opselB, *scaleB)
         .getResult();
   }
   if (m == 32 && n == 32 && k == 64) {
     return ROCDL::mfma_scale_f32_32x32x64_f8f6f4::create(builder, loc, accTy, a, b, c, cbsz, blgp,
-                                                         opselA, scaleA, opselB, scaleB)
+                                                         opselA, *scaleA, opselB, *scaleB)
         .getResult();
   }
 
