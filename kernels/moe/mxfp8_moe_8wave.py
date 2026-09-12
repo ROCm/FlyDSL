@@ -90,7 +90,7 @@ def _store_factory(
             for chunk in range_constexpr(2):
                 bits = (values[chunk].bitcast(fx.Int16) & 0x7FFF).reduce(ReductionOp.MAX).to(fx.Int32)
                 amax_bits = fx.max(amax_bits, bits)
-            amax_bits = fx.max(amax_bits, amax_bits.shuffle_xor(1, 64))
+            amax_bits = fx.max(amax_bits, fx.gpu.shuffle_xor(amax_bits, 1, 64))
             exponent = _mxfp8_exponent(amax_bits)
             scale = (exponent << 23).bitcast(fx.Float32)
             words = []
