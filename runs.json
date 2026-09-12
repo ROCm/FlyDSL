@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-12T11:47:01Z",
+ "updated": "2026-09-12T12:20:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34693306560,
+   "pr": 1128,
+   "commit": "aa7e0e4d2a0a14da6e17c5fa4bfea33a83fc9c8b",
+   "branch": "codex/scaled-tiled-gemm",
+   "event": "pull_request",
+   "title": "Support scale fragments in fully expanded tiled GEMM",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34693306560",
+   "created_at": "2026-09-12T12:18:15Z",
+   "updated_at": "2026-09-12T12:18:59Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34691668348,
    "pr": 1123,
@@ -14,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691668348",
    "created_at": "2026-09-12T11:40:39Z",
-   "updated_at": "2026-09-12T11:44:33Z",
+   "updated_at": "2026-09-12T12:19:00Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-12T12:18:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691668348/job/103551441654"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-12T12:11:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691668348/job/103551441671"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-12T12:11:50Z",
+     "completed_at": "2026-09-12T12:13:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691668348/job/103551441690"
+    }
+   ]
   },
   {
    "run_id": 34691576163,
@@ -29,9 +72,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691576163",
    "created_at": "2026-09-12T11:38:29Z",
-   "updated_at": "2026-09-12T11:39:50Z",
+   "updated_at": "2026-09-12T12:11:10Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-12T12:11:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691576163/job/103551441826"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-12T12:11:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691576163/job/103551441888"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-12T12:11:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691576163/job/103551441898"
+    }
+   ]
   },
   {
    "run_id": 34691445889,
@@ -40,13 +111,41 @@
    "branch": "codex/scaled-tiled-gemm",
    "event": "pull_request",
    "title": "Support scale fragments in fully expanded tiled GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691445889",
    "created_at": "2026-09-12T11:35:30Z",
-   "updated_at": "2026-09-12T11:37:32Z",
+   "updated_at": "2026-09-12T12:18:55Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-12T11:56:26Z",
+     "completed_at": "2026-09-12T12:18:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691445889/job/103549622630"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-12T11:56:13Z",
+     "completed_at": "2026-09-12T12:18:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691445889/job/103549622651"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-12T12:11:30Z",
+     "completed_at": "2026-09-12T12:18:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691445889/job/103549622696"
+    }
+   ]
   },
   {
    "run_id": 34690942760,
@@ -1961,21 +2060,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34446206959",
    "created_at": "2026-09-10T06:39:43Z",
    "updated_at": "2026-09-10T06:39:43Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 34446193317,
-   "pr": null,
-   "commit": "84faa9e93c90f1a3632fa3307f0dbc8c2085eb14",
-   "branch": "feat/rocdl-cvt-f32-fp8",
-   "event": "pull_request",
-   "title": "[DSL] Expose F32_FP8 conversion from packed_i32",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34446193317",
-   "created_at": "2026-09-10T06:39:31Z",
-   "updated_at": "2026-09-10T06:39:31Z",
    "actor": "big-yellow-duck",
    "jobs": []
   }
