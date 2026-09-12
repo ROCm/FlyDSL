@@ -104,9 +104,8 @@ FlyDSL/
 │   │   ├── mxfp_moe/               # Fused a4w4/a8w4 MoE 2-stage (device fp4 re-quant)
 │   │   ├── moe_sorting_kernel.py     # MoE token sorting
 │   │   └── topk_gating_softmax_kernel.py # Top-k gating softmax
-│   ├── mma/                          # Shared MMA pipeline helpers
-│   │   ├── mfma_epilogues.py         # MFMA epilogue helpers
-│   │   ├── mfma_preshuffle_pipeline.py # Preshuffle helpers for MFMA kernels
+│   ├── common/mma/                   # Shared MMA pipeline helpers
+│   │   ├── mfma_preshuffle_pipeline.py # Preshuffle layout and XCD remapping
 │   │   └── pipeline_utils.py         # Pipeline utility helpers
 │   ├── conv/                         # Convolution kernels
 │   │   └── conv3d_implicit_8wave.py  # Implicit-GEMM 3D convolution

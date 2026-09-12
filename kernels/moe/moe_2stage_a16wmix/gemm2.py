@@ -5,10 +5,11 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from kernels.common.layout_utils import crd2idx
+from kernels.moe.mxfp_moe.mxfp4_gemm_common import lds_typed_ptr, lds_vec_load
 
 from .utils import (
     A16WI4_GROUP_SIZE,
@@ -16,13 +17,11 @@ from .utils import (
     _buffer_i32_scalar_read,
     _e8m0_byte_to_f32,
     _gep1,
-    _gep3,
     _global_base_ptr1,
     _global_i32_at,
     _global_i32_buffer_tiles,
     _global_i32_buffer_view,
     _int4_nibble_to_bf16x8,
-    _lds_ptr3,
     _raw,
     _udiv,
     _umod,
@@ -63,7 +62,6 @@ def _atomic_bf16_epilog(
     _s_count = BN // 64  # readback: each s-iter covers 64 cols (32 lanes x vec2)
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
-    lds_base = _lds_ptr3(lds_acc_base_i32, fx.Int32(0))
 
     tx_i32 = fx.Int32(gpu.thread_id("x"))
     m_lane = tx_i32 // fx.Int32(32)
@@ -87,7 +85,7 @@ def _atomic_bf16_epilog(
             vec = Vec(accm[i][J])
             for v in range_constexpr(4):
                 idx = (row_base + fx.Int32(v)) * fx.Int32(BN) + col
-                llvm.StoreOp(_raw(vec[v]), _gep3(lds_base, idx * fx.Int32(4)))
+                fx.ptr_store(vec[v], lds_typed_ptr(lds_acc_base_i32, T.f32, byte_offset=idx * fx.Int32(4)))
 
     gpu.barrier()
 
@@ -98,7 +96,7 @@ def _atomic_bf16_epilog(
             row_base_addr = token_id * fx.Int32(N_OUT) + n_block_idx * fx.Int32(BN) + col_start
             for s in range_constexpr(_s_count):
                 idx0 = row_in_block * fx.Int32(BN) + col_start + fx.Int32(s * 64)
-                v2 = Vec(llvm.load(T.vec(2, T.f32), _gep3(lds_base, idx0 * fx.Int32(4))))
+                v2 = Vec(lds_vec_load(lds_acc_base_i32, idx0 * fx.Int32(4), T.vec(2, T.f32), T.f32, align=8))
                 pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
                 off = (row_base_addr + fx.Int32(s * 64)) * fx.Int32(2)
                 out_ptr = _gep1(out_base, off)
@@ -589,14 +587,14 @@ def compile_gemm2_a16w4_port(
 
         def _xcd_np(pid):
             xc = _umod(pid, _NXCD)
-            wgid = xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + _udiv(pid, _NXCD)
+            wgid = xc * _xq + fx.min(xc, _xr) + _udiv(pid, _NXCD)
             if const_expr(_SW <= 0):
                 return wgid
             _ng = fx.Int32(_SW * _num_n_blocks)
             group_id = wgid // _ng
             first_pid_m = group_id * fx.Int32(_SW)
             remaining_m = total_m_blocks - first_pid_m
-            group_size_m = fx.Int32(arith.minsi(_raw(remaining_m), _raw(fx.Int32(_SW))))
+            group_size_m = fx.min(remaining_m, fx.Int32(_SW))
             wig = wgid % _ng
             m_block = first_pid_m + (wig % group_size_m)
             n_block = wig // group_size_m

@@ -10,13 +10,18 @@ import os
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, range_constexpr, rocdl
-from flydsl.expr.typing import T
+from flydsl.expr import range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch
-from kernels.common import buffer_ops
-
-_PTR3 = "!llvm.ptr<3>"
-LOG2E = 1.4426950408889634
+from kernels.moe.mxfp_moe.mxfp4_gemm_common import (  # noqa: F401
+    _gep1,
+    _global_base_ptr1,
+    _global_i32_at,
+    _global_i32_buffer_tiles,
+    _global_i32_buffer_view,
+    _raw,
+    _udiv,
+    _umod,
+)
 
 # a16wi4 (int4 W) groupwise scale: group_size = 32 == one MFMA K32 step (one ku per
 # K-group). Scale packed bf16 pairs (E, N, G//2, 2); even/odd ku selects lo/hi half.
@@ -38,36 +43,6 @@ def a16wmix_use_k16(arch=None):
     return "gfx95" not in str(arch)
 
 
-def _raw(v):
-    if not isinstance(v, ir.Value) and hasattr(v, "ir_value"):
-        return v.ir_value()
-    return v
-
-
-def _udiv(a, c):
-    cc = fx.Int32(c) if isinstance(c, int) else c
-    return fx.Int32(arith.divui(_raw(a), _raw(cc)))
-
-
-def _umod(a, c):
-    cc = fx.Int32(c) if isinstance(c, int) else c
-    return fx.Int32(arith.remui(_raw(a), _raw(cc)))
-
-
-def _global_i32_buffer_view(addr_i64, num_bytes):
-    # fx.copy BufferCopy atoms take soffset as an element count (not bytes); the
-    # make_layout dynamic-shape leaf must be i32/i64, not fx.Index.
-    num_bytes_i64 = fx.Int64(num_bytes)
-    ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
-    ptr = fx.inttoptr(ptr_ty, fx.Int64(addr_i64))
-    view = fx.Tensor(fx.make_view(ptr, fx.make_layout(num_bytes_i64 // fx.Int64(4), 1)))
-    return fx.rocdl.make_buffer_tensor(view, max_size=False, num_records_bytes=num_bytes_i64)
-
-
-def _global_i32_buffer_tiles(addr_i64, num_bytes, tile_elems):
-    return fx.logical_divide(_global_i32_buffer_view(addr_i64, num_bytes), fx.make_layout(tile_elems, 1))
-
-
 def _buffer_i32_scalar_read(tiles1, idx, atom):
     """Read one i32 dword at element ``idx`` from a ``_global_i32_buffer_tiles(..., 1)``
     view via the layout-API BufferCopy atom (buffer_load_dword; OOB-clamped by the
@@ -78,36 +53,10 @@ def _buffer_i32_scalar_read(tiles1, idx, atom):
     return fx.Int32(fx.Vector(fx.memref_load_vec(r))[0])
 
 
-def _lds_ptr3(base_i32, byte_off_i32):
-    addr_i64 = fx.Int64(base_i32 + byte_off_i32)
-    return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(addr_i64))
-
-
-def _gep3(base_ptr, byte_off_i32):
-    return buffer_ops.get_element_ptr(base_ptr, byte_offset=_raw(byte_off_i32), elem_type=T.i8)
-
-
-def _global_base_ptr1(addr_i64):
-    return llvm.inttoptr(ir.Type.parse("!llvm.ptr<1>"), _raw(fx.Int64(addr_i64)))
-
-
-def _gep1(base_ptr, byte_off_i32):
-    return buffer_ops.get_element_ptr(base_ptr, byte_offset=_raw(byte_off_i32), elem_type=T.i8)
-
-
-def _global_i32_ptr(addr_i64):
-    ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
-    return fx.inttoptr(ptr_ty, fx.Int64(addr_i64))
-
-
-def _global_i32_at(addr_i64, idx):
-    return _global_i32_ptr(addr_i64)[idx]
-
-
 def _e8m0_byte_to_f32(packed_i32, byte_pos):
     shift = byte_pos * fx.Int32(8)
     b = packed_i32.shrui(shift) & fx.Int32(0xFF)
-    return fx.Float32(_raw(b << fx.Int32(23)).bitcast(T.f32))
+    return (b << fx.Int32(23)).bitcast(fx.Float32)
 
 
 def _cvt_pk_bf16_f32_se(src_a_f32, src_b_f32):

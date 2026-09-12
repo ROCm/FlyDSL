@@ -5,12 +5,12 @@
 """Layout-API helper layer for the MoE 2-stage MFMA kernels (gemm1.py / gemm2.py)."""
 
 import flydsl.expr as fx
-from flydsl._mlir.dialects import rocdl
 from flydsl.compiler.ast_rewriter import ASTRewriter
-from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
+from kernels.common.act import LOG2E
 
 
 def reps(tensor, mode):
@@ -137,10 +137,9 @@ def make_preshuffle_b_layout_int4(N_full, K):
     A-fragment's ki-separated kpack byte addressing (see ``load_weight_int4_frag``).
     ``N_full`` = per-expert output channels (2*inter_dim gemm1 / model_dim gemm2);
     ``K`` = contraction dim in int8 elems."""
-    from flydsl.expr import arith as _lay_arith
     from kernels.common.mma.mfma_preshuffle_pipeline import make_preshuffle_b_layout
 
-    return make_preshuffle_b_layout(_lay_arith, c_n=fx.Index(int(N_full)), c_k=fx.Index(int(K)), kpack_bytes=8).layout_b
+    return make_preshuffle_b_layout(c_n=fx.Index(int(N_full)), c_k=fx.Index(int(K)), kpack_bytes=8).layout_b
 
 
 def load_weight_int4_frag(bt_i32, b_layout, frag, expert_off_dwords, col_base, kb, tid, ki_reps):
@@ -220,7 +219,7 @@ def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=N
     """silu(gate)*up -> out_dtype (optional fp8 weight/act scales folded in pre-silu).
     out_dtype MUST match the caller's CShuffle staging/store dtype: the fragment holds
     raw bits, so a mismatch silently reinterprets them (bf16 0x4480 == 1024.0 -> f16 4.5)."""
-    log2_exp1 = -1.4426950408889634
+    log2_exp1 = -LOG2E
     round_bit = fx.Uint32(0x8000)
     out_frag = fx.make_fragment_like(gate_frag, dtype=out_dtype)
     m_reps = reps(gate_frag, 1)

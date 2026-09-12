@@ -3,8 +3,7 @@
 
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
 
 # ceildiv is the canonical cdiv from the shared layer; re-exported here for the
@@ -59,7 +58,7 @@ def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
     iter_i8 = fx.get_iter(t_i8)
     f8_buf_ptr_ty = fx.PointerType.get(
         elem_ty=fp8_ir_t,
-        address_space=TargetAddressSpace.BufferDesc,
+        address_space=fx.rocdl.TargetAddressSpace.BufferDesc,
         alignment=fx.PointerType(iter_i8.type).alignment,
     )
     iter_f8 = fx.recast_iter(f8_buf_ptr_ty, iter_i8)
@@ -224,7 +223,7 @@ class StoreC:
                     else:
                         out = vec_f32[i].to(fx.BFloat16)
                     c_index = (row + i) * self.c_cols + col
-                    self._store_bf16(out, arith.select(col_valid, c_index, oob))
+                    self._store_bf16(out, col_valid.select(c_index, oob))
 
 
 def wait_barrier(count):

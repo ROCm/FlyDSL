@@ -22,7 +22,6 @@ from lang_utils import dtype_of, dynamic_binop, dynamic_literal_binop, run, sour
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import arith
 from flydsl.expr import math as fmath
 from flydsl.expr.numeric import (
     BFloat16,
@@ -1024,7 +1023,7 @@ class TestReduction:
 
     def test_reduce_with_fastmath(self):
         def body():
-            _ = vec(Float32).reduce(ReductionOp.ADD, fastmath=arith.FastMathFlags.fast)
+            _ = vec(Float32).reduce(ReductionOp.ADD, fastmath=fx.FastMathFlags.fast)
 
         ir_text = source_ir(body)
         assert "fastmath" in ir_text.lower() or "fast" in ir_text
@@ -1102,7 +1101,7 @@ class TestReduction:
 
     def test_reduce_combining_kind_direct(self):
         """reduce() accepts raw CombiningKind."""
-        from flydsl._mlir.dialects.vector import CombiningKind
+        from flydsl._mlir.dialects._vector_enum_gen import CombiningKind
 
         def body():
             assert isinstance(vec(Float32).reduce(CombiningKind.ADD), Float32)

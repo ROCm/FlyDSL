@@ -42,7 +42,6 @@ Utilities
 
 - ``kernels.common.kernels_common`` -- Shared constants and helper functions
 - ``kernels.common.layout_utils`` -- Layout utility functions
-- ``kernels.mma.mfma_epilogues`` -- MFMA epilogue patterns (store, accumulate, scale)
-- ``kernels.mma.mfma_preshuffle_pipeline`` -- Shared MFMA preshuffle helpers (B layout builder, K32 pack loads) used by preshuffle GEMM and MoE kernels
+- ``kernels.common.mma.mfma_preshuffle_pipeline`` -- B layout builder and XCD block remapping used by preshuffle GEMM and MoE kernels
 
 .. seealso:: :doc:`../prebuilt_kernels_guide` for detailed usage and configuration of each kernel.

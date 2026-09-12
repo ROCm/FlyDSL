@@ -1,34 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Shared module-level helpers for the gfx950 dual-wave, software-pipelined
-flash-attention kernels.
+"""Shared helpers for the gfx950 dual-wave, software-pipelined flash-attention kernels."""
 
-These MLIR-dialect-facing free functions and the ``s_waitcnt`` bit-field
-constants were previously duplicated verbatim across ``flash_attn_gfx950``
-(bf16/f16) and ``flash_attn_fp8_gfx950`` (fp8); ``_LOG2E`` / ``_waitcnt_vm_n``
-are also shared with ``flash_attn_generic``. Moving them here changes nothing
-about the emitted IR/ISA -- it only removes the duplication.
-"""
-
-import math as host_math
 import os
 from dataclasses import dataclass
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm, vector
-from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TargetAddressSpace
-from flydsl.compiler.ast_rewriter import ReplaceIfWithDispatch
+from flydsl._mlir.dialects import fly, llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from kernels.common import buffer_ops
+from kernels.common.act import LOG2E as _LOG2E
 from kernels.common.kernels_common import dtype_to_elem_type
 
-_LOG2E = host_math.log2(host_math.e)
 # gfx950 (MI350/MI355X): 8 XCDs, each with a private ~4 MB L2.
 NUM_XCD_GFX950 = 8
 LDS_BYTES_GFX950 = 160 * 1024
@@ -36,7 +25,6 @@ MIN_Q_BLOCKS_XCD_SWIZZLE = 64
 # The dual-wave 8-wave CTA fixes the q-block height; callers need it to count
 # q-blocks before any traits object exists.
 DUALWAVE_SWP_BLOCK_M = 256
-scf_if_dispatch = ReplaceIfWithDispatch.scf_if_dispatch
 
 
 _LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "flydsl.dualwave_swp.lds">'
@@ -87,7 +75,7 @@ def _read_exec_i64():
 def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
     """gfx950 ds_read_b64_tr_b16 with DUALWAVE_SWP immediate byte offset."""
     imm = int(imm_offset)
-    raw_type = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
+    raw_type = T.vec(2, T.i32)
     raw = llvm.inline_asm(
         raw_type,
         [as_mlir_value(addr_i32)],
@@ -95,7 +83,7 @@ def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
         "=v,v,~{memory}",
         has_side_effects=True,
     )
-    return vector.BitCastOp(result_type, raw).result
+    return fx.Vector(raw).bitcast(fx.Numeric.from_ir_type(ir.VectorType(result_type).element_type)).ir_value()
 
 
 def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0):
@@ -105,7 +93,7 @@ def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0):
     used for the fp8 V transpose load.
     """
     imm = int(imm_offset)
-    raw_type = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
+    raw_type = T.vec(2, T.i32)
     raw = llvm.inline_asm(
         raw_type,
         [as_mlir_value(addr_i32)],
@@ -113,7 +101,7 @@ def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0):
         "=v,v,~{memory}",
         has_side_effects=True,
     )
-    return vector.BitCastOp(result_type, raw).result
+    return fx.Vector(raw).bitcast(fx.Numeric.from_ir_type(ir.VectorType(result_type).element_type)).ir_value()
 
 
 # Arithmetic and inline-asm primitives
@@ -143,11 +131,11 @@ def _concat_vectors(lhs, rhs):
 
 
 def _bitcast_i32(value):
-    return as_mlir_value(fx.Float32(value).bitcast(fx.Int32).ir_value())
+    return fx.Float32(value).bitcast(fx.Int32).ir_value()
 
 
 def _bitcast_f32(value):
-    return as_mlir_value(fx.Int32(value).bitcast(fx.Float32).ir_value())
+    return fx.Int32(value).bitcast(fx.Float32).ir_value()
 
 
 def _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32):
@@ -523,10 +511,8 @@ def _llvm_value(value):
 
 
 def _extract_aligned_pointer(tensor, address_space=None) -> ir.Value:
-    from flydsl._mlir.dialects import fly as _fly
-
     ptr_type = ir.Type.parse("!llvm.ptr" if address_space is None else f"!llvm.ptr<{address_space}>")
-    return _fly.extract_aligned_pointer_as_index(ptr_type, _llvm_value(tensor))
+    return fly.extract_aligned_pointer_as_index(ptr_type, _llvm_value(tensor))
 
 
 def _pointer_load(result_type: ir.Type, ptr: ir.Value) -> ir.Value:
@@ -566,7 +552,7 @@ def _make_page_view(
     base_i64 = fx.Int64(fx.ptrtoint(base_iter))
     off_i64 = fx.Int64(page_id * page_byte_stride)
     shifted = fx.inttoptr(base_iter_ty, base_i64 + off_i64)
-    buf_ptr_ty = fx.PointerType.get(elem_ty=elem_ir, address_space=_TargetAddressSpace.BufferDesc, alignment=align)
+    buf_ptr_ty = fx.PointerType.get(elem_ty=elem_ir, address_space=rocdl.TargetAddressSpace.BufferDesc, alignment=align)
     buf_ptr = fx.make_ptr(
         buf_ptr_ty,
         [shifted, fx.Int16(0).ir_value(), page_nrec_bytes.ir_value(), buf_flags_i32.ir_value()],
@@ -584,7 +570,7 @@ def _make_rebased_view(base_iter, byte_off, nrec_bytes, layout, _buf_flags_i32, 
     shifted = fx.inttoptr(base_iter.type, base_i64 + fx.Int64(byte_off))
     buf_ptr_ty = fx.PointerType.get(
         elem_ty=_elem_ir,
-        address_space=_TargetAddressSpace.BufferDesc,
+        address_space=rocdl.TargetAddressSpace.BufferDesc,
         alignment=base_iter.alignment,
     )
     buf_ptr = fx.make_ptr(
@@ -1045,7 +1031,7 @@ def _init_dualwave_thread_mapping(ctx):
         (_tid_i32 // fx.Int32(traits.WARP_SIZE)).ir_value(),
     )
     # Two stagger groups, whatever the wave count.
-    ctx.stagger_i32 = arith.divsi(_wave_id_uni_i32, as_mlir_value(fx.Int32(traits.NUM_WAVES // 2)))
+    ctx.stagger_i32 = (fx.Int32(_wave_id_uni_i32) // fx.Int32(traits.NUM_WAVES // 2)).ir_value()
     ctx.wave_id_uni = fx.Index(_wave_id_uni_i32)
 
     ctx.wave_q_offset = ctx.wave_id * traits.ROWS_PER_WAVE
@@ -3836,7 +3822,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         l_row = l_row * corr + sink_w
         return m_new, l_row
 
-    def _lazy_rescale_o_rescale(self, _n, *_st, v_o, m_row, l_row, m_tile_max, v_p):
+    def _lazy_rescale_o_rescale(self, v_o, m_row, l_row, m_tile_max, v_p):
         # Lanes below their running max are dragged into this wave-uniform branch and
         # m_tile_max alone would overflow them. nnan, not the ambient: -inf is live here.
         m_new = fx.maxnumf(m_row, m_tile_max, fastmath=arith.FastMathFlags.nnan)
@@ -3867,8 +3853,8 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
             m_diff = m_tile_max - m_row
             below = fx.Float32(m_diff) <= c_eight_f
             ballot = rocdl.ballot(T.i64, as_mlir_value(below))
-            all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
-            all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
+            all_below = (fx.Int64(ballot) == fx.Int64(_read_exec_i64())).ir_value()
+            all_below = llvm.intr_expect(all_below, fx.Boolean(True).ir_value())
             _debug_count_lazy_branch(
                 traits,
                 all_below,
@@ -3876,21 +3862,13 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
                 lane=lane,
             )
 
-            _state = [as_mlir_value(v_o[dc]) for dc in range(traits.D_CHUNKS)]
-            _state += [_v_p_to_vec32(v_p), as_mlir_value(l_row), as_mlir_value(m_row)]
-            _names = tuple("_lr%d" % i for i in range(traits.D_CHUNKS + 3))
+            _res = [as_mlir_value(v_o[dc]) for dc in range(traits.D_CHUNKS)]
+            _res += [_v_p_to_vec32(v_p), as_mlir_value(l_row), as_mlir_value(m_row)]
+            if fx.Boolean(all_below):
+                pass
+            else:
+                _res = self._lazy_rescale_o_rescale(v_o, m_row, l_row, m_tile_max, v_p)
 
-            _rescale = lambda _n, *_st: self._lazy_rescale_o_rescale(
-                _n,
-                *_st,
-                v_o=v_o,
-                m_row=m_row,
-                l_row=l_row,
-                m_tile_max=m_tile_max,
-                v_p=v_p,
-            )
-
-            _res = scf_if_dispatch(all_below, lambda *_a: None, _rescale, state_names=_names, state_values=_state)
             o_out = list(_res[0 : traits.D_CHUNKS])
             vp_out = _res[traits.D_CHUNKS]
             l_out = _res[traits.D_CHUNKS + 1]
@@ -4735,7 +4713,7 @@ class DualwaveFp8GemmHelper(DualwaveFp8KernelContext):
     def _v_concat_i32x8(self, v_v, dc):
         words = []
         for ks in range_constexpr(4):
-            v2 = Vec(llvm.bitcast(self.v2i32_type, as_mlir_value(v_v[ks][dc])), (2,), fx.Int32)
+            v2 = Vec.from_elements([fx.Int64(v_v[ks][dc])], fx.Int64).bitcast(fx.Int32)
             words.append(fx.Int32(v2[0]))
             words.append(fx.Int32(v2[1]))
         return Vec.from_elements(words, fx.Int32).ir_value()
@@ -4946,7 +4924,7 @@ class DualwaveFp8KvLdsToVgprLoader(DualwaveFp8KernelContext):
 
         def _tr8(imm):
             r = _ds_read_tr8_b64_imm(self.v2i32_type, base, imm)
-            return llvm.bitcast(T.i64, as_mlir_value(Vec(r)))
+            return Vec(r).bitcast(fx.Int64)[0].ir_value()
 
         packs = [[None] * traits.D_CHUNKS for _ in range(4)]
         for dc in range_constexpr(traits.D_CHUNKS):
@@ -5165,8 +5143,8 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             m_diff_scaled = m_diff * self.c_logit_scale
             below = fx.Float32(m_diff_scaled) <= self.c_rescale_thr_f
             ballot = rocdl.ballot(T.i64, as_mlir_value(below))
-            all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
-            all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
+            all_below = (fx.Int64(ballot) == fx.Int64(_read_exec_i64())).ir_value()
+            all_below = llvm.intr_expect(all_below, fx.Boolean(True).ir_value())
 
             o_out = [as_mlir_value(v_o[dc]) for dc in range_constexpr(self.traits.D_CHUNKS)]
             m_out = as_mlir_value(m_row)
@@ -5191,8 +5169,8 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             m_diff_scaled = m_diff * self.c_logit_scale
             below = fx.Float32(m_diff_scaled) <= self.c_rescale_thr_f
             ballot = rocdl.ballot(T.i64, as_mlir_value(below))
-            all_below = arith.cmpi(arith.CmpIPredicate.eq, as_mlir_value(ballot), _read_exec_i64())
-            all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
+            all_below = (fx.Int64(ballot) == fx.Int64(_read_exec_i64())).ir_value()
+            all_below = llvm.intr_expect(all_below, fx.Boolean(True).ir_value())
 
             o_out = [as_mlir_value(v_o[dc]) for dc in range_constexpr(self.traits.D_CHUNKS)]
             m_out = as_mlir_value(m_row)
@@ -5483,8 +5461,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
                     vec_width=2,
                     dtype=T.i32,
                 )
-                o2_i32 = ir.Value(o2_raw)
-                o4 = Vec(o2_i32, (2,), fx.Int32).bitcast(self.elem_dtype).to(fx.Float32)
+                o4 = Vec(o2_raw, (2,), fx.Int32).bitcast(self.elem_dtype).to(fx.Float32)
                 w4 = Vec.from_elements([fx.Float32(wl)], fx.Float32).broadcast_to(4)
                 acc = acc + w4 * o4
             return acc, den

@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import arith as std_arith
 from flydsl._mlir.dialects import llvm
 from flydsl._mlir.extras import types as T
 from flydsl.expr.meta import dsl_loc_tracing
@@ -119,13 +118,10 @@ def _unwrap_value(value):
 
 @dsl_loc_tracing
 def _create_i32_constant(value: int) -> ir.Value:
-    """Create i32 constant using standard MLIR arith dialect."""
-    i32_type = T.i32()
+    """Create a signless i32 constant from a packed 32-bit value."""
     if value > 0x7FFFFFFF:
         value = int(value - 2**32)
-    attr = ir.IntegerAttr.get(i32_type, value)
-    op = std_arith.ConstantOp(i32_type, attr)
-    return _unwrap_value(op.result)
+    return fx.Int32(value).ir_value()
 
 
 @dsl_loc_tracing
@@ -166,8 +162,7 @@ def _add_soffset_bytes(byte_offset: ir.Value, soffset_bytes) -> ir.Value:
     """Fold ``soffset_bytes`` into the byte offset."""
     if soffset_bytes is None:
         return byte_offset
-    soffset = fx.Int32(soffset_bytes).ir_value()
-    return _unwrap_value(std_arith.AddIOp(byte_offset, soffset).result)
+    return (fx.Int32(byte_offset) + fx.Int32(soffset_bytes)).ir_value()
 
 
 @dsl_loc_tracing
@@ -237,10 +232,8 @@ def get_element_ptr(
             raise TypeError("byte_offset must be int, index, or integer-typed MLIR value; " f"got {offset_val.type}")
 
         if static_byte_offset != 0:
-            static_type = offset_val.type
-            static_attr = ir.IntegerAttr.get(static_type, int(static_byte_offset))
-            static_const = _unwrap_value(std_arith.ConstantOp(static_type, static_attr).result)
-            offset_val = _unwrap_value(std_arith.AddIOp(offset_val, static_const).result)
+            dtype = fx.Numeric.from_ir_type(offset_val.type)
+            offset_val = (dtype(offset_val) + dtype(static_byte_offset)).ir_value()
 
         dynamic_indices = [offset_val]
         raw_constant_indices = [_gep_dynamic_index_sentinel]
@@ -445,42 +438,23 @@ def buffer_load(
         if mask is not None or soffset_bytes is not None:
             raise ValueError("buffer_load(is_scalar=True) does not support mask or soffset_bytes")
         dtype = T.i32()
-    # Default dtype to f32
     elif dtype is None:
         dtype = T.f32()
     # Accept DSL Numeric class (e.g. fx.Int32) as dtype: unwrap to ir.Type
     elif hasattr(dtype, "ir_type"):
         dtype = dtype.ir_type
 
-    # Unwrap offset first (accept Python ints and DSL Numeric values).
-    if isinstance(offset, int):
-        offset = _create_i32_constant(offset)
-    elif hasattr(offset, "ir_value"):
-        offset = offset.ir_value()
-    offset = _unwrap_value(offset)
+    offset = fx.Int32(_unwrap_value(offset)).ir_value()
 
-    # Convert offset to i32 if needed
-    offset = fx.Int32(offset).ir_value()
-
-    # IMPORTANT: Buffer load offset is in BYTES, not elements!
-    # For vec4xf32, each element is 4 bytes, so multiply offset by 4
+    # Convert the API's element offset to the buffer instruction's byte offset.
     element_bytes = dtype.width // 8
-    bytes_const = _create_i32_constant(element_bytes)
-    op = std_arith.MulIOp(offset, bytes_const)
-    offset = _unwrap_value(op.result)
+    offset = (fx.Int32(offset) * fx.Int32(element_bytes)).ir_value()
 
     # Apply mask by setting invalid offsets to max
     if mask is not None:
-        mask = _unwrap_value(mask)
-        max_offset = _create_i32_constant(0x7FFFFFFF)
-        op = std_arith.SelectOp(mask, offset, max_offset)
-        offset = _unwrap_value(op.result)
+        offset = fx.Boolean(mask).select(fx.Int32(offset), fx.Int32(0x7FFFFFFF)).ir_value()
 
-    # Create vector type
-    if vec_width == 1:
-        result_type = dtype
-    else:
-        result_type = ir.VectorType.get([vec_width], dtype)
+    result_type = dtype if vec_width == 1 else ir.VectorType.get([vec_width], dtype)
 
     # Scalar/uniform load path: s.buffer.load is an SMEM instruction with no CopyOp type,
     # so it stays on the raw intrinsic and needs the raw v4i32 resource. Returns i32
@@ -505,7 +479,10 @@ def buffer_load(
     loaded = fx.memref_load_vec(reg)
     result = _unwrap_value(loaded[0] if vec_width == 1 else loaded)
     if result.type != result_type:
-        result = _unwrap_value(std_arith.BitcastOp(result_type, result).result)
+        if vec_width == 1:
+            result = fx.Numeric.from_ir_type(result.type)(result).bitcast(fx.Numeric.from_ir_type(dtype)).ir_value()
+        else:
+            result = fx.Vector(result).bitcast(fx.Numeric.from_ir_type(dtype)).ir_value()
     return result
 
 
@@ -538,21 +515,10 @@ def buffer_store(
         >>> # Store with mask
         >>> buffer_store(data, rsrc, offset, mask=valid)
     """
-    # Unwrap all inputs (accept DSL Numeric values via ir_value()). `rsrc` stays a DSL
-    # pointer: the copy atom needs the !fly.ptr<i8, BufferDesc> fat pointer, not a value.
-    if hasattr(data, "ir_value"):
-        data = data.ir_value()
-    if isinstance(offset, int):
-        offset = _create_i32_constant(offset)
-    elif hasattr(offset, "ir_value"):
-        offset = offset.ir_value()
+    # Keep `rsrc` as a !fly.ptr<i8, BufferDesc> for the copy atom.
     data = _unwrap_value(data)
-    offset = _unwrap_value(offset)
+    offset = fx.Int32(_unwrap_value(offset)).ir_value()
 
-    # Convert offset to i32 if needed
-    offset = fx.Int32(offset).ir_value()
-
-    # Get element size from data type
     data_type = data.type
     if hasattr(data_type, "element_type"):  # Vector type
         element_type = data_type.element_type
@@ -562,20 +528,13 @@ def buffer_store(
         vec_width = 1
     element_bytes = element_type.width // 8
 
-    # IMPORTANT: the buffer store offset is in BYTES.
-    # For backward compat, `buffer_store()` accepts element offsets by default
-    # and scales them to bytes. Set `offset_is_bytes=True` to skip scaling.
+    # Convert element offsets unless the caller already supplied bytes.
     if not offset_is_bytes:
-        bytes_const = _create_i32_constant(element_bytes)
-        op = std_arith.MulIOp(offset, bytes_const)
-        offset = _unwrap_value(op.result)
+        offset = (fx.Int32(offset) * fx.Int32(element_bytes)).ir_value()
 
     # Apply mask by setting invalid offsets to max
     if mask is not None:
-        mask = _unwrap_value(mask)
-        max_offset = _create_i32_constant(0x7FFFFFFF)
-        op = std_arith.SelectOp(mask, offset, max_offset)
-        offset = _unwrap_value(op.result)
+        offset = fx.Boolean(mask).select(fx.Int32(offset), fx.Int32(0x7FFFFFFF)).ir_value()
 
     offset = _add_soffset_bytes(offset, soffset_bytes)
     dst = fx.make_view(rsrc + fx.Int32(offset), fx.make_layout(vec_width * element_bytes, 1))

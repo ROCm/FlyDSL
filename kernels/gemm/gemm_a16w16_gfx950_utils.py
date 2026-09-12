@@ -7,7 +7,7 @@ from typing import Any, Callable
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, vector
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import (
     arith,
     const_expr,
@@ -68,15 +68,10 @@ def run_cached(
 
 def store_global_f32_vec(c_ptr, global_offset, vec, vec_size):
     rocdl.s_waitcnt(0)
+    vec = fx.Vector(vec)
     for vec_idx in range_constexpr(vec_size // 4):
-        vals = [arith.constant(0.0, type=T.f32)] * 4
-        for elem_idx in range_constexpr(4):
-            vals[elem_idx] = vector.extract(
-                vec,
-                static_position=[vec_idx * 4 + elem_idx],
-                dynamic_position=[],
-            )
-        chunk = vector.from_elements(T.f32x4, vals)
+        vals = [vec[vec_idx * 4 + elem_idx] for elem_idx in range_constexpr(4)]
+        chunk = fx.Vector.from_elements(vals, fx.Float32)
         chunk_ptr = get_llvm_ptr(
             c_ptr,
             global_offset + vec_idx * 4,
@@ -85,7 +80,7 @@ def store_global_f32_vec(c_ptr, global_offset, vec, vec_size):
         )
         llvm.InlineAsmOp(
             None,
-            [chunk_ptr, chunk],
+            [chunk_ptr, chunk.ir_value()],
             "global_store_dwordx4 $0, $1, off sc0 sc1",
             "v,v",
             has_side_effects=True,
@@ -204,7 +199,7 @@ class SplitKProtocol:
                         store_global_f32_vec(
                             self.c_ptr,
                             c_offset,
-                            fx.as_ir_value(init_vec),
+                            init_vec,
                             self.STG_VEC_SIZE,
                         )
                     else:

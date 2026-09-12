@@ -3,9 +3,7 @@
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
 from . import dpp_utils
@@ -360,17 +358,17 @@ def _gemm1_body(
             off = row_off + (blk_byte ^ mask_r) + (lib & fx.Int32(1)) * fx.Int32(8)
             # cvt.pk.fp8 packs 2 fp8 into a 16b lane of a vector<2xi16> accumulator
             # (dstLoHiSel = lo/hi); two lanes -> 4 fp8 = one i32 stored to LDS.
-            i16x2 = ir.Type.parse("vector<2xi16>")
-            zero16 = llvm.BitcastOp(i16x2, _raw(fx.Int32(0))).result
+            i16x2 = T.vec(2, T.i16)
+            zero16 = _raw(fx.Vector.filled(2, 0, fx.Int16))
             pk0 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, zero16, _bf16x2(h_dw_i[0]), qs_raw, 0)
             pk0 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, pk0, _bf16x2(h_dw_i[1]), qs_raw, 1)
             pk1 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, zero16, _bf16x2(h_dw_i[2]), qs_raw, 0)
             pk1 = rocdl.cvt_scalef32_pk_fp8_bf16(i16x2, pk1, _bf16x2(h_dw_i[3]), qs_raw, 1)
-            _scalar_store(s_aq_i32x1_tiles, off // fx.Int32(4), fx.Int32(llvm.BitcastOp(T.i32, pk0).result), fx.Int32)
+            _scalar_store(s_aq_i32x1_tiles, off // fx.Int32(4), fx.Vector(pk0).bitcast(fx.Int32)[0], fx.Int32)
             _scalar_store(
                 s_aq_i32x1_tiles,
                 (off + fx.Int32(4)) // fx.Int32(4),
-                fx.Int32(llvm.BitcastOp(T.i32, pk1).result),
+                fx.Vector(pk1).bitcast(fx.Int32)[0],
                 fx.Int32,
             )
         else:
@@ -756,12 +754,12 @@ def compile_gemm1_a4w4_port(
 
         def _xcd(pid):
             xc = _umod(pid, _NXCD)
-            wgid = xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + _udiv(pid, _NXCD)
+            wgid = xc * _xq + fx.min(xc, _xr) + _udiv(pid, _NXCD)
             _ng = fx.Int32(_SW * _NUM_N_BLOCKS)
             group_id = wgid // _ng
             first_pid_m = group_id * fx.Int32(_SW)
             remaining_m = total_m_blocks - first_pid_m
-            group_size_m = fx.Int32(arith.minsi(_raw(remaining_m), _raw(fx.Int32(_SW))))
+            group_size_m = fx.min(remaining_m, fx.Int32(_SW))
             wig = wgid % _ng
             m_block = first_pid_m + (wig % group_size_m)
             n_block = wig // group_size_m

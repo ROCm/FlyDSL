@@ -25,6 +25,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks_tile
 from kernels.common import dpp_utils
+from kernels.common.act import LOG2E
 from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
 from kernels.common.tensor_shim import _run_compiled, get_dtype_str
 from kernels.common.utils import (
@@ -107,8 +108,6 @@ LDS_SCALE_V_OFFSET = KV_COMPUTE_BLOCK + LDS_SCALE_V_PADDING
 LDS_SCALE_BYTES = (LDS_SCALE_V_OFFSET + KV_COMPUTE_BLOCK) * 4  # K/V per-token scale staging
 
 FP8_MAX = 240.0
-
-LOG2E = 1.4426950408889634
 
 
 def _load_k_flat(

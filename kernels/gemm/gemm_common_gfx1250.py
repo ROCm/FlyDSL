@@ -1,11 +1,10 @@
 """Shared utilities for gfx1250 GEMM kernels (fp16 / mxfp4 / mxfp8)."""
 
-import math as _math
-
 import flydsl.expr as fx
 from flydsl.expr import gpu, rocdl
 from flydsl.expr.rocdl import cluster, tdm_ops
 from flydsl.expr.typing import T
+from kernels.common.act import LOG2E
 
 
 def make_lds_copy_ops(bits):
@@ -28,13 +27,13 @@ def make_lds_copy_ops(bits):
 
     def load(lds_base_idx, byte_offset):
         rmem = fx.make_rmem_tensor(layout, fx.Int32)
-        fx.copy_atom_call(atom, _view(lds_base_idx, byte_offset), rmem)
+        fx.copy(atom, _view(lds_base_idx, byte_offset), rmem)
         return rmem.load()
 
     def store(lds_base_idx, byte_offset, data):
         rmem = fx.make_rmem_tensor(layout, fx.Int32)
         rmem.store(data)
-        fx.copy_atom_call(atom, rmem, _view(lds_base_idx, byte_offset))
+        fx.copy(atom, rmem, _view(lds_base_idx, byte_offset))
 
     return load, store
 
@@ -92,36 +91,27 @@ def pipeline_fence_wait(use_cluster=False):
         cluster.cluster_wait()
 
 
-LOG2E = _math.log2(_math.e)
-
-
 def fmin_f32(a, b):
     """Scalar f32 min (select-based, no NaN handling)."""
-    import flydsl.expr as _fx
-
-    return _fx.Float32((a < b).select(a, b))
+    return fx.Float32((a < b).select(a, b))
 
 
 def fmax_f32(a, b):
     """Scalar f32 max (select-based, no NaN handling)."""
-    import flydsl.expr as _fx
-
-    return _fx.Float32((a > b).select(a, b))
+    return fx.Float32((a > b).select(a, b))
 
 
 def fused_silu_swiglu_elem(g, u, *, swiglu, limit_f32, neg_limit_f32):
     """One (gate, up) pair -> fused silu or swiglu scalar (gpt-oss clamp)."""
-    import flydsl.expr as _fx
-
-    _one = _fx.Float32(1.0)
+    _one = fx.Float32(1.0)
     g = fmin_f32(g, limit_f32)
     u = fmin_f32(fmax_f32(u, neg_limit_f32), limit_f32)
     if swiglu:
-        nlog2e = _fx.Float32(-1.702 * LOG2E)
-        sig = _fx.Float32(rocdl.rcp(T.f32, _one + (g * nlog2e).exp2()))
+        nlog2e = fx.Float32(-1.702 * LOG2E)
+        sig = fx.Float32(rocdl.rcp(T.f32, _one + (g * nlog2e).exp2()))
         return g * sig * (u + _one)
-    nlog2e = _fx.Float32(-LOG2E)
-    sig = _fx.Float32(rocdl.rcp(T.f32, _one + (g * nlog2e).exp2()))
+    nlog2e = fx.Float32(-LOG2E)
+    sig = fx.Float32(rocdl.rcp(T.f32, _one + (g * nlog2e).exp2()))
     return g * sig * u
 
 

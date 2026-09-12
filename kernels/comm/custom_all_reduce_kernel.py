@@ -12,9 +12,9 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm, rocdl
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith as ea
-from flydsl.expr import const_expr, gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.comm.custom_all_reduce import _KMAXBLOCKS as _MAX_BLOCKS
 from kernels.common import buffer_ops

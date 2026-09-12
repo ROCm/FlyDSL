@@ -14,9 +14,8 @@ into the INT32 output atomically, which is exact.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import fly, vector
-from flydsl.expr import as_ir_value, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import T
+from flydsl._mlir.dialects import fly
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.mem_ops import atomic_add
 
@@ -528,9 +527,7 @@ def create_wmma_int8_gemm_module(
                 else:
                     out_elems = [acc[si].to(out_elem_cls) for acc in ordered_accs for si in range_constexpr(8)]
 
-            frag_C_out.store(
-                vector.from_elements(T.vec(8 * n_acc, out_elem_cls.ir_type), [as_ir_value(e) for e in out_elems])
-            )
+            frag_C_out.store(fx.Vector.from_elements(out_elems, out_elem_cls))
             fx.copy(copy_out, frag_C_retile, pC_g)
 
         if const_expr(not persist_wgs):
