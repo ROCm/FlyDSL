@@ -1927,6 +1927,39 @@ FLY_INFER_RETURN_TYPES(DecompositionOp) {
   return success();
 }
 
+LogicalResult GemmOp::verify() {
+  if (!getScaleA() && !getScaleB())
+    return success();
+
+  Type atomTy = getMmaAtom().getType();
+  if (auto tiledTy = dyn_cast<TiledMmaType>(atomTy))
+    atomTy = tiledTy.getMmaAtom();
+  auto mmaTy = dyn_cast<MmaAtomType>(atomTy);
+  if (!mmaTy || !mmaTy.isStateful())
+    return emitOpError("scale fragments require a stateful MMA atom");
+
+  auto checkScale = [&](Value scale, Value operand) -> LogicalResult {
+    if (!scale || scale.getType().isInteger(32))
+      return success();
+    auto scaleTy = cast<fly::MemRefType>(scale.getType());
+    auto layout = dyn_cast<LayoutAttr>(scaleTy.getLayout());
+    if (!layout || !layout.isStaticShape() || !layout.isStaticStride() ||
+        !scaleTy.getElemTy().isInteger(32))
+      return emitOpError("scale fragments must have static layouts and i32 elements");
+    auto operandLayout = dyn_cast<LayoutAttr>(cast<fly::MemRefType>(operand.getType()).getLayout());
+    if (!operandLayout || layout.rank() == 0 || layout.rank() != operandLayout.rank() ||
+        layout.getShape().at(0) != IntTupleAttr::getLeafStatic(getContext(), 1))
+      return emitOpError("scale fragments must match the operand rank with mode-0 size 1");
+    for (int32_t i = 1; i < layout.rank(); ++i)
+      if (layout.getShape().at(i) != operandLayout.getShape().at(i))
+        return emitOpError("scale fragment tile dimensions must match its operand");
+    return success();
+  };
+  if (failed(checkScale(getScaleA(), getA())) || failed(checkScale(getScaleB(), getB())))
+    return failure();
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
   if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {
     inferredReturnTypes.push_back(memrefTy.getElemTy());
