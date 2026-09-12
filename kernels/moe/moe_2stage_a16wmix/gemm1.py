@@ -4,80 +4,34 @@
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from kernels.common import buffer_ops
+from kernels.common.act import (
+    silu_mul_batch as _silu_mul_batch,
+)
+from kernels.common.act import (
+    situ_mul_batch as _situ_mul_batch,
+)
 from kernels.common.layout_utils import crd2idx
+from kernels.moe.mxfp_moe.mxfp4_gemm_common import lds_typed_ptr, lds_vec_load
 
 from .utils import (
     A16WI4_GROUP_SIZE,
-    LOG2E,
     _a16w4_swizzle_xor16,
     _buffer_i32_scalar_read,
     _e8m0_byte_to_f32,
-    _gep3,
     _global_i32_at,
     _global_i32_buffer_tiles,
     _global_i32_buffer_view,
     _int4_nibble_to_bf16x8,
     _int4_nibble_to_bf16x8_raw,
-    _lds_ptr3,
     _raw,
     _udiv,
     _umod,
     a16wmix_use_k16,
 )
-
-
-def _silu_mul_batch(gs, us):
-    e = [fx.Float32(rocdl.exp2(T.f32, _raw(g * fx.Float32(-LOG2E)))) for g in gs]
-    sig = [fx.Float32(rocdl.rcp(T.f32, _raw(fx.Float32(1.0) + ei))) for ei in e]
-    return [gs[i] * sig[i] * us[i] for i in range(len(gs))]
-
-
-def _sigmoid_f32(g):
-    e = fx.Float32(rocdl.exp2(T.f32, _raw(g * fx.Float32(-LOG2E))))
-    return fx.Float32(rocdl.rcp(T.f32, _raw(fx.Float32(1.0) + e)))
-
-
-def _tanh_f32(x):
-    # tanh via exp2/rcp, sign-restored (aiter mixed_moe tanh_elem):
-    #   t = (1-exp(-2|x|))/(1+exp(-2|x|)),  tanh(x) = sign(x)*t
-    neg_two_log2e = fx.Float32(-2.0 * LOG2E)
-    abs_x = x.maximumf(-x)
-    e = fx.Float32(rocdl.exp2(T.f32, _raw(abs_x * neg_two_log2e)))
-    recip = fx.Float32(rocdl.rcp(T.f32, _raw(fx.Float32(1.0) + e)))
-    tanh_abs = (fx.Float32(1.0) - e) * recip
-    is_pos = arith.cmpf(arith.CmpFPredicate.OGT, _raw(x), _raw(fx.Float32(0.0)))
-    return fx.Float32(arith.select(is_pos, _raw(tanh_abs), _raw(-tanh_abs)))
-
-
-def _situ_mul_batch(gs, us, beta, beta_rcp, lbeta, lbeta_rcp, neg_clamp_limit):
-    """SiTUv2 activation (aiter mixed_moe situ_mul_vec4):
-        situ(g)    = beta * tanh(g / beta) * sigmoid(g)
-        situ_up(u) = linear_beta * tanh(u / linear_beta)
-        out        = situ(clamp_gate(g)) * situ_up(clamp_lin(u))
-    clamp_gate: g <= +limit (upper only); clamp_lin: u in [-limit, +limit].
-
-    beta/beta_rcp/lbeta/lbeta_rcp and neg_clamp_limit are runtime fx.Float32
-    scalars (nothing baked; one kernel serves any beta/limit). neg_clamp_limit is
-    -swiglu_limit (host-negated): a +inf limit -> -inf -> maximumf no-op = no
-    clamp; a finite limit clamps. Matches the a8w4/mixed_moe situv2 clamp -- do
-    NOT drop the clamp, at large linear_beta the model expects it and no-clamp
-    diverges badly.
-    """
-    out = []
-    for i in range(len(gs)):
-        # clamp_gate: g <= +lim (upper only); clamp_lin: u in [-lim, +lim].
-        g = -((-gs[i]).maximumf(neg_clamp_limit))
-        u = (-((-us[i]).maximumf(neg_clamp_limit))).maximumf(neg_clamp_limit)
-        situ_g = beta * _tanh_f32(g * beta_rcp) * _sigmoid_f32(g)
-        situ_u = lbeta * _tanh_f32(u * lbeta_rcp)
-        out.append(situ_g * situ_u)
-    return out
-
 
 # =============================================================================
 # Stage1 (gate+up GEMM + SiLU/SiTUv2)
@@ -640,7 +594,6 @@ def _gemm1_body_a16w4(
         nm = num_acc_n * m_repeat
         grp_stride = 64 * nm * 4  # f32 elems per wave (vec4 per lane per acc-slot)
         lds_scr_i32 = fx.Int32(fx.ptrtoint(lds_raw_ptr))
-        scr_base = _lds_ptr3(lds_scr_i32, fx.Int32(0))
 
         def _reduce_round(accs):
             gpu.barrier()  # A-LDS region no longer needed; reuse it as scratch
@@ -649,7 +602,9 @@ def _gemm1_body_a16w4(
                 v = Vec(fx.memref_load_vec(accs[ai // num_acc_n][ai % num_acc_n]))
                 sidx = my_base + fx.Int32(ai * 64 * 4)
                 for vv in range_constexpr(4):
-                    llvm.StoreOp(_raw(v[vv]), _gep3(scr_base, (sidx + fx.Int32(vv)) * fx.Int32(4)))
+                    fx.ptr_store(
+                        v[vv], lds_typed_ptr(lds_scr_i32, T.f32, byte_offset=(sidx + fx.Int32(vv)) * fx.Int32(4))
+                    )
             gpu.barrier()
             for ai in range_constexpr(nm):
                 ai_off = fx.Int32(ai * 64 * 4) + lane * fx.Int32(4)
@@ -658,7 +613,7 @@ def _gemm1_body_a16w4(
                 for g in range_constexpr(1, k_wave):
                     peer = fx.Int32(g * num_n_waves) + wave_n_id
                     pidx = peer * fx.Int32(grp_stride) + ai_off
-                    pv = Vec(llvm.load(T.vec(4, T.f32), _gep3(scr_base, pidx * fx.Int32(4))))
+                    pv = Vec(lds_vec_load(lds_scr_i32, pidx * fx.Int32(4), T.vec(4, T.f32), T.f32, align=16))
                     s = Vec.from_elements([s[vv] + pv[vv] for vv in range_constexpr(4)], fx.Float32)
                 acc.store(s)
 
@@ -828,12 +783,12 @@ def compile_gemm1_a16w4_port(
 
         def _xcd(pid):
             xc = _umod(pid, _NXCD)
-            wgid = xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + _udiv(pid, _NXCD)
+            wgid = xc * _xq + fx.min(xc, _xr) + _udiv(pid, _NXCD)
             _ng = fx.Int32(_SW * NUM_N_BLOCKS)
             group_id = wgid // _ng
             first_pid_m = group_id * fx.Int32(_SW)
             remaining_m = total_m_blocks - first_pid_m
-            group_size_m = fx.Int32(arith.minsi(_raw(remaining_m), _raw(fx.Int32(_SW))))
+            group_size_m = fx.min(remaining_m, fx.Int32(_SW))
             wig = wgid % _ng
             m_block = first_pid_m + (wig % group_size_m)
             n_block = wig // group_size_m

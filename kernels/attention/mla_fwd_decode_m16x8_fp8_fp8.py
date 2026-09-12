@@ -27,6 +27,7 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops
+from kernels.common.act import LOG2E
 
 
 def _is_gfx950_arch(arch: str) -> bool:
@@ -56,7 +57,6 @@ TILE_M: int = BLOCK_M // NUM_WARPS  # 16
 OCCUPANCY: int = 1
 
 SIZE_MLA_WORK_INFO_IN_DW: int = 8
-LOG2E: float = 1.4426950408889634
 
 # ---------------------------------------------------------------------------
 # KvManagerV2 LDS layout constants

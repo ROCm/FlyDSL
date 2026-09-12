@@ -42,6 +42,7 @@ from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import ReductionOp, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops, dpp_utils
+from kernels.common.act import LOG2E
 from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import (
     cdiv,
@@ -54,7 +55,6 @@ MFMA_MNK = 16  # M = N = 16 for the MMA atom; also query rows handled per CTA (p
 FP8_MFMA_K = 32
 BF16_MFMA_K = 16
 WAVE = 64
-LOG2E = 1.4426950408889634
 BF16_KV_SUPPORTED_ARCHS = ("gfx942", "gfx950")
 
 

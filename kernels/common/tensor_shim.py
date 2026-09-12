@@ -57,31 +57,20 @@ def get_dtype_str(dtype):
         return "bf16"
 
 
-def get_dtype_in_kernel(dtype: str):
-    if dtype == "f32":
-        return T.f32
-    elif dtype == "f16":
-        return T.f16
-    elif dtype == "bf16":
-        return T.bf16
+def ptr_rsrc(ptr, num_records_bytes=None):
+    """Buffer resource over an fx pointer, with an optional byte OOB bound."""
+    return buffer_ops.create_buffer_resource_from_addr(fx.Int64(fx.ptrtoint(ptr)), num_records_bytes=num_records_bytes)
 
 
-def get_dtype_vec_size(dtype: str):
-    if dtype == "f32":
-        return 4
-    elif dtype == "f16":
-        return 8
-    elif dtype == "bf16":
-        return 8
-
-
-def get_dtype_bytes(dtype: str):
-    if dtype == "f32":
-        return 4
-    elif dtype == "f16":
-        return 2
-    elif dtype == "bf16":
-        return 2
+def buf_base_i64(base):
+    """Address of an fx pointer, tensor/memref, or integer byte address."""
+    raw = extract_to_ir_values(base)[0]
+    if str(raw.type).startswith(("!fly.ptr", "!llvm.ptr")):
+        return fx.Int64(fx.ptrtoint(base))
+    if isinstance(raw.type, (ir.IntegerType, ir.IndexType)):
+        return fx.Int64(base)
+    aligned = fly.extract_aligned_pointer_as_index(ir.Type.parse("!llvm.ptr<1>"), raw)
+    return fx.Int64(llvm.PtrToIntOp(T.i64, aligned).result)
 
 
 class TensorView:
@@ -300,7 +289,7 @@ class GTensor(TensorBase):
         if static_bytes_offset_i64 is None:
             self.rsrc = buffer_ops.create_buffer_resource(memref, max_size=True)
         else:
-            array_base_i64 = self.get_llvm_ptr(memref, (static_bytes_offset_i64))
+            array_base_i64 = buf_base_i64(memref) + fx.Int64(static_bytes_offset_i64)
             self.rsrc = buffer_ops.create_buffer_resource_from_addr(array_base_i64)
         self.cache_modifier = cache_modifier
 
@@ -309,18 +298,6 @@ class GTensor(TensorBase):
 
     def store(self, offset, value, vec_size=1):
         buffer_ops.buffer_store(value, self.rsrc, offset, cache_modifier=self.cache_modifier)
-
-    def get_llvm_ptr(self, ptr, bytes_offset_i64, ptr_type="!llvm.ptr<1>"):
-        bytes_offset_i64 = fx.Int64(bytes_offset_i64).ir_value()
-        raw_ptr = extract_to_ir_values(ptr)[0]
-        if isinstance(raw_ptr, fx.Pointer):
-            base_ptr = fx.Int64(fx.ptrtoint(raw_ptr)).ir_value()
-        else:
-            _ptr_type = ir.Type.parse(ptr_type)
-            base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, raw_ptr)
-            base_ptr = llvm.PtrToIntOp(T.i64, base_ptr).result
-        llvm_ptr = llvm.AddOp(base_ptr, bytes_offset_i64, llvm.IntegerOverflowFlags(0)).result
-        return llvm_ptr
 
 
 class STensor(TensorBase):

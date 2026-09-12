@@ -10,6 +10,7 @@ from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
+from kernels.common.act import LOG2E
 
 
 def reps(tensor, mode):
@@ -218,7 +219,7 @@ def silu_pair_bf16(gate_frag, up_frag, gate_scale=None, up_scale=None, a_scale=N
     """silu(gate)*up -> out_dtype (optional fp8 weight/act scales folded in pre-silu).
     out_dtype MUST match the caller's CShuffle staging/store dtype: the fragment holds
     raw bits, so a mismatch silently reinterprets them (bf16 0x4480 == 1024.0 -> f16 4.5)."""
-    log2_exp1 = -1.4426950408889634
+    log2_exp1 = -LOG2E
     round_bit = fx.Uint32(0x8000)
     out_frag = fx.make_fragment_like(gate_frag, dtype=out_dtype)
     m_reps = reps(gate_frag, 1)

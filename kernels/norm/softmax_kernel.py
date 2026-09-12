@@ -20,6 +20,7 @@ import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, full
+from kernels.common.act import LOG2E
 from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "softmax_kernel"
@@ -94,7 +95,6 @@ def build_softmax_module(
 
         c_zero_f = fx.Float32(0.0)
         c_neg_inf = fx.Float32(float("-inf"))
-        c_log2e = 1.4426950408889634
 
         # ── wave / block reduction (supports max and sum) ─────────────────
         def shuffle_reduce(x, mode, width):
@@ -191,7 +191,7 @@ def build_softmax_module(
 
             for i in range_constexpr(num_tiles):
                 x = row_buffer[i]
-                scaled = (x - global_max) * c_log2e
+                scaled = (x - global_max) * LOG2E
                 exp_val = fmath.exp2(scaled, fastmath=fm_fast)
                 row_buffer[i] = exp_val
                 red_sum = exp_val.reduce(ReductionOp.ADD, fastmath=fm_fast)
@@ -269,7 +269,7 @@ def build_softmax_module(
             new_buffer = []
             for safe_val, is_valid in row_buffer:
                 sub = safe_val - global_max
-                scaled = sub * c_log2e
+                scaled = sub * LOG2E
                 exp_val = scaled.exp2(fastmath=fm_fast)
                 safe_exp = is_valid.select(exp_val, c_zero_f)
                 thread_sum = thread_sum + safe_exp

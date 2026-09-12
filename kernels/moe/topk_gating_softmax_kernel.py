@@ -29,6 +29,7 @@ import flydsl.expr as fx
 from flydsl.expr import arith, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, T
+from kernels.common.act import LOG2E
 from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "topk_gating_softmax_kernel"
@@ -176,7 +177,7 @@ def _emit_topk_gating_softmax_body(
 
     c_zero_f = fx.Float32(0.0)
     c_neg_inf = fx.Float32(float("-inf"))
-    c_log2e = fx.Float32(1.4426950408889634)
+    c_log2e = fx.Float32(LOG2E)
     c_one_f = fx.Float32(1.0)
 
     c_warp = fx.Int32(WARP_SIZE)
@@ -433,7 +434,7 @@ def build_topk_gating_softmax_module(
 
         c_zero_f = fx.Float32(0.0)
         c_neg_inf = fx.Float32(float("-inf"))
-        c_log2e = fx.Float32(1.4426950408889634)
+        c_log2e = fx.Float32(LOG2E)
         c_one_f = fx.Float32(1.0)
 
         # Thread → (warp, token-in-warp, expert-lane) decomposition

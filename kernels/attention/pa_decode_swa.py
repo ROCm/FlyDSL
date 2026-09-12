@@ -11,6 +11,7 @@ from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from kernels.attention.pa_common import _compute_block_base_dw_i64
 from kernels.common import dpp_utils
+from kernels.common.act import LOG2E
 from kernels.common.kernels_common import get_warp_size
 from kernels.common.utils import (
     cdiv,
@@ -20,6 +21,10 @@ from kernels.common.utils import (
     unflatten_k,
     urem_const,
 )
+from kernels.common.utils import copy_load as _copy_load
+from kernels.common.utils import copy_store as _copy_store
+from kernels.common.utils import global_pointer_from_addr as _global_pointer_from_addr
+from kernels.common.utils import load_global_16b as _load_global_16b
 
 # ── Kernel geometry constants ────────────────────────────────────────
 KV_BLOCK_SIZE = 1024  # physical page size (matches SP3 kBlockSize)
@@ -49,36 +54,10 @@ LDS_SCALE_V_OFFSET = KV_COMPUTE_BLOCK + LDS_SCALE_V_PADDING
 LDS_SCALE_BYTES = (LDS_SCALE_V_OFFSET + KV_COMPUTE_BLOCK) * 4  # K/V per-token scale staging
 
 FP8_MAX = 240.0
-LOG2E = 1.4426950408889634
 _FLAT_BUFFER_ELEMENTS = 1 << 30
 
 # Tiles per block (1024 tokens / 256 tokens per tile = 4, matches SP3 kNumBlockTiles)
 TILES_PER_BLOCK = KV_BLOCK_SIZE // KV_COMPUTE_BLOCK  # 4
-
-
-def _global_pointer_from_addr(addr, dtype, *, alignment: int):
-    ptr_type = fx.PointerType.get(
-        elem_ty=dtype.ir_type,
-        address_space=fx.AddressSpace.Global,
-        alignment=alignment,
-    )
-    return fx.inttoptr(ptr_type, addr)
-
-
-def _copy_load(source, offset, copy_atom, register):
-    fx.copy(copy_atom, fx.slice(source, (None, fx.Int32(offset))), register)
-    return fx.memref_load_vec(register)
-
-
-def _copy_store(destination, offset, copy_atom, register, value):
-    fx.memref_store_vec(value, register)
-    fx.copy(copy_atom, register, fx.slice(destination, (None, fx.Int32(offset))))
-
-
-def _load_global_16b(global_ptr, byte_offset, copy_atom, register):
-    source = fx.make_view(global_ptr + byte_offset, fx.make_layout(16, 1))
-    fx.copy(copy_atom, source, register)
-    return fx.memref_load_vec(register).bitcast(fx.Int64)
 
 
 def _get_sw_mtp_group_count(query_length: int, query_group_size: int) -> int:
