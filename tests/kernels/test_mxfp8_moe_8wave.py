@@ -14,6 +14,7 @@ from kernels.moe.mxfp8_moe_8wave import (
     compile_mxfp8_moe_gemm_8w,
     compile_mxfp8_moe_quant,
     compile_mxfp8_moe_reduce,
+    compile_mxfp8_moe_sort_input_scale,
     compile_mxfp8_moe_unpack_routes,
 )
 from tests.kernels.utils.gemm_common_utils import (
@@ -203,6 +204,52 @@ def test_a8w4_fused_stage1_quant_dynamic_graph(n):
         assert torch.equal(actual, expected)
         assert (actual[: rows * kp].view(rows, kp)[active:] == 42).all()
         assert (actual[rows * kp :].view(rows, kp // 32)[active:] == 42).all()
+
+
+@pytest.mark.parametrize("k", [512, 7168])
+def test_mxfp8_sort_input_scale_dynamic_graph(k):
+    torch.manual_seed(815)
+    tokens, topk, rows = 129, 3, 768
+    source = torch.randint(256, (tokens, k // 32), device="cuda", dtype=torch.uint8)
+    token = torch.randint(tokens + 64, (rows,), device="cuda", dtype=torch.int32)
+    slot = torch.randint(topk, (rows,), device="cuda", dtype=torch.int32)
+    packed = (slot << 24) | token
+    packed[5] = -(1 << 24) | 7  # Slot255 is invalid even with a valid token.
+    token, slot = packed & 0xFFFFFF, (packed >> 24) & 0xFF
+    valid_route = (token < tokens) & (slot < topk)
+    expected_map = torch.where(valid_route, token, -1)
+    expected = source[token.clamp_max(tokens - 1).long()]
+    expected[~valid_route] = 127
+    expected = shuffle_scale_w4(expected, 1, False)
+    actual = torch.empty_like(expected)
+    row_map = torch.empty_like(packed)
+    valid = torch.tensor([rows], device="cuda", dtype=torch.int32)
+    args = (
+        source.flatten(),
+        actual.view(torch.int32).flatten(),
+        packed,
+        row_map,
+        valid,
+        tokens,
+        rows,
+        torch.cuda.current_stream(),
+    )
+    fn = flyc.compile(compile_mxfp8_moe_sort_input_scale(K=k, topk=topk), *args)
+    fn(*args)
+    assert torch.equal(actual, expected)
+    assert torch.equal(row_map, expected_map)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        fn(*args[:-1], torch.cuda.current_stream())
+    for active in (512, 256, 0, 768):
+        actual.fill_(42)
+        row_map.fill_(-123)
+        valid.fill_(active)
+        graph.replay()
+        assert torch.equal(actual[:active], expected[:active])
+        assert torch.equal(row_map[:active], expected_map[:active])
+        assert (actual[active:] == 42).all()
+        assert (row_map[active:] == -123).all()
 
 
 def test_mxfp8_moe_reduce():
