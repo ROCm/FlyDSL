@@ -72,24 +72,13 @@ class ScalePreshuffledS2R:
 
 
 class MxMfma:
-    """16x16x128 scaled-MFMA driver (bare atom: ``TiledMma`` has no ``set_value``).
-
-    One ``(opsel_a, opsel_b)`` atom per byte pair: in the ``shuffle_scale_w4``
-    layout a single i32 carries the E8M0 of two 16-row tiles x two K-steps, and
-    the byte is picked by ``opsel`` -- a compile-time atom field -- so the hot
-    loop emits no byte-select instructions at all.
-    """
+    """One statically expanded tiled GEMM with per-atom MX scale words."""
 
     def __init__(self, n_tiles_a, n_tiles_b):
-        # opsel = k_pack * 2 + tile_in_pair, so both operands share k_pack.
-        self.atoms = {
-            (kp * 2 + ia, kp * 2 + jb): fx.make_mma_atom(
-                fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN, opsel_a=kp * 2 + ia, opsel_b=kp * 2 + jb)
-            )
-            for kp in range_constexpr(2)
-            for ia in range_constexpr(2)
-            for jb in range_constexpr(2)
-        }
+        self.mma = fx.make_tiled_mma(
+            fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN)),
+            fx.make_layout((1, 1, 1), (1, 1, 1)),
+        )
         self.zero_value = Vec.filled(4, 0.0, fx.Float32)
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
@@ -97,38 +86,43 @@ class MxMfma:
     def idx(self, i, j):
         return i * self.n_tiles_b + j
 
-    def _operand(self, value):
-        frag = fx.make_rmem_tensor(8, fx.Int32)
-        frag.store(Vec(value))
+    def _operand(self, values, words=8):
+        frag = fx.make_rmem_tensor(fx.make_layout((words, len(values)), (1, words)), fx.Int32)
+        for i in range_constexpr(len(values)):
+            fx.slice(frag, (None, i)).store(Vec(values[i]))
         return frag
 
-    def _accum(self, value):
-        frag = fx.make_rmem_tensor(4, fx.Float32)
-        frag.store(Vec(value))
+    def _scales(self, values, k_pack):
+        frag = fx.make_rmem_tensor(fx.make_layout((1, len(values)), (0, 1)), fx.Int32)
+        for i in range_constexpr(len(values)):
+            # shuffle_scale_w4 packs two adjacent row tiles and two K steps
+            # into each word. CDNA4 folds this byte selection into MFMA opsel.
+            scale = values[i] >> (8 * (k_pack * 2 + i % 2))
+            fx.slice(frag, (None, i)).store(Vec.filled(1, scale, fx.Int32))
         return frag
-
-    def _atom_for(self, k_pack, i, j):
-        return self.atoms[(k_pack * 2 + i % 2, k_pack * 2 + j % 2)]
 
     def call(self, a, b, c, sa, sb, *, k_pack, set_prio=True):
-        assert len(a) == self.n_tiles_a and len(sa) == self.n_tiles_a
-        assert len(b) == self.n_tiles_b and len(sb) == self.n_tiles_b
+        assert len(a) == len(sa) == self.n_tiles_a
+        assert len(b) == len(sb) == self.n_tiles_b
         assert len(c) == self.n_tiles_a * self.n_tiles_b
-
-        a_frags = [self._operand(a[i]) for i in range_constexpr(self.n_tiles_a)]
-        b_frags = [self._operand(b[j]) for j in range_constexpr(self.n_tiles_b)]
-        c_frags = [self._accum(c[i]) for i in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
+        af, bf = self._operand(a), self._operand(b)
+        cf = fx.make_rmem_tensor(
+            fx.make_layout((4, self.n_tiles_a, self.n_tiles_b), (1, 4 * self.n_tiles_b, 4)),
+            fx.Float32,
+        )
+        for i in range_constexpr(len(c)):
+            fx.slice(cf, (None, i // self.n_tiles_b, i % self.n_tiles_b)).store(Vec(c[i]))
+        saf, sbf = self._scales(sa, k_pack), self._scales(sb, k_pack)
         if const_expr(set_prio):
             rocdl.s_setprio(1)
-        for i in range_constexpr(self.n_tiles_a):
-            for j in range_constexpr(self.n_tiles_b):
-                cf = c_frags[self.idx(i, j)]
-                atom = self._atom_for(k_pack, i, j)
-                fx.gemm(atom, cf, a_frags[i], b_frags[j], cf, scale_a=sa[i], scale_b=sb[j])
+        fx.gemm(self.mma, cf, [af, saf], [bf, sbf], cf)
         if const_expr(set_prio):
             rocdl.s_setprio(0)
             rocdl.s_barrier()
-        return [c_frags[i].load().ir_value() for i in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
+        return [
+            fx.slice(cf, (None, i // self.n_tiles_b, i % self.n_tiles_b)).load().ir_value()
+            for i in range_constexpr(len(c))
+        ]
 
 
 def compile_mxfp8_gemm_8w(

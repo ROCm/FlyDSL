@@ -684,25 +684,15 @@ public:
 
     Location loc = op.getLoc();
 
-    Value dPtr = adaptor.getD();
-    Value aPtr = adaptor.getA();
-    Value bPtr = adaptor.getB();
-    Value cPtr = adaptor.getC();
-
-    if (!isa<LLVM::LLVMPointerType>(dPtr.getType()) ||
-        !isa<LLVM::LLVMPointerType>(aPtr.getType()) ||
-        !isa<LLVM::LLVMPointerType>(bPtr.getType()) || !isa<LLVM::LLVMPointerType>(cPtr.getType()))
+    auto isPointer = [](Value value) { return isa<LLVM::LLVMPointerType>(value.getType()); };
+    if (!isPointer(adaptor.getD()) || !llvm::all_of(adaptor.getA(), isPointer) ||
+        !llvm::all_of(adaptor.getB(), isPointer) || !isPointer(adaptor.getC()))
       return rewriter.notifyMatchFailure(op, "expected llvm.ptr operands after type conversion");
 
-    auto dMemTy = dyn_cast<fly::MemRefType>(op.getD().getType());
-    auto aMemTy = dyn_cast<fly::MemRefType>(op.getA().getType());
-    auto bMemTy = dyn_cast<fly::MemRefType>(op.getB().getType());
-    auto cMemTy = dyn_cast<fly::MemRefType>(op.getC().getType());
-    if (!dMemTy || !aMemTy || !bMemTy || !cMemTy)
-      return rewriter.notifyMatchFailure(op, "expected Fly memref types on original op");
-
-    if (failed(mmaAtomTy.emitAtomCall(rewriter, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy,
-                                      adaptor.getMmaAtom(), dPtr, aPtr, bPtr, cPtr)))
+    if (failed(mmaAtomTy.emitAtomCall(rewriter, loc, mmaAtomTy, op.getD().getType(),
+                                      op.getA().getTypes(), op.getB().getTypes(),
+                                      op.getC().getType(), adaptor.getMmaAtom(), adaptor.getD(),
+                                      adaptor.getA(), adaptor.getB(), adaptor.getC())))
       return failure();
 
     rewriter.eraseOp(op);
@@ -728,8 +718,8 @@ public:
     Value dPtr = hasResult ? Value{} : adaptor.getD();
 
     auto result =
-        mmaAtomTy.emitAtomCallSSA(rewriter, loc, resultTy, mmaAtomTy, dTy, op.getA().getType(),
-                                  op.getB().getType(), op.getC().getType(), adaptor.getMmaAtom(),
+        mmaAtomTy.emitAtomCallSSA(rewriter, loc, resultTy, mmaAtomTy, dTy, op.getA().getTypes(),
+                                  op.getB().getTypes(), op.getC().getType(), adaptor.getMmaAtom(),
                                   dPtr, adaptor.getA(), adaptor.getB(), adaptor.getC());
     if (failed(result))
       return failure();

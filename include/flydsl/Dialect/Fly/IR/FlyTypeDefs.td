@@ -313,11 +313,11 @@ def Fly_MmaAtom : Fly_Type<"MmaAtom", "mma_atom", [
     ::mlir::Attribute getThrValLayoutB() const;
     ::mlir::Attribute getThrValLayoutC() const;
     ::mlir::LogicalResult emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
-                                       Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy, Value atomVal, Value d,
-                                       Value a, Value b, Value c) const;
+                                       Type dMemTy, TypeRange aMemTy, TypeRange bMemTy, Type cMemTy, Value atomVal, Value d,
+                                       ValueRange a, ValueRange b, Value c) const;
     ::mlir::FailureOr<::mlir::Value> emitAtomCallSSA(OpBuilder &builder, Location loc, Type resultTy,
-                                                     Type mmaAtomTy, Type dTy, Type aTy, Type bTy, Type cTy, 
-                                                     Value atomVal, Value d, Value a, Value b, Value c) const;
+                                                     Type mmaAtomTy, Type dTy, TypeRange aTy, TypeRange bTy, Type cTy,
+                                                     Value atomVal, Value d, ValueRange a, ValueRange b, Value c) const;
 
     bool isStateful() const;
     ::mlir::Type getConvertedType(::mlir::MLIRContext *ctx) const;

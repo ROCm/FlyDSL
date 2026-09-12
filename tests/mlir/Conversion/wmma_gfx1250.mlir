@@ -23,7 +23,7 @@ func.func @test_wmma_iu4(
   // Unsigned (default): the printer elides the false sign/clamp attrs.
   // CHECK: %[[RES:.*]] = rocdl.wmma.i32.16x16x32.iu4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]] : (vector<2xi32>, vector<2xi32>, vector<8xi32>) -> vector<8xi32>
   // CHECK: llvm.store %[[RES]], %{{.*}} : vector<8xi32>, !llvm.ptr<5>
-  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32, signA = false, signB = false, clamp = false>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i32, register, 8:1>) -> ()
+  fly.mma_atom_call(%atom, %d, [%a], [%b], %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32, signA = false, signB = false, clamp = false>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i32, register, 8:1>) -> ()
   return
 }
 
@@ -46,7 +46,7 @@ func.func @test_wmma_iu4_signed_clamp(
   // CHECK-SAME: clamp = true
   // CHECK-SAME: signA = true
   // CHECK-SAME: signB = true
-  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i32, register, 8:1>) -> ()
+  fly.mma_atom_call(%atom, %d, [%a], [%b], %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i32, register, 8:1>) -> ()
   return
 }
 
@@ -69,6 +69,6 @@ func.func @test_wmma_bf16_modc_reuse(
   // CHECK-SAME: modC = neg
   // CHECK-SAME: reuseA = true
   // CHECK-SAME: reuseB = true
-  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (bf16, bf16) -> f32, signA = false, signB = false, clamp = false, modC = 1, reuseA = true, reuseB = true>>, !fly.memref<f32, register, 8:1>, !fly.memref<bf16, register, 16:1>, !fly.memref<bf16, register, 16:1>, !fly.memref<f32, register, 8:1>) -> ()
+  fly.mma_atom_call(%atom, %d, [%a], [%b], %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (bf16, bf16) -> f32, signA = false, signB = false, clamp = false, modC = 1, reuseA = true, reuseB = true>>, !fly.memref<f32, register, 8:1>, !fly.memref<bf16, register, 16:1>, !fly.memref<bf16, register, 16:1>, !fly.memref<f32, register, 8:1>) -> ()
   return
 }

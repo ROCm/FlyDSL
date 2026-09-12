@@ -1051,9 +1051,28 @@ def copy_atom_call(copy_atom, src, dst, *, pred=None):
     return fly.copy_atom_call(copy_atom, src, dst, pred=pred)
 
 
+def _normalize_mma_operand(operand, name):
+    from .typing import Tensor
+
+    tensors = list(operand) if isinstance(operand, (list, tuple)) else [operand]
+    if not tensors:
+        raise ValueError(f"'{name}' must contain at least one Tensor")
+    for index, tensor in enumerate(tensors):
+        if not isinstance(tensor, Tensor):
+            raise TypeError(f"'{name}' operand {index} must be a Tensor, got {type(tensor).__name__}")
+    return tensors
+
+
 @dsl_loc_tracing
-def mma_atom_call(mma_atom, d, a, b, c):
-    return fly.mma_atom_call(mma_atom, d, a, b, c)
+def mma_atom_call(mma_atom, d, a, b, c, **kwargs):
+    """Apply one MMA atom to Tensor or list/tuple operands, with optional atom state."""
+    return fly.mma_atom_call(
+        mma_atom if not kwargs else mma_atom.set_value(kwargs),
+        d,
+        _normalize_mma_operand(a, "a"),
+        _normalize_mma_operand(b, "b"),
+        c,
+    )
 
 
 @dsl_loc_tracing
@@ -1111,13 +1130,30 @@ def copy(copy_atom, src, dst, *, pred=None, **kwargs):
 
 @dsl_loc_tracing
 def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, **kwargs):
+    """Multiply register tiles, fully unrolling their static M/N/K dimensions.
+
+    ``a`` and ``b`` each accept a Tensor or a nonempty list/tuple containing
+    the primary tensor followed by the atom's auxiliary tensors. For scaled
+    MMA, use ``gemm(mma, d, [a, scale_a], [b, scale_b], c)``. Scale fragments
+    have shape ``(1, M[, K])`` for A and ``(1, N[, K])`` for B. Broadcast a
+    scale across tiles with zero strides in the corresponding tile modes.
+
+    Operand groups can contain more than two tensors (for example, data,
+    scales, and sparsity metadata) when supported by the MMA atom. Each
+    group's tensors share the tile dimensions after mode 0 and are sliced
+    together. The atom defines their order, element types, and mode-0 sizes.
+
+    Scalar atom-state keywords retain their existing behavior. Traversal
+    order changes the order of expanded calls without introducing a runtime loop.
+    """
+
     if traversal_order is not None and traversal_layout is not None:
         raise ValueError("Only one of 'traversal_order' or 'traversal_layout' can be specified, not both")
     return fly.gemm(
-        mma_atom if (not kwargs) else mma_atom.set_value(kwargs),
+        mma_atom if not kwargs else mma_atom.set_value(kwargs),
         d,
-        a,
-        b,
+        _normalize_mma_operand(a, "a"),
+        _normalize_mma_operand(b, "b"),
         c,
         traversal_order=traversal_order,
         traversal_layout=traversal_layout,

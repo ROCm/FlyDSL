@@ -1927,6 +1927,39 @@ FLY_INFER_RETURN_TYPES(DecompositionOp) {
   return success();
 }
 
+static LogicalResult verifyMmaOperandGroups(Operation *op, ValueRange a, ValueRange b) {
+  if (a.empty() || b.empty())
+    return op->emitOpError("A and B operand groups must each contain at least one tensor");
+  return success();
+}
+
+LogicalResult MmaAtomCall::verify() { return verifyMmaOperandGroups(*this, getA(), getB()); }
+
+LogicalResult MmaAtomCallSSA::verify() { return verifyMmaOperandGroups(*this, getA(), getB()); }
+
+LogicalResult GemmOp::verify() {
+  if (failed(verifyMmaOperandGroups(*this, getA(), getB())))
+    return failure();
+  auto checkGroup = [&](ValueRange operands) -> LogicalResult {
+    auto primaryLayout =
+        dyn_cast<LayoutAttr>(cast<fly::MemRefType>(operands.front().getType()).getLayout());
+    for (Value auxiliary : operands.drop_front()) {
+      auto layout = dyn_cast<LayoutAttr>(cast<fly::MemRefType>(auxiliary.getType()).getLayout());
+      if (!layout || !layout.isStaticShape() || !layout.isStaticStride())
+        return emitOpError("auxiliary operands must have static layouts");
+      if (!primaryLayout || layout.rank() == 0 || layout.rank() != primaryLayout.rank())
+        return emitOpError("auxiliary operands must match the primary operand rank");
+      for (int32_t i = 1; i < layout.rank(); ++i)
+        if (layout.getShape().at(i) != primaryLayout.getShape().at(i))
+          return emitOpError("auxiliary operand tile dimensions must match its primary operand");
+    }
+    return success();
+  };
+  if (failed(checkGroup(getA())) || failed(checkGroup(getB())))
+    return failure();
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
   if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {
     inferredReturnTypes.push_back(memrefTy.getElemTy());

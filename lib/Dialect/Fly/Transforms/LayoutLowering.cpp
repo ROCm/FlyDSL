@@ -2285,6 +2285,8 @@ public:
   using OpRewritePattern<GemmOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(GemmOp op, PatternRewriter &rewriter) const override {
+    if (failed(op.verify()))
+      return failure();
     Location loc = op.getLoc();
     auto *ctx = rewriter.getContext();
 
@@ -2294,8 +2296,8 @@ public:
     }
 
     Value d = op.getD();
-    Value a = op.getA();
-    Value b = op.getB();
+    Value a = op.getA().front();
+    Value b = op.getB().front();
     Value c = op.getC();
 
     LayoutAttr dLayoutAttr = cast<LayoutAttr>(cast<fly::MemRefType>(d.getType()).getLayout());
@@ -2309,7 +2311,7 @@ public:
     int32_t cRank = cLayoutAttr.rank();
 
     if (dRank == 1 && aRank == 1 && bRank == 1 && cRank == 1) {
-      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, a, b, c);
+      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, op.getA(), op.getB(), c);
       rewriter.eraseOp(op);
       return success();
     }
@@ -2340,10 +2342,18 @@ public:
           rewriter, loc, IntTupleType::get(IntTupleAttr::get(ArrayAttr::get(ctx, coordElems))), {});
     };
 
+    auto sliceGroup = [&](ValueRange operands, ArrayRef<int32_t> idx) {
+      SmallVector<Value> slices;
+      Value coord = getSliceCoord(idx);
+      for (Value operand : operands)
+        slices.push_back(SliceOp::create(rewriter, loc, operand, coord));
+      return slices;
+    };
+
     if (aRank == 2 && bRank == 2) {
       auto emitMmaCall2D = [&](int32_t m, int32_t n) {
-        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m}));
-        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
+        auto aSlice = sliceGroup(op.getA(), {m});
+        auto bSlice = sliceGroup(op.getB(), {n});
         Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
         Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
         MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
@@ -2444,8 +2454,8 @@ public:
         bool &visited = mnVisited[m * loop_n + n];
         Value cSrc = visited ? d : c;
         visited = true;
-        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
-        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
+        auto aSlice = sliceGroup(op.getA(), {m, k});
+        auto bSlice = sliceGroup(op.getB(), {n, k});
         Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
         Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
         MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
