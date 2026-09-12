@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-12T18:29:13Z",
+ "updated": "2026-09-12T18:46:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -54,21 +54,22 @@
    "branch": "codex/vector-api-migration",
    "event": "pull_request",
    "title": "Migrate vector consumers and share single-GPU kernel helpers",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34706688929",
    "created_at": "2026-09-12T16:55:33Z",
-   "updated_at": "2026-09-12T17:46:04Z",
+   "updated_at": "2026-09-12T18:43:29Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-12T17:08:43Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34706688929/job/103589636728"
+     "completed_at": "2026-09-12T18:30:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34706688929/job/103589636728",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -83,11 +84,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-12T17:46:04Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34706688929/job/103589636795"
+     "completed_at": "2026-09-12T18:43:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34706688929/job/103589636795",
+     "log_fetch_failed": true
     }
    ]
   },
