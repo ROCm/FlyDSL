@@ -259,9 +259,17 @@ static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType
 
 FailureOr<Value> MmaOpGFX1250_WMMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
                                                         Type resultTy, Type mmaAtomTyArg,
-                                                        Type dTyArg, Type aTyArg, Type bTyArg,
-                                                        Type cTyArg, Value atomVal, Value d,
-                                                        Value a, Value b, Value c) const {
+                                                        Type dTyArg, TypeRange aTyArgs,
+                                                        TypeRange bTyArgs, Type cTyArg,
+                                                        Value atomVal, Value d, ValueRange aValues,
+                                                        ValueRange bValues, Value c) const {
+  if (aValues.size() != 1 || bValues.size() != 1) {
+    emitError(loc, "this MMA atom does not support auxiliary operands");
+    return failure();
+  }
+  Value a = aValues.front();
+  Value b = bValues.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -342,9 +350,17 @@ FailureOr<Value> MmaOpGFX1250_WMMAType::emitAtomCallSSA(OpBuilder &builder, Loca
 }
 
 LogicalResult MmaOpGFX1250_WMMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
-                                                  Type dMemTy, Type aMemTy, Type bMemTy,
+                                                  Type dMemTy, TypeRange aMemTys, TypeRange bMemTys,
                                                   Type cMemTy, Value atomVal, Value dPtr,
-                                                  Value aPtr, Value bPtr, Value cPtr) const {
+                                                  ValueRange aPtrs, ValueRange bPtrs,
+                                                  Value cPtr) const {
+  if (aPtrs.size() != 1 || bPtrs.size() != 1) {
+    emitError(loc, "this MMA atom does not support auxiliary operands");
+    return failure();
+  }
+  Value aPtr = aPtrs.front();
+  Value bPtr = bPtrs.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();

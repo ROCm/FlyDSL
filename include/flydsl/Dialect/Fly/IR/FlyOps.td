@@ -361,8 +361,12 @@ def Fly_AtomSetValueOp : Fly_Op<"atom.set_value", [Pure, DeclareOpInterfaceMetho
 def Fly_CopyAtomCall : Fly_Op<"copy_atom_call"> {
   let arguments = (ins Fly_CopyAtom:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, Optional<Fly_MemRef>:$pred);
 }
-def Fly_MmaAtomCall : Fly_Op<"mma_atom_call"> {
-  let arguments = (ins Fly_MmaAtom:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c);
+def Fly_MmaAtomCall : Fly_Op<"mma_atom_call", [AttrSizedOperandSegments]> {
+  let hasVerifier = 1;
+  let arguments = (ins Fly_MmaAtom:$mmaAtom, Fly_MemRef:$d,
+                       Variadic<Fly_MemRef>:$a, Variadic<Fly_MemRef>:$b, Fly_MemRef:$c);
+  let assemblyFormat = "`(` $mmaAtom `,` $d `,` `[` $a `]` `,` `[` $b `]` `,` $c `)` "
+                       "attr-dict `:` functional-type(operands, results)";
 }
 
 def Fly_CopyAtomCallSSA : Fly_Op<"copy_atom_call_ssa", [AttrSizedOperandSegments]> {
@@ -370,10 +374,13 @@ def Fly_CopyAtomCallSSA : Fly_Op<"copy_atom_call_ssa", [AttrSizedOperandSegments
                        Optional<AnyType>:$dst, Optional<AnyType>:$pred);
   let results = (outs Variadic<AnyType>:$results);
 }
-def Fly_MmaAtomCallSSA : Fly_Op<"mma_atom_call_ssa"> {
+def Fly_MmaAtomCallSSA : Fly_Op<"mma_atom_call_ssa", [AttrSizedOperandSegments]> {
+  let hasVerifier = 1;
   let arguments = (ins Fly_MmaAtom:$mmaAtom, Optional<AnyType>:$d,
-                       AnyType:$a, AnyType:$b, AnyType:$c);
+                       Variadic<AnyType>:$a, Variadic<AnyType>:$b, AnyType:$c);
   let results = (outs Variadic<AnyType>:$results);
+  let assemblyFormat = "`(` $mmaAtom `,` `[` $a `]` `,` `[` $b `]` `,` $c `)` "
+                       "(`dst` `=` $d^)? attr-dict `:` functional-type(operands, results)";
 }
 
 def Fly_MakeTiledCopyOp : Fly_Op<"make_tiled_copy", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
@@ -421,13 +428,20 @@ def Fly_CopyOp : Fly_Op<"copy"> {
 }
 def Fly_GemmOp : Fly_Op<"gemm", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
-  let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c,
+  let summary = "Fully expand tiled GEMM with variadic A and B operand groups";
+  let description = [{
+    Each A/B group contains the primary tensor followed by any auxiliary tensors
+    required by the MMA atom, such as scales or sparsity metadata. All tensors in
+    a group share the tile dimensions (modes after mode 0); their mode-0 sizes and
+    element types are defined by the atom. Expansion slices every tensor in the
+    group at the same tile coordinate and preserves the group for atom lowering.
+  }];
+  let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d,
+                       Variadic<Fly_MemRef>:$a, Variadic<Fly_MemRef>:$b, Fly_MemRef:$c,
                        OptionalAttr<Fly_GemmTraversalOrderAttr>:$traversalOrder,
-                       Optional<Fly_Layout>:$traversalLayout,
-                       Optional<AnyTypeOf<[I32, Fly_MemRef]>>:$scaleA,
-                       Optional<AnyTypeOf<[I32, Fly_MemRef]>>:$scaleB);
-  let assemblyFormat = "`(` $mmaAtom `,` $d `,` $a `,` $b `,` $c `)` (`traversalLayout` `=` $traversalLayout^)? "
-                       "(`scaleA` `=` $scaleA^)? (`scaleB` `=` $scaleB^)? "
+                       Optional<Fly_Layout>:$traversalLayout);
+  let assemblyFormat = "`(` $mmaAtom `,` $d `,` `[` $a `]` `,` `[` $b `]` `,` $c `)` "
+                       "(`traversalLayout` `=` $traversalLayout^)? "
                        "attr-dict `:` functional-type(operands, results)";
 }
 

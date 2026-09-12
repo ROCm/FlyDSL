@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
+#include "../MmaScaleUtils.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
@@ -219,11 +221,18 @@ static void foldScaleByteShift(Value &scale, uint32_t &opsel) {
   scale = word;
 }
 
-FailureOr<Value> MmaOpCDNA4_MFMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc,
-                                                           Type resultTy, Type mmaAtomTyArg,
-                                                           Type dTyArg, Type aTyArg, Type bTyArg,
-                                                           Type cTyArg, Value atomVal, Value d,
-                                                           Value a, Value b, Value c) const {
+FailureOr<Value>
+MmaOpCDNA4_MFMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type resultTy,
+                                          Type mmaAtomTyArg, Type dTyArg, TypeRange aTyArgs,
+                                          TypeRange bTyArgs, Type cTyArg, Value atomVal, Value d,
+                                          ValueRange aValues, ValueRange bValues, Value c) const {
+  if (aValues.empty() || aValues.size() > 2 || bValues.empty() || bValues.size() > 2) {
+    emitError(loc, "scaled MMA expects [data] or [data, scale] for each operand");
+    return failure();
+  }
+  Value a = aValues.front();
+  Value b = bValues.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -259,6 +268,19 @@ FailureOr<Value> MmaOpCDNA4_MFMAScaleType::emitAtomCallSSA(OpBuilder &builder, L
       loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});
   Value scaleB = builder.createOrFold<LLVM::ExtractValueOp>(
       loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
+  Type scaleType = builder.getI32Type();
+  if (aValues.size() == 2) {
+    auto scale = loadMmaScale(builder, loc, aTyArgs[1], aValues[1], scaleType);
+    if (failed(scale))
+      return failure();
+    scaleA = *scale;
+  }
+  if (bValues.size() == 2) {
+    auto scale = loadMmaScale(builder, loc, bTyArgs[1], bValues[1], scaleType);
+    if (failed(scale))
+      return failure();
+    scaleB = *scale;
+  }
 
   auto cbsz = static_cast<ROCDL::MatrixFormat>(*aTypeCode);
   auto blgp = static_cast<ROCDL::MatrixFormat>(*bTypeCode);
@@ -282,10 +304,17 @@ FailureOr<Value> MmaOpCDNA4_MFMAScaleType::emitAtomCallSSA(OpBuilder &builder, L
 }
 
 LogicalResult MmaOpCDNA4_MFMAScaleType::emitAtomCall(OpBuilder &builder, Location loc,
-                                                     Type mmaAtomTy, Type dMemTy, Type aMemTy,
-                                                     Type bMemTy, Type cMemTy, Value atomVal,
-                                                     Value dPtr, Value aPtr, Value bPtr,
+                                                     Type mmaAtomTy, Type dMemTy, TypeRange aMemTys,
+                                                     TypeRange bMemTys, Type cMemTy, Value atomVal,
+                                                     Value dPtr, ValueRange aPtrs, ValueRange bPtrs,
                                                      Value cPtr) const {
+  if (aPtrs.empty() || aPtrs.size() > 2 || bPtrs.empty() || bPtrs.size() > 2) {
+    emitError(loc, "scaled MMA expects [data] or [data, scale] for each operand");
+    return failure();
+  }
+  Value aPtr = aPtrs.front();
+  Value bPtr = bPtrs.front();
+
   int32_t m = getM();
   int32_t n = getN();
   Type elemTyA = getElemTyA();
@@ -307,8 +336,14 @@ LogicalResult MmaOpCDNA4_MFMAScaleType::emitAtomCall(OpBuilder &builder, Locatio
   Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
   Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
   Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
-  auto res = emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, abTyA, abTyB, accTy, atomVal,
-                             Value{}, a, b, c);
+  SmallVector<Value> aValues{a}, bValues{b};
+  SmallVector<Type> aTypes{abTyA}, bTypes{abTyB};
+  llvm::append_range(aValues, aPtrs.drop_front());
+  llvm::append_range(bValues, bPtrs.drop_front());
+  llvm::append_range(aTypes, aMemTys.drop_front());
+  llvm::append_range(bTypes, bMemTys.drop_front());
+  auto res = emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, aTypes, bTypes, accTy, atomVal,
+                             Value{}, aValues, bValues, c);
   if (failed(res))
     return failure();
   LLVM::StoreOp::create(builder, loc, *res, dPtr);

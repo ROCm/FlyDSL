@@ -89,8 +89,8 @@ def _compile_single_integer_wmma(elem_cls, *, sign_a, sign_b):
             fly.mma_atom_call_ssa(
                 [fx.Vector.make_type(8, fx.Int32)],
                 mma_atom,
-                a_vec.ir_value(),
-                b_vec.ir_value(),
+                [a_vec.ir_value()],
+                [b_vec.ir_value()],
                 acc.ir_value(),
             )
         )
