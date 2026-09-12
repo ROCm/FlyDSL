@@ -1927,35 +1927,35 @@ FLY_INFER_RETURN_TYPES(DecompositionOp) {
   return success();
 }
 
+static LogicalResult verifyMmaOperandGroups(Operation *op, ValueRange a, ValueRange b) {
+  if (a.empty() || b.empty())
+    return op->emitOpError("A and B operand groups must each contain at least one tensor");
+  return success();
+}
+
+LogicalResult MmaAtomCall::verify() { return verifyMmaOperandGroups(*this, getA(), getB()); }
+
+LogicalResult MmaAtomCallSSA::verify() { return verifyMmaOperandGroups(*this, getA(), getB()); }
+
 LogicalResult GemmOp::verify() {
-  if (!getScaleA() && !getScaleB())
-    return success();
-
-  Type atomTy = getMmaAtom().getType();
-  if (auto tiledTy = dyn_cast<TiledMmaType>(atomTy))
-    atomTy = tiledTy.getMmaAtom();
-  auto mmaTy = dyn_cast<MmaAtomType>(atomTy);
-  if (!mmaTy || !mmaTy.isStateful())
-    return emitOpError("scale fragments require a stateful MMA atom");
-
-  auto checkScale = [&](Value scale, Value operand) -> LogicalResult {
-    if (!scale || scale.getType().isInteger(32))
-      return success();
-    auto scaleTy = cast<fly::MemRefType>(scale.getType());
-    auto layout = dyn_cast<LayoutAttr>(scaleTy.getLayout());
-    if (!layout || !layout.isStaticShape() || !layout.isStaticStride() ||
-        !scaleTy.getElemTy().isInteger(32))
-      return emitOpError("scale fragments must have static layouts and i32 elements");
-    auto operandLayout = dyn_cast<LayoutAttr>(cast<fly::MemRefType>(operand.getType()).getLayout());
-    if (!operandLayout || layout.rank() == 0 || layout.rank() != operandLayout.rank() ||
-        layout.getShape().at(0) != IntTupleAttr::getLeafStatic(getContext(), 1))
-      return emitOpError("scale fragments must match the operand rank with mode-0 size 1");
-    for (int32_t i = 1; i < layout.rank(); ++i)
-      if (layout.getShape().at(i) != operandLayout.getShape().at(i))
-        return emitOpError("scale fragment tile dimensions must match its operand");
+  if (failed(verifyMmaOperandGroups(*this, getA(), getB())))
+    return failure();
+  auto checkGroup = [&](ValueRange operands) -> LogicalResult {
+    auto primaryLayout =
+        dyn_cast<LayoutAttr>(cast<fly::MemRefType>(operands.front().getType()).getLayout());
+    for (Value auxiliary : operands.drop_front()) {
+      auto layout = dyn_cast<LayoutAttr>(cast<fly::MemRefType>(auxiliary.getType()).getLayout());
+      if (!layout || !layout.isStaticShape() || !layout.isStaticStride())
+        return emitOpError("auxiliary operands must have static layouts");
+      if (!primaryLayout || layout.rank() == 0 || layout.rank() != primaryLayout.rank())
+        return emitOpError("auxiliary operands must match the primary operand rank");
+      for (int32_t i = 1; i < layout.rank(); ++i)
+        if (layout.getShape().at(i) != primaryLayout.getShape().at(i))
+          return emitOpError("auxiliary operand tile dimensions must match its primary operand");
+    }
     return success();
   };
-  if (failed(checkScale(getScaleA(), getA())) || failed(checkScale(getScaleB(), getB())))
+  if (failed(checkGroup(getA())) || failed(checkGroup(getB())))
     return failure();
   return success();
 }

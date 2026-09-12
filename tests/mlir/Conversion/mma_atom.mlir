@@ -20,7 +20,7 @@ func.func @test_mma_atom_call(
   // CHECK: %[[C_VAL:.*]] = llvm.load %[[C]] : !llvm.ptr<5> -> vector<4xf32>
   // CHECK: %[[RES:.*]] = rocdl.mfma.f32.16x16x4f32 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]]
   // CHECK: llvm.store %[[RES]], %[[D]] : vector<4xf32>, !llvm.ptr<5>
-  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, !fly.memref<f32, register, 4:1>, !fly.memref<f32, register, 1:1>, !fly.memref<f32, register, 1:1>, !fly.memref<f32, register, 4:1>) -> ()
+  fly.mma_atom_call(%atom, %d, [%a], [%b], %c) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, !fly.memref<f32, register, 4:1>, !fly.memref<f32, register, 1:1>, !fly.memref<f32, register, 1:1>, !fly.memref<f32, register, 4:1>) -> ()
   return
 }
 
@@ -32,7 +32,7 @@ func.func @test_gemm_from_tiled_mma_arg(
     %a: !fly.memref<f32, register, 1:1>,
     %b: !fly.memref<f32, register, 1:1>,
     %c: !fly.memref<f32, register, 4:1>) {
-  fly.gemm(%tiled_mma, %d, %a, %b, %c) : (!fly.tiled_mma<!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, <(1,4,1):(0,1,0)>>, !fly.memref<f32, register, 4:1>, !fly.memref<f32, register, 1:1>, !fly.memref<f32, register, 1:1>, !fly.memref<f32, register, 4:1>) -> ()
+  fly.gemm(%tiled_mma, %d, [%a], [%b], %c) : (!fly.tiled_mma<!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x4, (f32, f32) -> f32>>, <(1,4,1):(0,1,0)>>, !fly.memref<f32, register, 4:1>, !fly.memref<f32, register, 1:1>, !fly.memref<f32, register, 1:1>, !fly.memref<f32, register, 4:1>) -> ()
   return
 }
 
@@ -46,7 +46,7 @@ func.func @test_mma_atom_call_ssa_fp8(
   // CHECK: %[[A_CAST:.*]] = llvm.bitcast %[[A]] : vector<8xi8> to i64
   // CHECK: %[[B_CAST:.*]] = llvm.bitcast %[[B]] : vector<8xi8> to i64
   // CHECK: %[[RES:.*]] = rocdl.mfma.f32.16x16x32.fp8.fp8 %[[A_CAST]], %[[B_CAST]], %[[C]]
-  %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x32, (f8E4M3FNUZ, f8E4M3FNUZ) -> f32>>, vector<8xi8>, vector<8xi8>, vector<4xf32>) -> vector<4xf32>
+  %res = fly.mma_atom_call_ssa(%atom, [%a], [%b], %c) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x32, (f8E4M3FNUZ, f8E4M3FNUZ) -> f32>>, vector<8xi8>, vector<8xi8>, vector<4xf32>) -> vector<4xf32>
   return %res : vector<4xf32>
 }
 
@@ -60,6 +60,6 @@ func.func @test_mma_atom_call_ssa_bf16_32x32x8(
   // CHECK: %[[A_CAST:.*]] = llvm.bitcast %[[A]] : vector<4xbf16> to vector<4xi16>
   // CHECK: %[[B_CAST:.*]] = llvm.bitcast %[[B]] : vector<4xbf16> to vector<4xi16>
   // CHECK: %[[RES:.*]] = rocdl.mfma.f32.32x32x8bf16.1k %[[A_CAST]], %[[B_CAST]], %[[C]]
-  %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<32x32x8, (bf16, bf16) -> f32>>, vector<4xbf16>, vector<4xbf16>, vector<16xf32>) -> vector<16xf32>
+  %res = fly.mma_atom_call_ssa(%atom, [%a], [%b], %c) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<32x32x8, (bf16, bf16) -> f32>>, vector<4xbf16>, vector<4xbf16>, vector<16xf32>) -> vector<16xf32>
   return %res : vector<16xf32>
 }

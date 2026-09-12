@@ -13,6 +13,6 @@ func.func @test_gfx11_wmma_bf16_signA_rejected(
     %b: vector<16xbf16>,
     %c: vector<8xf32>) -> vector<8xf32> {
   %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (bf16, bf16) -> f32, signA = true, signB = false, clamp = false>>
-  %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (bf16, bf16) -> f32, signA = true, signB = false, clamp = false>>, vector<16xbf16>, vector<16xbf16>, vector<8xf32>) -> vector<8xf32>
+  %res = fly.mma_atom_call_ssa(%atom, [%a], [%b], %c) : (!fly.mma_atom<!fly_rocdl.gfx11.wmma<16x16x16, (bf16, bf16) -> f32, signA = true, signB = false, clamp = false>>, vector<16xbf16>, vector<16xbf16>, vector<8xf32>) -> vector<8xf32>
   return %res : vector<8xf32>
 }

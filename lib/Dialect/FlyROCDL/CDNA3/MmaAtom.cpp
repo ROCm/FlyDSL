@@ -138,9 +138,17 @@ static int64_t getMfmaAccVecSize(int32_t m, int32_t n, Type elemTyA) {
 
 FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
                                                       Type resultTy, Type mmaAtomTyArg, Type dTyArg,
-                                                      Type aTyArg, Type bTyArg, Type cTyArg,
-                                                      Value atomVal, Value d, Value a, Value b,
+                                                      TypeRange aTyArgs, TypeRange bTyArgs,
+                                                      Type cTyArg, Value atomVal, Value d,
+                                                      ValueRange aValues, ValueRange bValues,
                                                       Value c) const {
+  if (aValues.size() != 1 || bValues.size() != 1) {
+    emitError(loc, "this MMA atom does not support auxiliary operands");
+    return failure();
+  }
+  Value a = aValues.front();
+  Value b = bValues.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -216,9 +224,17 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
 }
 
 LogicalResult MmaOpCDNA3_MFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
-                                                Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
-                                                Value atomVal, Value dPtr, Value aPtr, Value bPtr,
+                                                Type dMemTy, TypeRange aMemTys, TypeRange bMemTys,
+                                                Type cMemTy, Value atomVal, Value dPtr,
+                                                ValueRange aPtrs, ValueRange bPtrs,
                                                 Value cPtr) const {
+  if (aPtrs.size() != 1 || bPtrs.size() != 1) {
+    emitError(loc, "this MMA atom does not support auxiliary operands");
+    return failure();
+  }
+  Value aPtr = aPtrs.front();
+  Value bPtr = bPtrs.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();

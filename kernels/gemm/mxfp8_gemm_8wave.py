@@ -115,7 +115,7 @@ class MxMfma:
         saf, sbf = self._scales(sa, k_pack), self._scales(sb, k_pack)
         if const_expr(set_prio):
             rocdl.s_setprio(1)
-        fx.gemm(self.mma, cf, af, bf, cf, scale_a=saf, scale_b=sbf)
+        fx.gemm(self.mma, cf, [af, saf], [bf, sbf], cf)
         if const_expr(set_prio):
             rocdl.s_setprio(0)
             rocdl.s_barrier()

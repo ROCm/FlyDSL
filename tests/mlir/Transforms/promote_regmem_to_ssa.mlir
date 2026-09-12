@@ -54,7 +54,7 @@ gpu.module @promote_rmem_to_vector_ssa {
     // CHECK: %[[LOOP_ACC_NEXT:.*]] = vector.insert_strided_slice %[[LOOP_RES]], %[[ACC]] {offsets = [4], strides = [1]} : vector<4xf32> into vector<8xf32>
     // CHECK: scf.yield %[[A_ITER]], %[[B_ITER]], %[[LOOP_ACC_NEXT]] : vector<4xf16>, vector<4xf16>, vector<8xf32>
     scf.for %iv = %c0 to %c2 step %c1 {
-      fly.mma_atom_call(%atom, %acc_view, %a_view, %b_view, %acc_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, (4,1):(1,0)>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, (4,1):(1,0)>) -> ()
+      fly.mma_atom_call(%atom, %acc_view, [%a_view], [%b_view], %acc_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, (4,1):(1,0)>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, (4,1):(1,0)>) -> ()
     }
 
     // CHECK: %[[TAIL_A:.*]] = vector.extract_strided_slice %{{.*}} {offsets = [0], sizes = [4], strides = [1]} : vector<4xf16> to vector<4xf16>
@@ -62,7 +62,7 @@ gpu.module @promote_rmem_to_vector_ssa {
     // CHECK: %[[TAIL_C:.*]] = vector.extract_strided_slice %{{.*}} {offsets = [4], sizes = [4], strides = [1]} : vector<8xf32> to vector<4xf32>
     // CHECK: %[[TAIL_RES:.*]] = fly.mma_atom_call_ssa
     // CHECK: %[[TAIL_ACC:.*]] = vector.insert_strided_slice %[[TAIL_RES]], %{{.*}} {offsets = [4], strides = [1]} : vector<4xf32> into vector<8xf32>
-    fly.mma_atom_call(%atom, %acc_view, %a_view, %b_view, %acc_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, (4,1):(1,0)>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, (4,1):(1,0)>) -> ()
+    fly.mma_atom_call(%atom, %acc_view, [%a_view], [%b_view], %acc_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, (4,1):(1,0)>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, (4,1):(1,0)>) -> ()
 
     // CHECK: %[[FINAL:.*]] = vector.extract_strided_slice %[[TAIL_ACC]] {offsets = [4], sizes = [4], strides = [1]} : vector<8xf32> to vector<4xf32>
     // CHECK: %[[ELEM:.*]] = vector.extract %[[FINAL]][%{{.*}}] : f32 from vector<4xf32>
@@ -84,7 +84,7 @@ gpu.module @promote_rmem_to_vector_ssa {
   // CHECK: %[[A:.*]] = vector.extract_strided_slice %[[A_STATE]] {offsets = [0], sizes = [8], strides = [1]} : vector<8xi8> to vector<8xi8>
   // CHECK: %[[B:.*]] = vector.extract_strided_slice %[[B_STATE]] {offsets = [0], sizes = [8], strides = [1]} : vector<8xi8> to vector<8xi8>
   // CHECK: %[[C:.*]] = vector.extract_strided_slice %[[ACC_INIT]] {offsets = [4], sizes = [4], strides = [1]} : vector<8xf32> to vector<4xf32>
-  // CHECK: %[[RES:.*]] = fly.mma_atom_call_ssa(%{{.*}}, %[[A]], %[[B]], %[[C]])
+  // CHECK: %[[RES:.*]] = fly.mma_atom_call_ssa(%{{.*}}, [%[[A]]], [%[[B]]], %[[C]])
   // CHECK-SAME: -> vector<4xf32>
   gpu.func @promote_fp8_mma_to_vector_ssa(%out: !fly.ptr<f32, global>) kernel {
     %c0 = arith.constant 0 : index
@@ -115,7 +115,7 @@ gpu.module @promote_rmem_to_vector_ssa {
     %acc_view = fly.make_view(%acc_slot, %acc_layout) : (!fly.ptr<f32, register>, !fly.layout<(4,1):(1,0)>) -> !fly.memref<f32, register, (4,1):(1,0)>
     %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x32, (f8E4M3FNUZ, f8E4M3FNUZ) -> f32>>
 
-    fly.mma_atom_call(%atom, %acc_view, %a_view, %b_view, %acc_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x32, (f8E4M3FNUZ, f8E4M3FNUZ) -> f32>>, !fly.memref<f32, register, (4,1):(1,0)>, !fly.memref<f8E4M3FNUZ, register, 8:1>, !fly.memref<f8E4M3FNUZ, register, 8:1>, !fly.memref<f32, register, (4,1):(1,0)>) -> ()
+    fly.mma_atom_call(%atom, %acc_view, [%a_view], [%b_view], %acc_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x32, (f8E4M3FNUZ, f8E4M3FNUZ) -> f32>>, !fly.memref<f32, register, (4,1):(1,0)>, !fly.memref<f8E4M3FNUZ, register, 8:1>, !fly.memref<f8E4M3FNUZ, register, 8:1>, !fly.memref<f32, register, (4,1):(1,0)>) -> ()
 
     %final = fly.ptr.load(%acc_slot) : (!fly.ptr<f32, register>) -> vector<4xf32>
     %elem0 = vector.extract %final[%c0] : f32 from vector<4xf32>
