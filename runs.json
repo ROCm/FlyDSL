@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-12T12:36:11Z",
+ "updated": "2026-09-12T12:49:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34694422124,
+   "pr": 1128,
+   "commit": "e23305640386c0197eecaaa2c3f478928a139076",
+   "branch": "codex/scaled-tiled-gemm",
+   "event": "pull_request",
+   "title": "Support variadic operands in fully expanded tiled GEMM",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34694422124",
+   "created_at": "2026-09-12T12:42:48Z",
+   "updated_at": "2026-09-12T12:48:10Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34693306560,
    "pr": 1128,
@@ -10,11 +25,11 @@
    "branch": "codex/scaled-tiled-gemm",
    "event": "pull_request",
    "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34693306560",
    "created_at": "2026-09-12T12:18:15Z",
-   "updated_at": "2026-09-12T12:23:11Z",
+   "updated_at": "2026-09-12T12:47:50Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2046,21 +2061,6 @@
    "created_at": "2026-09-10T06:54:47Z",
    "updated_at": "2026-09-10T07:14:47Z",
    "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 34446206959,
-   "pr": 1110,
-   "commit": "c52a13f9259c4ead2aa44b5656b7315a86267d85",
-   "branch": "fix/llvm-amdgpu-cvt-pk-f32-f8-true16",
-   "event": "pull_request",
-   "title": "[LLVM] Fix true16 lowering for packed FP8 conversions",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34446206959",
-   "created_at": "2026-09-10T06:39:43Z",
-   "updated_at": "2026-09-10T06:39:43Z",
-   "actor": "big-yellow-duck",
    "jobs": []
   }
  ]
