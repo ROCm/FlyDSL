@@ -191,9 +191,14 @@ def build_flash_attn_paged_fp8_module(
         D_CHUNKS = traits.D_CHUNKS
         NPF = traits.NUM_PREFETCH_K
         BOUNDED_MAX = traits.HEAD_DIM == 128 and traits.DUALWAVE_SWP_LAZY_RESCALE
-        STREAM_PAGE16_V128 = traits.PAGE_SIZE == 16 and traits.HEAD_DIM == 192 and traits.HEAD_DIM_V == 128
+        FRAGMENT_PV = traits.HEAD_DIM == 192 and traits.HEAD_DIM_V == 128
         t0 = ctx.split_t0
         t_end = ctx.split_t_end
+
+        def _load_v_first(buf_id):
+            if const_expr(FRAGMENT_PV):
+                return kv_lds_to_regs.load_v_fragment(buf_id, 0)
+            return kv_lds_to_regs.load_v(buf_id)
 
         def _softmax_part(v_s, l_row, m_new):
             v_s = softmax_helper.sub_m(v_s, m_new)
@@ -203,11 +208,22 @@ def build_flash_attn_paged_fp8_module(
             v_p = gemm_helper.cast_p_fp8_direct(v_p)
             return v_p, l_row
 
-        def _subtile_tail(v_s, v_v, v_o, l_row, m_new):
+        def _subtile_tail(v_s, v_v, v_o, l_row, m_new, buf_id):
             v_p, l_row = _softmax_part(v_s, l_row, m_new)
             # Keep the post-MFMA accumulators in SSA. Pinning them after each
             # subtile lengthens the paged schedule without reducing registers.
-            v_o = gemm_helper.pv(v_p, v_v, v_o)
+            if const_expr(FRAGMENT_PV):
+                v_o = gemm_helper.preserve_accumulators(v_o)
+                next_v = v_v
+                # Keep K early on every page layout; retain only one current V
+                # fragment and overlap the next LDS read with this fragment's PV.
+                for dc in range_constexpr(D_CHUNKS):
+                    current = next_v
+                    if const_expr(dc + 1 < D_CHUNKS):
+                        next_v = kv_lds_to_regs.load_v_fragment(buf_id, dc + 1)
+                    v_o[dc] = gemm_helper._mfma_acc_fp8_wide(current, v_p, v_o[dc])
+            else:
+                v_o = gemm_helper.pv(v_p, v_v, v_o)
             return v_o, l_row
 
         def _correct_o(v_o, m_row, l_row, m_tile):
@@ -254,14 +270,8 @@ def build_flash_attn_paged_fp8_module(
             kv_gmem_to_lds.load_v((t0 + 2) * BN, (t0 + 2) % NPF, page_id=page_t2)
             kv_gmem_to_lds.load_v((t0 + 3) * BN, (t0 + 3) % NPF, page_id=page_t3)
         else:
-            next_v_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
-                (t0 + 2) * BN,
-                page_id=page_t2,
-            )
-            next_v_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
-                (t0 + 3) * BN,
-                page_id=page_t3,
-            )
+            next_v_a = kv_gmem_to_lds.load_v_source((t0 + 2) * BN, page_id=page_t2)
+            next_v_b = kv_gmem_to_lds.load_v_source((t0 + 3) * BN, page_id=page_t3)
         fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
@@ -327,32 +337,19 @@ def build_flash_attn_paged_fp8_module(
                 next_v_b = loop_args[next_v_arg_idx + 1]
 
                 v_k_a = kv_lds_to_regs.load_k(a_buf)
-                if const_expr(not STREAM_PAGE16_V128):
-                    v_k_b = kv_lds_to_regs.load_k(b_buf)
-                    v_v_a = kv_lds_to_regs.load_v(a_buf)
+                v_k_b = kv_lds_to_regs.load_k(b_buf)
+                v_v_a = _load_v_first(a_buf)
 
                 page_f_a, page_f_b = ctx.load_page_id_pair((j + 4) * BN)
                 kv_gmem_to_lds.load_k((j + 4) * BN, f_a_buf, page_id=page_f_a)
                 kv_gmem_to_lds.load_k((j + 5) * BN, f_b_buf, page_id=page_f_b)
 
                 v_s_a = gemm_helper.qk(v_k_a, q_wide)
-                if const_expr(STREAM_PAGE16_V128):
-                    v_k_b = kv_lds_to_regs.load_k(b_buf)
-                kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_a, nn_a_buf, (j + 2) * BN, mask_padding=mask_v)
-                v_f_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
-                    (j + 4) * BN,
-                    page_id=page_f_a,
-                )
-                v_f_b = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
-                    (j + 5) * BN,
-                    page_id=page_f_b,
-                )
+                kv_gmem_to_lds.store_v_source(next_v_a, nn_a_buf, (j + 2) * BN, mask_padding=mask_v)
+                v_f_a = kv_gmem_to_lds.load_v_source((j + 4) * BN, page_id=page_f_a)
+                v_f_b = kv_gmem_to_lds.load_v_source((j + 5) * BN, page_id=page_f_b)
                 v_s_b = gemm_helper.qk(v_k_b, q_wide)
-                kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_b, nn_b_buf, (j + 3) * BN, mask_padding=mask_v)
-                if const_expr(STREAM_PAGE16_V128):
-                    # The current V slot is distinct from both next-V stores.
-                    # Delay its fragment until K operands have been consumed.
-                    v_v_a = kv_lds_to_regs.load_v(a_buf)
+                kv_gmem_to_lds.store_v_source(next_v_b, nn_b_buf, (j + 3) * BN, mask_padding=mask_v)
                 if const_expr(do_mask):
                     v_s_a, v_s_b = softmax_helper.causal_mask_pair_if_needed(v_s_a, v_s_b, j)
                 m_new = m_row
@@ -365,9 +362,9 @@ def build_flash_attn_paged_fp8_module(
                     v_o, m_new, l_row = _correct_o(v_o, m_row, l_row, m_tile)
                 v_o = softmax_helper.anchor_v_o(v_o)
 
-                v_o, l_row = _subtile_tail(v_s_a, v_v_a, v_o, l_row, m_new)
-                v_v_b = kv_lds_to_regs.load_v(b_buf)
-                v_o, l_row = _subtile_tail(v_s_b, v_v_b, v_o, l_row, m_new)
+                v_o, l_row = _subtile_tail(v_s_a, v_v_a, v_o, l_row, m_new, a_buf)
+                v_v_b = _load_v_first(b_buf)
+                v_o, l_row = _subtile_tail(v_s_b, v_v_b, v_o, l_row, m_new, b_buf)
                 m_row = m_new
                 next_args = [m_row, l_row] + v_o + [nn_a_buf, v_f_a, v_f_b]
 
@@ -412,22 +409,17 @@ def build_flash_attn_paged_fp8_module(
             for j, loop_args in range(slow_prefix_end, fx.Int64(t_end), fx.Int64(2), init=slow_tail_state):
                 next_args = _iterate(j, loop_args, True)
                 loop_results = yield next_args
-        elif const_expr(traits.HEAD_DIM == 192 and traits.HEAD_DIM_V == 128):
-            # The prefix boundary is wave-uniform, not CTA-uniform. Both loops
-            # must keep the same pair order and one rendezvous per pair.
-            prefix_end = fx.Int64(ctx.q_start_pos_i32 + ctx.delta_i32) // (2 * BN) * 2
-            prefix_end = fx.min(fx.Int64(t_end), fx.max(fx.Int64(t0), fx.min(prefix_end, v_prefix_end)))
-            for j, loop_args in range(fx.Int64(t0), prefix_end, fx.Int64(2), init=init_args):
-                next_args = _iterate(j, loop_args, False, mask_v=False)
-                loop_results = yield next_args
-            tail_init = loop_results
-            for j, loop_args in range(prefix_end, fx.Int64(t_end), fx.Int64(2), init=tail_init):
-                next_args = _iterate(j, loop_args, True)
-                loop_results = yield next_args
         else:
-            prefix_end = fx.min(fx.Int64(t_end), fx.max(fx.Int64(t0), v_prefix_end))
+            mask_prefix = (traits.HEAD_DIM, traits.HEAD_DIM_V) != (192, 128)
+            prefix_end = v_prefix_end
+            if const_expr(not mask_prefix):
+                # This boundary is wave-uniform, not CTA-uniform. Both loops
+                # must keep the same pair order and one rendezvous per pair.
+                causal_prefix_end = fx.Int64(ctx.q_start_pos_i32 + ctx.delta_i32) // (2 * BN) * 2
+                prefix_end = fx.min(causal_prefix_end, v_prefix_end)
+            prefix_end = fx.min(fx.Int64(t_end), fx.max(fx.Int64(t0), prefix_end))
             for j, loop_args in range(fx.Int64(t0), prefix_end, fx.Int64(2), init=init_args):
-                next_args = _iterate(j, loop_args, True, mask_v=False)
+                next_args = _iterate(j, loop_args, mask_prefix, mask_v=False)
                 loop_results = yield next_args
             tail_init = loop_results
             for j, loop_args in range(prefix_end, fx.Int64(t_end), fx.Int64(2), init=tail_init):
