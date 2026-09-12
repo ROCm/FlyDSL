@@ -2308,8 +2308,30 @@ public:
     int32_t bRank = bLayoutAttr.rank();
     int32_t cRank = cLayoutAttr.rank();
 
+    auto getScaledAtom = [&](ArrayRef<int32_t> aIdx, ArrayRef<int32_t> bIdx) {
+      Value atom = mmaAtomVal;
+      auto setScale = [&](Value scale, StringRef field, ArrayRef<int32_t> idx) {
+        if (!scale)
+          return;
+        if (scale.getType().isInteger(32)) {
+          atom = AtomSetValueOp::create(rewriter, loc, atom, field, scale);
+          return;
+        }
+        SmallVector<Attribute> coordElems = {IntTupleAttr::getLeafStatic(ctx, 0)};
+        for (int32_t i : idx)
+          coordElems.push_back(IntTupleAttr::getLeafStatic(ctx, i));
+        auto coordAttr = IntTupleAttr::get(ArrayAttr::get(ctx, coordElems));
+        Value coord = MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(coordAttr), {});
+        Value value = MemRefLoadOp::create(rewriter, loc, scale, coord);
+        atom = AtomSetValueOp::create(rewriter, loc, atom, field, value);
+      };
+      setScale(op.getScaleA(), "scale_a", aIdx);
+      setScale(op.getScaleB(), "scale_b", bIdx);
+      return atom;
+    };
+
     if (dRank == 1 && aRank == 1 && bRank == 1 && cRank == 1) {
-      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, a, b, c);
+      MmaAtomCall::create(rewriter, loc, getScaledAtom({}, {}), d, a, b, c);
       rewriter.eraseOp(op);
       return success();
     }
@@ -2346,7 +2368,7 @@ public:
         Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
         Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
         Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
-        MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+        MmaAtomCall::create(rewriter, loc, getScaledAtom({m}, {n}), dSlice, aSlice, bSlice, cSlice);
       };
 
       int32_t totalIters = loop_m * loop_n;
@@ -2448,7 +2470,8 @@ public:
         Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
         Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
         Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
-        MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
+        MmaAtomCall::create(rewriter, loc, getScaledAtom({m, k}, {n, k}), dSlice, aSlice, bSlice,
+                            cSlice);
       };
 
       Value traversalLayoutVal = op.getTraversalLayout();

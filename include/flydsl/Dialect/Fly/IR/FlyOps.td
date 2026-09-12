@@ -419,11 +419,15 @@ def Fly_CopyOp : Fly_Op<"copy"> {
   let arguments = (ins AnyType:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, Optional<Fly_MemRef>:$pred);
   let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`,` $pred^)? `)` attr-dict `:` functional-type(operands, results)";
 }
-def Fly_GemmOp : Fly_Op<"gemm"> {
+def Fly_GemmOp : Fly_Op<"gemm", [AttrSizedOperandSegments]> {
+  let hasVerifier = 1;
   let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c,
                        OptionalAttr<Fly_GemmTraversalOrderAttr>:$traversalOrder,
-                       Optional<Fly_Layout>:$traversalLayout);
+                       Optional<Fly_Layout>:$traversalLayout,
+                       Optional<AnyTypeOf<[I32, Fly_MemRef]>>:$scaleA,
+                       Optional<AnyTypeOf<[I32, Fly_MemRef]>>:$scaleB);
   let assemblyFormat = "`(` $mmaAtom `,` $d `,` $a `,` $b `,` $c `)` (`traversalLayout` `=` $traversalLayout^)? "
+                       "(`scaleA` `=` $scaleA^)? (`scaleB` `=` $scaleB^)? "
                        "attr-dict `:` functional-type(operands, results)";
 }
 
