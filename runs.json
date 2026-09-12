@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-09-12T01:00:41Z",
+ "updated": "2026-09-12T03:33:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34669097321,
+   "pr": 1123,
+   "commit": "5efe4c4d964d14a2236a487ab945d3c7eeb4e084",
+   "branch": "codex/minimax-mxfp8-moe-8wave",
+   "event": "pull_request",
+   "title": "Add grouped eight-wave MXFP8 and FP4-weight MoE kernels",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34669097321",
+   "created_at": "2026-09-12T02:58:16Z",
+   "updated_at": "2026-09-12T03:23:38Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-12T03:23:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34669097321/job/103490124607"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-12T03:25:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34669097321/job/103490124630"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-12T03:23:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34669097321/job/103490124665"
+    }
+   ]
+  },
   {
    "run_id": 34645855663,
    "pr": 1119,
@@ -10,11 +53,11 @@
    "branch": "codex/topk-gating-mi355",
    "event": "pull_request",
    "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645855663",
    "created_at": "2026-09-11T20:45:05Z",
-   "updated_at": "2026-09-11T21:04:31Z",
+   "updated_at": "2026-09-12T02:45:17Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -40,9 +83,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-11T21:04:31Z",
+     "started_at": "2026-09-12T02:45:17Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645855663/job/103421751427"
     }
@@ -130,7 +173,7 @@
    "commit": "adab80586372fcd41c6cbd87aa6c2bc9ba4c8a66",
    "branch": "codex/minimax-mxfp8-moe-8wave",
    "event": "pull_request",
-   "title": "Add grouped eight-wave MXFP8 MoE prefill kernels",
+   "title": "Add grouped eight-wave MXFP8 and FP4-weight MoE kernels",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34622262193",
@@ -176,7 +219,7 @@
    "commit": "eaa041569024b58e1d94ff51871825574504ad77",
    "branch": "codex/minimax-mxfp8-moe-8wave",
    "event": "pull_request",
-   "title": "Add grouped eight-wave MXFP8 MoE prefill kernels",
+   "title": "Add grouped eight-wave MXFP8 and FP4-weight MoE kernels",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34614690334",
@@ -220,7 +263,7 @@
    "commit": "98c47b5810c510e4f7666cdbdbff95e642efc7d5",
    "branch": "codex/minimax-mxfp8-moe-8wave",
    "event": "pull_request",
-   "title": "Add grouped eight-wave MXFP8 MoE prefill kernels",
+   "title": "Add grouped eight-wave MXFP8 and FP4-weight MoE kernels",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34610405845",
@@ -1961,21 +2004,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34439021827",
    "created_at": "2026-09-10T04:55:00Z",
    "updated_at": "2026-09-10T05:07:05Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 34438138626,
-   "pr": null,
-   "commit": "5c6ba71861bb3d5c0f95745eb491a03b59662ce4",
-   "branch": "skill/review-flydsl-kernel",
-   "event": "pull_request",
-   "title": "feat(skills): add supplemental FlyDSL review checks",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34438138626",
-   "created_at": "2026-09-10T04:41:15Z",
-   "updated_at": "2026-09-10T04:44:35Z",
    "actor": "jhinpan",
    "jobs": []
   }
