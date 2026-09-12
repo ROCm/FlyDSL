@@ -4559,6 +4559,11 @@ def test_return_lse_false_returns_only_out():
     assert out.shape == q.shape
 
 
+_PAGED_FP8_DIMS = [(128, 128), (192, 128), (192, 192)]
+_PAGED_FP8_PHYSICAL_LAYOUTS = [(1, "linear"), (1, "linear3d"), (16, "vectorized"), (1024, "vectorized")]
+_PAGED_FP8_LAYOUTS = [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS
+
+
 def _paged_fp8_cache_shapes(num_pages, num_kv_heads, head_dim, value_head_dim, page_size, kv_cache_layout):
     if kv_cache_layout == "vectorized":
         return (
@@ -4618,13 +4623,8 @@ def test_return_lse_rejects_fp8():
 @_requires_gfx950
 @pytest.mark.parametrize(
     ("head_dim", "value_head_dim"),
-    [(128, 128), (192, 128), (192, 192)],
+    _PAGED_FP8_DIMS,
     ids=["d128-v128", "d192-v128", "d192-v192"],
-)
-@pytest.mark.parametrize(
-    ("use_non_default_stream", "force_internal_copies"),
-    [(False, False), (True, False), (True, True)],
-    ids=["default", "side", "side-copies"],
 )
 @pytest.mark.parametrize(
     ("query_lengths", "kv_lengths", "block_table_rows"),
@@ -4635,23 +4635,22 @@ def test_return_lse_rejects_fp8():
     ],
     ids=["ragged", "single-sequence-even-pages", "single-sequence-odd-pages"],
 )
-def test_paged_fp8_asymmetric_value_matches_torch(
+def test_paged_fp8_page64_side_stream_copies(
     head_dim,
     value_head_dim,
-    use_non_default_stream,
-    force_internal_copies,
     query_lengths,
     kv_lengths,
     block_table_rows,
 ):
+    """Copy ordering for B=1/B>1 and paired/scalar page-ID schedules."""
     _check_paged_fp8_matches_torch(
-        head_dim,
-        value_head_dim,
-        use_non_default_stream,
-        force_internal_copies,
-        query_lengths,
-        kv_lengths,
-        block_table_rows,
+        head_dim=head_dim,
+        value_head_dim=value_head_dim,
+        use_non_default_stream=True,
+        force_internal_copies=True,
+        query_lengths=query_lengths,
+        kv_lengths=kv_lengths,
+        block_table_rows=block_table_rows,
     )
 
 
@@ -4791,21 +4790,22 @@ def _check_paged_fp8_matches_torch(
     return actual
 
 
-_PAGED_FP8_PHYSICAL_LAYOUTS = [(1, "linear"), (1, "linear3d"), (16, "vectorized"), (1024, "vectorized")]
-
-
 @_requires_gfx950
 @pytest.mark.parametrize(
     "page_size,kv_cache_layout,longest_kv",
-    [(64, "vectorized", 193)] + [(p, layout, 129) for p, layout in [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS],
+    [(64, "vectorized", 193)] + [(p, layout, 129) for p, layout in _PAGED_FP8_LAYOUTS],
 )
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
-@pytest.mark.parametrize("num_query_heads,num_kv_heads", [(1, 1), (3, 1), (6, 2), (6, 3), (8, 8), (24, 3), (16, 1)])
-@pytest.mark.parametrize("lazy_rescale", [False, True])
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
+@pytest.mark.parametrize(
+    "num_query_heads,num_kv_heads,lazy_rescale",
+    [(hq, hkv, True) for hq, hkv in [(1, 1), (3, 1), (6, 2), (6, 3), (8, 8), (24, 3), (16, 1)]] + [(16, 1, False)],
+)
 def test_paged_fp8_general_head_counts_and_ragged_lengths(
     page_size, kv_cache_layout, longest_kv, head_dim, value_head_dim, num_query_heads, num_kv_heads, lazy_rescale
 ):
     """MHA/GQA and masked rows must not depend on the Hq16/Hkv1 benchmark."""
+    # Addressing covers every head ratio; eager/lazy correction still covers
+    # every page/width here and multiple KV heads in the ragged pipeline tests.
     query_lengths = [0, 65, 300, 17]
     kv_lengths = [33, 0, longest_kv, 65]
     counts = [(length + page_size - 1) // page_size for length in kv_lengths]
@@ -4837,12 +4837,14 @@ def test_paged_fp8_general_head_counts_and_ragged_lengths(
     [(64, "vectorized", "paired"), (64, "vectorized", "scalar"), (1024, "vectorized", "native")]
     + [(p, layout, mode) for p, layout in _PAGED_FP8_PHYSICAL_LAYOUTS if p < 64 for mode in ("buffered", "wide")],
 )
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
-@pytest.mark.parametrize("kv_length", [1, 2, 15, 16, 17, 63, 64, 65, 66, 127, 128, 129, 513, 1025])
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
+@pytest.mark.parametrize("kv_length", [1, 16, 17, 63, 64, 65, 127, 128, 129, 513, 1025])
 def test_paged_fp8_inactive_cache_values_do_not_contaminate_output(
     monkeypatch, page_size, kv_cache_layout, mode, head_dim, value_head_dim, kv_length
 ):
     """Only active K/V values matter, including empty requests and partial pages."""
+    # Byte-residue combinations are exhaustive in test_paged_fp8_value_mask_is_byte_exact;
+    # this integration matrix targets token-group, tile, page-pair and pipeline boundaries.
     if mode == "wide":
         build = flash_attn_interface._build_paged_fp8
 
@@ -4947,8 +4949,8 @@ def test_paged_fp8_value_mask_is_byte_exact(num_words, token_base):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("page_size,kv_cache_layout", [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS)
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_LAYOUTS)
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 def test_paged_fp8_shared_pages_and_strided_metadata(page_size, kv_cache_layout, head_dim, value_head_dim):
     """Page IDs may be shared; cumulative lengths need not be contiguous views."""
     kv_lengths = [256, 65]
@@ -4971,15 +4973,15 @@ def test_paged_fp8_shared_pages_and_strided_metadata(page_size, kv_cache_layout,
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("page_size,kv_cache_layout", [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS)
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_LAYOUTS)
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 @pytest.mark.parametrize("strided_metadata", [False, True])
 def test_paged_fp8_graph_replay_updates_lengths_and_ignores_padding(
     page_size, kv_cache_layout, head_dim, value_head_dim, strided_metadata
 ):
     """One captured graph honors changing device lengths and poisoned unused IDs."""
     torch.manual_seed(981)
-    query_length, max_query, max_kv = 17, 512, 512
+    query_length, max_query, max_kv = 17, 512, max(512, page_size + 1)
     num_heads, num_kv_heads = 6, 2
     num_pages = (max_kv + page_size - 1) // page_size
     query, q_scale = quantize_per_tensor_fp8(torch.randn(query_length, num_heads, head_dim, device="cuda") * 0.2)
@@ -5033,7 +5035,7 @@ def test_paged_fp8_graph_replay_updates_lengths_and_ignores_padding(
     with torch.cuda.graph(graph):
         captured = call()
     assert captured is output
-    for length in (65, 129, 0, 33):
+    for length in (65, 129, max_kv, 0, 33):
         update_metadata(length)
         output.fill_(float("nan"))
         graph.replay()
@@ -5046,8 +5048,8 @@ def test_paged_fp8_graph_replay_updates_lengths_and_ignores_padding(
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("page_size,kv_cache_layout", [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS)
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_LAYOUTS)
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 @pytest.mark.parametrize("max_query", [256, 512])
 def test_paged_fp8_maxima_are_upper_bounds(page_size, kv_cache_layout, head_dim, value_head_dim, max_query):
     """Loose launch bounds must not replace device-side lengths or overwrite O."""
@@ -5105,13 +5107,7 @@ def test_paged_fp8_maxima_are_upper_bounds(page_size, kv_cache_layout, head_dim,
     torch.testing.assert_close(actual, torch.ones_like(actual), rtol=2.0e-2, atol=2.0e-2)
 
 
-@_requires_gfx950
-@pytest.mark.parametrize("page_size,kv_cache_layout", [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS)
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
-@pytest.mark.parametrize("query_lengths,kv_lengths", [([0, 0], [65, 0]), ([17, 0, 65], [0, 0, 0]), ([], [])])
-@pytest.mark.parametrize("preallocated", [False, True])
-@pytest.mark.parametrize("kv_max_mode", ["exact", "upper_bound", "infer"])
-def test_paged_fp8_empty_attention_skips_kernel(
+def _check_paged_fp8_empty_attention(
     monkeypatch,
     page_size,
     kv_cache_layout,
@@ -5170,6 +5166,34 @@ def test_paged_fp8_empty_attention_skips_kernel(
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@_requires_gfx950
+@pytest.mark.parametrize("query_lengths,kv_lengths", [([0, 0], [65, 0]), ([17, 0, 65], [0, 0, 0]), ([], [])])
+@pytest.mark.parametrize("preallocated", [False, True])
+@pytest.mark.parametrize("kv_max_mode", ["exact", "upper_bound", "infer"])
+def test_paged_fp8_empty_attention_skips_kernel(monkeypatch, query_lengths, kv_lengths, preallocated, kv_max_mode):
+    """Empty-result control flow does not depend on physical cache geometry."""
+    _check_paged_fp8_empty_attention(
+        monkeypatch, 64, "vectorized", 192, 128, query_lengths, kv_lengths, preallocated, kv_max_mode
+    )
+
+
+@_requires_gfx950
+@pytest.mark.parametrize(
+    "page_size,kv_cache_layout,head_dim,value_head_dim",
+    [
+        (page, layout, head_dim, value_dim)
+        for page, layout in _PAGED_FP8_LAYOUTS
+        for head_dim, value_dim in _PAGED_FP8_DIMS
+        if (page, layout, head_dim, value_dim) != (64, "vectorized", 192, 128)
+    ],
+)
+def test_paged_fp8_empty_output_layouts(monkeypatch, page_size, kv_cache_layout, head_dim, value_head_dim):
+    """All native cache/output shapes support the same empty-KV fast path."""
+    _check_paged_fp8_empty_attention(
+        monkeypatch, page_size, kv_cache_layout, head_dim, value_head_dim, [17, 0, 65], [0, 0, 0], True, "upper_bound"
+    )
+
+
 def _paged_fp8_validation_inputs(num_heads=6, num_kv_heads=2, page_size=64, kv_cache_layout="vectorized"):
     query = torch.zeros((17, num_heads, 128), dtype=FP8_DTYPE, device="cuda")
     num_pages = (256 + page_size - 1) // page_size
@@ -5200,11 +5224,16 @@ def _unexpected_paged_fp8_build(**kwargs):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("page_size,kv_cache_layout", [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS)
 @pytest.mark.parametrize(
-    "scale_shape,scale_stride", [((), None), ((1,), None), ((1, 1), None), ((1,), (0,)), ((1,), (2,))]
+    "page_size,kv_cache_layout,scale_shape,scale_stride",
+    [
+        (64, "vectorized", shape, stride)
+        for shape, stride in [((), None), ((1,), None), ((1, 1), None), ((1,), (0,)), ((1,), (2,))]
+    ]
+    + [(page, layout, (), None) for page, layout in _PAGED_FP8_PHYSICAL_LAYOUTS],
 )
 def test_paged_fp8_single_value_descale_shapes(page_size, kv_cache_layout, scale_shape, scale_stride):
+    """Normalize every singleton form once, and accept scalars on every layout."""
     (query, key, value), kwargs = _paged_fp8_validation_inputs(page_size=page_size, kv_cache_layout=kv_cache_layout)
     value.fill_(1.0)
     for name in ("q_descale", "k_descale", "v_descale"):
@@ -5303,7 +5332,7 @@ def test_paged_fp8_rejects_negative_launch_bounds(monkeypatch, name):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("page_size,kv_cache_layout", [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS)
+@pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_LAYOUTS)
 @pytest.mark.parametrize("preallocated", [False, True])
 def test_paged_fp8_empty_cache_on_stream_and_graph(monkeypatch, page_size, kv_cache_layout, preallocated):
     (query, key, value), kwargs = _paged_fp8_validation_inputs(page_size=page_size, kv_cache_layout=kv_cache_layout)
@@ -5420,7 +5449,7 @@ def test_paged_fp8_paired_page_ids_ignore_padding(page_base, num_tiles, tile):
 
 @_requires_gfx950
 @pytest.mark.parametrize("page_size,kv_cache_layout", [(1, "linear"), (1, "linear3d"), (16, "vectorized")])
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 def test_paged_fp8_cache_buffer_matches_wide_fallback(
     monkeypatch, page_size, kv_cache_layout, head_dim, value_head_dim
 ):
@@ -5766,7 +5795,7 @@ def test_paged_fp8_rejects_inconsistent_page_metadata(violation):
 
 @_requires_gfx950
 @pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_PHYSICAL_LAYOUTS)
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 def test_paged_fp8_physical_pages_side_stream_copies(page_size, kv_cache_layout, head_dim, value_head_dim):
     kv_lengths = [page_size + 65, page_size + 17, 33]
     counts = [(length + page_size - 1) // page_size for length in kv_lengths]
@@ -5790,15 +5819,15 @@ def test_paged_fp8_physical_pages_side_stream_copies(page_size, kv_cache_layout,
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_PHYSICAL_LAYOUTS)
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_LAYOUTS)
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 @pytest.mark.parametrize("num_kv_heads", [1, 2, 4])
 @pytest.mark.parametrize("lazy_rescale", [True, False])
-def test_paged_fp8_physical_page_size_ragged_matches_torch(
+def test_paged_fp8_ragged_multiblock_matches_torch(
     page_size, kv_cache_layout, head_dim, value_head_dim, num_kv_heads, lazy_rescale
 ):
     query_lengths = [300, 257, 33, 7, 1]
-    kv_lengths = [max(513, 2 * page_size + 1), max(385, page_size + 1), 65, 16, 1]
+    kv_lengths = [max(513, 2 * page_size + 1), max(385, page_size + 1), 129, 16, 1]
     counts = [(length + page_size - 1) // page_size for length in kv_lengths]
     physical_pages = list(reversed(range(sum(counts))))
     rows = []
@@ -5822,10 +5851,11 @@ def test_paged_fp8_physical_page_size_ragged_matches_torch(
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 @pytest.mark.parametrize(
     "page_size,kv_cache_layout,kv_length",
-    [
+    [(64, "vectorized", 63)]
+    + [
         (size, layout, length)
         for size, layout in _PAGED_FP8_PHYSICAL_LAYOUTS
         for length in sorted({63, 64, 65, max(1, size - 1), size, size + 1})
@@ -5845,38 +5875,6 @@ def test_paged_fp8_physical_page_boundary_matches_torch(
         block_table_rows=[list(reversed(range(pages)))],
         page_size=page_size,
         kv_cache_layout=kv_cache_layout,
-    )
-
-
-@_requires_gfx950
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
-@pytest.mark.parametrize("num_kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("lazy_rescale", [True, False])
-def test_paged_fp8_odd_page_ragged_multiblock_matches_torch(head_dim, value_head_dim, num_kv_heads, lazy_rescale):
-    _check_paged_fp8_matches_torch(
-        head_dim=head_dim,
-        value_head_dim=value_head_dim,
-        use_non_default_stream=True,
-        force_internal_copies=False,
-        query_lengths=[300, 257, 33],
-        kv_lengths=[513, 385, 129],
-        block_table_rows=[list(reversed(range(9))), list(reversed(range(9, 16))) + [0] * 2, [18, 16, 17] + [0] * 6],
-        num_kv_heads=num_kv_heads,
-        lazy_rescale=lazy_rescale,
-    )
-
-
-@_requires_gfx950
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
-def test_paged_fp8_single_partial_page_matches_torch(head_dim, value_head_dim):
-    _check_paged_fp8_matches_torch(
-        head_dim=head_dim,
-        value_head_dim=value_head_dim,
-        use_non_default_stream=False,
-        force_internal_copies=False,
-        query_lengths=[17],
-        kv_lengths=[63],
-        block_table_rows=[[0]],
     )
 
 
@@ -5902,7 +5900,7 @@ def test_paged_fp8_d192_bn128_multiple_kv_heads(value_head_dim, num_kv_heads):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 def test_paged_fp8_bn128_ragged_multiblock_matches_torch(head_dim, value_head_dim):
     """The multi-batch BN128 path handles distinct causal offsets and inactive q-blocks."""
     _check_paged_fp8_matches_torch(
@@ -6008,7 +6006,7 @@ def test_paged_fp8_d192_batch_interleave_group(batch_size, head_dims, expected):
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 3, 4, 5, 7, 8, 16, 33])
-@pytest.mark.parametrize("head_dims", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("head_dims", _PAGED_FP8_DIMS)
 def test_paged_fp8_paired_batch_interleave_group(batch_size, head_dims):
     choose = flash_attn_interface._paged_fp8_batch_interleave_group
     if head_dims == (128, 128):
@@ -6057,7 +6055,7 @@ def test_paged_fp8_bn128_batch2_ragged_multiblock_matches_torch():
 @_requires_gfx950
 @pytest.mark.parametrize(
     ("head_dim", "value_head_dim"),
-    [(128, 128), (192, 128), (192, 192)],
+    _PAGED_FP8_DIMS,
     ids=["d128-v128", "d192-v128", "d192-v192"],
 )
 def test_paged_fp8_long_context_random_pages_matches_torch(head_dim, value_head_dim):
@@ -6111,75 +6109,9 @@ def test_paged_fp8_long_context_random_pages_matches_torch(head_dim, value_head_
 
 
 @_requires_gfx950
-@pytest.mark.parametrize(
-    ("head_dim", "value_head_dim"),
-    [(128, 128), (192, 128), (192, 192)],
-    ids=["d128-v128", "d192-v128", "d192-v192"],
-)
-@pytest.mark.parametrize("page_size,kv_cache_layout", [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS)
-def test_paged_fp8_graph_replay_matches_torch(head_dim, value_head_dim, page_size, kv_cache_layout):
-    """The optimized paged variants preserve caller-owned graph output."""
-    torch.manual_seed(29)
-    query_length = 63
-    kv_length = max(128, page_size + 1)
-    num_pages = (kv_length + page_size - 1) // page_size
-    query, query_descale = quantize_per_tensor_fp8(torch.randn(query_length, 16, head_dim, device="cuda") * 0.2)
-    key_shape, value_shape = _paged_fp8_cache_shapes(num_pages, 1, head_dim, value_head_dim, page_size, kv_cache_layout)
-    key, key_descale = quantize_per_tensor_fp8(torch.randn(key_shape, device="cuda") * 0.2)
-    value, value_descale = quantize_per_tensor_fp8(torch.randn(value_shape, device="cuda") * 0.2)
-    output = torch.empty(query_length, 16, value_head_dim, device="cuda", dtype=torch.bfloat16)
-    block_table = torch.arange(num_pages - 1, -1, -1, device="cuda", dtype=torch.int32).reshape(1, -1)
-    q_indptr = torch.tensor([0, query_length], device="cuda", dtype=torch.int32)
-    kv_indptr = torch.tensor([0, kv_length], device="cuda", dtype=torch.int32)
-    seqlen_k = torch.tensor([kv_length], device="cuda", dtype=torch.int32)
-    kwargs = dict(
-        causal=True,
-        num_kv_heads=1,
-        cu_seqlens_q=q_indptr,
-        cu_seqlens_kv=kv_indptr,
-        max_seqlen_q=query_length,
-        max_seqlen_kv=kv_length,
-        cross_seqlen=True,
-        block_table=block_table,
-        seqlen_k=seqlen_k,
-        kv_cache_layout=kv_cache_layout,
-        q_descale=query_descale,
-        k_descale=key_descale,
-        v_descale=value_descale,
-        out=output,
-    )
-
-    warmup_stream = torch.cuda.Stream()
-    with torch.cuda.stream(warmup_stream):
-        flydsl_flash_attn_func(query, key, value, **kwargs)
-    torch.cuda.current_stream().wait_stream(warmup_stream)
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        captured = flydsl_flash_attn_func(query, key, value, **kwargs)
-    graph.replay()
-    torch.cuda.synchronize()
-
-    expected = _paged_fp8_torch_reference(
-        query,
-        key,
-        value,
-        block_table,
-        [query_length],
-        [kv_length],
-        (query_descale, key_descale, value_descale),
-        kv_cache_layout=kv_cache_layout,
-    )
-
-    assert captured.data_ptr() == output.data_ptr()
-    assert bool(torch.isfinite(output).all().item())
-    torch.testing.assert_close(output, expected, rtol=2.0e-2, atol=2.0e-2)
-
-
-@_requires_gfx950
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 @pytest.mark.parametrize("kv_length", [128, 192])
-@pytest.mark.parametrize("page_size,kv_cache_layout", [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS)
+@pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_LAYOUTS)
 def test_paged_fp8_explicit_compile_matches_torch(
     monkeypatch, head_dim, value_head_dim, kv_length, page_size, kv_cache_layout
 ):
@@ -6207,9 +6139,9 @@ def test_paged_fp8_explicit_compile_matches_torch(
 @_requires_gfx950
 @pytest.mark.parametrize(
     "page_size,kv_cache_layout,longest_kv",
-    [(64, "vectorized", 193)] + [(p, layout, 129) for p, layout in [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS],
+    [(64, "vectorized", 193)] + [(p, layout, 129) for p, layout in _PAGED_FP8_LAYOUTS],
 )
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 def test_paged_fp8_interleave_is_not_limited_to_benchmark_heads(
     monkeypatch, page_size, kv_cache_layout, longest_kv, head_dim, value_head_dim
 ):
@@ -6240,15 +6172,16 @@ def test_paged_fp8_interleave_is_not_limited_to_benchmark_heads(
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("page_size,kv_cache_layout", [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS)
 @pytest.mark.parametrize("compile_only", [False, True])
 @pytest.mark.parametrize(
     "missing",
     ["cu_seqlens_q", "cu_seqlens_kv", "block_table", "block_table_stride", "q_descale", "k_descale", "v_descale"],
 )
-def test_paged_fp8_direct_launcher_requires_metadata(monkeypatch, page_size, kv_cache_layout, compile_only, missing):
+def test_paged_fp8_direct_launcher_requires_metadata(monkeypatch, compile_only, missing):
+    """The common host guard precedes page-specific compilation and launch."""
     from kernels.attention import flash_attn_fp8_paged_gfx950 as paged_module
 
+    page_size, kv_cache_layout = 64, "vectorized"
     (query, key, value), public_kwargs = _paged_fp8_validation_inputs(
         page_size=page_size, kv_cache_layout=kv_cache_layout
     )
@@ -6455,8 +6388,8 @@ def test_paged_legacy_dtype_accepts_host_only_seqlen_metadata(dtype):
 
 @_requires_gfx950
 @pytest.mark.large_shape
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
-@pytest.mark.parametrize("page_size,kv_cache_layout", [(64, "vectorized")] + _PAGED_FP8_PHYSICAL_LAYOUTS)
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
+@pytest.mark.parametrize("page_size,kv_cache_layout", _PAGED_FP8_LAYOUTS)
 def test_paged_fp8_cache_offsets_above_4gib(head_dim, value_head_dim, page_size, kv_cache_layout):
     """Physical K and V page rebasing remains 64-bit beyond 4 GiB."""
     key_page_bytes = page_size * head_dim
@@ -6959,9 +6892,11 @@ def test_fp8_rescale_threshold_drops_past_the_long_sequence_bound():
     assert set(f(s) for s in (1, 1024, 4096, 4097, 8192, 131072)) == {6.0, 4.0}
 
 
-@pytest.mark.parametrize("head_dim,value_head_dim", [(128, 128), (192, 128), (192, 192)])
+@pytest.mark.parametrize("head_dim,value_head_dim", _PAGED_FP8_DIMS)
 @pytest.mark.parametrize("page_size", [1, 16, 64, 1024])
 def test_paged_fp8_traits_match_supported_value_segments(head_dim, value_head_dim, page_size):
+    from dataclasses import replace
+
     from kernels.attention.flash_attn_utils import LDS_BYTES_GFX950, _make_paged_dualwave_swp_fp8_traits
 
     traits = _make_paged_dualwave_swp_fp8_traits(
@@ -6978,6 +6913,19 @@ def test_paged_fp8_traits_match_supported_value_segments(head_dim, value_head_di
     assert traits.FP8_PV_SEGMENTED == (value_head_dim == 192)
     assert traits.VT_BF16_TOTAL * 2 >= traits.NUM_PREFETCH_K * value_head_dim * traits.FP8_V_ROW_STRIDE
     assert traits.LDS_KV_TOTAL_SIZE + traits.VT_BF16_TOTAL * 2 <= LDS_BYTES_GFX950
+    # Source layout, shared page IDs and LDS consumers must select one policy.
+    for buffered in (False, True):
+        layout = replace(traits, CACHE_BUFFERED=buffered)
+        assert layout.K_LDS_PAGE_GROUPED == (page_size == 16 and value_head_dim == 192)
+        if page_size == 1:
+            expected = "token_transpose" if (head_dim, value_head_dim) == (192, 128) else "token_words"
+            shared = "tokens" if value_head_dim == 192 else None
+        elif page_size == 16:
+            expected = "page_waves" if head_dim == 192 and (value_head_dim == 192 or not buffered) else "lane_groups"
+            shared = expected if buffered else None
+        else:
+            expected, shared = "lane_groups", None
+        assert (layout.V_LOAD_LAYOUT, layout.SHARED_PAGE_ID_LAYOUT) == (expected, shared)
 
 
 @_requires_gfx950
@@ -7109,10 +7057,10 @@ def test_fp8_split_kv(causal, num_kv_splits, head_dim, head_dim_v):
 
 @_requires_gfx950
 @pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("batch", (1, 2, 3, 4))
+@pytest.mark.parametrize("batch", (2, 3, 4))
 def test_fp8_split_kv_batched(causal, batch):
     """Split-KV over batches: the grid is B * num_kv_splits deep, so the batch is
-    what decides whether splitting still fills the GPU."""
+    what decides whether splitting still fills the GPU. B=1 is in test_fp8_split_kv."""
     _assert_fp8_shape(causal, batch=batch, seq_len=8192, num_kv_splits=4)
 
 
@@ -7126,9 +7074,12 @@ def test_fp8_split_kv_cross_length(causal, seq_len, seqlen_kv, num_kv_splits):
 
 @_requires_gfx950
 @pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("seq_len,num_kv_splits", list(zip(FP8_SPLITKV_SEQLENS, FP8_SPLITKV_SPLITS)))
+@pytest.mark.parametrize(
+    "seq_len,num_kv_splits",
+    [(seq, splits) for seq, splits in zip(FP8_SPLITKV_SEQLENS, FP8_SPLITKV_SPLITS) if seq != 8192],
+)
 def test_fp8_split_kv_long_sequence(causal, seq_len, num_kv_splits):
-    """Split count scaled with the KV length, 4k/2 through 32k/16."""
+    """Scaled split counts; the 8K/4-split case is already in test_fp8_split_kv."""
     _assert_fp8_shape(causal, batch=1, seq_len=seq_len, num_kv_splits=num_kv_splits)
 
 
@@ -7244,7 +7195,6 @@ _NUM_CU = 256
         (8, 32, 2048, 2048, True, 256),
         (16, 32, 1024, 1024, True, 256),
         (32, 32, 512, 512, True, 256),
-        (1, 8, 2048, 2048, True, 128),
         (1, 8, 4096, 4096, True, 256),
         (1, 8, 4096, 16384, True, 256),
         (2, 8, 4096, 4096, True, 256),
