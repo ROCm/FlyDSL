@@ -136,10 +136,9 @@ def make_preshuffle_b_layout_int4(N_full, K):
     A-fragment's ki-separated kpack byte addressing (see ``load_weight_int4_frag``).
     ``N_full`` = per-expert output channels (2*inter_dim gemm1 / model_dim gemm2);
     ``K`` = contraction dim in int8 elems."""
-    from flydsl.expr import arith as _lay_arith
     from kernels.common.mma.mfma_preshuffle_pipeline import make_preshuffle_b_layout
 
-    return make_preshuffle_b_layout(_lay_arith, c_n=fx.Index(int(N_full)), c_k=fx.Index(int(K)), kpack_bytes=8).layout_b
+    return make_preshuffle_b_layout(c_n=fx.Index(int(N_full)), c_k=fx.Index(int(K)), kpack_bytes=8).layout_b
 
 
 def load_weight_int4_frag(bt_i32, b_layout, frag, expert_off_dwords, col_base, kb, tid, ki_reps):

@@ -835,8 +835,6 @@ class TestFmath:
         assert "math.rsqrt" in ir_text
 
     def test_fastmath_flag(self):
-        from flydsl.expr.arith import FastMathFlags
-
         def build(a):
             ta = Vector(a, 8, Float32)
             _ = fmath.exp2(ta, fastmath=FastMathFlags.fast)

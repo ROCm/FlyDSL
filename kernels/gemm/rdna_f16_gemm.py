@@ -26,7 +26,7 @@ Computes C[M,N] = A[M,K] @ B_T[N,K]^T
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import as_ir_value, const_expr, gpu, range_constexpr
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Vector as Vec
 from kernels.common.kernels_common import cvt_sr_f32_to_bf16
 
@@ -250,7 +250,7 @@ def create_wmma_gemm_module(
                         out_elems.append(cvt_sr_f32_to_bf16(acc_vec[p_base + p_rel], rbits))
             else:
                 out_elems = [acc_vec[p].to(out_elem_cls) for p in range_constexpr(acc_size)]
-            out_vec = fx.Vector.from_elements([as_ir_value(e) for e in out_elems], out_elem_cls)
+            out_vec = fx.Vector.from_elements(out_elems, out_elem_cls)
             frag_C_out.store(out_vec)
         fx.copy(copy_out, frag_C_retile, pC_g)
 

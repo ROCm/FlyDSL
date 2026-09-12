@@ -579,9 +579,9 @@ def _build_kernel(
             )
             kv_off_dw = kv_off_elems >> arith.constant(1, type=i32)
             x_raw = buffer_ops.buffer_load(kv_rsrc, kv_off_dw, vec_width=VEC // 2, dtype=i32)
-            x_vec_bf16_raw = fx.Vector(x_raw).bitcast(fx.BFloat16)
+            x_vec_bf16 = fx.Vector(x_raw).bitcast(fx.BFloat16)
             kv_rmem = fx.make_rmem_tensor(full_lay, elem_dtype)
-            fx.memref_store_vec(x_vec_bf16_raw, kv_rmem)
+            fx.memref_store_vec(x_vec_bf16, kv_rmem)
             x_vec = fx.memref_load_vec(kv_rmem)
 
             kvw_buf = fx.rocdl.make_buffer_tensor(kv_weight)

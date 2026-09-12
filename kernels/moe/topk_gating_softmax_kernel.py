@@ -309,8 +309,7 @@ def _emit_topk_gating_softmax_body(
         atom_idx = expert_lane * c_atoms_pt + fx.Int32(a)
         atom_vec = _load_atom_in(gating_div, atom_idx)
         for v in range_constexpr(ELEMS_PER_ATOM):
-            val_e = fx.Vector(atom_vec)[v]
-            xv = val_e.to(fx.Float32)
+            xv = atom_vec[v].to(fx.Float32)
             x_list.append(xv)
             thread_max = fx.max(thread_max, xv)
 
@@ -562,8 +561,7 @@ def build_topk_gating_softmax_module(
             atom_idx = expert_lane * c_atoms_pt + fx.Int32(a)
             atom_vec = _load_atom_in(gating_div, atom_idx)
             for v in range_constexpr(ELEMS_PER_ATOM):
-                val_e = fx.Vector(atom_vec)[v]
-                xv = val_e.to(fx.Float32)
+                xv = atom_vec[v].to(fx.Float32)
                 x_list.append(xv)
                 thread_max = fx.max(thread_max, xv)
 

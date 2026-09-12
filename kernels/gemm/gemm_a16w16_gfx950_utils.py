@@ -199,7 +199,7 @@ class SplitKProtocol:
                         store_global_f32_vec(
                             self.c_ptr,
                             c_offset,
-                            fx.as_ir_value(init_vec),
+                            init_vec,
                             self.STG_VEC_SIZE,
                         )
                     else:

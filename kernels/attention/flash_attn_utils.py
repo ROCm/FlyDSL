@@ -19,7 +19,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm
-from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TargetAddressSpace
 from flydsl.compiler.ast_rewriter import ReplaceIfWithDispatch
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
@@ -523,10 +522,8 @@ def _llvm_value(value):
 
 
 def _extract_aligned_pointer(tensor, address_space=None) -> ir.Value:
-    from flydsl._mlir.dialects import fly as _fly
-
     ptr_type = ir.Type.parse("!llvm.ptr" if address_space is None else f"!llvm.ptr<{address_space}>")
-    return _fly.extract_aligned_pointer_as_index(ptr_type, _llvm_value(tensor))
+    return fly.extract_aligned_pointer_as_index(ptr_type, _llvm_value(tensor))
 
 
 def _pointer_load(result_type: ir.Type, ptr: ir.Value) -> ir.Value:
@@ -566,7 +563,7 @@ def _make_page_view(
     base_i64 = fx.Int64(fx.ptrtoint(base_iter))
     off_i64 = fx.Int64(page_id * page_byte_stride)
     shifted = fx.inttoptr(base_iter_ty, base_i64 + off_i64)
-    buf_ptr_ty = fx.PointerType.get(elem_ty=elem_ir, address_space=_TargetAddressSpace.BufferDesc, alignment=align)
+    buf_ptr_ty = fx.PointerType.get(elem_ty=elem_ir, address_space=rocdl.TargetAddressSpace.BufferDesc, alignment=align)
     buf_ptr = fx.make_ptr(
         buf_ptr_ty,
         [shifted, fx.Int16(0).ir_value(), page_nrec_bytes.ir_value(), buf_flags_i32.ir_value()],
@@ -584,7 +581,7 @@ def _make_rebased_view(base_iter, byte_off, nrec_bytes, layout, _buf_flags_i32, 
     shifted = fx.inttoptr(base_iter.type, base_i64 + fx.Int64(byte_off))
     buf_ptr_ty = fx.PointerType.get(
         elem_ty=_elem_ir,
-        address_space=_TargetAddressSpace.BufferDesc,
+        address_space=rocdl.TargetAddressSpace.BufferDesc,
         alignment=base_iter.alignment,
     )
     buf_ptr = fx.make_ptr(

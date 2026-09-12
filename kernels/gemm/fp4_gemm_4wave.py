@@ -95,7 +95,7 @@ def _asm_void(operands, asm_string, constraints, clobbers=""):
 
 def _cvt_pk_bf16(a, b):
     """same as rocdl.cvt_pk_bf16_f32, but no inline asm to give compiler more freedom"""
-    vec = Vec.from_elements([fx.Float32(a), fx.Float32(b)], fx.Float32)
+    vec = Vec.from_elements([a, b], fx.Float32)
     # llvm.bitcast, not arith.bitcast: the latter requires operand and result to
     # have the same shape, and this one is <2xbf16> -> i32.
     return _llvm.BitcastOp(fx.Int32.ir_type, vec.to(fx.BFloat16).ir_value()).result
@@ -611,9 +611,7 @@ class StoreCFp4:
         g = self.lane_id // 16
         row = base_row + ti * 16 + self.lane_id % 16
         col = base_col + (tj + g % 2) * 16 + (g // 2) * 8
-        pack = Vec.from_elements([fx.Int32(a0), fx.Int32(a1), fx.Int32(b0), fx.Int32(b1)], fx.Int32).bitcast(
-            fx.BFloat16
-        )
+        pack = Vec.from_elements([a0, a1, b0, b1], fx.Int32).bitcast(fx.BFloat16)
         fx.memref_store_vec(pack, self.reg_bf16_8)
         c_index = row * self.c_cols + col
         fx.copy(self.out_atom_8, self.reg_bf16_8, fx.slice(self.c_div, (None, fx.Int32(c_index))))

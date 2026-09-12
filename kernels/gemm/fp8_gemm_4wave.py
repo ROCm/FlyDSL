@@ -46,8 +46,8 @@ class Mfma16x16x128AGPR(Mfma16x16x128):
     scale is left default (=0); the real per-token scale is applied in StoreC."""
 
     def _do_mma(self, a, b, c):
-        a_i32x8 = fx.Vector(as_ir_value(a)).bitcast(fx.Int32)
-        b_i32x8 = fx.Vector(as_ir_value(b)).bitcast(fx.Int32)
+        a_i32x8 = fx.Vector(a).bitcast(fx.Int32)
+        b_i32x8 = fx.Vector(b).bitcast(fx.Int32)
         res_ty = _T.vec(4, _T.f32)
         return _llvm.inline_asm(
             res_ty,

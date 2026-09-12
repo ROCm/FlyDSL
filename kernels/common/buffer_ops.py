@@ -446,14 +446,7 @@ def buffer_load(
         dtype = dtype.ir_type
 
     # Unwrap offset first (accept Python ints and DSL Numeric values).
-    if isinstance(offset, int):
-        offset = _create_i32_constant(offset)
-    elif hasattr(offset, "ir_value"):
-        offset = offset.ir_value()
-    offset = _unwrap_value(offset)
-
-    # Convert offset to i32 if needed
-    offset = fx.Int32(offset).ir_value()
+    offset = fx.Int32(_unwrap_value(offset)).ir_value()
 
     # IMPORTANT: Buffer load offset is in BYTES, not elements!
     # For vec4xf32, each element is 4 bytes, so multiply offset by 4
@@ -464,11 +457,7 @@ def buffer_load(
     if mask is not None:
         offset = fx.Boolean(mask).select(fx.Int32(offset), fx.Int32(0x7FFFFFFF)).ir_value()
 
-    # Create vector type
-    if vec_width == 1:
-        result_type = dtype
-    else:
-        result_type = ir.VectorType.get([vec_width], dtype)
+    result_type = dtype if vec_width == 1 else ir.VectorType.get([vec_width], dtype)
 
     # Scalar/uniform load path: s.buffer.load is an SMEM instruction with no CopyOp type,
     # so it stays on the raw intrinsic and needs the raw v4i32 resource. Returns i32
@@ -531,17 +520,8 @@ def buffer_store(
     """
     # Unwrap all inputs (accept DSL Numeric values via ir_value()). `rsrc` stays a DSL
     # pointer: the copy atom needs the !fly.ptr<i8, BufferDesc> fat pointer, not a value.
-    if hasattr(data, "ir_value"):
-        data = data.ir_value()
-    if isinstance(offset, int):
-        offset = _create_i32_constant(offset)
-    elif hasattr(offset, "ir_value"):
-        offset = offset.ir_value()
     data = _unwrap_value(data)
-    offset = _unwrap_value(offset)
-
-    # Convert offset to i32 if needed
-    offset = fx.Int32(offset).ir_value()
+    offset = fx.Int32(_unwrap_value(offset)).ir_value()
 
     # Get element size from data type
     data_type = data.type
