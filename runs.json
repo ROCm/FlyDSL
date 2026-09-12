@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-12T03:33:32Z",
+ "updated": "2026-09-12T03:45:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,11 +53,11 @@
    "branch": "codex/topk-gating-mi355",
    "event": "pull_request",
    "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645855663",
    "created_at": "2026-09-11T20:45:05Z",
-   "updated_at": "2026-09-12T02:45:17Z",
+   "updated_at": "2026-09-12T03:42:28Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -83,11 +83,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-12T02:45:17Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645855663/job/103421751427"
+     "completed_at": "2026-09-12T03:42:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645855663/job/103421751427",
+     "log_fetch_failed": true
     }
    ]
   },
