@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm, vector
+from flydsl._mlir.dialects import fly, llvm
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TargetAddressSpace
 from flydsl.compiler.ast_rewriter import ReplaceIfWithDispatch
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
@@ -95,7 +95,7 @@ def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
         "=v,v,~{memory}",
         has_side_effects=True,
     )
-    return vector.BitCastOp(result_type, raw).result
+    return fx.Vector(raw).bitcast(fx.Numeric.from_ir_type(ir.VectorType(result_type).element_type)).ir_value()
 
 
 def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0):
@@ -113,7 +113,7 @@ def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0):
         "=v,v,~{memory}",
         has_side_effects=True,
     )
-    return vector.BitCastOp(result_type, raw).result
+    return fx.Vector(raw).bitcast(fx.Numeric.from_ir_type(ir.VectorType(result_type).element_type)).ir_value()
 
 
 # Arithmetic and inline-asm primitives

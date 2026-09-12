@@ -17,18 +17,6 @@ import re
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl.expr import arith
-from flydsl.expr.arith import ArithValue
-from flydsl.expr.typing import T
-
-
-def _wrap(v):
-    """Wrap raw ir.Value in ArithValue for operator overloading compatibility."""
-    if isinstance(v, ArithValue):
-        return v
-    if isinstance(v, ir.Value):
-        return ArithValue(v)
-    return v
 
 
 def _is_pow2(n):
@@ -44,7 +32,7 @@ def _div_pow2(val, divisor):
     """
     shift = _math.log2(divisor)
     assert shift == int(shift), f"{divisor} is not a power of 2"
-    return arith.shrui(val, arith.index(int(shift)))
+    return fx.Index(val) >> fx.Index(int(shift))
 
 
 def _mod_pow2(val, modulus):
@@ -52,7 +40,7 @@ def _mod_pow2(val, modulus):
 
     Emits ``arith.andi`` (1 VALU cycle) instead of ``arith.remui``.
     """
-    return arith.andi(val, arith.index(modulus - 1))
+    return fx.Index(val) & fx.Index(modulus - 1)
 
 
 def _parse_dim(tok):
@@ -92,10 +80,10 @@ def idx2crd(idx, layout):
     if parsed is None or _has_dynamic_strides(parsed[1]):
         result = fx.idx2crd(fx.Int32(idx), layout)
         ndims = len(parsed[1]) if parsed else 1
-        return [_wrap(fx.get(result, i)) for i in range(ndims)]
+        return [fx.get(result, i) for i in range(ndims)]
 
     if isinstance(idx, ir.Value) and not isinstance(idx.type, ir.IndexType):
-        idx = arith.index_cast(T.index, idx)
+        idx = fx.Index(idx).ir_value()
     shapes, strides = parsed
     ndims = len(strides)
 
@@ -112,12 +100,12 @@ def idx2crd(idx, layout):
         elif _is_pow2(stride_val):
             c = _div_pow2(remaining, stride_val)
         else:
-            c = remaining / arith.index(stride_val)
+            c = fx.Index(remaining) // fx.Index(stride_val)
         if size_val is not None:
             if _is_pow2(size_val):
                 c = _mod_pow2(c, size_val)
             else:
-                c = c % arith.index(size_val)
+                c = fx.Index(c) % fx.Index(size_val)
         coords[i] = c
     for i in range(ndims):
         if coords[i] is None:
@@ -136,42 +124,28 @@ def crd2idx(crd, layout):
     parsed = _parse_layout(layout)
 
     if parsed is None or _has_dynamic_strides(parsed[1]):
-        crd_i32 = []
-        for c in crd:
-            cv = c
-            if isinstance(cv, int):
-                cv = arith.constant(cv, T.i32)
-                crd_i32.append(cv)
-                continue
-            if isinstance(cv, ArithValue):
-                raw = cv.ir_value() if hasattr(cv, "ir_value") else cv
-                if isinstance(raw, ir.Value) and isinstance(raw.type, ir.IndexType):
-                    cv = arith.index_cast(T.i32, raw)
-                else:
-                    cv = raw
-            elif isinstance(cv, ir.Value) and isinstance(cv.type, ir.IndexType):
-                cv = arith.index_cast(T.i32, cv)
-            elif hasattr(cv, "ir_value"):
-                raw = cv.ir_value()
-                if isinstance(raw, ir.Value) and isinstance(raw.type, ir.IndexType):
-                    cv = arith.index_cast(T.i32, raw)
-                else:
-                    cv = raw
-            crd_i32.append(cv)
+        crd_i32 = [
+            (
+                fx.Int32(c).ir_value()
+                if isinstance(c, int) or isinstance(fx.as_ir_value(c).type, ir.IndexType)
+                else fx.as_ir_value(c)
+            )
+            for c in crd
+        ]
         coord_val = fx.make_coord(*crd_i32)
         scalar = fx.get_scalar(fx.crd2idx(coord_val, layout)).ir_value()
         if not isinstance(scalar.type, ir.IndexType):
-            scalar = arith.index_cast(T.index, scalar)
-        return _wrap(scalar)
+            scalar = fx.Index(scalar).ir_value()
+        return scalar
 
     _, strides = parsed
     result = None
     for coord_v, stride_v in _builtins.zip(crd, strides):
         if stride_v == 0:
             continue
-        term = coord_v if stride_v == 1 else coord_v * arith.index(stride_v)
+        term = coord_v if stride_v == 1 else coord_v * fx.Index(stride_v)
         result = term if result is None else result + term
-    return result if result is not None else arith.index(0)
+    return result if result is not None else fx.Index(0).ir_value()
 
 
 def get(int_tuple, mode):

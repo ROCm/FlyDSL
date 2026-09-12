@@ -12,8 +12,9 @@ Vector operations and verify the generated IR text.
 import pytest
 
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import arith, func
+from flydsl._mlir.dialects import func
 from flydsl.expr import math as fmath
+from flydsl.expr.arith import FastMathFlags
 from flydsl.expr.numeric import (
     BFloat16,
     Boolean,
@@ -529,7 +530,7 @@ class TestReduction:
     def test_reduce_with_fastmath(self):
         def build(a):
             ta = Vector(a, 8, Float32)
-            fm = arith.FastMathFlags.fast
+            fm = FastMathFlags.fast
             _ = ta.reduce(ReductionOp.ADD, fastmath=fm)
 
         ir_text = _build_module(build)
@@ -633,7 +634,7 @@ class TestReduction:
 
     def test_reduce_combining_kind_direct(self):
         """reduce() accepts raw CombiningKind."""
-        from flydsl._mlir.dialects.vector import CombiningKind
+        from flydsl._mlir.dialects._vector_enum_gen import CombiningKind
 
         def build(a):
             ta = Vector(a, 8, Float32)

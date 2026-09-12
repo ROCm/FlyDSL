@@ -5,9 +5,8 @@
 """Layout-API helper layer for the MoE 2-stage MFMA kernels (gemm1.py / gemm2.py)."""
 
 import flydsl.expr as fx
-from flydsl._mlir.dialects import rocdl
 from flydsl.compiler.ast_rewriter import ASTRewriter
-from flydsl.expr import const_expr, range_constexpr
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw

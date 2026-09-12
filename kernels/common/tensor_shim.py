@@ -8,10 +8,11 @@ import numpy as np
 import torch
 
 import flydsl.compiler as flyc
+import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm, vector
+from flydsl._mlir.dialects import fly, llvm
 from flydsl.compiler.protocol import extract_to_ir_values
-from flydsl.expr import arith, as_ir_value, range_constexpr
+from flydsl.expr import range_constexpr
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops
 
@@ -310,10 +311,14 @@ class GTensor(TensorBase):
         buffer_ops.buffer_store(value, self.rsrc, offset, cache_modifier=self.cache_modifier)
 
     def get_llvm_ptr(self, ptr, bytes_offset_i64, ptr_type="!llvm.ptr<1>"):
-        bytes_offset_i64 = arith.index_cast(T.i64, bytes_offset_i64)
-        _ptr_type = ir.Type.parse(ptr_type)
-        base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, extract_to_ir_values(ptr)[0])
-        base_ptr = llvm.PtrToIntOp(T.i64, base_ptr).result
+        bytes_offset_i64 = fx.Int64(bytes_offset_i64).ir_value()
+        raw_ptr = extract_to_ir_values(ptr)[0]
+        if isinstance(raw_ptr, fx.Pointer):
+            base_ptr = fx.Int64(fx.ptrtoint(raw_ptr)).ir_value()
+        else:
+            _ptr_type = ir.Type.parse(ptr_type)
+            base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, raw_ptr)
+            base_ptr = llvm.PtrToIntOp(T.i64, base_ptr).result
         llvm_ptr = llvm.AddOp(base_ptr, bytes_offset_i64, llvm.IntegerOverflowFlags(0)).result
         return llvm_ptr
 
@@ -325,17 +330,16 @@ class STensor(TensorBase):
 
     def load(self, offset, vec_size=1):
         vec_t = T.vec(vec_size, self.dtype)
-        x = vector.load(vec_t, as_ir_value(self.memptr), [as_ir_value(offset)])
+        x = fx.Vector.load(vec_t, self.memptr, [offset])
         if vec_size > 1:
             return x
         else:
-            x = vector.extract(as_ir_value(x), dynamic_position=[], static_position=[0])
+            x = x[0]
             return x
 
     def store(self, offset, value, vec_size=1):
         if vec_size > 1:
-            vector.store(as_ir_value(value), as_ir_value(self.memptr), [as_ir_value(offset)], alignment=16)
+            fx.Vector(value).store(self.memptr, [offset], alignment=16)
         else:
-            vec_t = T.vec(1, self.dtype)
-            vec = vector.from_elements(vec_t, [as_ir_value(value)])
-            vector.store(as_ir_value(vec), as_ir_value(self.memptr), [as_ir_value(offset)], alignment=16)
+            vec = fx.Vector.from_elements([value], fx.Numeric.from_ir_type(self.dtype))
+            vec.store(self.memptr, [offset], alignment=16)

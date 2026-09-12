@@ -54,8 +54,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm, rocdl, vector
-from flydsl.expr import arith, as_ir_value, const_expr, range_constexpr
+from flydsl.expr import arith, as_ir_value, const_expr, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.arith import ArithValue, CmpFPredicate
 from flydsl.expr.typing import Int32, ReductionOp, Stream, T
@@ -121,10 +120,7 @@ def _store_bf16_vec_g(vals_list, g_out, row_off_elems, idx, vec):
     """Convert VEC fp32 values to a bf16 vector and store via a GTensor whose
     base is already shifted per-token. ``row_off_elems`` is this head's row
     offset within the token (i32 elements); ``idx`` is the lane id."""
-    vec_t = T.vec(vec, T.f32)
-    raw = [v.ir_value() if hasattr(v, "ir_value") else v for v in vals_list]
-    f32v = vector.from_elements(vec_t, [as_ir_value(e) for e in raw])
-    bf16v = f32v.truncf(T.vec(vec, T.bf16))
+    bf16v = fx.Vector.from_elements(vals_list, fx.Float32).to(fx.BFloat16)
     my_off = ArithValue(row_off_elems) + ArithValue(idx) * arith.constant(vec, type=T.i32)
     g_out.store(my_off, bf16v, vec_size=vec)
 
@@ -164,8 +160,7 @@ def _store_fp8_packed(vals_list, out_rsrc, row_base_bytes, idx, vec):
     p1 = rocdl.cvt_pk_fp8_f32(i32, safe[6], safe[7], p1, 1)
 
     off_bytes = row_base_bytes + ArithValue(idx) * c8
-    vec2_i32 = T.vec(2, i32)
-    store_vec = vector.from_elements(vec2_i32, [as_ir_value(p0), as_ir_value(p1)])
+    store_vec = fx.Vector.from_elements([p0, p1], fx.Int32)
     buffer_ops.buffer_store(store_vec, out_rsrc, off_bytes, offset_is_bytes=True)
 
 
@@ -399,7 +394,7 @@ def _build_kernel(
                     # factor   = FP8_MAX / (amax * SQRT2)        (applied to x_in)
                     # The rstd factor cancels algebraically: store(out) =
                     # x_in * factor → dequant: x_norm = scale * out = x_in * rstd.
-                    rcp_am = llvm.call_intrinsic(f32, "llvm.amdgcn.rcp.f32", [am_safe], [], [])
+                    rcp_am = rocdl.rcp(f32, am_safe)
                     _fc = _fp8_const()
                     factor = arith.constant(_fc["max_over_sqrt2"], type=f32) * rcp_am
                     scale_val = am_safe * rstd * arith.constant(_fc["inv_max_sqrt2"], type=f32)
@@ -583,9 +578,8 @@ def _build_kernel(
                 VEC, type=i32
             )
             kv_off_dw = kv_off_elems >> arith.constant(1, type=i32)
-            vec_bf16xV = T.vec(VEC, T.bf16)
             x_raw = buffer_ops.buffer_load(kv_rsrc, kv_off_dw, vec_width=VEC // 2, dtype=i32)
-            x_vec_bf16_raw = vector.bitcast(vec_bf16xV, as_ir_value(x_raw))
+            x_vec_bf16_raw = fx.Vector(x_raw).bitcast(fx.BFloat16)
             kv_rmem = fx.make_rmem_tensor(full_lay, elem_dtype)
             fx.memref_store_vec(x_vec_bf16_raw, kv_rmem)
             x_vec = fx.memref_load_vec(kv_rmem)

@@ -15,7 +15,6 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl.expr import arith as _arith
 from flydsl.expr.typing import T
 
 
@@ -24,7 +23,7 @@ def preshuffle_crd2idx(crd, layout):
     scalar = fx.get_scalar(fx.crd2idx(crd, layout)).ir_value()
     if isinstance(scalar.type, ir.IndexType):
         return scalar
-    return _arith.IndexCastOp(T.index, scalar).result
+    return fx.Index(scalar).ir_value()
 
 
 def swizzle_xor16(row, col, k_blocks16):
@@ -53,7 +52,6 @@ def split_row_major_2d(index, minor_extent):
 
 def _buffer_load_vec(
     buffer_ops,
-    vector,
     rsrc,
     idx,
     *,
@@ -85,10 +83,10 @@ def _buffer_load_vec(
         cache_modifier=cache_modifier,
     )
     if vec_width == 1:
-        i32_vec = vector.from_elements(T.vec(1, T.i32), [i32_val])
+        i32_vec = fx.Vector.from_elements([i32_val], fx.Int32)
     else:
         i32_vec = i32_val
-    return vector.bitcast(T.vec(int(vec_elems), elem_type), i32_vec)
+    return fx.Vector(i32_vec).bitcast(fx.Numeric.from_ir_type(elem_type))
 
 
 @dataclass(frozen=True)
@@ -239,43 +237,42 @@ def _unpack_int4_to_int8_pair(packed32):
     return even, odd
 
 
-def _pack_i32_pair_to_i64(lo, hi, vector):
+def _pack_i32_pair_to_i64(lo, hi):
     """Pack two i32 values into one i64 via vector bitcast."""
-    v2 = vector.from_elements(T.vec(2, T.i32), [lo, hi])
-    v64 = vector.bitcast(T.vec(1, T.i64), v2)
-    return vector.extract(v64, static_position=[0], dynamic_position=[])
+    v2 = fx.Vector.from_elements([lo, hi], fx.Int32)
+    v64 = v2.bitcast(fx.Int64)
+    return v64[0]
 
 
-def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
+def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, scale_val=None):
     """Convert one i32 (4 signed int8 bytes) to 4 bf16 packed as i64.
 
     Uses shift-based f32->bf16 truncation (lshr 16) instead of arith.truncf
     which on gfx942 expands to ~5 VALU per element. The shift is exact for
     unscaled int8 values and introduces <0.5 ULP error for scaled values.
     """
-    v1 = vector.from_elements(T.vec(1, T.i32), [val_i32])
-    i8x4 = vector.bitcast(T.i8x4, v1)
+    v1 = fx.Vector.from_elements([val_i32], fx.Int32)
+    i8x4 = v1.bitcast(fx.Int8)
 
     f32_vals = []
     for i in range(4):
-        val_i8 = vector.extract(i8x4, static_position=[i], dynamic_position=[])
-        v = arith.sitofp(T.f32, val_i8)
+        val_i8 = i8x4[i]
+        v = val_i8.to(fx.Float32)
         if scale_val is not None:
             v = v * scale_val
         f32_vals.append(v)
 
-    c16 = fx.Int32(16)
-    c_ffff0000 = fx.Int32(0xFFFF0000)
-    bits = [arith.bitcast(T.i32, f) for f in f32_vals]
+    c16 = fx.Uint32(16)
+    c_ffff0000 = fx.Uint32(0xFFFF0000)
+    bits = [f.bitcast(fx.Uint32) for f in f32_vals]
     i32_lo = (bits[0] >> c16) | (bits[1] & c_ffff0000)
     i32_hi = (bits[2] >> c16) | (bits[3] & c_ffff0000)
-    return _pack_i32_pair_to_i64(i32_lo, i32_hi, vector)
+    return _pack_i32_pair_to_i64(i32_lo, i32_hi)
 
 
 def load_b_raw_w4a16(
     buffer_ops,
     arith,
-    vector,
     *,
     arg_b,
     b_rsrc,
@@ -317,7 +314,6 @@ def load_b_raw_w4a16(
 
     b4 = _buffer_load_vec(
         buffer_ops,
-        vector,
         b_rsrc,
         idx_bytes,
         elem_type=elem_type,
@@ -325,15 +321,11 @@ def load_b_raw_w4a16(
         elem_bytes=1,
         offset_in_bytes=True,
     )
-    packed32 = vector.extract(
-        vector.bitcast(T.vec(1, T.i32), b4),
-        static_position=[0],
-        dynamic_position=[],
-    )
+    packed32 = b4.bitcast(fx.Int32)[0]
     return packed32
 
 
-def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_val=None, defer_scale16=False):
+def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, scale_val=None, defer_scale16=False):
     """Convert 4 int4 nibbles to 4 bf16 packed as i64 using gfx950 instructions.
 
     Uses v_cvt_off_f32_i4_sdwa with byte_sel to avoid per-nibble shifts.
@@ -345,11 +337,7 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
     omitted and must be applied later (e.g. in the epilogue).  This saves VALU
     in the hot loop and uses v_cvt_pk_bf16_f32 for proper f32→bf16 conversion.
     """
-    from flydsl._mlir.dialects._arith_ops_gen import MulFOp as _MulFOp
     from flydsl.expr import rocdl
-
-    _uw = _arith._to_raw
-    _av = _arith.ArithValue
 
     src_even = packed32
     src_odd = packed32 >> fx.Int32(4)
@@ -358,33 +346,33 @@ def _int4_to_bf16x4_i64_gfx950(packed32, nibble_offsets, arith, vector, scale_va
     for nib in nibble_offsets:
         byte_idx = nib // 2
         src = src_odd if (nib % 2) else src_even
-        v = rocdl.cvt_off_f32_i4(src, byte_sel=byte_idx)
+        v = fx.Float32(rocdl.cvt_off_f32_i4(src, byte_sel=byte_idx))
         f32_vals.append(v)
 
     if defer_scale16:
         # Skip ×16; multiply by scale_val only if groupwise.
         if scale_val is not None:
-            raw_scale = _uw(scale_val)
-            f32_vals = [_MulFOp(v, raw_scale).result for v in f32_vals]
+            with fx.fastmath("none"):
+                f32_vals = [v * fx.Float32(scale_val) for v in f32_vals]
         # Use v_cvt_pk_bf16_f32 for proper f32→bf16 (no bit-shift trick needed).
         i32_lo = rocdl.cvt_pk_bf16_f32(f32_vals[0], f32_vals[1])
         i32_hi = rocdl.cvt_pk_bf16_f32(f32_vals[2], f32_vals[3])
     else:
         c16 = fx.Float32(16.0)
         effective_scale = scale_val * c16 if scale_val is not None else c16
-        raw_scale = _uw(effective_scale)
-        f32_vals = [_MulFOp(v, raw_scale).result for v in f32_vals]
+        with fx.fastmath("none"):
+            f32_vals = [v * fx.Float32(effective_scale) for v in f32_vals]
         # Truncate f32→bf16 via bit-shift (exact for scaled int values).
-        c16_shift = fx.Int32(16)
-        c_ffff0000 = fx.Int32(0xFFFF0000)
-        bf16_vals = [arith.bitcast(T.i32, _av(v)) for v in f32_vals]
+        c16_shift = fx.Uint32(16)
+        c_ffff0000 = fx.Uint32(0xFFFF0000)
+        bf16_vals = [v.bitcast(fx.Uint32) for v in f32_vals]
         i32_lo = (bf16_vals[0] >> c16_shift) | (bf16_vals[1] & c_ffff0000)
         i32_hi = (bf16_vals[2] >> c16_shift) | (bf16_vals[3] & c_ffff0000)
 
-    return _pack_i32_pair_to_i64(i32_lo, i32_hi, vector)
+    return _pack_i32_pair_to_i64(i32_lo, i32_hi)
 
 
-def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False, defer_scale16=False):
+def unpack_b_w4a16(packed32, arith, scale_val=None, use_gfx950_cvt=False, defer_scale16=False):
     """Phase 2 of W4A16 B load: unpack int4->int8 + convert int8->bf16.
 
     Takes raw packed32 from load_b_raw_w4a16 and produces (b0, b1) --
@@ -398,19 +386,18 @@ def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False
     in the epilogue.
     """
     if use_gfx950_cvt:
-        b0 = _int4_to_bf16x4_i64_gfx950(packed32, [0, 2, 4, 6], arith, vector, scale_val, defer_scale16=defer_scale16)
-        b1 = _int4_to_bf16x4_i64_gfx950(packed32, [1, 3, 5, 7], arith, vector, scale_val, defer_scale16=defer_scale16)
+        b0 = _int4_to_bf16x4_i64_gfx950(packed32, [0, 2, 4, 6], arith, scale_val, defer_scale16=defer_scale16)
+        b1 = _int4_to_bf16x4_i64_gfx950(packed32, [1, 3, 5, 7], arith, scale_val, defer_scale16=defer_scale16)
         return (b0, b1)
     even, odd = _unpack_int4_to_int8_pair(packed32)
-    b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
-    b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
+    b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, scale_val=scale_val)
+    b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, scale_val=scale_val)
     return (b0, b1)
 
 
 def load_b_pack_k32(
     buffer_ops,
     arith,
-    vector,
     *,
     arg_b,
     b_rsrc,
@@ -451,7 +438,6 @@ def load_b_pack_k32(
         idx_bytes = idx_pack + k2_base
         b4 = _buffer_load_vec(
             buffer_ops,
-            vector,
             b_rsrc,
             idx_bytes,
             elem_type=elem_type,
@@ -459,18 +445,13 @@ def load_b_pack_k32(
             elem_bytes=1,
             offset_in_bytes=True,
         )
-        packed32 = vector.extract(
-            vector.bitcast(T.vec(1, T.i32), b4),
-            static_position=[0],
-            dynamic_position=[],
-        )
+        packed32 = b4.bitcast(fx.Int32)[0]
         even, odd = _unpack_int4_to_int8_pair(packed32)
-        return _pack_i32_pair_to_i64(even, odd, vector)
+        return _pack_i32_pair_to_i64(even, odd)
 
     vec_elems = kpack_bytes // int(elem_bytes)
     b16 = _buffer_load_vec(
         buffer_ops,
-        vector,
         b_rsrc,
         idx_pack,
         elem_type=elem_type,
@@ -479,12 +460,12 @@ def load_b_pack_k32(
         offset_in_bytes=(elem_bytes == 1),
     )
 
-    b_i32x4 = vector.bitcast(T.i32x4, b16)
+    b_i32x4 = fx.Vector(b16).bitcast(fx.Int32)
 
     base = (ki_step % 2) * 2
-    d0 = vector.extract(b_i32x4, static_position=[base], dynamic_position=[])
-    d1 = vector.extract(b_i32x4, static_position=[base + 1], dynamic_position=[])
-    return _pack_i32_pair_to_i64(d0, d1, vector)
+    d0 = b_i32x4[base]
+    d1 = b_i32x4[base + 1]
+    return _pack_i32_pair_to_i64(d0, d1)
 
 
 def tile_chunk_coord_i32(
@@ -509,7 +490,6 @@ def tile_chunk_coord_i32(
 
 def buffer_copy_gmem16_dwordx4(
     buffer_ops,
-    vector,
     *,
     elem_type,
     idx_i32: ir.Value,
@@ -522,7 +502,6 @@ def buffer_copy_gmem16_dwordx4(
         raise ValueError(f"vec_elems must be > 0, got {vec_elems!r}")
     return _buffer_load_vec(
         buffer_ops,
-        vector,
         rsrc,
         idx_i32,
         elem_type=elem_type,
@@ -533,7 +512,6 @@ def buffer_copy_gmem16_dwordx4(
 
 
 def _lds_store_xor16(
-    vector,
     *,
     lds_memref,
     vec_ty,
@@ -552,12 +530,11 @@ def _lds_store_xor16(
     col_swz_bytes = swizzle_xor16(row_local, col_local_i32 * tx_c4, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes // 2
     idx0 = preshuffle_crd2idx((fx.Int32(row_local), fx.Int32(col_swz)), layout_lds) + lds_base
-    vector.store(vector.bitcast(vec_ty, vec_part), lds_memref, [idx0])
+    fx.Vector(vec_part).bitcast(fx.Numeric.from_ir_type(ir.VectorType(vec_ty).element_type)).store(lds_memref, [idx0])
 
 
 def lds_store_16b_xor16(
     arith,
-    vector,
     *,
     lds_memref,
     vec16_ty,
@@ -572,7 +549,6 @@ def lds_store_16b_xor16(
 ):
     """Store one 16B chunk into LDS with CK-style XOR16 swizzle on the K dimension."""
     _lds_store_xor16(
-        vector,
         lds_memref=lds_memref,
         vec_ty=vec16_ty,
         layout_lds=layout_lds,
@@ -588,7 +564,6 @@ def lds_store_16b_xor16(
 
 def lds_store_8b_xor16(
     arith,
-    vector,
     *,
     lds_memref,
     vec8_ty,
@@ -603,7 +578,6 @@ def lds_store_8b_xor16(
 ):
     """Store one 8B chunk into LDS with CK-style XOR16 swizzle on the K dimension."""
     _lds_store_xor16(
-        vector,
         lds_memref=lds_memref,
         vec_ty=vec8_ty,
         layout_lds=layout_lds,
@@ -619,7 +593,6 @@ def lds_store_8b_xor16(
 
 def lds_store_4b_xor16(
     arith,
-    vector,
     *,
     lds_memref,
     vec4_ty,
@@ -634,7 +607,6 @@ def lds_store_4b_xor16(
 ):
     """Store one 4B chunk into LDS with CK-style XOR16 swizzle on the K dimension."""
     _lds_store_xor16(
-        vector,
         lds_memref=lds_memref,
         vec_ty=vec4_ty,
         layout_lds=layout_lds,
@@ -650,7 +622,6 @@ def lds_store_4b_xor16(
 
 def lds_load_pack_k32(
     arith,
-    vector,
     *,
     lds_memref,
     layout_lds,
@@ -670,16 +641,16 @@ def lds_load_pack_k32(
     if ck_lds128:
         coord_a16 = (curr_row_a_lds, col_base_swz)
         idx_a16 = preshuffle_crd2idx(tuple(fx.Int32(c) for c in coord_a16), layout_lds) + lds_base
-        loaded_a16 = vector.load(vec16_ty, fx.as_ir_value(lds_memref), [fx.as_ir_value(idx_a16)])
-        a_vec128 = vector.bitcast(vec2_i64_ty, loaded_a16)
-        return vector.extract(a_vec128, static_position=[half], dynamic_position=[])
+        loaded_a16 = fx.Vector.load(vec16_ty, fx.as_ir_value(lds_memref), [fx.as_ir_value(idx_a16)])
+        a_vec128 = fx.Vector(loaded_a16).bitcast(fx.Numeric.from_ir_type(ir.VectorType(vec2_i64_ty).element_type))
+        return a_vec128[half]
     else:
         col_swizzled = col_base_swz + (half * 8)
         coord_a = (curr_row_a_lds, col_swizzled)
         idx_a = preshuffle_crd2idx(tuple(fx.Int32(c) for c in coord_a), layout_lds) + lds_base
-        loaded_a8 = vector.load(vec8_ty, fx.as_ir_value(lds_memref), [fx.as_ir_value(idx_a)])
-        a_vec64 = vector.bitcast(vec1_i64_ty, loaded_a8)
-        return vector.extract(a_vec64, static_position=[0], dynamic_position=[])
+        loaded_a8 = fx.Vector.load(vec8_ty, fx.as_ir_value(lds_memref), [fx.as_ir_value(idx_a)])
+        a_vec64 = fx.Vector(loaded_a8).bitcast(fx.Numeric.from_ir_type(ir.VectorType(vec1_i64_ty).element_type))
+        return a_vec64[0]
 
 
 @flyc.jit
@@ -829,7 +800,6 @@ def extract_bf16_scale(scale_raw_i32, ku: int):
 def load_b_raw_w4a16_groupwise(
     buffer_ops,
     arith,
-    vector,
     *,
     arg_b,
     b_rsrc,
@@ -858,7 +828,6 @@ def load_b_raw_w4a16_groupwise(
     packed32 = load_b_raw_w4a16(
         buffer_ops,
         arith,
-        vector,
         arg_b=arg_b,
         b_rsrc=b_rsrc,
         layout_b=layout_b,
@@ -887,6 +856,6 @@ def load_b_raw_w4a16_groupwise(
     return (packed32, scale_val)
 
 
-def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector, use_gfx950_cvt=False):
+def unpack_b_w4a16_groupwise(packed32, scale_val, arith, use_gfx950_cvt=False):
     """Phase 2 of W4A16 groupwise: unpack + scale + convert to bf16."""
-    return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt)
+    return unpack_b_w4a16(packed32, arith, scale_val=scale_val, use_gfx950_cvt=use_gfx950_cvt)

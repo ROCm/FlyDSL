@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import arith as std_arith
 from flydsl._mlir.dialects import llvm
 from flydsl._mlir.extras import types as T
 from flydsl.expr.meta import dsl_loc_tracing
@@ -119,13 +118,10 @@ def _unwrap_value(value):
 
 @dsl_loc_tracing
 def _create_i32_constant(value: int) -> ir.Value:
-    """Create i32 constant using standard MLIR arith dialect."""
-    i32_type = T.i32()
+    """Create a signless i32 constant from a packed 32-bit value."""
     if value > 0x7FFFFFFF:
         value = int(value - 2**32)
-    attr = ir.IntegerAttr.get(i32_type, value)
-    op = std_arith.ConstantOp(i32_type, attr)
-    return _unwrap_value(op.result)
+    return fx.Int32(value).ir_value()
 
 
 @dsl_loc_tracing
@@ -166,8 +162,7 @@ def _add_soffset_bytes(byte_offset: ir.Value, soffset_bytes) -> ir.Value:
     """Fold ``soffset_bytes`` into the byte offset."""
     if soffset_bytes is None:
         return byte_offset
-    soffset = fx.Int32(soffset_bytes).ir_value()
-    return _unwrap_value(std_arith.AddIOp(byte_offset, soffset).result)
+    return (fx.Int32(byte_offset) + fx.Int32(soffset_bytes)).ir_value()
 
 
 @dsl_loc_tracing
@@ -237,10 +232,8 @@ def get_element_ptr(
             raise TypeError("byte_offset must be int, index, or integer-typed MLIR value; " f"got {offset_val.type}")
 
         if static_byte_offset != 0:
-            static_type = offset_val.type
-            static_attr = ir.IntegerAttr.get(static_type, int(static_byte_offset))
-            static_const = _unwrap_value(std_arith.ConstantOp(static_type, static_attr).result)
-            offset_val = _unwrap_value(std_arith.AddIOp(offset_val, static_const).result)
+            dtype = fx.Numeric.from_ir_type(offset_val.type)
+            offset_val = (dtype(offset_val) + dtype(static_byte_offset)).ir_value()
 
         dynamic_indices = [offset_val]
         raw_constant_indices = [_gep_dynamic_index_sentinel]
@@ -465,16 +458,11 @@ def buffer_load(
     # IMPORTANT: Buffer load offset is in BYTES, not elements!
     # For vec4xf32, each element is 4 bytes, so multiply offset by 4
     element_bytes = dtype.width // 8
-    bytes_const = _create_i32_constant(element_bytes)
-    op = std_arith.MulIOp(offset, bytes_const)
-    offset = _unwrap_value(op.result)
+    offset = (fx.Int32(offset) * fx.Int32(element_bytes)).ir_value()
 
     # Apply mask by setting invalid offsets to max
     if mask is not None:
-        mask = _unwrap_value(mask)
-        max_offset = _create_i32_constant(0x7FFFFFFF)
-        op = std_arith.SelectOp(mask, offset, max_offset)
-        offset = _unwrap_value(op.result)
+        offset = fx.Boolean(mask).select(fx.Int32(offset), fx.Int32(0x7FFFFFFF)).ir_value()
 
     # Create vector type
     if vec_width == 1:
@@ -505,7 +493,10 @@ def buffer_load(
     loaded = fx.memref_load_vec(reg)
     result = _unwrap_value(loaded[0] if vec_width == 1 else loaded)
     if result.type != result_type:
-        result = _unwrap_value(std_arith.BitcastOp(result_type, result).result)
+        if vec_width == 1:
+            result = fx.Numeric.from_ir_type(result.type)(result).bitcast(fx.Numeric.from_ir_type(dtype)).ir_value()
+        else:
+            result = fx.Vector(result).bitcast(fx.Numeric.from_ir_type(dtype)).ir_value()
     return result
 
 
@@ -566,16 +557,11 @@ def buffer_store(
     # For backward compat, `buffer_store()` accepts element offsets by default
     # and scales them to bytes. Set `offset_is_bytes=True` to skip scaling.
     if not offset_is_bytes:
-        bytes_const = _create_i32_constant(element_bytes)
-        op = std_arith.MulIOp(offset, bytes_const)
-        offset = _unwrap_value(op.result)
+        offset = (fx.Int32(offset) * fx.Int32(element_bytes)).ir_value()
 
     # Apply mask by setting invalid offsets to max
     if mask is not None:
-        mask = _unwrap_value(mask)
-        max_offset = _create_i32_constant(0x7FFFFFFF)
-        op = std_arith.SelectOp(mask, offset, max_offset)
-        offset = _unwrap_value(op.result)
+        offset = fx.Boolean(mask).select(fx.Int32(offset), fx.Int32(0x7FFFFFFF)).ir_value()
 
     offset = _add_soffset_bytes(offset, soffset_bytes)
     dst = fx.make_view(rsrc + fx.Int32(offset), fx.make_layout(vec_width * element_bytes, 1))

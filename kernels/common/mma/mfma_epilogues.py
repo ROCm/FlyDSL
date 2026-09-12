@@ -28,7 +28,7 @@ This module provides:
   uses ``lds_out_split``), each handling half of the N dimension.
 
 These helpers are intentionally *dialect-agnostic*: callers pass the dialect
-modules (`arith`, `vector`, `gpu`) and the `range_constexpr` iterator.
+modules (`arith`, `gpu`) and the `range_constexpr` iterator.
 """
 
 from __future__ import annotations
@@ -85,14 +85,14 @@ def _cshuffle_write_row_split(
 
 
 @flyc.jit
-def _cshuffle_load_group_frag(is_group_b, vector, vec_frag, lds_out, lds_out_split, lds_idx):
+def _cshuffle_load_group_frag(is_group_b, vec_frag, lds_out, lds_out_split, lds_idx):
     """Read the half2 fragment from this wave-group's LDS buffer."""
     # hoisted default; both branches overwrite it (dead, DCE'd)
-    frag = vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx)])
+    frag = fx.Vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx)])
     if is_group_b:
-        frag = vector.load(vec_frag, fx.as_ir_value(lds_out_split), [fx.as_ir_value(lds_idx)])
+        frag = fx.Vector.load(vec_frag, fx.as_ir_value(lds_out_split), [fx.as_ir_value(lds_idx)])
     else:
-        frag = vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx)])
+        frag = fx.Vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx)])
     return frag
 
 
@@ -141,7 +141,6 @@ def default_epilog(
 def c_shuffle_epilog(
     *,
     arith,
-    vector,
     gpu,
     range_constexpr,
     # Tile params
@@ -288,7 +287,7 @@ def c_shuffle_epilog(
                     col_pair0_local = col_base_nr + (n_lane_s * c_evec)
                     lds_idx = row_base_lds + col_pair0_local
 
-                    frag = _cshuffle_load_group_frag(_is_group_b, vector, vec_frag, lds_out, lds_out_split, lds_idx)
+                    frag = _cshuffle_load_group_frag(_is_group_b, vec_frag, lds_out, lds_out_split, lds_idx)
 
                     col_pair0 = col_pair0_local + _is_group_b.select(_half_n_idx, _zero_idx)
                     store_pair(
@@ -396,7 +395,7 @@ def c_shuffle_epilog(
                 col_pair0 = col_base_nr + (n_lane * c_evec)  # even col within tile
 
                 lds_idx_pair = row_base_lds + col_pair0
-                frag = vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx_pair)])
+                frag = fx.Vector.load(vec_frag, fx.as_ir_value(lds_out), [fx.as_ir_value(lds_idx_pair)])
 
                 store_pair(
                     row_local=row_local,
@@ -425,7 +424,6 @@ def mfma_epilog(
     # Default epilog (required when use_cshuffle=False)
     body_row: Callable | None = None,
     # CShuffle epilog (required when use_cshuffle=True)
-    vector=None,
     gpu=None,
     tile_m: int | None = None,
     tile_n: int | None = None,
@@ -457,7 +455,6 @@ def mfma_epilog(
 
     return c_shuffle_epilog(
         arith=arith,
-        vector=vector,
         gpu=gpu,
         range_constexpr=range_constexpr,
         tile_m=int(tile_m),

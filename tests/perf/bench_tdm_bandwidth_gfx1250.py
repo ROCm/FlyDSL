@@ -26,7 +26,6 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import vector
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, tdm_ops
 from flydsl.expr.rocdl import cluster
@@ -127,8 +126,8 @@ def _compile_tdm_unique_add(grid_m, grid_n):
         base_elem = tid * arith.index(ELEMS_PER_THREAD)
         for v in range_constexpr(VECS_PER_THREAD):
             elem_off = base_elem + arith.index(v * VEC_WIDTH)
-            va = vector.load(vec_ty, as_ir_value(lds_a_memref), [as_ir_value(elem_off)])
-            vb = vector.load(vec_ty, as_ir_value(lds_b_memref), [as_ir_value(elem_off)])
+            va = fx.Vector.load(vec_ty, as_ir_value(lds_a_memref), [as_ir_value(elem_off)])
+            vb = fx.Vector.load(vec_ty, as_ir_value(lds_b_memref), [as_ir_value(elem_off)])
             vc = arith.addf(va, vb)
             fx.memref_store_vec(vc, rC)
             store_idx = fx.thread_idx.x * VECS_PER_THREAD + v
@@ -208,8 +207,8 @@ def _compile_tdm_read_only(grid_m, grid_n):
         # Every thread reads a vector from each LDS tile, adds, stores to C[bid]
         # to prevent dead code elimination of the TDM loads.
         vec_ty = T.vec(VEC_WIDTH, bf16_ty)
-        va = vector.load(vec_ty, as_ir_value(lds_a_memref), [as_ir_value(arith.index(0))])
-        vb = vector.load(vec_ty, as_ir_value(lds_b_memref), [as_ir_value(arith.index(0))])
+        va = fx.Vector.load(vec_ty, as_ir_value(lds_a_memref), [as_ir_value(arith.index(0))])
+        vb = fx.Vector.load(vec_ty, as_ir_value(lds_b_memref), [as_ir_value(arith.index(0))])
         vc = arith.addf(va, vb)
         bid = fx.block_idx.x * grid_n + fx.block_idx.y
         C = fx.rocdl.make_buffer_tensor(arg_c)
@@ -317,8 +316,8 @@ def _compile_tdm_shared_add(grid_m, grid_n, cluster_m, cluster_n):
         base_elem = tid * arith.index(ELEMS_PER_THREAD)
         for v in range_constexpr(VECS_PER_THREAD):
             elem_off = base_elem + arith.index(v * VEC_WIDTH)
-            va = vector.load(vec_ty, as_ir_value(lds_a_memref), [as_ir_value(elem_off)])
-            vb = vector.load(vec_ty, as_ir_value(lds_b_memref), [as_ir_value(elem_off)])
+            va = fx.Vector.load(vec_ty, as_ir_value(lds_a_memref), [as_ir_value(elem_off)])
+            vb = fx.Vector.load(vec_ty, as_ir_value(lds_b_memref), [as_ir_value(elem_off)])
             vc = arith.addf(va, vb)
             fx.memref_store_vec(vc, rC)
             store_idx = fx.thread_idx.x * VECS_PER_THREAD + v

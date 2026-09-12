@@ -7,10 +7,9 @@ from typing import Optional
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import vector
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import as_ir_value, const_expr, gpu, math, range_constexpr, rocdl
-from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, Float32, Int8, Int32, T
+from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, Float32, Int8, Int32
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
@@ -709,7 +708,7 @@ def compile_preshuffle_gemm(
                 val_s = apply_activation(val_s)
                 out_elems.append(val_s.to(out_elem_cls))
 
-            out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), [as_ir_value(_e) for _e in out_elems])
+            out_vec = fx.Vector.from_elements([as_ir_value(_e) for _e in out_elems], out_elem_cls)
             frag_C_out.store(out_vec)
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
 

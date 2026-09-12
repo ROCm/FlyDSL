@@ -26,8 +26,7 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import vector
-from flydsl.expr import arith, as_ir_value, range_constexpr
+from flydsl.expr import arith, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, T
 from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
@@ -171,7 +170,6 @@ def _emit_topk_gating_softmax_body(
 
     elem_dtype = dtype_to_elem_type(dtype_str)
     elem_type = elem_dtype.ir_type
-    compute_type = T.f32
     register_addr_space = int(fx.AddressSpace.Register)
 
     fm_fast = arith.FastMathFlags.fast
@@ -311,8 +309,8 @@ def _emit_topk_gating_softmax_body(
         atom_idx = expert_lane * c_atoms_pt + fx.Int32(a)
         atom_vec = _load_atom_in(gating_div, atom_idx)
         for v in range_constexpr(ELEMS_PER_ATOM):
-            val_e = vector.extract(as_ir_value(atom_vec), dynamic_position=[], static_position=[v])
-            xv = val_e if dtype_str == "f32" else val_e.extf(compute_type)
+            val_e = fx.Vector(atom_vec)[v]
+            xv = val_e.to(fx.Float32)
             x_list.append(xv)
             thread_max = fx.max(thread_max, xv)
 
@@ -431,7 +429,6 @@ def build_topk_gating_softmax_module(
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
-        compute_type = T.f32
 
         fm_fast = arith.FastMathFlags.fast
 
@@ -565,8 +562,8 @@ def build_topk_gating_softmax_module(
             atom_idx = expert_lane * c_atoms_pt + fx.Int32(a)
             atom_vec = _load_atom_in(gating_div, atom_idx)
             for v in range_constexpr(ELEMS_PER_ATOM):
-                val_e = vector.extract(as_ir_value(atom_vec), dynamic_position=[], static_position=[v])
-                xv = val_e if dtype_str == "f32" else val_e.extf(compute_type)
+                val_e = fx.Vector(atom_vec)[v]
+                xv = val_e.to(fx.Float32)
                 x_list.append(xv)
                 thread_max = fx.max(thread_max, xv)
 

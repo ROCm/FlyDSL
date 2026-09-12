@@ -20,8 +20,7 @@ Optional B preshuffle uses the same on-disk layout as
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects import vector as _vector
-from flydsl.expr import arith, as_ir_value, const_expr, range_constexpr
+from flydsl.expr import as_ir_value, const_expr, range_constexpr
 from flydsl.expr.typing import T as _T
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
@@ -47,12 +46,12 @@ class Mfma16x16x128AGPR(Mfma16x16x128):
     scale is left default (=0); the real per-token scale is applied in StoreC."""
 
     def _do_mma(self, a, b, c):
-        a_i32x8 = _vector.bitcast(_T.vec(8, _T.i32), as_ir_value(a))
-        b_i32x8 = _vector.bitcast(_T.vec(8, _T.i32), as_ir_value(b))
+        a_i32x8 = fx.Vector(as_ir_value(a)).bitcast(fx.Int32)
+        b_i32x8 = fx.Vector(as_ir_value(b)).bitcast(fx.Int32)
         res_ty = _T.vec(4, _T.f32)
         return _llvm.inline_asm(
             res_ty,
-            [arith._to_raw(a_i32x8), arith._to_raw(b_i32x8), arith._to_raw(c)],
+            [a_i32x8.ir_value(), b_i32x8.ir_value(), as_ir_value(c)],
             "v_mfma_f32_16x16x128_f8f6f4 $0, $1, $2, $0",
             "=a,v,v,0",
             has_side_effects=True,
