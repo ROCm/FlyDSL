@@ -41,7 +41,6 @@ def build_flash_attn_paged_fp8_module(
     dualwave_swp_lazy_rescale=True,
     rescale_threshold=8.0,
     dualwave_swp_setprio=True,
-    dualwave_swp_debug_lazy_counts=False,
     dualwave_swp_enable_stagger=True,
     num_kv_splits=1,
     varlen=False,
@@ -49,7 +48,6 @@ def build_flash_attn_paged_fp8_module(
     paged=False,
     kv_cache_layout="linear",
     paged_bn128=False,
-    paged_bn128_varlen=False,
     batch_interleave_group=1,
     page_size=64,
     cache_buffered=False,
@@ -58,6 +56,10 @@ def build_flash_attn_paged_fp8_module(
 
     Priority/stagger options are accepted for caller compatibility; this
     paired-page pipeline uses neither wave-priority nor staggered phases.
+    All page-ID paths consume packed cu-seqlens, including B=1. Direct
+    callers supply native cache tensors, flat contiguous Q/O, int32 metadata
+    and one-element fp32 descales for both launch and explicit compilation;
+    the public interface owns shape validation, copies and empty outputs.
     """
     gpu_arch = get_hip_arch()
     if value_head_dim is None:
@@ -87,6 +89,8 @@ def build_flash_attn_paged_fp8_module(
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
+    if num_heads <= 0 or num_kv_heads <= 0 or num_heads % num_kv_heads != 0:
+        raise ValueError("paged FP8 query and KV head counts must be positive, with query heads divisible by KV heads")
     if paged_bn128 and page_size != 64:
         raise ValueError("paired page-ID loads require physical page size 64")
     if cache_buffered and page_size not in (1, 16):
@@ -94,11 +98,6 @@ def build_flash_attn_paged_fp8_module(
     batch_interleave_group = int(batch_interleave_group)
     if batch_interleave_group < 1:
         raise ValueError(f"batch_interleave_group must be positive, got {batch_interleave_group}")
-    if batch_interleave_group > 1 and (
-        (head_dim == 128 and not paged_bn128) or (paged_bn128 and not paged_bn128_varlen)
-    ):
-        raise ValueError("batch interleaving requires general D192 or packed-varlen paired page IDs")
-    assert num_heads % num_kv_heads == 0
     traits = _make_paged_dualwave_swp_fp8_traits(
         num_heads,
         num_kv_heads,
@@ -108,8 +107,6 @@ def build_flash_attn_paged_fp8_module(
         daz=daz,
         dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
         rescale_threshold=rescale_threshold,
-        dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
-        varlen=not paged_bn128 or paged_bn128_varlen,
         paired_page_ids=paged_bn128,
         batch_interleave_group=batch_interleave_group,
         page_size=page_size,
@@ -121,7 +118,6 @@ def build_flash_attn_paged_fp8_module(
     HEAD_DIM = traits.HEAD_DIM
     NUM_HEADS_Q = traits.NUM_HEADS_Q
     PAIRED_PAGE_IDS = bool(paged_bn128)
-    USE_CU_SEQLENS = not paged_bn128 or paged_bn128_varlen
     BATCH_INTERLEAVE_GROUP = traits.BATCH_INTERLEAVE_GROUP
     DEFAULT_STRIDE_Q_N = traits.DEFAULT_STRIDE_Q_N
     DEFAULT_STRIDE_O_N = traits.NUM_HEADS_Q * traits.HEAD_DIM_V
@@ -140,7 +136,6 @@ def build_flash_attn_paged_fp8_module(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
-        DebugCounts: fx.Tensor,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
         BlockTable: fx.Tensor,
@@ -160,17 +155,16 @@ def build_flash_attn_paged_fp8_module(
             K,
             V,
             O,
-            DebugCounts,
-            CuSeqQ,
-            CuSeqKv,
-            QDescale,
-            KDescale,
-            VDescale,
-            seq_len,
-            seq_len_kv,
-            stride_q_n,
-            DEFAULT_STRIDE_KV_N,
-            head_dim_runtime,
+            CuSeqQ=CuSeqQ,
+            CuSeqKv=CuSeqKv,
+            QDescale=QDescale,
+            KDescale=KDescale,
+            VDescale=VDescale,
+            seq_len=seq_len,
+            seq_len_kv=seq_len_kv,
+            stride_q_n=stride_q_n,
+            stride_kv_n=DEFAULT_STRIDE_KV_N,
+            head_dim_runtime=head_dim_runtime,
             stride_o_n=DEFAULT_STRIDE_O_N if PAIRED_PAGE_IDS else stride_o_n,
             BlockTable=BlockTable,
             block_table_stride=block_table_stride,
@@ -179,12 +173,8 @@ def build_flash_attn_paged_fp8_module(
         ctx.init_runtime_indices()
         ctx.init_lds(SharedStorage)
         ctx.init_thread_mapping()
-        if const_expr(USE_CU_SEQLENS):
-            ctx.init_sequence_lengths()
-            ctx.init_varlen_causal_lpt_order()
-        else:
-            ctx.init_causal_lpt_order()
-            ctx.init_sequence_lengths()
+        ctx.init_sequence_lengths()
+        ctx.init_varlen_causal_lpt_order()
         ctx.init_descriptors()
         ctx.init_atoms_and_lds_ptrs()
         ctx.init_dma_thread_offsets()
@@ -200,9 +190,7 @@ def build_flash_attn_paged_fp8_module(
         BN = traits.BLOCK_N
         D_CHUNKS = traits.D_CHUNKS
         NPF = traits.NUM_PREFETCH_K
-        BOUNDED_MAX = (
-            traits.HEAD_DIM == 128 and traits.DUALWAVE_SWP_LAZY_RESCALE and not traits.DUALWAVE_SWP_DEBUG_LAZY_COUNTS
-        )
+        BOUNDED_MAX = traits.HEAD_DIM == 128 and traits.DUALWAVE_SWP_LAZY_RESCALE
         STREAM_PAGE16_V128 = traits.PAGE_SIZE == 16 and traits.HEAD_DIM == 192 and traits.HEAD_DIM_V == 128
         t0 = ctx.split_t0
         t_end = ctx.split_t_end
@@ -296,7 +284,7 @@ def build_flash_attn_paged_fp8_module(
         loop_results = init_args
         next_v_arg_idx = 3 + D_CHUNKS
 
-        def _iterate(j, loop_args, do_mask, skip_max=False, initialize=False):
+        def _iterate(j, loop_args, do_mask, skip_max=False, initialize=False, mask_v=True):
             m_row = loop_args[0]
             l_row = loop_args[1]
             v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
@@ -317,8 +305,8 @@ def build_flash_attn_paged_fp8_module(
                 page_f_a, page_f_b = ctx.load_page_id_pair((j + 4) * BN)
                 kv_gmem_to_lds.load_k((j + 4) * BN, f_a_buf, page_id=page_f_a)
                 kv_gmem_to_lds.load_k((j + 5) * BN, f_b_buf, page_id=page_f_b)
-                kv_gmem_to_lds.load_v((j + 4) * BN, f_a_buf, page_id=page_f_a)
-                kv_gmem_to_lds.load_v((j + 5) * BN, f_b_buf, page_id=page_f_b)
+                kv_gmem_to_lds.load_v((j + 4) * BN, f_a_buf, page_id=page_f_a, mask_padding=mask_v)
+                kv_gmem_to_lds.load_v((j + 5) * BN, f_b_buf, page_id=page_f_b, mask_padding=mask_v)
 
                 if const_expr(do_mask):
                     v_s_a, v_s_b = softmax_helper.causal_mask_pair_if_needed(v_s_a, v_s_b, j)
@@ -350,7 +338,7 @@ def build_flash_attn_paged_fp8_module(
                 v_s_a = gemm_helper.qk(v_k_a, q_wide)
                 if const_expr(STREAM_PAGE16_V128):
                     v_k_b = kv_lds_to_regs.load_k(b_buf)
-                kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_a, nn_a_buf)
+                kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_a, nn_a_buf, (j + 2) * BN, mask_padding=mask_v)
                 v_f_a = kv_gmem_to_lds._load_v_fp8_vectorized_bankpad_source(
                     (j + 4) * BN,
                     page_id=page_f_a,
@@ -360,7 +348,7 @@ def build_flash_attn_paged_fp8_module(
                     page_id=page_f_b,
                 )
                 v_s_b = gemm_helper.qk(v_k_b, q_wide)
-                kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_b, nn_b_buf)
+                kv_gmem_to_lds._store_v_fp8_vectorized_bankpad(next_v_b, nn_b_buf, (j + 3) * BN, mask_padding=mask_v)
                 if const_expr(STREAM_PAGE16_V128):
                     # The current V slot is distinct from both next-V stores.
                     # Delay its fragment until K operands have been consumed.
@@ -389,6 +377,14 @@ def build_flash_attn_paged_fp8_module(
             rocdl.sched_barrier(0)
             return next_args
 
+        # V128 stores packets j+2/j+3; segmented V stores j+4/j+5. Keep
+        # byte masking out of iterations whose furthest packet is fully valid.
+        if const_expr(traits.PAGE_SIZE == 1):
+            v_prefix_end = fx.Int64(t_end)
+        else:
+            v_ahead = 4 if traits.FP8_PV_SEGMENTED else 2
+            v_prefix_end = fx.max(fx.Int64(0), fx.Int64(ctx.seqlen_kv_v) // (2 * BN) * 2 - v_ahead)
+
         if const_expr(BOUNDED_MAX):
             first_end = fx.min(fx.Int64(t_end), fx.Int64(t0) + 2)
             for j, loop_args in range(fx.Int64(t0), first_end, fx.Int64(2), init=init_args):
@@ -396,30 +392,45 @@ def build_flash_attn_paged_fp8_module(
                 loop_results = yield next_args
             sealed = _query_bound_is_safe(ctx, upper_bound, fx.Float32(loop_results[0]))
             fast_end = sealed.select(fx.Int64(t_end), first_end)
+            fast_prefix_end = fx.min(fast_end, fx.max(first_end, v_prefix_end))
             first_state = loop_results
             # Waves can choose different loops, but pair order and barrier count agree.
-            for j, loop_args in range(first_end, fast_end, fx.Int64(2), init=first_state):
+            for j, loop_args in range(first_end, fast_prefix_end, fx.Int64(2), init=first_state):
+                next_args = _iterate(j, loop_args, True, skip_max=True, mask_v=False)
+                loop_results = yield next_args
+            fast_tail_state = loop_results
+            for j, loop_args in range(fast_prefix_end, fast_end, fx.Int64(2), init=fast_tail_state):
                 next_args = _iterate(j, loop_args, True, skip_max=True)
                 loop_results = yield next_args
             slow_start = sealed.select(fx.Int64(t_end), first_end)
+            slow_prefix_end = fx.min(fx.Int64(t_end), fx.max(slow_start, v_prefix_end))
             slow_state = loop_results
-            for j, loop_args in range(slow_start, fx.Int64(t_end), fx.Int64(2), init=slow_state):
+            for j, loop_args in range(slow_start, slow_prefix_end, fx.Int64(2), init=slow_state):
+                next_args = _iterate(j, loop_args, True, mask_v=False)
+                loop_results = yield next_args
+            slow_tail_state = loop_results
+            for j, loop_args in range(slow_prefix_end, fx.Int64(t_end), fx.Int64(2), init=slow_tail_state):
                 next_args = _iterate(j, loop_args, True)
                 loop_results = yield next_args
         elif const_expr(traits.HEAD_DIM == 192 and traits.HEAD_DIM_V == 128):
             # The prefix boundary is wave-uniform, not CTA-uniform. Both loops
             # must keep the same pair order and one rendezvous per pair.
             prefix_end = fx.Int64(ctx.q_start_pos_i32 + ctx.delta_i32) // (2 * BN) * 2
-            prefix_end = fx.min(fx.Int64(t_end), fx.max(fx.Int64(t0), prefix_end))
+            prefix_end = fx.min(fx.Int64(t_end), fx.max(fx.Int64(t0), fx.min(prefix_end, v_prefix_end)))
             for j, loop_args in range(fx.Int64(t0), prefix_end, fx.Int64(2), init=init_args):
-                next_args = _iterate(j, loop_args, False)
+                next_args = _iterate(j, loop_args, False, mask_v=False)
                 loop_results = yield next_args
             tail_init = loop_results
             for j, loop_args in range(prefix_end, fx.Int64(t_end), fx.Int64(2), init=tail_init):
                 next_args = _iterate(j, loop_args, True)
                 loop_results = yield next_args
         else:
-            for j, loop_args in range(fx.Int64(t0), t_end, fx.Int64(2), init=init_args):
+            prefix_end = fx.min(fx.Int64(t_end), fx.max(fx.Int64(t0), v_prefix_end))
+            for j, loop_args in range(fx.Int64(t0), prefix_end, fx.Int64(2), init=init_args):
+                next_args = _iterate(j, loop_args, True, mask_v=False)
+                loop_results = yield next_args
+            tail_init = loop_results
+            for j, loop_args in range(prefix_end, fx.Int64(t_end), fx.Int64(2), init=tail_init):
                 next_args = _iterate(j, loop_args, True)
                 loop_results = yield next_args
         m_row = loop_results[0]
@@ -427,7 +438,8 @@ def build_flash_attn_paged_fp8_module(
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
 
         inv_l = softmax_helper.safe_l_inv(l_row)
-        inv_l = inv_l * ctx.vd_fp8
+        value_descale = fx.generic_load(fx.get_iter(ctx.VDescale), dtype=fx.Float32, count=1)
+        inv_l = inv_l * value_descale
         softmax_helper.scale_o(v_o, inv_l)
         rocdl.s_barrier()
         output_store.store_final_o(v_o, q_row)
@@ -438,7 +450,6 @@ def build_flash_attn_paged_fp8_module(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
-        DebugCounts: fx.Tensor,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
         BlockTable: fx.Tensor,
@@ -480,7 +491,6 @@ def build_flash_attn_paged_fp8_module(
             K,
             V,
             O,
-            DebugCounts,
             CuSeqQ,
             CuSeqKv,
             BlockTable,
@@ -514,18 +524,16 @@ def build_flash_attn_paged_fp8_module(
         },
     }
 
-    def _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride):
+    def _validate_paged_bn128_launch(seq_len_kv, block_table_stride):
         if not PAIRED_PAGE_IDS:
             return
-        batch_size = int(batch_size)
         seq_len_kv = int(seq_len_kv)
         block_table_stride = int(block_table_stride)
         num_kv_pages = (seq_len_kv + traits.PAGE_SIZE - 1) // traits.PAGE_SIZE
-        if (not USE_CU_SEQLENS and batch_size != 1) or num_kv_pages < 2 or num_kv_pages % 2 != 0:
+        if num_kv_pages < 2 or num_kv_pages % 2 != 0:
             raise ValueError(
-                "paged BN128 requires batch_size=1 unless compiled for packed varlen, "
-                "and a positive even number "
-                f"of KV pages; got batch_size={batch_size}, seq_len_kv={seq_len_kv}, "
+                "paged BN128 requires a positive even number "
+                f"of KV pages; got seq_len_kv={seq_len_kv}, "
                 f"page_size={traits.PAGE_SIZE}"
             )
         if block_table_stride < num_kv_pages:
@@ -551,7 +559,6 @@ def build_flash_attn_paged_fp8_module(
         stride_q_n=None,
         stride_o_n=None,
         head_dim_runtime=None,
-        debug_counts=None,
         *,
         seq_len_kv=None,
         cu_seqlens_q=None,
@@ -569,6 +576,19 @@ def build_flash_attn_paged_fp8_module(
             and max(K.numel() * K.element_size(), V.numel() * V.element_size()) > PAGED_FP8_BUFFER_LIMIT_BYTES
         ):
             raise ValueError("paged FP8 whole-cache buffer descriptor exceeds its byte limit")
+        if (
+            cu_seqlens_q is None
+            or cu_seqlens_kv is None
+            or block_table is None
+            or block_table_stride is None
+            or q_descale is None
+            or k_descale is None
+            or v_descale is None
+        ):
+            raise ValueError(
+                "paged FP8 flash_attn requires cu_seqlens_q, cu_seqlens_kv, block_table, "
+                "block_table_stride, q_descale, k_descale, and v_descale"
+            )
         # stride_kv_n is accepted for compatibility; native cache layouts fix it.
         if stride_q_n is None:
             stride_q_n = DEFAULT_STRIDE_Q_N
@@ -578,30 +598,8 @@ def build_flash_attn_paged_fp8_module(
             head_dim_runtime = HEAD_DIM
         if seq_len_kv is None:
             seq_len_kv = seq_len
-        if debug_counts is None:
-            debug_counts = O
-        # Non-varlen B=1 BN128 ignores the cu_seqlens slots; use O as a placeholder
-        # for direct launcher calls that omit them.
-        if cu_seqlens_q is None:
-            cu_seqlens_q = O
-        if cu_seqlens_kv is None:
-            cu_seqlens_kv = O
-        if block_table is None:
-            block_table = O
-        if block_table_stride is None:
-            block_table_stride = 0
-        if block_table is O and not _compile_only:
-            raise ValueError("paged fp8 flash_attn requires block_table")
-        _validate_paged_bn128_launch(batch_size, seq_len_kv, block_table_stride)
+        _validate_paged_bn128_launch(seq_len_kv, block_table_stride)
         _validate_batch_interleave_launch(batch_size)
-        # Direct launcher calls must supply shape-[1] fp32 descales; O keeps the
-        # compiled signature valid when a placeholder is needed.
-        if q_descale is None:
-            q_descale = O
-        if k_descale is None:
-            k_descale = O
-        if v_descale is None:
-            v_descale = O
         dispatch = flyc.compile if _compile_only else _run_compiled
         return dispatch(
             launch_flash_attn_dualwave_swp,
@@ -609,7 +607,6 @@ def build_flash_attn_paged_fp8_module(
             K,
             V,
             O,
-            debug_counts,
             cu_seqlens_q,
             cu_seqlens_kv,
             block_table,
