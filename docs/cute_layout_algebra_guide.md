@@ -362,18 +362,6 @@ fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
 | `mfma_f32_32x32x8f16` | FP16 | 32×32×8 | GFX942+ |
 | `mfma_scale_x128` | MXFP4 | 16×16×128 | GFX950 |
 
-**K64-byte micro-step pattern (2× K32 per step):**
-```python
-for ku in range(tile_k_bytes // 64):
-    a_val = lds_load_pack_k32(...)   # Load A from LDS
-    b_val = load_b_pack_k32(...)     # Load B from GMEM
-    c_acc = rocdl.mfma_f32_16x16x32_fp8_fp8(a_val, b_val, c_acc)
-    # second half
-    a_val2 = lds_load_pack_k32(...)
-    b_val2 = load_b_pack_k32(...)
-    c_acc = rocdl.mfma_f32_16x16x32_fp8_fp8(a_val2, b_val2, c_acc)
-```
-
 ---
 
 ## 8. Synchronization

@@ -438,18 +438,15 @@ def buffer_load(
         if mask is not None or soffset_bytes is not None:
             raise ValueError("buffer_load(is_scalar=True) does not support mask or soffset_bytes")
         dtype = T.i32()
-    # Default dtype to f32
     elif dtype is None:
         dtype = T.f32()
     # Accept DSL Numeric class (e.g. fx.Int32) as dtype: unwrap to ir.Type
     elif hasattr(dtype, "ir_type"):
         dtype = dtype.ir_type
 
-    # Unwrap offset first (accept Python ints and DSL Numeric values).
     offset = fx.Int32(_unwrap_value(offset)).ir_value()
 
-    # IMPORTANT: Buffer load offset is in BYTES, not elements!
-    # For vec4xf32, each element is 4 bytes, so multiply offset by 4
+    # Convert the API's element offset to the buffer instruction's byte offset.
     element_bytes = dtype.width // 8
     offset = (fx.Int32(offset) * fx.Int32(element_bytes)).ir_value()
 
@@ -518,12 +515,10 @@ def buffer_store(
         >>> # Store with mask
         >>> buffer_store(data, rsrc, offset, mask=valid)
     """
-    # Unwrap all inputs (accept DSL Numeric values via ir_value()). `rsrc` stays a DSL
-    # pointer: the copy atom needs the !fly.ptr<i8, BufferDesc> fat pointer, not a value.
+    # Keep `rsrc` as a !fly.ptr<i8, BufferDesc> for the copy atom.
     data = _unwrap_value(data)
     offset = fx.Int32(_unwrap_value(offset)).ir_value()
 
-    # Get element size from data type
     data_type = data.type
     if hasattr(data_type, "element_type"):  # Vector type
         element_type = data_type.element_type
@@ -533,9 +528,7 @@ def buffer_store(
         vec_width = 1
     element_bytes = element_type.width // 8
 
-    # IMPORTANT: the buffer store offset is in BYTES.
-    # For backward compat, `buffer_store()` accepts element offsets by default
-    # and scales them to bytes. Set `offset_is_bytes=True` to skip scaling.
+    # Convert element offsets unless the caller already supplied bytes.
     if not offset_is_bytes:
         offset = (fx.Int32(offset) * fx.Int32(element_bytes)).ir_value()
 

@@ -36,16 +36,6 @@ binds current stream, handles strided KV and 4D cos/sin views). Internal
 who already have all buffers and want the lowest-overhead path.
 """
 
-# NOTE: do NOT add `from __future__ import annotations` to this file.
-# PEP 563 turns all annotations into strings, which defeats flydsl's
-# JitFunction._make_cache_key runtime detection:
-#   is_runtime = hasattr(ann, "__get_c_pointers__")
-# A string like 'fx.Int32' fails that check, so flydsl treats the
-# `kv_in_row_stride` and `num_tokens` Int32 parameters as compile-time
-# constants and embeds their VALUE in the cache key. Every distinct
-# batch size / KV stride then triggers a fresh ~30-70ms JIT compile
-# instead of hitting the in-memory CallState cache.
-
 import math
 from functools import lru_cache
 from typing import Optional, Tuple
@@ -111,9 +101,7 @@ _TORCH_DTYPE_FOR_SCALE = {
 }
 
 
-# ============================================================================
-# Store helpers (module-level so they're easy to reuse / unit-test)
-# ============================================================================
+# Store helpers
 
 
 def _store_bf16_vec_g(vals_list, g_out, row_off_elems, idx, vec):
@@ -126,7 +114,7 @@ def _store_bf16_vec_g(vals_list, g_out, row_off_elems, idx, vec):
 
 
 def _store_fp8_packed(vals_list, out_rsrc, row_base_bytes, idx, vec):
-    """Pack VEC fp32 -> VEC fp8 (e4m3fnuz) via cvt_pk_fp8_f32 and store.
+    """Pack VEC fp32 values to arch-native fp8 via cvt_pk_fp8_f32 and store.
 
     Emits one ``buffer_store_dwordx2`` per thread (VEC=8 → 2 dwords = 8 bytes).
 
@@ -164,9 +152,7 @@ def _store_fp8_packed(vals_list, out_rsrc, row_base_bytes, idx, vec):
     buffer_ops.buffer_store(store_vec, out_rsrc, off_bytes, offset_is_bytes=True)
 
 
-# ============================================================================
 # Kernel builder
-# ============================================================================
 
 
 def _build_kernel(
@@ -185,7 +171,7 @@ def _build_kernel(
     launchers with different (H, D, RD, group_size, scale_dtype, q_weighted)
     coexist safely. Returns the launcher.
 
-    quant=True writes fp8 (e4m3fnuz) with one scale per ``group_size``-wide
+    quant=True writes arch-native fp8 with one scale per ``group_size``-wide
     block of D. When ``group_size == head_dim`` the scale degenerates to
     per-row (NG=1). scale_dtype controls the stored scale encoding
     (``"fp32"`` or ``"e8m0"``).
@@ -475,12 +461,6 @@ def _build_kernel(
         # range. This lets the kernel handle arbitrary T (only HW grid Y
         # limits T per launch) without the bf16 element offset overflowing
         # signed i32 at H*D = 65k+ per token.
-        # Per-token byte offset, computed in index type (= platform pointer
-        # width, 64-bit on AMD). GTensor.get_llvm_ptr does
-        # arith.index_cast(i64, ...) on this value, which is only valid when
-        # the input is index-typed. Doing the math in index avoids large
-        # H*D configs (e.g. H=128 D=512 → 128 KB/token, max offset 8.6 GiB
-        # at bid_t=65534) silently producing garbage if we feed i64.
         q_tok_off_bytes = arith.MulIOp(bid_t_idx, arith.constant(H * D * 2, type=T.index)).result
 
         if bid_x < fx.Int32(H):
@@ -680,9 +660,7 @@ def _build_kernel(
     return launch_qk_norm_rope_quant
 
 
-# ============================================================================
 # Cached compile + public API
-# ============================================================================
 
 # Empirically (sweep on MI355X V4-Pro shape) ``waves_per_eu=8, fast_fp_math
 # =True, unsafe_fp_math=True`` gives the best occupancy at small/mid T with

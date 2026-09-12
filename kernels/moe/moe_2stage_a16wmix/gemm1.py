@@ -189,7 +189,7 @@ def _gemm1_body_a16w4(
         (N_OUT // 16, bfl_k0, 4, 16, 8),
         (bfl_stride_n0, bfl_stride_k0, bfl_stride_klane, 8, 1),
     )
-    # B-scale preshuffle layout (make_preshuffle_scale_layout, e8m0 u8, per-1x32):
+    # B-scale preshuffle layout (e8m0 u8, per-1x32):
     #   K padded to 256 mult. shape (N_OUT/32, c_k1, 4, 16), strides below.
     scale_k_padded = ((K + 255) // 256) * 256
     sc_k1 = ((scale_k_padded // 32) // 4) // 2

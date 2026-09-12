@@ -1,15 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Shared module-level helpers for the gfx950 dual-wave, software-pipelined
-flash-attention kernels.
-
-These MLIR-dialect-facing free functions and the ``s_waitcnt`` bit-field
-constants were previously duplicated verbatim across ``flash_attn_gfx950``
-(bf16/f16) and ``flash_attn_fp8_gfx950`` (fp8); ``_LOG2E`` / ``_waitcnt_vm_n``
-are also shared with ``flash_attn_generic``. Moving them here changes nothing
-about the emitted IR/ISA -- it only removes the duplication.
-"""
+"""Shared helpers for the gfx950 dual-wave, software-pipelined flash-attention kernels."""
 
 import math as host_math
 import os

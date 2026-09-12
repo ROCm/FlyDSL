@@ -3,12 +3,8 @@
 
 """Layout helpers for GEMM kernels.
 
-Parses fly layout type strings (e.g. '(4,64):(64,1)') and computes
-idx2crd / crd2idx with plain arith ops for static layouts.
-Falls back to fly dialect ops for dynamic layouts.
-
-Optimisation: power-of-2 strides/shapes emit ``shrui`` / ``andi`` instead of
-``divui`` / ``remui``, avoiding 10-15-cycle V_DIV sequences on CDNA GPUs.
+Static layouts use typed arithmetic and replace power-of-two division/remainder
+with shifts/masks. Dynamic layouts use fx.idx2crd and fx.crd2idx.
 """
 
 import builtins as _builtins
@@ -20,26 +16,18 @@ from flydsl._mlir import ir
 
 
 def _is_pow2(n):
-    """Return True when *n* is a positive power of two."""
     return n > 0 and (n & (n - 1)) == 0
 
 
 def _div_pow2(val, divisor):
-    """Unsigned divide index *val* by a **compile-time** power-of-2 *divisor*.
-
-    Emits ``arith.shrui`` (1 VALU cycle) instead of ``arith.divui``
-    (10-15 VALU cycles on CDNA).
-    """
+    """Unsigned divide by a compile-time power of two using a shift."""
     shift = _math.log2(divisor)
     assert shift == int(shift), f"{divisor} is not a power of 2"
     return fx.Index(val) >> fx.Index(int(shift))
 
 
 def _mod_pow2(val, modulus):
-    """Unsigned remainder of index *val* by a **compile-time** power-of-2 *modulus*.
-
-    Emits ``arith.andi`` (1 VALU cycle) instead of ``arith.remui``.
-    """
+    """Unsigned remainder by a compile-time power of two using a mask."""
     return fx.Index(val) & fx.Index(modulus - 1)
 
 
@@ -61,14 +49,13 @@ def _parse_layout(ly):
 
 
 def _has_dynamic_strides(strides):
-    """Check if any stride is dynamic (None)."""
     return any(s is None for s in strides)
 
 
 def idx2crd(idx, layout):
     """Decompose flat index into a list of coordinate values.
 
-    For static layouts, computes coordinates with plain arith ops.
+    For static layouts, computes coordinates with typed arithmetic.
     Power-of-2 strides/shapes use shift/mask instead of div/rem.
     For dynamic layouts, falls back to fx.idx2crd + fx.get.
     """
@@ -116,7 +103,7 @@ def idx2crd(idx, layout):
 def crd2idx(crd, layout):
     """Compute flat index from a coordinate tuple/list.
 
-    For static layouts, computes with plain arith ops.
+    For static layouts, computes with typed arithmetic.
     For dynamic layouts, falls back to fx.crd2idx with fx.make_coord.
     """
     if not isinstance(crd, (list, tuple)):

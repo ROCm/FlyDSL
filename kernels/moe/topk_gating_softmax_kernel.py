@@ -12,7 +12,7 @@ Fuses softmax + top-K selection + optional renormalization for MoE gating:
 Outputs: topk_weights (f32), topk_indices (i32), token_expert_indices (i32).
 
 This module also exposes two shared helpers used by the fused oneshot path in
-``kernels/moe_sorting_kernel.py``:
+``kernels/moe/moe_sorting_kernel.py``:
 
   - ``_compute_topk_gating_layout`` — resolves the full layout dict (VPT,
     THREADS_PER_TOKEN, TOKENS_PER_BLOCK, ATOM_BITS, ...).
@@ -67,7 +67,7 @@ def _compute_topk_gating_layout(num_experts: int, topk: int, dtype_str: str):
     token-per-block gating softmax kernel.
 
     Shared by the standalone kernel in this module and the fused oneshot
-    kernel in ``kernels/moe_sorting_kernel.py`` so the two paths can never
+    kernel in ``kernels/moe/moe_sorting_kernel.py`` so the two paths can never
     disagree on the layout.
     """
     elem_bits = 32 if dtype_str == "f32" else 16
@@ -136,7 +136,7 @@ def _emit_topk_gating_softmax_body(
 ):
     """Emit MLIR for gating logits → softmax → top-K into the current
     ``@flyc.kernel`` insertion point. Used by the fused oneshot kernel
-    in ``kernels/moe_sorting_kernel.py``.
+    in ``kernels/moe/moe_sorting_kernel.py``.
 
     Must be called from inside an ``@flyc.kernel`` so that ``fx.block_idx``,
     ``fx.thread_idx``, buffer/copy-atom operations, etc. are valid in the
@@ -436,7 +436,7 @@ def build_topk_gating_softmax_module(
         c_log2e = fx.Float32(1.4426950408889634)
         c_one_f = fx.Float32(1.0)
 
-        # ── Thread → (warp, token-in-warp, expert-lane) decomposition ────
+        # Thread → (warp, token-in-warp, expert-lane) decomposition
         c_warp = fx.Int32(WARP_SIZE)
         c_tpt = fx.Int32(THREADS_PER_TOKEN)
         c_tpw = fx.Int32(TOKENS_PER_WARP)
@@ -454,7 +454,7 @@ def build_topk_gating_softmax_module(
 
         global_token_safe = in_range.select(global_token, fx.Int32(0))
 
-        # ── Sub-warp reductions over the THREADS_PER_TOKEN-lane group ────
+        # Sub-warp reductions over the THREADS_PER_TOKEN-lane group
         def group_reduce(x, mode):
             """Butterfly reduce within a THREADS_PER_TOKEN sub-warp group."""
             width_i32 = c_tpt
@@ -488,7 +488,7 @@ def build_topk_gating_softmax_module(
                 wi = take_peer.select(peer_i, wi)
             return wv, wi
 
-        # ── Buffer-backed views ──────────────────────────────────────────
+        # Buffer-backed views
         GatingOutput_buf = fx.rocdl.make_buffer_tensor(GatingOutput)
         TopkWeights_buf = fx.rocdl.make_buffer_tensor(TopkWeights)
         TopkIndices_buf = fx.rocdl.make_buffer_tensor(TopkIndices)
@@ -507,7 +507,7 @@ def build_topk_gating_softmax_module(
         indices_div = fx.logical_divide(row_indices, fx.make_layout(1, 1))
         tei_div = fx.logical_divide(row_tei, fx.make_layout(1, 1))
 
-        # ── Input load: ATOM_BITS-wide buffer copy (ELEMS_PER_ATOM elems) ─
+        # Input load: ATOM_BITS-wide buffer copy (ELEMS_PER_ATOM elems)
         copy_atom_in = fx.make_copy_atom(fx.rocdl.BufferCopy(ATOM_BITS), elem_bits)
 
         # Output copy atoms: f32 path is reused for i32 indices via bitcast
@@ -541,9 +541,7 @@ def build_topk_gating_softmax_module(
             view = fx.slice(divided, (None, index))
             fx.copy(copy_atom_f32, r, view)
 
-        # ==================================================================
         # Pass 1: Load this thread's VPT experts + per-thread max
-        # ==================================================================
         # Each thread owns the contiguous expert columns
         # [expert_lane * VPT, expert_lane * VPT + VPT). With THREADS_PER_TOKEN
         # = num_experts / VPT, every column in [0, num_experts) is covered
@@ -567,9 +565,7 @@ def build_topk_gating_softmax_module(
 
         group_max = group_reduce(thread_max, "max")
 
-        # ==================================================================
         # Pass 2: exp(x - max) and per-token sum
-        # ==================================================================
         thread_sum = c_zero_f
         exp_list = []
         for v in range_constexpr(VPT):
@@ -581,17 +577,13 @@ def build_topk_gating_softmax_module(
 
         group_sum = group_reduce(thread_sum, "sum")
 
-        # ==================================================================
         # Pass 3: Normalize -> softmax probabilities (kept in registers)
-        # ==================================================================
         inv_sum = c_one_f / group_sum
         prob_list = []
         for v in range_constexpr(VPT):
             prob_list.append(exp_list[v] * inv_sum)
 
-        # ==================================================================
         # Pass 4: Iterative Top-K (sub-warp argmax → mask)
-        # ==================================================================
         # Stash both the winning weight and index per iteration so Pass 5
         # can write them without recomputing.
         selected_weights = []  # one f32 per k iter (replicated across the group)
@@ -623,17 +615,11 @@ def build_topk_gating_softmax_module(
                 is_winner = ArithValue(ci) == ArithValue(global_best_idx)
                 prob_list[v] = is_winner.select(c_neg_inf, prob_list[v])
 
-        # ==================================================================
         # Pass 5: Leader writes weights/indices/tei (with optional renorm)
-        # ==================================================================
         c_eps = fx.Float32(1e-20)
         denom = fx.max(selected_sum, c_eps)
         inv_denom = c_one_f / denom
 
-        # Inline the leader-active predicate so the AST rewriter recognises it
-        # as a dynamic test (it must contain a Call) and lowers `if ...` to
-        # `scf.IfOp`. Wrapping it in a named variable would short-circuit the
-        # rewrite and the runtime would try `Boolean.__bool__()` and raise.
         if (expert_lane == fx.Int32(0)) & (global_token < i32_num_tokens):
             num_tokens_v = ArithValue(i32_num_tokens)
             for k_idx in range_constexpr(topk):
@@ -646,7 +632,7 @@ def build_topk_gating_softmax_module(
                 tei_val = Int32(k_idx) * num_tokens_v + global_token
                 _store_scalar_i32(tei_div, Int32(k_idx), tei_val)
 
-    # ── JIT host launcher ─────────────────────────────────────────────────
+    # JIT host launcher
     @flyc.jit
     def launch_topk_gating_softmax(
         GatingOutput: fx.Tensor,

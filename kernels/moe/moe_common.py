@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""Common types and helpers shared across MoE FlyDSL kernel modules."""
+"""Gate computation modes for MoE kernels."""
 
 from enum import Enum
 
