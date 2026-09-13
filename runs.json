@@ -1,8 +1,83 @@
 {
  "schema": 1,
- "updated": "2026-09-13T06:48:58Z",
+ "updated": "2026-09-13T12:34:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34757308848,
+   "pr": 1129,
+   "commit": "539c4c4ce0e640a015d4967121e95ad6eed4c008",
+   "branch": "feature/iket-frontend",
+   "event": "pull_request",
+   "title": "[WIP][DSL][Feature] Add IKET in-kernel event tracing for gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34757308848",
+   "created_at": "2026-09-13T12:31:06Z",
+   "updated_at": "2026-09-13T12:31:35Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 34756582067,
+   "pr": 1129,
+   "commit": "c8f95cc7c107cecf6349f247544249d04f898042",
+   "branch": "feature/iket-frontend",
+   "event": "pull_request",
+   "title": "[WIP][DSL][Feature] Add IKET in-kernel event tracing for gfx950",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34756582067",
+   "created_at": "2026-09-13T12:15:12Z",
+   "updated_at": "2026-09-13T12:31:26Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 34746696030,
+   "pr": null,
+   "commit": "a5e28ef371c1afa2b21396d1ea5c560101c23750",
+   "branch": "main",
+   "event": "push",
+   "title": "Migrate vector consumers and consolidate kernel helpers (#1127)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34746696030",
+   "created_at": "2026-09-13T08:02:34Z",
+   "updated_at": "2026-09-13T08:16:21Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-13T08:16:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34746696030/job/103697367986"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-13T08:16:41Z",
+     "completed_at": "2026-09-13T09:30:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34746696030/job/103697367991",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-13T08:16:28Z",
+     "completed_at": "2026-09-13T08:32:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34746696030/job/103697368000",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 34736351838,
    "pr": 1127,
@@ -51,7 +126,7 @@
   },
   {
    "run_id": 34730154215,
-   "pr": 1127,
+   "pr": null,
    "commit": "6578bf85f5d0bc98cf4f3185a54af57aeb1af143",
    "branch": "codex/vector-api-migration",
    "event": "pull_request",
@@ -141,7 +216,7 @@
   },
   {
    "run_id": 34706688929,
-   "pr": 1127,
+   "pr": null,
    "commit": "4ddc3d8d0dc790c817a3c93e12bf4ed4dcd5d3f7",
    "branch": "codex/vector-api-migration",
    "event": "pull_request",
@@ -382,7 +457,7 @@
   },
   {
    "run_id": 34691576163,
-   "pr": 1127,
+   "pr": null,
    "commit": "5493e0b0788272a02a4f22b63c32adc6a6450824",
    "branch": "codex/vector-api-migration",
    "event": "pull_request",
@@ -486,7 +561,7 @@
   },
   {
    "run_id": 34688329344,
-   "pr": 1127,
+   "pr": null,
    "commit": "302a02c0bfb460dd44fb5d87b3ea15419126e651",
    "branch": "codex/vector-api-migration",
    "event": "pull_request",
@@ -2113,51 +2188,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34454499640,
-   "pr": 1116,
-   "commit": "cee677e6f871f33c58bd6020c02557e22ef2b5dd",
-   "branch": "yanbo/cleancode",
-   "event": "pull_request",
-   "title": "clean atomic add",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34454499640",
-   "created_at": "2026-09-10T08:19:03Z",
-   "updated_at": "2026-09-10T09:20:31Z",
-   "actor": "yanboshao",
-   "jobs": []
-  },
-  {
-   "run_id": 34454479540,
-   "pr": 1116,
-   "commit": "cee677e6f871f33c58bd6020c02557e22ef2b5dd",
-   "branch": "yanbo/cleancode",
-   "event": "pull_request",
-   "title": "clean atomic add",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34454479540",
-   "created_at": "2026-09-10T08:18:50Z",
-   "updated_at": "2026-09-10T08:19:05Z",
-   "actor": "yanboshao",
-   "jobs": []
-  },
-  {
-   "run_id": 34453416060,
-   "pr": null,
-   "commit": "c3077547dfd05b1f4963884cc5f49b3f0c006a46",
-   "branch": "mxfp8_v1",
-   "event": "pull_request",
-   "title": "Mxfp8 8w 1*32 scale",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34453416060",
-   "created_at": "2026-09-10T08:06:47Z",
-   "updated_at": "2026-09-10T08:33:07Z",
-   "actor": "solinzby1",
-   "jobs": []
   }
  ]
 }
