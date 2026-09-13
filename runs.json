@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-13T12:36:56Z",
+ "updated": "2026-09-13T13:54:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -9,22 +9,51 @@
    "commit": "539c4c4ce0e640a015d4967121e95ad6eed4c008",
    "branch": "feature/iket-frontend",
    "event": "pull_request",
-   "title": "[WIP][DSL][Feature] Add IKET in-kernel event tracing for gfx950",
-   "status": "in_progress",
+   "title": "[WIP][DSL][Feature] Add in-kernel event tracing for gfx950",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34757308848",
    "created_at": "2026-09-13T12:31:06Z",
-   "updated_at": "2026-09-13T12:32:25Z",
+   "updated_at": "2026-09-13T12:44:59Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-13T12:45:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34757308848/job/103725473958"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-13T12:44:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34757308848/job/103725473979"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-13T12:45:08Z",
+     "completed_at": "2026-09-13T13:02:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34757308848/job/103725474064",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 34756582067,
-   "pr": 1129,
+   "pr": null,
    "commit": "c8f95cc7c107cecf6349f247544249d04f898042",
    "branch": "feature/iket-frontend",
    "event": "pull_request",
-   "title": "[WIP][DSL][Feature] Add IKET in-kernel event tracing for gfx950",
+   "title": "[WIP][DSL][Feature] Add in-kernel event tracing for gfx950",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34756582067",
@@ -40,21 +69,22 @@
    "branch": "main",
    "event": "push",
    "title": "Migrate vector consumers and consolidate kernel helpers (#1127)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34746696030",
    "created_at": "2026-09-13T08:02:34Z",
-   "updated_at": "2026-09-13T08:16:21Z",
+   "updated_at": "2026-09-13T13:52:30Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-13T08:16:21Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34746696030/job/103697367986"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-13T12:45:18Z",
+     "completed_at": "2026-09-13T13:52:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34746696030/job/103697367986",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
