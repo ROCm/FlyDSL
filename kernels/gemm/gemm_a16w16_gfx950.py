@@ -9,7 +9,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, iket, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch
 
 from .gemm_a16w16_gfx950_utils import (
@@ -485,6 +485,11 @@ def gemm_a16w16_gfx950_kernel(
             param.has_bias,
         )
 
+    # In-kernel event tracing. Stripped entirely unless FLYDSL_IKET_ENABLE=1 (or the
+    # `iket` compile hint), so these calls cost nothing in a normal build.
+    wave_lifetime = iket.range_start("wave_lifetime")
+    iket.range_push("prologue")
+
     tid = fx.thread_idx.x
     threads_per_k_slice = param.m_waves * param.n_waves * GFX950_WAVE_SIZE
     tid_in_k_slice = tid % threads_per_k_slice
@@ -674,17 +679,37 @@ def gemm_a16w16_gfx950_kernel(
         rocdl.asyncmark()
     rocdl.sched_barrier(0)
 
+    iket.range_pop()  # prologue
+    iket.range_push("mainloop")
+
     main_loop_end = k_tiles - (stages - 1)
     for k_tile in range(0, main_loop_end, 1):
+        # k_wave_idx is the K-slice this wave owns; recording it lets the trace separate
+        # waves that are pipelining different slices of the same tile.
+        iket.range_push("k_tile", k_tile)
         current_stage = k_tile % stages
         write_stage = (current_stage + stages - 1) % stages
+
+        iket.range_push("lds_wait")
         rocdl.wait_asyncmark(stages - 2)
         rocdl.s_barrier()
+        iket.range_pop()  # lds_wait
+
+        iket.range_push("tile_load")
         async_load_b_to_lds(k_tile + (stages - 1), write_stage)
         async_load_a_to_lds(k_tile + (stages - 1), write_stage)
         rocdl.asyncmark()
+        iket.range_pop()  # tile_load
+
+        iket.range_push("mfma_issue")
         compute_stage(current_stage, k_tile)
+        iket.range_pop()  # mfma_issue
+
         rocdl.sched_barrier(0)
+        iket.range_pop()  # k_tile
+
+    iket.range_pop()  # mainloop
+    iket.range_push("drain")
 
     current_stage = main_loop_end % stages
     for s in range_constexpr(0, stages - 1):
@@ -692,6 +717,9 @@ def gemm_a16w16_gfx950_kernel(
         rocdl.s_barrier()
         compute_stage(current_stage, main_loop_end + s)
         current_stage = (current_stage + 1) % stages
+
+    iket.range_pop()  # drain
+    iket.range_push("epilogue")
 
     frag_C_out = fx.make_fragment_like(frag_C, elem_dtype)
     frag_C_out.store(frag_C.load().to(elem_dtype))
@@ -739,6 +767,9 @@ def gemm_a16w16_gfx950_kernel(
                 )
     if const_expr(is_split_k):
         splitk_protocol.finish_split(split_k)
+
+    iket.range_pop()  # epilogue
+    iket.range_end(wave_lifetime)
 
 
 @flyc.kernel

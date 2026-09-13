@@ -23,6 +23,10 @@ from . import math as math
 _BACKEND_MODULES = {
     "rocdl": ".rocdl",
     "tdm_ops": ".rocdl.tdm_ops",  # deprecated, use .rocdl.tdm_ops instead
+    # Single-dot: iket lives at expr/iket.py. The two-dot form used by
+    # _LIBRARY_MODULES resolves out of expr/ into flydsl.extension and would not
+    # find it.
+    "iket": ".iket",
 }
 
 _LIBRARY_MODULES = {
