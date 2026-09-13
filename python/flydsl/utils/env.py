@@ -300,14 +300,39 @@ class RuntimeEnvManager(EnvManager):
     )
 
 
+class IketEnvManager(EnvManager):
+    """In-kernel event tracing options (``FLYDSL_IKET_*`` environment variables)."""
+
+    env_prefix = "IKET"
+
+    enable = OptBool(False, description="Emit in-kernel event tracing instrumentation (gfx942/gfx950)")
+    buffer_bytes = OptInt(
+        64 << 20,
+        min_value=1 << 12,
+        description="Device trace buffer size in bytes; a run that needs more is rejected, not truncated",
+    )
+    events_per_wave = OptInt(
+        256,
+        min_value=1,
+        description="Trace slots reserved per wave; one atomic claims the range at kernel entry",
+    )
+    blocks = OptStr(
+        "",
+        description="Restrict recording to 'x,y,z' or 'xcc:N'; empty records every workgroup",
+    )
+    dump_dir = OptStr("", description="Directory for trace output; empty writes to the working directory")
+
+
 autotune = AutotuneEnvManager()
 compile = CompileEnvManager()
 debug = DebugEnvManager()
+iket = IketEnvManager()
 runtime = RuntimeEnvManager()
 
 __all__ = [
     "autotune",
     "compile",
     "debug",
+    "iket",
     "runtime",
 ]

@@ -132,6 +132,11 @@ _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_COMPILE_LLVM_DIR",
     "FLYDSL_DEBUG_ENABLE_DEBUG_INFO",
     "FLYDSL_EXTRA_SOURCE_DIRS",
+    # iket instrumentation changes the emitted kernel, so a traced build must not be
+    # served from -- or serve -- a cache entry produced with different settings.
+    "FLYDSL_IKET_ENABLE",
+    "FLYDSL_IKET_EVENTS_PER_WAVE",
+    "FLYDSL_IKET_BLOCKS",
 )
 
 
