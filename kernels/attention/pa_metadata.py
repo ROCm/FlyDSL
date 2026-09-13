@@ -168,24 +168,24 @@ def _compute_mtp_group_state(
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         lane_pair = lane_pair_raw
     else:
-        lane_pair = fx.Int32(fx.arith.select(lane_pair_raw < total_pairs, lane_pair_raw, pair_max))
+        lane_pair = (lane_pair_raw < total_pairs).select(lane_pair_raw, pair_max)
     qi_raw = udiv_const(lane_pair, query_group_size)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_val = qi_raw
     else:
-        qi_val = fx.Int32(fx.arith.select(qi_raw < qlen_minus1, qi_raw, qlen_minus1))
+        qi_val = (qi_raw < qlen_minus1).select(qi_raw, qlen_minus1)
     qhi_pos = urem_const(lane_pair, query_group_size)
 
     lqh_pair_raw = local_qhead_idx + g_off
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         lqh_pair = lqh_pair_raw
     else:
-        lqh_pair = fx.Int32(fx.arith.select(lqh_pair_raw < total_pairs, lqh_pair_raw, pair_max))
+        lqh_pair = (lqh_pair_raw < total_pairs).select(lqh_pair_raw, pair_max)
     lqi_raw = udiv_const(lqh_pair, query_group_size)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_for_q = lqi_raw
     else:
-        qi_for_q = fx.Int32(fx.arith.select(lqi_raw < qlen_minus1, lqi_raw, qlen_minus1))
+        qi_for_q = (lqi_raw < qlen_minus1).select(lqi_raw, qlen_minus1)
     local_qhead_idx_for_q = urem_const(lqh_pair, query_group_size)
     return qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q
 
@@ -216,7 +216,7 @@ def _finish_q_fragments(
 
     for sh in [8, 4, 2, 1]:
         local_max = fx.maxnumf(local_max, dpp_utils.dpp_xor_f32(local_max, sh))
-    query_scale_lane = fx.Float32(fx.arith.select(local_max > 0.0, local_max * (1.0 / FP8_MAX), 1.0))
+    query_scale_lane = (local_max > 0.0).select(local_max * (1.0 / FP8_MAX), 1.0)
     inv_query_scale = fx.Float32(rcp_f32(query_scale_lane))
     q_words = []
     for q_f32 in q_f32_chunks:
@@ -289,7 +289,7 @@ def _prefetch_mtp_group_query(
 
 
 def _normalize_pa_output(running_sum, outs):
-    safe_sum = fx.Float32(fx.arith.select(running_sum > 0.0, running_sum, 1.0))
+    safe_sum = (running_sum > 0.0).select(running_sum, 1.0)
     inv_sum = rcp_f32(safe_sum)
     return [out * fx.Float32(inv_sum) for out in outs]
 
@@ -428,13 +428,7 @@ def _make_pa_phase_helpers(
             for td in range_constexpr(TLOOP):
                 vs = fx.Vector(v_scale_vecs[td])
                 if const_expr(kv_tok_base is not None):
-                    vs = fx.Vector(
-                        fx.arith.select(
-                            _token_vec_i32(kv_tok_base, td) < seq_end, vs, fx.Vector.filled((4,), zero_f, fx.Float32)
-                        ),
-                        shape=(4,),
-                        dtype=fx.Float32,
-                    )
+                    vs = (_token_vec_i32(kv_tok_base, td) < seq_end).select(vs, zero_f)
                 v_max_warp = fx.maxnumf(v_max_warp, vs.reduce("max"))
             for sh in [32, 16]:
                 v_max_warp = fx.maxnumf(v_max_warp, v_max_warp.shuffle_xor(sh, WARP_SIZE))
@@ -476,15 +470,7 @@ def _make_pa_phase_helpers(
         kv_tok_base = partition_start + kv_tok_thread_base
         qk_max = neg_inf
         for td in range_constexpr(TLOOP):
-            logits_vec = fx.Vector(
-                fx.arith.select(
-                    _token_vec_i32(kv_tok_base, td) < causal_bound,
-                    fx.Vector(d_out[td]),
-                    fx.Vector.filled((4,), neg_inf, fx.Float32),
-                ),
-                shape=(4,),
-                dtype=fx.Float32,
-            )
+            logits_vec = (_token_vec_i32(kv_tok_base, td) < causal_bound).select(fx.Vector(d_out[td]), neg_inf)
             d_out[td] = logits_vec
             qk_max = fx.maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
@@ -504,7 +490,7 @@ def _make_pa_phase_helpers(
             partition_max = fx.maxnumf(partition_max, max_vec[w])
 
         new_rmax = fx.maxnumf(rmax, partition_max)
-        safe_eff_max = fx.Float32(fx.arith.select(partition_max > neg_inf, new_rmax, zero_f))
+        safe_eff_max = (partition_max > neg_inf).select(new_rmax, zero_f)
         local_exp_sum = zero_f
         for td in range_constexpr(TLOOP):
             diff_vec = fx.Vector(d_out[td]) - safe_eff_max
@@ -517,7 +503,7 @@ def _make_pa_phase_helpers(
             fx.Vector.from_elements([local_exp_sum], dtype=fx.Float32),
             softmax_base + sm_sum_off,
         )
-        accum_scale = fx.arith.select(rmax > neg_inf, exp2_f32_fast((rmax - new_rmax) * LOG2E), zero_f)
+        accum_scale = (rmax > neg_inf).select(exp2_f32_fast((rmax - new_rmax) * LOG2E), zero_f)
 
         gpu.barrier()
         sum_vec = fx.ptr_load(softmax_base + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
@@ -693,7 +679,7 @@ def compile_pa_metadata_v1(
 
         def _remain_for_cid(cid_val):
             mod = cid_val % num_splits_per_khead
-            return average + fx.Int32(fx.arith.select(mod < reminder, fx.Int32(1), 0))
+            return average + (mod < reminder).select(1, 0)
 
         cid = fx.Int32(0)
         num_works = fx.Int32(0)
@@ -724,30 +710,30 @@ def compile_pa_metadata_v1(
 
                 f_kv_end = kvend  # min(kv_start + remain_kv, kvend) == kvend
                 nsplit_pos = nsplit_ > 0
-                f_ploc = fx.Int32(fx.arith.select(nsplit_pos, pidx_, -1))
-                f_pidx2 = fx.Int32(fx.arith.select(nsplit_pos, pidx_ + query_length, pidx_))
+                f_ploc = nsplit_pos.select(pidx_, -1)
+                f_pidx2 = nsplit_pos.select(pidx_ + query_length, pidx_)
                 f_nworks2 = num_works + 1
                 f_remain2 = remain - remain_kv
                 f_batch2 = batch_ + 1
                 # Select evaluates both values, so clamp the speculative load.
                 nb_in_range = f_batch2 < num_batches
-                safe_idx = fx.Int32(fx.arith.select(nb_in_range, f_batch2, 0))
-                f_new_pages = fx.Int32(fx.arith.select(nb_in_range, _num_part(safe_idx), 0))
+                safe_idx = nb_in_range.select(f_batch2, 0)
+                f_new_pages = nb_in_range.select(_num_part(safe_idx), 0)
                 f_kvbeg2 = kvend
                 f_kvend2 = kvend + f_new_pages
 
                 s_emit = remain > 0
                 s_kv_end_raw = kv_start + remain
-                s_kv_end = fx.Int32(fx.arith.select(s_kv_end_raw < kvend, s_kv_end_raw, kvend))
-                s_nworks2 = fx.Int32(fx.arith.select(s_emit, num_works + 1, num_works))
-                s_pidx2 = fx.Int32(fx.arith.select(s_emit, pidx_ + query_length, pidx_))
-                s_kvblk2 = fx.Int32(fx.arith.select(s_emit, kvblk_ + remain, kvblk_))
-                s_nsplit2 = fx.Int32(fx.arith.select(s_emit, nsplit_ + 1, nsplit_))
+                s_kv_end = (s_kv_end_raw < kvend).select(s_kv_end_raw, kvend)
+                s_nworks2 = s_emit.select(num_works + 1, num_works)
+                s_pidx2 = s_emit.select(pidx_ + query_length, pidx_)
+                s_kvblk2 = s_emit.select(kvblk_ + remain, kvblk_)
+                s_nsplit2 = s_emit.select(nsplit_ + 1, nsplit_)
                 s_cid2 = cid + 1
                 s_remain2 = _remain_for_cid(s_cid2)
 
-                w_ploc = fx.Int32(fx.arith.select(do_finish, f_ploc, pidx_))
-                w_kv_end = fx.Int32(fx.arith.select(do_finish, f_kv_end, s_kv_end))
+                w_ploc = do_finish.select(f_ploc, pidx_)
+                w_kv_end = do_finish.select(f_kv_end, s_kv_end)
                 work_values = [
                     batch_,
                     w_ploc,
@@ -788,7 +774,7 @@ def compile_pa_metadata_v1(
                     store_reg2,
                 )
                 fx.copy(copy_i32x2, store_reg2, fx.slice(reduce_final_map, (None, grt_)))
-                rcount = fx.Int32(fx.arith.select(do_reduce, num_splits, 0))
+                rcount = do_reduce.select(num_splits, 0)
                 sidx = fx.Int32(0)
                 while sidx < rcount:
                     val = pidx_ - (nsplit_ - sidx) * query_length
@@ -800,7 +786,7 @@ def compile_pa_metadata_v1(
                         fx.Vector.from_elements([val], dtype=fx.Int32),
                     )
                     sidx = sidx + 1
-                next_num_works = fx.Int32(fx.arith.select(do_finish, f_nworks2, s_nworks2))
+                next_num_works = do_finish.select(f_nworks2, s_nworks2)
 
                 # The last same-value-race write before advancing cid is authoritative.
                 copy_store(
@@ -824,24 +810,24 @@ def compile_pa_metadata_v1(
                     lri_,
                     grt_,
                 ) = (
-                    fx.Int32(fx.arith.select(do_finish, cid, s_cid2)),
-                    fx.Int32(fx.arith.select(do_finish, f_batch2, batch_)),
-                    fx.Int32(fx.arith.select(do_finish, 0, s_kvblk2)),
-                    fx.Int32(fx.arith.select(do_finish, 0, s_nsplit2)),
+                    do_finish.select(cid, s_cid2),
+                    do_finish.select(f_batch2, batch_),
+                    do_finish.select(0, s_kvblk2),
+                    do_finish.select(0, s_nsplit2),
                     next_num_works,
-                    fx.Int32(fx.arith.select(do_finish, f_pidx2, s_pidx2)),
-                    fx.Int32(fx.arith.select(do_finish, f_kvbeg2, kvbeg_)),
-                    fx.Int32(fx.arith.select(do_finish, f_kvend2, kvend)),
-                    fx.Int32(fx.arith.select(do_finish, f_remain2, s_remain2)),
-                    lri_ + fx.Int32(fx.arith.select(do_reduce, num_splits, 0)),
-                    grt_ + fx.Int32(fx.arith.select(do_reduce, fx.Int32(1), 0)),
+                    do_finish.select(f_pidx2, s_pidx2),
+                    do_finish.select(f_kvbeg2, kvbeg_),
+                    do_finish.select(f_kvend2, kvend),
+                    do_finish.select(f_remain2, s_remain2),
+                    lri_ + do_reduce.select(num_splits, 0),
+                    grt_ + do_reduce.select(1, 0),
                 )
 
             last_reduce_indptr = lri_
             global_reduce_tile_idx = grt_
 
             in_range = cid < num_cu
-            cid = fx.Int32(fx.arith.select(in_range, cid + 1, cid))
+            cid = in_range.select(cid + 1, cid)
 
         it_t = cid
         while it_t <= num_cu:
@@ -1336,7 +1322,7 @@ def compile_pa_decode_metadata(
                             fx.slice(partial_out_tiles, (None, po_off // 4)),
                         )
 
-                    safe_sum_lse = fx.Float32(fx.arith.select(running_sum > 0.0, running_sum, 1.0))
+                    safe_sum_lse = (running_sum > 0.0).select(running_sum, 1.0)
                     log_sum = fmath.log(safe_sum_lse, fastmath="fast")
                     lse_val = running_max + log_sum
                     pl_off = _po_row * stride_pl_ql + qhead
@@ -1517,7 +1503,7 @@ def compile_pa_metadata_reduce(
 
             denom_f = fx.Float32(results[1])
             acc_f = fx.Vector(results[2])
-            safe_denom = fx.Float32(fx.arith.select(denom_f > 0.0, denom_f, 1.0))
+            safe_denom = (denom_f > 0.0).select(denom_f, 1.0)
             out_acc = acc_f * rcp_f32(safe_denom)
 
             out_off = out_row * stride_out_seq + qhead * stride_out_head + tid * vec_width

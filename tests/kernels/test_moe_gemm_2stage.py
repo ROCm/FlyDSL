@@ -1577,7 +1577,7 @@ def test_moe_gemm2_input_poison(accumulate, in_dtype, tile_m, tokens):
     poison rows are extra tokens.
 
     NOTE (measured, see PR report): stage2 also has a per-row scale validity guard
-    (dequant masks the scale to zero for token indices outside the input), so even an
+    (dequant does `valid = tok < tokens; sc = valid.select(scale, 0)`), so even an
     over-sized A num_records that reads poison contributes 0. Like the stage1 poison
     test this is a regression *tripwire*, not a single-factor num_records isolation;
     the bytes-vs-elements bug (b) is isolated by test_moe_gemm2_output_canary."""

@@ -34,9 +34,7 @@ def compact_positive(A: fx.Pointer, Out: fx.Tensor):
     storage = fx.SharedAllocator().allocate(block_scan.SharedStorage).peek()
 
     items = (A + fx.thread_idx.x * ITEMS).load(fx.Int32x4)
-    flags = fx.Vector(
-        fx.arith.select(items > 0, fx.Vector.filled(ITEMS, 1, fx.Int32), fx.Vector.filled(ITEMS, 0, fx.Int32))
-    )
+    flags = (items > 0).select(1, 0)
 
     # slots[i] == how many elements before this one are kept == where it goes.
     slots = block_scan.exclusive(flags, fx.ReductionOp.ADD, storage=storage)

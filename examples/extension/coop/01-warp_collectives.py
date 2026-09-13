@@ -27,7 +27,7 @@ WIDTH = 32
 @flyc.kernel
 def warp_compaction_index(A: fx.Tensor, Rank: fx.Tensor, Total: fx.Tensor):
     tid = fx.thread_idx.x
-    keep = fx.Int32(fx.arith.select(A[tid] > 0.0, fx.Int32(1), fx.Int32(0)))
+    keep = (A[tid] > 0.0).select(1, 0)
 
     Rank[tid] = fx.coop.warp_exclusive_scan(keep, fx.ReductionOp.ADD, width=WIDTH)
     Total[tid] = fx.coop.warp_reduce(keep, fx.ReductionOp.ADD, width=WIDTH)

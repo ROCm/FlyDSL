@@ -3,7 +3,6 @@
 
 """Warp-wide prefix scan."""
 
-from .... import expr as fx
 from ....expr.gpu import lane_id, shuffle_idx, shuffle_up
 from .._common import combine, identity, resolve_warp_width, seed
 
@@ -24,7 +23,7 @@ def _shuffle_up(value, offset, width):
 def _shift_up(inclusive, op, width):
     """Turn an inclusive scan into the exclusive one by moving it up a lane."""
     shifted, valid = _shuffle_up(inclusive, 1, width)
-    return inclusive.dtype(fx.arith.select(valid, shifted, identity(op, inclusive.dtype)))
+    return valid.select(shifted, identity(op, inclusive.dtype))
 
 
 def _broadcast_last(value, width):
@@ -50,8 +49,7 @@ def _hillis_steele(value, op, width):
     offset = 1
     while offset < width:
         shifted, valid = _shuffle_up(value, offset, width)
-        combined = fx.as_dsl_value(combine(op, shifted, value))
-        value = combined.dtype(fx.arith.select(valid, combined, fx.as_dsl_value(value).to(combined.dtype)))
+        value = valid.select(combine(op, shifted, value), value)
         offset <<= 1
     return value
 

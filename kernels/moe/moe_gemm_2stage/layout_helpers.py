@@ -368,9 +368,7 @@ class _TensorWithIndex:
                         else:
                             # Buffer path: out-of-tile slots -> OOB index, dropped by
                             # the buffer bounds-check.
-                            elem_idx = fx.Int32(
-                                fx.arith.select(valid, aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
-                            )
+                            elem_idx = valid.select(aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
                             if const_expr(atomic == "f32"):
                                 _buffer_atomic_f32(atomic_rsrc, elem_idx, reg_vec)
                             else:

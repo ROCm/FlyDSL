@@ -439,7 +439,7 @@ def compile_mega_moe_stage1(
             fx.barrier()
             work = Vec(work_scratch_view.load())[0]
             if tid == fx.Int32(0):
-                has_work = fx.Int32(fx.arith.select(work < total_work, fx.Int32(1), fx.Int32(0)))
+                has_work = (work < total_work).select(fx.Int32(1), fx.Int32(0))
                 if has_work != fx.Int32(0):  # noqa: SIM102 - keep the device and compile-time branches separate.
                     if const_expr(not direct_fixed_slot):
                         _wait_tile_payload(work)

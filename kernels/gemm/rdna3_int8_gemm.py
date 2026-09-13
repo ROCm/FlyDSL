@@ -315,7 +315,7 @@ def create_wmma_int8_gemm_module(
                 local = (k_first + fx.Int32(step)) % K_STEPS
             elif const_expr(persist_rot_step):
                 kk = rot + fx.Int32(step)
-                return fx.Int32(fx.arith.select(kk >= n_iter, kk - n_iter, kk))
+                return (kk >= n_iter).select(kk - n_iter, kk)
             else:
                 local = step
             return local if const_expr(k_base is None) else k_base + fx.Int32(local)
@@ -463,7 +463,7 @@ def create_wmma_int8_gemm_module(
 
         def _load_scale_a(row):
             if const_expr(partial_m):
-                row = fx.Int32(fx.arith.select(row < fx.Int32(M), row, fx.Int32(M - 1)))
+                row = (row < fx.Int32(M)).select(row, fx.Int32(M - 1))
             return sa_view[row, 0]
 
         def _atomic_add_row(accs, row, col_base, rm, si):

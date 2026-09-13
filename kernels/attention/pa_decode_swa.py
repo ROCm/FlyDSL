@@ -249,7 +249,7 @@ def _prefetch_sw_mtp_group_query(
     q_base = q_row * stride_q_seq + (kv_h * c_query_group_size + local_qhead_idx_for_q) * stride_q_head
     q_load_lane = lane16id
     if const_expr(q_lanes_per_head < MFMA_N):
-        q_load_lane = fx.Int32(fx.arith.select(lane16id < fx.Int32(q_lanes_per_head), lane16id, fx.Int32(0)))
+        q_load_lane = (lane16id < fx.Int32(q_lanes_per_head)).select(lane16id, fx.Int32(0))
     q_elem = q_base + q_load_lane * fx.Int32(Q_ELEMS_PER_LANE)
     q_chunks = [
         _copy_load(q_tiles, q_elem + fx.Int32(qwi * 4), q_copy_atom, q_register)
@@ -439,7 +439,7 @@ def _make_pa_phase_helpers(
         tok_vec = _token_vec_i32(kv_tok_base, td)
         in_range = (tok_vec < causal_bound) & (tok_vec >= seq_start)
         false_vec = fx.Vector.from_elements([false_value], dtype=fx.Float32).broadcast_to(4)
-        return fx.Vector(fx.arith.select(in_range, logit_vec, false_vec), shape=(4,), dtype=fx.Float32)
+        return in_range.select(logit_vec, false_vec)
 
     def _qk_and_intra_softmax(
         k_ops,

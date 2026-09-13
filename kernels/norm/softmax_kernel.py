@@ -84,7 +84,7 @@ def build_softmax_module(
             row_local = tid // THREADS_PER_ROW
             row = bid * ROWS_PER_BLOCK + row_local
             row_valid = row < MIn
-            row_safe = fx.Int32(fx.arith.select(row_valid, row, 0))
+            row_safe = row_valid.select(row, 0)
 
         elem_dtype = dtype_to_elem_type(dtype_str)
         fm_fast = arith.FastMathFlags.fast
@@ -127,10 +127,10 @@ def build_softmax_module(
 
             if wave == 0:
                 in_range = lane_in_wave < RED_SLOTS
-                lane_safe = fx.Int32(fx.arith.select(in_range, lane_in_wave, 0))
+                lane_safe = in_range.select(lane_in_wave, 0)
                 v = fx.memref_load(s_red_buffer, lane_safe)
                 z = neutral
-                ww = fx.Float32(fx.arith.select(in_range, v, z))
+                ww = in_range.select(v, z)
                 ww = shuffle_reduce(ww, mode, WARP_SIZE)
 
                 if lane_in_wave == 0:
@@ -254,10 +254,10 @@ def build_softmax_module(
             for base in range_constexpr(0, N, THREADS_PER_ROW):
                 idx = lane + base
                 is_valid = idx < N
-                idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
+                idx_safe = is_valid.select(idx, 0)
                 val_e = _load_scalar(a_div, idx_safe)
                 val = val_e if dtype_str == "f32" else val_e.to(fx.Float32)
-                safe_val = fx.Float32(fx.arith.select(is_valid, val, c_neg_inf))
+                safe_val = is_valid.select(val, c_neg_inf)
                 row_buffer.append((safe_val, is_valid))
                 thread_max = fx.max(thread_max, safe_val)
 
@@ -270,7 +270,7 @@ def build_softmax_module(
                 sub = safe_val - global_max
                 scaled = sub * LOG2E
                 exp_val = scaled.exp2(fastmath=fm_fast)
-                safe_exp = fx.Float32(fx.arith.select(is_valid, exp_val, c_zero_f))
+                safe_exp = is_valid.select(exp_val, c_zero_f)
                 thread_sum = thread_sum + safe_exp
                 new_buffer.append((exp_val, is_valid))
 

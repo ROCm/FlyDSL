@@ -130,9 +130,9 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = fx.Int32(fx.arith.select(in_range, lane, 0))
+                lane_safe = in_range.select(lane, 0)
                 v = fx.memref_load(s_red, lane_safe)
-                ww = fx.Float32(fx.arith.select(in_range, v, c_zero_f))
+                ww = in_range.select(v, c_zero_f)
                 ww = wave_reduce_add(ww)
 
                 if lane == 0:
@@ -249,7 +249,7 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
             for base in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base
                 is_valid = idx < N
-                idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
+                idx_safe = is_valid.select(idx, 0)
 
                 dy_e = _load_scalar(dy_div, idx_safe)
                 y_e = _load_scalar(y_div, idx_safe)
@@ -257,7 +257,7 @@ def build_softmax_bwd_module(N: int, dtype_str: str = "f32"):
                 y_f = y_e if dtype_str == "f32" else y_e.to(fx.Float32)
 
                 row_buffer.append((dy_f, y_f))
-                thread_dot = thread_dot + fx.Float32(fx.arith.select(is_valid, dy_f * y_f, c_zero_f))
+                thread_dot = thread_dot + is_valid.select(dy_f * y_f, c_zero_f)
 
             dot = block_reduce_add(thread_dot)
 

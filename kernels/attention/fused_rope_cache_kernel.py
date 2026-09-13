@@ -222,9 +222,7 @@ def build_fused_rope_cache_module(
 
                 q_cos = q_e * cos_e
                 q_pair_sin = q_pair_e * sin_e
-                q_sin_term = fx.Vector(
-                    fx.arith.select(is_first_half, -q_pair_sin, q_pair_sin), shape=(VEC_WIDTH,), dtype=elem_dtype
-                )
+                q_sin_term = is_first_half.select(-q_pair_sin, q_pair_sin)
                 q_rot_e = q_cos + q_sin_term
 
                 store_vec(q_rot_e.ir_value(), qo_div, tid)
@@ -246,9 +244,7 @@ def build_fused_rope_cache_module(
 
                 k_cos = k_e * cos_e
                 k_pair_sin = k_pair_e * sin_e
-                k_sin_term = fx.Vector(
-                    fx.arith.select(is_first_half, -k_pair_sin, k_pair_sin), shape=(VEC_WIDTH,), dtype=elem_dtype
-                )
+                k_sin_term = is_first_half.select(-k_pair_sin, k_pair_sin)
                 k_rot_e = k_cos + k_sin_term
 
                 store_vec(k_rot_e.ir_value(), ko_div, tid)

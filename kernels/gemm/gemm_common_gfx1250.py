@@ -93,12 +93,12 @@ def pipeline_fence_wait(use_cluster=False):
 
 def fmin_f32(a, b):
     """Scalar f32 min (select-based, no NaN handling)."""
-    return fx.Float32(fx.arith.select(a < b, a, b))
+    return fx.Float32((a < b).select(a, b))
 
 
 def fmax_f32(a, b):
     """Scalar f32 max (select-based, no NaN handling)."""
-    return fx.Float32(fx.arith.select(a > b, a, b))
+    return fx.Float32((a > b).select(a, b))
 
 
 def fused_silu_swiglu_elem(g, u, *, swiglu, limit_f32, neg_limit_f32):

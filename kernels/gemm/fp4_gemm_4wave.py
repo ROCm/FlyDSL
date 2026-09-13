@@ -317,10 +317,7 @@ def _s2r_thunks(s2r, src, holder, n, pre):
 
 
 def _min(a, b):
-    cond = a < b
-    if cond.is_static():
-        return fx.Int32(a if bool(cond) else b)
-    return fx.Int32(fx.arith.select(cond, a, b))
+    return (a < b).select(a, b)
 
 
 def _divmod_nonneg(a, b):
@@ -356,10 +353,7 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
     if const_expr(isinstance(use_simple, bool)):
         return (simple_m, simple_n) if use_simple else (pid_m, pid_n)
-    return (
-        fx.Int32(fx.arith.select(use_simple, simple_m, pid_m)),
-        fx.Int32(fx.arith.select(use_simple, simple_n, pid_n)),
-    )
+    return (use_simple.select(simple_m, pid_m), use_simple.select(simple_n, pid_n))
 
 
 # ── FP4 scaled MFMA ──────────────────────────────────────────────────────────
@@ -518,7 +512,7 @@ class ScaleGatherLDS:
 
         is_a = wid < fx.Int32(2)
         q = wid % fx.Int32(2)
-        base_tile = fx.Int32(fx.arith.select(is_a, a_base_tile + q * fx.Int32(64), b_base_tile + q * fx.Int32(64)))
+        base_tile = is_a.select(a_base_tile + q * fx.Int32(64), b_base_tile + q * fx.Int32(64))
         self._G = _uniform_i32(base_tile // fx.Int32(32))
         self._rsrc = fx.arith.select(is_a, self.a_rsrc, self.b_rsrc)
         # soffset=0 as a wave-uniform SGPR (readfirstlane'd once, reused every gather).

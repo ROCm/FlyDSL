@@ -204,7 +204,7 @@ _FMT_MAX_FP8_E4M3 = 448.0
 def _e8m0_roundup(amax_f32, fmt_max):
     wi = (amax_f32 * fx.Float32(1.0 / fmt_max)).bitcast(fx.Int32)
     bexp = (wi + fx.Int32(0x7FFFFF)).shrui(fx.Int32(23)) & fx.Int32(0xFF)
-    return fx.Int32(fx.arith.select(bexp < fx.Int32(254), bexp, fx.Int32(254)))
+    return (bexp < fx.Int32(254)).select(bexp, fx.Int32(254))
 
 
 def _e8m0_from_amax(amax_f32):

@@ -314,7 +314,7 @@ def compile_gemm2_a4w4_port(
     ):
         if const_expr(_persistent):
             tw = i32_max_m_blocks * fx.Int32(_num_n_blocks)
-            grid_i32 = fx.Int32(fx.arith.select(tw > fx.Int32(NUM_CU * 4), fx.Int32(NUM_CU), tw))
+            grid_i32 = (tw > fx.Int32(NUM_CU * 4)).select(fx.Int32(NUM_CU), tw)
             grid_x = fx.Index(grid_i32)
         else:
             grid_x = fx.Index(i32_max_m_blocks) * fx.Index(_num_n_blocks)
