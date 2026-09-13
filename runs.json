@@ -1,8 +1,52 @@
 {
  "schema": 1,
- "updated": "2026-09-13T01:07:57Z",
+ "updated": "2026-09-13T02:56:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34730154215,
+   "pr": 1127,
+   "commit": "6578bf85f5d0bc98cf4f3185a54af57aeb1af143",
+   "branch": "codex/vector-api-migration",
+   "event": "pull_request",
+   "title": "Migrate vector consumers and consolidate kernel helpers",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34730154215",
+   "created_at": "2026-09-13T01:17:17Z",
+   "updated_at": "2026-09-13T02:45:26Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-13T02:45:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34730154215/job/103652851627"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-13T01:31:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34730154215/job/103652851630"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-13T01:30:58Z",
+     "completed_at": "2026-09-13T01:47:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34730154215/job/103652851632",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 34708545224,
    "pr": 1066,
@@ -10,21 +54,22 @@
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34708545224",
    "created_at": "2026-09-12T17:32:46Z",
-   "updated_at": "2026-09-12T17:45:47Z",
+   "updated_at": "2026-09-13T02:53:25Z",
    "actor": "sammysun0711",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-12T17:45:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34708545224/job/103594691732"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-13T01:31:52Z",
+     "completed_at": "2026-09-13T02:53:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34708545224/job/103594691732",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -53,7 +98,7 @@
    "commit": "4ddc3d8d0dc790c817a3c93e12bf4ed4dcd5d3f7",
    "branch": "codex/vector-api-migration",
    "event": "pull_request",
-   "title": "Migrate vector consumers and share single-GPU kernel helpers",
+   "title": "Migrate vector consumers and consolidate kernel helpers",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34706688929",
@@ -294,7 +339,7 @@
    "commit": "5493e0b0788272a02a4f22b63c32adc6a6450824",
    "branch": "codex/vector-api-migration",
    "event": "pull_request",
-   "title": "Migrate vector consumers and share single-GPU kernel helpers",
+   "title": "Migrate vector consumers and consolidate kernel helpers",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34691576163",
@@ -398,7 +443,7 @@
    "commit": "302a02c0bfb460dd44fb5d87b3ea15419126e651",
    "branch": "codex/vector-api-migration",
    "event": "pull_request",
-   "title": "Migrate vector consumers and share single-GPU kernel helpers",
+   "title": "Migrate vector consumers and consolidate kernel helpers",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34688329344",
@@ -2081,49 +2126,6 @@
    "updated_at": "2026-09-10T08:06:50Z",
    "actor": "solinzby1",
    "jobs": []
-  },
-  {
-   "run_id": 34451734527,
-   "pr": 1106,
-   "commit": "157409858881b9cd4d24b5b4d43d74c77c64c77d",
-   "branch": "add-flydsl-code-review-skill",
-   "event": "pull_request",
-   "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34451734527",
-   "created_at": "2026-09-10T07:47:24Z",
-   "updated_at": "2026-09-10T08:49:10Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-10T08:10:08Z",
-     "completed_at": "2026-09-10T08:48:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34451734527/job/102795075498"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-10T08:10:59Z",
-     "completed_at": "2026-09-10T08:49:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34451734527/job/102795075536"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-10T08:39:52Z",
-     "completed_at": "2026-09-10T08:48:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34451734527/job/102795075600"
-    }
-   ]
   }
  ]
 }
