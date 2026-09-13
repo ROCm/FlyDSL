@@ -10,7 +10,7 @@ from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
-from kernels.common.act import LOG2E
+from kernels.common.kernels_common import LOG2E
 
 
 def reps(tensor, mode):
@@ -368,7 +368,9 @@ class _TensorWithIndex:
                         else:
                             # Buffer path: out-of-tile slots -> OOB index, dropped by
                             # the buffer bounds-check.
-                            elem_idx = valid.select(aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
+                            elem_idx = fx.Int32(
+                                fx.arith.select(valid, aligned, fx.Int32(row_limit) * fx.Int32(row_stride))
+                            )
                             if const_expr(atomic == "f32"):
                                 _buffer_atomic_f32(atomic_rsrc, elem_idx, reg_vec)
                             else:

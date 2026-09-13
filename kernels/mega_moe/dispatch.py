@@ -88,15 +88,15 @@ def _configure_payload_geometry(
         for local_expert in range(lane, fz_epr, 64):
             ge = fx.Int32(destination * fz_epr) + local_expert
             source_count = buffer_ops.buffer_load(local_hist, ge, vec_width=1, dtype=fx.Int32)
-            max_source_count = (source_count > max_source_count).select(source_count, max_source_count)
+            max_source_count = fx.Int32(fx.arith.select(source_count > max_source_count, source_count, max_source_count))
         max_source_count = fx.coop.warp_reduce(max_source_count, fx.ReductionOp.MAX, width=64)
         if lane == fx.Int32(0):
             chunks = (max_source_count + fx.Int32(payload_chunk_rows - 1)) // fx.Int32(payload_chunk_rows)
-            chunks = (chunks > fx.Int32(0)).select(chunks, fx.Int32(1))
-            chunks = (chunks > fx.Int32(4)).select(chunks, fx.Int32(4))
+            chunks = fx.Int32(fx.arith.select(chunks > fx.Int32(0), chunks, fx.Int32(1)))
+            chunks = fx.Int32(fx.arith.select(chunks > fx.Int32(4), chunks, fx.Int32(4)))
             buffer_ops.buffer_store(chunks, chunk_counts, fx.Int32(destination))
-            active_blocks = (chunks > fx.Int32(4)).select(chunks, fx.Int32(4))
-            active_blocks = (active_blocks < max_blocks).select(active_blocks, max_blocks)
+            active_blocks = fx.Int32(fx.arith.select(chunks > fx.Int32(4), chunks, fx.Int32(4)))
+            active_blocks = fx.Int32(fx.arith.select(active_blocks < max_blocks, active_blocks, max_blocks))
             buffer_ops.buffer_store(active_blocks, block_counts, fx.Int32(destination))
             active_payload_blocks = active_payload_blocks + active_blocks
     if lane == fx.Int32(0):
@@ -197,7 +197,7 @@ def emit_direct_fixed_slot_payload(
             global_expert_lane = buffer_ops.buffer_load(r_idx, wk, vec_width=1, dtype=fx.Int32)
         global_expert = fx.Int32(fx.rocdl.readfirstlane(T.i32, global_expert_lane))
         valid_expert = (global_expert >= fx.Int32(0)) & (global_expert < fx.Int32(fz_total_experts))
-        safe_expert = valid_expert.select(global_expert, fx.Int32(0))
+        safe_expert = fx.Int32(fx.arith.select(valid_expert, global_expert, fx.Int32(0)))
         destination = safe_expert // fx.Int32(fz_epr)
         local_expert = safe_expert - destination * fx.Int32(fz_epr)
         offset_lane = fx.Int32(0)
@@ -295,15 +295,15 @@ def emit_direct_fixed_slot_finalize(
         comm_ops.fence_system_acquire()
 
         valid_expert = lane < fx.Int32(fz_epr)
-        safe_expert = valid_expert.select(lane, fx.Int32(0))
+        safe_expert = fx.Int32(fx.arith.select(valid_expert, lane, fx.Int32(0)))
         count = buffer_ops.buffer_load(crfa(a_running), safe_expert, vec_width=1, dtype=fx.Int32)
-        count = valid_expert.select(count, fx.Int32(0))
-        overflow_flag = (count > fx.Int32(fz_cap)).select(fx.Int32(1), fx.Int32(0))
+        count = fx.Int32(fx.arith.select(valid_expert, count, fx.Int32(0)))
+        overflow_flag = fx.Int32(fx.arith.select(count > fx.Int32(fz_cap), fx.Int32(1), fx.Int32(0)))
         _, _, overflow_count = fx.coop.warp_scan_with_aggregate(
             overflow_flag, fx.ReductionOp.ADD, width=64
         )
         no_overflow = overflow_count == fx.Int32(0)
-        safe_count = (count <= fx.Int32(fz_cap)).select(count, fx.Int32(0))
+        safe_count = fx.Int32(fx.arith.select(count <= fx.Int32(fz_cap), count, fx.Int32(0)))
         num_expert_tiles = (safe_count + fx.Int32(fz_tile_m - 1)) // fx.Int32(fz_tile_m)
         max_expert_tiles = fx.coop.warp_reduce(num_expert_tiles, fx.ReductionOp.MAX, width=64)
         inclusive_tiles, _, total_tiles = fx.coop.warp_scan_with_aggregate(
@@ -328,8 +328,8 @@ def emit_direct_fixed_slot_finalize(
             buffer_ops.buffer_store(fx.Int32(0), crfa(a_running), safe_expert)
 
         if lane == fx.Int32(0):
-            num_valid = no_overflow.select(total_tiles * fx.Int32(fz_tile_m), fx.Int32(0))
-            ready_work = no_overflow.select(total_tiles * fx.Int32(n_tiles), fx.Int32(0))
+            num_valid = fx.Int32(fx.arith.select(no_overflow, total_tiles * fx.Int32(fz_tile_m), fx.Int32(0)))
+            ready_work = fx.Int32(fx.arith.select(no_overflow, total_tiles * fx.Int32(n_tiles), fx.Int32(0)))
             buffer_ops.buffer_store(num_valid, crfa(a_nv), fx.Int32(0))
             # num_valid[1] is a device-visible overflow status.
             buffer_ops.buffer_store(overflow_count, crfa(a_nv), fx.Int32(1))
@@ -411,7 +411,7 @@ def emit_dispatch_plan(
             for wk0 in range(gtid, wl, gnt * fx.Int32(2)):
                 wk1 = wk0 + gnt
                 valid_wk1 = wk1 < wl
-                safe_wk1 = valid_wk1.select(wk1, fx.Int32(0))
+                safe_wk1 = fx.Int32(fx.arith.select(valid_wk1, wk1, fx.Int32(0)))
                 expert0 = buffer_ops.buffer_load(r_idx, wk0, vec_width=1, dtype=fx.Int32)
                 expert1 = buffer_ops.buffer_load(r_idx, safe_wk1, vec_width=1, dtype=fx.Int32)
                 valid0 = (expert0 >= fx.Int32(0)) & (expert0 < fx.Int32(fz_total_experts))
@@ -469,7 +469,7 @@ def emit_dispatch_plan(
         for expert_chunk in range_constexpr((fz_epr + 63) // 64):
             local_expert = fx.Int32(expert_chunk * 64) + lane
             valid_expert = local_expert < fx.Int32(fz_epr)
-            safe_expert = valid_expert.select(local_expert, fx.Int32(0))
+            safe_expert = fx.Int32(fx.arith.select(valid_expert, local_expert, fx.Int32(0)))
             ge = fx.Int32(fz_rank * fz_epr + local_expert)
             source_counts = []
             total_count = fx.Int32(0)
@@ -477,14 +477,12 @@ def emit_dispatch_plan(
                 source_count = buffer_ops.buffer_load(
                     r_bc, fx.Int32(source * fz_epr) + safe_expert, vec_width=1, dtype=fx.Int32
                 )
-                source_count = valid_expert.select(source_count, fx.Int32(0))
+                source_count = fx.Int32(fx.arith.select(valid_expert, source_count, fx.Int32(0)))
                 source_counts.append(source_count)
                 total_count = total_count + source_count
             num_tiles = (total_count + fx.Int32(fz_tile_m - 1)) // fx.Int32(fz_tile_m)
             chunk_max = fx.coop.warp_reduce(num_tiles, fx.ReductionOp.MAX, width=64)
-            max_expert_tiles = (chunk_max > max_expert_tiles).select(
-                chunk_max, max_expert_tiles
-            )
+            max_expert_tiles = fx.Int32(fx.arith.select(chunk_max > max_expert_tiles, chunk_max, max_expert_tiles))
             padded_rows = num_tiles * fx.Int32(fz_tile_m)
             inclusive_rows, _, chunk_rows = fx.coop.warp_scan_with_aggregate(
                 padded_rows, fx.ReductionOp.ADD, width=64
@@ -554,9 +552,9 @@ def emit_dispatch_plan(
         for item in range_constexpr(pairs_per_lane):
             ge = lane_base + fx.Int32(item)
             valid_ge = ge < fx.Int32(fz_total_experts)
-            safe_ge = valid_ge.select(ge, fx.Int32(0))
+            safe_ge = fx.Int32(fx.arith.select(valid_ge, ge, fx.Int32(0)))
             source_count = buffer_ops.buffer_load(r_lh, safe_ge, vec_width=1, dtype=fx.Int32)
-            source_count = valid_ge.select(source_count, fx.Int32(0))
+            source_count = fx.Int32(fx.arith.select(valid_ge, source_count, fx.Int32(0)))
             lane_counts.append(source_count)
             lane_total = lane_total + source_count
         lane_prefix = fx.coop.warp_exclusive_scan(lane_total, fx.ReductionOp.ADD, width=64)
@@ -792,13 +790,13 @@ def emit_dispatch_payload(
             num_chunks = (source_count + fx.Int32(payload_chunk_rows - 1)) // fx.Int32(
                 payload_chunk_rows
             )
-            num_chunks = (num_chunks > fx.Int32(0)).select(num_chunks, fx.Int32(1))
+            num_chunks = fx.Int32(fx.arith.select(num_chunks > fx.Int32(0), num_chunks, fx.Int32(1)))
             chunk_active = chunk_id < num_chunks
             chunk_begin = chunk_id * fx.Int32(payload_chunk_rows)
             chunk_limit = chunk_begin + fx.Int32(payload_chunk_rows)
-            chunk_end = (source_count < chunk_limit).select(source_count, chunk_limit)
-            row_begin = chunk_active.select(chunk_begin, fx.Int32(0))
-            row_end = chunk_active.select(chunk_end, fx.Int32(0))
+            chunk_end = fx.Int32(fx.arith.select(source_count < chunk_limit, source_count, chunk_limit))
+            row_begin = fx.Int32(fx.arith.select(chunk_active, chunk_begin, fx.Int32(0)))
+            row_end = fx.Int32(fx.arith.select(chunk_active, chunk_end, fx.Int32(0)))
         else:
             num_chunks = fx.Int32(1)
             chunk_active = fx.Int32(0) == fx.Int32(0)

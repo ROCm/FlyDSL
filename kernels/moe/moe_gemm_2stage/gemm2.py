@@ -297,8 +297,8 @@ def _build_moe_gemm2_fp8(
             tok = packed & 0xFFFFFF
             slot = packed >> 24
             valid = tok < fx.Int32(tokens)
-            row = valid.select(tok * fx.Int32(TOPK) + slot, fx.Int32(0))
-            sc = valid.select(a_scale_tensor[row], fx.Float32(0.0))
+            row = fx.Int32(fx.arith.select(valid, tok * fx.Int32(TOPK) + slot, fx.Int32(0)))
+            sc = fx.Float32(fx.arith.select(valid, a_scale_tensor[row], fx.Float32(0.0)))
             a_sc_n.append(sc)
 
         for m in range_constexpr(m_reps):

@@ -15,7 +15,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from kernels.common import buffer_ops
-from kernels.common.act import LOG2E as _LOG2E
+from kernels.common.kernels_common import LOG2E as _LOG2E
 from kernels.common.kernels_common import dtype_to_elem_type
 
 # gfx950 (MI350/MI355X): 8 XCDs, each with a private ~4 MB L2.
@@ -185,12 +185,16 @@ def _fused_o_128_dwords(lane_div_32, d0_a, d1_a, d0_b, d1_b):
     y1_a_lo, y1_a_hi = _swap_halves(d1_a)
     y0_b_lo, y0_b_hi = _swap_halves(d0_b)
     y1_b_lo, y1_b_hi = _swap_halves(d1_b)
-    y0_a, y1_a = is_hi_half.select(y0_a_lo, y0_a_hi), is_hi_half.select(y1_a_lo, y1_a_hi)
-    y0_b, y1_b = is_hi_half.select(y0_b_lo, y0_b_hi), is_hi_half.select(y1_b_lo, y1_b_hi)
-    w0 = is_hi_half.select(y0_b, as_mlir_value(d0_a))
-    w1 = is_hi_half.select(y1_b, as_mlir_value(d1_a))
-    w2 = is_hi_half.select(as_mlir_value(d0_b), y0_a)
-    w3 = is_hi_half.select(as_mlir_value(d1_b), y1_a)
+    y0_a, y1_a = fx.Int32(fx.arith.select(is_hi_half, y0_a_lo, y0_a_hi)), fx.Int32(
+        fx.arith.select(is_hi_half, y1_a_lo, y1_a_hi)
+    )
+    y0_b, y1_b = fx.Int32(fx.arith.select(is_hi_half, y0_b_lo, y0_b_hi)), fx.Int32(
+        fx.arith.select(is_hi_half, y1_b_lo, y1_b_hi)
+    )
+    w0 = fx.Int32(fx.arith.select(is_hi_half, y0_b, as_mlir_value(d0_a)))
+    w1 = fx.Int32(fx.arith.select(is_hi_half, y1_b, as_mlir_value(d1_a)))
+    w2 = fx.Int32(fx.arith.select(is_hi_half, as_mlir_value(d0_b), y0_a))
+    w3 = fx.Int32(fx.arith.select(is_hi_half, as_mlir_value(d1_b), y1_a))
     return w0, w1, w2, w3
 
 
@@ -449,7 +453,7 @@ def _pack_p_v8_slices(traits, v_p, pack_v8_fn):
 
 def _safe_l_inv(l_row, zero_f):
     l_inv = rocdl.rcp(T.f32, as_mlir_value(l_row))
-    return (fx.Float32(l_row) > zero_f).select(l_inv, zero_f)
+    return fx.Float32(fx.arith.select(fx.Float32(l_row) > zero_f, l_inv, zero_f))
 
 
 def _rescale_from_tile_max(m_row, m_tile_max, fm_fast):
@@ -2207,10 +2211,10 @@ class GenericFlashAttnContext:
             self.delta_i32 = fx.Int32(self.seqlen_kv_b) - fx.Int32(self.seqlen_q_b)
             self.causal_end_raw_i32 = fx.Int32(q_end) + self.delta_i32
             causal_end_i32 = fx.Int32(
-                (self.causal_end_raw_i32 > fx.Int32(0)).select(self.causal_end_raw_i32, fx.Int32(0))
+                fx.arith.select(self.causal_end_raw_i32 > fx.Int32(0), self.causal_end_raw_i32, fx.Int32(0))
             )
             causal_end = fx.Index(causal_end_i32)
-            self.kv_upper = fx.Index((causal_end < self.seqlen_kv_b).select(causal_end, self.seqlen_kv_b))
+            self.kv_upper = fx.Index(fx.arith.select(causal_end < self.seqlen_kv_b, causal_end, self.seqlen_kv_b))
         else:
             self.kv_upper = self.seqlen_kv_b
 
@@ -2224,7 +2228,7 @@ class GenericFlashAttnContext:
 
     def kv_row_clamp(self, row_idx):
         last = self.seqlen_kv_b - fx.Index(1)
-        return fx.Index((row_idx < self.seqlen_kv_b).select(row_idx, last))
+        return fx.Index(fx.arith.select(row_idx < self.seqlen_kv_b, row_idx, last))
 
     def load_global_half_vec(self, ptr, base_idx, vec_elems: int):
         gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=self.elem_type)
@@ -2939,12 +2943,18 @@ class GenericSoftmaxHelper:
             masked_hi = list(s_raw_hi)
             if tile_needs_mask:
                 masked_lo = [
-                    (col_base_i32 + fx.Int32(moff[r]) > q_mask_limit_i32).select(c_neg_inf, s_raw_lo[r])
+                    fx.Float32(
+                        fx.arith.select(col_base_i32 + fx.Int32(moff[r]) > q_mask_limit_i32, c_neg_inf, s_raw_lo[r])
+                    )
                     for r in range(16)
                 ]
                 masked_hi = [
-                    (col_base_i32 + fx.Int32(moff[r]) + fx.Int32(traits.K_SUB_N) > q_mask_limit_i32).select(
-                        c_neg_inf, s_raw_hi[r]
+                    fx.Float32(
+                        fx.arith.select(
+                            col_base_i32 + fx.Int32(moff[r]) + fx.Int32(traits.K_SUB_N) > q_mask_limit_i32,
+                            c_neg_inf,
+                            s_raw_hi[r],
+                        )
                     )
                     for r in range(16)
                 ]
@@ -2958,10 +2968,12 @@ class GenericSoftmaxHelper:
             needs_pad_mask = fx.Int32(kv_tile_end) > seq_len_i32
             for r in range_constexpr(16):
                 kv_col = col_base_i32 + fx.Int32(moff[r])
-                masked_lo = (kv_col >= seq_len_i32).select(ctx.c_neg_inf, s_raw_lo[r])
-                masked_hi = (kv_col + fx.Int32(traits.K_SUB_N) >= seq_len_i32).select(ctx.c_neg_inf, s_raw_hi[r])
-                s_raw_lo[r] = (needs_pad_mask).select(masked_lo, s_raw_lo[r])
-                s_raw_hi[r] = (needs_pad_mask).select(masked_hi, s_raw_hi[r])
+                masked_lo = fx.Float32(fx.arith.select(kv_col >= seq_len_i32, ctx.c_neg_inf, s_raw_lo[r]))
+                masked_hi = fx.Float32(
+                    fx.arith.select(kv_col + fx.Int32(traits.K_SUB_N) >= seq_len_i32, ctx.c_neg_inf, s_raw_hi[r])
+                )
+                s_raw_lo[r] = fx.Float32(fx.arith.select(needs_pad_mask, masked_lo, s_raw_lo[r]))
+                s_raw_hi[r] = fx.Float32(fx.arith.select(needs_pad_mask, masked_hi, s_raw_hi[r]))
         return s_raw_lo, s_raw_hi
 
     def _exp2(self, x):
@@ -3154,8 +3166,8 @@ class GenericStoreHelper:
         lse_local = ctx.q_head_idx * ctx.seq_len_v + q_row
         # One writer per row: low half-wave + in-bounds q_row; else redirect to the
         # dropped OOB sentinel.
-        off_row = (q_row < ctx.seqlen_q_b).select(lse_local, ctx.lse_oob_off)
-        off = fx.Index((ctx.lane_div_32 == fx.Index(0)).select(off_row, ctx.lse_oob_off))
+        off_row = fx.Index(fx.arith.select(q_row < ctx.seqlen_q_b, lse_local, ctx.lse_oob_off))
+        off = fx.Index(fx.arith.select(ctx.lane_div_32 == fx.Index(0), off_row, ctx.lse_oob_off))
         buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), ctx.lse_rsrc, as_mlir_value(fx.Int32(off)))
 
     def finalize_o(self, loop_results):
@@ -3190,7 +3202,7 @@ class GenericStoreHelper:
 
         inv_l_rcp = rocdl.rcp(T.f32, l_final)
         if const_expr(traits.CAUSAL):
-            inv_l = (fx.Float32(l_final) > ctx.c_zero_f).select(inv_l_rcp, ctx.c_zero_f)
+            inv_l = fx.Float32(fx.arith.select(fx.Float32(l_final) > ctx.c_zero_f, inv_l_rcp, ctx.c_zero_f))
         else:
             inv_l = inv_l_rcp
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
@@ -3221,7 +3233,7 @@ class GenericStoreHelper:
             swapped = rocdl.permlane32_swap(pair_i32_ty, as_mlir_value(dw), as_mlir_value(dw), False, False)
             lo_res = llvm.extractvalue(T.i32, swapped, [0])
             hi_res = llvm.extractvalue(T.i32, swapped, [1])
-            return is_hi_half.select(lo_res, hi_res)
+            return fx.Int32(fx.arith.select(is_hi_half, lo_res, hi_res))
 
         for dc in range_constexpr(traits.D_CHUNKS):
             for g in range_constexpr(2):
@@ -3229,10 +3241,10 @@ class GenericStoreHelper:
                 d0_b, d1_b = _o_pack_2dw(dc, 2 * g + 1)
                 y0_a, y1_a = _swap_halves(d0_a), _swap_halves(d1_a)
                 y0_b, y1_b = _swap_halves(d0_b), _swap_halves(d1_b)
-                w0 = is_hi_half.select(y0_b, as_mlir_value(d0_a))
-                w1 = is_hi_half.select(y1_b, as_mlir_value(d1_a))
-                w2 = is_hi_half.select(as_mlir_value(d0_b), y0_a)
-                w3 = is_hi_half.select(as_mlir_value(d1_b), y1_a)
+                w0 = fx.Int32(fx.arith.select(is_hi_half, y0_b, as_mlir_value(d0_a)))
+                w1 = fx.Int32(fx.arith.select(is_hi_half, y1_b, as_mlir_value(d1_a)))
+                w2 = fx.Int32(fx.arith.select(is_hi_half, as_mlir_value(d0_b), y0_a))
+                w3 = fx.Int32(fx.arith.select(is_hi_half, as_mlir_value(d1_b), y1_a))
                 o_pack = Vec.from_elements([fx.Int32(w0), fx.Int32(w1), fx.Int32(w2), fx.Int32(w3)], fx.Int32)
                 d_col = fx.Index(dc * traits.D_CHUNK) + (fx.Index(2 * g) + ctx.lane_div_32) * fx.Index(8)
                 o_global = ctx.global_idx_q(q_row, d_col)
@@ -3548,29 +3560,33 @@ class DualwaveKernelContext:
         if const_expr(traits.CAUSAL):
             self.causal_end_raw_i32 = fx.Int32(self.q_start + traits.BLOCK_M) + self.delta_i32
             causal_end_i32 = fx.Int32(
-                (self.causal_end_raw_i32 > fx.Int32(0)).select(self.causal_end_raw_i32, fx.Int32(0))
+                fx.arith.select(self.causal_end_raw_i32 > fx.Int32(0), self.causal_end_raw_i32, fx.Int32(0))
             )
             causal_num_tiles = (fx.Index(causal_end_i32) + self.kv_tile_size - 1) // self.kv_tile_size
             self.max_num_tiles = fx.Index(
-                (causal_num_tiles < self.num_kv_tiles).select(causal_num_tiles, self.num_kv_tiles)
+                fx.arith.select(causal_num_tiles < self.num_kv_tiles, causal_num_tiles, self.num_kv_tiles)
             )
         else:
             self.causal_end_raw_i32 = None
             self.max_num_tiles = self.num_kv_tiles
 
         self.max_num_tiles = ((self.max_num_tiles + fx.Index(1)) // fx.Index(2)) * fx.Index(2)
-        self.max_num_tiles = fx.Index((self.max_num_tiles < fx.Index(4)).select(fx.Index(4), self.max_num_tiles))
+        self.max_num_tiles = fx.Index(
+            fx.arith.select(self.max_num_tiles < fx.Index(4), fx.Index(4), self.max_num_tiles)
+        )
 
         if const_expr(traits.SPLITK):
             chunk = ((self.max_num_tiles + (traits.NUM_KV_SPLITS - 1)) // traits.NUM_KV_SPLITS + 1) // 2 * 2
-            chunk = fx.Index((chunk < fx.Index(6)).select(fx.Index(6), chunk))
+            chunk = fx.Index(fx.arith.select(chunk < fx.Index(6), fx.Index(6), chunk))
             self.split_t0 = self.split_idx * chunk
             self.split_t_end = self.split_t0 + chunk
             self.split_t_end = fx.Index(
-                (self.split_t_end < self.max_num_tiles).select(self.split_t_end, self.max_num_tiles)
+                fx.arith.select(self.split_t_end < self.max_num_tiles, self.split_t_end, self.max_num_tiles)
             )
             self.split_t_end = fx.Index(
-                (self.max_num_tiles - self.split_t_end < fx.Index(4)).select(self.max_num_tiles, self.split_t_end)
+                fx.arith.select(
+                    self.max_num_tiles - self.split_t_end < fx.Index(4), self.max_num_tiles, self.split_t_end
+                )
             )
             self.split_nonempty = self.split_t0 + fx.Index(4) <= self.max_num_tiles
         else:
@@ -3943,8 +3959,8 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         for r in range_constexpr(16):
             col_lo = col_base + fx.Int32(_seq_pad_score_threshold(self.traits, r))
             col_hi = col_lo + fx.Int32(32)
-            s_lo[r] = (col_lo < self.seqlen_kv_i32).select(s_lo[r], self.c_neg_inf)
-            s_hi[r] = (col_hi < self.seqlen_kv_i32).select(s_hi[r], self.c_neg_inf)
+            s_lo[r] = fx.Float32(fx.arith.select(col_lo < self.seqlen_kv_i32, s_lo[r], self.c_neg_inf))
+            s_hi[r] = fx.Float32(fx.arith.select(col_hi < self.seqlen_kv_i32, s_hi[r], self.c_neg_inf))
 
     def seq_pad_mask_if_needed(self, v_s, tile_idx):
         traits = self.traits
@@ -4314,8 +4330,8 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         lse_val = m_row * self.c_ln2_f + fx.log(l_row, fastmath=self.fm_fast)
         lse_local = self.q_head_idx * self.seq_len_v + q_row
         # One writer per row: low half-wave + in-bounds q_row; else the dropped OOB sentinel.
-        lse_off_row = (q_row < self.seqlen_q_v).select(lse_local, lse_per_batch_elems)
-        lse_off = fx.Index((self.lane < fx.Index(32)).select(lse_off_row, lse_per_batch_elems))
+        lse_off_row = fx.Index(fx.arith.select(q_row < self.seqlen_q_v, lse_local, lse_per_batch_elems))
+        lse_off = fx.Index(fx.arith.select(self.lane < fx.Index(32), lse_off_row, lse_per_batch_elems))
         _ws_store_f32(lse_val, lse_off, lse_rsrc)
 
     def store_final_o(self, v_o, q_row, m_row=None, l_row=None):
@@ -4545,23 +4561,27 @@ class DualwaveFp8KernelContext:
         num_kv_tiles = (self.seqlen_kv_v + kv_tile_size - 1) // kv_tile_size
         if const_expr(traits.CAUSAL):
             causal_end_raw_i32 = fx.Int32(self.q_start + traits.BLOCK_M) + self.delta_i32
-            causal_end_i32 = fx.Int32((causal_end_raw_i32 > fx.Int32(0)).select(causal_end_raw_i32, fx.Int32(0)))
+            causal_end_i32 = fx.Int32(
+                fx.arith.select(causal_end_raw_i32 > fx.Int32(0), causal_end_raw_i32, fx.Int32(0))
+            )
             causal_num_tiles = (fx.Index(causal_end_i32) + kv_tile_size - 1) // kv_tile_size
-            max_num_tiles = fx.Index((causal_num_tiles < num_kv_tiles).select(causal_num_tiles, num_kv_tiles))
+            max_num_tiles = fx.Index(fx.arith.select(causal_num_tiles < num_kv_tiles, causal_num_tiles, num_kv_tiles))
         else:
             causal_end_raw_i32 = None
             max_num_tiles = num_kv_tiles
         # Pipeline needs an EVEN tile count >= 4; extra tiles read 0 (num_records) and are masked.
         max_num_tiles = ((max_num_tiles + fx.Index(1)) // fx.Index(2)) * fx.Index(2)
-        max_num_tiles = fx.Index((max_num_tiles < fx.Index(4)).select(fx.Index(4), max_num_tiles))
+        max_num_tiles = fx.Index(fx.arith.select(max_num_tiles < fx.Index(4), fx.Index(4), max_num_tiles))
         self.max_num_tiles = max_num_tiles
         if const_expr(traits.SPLITK):
             chunk = ((max_num_tiles + (traits.NUM_KV_SPLITS - 1)) // traits.NUM_KV_SPLITS + 1) // 2 * 2
-            chunk = fx.Index((chunk < fx.Index(6)).select(fx.Index(6), chunk))
+            chunk = fx.Index(fx.arith.select(chunk < fx.Index(6), fx.Index(6), chunk))
             split_t0 = self.split_idx * chunk
             split_t_end = split_t0 + chunk
-            split_t_end = fx.Index((split_t_end < max_num_tiles).select(split_t_end, max_num_tiles))
-            split_t_end = fx.Index((max_num_tiles - split_t_end < fx.Index(4)).select(max_num_tiles, split_t_end))
+            split_t_end = fx.Index(fx.arith.select(split_t_end < max_num_tiles, split_t_end, max_num_tiles))
+            split_t_end = fx.Index(
+                fx.arith.select(max_num_tiles - split_t_end < fx.Index(4), max_num_tiles, split_t_end)
+            )
             self.split_nonempty = split_t0 + fx.Index(4) <= max_num_tiles
         else:
             split_t0 = 0
@@ -4575,7 +4595,7 @@ class DualwaveFp8KernelContext:
             if const_expr(traits.CAUSAL and traits.CROSS_SEQLEN):
                 in_mask = causal_end_raw_i32 > fx.Int32(0)
                 active = in_mask if active is None else (active & in_mask)
-            split_t_end = fx.Index(active.select(split_t_end, split_t0))
+            split_t_end = fx.Index(fx.arith.select(active, split_t_end, split_t0))
 
         self.split_t0 = split_t0
         self.split_t_end = split_t_end
@@ -4859,7 +4879,11 @@ class DualwaveFp8KvGmemToLdsLoader(DualwaveFp8KernelContext):
             w16 = dest_n % fx.Int32(16)
             c_add = (w16 >= fx.Int32(4)) & (w16 < fx.Int32(8))
             c_sub = (w16 >= fx.Int32(8)) & (w16 < fx.Int32(12))
-            n = dest_n + c_add.select(fx.Int32(4), fx.Int32(0)) - c_sub.select(fx.Int32(4), fx.Int32(0))
+            n = (
+                dest_n
+                + fx.Int32(fx.arith.select(c_add, fx.Int32(4), fx.Int32(0)))
+                - fx.Int32(fx.arith.select(c_sub, fx.Int32(4), fx.Int32(0)))
+            )
             d_block = rem // fx.Index(8)
             src_elem = self.v_gmem_elem_offset + fx.Index(n) * self.stride_v_n_v + d_block * fx.Index(16)
             if const_expr(num_dma % traits.NUM_WAVES == 0 or pas < passes - 1):
@@ -5018,8 +5042,8 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             thr = (r // 4) * 8 + (r % 4)
             col_lo = col_base + fx.Int32(thr)
             col_hi = col_lo + fx.Int32(32)
-            s_lo[r] = (col_lo < self.seqlen_kv_i32).select(s_lo[r], self.c_neg_inf)
-            s_hi[r] = (col_hi < self.seqlen_kv_i32).select(s_hi[r], self.c_neg_inf)
+            s_lo[r] = fx.Float32(fx.arith.select(col_lo < self.seqlen_kv_i32, s_lo[r], self.c_neg_inf))
+            s_hi[r] = fx.Float32(fx.arith.select(col_hi < self.seqlen_kv_i32, s_hi[r], self.c_neg_inf))
 
     def seq_pad_mask_if_needed(self, v_s, tile_idx=None):
         if tile_idx is None:
@@ -5202,7 +5226,7 @@ class DualwaveFp8StoreHelper(DualwaveFp8KernelContext):
         swapped = rocdl.permlane32_swap(pair_i32_ty, as_mlir_value(dw), as_mlir_value(dw), False, False)
         lo_res = llvm.extractvalue(T.i32, swapped, [0])
         hi_res = llvm.extractvalue(T.i32, swapped, [1])
-        return (self.lane_div_32 != fx.Index(0)).select(lo_res, hi_res)
+        return fx.Int32(fx.arith.select(self.lane_div_32 != fx.Index(0), lo_res, hi_res))
 
     def _packed_o_128_dwords(self, v_o, dc, g):
         is_hi_half = self.lane_div_32 != fx.Index(0)
@@ -5210,10 +5234,10 @@ class DualwaveFp8StoreHelper(DualwaveFp8KernelContext):
         d0_b, d1_b = self._o_pack_2dw(v_o, dc, 2 * g + 1)
         y0_a, y1_a = self._swap_half_partner(d0_a), self._swap_half_partner(d1_a)
         y0_b, y1_b = self._swap_half_partner(d0_b), self._swap_half_partner(d1_b)
-        w0 = is_hi_half.select(y0_b, as_mlir_value(d0_a))
-        w1 = is_hi_half.select(y1_b, as_mlir_value(d1_a))
-        w2 = is_hi_half.select(as_mlir_value(d0_b), y0_a)
-        w3 = is_hi_half.select(as_mlir_value(d1_b), y1_a)
+        w0 = fx.Int32(fx.arith.select(is_hi_half, y0_b, as_mlir_value(d0_a)))
+        w1 = fx.Int32(fx.arith.select(is_hi_half, y1_b, as_mlir_value(d1_a)))
+        w2 = fx.Int32(fx.arith.select(is_hi_half, as_mlir_value(d0_b), y0_a))
+        w3 = fx.Int32(fx.arith.select(is_hi_half, as_mlir_value(d1_b), y1_a))
         return w0, w1, w2, w3
 
     def _packed_o_128_vec(self, v_o, dc, g):
@@ -5331,7 +5355,7 @@ class DualwaveSplitKCombineContext:
         rows_per_batch = self.seq_len_v * traits.NUM_HEADS_Q
         row_raw = self.blk * combine_rows_per_block + self.tid // combine_lanes_per_row
         threads_in_use = fx.Index(combine_rows_per_block * combine_lanes_per_row)
-        self.row = (self.tid < threads_in_use).select(row_raw, rows_per_batch)
+        self.row = fx.Index(fx.arith.select(self.tid < threads_in_use, row_raw, rows_per_batch))
         self.row_valid = self.row < rows_per_batch
         self.q_head_idx = self.row // self.seq_len_v
         self.seq_idx = self.row % self.seq_len_v
@@ -5476,7 +5500,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
 
     def pack_output(self, acc, den):
         inv_rcp = rocdl.rcp(T.f32, den)
-        inv = (fx.Float32(den) > self.c_zero_f).select(inv_rcp, self.c_zero_f)
+        inv = fx.Float32(fx.arith.select(fx.Float32(den) > self.c_zero_f, inv_rcp, self.c_zero_f))
         inv4 = Vec.from_elements([fx.Float32(inv)], fx.Float32).broadcast_to(4)
         out4 = Vec(acc * inv4, (4,), fx.Float32)
         if const_expr(self.out_dtype_str == "bf16"):
@@ -5498,14 +5522,14 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         lse_per_batch_bytes = lse_per_batch_elems * fx.Index(4)
         lse_rsrc = _make_ws_rsrc(lse_base_i64, self.batch_idx * lse_per_batch_bytes, lse_per_batch_bytes)
         lse_val = m_max * self.c_ln2_f + fx.log(den, fastmath=self.fm_fast)
-        lse_in_range = self.row_valid.select(self.local_ml_idx, lse_per_batch_elems)
-        lse_off = fx.Index((self.col == fx.Index(0)).select(lse_in_range, lse_per_batch_elems))
+        lse_in_range = fx.Index(fx.arith.select(self.row_valid, self.local_ml_idx, lse_per_batch_elems))
+        lse_off = fx.Index(fx.arith.select(self.col == fx.Index(0), lse_in_range, lse_per_batch_elems))
         buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), lse_rsrc, as_mlir_value(fx.Int32(lse_off)))
 
     def store_output(self, o_pack):
         o_global = self.seq_idx * self.stride_o_n_v + self.q_head_idx * self.traits.HEAD_DIM_V + self.col
         # Out-of-range rows aim past num_records, which the buffer drops.
-        o_off = self.row_valid.select(o_global * fx.Index(2), self.o_nrec_bytes)
+        o_off = fx.Index(fx.arith.select(self.row_valid, o_global * fx.Index(2), self.o_nrec_bytes))
         buffer_ops.buffer_store(
             o_pack.ir_value(),
             self.o_rsrc,

@@ -148,11 +148,11 @@ def build_rmsnorm_module(
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
+                lane_safe = fx.Int32(fx.arith.select(in_range, lane, 0))
                 v0 = fx.memref_load(s_red, lane_safe)
                 v1 = fx.memref_load(s_red2, lane_safe)
-                ww0 = in_range.select(v0, 0.0)
-                ww1 = in_range.select(v1, 0.0)
+                ww0 = fx.Float32(fx.arith.select(in_range, v0, 0.0))
+                ww1 = fx.Float32(fx.arith.select(in_range, v1, 0.0))
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
@@ -246,11 +246,11 @@ def build_rmsnorm_module(
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
-                idx_safe = is_valid.select(idx, 0)
+                idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
                 x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 x2 = x * x
-                x2_safe = is_valid.select(x2, c_zero_f)
+                x2_safe = fx.Float32(fx.arith.select(is_valid, x2, c_zero_f))
                 thread_sumsq = thread_sumsq + x2_safe
 
             sum_sq = block_reduce_add(thread_sumsq)
@@ -412,11 +412,11 @@ def _build_rmsnorm_large_m_small_n_module(
             for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
                 idx = lane + base_idx_int
                 is_valid = idx < N
-                idx_safe = is_valid.select(idx, 0)
+                idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
                 x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 x2 = x * x
-                thread_sumsq = thread_sumsq + is_valid.select(x2, c_zero_f)
+                thread_sumsq = thread_sumsq + fx.Float32(fx.arith.select(is_valid, x2, c_zero_f))
 
             sum_sq = group_reduce_add(thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -553,11 +553,11 @@ def build_fused_add_rmsnorm_module(
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
+                lane_safe = fx.Int32(fx.arith.select(in_range, lane, 0))
                 v0 = fx.memref_load(s_red, lane_safe)
                 v1 = fx.memref_load(s_red2, lane_safe)
-                ww0 = in_range.select(v0, 0.0)
-                ww1 = in_range.select(v1, 0.0)
+                ww0 = fx.Float32(fx.arith.select(in_range, v0, 0.0))
+                ww1 = fx.Float32(fx.arith.select(in_range, v1, 0.0))
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
@@ -663,7 +663,7 @@ def build_fused_add_rmsnorm_module(
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
-                idx_safe = is_valid.select(idx, 0)
+                idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
                 x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
                 residual_e = _load_scalar(copy_atom_s, elem_dtype, residual_in_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
@@ -673,7 +673,7 @@ def build_fused_add_rmsnorm_module(
                     _store_scalar(copy_atom_s, elem_dtype, residual_out_div, idx, added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
-                thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
+                thread_sumsq = thread_sumsq + fx.Float32(fx.arith.select(is_valid, added2, c_zero_f))
 
             sum_sq = block_reduce_add(thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -819,11 +819,11 @@ def _build_rmsnorm_quant_module(
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
+                lane_safe = fx.Int32(fx.arith.select(in_range, lane, 0))
                 v0 = fx.memref_load(s_red, lane_safe)
                 v1 = fx.memref_load(s_red2, lane_safe)
-                ww0 = in_range.select(v0, c_zero_f)
-                ww1 = in_range.select(v1, c_zero_f)
+                ww0 = fx.Float32(fx.arith.select(in_range, v0, c_zero_f))
+                ww1 = fx.Float32(fx.arith.select(in_range, v1, c_zero_f))
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
@@ -848,9 +848,9 @@ def _build_rmsnorm_quant_module(
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
+                lane_safe = fx.Int32(fx.arith.select(in_range, lane, 0))
                 v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_neg_inf)
+                ww = fx.Float32(fx.arith.select(in_range, v, c_neg_inf))
                 ww = wave_reduce_max(ww)
                 if lane == 0:
                     fx.memref_store(ww, s_red, 0)
@@ -923,7 +923,7 @@ def _build_rmsnorm_quant_module(
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
-            final_scale = (scale == c_zero_f).select(c_one_f, scale)
+            final_scale = fx.Float32(fx.arith.select(scale == c_zero_f, c_one_f, scale))
 
             if tid == 0:
                 _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
@@ -970,7 +970,7 @@ def _build_rmsnorm_quant_module(
             def _abs_scalar(val):
                 is_neg = val < c_zero_f
                 neg_val = c_zero_f - val
-                return is_neg.select(neg_val, val)
+                return fx.Float32(fx.arith.select(is_neg, neg_val, val))
 
             thread_sumsq = c_zero_f
 
@@ -978,11 +978,11 @@ def _build_rmsnorm_quant_module(
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
-                idx_safe = is_valid.select(idx, 0)
+                idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
                 x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 x2 = x * x
-                thread_sumsq = thread_sumsq + is_valid.select(x2, c_zero_f)
+                thread_sumsq = thread_sumsq + fx.Float32(fx.arith.select(is_valid, x2, c_zero_f))
 
             sum_sq = block_reduce_add(thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -994,7 +994,7 @@ def _build_rmsnorm_quant_module(
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
-                idx_safe = is_valid.select(idx, 0)
+                idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
                 x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
                 g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
@@ -1005,11 +1005,11 @@ def _build_rmsnorm_quant_module(
                     s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                     y = y * s
                 y_abs = _abs_scalar(y)
-                thread_row_max = fx.max(thread_row_max, is_valid.select(y_abs, c_zero_f))
+                thread_row_max = fx.max(thread_row_max, fx.Float32(fx.arith.select(is_valid, y_abs, c_zero_f)))
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
-            final_scale = (scale == c_zero_f).select(c_one_f, scale)
+            final_scale = fx.Float32(fx.arith.select(scale == c_zero_f, c_one_f, scale))
 
             if tid == 0:
                 _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
@@ -1188,11 +1188,11 @@ def _build_fused_add_rmsnorm_quant_module(
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
+                lane_safe = fx.Int32(fx.arith.select(in_range, lane, 0))
                 v0 = fx.memref_load(s_red, lane_safe)
                 v1 = fx.memref_load(s_red2, lane_safe)
-                ww0 = in_range.select(v0, c_zero_f)
-                ww1 = in_range.select(v1, c_zero_f)
+                ww0 = fx.Float32(fx.arith.select(in_range, v0, c_zero_f))
+                ww1 = fx.Float32(fx.arith.select(in_range, v1, c_zero_f))
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
@@ -1217,9 +1217,9 @@ def _build_fused_add_rmsnorm_quant_module(
 
             if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
+                lane_safe = fx.Int32(fx.arith.select(in_range, lane, 0))
                 v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_neg_inf)
+                ww = fx.Float32(fx.arith.select(in_range, v, c_neg_inf))
                 ww = wave_reduce_max(ww)
                 if lane == 0:
                     fx.memref_store(ww, s_red, 0)
@@ -1300,7 +1300,7 @@ def _build_fused_add_rmsnorm_quant_module(
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
-            final_scale = (scale == c_zero_f).select(c_one_f, scale)
+            final_scale = fx.Float32(fx.arith.select(scale == c_zero_f, c_one_f, scale))
 
             if tid == 0:
                 _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)
@@ -1354,7 +1354,7 @@ def _build_fused_add_rmsnorm_quant_module(
             def _abs_scalar(val):
                 is_neg = val < c_zero_f
                 neg_val = c_zero_f - val
-                return is_neg.select(neg_val, val)
+                return fx.Float32(fx.arith.select(is_neg, neg_val, val))
 
             thread_sumsq = c_zero_f
 
@@ -1362,7 +1362,7 @@ def _build_fused_add_rmsnorm_quant_module(
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
-                idx_safe = is_valid.select(idx, 0)
+                idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
                 x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
                 residual_e = _load_scalar(copy_atom_s, elem_dtype, residual_in_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
@@ -1372,7 +1372,7 @@ def _build_fused_add_rmsnorm_quant_module(
                     _store_scalar(copy_atom_s, elem_dtype, residual_out_div, idx, added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
-                thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
+                thread_sumsq = thread_sumsq + fx.Float32(fx.arith.select(is_valid, added2, c_zero_f))
 
             sum_sq = block_reduce_add(thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -1384,7 +1384,7 @@ def _build_fused_add_rmsnorm_quant_module(
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
-                idx_safe = is_valid.select(idx, 0)
+                idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
                 g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx_safe)
                 added_e = _load_scalar(copy_atom_s, elem_dtype, residual_out_div, idx_safe)
                 g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
@@ -1395,11 +1395,11 @@ def _build_fused_add_rmsnorm_quant_module(
                     s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                     y = y * s
                 y_abs = _abs_scalar(y)
-                thread_row_max = fx.max(thread_row_max, is_valid.select(y_abs, c_zero_f))
+                thread_row_max = fx.max(thread_row_max, fx.Float32(fx.arith.select(is_valid, y_abs, c_zero_f)))
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
-            final_scale = (scale == c_zero_f).select(c_one_f, scale)
+            final_scale = fx.Float32(fx.arith.select(scale == c_zero_f, c_one_f, scale))
 
             if tid == 0:
                 _store_scalar(scale_copy_atom, fx.Float32, yscale_div, bid, final_scale)

@@ -210,7 +210,7 @@ i64_val = fx.Int64(int_val) # cast to 64-bit integer (fx.Index is deprecated)
 i32_val = fx.Int32(i64_val) # cast to i32
 
 # Select
-result = cond.select(true_val, false_val)  # when cond is an ArithValue
+result = fx.arith.select(cond, true_val, false_val)  # matching branch types
 
 # Bitwise
 result = a & b

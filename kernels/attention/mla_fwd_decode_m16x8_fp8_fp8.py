@@ -27,7 +27,7 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops
-from kernels.common.act import LOG2E
+from kernels.common.kernels_common import LOG2E
 
 
 def _is_gfx950_arch(arch: str) -> bool:
@@ -870,7 +870,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 is_oob = pos >= kv_end
                 if const_expr(check_boundary is not True):
                     is_oob = _raw(ArithValue(check_boundary) & is_oob)
-                result[i] = ArithValue(is_oob).select(_raw(c_neg_inf), result[i])
+                result[i] = fx.arith.select(is_oob, _raw(c_neg_inf), result[i])
         return result
 
     # ---- Helper: online softmax ----
@@ -1896,8 +1896,8 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
                 # Buffer parity
                 is_odd = (tile_iv_i32 & 1) != 0
-                curr_base_idx = ArithValue(is_odd).select(p_lds_kv_1_base, p_lds_kv_0_base)
-                next_warp = ArithValue(is_odd).select(p_lds_kv_0_warp, p_lds_kv_1_warp)
+                curr_base_idx = fx.arith.select(is_odd, p_lds_kv_1_base, p_lds_kv_0_base)
+                next_warp = fx.arith.select(is_odd, p_lds_kv_0_warp, p_lds_kv_1_warp)
 
                 # check_boundary_next: True when tile_idx == num_tiles-2 AND last_tile_partial
                 is_second_to_last = tile_iv_i32 == ArithValue(num_tiles_m2)
@@ -1977,10 +1977,10 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             last_tile_iv = ArithValue(num_tiles_m1)
             kv_last_start = _raw(kv_start_v + last_tile_iv * BLOCK_N)
             last_is_odd = (last_tile_iv & 1) != 0
-            last_curr_base = ArithValue(last_is_odd).select(p_lds_kv_1_base, p_lds_kv_0_base)
+            last_curr_base = fx.arith.select(last_is_odd, p_lds_kv_1_base, p_lds_kv_0_base)
             # gfx950: bounce output through the OPPOSITE KV buffer so output
             # stores do not corrupt the V reads happening on `last_curr_base`.
-            last_o_base = ArithValue(last_is_odd).select(p_lds_kv_0_base, p_lds_kv_1_base)
+            last_o_base = fx.arith.select(last_is_odd, p_lds_kv_0_base, p_lds_kv_1_base)
 
             _barrier(vmcnt=0, lgkmcnt=0)
             rocdl.sched_barrier(0)

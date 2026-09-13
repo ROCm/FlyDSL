@@ -4,7 +4,7 @@ import flydsl.expr as fx
 from flydsl.expr import gpu, rocdl
 from flydsl.expr.rocdl import cluster, tdm_ops
 from flydsl.expr.typing import T
-from kernels.common.act import LOG2E
+from kernels.common.kernels_common import LOG2E
 
 
 def make_lds_copy_ops(bits):
@@ -93,12 +93,12 @@ def pipeline_fence_wait(use_cluster=False):
 
 def fmin_f32(a, b):
     """Scalar f32 min (select-based, no NaN handling)."""
-    return fx.Float32((a < b).select(a, b))
+    return fx.Float32(fx.arith.select(a < b, a, b))
 
 
 def fmax_f32(a, b):
     """Scalar f32 max (select-based, no NaN handling)."""
-    return fx.Float32((a > b).select(a, b))
+    return fx.Float32(fx.arith.select(a > b, a, b))
 
 
 def fused_silu_swiglu_elem(g, u, *, swiglu, limit_f32, neg_limit_f32):

@@ -68,7 +68,7 @@ def _prefetch_q_chunks_tile(
 ):
     q_load_lane = lane16id
     if const_expr(q_lanes_per_head < MFMA_N):
-        q_load_lane = (lane16id < fx.Int32(q_lanes_per_head)).select(lane16id, fx.Int32(0))
+        q_load_lane = fx.Int32(fx.arith.select(lane16id < fx.Int32(q_lanes_per_head), lane16id, fx.Int32(0)))
     q_elem = q_base + q_load_lane * fx.Int32(Q_ELEMS_PER_LANE)
     q_tile = q_elem // fx.Int32(4)
     q_chunks = []

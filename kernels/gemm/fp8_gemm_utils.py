@@ -39,7 +39,10 @@ def xcd_remap_pid(num_pid_m, num_pid_n, *, group_m, num_xcds=8):
     pid_m = first_pid_m + intra_group_m
 
     use_simple = (num_wg < swizzle_threshold) | (num_wg % num_xcds != 0)
-    return (use_simple.select(simple_m, pid_m), use_simple.select(simple_n, pid_n))
+    return (
+        fx.Int32(fx.arith.select(use_simple, simple_m, pid_m)),
+        fx.Int32(fx.arith.select(use_simple, simple_n, pid_n)),
+    )
 
 
 def preshuffle_b(b_t):
@@ -223,7 +226,7 @@ class StoreC:
                     else:
                         out = vec_f32[i].to(fx.BFloat16)
                     c_index = (row + i) * self.c_cols + col
-                    self._store_bf16(out, col_valid.select(c_index, oob))
+                    self._store_bf16(out, fx.Int32(fx.arith.select(col_valid, c_index, oob)))
 
 
 def wait_barrier(count):

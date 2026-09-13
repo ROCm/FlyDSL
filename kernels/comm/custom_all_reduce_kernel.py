@@ -443,10 +443,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         # Compute pack range for this rank's reduce-scatter partition
         start_pack = rank_i32 * part_p
         is_last_rank = rank_i32 == (world_size - 1)
-        end_pack = is_last_rank.select(
-            num_packs,
-            start_pack + part_p,
-        )
+        end_pack = fx.Int32(fx.arith.select(is_last_rank, num_packs, start_pack + part_p))
 
         _signal_start_sync(
             lane_i32=lane_i32,
@@ -626,10 +623,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
         start_pack_for_warp = warp_id * part_p
         is_last_warp = warp_id == (world_size - 1)
-        end_pack_for_warp = is_last_warp.select(
-            num_packs,
-            start_pack_for_warp + part_p,
-        )
+        end_pack_for_warp = fx.Uint32(fx.arith.select(is_last_warp, num_packs, start_pack_for_warp + part_p))
 
         dst_tmp_i64 = _extract_i64(tmp_ptrs_vec, warp_id)
         # Stage-1 writes are 16B vector stores; enforce non-null and 16B alignment.
@@ -665,7 +659,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         packs_per_rank_i32 = ea.constant(part_p, type=T.i32)
         max_packs_per_rank_i32 = ea.constant(largest_part_p, type=T.i32)
         is_last_rank_s2 = rank_i32 == (world_size - 1)
-        stage2_end_pack = is_last_rank_s2.select(max_packs_per_rank_i32, packs_per_rank_i32)
+        stage2_end_pack = fx.Int32(fx.arith.select(is_last_rank_s2, max_packs_per_rank_i32, packs_per_rank_i32))
 
         # Stage-2 load uses 16B vectors; enforce non-null and 16B alignment.
         is_tmpout_null = tmp_out_base_i64 == _c64(0)

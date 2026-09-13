@@ -42,7 +42,7 @@ from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import ReductionOp, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops, dpp_utils
-from kernels.common.act import LOG2E
+from kernels.common.kernels_common import LOG2E
 from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import (
     cdiv,
@@ -744,7 +744,10 @@ def compile_pa_decode_tile(
                     else:
                         scaled_frags = frag_Ss
 
-                    masked_chunks = [(_ct[a] < thr).select(scaled_frags[a], neg4) for a in range_constexpr(NCHUNK)]
+                    masked_chunks = [
+                        fx.Vector(fx.arith.select(_ct[a] < thr, scaled_frags[a], neg4), shape=(4,), dtype=fx.Float32)
+                        for a in range_constexpr(NCHUNK)
+                    ]
 
                     pm = fx.Float32(float("-inf"))
                     for a in range_constexpr(NCHUNK):
@@ -922,7 +925,10 @@ def compile_pa_decode_tile(
                 else:
                     scaled_frags = frag_Ss
                 # Reused in pass 2 below, halving the mask instruction count.
-                masked_chunks = [(_ct[a] < thr).select(scaled_frags[a], neg4) for a in range_constexpr(NCHUNK)]
+                masked_chunks = [
+                    fx.Vector(fx.arith.select(_ct[a] < thr, scaled_frags[a], neg4), shape=(4,), dtype=fx.Float32)
+                    for a in range_constexpr(NCHUNK)
+                ]
                 # pass 1: per-warp max for this qhead
                 pm = fx.Float32(float("-inf"))
                 for a in range_constexpr(NCHUNK):
@@ -964,7 +970,11 @@ def compile_pa_decode_tile(
                 for a in range_constexpr(NCHUNK):
                     # re-mask Pa so a fully-masked chunk contributes exactly 0
                     valid_a = masked_chunks[a] > fx.Vector.filled(4, -1e29, fx.Float32)
-                    Pa = valid_a.select(fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b)), zero4_p)
+                    Pa = fx.Vector(
+                        fx.arith.select(valid_a, fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b)), zero4_p),
+                        shape=(4,),
+                        dtype=fx.Float32,
+                    )
                     ls = ls + Pa.reduce(ReductionOp.ADD)
                     if const_expr(per_token_kv):
                         v_scale_this = (

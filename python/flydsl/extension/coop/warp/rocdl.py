@@ -9,6 +9,7 @@ is a different sequence rather than a different constant -- and one with much
 less to gain, since LLVM's own rewrite already reaches pure DPP there.
 """
 
+from .... import expr as fx
 from ....compiler.backends import current_target
 from ....expr.gpu import lane_id
 from ....expr.numeric import Int32, Numeric
@@ -202,7 +203,7 @@ def _inclusive_scan(value, op, width):
     while shift < min(width, 16):
         moved = _dpp(acc, _ROW_SHR[shift], _ALL_ROWS, neutral)
         if in_group is not None:
-            moved = (in_group >= shift).select(moved, neutral)
+            moved = moved.dtype(fx.arith.select(in_group >= shift, moved, neutral))
         acc = combine(op, moved, acc)
         shift <<= 1
 
@@ -231,7 +232,7 @@ def _shift_up(inclusive, op, width):
     shifted = _dpp(inclusive, ctrl, _ALL_ROWS, neutral)
     if width < 16 or width == 32:
         at_group_start = (lane_id() % width) == 0
-        shifted = at_group_start.select(neutral, shifted)
+        shifted = shifted.dtype(fx.arith.select(at_group_start, neutral, shifted))
     return shifted
 
 

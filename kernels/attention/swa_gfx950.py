@@ -443,23 +443,23 @@ def build_gqa_attn(
         if const_expr(NT_BAND is not None):
             qs = block_tile_idx * i32(Q_BLOCK_SIZE * NUM_WARPS)  # first q row of CTA
             left_edge = qs - i32(swa_left)
-            left_edge = (left_edge > i32(0)).select(left_edge, i32(0))
+            left_edge = fx.Int32(fx.arith.select(left_edge > i32(0), left_edge, i32(0)))
             right_edge = qs + i32((Q_BLOCK_SIZE * NUM_WARPS - 1) + swa_right)
             seq_m1 = i32(seq_len_kv) - i32(1)
-            right_edge = (right_edge < seq_m1).select(right_edge, seq_m1)
+            right_edge = fx.Int32(fx.arith.select(right_edge < seq_m1, right_edge, seq_m1))
             # First in-band tile, 64-aligned (>= 0 since qs >= 0).
             base0 = (left_edge // i32(KV_BLOCK_SIZE)) * i32(KV_BLOCK_SIZE)
             # In-band tile count for THIS CTA: ceil((right - base0 + 1)/64), rounded
             span_tiles = (right_edge - base0 + i32(KV_BLOCK_SIZE)) // i32(KV_BLOCK_SIZE)
             nt_ct = (span_tiles + i32(3)) // i32(4) * i32(4)
-            nt_ct = (nt_ct > i32(4)).select(nt_ct, i32(4))
-            nt_ct = (nt_ct < i32(NT_BAND)).select(nt_ct, i32(NT_BAND))
+            nt_ct = fx.Int32(fx.arith.select(nt_ct > i32(4), nt_ct, i32(4)))
+            nt_ct = fx.Int32(fx.arith.select(nt_ct < i32(NT_BAND), nt_ct, i32(NT_BAND)))
             nt_ct = sgpr(nt_ct)
             nt_rt = nt_ct
 
             max_base = i32(seq_len_kv) - nt_ct * i32(KV_BLOCK_SIZE)
-            base_unclamped = (base0 < max_base).select(base0, max_base)
-            base_unclamped = (base_unclamped > i32(0)).select(base_unclamped, i32(0))
+            base_unclamped = fx.Int32(fx.arith.select(base0 < max_base, base0, max_base))
+            base_unclamped = fx.Int32(fx.arith.select(base_unclamped > i32(0), base_unclamped, i32(0)))
             base_kv_row = sgpr(base_unclamped)
             swa_row_off = base_kv_row * i32(ATTN_H_KV * ATTN_D)
         else:
@@ -485,7 +485,7 @@ def build_gqa_attn(
                 c = 8 * (r // 4) + (r % 4)
                 shifted = (rel_base + i32(c)).bitcast(fx.Uint32)
                 keep = shifted <= width
-                elems.append(keep.select(f32(src[r]), NEG_INF))
+                elems.append(fx.Float32(fx.arith.select(keep, f32(src[r]), NEG_INF)))
 
             return Vec.from_elements(elems, f32)
 
@@ -661,7 +661,7 @@ def build_gqa_attn(
             not_ok = delta > RESCALE_THRESHOLD
             mask = rocdl.ballot(T.i64, not_ok)
             needs_rescale = fx.Int64(mask) != 0
-            kept_max = needs_rescale.select(m_new, max_prev)
+            kept_max = fx.Float32(fx.arith.select(needs_rescale, m_new, max_prev))
 
             o0, o1, o2, o3 = o_reg
             p0, p1, p2, p3 = packs

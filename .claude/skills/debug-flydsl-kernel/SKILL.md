@@ -45,7 +45,7 @@ When ALL tokens in a partition are masked (out of context), `qk_max = -inf`. The
 
 **Fix**: Guard the exp calculation:
 ```python
-safe_diff = (qk_max > NEG_INF).select(diff, ZERO_F)
+safe_diff = fx.Float32(fx.arith.select(qk_max > NEG_INF, diff, ZERO_F))
 ```
 
 ### 2.2 Division by zero in normalization
@@ -54,7 +54,7 @@ When `exp_sum = 0` (all probs zero), `1/exp_sum = inf`.
 
 **Fix**:
 ```python
-safe_sum = (running_sum > ZERO_F).select(running_sum, fx.Float32(1.0))
+safe_sum = fx.Float32(fx.arith.select(running_sum > ZERO_F, running_sum, fx.Float32(1.0)))
 inv_sum = fx.Float32(1.0) / safe_sum
 ```
 
@@ -166,7 +166,7 @@ if lane == c_zero:
     fx.printf("lane zero")
 
 # Runtime predicate for select
-val = (lane < c_limit).select(good_val, zero_val)
+val = fx.arith.select(lane < c_limit, good_val, zero_val)
 
 ```
 

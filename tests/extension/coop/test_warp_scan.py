@@ -105,6 +105,38 @@ def test_sum(entry, width, inclusive):
     assert torch.equal(out, expected_scan(values, name, width=group, inclusive=inclusive))
 
 
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("universal", (False, True), ids=("dispatched", "universal"))
+@pytest.mark.parametrize("inclusive", (True, False), ids=("inclusive", "exclusive"))
+@pytest.mark.parametrize("width", (2, None), ids=width_id)
+def test_boolean_sum_promotes_to_int32(universal, inclusive, width):
+    block = 2 * fx.num_warp_threads()
+    group = fx.num_warp_threads() if width is None else width
+
+    @flyc.kernel(known_block_size=[block, 1, 1])
+    def kernel(A: fx.Tensor, Out: fx.Tensor):
+        tid = fx.thread_idx.x
+        namespace = fx.coop.universal if universal else fx.coop
+        form = namespace.warp_inclusive_scan if inclusive else namespace.warp_exclusive_scan
+        Out[tid] = form(A[tid] > 0, fx.ReductionOp.ADD, width=width)
+
+    @flyc.jit
+    def launch(A: fx.Tensor, Out: fx.Tensor):
+        kernel(A, Out).launch(grid=(1, 1, 1), block=(block, 1, 1))
+
+    values = torch.arange(block, dtype=torch.int32, device="cuda") % 3
+    out = torch.empty_like(values)
+    launch(values, out)
+    torch.cuda.synchronize()
+    flags = (values.cpu() > 0).to(torch.int32).reshape(-1, group)
+    expected = flags.cumsum(1, dtype=torch.int32)
+    if not inclusive:
+        expected -= flags
+    assert torch.equal(out.cpu(), expected.reshape(-1))
+
+
 # ── combined inclusive/exclusive scan ─────────────────────────────────────
 
 

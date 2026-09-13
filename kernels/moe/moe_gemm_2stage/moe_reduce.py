@@ -145,7 +145,11 @@ def moe_reduction_kernel(
                 vk = fx.Vector(fx.memref_load_vec(frags[k]))
                 vk = vk.extf(vec_f32) if is_16b else vk
             if const_expr(use_mask):
-                vk = (em_ptr[tk_ptr[k]] != fx.Int32(0)).select(vk, fx.Vector.filled(V, 0.0, fx.Float32))
+                vk = fx.Vector(
+                    fx.arith.select(em_ptr[tk_ptr[k]] != fx.Int32(0), vk, fx.Vector.filled(V, 0.0, fx.Float32)),
+                    shape=(V,),
+                    dtype=fx.Float32,
+                )
             acc = acc + vk
         ofrag = fx.make_fragment_like(p_dst)
         fx.memref_store_vec(acc.truncf(vec_out) if is_16b else acc, ofrag)

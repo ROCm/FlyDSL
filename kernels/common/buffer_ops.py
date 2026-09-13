@@ -452,7 +452,7 @@ def buffer_load(
 
     # Apply mask by setting invalid offsets to max
     if mask is not None:
-        offset = fx.Boolean(mask).select(fx.Int32(offset), fx.Int32(0x7FFFFFFF)).ir_value()
+        offset = fx.Int32(fx.arith.select(fx.Boolean(mask), fx.Int32(offset), fx.Int32(0x7FFFFFFF))).ir_value()
 
     result_type = dtype if vec_width == 1 else ir.VectorType.get([vec_width], dtype)
 
@@ -534,7 +534,7 @@ def buffer_store(
 
     # Apply mask by setting invalid offsets to max
     if mask is not None:
-        offset = fx.Boolean(mask).select(fx.Int32(offset), fx.Int32(0x7FFFFFFF)).ir_value()
+        offset = fx.Int32(fx.arith.select(fx.Boolean(mask), fx.Int32(offset), fx.Int32(0x7FFFFFFF))).ir_value()
 
     offset = _add_soffset_bytes(offset, soffset_bytes)
     dst = fx.make_view(rsrc + fx.Int32(offset), fx.make_layout(vec_width * element_bytes, 1))

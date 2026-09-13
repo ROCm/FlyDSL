@@ -104,7 +104,7 @@ def build_permlane_probe():
         lo_res = llvm.extractvalue(T.i32, sw, [0])
         hi_res = llvm.extractvalue(T.i32, sw, [1])
         is_hi = ArithValue(fx.Int32(lane // fx.Index(32)) == fx.Int32(1))
-        partner = fx.Int32(is_hi.select(lo_res, hi_res))
+        partner = fx.Int32(fx.arith.select(is_hi, lo_res, hi_res))
         Odiv = fx.logical_divide(fx.rocdl.make_buffer_tensor(OUT), fx.make_layout(1, 1))
         store32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
         oreg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)

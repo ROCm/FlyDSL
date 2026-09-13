@@ -273,7 +273,7 @@ def create_wmma_gemm_module(
                 return (k_first + fx.Int32(step)) % num_k_tiles
             if const_expr(persist_rot_step):
                 kk = rot + fx.Int32(step)
-                return (kk >= n_iter).select(kk - n_iter, kk)
+                return fx.Int32(fx.arith.select(kk >= n_iter, kk - n_iter, kk))
             return step
 
         wave_m = wave_id // waves_n

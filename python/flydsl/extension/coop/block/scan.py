@@ -5,6 +5,7 @@
 
 import enum
 
+from .... import expr as fx
 from ....compiler import jit
 from ....expr.gpu import barrier
 from ....expr.primitive import const_expr, range_constexpr
@@ -74,7 +75,9 @@ def _prefix_warp_scans(partial, tid, slots, op, warp_scan_with_aggregate, warp_t
         # make it logarithmic: warp 0 scans the num_warps totals, and each
         # thread then reads the single entry in front of its own warp.
         for i in range_constexpr(num_warps - 2, -1, -1):
-            prefix = (warp_id > i).select(combine(op, slots[i], prefix), prefix)
+            valid = warp_id > i
+            combined = fx.as_dsl_value(combine(op, slots[i], prefix))
+            prefix = combined.dtype(fx.arith.select(valid, combined, fx.as_dsl_value(prefix).to(combined.dtype)))
         # Same slots, folded unconditionally: that is the whole block.
         aggregate = slots[0]
         for i in range_constexpr(1, num_warps):

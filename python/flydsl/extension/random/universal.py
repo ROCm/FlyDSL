@@ -3,6 +3,7 @@
 
 """Target-neutral implementations of the random library."""
 
+from ... import expr as fx
 from ...expr.math import cos, log, sin, sqrt
 from ...expr.numeric import Float32, Int32, Int64, Uint32, Uint64, Uint128, as_numeric
 
@@ -140,7 +141,11 @@ def uint_to_uniform_float(word):
         UNIFORM_SCALE = 1.0842020432385337e-19
 
     signed = signed_type(word)
-    folded = (signed < signed_type(0)).select(-signed - signed_type(1), signed)
+    negative = signed < signed_type(0)
+    if negative.is_static():
+        folded = -signed - signed_type(1) if negative.value else signed
+    else:
+        folded = signed_type(fx.arith.select(negative, -signed - signed_type(1), signed))
     return Float32(folded) * Float32(UNIFORM_SCALE)
 
 

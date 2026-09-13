@@ -24,13 +24,11 @@ FlyDSL-specific kernel interfaces and tuning choices when reusing aiter code.
 Kernel cleanup should use the existing API; do not expand it into `expr/` or
 compiler changes unless the task calls for that. Honor the requested GPU scope.
 
-Reuse `kernels/common/act.py` for shared activation components and `LOG2E`,
+Reuse `kernels/common/act.py` for shared activation components,
 `kernels/common/tensor_shim.py` for pointer/base extraction and cached dispatch,
-`kernels/common/kernels_common.py` for dtype and architecture lookup, and family
+`kernels/common/kernels_common.py` for `LOG2E`, dtype and architecture lookup, and family
 common modules for specialized memory operations. Similar formulas can encode
-different rounding or scheduling contracts. Read
-[semantic preservation and validation](references/semantic-preservation.md)
-when extracting helpers or replacing low-level operations.
+different rounding or scheduling contracts.
 
 ## Cautions
 
@@ -145,7 +143,7 @@ fx.copy(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA (§7b: pr
 | `arith.mulf/addf(a,b)` | `a * b` / `a + b` |
 | `arith.trunc_f(ty, v)` / `ext_f` | `v.to(fx.BFloat16)` |
 | `arith.index_cast(T.i32, v)` | `fx.Int32(v)` |
-| `arith.select(cond, t, f)` | `cond.select(t, f)` |
+| `cond.select(t, f)` | `fx.arith.select(cond, t, f)` with matching branch types and an explicit result type where needed |
 | `arith.cmpi(slt, a, b)` | `a < b` |
 | `arith.maximumf/minimumf(a,b)` | `fx.max(a, b)` / `fx.min(a, b)` |
 | `arith.maxsi/maxui/minsi/minui(a,b)` | `fx.max(a, b)` / `fx.min(a, b)` |
@@ -155,6 +153,10 @@ fx.copy(copy, fx.slice(tA, (None, tid)), rA)   # after partitioning tA (§7b: pr
 
 Keep `arith.cmpf` / explicit `*FOp` only where no operator exists or fastmath is
 needed.
+
+Scalar `fx.arith.select` results are `ArithValue`; vector wrappers can infer a
+different signedness. Preserve branch promotion, result dtype and shape, static
+folding and broadcasting explicitly, e.g. `fx.Int32(fx.arith.select(cond, t, f))`.
 
 ### `scf`
 | Raw | Preferred |
@@ -215,8 +217,8 @@ p = fx.to_llvm_ptr(ptr)   # equivalent free function; backend resolves the AS
   arithmetic; keep the offset math (layout views / `get_element_ptr`) and only swap
   the final ptr cast for `.llvm_ptr`.
 - Preserve byte versus element GEPs and alignment provenance. An equal numeric
-  address alone does not guarantee equal memory instructions; see the semantic
-  preservation reference before replacing an epilog pointer path.
+  address alone does not guarantee equal memory instructions; compare the
+  generated loads and stores when replacing an epilog pointer path.
 
 ### 3c. Manual `s_waitcnt` bitfields → `fx.rocdl.s_waitcnt(vmcnt=/lgkmcnt=/expcnt=)`
 
@@ -501,8 +503,8 @@ _run_compiled(compiled["launch"], out.data_ptr(), a.data_ptr(), b.data_ptr(),
    FLYDSL_RUNTIME_ENABLE_CACHE=0 python3 -m pytest tests/kernels/test_<kernel>.py -v
    ```
    Use the existing test's actual CLI when it is a script rather than pytest.
-   Check asserted comparisons and dispatch logs as well as the exit code. See
-   the reference for bit-level probes, ISA and performance evidence.
+   Check asserted comparisons and dispatch logs as well as the exit code;
+   compare numerical results, ISA and performance for the changed paths.
 5. **Review the actual merge-base diff and all remaining candidates.** Check
    callers of shared helpers, excluded paths importing them, and the final tree
    after any upstream merge. Inspect `git diff --stat` and `git diff --check`.
@@ -520,7 +522,7 @@ _run_compiled(compiled["launch"], out.data_ptr(), a.data_ptr(), b.data_ptr(),
 | `ArithValue(x) + y` | `x + y` (typed `fx`) |
 | `arith.unwrap(v)` / `_to_raw(v)` | `v.ir_value()` (boundary only) |
 | index-typed arithmetic | explicit `fx.Int64/Int32(...)` where supported; retain `fx.Index` at index-typed boundaries |
-| `arith.mulf/addf/trunc_f/select` | `*`, `+`, `.to(ty)`, `.select(...)` |
+| `arith.mulf/addf/trunc_f/select` | `*`, `+`, `.to(ty)`, `fx.arith.select(...)` |
 | raw integer min/max or ceil-div | `fx.max` / `fx.min` / `fx.ceildiv` when signedness and overflow behavior match |
 | `vector.extract/bitcast/splat` | `fx.Vector(v)[i]` / `.bitcast(ty)` / `.filled(...)` |
 | `scf.ForOp` / `scf.IfOp` | `range_constexpr` / `range(..., init=)` / Python `if` / `const_expr` |

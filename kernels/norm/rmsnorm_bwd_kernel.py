@@ -95,9 +95,9 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
             gpu.barrier()
             if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
+                lane_safe = fx.Int32(fx.arith.select(in_range, lane, 0))
                 v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_zero_f)
+                ww = fx.Float32(fx.arith.select(in_range, v, c_zero_f))
                 ww = wave_reduce_add(ww)
                 if lane == 0:
                     fx.memref_store(ww, s_red, 0)
@@ -137,7 +137,7 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
         for base in range_constexpr(0, N, BLOCK_THREADS):
             idx = tid + base
             is_valid = idx < N
-            idx_safe = is_valid.select(idx, 0)
+            idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
             x_e = load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
             dy_e = load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
             g_e = load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx_safe)
@@ -147,7 +147,7 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
             x_hat = x * rstd
             wdy = dy * g
             prod = x_hat * wdy
-            thread_acc = thread_acc + is_valid.select(prod, c_zero_f)
+            thread_acc = thread_acc + fx.Float32(fx.arith.select(is_valid, prod, c_zero_f))
 
         sum_prod = block_reduce_add(thread_acc)
         c1 = sum_prod / n_float
@@ -254,9 +254,9 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
             gpu.barrier()
             if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
+                lane_safe = fx.Int32(fx.arith.select(in_range, lane, 0))
                 v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_zero_f)
+                ww = fx.Float32(fx.arith.select(in_range, v, c_zero_f))
                 ww = wave_reduce_add(ww)
                 if lane == 0:
                     fx.memref_store(ww, s_red, 0)
@@ -299,7 +299,7 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
         for base in range_constexpr(0, N, BLOCK_THREADS):
             idx = tid + base
             is_valid = idx < N
-            idx_safe = is_valid.select(idx, 0)
+            idx_safe = fx.Int32(fx.arith.select(is_valid, idx, 0))
             a_e = load_scalar(copy_atom_s, elem_dtype, added_div, idx_safe)
             dy_e = load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
             g_e = load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx_safe)
@@ -309,7 +309,7 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
             a_hat = a * rstd
             wdy = dy * g
             prod = a_hat * wdy
-            thread_acc = thread_acc + is_valid.select(prod, c_zero_f)
+            thread_acc = thread_acc + fx.Float32(fx.arith.select(is_valid, prod, c_zero_f))
 
         sum_prod = block_reduce_add(thread_acc)
         c1 = sum_prod / n_float
@@ -438,9 +438,9 @@ def _build_rmsnorm_bwd_two_stage_module(
             gpu.barrier()
             if wave == 0:
                 in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
+                lane_safe = fx.Int32(fx.arith.select(in_range, lane, 0))
                 v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_zero_f)
+                ww = fx.Float32(fx.arith.select(in_range, v, c_zero_f))
                 ww = wave_reduce_add(ww)
                 if lane == 0:
                     fx.memref_store(ww, s_red, 0)
@@ -482,7 +482,7 @@ def _build_rmsnorm_bwd_two_stage_module(
             for tile_i in range_constexpr(NUM_IO_ITERS):
                 io_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
                 is_valid = io_idx < NUM_IO_TILES
-                io_idx_safe = is_valid.select(io_idx, 0)
+                io_idx_safe = fx.Int32(fx.arith.select(is_valid, io_idx, 0))
                 gamma_local.append(
                     load_weight_vec(
                         gamma_copy_atom,
@@ -514,7 +514,7 @@ def _build_rmsnorm_bwd_two_stage_module(
             for tile_i in range_constexpr(NUM_IO_ITERS):
                 io_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
                 is_valid = io_idx < NUM_IO_TILES
-                io_idx_safe = is_valid.select(io_idx, 0)
+                io_idx_safe = fx.Int32(fx.arith.select(is_valid, io_idx, 0))
                 if const_expr(USE_VEC):
                     source_e = load_vec(copy_atom_io, IO_WIDTH, elem_dtype, source_div, io_idx_safe)
                     dy_e = load_vec(copy_atom_io, IO_WIDTH, elem_dtype, dy_div, io_idx_safe)
@@ -535,7 +535,7 @@ def _build_rmsnorm_bwd_two_stage_module(
                 if const_expr(USE_VEC):
                     prod = prod.reduce(ReductionOp.ADD, fastmath=fm_fast)
 
-                thread_acc = thread_acc + is_valid.select(prod, c_zero_f)
+                thread_acc = thread_acc + fx.Float32(fx.arith.select(is_valid, prod, c_zero_f))
 
             sum_prod = block_reduce_add(thread_acc)
             c1 = sum_prod / n_float
@@ -543,7 +543,7 @@ def _build_rmsnorm_bwd_two_stage_module(
             for tile_i in range_constexpr(NUM_IO_ITERS):
                 io_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
                 is_valid = io_idx < NUM_IO_TILES
-                io_idx_safe = is_valid.select(io_idx, 0)
+                io_idx_safe = fx.Int32(fx.arith.select(is_valid, io_idx, 0))
                 if const_expr(USE_VEC):
                     source_e = source_local[tile_i]
                     dy_e = dy_local[tile_i]
@@ -579,9 +579,9 @@ def _build_rmsnorm_bwd_two_stage_module(
                 dw = dy * source_hat
                 if const_expr(USE_VEC):
                     for lane in range_constexpr(IO_WIDTH):
-                        row_dweight.append(is_valid.select(dw[lane], c_zero_f))
+                        row_dweight.append(fx.Float32(fx.arith.select(is_valid, dw[lane], c_zero_f)))
                 else:
-                    row_dweight.append(is_valid.select(dw, c_zero_f))
+                    row_dweight.append(fx.Float32(fx.arith.select(is_valid, dw, c_zero_f)))
 
             dweight_partial = dweight_partial + fx.Vector.from_elements(row_dweight, fx.Float32)
             gpu.barrier()
@@ -612,7 +612,7 @@ def _build_rmsnorm_bwd_two_stage_module(
         partial_lane = tid // DWEIGHT_REDUCE_COLS
         col = bid * DWEIGHT_REDUCE_COLS + col_lane
         is_valid = col < N
-        col_safe = is_valid.select(col, 0)
+        col_safe = fx.Int32(fx.arith.select(is_valid, col, 0))
 
         weight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
         DWeightPartial_buf = fx.rocdl.make_buffer_tensor(DWeightPartial)
@@ -633,10 +633,10 @@ def _build_rmsnorm_bwd_two_stage_module(
         for partial_base in range(0, num_programs, DWEIGHT_REDUCE_ROW_LANES):
             partial_row = partial_base + partial_lane
             partial_valid = partial_row < num_programs
-            partial_row_safe = partial_valid.select(partial_row, 0)
+            partial_row_safe = fx.arith.select(partial_valid, partial_row, 0)
             partial_idx = partial_row_safe * N + col_safe
             value = load_scalar(copy_atom_f32, fx.Float32, partial_div, partial_idx)
-            acc = acc + partial_valid.select(value, c_zero_f)
+            acc = acc + fx.arith.select(partial_valid, value, c_zero_f)
         fx.memref_store(acc, s_partial, tid)
         gpu.barrier()
 

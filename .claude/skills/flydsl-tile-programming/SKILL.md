@@ -321,7 +321,7 @@ vC = Vec(vA).maximumf(zero)
 v = Vec(vA)
 neg = -v
 is_neg = v < zero
-vC = is_neg.select(neg, v)
+vC = Vec(fx.arith.select(is_neg, neg, v))
 
 # Type conversion
 vC = Vec(vI32).to(fx.Float32)  # int -> float

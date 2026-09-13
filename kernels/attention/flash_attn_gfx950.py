@@ -59,7 +59,7 @@ from kernels.attention.flash_attn_utils import (
     _waitcnt_vm_n,
     bias_addressing_error,
 )
-from kernels.common.act import LOG2E as BIAS_LOG2E
+from kernels.common.kernels_common import LOG2E as BIAS_LOG2E
 from kernels.common.kernels_common import dtype_to_elem_type
 
 

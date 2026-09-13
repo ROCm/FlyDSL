@@ -6,9 +6,8 @@
 import flydsl.expr as fx
 from flydsl.expr import rocdl
 from flydsl.expr.typing import T
+from kernels.common.kernels_common import LOG2E
 from kernels.common.tensor_shim import _to_raw as _raw
-
-LOG2E = 1.4426950408889634
 
 
 def sigmoid_batch(xs):
@@ -43,7 +42,7 @@ def tanh_batch(xs):
     out = []
     for i, x in enumerate(xs):
         tanh_abs = (fx.Float32(1.0) - es[i]) * recips[i]
-        out.append((x > zero).select(tanh_abs, -tanh_abs))
+        out.append(fx.Float32(fx.arith.select(x > zero, tanh_abs, -tanh_abs)))
     return out
 
 

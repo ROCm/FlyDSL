@@ -435,13 +435,18 @@ mask = fx.Int32(0xFF)                            # i32 constant (preferred)
 # Prefer operators / Numeric methods
 result = a + b
 result = a * scale
-result = cond.select(true_val, false_val)
+result = fx.arith.select(cond, true_val, false_val)
 largest = fx.max(a, b)
 smallest = fx.min(a, b)
 tiles = fx.ceildiv(count, tile_size)  # signed/unsigned dispatch from typed operands
 
 # Keep direct arith.*FOp only when explicit fastmath flags are required.
 ```
+
+`fx.arith.select` requires matching branch types. Scalar results are
+`ArithValue`; inferred vector wrappers may lose unsigned element metadata.
+Preserve promotion, static folding, broadcasting and the exact result dtype and
+shape when migrating a method call.
 
 ### Internal Types: Vector and Numeric (PREFERRED)
 
@@ -493,8 +498,8 @@ Use `Vec.filled(...)` for splats and `Vec.from_elements(...)` for vectors from s
 | Max / Min | `fx.max(a, b)` / `fx.min(a, b)` | Yes | Float forms propagate NaN; `fx.maxnumf` / `fx.minnumf` do not |
 | Integer ceil-div | `fx.ceildiv(a, b)` | Yes | Direct signed/unsigned op; distinct from layout `fx.ceil_div` |
 | Compare | `arith.cmpf(pred, a, b)` | Yes | predicate FIRST; returns i1/vec<i1> |
-| Select | `cond.select(t, f)` | Yes | |
-| Abs | no direct helper | Use `-v`, comparison, and `cond.select(...)` |
+| Select | `fx.arith.select(cond, t, f)` | Yes | Match branch types; wrap the result in its DSL type |
+| Abs | no direct helper | Use `-v`, comparison, and `fx.arith.select(...)` |
 | FMA | `a * b + c` | Yes | Use direct FOp only when explicit fastmath is needed |
 | Splat const | `Vec.filled(width, val, dtype)` | Creates vector | For scalar broadcast |
 

@@ -518,7 +518,7 @@ def launch_gemm(
 
         c_tile_addr = c_addr + fx.Int64(bx_m) * fx.Int64(c_stride) * fx.Int64(_ebytes)
         _rows_rem = i32_m - fx.Int32(bx_m)
-        _rows_wg = (_rows_rem < fx.Int32(BM)).select(_rows_rem, fx.Int32(BM))
+        _rows_wg = fx.Int32(fx.arith.select(_rows_rem < fx.Int32(BM), _rows_rem, fx.Int32(BM)))
         c_nrec = fx.Int64(_rows_wg) * fx.Int64(c_stride) * fx.Int64(_ebytes)
         c_ptr_ty = fx.PointerType.get(store_elem.ir_type, address_space=fx.AddressSpace.Global, alignment=_ebytes)
         c_flat = fx.logical_divide(

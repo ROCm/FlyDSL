@@ -29,8 +29,7 @@ import flydsl.expr as fx
 from flydsl.expr import arith, range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, T
-from kernels.common.act import LOG2E
-from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
+from kernels.common.kernels_common import LOG2E, dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "topk_gating_softmax_kernel"
 
@@ -194,7 +193,7 @@ def _emit_topk_gating_softmax_body(
     global_token = bid * c_tpb + local_token  # token row
 
     in_range = global_token < i32_num_tokens
-    global_token_safe = in_range.select(global_token, fx.Int32(0))
+    global_token_safe = fx.Int32(fx.arith.select(in_range, global_token, fx.Int32(0)))
 
     def group_reduce(x, mode):
         """Butterfly reduce within a THREADS_PER_TOKEN sub-warp group."""
@@ -225,8 +224,8 @@ def _emit_topk_gating_softmax_body(
             is_equal = ArithValue(peer_v) == ArithValue(wv)
             peer_lower_idx = peer_i < wi
             take_peer = is_greater | (is_equal & peer_lower_idx)
-            wv = take_peer.select(peer_v, wv)
-            wi = take_peer.select(peer_i, wi)
+            wv = fx.Float32(fx.arith.select(take_peer, peer_v, wv))
+            wi = fx.Int32(fx.arith.select(take_peer, peer_i, wi))
         return wv, wi
 
     GatingOutput_buf = fx.rocdl.make_buffer_tensor(GatingOutput)
@@ -346,8 +345,8 @@ def _emit_topk_gating_softmax_body(
             pv = prob_list[v]
             ci = col_idx_list[v]
             is_better = pv > thread_best_val
-            thread_best_val = is_better.select(pv, thread_best_val)
-            thread_best_idx = is_better.select(ci, thread_best_idx)
+            thread_best_val = fx.Float32(fx.arith.select(is_better, pv, thread_best_val))
+            thread_best_idx = fx.Int32(fx.arith.select(is_better, ci, thread_best_idx))
 
         global_best_val, global_best_idx = group_reduce_argmax(thread_best_val, thread_best_idx)
 
@@ -358,7 +357,7 @@ def _emit_topk_gating_softmax_body(
         for v in range_constexpr(VPT):
             ci = col_idx_list[v]
             is_winner = ArithValue(ci) == ArithValue(global_best_idx)
-            prob_list[v] = is_winner.select(c_neg_inf, prob_list[v])
+            prob_list[v] = fx.Float32(fx.arith.select(is_winner, c_neg_inf, prob_list[v]))
 
     # Pass 5: leader writes weights/indices/tei (with optional renorm).
     c_eps = fx.Float32(1e-20)
@@ -453,7 +452,7 @@ def build_topk_gating_softmax_module(
 
         in_range = global_token < i32_num_tokens
 
-        global_token_safe = in_range.select(global_token, fx.Int32(0))
+        global_token_safe = fx.Int32(fx.arith.select(in_range, global_token, fx.Int32(0)))
 
         # Sub-warp reductions over the THREADS_PER_TOKEN-lane group
         def group_reduce(x, mode):
@@ -485,8 +484,8 @@ def build_topk_gating_softmax_module(
                 is_equal = ArithValue(peer_v) == ArithValue(wv)
                 peer_lower_idx = peer_i < wi
                 take_peer = is_greater | (is_equal & peer_lower_idx)
-                wv = take_peer.select(peer_v, wv)
-                wi = take_peer.select(peer_i, wi)
+                wv = fx.Float32(fx.arith.select(take_peer, peer_v, wv))
+                wi = fx.Int32(fx.arith.select(take_peer, peer_i, wi))
             return wv, wi
 
         # Buffer-backed views
@@ -599,8 +598,8 @@ def build_topk_gating_softmax_module(
                 pv = prob_list[v]
                 ci = col_idx_list[v]
                 is_better = pv > thread_best_val
-                thread_best_val = is_better.select(pv, thread_best_val)
-                thread_best_idx = is_better.select(ci, thread_best_idx)
+                thread_best_val = fx.Float32(fx.arith.select(is_better, pv, thread_best_val))
+                thread_best_idx = fx.Int32(fx.arith.select(is_better, ci, thread_best_idx))
 
             # Sub-warp argmax → all THREADS_PER_TOKEN lanes hold the winner.
             global_best_val, global_best_idx = group_reduce_argmax(thread_best_val, thread_best_idx)
@@ -614,7 +613,7 @@ def build_topk_gating_softmax_module(
             for v in range_constexpr(VPT):
                 ci = col_idx_list[v]
                 is_winner = ArithValue(ci) == ArithValue(global_best_idx)
-                prob_list[v] = is_winner.select(c_neg_inf, prob_list[v])
+                prob_list[v] = fx.arith.select(is_winner, c_neg_inf, prob_list[v])
 
         # Pass 5: Leader writes weights/indices/tei (with optional renorm)
         c_eps = fx.Float32(1e-20)
