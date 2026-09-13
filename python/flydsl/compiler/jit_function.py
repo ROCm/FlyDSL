@@ -1129,7 +1129,25 @@ def _build_call_state(sig, args_tuple, func_exe):
     if not has_user_stream:
         slot_specs.append((-1, ctypes.c_void_p, None))
 
-    return CallState(slot_specs, func_exe)
+    # iket: the trace buffer is an implicit trailing argument, so it has no entry in the
+    # signature. Its slot needs a real address -- unlike the auto-stream slot above, whose
+    # NULL selects the HIP default stream, this pointer is dereferenced by the kernel, so a
+    # null fill is an illegal memory access rather than a default.
+    # It must come after the stream slot, matching the trace-time argument order.
+    from ..expr import iket as _iket
+
+    presets = {}
+    if _iket.tracing_enabled():
+        from ..expr import iket_emit as _iket_emit
+        from ..utils import env as _env
+
+        if not _env.compile.compile_only:
+            # A preset, not a fill: fills index the caller's argument tuple, and this
+            # argument is implicit -- there is no tuple entry to read.
+            presets[len(slot_specs)] = _iket_emit.ensure_buffer().device_ptr
+            slot_specs.append((-1, ctypes.c_void_p, None))
+
+    return CallState(slot_specs, func_exe, presets)
 
 
 class JitFunction:
@@ -1621,17 +1639,26 @@ def _ensure_iket_buffer_arg(jit_args: list) -> bool:
     disk-cacheable: registering a ``post_load_processors`` callback sets ``extern_linked``
     (see :func:`_build_compiled`), which disables the disk cache for that kernel.
 
-    The value is a null pointer at trace time; the runtime fills the real address into the
-    ABI slot before launch.
+    The pointer must be a real device address whenever the kernel can actually run: the
+    kernel dereferences it, so a null there segfaults at launch rather than raising
+    anything diagnosable.  Under ``COMPILE_ONLY`` no launch happens, and allocating would
+    require a live HIP device for an address nothing reads.
     """
     from ..expr import iket as _iket
 
     if not _iket.tracing_enabled():
         return False
+    from ..expr import iket_emit as _iket_emit
     from ..expr.numeric import Int8
+    from ..utils import env
     from .jit_argument import PointerJitArg
 
-    jit_args.append(PointerJitArg(Int8, None))
+    # Under COMPILE_ONLY nothing launches, so skip the allocation: it would need a live
+    # HIP device purely to produce an address the kernel never dereferences.
+    address = None
+    if not env.compile.compile_only:
+        address = ctypes.c_void_p(_iket_emit.ensure_buffer().device_ptr)
+    jit_args.append(PointerJitArg(Int8, address))
     return True
 
 

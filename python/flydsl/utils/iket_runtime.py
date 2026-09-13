@@ -79,7 +79,14 @@ class TraceBuffer:
         )
 
     def claimed_slots(self) -> int:
-        """Slots waves *claimed*, which may exceed capacity -- that is the overflow signal."""
+        """Slots waves *reserved*, not events written.
+
+        Every wave that reaches the prologue claims ``FLYDSL_IKET_EVENTS_PER_WAVE`` slots
+        up front, whether or not it goes on to record, so this is a high-water mark: 64
+        waves at the default 256 reads 16384 even if only two events were emitted. It is
+        the right quantity for the overflow check (it measures what the run *wanted*), and
+        :func:`decode_records` drops the untouched slots.
+        """
         out = ctypes.c_uint32(0)
         _check(
             _hip_lib().hipMemcpy(ctypes.byref(out), ctypes.c_void_p(self.cursor_ptr), 4, _MEMCPY_D2H),
@@ -107,8 +114,9 @@ class TraceBuffer:
         if nbytes == 0:
             return []
         raw = (ctypes.c_char * nbytes)()
+        # Skip the reserved cursor slot.
         _check(
-            _hip_lib().hipMemcpy(raw, ctypes.c_void_p(self.device_ptr), nbytes, _MEMCPY_D2H),
+            _hip_lib().hipMemcpy(raw, ctypes.c_void_p(self.device_ptr + _iket.RECORD_BYTES), nbytes, _MEMCPY_D2H),
             "hipMemcpy(records)",
         )
         return decode_records(bytes(raw))
@@ -176,17 +184,14 @@ def allocate(capacity_bytes: int | None = None) -> TraceBuffer:
     _check(hip.hipMalloc(ctypes.byref(device_ptr), capacity_bytes), "hipMalloc(trace buffer)")
     _check(hip.hipMemset(device_ptr, 0, capacity_bytes), "hipMemset(trace buffer)")
 
-    cursor = ctypes.c_void_p()
-    _check(hip.hipMalloc(ctypes.byref(cursor), 4), "hipMalloc(trace cursor)")
-    _check(hip.hipMemset(cursor, 0, 4), "hipMemset(trace cursor)")
-
-    buf = TraceBuffer(
+    # The kernel's slot counter lives in the buffer's first record slot, so the host reads
+    # exactly the memory the kernel incremented.
+    return TraceBuffer(
         device_ptr=device_ptr.value or 0,
-        capacity_slots=capacity_slots,
-        cursor_ptr=cursor.value or 0,
+        capacity_slots=capacity_slots - 1,  # slot 0 is the cursor
+        cursor_ptr=device_ptr.value or 0,
         bufptr_ptr=0,
     )
-    return buf
 
 
 def dump_dir() -> str:

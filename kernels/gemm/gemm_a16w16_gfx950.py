@@ -814,6 +814,13 @@ def gemm_a16w16_hti_gfx950_kernel(
             param.has_bias,
         )
 
+    # Same instrumentation scheme as gemm_a16w16_gfx950_kernel; stripped entirely unless
+    # FLYDSL_IKET_ENABLE=1. Phase granularity only: the half-tile interleave below is
+    # hand-scheduled around sched_barrier, and annotating inside it would distort the very
+    # overlap it exists to create.
+    wave_lifetime = iket.range_start("wave_lifetime")
+    iket.range_push("prologue")
+
     tid = fx.thread_idx.x
     wid = tid // GFX950_WAVE_SIZE
     num_pid_m = (m + block_m - 1) // block_m
@@ -1071,8 +1078,14 @@ def gemm_a16w16_hti_gfx950_kernel(
     rocdl.sched_barrier(0)
     wait_vmcnt_and_barrier(half_ldg_b_iters + half_ldg_a_iters)
 
+    iket.range_pop()  # prologue
+    iket.range_push("mainloop")
+
     main_loop_end = k_tiles - 2
     for k_tile in range(0, main_loop_end, 2):
+        # The loop advances two k-tiles per iteration (half-tile interleaved), so the
+        # payload is the first tile of the pair.
+        iket.range_push("k_tile_pair", k_tile)
         next_k_tile = k_tile + 2
         # 0
         b0 = load_b_fragment(0, 0)
@@ -1116,6 +1129,11 @@ def gemm_a16w16_hti_gfx950_kernel(
         wait_vmcnt_and_barrier(half_ldg_b_iters + half_ldg_a_iters)
         consume(c11, a1, b1, True)
         rocdl.s_barrier()
+
+        iket.range_pop()  # k_tile_pair
+
+    iket.range_pop()  # mainloop
+    iket.range_push("drain_epilogue")
 
     k_tile = main_loop_end
     # 0
@@ -1181,6 +1199,9 @@ def gemm_a16w16_hti_gfx950_kernel(
         wait_vmcnt_and_barrier(0)
         store_half_tile_to_global(1, 0)
         store_half_tile_to_global(1, 1)
+
+    iket.range_pop()  # drain_epilogue
+    iket.range_end(wave_lifetime)
 
 
 @flyc.jit

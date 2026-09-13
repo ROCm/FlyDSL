@@ -133,8 +133,13 @@ def _load_gpu_modules(engine: ExecutionEngine) -> List[int]:
     return [module.value]
 
 
-def build_abi_storage(ctypes_seq):
-    """One zeroed ctypes storage per slot ctype, plus a packed pointer array of their addresses."""
+def build_abi_storage(ctypes_seq, presets=None):
+    """One zeroed ctypes storage per slot ctype, plus a packed pointer array of their addresses.
+
+    *presets* maps a slot index to a constant value written once here.  That is how an
+    *implicit* argument gets a value: it has no entry in the caller's signature, so it
+    cannot use a per-call fill -- those index the argument tuple and would raise.
+    """
     packed = (ctypes.c_void_p * len(ctypes_seq))()
     storages = []
     for i, ct in enumerate(ctypes_seq):
@@ -142,6 +147,8 @@ def build_abi_storage(ctypes_seq):
             s = ct(0)
         except TypeError:
             s = ct()
+        if presets and i in presets:
+            s.value = presets[i]
         storages.append(s)
         packed[i] = ctypes.addressof(s)
     return storages, packed
@@ -190,18 +197,19 @@ class CallState:
     -- no per-slot loop, no ctypes allocation. Thread-local for thread safety.
     """
 
-    __slots__ = ("_func_exe", "_spec", "_tls", "_factory")
+    __slots__ = ("_func_exe", "_spec", "_tls", "_factory", "_presets")
 
-    def __init__(self, slot_specs, func_exe):
+    def __init__(self, slot_specs, func_exe, presets=None):
         self._func_exe = func_exe
         self._spec = slot_specs  # list of (arg_idx, ctype, fill)
+        self._presets = presets or {}
         self._tls = threading.local()
         self._factory = _build_dispatch_factory(slot_specs)
 
     def _make_dispatch(self):
         # Allocate one typed storage per slot + the packed pointer array; the null
         # auto-stream slot uses c_void_p -> NULL (its fill is None, never written).
-        storages, packed = build_abi_storage([ctype for _arg_idx, ctype, _fill in self._spec])
+        storages, packed = build_abi_storage([ctype for _arg_idx, ctype, _fill in self._spec], self._presets)
         # The dispatch closure keeps packed + storages alive
         self._tls.packed = packed
         self._tls.storages = storages

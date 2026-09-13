@@ -88,9 +88,9 @@ def test_three_events_emit_one_atomic_not_three(monkeypatch):
     text = _ir(launch)
     assert text.count("s_memrealtime") == 3, "each event needs its own timestamp"
     assert text.count("atomicrmw") == 1, "slot claim must be hoisted to the prologue"
-    # Only the cursor is a device global; the buffer arrives as a kernel argument, which
-    # is what keeps the kernel disk-cacheable.
-    assert text.count("llvm.mlir.global") == 1  # __iket_cursor
+    # No device globals at all: the buffer arrives as a kernel argument and its first
+    # record slot holds the cursor, so nothing needs host-side symbol binding.
+    assert text.count("llvm.mlir.global") == 0
 
 
 def test_disabled_build_is_identical_to_uninstrumented(monkeypatch):
@@ -364,3 +364,40 @@ def test_trace_buffer_is_a_trailing_kernel_argument(monkeypatch):
     assert "fly.ptr<i8, global>" in text, "trace buffer parameter is missing"
     launch_line = next(ln for ln in text.splitlines() if "gpu.launch_func" in ln)
     assert "fly.ptr" in launch_line, "buffer is not passed as a launch operand"
+
+
+def test_buffer_pointer_is_real_when_the_kernel_can_launch(monkeypatch):
+    """A launchable traced kernel must get a real device address, not a null pointer.
+
+    The kernel dereferences this pointer, so a null reaches the GPU as a segfault at
+    launch with no Python-level error -- the failure mode this test exists to prevent.
+    Under COMPILE_ONLY nothing launches, so allocation is skipped there instead.
+    """
+    from flydsl.compiler.jit_function import _ensure_iket_buffer_arg
+
+    _frontend_only(monkeypatch, enable=True)  # sets COMPILE_ONLY=1
+
+    args = []
+    assert _ensure_iket_buffer_arg(args) is True
+    assert len(args) == 1
+    # COMPILE_ONLY: no allocation, so no device is touched.
+    assert not args[0].pointer  # c_void_p(None) is falsy
+
+    # Without COMPILE_ONLY the helper must allocate rather than pass a null through.
+    monkeypatch.delenv("COMPILE_ONLY", raising=False)
+    allocated = {}
+
+    class _FakeBuffer:
+        device_ptr = 0xDEADBEEF
+
+    from flydsl.expr import iket_emit
+
+    def _fake_ensure():
+        allocated["called"] = True
+        return _FakeBuffer()
+
+    monkeypatch.setattr(iket_emit, "ensure_buffer", _fake_ensure)
+    args2 = []
+    assert _ensure_iket_buffer_arg(args2) is True
+    assert allocated.get("called"), "launchable kernel did not allocate a trace buffer"
+    assert args2[0].pointer.value == 0xDEADBEEF
