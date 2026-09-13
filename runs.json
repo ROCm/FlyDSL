@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-13T06:45:28Z",
+ "updated": "2026-09-13T06:48:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,21 +10,22 @@
    "branch": "codex/vector-api-migration",
    "event": "pull_request",
    "title": "Migrate vector consumers and consolidate kernel helpers",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34736351838",
    "created_at": "2026-09-13T03:47:37Z",
-   "updated_at": "2026-09-13T05:37:44Z",
+   "updated_at": "2026-09-13T06:47:29Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-13T05:37:44Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34736351838/job/103669715901"
+     "completed_at": "2026-09-13T06:47:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34736351838/job/103669715901",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
