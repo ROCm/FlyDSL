@@ -3,18 +3,15 @@
 
 """Host side of in-kernel event tracing: allocate the buffer, bind it, read it back.
 
-The device writes records into a buffer whose address arrives through the
-``__iket_bufptr`` global (see :mod:`flydsl.expr.iket_emit`).  Binding it needs a
-device-symbol lookup, which FlyDSL does not export -- the 26 ``mgpu*`` wrappers
-include ``mgpuModuleGetFunction`` but no global-address lookup -- so iket calls
-``hipModuleGetGlobal`` directly through ``ctypes``.
+The device writes records into a buffer whose address is passed to instrumented
+kernels as a trailing implicit argument (see :mod:`flydsl.expr.iket_emit` and
+``compiler/kernel_function.py``).  Nothing here resolves a device symbol, which is
+what keeps traced kernels disk-cacheable: registering a ``post_load_processors``
+callback would set ``extern_linked`` and disable the disk cache.
 
-That is a deliberate, contained exception: ``libamdhip64.so`` is already a
-``DT_NEEDED`` of ``libfly_jit_runtime.so``, so it is loaded in-process before any
-iket code runs, and the dependency is confined to this module.  The alternative --
-adding an ``mgpuModuleGetGlobal`` wrapper -- is a C++ change plus a dual-arch
-rebuild, for a binding that the dialect phase replaces with an implicit kernel
-argument anyway.
+Allocation goes through ``ctypes`` on ``libamdhip64.so`` -- already a ``DT_NEEDED``
+of ``libfly_jit_runtime.so``, so it is loaded in-process before any iket code runs.
+The dependency is confined to this module.
 """
 
 from __future__ import annotations
@@ -38,16 +35,9 @@ def _hip_lib():
             _hip = ctypes.CDLL("libamdhip64.so")
         except OSError as exc:  # pragma: no cover - depends on the ROCm install
             raise RuntimeError(
-                "iket needs libamdhip64.so to resolve device globals via hipModuleGetGlobal; "
+                "iket needs libamdhip64.so to allocate its device trace buffer; "
                 "it is normally already loaded as a dependency of libfly_jit_runtime.so"
             ) from exc
-        _hip.hipModuleGetGlobal.restype = ctypes.c_int
-        _hip.hipModuleGetGlobal.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_size_t),
-            ctypes.c_void_p,
-            ctypes.c_char_p,
-        ]
         for name, argtypes in (
             ("hipMalloc", [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t]),
             ("hipFree", [ctypes.c_void_p]),
@@ -169,12 +159,12 @@ def buffer_bytes() -> int:
     return int(env.iket.buffer_bytes)
 
 
-def attach(module_handle: int, *, capacity_bytes: int | None = None) -> TraceBuffer:
-    """Allocate a trace buffer and bind it into *module_handle*.
+def allocate(capacity_bytes: int | None = None) -> TraceBuffer:
+    """Allocate a trace buffer for the current process.
 
-    Intended as a ``post_load_processors`` callback: that hook hands over the raw
-    ``hipModule_t`` right after the GPU module is loaded, which is the only point where
-    the device globals exist and the first kernel has not yet launched.
+    The buffer address is passed to instrumented kernels as a trailing argument, so
+    nothing here needs a loaded module or a device-symbol lookup -- which is what keeps
+    traced kernels disk-cacheable.
     """
     hip = _hip_lib()
     capacity_bytes = capacity_bytes if capacity_bytes is not None else buffer_bytes()
@@ -182,42 +172,20 @@ def attach(module_handle: int, *, capacity_bytes: int | None = None) -> TraceBuf
     if capacity_slots == 0:
         raise ValueError(f"FLYDSL_IKET_BUFFER_BYTES={capacity_bytes} is smaller than one record")
 
-    cursor = ctypes.c_void_p()
-    bufptr = ctypes.c_void_p()
-    size = ctypes.c_size_t()
-    _check(
-        hip.hipModuleGetGlobal(
-            ctypes.byref(cursor),
-            ctypes.byref(size),
-            ctypes.c_void_p(module_handle),
-            _iket.CURSOR_SYMBOL.encode(),
-        ),
-        f"hipModuleGetGlobal({_iket.CURSOR_SYMBOL})",
-    )
-    _check(
-        hip.hipModuleGetGlobal(
-            ctypes.byref(bufptr),
-            ctypes.byref(size),
-            ctypes.c_void_p(module_handle),
-            _iket.BUFPTR_SYMBOL.encode(),
-        ),
-        f"hipModuleGetGlobal({_iket.BUFPTR_SYMBOL})",
-    )
-
     device_ptr = ctypes.c_void_p()
     _check(hip.hipMalloc(ctypes.byref(device_ptr), capacity_bytes), "hipMalloc(trace buffer)")
     _check(hip.hipMemset(device_ptr, 0, capacity_bytes), "hipMemset(trace buffer)")
 
-    addr = ctypes.c_uint64(device_ptr.value or 0)
-    _check(hip.hipMemcpy(bufptr, ctypes.byref(addr), 8, _MEMCPY_H2D), "hipMemcpy(bufptr)")
+    cursor = ctypes.c_void_p()
+    _check(hip.hipMalloc(ctypes.byref(cursor), 4), "hipMalloc(trace cursor)")
+    _check(hip.hipMemset(cursor, 0, 4), "hipMemset(trace cursor)")
 
     buf = TraceBuffer(
         device_ptr=device_ptr.value or 0,
         capacity_slots=capacity_slots,
         cursor_ptr=cursor.value or 0,
-        bufptr_ptr=bufptr.value or 0,
+        bufptr_ptr=0,
     )
-    buf.reset()
     return buf
 
 

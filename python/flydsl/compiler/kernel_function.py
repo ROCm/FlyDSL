@@ -208,6 +208,7 @@ class CompilationContext:
         # Callables invoked on each GPU hipModule_t after ExecutionEngine
         # loads it.  Populated by ExternFunction when module_init_fn is set.
         self.post_load_processors: list = []
+        self.iket_buf_arg = None  # host-side SSA value for the iket trace buffer
 
     @classmethod
     def get_current(cls) -> Optional["CompilationContext"]:
@@ -387,6 +388,11 @@ class KernelLauncher:
         kernel_operands = []
         for arg in kernel_args:
             kernel_operands.extend(extract_to_ir_values(arg))
+        # The iket buffer is a kernel OPERAND, not an async dependency: the stream travels
+        # through async_dependencies, and putting a pointer there is a type error.
+        _iket_ctx = CompilationContext.get_current()
+        if _iket_ctx is not None and _iket_ctx.iket_buf_arg is not None:
+            kernel_operands.append(_iket_ctx.iket_buf_arg)
 
         with launch_loc:
             grid_x = Index(grid_dims[0]).ir_value()
@@ -553,6 +559,15 @@ class KernelFunction:
         kernel_arg_types = []
         for value in param_values:
             kernel_arg_types.extend(get_ir_types(value))
+
+        # iket: a trailing implicit pointer parameter carrying the trace buffer. Declared
+        # on the kernel rather than bound as a device global so the kernel stays
+        # disk-cacheable; kernel args are bare pointers here, so it costs one SGPR pair.
+        iket_traced = ctx.iket_buf_arg is not None
+        if iket_traced:
+            # Match the host-side PointerJitArg's type exactly, or gpu.launch_func
+            # rejects the operand.
+            kernel_arg_types.append(ctx.iket_buf_arg.type)
 
         kernel_id = ctx.next_kernel_id()
         if self._name is not None:

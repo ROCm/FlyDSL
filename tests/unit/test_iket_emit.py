@@ -88,7 +88,9 @@ def test_three_events_emit_one_atomic_not_three(monkeypatch):
     text = _ir(launch)
     assert text.count("s_memrealtime") == 3, "each event needs its own timestamp"
     assert text.count("atomicrmw") == 1, "slot claim must be hoisted to the prologue"
-    assert text.count("llvm.mlir.global") == 2  # __iket_cursor, __iket_bufptr
+    # Only the cursor is a device global; the buffer arrives as a kernel argument, which
+    # is what keeps the kernel disk-cacheable.
+    assert text.count("llvm.mlir.global") == 1  # __iket_cursor
 
 
 def test_disabled_build_is_identical_to_uninstrumented(monkeypatch):
@@ -317,3 +319,48 @@ def test_chrome_trace_names_each_wave_by_hardware_location():
     assert labels == ["XCD3/SE2/SH1/CU9/SIMD2/wave5"]
     instant = [e for e in doc["traceEvents"] if e.get("ph") == "i"]
     assert instant and instant[0]["name"] == "phase" and instant[0]["args"]["payload"] == 7
+
+
+def test_traced_kernel_stays_disk_cacheable(monkeypatch):
+    """Tracing must not register a post_load_processor.
+
+    Doing so sets ``extern_linked`` in the jit layer, which disables the disk cache for
+    that kernel -- so every profiling run would recompile from scratch. Passing the trace
+    buffer as an implicit kernel argument avoids the callback entirely.
+    """
+    _frontend_only(monkeypatch, enable=True)
+
+    @flyc.kernel
+    def annotated():
+        iket.mark("a")
+
+    @flyc.jit
+    def launch():
+        annotated().launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+    launch()
+    assert not getattr(
+        launch, "_extern_linkage_keys", None
+    ), "tracing registered a post_load_processor, which disables the disk cache"
+
+
+def test_trace_buffer_is_a_trailing_kernel_argument(monkeypatch):
+    """The buffer is an operand of gpu.launch_func, not an async dependency.
+
+    The stream travels through async_dependencies; putting a pointer there is a type
+    error rather than a kernel argument.
+    """
+    _frontend_only(monkeypatch, enable=True)
+
+    @flyc.kernel
+    def annotated():
+        iket.mark("a")
+
+    @flyc.jit
+    def launch():
+        annotated().launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+    text = _ir(launch)
+    assert "fly.ptr<i8, global>" in text, "trace buffer parameter is missing"
+    launch_line = next(ln for ln in text.splitlines() if "gpu.launch_func" in ln)
+    assert "fly.ptr" in launch_line, "buffer is not passed as a launch operand"

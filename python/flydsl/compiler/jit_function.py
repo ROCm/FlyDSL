@@ -1487,6 +1487,7 @@ class JitFunction:
                         ):
                             warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
                     has_user_stream = _ensure_stream_arg(jit_args)
+                    has_iket_buf = _ensure_iket_buffer_arg(jit_args)
                     ir_types = get_ir_types(jit_args)
                     loc = func_def_location(self.func, ctx)
 
@@ -1510,8 +1511,12 @@ class JitFunction:
 
                             with ir.InsertionPoint(entry_block):
                                 ir_args = list(func_op.regions[0].blocks[0].arguments)
+                                # The iket buffer is appended after the stream, so it is
+                                # last when present.
+                                if has_iket_buf:
+                                    comp_ctx.iket_buf_arg = ir_args[-1]
                                 if not has_user_stream:
-                                    comp_ctx.stream_arg = ir_args[-1]
+                                    comp_ctx.stream_arg = ir_args[-2] if has_iket_buf else ir_args[-1]
                                 user_jit_args = jit_args[: len(param_names)]
                                 dsl_args = construct_from_ir_values(dsl_types, user_jit_args, ir_args)
                                 log().info(f"dsl_args={dsl_args}")
@@ -1607,6 +1612,27 @@ def _ensure_stream_arg(jit_args: list) -> bool:
         return True
     jit_args.append(Stream(None))
     return False
+
+
+def _ensure_iket_buffer_arg(jit_args: list) -> bool:
+    """Append the iket trace-buffer pointer to *jit_args* when tracing is enabled.
+
+    Passing the buffer as an argument rather than binding a device global keeps the kernel
+    disk-cacheable: registering a ``post_load_processors`` callback sets ``extern_linked``
+    (see :func:`_build_compiled`), which disables the disk cache for that kernel.
+
+    The value is a null pointer at trace time; the runtime fills the real address into the
+    ABI slot before launch.
+    """
+    from ..expr import iket as _iket
+
+    if not _iket.tracing_enabled():
+        return False
+    from ..expr.numeric import Int8
+    from .jit_argument import PointerJitArg
+
+    jit_args.append(PointerJitArg(Int8, None))
+    return True
 
 
 def jit(func: Optional[Callable] = None) -> JitFunction:
