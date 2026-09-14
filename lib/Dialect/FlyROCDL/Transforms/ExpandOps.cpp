@@ -116,6 +116,22 @@ Value materializeScalar(OpBuilder &builder, Location loc, const tdm::Scalar &sca
   if (scalar.isStatic)
     return arith::ConstantIntOp::create(builder, loc, ty, scalar.value);
 
+  if (!scalar.extentTerms.empty()) {
+    Value result = arith::ConstantIntOp::create(builder, loc, ty, scalar.value);
+    Value one = arith::ConstantIntOp::create(builder, loc, ty, 1);
+    for (auto [mode, scale] : scalar.extentTerms) {
+      Value extent =
+          materializeScalar(builder, loc, tdm::Scalar::getDynamic(mode, true), width, leaves);
+      if (!extent)
+        return nullptr;
+      Value term = arith::SubIOp::create(builder, loc, extent, one);
+      term = arith::MulIOp::create(builder, loc, term,
+                                   arith::ConstantIntOp::create(builder, loc, ty, scale));
+      result = arith::AddIOp::create(builder, loc, result, term);
+    }
+    return result;
+  }
+
   Value leaf = leaves.get(scalar.mode, scalar.fromShape);
   if (!leaf)
     return nullptr;
@@ -124,12 +140,6 @@ Value materializeScalar(OpBuilder &builder, Location loc, const tdm::Scalar &sca
     leaf = arith::ExtUIOp::create(builder, loc, ty, leaf);
   else if (leafWidth > width)
     leaf = arith::TruncIOp::create(builder, loc, ty, leaf);
-  if (scalar.divisor != 1) {
-    // The recast's division, deferred to run time: the caller asserted the tensor is laid
-    // out in whole internal units, which a value only known now cannot be checked against.
-    Value divisor = arith::ConstantIntOp::create(builder, loc, ty, scalar.divisor);
-    leaf = arith::DivUIOp::create(builder, loc, leaf, divisor);
-  }
   return leaf;
 }
 
@@ -140,19 +150,12 @@ Value staticTuple(OpBuilder &builder, Location loc, IntTupleAttr attr) {
 
 /// The coordinate tensor's shape, as a value.
 ///
-/// Unlike its base and its stride, this one is not all-static: it is the global tensor's
-/// own shape — except under a recast, which splits the contiguous mode into
-/// `(ratio, extent / ratio)` — so a tensor with run-time extents leaves dynamic leaves in
-/// it, and those have to be resolved out of the layout operand exactly like the
-/// descriptor's extents are. An operand-less `fly.make_int_tuple` would type-check and
-/// then have nothing behind those leaves for a later pass to read.
+/// Preserve the global shape, materializing dynamic leaves from the input layout.
 Value materializeCoordShape(OpBuilder &builder, Location loc, IntTupleAttr shape,
                             const tdm::Geometry &geometry, LayoutLeaves &leaves) {
   // One scalar per leaf, in the order `tdm::coordLayout` laid them out.
   SmallVector<tdm::Scalar> scalars;
   for (int32_t mode = 0; mode < static_cast<int32_t>(geometry.modeExtent.size()); ++mode) {
-    if (geometry.ratio != 1 && mode == geometry.contiguousMode)
-      scalars.push_back(tdm::Scalar::getStatic(geometry.ratio));
     scalars.push_back(geometry.modeExtent[mode]);
   }
 
@@ -222,12 +225,6 @@ template <typename OpT> LogicalResult expandOne(OpT op, IRRewriter &rewriter) {
     if (!v)
       return op.emitOpError() << "could not materialize the extent of descriptor dim "
                               << (descRank - 1 - i);
-    args.push_back(v);
-  }
-  if (geometry->iterCount > 1) {
-    Value v = materializeScalar(rewriter, loc, geometry->iterStride, 64, leaves);
-    if (!v)
-      return op.emitOpError() << "could not materialize the iteration stride";
     args.push_back(v);
   }
 

@@ -76,23 +76,13 @@ IntTupleAttr asLeaf(Attribute a) {
   return IntTupleAttr::get(a);
 }
 
-/// Rebuild a tuple shaped like `profile`, taking leaves from `flat` in depth-first order.
-/// The leaf at index `splitLeaf` is replaced by `splitValue` instead, which makes the
-/// result one level deeper there — that is how a recast's integer division is written
-/// into the coordinate tensor's shape. `intTupleUnflatten` takes whatever attribute sits
-/// at a profile leaf, so a two-element `splitValue` needs no special case.
-IntTupleAttr unflattenLike(MLIRContext *ctx, IntTupleAttr profile, ArrayRef<Attribute> flat,
-                           int32_t splitLeaf = -1, Attribute splitValue = nullptr) {
+/// Rebuild the original tensor profile from depth-first leaves.
+IntTupleAttr unflattenLike(MLIRContext *ctx, IntTupleAttr profile, ArrayRef<Attribute> flat) {
   SmallVector<Attribute> leaves;
-  for (auto [i, elem] : llvm::enumerate(flat))
-    leaves.push_back(static_cast<int32_t>(i) == splitLeaf ? splitValue : Attribute(asLeaf(elem)));
+  for (Attribute elem : flat)
+    leaves.push_back(asLeaf(elem));
   return intTupleUnflatten(TupleBuilder(ctx), IntTupleAttr::get(ArrayAttr::get(ctx, leaves)),
                            profile);
-}
-
-/// A two-element int tuple, as an attribute usable as a leaf replacement.
-Attribute makePair(MLIRContext *ctx, Attribute a, Attribute b) {
-  return IntTupleAttr::get(ArrayAttr::get(ctx, {asLeaf(a), asLeaf(b)}));
 }
 
 //===----------------------------------------------------------------------===//
@@ -263,12 +253,18 @@ FailureOr<LayoutAttr> makeValueMap(IntTupleAttr gshape, TileAttr tiler,
   FailureOr<Attribute> padded = padTiler(ctx, tiler, gshape, 0, emitError);
   if (failed(padded))
     return failure();
+  AttrLayoutBuilder layoutBuilder(ctx);
+  LayoutAttr identity = LayoutAttr::get(gshape, intTupleMakeBasisTupleLike(gshape));
+  // A single-mode tiler canonicalizes to a scalar. Tile composition indexes
+  // tuple modes, so use ordinary layout composition for this scalar case.
+  if (auto extent = dyn_cast<IntAttr>(*padded))
+    return layoutComposition(
+        layoutBuilder, identity,
+        LayoutAttr::get(IntTupleAttr::get(extent), IntTupleAttr::getLeafStatic(ctx, 1)));
   auto tileAttr = dyn_cast<TileAttr>(*padded);
   if (!tileAttr)
     tileAttr = TileAttr::get(*padded);
 
-  AttrLayoutBuilder layoutBuilder(ctx);
-  LayoutAttr identity = LayoutAttr::get(gshape, intTupleMakeBasisTupleLike(gshape));
   return layoutComposition(layoutBuilder, identity, tileAttr);
 }
 
@@ -286,15 +282,11 @@ struct VectorEntry {
 
 /// `coalesce(composition(valueMap, right_inverse(slayout)))`.
 ///
-/// The vector is the smem run innermost first, truncated at the first mode whose basis
-/// coefficient is not 1 (no starting in the middle of a global
-/// mode). `nextAfterCut` is the mode the cut stopped on, or -1 when the vector runs to the
-/// end — it matters because it is the mode the box is *adjacent to in LDS*, and hardware
-/// iteration walks LDS with a constant increment of one box, so that mode and only that
-/// mode can be folded into the instruction.
+/// The vector is the smem run innermost first, truncated at the first non-unit
+/// basis coefficient. Residual values become additional software iterations.
 FailureOr<SmallVector<VectorEntry>> ldsRun(MLIRContext *ctx, LayoutAttr valueMap,
                                            IntTupleAttr gshape, IntTupleAttr smemShape,
-                                           IntTupleAttr compactStride, int32_t &nextAfterCut,
+                                           IntTupleAttr compactStride,
                                            function_ref<InFlightDiagnostic()> emitError) {
   AttrLayoutBuilder layoutBuilder(ctx);
   LayoutAttr compactSmem = LayoutAttr::get(smemShape, compactStride);
@@ -307,7 +299,6 @@ FailureOr<SmallVector<VectorEntry>> ldsRun(MLIRContext *ctx, LayoutAttr valueMap
   flattenLeaves(sidx2gmode.getStride(), strides);
 
   SmallVector<VectorEntry> vector;
-  nextAfterCut = -1;
   for (auto [extentLeaf, strideLeaf] : llvm::zip(extents, strides)) {
     if (!extentLeaf.isLeafInt() || !extentLeaf.isStatic())
       return emitError() << "the tile/global vectorization must be static";
@@ -326,8 +317,7 @@ FailureOr<SmallVector<VectorEntry>> ldsRun(MLIRContext *ctx, LayoutAttr valueMap
       return emitError() << "unsupported stride leaf in the tile/global vectorization";
     }
     if (coeff != 1 || mode < 0) {
-      nextAfterCut = mode; // -1 when the leaf carried no mode at all
-      break;               // stop at the first non-unit basis
+      break; // stop at the first non-unit basis
     }
     vector.push_back({extent, mode});
   }
@@ -336,47 +326,6 @@ FailureOr<SmallVector<VectorEntry>> ldsRun(MLIRContext *ctx, LayoutAttr valueMap
                           "tile do not share a contiguous innermost run. Does the tiler select "
                           "out the major global mode?";
   return vector;
-}
-
-/// One warp's share of the smem run: its leading `1 / numWarps`.
-///
-/// The whole run belongs to the workgroup; the box only has to be one participant's share
-/// of it, and the participants take equal contiguous chunks. Every chunk is then the same
-/// box translated along a single global mode, which is what lets one descriptor serve all
-/// of them: the caller moves the origin, not the geometry.
-FailureOr<SmallVector<VectorEntry>> splitAcrossWarps(ArrayRef<VectorEntry> vector, int32_t numWarps,
-                                                     function_ref<InFlightDiagnostic()> emitError) {
-  if (numWarps == 1)
-    return SmallVector<VectorEntry>(vector);
-  int32_t total = 1;
-  for (const VectorEntry &e : vector)
-    total *= e.extent;
-  if (total % numWarps)
-    return emitError() << numWarps << " warps cannot split this transfer's " << total
-                       << "-element contiguous run evenly; num_warps has to divide it";
-  int32_t want = total / numWarps;
-
-  SmallVector<VectorEntry> out;
-  int32_t acc = 1;
-  for (const VectorEntry &e : vector) {
-    int32_t room = want / acc;
-    if (room == 1)
-      break;
-    if (e.extent <= room) {
-      out.push_back(e);
-      acc *= e.extent;
-      continue;
-    }
-    if (e.extent % room)
-      return emitError() << "splitting the transfer run " << numWarps << " ways cuts global mode "
-                         << e.mode << " at " << room << " of the " << e.extent
-                         << " elements the tile takes from it, which does not divide it";
-    out.push_back({room, e.mode});
-    break;
-  }
-  if (out.empty())
-    out.push_back({1, vector.front().mode});
-  return out;
 }
 
 //===----------------------------------------------------------------------===//
@@ -402,40 +351,54 @@ FailureOr<std::pair<Scalar, Scalar>> foldModes(ArrayRef<int32_t> modes, ArrayRef
   if (modes.size() == 1)
     return std::make_pair(modeExtent[modes[0]], modeStride[modes[0]]);
 
-  // The recurrence below is compile-time `int32_t` arithmetic, so the packing is static
-  // or it does not happen. That is the companion of the restriction in
-  // `axisBasisPerMode`: see the TODO there for what lifting both would take.
   for (int32_t m : modes)
-    if (!modeExtent[m].isStatic || !modeStride[m].isStatic)
-      return emitError() << "a descriptor dim spans several global modes but mode " << m
-                         << " has a dynamic extent or stride; a multi-mode dim needs static "
-                            "geometry";
+    if (!modeStride[m].isStatic)
+      return emitError() << "a shared descriptor axis requires static global strides";
   int32_t stride = 0;
   for (int32_t m : modes)
     stride = std::gcd(stride, modeStride[m].value);
   if (stride == 0)
     return std::make_pair(modeExtent[modes[0]], Scalar::getStatic(0));
-  int32_t extent = 1;
-  for (int32_t m : modes)
-    extent += (modeExtent[m].value - 1) * (modeStride[m].value / stride);
-  return std::make_pair(Scalar::getStatic(extent), Scalar::getStatic(stride));
+  Scalar extent = Scalar::getStatic(1);
+  for (int32_t m : modes) {
+    int32_t scale = modeStride[m].value / stride;
+    if (modeExtent[m].isStatic)
+      extent.value += (modeExtent[m].value - 1) * scale;
+    else {
+      extent.isStatic = false;
+      extent.extentTerms.emplace_back(m, scale);
+    }
+  }
+  return std::make_pair(extent, Scalar::getStatic(stride));
 }
 
-/// Divide a scalar by the recast ratio. A static value is checked; a dynamic one records
-/// the divisor for the expansion, because the caller is asserting that its tensor is laid
-/// out in whole internal units and a run-time value cannot be checked against that any more
-/// than a static check can verify a dynamic value.
-LogicalResult recastDivide(Scalar &s, int32_t ratio, const Twine &what,
-                           function_ref<InFlightDiagnostic()> emitError) {
-  if (!s.isStatic) {
-    s.divisor *= ratio;
-    return success();
+// Split the compact LDS traversal into contiguous per-warp chunks. Descriptor
+// axes follow that traversal innermost first; logicalShape reverses them, so
+// consuming outermost axes here matches the (ATOM, WARP, ITER) partition map.
+FailureOr<SmallVector<int32_t>> physicalTileShape(ArrayRef<int32_t> logicalShape, int32_t numWarps,
+                                                  function_ref<InFlightDiagnostic()> emitError) {
+  if (numWarps < 1)
+    return emitError() << "num_warps must be positive";
+  SmallVector<int32_t> shape(logicalShape);
+  int32_t remaining = numWarps;
+  for (int32_t &extent : shape) {
+    if (extent < 1)
+      return emitError() << "TDM tile shape dims must be positive";
+    if (remaining == 1)
+      continue;
+    if (extent % remaining == 0) {
+      extent /= remaining;
+      remaining = 1;
+    } else if (remaining % extent == 0) {
+      remaining /= extent;
+      extent = 1;
+    } else {
+      return emitError() << "num_warps cuts a descriptor axis unevenly";
+    }
   }
-  if (s.value % ratio)
-    return emitError() << what << " is " << s.value
-                       << ", which is not divisible by the recast ratio " << ratio;
-  s.value /= ratio;
-  return success();
+  if (remaining != 1)
+    return emitError() << "num_warps exceeds the logical descriptor box";
+  return shape;
 }
 
 } // namespace
@@ -471,7 +434,7 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
                         : Scalar::getDynamic(i, /*fromShape=*/false);
   }
 
-  // The single contiguous mode, recorded before the recast rewrites the strides.
+  // The single contiguous global mode.
   int32_t contiguousMode = -1;
   {
     int32_t found = 0;
@@ -512,10 +475,8 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
     return emitError() << "the tiler holds " << vSize << " elements but the LDS tile holds "
                        << smemSize << "; a tiler reshapes the tile, it does not shrink it";
 
-  // Per global mode, how many elements the tile takes and the step it takes them by. The
-  // step is the basis coefficient: 1 for the ordinary case where the tile walks a mode
-  // element by element, and more when it strides — `8:2E0` takes 8 rows two apart.
-  SmallVector<int32_t> tileExtent(numModes, 1), tileStep(numModes, 1);
+  // Per global mode, how many elements the tiler takes.
+  SmallVector<int32_t> tileExtent(numModes, 1);
   {
     llvm::DenseSet<int32_t> tiled;
     SmallVector<IntTupleAttr> vExtents, vStrides;
@@ -533,114 +494,43 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
       if (!extentLeaf.isLeafInt() || !extentLeaf.isStatic())
         return emitError() << "the tiler must be static";
       int32_t extent = extentLeaf.getLeafAsInt().getValue();
-      int32_t coeff = basis.getValue().getValue();
       if (tiled.insert(mode).second) {
         tileExtent[mode] = extent;
-        tileStep[mode] = coeff;
       } else {
         tileExtent[mode] *= extent;
-        tileStep[mode] = std::min(tileStep[mode], coeff);
       }
     }
   }
 
-  int32_t nextAfterCut = -1;
-  FailureOr<SmallVector<VectorEntry>> vectorOr = ldsRun(
-      ctx, valueMap, gshape, request.smemLayout.getShape(), compactStride, nextAfterCut, emitError);
+  FailureOr<SmallVector<VectorEntry>> vectorOr =
+      ldsRun(ctx, valueMap, gshape, request.smemLayout.getShape(), compactStride, emitError);
   if (failed(vectorOr))
     return failure();
   SmallVector<VectorEntry> vector = *vectorOr;
 
-  // How much of each mode the box covers, counted before the recast rewrites the run in
-  // wider units — `tileExtent` is in the tensor's own elements and the two are compared
-  // below.
-  SmallVector<int32_t> coveredExtent(numModes, 1);
-  for (const VectorEntry &e : vector)
-    coveredExtent[e.mode] *= e.extent;
-
-  // Cut before the recast, so the other warps' share turns into
-  // neither a wider unit nor an iteration — it is simply not this box.
-  FailureOr<SmallVector<VectorEntry>> splitOr =
-      splitAcrossWarps(vector, request.numWarps, emitError);
-  if (failed(splitOr))
-    return failure();
-  vector = *splitOr;
-
-  // The recast: view the transfer in a wider unit. The innermost run,
-  // the contiguous global mode's extent, and every global stride are divided by the ratio.
-  // This is what lets a sub-byte or awkward element type ride on a TDM data size the
-  // hardware can encode.
-  if (request.elemBits <= 0 || request.internalBits % request.elemBits != 0)
-    return emitError() << "internal width " << request.internalBits
-                       << " is not a multiple of element width " << request.elemBits;
-  int32_t ratio = request.internalBits / request.elemBits;
-  if (ratio != 1) {
-    if (vector.front().extent % ratio)
-      return emitError() << "the innermost run is " << vector.front().extent
-                         << ", which is not divisible by the recast ratio " << ratio;
-    vector.front().extent /= ratio;
-    for (int32_t i = 0; i < numModes; ++i) {
-      if (modeStride[i].isStatic && modeStride[i].value == 0)
-        continue;
-      if (modeStride[i].isStatic && modeStride[i].value == 1) {
-        // The contiguous mode is the one measured in elements; recast shrinks it.
-        if (failed(recastDivide(modeExtent[i], ratio,
-                                "the extent of the contiguous global mode " + Twine(i), emitError)))
-          return failure();
-      } else if (failed(recastDivide(modeStride[i], ratio, "the stride of global mode " + Twine(i),
-                                     emitError))) {
-        return failure();
-      }
-    }
-    // The pad fields ride in the same units as the box (the lowering rebuilds the LDS pitch
-    // as `tileShape[-1] + padAmount`), so a recast rescales them too.
-    if (padAmount) {
-      if (padInterval % ratio || padAmount % ratio)
-        return emitError() << "LDS padding (" << padInterval << ", " << padAmount
-                           << ") is not divisible by the recast ratio " << ratio
-                           << "; the pad must be a whole number of internal units";
-      padInterval /= ratio;
-      padAmount /= ratio;
-    }
-  }
-
-  // The box need not span the whole tile. What the cut above leaves behind is not an
-  // error: a TiledCopy says how many values one *tiled*
-  // operation covers, the atom says how many one *call* covers, and the V mode carries the
-  // difference as more calls.
-  //
-  // What TDM adds is one optimization on top: `iterate_enable` replays a single descriptor
-  // `iterate_count` times, advancing global and LDS by a constant increment each time. That
-  // folds *one* of those axes back into the instruction. Which one is not a free choice —
-  // the LDS increment is one whole box, so it has to be the mode the box is adjacent to in
-  // LDS, which is exactly the mode the cut stopped on. Hardware iteration also
-  // steps LDS by one box, which is the other warps' space once the box is only a share of
-  // the tile, so a split gives the axis up.
+  // Residual traversal stays in ITER instead of changing the logical atom's
+  // size through hardware descriptor iteration.
   llvm::DenseSet<int32_t> coveredModes;
-  for (const VectorEntry &e : vector)
-    coveredModes.insert(e.mode);
 
-  int32_t iterCount = 1, iterMode = -1;
-  Scalar iterStride;
-  if (request.numWarps == 1 && nextAfterCut >= 0 &&
-      tileExtent[nextAfterCut] > coveredExtent[nextAfterCut]) {
-    int32_t count = tileExtent[nextAfterCut] / coveredExtent[nextAfterCut];
-    if (count <= kMaxIterateCount && !padAmount) {
-      Scalar step = modeStride[nextAfterCut];
-      if (!step.isStatic && tileStep[nextAfterCut] != 1) {
-        // The step would need a run-time multiply the expansion does not model; keep the
-        // axis in the V mode instead, which is always correct and only costs instructions.
-      } else {
-        iterMode = nextAfterCut;
-        iterCount = count;
-        iterStride = step.isStatic ? Scalar::getStatic(step.value * tileStep[nextAfterCut]) : step;
-      }
+  // Coalesce contiguous axes up to half CDNA5's encodable tile length range.
+  // Missing global modes are appended afterwards, so they never change this choice.
+  SmallVector<RawDim> dims;
+  for (const VectorEntry &e : vector) {
+    if (e.extent == 1)
+      continue;
+    const Scalar &stride = modeStride[e.mode];
+    if (!dims.empty() && dims.back().stride.isStatic && stride.isStatic &&
+        static_cast<int64_t>(dims.back().box) * dims.back().stride.value == stride.value &&
+        static_cast<int64_t>(dims.back().box) * e.extent <= kMaxCoalescedTileDim) {
+      dims.back().box *= e.extent;
+      dims.back().modes.push_back(e.mode);
+    } else {
+      dims.push_back({e.extent, {e.mode}, stride});
     }
   }
-
-  SmallVector<RawDim> dims;
-  for (const VectorEntry &e : vector)
-    dims.push_back({e.extent, {e.mode}, modeStride[e.mode]});
+  for (const RawDim &dim : dims)
+    for (int32_t mode : dim.modes)
+      coveredModes.insert(mode);
   // A tile extent of one still needs a descriptor coordinate when the global tensor can
   // move on that mode. Without this filler, changing a batch index leaves global_addr at
   // batch zero.
@@ -658,7 +548,7 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
   // global mode. It can legitimately be missing: `coalesce` drops a size-1 mode from the
   // smem vector, so a tile that is one element wide along the contiguous mode loses it. Put
   // it back as an extent-1 dim instead of rejecting the copy.
-  if (!dims.front().stride.isStatic || dims.front().stride.value != 1) {
+  if (dims.empty() || !dims.front().stride.isStatic || dims.front().stride.value != 1) {
     llvm::DenseSet<int32_t> seen;
     for (const RawDim &d : dims)
       for (int32_t m : d.modes)
@@ -668,13 +558,12 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
     else
       return emitError() << "the innermost descriptor dim must be contiguous in global memory "
                             "(stride 1), got global mode "
-                         << dims.front().modes.front()
+                         << (dims.empty() ? -1 : dims.front().modes.front())
                          << " — the LDS tile's majorness does not match the global tensor's";
   }
 
-  // Every mode the box spans keeps its own descriptor dim: two dims that happen to be
-  // adjacent in global memory are not folded into one, so a dim's bound is always a
-  // per-mode rectangular bound and the descriptor says exactly what the tile said.
+  // A merged axis has one linear descriptor bound shared by its contributing
+  // modes, matching the TDM descriptor's folded global extent.
   SmallVector<bool> clampable(dims.size(), true);
 
   // Past five dims the trailing modes are packed into the
@@ -719,10 +608,8 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
   Geometry geometry;
   geometry.padInterval = padInterval;
   geometry.padAmount = padAmount;
-  geometry.ratio = ratio;
   geometry.modeExtent = modeExtent;
   geometry.modeStride = modeStride;
-  geometry.contiguousMode = contiguousMode;
   for (auto [d, raw] : llvm::enumerate(dims)) {
     FailureOr<std::pair<Scalar, Scalar>> folded =
         foldModes(raw.modes, modeExtent, modeStride, emitError);
@@ -741,22 +628,18 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
     geometry.dims.push_back(dim);
   }
 
-  // Iteration is paid for out of the descriptor's own slots (`tdm::kMaxIterateRank`), so a
-  // descriptor that needs them keeps its residual axis in the V mode instead. Declining is
-  // not a failure: the copy still moves the whole tile, it just spends one more instruction
-  // per step.
-  if (iterCount > 1 && geometry.rank() > kMaxIterateRank)
-    iterCount = 1;
-  if (iterCount > 1) {
-    geometry.iterCount = iterCount;
-    geometry.iterStride = iterStride;
-    geometry.iterMode = iterMode;
-    // The residual axis is stepped by the hardware, not by a `tensor_dim`, so whichever dim
-    // carries its tile origin has no bound to give.
-    for (Dim &dim : geometry.dims)
-      if (llvm::is_contained(dim.modes, iterMode))
-        dim.clampable = false;
+  auto physical = physicalTileShape(tileShape(geometry), request.numWarps, emitError);
+  if (failed(physical))
+    return failure();
+  int64_t physicalElems = 1;
+  for (int32_t dim : *physical) {
+    if (dim > kMaxTileDim)
+      return emitError() << "physical TDM tile dimension exceeds " << kMaxTileDim;
+    physicalElems *= dim;
   }
+  if (padAmount && physicalElems % padInterval)
+    return emitError() << "padInterval must divide each warp's physical TDM box";
+  geometry.descriptorShape = std::move(*physical);
 
   return geometry;
 }
@@ -788,10 +671,8 @@ namespace {
 
 /// Per global mode, the descriptor axis it moves along, as a basis leaf (`0` = none).
 ///
-/// Shared by the coordinate tensor's strides and by the atom's boundary-check mode map,
-/// which differ only in whether a dim the descriptor cannot put a
-/// single bound on still contributes: a coordinate on such a dim is still a coordinate, a
-/// bound on it would not be one.
+/// Coordinates use descriptor order; boundary flags use state-slot order and omit
+/// packed dimensions that cannot preserve a descriptor bound.
 FailureOr<SmallVector<Attribute>> axisBasisPerMode(MLIRContext *ctx, const Geometry &geometry,
                                                    IntTupleAttr gshape, bool clampableOnly,
                                                    function_ref<InFlightDiagnostic()> emitError) {
@@ -809,9 +690,9 @@ FailureOr<SmallVector<Attribute>> axisBasisPerMode(MLIRContext *ctx, const Geome
   for (auto [descDim, dim] : llvm::enumerate(geometry.dims)) {
     if (clampableOnly && !dim.clampable)
       continue;
-    // Axis indices are in tensor dim order, the reverse of descriptor order, matching the
-    // atom's `tileShape` and its state slots.
-    int32_t axis = descRank - 1 - static_cast<int32_t>(descDim);
+    // Boundary flags use state-slot order; public coordinates use descriptor order.
+    int32_t axis = clampableOnly ? descRank - 1 - static_cast<int32_t>(descDim)
+                                 : static_cast<int32_t>(descDim);
     for (int32_t mode : dim.modes) {
       // A size-1 axis has only coordinate 0 and a stride-0 one is a
       // broadcast; neither can move the tile, so neither gets a basis.
@@ -825,8 +706,8 @@ FailureOr<SmallVector<Attribute>> axisBasisPerMode(MLIRContext *ctx, const Geome
         byMode[mode] = BasisAttr::get(IntAttr::getStatic(ctx, 1), axis);
         continue;
       }
-      // A dim covering several modes only ever comes out of the rank-5 packing. Each of
-      // those modes rides the shared axis at its own scale, `mode_stride / dim_stride`,
+      // Contiguous merging and rank-5 packing can put several modes on one dim. Each
+      // mode rides the shared axis at its own scale, `mode_stride / dim_stride`,
       // and the map has nowhere to put a scale that is not a compile-time integer: a
       // `tensor2tdm` leaf is a `BasisAttr`, so the whole 1-to-many mapping has to be
       // static or it is not expressible.
@@ -876,37 +757,7 @@ FailureOr<LayoutAttr> coordLayout(const Geometry &geometry, IntTupleAttr gshape,
   if (failed(byMode))
     return failure();
 
-  if (geometry.ratio == 1)
-    return LayoutAttr::get(gshape, unflattenLike(ctx, gshape, *byMode));
-
-  // Under a recast the descriptor counts in wider units than the tensor does, so the
-  // contiguous mode's coordinate has to be divided by the ratio — and a rational basis
-  // scale is not something a Fly basis can hold (its coefficient is an
-  // integer). The shape carries it instead: that mode becomes `(ratio, N / ratio)` with
-  // strides `(0, 1E<axis>)`, so a logical coordinate `n` decomposes into
-  // `(n % ratio, n / ratio)` and only the second half reaches the axis. Integer division,
-  // done by the layout algebra, invisible to the kernel — which goes on tiling in tensor
-  // elements.
-  if (geometry.contiguousMode < 0)
-    return emitError() << "a recast needs exactly one contiguous global mode to divide the "
-                          "coordinate on, found none";
-  int32_t split = geometry.contiguousMode;
-  const Scalar &recastExtent = geometry.modeExtent[split];
-  Attribute extentAttr = recastExtent.isStatic
-                             ? Attribute(IntAttr::getStatic(ctx, recastExtent.value))
-                             : Attribute(IntAttr::getDynamic(ctx));
-  SmallVector<IntTupleAttr> gshapeLeaves;
-  flattenLeaves(gshape, gshapeLeaves);
-  SmallVector<Attribute> flatShape;
-  for (IntTupleAttr leaf : gshapeLeaves)
-    flatShape.push_back(leaf.getValue());
-
-  IntTupleAttr shape =
-      unflattenLike(ctx, gshape, flatShape, split,
-                    makePair(ctx, IntAttr::getStatic(ctx, geometry.ratio), extentAttr));
-  IntTupleAttr stride = unflattenLike(ctx, gshape, *byMode, split,
-                                      makePair(ctx, IntAttr::getStatic(ctx, 0), (*byMode)[split]));
-  return LayoutAttr::get(shape, stride);
+  return LayoutAttr::get(gshape, unflattenLike(ctx, gshape, *byMode));
 }
 
 SmallVector<int32_t> tileShape(const Geometry &geometry) {
@@ -945,70 +796,52 @@ FailureOr<LayoutAttr> partitionLayout(IntTupleAttr atomValShape, int32_t atomVal
   MLIRContext *ctx = smemLayout.getContext();
   AttrLayoutBuilder layoutBuilder(ctx);
 
-  FailureOr<int64_t> vSize = staticSize(smemLayout.getShape(), "the LDS tile's shape", emitError);
-  if (failed(vSize))
-    return failure();
-  FailureOr<int64_t> gSize = staticSize(coordShape, "the coordinate tile's shape", emitError);
-  if (failed(gSize))
-    return failure();
-  if (*vSize != *gSize)
-    return emitError() << "the LDS tile holds " << *vSize << " values but the coordinate tile "
-                       << "holds " << *gSize
-                       << "; the two are cut by the same layout, so they must agree";
-  if (numWarps < 1)
-    return emitError() << "the warp layout must have a positive size, got " << numWarps;
-  if (*vSize % numWarps)
-    return emitError() << numWarps << " warps do not divide the tile's " << *vSize
-                       << " values evenly";
-  int64_t want = *vSize / numWarps;
-
-  // Tensor elements one atom *call* moves. The atom counts in its own `val_bits`, which a
-  // recast makes wider than the tile's element, while the tile
-  // counts in its own. TDM's two sides carry the same value layout -- one instruction
-  // moves one whole box either way -- so which of src / dst is read does not matter.
+  if (smemLayout.getShape().isLeaf() || coordShape.isLeaf())
+    return emitError() << "partition inputs must have shape (box, rest...)";
+  LayoutAttr smemBox = smemLayout.at(0);
+  IntTupleAttr targetBox = coordShape.at(0);
+  FailureOr<int64_t> sSize = staticSize(smemBox.getShape(), "the LDS box", emitError);
+  FailureOr<int64_t> targetSize = staticSize(targetBox, "the target box", emitError);
   FailureOr<int64_t> vals = staticSize(atomValShape, "the atom's value mode", emitError);
-  if (failed(vals))
+  if (failed(sSize) || failed(targetSize) || failed(vals))
     return failure();
   int64_t bits = *vals * atomValBits;
   if (ldsElemBits <= 0 || bits % ldsElemBits)
-    return emitError() << "one call moves " << bits
-                       << " bits, which is not a whole number of the LDS tile's " << ldsElemBits
-                       << "-bit elements";
+    return emitError() << "the atom must move a whole number of LDS elements";
   int64_t numElems = bits / ldsElemBits;
-  if (numElems <= 0 || want % numElems)
-    return emitError() << "each of the " << numWarps << " warps takes " << want
-                       << " values but one call moves " << numElems << ", which does not divide it";
+  int64_t collectiveElems = numElems * numWarps;
+  if (*sSize <= 0 || *targetSize <= 0 || numWarps < 1 || numElems <= 0 ||
+      *sSize % collectiveElems || *targetSize % collectiveElems)
+    return emitError() << "both mode-0 sizes must be multiples of the cooperative tile size "
+                       << collectiveElems << " (atom size * num_warps)";
 
-  // The inverse of the compact tile, composed directly: the pad has already been taken
-  // back out, so it covers the tile exactly and needs no tiling up to the tile's size.
-  FailureOr<std::tuple<int32_t, int32_t, IntTupleAttr>> lds = analyzeLdsTile(smemLayout, emitError);
+  FailureOr<std::tuple<int32_t, int32_t, IntTupleAttr>> lds = analyzeLdsTile(smemBox, emitError);
   if (failed(lds))
     return failure();
   LayoutAttr invSmem =
-      layoutRightInverse(layoutBuilder, LayoutAttr::get(smemLayout.getShape(), std::get<2>(*lds)));
-
-  auto flat = [&](int64_t extent, int64_t stride) {
-    return LayoutAttr::get(IntTupleAttr::get(IntAttr::getStatic(ctx, extent)),
-                           IntTupleAttr::get(IntAttr::getStatic(ctx, stride)));
-  };
-  LayoutAttr layoutV = layoutComposition(layoutBuilder, invSmem, flat(numElems, 1));
-  LayoutAttr layoutIter =
-      layoutComposition(layoutBuilder, invSmem, flat(want / numElems, numElems));
-
-  SmallVector<Attribute> shapes{layoutV.getShape()};
-  SmallVector<Attribute> strides{layoutV.getStride()};
-  if (numWarps > 1) {
-    // `((ATOM), (WARP), (ITER))` before the warp coordinate is sliced out: the
-    // warps take equal contiguous chunks of the LDS order, so warp `w` starts at
-    // `w * want` -- the stride of the WARP mode.
-    LayoutAttr layoutWarp = layoutComposition(layoutBuilder, invSmem, flat(numWarps, want));
-    shapes.push_back(layoutWarp.getShape());
-    strides.push_back(layoutWarp.getStride());
-  }
-  shapes.push_back(layoutIter.getShape());
-  strides.push_back(layoutIter.getStride());
-  return LayoutAttr::get(IntTupleAttr::get(ArrayAttr::get(ctx, shapes)),
-                         IntTupleAttr::get(ArrayAttr::get(ctx, strides)));
+      layoutRightInverse(layoutBuilder, LayoutAttr::get(smemBox.getShape(), std::get<2>(*lds)));
+  auto scalar = [&](int64_t n) { return IntTupleAttr::getLeafStatic(ctx, n); };
+  // Repeat the compact inverse in logical shared-box order. The extra stride is
+  // the logical box size, not its padded address footprint.
+  LayoutAttr traversal = invSmem;
+  if (*targetSize > *sSize)
+    traversal = LayoutAttr::get(
+        IntTupleAttr::get(
+            ArrayAttr::get(ctx, {invSmem.getShape(), scalar((*targetSize + *sSize - 1) / *sSize)})),
+        IntTupleAttr::get(ArrayAttr::get(ctx, {invSmem.getStride(), scalar(*sSize)})));
+  traversal = layoutCoalesce(layoutBuilder, traversal);
+  LayoutAttr values =
+      layoutComposition(layoutBuilder, traversal, LayoutAttr::get(scalar(numElems), scalar(1)));
+  LayoutAttr warps = layoutComposition(layoutBuilder, traversal,
+                                       LayoutAttr::get(scalar(numWarps), scalar(numElems)));
+  LayoutAttr iterations = layoutComposition(
+      layoutBuilder, traversal,
+      LayoutAttr::get(scalar(*targetSize / collectiveElems), scalar(collectiveElems)));
+  return LayoutAttr::get(
+      IntTupleAttr::get(
+          ArrayAttr::get(ctx, {values.getShape(), warps.getShape(), iterations.getShape()})),
+      IntTupleAttr::get(
+          ArrayAttr::get(ctx, {values.getStride(), warps.getStride(), iterations.getStride()})));
 }
 
 } // namespace mlir::fly_rocdl::tdm

@@ -6,8 +6,8 @@
 // becomes `global_addr_increment`, `tensor_dim3` becomes `lds_addr_increment`, and
 // `tile_dim3` becomes `iterate_count`. A dim whose stride the descriptor no longer holds
 // is not a dim, so an iterating descriptor has two -- the third axis is the one the
-// iteration itself walks. The builder never reaches this: `foldModes` drops iteration
-// rather than refusing the atom. Hand-written IR does, and must be refused.
+// iteration itself walks. The tiled builder keeps residual values in the software
+// ITER mode; explicit hardware-iterating atoms must respect this rank limit.
 
 // -----
 

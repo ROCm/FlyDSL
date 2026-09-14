@@ -434,8 +434,9 @@ LogicalResult tdmVerify(function_ref<InFlightDiagnostic()> emitError, ArrayRef<i
     }
   }
   for (int32_t d : tileShape)
-    if (d < 1)
-      return emitError() << "TDM tile shape dims must be >= 1, got " << d;
+    if (d < 1 || d > tdm::kMaxTileDim)
+      return emitError() << "TDM tile shape dims must be in [1, " << tdm::kMaxTileDim << "], got "
+                         << d;
   // A width is all the descriptor takes from the data type, so a type without one
   // (a memref, a tuple) has nothing to give it -- and `getIntOrFloatBitWidth` asserts
   // rather than answering, so this guard comes first.
@@ -637,6 +638,10 @@ LogicalResult emitTdmAtomCall(OpBuilder &builder, Location loc, const TdmStatic 
   if (static_cast<int32_t>(coord.size()) != rank)
     return mlir::emitError(loc) << "cdna5 TDM: the coordinate has " << coord.size()
                                 << " leaves but the atom's tile is rank " << rank;
+
+  // Coordinate tensors expose descriptor axes innermost-first.
+  // The state slots and tileShape remain in outermost-first tensor order.
+  std::reverse(coord.begin(), coord.end());
 
   // global_addr = base + elem_bytes * sum_i coord_i * stride_i. A coord left at zero
   // folds its whole term away, so a tile that never moves along a dim costs nothing.

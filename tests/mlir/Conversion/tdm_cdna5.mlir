@@ -53,7 +53,7 @@ func.func @test_cdna5_store_type(
 // -----
 
 // A static tile coordinate. `local_tile` has already folded it into the coord
-// tensor's type — origin (384, 128) — so the copy site carries no arithmetic at all;
+// tensor's type — descriptor-order origin (128, 384) — so the copy site carries no arithmetic at all;
 // layout lowering turns that origin into coord_0 / coord_1 and the descriptor math
 // falls out as constants folded against the runtime strides.
 //
@@ -65,11 +65,11 @@ func.func @test_cdna5_load_static_coord(
     %base: !fly.ptr<f16, global>, %s0: i64, %e0: i32, %e1: i32,
     %lds: !fly.memref<f16, shared, (128,64):(64,1)>) {
   %atom = fly.make_copy_atom(%base, %s0, %e0, %e1 : !fly.ptr<f16, global>, i64, i32, i32) {valBits = 16 : i32} : !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>
-  %org = fly.make_coord() : () -> !fly.int_tuple<(384,128)>
+  %org = fly.make_coord() : () -> !fly.int_tuple<(128,384)>
   %shp = fly.make_int_tuple() : () -> !fly.int_tuple<(128,64)>
-  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0,1E1)>
-  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E0,1E1)>) -> !fly.layout<(128,64):(1E0,1E1)>
-  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(384,128)>, !fly.layout<(128,64):(1E0,1E1)>) -> !fly.coord_tensor<(384,128), (128,64):(1E0,1E1)>
+  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1,1E0)>
+  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E1,1E0)>) -> !fly.layout<(128,64):(1E1,1E0)>
+  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(128,384)>, !fly.layout<(128,64):(1E1,1E0)>) -> !fly.coord_tensor<(128,384), (128,64):(1E1,1E0)>
   // A fully static origin lives in the operand's *type*, so it materializes as two
   // constants and nothing was computed to get them.
   // CHECK-DAG: %[[C0:.*]] = arith.constant 384 : i32
@@ -87,7 +87,7 @@ func.func @test_cdna5_load_static_coord(
   // CHECK-DAG: %[[R1:.*]] = arith.subi %arg3, %[[C1]] : i32
   // CHECK-DAG: arith.maxsi %[[R1]]
   // CHECK: rocdl.tensor.load.to.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, 0 : vector<4xi32>, vector<8xi32>
-  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.coord_tensor<(384,128), (128,64):(1E0,1E1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
+  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.coord_tensor<(128,384), (128,64):(1E1,1E0)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
 }
 
@@ -114,12 +114,12 @@ func.func @test_cdna5_load_no_boundary_check(
   %off = fly.make_int_tuple() : () -> !fly.int_tuple<(0,0)>
   %a0 = fly.make_copy_atom(%base, %s0, %e0, %e1 : !fly.ptr<f16, global>, i64, i32, i32) {valBits = 16 : i32} : !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>
   %atom = fly.atom.set_value(%a0, "boundary_check", %off) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.int_tuple<(0,0)>) -> !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>
-  %org = fly.make_coord() : () -> !fly.int_tuple<(384,128)>
+  %org = fly.make_coord() : () -> !fly.int_tuple<(128,384)>
   %shp = fly.make_int_tuple() : () -> !fly.int_tuple<(128,64)>
-  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0,1E1)>
-  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E0,1E1)>) -> !fly.layout<(128,64):(1E0,1E1)>
-  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(384,128)>, !fly.layout<(128,64):(1E0,1E1)>) -> !fly.coord_tensor<(384,128), (128,64):(1E0,1E1)>
-  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.coord_tensor<(384,128), (128,64):(1E0,1E1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
+  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1,1E0)>
+  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E1,1E0)>) -> !fly.layout<(128,64):(1E1,1E0)>
+  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(128,384)>, !fly.layout<(128,64):(1E1,1E0)>) -> !fly.coord_tensor<(128,384), (128,64):(1E1,1E0)>
+  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.coord_tensor<(128,384), (128,64):(1E1,1E0)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
 }
 
@@ -144,12 +144,12 @@ func.func @test_cdna5_load_mixed_boundary_check(
   %off = fly.make_int_tuple() : () -> !fly.int_tuple<(1,0)>
   %a0 = fly.make_copy_atom(%base, %s0, %e0, %e1 : !fly.ptr<f16, global>, i64, i32, i32) {valBits = 16 : i32} : !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>
   %atom = fly.atom.set_value(%a0, "boundary_check", %off) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.int_tuple<(1,0)>) -> !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>
-  %org = fly.make_coord() : () -> !fly.int_tuple<(384,128)>
+  %org = fly.make_coord() : () -> !fly.int_tuple<(128,384)>
   %shp = fly.make_int_tuple() : () -> !fly.int_tuple<(128,64)>
-  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0,1E1)>
-  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E0,1E1)>) -> !fly.layout<(128,64):(1E0,1E1)>
-  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(384,128)>, !fly.layout<(128,64):(1E0,1E1)>) -> !fly.coord_tensor<(384,128), (128,64):(1E0,1E1)>
-  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.coord_tensor<(384,128), (128,64):(1E0,1E1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
+  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1,1E0)>
+  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E1,1E0)>) -> !fly.layout<(128,64):(1E1,1E0)>
+  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(128,384)>, !fly.layout<(128,64):(1E1,1E0)>) -> !fly.coord_tensor<(128,384), (128,64):(1E1,1E0)>
+  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.coord_tensor<(128,384), (128,64):(1E1,1E0)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
 }
 
@@ -171,12 +171,12 @@ func.func @test_cdna5_load_dynamic_boundary_check(
   %off = fly.make_int_tuple(%flag) : (i32) -> !fly.int_tuple<(1,?)>
   %a0 = fly.make_copy_atom(%base, %s0, %e0, %e1 : !fly.ptr<f16, global>, i64, i32, i32) {valBits = 16 : i32} : !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>
   %atom = fly.atom.set_value(%a0, "boundary_check", %off) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.int_tuple<(1,?)>) -> !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>
-  %org = fly.make_coord() : () -> !fly.int_tuple<(384,128)>
+  %org = fly.make_coord() : () -> !fly.int_tuple<(128,384)>
   %shp = fly.make_int_tuple() : () -> !fly.int_tuple<(128,64)>
-  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0,1E1)>
-  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E0,1E1)>) -> !fly.layout<(128,64):(1E0,1E1)>
-  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(384,128)>, !fly.layout<(128,64):(1E0,1E1)>) -> !fly.coord_tensor<(384,128), (128,64):(1E0,1E1)>
-  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.coord_tensor<(384,128), (128,64):(1E0,1E1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
+  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1,1E0)>
+  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E1,1E0)>) -> !fly.layout<(128,64):(1E1,1E0)>
+  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(128,384)>, !fly.layout<(128,64):(1E1,1E0)>) -> !fly.coord_tensor<(128,384), (128,64):(1E1,1E0)>
+  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.coord_tensor<(128,384), (128,64):(1E1,1E0)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
 }
 
@@ -190,16 +190,16 @@ func.func @test_cdna5_load_dynamic_coord(
     %base: !fly.ptr<f16, global>, %s0: i64, %e0: i32, %e1: i32, %m: i32,
     %lds: !fly.memref<f16, shared, (128,64):(64,1)>) {
   %atom = fly.make_copy_atom(%base, %s0, %e0, %e1 : !fly.ptr<f16, global>, i64, i32, i32) {valBits = 16 : i32} : !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>
-  %org = fly.make_coord(%m) : (i32) -> !fly.int_tuple<(?,0)>
+  %org = fly.make_coord(%m) : (i32) -> !fly.int_tuple<(0,?)>
   %shp = fly.make_int_tuple() : () -> !fly.int_tuple<(128,64)>
-  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0,1E1)>
-  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E0,1E1)>) -> !fly.layout<(128,64):(1E0,1E1)>
-  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(?,0)>, !fly.layout<(128,64):(1E0,1E1)>) -> !fly.coord_tensor<(?,0), (128,64):(1E0,1E1)>
+  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1,1E0)>
+  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E1,1E0)>) -> !fly.layout<(128,64):(1E1,1E0)>
+  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(0,?)>, !fly.layout<(128,64):(1E1,1E0)>) -> !fly.coord_tensor<(0,?), (128,64):(1E1,1E0)>
   // The dynamic leaf is the block index itself, taken straight off the operand; the
   // static one is still a constant from the type.
   // CHECK: arith.subi %{{.*}}, %arg4 : i32
   // CHECK: rocdl.tensor.load.to.lds
-  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.coord_tensor<(?,0), (128,64):(1E0,1E1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
+  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.coord_tensor<(0,?), (128,64):(1E1,1E0)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
 }
 
@@ -214,11 +214,11 @@ func.func @test_cdna5_store(
   %atom = fly.make_copy_atom(%base, %s0, %e0, %e1 : !fly.ptr<f16, global>, i64, i32, i32) {valBits = 16 : i32} : !fly.copy_atom<!fly_rocdl.cdna5.tensor_store<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>
   %org = fly.make_coord() : () -> !fly.int_tuple<(0,0)>
   %shp = fly.make_int_tuple() : () -> !fly.int_tuple<(128,64)>
-  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0,1E1)>
-  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E0,1E1)>) -> !fly.layout<(128,64):(1E0,1E1)>
-  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(0,0)>, !fly.layout<(128,64):(1E0,1E1)>) -> !fly.coord_tensor<(0,0), (128,64):(1E0,1E1)>
+  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1,1E0)>
+  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E1,1E0)>) -> !fly.layout<(128,64):(1E1,1E0)>
+  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(0,0)>, !fly.layout<(128,64):(1E1,1E0)>) -> !fly.coord_tensor<(0,0), (128,64):(1E1,1E0)>
   // CHECK: rocdl.tensor.store.from.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, 0 : vector<4xi32>, vector<8xi32>
-  fly.copy_atom_call(%atom, %lds, %gt) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_store<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.memref<f16, shared, (128,64):(64,1)>, !fly.coord_tensor<(0,0), (128,64):(1E0,1E1)>) -> ()
+  fly.copy_atom_call(%atom, %lds, %gt) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_store<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>, !fly.memref<f16, shared, (128,64):(64,1)>, !fly.coord_tensor<(0,0), (128,64):(1E1,1E0)>) -> ()
   return
 }
 
@@ -234,15 +234,15 @@ func.func @test_cdna5_load_recast_subbyte(
     %base: !fly.ptr<f4E2M1FN, global>, %s0: i64, %e0: i32, %e1: i32,
     %lds: !fly.memref<f4E2M1FN, shared, (128,64):(64,1)>) {
   %atom = fly.make_copy_atom(%base, %s0, %e0, %e1 : !fly.ptr<f4E2M1FN, global>, i64, i32, i32) {valBits = 8 : i32} : !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 32], elem = i8, tensor2tdm = (1E0,1E1)>, 8>
-  %org = fly.make_coord() : () -> !fly.int_tuple<(384,64)>
+  %org = fly.make_coord() : () -> !fly.int_tuple<(64,384)>
   %shp = fly.make_int_tuple() : () -> !fly.int_tuple<(128,32)>
-  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0,1E1)>
-  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,32)>, !fly.int_tuple<(1E0,1E1)>) -> !fly.layout<(128,32):(1E0,1E1)>
-  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(384,64)>, !fly.layout<(128,32):(1E0,1E1)>) -> !fly.coord_tensor<(384,64), (128,32):(1E0,1E1)>
+  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1,1E0)>
+  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,32)>, !fly.int_tuple<(1E1,1E0)>) -> !fly.layout<(128,32):(1E1,1E0)>
+  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(64,384)>, !fly.layout<(128,32):(1E1,1E0)>) -> !fly.coord_tensor<(64,384), (128,32):(1E1,1E0)>
   // data_size 0 == 1 byte, and the address arithmetic scales the coordinate by that
   // byte rather than by the tensor's 4-bit element.
   // CHECK: rocdl.tensor.load.to.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, 0 : vector<4xi32>, vector<8xi32>
-  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 32], elem = i8, tensor2tdm = (1E0,1E1)>, 8>, !fly.coord_tensor<(384,64), (128,32):(1E0,1E1)>, !fly.memref<f4E2M1FN, shared, (128,64):(64,1)>) -> ()
+  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 32], elem = i8, tensor2tdm = (1E0,1E1)>, 8>, !fly.coord_tensor<(64,384), (128,32):(1E1,1E0)>, !fly.memref<f4E2M1FN, shared, (128,64):(64,1)>) -> ()
   return
 }
 
@@ -260,9 +260,9 @@ func.func @test_cdna5_load_iterate(
   %atom = fly.make_copy_atom(%base, %s0, %e0, %e1, %istride : !fly.ptr<f16, global>, i64, i32, i32, i64) {valBits = 16 : i32} : !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [1, 64], elem = f16, tensor2tdm = (0,1E1), iterCount = 8>, 16>
   %org = fly.make_coord() : () -> !fly.int_tuple<(0,0)>
   %shp = fly.make_int_tuple() : () -> !fly.int_tuple<(1,64)>
-  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0,1E1)>
-  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(1,64)>, !fly.int_tuple<(1E0,1E1)>) -> !fly.layout<(1,64):(1E0,1E1)>
-  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(0,0)>, !fly.layout<(1,64):(1E0,1E1)>) -> !fly.coord_tensor<(0,0), (1,64):(1E0,1E1)>
+  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1,1E0)>
+  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(1,64)>, !fly.int_tuple<(1E1,1E0)>) -> !fly.layout<(1,64):(1E1,1E0)>
+  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(0,0)>, !fly.layout<(1,64):(1E1,1E0)>) -> !fly.coord_tensor<(0,0), (1,64):(1E1,1E0)>
   // GROUP1 word 0 carries data_size (1 << 16 for 2-byte elements) together with
   // iterate_enable (1 << 19): 0x80000 | 0x10000 == 589824.
   // CHECK-DAG: arith.constant 589824 : i32
@@ -271,7 +271,7 @@ func.func @test_cdna5_load_iterate(
   // GROUP2 word 3's upper half is iterate_count encoded as value-minus-one: 7 << 16.
   // CHECK-DAG: arith.constant 458752 : i32
   // CHECK: rocdl.tensor.load.to.lds %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, 0 : vector<4xi32>, vector<8xi32>
-  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [1, 64], elem = f16, tensor2tdm = (0,1E1), iterCount = 8>, 16>, !fly.coord_tensor<(0,0), (1,64):(1E0,1E1)>, !fly.memref<f16, shared, (8,64):(64,1)>) -> ()
+  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [1, 64], elem = f16, tensor2tdm = (0,1E1), iterCount = 8>, 16>, !fly.coord_tensor<(0,0), (1,64):(1E1,1E0)>, !fly.memref<f16, shared, (8,64):(64,1)>) -> ()
   return
 }
 
@@ -307,9 +307,9 @@ func.func @test_cdna5_atomic_barrier(
   %atom = fly.atom.set_value(%a0, "atomic_barrier_addr", %bar) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1), atomicBarrier = true>, 16>, !fly.ptr<i64, shared>) -> !fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1), atomicBarrier = true>, 16>
   %org = fly.make_coord() : () -> !fly.int_tuple<(0,0)>
   %shp = fly.make_int_tuple() : () -> !fly.int_tuple<(128,64)>
-  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0,1E1)>
-  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E0,1E1)>) -> !fly.layout<(128,64):(1E0,1E1)>
-  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(0,0)>, !fly.layout<(128,64):(1E0,1E1)>) -> !fly.coord_tensor<(0,0), (128,64):(1E0,1E1)>
-  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1), atomicBarrier = true>, 16>, !fly.coord_tensor<(0,0), (128,64):(1E0,1E1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
+  %str = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1,1E0)>
+  %lay = fly.make_layout(%shp, %str) : (!fly.int_tuple<(128,64)>, !fly.int_tuple<(1E1,1E0)>) -> !fly.layout<(128,64):(1E1,1E0)>
+  %gt = fly.make_view(%org, %lay) : (!fly.int_tuple<(0,0)>, !fly.layout<(128,64):(1E1,1E0)>) -> !fly.coord_tensor<(0,0), (128,64):(1E1,1E0)>
+  fly.copy_atom_call(%atom, %gt, %lds) : (!fly.copy_atom<!fly_rocdl.cdna5.tensor_load<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1), atomicBarrier = true>, 16>, !fly.coord_tensor<(0,0), (128,64):(1E1,1E0)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
 }

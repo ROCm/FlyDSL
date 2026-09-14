@@ -222,6 +222,14 @@ def make_tiled_tdm_atom(
 ):
     """Build a wave-scoped CDNA5 TDM copy atom and its coordinate tensor.
 
+    The atom describes one warp's physical issue. The coordinate tensor retains
+    the input global tensor's shape; :func:`tdm_partition` selects each warp's
+    share using the same compact LDS traversal as descriptor construction.
+
+    Stage one supports at most five leaf modes in the global tensor's shape,
+    counted before coalescing (including extent-one modes). The innermost
+    descriptor dimension of each warp's issue must span at least 16 bytes.
+
     * ``op`` — a ``TensorLoad(...)`` or ``TensorStore(...)`` instance.
     * ``tensor`` — the global tensor.
     * ``smem_layout`` — the LDS tile layout.
@@ -231,10 +239,7 @@ def make_tiled_tdm_atom(
       layout.
     * ``init_boundary_check`` — The *initial* ``boundary_check`` state.
     * ``atomic_barrier`` — whether this atom arrives on the atomic barrier when finished.
-    * ``internal_type`` — the unit the *descriptor* counts in, which may be
-      wider than the tensor's element (its width must be a multiple). It
-      is what lets a sub-byte element ride on a ``data_size`` the hardware can
-      encode.
+    * ``internal_type`` — reserved; currently must be ``None``.
 
     Example:
         Loading a 128x64 tile of a row-major ``gA`` into LDS.
@@ -242,11 +247,11 @@ def make_tiled_tdm_atom(
             sA_layout = fx.make_layout((128, 64), (64, 1))
             atom, mA = make_tiled_tdm_atom(TensorLoad(), gA, sA_layout, (128, 64))
 
-            mA = fx.zipped_divide(mA, (128, 64))[None, (bid_x, bid_y)]
-            sA = fx.Tensor(fx.make_view(smem_ptr, sA_layout))
+            mA = fx.zipped_divide(mA, (128, 64))[None, (bid_x, None)]
+            sA = fx.make_view(smem_ptr, fx.make_layout(((128, 64), Stages), ((64, 1), 8192)))
 
             tAsA, tAgA = tdm_partition(atom, warp_coord, warp_layout, sA, mA)
-            fx.copy(atom, tAgA, tAsA)
+            fx.copy(atom, tAgA[None, i], tAsA[None, 0])
 
     Choosing ``sA_layout``:
         The layouts below all hold that same 128x64 tile and differ only in how
@@ -275,8 +280,11 @@ def make_tiled_tdm_atom(
 
     if not isinstance(op, (TensorLoad, TensorStore)):
         raise TypeError(
-            f"make_tiled_tdm_atom: first argument must be a TensorLoad() or " f"TensorStore() instance, got {op!r}"
+            f"make_tiled_tdm_atom: first argument must be a TensorLoad() or TensorStore() instance, got {op!r}"
         )
+
+    if internal_type is not None:
+        raise ValueError("internal_type must be None for now")
 
     smem_layout = smem_layout.layout if isinstance(smem_layout, Tensor) else smem_layout
     # An `!fly.tile` operand, like `smem_layout`: it is entirely static, so it lives in the
@@ -308,30 +316,44 @@ def tdm_partition(
     stensor,
     gtensor,
 ):
-    """Cut an LDS tile and a coordinate tile into the calls the atom makes.
+    """Partition ``(TDM_Tile, rest...)`` tensors, returning ``(shared, global)``.
 
-    Both tiles come out shaped ``((ATOM), (ITER))`` -- mode 0 is one call's worth of
-    values and mode 1 counts the calls.
-
-    ``warp_coord`` / ``warp_layout`` say how the warps split the tile: each
-    issues one instruction over its own share, and the assembled tile belongs to
-    the whole workgroup. Pass ``0`` and ``make_layout(1)`` when a single warp
-    does the copy. There is no thread index and no per-lane slice, so within a
-    warp every lane sees the same partition.
+    Each result has shape ``((ATOM, ITER), rest...)``. ATOM contains exactly
+    one warp's issue (the atom's NumVal). WARP selects consecutive chunks in the
+    same compact LDS traversal used to build the descriptor; ITER advances by
+    ``NumVal * size(warp_layout)``. Each tensor keeps its own ITER and rest modes.
+    The warp layout must bijectively map participants to consecutive IDs starting
+    at zero, and its size must match num_warps used to build the atom.
     """
-    from ..primitive import composition, crd2idx, size
+    from ..primitive import (
+        TileType,
+        coalesce,
+        composition,
+        cosize,
+        crd2idx,
+        group,
+        make_int_tuple,
+        right_inverse,
+        size,
+    )
     from ..typing import static
 
     n_warps = size(warp_layout).unpack()
+    if n_warps < 1 or cosize(warp_layout).unpack() != n_warps or size(right_inverse(warp_layout)).unpack() != n_warps:
+        raise ValueError("warp layout must bijectively map participants to consecutive IDs starting at zero")
+    warp_id = crd2idx(warp_coord, warp_layout).unpack()
 
-    layout_V = static(fly_rocdl.tdm_partition_layout(atom.type, stensor.type, gtensor.type, n_warps))
-    if n_warps == 1:
-        return composition(stensor, layout_V), composition(gtensor, layout_V)
+    def apply(tensor):
+        layout_v = static(fly_rocdl.tdm_partition_layout(atom.type, stensor.type, tensor.type, n_warps))
+        n_rest = tensor.layout.rank - 1
+        tiled = composition(tensor, static(TileType.get([layout_v.type, *([None] * n_rest)])))
+        # Composition canonicalizes singleton wrappers. Restore the tile mode
+        # before selecting WARP from (ATOM, WARP, ITER).
+        if n_rest == 0:
+            tiled = group(tiled, 0, tiled.layout.rank)
+        tiled = tiled[((None, warp_id, None), *([None] * n_rest))]
+        # Slice collects the surviving ATOM and ITER modes at the outer level.
+        tiled = group(tiled, 0, 2)
+        return coalesce(tiled, make_int_tuple(((1, 1),)))
 
-    # The multicast coordinate is sliced out of the middle mode: the warps take equal
-    # contiguous chunks of the LDS order, and this one is `warp_coord`'s.
-    warp_id = crd2idx(warp_coord, warp_layout)
-    return (
-        composition(stensor, layout_V)[None, warp_id, None],
-        composition(gtensor, layout_V)[None, warp_id, None],
-    )
+    return apply(stensor), apply(gtensor)

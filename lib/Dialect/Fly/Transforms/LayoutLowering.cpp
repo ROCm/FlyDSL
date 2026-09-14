@@ -2185,8 +2185,7 @@ public:
         return layout;
       return getLayoutAttr(cast<ComposedLayoutAttr>(attr).getOuter());
     };
-    // An operand is a memref or a coordinate tensor -- a TMA-style atom is addressed by
-    // a coordinate, and only its layout is needed to decide how the tile decomposes.
+    // An operand is a memref or a coordinate tensor
     auto tensorLikeLayout = [&](Type ty) -> LayoutAttr {
       if (auto memref = dyn_cast<fly::MemRefType>(ty))
         return getLayoutAttr(memref.getLayout());
@@ -2205,9 +2204,6 @@ public:
 
     int32_t srcRank = srcLayoutAttr.rank();
     int32_t dstRank = dstLayoutAttr.rank();
-
-    if (srcRank != dstRank)
-      return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
 
     // tests `size(src) == NumValSrc` *before* it peels or loops: a call is
     // issued the moment the operand holds exactly one atom's worth of values.
@@ -2230,11 +2226,27 @@ public:
                             srcVals.getValue() == atomSrcVals.getValue() &&
                             dstVals.getValue() == atomDstVals.getValue();
       if (singleAtomCall || copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+        // As in the leaf case below, materialize composed-layout offsets before
+        // the atom consumes the pointer. Bypassing decomposition loses the LDS
+        // swizzle offset even when the operands hold exactly one atom's values.
+        // Whole-tile atoms instead consume the original layout themselves.
+        if (!copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+          if (isa<fly::MemRefType>(src.getType()))
+            src = DecompositionOp::create(rewriter, loc, src);
+          if (isa<fly::MemRefType>(dst.getType()))
+            dst = DecompositionOp::create(rewriter, loc, dst);
+        }
         CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
         rewriter.eraseOp(op);
         return success();
       }
     }
+
+    // A single atom may have different source/destination profiles (coordinate
+    // bases do not coalesce like contiguous LDS addresses). Only recursive
+    // decomposition requires equal outer ranks.
+    if (srcRank != dstRank)
+      return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
 
     if (pred && predLayoutAttr.rank() == srcRank - 1) {
       LayoutBuilder<LayoutValueAdaptor> builder(rewriter, loc);

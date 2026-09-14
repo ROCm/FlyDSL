@@ -19,6 +19,13 @@ namespace mlir::fly_rocdl::tdm {
 // the last one.
 constexpr int32_t kMaxRank = 5;
 
+// Tile dimensions are direct 16-bit lengths; zero disables a dimension (dim 0: NOP).
+constexpr int32_t kMaxTileDim = 0xFFFF;
+
+// Keep merged axes within half the encodable range. This is a coalescing policy,
+// not a restriction on an individual descriptor dimension.
+constexpr int32_t kMaxCoalescedTileDim = 32768;
+
 // `tensor_dimN_stride` is a 48-bit field, in elements of data_size.
 constexpr uint64_t kMaxTensorStride = (uint64_t{1} << 48) - 1;
 
@@ -39,30 +46,32 @@ constexpr int32_t kMaxIterateRank = 2;
 /// value only exists at run time. The reference is what lets type inference and the
 /// expansion share one derivation: inference needs the geometry's *shape* and reads it
 /// off the static half, while the expansion needs the SSA value and looks it up by
-/// `mode` in the layout operand. `divisor` is the ratio applied to the looked-up value
-/// when the descriptor counts in a wider unit than the tensor's element, 1 otherwise.
+/// `mode` in the layout operand. A folded extent can also sum multiple dynamic modes.
 struct Scalar {
   int32_t value = 0; ///< valid when `isStatic`
   bool isStatic = true;
   int32_t mode = -1;      ///< global mode (depth-first leaf index) when dynamic
   bool fromShape = false; ///< dynamic: read the mode's extent rather than its stride
-  int32_t divisor = 1;
 
-  static Scalar getStatic(int32_t v) { return Scalar{v, true, -1, false, 1}; }
+  /// Dynamic folded extent: value + sum((mode_extent - 1) * scale).
+  SmallVector<std::pair<int32_t, int32_t>> extentTerms;
+
+  static Scalar getStatic(int32_t v) {
+    return Scalar{v, true, -1, false, {}};
+  }
   static Scalar getDynamic(int32_t mode, bool fromShape) {
-    return Scalar{0, false, mode, fromShape, 1};
+    return Scalar{0, false, mode, fromShape, {}};
   }
 };
 
 /// One descriptor dim.
 struct Dim {
-  int32_t box = 1;            ///< tile extent along this dim
+  int32_t box = 1;            ///< full logical box extent along this dim
   SmallVector<int32_t> modes; ///< global modes feeding it, depth-first leaf indices
   Scalar stride;              ///< global stride, in descriptor elements
   Scalar tensorDim;           ///< global extent, for the hardware boundary check
-  /// Whether this dim's bound is a faithful per-mode rectangular bound. A dim fed by one
-  /// mode always is. The rank-5 packing's is not — its extent comes from a gcd recurrence
-  /// over modes that are unrelated in memory.
+  /// Whether this dim supports a descriptor bound. Contiguous merged modes share
+  /// one linear bound. Rank-5 packing of unrelated modes cannot preserve a bound.
   bool clampable = true;
 };
 
@@ -71,19 +80,10 @@ struct Geometry {
   SmallVector<Dim> dims;
   int32_t padInterval = 0;
   int32_t padAmount = 0;
-  int32_t ratio = 1;     ///< tensor elements per descriptor element
-  int32_t iterCount = 1; ///< descriptor replays, 1 when it does not iterate
-  Scalar iterStride;     ///< global step between replays, valid when iterCount > 1
-  int32_t iterMode = -1; ///< the global mode hardware iteration absorbed
-
-  /// Per global mode, its geometry *after* the recast — what the descriptor counts in.
-  /// Kept because the coordinate tensor's basis scales are read back off it.
+  SmallVector<int32_t> descriptorShape; ///< Per-issue box, outermost first; used by the atom type.
+  /// Per-global-mode geometry, used to reconstruct coordinate basis scales.
   SmallVector<Scalar> modeExtent;
   SmallVector<Scalar> modeStride;
-  /// The single stride-1 global mode, or -1. Under a recast this is the mode whose
-  /// coordinate has to be divided by `ratio`.
-  int32_t contiguousMode = -1;
-
   int32_t rank() const { return static_cast<int32_t>(dims.size()); }
 };
 
@@ -92,8 +92,6 @@ struct Request {
   fly::LayoutAttr smemLayout; ///< the LDS tile layout, fully static
   /// The value map, from tile values to global modes: `makeValueMap` of the tiler.
   fly::LayoutAttr valueMap;
-  int32_t elemBits = 0;
-  int32_t internalBits = 0;
   int32_t numWarps = 1;
   /// Whether the atom starts out bounding what it can. One flag for the whole tensor:
   /// which *individual* modes clamp is per-call state, so the builder only says whether
@@ -153,26 +151,13 @@ FailureOr<fly::IntTupleAttr> initialBoundaryCheck(const Geometry &geometry,
                                                   fly::IntTupleAttr gshape, bool enable,
                                                   function_ref<InFlightDiagnostic()> emitError);
 
-/// The tile shape the atom type carries, in tensor dim order.
+/// The full box before warp splitting, in tensor dim order.
 SmallVector<int32_t> tileShape(const Geometry &geometry);
 
-/// The layout `tdm_partition` cuts both the LDS tile and the coordinate tile by, so the
-/// two keep describing the same elements.
-///
-/// The result is `((ATOM), (ITER))`, or `((ATOM), (WARP), (ITER))` when the workgroup's
-/// warps split the tile: mode 0 is one atom call's worth of values, the middle mode (when
-/// present) is the warp the caller slices out, and the last counts the calls. Composing a
-/// tensor with it is what the caller still does in IR; everything up to it is static and
-/// is folded here, which is why this hands back a layout rather than a tensor.
-///
-/// `smemLayout` decides the split. Inverting it gives the order the tile is laid out in
-/// LDS; that order is cut into `numWarps` equal chunks and the first ATOM values of a
-/// chunk are what one descriptor fills. The padding is divided out first, because a pad is
-/// a hole in the addresses and not in the values.
-///
-/// `atomValBits` / `atomValShape` come from the copy atom: how many values one *call*
-/// moves, counted in the atom's own unit, which a recast makes wider than the LDS tile's
-/// element. `ldsElemBits` is that element, and the two are reconciled in bits.
+/// Build an (ATOM, WARP, ITER) map for the target tensor's mode 0 using the
+/// shared box's compact traversal. ATOM is one physical issue; WARP selects a
+/// contiguous share of each cooperative box. Each side may have an independent
+/// ITER count. The caller slices WARP and preserves all rest modes.
 FailureOr<fly::LayoutAttr> partitionLayout(fly::IntTupleAttr atomValShape, int32_t atomValBits,
                                            fly::LayoutAttr smemLayout, int32_t ldsElemBits,
                                            fly::IntTupleAttr coordShape, int32_t numWarps,

@@ -135,8 +135,8 @@ class FlyROCDL_CopyOpCDNA5TDM<string typeName, string typeMnemonic>
     // with that tensor's shape.
     //
     // Being an attribute is a real restriction, not just an encoding choice: a leaf is
-    // `scale E axis`, so the scale is a compile-time integer. One axis per mode is exact
-    // while the map is 1:1, which it is up to five modes.
+    // `scale E axis`, so the scale is a compile-time integer. Contiguous merging and
+    // rank-5 packing can map multiple global modes onto the same descriptor axis.
     // TODO(rank>5, dynamic strides)
     "::mlir::fly::IntTupleAttr":$tensor2tdm,
     // Whether this atom arrives on the HW auto-barrier (descriptor config bit 18).
