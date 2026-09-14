@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-14T03:15:34Z",
+ "updated": "2026-09-14T03:38:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34801828375",
    "created_at": "2026-09-14T03:13:03Z",
-   "updated_at": "2026-09-14T03:13:42Z",
+   "updated_at": "2026-09-14T03:30:12Z",
    "actor": "sammysun0711",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-14T03:30:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34801828375/job/103848746720"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T03:30:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34801828375/job/103848746745"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T03:30:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34801828375/job/103848746752"
+    }
+   ]
   },
   {
    "run_id": 34797082155,
@@ -1610,14 +1638,13 @@
    "actor": "yanboshao",
    "jobs": [
     {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T04:17:22Z",
-     "completed_at": "2026-09-11T04:32:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103134835118",
-     "log_fetch_failed": true
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-14T03:37:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103849862265"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1626,8 +1653,17 @@
      "conclusion": "success",
      "started_at": "2026-09-11T03:33:57Z",
      "completed_at": "2026-09-11T04:59:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103134835126",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103849862301",
      "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-14T03:37:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103849862339"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -1636,26 +1672,18 @@
      "conclusion": "success",
      "started_at": "2026-09-11T03:21:08Z",
      "completed_at": "2026-09-11T04:51:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103134835152",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103849862884",
      "log_fetch_failed": true
     },
     {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
      "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-11T08:36:21Z",
-     "completed_at": "2026-09-11T08:59:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103152917614"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-11T06:25:34Z",
-     "completed_at": "2026-09-11T07:07:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103152917683"
+     "conclusion": "success",
+     "started_at": "2026-09-11T04:17:22Z",
+     "completed_at": "2026-09-11T04:32:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103849863037",
+     "log_fetch_failed": true
     }
    ]
   },
