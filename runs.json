@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-14T15:31:07Z",
+ "updated": "2026-09-14T15:36:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34862944061,
+   "pr": 1134,
+   "commit": "029ae8b9cc4bc55a435bbed6215582da225b876b",
+   "branch": "opus-fa4-align-bf16-perf",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Tune gfx950 BF16 attention XCD config",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061",
+   "created_at": "2026-09-14T15:33:32Z",
+   "updated_at": "2026-09-14T15:33:49Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34853593531,
    "pr": null,
@@ -71,11 +86,11 @@
    "branch": "opus-fa4-align-bf16-perf",
    "event": "pull_request",
    "title": "[Kernel][Perf] Tune gfx950 BF16 attention XCD config",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681",
    "created_at": "2026-09-14T13:45:58Z",
-   "updated_at": "2026-09-14T14:07:43Z",
+   "updated_at": "2026-09-14T15:33:35Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -91,10 +106,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-14T14:07:43Z",
-     "completed_at": null,
+     "completed_at": "2026-09-14T15:33:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681/job/104007305202"
     },
     {
@@ -2187,49 +2202,6 @@
    "updated_at": "2026-09-11T08:37:38Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 34577222538,
-   "pr": null,
-   "commit": "eaa2f4fad6e5663f21c04ac7b0373d0856b399e5",
-   "branch": "ci/pypi-moe-csv-hgemm",
-   "event": "pull_request",
-   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577222538",
-   "created_at": "2026-09-11T08:02:31Z",
-   "updated_at": "2026-09-11T08:32:33Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T08:23:50Z",
-     "completed_at": "2026-09-11T08:31:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577222538/job/103197861567"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T08:26:33Z",
-     "completed_at": "2026-09-11T08:32:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577222538/job/103197861596"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T08:24:08Z",
-     "completed_at": "2026-09-11T08:32:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577222538/job/103197862038"
-    }
-   ]
   }
  ]
 }
