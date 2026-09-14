@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-14T14:13:15Z",
+ "updated": "2026-09-14T15:05:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -70,7 +70,7 @@
    "commit": "ea8ac83330a3bcb851c96d1b2f39890e679ca596",
    "branch": "opus-fa4-align-bf16-perf",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Tune gfx950 BF16 attention pipeline and XCD swizzle",
+   "title": "[Kernel][Perf] Tune gfx950 BF16 attention XCD config",
    "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681",
@@ -81,11 +81,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T14:07:54Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681/job/104007305200"
+     "completed_at": "2026-09-14T14:23:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681/job/104007305200",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -175,21 +176,22 @@
    "branch": "codex/scaled-tiled-gemm",
    "event": "pull_request",
    "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065",
    "created_at": "2026-09-14T13:10:31Z",
-   "updated_at": "2026-09-14T14:08:06Z",
+   "updated_at": "2026-09-14T15:03:12Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T13:39:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939083"
+     "completed_at": "2026-09-14T14:58:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939083",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -204,11 +206,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T14:08:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939240"
+     "completed_at": "2026-09-14T15:03:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939240",
+     "log_fetch_failed": true
     }
    ]
   },
