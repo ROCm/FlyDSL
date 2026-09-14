@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-14T09:41:40Z",
+ "updated": "2026-09-14T10:20:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -54,11 +54,11 @@
    "branch": "jit-cache-key-captured-types",
    "event": "pull_request",
    "title": "[Bugfix] Include captured types in the JIT cache key",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821981040",
    "created_at": "2026-09-14T08:17:35Z",
-   "updated_at": "2026-09-14T08:57:09Z",
+   "updated_at": "2026-09-14T10:17:29Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -74,20 +74,22 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T08:57:09Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821981040/job/103910922870"
+     "completed_at": "2026-09-14T10:17:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821981040/job/103910922870",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T08:38:52Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821981040/job/103910922914"
+     "completed_at": "2026-09-14T10:09:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821981040/job/103910922914",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -1919,11 +1921,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T09:38:54Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103927791482"
+     "completed_at": "2026-09-14T09:57:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103927791482",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
