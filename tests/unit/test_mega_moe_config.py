@@ -9,6 +9,7 @@ from kernels.mega_moe.mega_moe_config import (
     A8W4SMOOTH_DECODE_MTPRS,
     MAX_MTPR_CLASS,
     TOKEN_BUCKETS,
+    Stage2Config,
     expert_config_class,
     fixed_slot_max_mtpr,
     mtpr_config_class,
@@ -321,13 +322,14 @@ def test_mxfp4_transport_config_is_w8a8smooth_prefill_only():
 def test_native_a8w4_prefill_contract(tokens):
     config = select_mega_moe_config(tokens, tokens, **M13_A8W4)
     expected = {
-        # SBM, waves, dispatch CUs, shards, Stage2 CUs, strided, epilogue, scatter
-        1024: (64, 4, 120, 8, 256, True, False, 8),
-        2048: (128, 8, 64, 8, 240, True, True, 8),
-        4096: (128, 8, 64, 8, 240, True, True, 8),
-        8192: (128, 8, 64, 8, 224, False, True, 8),
-        16384: (128, 8, 64, 1, 256, False, True, 8),
-        32768: (128, 8, 64, 1, 256, False, False, 16),
+        # SBM, waves, dispatch CUs, shards, Stage2 CUs, strided,
+        # N-major, epilogue, scatter.
+        1024: (64, 4, 120, 8, 256, True, False, False, 8),
+        2048: (128, 8, 64, 8, 240, True, False, True, 8),
+        4096: (128, 8, 64, 8, 240, True, False, True, 8),
+        8192: (128, 8, 64, 8, 224, True, True, True, 8),
+        16384: (128, 8, 64, 1, 256, True, True, True, 8),
+        32768: (128, 8, 64, 1, 256, False, False, False, 16),
     }[tokens]
     stage1 = config.stage1
     stage2 = config.stage2
@@ -339,6 +341,7 @@ def test_native_a8w4_prefill_contract(tokens):
         stage1.work_shards,
         stage2.persist_cu,
         stage2.persist_strided,
+        stage2.persist_n_major,
         stage2.fp8_epilog_opt,
         stage2.scatter_vec,
     ) == expected
@@ -363,8 +366,73 @@ def test_native_a8w4_prefill_supports_max_capacity(tokens):
     assert config.stage1.external_grouping
     assert config.stage1.external_counting
     assert config.stage1.native_first_stripe_prefetch is (tokens == 4096)
+    assert config.stage2.persist_n_major is (tokens in (8192, 16384))
     assert config.p2p_quant == "fp8_blockwise_1x32"
     assert config.stage1.use_tile_resource
+
+
+def test_stage2_config_preserves_legacy_positional_fields():
+    legacy = (32, 128, True, 211, False, True, 7, 64, False, False, 17, True, True, 16)
+    config = Stage2Config(*legacy)
+
+    assert (
+        config.block_m,
+        config.block_n,
+        config.persist,
+        config.persist_cu,
+        config.use_nt,
+        config.persist_strided,
+        config.skew_cu,
+        config.block_k,
+        config.b_hoist,
+        config.ascale_prefetch,
+        config.spatial_partition,
+        config.bf16_lds,
+        config.fp8_epilog_opt,
+        config.scatter_vec,
+    ) == legacy
+    assert config.persist_n_major is False
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"experts_per_rank": 64},
+        {"model_dim": 4096},
+        {"inter_dim": 1536},
+        {"world_size": 4},
+        {"topk": 4},
+    ],
+)
+def test_native_a8w4_rejects_non_m13_shapes(override):
+    kwargs = dict(M13_A8W4)
+    kwargs.update(override)
+    with pytest.raises(ValueError, match="native A8W4 is specialized for M13"):
+        select_mega_moe_config(8192, 8192, **kwargs)
+
+
+@pytest.mark.parametrize("quant_mode,tokens", [("a8w4smooth", 1024), ("w8a8smooth", 8192)])
+def test_smooth_stage2_never_selects_native_n_major(quant_mode, tokens):
+    config = select_mega_moe_config(
+        tokens,
+        tokens,
+        **dict(M13_A8W4, quant_mode=quant_mode),
+    )
+    assert not config.stage2.persist_n_major
+
+
+@pytest.mark.parametrize("m_blocks", [0, 1, 223, 224, 225, 239, 240, 241, 255, 256, 257])
+@pytest.mark.parametrize("n_blocks", [1, 5, 14, 28])
+@pytest.mark.parametrize("m_slots", [224, 240, 256])
+def test_persistent_n_major_tile_mapping_is_bijective(m_blocks, n_blocks, m_slots):
+    units = []
+    for block_id in range(m_slots * n_blocks):
+        m_slot = block_id % m_slots
+        n_block = block_id // m_slots
+        for m_block in range(m_slot, m_blocks, m_slots):
+            units.append(m_block * n_blocks + n_block)
+
+    assert sorted(units) == list(range(m_blocks * n_blocks))
 
 
 def test_native_a8w4_prefill_protocol_follows_capacity_not_live_tokens():

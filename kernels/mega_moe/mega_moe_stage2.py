@@ -129,7 +129,8 @@ def p2p_scatter_epilog(lds_acc_base, accm, m_row, n_block_idx, wave, lane, *, N_
         raise ValueError(f"unsupported p2p_quant_type={p2p_quant_type!r}")
     optimize_fp8_epilog = quant_fp8 and fp8_epilog_opt
     out_elem_bytes = 1 if quant_fp8 else 2
-    token_nbytes = N_OUT + N_OUT // 32 if quant_fp8 else N_OUT * out_elem_bytes
+    payload_nbytes = N_OUT + N_OUT // 32 if quant_fp8 else N_OUT * out_elem_bytes
+    token_nbytes = (payload_nbytes + 31) // 32 * 32 if quant_fp8 else payload_nbytes
     quant_store_cache_modifier = (
         0
         if optimize_fp8_epilog
@@ -448,7 +449,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
     BK: int = 256, use_nt: bool = True, HIDDEN_MAX: int = 8192, INTER_MAX: int = 8192, a_dtype: str = "fp8",
     SBM: int | None = None,
     persist: bool = False, cu_num: int = 0, has_pad: bool = False, g2_bhoist=None, g2_ascale_pf=None,
-    g2_spart=None, persist_strided: bool = False, g2_bf16_lds: bool = False, p2p_quant_type: str = "none",
+    g2_spart=None, persist_strided: bool = False, persist_n_major: bool = False,
+    g2_bf16_lds: bool = False, p2p_quant_type: str = "none",
     fixed_slot_dispatch: bool = False, skew_cu: int = 0, quant_mode: str = "a8w4",
     fp8_epilog_opt: bool = False, scatter_vec: int = 8):
 # fmt: on
@@ -478,6 +480,10 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         raise ValueError(f"unsupported quant_mode={quant_mode!r}")
     int8_mode = quant_mode in ("a8w4smooth", "w8a8smooth")
     packed_int4 = quant_mode == "a8w4smooth"
+    if persist_n_major and int8_mode:
+        raise ValueError(
+            "persist_n_major is only supported by native A8W4 Stage2"
+        )
     if int8_mode:
         a_dtype = "int8"
         if (BM, BN, BK) != (32, 128, 256):
@@ -490,6 +496,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
     if persist and cu_num <= 0:
         raise AssertionError(f"persist=True requires cu_num>0, got {cu_num}")
+    if persist_n_major and not persist:
+        raise AssertionError("persist_n_major=True requires persist=True")
     if skew_cu and (not persist or not 0 < skew_cu < cu_num):
         raise AssertionError(f"skew_cu={skew_cu} requires persist=True and 0<skew_cu<cu_num={cu_num}")
     log2_max_tok = max_tok.bit_length() - 1
@@ -508,10 +516,22 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
     lds_peer_off = lds_weight_off + BM * 4
     lds_bytes = lds_peer_off + npes * 8
     _recv_cap = npes * max_tok if recv_cap is None else int(recv_cap)
-    _row_nbytes = N_OUT + N_OUT // 32 if p2p_quant_type == "fp8_blockwise_1x32" else N_OUT * 2
-    _comb_inp_nbytes = max_tok * topk * _row_nbytes if comb_inp_nbytes is None else int(comb_inp_nbytes)
-    if not 0 < _comb_inp_nbytes < _BUFFER_OFFSET_ABI_BYTES:
+    _row_nbytes = N_OUT * 2
+    if p2p_quant_type == "fp8_blockwise_1x32":
+        _row_nbytes = (N_OUT + N_OUT // 32 + 31) // 32 * 32
+    _required_comb_inp_nbytes = max_tok * topk * _row_nbytes
+    if not 0 < _required_comb_inp_nbytes < _BUFFER_OFFSET_ABI_BYTES:
         raise ValueError("MegaMoE v2 stage2 P2P buffer exceeds the 32-bit buffer-resource ABI")
+    _comb_inp_nbytes = (
+        _required_comb_inp_nbytes
+        if comb_inp_nbytes is None
+        else int(comb_inp_nbytes)
+    )
+    if not _required_comb_inp_nbytes <= _comb_inp_nbytes < _BUFFER_OFFSET_ABI_BYTES:
+        raise ValueError(
+            "MegaMoE v2 stage2 P2P buffer is smaller than the required "
+            f"{_required_comb_inp_nbytes} bytes or exceeds the 32-bit buffer-resource ABI"
+        )
     _expert_offset = 0 if int8_mode else rank * experts
 
     @fx.struct
@@ -519,6 +539,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         buf: fx.Array[Int8, lds_bytes, 16]
 
     dispatch_path = "fixedslot" if fixed_slot_dispatch else "compact"
+    n_major_suffix = "_nm1" if persist_n_major else ""
     kernel_name = (
         f"megamoe_stage2_{dispatch_path}_t{BM}x{BN}x{BK}"
         f"_sbm{SBM}_{a_dtype}_nt{int(use_nt)}"
@@ -527,7 +548,9 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         f"_bh{int(g2_bhoist)}apf{int(g2_ascale_pf)}sp{g2_group_num}x{g2_m01}"
         f"_bf16lds{int(g2_bf16_lds)}_{p2p_quant_type}"
         f"_epopt{int(fp8_epilog_opt)}"
+        f"{'_ra32' if p2p_quant_type == 'fp8_blockwise_1x32' else ''}"
         f"_sv{scatter_vec}"
+        f"{n_major_suffix}"
         f"_{quant_mode}"
         f"_sidlds{int(int8_mode)}"
         f"_abov{int(int8_mode)}"
@@ -655,8 +678,12 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 rocdl.sched_barrier(0)
                 run_unit(unit_bx, m_block_idx)
         elif const_expr(skew_cu > 0):
-            m_slot = bx_i32 // fx.Int32(num_n_blocks)
-            n_block = bx_i32 - m_slot * fx.Int32(num_n_blocks)
+            if const_expr(persist_n_major):
+                m_slot = bx_i32 % fx.Int32(cu_num)
+                n_block = bx_i32 // fx.Int32(cu_num)
+            else:
+                m_slot = bx_i32 // fx.Int32(num_n_blocks)
+                n_block = bx_i32 - m_slot * fx.Int32(num_n_blocks)
             total_stage1_tiles = (cumsum0 + fx.Int32(SBM - 1)) // fx.Int32(SBM)
             max_expert_tiles = global_typed_ptr(arg_max_expert_tiles, T.i32)[0]
             skewed = max_expert_tiles * fx.Int32(4) > total_stage1_tiles
@@ -687,8 +714,12 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                     if fx.Int32(m_block) < total_m_blocks:
                         run_unit(unit_bx, m_block)
         else:
-            m_slot = bx_i32 // fx.Int32(num_n_blocks)
-            n_block = bx_i32 - m_slot * fx.Int32(num_n_blocks)
+            if const_expr(persist_n_major):
+                m_slot = bx_i32 % fx.Int32(cu_num)
+                n_block = bx_i32 // fx.Int32(cu_num)
+            else:
+                m_slot = bx_i32 // fx.Int32(num_n_blocks)
+                n_block = bx_i32 - m_slot * fx.Int32(num_n_blocks)
             if const_expr(persist_strided):
                 diff = total_m_blocks - m_slot
                 rem = (diff > fx.Int32(0)).select(diff, fx.Int32(0))
@@ -753,6 +784,7 @@ def run_mega_moe_stage2(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cu
     model_dim, inter_dim, experts, topk, rank, npes, max_tok, recv_cap, comb_inp_nbytes, BM, SBM,
     HIDDEN_MAX, INTER_MAX, cu_num, BN=256, BK=256, use_nt=True, g2_bhoist=True,
     g2_ascale_pf=True, g2_spart=402, persist=False, persist_cu=0, persist_strided=False,
+    persist_n_major=False,
     g2_bf16_lds=False, p2p_quant_type="none", fixed_slot_dispatch=False, skew_cu=0,
     quant_mode="a8w4", qscale_w=None, qzero_w=None, fp8_epilog_opt=False,
     scatter_vec=8):
@@ -765,6 +797,7 @@ def run_mega_moe_stage2(arg_aq, arg_ascale, arg_bq, arg_bscale, arg_eids, arg_cu
         use_nt=use_nt, HIDDEN_MAX=HIDDEN_MAX, INTER_MAX=INTER_MAX, SBM=SBM, persist=persist,
         cu_num=launch_cu_num, g2_bhoist=g2_bhoist, g2_ascale_pf=g2_ascale_pf,
         g2_spart=g2_spart, persist_strided=persist_strided, g2_bf16_lds=g2_bf16_lds,
+        persist_n_major=persist_n_major,
         p2p_quant_type=p2p_quant_type, fixed_slot_dispatch=fixed_slot_dispatch, skew_cu=skew_cu,
         quant_mode=quant_mode, fp8_epilog_opt=fp8_epilog_opt,
         scatter_vec=scatter_vec,

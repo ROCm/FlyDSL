@@ -40,8 +40,9 @@ from .communication_ops_utils import (
     store_i64_global_system,
 )
 
-# Bump when generated kernel shape changes.
-_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v16-stage2-p2p-system-fence"
+# Bump the affected schema when a generated kernel shape changes.
+_DISPATCH_JIT_SCHEMA_VERSION = "v16-stage2-p2p-system-fence"
+_COMBINE_JIT_SCHEMA_VERSION = "v17-blockwise-fp8-row-align32"
 
 # Stage-3 switches from narrow step=64 to wide step=128/256 above this threshold.
 _S3_WIDE_PATH_THRESHOLD_I32 = 895
@@ -398,6 +399,8 @@ def make_combine_kernel(
     # not enable_std_moe. skip_stage1 and zero_copy are independent switches.
     if blockwise_fp8_transport and (not skip_stage1 or data_type != torch.bfloat16):
         raise ValueError("blockwise_fp8_transport requires skip_stage1=True and external bf16")
+    if blockwise_fp8_transport and zero_copy:
+        raise ValueError("blockwise_fp8_transport is incompatible with zero_copy=True")
     if blockwise_fp8_transport and fp8_direct_cast:
         raise ValueError("blockwise_fp8_transport and fp8_direct_cast are mutually exclusive")
     _xfer_bf16_to_fp8 = fp8_direct_cast
@@ -415,6 +418,9 @@ def make_combine_kernel(
     else:
         n_i32 = (hidden_dim * hidden_elem_size) // 4
         nbytes = hidden_dim * hidden_elem_size
+    # Avoid splitting alternate blockwise-FP8 rows across extra 32-byte
+    # fabric/TCC sectors; padding is internal and never read as payload.
+    row_stride_nbytes = (nbytes + 31) // 32 * 32 if blockwise_fp8_transport else nbytes
 
     # Stage 1/3 strides diverge only under ``fp8_direct_cast``: external
     # bf16 reads/writes vs fp8 staging. Other modes keep transport == external.
@@ -838,7 +844,7 @@ def make_combine_kernel(
                 # partials (no tok_map decode; zero_copy excluded, keeps decode).
                 for k_slot in range_constexpr(experts_per_token):
                     slot_idx = tok_id * experts_per_token + k_slot
-                    expert_tok_off = fx.Int64(slot_idx) * nbytes
+                    expert_tok_off = fx.Int64(slot_idx) * row_stride_nbytes
                     expert_tok_addr = as_ir_value(addr_shmem_tok + expert_tok_off)
                     # Warp-uniform base -> SGPR (avoids per-lane waterfall).
                     expert_tok_addr = _wave_uniform_i64(expert_tok_addr)
@@ -864,10 +870,10 @@ def make_combine_kernel(
                         dtok_global = enc_k % max_recv
                         safe_dtok = vld_k.select(dtok_global, 0)
                         peer_base = fx.memref_load(_lds_p2p_bases, safe_pe)
-                        expert_tok_off = fx.Int64(safe_dtok) * nbytes
+                        expert_tok_off = fx.Int64(safe_dtok) * row_stride_nbytes
                         expert_tok_addr = as_ir_value(peer_base) + expert_tok_off
                     else:
-                        expert_tok_off = fx.Int64(safe_pe * max_tok_per_rank + tok_id) * nbytes
+                        expert_tok_off = fx.Int64(safe_pe * max_tok_per_rank + tok_id) * row_stride_nbytes
                         expert_tok_addr = as_ir_value(addr_shmem_tok + expert_tok_off)
                     # Warp-uniform base -> SGPR (avoids per-lane waterfall).
                     expert_rsrcs.append(create_buffer_resource_from_addr(_wave_uniform_i64(expert_tok_addr)))
@@ -1057,7 +1063,7 @@ def make_dispatch_jit(
     _key_experts_per_rank = experts_per_rank
     _key_scale_dim = scale_dim
     _key_scale_type_size = scale_type_size
-    _key_schema_version = _DISPATCH_COMBINE_JIT_SCHEMA_VERSION
+    _key_schema_version = _DISPATCH_JIT_SCHEMA_VERSION
 
     @flyc.jit
     def dispatch_launch(
@@ -1197,7 +1203,7 @@ def make_combine_jit(
     _key_max_recv = max_recv if max_recv is not None else npes * max_tok_per_rank
     # See dispatch launcher for the ``str(torch.dtype)`` rationale.
     _key_data_type = str(data_type)
-    _key_schema_version = _DISPATCH_COMBINE_JIT_SCHEMA_VERSION
+    _key_schema_version = _COMBINE_JIT_SCHEMA_VERSION
 
     @flyc.jit
     def combine_launch(

@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import gc
 import inspect
+import weakref
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+import kernels.mega_moe.mega_moe_stage2 as stage2_module
 from kernels.comm.flydsl_dispatch_combine_intranode_op import FlyDSLDispatchCombineConfig
 from kernels.mega_moe import (
     convert_aiter_lqq_to_megamoe as exported_convert_aiter_lqq_to_megamoe,
@@ -14,7 +18,9 @@ from kernels.mega_moe.mega_moe import (
     MegaMoEV2,
     _combine_launch_geometry,
     _dispatch_quant_config,
+    _shared_runtime_signature,
 )
+from kernels.mega_moe.mega_moe_config import Stage2Config
 from kernels.mega_moe.quant import (
     convert_aiter_lqq_to_megamoe,
     repack_megamoe_lqq_for_int8_loader,
@@ -112,6 +118,147 @@ def test_a8w4_constructor_contract_is_unchanged():
         assert params[name].default is None
     assert params["weight_format"].default == "megamoe"
     assert params["dispatch_quant"].default is None
+    assert params["shared_instance"].default is None
+
+
+def _m13_comb_config(*, mtpr=128):
+    return FlyDSLDispatchCombineConfig(
+        rank=0,
+        world_size=8,
+        hidden_dim=3584,
+        max_num_inp_token_per_rank=mtpr,
+        num_experts_per_rank=48,
+        num_experts_per_token=8,
+        combine_dtype=torch.bfloat16,
+        dispatch_dtype=torch.float8_e4m3fn,
+        scale_dim=112,
+        scale_type_size=1,
+        enable_std_moe=False,
+        enable_group_major=True,
+        gm_unit_size=32,
+        gm_scheme="fixedslot",
+        gm_compact=False,
+        max_total_recv_tokens=8,
+    )
+
+
+def _host_only_owner(*, mtpr=128):
+    config = _m13_comb_config(mtpr=mtpr)
+    owner = object.__new__(MegaMoEV2)
+    owner._mega_moe_shared_runtime_signature = _shared_runtime_signature(
+        config,
+        quant="a8w4",
+        inter_dim=1280,
+        dispatch_quant=None,
+        weight_format="megamoe",
+        swiglu_limit=0.0,
+    )
+    owner._is_int8_smooth = False
+    owner.comb_op = object()
+    owner._s1_epoch_parity = torch.zeros(1)
+    owner._s1_dispatch_workspace = {"entry_count": torch.zeros(1)}
+    owner._s1_out = torch.zeros(2)
+    owner._s1_osd = torch.zeros(3, dtype=torch.uint8)
+    owner._g2_combine_placeholder = torch.zeros(4)
+    return owner
+
+
+def _make_shared_native(owner, *, mtpr=128, value=0.0):
+    weight = torch.tensor([value])
+    return MegaMoEV2(
+        rank=0,
+        world_size=8,
+        model_dim=3584,
+        inter_dim=1280,
+        experts=384,
+        topk=8,
+        quant="a8w4",
+        w1=weight,
+        w1_scale=weight,
+        w2=weight,
+        w2_scale=weight,
+        max_tok_per_rank=mtpr,
+        shared_instance=owner,
+    )
+
+
+def test_shared_instance_rejects_an_uninitialized_instance():
+    with pytest.raises(ValueError, match="not fully initialized"):
+        _make_shared_native(object.__new__(MegaMoEV2))
+
+
+def test_failed_owner_construction_is_not_shareable(monkeypatch):
+    owner = object.__new__(MegaMoEV2)
+    weight = torch.tensor([0.0])
+
+    def fail_runtime_construction(_config):
+        raise RuntimeError("injected communication allocation failure")
+
+    monkeypatch.setattr(
+        "kernels.mega_moe.mega_moe.FlyDSLDispatchCombineIntraNodeOp",
+        fail_runtime_construction,
+    )
+    with pytest.raises(RuntimeError, match="injected communication"):
+        MegaMoEV2.__init__(
+            owner,
+            rank=0,
+            world_size=8,
+            model_dim=3584,
+            inter_dim=1280,
+            experts=384,
+            topk=8,
+            quant="a8w4",
+            w1=weight,
+            w1_scale=weight,
+            w2=weight,
+            w2_scale=weight,
+            max_tok_per_rank=128,
+        )
+
+    assert not hasattr(owner, "_mega_moe_shared_runtime_signature")
+    with pytest.raises(ValueError, match="not fully initialized"):
+        _make_shared_native(owner)
+
+
+def test_shared_instance_rejects_the_wrong_type():
+    with pytest.raises(TypeError, match="must be a MegaMoEV2"):
+        _make_shared_native(object())
+
+
+def test_shared_instance_rejects_a_config_mismatch():
+    with pytest.raises(ValueError, match="max_num_inp_token_per_rank"):
+        _make_shared_native(_host_only_owner(mtpr=128), mtpr=64)
+
+
+def test_76_instances_reuse_the_complete_runtime_workspace():
+    owner = _host_only_owner()
+    instances = [owner]
+    for index in range(1, 76):
+        # Frameworks may naturally pass the preceding layer rather than keep
+        # the first owner separately.  Nested sharing must still resolve to
+        # the single root runtime.
+        instances.append(_make_shared_native(instances[-1], value=index))
+
+    assert all(instance.comb_op is owner.comb_op for instance in instances)
+    assert all(instance._shared_runtime is owner for instance in instances[1:])
+    assert all(instance._s1_epoch_parity is owner._s1_epoch_parity for instance in instances)
+    assert all(instance._s1_dispatch_workspace is owner._s1_dispatch_workspace for instance in instances)
+    for name in ("_s1_out", "_s1_osd", "_g2_combine_placeholder"):
+        assert all(getattr(instance, name) is getattr(owner, name) for instance in instances)
+    assert [instance._s1_w1.item() for instance in instances[1:]] == list(map(float, range(1, 76)))
+    assert not hasattr(owner, "_s1_w1")
+
+
+def test_shared_instance_keeps_the_runtime_owner_alive():
+    owner = _host_only_owner()
+    owner_ref = weakref.ref(owner)
+    instance = _make_shared_native(owner)
+
+    del owner
+    gc.collect()
+
+    assert owner_ref() is instance._shared_runtime
+    assert instance.comb_op is instance._shared_runtime.comb_op
 
 
 def test_smooth_forward_does_not_require_live_tokens_to_equal_capacity():
@@ -129,14 +276,44 @@ def test_smooth_forward_does_not_require_live_tokens_to_equal_capacity():
     assert moe.forward(x, weights, expert_ids) is sentinel
 
 
+def test_int8_stage2_rejects_native_n_major_before_runtime_access():
+    moe = object.__new__(MegaMoEV2)
+    moe._active_config = SimpleNamespace(
+        stage2=Stage2Config(
+            block_m=32,
+            block_n=128,
+            persist=True,
+            persist_cu=240,
+            use_nt=False,
+            persist_n_major=True,
+        )
+    )
+    with pytest.raises(ValueError, match="only supported by native A8W4 Stage2"):
+        moe._run_int8_stage2(None, None, None, 0, None, False)
+
+
+def test_n_major_stage2_requires_persistent_mode(monkeypatch):
+    monkeypatch.setattr(stage2_module, "get_rocm_arch", lambda: "gfx950")
+    with pytest.raises(AssertionError, match="persist_n_major=True requires persist=True"):
+        stage2_module.compile_mega_moe_stage2(
+            model_dim=3584,
+            inter_dim=1280,
+            experts=48,
+            topk=8,
+            rank=0,
+            npes=8,
+            max_tok=8192,
+            persist=False,
+            persist_n_major=True,
+        )
+
+
 def test_lqq_conversion_shape_and_layout_formula():
     assert exported_convert_aiter_lqq_to_megamoe is convert_aiter_lqq_to_megamoe
     experts, rows, k_dim = 1, 16, 256
     u4 = (torch.arange(experts * rows * k_dim, dtype=torch.int64) % 16).to(torch.uint8)
     u4 = u4.view(experts, rows, k_dim)
-    scale = torch.arange(experts * rows * (k_dim // 64), dtype=torch.uint8).view(
-        experts, rows, k_dim // 64
-    )
+    scale = torch.arange(experts * rows * (k_dim // 64), dtype=torch.uint8).view(experts, rows, k_dim // 64)
     zero = (255 - scale).to(torch.uint8)
 
     weight, packed_scale, packed_zero = convert_aiter_lqq_to_megamoe(u4, scale, zero)
@@ -159,10 +336,7 @@ def test_lqq_conversion_shape_and_layout_formula():
             source = shuffled[row, chunk * 128 : (chunk + 1) * 128]
             interleaved[row, chunk * 128 : (chunk + 1) * 128 : 2] = source[:64]
             interleaved[row, chunk * 128 + 1 : (chunk + 1) * 128 : 2] = source[64:]
-    expected_weight = (
-        interleaved.reshape(-1, 2)[:, 0]
-        | (interleaved.reshape(-1, 2)[:, 1] << 4)
-    )
+    expected_weight = interleaved.reshape(-1, 2)[:, 0] | (interleaved.reshape(-1, 2)[:, 1] << 4)
     assert torch.equal(weight.view(torch.uint8), expected_weight)
 
     for row in range(rows):
@@ -194,7 +368,5 @@ def test_legacy_lqq_repack_matches_direct_k64_pairs():
         .contiguous()
         .view(1, rows // 16, k_dim // 64, 4, 16, 16)
     )
-    expected = (
-        full_layout[:, :, 0::2] | (full_layout[:, :, 1::2] << 4)
-    ).contiguous()
+    expected = (full_layout[:, :, 0::2] | (full_layout[:, :, 1::2] << 4)).contiguous()
     assert torch.equal(repacked.view(torch.uint8), expected.view(-1))

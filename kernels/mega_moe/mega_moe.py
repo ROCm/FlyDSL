@@ -2,7 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 """MegaMoE v2 fused dispatch, GEMM1, GEMM2, and combine implementation."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import mori.shmem as ms
 import torch
@@ -35,24 +35,35 @@ __all__ = ["MegaMoEV2"]
 _SUPPORTED_QUANT_MODES = ("a8w4", "a8w4smooth", "w8a8smooth")
 _SUPPORTED_WEIGHT_FORMATS = ("megamoe", "aiter_lqq")
 
+_SHARED_RUNTIME_SIGNATURE_ATTR = "_mega_moe_shared_runtime_signature"
 
-def _dispatch_quant_config(
-    quant: str, model_dim: int, dispatch_quant: str | None = None
-):
+
+def _shared_runtime_signature(config, *, quant, inter_dim, dispatch_quant, weight_format, swiglu_limit):
+    # ``tuning_table`` is populated lazily by the initialized op.  Every other
+    # dataclass field participates so future communication ABI fields cannot be
+    # omitted silently.
+    config_items = (
+        (field.name, getattr(config, field.name)) for field in fields(config) if field.name != "tuning_table"
+    )
+    return (
+        ("quant", quant),
+        ("inter_dim", int(inter_dim)),
+        ("dispatch_quant", dispatch_quant),
+        ("weight_format", weight_format),
+        ("swiglu_limit", float(swiglu_limit)),
+        *config_items,
+    )
+
+
+def _dispatch_quant_config(quant: str, model_dim: int, dispatch_quant: str | None = None):
     """Return the dispatch dtype and scale ABI for a MegaMoEV2 quant mode."""
     if quant not in _SUPPORTED_QUANT_MODES:
-        raise ValueError(
-            f"unsupported quant={quant!r}; expected one of {_SUPPORTED_QUANT_MODES}"
-        )
+        raise ValueError(f"unsupported quant={quant!r}; expected one of {_SUPPORTED_QUANT_MODES}")
     if dispatch_quant not in (None, "mxfp4"):
-        raise ValueError(
-            f"unsupported dispatch_quant={dispatch_quant!r}; expected None or 'mxfp4'"
-        )
+        raise ValueError(f"unsupported dispatch_quant={dispatch_quant!r}; expected None or 'mxfp4'")
     if dispatch_quant == "mxfp4":
         if quant != "w8a8smooth":
-            raise ValueError(
-                "dispatch_quant='mxfp4' is only supported by w8a8smooth prefill"
-            )
+            raise ValueError("dispatch_quant='mxfp4' is only supported by w8a8smooth prefill")
         return torch.float4_e2m1fn_x2, int(model_dim) // 32, 1
     if quant == "a8w4":
         return torch.float8_e4m3fn, int(model_dim) // 32, 1
@@ -86,7 +97,13 @@ class Int8Stage1Output:
 
 
 class MegaMoEV2:
-    """Fused dispatch, GEMM1, GEMM2, and combine with one in-flight launch per instance."""
+    """Fused dispatch, GEMM1, GEMM2, and combine.
+
+    Instances may share one complete runtime workspace when their execution
+    signatures are identical.  A shared runtime permits only one in-flight
+    launch; callers that execute layers concurrently need separate runtimes.
+    Every rank in an EP group must construct the same owner/shared topology.
+    """
 
     # fmt: off
     def __init__(self, *, rank: int, world_size: int, model_dim: int, inter_dim: int, experts: int, topk: int,
@@ -95,7 +112,8 @@ class MegaMoEV2:
         w1_lqq_scale: torch.Tensor | None = None, w1_lqq_zero: torch.Tensor | None = None,
         w2_lqq_scale: torch.Tensor | None = None, w2_lqq_zero: torch.Tensor | None = None,
         fc1_smooth_scale: torch.Tensor | None = None, fc2_smooth_scale: torch.Tensor | None = None,
-        weight_format: str = "megamoe", dispatch_quant: str | None = None):
+        weight_format: str = "megamoe", dispatch_quant: str | None = None,
+        shared_instance: "MegaMoEV2 | None" = None):
     # fmt: on
         dispatch_dtype, scale_dim, scale_type_size = _dispatch_quant_config(
             quant, model_dim, dispatch_quant
@@ -218,6 +236,66 @@ class MegaMoEV2:
             enable_std_moe=False, enable_group_major=True, gm_unit_size=capacity_tile_m,
             gm_scheme=mega_scheme, gm_compact=compact, max_total_recv_tokens=self.world_size)
         # fmt: on
+        runtime_signature = _shared_runtime_signature(
+            self.comb_cfg,
+            quant=self.quant,
+            inter_dim=self.inter_dim,
+            dispatch_quant=self.dispatch_quant,
+            weight_format=weight_format,
+            swiglu_limit=self.swiglu_limit,
+        )
+        if shared_instance is not None:
+            if not isinstance(shared_instance, type(self)):
+                raise TypeError(
+                    "shared_instance must be a MegaMoEV2, "
+                    f"got {type(shared_instance).__name__}"
+                )
+            owner = getattr(shared_instance, "_shared_runtime", shared_instance)
+            bound_signature = getattr(
+                owner, _SHARED_RUNTIME_SIGNATURE_ATTR, None
+            )
+            if bound_signature is None:
+                raise ValueError("shared_instance is not fully initialized")
+            if bound_signature != runtime_signature:
+                shared = dict(bound_signature)
+                mismatch = ", ".join(
+                    f"{name}: shared={shared.get(name)!r}, requested={value!r}"
+                    for name, value in runtime_signature
+                    if shared.get(name) != value
+                )
+                raise ValueError(
+                    f"shared_instance MegaMoE signature mismatch ({mismatch})"
+                )
+
+            # Share every mutable protocol/scratch object, including the epoch
+            # state.  Sharing only comb_op is unsafe because consecutive layers
+            # would advance independent epoch tensors against common buffers.
+            self.__dict__ = owner.__dict__.copy()
+            self._shared_runtime = owner
+            self.w2 = w2 if w2.is_contiguous() else w2.contiguous()
+            self.w2_scale = (
+                w2_scale if w2_scale.is_contiguous() else w2_scale.contiguous()
+            )
+            if self._is_int8_smooth:
+                self._bind_int8_weights(
+                    w1,
+                    w1_scale,
+                    w1_lqq_scale=w1_lqq_scale,
+                    w1_lqq_zero=w1_lqq_zero,
+                    w2_lqq_scale=w2_lqq_scale,
+                    w2_lqq_zero=w2_lqq_zero,
+                    fc1_smooth_scale=fc1_smooth_scale,
+                    fc2_smooth_scale=fc2_smooth_scale,
+                )
+            else:
+                self._s1_w1 = w1 if w1.is_contiguous() else w1.contiguous()
+                self._s1_w1_scale = (
+                    w1_scale
+                    if w1_scale.is_contiguous()
+                    else w1_scale.contiguous()
+                )
+            return
+
         self.comb_op = FlyDSLDispatchCombineIntraNodeOp(self.comb_cfg)
         torch.cuda.synchronize()
         ms.shmem_barrier_all()
@@ -238,6 +316,10 @@ class MegaMoEV2:
             # Keep the established A8W4 build path unchanged.
             self._build_fused_stage1(w1, w1_scale)
             self._build_fused_stage2()
+        # Publish shareability only after every communication/protocol/scratch
+        # object has been constructed successfully.  A failed constructor must
+        # never leave behind an apparently usable runtime owner.
+        setattr(self, _SHARED_RUNTIME_SIGNATURE_ATTR, runtime_signature)
 
     def _build_int8_host(
         self,
@@ -252,29 +334,19 @@ class MegaMoEV2:
         fc2_smooth_scale,
     ):
         """Prepare the Stage-1/2 INT8 host contract without fusing quant kernels."""
+        self._bind_int8_weights(
+            w1,
+            w1_scale,
+            w1_lqq_scale=w1_lqq_scale,
+            w1_lqq_zero=w1_lqq_zero,
+            w2_lqq_scale=w2_lqq_scale,
+            w2_lqq_zero=w2_lqq_zero,
+            fc1_smooth_scale=fc1_smooth_scale,
+            fc2_smooth_scale=fc2_smooth_scale,
+        )
         op = self.comb_op._gm
         assert op is not None, "combine op was built without enable_group_major"
         self._s1_op = op
-        self._int8_w1 = w1.contiguous()
-        self._int8_w1_scale = w1_scale.contiguous()
-        self._int8_w1_lqq_scale = (
-            _as_packed_i32(w1_lqq_scale) if w1_lqq_scale is not None else None
-        )
-        self._int8_w1_lqq_zero = (
-            _as_packed_i32(w1_lqq_zero) if w1_lqq_zero is not None else None
-        )
-        self._int8_w2_lqq_scale = (
-            _as_packed_i32(w2_lqq_scale) if w2_lqq_scale is not None else None
-        )
-        self._int8_w2_lqq_zero = (
-            _as_packed_i32(w2_lqq_zero) if w2_lqq_zero is not None else None
-        )
-        self._int8_fc1_smooth = fc1_smooth_scale.to(torch.float32).contiguous()
-        local_begin = self.rank * self.epr
-        self._int8_fc2_smooth = (
-            fc2_smooth_scale.to(torch.float32)[local_begin : local_begin + self.epr]
-            .contiguous()
-        )
 
         # Both standalone Smooth paths materialize route-major front quant.
         requant_rows = self.max_recv * self.topk
@@ -369,6 +441,40 @@ class MegaMoEV2:
         )
         self._int8_stage1 = run_mega_moe_stage1
         self._build_fused_stage2()
+
+    def _bind_int8_weights(
+        self,
+        w1,
+        w1_scale,
+        *,
+        w1_lqq_scale,
+        w1_lqq_zero,
+        w2_lqq_scale,
+        w2_lqq_zero,
+        fc1_smooth_scale,
+        fc2_smooth_scale,
+    ):
+        """Bind one layer's already-converted SmoothQuant weights."""
+        self._int8_w1 = w1.contiguous()
+        self._int8_w1_scale = w1_scale.contiguous()
+        self._int8_w1_lqq_scale = (
+            _as_packed_i32(w1_lqq_scale) if w1_lqq_scale is not None else None
+        )
+        self._int8_w1_lqq_zero = (
+            _as_packed_i32(w1_lqq_zero) if w1_lqq_zero is not None else None
+        )
+        self._int8_w2_lqq_scale = (
+            _as_packed_i32(w2_lqq_scale) if w2_lqq_scale is not None else None
+        )
+        self._int8_w2_lqq_zero = (
+            _as_packed_i32(w2_lqq_zero) if w2_lqq_zero is not None else None
+        )
+        self._int8_fc1_smooth = fc1_smooth_scale.to(torch.float32).contiguous()
+        local_begin = self.rank * self.epr
+        self._int8_fc2_smooth = (
+            fc2_smooth_scale.to(torch.float32)[local_begin : local_begin + self.epr]
+            .contiguous()
+        )
 
     def _build_fused_stage1(self, w1, w1_scale):
         from .mega_moe_stage1 import run_mega_moe_stage1
@@ -1101,11 +1207,15 @@ class MegaMoEV2:
 
     def _run_int8_stage2(self, requant_q, requant_scale, stage1_output, run_tokens, stream, slice_output):
         """Run gfx950 K64 INT8 GEMM2 and the existing weighted P2P combine."""
+        config = self._active_config
+        stage2 = config.stage2
+        if stage2.persist_n_major:
+            raise ValueError(
+                "persist_n_major is only supported by native A8W4 Stage2"
+            )
         if stream is None:
             stream = torch.cuda.current_stream()
         s_fx = fx.Stream(stream.cuda_stream)
-        config = self._active_config
-        stage2 = config.stage2
         invariants = self._g2_invariants_by_quant["none"]
         self._g2_run(
             fx.Int64(requant_q.data_ptr()),
@@ -1238,11 +1348,12 @@ class MegaMoEV2:
         self._g2_run = run_mega_moe_stage2
         self._g2_invariants_by_quant = {}
         for p2p_quant in ("none", "fp8_blockwise_1x32"):
-            p2p_row_nbytes = (
-                int(comb_cfg.hidden_dim) + int(comb_cfg.hidden_dim) // 32
-                if p2p_quant == "fp8_blockwise_1x32"
-                else int(comb_cfg.hidden_dim) * 2
-            )
+            p2p_row_nbytes = int(comb_cfg.hidden_dim) * 2
+            if p2p_quant == "fp8_blockwise_1x32":
+                payload_nbytes = int(comb_cfg.hidden_dim) + int(comb_cfg.hidden_dim) // 32
+                # The registered BF16 combine buffer already covers this
+                # internal 32-byte-aligned transport stride.
+                p2p_row_nbytes = (payload_nbytes + 31) // 32 * 32
             self._g2_invariants_by_quant[p2p_quant] = {
                 "model_dim": int(comb_cfg.hidden_dim), "inter_dim": int(self.inter_dim),
                 "experts": int(comb_cfg.num_experts_per_rank), "topk": int(k), "rank": int(comb_cfg.rank),
@@ -1280,7 +1391,9 @@ class MegaMoEV2:
             g2_ascale_pf=stage2.ascale_prefetch,
             g2_spart=stage2.spatial_partition,
             persist=stage2.persist, persist_cu=stage2.persist_cu,
-            persist_strided=stage2.persist_strided, skew_cu=stage2.skew_cu,
+            persist_strided=stage2.persist_strided,
+            persist_n_major=stage2.persist_n_major,
+            skew_cu=stage2.skew_cu,
             g2_bf16_lds=stage2.bf16_lds,
             fp8_epilog_opt=stage2.fp8_epilog_opt,
             scatter_vec=stage2.scatter_vec,

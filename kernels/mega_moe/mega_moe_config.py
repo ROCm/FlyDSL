@@ -67,6 +67,7 @@ class Stage2Config:
     bf16_lds: bool = False
     fp8_epilog_opt: bool = False
     scatter_vec: int = 8
+    persist_n_major: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,7 +573,8 @@ def _apply_quant_and_shape_rules(
                 block_n=256,
                 block_k=256,
                 persist_cu=stage2_cu,
-                persist_strided=bucket <= 4096,
+                persist_strided=bucket < 32768,
+                persist_n_major=bucket in (8192, 16384),
                 skew_cu=0,
                 fp8_epilog_opt=2048 <= bucket <= 16384,
                 scatter_vec=16 if bucket == 32768 else 8,
