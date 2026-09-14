@@ -1,6 +1,6 @@
 # Why these two checks
 
-The scanners and their CPU regressions are adapted from
+The scanners are adapted from
 [PR #1047 at `2480f877`](https://github.com/ROCm/FlyDSL/tree/2480f877aa7f74a24d1ce857b48ba92ff0699cf5/.claude/skills/flydsl-review-checks).
 They supplement the existing review runner; their output is evidence to inspect,
 not an independent review verdict or another skill entry point.

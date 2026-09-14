@@ -6,13 +6,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import math
 import posixpath
 import re
+import sys
+import traceback
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PER_ANGLE = 6
 SWEEP_MAX = 8
 MAX_FINDINGS = 12
@@ -91,8 +95,45 @@ def stage_output(stages: dict, label: str) -> dict | None:
     return stage.get("output") if stage.get("status") == "COMPLETE" else None
 
 
+def scanner_main(main) -> int:
+    """Emit a completion record only after the scanner returns normally."""
+    argv = sys.argv[1:]
+
+    def invoke():
+        try:
+            code = main(argv)
+            if type(code) is not int or code not in (0, 1, 2):
+                raise ValueError(f"invalid scanner exit code: {code!r}")
+            return code
+        except SystemExit as exc:
+            # argparse uses SystemExit for help and invalid arguments.
+            return 0 if exc.code in (None, 0) else 2
+        except Exception:
+            traceback.print_exc()
+            return 2
+
+    if "--json" not in argv:
+        return invoke()
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        code = invoke()
+    print(
+        canonical(
+            {
+                "status": "COMPLETE" if code in (0, 1) else "INCOMPLETE",
+                "exit_code": code,
+                "stdout": stdout.getvalue(),
+                "stderr": stderr.getvalue(),
+            }
+        )
+    )
+    return code
+
+
 def validate_preflight(output: dict) -> dict:
-    if not isinstance(output, dict) or type(output.get("exit_code")) is not int or output["exit_code"] not in (0, 1):
+    if not isinstance(output, dict) or output.get("status") != "COMPLETE":
+        raise ValueError("scanner did not return a COMPLETE result")
+    if type(output.get("exit_code")) is not int or output["exit_code"] not in (0, 1):
         raise ValueError("completed preflight must have scanner exit code 0 or 1")
     if not all(isinstance(output.get(key), str) for key in ("stdout", "stderr")):
         raise ValueError("completed preflight must retain scanner stdout and stderr")

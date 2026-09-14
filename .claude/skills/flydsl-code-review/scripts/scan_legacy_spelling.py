@@ -160,6 +160,7 @@ def scan(diff):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--diff", required=True, type=Path, metavar="FILE")
+    parser.add_argument("--json", action="store_true", help="emit a structured completion result for the runner")
     args = parser.parse_args(argv)
 
     try:
@@ -184,4 +185,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from review_common import scanner_main
+
+    raise SystemExit(scanner_main(main))

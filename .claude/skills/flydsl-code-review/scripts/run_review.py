@@ -477,7 +477,7 @@ class ReviewRun:
             record = {"status": "RUNNING"}
             stage["runs"].append(record)
             self.save()
-            argv = [sys.executable, str(SCRIPTS / script), "--diff", str(self.run_dir / "diff.patch")]
+            argv = [sys.executable, str(SCRIPTS / script), "--diff", str(self.run_dir / "diff.patch"), "--json"]
             if label == "preflight:test-doc":
                 argv += ["--head", str(self.snapshot)]
             print(f"{label}: scanning pinned diff", file=sys.stderr, flush=True)
@@ -485,10 +485,16 @@ class ReviewRun:
             try:
                 result = command_result(*argv, cwd=self.snapshot, deadline=deadline, cancelled=self.cancelled)
                 record.update(exit_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+                output = json.loads(result.stdout)
+                if not isinstance(output, dict):
+                    raise ValueError("scanner did not return a structured result object")
                 if result.returncode not in (0, 1):
-                    raise ValueError(f"scanner exited {result.returncode}: {result.stderr.strip()}")
+                    raise ValueError(f"scanner exited {result.returncode}: {output.get('stderr') or result.stderr}")
+                validate_preflight(output)
+                if output["exit_code"] != result.returncode:
+                    raise ValueError("scanner result exit code does not match the process exit code")
                 record["status"] = "COMPLETE"
-                stage["output"] = {key: record[key] for key in ("exit_code", "stdout", "stderr")}
+                stage["output"] = output
             except (OSError, ValueError, TimeoutError) as exc:
                 record.update(status="INCOMPLETE", error=str(exc))
                 stage["error"] = str(exc)

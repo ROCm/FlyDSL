@@ -279,6 +279,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--diff", required=True, type=Path)
     parser.add_argument("--head", required=True, type=Path, metavar="DIR")
+    parser.add_argument("--json", action="store_true", help="emit a structured completion result for the runner")
     args = parser.parse_args(argv)
     try:
         root = args.head.resolve(strict=True)
@@ -325,4 +326,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from review_common import scanner_main
+
+    sys.exit(scanner_main(main))

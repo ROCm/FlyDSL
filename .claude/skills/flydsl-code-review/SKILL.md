@@ -76,9 +76,13 @@ an interruption so the user can resume it.
 
 After pinning a nonempty diff, the runner runs two source scanners from its own
 `scripts/` directory against that diff and checkout. Both are required stages:
-exit `0` means no leads in the supported scope, `1` means leads need inspection,
-and any error or timeout makes the review INCOMPLETE. The artifact retains each
-scanner's output, exit status and run history; resume reuses completed checks.
+exit `0` means no leads in the supported scope, `1` means leads need inspection.
+The runner requests `--json` and requires a COMPLETE result whose exit code
+matches the process exit code. An exception, missing/malformed result or timeout
+makes the review INCOMPLETE; exit code `1` alone never proves success. Artifact
+schema v3 requires this explicit completion record, so older results must be rerun.
+The artifact retains each scanner's output, exit status and run history; resume
+reuses completed checks.
 Neither scanner executes or imports the reviewed code.
 
 - **Angle G:** `scan_legacy_spelling.py` checks added `kernels/**/*.py` lines,
