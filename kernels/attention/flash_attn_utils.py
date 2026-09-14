@@ -280,6 +280,47 @@ def _anchor_v_p(traits, v_p, elem_dtype):
     return anchored_lo, anchored_hi
 
 
+def _anchor_v_s(traits, v_s):
+    """Pin an fp32 score pair so the following P cast can reuse its registers."""
+    s_lo, s_hi = v_s
+    if not isinstance(s_lo, (list, tuple)):
+        s_lo = [Vec(s_lo)[i] for i in range_constexpr(16)]
+    if not isinstance(s_hi, (list, tuple)):
+        s_hi = [Vec(s_hi)[i] for i in range_constexpr(16)]
+    if const_expr(traits.DTYPE_STR == "bf16" and traits.HEAD_DIM == 128):
+        # Empty inline asm still consumes a VALU slot in sched_group_barrier.
+        # Keep all scalar ties in one instruction: 32 separate anchors otherwise
+        # fill the softmax schedule with no-ops and leave a dense QK MFMA tail.
+        # Scalar outputs avoid the contiguous-register constraint of a vector<32>.
+        scores = [as_mlir_value(value) for value in list(s_lo) + list(s_hi)]
+        result = llvm.inline_asm(
+            ir.Type.parse("!llvm.struct<(" + ", ".join(["f32"] * 32) + ")>"),
+            scores,
+            "",
+            ",".join(["=v"] * 32 + [str(i) for i in range(32)]),
+            has_side_effects=True,
+        )
+        anchored = [fx.Float32(llvm.extractvalue(T.f32, result, [i])) for i in range_constexpr(32)]
+        return anchored[:16], anchored[16:]
+    return (
+        [fx.Float32(_anchor_scalar_f32(s_lo[i])) for i in range_constexpr(16)],
+        [fx.Float32(_anchor_scalar_f32(s_hi[i])) for i in range_constexpr(16)],
+    )
+
+
+def _opaque_i32(x):
+    """Return a VGPR-pinned i32 copy that cannot be CSE'd with its source."""
+    x_ir = as_mlir_value(fx.Int32(x))
+    anchored = llvm.inline_asm(
+        x_ir.type,
+        [x_ir],
+        "",
+        "=v,0",
+        has_side_effects=True,
+    )
+    return fx.Index(fx.Int32(anchored))
+
+
 def _v_pair_to_vec32(v):
     return _concat_vectors(v[0], v[1]).ir_value()
 
@@ -1588,6 +1629,7 @@ class DualwaveSwpTraits:
     LDS_SCOPE_NAMES: tuple[str, str, str, str]
     NEG_INF_F32_BITS: int
     LGKMCNT_0_ONLY: int
+    QLDS: bool
     RETURN_LSE: bool = False
     XCD_SWIZZLE: bool = False
 
@@ -1612,6 +1654,7 @@ class DualwaveSwpTraits:
             self.CROSS_SEQLEN,
             self.KV_CACHE_LAYOUT,
             self.KV_VECTORIZED,
+            self.QLDS,
             self.RETURN_LSE,
             self.XCD_SWIZZLE,
         )
@@ -1635,6 +1678,7 @@ def _make_dualwave_swp_traits(
     paged=False,
     kv_cache_layout="linear",
     kv_vectorized=None,
+    qlds=True,
     return_lse=False,
     xcd_swizzle=False,
 ):
@@ -1787,6 +1831,7 @@ def _make_dualwave_swp_traits(
         LDS_SCOPE_NAMES=("lds_k0", "lds_k1", "lds_v0", "lds_v1"),
         NEG_INF_F32_BITS=0xFF800000,
         LGKMCNT_0_ONLY=0xC07F,
+        QLDS=bool(qlds),
         RETURN_LSE=bool(return_lse),
         XCD_SWIZZLE=bool(xcd_swizzle),
     )
@@ -3543,6 +3588,8 @@ class DualwaveKernelContext:
         self.lds = lds
         self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
         self.lds_kv_base_ptr = lds.kv.ptr.llvm_ptr
+        self.lds_q_base_idx = fx.Index(fx.ptrtoint(lds.q.ptr))
+        self.lds_q_base_ptr = lds.q.ptr.llvm_ptr
         if const_expr(self.traits.PAGED):
             self.lds_bt_base_idx = fx.Index(fx.ptrtoint(lds.bt.ptr))
             self.lds_bt_base_ptr = lds.bt.ptr.llvm_ptr
@@ -3878,6 +3925,25 @@ class DualwaveQLoader(DualwaveKernelContext):
     def __init__(self, ctx):
         super().__init__(ctx)
 
+    def stage_q_to_lds(self):
+        traits = self.traits
+        chunks_per_row = traits.HEAD_DIM // traits.VEC_KV
+        total_chunks = traits.BLOCK_M * chunks_per_row
+        for p in range_constexpr(total_chunks // traits.BLOCK_SIZE):
+            c = self.tid + fx.Index(p * traits.BLOCK_SIZE)
+            row = c // fx.Index(chunks_per_row)
+            dchunk = c % fx.Index(chunks_per_row)
+            src_elem = self.q_gmem_elem_offset + row * self.stride_q_n_v + dchunk * fx.Index(traits.VEC_KV)
+            lds_addr = self.lds_q_base_idx + c * fx.Index(traits.DMA_BYTES)
+            _buffer_load_lds_128(
+                self.q_div,
+                lds_addr,
+                src_elem,
+                0,
+                _dma_atom=self.dma_atom,
+                _lds_ptr_ty=self.lds_ptr_ty,
+            )
+
     def load_pack(self, q_row_in_block, ks):
         q_i32_pack = _buffer_load_128(
             self.q_gmem_elem_offset
@@ -3894,14 +3960,25 @@ class DualwaveQLoader(DualwaveKernelContext):
         )
         return Vec(q_i32_pack, (4,), fx.Int32).bitcast(self.elem_dtype).ir_value()
 
-    def load_all(self):
+    def load_pack_from_lds(self, q_row_in_block, ks):
+        elem_idx = q_row_in_block * fx.Index(self.traits.HEAD_DIM) + fx.Index(
+            _q_pack_col(self.traits, ks, lane_div_32=self.lane_div_32)
+        )
+        ptr = buffer_ops.get_element_ptr(
+            self.lds_q_base_ptr,
+            byte_offset=as_mlir_value(fx.Int32(elem_idx * fx.Index(self.traits.BF16_BYTES))),
+            elem_type=T.i8,
+        )
+        return llvm.LoadOp(self.kv_mfma_pack_type, ptr, alignment=self.traits.DMA_BYTES).result
+
+    def _load_all_with(self, load_pack):
         traits = self.traits
         ctx = self.ctx_ref
         ctx.init_q_row()
 
         q_raw_packs = []
         for ks in range_constexpr(traits.K_STEPS_QK):
-            q_raw_packs.append(self.load_pack(ctx.q_row_in_block, ks))
+            q_raw_packs.append(load_pack(ctx.q_row_in_block, ks))
         q_16_packs = []
         for pair in range_constexpr(traits.K_STEPS_QK // 2):
             q_16_packs.append(_concat_vectors(q_raw_packs[pair * 2], q_raw_packs[pair * 2 + 1]))
@@ -3912,6 +3989,12 @@ class DualwaveQLoader(DualwaveKernelContext):
 
         q_all = q_32_packs[0] if const_expr(traits.K_STEPS_QK == 4) else _concat_vectors(q_32_packs[0], q_32_packs[1])
         return Vec(q_all, (traits.K_STEPS_QK * traits.MFMA_LANE_K,), self.elem_dtype)
+
+    def load_all(self):
+        return self._load_all_with(self.load_pack)
+
+    def load_all_from_lds(self):
+        return self._load_all_with(self.load_pack_from_lds)
 
     def scale_all(self, q_all_bf16):
         traits = self.traits
@@ -6428,6 +6511,29 @@ def _sched_barrier_exp_pairs(traits, pairs, exp_cnt, group):
     for _ in range_constexpr(pairs):
         rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, 1, group)
         rocdl.sched_group_barrier(traits.SCHED_EXP_MASK, exp_cnt, group)
+
+
+def _sched_barrier_exp_valu_pairs(traits, pairs, exp_cnt, valu_cnt, group):
+    """Emit pairs of MFMA, EXP, then dependent VALU schedule groups."""
+    pairs = _scale_sched_pairs(pairs, traits.HEAD_DIM)
+    for _ in range_constexpr(pairs):
+        rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, 1, group)
+        rocdl.sched_group_barrier(traits.SCHED_EXP_MASK, exp_cnt, group)
+        rocdl.sched_group_barrier(traits.SCHED_VALU_MASK, valu_cnt, group)
+
+
+def _sched_barrier_valu_exp_pairs(traits, pairs, valu_cnt, exp_cnt, group):
+    """Emit pairs of MFMA, VALU, then dependent EXP schedule groups."""
+    pairs = _scale_sched_pairs(pairs, traits.HEAD_DIM)
+    for _ in range_constexpr(pairs):
+        rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, 1, group)
+        rocdl.sched_group_barrier(traits.SCHED_VALU_MASK, valu_cnt, group)
+        rocdl.sched_group_barrier(traits.SCHED_EXP_MASK, exp_cnt, group)
+
+
+def _sched_mfma_tail(traits, count, group):
+    """Emit a trailing dense MFMA schedule group."""
+    rocdl.sched_group_barrier(traits.SCHED_MFMA_MASK, _scale_sched_pairs(count, traits.HEAD_DIM), group)
 
 
 def _stagger_extra_barrier_if_zero(stagger_i32):

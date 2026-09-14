@@ -33,6 +33,7 @@ from kernels.attention.flash_attn_utils import (
     DualwaveStoreHelper,
     _anchor_v_o,
     _anchor_v_p,
+    _anchor_v_s,
     _bias_buf_bytes,
     _bias_dma_m0_base,
     _bias_dma_src_elem,
@@ -43,13 +44,17 @@ from kernels.attention.flash_attn_utils import (
     _make_bias_lds_ptr,
     _make_dualwave_swp_traits,
     _num_bias_dma,
+    _opaque_i32,
     _s_barrier,
     _s_nop,
     _s_setprio,
     _s_waitcnt,
     _sched_barrier,
     _sched_barrier_exp_pairs,
+    _sched_barrier_exp_valu_pairs,
     _sched_barrier_pairs,
+    _sched_barrier_valu_exp_pairs,
+    _sched_mfma_tail,
     _seq_pad_col_base,
     _seq_pad_score_threshold,
     _stagger_extra_barrier_if_one,
@@ -144,6 +149,7 @@ def build_flash_attn_dualwave_swp_module(
         paged=paged,
         kv_cache_layout=kv_cache_layout,
         kv_vectorized=KV_VECTORIZED,
+        qlds=(dtype_str == "bf16" and not HAS_BIAS),
         return_lse=return_lse,
         xcd_swizzle=_xcd_swizzle,
     )
@@ -151,8 +157,13 @@ def build_flash_attn_dualwave_swp_module(
 
     _dualwave_swp_cache_tag = (traits.cache_tag, HAS_BIAS, HAS_ALIBI, HAS_SINK)
 
+    # BF16 d128 centers score pairs with packed adds. Budget their emitted VALU
+    # instructions, so the PV MFMAs overlap both subtraction and the exp2 head.
+    _PV_SUB_VALU_CNT = 3 if dtype_str == "bf16" and head_dim == 128 else 6
+
     # Shared-memory layout: one 16B-aligned K/V region (K0/V0/K1/V1).
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
+    _Q_LDS_ELEMS = traits.BLOCK_M * traits.HEAD_DIM if traits.QLDS else 16
     # Bias adds a double-buffered [NUM_WAVES, ROWS_PER_WAVE, BLOCK_N] staging tile.
     _BIAS_LDS_ELEMS = 2 * _bias_buf_bytes(traits) // traits.BF16_BYTES
     _NUM_DMA_BIAS = _num_bias_dma(traits)
@@ -164,6 +175,7 @@ def build_flash_attn_dualwave_swp_module(
             kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
             bt: fx.Array[fx.Int32, traits.PAGED_BT_LDS_SIZE, 16]
             bias: fx.Array[_lds_elem_dtype, _BIAS_LDS_ELEMS, 128]
+            q: fx.Array[_lds_elem_dtype, _Q_LDS_ELEMS, 16]
 
     elif const_expr(traits.PAGED):
 
@@ -171,6 +183,7 @@ def build_flash_attn_dualwave_swp_module(
         class SharedStorage:
             kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
             bt: fx.Array[fx.Int32, traits.PAGED_BT_LDS_SIZE, 16]
+            q: fx.Array[_lds_elem_dtype, _Q_LDS_ELEMS, 16]
 
     elif const_expr(HAS_BIAS):
 
@@ -178,12 +191,14 @@ def build_flash_attn_dualwave_swp_module(
         class SharedStorage:
             kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
             bias: fx.Array[_lds_elem_dtype, _BIAS_LDS_ELEMS, 128]
+            q: fx.Array[_lds_elem_dtype, _Q_LDS_ELEMS, 16]
 
     else:
 
         @fx.struct
         class SharedStorage:
             kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
+            q: fx.Array[_lds_elem_dtype, _Q_LDS_ELEMS, 16]
 
     @flyc.kernel(known_block_size=[traits.BLOCK_SIZE, 1, 1])
     def flash_attn_dualwave_swp_gfx950_kernel(
@@ -384,6 +399,8 @@ def build_flash_attn_dualwave_swp_module(
             return scored
 
         def _main_body():
+            urk_pong = _opaque_i32(ctx.k_lds_read_base_per_lane)
+
             # Paged: stage the block-table row into LDS before any page-id ds_read.
             if const_expr(traits.PAGED):
                 page_ids.load_block_table_to_lds()
@@ -397,6 +414,8 @@ def build_flash_attn_dualwave_swp_module(
                 kv_gmem_to_lds.load_k_split(0, 0, page_id=pro_pageid_0)
             else:
                 kv_gmem_to_lds.load_k_split(0, 0)
+            if const_expr(traits.QLDS):
+                q_loader.stage_q_to_lds()
             _s_waitcnt(0)
             _sched_barrier(0)
             _s_barrier()
@@ -405,7 +424,11 @@ def build_flash_attn_dualwave_swp_module(
                 _issue_bias_dma(ctx.split_tile(0), 0)
 
             # Load this wave's Q rows and pre-scale by the 1/sqrt(D) softmax
-            q_all_bf16 = q_loader.load_all()
+            if const_expr(traits.QLDS):
+                q_all_bf16 = q_loader.load_all_from_lds()
+                _s_waitcnt(traits.LGKMCNT_0_ONLY)
+            else:
+                q_all_bf16 = q_loader.load_all()
             q_all_scaled_bf16 = q_loader.scale_all(q_all_bf16)
 
             # Pipeline ahead: prefetch K tile1 (buf1) + V tile0 (buf0) as background
@@ -513,10 +536,14 @@ def build_flash_attn_dualwave_swp_module(
                 v_s_1 = qk_scored(v_k, q_all_scaled_bf16, j_idx - 2, buf=1)
                 v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
                 l_row = softmax_helper.reduce_sum(l_row, v_p_0)
+                v_p_0 = _anchor_v_s(traits, v_p_0)
                 v_p_0 = softmax_helper.cast_p(v_p_0)
                 v_p_0 = _anchor_v_p(traits, v_p_0, elem_dtype=elem_dtype)
-                _sched_barrier_exp_pairs(traits, 6, 3, 1)
-                _sched_barrier_pairs(traits, 10, 5, 1)
+                _sched_barrier_exp_pairs(traits, 5, 3, 1)
+                _sched_barrier_exp_valu_pairs(traits, 1, 2, 2, 1)
+                _sched_barrier_pairs(traits, 6, 5, 1)
+                _sched_barrier_pairs(traits, 1, 4, 1)
+                _sched_barrier_pairs(traits, 3, 5, 1)
                 # Hoist side-effect-free Cluster 2 K-DMA address prep to overlap Cluster 1 compute.
                 c2_pageid = page_ids.finish_page_id(c2_pageid_lds) if const_expr(traits.PAGED) else fx.Index(0)
                 _dualwave_sync_barrier()
@@ -549,7 +576,8 @@ def build_flash_attn_dualwave_swp_module(
                 else:
                     v_s_1 = softmax_helper.v_s_vec_to_lists(v_s_1)
                 m_tile_max_a = softmax_helper.reduce_max(v_s_1)
-                _sched_barrier_pairs(traits, 4, 6, 2)
+                _sched_barrier_pairs(traits, 3, 6, 2)
+                _sched_barrier_pairs(traits, 1, 5, 2)
                 if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
                     v_o, m_row, l_row, v_p_0 = softmax_helper.lazy_rescale_o(v_o, m_row, l_row, m_tile_max_a, v_p_0)
                 else:
@@ -560,9 +588,10 @@ def build_flash_attn_dualwave_swp_module(
                 v_s_1 = softmax_helper.sub_m(v_s_1, m_row)
                 v_p_1 = softmax_helper.exp2(v_s_1, 0, 16)
 
-                _sched_barrier_pairs(traits, 6, 6, 2)
-                # IGroupLP group 2 keeps softmax exp2 near its MFMA window.
-                _sched_barrier_exp_pairs(traits, 6, 3, 2)
+                _sched_mfma_tail(traits, 1, 2)
+                _sched_barrier_pairs(traits, 5, _PV_SUB_VALU_CNT, 2)
+                _sched_barrier_valu_exp_pairs(traits, 1, 2, 2, 2)
+                _sched_barrier_exp_pairs(traits, 5, 3, 2)
                 if const_expr(traits.DUALWAVE_SWP_SETPRIO):
                     _s_setprio(0)
                 # Hoist side-effect-free Cluster 4 V-DMA address prep to overlap Cluster 3 compute.
@@ -577,7 +606,7 @@ def build_flash_attn_dualwave_swp_module(
                     kv_gmem_to_lds.load_v_tile(j_idx - 1, 0, page_id=c4_pageid)
                 else:
                     kv_gmem_to_lds.load_v_tile(j_idx - 1, 0)
-                v_k = kv_lds_to_regs.load_k(0)
+                v_k = kv_lds_to_regs.load_k(0, urk_base=urk_pong)
                 _s_waitcnt(traits.LGKMCNT_0_ONLY)
                 _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
                 _dualwave_sync_barrier()
@@ -588,10 +617,14 @@ def build_flash_attn_dualwave_swp_module(
                 v_s_0 = qk_scored(v_k, q_all_scaled_bf16, j_idx - 1, buf=0)
                 v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
                 l_row = softmax_helper.reduce_sum(l_row, v_p_1)
+                v_p_1 = _anchor_v_s(traits, v_p_1)
                 v_p_1 = softmax_helper.cast_p(v_p_1)
                 v_p_1 = _anchor_v_p(traits, v_p_1, elem_dtype=elem_dtype)
-                _sched_barrier_exp_pairs(traits, 6, 3, 3)
-                _sched_barrier_pairs(traits, 10, 5, 3)
+                _sched_barrier_exp_pairs(traits, 5, 3, 3)
+                _sched_barrier_exp_valu_pairs(traits, 1, 2, 2, 3)
+                _sched_barrier_pairs(traits, 6, 5, 3)
+                _sched_barrier_pairs(traits, 1, 4, 3)
+                _sched_barrier_pairs(traits, 3, 5, 3)
                 # Hoist Cluster 6 K-DMA address prep to overlap Cluster 5 compute.
                 _c6_kpid = page_ids.finish_page_id(_c6_kpid_lds) if const_expr(traits.PAGED) else fx.Index(0)
                 _dualwave_sync_barrier()
@@ -623,7 +656,8 @@ def build_flash_attn_dualwave_swp_module(
                     _s_setprio(1)
                 v_o = gemm_helper.pv_step_k(0, v_p_1, v_v, v_o)
                 m_tile_max_b = softmax_helper.reduce_max(v_s_0)
-                _sched_barrier_pairs(traits, 4, 6, 4)
+                _sched_barrier_pairs(traits, 3, 6, 4)
+                _sched_barrier_pairs(traits, 1, 5, 4)
                 if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
                     v_o, m_row, l_row, v_p_1 = softmax_helper.lazy_rescale_o(v_o, m_row, l_row, m_tile_max_b, v_p_1)
                 else:
@@ -633,8 +667,10 @@ def build_flash_attn_dualwave_swp_module(
                 v_o = gemm_helper.pv_step_k(3, v_p_1, v_v, v_o)
                 v_s_0 = softmax_helper.sub_m(v_s_0, m_row)
                 v_p_0 = softmax_helper.exp2(v_s_0, 0, 16)
-                _sched_barrier_pairs(traits, 6, 5, 4)
-                _sched_barrier_exp_pairs(traits, 6, 3, 4)
+                _sched_mfma_tail(traits, 1, 4)
+                _sched_barrier_pairs(traits, 5, _PV_SUB_VALU_CNT, 4)
+                _sched_barrier_valu_exp_pairs(traits, 1, 2, 2, 4)
+                _sched_barrier_exp_pairs(traits, 5, 3, 4)
                 if const_expr(traits.DUALWAVE_SWP_SETPRIO):
                     _s_setprio(0)
                 # Prefetch the next iteration's Cluster-0 V page id before this barrier.
@@ -679,6 +715,7 @@ def build_flash_attn_dualwave_swp_module(
             v_s_1 = qk_scored(v_k, q_all_scaled_bf16, max_m3, buf=1)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
+            v_p_0 = _anchor_v_s(traits, v_p_0)
             v_p_0 = softmax_helper.cast_p(v_p_0)
             v_p_0 = _anchor_v_p(traits, v_p_0, elem_dtype=elem_dtype)
             _sched_barrier_exp_pairs(traits, 6, 3, 5)
@@ -737,7 +774,7 @@ def build_flash_attn_dualwave_swp_module(
                 kv_gmem_to_lds.load_v_tile(max_m2, 0, page_id=ec4_pageid)
             else:
                 kv_gmem_to_lds.load_v_tile(max_m2, 0)
-            v_k = kv_lds_to_regs.load_k(0)
+            v_k = kv_lds_to_regs.load_k(0, urk_base=urk_pong)
             _s_waitcnt(traits.LGKMCNT_0_ONLY)
             _waitcnt_vm_n(ctx.NUM_DMA_K + ctx.NUM_DMA_V)
             _dualwave_sync_barrier()
@@ -747,6 +784,7 @@ def build_flash_attn_dualwave_swp_module(
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e3)
             v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_1)
+            v_p_1 = _anchor_v_s(traits, v_p_1)
             v_p_1 = softmax_helper.cast_p(v_p_1)
             v_p_1 = _anchor_v_p(traits, v_p_1, elem_dtype=elem_dtype)
             _sched_barrier_exp_pairs(traits, 6, 3, 7)
@@ -806,6 +844,7 @@ def build_flash_attn_dualwave_swp_module(
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e7)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
             l_row = softmax_helper.reduce_sum(l_row, v_p_0)
+            v_p_0 = _anchor_v_s(traits, v_p_0)
             v_p_0 = softmax_helper.cast_p(v_p_0)
             v_p_0 = _anchor_v_p(traits, v_p_0, elem_dtype=elem_dtype)
             _sched_barrier_exp_pairs(traits, 6, 3, 9)
@@ -839,6 +878,7 @@ def build_flash_attn_dualwave_swp_module(
             v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
             l_row = softmax_helper.apply_l_rescale(l_row, rescale_e11)
             l_row = softmax_helper.reduce_sum(l_row, v_p_1)
+            v_p_1 = _anchor_v_s(traits, v_p_1)
             v_p_1 = softmax_helper.cast_p(v_p_1)
             v_p_1 = _anchor_v_p(traits, v_p_1, elem_dtype=elem_dtype)
             _sched_barrier(0)

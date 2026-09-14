@@ -3858,6 +3858,34 @@ def test_lse_dense(dtype, causal, B, S, H, Hkv, D):
 
 
 @_requires_gfx950
+@pytest.mark.parametrize(
+    "S,Hkv,D,dtype",
+    [
+        (513, 8, 128, torch.bfloat16),
+        (1024, 2, 128, torch.bfloat16),
+        (1024, 8, 64, torch.bfloat16),
+        (1024, 8, 128, torch.float16),
+    ],
+)
+@pytest.mark.parametrize("causal", [False, True])
+def test_dualwave_dense_pipeline_matches_torch(S, Hkv, D, dtype, causal):
+    """Exercise the steady-state pipeline, including a partial last Q/KV tile."""
+    torch.manual_seed(123)
+    q = torch.randn(1, S, 8, D, device="cuda", dtype=dtype)
+    k = torch.randn(1, S, Hkv, D, device="cuda", dtype=dtype)
+    v = torch.randn_like(k)
+    actual = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_heads=Hkv)
+    expected = F.scaled_dot_product_attention(
+        q.transpose(1, 2).float(),
+        k.transpose(1, 2).float(),
+        v.transpose(1, 2).float(),
+        is_causal=causal,
+        enable_gqa=Hkv != 8,
+    ).transpose(1, 2)
+    torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-2)
+
+
+@_requires_gfx950
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("D,num_kv_splits", [(64, 2), (128, 3)])
 def test_lse_splitk(causal, num_kv_splits, D):
@@ -6474,28 +6502,28 @@ def test_paged_fp8_cache_offsets_above_4gib(head_dim, value_head_dim, page_size,
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("H", [8, 64])
-def test_xcd_swizzle_is_bit_identical(H):
+@pytest.mark.parametrize("B,S,H", [(1, 8192, 8), (4, 8192, 64), (1, 16384, 8), (1, 16384, 64)])
+def test_xcd_swizzle_is_bit_identical(B, S, H):
     """The head-slow remap must not change a single bit of the output.
 
     It only re-derives (head, q_block) from the same linear workgroup id, so it
     is bijective by construction -- but a mistake in the derivation would show
     up as a permuted or partially-recomputed output rather than as an error, so
-    this pins it. S clears the auto-dispatch threshold (num_q_blocks >= 64 at
-    BLOCK_M=256) so both settings run on the shapes the remap targets.
+    this pins it. Cover both the 8K large-MHA threshold and the general 16K
+    threshold, plus a small 8K workload that retains the original mapping.
     """
-    S = 64 * 256
     dtype = torch.bfloat16
     torch.manual_seed(H)
-    q = _rand_lse(1, S, H, 128, dtype=dtype)
+    q = _rand_lse(B, S, H, 128, dtype=dtype)
     k, v = torch.randn_like(q), torch.randn_like(q)
 
     def run(flag):
         return flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=flag).clone()
 
-    off, on = run(False), run(True)
+    off, on, auto = run(False), run(True), run(None)
     torch.cuda.synchronize()
     assert torch.equal(off, on)
+    assert torch.equal(off, auto)
 
 
 @_requires_gfx950
