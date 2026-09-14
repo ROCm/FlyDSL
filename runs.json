@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-14T14:07:47Z",
+ "updated": "2026-09-14T14:10:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34853593531,
+   "pr": null,
+   "commit": "09c0f6caf62957ba30a495f7d2268491b31deeed",
+   "branch": "main",
+   "event": "push",
+   "title": "[Doc] Introduction for DSL procotols (#1120)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34853593531",
+   "created_at": "2026-09-14T14:07:52Z",
+   "updated_at": "2026-09-14T14:08:50Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34852987816,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Reduce full test runtime without dropping edge coverage (#1132)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34852987816",
    "created_at": "2026-09-14T14:02:15Z",
-   "updated_at": "2026-09-14T14:04:05Z",
+   "updated_at": "2026-09-14T14:08:47Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,13 +40,41 @@
    "branch": "opus-fa4-align-bf16-perf",
    "event": "pull_request",
    "title": "[Kernel][Perf] Tune gfx950 BF16 attention pipeline and XCD swizzle",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681",
    "created_at": "2026-09-14T13:45:58Z",
-   "updated_at": "2026-09-14T13:47:51Z",
+   "updated_at": "2026-09-14T14:07:43Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T14:07:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681/job/104007305200"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-14T14:07:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681/job/104007305202"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T14:08:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681/job/104007305250"
+    }
+   ]
   },
   {
    "run_id": 34847992862,
@@ -101,11 +144,11 @@
    "branch": "codex/scaled-tiled-gemm",
    "event": "pull_request",
    "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065",
    "created_at": "2026-09-14T13:10:31Z",
-   "updated_at": "2026-09-14T13:38:36Z",
+   "updated_at": "2026-09-14T14:08:06Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -130,9 +173,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-14T13:38:36Z",
+     "started_at": "2026-09-14T14:08:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939240"
     }
@@ -1975,7 +2018,7 @@
   },
   {
    "run_id": 34585436487,
-   "pr": 1120,
+   "pr": null,
    "commit": "097452786ef9181dcaab8aab87157635806dc2bc",
    "branch": "pr/docs-dsl-protocols",
    "event": "pull_request",
@@ -2150,52 +2193,6 @@
      "started_at": "2026-09-11T08:24:08Z",
      "completed_at": "2026-09-11T08:32:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577222538/job/103197862038"
-    }
-   ]
-  },
-  {
-   "run_id": 34577216645,
-   "pr": 848,
-   "commit": "21c0eae44a93f88851b44395bcfbac68d633ce5f",
-   "branch": "cjl/norm_perf",
-   "event": "pull_request",
-   "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645",
-   "created_at": "2026-09-11T08:02:27Z",
-   "updated_at": "2026-09-11T10:00:08Z",
-   "actor": "cschenjunlin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T08:32:34Z",
-     "completed_at": "2026-09-11T08:57:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645/job/103199137555",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T08:34:32Z",
-     "completed_at": "2026-09-11T09:27:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645/job/103199137678",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T08:30:21Z",
-     "completed_at": "2026-09-11T10:00:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34577216645/job/103199137680",
-     "log_fetch_failed": true
     }
    ]
   }
