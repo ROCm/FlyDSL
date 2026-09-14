@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-14T13:30:27Z",
+ "updated": "2026-09-14T14:04:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34852987816,
+   "pr": null,
+   "commit": "04810f06dc010cff7c0e7dd40c3598ab9d238209",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Reduce full test runtime without dropping edge coverage (#1132)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34852987816",
+   "created_at": "2026-09-14T14:02:15Z",
+   "updated_at": "2026-09-14T14:02:23Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34851278681,
+   "pr": 1134,
+   "commit": "ea8ac83330a3bcb851c96d1b2f39890e679ca596",
+   "branch": "opus-fa4-align-bf16-perf",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Tune gfx950 BF16 attention pipeline and XCD swizzle",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681",
+   "created_at": "2026-09-14T13:45:58Z",
+   "updated_at": "2026-09-14T13:47:51Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34847992862,
    "pr": 891,
@@ -71,13 +101,42 @@
    "branch": "codex/scaled-tiled-gemm",
    "event": "pull_request",
    "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065",
    "created_at": "2026-09-14T13:10:31Z",
-   "updated_at": "2026-09-14T13:12:27Z",
+   "updated_at": "2026-09-14T13:38:36Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T13:39:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939083"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T13:38:52Z",
+     "completed_at": "2026-09-14T13:57:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939232",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-14T13:38:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939240"
+    }
+   ]
   },
   {
    "run_id": 34845090767,
@@ -139,11 +198,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T12:56:50Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34844925217/job/103982712696"
+     "completed_at": "2026-09-14T14:01:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34844925217/job/103982712696",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -273,7 +333,7 @@
   },
   {
    "run_id": 34837262103,
-   "pr": 1132,
+   "pr": null,
    "commit": "123ce0707e8254089b8a26b232d24d8d67a96cf7",
    "branch": "codex/reduce-ci-test-runtime",
    "event": "pull_request",
@@ -318,7 +378,7 @@
   },
   {
    "run_id": 34835910972,
-   "pr": 1132,
+   "pr": null,
    "commit": "b49d10b6bb22a08f78705b7fca072cf863e6f0d1",
    "branch": "codex/reduce-ci-test-runtime",
    "event": "pull_request",
@@ -2137,65 +2197,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34575338851,
-   "pr": null,
-   "commit": "68345e187d2e517c1643911b248216d123afe01b",
-   "branch": "main",
-   "event": "push",
-   "title": "fix(ci): use host networking for manylinux image builds (#1118)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851",
-   "created_at": "2026-09-11T07:38:36Z",
-   "updated_at": "2026-09-11T08:54:35Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T08:27:07Z",
-     "completed_at": "2026-09-11T08:54:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192019617"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T08:04:27Z",
-     "completed_at": "2026-09-11T08:54:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192019681"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T08:01:58Z",
-     "completed_at": "2026-09-11T08:23:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34575338851/job/103192020057",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34574857685,
-   "pr": null,
-   "commit": "2aff2aaa49e8d2921fd483a069e1f2c069e0b696",
-   "branch": "main",
-   "event": "push",
-   "title": "[Perf][Dialect] Fold redundant index cast pairs in layout lowering (#\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34574857685",
-   "created_at": "2026-09-11T07:32:26Z",
-   "updated_at": "2026-09-11T07:38:41Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
