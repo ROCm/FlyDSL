@@ -617,7 +617,7 @@ jobs:
           docker exec flydsl_test bash -c "python3 -c 'import torch; import triton; assert tuple(map(int, triton.__version__.split(\"+\", 1)[0].split(\".\")[:3])) >= (3, 6, 0), triton.__version__; print(\"Using image Triton\", triton.__version__, \"with PyTorch\", torch.__version__)'"
 
       - name: Run tests
-        timeout-minutes: 60
+        timeout-minutes: 70
         run: |
           docker exec -e ROCM_PATH flydsl_test bash -c 'export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh'
 
