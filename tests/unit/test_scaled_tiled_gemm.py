@@ -9,7 +9,7 @@ import pytest
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, gpu
+from flydsl._mlir.dialects import fly, func, gpu
 from flydsl._mlir.passmanager import PassManager
 
 pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
@@ -199,6 +199,51 @@ def test_atom_operand_groups_and_scalar_state(call, mode, promote):
             assert all(value.owner.name == "llvm.load" for value in calls[0].operands[3:])
 
 
+@pytest.mark.parametrize("rank", [2, 3])
+@pytest.mark.parametrize("mode", ["state", "override_state"])
+def test_tiled_gemm_forwards_atom_state(rank, mode):
+    with ir.Context(), ir.Location.unknown():
+        module, (m, n, k) = _build_gemm(rank, scale_mode=mode)
+        PassManager.parse(PIPELINE).run(module.operation)
+        scales = [
+            tuple(ir.IntegerAttr(v.owner.attributes["value"]).value for v in op.operands[3:])
+            for op in _walk(module.operation)
+            if op.name == MFMA
+        ]
+        expected = (
+            [(117, 120)] * (m * n * k)
+            if mode == "state"
+            else [
+                (117 + mt + m * kt, 120 + nt + n * kt) for mt, nt, kt in itertools.product(range(m), range(n), range(k))
+            ]
+        )
+        assert sorted(scales) == sorted(expected)
+
+
+def test_tiled_mma_state_preserves_tiling_and_runtime_atom():
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.create()
+        with ir.InsertionPoint(module.body):
+            atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
+            tiled = fx.make_tiled_mma(atom, fx.make_layout((2, 2, 1), (1, 2, 4)), (32, 32, 128))
+            data_type = ir.VectorType.get([8], fx.Int32.ir_type)
+            acc_type = ir.VectorType.get([4], fx.Float32.ir_type)
+            function = func.FuncOp("update", ([tiled.type, fx.Int32.ir_type, data_type, acc_type], [acc_type]))
+            with ir.InsertionPoint(function.add_entry_block()):
+                original, scale, data, acc = function.arguments
+                updated = original.set_value("scale_a", scale)
+                assert updated.type == original.type
+                result = fly.mma_atom_call_ssa([acc_type], fly.get_mma_atom(updated), [data], [data], acc)
+                func.ReturnOp([result])
+        assert module.operation.verify()
+        PassManager.parse("builtin.module(canonicalize,convert-fly-to-rocdl,canonicalize)").run(module.operation)
+        function = module.body.operations[0]
+        call = next(op for op in _walk(function.operation) if op.name == MFMA)
+        assert call.operands[3] == function.arguments[1]
+        assert call.operands[4].owner.name == "llvm.extractvalue"
+        assert call.operands[4].owner.operands[0] == function.arguments[0]
+
+
 @pytest.mark.parametrize("rank,metadata_v", [(1, 2), (1, (2,)), (1, ((2,),)), (2, 2), (3, 2)])
 @pytest.mark.parametrize("metadata_operands", [("a",), ("b",), ("a", "b")])
 def test_three_tensor_operand_groups_survive_expansion_and_ssa(rank, metadata_v, metadata_operands):
@@ -257,6 +302,59 @@ def test_ir_rejects_empty_operand_groups(call, operand):
                 op = call(atom, tensor, c=tensor, **args)
             with pytest.raises(ir.MLIRError, match="at least one tensor"):
                 op.operation.verify()
+
+
+@pytest.mark.parametrize("call", [fly.gemm, fly.mma_atom_call])
+def test_low_level_memref_builders_accept_legacy_single_operands(call):
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.create()
+        with ir.InsertionPoint(module.body):
+            atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
+            data = fx.make_rmem_tensor(8, fx.Int32)
+            acc = fx.make_rmem_tensor(4, fx.Float32)
+            op = call(atom, acc, data, data, acc)
+        assert module.operation.verify()
+        assert "[" not in str(op).split(":", 1)[0]
+
+
+def test_low_level_ssa_builder_accepts_legacy_single_operands():
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.create()
+        with ir.InsertionPoint(module.body):
+            atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
+            data = fx.Vector.filled(8, 1, fx.Int32).ir_value()
+            acc = fx.Vector.filled(4, 0.0, fx.Float32).ir_value()
+            result = fly.mma_atom_call_ssa([acc.type], atom, data, data, acc)
+        assert module.operation.verify()
+        assert "[" not in str(result.owner).split(":", 1)[0]
+
+
+def test_textual_ir_accepts_legacy_single_operand_syntax():
+    atom = "!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x32, (f8E4M3FNUZ, f8E4M3FNUZ) -> f32>>"
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.parse(f"""
+        func.func @test(%a: vector<8xi8>, %b: vector<8xi8>, %c: vector<4xf32>) -> vector<4xf32> {{
+          %atom = fly.make_mma_atom : {atom}
+          %result = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : ({atom}, vector<8xi8>, vector<8xi8>, vector<4xf32>) -> vector<4xf32>
+          return %result : vector<4xf32>
+        }}""")
+        assert module.operation.verify()
+        text = str(module)
+        assert "fly.mma_atom_call_ssa(%0, %arg0, %arg1, %arg2)" in text
+
+
+def test_textual_ir_prints_multi_operand_groups_with_brackets():
+    atom = "!fly.mma_atom<!fly_rocdl.cdna4.mfma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>"
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.parse(f"""
+        func.func @test(%a: vector<8xi32>, %b: vector<8xi32>, %c: vector<4xf32>, %sa: i32, %sb: i32) -> vector<4xf32> {{
+          %atom = fly.make_mma_atom : {atom}
+          %result = fly.mma_atom_call_ssa(%atom, [%a, %sa], [%b, %sb], %c) : ({atom}, vector<8xi32>, i32, vector<8xi32>, i32, vector<4xf32>) -> vector<4xf32>
+          return %result : vector<4xf32>
+        }}""")
+        assert module.operation.verify()
+        text = str(module)
+        assert "fly.mma_atom_call_ssa(%0, [%arg0, %arg3], [%arg1, %arg4], %arg2)" in text
 
 
 @pytest.mark.parametrize("layout", ["(1,?):(1,1)", "(1,2):(1,?)"])

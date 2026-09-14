@@ -403,8 +403,18 @@ together and fully expands the static M/N/K dimensions.
 The first tensor is always the primary operand. Further tensors are defined
 by the MMA atom; the interface can also represent a three-input group such
 as `[data, scales, metadata]` when an atom supports it. Single Tensor operands
-and scalar atom-state keywords remain supported. The current scaled atoms
+and scalar atom-state keywords remain supported for both bare atoms and tiled
+MMA. `tiled_mma.set_value("scale_a", scale)` returns a new tiled MMA with the
+same layout and permutation. Explicit scale tensors override the corresponding
+atom-state fields; omitted scale tensors use those fields. The current scaled atoms
 accept data and an optional scale; they do not consume sparsity metadata.
+
+The low-level Python dialect builders also accept the legacy single-value form
+for A and B and normalize it to singleton groups. Textual MLIR keeps the legacy
+bare operand syntax for singleton groups and uses brackets only for multi-value
+groups, for example `%a, %b` versus
+`[%a, %scale_a], [%b, %scale_b]`. The parser accepts either spelling for a
+singleton group.
 
 **TDM async copy atom** — the **base pointer comes from the `copy_atom_call` global
 operand** (its pointer); the per-dim extent (HW out-of-bounds handling), per-dim

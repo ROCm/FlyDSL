@@ -15,6 +15,12 @@
 #include <mlir/IR/Attributes.h>
 #include <mlir/IR/BuiltinAttributes.h>
 
+namespace mlir::fly {
+ParseResult parseMmaOperandGroup(OpAsmParser &parser,
+                                 SmallVectorImpl<OpAsmParser::UnresolvedOperand> &operands);
+void printMmaOperandGroup(OpAsmPrinter &printer, Operation *op, OperandRange operands);
+} // namespace mlir::fly
+
 #define GET_OP_CLASSES
 #include "flydsl/Dialect/Fly/IR/FlyOps.cpp.inc"
 
@@ -23,6 +29,36 @@
 
 using namespace mlir;
 using namespace mlir::fly;
+
+namespace mlir::fly {
+
+ParseResult parseMmaOperandGroup(OpAsmParser &parser,
+                                 SmallVectorImpl<OpAsmParser::UnresolvedOperand> &operands) {
+  if (succeeded(parser.parseOptionalLSquare())) {
+    if (parser.parseOperandList(operands) || parser.parseRSquare())
+      return failure();
+    return success();
+  }
+
+  OpAsmParser::UnresolvedOperand operand;
+  if (parser.parseOperand(operand))
+    return failure();
+  operands.push_back(operand);
+  return success();
+}
+
+void printMmaOperandGroup(OpAsmPrinter &printer, Operation *, OperandRange operands) {
+  if (operands.size() == 1) {
+    printer << operands.front();
+    return;
+  }
+
+  printer << '[';
+  printer.printOperands(operands);
+  printer << ']';
+}
+
+} // namespace mlir::fly
 
 namespace {
 
@@ -1477,6 +1513,17 @@ FLY_INFER_RETURN_TYPES(MakeTiledMmaOp) {
   auto tiledMmaTy = TiledMmaType::get(context, mmaAtomTy, layoutTy, tileTy);
   inferredReturnTypes.assign({tiledMmaTy});
   return success();
+}
+
+FLY_INFER_RETURN_TYPES(GetMmaAtomOp) {
+  inferredReturnTypes.assign({cast<TiledMmaType>(operands[0].getType()).getMmaAtom()});
+  return success();
+}
+
+OpFoldResult GetMmaAtomOp::fold(FoldAdaptor) {
+  if (auto tiledMma = getTiledMma().getDefiningOp<MakeTiledMmaOp>())
+    return tiledMma.getMmaAtom();
+  return {};
 }
 
 FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {

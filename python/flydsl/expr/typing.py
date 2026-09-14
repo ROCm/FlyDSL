@@ -1291,6 +1291,19 @@ class TiledCopy(BuiltinDslType):
 
 @ir.register_value_caster(TiledMmaType.static_typeid, replace=True)
 class TiledMma(BuiltinDslType):
+    @overload
+    def set_value(self, field: str, value): ...
+    @overload
+    def set_value(self, field: dict): ...
+
+    @dsl_loc_tracing
+    def set_value(self, field, value=None):
+        """Return a tiled MMA with updated atom state and the same tiling."""
+        from .._mlir.dialects import fly
+
+        atom = fly.get_mma_atom(self).set_value(field, value)
+        return make_tiled_mma(atom, self.atom_layout, self.permutation_mnk)
+
     @property
     def mma_atom(self):
         return self.type.mma_atom

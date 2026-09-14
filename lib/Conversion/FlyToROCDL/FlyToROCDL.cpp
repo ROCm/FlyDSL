@@ -556,6 +556,17 @@ public:
   }
 };
 
+class GetMmaAtomOpLowering : public OpConversionPattern<GetMmaAtomOp> {
+public:
+  using OpConversionPattern<GetMmaAtomOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(GetMmaAtomOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, adaptor.getTiledMma());
+    return success();
+  }
+};
+
 class AtomSetValueOpLowering : public OpConversionPattern<AtomSetValueOp> {
 public:
   using OpConversionPattern<AtomSetValueOp>::OpConversionPattern;
@@ -965,7 +976,7 @@ public:
     patterns.add<PtrLoadOpLowering, PtrStoreOpLowering>(typeConverter, context);
     patterns.add<MakeCopyAtomOpLowering, MakeMmaAtomOpLowering>(typeConverter, context);
     patterns.add<MakeTiledCopyOpLowering, MakeTiledMmaOpLowering>(typeConverter, context);
-    patterns.add<AtomSetValueOpLowering>(typeConverter, context);
+    patterns.add<GetMmaAtomOpLowering, AtomSetValueOpLowering>(typeConverter, context);
     patterns.add<CopyAtomCallLowering, MmaAtomCallLowering>(typeConverter, context);
     patterns.add<CopyAtomCallSSALowering, MmaAtomCallSSALowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);

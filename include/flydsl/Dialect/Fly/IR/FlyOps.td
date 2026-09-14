@@ -373,7 +373,8 @@ def Fly_MmaAtomCall : Fly_Op<"mma_atom_call", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
   let arguments = (ins Fly_MmaAtom:$mmaAtom, Fly_MemRef:$d,
                        Variadic<Fly_MemRef>:$a, Variadic<Fly_MemRef>:$b, Fly_MemRef:$c);
-  let assemblyFormat = "`(` $mmaAtom `,` $d `,` `[` $a `]` `,` `[` $b `]` `,` $c `)` "
+  let assemblyFormat = "`(` $mmaAtom `,` $d `,` custom<MmaOperandGroup>($a) `,` "
+                       "custom<MmaOperandGroup>($b) `,` $c `)` "
                        "attr-dict `:` functional-type(operands, results)";
 }
 
@@ -387,7 +388,8 @@ def Fly_MmaAtomCallSSA : Fly_Op<"mma_atom_call_ssa", [AttrSizedOperandSegments]>
   let arguments = (ins Fly_MmaAtom:$mmaAtom, Optional<AnyType>:$d,
                        Variadic<AnyType>:$a, Variadic<AnyType>:$b, AnyType:$c);
   let results = (outs Variadic<AnyType>:$results);
-  let assemblyFormat = "`(` $mmaAtom `,` `[` $a `]` `,` `[` $b `]` `,` $c `)` "
+  let assemblyFormat = "`(` $mmaAtom `,` custom<MmaOperandGroup>($a) `,` "
+                       "custom<MmaOperandGroup>($b) `,` $c `)` "
                        "(`dst` `=` $d^)? attr-dict `:` functional-type(operands, results)";
 }
 
@@ -399,6 +401,14 @@ def Fly_MakeTiledMmaOp : Fly_Op<"make_tiled_mma", [Pure, DeclareOpInterfaceMetho
   let arguments = (ins AnyType:$mmaAtom, Fly_Layout:$atomLayout, Optional<Fly_Tile>:$permutation);
   let results = (outs Fly_TiledMma:$result);
   let assemblyFormat = "`(` $mmaAtom `,` $atomLayout (`,` $permutation^)? `)` attr-dict `:` functional-type(operands, results)";
+}
+
+def Fly_GetMmaAtomOp : Fly_Op<"get_mma_atom", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let summary = "Extract the MMA atom and its runtime state from a tiled MMA";
+  let arguments = (ins Fly_TiledMma:$tiledMma);
+  let results = (outs Fly_MmaAtom:$result);
+  let hasFolder = 1;
+  let assemblyFormat = "`(` $tiledMma `)` attr-dict `:` functional-type(operands, results)";
 }
 
 def Fly_TiledCopyPartitionSrcOp : Fly_Op<"tiled_copy.partition_src", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
@@ -449,7 +459,8 @@ def Fly_GemmOp : Fly_Op<"gemm", [AttrSizedOperandSegments]> {
                        Variadic<Fly_MemRef>:$a, Variadic<Fly_MemRef>:$b, Fly_MemRef:$c,
                        OptionalAttr<Fly_GemmTraversalOrderAttr>:$traversalOrder,
                        Optional<Fly_Layout>:$traversalLayout);
-  let assemblyFormat = "`(` $mmaAtom `,` $d `,` `[` $a `]` `,` `[` $b `]` `,` $c `)` "
+  let assemblyFormat = "`(` $mmaAtom `,` $d `,` custom<MmaOperandGroup>($a) `,` "
+                       "custom<MmaOperandGroup>($b) `,` $c `)` "
                        "(`traversalLayout` `=` $traversalLayout^)? "
                        "attr-dict `:` functional-type(operands, results)";
 }
