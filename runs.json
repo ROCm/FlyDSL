@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-14T13:13:45Z",
+ "updated": "2026-09-14T13:16:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34847992862,
+   "pr": 891,
+   "commit": "f3a624be5bfe8b01c9010e2c5e7c37afe6470fce",
+   "branch": "add-wmma-tests-gfx1250",
+   "event": "pull_request",
+   "title": "[Test] Add gfx1250 WMMA lowering tests for additional dtypes",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847992862",
+   "created_at": "2026-09-14T13:14:14Z",
+   "updated_at": "2026-09-14T13:14:14Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34847855493,
+   "pr": null,
+   "commit": "ef853d84dcb8d2e927c8b702f00780250e02bf43",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Align pre-commit Python and C++ style checks with CI (#1133)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847855493",
+   "created_at": "2026-09-14T13:12:56Z",
+   "updated_at": "2026-09-14T13:13:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34847600065,
    "pr": 1128,
@@ -14,7 +44,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065",
    "created_at": "2026-09-14T13:10:31Z",
-   "updated_at": "2026-09-14T13:11:27Z",
+   "updated_at": "2026-09-14T13:12:27Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -277,21 +307,22 @@
    "branch": "codex/port-preshuffle-layout-algebra",
    "event": "pull_request",
    "title": "[Kernel] Refactor preshuffle GEMM indexing with layout algebra",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835721501",
    "created_at": "2026-09-14T10:57:19Z",
-   "updated_at": "2026-09-14T11:31:58Z",
+   "updated_at": "2026-09-14T13:12:10Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T11:31:57Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835721501/job/103953283348"
+     "completed_at": "2026-09-14T13:12:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835721501/job/103953283348",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -2134,94 +2165,6 @@
    "updated_at": "2026-09-11T07:38:41Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 34569038398,
-   "pr": null,
-   "commit": "578cfc7aa685b5ef3940c8fca8e5d64be8a5b677",
-   "branch": "main",
-   "event": "push",
-   "title": "Mxfp8 8w 1*32 scale (#1107)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34569038398",
-   "created_at": "2026-09-11T06:13:36Z",
-   "updated_at": "2026-09-11T07:32:58Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T06:39:36Z",
-     "completed_at": "2026-09-11T07:32:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34569038398/job/103171919400"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T06:36:55Z",
-     "completed_at": "2026-09-11T07:32:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34569038398/job/103171919423"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T06:37:16Z",
-     "completed_at": "2026-09-11T07:11:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34569038398/job/103171919453",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34567151160,
-   "pr": null,
-   "commit": "c417b2819c609a877c1c6f6cbee59a917c45fb1a",
-   "branch": "codex/topk-gating-mi355",
-   "event": "pull_request",
-   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34567151160",
-   "created_at": "2026-09-11T05:44:54Z",
-   "updated_at": "2026-09-11T08:50:47Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T05:59:26Z",
-     "completed_at": "2026-09-11T06:19:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34567151160/job/103164056332",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-11T05:59:38Z",
-     "completed_at": "2026-09-11T06:52:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34567151160/job/103164056362"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-11T08:10:44Z",
-     "completed_at": "2026-09-11T08:50:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34567151160/job/103164056403"
-    }
-   ]
   }
  ]
 }
