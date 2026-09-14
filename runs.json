@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-09-14T12:31:56Z",
+ "updated": "2026-09-14T12:35:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34843870117,
+   "pr": 1133,
+   "commit": "6bfc1e17ab4e81ae1779dde0013a2b7eff115a6b",
+   "branch": "pr/enh-pre-commit-style",
+   "event": "pull_request",
+   "title": "[CI] Align pre-commit Python and C++ style checks with CI",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34843870117",
+   "created_at": "2026-09-14T12:31:17Z",
+   "updated_at": "2026-09-14T12:33:03Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T12:32:58Z",
+     "completed_at": "2026-09-14T12:33:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34843870117/job/103975356515",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T12:32:58Z",
+     "completed_at": "2026-09-14T12:33:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34843870117/job/103975356552",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T12:32:58Z",
+     "completed_at": "2026-09-14T12:33:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34843870117/job/103975356707",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 34842937541,
    "pr": 1013,
@@ -50,11 +96,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T11:31:59Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34837262103/job/103958177684"
+     "completed_at": "2026-09-14T12:32:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34837262103/job/103958177684",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -2168,52 +2215,6 @@
    "updated_at": "2026-09-11T02:37:42Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 34546203897,
-   "pr": 1105,
-   "commit": "cec2ca39d832239b33e64ac19835d6639181509c",
-   "branch": "lhc/fold-index-cast-on-main",
-   "event": "pull_request",
-   "title": "[Perf][Dialect] Fold redundant index cast pairs in layout lowering",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897",
-   "created_at": "2026-09-11T00:22:17Z",
-   "updated_at": "2026-09-11T04:54:38Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T03:43:14Z",
-     "completed_at": "2026-09-11T04:02:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897/job/103103511784",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T02:46:16Z",
-     "completed_at": "2026-09-11T04:54:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897/job/103103511839",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T00:42:39Z",
-     "completed_at": "2026-09-11T02:12:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34546203897/job/103103511906",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
