@@ -140,18 +140,33 @@ If you don't have access to specific AMD GPU models, mention this in your PR. Ou
 
 ### Python
 
-FlyDSL uses [Ruff](https://docs.astral.sh/ruff/) for linting and formatting. The project configuration is defined in `pyproject.toml`:
+FlyDSL uses [Black](https://black.readthedocs.io/) for formatting and
+[Ruff](https://docs.astral.sh/ruff/) for linting and import sorting. Their
+versions and configuration are defined in `pyproject.toml`:
 
 * **Line length**: 120 characters
 * **Target version**: Python 3.10+
 * **Linting rules**: pycodestyle (E/W), pyflakes (F), isort (I)
 * **Import sorting**: `flydsl` is treated as first-party
 
-Before submitting, run:
+Install the style tools and enable the commit hook once per checkout:
 
 ```bash
-ruff check python/ kernels/ tests/
-ruff format --check python/ kernels/ tests/
+python3 -m pip install --upgrade "pip>=25.1"
+python3 -m pip install --group style
+pre-commit install
+```
+
+The hook formats and checks staged Python files before each commit. To format and check all branch-local Python changes manually, run:
+
+```bash
+bash scripts/check_python_style.sh --fix --include-local
+```
+
+To run every configured pre-commit hook over the repository, use:
+
+```bash
+pre-commit run --all-files
 ```
 
 ### C++ (Fly Dialect)

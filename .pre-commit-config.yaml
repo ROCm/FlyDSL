@@ -1,0 +1,32 @@
+repos:
+  - repo: local
+    hooks:
+      - id: black
+        name: Format Python with Black
+        entry: black
+        language: python
+        additional_dependencies:
+          - black==26.5.1
+          - ruff==0.16.6
+        types: [python]
+        exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
+
+      - id: ruff
+        name: Fix Python lint with Ruff
+        entry: ruff check --fix
+        language: python
+        additional_dependencies:
+          - black==26.5.1
+          - ruff==0.16.6
+        types: [python]
+        exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
+
+      - id: black-final
+        name: Normalize Ruff fixes with Black
+        entry: black
+        language: python
+        additional_dependencies:
+          - black==26.5.1
+          - ruff==0.16.6
+        types: [python]
+        exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)

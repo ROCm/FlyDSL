@@ -11,6 +11,13 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[dependency-groups]
+style = [
+  "black==26.5.1",
+  "pre-commit>=4,<5",
+  "ruff==0.16.6",
+]
+
 [tool.black]
 line-length = 120
 extend-exclude = """
