@@ -73,15 +73,23 @@ echo "========================================================================"
 echo "Examples (examples/)"
 echo "========================================================================"
 
-# Whitelist from tests/arch_compat.py (single source of truth for arch compat).
-_RDNA_EXAMPLE_WHITELIST=$(python3 -c "from tests.arch_compat import RDNA_COMPATIBLE_EXAMPLES; print(' '.join(RDNA_COMPATIBLE_EXAMPLES))" 2>/dev/null || echo "")
+# Architecture assignments from tests/arch_compat.py, checked before execution.
 _gpu_arch=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
 for example in "${REPO_ROOT}"/examples/*.py "${REPO_ROOT}"/examples/extension/*/*.py; do
     [ -f "${example}" ] || continue
     # Named by their path under examples/, so nested ones stay unambiguous.
     name="${example#"${REPO_ROOT}"/examples/}"
-    if [[ "${_gpu_arch}" != gfx9* ]] && ! echo "${_RDNA_EXAMPLE_WHITELIST}" | grep -qw "${name}"; then
-        echo "  SKIP  ${name}  (not in RDNA whitelist, arch: ${_gpu_arch})"
+    allowed_arches=$(python3 -c 'import sys; from tests.arch_compat import EXAMPLE_ARCHITECTURES; print(" ".join(EXAMPLE_ARCHITECTURES[sys.argv[1]]))' "${name}")
+    read -r -a arch_patterns <<< "${allowed_arches}"
+    supported=false
+    for pattern in "${arch_patterns[@]}"; do
+        if [[ "${_gpu_arch}" == ${pattern} ]]; then
+            supported=true
+            break
+        fi
+    done
+    if [[ "${supported}" != true ]]; then
+        echo "  SKIP  ${name}  (requires: ${allowed_arches}; arch: ${_gpu_arch})"
         continue
     fi
     output=$(python3 "${example}" 2>&1) || {
