@@ -56,9 +56,7 @@ struct Scalar {
   /// Dynamic folded extent: value + sum((mode_extent - 1) * scale).
   SmallVector<std::pair<int32_t, int32_t>> extentTerms;
 
-  static Scalar getStatic(int32_t v) {
-    return Scalar{v, true, -1, false, {}};
-  }
+  static Scalar getStatic(int32_t v) { return Scalar{v, true, -1, false, {}}; }
   static Scalar getDynamic(int32_t mode, bool fromShape) {
     return Scalar{0, false, mode, fromShape, {}};
   }
