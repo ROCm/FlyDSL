@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-14T17:28:50Z",
+ "updated": "2026-09-14T18:35:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34880575937,
+   "pr": 1119,
+   "commit": "1cac3c82f8aa8d80b88174b831624886e5041bdb",
+   "branch": "codex/topk-gating-mi355",
+   "event": "pull_request",
+   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34880575937",
+   "created_at": "2026-09-14T18:24:13Z",
+   "updated_at": "2026-09-14T18:26:20Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 34874379031,
    "pr": 1135,
@@ -56,13 +71,42 @@
    "branch": "pr/enh-cdna5-tiled-tdm-atom",
    "event": "pull_request",
    "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874295558",
    "created_at": "2026-09-14T17:21:53Z",
-   "updated_at": "2026-09-14T17:24:19Z",
+   "updated_at": "2026-09-14T17:40:57Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T17:41:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874295558/job/104083969538"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T17:41:12Z",
+     "completed_at": "2026-09-14T17:57:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874295558/job/104083969565",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-14T17:40:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874295558/job/104083969585"
+    }
+   ]
   },
   {
    "run_id": 34862944061,
@@ -71,30 +115,31 @@
    "branch": "opus-fa4-align-bf16-perf",
    "event": "pull_request",
    "title": "[Kernel][Perf] Tune gfx950 BF16 attention pipeline and GQA loads",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061",
    "created_at": "2026-09-14T15:33:32Z",
-   "updated_at": "2026-09-14T15:48:58Z",
+   "updated_at": "2026-09-14T17:41:30Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-14T15:48:58Z",
+     "started_at": "2026-09-14T17:41:29Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061/job/104045253390"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T15:49:25Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061/job/104045253407"
+     "completed_at": "2026-09-14T17:30:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061/job/104045253407",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -909,7 +954,7 @@
   },
   {
    "run_id": 34808875422,
-   "pr": 1119,
+   "pr": null,
    "commit": "662201df8403e763e7210269ce8aea9f1e88119f",
    "branch": "codex/topk-gating-mi355",
    "event": "pull_request",
@@ -2213,52 +2258,6 @@
      "started_at": "2026-09-11T09:19:33Z",
      "completed_at": "2026-09-11T10:40:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34581453400/job/103211781497",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34580089132,
-   "pr": 1094,
-   "commit": "da8d2a893875869a1a179412afae31913221a6f1",
-   "branch": "ci/pypi-moe-csv-hgemm",
-   "event": "pull_request",
-   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34580089132",
-   "created_at": "2026-09-11T08:37:20Z",
-   "updated_at": "2026-09-11T10:41:13Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T09:21:07Z",
-     "completed_at": "2026-09-11T10:41:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34580089132/job/103208083246",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T09:02:51Z",
-     "completed_at": "2026-09-11T09:26:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34580089132/job/103208083299",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T09:04:35Z",
-     "completed_at": "2026-09-11T10:39:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34580089132/job/103208083301",
      "log_fetch_failed": true
     }
    ]
