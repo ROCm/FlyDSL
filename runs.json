@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-14T10:55:57Z",
+ "updated": "2026-09-14T10:59:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34835721501,
+   "pr": 1131,
+   "commit": "f4216b6c6634a3d90efab813e6c7dc5715199093",
+   "branch": "codex/port-preshuffle-layout-algebra",
+   "event": "pull_request",
+   "title": "[Kernel] Refactor preshuffle GEMM indexing with layout algebra",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835721501",
+   "created_at": "2026-09-14T10:57:19Z",
+   "updated_at": "2026-09-14T10:58:02Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34835443408,
    "pr": 1131,
@@ -10,11 +25,11 @@
    "branch": "codex/port-preshuffle-layout-algebra",
    "event": "pull_request",
    "title": "[Kernel] Refactor preshuffle GEMM indexing with layout algebra",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835443408",
    "created_at": "2026-09-14T10:53:55Z",
-   "updated_at": "2026-09-14T10:54:48Z",
+   "updated_at": "2026-09-14T10:57:37Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1943,11 +1958,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T09:39:01Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103927791464"
+     "completed_at": "2026-09-14T10:57:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34557181309/job/103927791464",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -2205,52 +2221,6 @@
      "started_at": "2026-09-10T15:39:18Z",
      "completed_at": "2026-09-10T16:25:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34492588995/job/102934833288",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34481829789,
-   "pr": null,
-   "commit": "787efd7a045cf2e434cf67b5474809c6dba70080",
-   "branch": "upstream/fa-paged-fp8-asymmetric-v",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34481829789",
-   "created_at": "2026-09-10T13:18:35Z",
-   "updated_at": "2026-09-11T02:39:43Z",
-   "actor": "sammysun0711",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T14:06:59Z",
-     "completed_at": "2026-09-10T14:55:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34481829789/job/102895102364",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T02:22:11Z",
-     "completed_at": "2026-09-11T02:39:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34481829789/job/102895102458",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T13:45:00Z",
-     "completed_at": "2026-09-10T15:09:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34481829789/job/102895102557",
      "log_fetch_failed": true
     }
    ]
