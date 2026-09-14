@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-09-14T06:56:06Z",
+ "updated": "2026-09-14T07:24:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34817455358,
+   "pr": null,
+   "commit": "49cbefb45707e3ce84b7c1a7e7d6aa8022807362",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Skip GPU tests for more non-code path changes (#1121)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817455358",
+   "created_at": "2026-09-14T07:21:06Z",
+   "updated_at": "2026-09-14T07:21:33Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34817395047,
+   "pr": null,
+   "commit": "11374979fc0789c542754274bee7deebd9e33a00",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V he\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817395047",
+   "created_at": "2026-09-14T07:20:19Z",
+   "updated_at": "2026-09-14T07:21:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 34817329648,
+   "pr": 1013,
+   "commit": "1bf0e69f0b30ace7f18b95a52853f1664c0de7ba",
+   "branch": "pr/enh-cdna5-tiled-tdm-atom",
+   "event": "pull_request",
+   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817329648",
+   "created_at": "2026-09-14T07:19:27Z",
+   "updated_at": "2026-09-14T07:21:27Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 34808875422,
    "pr": 1119,
@@ -2202,81 +2247,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34459592706,
-   "pr": null,
-   "commit": "39b271c562923b737631546ec61aa168fef804ad",
-   "branch": "main",
-   "event": "push",
-   "title": "[DSL] Add llvm load/store primitives (#1096)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706",
-   "created_at": "2026-09-10T09:15:02Z",
-   "updated_at": "2026-09-11T02:18:10Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-10T14:23:22Z",
-     "completed_at": "2026-09-11T02:18:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706/job/102909585591"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T14:24:12Z",
-     "completed_at": "2026-09-10T15:35:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706/job/102909585592",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T15:31:11Z",
-     "completed_at": "2026-09-10T16:23:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459592706/job/102909586387",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34459276491,
-   "pr": null,
-   "commit": "bf94edcf1d3f8873441d4b03ea9a256ac9698f06",
-   "branch": "main",
-   "event": "push",
-   "title": "fix(ci): skip unused ROCm repository (#1115)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459276491",
-   "created_at": "2026-09-10T09:11:36Z",
-   "updated_at": "2026-09-10T09:15:03Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 34458153585,
-   "pr": null,
-   "commit": "0b92602b4e90338d5ee61f00362b26ef3b98c552",
-   "branch": "main",
-   "event": "push",
-   "title": "[Compiler][gfx120] Add modC/reuseA/reuseB to MmaOpGFX1250_WMMAType (#\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34458153585",
-   "created_at": "2026-09-10T08:59:29Z",
-   "updated_at": "2026-09-10T09:11:37Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
