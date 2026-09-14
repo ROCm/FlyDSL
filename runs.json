@@ -1,8 +1,125 @@
 {
  "schema": 1,
- "updated": "2026-09-14T07:24:19Z",
+ "updated": "2026-09-14T09:15:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34824246782,
+   "pr": 1131,
+   "commit": "f4216b6c6634a3d90efab813e6c7dc5715199093",
+   "branch": "codex/port-preshuffle-layout-algebra",
+   "event": "pull_request",
+   "title": "[Kernel] Refactor preshuffle GEMM indexing with layout algebra",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34824246782",
+   "created_at": "2026-09-14T08:44:20Z",
+   "updated_at": "2026-09-14T08:56:47Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T08:58:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34824246782/job/103915943150"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T08:57:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34824246782/job/103915943262"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-14T08:56:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34824246782/job/103915943773"
+    }
+   ]
+  },
+  {
+   "run_id": 34821981040,
+   "pr": 1130,
+   "commit": "e2bf7c2a61b65720a2d932fbbded69e2c04ba34f",
+   "branch": "jit-cache-key-captured-types",
+   "event": "pull_request",
+   "title": "[Bugfix] Include captured types in the JIT cache key",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821981040",
+   "created_at": "2026-09-14T08:17:35Z",
+   "updated_at": "2026-09-14T08:57:09Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T08:38:30Z",
+     "completed_at": "2026-09-14T08:58:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821981040/job/103910922788",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T08:57:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821981040/job/103910922870"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T08:38:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821981040/job/103910922914"
+    }
+   ]
+  },
+  {
+   "run_id": 34821549524,
+   "pr": null,
+   "commit": "574338b9b95a44bc7827b8dfd745fec6b0eab7d9",
+   "branch": "jit-cache-key-captured-types",
+   "event": "pull_request",
+   "title": "[Bugfix] Include captured types in the JIT cache key",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821549524",
+   "created_at": "2026-09-14T08:12:37Z",
+   "updated_at": "2026-09-14T08:12:37Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 34818723060,
+   "pr": null,
+   "commit": "80175c8370f99c099575902080df2461aba41535",
+   "branch": "jit-cache-key-captured-types",
+   "event": "pull_request",
+   "title": "[Bugfix] Include captured types in the JIT cache key",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34818723060",
+   "created_at": "2026-09-14T07:37:30Z",
+   "updated_at": "2026-09-14T07:37:30Z",
+   "actor": "LWenH",
+   "jobs": []
+  },
   {
    "run_id": 34817455358,
    "pr": null,
@@ -10,13 +127,44 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Skip GPU tests for more non-code path changes (#1121)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817455358",
    "created_at": "2026-09-14T07:21:06Z",
-   "updated_at": "2026-09-14T07:21:33Z",
+   "updated_at": "2026-09-14T09:13:24Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T07:50:27Z",
+     "completed_at": "2026-09-14T09:13:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817455358/job/103894209780",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T07:34:09Z",
+     "completed_at": "2026-09-14T07:59:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817455358/job/103894209827",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T07:34:14Z",
+     "completed_at": "2026-09-14T08:51:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817455358/job/103894209831",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 34817395047,
@@ -44,9 +192,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817329648",
    "created_at": "2026-09-14T07:19:27Z",
-   "updated_at": "2026-09-14T07:21:27Z",
+   "updated_at": "2026-09-14T08:38:42Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-14T07:41:02Z",
+     "completed_at": "2026-09-14T08:48:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817329648/job/103895868213"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T08:38:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817329648/job/103895868236"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-14T08:00:01Z",
+     "completed_at": "2026-09-14T08:03:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817329648/job/103895868280"
+    }
+   ]
   },
   {
    "run_id": 34808875422,
@@ -2125,128 +2301,6 @@
    "updated_at": "2026-09-10T11:07:47Z",
    "actor": "sjfeng1999",
    "jobs": []
-  },
-  {
-   "run_id": 34463722679,
-   "pr": 1114,
-   "commit": "d4bb270adc32719d236160ed8a025f0d843adf32",
-   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
-   "event": "pull_request",
-   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34463722679",
-   "created_at": "2026-09-10T10:00:15Z",
-   "updated_at": "2026-09-10T13:26:54Z",
-   "actor": "Boss2002n",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T10:36:39Z",
-     "completed_at": "2026-09-10T10:47:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34463722679/job/102837577354",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T10:36:46Z",
-     "completed_at": "2026-09-10T11:44:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34463722679/job/102837577391",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T12:22:31Z",
-     "completed_at": "2026-09-10T13:26:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34463722679/job/102837577427",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34463453680,
-   "pr": 1109,
-   "commit": "9b022dee16f68bab4b2580b8f2f9cdf2caf48f0c",
-   "branch": "feat/rocdl-cvt-f32-fp8",
-   "event": "pull_request",
-   "title": "[DSL] Expose F32_FP8 conversion from packed_i32",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34463453680",
-   "created_at": "2026-09-10T09:57:09Z",
-   "updated_at": "2026-09-10T09:57:09Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 34460203091,
-   "pr": 1114,
-   "commit": "6b53221147a6e8fd76722dc89e030eac2ee10316",
-   "branch": "jli/gfx1250/llvm-unclausevmem-patch",
-   "event": "pull_request",
-   "title": "[WIP][LLVM] Add LLVM cherry-pick support for gfx1250 unclaused VMEM prolo\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34460203091",
-   "created_at": "2026-09-10T09:21:41Z",
-   "updated_at": "2026-09-10T10:00:27Z",
-   "actor": "Boss2002n",
-   "jobs": []
-  },
-  {
-   "run_id": 34459649023,
-   "pr": 1107,
-   "commit": "c13b6991777a958d98600ca1ec4edbefb3d1c972",
-   "branch": "mxfp8_v1",
-   "event": "pull_request",
-   "title": "Mxfp8 8w 1*32 scale",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459649023",
-   "created_at": "2026-09-10T09:15:37Z",
-   "updated_at": "2026-09-10T11:55:05Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T09:34:53Z",
-     "completed_at": "2026-09-10T10:47:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459649023/job/102819675507",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T09:38:33Z",
-     "completed_at": "2026-09-10T09:55:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459649023/job/102819675564",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T10:36:49Z",
-     "completed_at": "2026-09-10T11:55:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34459649023/job/102819675626",
-     "log_fetch_failed": true
-    }
-   ]
   }
  ]
 }
