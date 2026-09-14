@@ -1,22 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-14T01:50:10Z",
+ "updated": "2026-09-14T03:15:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 34797082155,
+   "run_id": 34801828375,
    "pr": 1066,
-   "commit": "08ac7cbbb2da4122a27d2fdbfec9029e614e372d",
+   "commit": "8a662b0b19d0b564fe01fc230640d7a3c5602bf1",
    "branch": "upstream/fa-paged-fp8-asymmetric-v",
    "event": "pull_request",
    "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
    "status": "in_progress",
    "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34797082155",
-   "created_at": "2026-09-14T01:48:01Z",
-   "updated_at": "2026-09-14T01:48:13Z",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34801828375",
+   "created_at": "2026-09-14T03:13:03Z",
+   "updated_at": "2026-09-14T03:13:42Z",
    "actor": "sammysun0711",
    "jobs": []
+  },
+  {
+   "run_id": 34797082155,
+   "pr": null,
+   "commit": "08ac7cbbb2da4122a27d2fdbfec9029e614e372d",
+   "branch": "upstream/fa-paged-fp8-asymmetric-v",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34797082155",
+   "created_at": "2026-09-14T01:48:01Z",
+   "updated_at": "2026-09-14T03:13:30Z",
+   "actor": "sammysun0711",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-14T02:51:03Z",
+     "completed_at": "2026-09-14T03:13:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34797082155/job/103834173042"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T02:01:34Z",
+     "completed_at": "2026-09-14T02:22:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34797082155/job/103834173043",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-14T02:02:28Z",
+     "completed_at": "2026-09-14T03:10:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34797082155/job/103834173049"
+    }
+   ]
   },
   {
    "run_id": 34768581777,
@@ -2203,21 +2247,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34457180157,
-   "pr": 1104,
-   "commit": "4e5f9fe1de484e87e837fa4da7a2ac8319338697",
-   "branch": "ywx/mega_moe_r1_tune",
-   "event": "pull_request",
-   "title": " deepseekv3 r1 tune config",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34457180157",
-   "created_at": "2026-09-10T08:48:40Z",
-   "updated_at": "2026-09-10T09:20:31Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
