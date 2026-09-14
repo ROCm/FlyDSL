@@ -84,7 +84,7 @@ gpu.module @promote_rmem_to_vector_ssa {
   // CHECK: %[[A:.*]] = vector.extract_strided_slice %[[A_STATE]] {offsets = [0], sizes = [8], strides = [1]} : vector<8xi8> to vector<8xi8>
   // CHECK: %[[B:.*]] = vector.extract_strided_slice %[[B_STATE]] {offsets = [0], sizes = [8], strides = [1]} : vector<8xi8> to vector<8xi8>
   // CHECK: %[[C:.*]] = vector.extract_strided_slice %[[ACC_INIT]] {offsets = [4], sizes = [4], strides = [1]} : vector<8xf32> to vector<4xf32>
-  // CHECK: %[[RES:.*]] = fly.mma_atom_call_ssa(%{{.*}}, [%[[A]]], [%[[B]]], %[[C]])
+  // CHECK: %[[RES:.*]] = fly.mma_atom_call_ssa(%{{.*}}, %[[A]], %[[B]], %[[C]])
   // CHECK-SAME: -> vector<4xf32>
   gpu.func @promote_fp8_mma_to_vector_ssa(%out: !fly.ptr<f32, global>) kernel {
     %c0 = arith.constant 0 : index

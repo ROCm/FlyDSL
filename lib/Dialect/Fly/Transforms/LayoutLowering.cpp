@@ -2291,9 +2291,8 @@ public:
     auto *ctx = rewriter.getContext();
 
     Value mmaAtomVal = op.getMmaAtom();
-    if (auto tiledMmaOp = mmaAtomVal.getDefiningOp<MakeTiledMmaOp>()) {
-      mmaAtomVal = tiledMmaOp.getMmaAtom();
-    }
+    if (isa<TiledMmaType>(mmaAtomVal.getType()))
+      mmaAtomVal = rewriter.createOrFold<GetMmaAtomOp>(loc, mmaAtomVal);
 
     Value d = op.getD();
     Value a = op.getA().front();

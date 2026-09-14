@@ -1143,8 +1143,10 @@ def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, *
     group's tensors share the tile dimensions after mode 0 and are sliced
     together. The atom defines their order, element types, and mode-0 sizes.
 
-    Scalar atom-state keywords retain their existing behavior. Traversal
-    order changes the order of expanded calls without introducing a runtime loop.
+    Scalar atom-state keywords update the atom for both MmaAtom and TiledMma;
+    explicit auxiliary tensors take precedence over the corresponding state.
+    Traversal order changes the order of expanded calls without introducing a
+    runtime loop.
     """
 
     if traversal_order is not None and traversal_layout is not None:
