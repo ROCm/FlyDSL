@@ -104,9 +104,8 @@ FlyDSL/
 │   │   ├── mxfp_moe/               # Fused a4w4/a8w4 MoE 2-stage (device fp4 re-quant)
 │   │   ├── moe_sorting_kernel.py     # MoE token sorting
 │   │   └── topk_gating_softmax_kernel.py # Top-k gating softmax
-│   ├── mma/                          # Shared MMA pipeline helpers
-│   │   ├── mfma_epilogues.py         # MFMA epilogue helpers
-│   │   ├── mfma_preshuffle_pipeline.py # Preshuffle helpers for MFMA kernels
+│   ├── common/mma/                   # Shared MMA pipeline helpers
+│   │   ├── mfma_preshuffle_pipeline.py # Preshuffle layout and XCD remapping
 │   │   └── pipeline_utils.py         # Pipeline utility helpers
 │   ├── conv/                         # Convolution kernels
 │   │   └── conv3d_implicit_8wave.py  # Implicit-GEMM 3D convolution
@@ -332,19 +331,23 @@ Wraps MLIR's `ExecutionEngine` for JIT execution:
 
 ### 4.5 `DslType` / `JitArgument` protocols
 
-Extensible type system for mapping Python values to MLIR:
+Extensible type system for mapping Python values to MLIR. The language-level
+contracts, including `Storable`, are in [DSL protocols](language/dsl_protocols.md).
 
 ```python
 # DslType protocol — for values used inside kernel/jit functions
 class DslType(Protocol):
     @classmethod
-    def __construct_from_ir_values__(cls, values: List[ir.Value]) -> "DslType": ...
+    def __construct_from_ir_values__(
+        cls, values: List[ir.Value], exemplar: "DslType | None" = None
+    ) -> "DslType": ...
     def __extract_to_ir_values__(self) -> List[ir.Value]: ...
 
 # JitArgument protocol — for values passed at the host boundary
 class JitArgument(Protocol):
     def __get_ir_types__(self) -> List[ir.Type]: ...
-    def __get_c_pointers__(self) -> List[ctypes.c_void_p]: ...
+    def __cache_signature__(self) -> object: ...
+    def __c_abi_spec__(self) -> List[Tuple[type, Callable]]: ...
 ```
 
 Built-in types: `Tensor`, `Stream`, `Int32`, and `Constexpr[T]`
@@ -356,8 +359,13 @@ from flydsl.compiler import JitArgumentRegistry
 @JitArgumentRegistry.register(MyPythonType, dsl_type=MyDslType)
 class MyJitArg:
     def __get_ir_types__(self): ...
-    def __get_c_pointers__(self): ...
+    def __cache_signature__(self): ...
+    def __c_abi_spec__(self): ...
 ```
+
+`__c_abi_spec__()` returns ordered `(ctype, fill)` slots for the packed C
+interface; they need not be one-to-one with `__get_ir_types__()`. Do not
+implement `__get_c_pointers__` — that hook has been removed.
 
 ### 4.6 `ASTRewriter`
 

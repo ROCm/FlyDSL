@@ -28,7 +28,7 @@ jobs:
         with:
           sparse-checkout: |
             scripts/install_awscli.sh
-            scripts/generate_summary.py
+            .github/scripts/generate_summary.py
           path: flydsl
 
       - name: Configure AWS credentials
@@ -75,5 +75,5 @@ jobs:
           SUMMARY_S3_SOURCE: "s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950"
           SUMMARY_S3_DEST: "s3://framework-whls-${{ inputs.release_type }}/whl/gfx942-gfx950"
           SUMMARY_WHEEL_NAMES: ${{ inputs.wheel_names }}
-        run: python3 flydsl/scripts/generate_summary.py promote
+        run: python3 flydsl/.github/scripts/generate_summary.py promote
 

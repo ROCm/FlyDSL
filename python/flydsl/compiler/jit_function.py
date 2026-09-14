@@ -469,6 +469,8 @@ def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -
             continue
         if isinstance(val, (int, float, bool, str, type(None), tuple, enum.Enum)):
             vals.append(f"{name}={val!r}")
+        elif isinstance(val, type):
+            vals.append(f"{name}={val.__module__}.{val.__qualname__}")
         else:
             # Recurse into callable deps (KernelFunction, JitFunction, plain functions)
             underlying = _get_underlying_func(val)

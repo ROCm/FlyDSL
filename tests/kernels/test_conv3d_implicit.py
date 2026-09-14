@@ -135,9 +135,18 @@ def test_conv3d_autotune(tmp_path, monkeypatch):
     from kernels.conv import conv3d_autotune
 
     conv3d_autotune._MEM_CACHE.clear()
+    # Every BF16 tile is checked immediately above.  The autotune integration
+    # only needs representative tile extremes while retaining every WGM value;
+    # sweeping the full 8 x 3 product recompiles already-covered kernels.
+    monkeypatch.setattr(
+        conv3d_autotune,
+        "BF16_CANDIDATES",
+        [(128, 128, 2, 4), (64, 64, 2, 2)],
+    )
 
     torch.manual_seed(4242)
-    n, c, t, h, w, k = 1, 128, 6, 40, 40, 128
+    # Match test_conv3d_tile_configs so its WGM=1 compilations are reusable.
+    n, c, t, h, w, k = 2, 64, 6, 18, 18, 192
     x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
 

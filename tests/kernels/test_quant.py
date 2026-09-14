@@ -412,6 +412,28 @@ def benchmark_per_token_quant(M=4096, N=8192, launch_fn=None, config=None):
     return output_diff <= 1.0
 
 
+def test_per_token_quant_correctness():
+    """Cover the multi-tile and partial-vector paths without a benchmark-sized input."""
+    m, n = 3, BLOCK_THREADS * VEC_WIDTH + VEC_WIDTH
+    launch_fn, _ = compile_kernel_for_n(n)
+
+    input_torch = torch.linspace(-5.0, 5.0, steps=m * n, device="cuda", dtype=torch.float16).reshape(m, n)
+    output_torch = torch.empty((m, n), device="cuda", dtype=torch.int8)
+    scales_torch = torch.empty((m,), device="cuda", dtype=torch.float32)
+
+    launch_fn(input_torch, output_torch, scales_torch, m)
+    torch.cuda.synchronize()
+
+    input_f32 = input_torch.float()
+    scales_ref = input_f32.abs().amax(dim=1) / 127.0
+    scales_ref = torch.where(scales_ref == 0, torch.ones_like(scales_ref), scales_ref)
+    output_ref = (input_f32 / scales_ref[:, None]).to(torch.int8)
+
+    assert torch.allclose(scales_torch, scales_ref, rtol=1e-5, atol=1e-5)
+    assert (output_torch.to(torch.int16) - output_ref.to(torch.int16)).abs().max().item() <= 1
+
+
+@pytest.mark.benchmark
 def test_benchmark_per_token_quant():
     """Pytest wrapper for per-token quantization benchmark."""
     print("\n" + "=" * 80)

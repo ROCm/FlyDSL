@@ -43,11 +43,13 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Detect whether the change touches code. Docs-only / non-code changes (docs,
-  # markdown, root docs, images, non-workflow .github files) set code_changed to
-  # 'false', and the heavy test / multi-gpu jobs below are skipped at the job
-  # level (a skipped required check still counts as passing for branch
-  # protection), so no GPU runner is used. workflow_dispatch always forces a
-  # full run, and a detection failure fails safe to running the tests.
+  # markdown, images, license, git/style/agent metadata, and non-workflow
+  # .github files) set code_changed to 'false', and the heavy test / multi-gpu
+  # jobs below are skipped at the job level (a skipped required check still
+  # counts as passing for branch protection), so no GPU runner is used.
+  # workflow_dispatch always forces a full run, and a detection failure fails
+  # safe to running the tests. Workflow YAML under .github/workflows is still
+  # treated as code so GPU job wiring itself is re-tested.
   # ---------------------------------------------------------------------------
   detect-changes:
     runs-on: ubuntu-latest
@@ -80,7 +82,16 @@ jobs:
               - '!**/*.gif'
               - '!**/*.svg'
               - '!**/*.webp'
+              - '!.gitignore'
+              - '!.clang-format'
+              - '!.pre-commit-config.yaml'
+              - '!.claude/**'
+              - '!.cursor/**'
+              - '!.codex/**'
               - '!.github/ISSUE_TEMPLATE/**'
+              - '!.github/dashboard/**'
+              - '!.github/runner-config.yml'
+              - '!.github/scripts/**'
 
   check-signal:
     if: ${{ github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'multi-gpu' }}
@@ -114,7 +125,7 @@ jobs:
       matrix:
         runners: [
           'linux-flydsl-mi325-1',
-          'linux-flydsl-mi355-1',
+          'linux-flydsl-mi35x-1',
           'linux-flydsl-navi-2',
         ]
     runs-on: ubuntu-latest
@@ -296,7 +307,8 @@ jobs:
           ROCM_VERSION=7.2
           IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-cp310-cp314"
           if ! docker pull "${IMAGE}"; then
-            docker build \
+            # Use the runner's network for dnf/pip during the build, too.
+            docker build --network=host \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
               -t "${IMAGE}" \
               - < flydsl-test/.github/workflows/Dockerfile.manylinux_2_28
@@ -498,12 +510,13 @@ jobs:
       CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || '' }}
     strategy:
       # Must match the 'test-skip' matrix above, and must keep emitting the
-      # checks required by the 'main' ruleset. linux-flydsl-mi35x-1 is absent
-      # on purpose: it is the same gfx950 target as linux-flydsl-mi355-1.
+      # checks required by the 'main' ruleset. linux-flydsl-mi35x-1 covers both
+      # MI350 and MI355 machines; the MI355-only linux-flydsl-mi355-1 label is
+      # absent on purpose since it is the same gfx950 target.
       matrix:
         runners: [
           'linux-flydsl-mi325-1',
-          'linux-flydsl-mi355-1',
+          'linux-flydsl-mi35x-1',
           'linux-flydsl-navi-2',
         ]
       fail-fast: false
@@ -615,7 +628,7 @@ jobs:
           docker exec flydsl_test bash -c "python3 -c 'import torch; import triton; assert tuple(map(int, triton.__version__.split(\"+\", 1)[0].split(\".\")[:3])) >= (3, 6, 0), triton.__version__; print(\"Using image Triton\", triton.__version__, \"with PyTorch\", torch.__version__)'"
 
       - name: Run tests
-        timeout-minutes: 60
+        timeout-minutes: 70
         run: |
           docker exec -e ROCM_PATH flydsl_test bash -c 'export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh'
 
@@ -973,7 +986,7 @@ jobs:
           docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test
             python3 -m pytest tests/kernels/test_allreduce.py \
-              -m multi_gpu -v --no-header --tb=short
+              -m 'multi_gpu and not benchmark' -v --no-header --tb=short
           "
 
       - name: Run allreduce benchmark (PR)

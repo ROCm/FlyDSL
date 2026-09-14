@@ -13,6 +13,7 @@ perf harness.
 import logging
 import os
 import sys
+from itertools import combinations, product
 
 import pytest
 import torch
@@ -115,6 +116,42 @@ DEFAULT_BENCH_WARMUP = 3
 DEFAULT_RUN_AITER_BENCH = True
 
 
+def _run_correctness_or_benchmark(
+    launch,
+    *args,
+    bench_iters: int,
+    bench_warmup: int,
+    test_graph: bool = False,
+):
+    """Run once under pytest; retain timed iterations for the CLI benchmark."""
+    if int(bench_iters) > 0:
+        _, us = run_perftest(
+            launch,
+            *args,
+            num_iters=max(2, int(bench_iters)),
+            num_warmup=int(bench_warmup),
+            testGraph=test_graph,
+        )
+        return us
+    if test_graph:
+        # Keep graph capture/replay coverage without turning a correctness case
+        # into a performance loop. run_perftest needs two samples for timing.
+        run_perftest(launch, *args, num_iters=2, num_warmup=0, testGraph=True)
+    else:
+        launch(*args)
+    torch.cuda.synchronize()
+    return None
+
+
+def _pairwise_projection(cases):
+    return {
+        (left_index, left, right_index, right)
+        for case in cases
+        for left_index, right_index in combinations(range(len(case)), 2)
+        for left, right in [(case[left_index], case[right_index])]
+    }
+
+
 def run_torch(a, b, scale_a, scale_b, bias=None, dtype=torch.float32):
     if scale_a is not None and scale_b is not None:
         a_f32 = a.to(torch.float32) * scale_a.view(-1, 1)
@@ -128,25 +165,44 @@ def run_torch(a, b, scale_a, scale_b, bias=None, dtype=torch.float32):
     return c.to(dtype)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "fp16", "bf16"])
+_A8_DTYPES = ["fp8", "int8", "fp16", "bf16"]
+_A8_SHAPES = [
+    (16, 5120, 8192, 16, 64, 512),
+    (33, 1024, 2048, 32, 64, 512),
+    (5120, 5120, 8320, 64, 256, 128),
+    (5120, 2048, 8320, 128, 128, 128),
+    (9728, 8192, 8320, 128, 128, 128),
+    (5133, 5120, 8320, 64, 256, 128),
+]
+
+# The old dtype x shape x copy-mode x launch-mode Cartesian product ran 96
+# expensive GEMMs.  Dtype x shape alone requires 24 cases, so use that lower
+# bound and distribute sync/async plus eager/graph to retain every pairwise
+# interaction.  Shapes 2+ keep their original large_shape classification.
+_A8_CASE_VALUES = [
+    (in_dtype, shape, bool((dtype_index + shape_index) % 2), bool((dtype_index // 2 + shape_index) % 2))
+    for dtype_index, in_dtype in enumerate(_A8_DTYPES)
+    for shape_index, shape in enumerate(_A8_SHAPES)
+]
+_A8_CASES = [
+    pytest.param(
+        in_dtype,
+        *shape,
+        use_async_copy,
+        test_graph,
+        marks=pytest.mark.large_shape if shape in _A8_SHAPES[2:] else (),
+        id=(
+            f"{in_dtype}-M{shape[0]}-tile{shape[3]}x{shape[4]}x{shape[5]}-"
+            f"{'async' if use_async_copy else 'sync'}-{'graph' if test_graph else 'eager'}"
+        ),
+    )
+    for in_dtype, shape, use_async_copy, test_graph in _A8_CASE_VALUES
+]
+
+
 @pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k",
-    [
-        (16, 5120, 8192, 16, 64, 512),
-        (33, 1024, 2048, 32, 64, 512),
-        pytest.param(5120, 5120, 8320, 64, 256, 128, marks=pytest.mark.large_shape),
-        pytest.param(5120, 2048, 8320, 128, 128, 128, marks=pytest.mark.large_shape),
-        pytest.param(9728, 8192, 8320, 128, 128, 128, marks=pytest.mark.large_shape),
-        pytest.param(5133, 5120, 8320, 64, 256, 128, marks=pytest.mark.large_shape),
-    ],
-)
-@pytest.mark.parametrize("use_async_copy", [False, True], ids=["sync_copy", "async_copy"])
-@pytest.mark.parametrize(
-    "test_graph",
-    [
-        pytest.param(False, id="eager"),
-        pytest.param(True, id="graph"),
-    ],
+    "in_dtype,M,N,K,tile_m,tile_n,tile_k,use_async_copy,test_graph",
+    _A8_CASES,
 )
 def test_mfma_a8_flyc_preshuffle(
     in_dtype,
@@ -160,9 +216,9 @@ def test_mfma_a8_flyc_preshuffle(
     use_async_copy,
     test_graph,
     out_dtype: str = "bf16",
-    bench_iters: int = DEFAULT_BENCH_ITERS,
-    bench_warmup: int = DEFAULT_BENCH_WARMUP,
-    run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
+    bench_iters: int = 0,
+    bench_warmup: int = 0,
+    run_aiter_bench: bool = False,
     waves_per_eu: int = 0,
     xcd_swizzle: int = 0,
 ):
@@ -270,18 +326,16 @@ def test_mfma_a8_flyc_preshuffle(
     def launch_kernel(c, a, b, sa, sb):
         compiled_fn(*_gemm_args(c, a, b, sa, sb))
 
-    bench_iters = max(2, int(bench_iters))
-    bench_warmup = int(bench_warmup)
-    _, us = run_perftest(
+    us = _run_correctness_or_benchmark(
         launch_kernel,
         c_out_raw,
         a_q,
         b_input,
         sa_flat,
         sb_flat,
-        num_iters=bench_iters,
-        num_warmup=bench_warmup,
-        testGraph=test_graph,
+        bench_iters=bench_iters,
+        bench_warmup=bench_warmup,
+        test_graph=test_graph,
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
@@ -322,11 +376,12 @@ def test_mfma_a8_flyc_preshuffle(
             print(f"Skipping Aiter benchmark (not runnable here): {msg}")
             print("-" * 40)
 
-    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
-    flops = 2 * M * N * K
-    tflops = flops / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+    if us is not None:
+        bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
+        flops = 2 * M * N * K
+        tflops = flops / (us / 1e6) / 1e12
+        tbps = bytes_moved / 1e12 / (us / 1e6)
+        print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
 @pytest.mark.parametrize("in_dtype", ["fp8", "int8", "fp16", "bf16"])
@@ -355,7 +410,7 @@ def test_v2_preshuffle_c_store_oob(in_dtype):
 
 
 @pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])
-@pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
+@pytest.mark.parametrize("a_dtype", ["fp4"])
 @pytest.mark.parametrize("b_dtype", ["fp4"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k",
@@ -378,16 +433,13 @@ def test_mfma_w4_flyc_preshuffle(
     tile_n,
     tile_k,
     *,
-    bench_iters: int = DEFAULT_BENCH_ITERS,
-    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    bench_iters: int = 0,
+    bench_warmup: int = 0,
     waves_per_eu: int = 0,
 ):
     """FP4 (MXFP4) preshuffle GEMM (layout-API v2) — gfx950 only."""
     if get_rocm_arch() != "gfx950":
         pytest.skip(f"FP4 GEMM requires gfx950, got {get_rocm_arch()}")
-    if a_dtype == "fp8":
-        pytest.skip("fp8-A not yet supported with MXFP4 preshuffle kernel (op_sel_a overflow)")
-
     print("=" * 80)
     print(f"MFMA MXFP4 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
     print("=" * 80)
@@ -455,30 +507,30 @@ def test_mfma_w4_flyc_preshuffle(
     def launch_kernel(c, a, b, sa, sb):
         launch_fn(*_w4_args(c, a, b, sa, sb))
 
-    bench_iters = max(2, int(bench_iters))
-    _, us = run_perftest(
+    us = _run_correctness_or_benchmark(
         launch_kernel,
         c_out,
         a_q,
         b_shuffled,
         scale_a,
         scale_b_shuffled,
-        num_iters=bench_iters,
-        num_warmup=int(bench_warmup),
+        bench_iters=bench_iters,
+        bench_warmup=bench_warmup,
     )
     torch.cuda.synchronize()
     c_out_f32 = c_out.to(torch.float32)
 
     assert verify_output(c_out_f32, c_ref, rtol=0.1, atol=0.1)
 
-    size_a = (M * K) // 2
-    size_b = (N * K) // 2
-    size_c = M * N
-    bytes_moved = size_a + size_b + size_c * 2 + (M + N) * (K // 32)
-    flops = 2 * M * N * K
-    tflops = flops / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+    if us is not None:
+        size_a = (M * K) // 2
+        size_b = (N * K) // 2
+        size_c = M * N
+        bytes_moved = size_a + size_b + size_c * 2 + (M + N) * (K // 32)
+        flops = 2 * M * N * K
+        tflops = flops / (us / 1e6) / 1e12
+        tbps = bytes_moved / 1e12 / (us / 1e6)
+        print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
 # ── W4A6: MXFP6 (E2M3) A × MXFP4 (E2M1) B ─────────────────────────────────
@@ -506,8 +558,8 @@ def test_mfma_a6w4_preshuffle(
     tile_n,
     tile_k,
     *,
-    bench_iters: int = DEFAULT_BENCH_ITERS,
-    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    bench_iters: int = 0,
+    bench_warmup: int = 0,
     waves_per_eu: int = 0,
 ):
     """W4A6: MXFP6 (E2M3) A × MXFP4 (E2M1) B preshuffle GEMM — gfx950 only."""
@@ -577,42 +629,71 @@ def test_mfma_a6w4_preshuffle(
     def launch_kernel(c, a, b, sa, sb):
         launch_fn(*_a6w4_args(c, a, b, sa, sb))
 
-    bench_iters = max(2, int(bench_iters))
-    _, us = run_perftest(
+    us = _run_correctness_or_benchmark(
         launch_kernel,
         c_out,
         a_codes,
         b_shuffled,
         scale_a,
         scale_b_shuffled,
-        num_iters=bench_iters,
-        num_warmup=int(bench_warmup),
+        bench_iters=bench_iters,
+        bench_warmup=bench_warmup,
     )
     torch.cuda.synchronize()
 
     assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
     # A: 1 byte/code (FP8-padded); B: 0.5 byte/code (MXFP4).
-    bytes_moved = M * K + (N * K) // 2 + M * N * 2 + (M + N) * (K // 32)
-    tflops = (2 * M * N * K) / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"[flyc] W4A6 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+    if us is not None:
+        bytes_moved = M * K + (N * K) // 2 + M * N * 2 + (M + N) * (K // 32)
+        tflops = (2 * M * N * K) / (us / 1e6) / 1e12
+        tbps = bytes_moved / 1e12 / (us / 1e6)
+        print(f"[flyc] W4A6 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
 # ── A8W8: MXFP8 (E4M3) A × MXFP8 (E4M3) B ─────────────────────────────────
 
 
-@pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])
+_A8W8_OUT_DTYPES = ["bf16", "fp16"]
+_A8W8_SHAPES = [
+    (64, 8192, 8192, 64, 128, 128),
+    (32, 8192, 8192, 32, 128, 256),
+    (128, 8192, 8192, 64, 128, 256),
+    (1024, 8192, 8192, 64, 256, 256),
+]
+_A8W8_XCD_SWIZZLES = [0, 4]
+_A8W8_CASE_VALUES = [
+    (out_dtype, shape, _A8W8_XCD_SWIZZLES[(out_index + shape_index) % 2])
+    for out_index, out_dtype in enumerate(_A8W8_OUT_DTYPES)
+    for shape_index, shape in enumerate(_A8W8_SHAPES)
+]
+_A8W8_CASES = [
+    pytest.param(
+        out_dtype,
+        *shape,
+        xcd_swizzle,
+        marks=pytest.mark.large_shape if shape in _A8W8_SHAPES[2:] else (),
+        id=f"{out_dtype}-M{shape[0]}-tile{shape[3]}x{shape[4]}x{shape[5]}-xcd{xcd_swizzle}",
+    )
+    for out_dtype, shape, xcd_swizzle in _A8W8_CASE_VALUES
+]
+
+
+def test_preshuffle_case_lists_preserve_pairwise_coverage():
+    """Prevent matrix edits from silently dropping a two-factor interaction."""
+    a8_expected = _pairwise_projection(product(_A8_DTYPES, _A8_SHAPES, [False, True], [False, True]))
+    a8_missing = a8_expected - _pairwise_projection(_A8_CASE_VALUES)
+    assert not a8_missing, f"A8 matrix is missing {sorted(a8_missing, key=repr)}"
+
+    a8w8_expected = _pairwise_projection(product(_A8W8_OUT_DTYPES, _A8W8_SHAPES, _A8W8_XCD_SWIZZLES))
+    a8w8_missing = a8w8_expected - _pairwise_projection(_A8W8_CASE_VALUES)
+    assert not a8w8_missing, f"A8W8 matrix is missing {sorted(a8w8_missing, key=repr)}"
+
+
 @pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k",
-    [
-        (64, 8192, 8192, 64, 128, 128),
-        (32, 8192, 8192, 32, 128, 256),
-        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),
-        pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
-    ],
+    "out_dtype,M,N,K,tile_m,tile_n,tile_k,xcd_swizzle",
+    _A8W8_CASES,
 )
-@pytest.mark.parametrize("xcd_swizzle", [0, 4], ids=["xcd0", "xcd4"])
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 def test_mfma_a8w8_preshuffle(
@@ -625,8 +706,8 @@ def test_mfma_a8w8_preshuffle(
     tile_k,
     xcd_swizzle,
     *,
-    bench_iters: int = DEFAULT_BENCH_ITERS,
-    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    bench_iters: int = 0,
+    bench_warmup: int = 0,
     waves_per_eu: int = 0,
 ):
     """A8W8: MXFP8 (E4M3) A × MXFP8 (E4M3) B preshuffle GEMM — gfx950 only."""
@@ -693,26 +774,26 @@ def test_mfma_a8w8_preshuffle(
     def launch_kernel(c, a, b, sa, sb):
         launch_fn(*_a8w8_args(c, a, b, sa, sb))
 
-    bench_iters = max(2, int(bench_iters))
-    _, us = run_perftest(
+    us = _run_correctness_or_benchmark(
         launch_kernel,
         c_out,
         a_codes,
         b_shuffled,
         scale_a,
         scale_b_shuffled,
-        num_iters=bench_iters,
-        num_warmup=int(bench_warmup),
+        bench_iters=bench_iters,
+        bench_warmup=bench_warmup,
     )
     torch.cuda.synchronize()
 
     assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
     # A and B: 1 byte/code; scales: (M+N) * (K//32) bytes.
-    bytes_moved = M * K + N * K + M * N * 2 + (M + N) * (K // 32)
-    tflops = (2 * M * N * K) / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"[flyc] A8W8 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+    if us is not None:
+        bytes_moved = M * K + N * K + M * N * 2 + (M + N) * (K // 32)
+        tflops = (2 * M * N * K) / (us / 1e6) / 1e12
+        tbps = bytes_moved / 1e12 / (us / 1e6)
+        print(f"[flyc] A8W8 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
 if __name__ == "__main__":
@@ -1077,8 +1158,8 @@ def test_mfma_a8w8_preshuffle_blockscale(
     tile_n,
     tile_k,
     *,
-    bench_iters: int = DEFAULT_BENCH_ITERS,
-    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    bench_iters: int = 0,
+    bench_warmup: int = 0,
     waves_per_eu: int = 0,
 ):
     """A8W8 blockscale GEMM driven from randn fp32 operands (test_mfma_a8_flyc_preshuffle
@@ -1143,22 +1224,23 @@ def test_mfma_a8w8_preshuffle_blockscale(
             torch.cuda.current_stream(),
         )
 
-    _, us = run_perftest(
+    us = _run_correctness_or_benchmark(
         launch_kernel,
         c_out,
         a_q,
         b_shuffled,
         scale_a_shuffled,
         scale_b_shuffled,
-        num_iters=max(2, int(bench_iters)),
-        num_warmup=int(bench_warmup),
+        bench_iters=bench_iters,
+        bench_warmup=bench_warmup,
     )
     torch.cuda.synchronize()
 
     assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
     # A and B: 1 byte/code; scales: M + N//128 rows of K//128 bytes.
-    bytes_moved = M * K + N * K + M * N * 2 + (M + N // SCALE_BLOCK_128) * scale_k
-    tflops = (2 * M * N * K) / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"[flyc] A8W8 blockscale Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+    if us is not None:
+        bytes_moved = M * K + N * K + M * N * 2 + (M + N // SCALE_BLOCK_128) * scale_k
+        tflops = (2 * M * N * K) / (us / 1e6) / 1e12
+        tbps = bytes_moved / 1e12 / (us / 1e6)
+        print(f"[flyc] A8W8 blockscale Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
