@@ -314,8 +314,9 @@ def tdm_partition(
     values sits in, and the trailing "rest" modes (e.g. ``PIPE`` on the LDS side, k-tiles on
     the coordinate side) are independent and may differ between the two -- only mode 0 is
     related, and its size (``size<0>``) is all that must match. Mode 0 is reshaped into
-    ``((ATOM), (ITER))`` (or ``((ATOM), (WARP), (ITER))`` before the warp slice) while the
-    rest passes through, so each tile comes out ``((ATOM), (ITER)), rest...``.
+    ``((ATOM), (ITER))`` (grouped as ``(((ATOM), (ITER)), (WARP))`` before the warp slice),
+    so -- for every warp count -- each tile comes out ``((ATOM), (ITER)), rest...``. The warp
+    is folded into the base pointer, never a visible mode.
 
     ``warp_coord`` / ``warp_layout`` say how the warps split the box: each issues one
     instruction over its own share, and the assembled box belongs to the whole workgroup.
@@ -337,9 +338,10 @@ def tdm_partition(
         n_rest = tensor.layout.rank - 1
         tiled = composition(tensor, make_tile(layout_V, *([None] * n_rest)))
         if n_warps > 1:
-            # Slice the warp's chunk out of the middle of the (nested) mode 0, keeping
-            # ATOM/ITER and every rest mode.
-            tiled = tiled[tuple([(None, warp_id, None), *([None] * n_rest)])]
+            # Mode 0 is `((ATOM, ITER), WARP)`: keep the `(ATOM, ITER)` box whole and slice the
+            # warp coordinate off the second mode, folding it into the base pointer. The result
+            # is `((ATOM, ITER), rest...)`, the same shape the single-warp path returns.
+            tiled = tiled[tuple([(None, warp_id), *([None] * n_rest)])]
         return tiled
 
     return apply(stensor), apply(gtensor)

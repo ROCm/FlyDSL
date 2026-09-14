@@ -1005,12 +1005,19 @@ FailureOr<LayoutAttr> partitionLayout(IntTupleAttr atomValShape, int32_t atomVal
   SmallVector<Attribute> shapes{layoutV.getShape()};
   SmallVector<Attribute> strides{layoutV.getStride()};
   if (numWarps > 1) {
-    // `((ATOM), (WARP), (ITER))` before the warp coordinate is sliced out: the
-    // warps take equal contiguous chunks of the LDS order, so warp `w` starts at
-    // `w * want` -- the stride of the WARP mode.
+    // Group the box `(ATOM, ITER)` into mode-0 and keep WARP a separate mode, i.e.
+    // `((ATOM, ITER), WARP)`. `tdm_partition` slices the warp coordinate off the second
+    // mode and keeps mode-0's `(ATOM, ITER)` group whole, so every warp count returns the
+    // same `((ATOM, ITER), Rest...)` shape as the single-warp path. The warp still takes an
+    // equal contiguous `w * want` chunk of the LDS order -- the stride of the WARP mode.
     LayoutAttr layoutWarp = layoutComposition(layoutBuilder, invSmem, flat(numWarps, want));
-    shapes.push_back(layoutWarp.getShape());
-    strides.push_back(layoutWarp.getStride());
+    Attribute boxShape =
+        IntTupleAttr::get(ArrayAttr::get(ctx, {layoutV.getShape(), layoutIter.getShape()}));
+    Attribute boxStride =
+        IntTupleAttr::get(ArrayAttr::get(ctx, {layoutV.getStride(), layoutIter.getStride()}));
+    return LayoutAttr::get(
+        IntTupleAttr::get(ArrayAttr::get(ctx, {boxShape, layoutWarp.getShape()})),
+        IntTupleAttr::get(ArrayAttr::get(ctx, {boxStride, layoutWarp.getStride()})));
   }
   shapes.push_back(layoutIter.getShape());
   strides.push_back(layoutIter.getStride());

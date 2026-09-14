@@ -63,7 +63,7 @@ def _tdm_load_tile(g_tensor, blk_sel, lds_ptr, mask, wave):
     blk = fx.zipped_divide(coord, (TILE, TILE))[None, blk_sel]
     s = fx.Tensor(fx.make_view(lds_ptr, fx.make_layout(((TILE, TILE), 1), ((TILE, 1), TILE * TILE))))
     ts, tg = fx.rocdl.cdna5.tdm_partition(atom, wave, fx.make_layout(NUM_WARPS, 1), s, blk)
-    fx.copy(atom, tg[None, 0, 0], ts[None, 0, 0])
+    fx.copy(atom, tg[None, 0], ts[None, 0])
 
 
 # ---------------------------------------------------------------------------

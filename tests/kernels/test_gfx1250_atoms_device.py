@@ -78,17 +78,11 @@ def _compile_tdm_roundtrip(M: int, N: int, num_warps: int):
         tAs, tAg = fx.rocdl.cdna5.tdm_partition(load_atom, wcrd, wlay, smem, blkA)
         tCs, tCg = fx.rocdl.cdna5.tdm_partition(store_atom, wcrd, wlay, smem, blkC)
 
-        # num_warps==1 leaves the copy tiles rank-2 ((ATOM,ITER), rest); num_warps>1 adds a warp mode.
-        if num_warps == 1:
-            fx.copy(load_atom, tAg[None, 0], tAs[None, 0])
-        else:
-            fx.copy(load_atom, tAg[None, 0, 0], tAs[None, 0, 0])
+        # Every warp count returns the copy tiles as ((ATOM,ITER), rest); index the box with None.
+        fx.copy(load_atom, tAg[None, 0], tAs[None, 0])
         fx.rocdl.s_wait_tensorcnt(0)
         fx.barrier()
-        if num_warps == 1:
-            fx.copy(store_atom, tCs[None, 0], tCg[None, 0])
-        else:
-            fx.copy(store_atom, tCs[None, 0, 0], tCg[None, 0, 0])
+        fx.copy(store_atom, tCs[None, 0], tCg[None, 0])
         fx.rocdl.s_wait_tensorcnt(0)
 
     @flyc.jit

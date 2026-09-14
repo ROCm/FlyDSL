@@ -528,7 +528,7 @@ def launch_gemm_a8w8(
             )
         )
         tCsC, tCgC = fx.rocdl.cdna5.tdm_partition(atomC, wave, fx.make_layout(num_waves, 1), sC_lds, blkC)
-        fx.copy(atomC, tCsC[None, 0, 0], tCgC[None, 0, bid_y])
+        fx.copy(atomC, tCsC[None, 0], tCgC[None, bid_y])
         tdm_ops.tensor_wait(0)
 
     gx = (i32_m + (tile_m - 1)) // tile_m

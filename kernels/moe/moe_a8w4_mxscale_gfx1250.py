@@ -252,9 +252,9 @@ def launch_moe_gemm_a8w4(
         def issue(s, kt):
             for atom, tAs, tAg, gpair in loads:
                 if const_expr(gpair is None):
-                    fx.copy(atom, tAg[None, 0, kt], tAs[None, 0, s])
+                    fx.copy(atom, tAg[None, kt], tAs[None, s])
                 elif wave // 2 == gpair:
-                    fx.copy(atom, tAg[None, 0, kt], tAs[None, 0, s])
+                    fx.copy(atom, tAg[None, kt], tAs[None, s])
 
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
@@ -453,7 +453,7 @@ def launch_moe_gemm_a8w4(
                 )
             )
             tCsC, tCgC = fx.rocdl.cdna5.tdm_partition(atomC, wave, fx.make_layout(num_waves, 1), sC_lds, blkC)
-            fx.copy(atomC, tCsC[None, 0, 0], tCgC[None, 0, fx.Int32(out_col_off // STORE_N)])
+            fx.copy(atomC, tCsC[None, 0], tCgC[None, fx.Int32(out_col_off // STORE_N)])
             tdm_ops.tensor_wait(0)
 
     m_tiles = (i32_m + (tile_m - 1)) // tile_m

@@ -123,8 +123,8 @@ def _compile_tdm_mcast_add(grid_m, grid_n, cluster_m, cluster_n):
         sB = fx.Tensor(fx.make_view(b_ptr, pipe_lds))
         tBs, tBg = fx.rocdl.cdna5.tdm_partition(atomB, wave, wlay, sB, blkB)
 
-        fx.copy(atomA, tAg[None, 0, 0], tAs[None, 0, 0])
-        fx.copy(atomB, tBg[None, 0, 0], tBs[None, 0, 0])
+        fx.copy(atomA, tAg[None, 0], tAs[None, 0])
+        fx.copy(atomB, tBg[None, 0], tBs[None, 0])
         fx.rocdl.s_wait_tensorcnt(0)
         if const_expr(use_cluster):
             cluster.cluster_barrier()
