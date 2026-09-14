@@ -1,3 +1,6 @@
+# Keep file exclusions aligned with .github/scripts/check_{python,cpp}_style.sh.
+exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
+
 repos:
   - repo: local
     hooks:
@@ -5,28 +8,32 @@ repos:
         name: Format Python with Black
         entry: black
         language: python
-        additional_dependencies:
+        # CI installs these versions from pyproject.toml's style group.
+        additional_dependencies: &python_style_dependencies
           - black==26.5.1
           - ruff==0.16.6
         types: [python]
-        exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
 
       - id: ruff
         name: Fix Python lint with Ruff
         entry: ruff check --fix
         language: python
-        additional_dependencies:
-          - black==26.5.1
-          - ruff==0.16.6
+        additional_dependencies: *python_style_dependencies
         types: [python]
-        exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
 
       - id: black-final
         name: Normalize Ruff fixes with Black
         entry: black
         language: python
-        additional_dependencies:
-          - black==26.5.1
-          - ruff==0.16.6
+        additional_dependencies: *python_style_dependencies
         types: [python]
-        exclude: ^(?:\.claude/|build/|build-fly/|build_.*|thirdparty/)
+
+      - id: clang-format
+        name: Format C/C++ with clang-format
+        entry: clang-format -i --style=file --fallback-style=none
+        language: python
+        # CI installs clang-format-18 in .github/workflows/pre-checks.yaml.
+        additional_dependencies:
+          - clang-format==18.1.8
+        types: [file]
+        files: \.(c|cc|cpp|cxx|h|hh|hpp|hxx|cu|cuh)$

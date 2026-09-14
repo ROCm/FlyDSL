@@ -25,6 +25,12 @@ The project uses a **layered model** so CI and contributors can select tests by 
 
 **Legacy:** `large_shape` — used for slow/large kernel shapes; `scripts/run_tests.sh` skips it unless `RUN_TESTS_FULL=1`.
 
+`scripts/run_tests.sh` always excludes `multi_gpu` and `benchmark` tests. Those
+tests have dedicated CI jobs/steps and running them in the broad correctness
+suite duplicates work (and can accidentally consume every GPU on a multi-GPU
+host). CI can still opt into the full suite, including `large_shape` tests, with
+`RUN_TESTS_FULL=1`; the exclusions apply in both modes.
+
 ### Rollout status
 
 First-pass annotations now cover `tests/unit` and `tests/kernels` for clearly classified files (L0/L1a/L1b/L2).
@@ -72,11 +78,13 @@ export LD_LIBRARY_PATH="${PWD}/build-fly/python_packages/flydsl/_mlir/_mlir_libs
 Examples:
 
 ```bash
-# Default: full pytest areas (same idea as scripts/run_tests.sh pytest step)
-python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/python/examples/ -v
+# Default PR correctness suite (matches scripts/run_tests.sh)
+python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/system/ tests/extension/ tests/python/examples/ \
+  -m "not large_shape and not multi_gpu and not benchmark" -v
 
-# Exclude large shapes (matches run_tests.sh when RUN_TESTS_FULL is unset)
-python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/python/examples/ -m "not large_shape" -v
+# Exhaustive single-GPU correctness suite (RUN_TESTS_FULL=1)
+python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/system/ tests/extension/ tests/python/examples/ \
+  -m "not multi_gpu and not benchmark" -v
 
 # When tests are annotated — examples (forward-looking)
 # python3 -m pytest tests/ -m "l0_backend_agnostic or l1a_compile_no_target_dialect" -v
