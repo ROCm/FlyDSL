@@ -986,7 +986,7 @@ jobs:
           docker exec -e ROCM_PATH flydsl_test bash -c "
             cd /flydsl-test
             python3 -m pytest tests/kernels/test_allreduce.py \
-              -m multi_gpu -v --no-header --tb=short
+              -m 'multi_gpu and not benchmark' -v --no-header --tb=short
           "
 
       - name: Run allreduce benchmark (PR)
