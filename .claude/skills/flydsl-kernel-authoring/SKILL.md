@@ -490,7 +490,7 @@ Use `Vec.filled(...)` for splats and `Vec.from_elements(...)` for vectors from s
 | Add | `a + b` | Yes | Use direct FOp only for explicit fastmath |
 | Multiply | `a * b` | Yes | Use direct FOp only for explicit fastmath |
 | Negate | `-a` | Yes | |
-| Max / Min | `fx.max(a, b)` / `fx.min(a, b)` | Yes | Float forms propagate NaN; `fx.maxnumf` does not |
+| Max / Min | `fx.max(a, b)` / `fx.min(a, b)` | Yes | Float forms propagate NaN; `fx.maxnumf` / `fx.minnumf` do not |
 | Integer ceil-div | `fx.ceildiv(a, b)` | Yes | Direct signed/unsigned op; distinct from layout `fx.ceil_div` |
 | Compare | `arith.cmpf(pred, a, b)` | Yes | predicate FIRST; returns i1/vec<i1> |
 | Select | `cond.select(t, f)` | Yes | |

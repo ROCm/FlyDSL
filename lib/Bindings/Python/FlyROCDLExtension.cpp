@@ -66,17 +66,19 @@ struct PyMmaOpGFX1250_WMMAType : PyConcreteType<PyMmaOpGFX1250_WMMAType> {
     c.def_static(
         "get",
         [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
-           bool signA, bool signB, bool clamp, DefaultingPyMlirContext context) {
+           bool signA, bool signB, bool clamp, int32_t modC, DefaultingPyMlirContext context) {
           return PyMmaOpGFX1250_WMMAType(
               context->getRef(),
               wrap(MmaOpGFX1250_WMMAType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB),
-                                              unwrap(elemTyAcc), signA, signB, clamp)));
+                                              unwrap(elemTyAcc), signA, signB, clamp, modC)));
         },
         "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, "sign_a"_a = false,
-        "sign_b"_a = false, "clamp"_a = false, nb::kw_only(), "context"_a = nb::none(),
+        "sign_b"_a = false, "clamp"_a = false, "mod_c"_a = 0, nb::kw_only(),
+        "context"_a = nb::none(),
         "Create a MmaOpGFX1250_WMMAType with m, n, k dimensions and element types. "
         "sign_a / sign_b / clamp are integer-only (iu4 / iu8) controls (signed operands / "
-        "accumulator saturation); they must be false on the float paths.");
+        "accumulator saturation); they must be false on the float paths. "
+        "mod_c (I16 C-operand modifier, default 0) is forwarded to the ROCDL intrinsic.");
   }
 };
 
@@ -144,7 +146,8 @@ struct PyMmaOpGFX120X_WMMAType : PyConcreteType<PyMmaOpGFX120X_WMMAType> {
         "sign_a"_a = false, "sign_b"_a = false, "clamp"_a = false, "context"_a = nb::none(),
         "Create a MmaOpGFX120X_WMMAType with m, n, k dimensions and element types "
         "(RDNA4 gfx1200 / gfx1201 wave32 WMMA, 16x16x16 with the v8 operand ABI). "
-        "sign_a/sign_b/clamp must be false: only the fp16/bf16 paths are supported.");
+        "sign_a/sign_b/clamp must be false: fp16, bf16, and every fp8(E4M3FN)/"
+        "bf8(E5M2) A/B combination are supported.");
   }
 };
 

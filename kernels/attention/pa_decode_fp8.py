@@ -296,11 +296,83 @@ def pa_decode_ps_launch(
     """
     num_query_heads = query.shape[1]
     num_kv_heads = key_cache.shape[1]
-    trans_v = len(value_cache.shape) == 5
-    query_input_dtype = _get_query_input_dtype(query)
-
+    batch_size = context_lengths.shape[0]
+    if query.shape[0] % batch_size != 0:
+        raise ValueError(f"query.shape[0] ({query.shape[0]}) must be divisible by " f"batch_size ({batch_size})")
+    if num_query_heads % num_kv_heads != 0:
+        raise ValueError(f"num_query_heads ({num_query_heads}) must be divisible by " f"num_kv_heads ({num_kv_heads})")
+    query_length = query.shape[0] // batch_size
+    query_group_size = num_query_heads // num_kv_heads
+    head_size = query.shape[-1]
+    value_head_size = output.shape[-1]
+    block_size = key_cache.shape[-2]
     dev = query.device
     is_graph_capturing = _is_current_stream_capturing()
+    s = stream or torch.cuda.current_stream()
+
+    if max_context_partition_num <= 0:
+        raise ValueError("max_context_partition_num must be positive.")
+
+    # Small physical pages use the standalone tile kernel. Dispatch before the
+    # FP8 metadata/SW setup so BF16 KV stays unscaled and asymmetric V uses the
+    # tile wrapper's value-sized workspace allocation and validation.
+    if block_size in _PA_DECODE_PS_SMALL_BLOCK_SIZES and sliding_window == 0:
+        if block_tables is None:
+            raise ValueError(
+                f"pa_decode_ps_launch: block_size={block_size} requires `block_tables` "
+                "(per-sequence physical block index table)."
+            )
+
+        tile_key_scale = key_scale
+        tile_value_scale = value_scale
+        if key_cache.dtype != torch.bfloat16:
+            tile_key_scale = _prepare_scale_tensor(
+                "key_scale",
+                key_scale,
+                device=dev,
+                is_graph_capturing=is_graph_capturing,
+            )
+            tile_value_scale = _prepare_scale_tensor(
+                "value_scale",
+                value_scale,
+                device=dev,
+                is_graph_capturing=is_graph_capturing,
+            )
+            if tile_key_scale.ndim > 1:
+                num_blocks = key_cache.shape[0]
+                tile_key_scale = tile_key_scale.reshape(num_blocks, num_kv_heads, block_size)
+                tile_value_scale = tile_value_scale.reshape(num_blocks, num_kv_heads, block_size)
+
+        pa_decode_tile(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            context_lengths,
+            tile_key_scale,
+            tile_value_scale,
+            softmax_scale=softmax_scale,
+            stream=s,
+            num_partitions=max_context_partition_num,
+            pmax=max_logits,
+            psum=exp_sums,
+            pout=temporary_output,
+        )
+        return "ps_small_block"
+
+    is_bf16_kv = key_cache.dtype == torch.bfloat16
+    is_asymmetric = value_head_size != head_size
+    if is_bf16_kv or is_asymmetric:
+        unsupported_path = "sliding-window" if sliding_window > 0 else "page-1024 metadata"
+        raise ValueError(
+            "BF16 KV and asymmetric value dimensions currently require "
+            "block_size 16 or 64 with sliding_window=0; "
+            f"the {unsupported_path} path is not supported."
+        )
+
+    trans_v = len(value_cache.shape) == 5
+    query_input_dtype = _get_query_input_dtype(query)
 
     key_scale = _prepare_scale_tensor(
         "key_scale",
@@ -319,28 +391,16 @@ def pa_decode_ps_launch(
     # token), which enables the per-token K/V path in the metadata kernel.
     per_token_kv = key_scale.ndim > 1
 
-    query_length = query.shape[0] // context_lengths.shape[0]
-    query_group_size = num_query_heads // num_kv_heads
-    batch_size = context_lengths.shape[0]
-    head_size = query.shape[-1]
-
     # Strides for key_scale/value_scale
     stride_ks_block = key_scale.stride(0) if per_token_kv else 0
     stride_ks_head = key_scale.stride(1) if per_token_kv else 0
 
-    s = stream or torch.cuda.current_stream()
-
-    if max_context_partition_num <= 0:
-        raise ValueError("max_context_partition_num must be positive for sliding-window decode.")
     if is_graph_capturing and (exp_sums is None or max_logits is None or temporary_output is None):
         raise ValueError(
             "CUDA graph capture requires preallocated `exp_sums`, `max_logits`, "
             "and `temporary_output` for the sliding-window path."
         )
-    # ── small-block (block_size 16/64) → tile kernel ──
-    # Key cache shape is [num_blocks, num_kv_heads, head_size // 16, block_size, 16].
-    block_size = key_cache.shape[-2]
-    if block_size in _PA_DECODE_PS_SMALL_BLOCK_SIZES or sliding_window > 0:
+    if sliding_window > 0:
         eqgs = query_length * query_group_size
         if exp_sums is None:
             exp_sums = torch.zeros(
@@ -453,48 +513,6 @@ def pa_decode_ps_launch(
             s,
         )
         return "ps_sw_partitioned"
-
-    if block_size in _PA_DECODE_PS_SMALL_BLOCK_SIZES:
-        if block_tables is None:
-            raise ValueError(
-                f"pa_decode_ps_launch: block_size={block_size} requires `block_tables` "
-                "(per-sequence physical block index table)."
-            )
-        if is_graph_capturing:
-            # Buffer sizes must be fixed ahead of capture and stay identical
-            # across every replay, so require the caller to have preallocated
-            # exp_sums/max_logits/temporary_output, exactly as the other PS
-            # paths already require.
-            if exp_sums is None or max_logits is None or temporary_output is None:
-                raise ValueError(
-                    "CUDA graph capture requires preallocated `exp_sums`, `max_logits`, "
-                    "and `temporary_output` for the tile-backed small-block PS path."
-                )
-        # pa_decode_tile requires an exact [num_blocks, num_kv_heads,
-        # block_size] per-token scale shape; callers here may pass an extra
-        # trailing singleton dim (e.g. from a pertoken-quant helper), which
-        # reshape away without changing the strides.
-        if per_token_kv:
-            num_blocks = key_cache.shape[0]
-            key_scale = key_scale.reshape(num_blocks, num_kv_heads, block_size)
-            value_scale = value_scale.reshape(num_blocks, num_kv_heads, block_size)
-        pa_decode_tile(
-            output,
-            query,
-            key_cache,
-            value_cache,
-            block_tables,
-            context_lengths,
-            key_scale,
-            value_scale,
-            softmax_scale=softmax_scale,
-            stream=s,
-            num_partitions=max_context_partition_num,
-            pmax=max_logits,
-            psum=exp_sums,
-            pout=temporary_output,
-        )
-        return "ps_small_block"
 
     if metadata is None:
         if is_graph_capturing:

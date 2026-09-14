@@ -304,7 +304,7 @@ def test_hint_changes_cache_key():
 
 
 @pytest.mark.l0_backend_agnostic
-@pytest.mark.parametrize("op_name", ["maxnumf", "maximumf", "minimumf"])
+@pytest.mark.parametrize("op_name", ["maxnumf", "minnumf", "maximumf", "minimumf"])
 def test_minmax_inherits_ambient(op_name):
     """These reach the raw MLIR builder, so they need the ambient lookup themselves."""
     op = getattr(fx, op_name)
@@ -320,7 +320,7 @@ def test_minmax_inherits_ambient(op_name):
 
 
 @pytest.mark.l0_backend_agnostic
-@pytest.mark.parametrize("op_name", ["maxnumf", "maximumf", "minimumf"])
+@pytest.mark.parametrize("op_name", ["maxnumf", "minnumf", "maximumf", "minimumf"])
 def test_minmax_explicit_arg_overrides_ambient(op_name):
     def build(a, b):
         fa, fb = Float32(a), Float32(b)
@@ -332,7 +332,7 @@ def test_minmax_explicit_arg_overrides_ambient(op_name):
 
 
 @pytest.mark.l0_backend_agnostic
-@pytest.mark.parametrize("op_name", ["maxnumf", "maximumf", "minimumf"])
+@pytest.mark.parametrize("op_name", ["maxnumf", "minnumf", "maximumf", "minimumf"])
 def test_minmax_unflagged_outside_block(op_name):
     def build(a, b):
         fa, fb = Float32(a), Float32(b)
