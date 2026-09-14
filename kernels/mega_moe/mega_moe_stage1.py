@@ -204,9 +204,7 @@ def compile_mega_moe_stage1(
         ticket_scratch = fx.recast_iter(fx.Int64, a_buf.ptr)
         ticket_view = fx.make_view(ticket_scratch, fx.make_layout(1, 1))
         if tid == fx.Int32(0):
-            ticket64 = fx.Int64(
-                comm_ops.atomic_add_agent(a_entry_count + fx.Int64(grid_epoch_slot * 8), fx.Int64(1))
-            )
+            ticket64 = comm_ops.atomic_add_agent(a_entry_count + fx.Int64(grid_epoch_slot * 8), fx.Int64(1))
             fx.ptr_store(Vec.from_elements([ticket64], fx.Int64), ticket_scratch)
         fx.barrier()
         ticket64 = Vec(ticket_view.load())[0]
@@ -429,10 +427,8 @@ def compile_mega_moe_stage1(
         work_shard = ticket & fx.Int32(WORK_SHARDS - 1)
         while consumer_active:
             if tid == fx.Int32(0):
-                local_work = fx.Int32(
-                    comm_ops.atomic_add_agent(
-                        a_work_head + fx.Int64(work_shard) * fx.Int64(64), fx.Int32(1)
-                    )
+                local_work = comm_ops.atomic_add_agent(
+                    a_work_head + fx.Int64(work_shard) * fx.Int64(64), fx.Int32(1)
                 )
                 work = work_shard + local_work * fx.Int32(WORK_SHARDS)
                 fx.ptr_store(Vec.from_elements([work], fx.Int32), work_scratch)
