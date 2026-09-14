@@ -3859,19 +3859,21 @@ def test_lse_dense(dtype, causal, B, S, H, Hkv, D):
 
 @_requires_gfx950
 @pytest.mark.parametrize(
-    "S,Hkv,D,dtype",
+    "S,H,Hkv,D,dtype",
     [
-        (513, 8, 128, torch.bfloat16),
-        (1024, 2, 128, torch.bfloat16),
-        (1024, 8, 64, torch.bfloat16),
-        (1024, 8, 128, torch.float16),
+        (513, 8, 8, 128, torch.bfloat16),
+        (1024, 8, 2, 128, torch.bfloat16),
+        (1024, 8, 8, 64, torch.bfloat16),
+        (1024, 8, 8, 128, torch.float16),
+        (2049, 64, 8, 128, torch.bfloat16),
+        (513, 16, 4, 128, torch.bfloat16),
     ],
 )
 @pytest.mark.parametrize("causal", [False, True])
-def test_dualwave_dense_pipeline_matches_torch(S, Hkv, D, dtype, causal):
+def test_dualwave_dense_pipeline_matches_torch(S, H, Hkv, D, dtype, causal):
     """Exercise the steady-state pipeline, including a partial last Q/KV tile."""
     torch.manual_seed(123)
-    q = torch.randn(1, S, 8, D, device="cuda", dtype=dtype)
+    q = torch.randn(1, S, H, D, device="cuda", dtype=dtype)
     k = torch.randn(1, S, Hkv, D, device="cuda", dtype=dtype)
     v = torch.randn_like(k)
     actual = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_heads=Hkv)
@@ -3880,7 +3882,7 @@ def test_dualwave_dense_pipeline_matches_torch(S, Hkv, D, dtype, causal):
         k.transpose(1, 2).float(),
         v.transpose(1, 2).float(),
         is_causal=causal,
-        enable_gqa=Hkv != 8,
+        enable_gqa=Hkv != H,
     ).transpose(1, 2)
     torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-2)
 

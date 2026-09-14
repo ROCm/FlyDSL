@@ -4065,6 +4065,19 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         return _exp2_score_slice(v_s, start, length)
 
     def reduce_sum(self, l_row, v_p):
+        if const_expr(self.traits.DTYPE_STR == "bf16" and self.traits.HEAD_DIM == 128):
+            # Reduce adjacent scores before crossing halves. This gives the
+            # scheduler short, independent add chains in the QK MFMA window.
+            values = []
+            for half in v_p:
+                if isinstance(half, (list, tuple)):
+                    values.extend(half)
+                else:
+                    values.extend(Vec(half)[i] for i in range_constexpr(16))
+            for width in (16, 8, 4, 2, 1):
+                values = [values[2 * i] + values[2 * i + 1] for i in range_constexpr(width)]
+            reducer = lambda a, b, _fm: a + b  # noqa: E731
+            return l_row + _lane_pair_reduce(values[0], reducer, self.fm_fast)
         return l_row + _score_pair_sum(v_p, self.c_zero_f, self.fm_fast)
 
     def sub_m(self, v_s, row_max):

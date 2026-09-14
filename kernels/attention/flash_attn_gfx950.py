@@ -131,6 +131,14 @@ def build_flash_attn_dualwave_swp_module(
     HAS_ALIBI = bool(has_alibi)
     HAS_SINK = bool(has_sink)
 
+    # Dense non-causal GQA does not benefit from the extra Q LDS round-trip.
+    # Direct loads also avoid the row-major Q tile's bank-conflicted reads.
+    direct_gqa_q = (
+        head_dim == 128
+        and num_kv_heads < num_heads
+        and not (causal or VARLEN or PAGED or SPLITK or cross_seqlen or HAS_ALIBI or HAS_SINK)
+    )
+
     traits = _make_dualwave_swp_traits(
         num_heads,
         num_kv_heads,
@@ -149,13 +157,14 @@ def build_flash_attn_dualwave_swp_module(
         paged=paged,
         kv_cache_layout=kv_cache_layout,
         kv_vectorized=KV_VECTORIZED,
-        qlds=(dtype_str == "bf16" and not HAS_BIAS),
+        qlds=(dtype_str == "bf16" and not HAS_BIAS and not direct_gqa_q),
         return_lse=return_lse,
         xcd_swizzle=_xcd_swizzle,
     )
     traits.BLOCK_N_OUT // traits.BLOCK_N
 
-    _dualwave_swp_cache_tag = (traits.cache_tag, HAS_BIAS, HAS_ALIBI, HAS_SINK)
+    # Also invalidate older runtimes' disk caches when helper-only math changes.
+    _dualwave_swp_cache_tag = (traits.cache_tag, HAS_BIAS, HAS_ALIBI, HAS_SINK, "adjacent_sum_v1")
 
     # BF16 d128 centers score pairs with packed adds. Budget their emitted VALU
     # instructions, so the PV MFMAs overlap both subtraction and the exp2 head.
