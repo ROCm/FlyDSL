@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-14T18:35:09Z",
+ "updated": "2026-09-14T18:56:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,42 @@
    "branch": "codex/topk-gating-mi355",
    "event": "pull_request",
    "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34880575937",
    "created_at": "2026-09-14T18:24:13Z",
-   "updated_at": "2026-09-14T18:26:20Z",
+   "updated_at": "2026-09-14T18:38:22Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T18:38:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34880575937/job/104103363975"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T18:38:37Z",
+     "completed_at": "2026-09-14T18:53:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34880575937/job/104103364031",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-14T18:38:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34880575937/job/104103364088"
+    }
+   ]
   },
   {
    "run_id": 34874379031,
@@ -71,11 +100,11 @@
    "branch": "pr/enh-cdna5-tiled-tdm-atom",
    "event": "pull_request",
    "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874295558",
    "created_at": "2026-09-14T17:21:53Z",
-   "updated_at": "2026-09-14T17:40:57Z",
+   "updated_at": "2026-09-14T18:40:22Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -100,9 +129,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-14T17:40:57Z",
+     "started_at": "2026-09-14T18:40:21Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874295558/job/104083969585"
     }
@@ -115,21 +144,22 @@
    "branch": "opus-fa4-align-bf16-perf",
    "event": "pull_request",
    "title": "[Kernel][Perf] Tune gfx950 BF16 attention pipeline and GQA loads",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061",
    "created_at": "2026-09-14T15:33:32Z",
-   "updated_at": "2026-09-14T17:41:30Z",
+   "updated_at": "2026-09-14T18:54:20Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-14T17:41:29Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061/job/104045253390"
+     "completed_at": "2026-09-14T18:54:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061/job/104045253390",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
