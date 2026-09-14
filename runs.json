@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-14T10:54:30Z",
+ "updated": "2026-09-14T10:55:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34835443408,
+   "pr": 1131,
+   "commit": "7c8ec0baf7cefc89de2db956d5ce88d5e5e68261",
+   "branch": "codex/port-preshuffle-layout-algebra",
+   "event": "pull_request",
+   "title": "[Kernel] Refactor preshuffle GEMM indexing with layout algebra",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835443408",
+   "created_at": "2026-09-14T10:53:55Z",
+   "updated_at": "2026-09-14T10:54:48Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 34835262589,
    "pr": null,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835262589",
    "created_at": "2026-09-14T10:51:43Z",
-   "updated_at": "2026-09-14T10:51:51Z",
+   "updated_at": "2026-09-14T10:53:34Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,11 +40,11 @@
    "branch": "codex/port-preshuffle-layout-algebra",
    "event": "pull_request",
    "title": "[Kernel] Refactor preshuffle GEMM indexing with layout algebra",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34824246782",
    "created_at": "2026-09-14T08:44:20Z",
-   "updated_at": "2026-09-14T09:39:05Z",
+   "updated_at": "2026-09-14T10:54:23Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -55,10 +70,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-14T09:39:04Z",
-     "completed_at": null,
+     "completed_at": "2026-09-14T10:54:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34824246782/job/103915943773"
     }
    ]
@@ -2236,52 +2251,6 @@
      "started_at": "2026-09-10T13:45:00Z",
      "completed_at": "2026-09-10T15:09:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34481829789/job/102895102557",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34474967700,
-   "pr": 1106,
-   "commit": "62be8677afcbfc08c299b057b4f7c27f46995b63",
-   "branch": "add-flydsl-code-review-skill",
-   "event": "pull_request",
-   "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34474967700",
-   "created_at": "2026-09-10T12:07:36Z",
-   "updated_at": "2026-09-11T02:21:35Z",
-   "actor": "zhiding512",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T12:22:23Z",
-     "completed_at": "2026-09-10T13:33:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34474967700/job/102867730476",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-10T13:44:26Z",
-     "completed_at": "2026-09-10T14:32:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34474967700/job/102867730568",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T02:04:44Z",
-     "completed_at": "2026-09-11T02:21:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34474967700/job/102867730747",
      "log_fetch_failed": true
     }
    ]
