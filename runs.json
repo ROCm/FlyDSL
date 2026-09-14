@@ -1,22 +1,112 @@
 {
  "schema": 1,
- "updated": "2026-09-14T15:36:37Z",
+ "updated": "2026-09-14T17:28:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34874379031,
+   "pr": 1135,
+   "commit": "cb5b619af0dfd3c4cfc606088ff9f2c0a58f4510",
+   "branch": "pr/docs-remove-typed-arithmetic",
+   "event": "pull_request",
+   "title": "[Docs] Remove tedious typed arithmetic section",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874379031",
+   "created_at": "2026-09-14T17:22:43Z",
+   "updated_at": "2026-09-14T17:26:15Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T17:24:25Z",
+     "completed_at": "2026-09-14T17:24:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874379031/job/104078232135",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T17:24:27Z",
+     "completed_at": "2026-09-14T17:24:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874379031/job/104078232152",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T17:24:26Z",
+     "completed_at": "2026-09-14T17:26:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874379031/job/104078232161",
+     "log_fetch_failed": true
+    }
+   ]
+  },
+  {
+   "run_id": 34874295558,
+   "pr": 1013,
+   "commit": "fecae78739d99298457d44e314e920e176170279",
+   "branch": "pr/enh-cdna5-tiled-tdm-atom",
+   "event": "pull_request",
+   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874295558",
+   "created_at": "2026-09-14T17:21:53Z",
+   "updated_at": "2026-09-14T17:24:19Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 34862944061,
    "pr": 1134,
    "commit": "029ae8b9cc4bc55a435bbed6215582da225b876b",
    "branch": "opus-fa4-align-bf16-perf",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Tune gfx950 BF16 attention XCD config",
-   "status": "in_progress",
+   "title": "[Kernel][Perf] Tune gfx950 BF16 attention pipeline and GQA loads",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061",
    "created_at": "2026-09-14T15:33:32Z",
-   "updated_at": "2026-09-14T15:33:49Z",
+   "updated_at": "2026-09-14T15:48:58Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-14T15:48:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061/job/104045253390"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-14T15:49:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061/job/104045253407"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-14T15:49:09Z",
+     "completed_at": "2026-09-14T16:08:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34862944061/job/104045254065",
+     "log_fetch_failed": true
+    }
+   ]
   },
   {
    "run_id": 34853593531,
@@ -85,7 +175,7 @@
    "commit": "ea8ac83330a3bcb851c96d1b2f39890e679ca596",
    "branch": "opus-fa4-align-bf16-perf",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Tune gfx950 BF16 attention XCD config",
+   "title": "[Kernel][Perf] Tune gfx950 BF16 attention pipeline and GQA loads",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34851278681",
@@ -2172,36 +2262,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34579879465,
-   "pr": 1057,
-   "commit": "ddd20408baba52462c488d50c2a048754458d518",
-   "branch": "perf/gfx1151-rdna3_5-tuning",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add gfx1151 tile selection for RDNA3 GEMM",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34579879465",
-   "created_at": "2026-09-11T08:34:46Z",
-   "updated_at": "2026-09-11T08:34:46Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 34579648475,
-   "pr": null,
-   "commit": "769e4b83d06fa9cbd268c8d1b983953ff9e8065c",
-   "branch": "ci/pypi-moe-csv-hgemm",
-   "event": "pull_request",
-   "title": "[CI] Run aiter CSV MoE and HGEMM in the wheel/PyPI test job",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34579648475",
-   "created_at": "2026-09-11T08:31:58Z",
-   "updated_at": "2026-09-11T08:37:38Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
