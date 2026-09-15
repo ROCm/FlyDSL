@@ -300,14 +300,42 @@ class RuntimeEnvManager(EnvManager):
     )
 
 
+class KtraceEnvManager(EnvManager):
+    """In-kernel wave tracing options (``FLYDSL_KTRACE_*`` environment variables)."""
+
+    env_prefix = "KTRACE"
+
+    enable = OptBool(False, description="Emit in-kernel wave tracing instrumentation (gfx942/gfx950)")
+    buffer_bytes = OptInt(
+        64 << 20,
+        min_value=1 << 12,
+        description="Device trace buffer size in bytes; a run that needs more is rejected, not truncated",
+    )
+    events_per_wave = OptInt(
+        256,
+        # 2, not 1: the emitted guard is `local < events_per_wave - 1`, so a value of 1
+        # makes it `local < 0` -- false for the very first event, silently suppressing
+        # every record while the counter still climbs. A clean run and an empty trace.
+        min_value=2,
+        description="Trace slots reserved per wave; one atomic claims the range at kernel entry",
+    )
+    blocks = OptStr(
+        "",
+        description="Restrict recording to 'x,y,z' or 'xcc:N'; empty records every workgroup",
+    )
+    dump_dir = OptStr("", description="Directory for trace output; empty writes to the working directory")
+
+
 autotune = AutotuneEnvManager()
 compile = CompileEnvManager()
 debug = DebugEnvManager()
+ktrace = KtraceEnvManager()
 runtime = RuntimeEnvManager()
 
 __all__ = [
     "autotune",
     "compile",
     "debug",
+    "ktrace",
     "runtime",
 ]
