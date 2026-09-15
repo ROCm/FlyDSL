@@ -2,5 +2,14 @@
   "upstream": {
     "repository": "https://github.com/llvm/llvm-project.git",
     "llvm_hash": "e2a39f504fee836e4def9581bed817ecc327b9dc"
+  },
+  "upstream-main-add-unclausevmem-patch": {
+    "repository": "https://github.com/llvm/llvm-project.git",
+    "llvm_hash": "941a04e69ee8fe4c7a162b2f1e215aa8df867534",
+    "cherry_pick_commits": [
+      "1109d68feb1b746c675d8f88fb89085334f8f514",
+      "739eaa08d45e5f6e5d13b1dd82daf0e5dc27e344"
+    ],
+    "description": "gfx1250: fix unclaused VMEM prologue (base=#214885 incl #214127; cherry-pick #215450, #216897)"
   }
 }

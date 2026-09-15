@@ -13,9 +13,55 @@ LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
-# Read LLVM commit hash from thirdparty/llvm-build-info.json (upstream entry)
+# Parse CLI args early so --llvm-entry is available before reading the JSON.
+for arg in "$@"; do
+    case "$arg" in
+        --llvm-entry=*) LLVM_BUILD_ENTRY="${arg#*=}" ;;
+    esac
+done
+
+# Read LLVM commit hash from thirdparty/llvm-build-info.json.
+# Use --llvm-entry=<name> or LLVM_BUILD_ENTRY to select a non-default entry,
+# or pick interactively when neither is set and stdin is a terminal.
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
-LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
+if [ -z "${LLVM_BUILD_ENTRY}" ] && [ -t 0 ]; then
+    mapfile -t LLVM_ENTRIES < <(python3 -c "
+import json
+info = json.load(open('${LLVM_BUILD_INFO}'))
+for k in info:
+    desc = info[k].get('description', '')
+    suffix = '  -- ' + desc if desc else ''
+    print(k + suffix)
+")
+    if [ "${#LLVM_ENTRIES[@]}" -gt 1 ]; then
+        echo "Available LLVM build entries:"
+        for i in "${!LLVM_ENTRIES[@]}"; do
+            default_tag=""
+            entry_name="${LLVM_ENTRIES[$i]%%  --*}"
+            if [ "$entry_name" = "upstream" ]; then
+                default_tag=" (default)"
+            fi
+            echo "  $((i+1))) ${LLVM_ENTRIES[$i]}${default_tag}"
+        done
+        read -r -p "Select entry [1]: " choice
+        choice="${choice:-1}"
+        idx=$((choice - 1))
+        if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#LLVM_ENTRIES[@]}" ]; then
+            LLVM_BUILD_ENTRY="${LLVM_ENTRIES[$idx]%%  --*}"
+        else
+            echo "Invalid selection, using 'upstream'."
+            LLVM_BUILD_ENTRY="upstream"
+        fi
+    fi
+fi
+LLVM_BUILD_ENTRY="${LLVM_BUILD_ENTRY:-upstream-main-add-unclausevmem-patch}"
+LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['${LLVM_BUILD_ENTRY}']['llvm_hash'])")
+LLVM_CHERRY_PICKS=$(python3 -c "
+import json
+entry = json.load(open('${LLVM_BUILD_INFO}')).get('${LLVM_BUILD_ENTRY}', {})
+commits = entry.get('cherry_pick_commits', [])
+print(' '.join(commits))
+")
 LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
 LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
 LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
@@ -43,7 +89,11 @@ echo "LLVM Source:    $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
+echo "LLVM Entry:     $LLVM_BUILD_ENTRY"
 echo "LLVM Ref:       $LLVM_REF"
+if [ -n "${LLVM_CHERRY_PICKS}" ]; then
+    echo "LLVM Cherry:    ${LLVM_CHERRY_PICKS}"
+fi
 echo "LLVM Profile:   $LLVM_BUILD_PROFILE"
 echo "LLVM Projects:  $LLVM_ENABLE_PROJECTS"
 echo "LLVM Targets:   $LLVM_TARGETS_TO_BUILD"
@@ -91,6 +141,42 @@ else
     echo "Fetching ref ${LLVM_REF} ..."
     git fetch "${LLVM_FETCH_ARGS[@]}" origin "${LLVM_REF}"
     git checkout FETCH_HEAD
+fi
+
+# Cherry-pick commits if the selected entry lists any.
+if [ -n "${LLVM_CHERRY_PICKS}" ]; then
+    echo "Cherry-picking upstream commits for entry '${LLVM_BUILD_ENTRY}' ..."
+    LLVM_UPSTREAM_REMOTE="${LLVM_UPSTREAM_REMOTE:-https://github.com/llvm/llvm-project.git}"
+    if ! git remote get-url upstream >/dev/null 2>&1; then
+        git remote add upstream "${LLVM_UPSTREAM_REMOTE}"
+    fi
+    for cherry_hash in ${LLVM_CHERRY_PICKS}; do
+        if git merge-base --is-ancestor "${cherry_hash}" HEAD 2>/dev/null; then
+            echo "  ${cherry_hash} already present, skipping."
+            continue
+        fi
+        echo "  Fetching and cherry-picking ${cherry_hash} ..."
+        git fetch --depth=2 upstream "${cherry_hash}"
+        if ! git cherry-pick --no-commit "${cherry_hash}" 2>/dev/null; then
+            # Auto-resolve .ll test file conflicts with theirs strategy;
+            # fail if any non-.ll file has conflicts.
+            conflict_files=$(git diff --name-only --diff-filter=U)
+            non_ll_conflicts=$(echo "$conflict_files" | grep -v '\.ll$' | grep -v '^$' || true)
+            if [ -n "$non_ll_conflicts" ]; then
+                echo "ERROR: non-test-file conflicts during cherry-pick of ${cherry_hash}:" >&2
+                echo "$non_ll_conflicts" >&2
+                exit 1
+            fi
+            echo "  Resolving .ll test file conflicts with theirs strategy ..."
+            echo "$conflict_files" | while read -r f; do
+                [ -n "$f" ] && git checkout --theirs -- "$f" && git add "$f"
+            done
+        fi
+    done
+    if ! git diff --cached --quiet; then
+        git -c user.name="FlyDSL CI" -c user.email="flydsl-ci@noreply" \
+            commit -m "cherry-pick: gfx1250 unclaused VMEM prologue fixes (#215450, #216897)"
+    fi
 fi
 
 if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
