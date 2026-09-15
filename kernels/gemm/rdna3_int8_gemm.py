@@ -330,7 +330,7 @@ def create_wmma_int8_gemm_module(
 
         def _tile_operands(bid_m, bid_n):
             tA = fx.flat_divide(
-                fx.rocdl.make_buffer_tensor(arg_a, max_size=not partial_m, bounds_checked=partial_m),
+                fx.rocdl.make_buffer_tensor(arg_a, max_size=not partial_m),
                 fx.make_tile(BLOCK_M, BLOCK_K),
             )[None, None, bid_m, None]
             tB = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_bt), fx.make_tile(BLOCK_N, BLOCK_K))[
@@ -495,7 +495,7 @@ def create_wmma_int8_gemm_module(
                 return
 
             tC = fx.flat_divide(
-                fx.rocdl.make_buffer_tensor(arg_c, max_size=not partial_m, bounds_checked=partial_m),
+                fx.rocdl.make_buffer_tensor(arg_c, max_size=not partial_m),
                 fx.make_tile(BLOCK_M, BLOCK_N),
             )[None, None, bid_m, bid_n]
             frag_C = thr_mma.make_fragment_C(tC)
