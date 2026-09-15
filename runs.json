@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-15T19:30:51Z",
+ "updated": "2026-09-15T19:33:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -98,11 +98,11 @@
    "branch": "pr/fix-pointer-control-flow",
    "event": "pull_request",
    "title": "[Fix] Convert fly pointer types across control-flow boundaries",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35001342058",
    "created_at": "2026-09-15T17:27:04Z",
-   "updated_at": "2026-09-15T18:50:14Z",
+   "updated_at": "2026-09-15T19:31:03Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -128,11 +128,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-15T18:50:13Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35001342058/job/104497426156"
+     "completed_at": "2026-09-15T19:31:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35001342058/job/104497426156",
+     "log_fetch_failed": true
     }
    ]
   },
