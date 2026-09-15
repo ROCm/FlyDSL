@@ -141,7 +141,8 @@ public:
 private:
   struct Placement {
     RegisterClassAttr regClass;
-    int64_t start;
+    IntegerAttr start;
+    IntegerAttr registerAlignment;
   };
   DenseMap<MakePtrOp, Placement> placements;
   DenseMap<MakePtrOp, RegAllocaInfo> regAllocaInfos;
@@ -195,10 +196,12 @@ private:
         invalidPlacement = true;
         return;
       }
-      auto [it, inserted] = placements.try_emplace(
-          root->first, Placement{op.getRegClassAttr(), op.getStartAttr().getInt()});
-      if (!inserted && (it->second.regClass != op.getRegClassAttr() ||
-                        it->second.start != op.getStartAttr().getInt())) {
+      auto [it, inserted] =
+          placements.try_emplace(root->first, Placement{op.getRegClassAttr(), op.getStartAttr(),
+                                                        op.getRegisterAlignmentAttr()});
+      if (!inserted &&
+          (it->second.regClass != op.getRegClassAttr() || it->second.start != op.getStartAttr() ||
+           it->second.registerAlignment != op.getRegisterAlignmentAttr())) {
         op.emitOpError("conflicting declarations for the same register allocation");
         invalidPlacement = true;
       }
@@ -508,9 +511,9 @@ private:
     int64_t bitOffset = int64_t(access.offset) * access.elemTy.getIntOrFloatBitWidth();
     int64_t storageBits = int64_t(info.allocSize) * info.elemTy.getIntOrFloatBitWidth();
     return RegisterValueOp::create(builder, loc, value.getType(), value, it->second.regClass,
-                                   builder.getI64IntegerAttr(it->second.start),
-                                   builder.getI64IntegerAttr(bitOffset),
-                                   builder.getI64IntegerAttr(storageBits));
+                                   it->second.start, builder.getI64IntegerAttr(bitOffset),
+                                   builder.getI64IntegerAttr(storageBits),
+                                   it->second.registerAlignment);
   }
 
   LogicalResult rewritePtrStore(PtrStoreOp storeOp, OpBuilder &builder, IRMapping &mapping,

@@ -169,3 +169,104 @@ def test_custom_storable_and_aligned_composite():
         assert isinstance(overlay.halves.peek()[1], fx.Int16)
 
     assert re.findall(r"start = (\d+) : i64", source_ir(body)) == ["66", "68"]
+
+
+def test_automatic_allocator_keeps_layout_without_fixed_numbers():
+    captured = {}
+
+    def body():
+        regs = fx.RegisterAllocator(fx.rocdl.AGPR, start_offset=None, register_alignment=4)
+        regs.allocate(fx.Int32)
+        regs.allocate(RegisterPayload)
+        captured["bytes"] = regs.allocated_bytes
+
+    text = source_ir(body)
+    assert text.count("fly.set_register") == 2
+    assert "start =" not in text
+    assert text.count("registerAlignment = 4 : i64") == 2
+    assert captured["bytes"] == 48
+
+
+@pytest.mark.parametrize("alignment", [0, -1, 3, True, 1.5, 2**63])
+def test_invalid_register_alignment(alignment):
+    with pytest.raises(ValueError, match="register_alignment"):
+        fx.RegisterAllocator(fx.rocdl.VGPR, None, register_alignment=alignment)
+
+
+def test_fixed_allocator_rounds_to_register_alignment():
+    def body():
+        regs = fx.RegisterAllocator(fx.rocdl.VGPR, 65, register_alignment=4)
+        regs.allocate(fx.Int32)
+        regs.allocate(fx.Int32)
+
+    assert re.findall(r"start = (\d+) : i64", source_ir(body)) == ["68", "72"]
+
+
+@pytest.mark.parametrize("start", [0, None])
+def test_unplaced_allocator_preserves_storable_layout_without_markers(start):
+    captured = {}
+
+    def body():
+        regs = fx.RegisterAllocator(start_offset=start)
+        byte = regs.allocate(fx.Int8)
+        byte.poke(7)
+        payload = regs.allocate(RegisterPayload)
+        payload.tag.poke(byte.peek())
+        payload.scalar.poke(2.0)
+        payload.vector.poke(fx.Vector.filled((2, 4), 3.0, fx.Float16))
+        payload.poke(payload.peek())
+        regs.allocate(3)
+        captured["bytes"] = regs.allocated_bytes
+        captured["registers"] = regs.allocated_registers
+
+    text = source_ir(body)
+    assert "fly.make_ptr" in text
+    assert "fly.set_register" not in text
+    assert "vector<8xf16>" in text
+    assert captured == {"bytes": 52, "registers": 13}
+
+
+@pytest.mark.parametrize("kwargs", [{"start_offset": 32}, {"register_alignment": 4}])
+def test_unplaced_allocator_rejects_physical_constraints(kwargs):
+    with pytest.raises(ValueError, match="constraints require a register_class"):
+        fx.RegisterAllocator(**kwargs)
+
+
+@fx.struct
+class MixedRegisterRefs:
+    scalar: fx.Storage[fx.Int32]
+    vector: fx.Storage[fx.Vector[fx.Float32, 4]]
+    accumulator: fx.Storage[fx.Float32]
+    scratch: fx.Storage[fx.Int16]
+
+
+@flyc.jit
+def update_register_refs(refs: MixedRegisterRefs):
+    refs.scalar.poke(refs.scalar.peek() + 1)
+    return refs
+
+
+def test_struct_groups_independent_storage_across_classes_and_jit_loop():
+    @flyc.kernel
+    def kernel(n: fx.Int32):
+        refs = MixedRegisterRefs(
+            scalar=fx.RegisterAllocator(fx.rocdl.SGPR, 40).allocate(fx.Int32),
+            vector=fx.RegisterAllocator(fx.rocdl.VGPR, 32).allocate(fx.Vector[fx.Float32, 4]),
+            accumulator=fx.RegisterAllocator(fx.rocdl.AGPR, 64).allocate(fx.Float32),
+            scratch=fx.RegisterAllocator().allocate(fx.Int16),
+        )
+        refs = construct_from_ir_values(type(refs), refs, extract_to_ir_values(refs))
+        refs.scalar.poke(fx.Int32(fx.block_idx.x))
+        refs.vector.poke(fx.Vector.filled(4, 2.0, fx.Float32))
+        refs.accumulator.poke(refs.vector.peek()[0])
+        refs.scratch.poke(3)
+        for _ in range(0, n):
+            refs = update_register_refs(refs)
+        refs.scratch.poke(fx.Int16(refs.scalar.peek()))
+
+    text = launch_ir(kernel, fx.Int32(3))
+    assert text.count("fly.set_register") == 3
+    for name in ("SGPR_32", "VGPR_32", "AGPR_32"):
+        assert name in text
+    assert "scf.for" in text
+    assert "vector<4xf32>" in text

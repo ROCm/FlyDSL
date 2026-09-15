@@ -57,9 +57,10 @@ def test_checked_serialization_leaves_unannotated_modules_unchanged():
 
 @pytest.mark.parametrize("arch", ["gfx908", "gfx942", "gfx950"])
 @pytest.mark.parametrize("bank", ["AGPR", "VGPR"])
-def test_partial_mfma_requires_native_definition_class(tmp_path, arch, bank):
+def test_partial_mfma_direct_placement_after_llvm_rewriting(tmp_path, arch, bank):
     # Only D is fixed. Do not accept a write-back copy as successful placement.
-    # The default LLVM selection uses AGPR C/D on gfx908 and VGPR on gfx942/950.
+    # LLVM can reclassify the unplaced C as well on gfx942/950. The native
+    # rewrite is unavailable on gfx908, which retains AGPR-only C/D.
     body = f"""
       %a = llvm.load volatile %p : !llvm.ptr<1> -> vector<4xf16>
       %b = llvm.load volatile %p : !llvm.ptr<1> -> vector<4xf16>
@@ -73,7 +74,7 @@ def test_partial_mfma_requires_native_definition_class(tmp_path, arch, bank):
     """
     result = _compile_machine_module(tmp_path, body, arch=arch)
     native_bank = "AGPR" if arch == "gfx908" else "VGPR"
-    if bank != native_bank:
+    if arch == "gfx908" and bank != native_bank:
         assert result.returncode != 0
         assert "explicit register definition cannot use" in result.stderr
         assert "automatic write-back copies are disabled" in result.stderr
@@ -92,11 +93,72 @@ def test_partial_mfma_requires_native_definition_class(tmp_path, arch, bank):
     assert result.returncode == 0, result.stdout + result.stderr
     plain_inst = next(line for line in (plain / "final.s").read_text().splitlines() if "v_mfma_" in line)
     assert fixed_inst.split()[0] == plain_inst.split()[0]
-    # The selected opcode is unchanged, and its destination directly names the
-    # requested tuple. Merely seeing a64/v64 in a later COPY is insufficient.
-    assert re.findall(r"\b([av])\[", fixed_inst)[::3] == re.findall(r"\b([av])\[", plain_inst)[::3]
+    # The destination directly names the requested tuple. Merely seeing
+    # a64/v64 in a later COPY is insufficient.
     prefix = "a" if bank == "AGPR" else "v"
     assert re.search(rf"v_mfma_\S+ {prefix}\[64:67\],", fixed_inst), fixed_inst
+
+
+@pytest.mark.parametrize("start", [4, 8])
+def test_native_rewrite_does_not_evict_live_implicit_accumulator(tmp_path, start):
+    # C remains live after MFMA. LLVM's native rewrite keeps it in a[4:7];
+    # forcing D onto that same range must fail, not overwrite or move C.
+    body = f"""
+      %a = llvm.load volatile %p : !llvm.ptr<1> -> vector<4xf16>
+      %b = llvm.load volatile %p : !llvm.ptr<1> -> vector<4xf16>
+      %c = llvm.load volatile %p : !llvm.ptr<1> -> vector<4xf32>
+      %zero = llvm.mlir.constant(0 : i32) : i32
+      %d = llvm.call_intrinsic "llvm.amdgcn.mfma.f32.16x16x16f16"(%a, %b, %c, %zero, %zero, %zero)
+        : (vector<4xf16>, vector<4xf16>, vector<4xf32>, i32, i32, i32) -> vector<4xf32>
+      %fixed = fly.register_value %d {{regClass = #fly.register_class<"amdgcn", "AGPR_32">,
+        start = {start} : i64, bitOffset = 0 : i64, storageBits = 128 : i64}} : vector<4xf32>
+      llvm.store volatile %c, %p : vector<4xf32>, !llvm.ptr<1>
+      llvm.store volatile %fixed, %p : vector<4xf32>, !llvm.ptr<1>
+    """
+    result = _compile_machine_module(tmp_path, body)
+    if start == 4:
+        assert result.returncode != 0
+        assert "interferes with a live value after LLVM allocation" in result.stderr
+        assert not (tmp_path / "final.s").exists()
+        result = _compile_machine_module(tmp_path, body, strip_placement=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        asm = (tmp_path / "final.s").read_text()
+        assert re.search(r"v_mfma_\S+ a\[8:11\],.*a\[4:7\]", asm), asm
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+def test_llvm_rewrites_fixed_agpr_accumulator(tmp_path, arch):
+    # Both the incoming accumulator and the result request AGPRs. FlyDSL
+    # supplies COPY boundaries; the target owns all MFMA opcode conversion.
+    body = """
+      %a = llvm.load volatile %p : !llvm.ptr<1> -> vector<4xf16>
+      %b = llvm.load volatile %p : !llvm.ptr<1> -> vector<4xf16>
+      %c = llvm.load volatile %p : !llvm.ptr<1> -> vector<4xf32>
+      %cin = fly.register_value %c {regClass = #fly.register_class<"amdgcn", "AGPR_32">,
+        start = 0 : i64, bitOffset = 0 : i64, storageBits = 128 : i64} : vector<4xf32>
+      %zero = llvm.mlir.constant(0 : i32) : i32
+      %d = llvm.call_intrinsic "llvm.amdgcn.mfma.f32.16x16x16f16"(%a, %b, %cin, %zero, %zero, %zero)
+        : (vector<4xf16>, vector<4xf16>, vector<4xf32>, i32, i32, i32) -> vector<4xf32>
+      %fixed = fly.register_value %d {regClass = #fly.register_class<"amdgcn", "AGPR_32">,
+        start = 0 : i64, bitOffset = 0 : i64, storageBits = 128 : i64} : vector<4xf32>
+      %half = llvm.fptrunc %fixed : vector<4xf32> to vector<4xf16>
+      llvm.store volatile %half, %p : vector<4xf16>, !llvm.ptr<1>
+    """
+    result = _compile_machine_module(tmp_path, body, arch=arch)
+    assert result.returncode == 0, result.stdout + result.stderr
+    asm = (tmp_path / "final.s").read_text()
+    mfma = next(line for line in asm.splitlines() if "v_mfma_" in line)
+    assert re.search(r"v_mfma_\S+ a\[0:3\],.*a\[0:3\]", mfma), asm
+    assert "v_accvgpr_write_b32" not in asm
+    assert asm.count("v_accvgpr_read_b32") == 4
+    assert asm.index("v_accvgpr_read_b32") > asm.index(mfma)
+    before = (tmp_path / "placement_test.registers.txt").read_text()
+    after = (tmp_path / "placement_test.rewritten-registers.txt").read_text()
+    assert "V_MFMA_F32_16X16X16F16_vgprcd_e64" in before
+    assert "V_MFMA_F32_16X16X16F16_vgprcd_e64" not in after
+    assert "V_MFMA_F32_16X16X16F16_e64" in after
 
 
 def test_agpr_tuple_read_for_float_conversion(tmp_path):

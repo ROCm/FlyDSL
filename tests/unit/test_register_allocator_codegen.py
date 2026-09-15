@@ -52,10 +52,19 @@ SCALAR_TYPES = {
 
 
 @flyc.kernel
-def allocator_kernel(In: fx.Tensor, Out: fx.Tensor, mode: fx.Constexpr[str], bank: fx.Constexpr[str]):
+def allocator_kernel(
+    In: fx.Tensor,
+    Out: fx.Tensor,
+    mode: fx.Constexpr[str],
+    bank: fx.Constexpr[str],
+    automatic: fx.Constexpr[bool],
+    register_alignment: fx.Constexpr[int],
+):
     tid = fx.thread_idx.x
     reg_class = fx.rocdl.AGPR if bank == "AGPR" else fx.rocdl.VGPR
-    regs = fx.RegisterAllocator(reg_class, start_offset=65)
+    regs = fx.RegisterAllocator(
+        reg_class, start_offset=None if automatic else 65, register_alignment=register_alignment
+    )
     if mode == "scalar":
         scalar = regs.allocate(fx.Align[fx.Int32, 16])
         scalar.poke(In[tid])
@@ -66,7 +75,9 @@ def allocator_kernel(In: fx.Tensor, Out: fx.Tensor, mode: fx.Constexpr[str], ban
         buf.poke(fx.Vector(fx.ptr_load(ptr, fx.Vector.make_type((2, 2), fx.Int32)), (2, 2), fx.Int32))
         Out[tid] = buf.peek().reduce(fx.ReductionOp.ADD)
     elif mode == "sgpr":
-        scalar = fx.RegisterAllocator(fx.rocdl.SGPR, start_offset=40).allocate(fx.Int32)
+        scalar = fx.RegisterAllocator(
+            fx.rocdl.SGPR, start_offset=None if automatic else 40, register_alignment=register_alignment
+        ).allocate(fx.Int32)
         scalar.poke(fx.Int32(fx.block_idx.x))
         Out[tid] = scalar.peek() + 7
     elif mode == "union":
@@ -120,8 +131,15 @@ def allocator_kernel(In: fx.Tensor, Out: fx.Tensor, mode: fx.Constexpr[str], ban
 
 
 @flyc.jit
-def launch_allocator(In: fx.Tensor, Out: fx.Tensor, mode: fx.Constexpr[str], bank: fx.Constexpr[str] = "VGPR"):
-    allocator_kernel(In, Out, mode, bank).launch(grid=(1, 1, 1), block=(64, 1, 1))
+def launch_allocator(
+    In: fx.Tensor,
+    Out: fx.Tensor,
+    mode: fx.Constexpr[str],
+    bank: fx.Constexpr[str] = "VGPR",
+    automatic: fx.Constexpr[bool] = False,
+    register_alignment: fx.Constexpr[int] = 1,
+):
+    allocator_kernel(In, Out, mode, bank, automatic, register_alignment).launch(grid=(1, 1, 1), block=(64, 1, 1))
 
 
 @pytest.mark.parametrize(
@@ -224,13 +242,15 @@ run_allocator({mode!r}, bank="AGPR")
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def run_allocator(mode, *, run=False, bank="VGPR"):
+def run_allocator(mode, *, run=False, bank="VGPR", automatic=False, register_alignment=1):
     import torch
 
     device = "cuda" if run else "cpu"
     source = torch.arange(1024, dtype=torch.int32, device=device) * 7919 - 50000
     out = torch.empty(64, dtype=torch.int32, device=device)
-    launch_allocator(flyc.from_torch_tensor(source), flyc.from_torch_tensor(out), mode, bank)
+    launch_allocator(
+        flyc.from_torch_tensor(source), flyc.from_torch_tensor(out), mode, bank, automatic, register_alignment
+    )
     if run:
         torch.cuda.synchronize()
         if mode == "scalar":

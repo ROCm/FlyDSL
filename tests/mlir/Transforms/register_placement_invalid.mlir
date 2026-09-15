@@ -28,3 +28,24 @@ func.func @slice_outside(%v: vector<4xi32>) {
 
 // expected-error @+1 {{register class target and name must be nonempty}}
 module attributes {test = #fly.register_class<"", "VGPR_32">} {}
+
+// -----
+func.func @invalid_register_alignment(%p: !fly.ptr<i32, register>) {
+  // expected-error @+1 {{registerAlignment must be a positive power of two}}
+  fly.set_register %p {regClass = #fly.register_class<"amdgcn", "VGPR_32">, registerAlignment = 3 : i64} : !fly.ptr<i32, register>
+  return
+}
+
+// -----
+func.func @misaligned_fixed_start(%p: !fly.ptr<i32, register>) {
+  // expected-error @+1 {{start must satisfy registerAlignment}}
+  fly.set_register %p {regClass = #fly.register_class<"amdgcn", "VGPR_32">, start = 65 : i64, registerAlignment = 4 : i64} : !fly.ptr<i32, register>
+  return
+}
+
+// -----
+func.func @invalid_value_alignment(%x: i32) {
+  // expected-error @+1 {{registerAlignment must be a positive power of two}}
+  %v = fly.register_value %x {regClass = #fly.register_class<"amdgcn", "AGPR_32">, bitOffset = 0 : i64, storageBits = 32 : i64, registerAlignment = 0 : i64} : i32
+  return
+}

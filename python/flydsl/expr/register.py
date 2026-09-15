@@ -58,29 +58,48 @@ class RegisterClass:
 
 
 class RegisterAllocator(Arena):
-    """Allocate ``Storage[T]`` in consecutive members of an LLVM register class.
+    """Allocate register-memory ``Storage[T]`` with optional placement constraints.
 
-    ``start_offset`` is a register class index. Storable sizes and alignments
+    With no ``register_class``, emit plain regmem and let LLVM choose both the
+    class and numbers. This mode uses 32-bit storage slots, does not emit
+    ``set_register``, and accepts only the default placement settings
+    (``start_offset=0`` or None, ``register_alignment=1``). Storable byte
+    alignment still applies. With a class, placement is checked by codegen.
+
+    ``start_offset`` is a register class index, or None for LLVM-selected
+    numbers. The default remains zero. ``register_alignment`` constrains the
+    allocation origin in class members (a positive power of two); automatic
+    slices preserve their word offset modulo this alignment without promising
+    contiguous physical storage. Storable sizes and layout alignments
     remain in bytes. Alignment is applied to the absolute register byte offset;
     each allocation is rounded up to a whole class member. Separate allocators
     do not coordinate their ranges; overlapping live placements are diagnosed
     by the backend. Accesses must have static offsets and support promotion.
 
-    AMDGPU requires instructions producing fixed values to support the chosen
-    registers directly. Incompatible results are rejected, never computed in
-    temporaries and copied back. Consumers with unplaced results may read via
-    a bit-preserving class transfer (for example, AGPR to VGPR before fptrunc).
+    AMDGPU requires instructions producing fixed values to ultimately support
+    the chosen registers directly. LLVM's native class rewriting is used when
+    available; remaining transfers inside fixed dataflow or interference at the
+    requested numbers cause compilation failure. Consumers with unplaced results
+    may read via a class transfer (for example, AGPR to VGPR before fptrunc).
     Such read temporaries do not inherit the allocation's register numbers.
-    This does not change LLVM's instruction selection or force constants into
+    FlyDSL does not choose instruction encodings or force constants into
     registers. Storable layout support does not imply support for every class.
     """
 
-    def __init__(self, register_class: RegisterClass, start_offset: int = 0):
-        if not isinstance(register_class, RegisterClass):
-            raise TypeError("register_class must be a RegisterClass descriptor")
-        if isinstance(start_offset, bool) or not isinstance(start_offset, int) or not 0 <= start_offset < 2**63:
+    def __init__(
+        self, register_class: RegisterClass | None = None, start_offset: int | None = 0, *, register_alignment: int = 1
+    ):
+        if register_class is not None and not isinstance(register_class, RegisterClass):
+            raise TypeError("register_class must be a RegisterClass descriptor or None")
+        if start_offset is not None and (
+            isinstance(start_offset, bool) or not isinstance(start_offset, int) or not 0 <= start_offset < 2**63
+        ):
             raise ValueError("start_offset must be a nonnegative signed 64-bit register class index")
-        bits = register_class.size_bits
+        _check_register_alignment(register_alignment)
+        if register_class is None and (start_offset not in (None, 0) or register_alignment != 1):
+            raise ValueError("start_offset and register_alignment constraints require a register_class")
+        self.register_alignment = register_alignment
+        bits = register_class.size_bits if register_class is not None else 32
         if bits <= 0 or bits % 8:
             raise ValueError("RegisterAllocator requires byte-addressable register class members")
         self.register_class = register_class
@@ -94,7 +113,7 @@ class RegisterAllocator(Arena):
 
     @property
     def allocated_registers(self):
-        """Number of consumed class members, including alignment padding."""
+        """Consumed class members (32-bit slots when unplaced), including padding."""
         return self.allocated_bytes // self._register_bytes
 
     @dsl_loc_tracing
@@ -124,33 +143,57 @@ class RegisterAllocator(Arena):
             raise ValueError("Storable size must be a nonnegative integer in bytes")
         align = max(natural, alignment or natural)
         unit = self._register_bytes
-        placement_align = lcm(align, unit)
-        absolute = self.start_offset * unit + self._offset
+        placement_align = lcm(align, unit * self.register_alignment)
+        origin = (self.start_offset or 0) * unit
+        absolute = origin + self._offset
         begin = (absolute + placement_align - 1) // placement_align * placement_align
         size = (nbytes + unit - 1) // unit * unit
         start = begin // unit
-        if start + size // unit > self.register_class.member_count:
+        if (
+            self.register_class is not None
+            and self.start_offset is not None
+            and start + size // unit > self.register_class.member_count
+        ):
             raise ValueError("allocation exceeds the LLVM register class member range")
         ptr_ty = PointerType.get(elem_ty=Uint8.ir_type, address_space=AddressSpace.Register, alignment=align)
         attrs = ir.DictAttr.get({"allocSize": ir.IntegerAttr.get(ir.IntegerType.get_signless(64), size)})
         ptr = make_ptr(ptr_ty, [], dict_attrs=attrs)
-        if size:
-            set_register(ptr, register_class=self.register_class, start=start)
-        self._offset = begin + size - self.start_offset * unit
+        if size and self.register_class is not None:
+            set_register(
+                ptr,
+                register_class=self.register_class,
+                start=start if self.start_offset is not None else None,
+                register_alignment=self.register_alignment,
+            )
+        self._offset = begin + size - origin
         return Storage[storable](ptr)
 
 
+def _check_register_alignment(alignment):
+    if (
+        isinstance(alignment, bool)
+        or not isinstance(alignment, int)
+        or alignment <= 0
+        or alignment >= 2**63
+        or alignment & (alignment - 1)
+    ):
+        raise ValueError("register_alignment must be a positive power of two below 2**63")
+
+
 @dsl_loc_tracing
-def set_register(storage, *, register_class: RegisterClass, start: int):
-    """Declare physical placement on existing regmem; return None.
+def set_register(storage, *, register_class: RegisterClass, start: int | None = None, register_alignment: int = 1):
+    """Declare class and optional physical placement on existing regmem; return None.
 
     Call on the allocation base in the allocation's block. The declaration
-    applies to the entire allocation. Target availability is checked at codegen.
+    applies to the entire allocation. With ``start=None``, LLVM chooses numbers
+    in the requested class. ``register_alignment`` is measured in class members
+    and constrains the origin; slices preserve their relative alignment residue.
+    It does not guarantee contiguous storage in automatic mode. Target availability is checked at codegen.
     Instructions producing fixed values must accept their fixed inputs and
-    outputs directly; automatic write-back copies are not supported. Consumers
-    with unplaced outputs may use read copies. Transfers requiring implicit
-    lane selection are rejected. It currently
-    requires static, whole-dword slices and optimized SelectionDAG codegen.
+    outputs directly, possibly after LLVM's native class rewriting. Residual
+    write-back copies are not supported. Consumers with unplaced outputs may
+    use read copies. Transfers requiring implicit lane selection are rejected.
+    It requires static, whole-dword slices and optimized SelectionDAG codegen.
     This does not force constant materialization. Native placement conflicts
     may produce a fatal LLVM diagnostic.
     """
@@ -159,11 +202,14 @@ def set_register(storage, *, register_class: RegisterClass, start: int):
 
     if not isinstance(register_class, RegisterClass):
         raise TypeError("register_class must be a RegisterClass descriptor")
-    if isinstance(start, bool) or not isinstance(start, int) or not 0 <= start < 2**63:
+    if start is not None and (isinstance(start, bool) or not isinstance(start, int) or not 0 <= start < 2**63):
         raise ValueError("start must be a nonnegative signed 64-bit register class index")
+    _check_register_alignment(register_alignment)
+    if start is not None and start % register_alignment:
+        raise ValueError("start must satisfy register_alignment")
     value = as_ir_value(storage)
     if not hasattr(value.type, "address_space") or not is_generic_address_space(
         value.type.address_space, fly.AddressSpace.Register
     ):
         raise ValueError("set_register requires a register-memory pointer or tensor")
-    fly.set_register(value, reg_class=register_class._to_mlir(), start=start)
+    fly.set_register(value, reg_class=register_class._to_mlir(), start=start, register_alignment=register_alignment)

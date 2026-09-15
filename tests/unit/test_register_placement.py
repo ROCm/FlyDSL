@@ -61,6 +61,7 @@ def test_register_pointer_slice_keeps_physical_bit_offset():
         ("gfx950", 0, 64, 64, "VGPR"),
         ("gfx942", 0, 64, 128, "AGPR"),
         ("gfx950", 0, 64, 128, "AGPR"),
+        ("gfx942", 128, 192, 0, "AGPR"),
     ],
 )
 def test_example04_exact_registers_in_final_isa(tmp_path, arch, a_start, b_start, c_start, c_bank):
@@ -90,25 +91,6 @@ example.MMA_REG_C = (example.fx.rocdl.{c_bank}, {c_start})
 example.main()
 """
     result = subprocess.run([sys.executable, "-c", script], env=run_env, capture_output=True, text=True, timeout=180)
-    if c_bank == "AGPR":
-        assert result.returncode != 0
-        assert "explicit register definition cannot use" in result.stderr
-        assert "automatic write-back copies are disabled" in result.stderr
-        assert not list((tmp_path / "ir").rglob("*_final_isa.s"))
-        # The unsupported annotation must be the reason compilation fails.
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                script.replace("example.EXPLICIT_REGISTERS = True", "example.EXPLICIT_REGISTERS = False"),
-            ],
-            env=run_env,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        return
     assert result.returncode == 0, result.stdout + result.stderr
     files = list((tmp_path / "ir").rglob("*_final_isa.s"))
     assert len(files) == 1
@@ -116,8 +98,11 @@ example.main()
     instructions = re.findall(r"^\s*v_mfma_.*$", asm, re.MULTILINE)
     assert len(instructions) == 256
     used_a, used_b, used_c = set(), set(), set()
+    c_prefix = "a" if c_bank == "AGPR" else "v"
     for inst in instructions:
-        match = re.search(r" v\[(\d+):(\d+)\], a\[(\d+):(\d+)\], a\[(\d+):(\d+)\], v\[(\d+):(\d+)\]", inst)
+        match = re.search(
+            rf" {c_prefix}\[(\d+):(\d+)\], a\[(\d+):(\d+)\], a\[(\d+):(\d+)\], {c_prefix}\[(\d+):(\d+)\]", inst
+        )
         assert match, inst
         d0, d1, a0, a1, b0, b1, c0, c1 = map(int, match.groups())
         assert (d0, d1) == (c0, c1)
@@ -133,8 +118,19 @@ example.main()
     assert re.search(rf"ds_read_b128 a\[{a_start}:{a_start + 3}\]", asm)
     assert re.search(rf"buffer_load_dwordx4 a\[{b_start}:{b_start + 3}\]", asm)
     assert "Invalid register" not in asm
-    assert "v_accvgpr_read" not in asm
-    assert "v_accvgpr_write" not in asm
+    if c_bank == "AGPR":
+        lines = asm.splitlines()
+        mfma_lines = [i for i, line in enumerate(lines) if "v_mfma_" in line]
+        # Target rewriting must remove all mainloop bank transfers. Reads are
+        # allowed only after the final MFMA, for the unplaced f16 epilogue.
+        assert not any("v_accvgpr_" in line for line in lines[mfma_lines[0] : mfma_lines[-1] + 1])
+        read_lines = [(i, line) for i, line in enumerate(lines) if "v_accvgpr_read_b32" in line]
+        assert len(read_lines) == 64
+        assert all(i > mfma_lines[-1] for i, _ in read_lines)
+        assert {int(re.search(r", a(\d+)", line)[1]) for _, line in read_lines} == set(range(c_start, c_start + 64))
+    else:
+        assert "v_accvgpr_read" not in asm
+        assert "v_accvgpr_write" not in asm
     assert int(re.search(r"\.vgpr_spill_count:\s*(\d+)", asm)[1]) == 0
 
 

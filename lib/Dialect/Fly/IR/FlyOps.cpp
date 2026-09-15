@@ -6,6 +6,7 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Support/LogicalResult.h"
+#include "llvm/Support/MathExtras.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
@@ -2019,15 +2020,23 @@ LogicalResult SetRegisterOp::verify() {
     addressSpace = memref.getAddressSpace();
   if (!addressSpace || !isGenericAddressSpace<AddressSpace::Register>(addressSpace))
     return emitOpError("requires a register-memory pointer or tensor");
-  if (getStartAttr().getInt() < 0)
+  if (getStartAttr() && getStartAttr().getInt() < 0)
     return emitOpError("start must be a nonnegative register class index");
+  if (getRegisterAlignment() <= 0 || !llvm::isPowerOf2_64(getRegisterAlignment()))
+    return emitOpError("registerAlignment must be a positive power of two");
+  if (getStartAttr() && getStartAttr().getInt() % getRegisterAlignment())
+    return emitOpError("start must satisfy registerAlignment");
   return success();
 }
 
 LogicalResult RegisterValueOp::verify() {
-  if (getStartAttr().getInt() < 0 || getBitOffsetAttr().getInt() < 0 ||
+  if ((getStartAttr() && getStartAttr().getInt() < 0) || getBitOffsetAttr().getInt() < 0 ||
       getStorageBitsAttr().getInt() <= 0)
     return emitOpError("requires nonnegative start/bitOffset and positive storageBits");
+  if (getRegisterAlignment() <= 0 || !llvm::isPowerOf2_64(getRegisterAlignment()))
+    return emitOpError("registerAlignment must be a positive power of two");
+  if (getStartAttr() && getStartAttr().getInt() % getRegisterAlignment())
+    return emitOpError("start must satisfy registerAlignment");
   Type type = getValue().getType();
   int64_t count = 1;
   if (auto vector = dyn_cast<VectorType>(type)) {

@@ -529,12 +529,17 @@ def Fly_SetRegisterOp : Fly_Op<"set_register"> {
   let summary = "Assign existing register memory to members of an LLVM register class";
   let description = [{
     Declare placement on the base of a static register-memory allocation in
-    the same block. `start` is a nonnegative index into `regClass`. Promotion
+    the same block. Optional `start` is a nonnegative index into `regClass`;
+    when absent, LLVM chooses the physical numbers. `registerAlignment` is a
+    power-of-two alignment in class members for the allocation origin.
+    Promotion
     consumes the declaration and propagates it to the storage's SSA slices.
     This declaration applies to the whole allocation, regardless of its order
     relative to accesses in that block; it is not a runtime assignment.
   }];
-  let arguments = (ins AnyType:$storage, Fly_RegisterClassAttr:$regClass, I64Attr:$start);
+  let arguments = (ins AnyType:$storage, Fly_RegisterClassAttr:$regClass,
+                       OptionalAttr<I64Attr>:$start,
+                       DefaultValuedAttr<I64Attr, "1">:$registerAlignment);
   let assemblyFormat = "$storage attr-dict `:` type($storage)";
   let hasVerifier = 1;
 }
@@ -543,13 +548,16 @@ def Fly_SetRegisterOp : Fly_Op<"set_register"> {
 def Fly_RegisterValueOp : Fly_Op<"register_value", [SameOperandsAndResultType]> {
   let summary = "Carry register-memory placement on a promoted SSA slice";
   let description = [{
-    `start` indexes the register class. `bitOffset` is the slice offset within
+    Optional `start` indexes the register class. `registerAlignment` constrains
+    the origin modulo a power of two without requiring contiguous allocation.
+    `bitOffset` is the slice offset within
     the allocation and `storageBits` is the entire allocation size in bits.
     Register width and physical range availability are resolved by the backend.
     This identity operation must survive until register placement lowering.
   }];
   let arguments = (ins AnyType:$value, Fly_RegisterClassAttr:$regClass,
-                       I64Attr:$start, I64Attr:$bitOffset, I64Attr:$storageBits);
+                       OptionalAttr<I64Attr>:$start, I64Attr:$bitOffset, I64Attr:$storageBits,
+                       DefaultValuedAttr<I64Attr, "1">:$registerAlignment);
   let results = (outs AnyType:$result);
   let assemblyFormat = "$value attr-dict `:` type($result)";
   let hasVerifier = 1;

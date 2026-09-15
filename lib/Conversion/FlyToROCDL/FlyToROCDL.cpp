@@ -908,7 +908,7 @@ public:
     }
     name += "_" + typeName;
     auto i64 = rewriter.getI64Type();
-    auto signature = LLVM::LLVMFunctionType::get(type, {type, i64, i64, i64});
+    auto signature = LLVM::LLVMFunctionType::get(type, {type, i64, i64, i64, i64});
     auto metadata = rewriter.getArrayAttr(
         {rewriter.getArrayAttr({rewriter.getStringAttr("flydsl-register-target"),
                                 rewriter.getStringAttr(regClass.getTarget())}),
@@ -926,11 +926,16 @@ public:
       auto func = LLVM::LLVMFuncOp::create(rewriter, op.getLoc(), name, signature);
       func.setPassthroughAttr(metadata);
     }
-    auto start = LLVM::ConstantOp::create(rewriter, op.getLoc(), i64, op.getStartAttr());
+    // -1 is the internal marker encoding for an absent physical origin.
+    auto start = LLVM::ConstantOp::create(rewriter, op.getLoc(), i64,
+                                          op.getStartAttr() ? op.getStartAttr()
+                                                            : rewriter.getI64IntegerAttr(-1));
+    auto alignment =
+        LLVM::ConstantOp::create(rewriter, op.getLoc(), i64, op.getRegisterAlignmentAttr());
     auto offset = LLVM::ConstantOp::create(rewriter, op.getLoc(), i64, op.getBitOffsetAttr());
     auto size = LLVM::ConstantOp::create(rewriter, op.getLoc(), i64, op.getStorageBitsAttr());
-    rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, TypeRange{type}, name,
-                                              ValueRange{adaptor.getValue(), start, offset, size});
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(
+        op, TypeRange{type}, name, ValueRange{adaptor.getValue(), start, offset, size, alignment});
     return success();
   }
 };

@@ -11,12 +11,13 @@ STAGES_A = 2
 
 # Explicit per-thread register storage, numbered in 32-bit registers.
 # A occupies 64 AGPRs; the two B stages occupy 32 AGPRs; C occupies 64 VGPRs.
-# These classes are directly supported by LLVM's selected instructions on
-# gfx942/gfx950. AGPR C is rejected instead of adding mainloop write-back copies.
+# The default uses LLVM's selected classes directly. --agpr-accumulator also
+# requests AGPR C, relying on LLVM's native rewrite and checked exact placement.
 EXPLICIT_REGISTERS = False
 MMA_REG_A = (fx.rocdl.AGPR, 0)
 MMA_REG_B = (fx.rocdl.AGPR, 64)
 MMA_REG_C = (fx.rocdl.VGPR, 64)
+MMA_REG_ALIGNMENT = 4
 
 M, N, K = 4096, 4096, 4096
 
@@ -71,9 +72,15 @@ def gemm_kernel(
     mma_frag_C = thr_mma.make_fragment_C(gC)  # (VC, VM, VN)
 
     if fx.const_expr(EXPLICIT_REGISTERS):
-        fx.set_register(mma_frag_A, register_class=MMA_REG_A[0], start=MMA_REG_A[1])
-        fx.set_register(mma_frag_B, register_class=MMA_REG_B[0], start=MMA_REG_B[1])
-        fx.set_register(mma_frag_C, register_class=MMA_REG_C[0], start=MMA_REG_C[1])
+        fx.set_register(
+            mma_frag_A, register_class=MMA_REG_A[0], start=MMA_REG_A[1], register_alignment=MMA_REG_ALIGNMENT
+        )
+        fx.set_register(
+            mma_frag_B, register_class=MMA_REG_B[0], start=MMA_REG_B[1], register_alignment=MMA_REG_ALIGNMENT
+        )
+        fx.set_register(
+            mma_frag_C, register_class=MMA_REG_C[0], start=MMA_REG_C[1], register_alignment=MMA_REG_ALIGNMENT
+        )
 
     mma_frag_A_retile = thr_copy_s2r_A.retile(mma_frag_A)
     mma_frag_B_retile = thr_copy_g2r_B.retile(mma_frag_B)
@@ -238,5 +245,22 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Preshuffled GEMM with optional register placement")
     parser.add_argument("--explicit-registers", action="store_true", help="Place A/B in AGPRs and C in VGPRs")
-    EXPLICIT_REGISTERS = parser.parse_args().explicit_registers
+    parser.add_argument("--agpr-accumulator", action="store_true", help="Place A/B in AGPRs and C in a128:a191")
+    parser.add_argument("--auto-registers", action="store_true", help="Let LLVM choose A/B/C register numbers")
+    parser.add_argument(
+        "--register-alignment",
+        type=int,
+        choices=[1, 2, 4],
+        default=1,
+        help="Align register allocation origins in 32-bit register units",
+    )
+    args = parser.parse_args()
+    EXPLICIT_REGISTERS = args.explicit_registers or args.agpr_accumulator or args.auto_registers
+    MMA_REG_ALIGNMENT = args.register_alignment
+    if args.agpr_accumulator:
+        MMA_REG_C = (fx.rocdl.AGPR, 128)
+    if args.auto_registers:
+        MMA_REG_A = (MMA_REG_A[0], None)
+        MMA_REG_B = (MMA_REG_B[0], None)
+        MMA_REG_C = (MMA_REG_C[0], None)
     main()
