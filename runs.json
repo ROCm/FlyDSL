@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-15T09:38:27Z",
+ "updated": "2026-09-15T10:09:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725",
    "created_at": "2026-09-15T09:33:57Z",
-   "updated_at": "2026-09-15T09:35:31Z",
+   "updated_at": "2026-09-15T09:54:13Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-15T09:54:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725/job/104335021591"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-15T09:54:19Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725/job/104335021607"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-15T09:54:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725/job/104335021618"
+    }
+   ]
   },
   {
    "run_id": 34951330148,
@@ -55,20 +83,20 @@
    "branch": "fp8-attention-tune-20260915",
    "event": "pull_request",
    "title": "[Kernel][Perf] Fix and tune gfx950 dense FP8 attention",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433",
    "created_at": "2026-09-15T07:36:32Z",
-   "updated_at": "2026-09-15T07:56:06Z",
+   "updated_at": "2026-09-15T10:07:45Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-15T07:56:06Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-15T09:41:56Z",
+     "completed_at": "2026-09-15T09:52:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104299777574"
     },
     {
@@ -84,11 +112,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-15T09:26:45Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104299777619"
+     "completed_at": "2026-09-15T10:07:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104299777619",
+     "log_fetch_failed": true
     }
    ]
   },
