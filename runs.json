@@ -1,8 +1,97 @@
 {
  "schema": 1,
- "updated": "2026-09-15T06:45:26Z",
+ "updated": "2026-09-15T09:35:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34953196725,
+   "pr": 1138,
+   "commit": "c02cb7915d7259390e2722213e961085c1fb0f61",
+   "branch": "pr/feat-coop",
+   "event": "pull_request",
+   "title": "[DSL] Support struct as the elemType of Array",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725",
+   "created_at": "2026-09-15T09:33:57Z",
+   "updated_at": "2026-09-15T09:33:59Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 34951330148,
+   "pr": 1138,
+   "commit": "59af6ec5664d3d9130c92c99060a464ba17fd7e1",
+   "branch": "pr/feat-coop",
+   "event": "pull_request",
+   "title": "[DSL] Support struct as the elemType of Array",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34951330148",
+   "created_at": "2026-09-15T09:13:17Z",
+   "updated_at": "2026-09-15T09:15:22Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 34942656593,
+   "pr": 1136,
+   "commit": "9584102fba3b4f2f1b9b5f83a97773fd56d8b18d",
+   "branch": "qiangpan/fix_rdna3_int8_gemm",
+   "event": "pull_request",
+   "title": "[Bugfix][Kernel] Fix rdna3_int8_gemm RDNA bounds checks",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593",
+   "created_at": "2026-09-15T07:37:33Z",
+   "updated_at": "2026-09-15T07:37:33Z",
+   "actor": "qiangpan2",
+   "jobs": []
+  },
+  {
+   "run_id": 34942569433,
+   "pr": 1137,
+   "commit": "50ab7fc7fba2fa75883fe1a054e173b2c0918b8b",
+   "branch": "fp8-attention-tune-20260915",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Fix and tune gfx950 dense FP8 attention",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433",
+   "created_at": "2026-09-15T07:36:32Z",
+   "updated_at": "2026-09-15T07:56:06Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-15T07:56:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104299777574"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-15T07:56:14Z",
+     "completed_at": "2026-09-15T08:10:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104299777583",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-15T09:26:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104299777619"
+    }
+   ]
+  },
   {
    "run_id": 34924886726,
    "pr": 1106,
@@ -2082,185 +2171,6 @@
    "updated_at": "2026-09-11T19:09:36Z",
    "actor": "amd-hhashemi",
    "jobs": []
-  },
-  {
-   "run_id": 34627358715,
-   "pr": 1106,
-   "commit": "bc5c97a0bbef1272587f4c2e5fd89901b72b476a",
-   "branch": "add-flydsl-code-review-skill",
-   "event": "pull_request",
-   "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34627358715",
-   "created_at": "2026-09-11T17:22:59Z",
-   "updated_at": "2026-09-11T22:03:11Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T21:05:48Z",
-     "completed_at": "2026-09-11T22:03:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34627358715/job/103363888889",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T17:50:09Z",
-     "completed_at": "2026-09-11T18:04:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34627358715/job/103363888952",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T17:50:33Z",
-     "completed_at": "2026-09-11T19:18:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34627358715/job/103363889019",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34622262193,
-   "pr": 1123,
-   "commit": "adab80586372fcd41c6cbd87aa6c2bc9ba4c8a66",
-   "branch": "codex/minimax-mxfp8-moe-8wave",
-   "event": "pull_request",
-   "title": "Add grouped MXFP8/A8W4 MoE GEMMs and fused GEMM1 quantization",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34622262193",
-   "created_at": "2026-09-11T16:29:16Z",
-   "updated_at": "2026-09-11T18:51:14Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T17:50:28Z",
-     "completed_at": "2026-09-11T18:51:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34622262193/job/103347506875",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T16:57:27Z",
-     "completed_at": "2026-09-11T17:11:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34622262193/job/103347506984",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T16:57:42Z",
-     "completed_at": "2026-09-11T18:29:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34622262193/job/103347507050",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34614690334,
-   "pr": 1123,
-   "commit": "eaa041569024b58e1d94ff51871825574504ad77",
-   "branch": "codex/minimax-mxfp8-moe-8wave",
-   "event": "pull_request",
-   "title": "Add grouped MXFP8/A8W4 MoE GEMMs and fused GEMM1 quantization",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34614690334",
-   "created_at": "2026-09-11T15:11:58Z",
-   "updated_at": "2026-09-11T16:30:54Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T15:46:50Z",
-     "completed_at": "2026-09-11T16:30:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34614690334/job/103324862246"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T15:46:03Z",
-     "completed_at": "2026-09-11T16:29:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34614690334/job/103324862301"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T15:46:16Z",
-     "completed_at": "2026-09-11T15:59:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34614690334/job/103324862348",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34610405845,
-   "pr": 1123,
-   "commit": "98c47b5810c510e4f7666cdbdbff95e642efc7d5",
-   "branch": "codex/minimax-mxfp8-moe-8wave",
-   "event": "pull_request",
-   "title": "Add grouped MXFP8/A8W4 MoE GEMMs and fused GEMM1 quantization",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34610405845",
-   "created_at": "2026-09-11T14:29:15Z",
-   "updated_at": "2026-09-11T15:12:34Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T15:07:51Z",
-     "completed_at": "2026-09-11T15:12:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34610405845/job/103312100995"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T15:07:35Z",
-     "completed_at": "2026-09-11T15:11:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34610405845/job/103312101020"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-11T15:07:44Z",
-     "completed_at": "2026-09-11T15:12:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34610405845/job/103312101033"
-    }
-   ]
   }
  ]
 }
