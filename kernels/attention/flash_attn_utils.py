@@ -487,10 +487,18 @@ def _exp2_score_slice(v_s, start, length):
         s_lo = [Vec(v_s[0])[r] for r in range_constexpr(16)]
         lo_partial = []
         for r in range_constexpr(16):
-            lo_partial.append(rocdl.exp2(T.f32, as_mlir_value(s_lo[r])))
+            if const_expr(r < length):
+                lo_partial.append(rocdl.exp2(T.f32, as_mlir_value(s_lo[r])))
+            else:
+                lo_partial.append(s_lo[r])
         return Vec.from_elements(lo_partial, fx.Float32).ir_value(), v_s[1]
 
-    lo_partial = [Vec(v_s[0])[r] for r in range_constexpr(16)]
+    lo_partial = []
+    for r in range_constexpr(16):
+        value = Vec(v_s[0])[r]
+        if const_expr(start <= r < start + length):
+            value = rocdl.exp2(T.f32, as_mlir_value(value))
+        lo_partial.append(value)
     hi_full = []
     for r in range_constexpr(16):
         hi_full.append(rocdl.exp2(T.f32, as_mlir_value(Vec(v_s[1])[r])))
