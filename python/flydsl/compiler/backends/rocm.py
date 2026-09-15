@@ -49,16 +49,15 @@ class RocmBackend(BaseBackend):
 
     def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         chip = self.target.arch
-        waves_per_eu = compile_hints.get("waves_per_eu")
-        maxnreg = compile_hints.get("maxnreg")
 
+        # `opts=` below is never read on AMD: TargetOptions::tokenizeCmdOptions()
+        # is called only by the XeVM and NVVM targets, and ROCDL::assembleIsa()
+        # takes no flags parameter. Nothing may be routed through it and expected
+        # to take effect -- waves_per_eu reaches LLVM through lower_compile_hints
+        # setting the rocdl.waves_per_eu attribute instead. Kept empty rather than
+        # removed so the pass fragment's shape (and the external-codegen split in
+        # test_rocm_external_pipeline_split_matches_full_pipeline) is unchanged.
         bin_cli_opts = []
-        if env.debug.enable_debug_info:
-            bin_cli_opts.append("-g")
-        if waves_per_eu:
-            bin_cli_opts.append(f"--amdgpu-waves-per-eu={waves_per_eu}")
-        if maxnreg:
-            bin_cli_opts.append(f"--amdgpu-num-vgpr={maxnreg}")
 
         rocdl_opts = {
             "O": 2,
@@ -117,6 +116,17 @@ class RocmBackend(BaseBackend):
 
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Materialize a scalar waves-per-EU override on kernel entries."""
+        if compile_hints.get("maxnreg") is not None:
+            raise ValueError(
+                "maxnreg is not supported. It only ever reached LLVM through "
+                "gpu-module-to-binary opts=, which ROCDL never reads, so it has "
+                "been silently inert. The underlying amdgpu-num-vgpr attribute is "
+                "deprecated in LLVM ('use amdgpu-waves-per-eu instead') and is "
+                "silently doubled on gfx90a/gfx942/gfx950, where it is a combined "
+                "VGPR+AGPR budget rather than a VGPR cap. Use waves_per_eu to "
+                "target occupancy; see the `llvm` skill to verify it applied."
+            )
+
         waves_per_eu = compile_hints.get("waves_per_eu")
         if waves_per_eu is None:
             return

@@ -563,13 +563,16 @@ def build_flash_attn_func_module_primary(
     # Best MI355X FMHA numbers were measured with ROCm/llvm-project `felix/tune_fmha`;
     # other LLVM revisions usually leave a few percent of peak throughput on the table.
     _llvm_opts = {
-        "enable-post-misched": os.getenv("FLYDSL_LLVM_ENABLE_POST_MISChed", "0") == "1",
+        "enable-post-misched": os.getenv("FLYDSL_LLVM_ENABLE_POST_MISCHED", "0") == "1",
         "lsr-drop-solution": True,
     }
-    if gpu_arch.startswith("gfx942"):
-        _llvm_opts["amdgpu-expert-scheduling-mode"] = os.getenv("FLYDSL_LLVM_EXPERT_SCHED", "1") == "1"
-        if os.getenv("FLYDSL_LLVM_SCHEDULE_REGION", "0") == "1":
-            _llvm_opts["amdgpu-schedule-regions"] = True
+    # Dropped here because neither knob does anything on gfx942 (verified against
+    # the pinned LLVM, see `/llvm`):
+    #   - amdgpu-expert-scheduling-mode is gated on getGeneration() >= GFX12
+    #     (GCNSubtarget.h hasExpertSchedulingMode); on gfx942/gfx950 it changes
+    #     nothing, while on gfx1250 it visibly does.
+    #   - amdgpu-schedule-regions does not exist as a cl::opt at all; llc rejects
+    #     it, so in external-codegen mode it would fail the mlir-opt subprocess.
     _fmha_compile_hints = {
         "fast_fp_math": fast_fp_math,
         "unsafe_fp_math": unsafe_fp_math,

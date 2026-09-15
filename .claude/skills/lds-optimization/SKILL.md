@@ -28,6 +28,10 @@ Run `/kernel-trace-analysis` first. Apply this skill when the trace shows:
 | Multiple `s_barrier` between `ds_write` and `ds_read` | Barrier stall > 5000 | `L606: stall=17024 s_barrier` |
 | Total LDS-related stall > 15% of kernel stall | Sum all lgkmcnt + ds stalls | Softmax reduce phase in PA decode |
 
+For the LLVM side of an LDS problem — `sched_group_barrier` masks to interleave
+`ds_read` with MFMA, `s_waitcnt` placement, or the per-arch LDS capacity limits
+the compiler enforces — use `/llvm`.
+
 ## LDS Architecture on CDNA3 (gfx942)
 
 ### Hardware Facts
