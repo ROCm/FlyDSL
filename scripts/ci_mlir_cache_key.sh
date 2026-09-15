@@ -19,9 +19,12 @@ TREE_ROOT="${1:?usage: ci_mlir_cache_key.sh <tree-root>}"
 
 INPUTS=(
   thirdparty/llvm-build-info.json
-  thirdparty/llvm-rocdl-lld-argv0.patch
   scripts/build_llvm.sh
 )
+
+# Each patch's name and contents, sorted so every tree hashes alike. Their order
+# lives in build_llvm.sh, hashed above.
+EXT_DIR="thirdparty/llvm-extensions"
 
 # Per-file digests, so moving bytes across a file boundary changes the key.
 digests=""
@@ -32,6 +35,16 @@ for input in "${INPUTS[@]}"; do
     digests+="${input}:absent"$'\n'
   fi
 done
+
+while IFS= read -r ext_file; do
+  rel="${ext_file#"${TREE_ROOT}/"}"
+  digests+="${rel}:$(sha256sum <"${ext_file}" | cut -d' ' -f1)"$'\n'
+done < <(find "${TREE_ROOT}/${EXT_DIR}" -maxdepth 1 -type f -name '*.patch' -print 2>/dev/null | LC_ALL=C sort)
+# A no-extension build is a different install. Added only when set, so the
+# ordinary key does not change.
+if [[ "${FLYDSL_LLVM_NO_EXT:-0}" == "1" ]]; then
+  digests+="FLYDSL_LLVM_NO_EXT:1"$'\n'
+fi
 digest="$(printf '%s' "${digests}" | sha256sum | cut -c1-40)"
 
 printf 'mlir-install-%s-%s-%s-%s-%s\n' \
