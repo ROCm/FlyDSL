@@ -90,6 +90,7 @@ as trace-time configuration.
 | `fx.Pointer` | yes | one SSA value |
 | `fx.Tensor` | yes, when built from a traced tensor | one SSA value |
 | `fx.Array[E, N]` | yes | one SSA value |
+| `fx.Align[T, A]` | whenever `T` has a value form | the underlying `T` value; alignment affects storage only |
 | another `@fx.struct` | yes | its own fields, recursively |
 | a `@fx.union` type | **no** — it has no value form | storage only |
 | `fx.Constexpr[T]` | yes, as a Python value | nothing at run time |
