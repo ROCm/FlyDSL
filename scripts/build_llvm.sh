@@ -17,7 +17,29 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
 LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
 LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
-LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+LLVM_EXT_DIR="${REPO_ROOT}/thirdparty/llvm-extensions"
+
+# Local LLVM extensions, applied in the order listed here. These carry the parts
+# of FlyDSL's end-to-end performance work that belong in LLVM rather than in the
+# DSL. Only two kinds of change belong here: one already submitted upstream and
+# waiting on review, or one specific enough to FlyDSL that upstream would not
+# take it. Every entry says which, so the next pin bump can drop what landed.
+# Every entry must also be switchable at run time (cl::opt or getenv), so a
+# regression can be turned off without rebuilding LLVM -- enforced by
+# scripts/check_llvm_extensions.py.
+#
+# Each extension is a diff against the tree with its predecessors already
+# applied, so the order is part of their meaning -- keep it deliberate, and
+# append rather than insert unless a new one genuinely has to precede another.
+#
+# To add one: bash scripts/llvm_extension.sh <slug>
+# See CONTRIBUTING.md, "Add an LLVM Extension".
+LLVM_EXTENSIONS=(
+    # Pass the resolved lld path as argv[0] instead of the literal "ld.lld", so
+    # MLIR's ROCDL target finds the linker when it is not on PATH under that
+    # name. Case 1 (upstreamable). Upstream: not yet submitted.
+    rocdl-lld-argv0.patch
+)
 LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
 
 case "${LLVM_BUILD_PROFILE}" in
@@ -86,20 +108,65 @@ if [[ "$LLVM_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
         echo "LLVM commit ${LLVM_REF} is already available locally."
     fi
     echo "Checking out LLVM commit ${LLVM_REF} ..."
-    git checkout "${LLVM_REF}"
+    git checkout --force "${LLVM_REF}"
 else
     echo "Fetching ref ${LLVM_REF} ..."
     git fetch "${LLVM_FETCH_ARGS[@]}" origin "${LLVM_REF}"
-    git checkout FETCH_HEAD
+    git checkout --force FETCH_HEAD
 fi
 
-if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
-    echo "LLVM patch already applied: ${LLVM_PATCH}"
-else
-    echo "Applying LLVM patch: ${LLVM_PATCH}"
-    git apply --check "${LLVM_PATCH}"
-    git apply "${LLVM_PATCH}"
-fi
+# Patches are replayed from a pristine tree rather than detected as
+# already-applied. A per-patch `git apply --reverse --check` probe cannot work
+# for a series: once patch N+1 has rewritten the same lines, patch N no longer
+# reverse-applies, so the probe reports it as missing and the re-apply fails.
+# The forced checkout above is what makes the replay total: it discards the
+# previous run's applied extensions and moves HEAD even when the authoring
+# script left a commit behind. A plain checkout refuses both, and `set -e`
+# would then abort here on every subsequent run with no way to recover.
+#
+# Tracked files only -- deliberately NOT `git clean -fd`, which would delete
+# build-flydsl/ and mlir_install/ (both live inside this checkout, and
+# mlir_install/ is not covered by LLVM's ignore rules) and turn every
+# incremental build into a full one.
+
+# A .patch file present but absent from LLVM_EXTENSIONS would be silently
+# ignored, which is the most likely way an added extension goes missing (the
+# array edit is forgotten in review). Check both directions before applying.
+for ext_file in "${LLVM_EXT_DIR}"/*.patch; do
+    [ -e "${ext_file}" ] || continue
+    ext_base="$(basename "${ext_file}")"
+    listed=0
+    for ext_name in "${LLVM_EXTENSIONS[@]}"; do
+        [ "${ext_name}" = "${ext_base}" ] && listed=1 && break
+    done
+    if [ "${listed}" -eq 0 ]; then
+        echo "Error: extension file is not listed in LLVM_EXTENSIONS: ${ext_base}" >&2
+        echo "       Add it to the LLVM_EXTENSIONS array in scripts/build_llvm.sh, or delete it." >&2
+        exit 1
+    fi
+done
+for ext_name in "${LLVM_EXTENSIONS[@]}"; do
+    if [ ! -f "${LLVM_EXT_DIR}/${ext_name}" ]; then
+        echo "Error: LLVM_EXTENSIONS lists a file that does not exist: ${ext_name}" >&2
+        echo "       Expected at: ${LLVM_EXT_DIR}/${ext_name}" >&2
+        exit 1
+    fi
+done
+
+echo "LLVM Extensions: ${#LLVM_EXTENSIONS[@]}"
+for ext_name in "${LLVM_EXTENSIONS[@]}"; do
+    echo "  applying ${ext_name}"
+    if ! git apply "${LLVM_EXT_DIR}/${ext_name}"; then
+        echo "" >&2
+        echo "Error: LLVM extension failed to apply: ${ext_name}" >&2
+        echo "       LLVM pin: ${LLVM_REF}" >&2
+        echo "" >&2
+        echo "  Either the extension is stale against this pin, or it landed upstream." >&2
+        echo "  To rebase it:   bash scripts/llvm_extension.sh --rebase ${ext_name}" >&2
+        echo "  If it landed:   delete it and drop it from LLVM_EXTENSIONS in scripts/build_llvm.sh" >&2
+        exit 1
+    fi
+done
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd

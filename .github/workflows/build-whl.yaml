@@ -104,7 +104,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-build-info.json', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
+          # The extension set is part of what the install contains, so it must be part
+          # of the key: without it, editing one returns a cache hit built from
+          # the old one. The apply order lives in build_llvm.sh, already hashed.
+          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-build-info.json', 'flydsl/thirdparty/llvm-extensions/**', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'

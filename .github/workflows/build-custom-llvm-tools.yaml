@@ -115,7 +115,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-tools-${{ steps.llvm-ref.outputs.safe_ref }}-${{ hashFiles('flydsl/scripts/build_llvm.sh') }}
+          # build_llvm.sh applies the extension set for this workflow too, so the key
+          # must cover it; otherwise an edit serves a stale mlir-opt tarball.
+          key: mlir-tools-${{ steps.llvm-ref.outputs.safe_ref }}-${{ hashFiles('flydsl/scripts/build_llvm.sh', 'flydsl/thirdparty/llvm-extensions/**') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
