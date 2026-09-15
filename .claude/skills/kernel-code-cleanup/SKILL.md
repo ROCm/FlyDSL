@@ -479,7 +479,7 @@ For review-only requests, use **Find** and **Triage**, then report the location,
 resolved API, suggested replacement, and relevant semantic constraints. Stop
 before migration or formatting. Use the caller's review scope.
 
-1. **Find** legacy usage (under `kernels/`):
+1. **Find** legacy usage, starting with these searches:
    ```bash
    rg -n 'ArithValue|_to_raw|arith\.(unwrap|index|index_cast)|fx\.Index\(' <file>
    rg -n 'maximumf|minimumf|maxnumf|minnumf|maxsi|maxui|minsi|minui|ceildivsi|ceildivui' <file>
@@ -493,14 +493,15 @@ before migration or formatting. Use the caller's review scope.
    rg -n 's_waitcnt\(|_encode_waitcnt|_s_waitcnt|CNT_[0-9A-Z_]*=|0x[Cc]07[Ff]' <file>
    rg -n 'LOG2E|log2e|def .*sigmoid|def .*tanh|def .*ceildiv|def .*ptr' <file>
    ```
-   Treat these searches as leads, not proof of duplication or dead code. Read
-   imports and enclosing functions, inspect nested definitions/callers, follow
-   module aliases and direct imports to their calls, and account for local
-   rebinding. `from flydsl.expr.arith import maximumf as old_max` makes
+   Treat these searches as leads. Read the imports, enclosing functions, and
+   nested definitions/callers. Follow module aliases and direct imports to their
+   calls, and account for local rebinding. `from flydsl.expr.arith import maximumf as old_max` makes
    `old_max(a, b)` a candidate even though the call uses a different name.
+   Text hits are not proof of duplication or dead code.
    An empty search is not evidence that the review scope is clean.
-2. **Triage:** do mechanical swaps (operators, casts, `vector.extract/bitcast`)
-   first; structural ones (control flow, `buffer_ops` offsets, MMA loops) next.
+2. **Triage:** classify operator/cast/`vector.extract/bitcast` replacements as
+   mechanical, and control flow, `buffer_ops` offsets, or MMA loops as structural.
+   Prioritize mechanical changes before structural ones.
    Match resolved calls against the tables above and check operand types,
    signedness, and explicit `fastmath` flags. Preserve §3's distinct NaN behavior
    for `maximumf`/`minimumf` and `maxnumf`/`minnumf`; recommend a replacement only
