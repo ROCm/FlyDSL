@@ -7208,6 +7208,97 @@ def test_fp8_dense_ragged_seq_lens(seq_len):
     _assert_fp8_shape(True, batch=2, seq_len=seq_len, num_heads=4, head_dim=192, head_dim_v=128)
 
 
+@_requires_gfx950
+@pytest.mark.parametrize("seq_len", [1, 127, 128, 129, 255, 256, 257, 383, 384, 385, 511, 512, 513])
+@pytest.mark.parametrize("block_m", [128, 256])
+@pytest.mark.parametrize(
+    "num_kv_heads,causal,lazy", [(2, False, True), (2, False, False), (8, False, True), (2, True, True)]
+)
+def test_fp8_dense_paired_tile_boundaries(seq_len, block_m, num_kv_heads, causal, lazy):
+    """Check both wave counts around paired KV tiles and six-slot ring wraparound."""
+    torch.manual_seed(321 + seq_len)
+    B, H, D = 1, 8, 128
+    masters = [
+        torch.empty(B, seq_len, heads, D, device="cuda", dtype=torch.bfloat16).uniform_(-1, 1)
+        for heads in (H, num_kv_heads, num_kv_heads)
+    ]
+    quantized = [quantize_per_tensor_fp8(t) for t in masters]
+    (q, qs), (k, ks), (v, vs) = quantized
+    out = torch.full(q.shape, float("nan"), device="cuda", dtype=torch.bfloat16)
+    actual = flydsl_flash_attn_func(
+        q,
+        k,
+        v,
+        causal=causal,
+        num_kv_heads=num_kv_heads,
+        out=out,
+        q_descale=qs,
+        k_descale=ks,
+        v_descale=vs,
+        fp8_block_m=block_m,
+        num_kv_splits=1,
+        dualwave_swp_lazy_rescale=lazy,
+    )
+    assert actual is out
+    assert torch.isfinite(out).all()
+    expected = F.scaled_dot_product_attention(
+        _dequant_fp8(q, qs).transpose(1, 2),
+        _dequant_fp8(k, ks).transpose(1, 2),
+        _dequant_fp8(v, vs).transpose(1, 2),
+        is_causal=causal,
+        enable_gqa=num_kv_heads != H,
+    ).transpose(1, 2)
+    assert (out.float() - expected).abs().max().item() < FP8_MAX_ERR
+    assert F.cosine_similarity(out.float(), expected, dim=-1).min().item() > FP8_MIN_COS
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("block_m", [128, 256])
+def test_fp8_dense_graph_replay_is_deterministic(block_m):
+    """A staggered consumer must see every wave's completed KV prefetches.
+
+    Long, normal-input graph replays exercise the rare DMA delay hidden by
+    short uniform-input tests. The forward kernel has no atomic reductions;
+    fixed inputs must therefore produce identical bits on every replay.
+    """
+    B, S, H, Hkv, D = 8, 16384, 64, 8, 128
+    torch.manual_seed(123 + S)
+    quantized = [
+        quantize_per_tensor_fp8(torch.randn(B, S, heads, D, device="cuda", dtype=torch.bfloat16))
+        for heads in (H, Hkv, Hkv)
+    ]
+    (q, qs), (k, ks), (v, vs) = quantized
+    out = torch.empty(q.shape, device="cuda", dtype=torch.bfloat16)
+
+    def forward():
+        flydsl_flash_attn_func(
+            q,
+            k,
+            v,
+            out=out,
+            causal=False,
+            num_kv_heads=Hkv,
+            q_descale=qs,
+            k_descale=ks,
+            v_descale=vs,
+            fp8_block_m=block_m,
+            num_kv_splits=1,
+        )
+
+    forward()
+    torch.cuda.synchronize()
+    expected = out.clone()
+    assert torch.isfinite(expected).all()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        for _ in range(10):
+            forward()
+    for _ in range(20):
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.equal(out, expected), "KV prefetch race: identical graph replay changed the output"
+
+
 _NUM_CU = 256
 
 
