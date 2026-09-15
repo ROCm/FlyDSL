@@ -2087,12 +2087,14 @@ class Array:
         align = None
 
         def __init__(self, ptr_value):
-            self._ptr_value = ptr_value
+            # Struct field offsets and the array stride are byte offsets. The
+            # caller may supply a pointer whose original element is wider.
+            self._ptr_value = ptr_value if self._is_numeric else recast_iter(Uint8, ptr_value)
 
         def __repr__(self):
             cls = type(self)
             name = getattr(cls.dtype, "__name__", repr(cls.dtype))
-            suffix = f", {cls.align}" if cls.align != max(1, cls.dtype.width // 8) else ""
+            suffix = f", {cls.align}" if cls.align != cls._element_align else ""
             return f"Array[{name}, {cls.size}{suffix}]({self._ptr_value})"
 
         @property
@@ -2110,8 +2112,7 @@ class Array:
 
         @classmethod
         def __dsl_size_of__(cls) -> int:
-            total_bytes = max(1, cls.dtype.width * cls.size // 8)
-            return total_bytes
+            return cls._nbytes
 
         @classmethod
         def __dsl_align_of__(cls) -> int:
@@ -2119,22 +2120,40 @@ class Array:
 
         @classmethod
         def __peek_from_ptr__(cls, ptr):
-            typed_ptr = recast_iter(cls.dtype, ptr)
-            return cls(typed_ptr)
+            return cls(recast_iter(cls.dtype, ptr) if cls._is_numeric else ptr)
 
         @classmethod
         def __poke_into_ptr__(cls, ptr, value):
             raise NotImplementedError(f"{cls.__name__} does not support __poke_into_ptr__ yet")
 
+        def _element_ptr(self, offset):
+            # IntTuple multiplication retains the stride's divisibility, so a
+            # dynamic byte offset does not lose the element's known alignment.
+            byte_offset = (
+                offset * self._element_size if isinstance(offset, int) else int_tuple_mul(offset, self._element_size)
+            )
+            return add_offset(self.ptr, byte_offset)
+
         @dsl_loc_tracing
         def __getitem__(self, offset):
-            return self.ptr.__getitem__(offset)
+            if self._is_numeric:
+                return self.ptr.__getitem__(offset)
+            from ..compiler.protocol import peek_from_ptr
+
+            return peek_from_ptr(self.dtype, self._element_ptr(offset))
 
         @dsl_loc_tracing
         def __setitem__(self, offset, value):
-            self.ptr.__setitem__(offset, value)
+            if self._is_numeric:
+                self.ptr.__setitem__(offset, value)
+            else:
+                from ..compiler.protocol import poke_into_ptr
+
+                poke_into_ptr(self.dtype, self._element_ptr(offset), value)
 
         def view(self, layout):
+            if not self._is_numeric:
+                raise TypeError("Array.view(layout) requires Numeric elements; index a Struct array directly")
             return make_view(self._ptr_value, layout)
 
     def __class_getitem__(cls, params):
@@ -2148,17 +2167,28 @@ class Array:
         else:
             raise TypeError("Array expects Array[dtype, size] or Array[dtype, size, align]")
 
-        if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
-            raise TypeError(f"Array dtype must be a Numeric subclass, got {dtype!r}")
+        is_numeric = isinstance(dtype, type) and issubclass(dtype, Numeric)
+        if not is_numeric:
+            # struct imports Array, so resolve the composite predicate lazily.
+            from ..compiler.protocol import dsl_align_of, dsl_size_of
+            from .struct import is_struct_type
+
+            if not is_struct_type(dtype):
+                raise TypeError(f"Array dtype must be a Numeric subclass or a storable Struct, got {dtype!r}")
         if not isinstance(size, int) or size <= 0:
             raise TypeError(f"Array size must be a positive integer, got {size!r}")
 
-        elem_byte_size = max(1, dtype.width // 8)
+        elem_byte_size = max(1, dtype.width // 8) if is_numeric else dsl_size_of(dtype)
+        elem_align = elem_byte_size if is_numeric else dsl_align_of(dtype)
         if align is None:
-            align = elem_byte_size
+            align = elem_align
         else:
             if not isinstance(align, int) or align <= 0:
                 raise TypeError(f"Array align must be a positive integer, got {align!r}")
+            if not is_numeric and align % elem_align != 0:
+                raise ValueError(f"Array align must be a multiple of the element alignment {elem_align}, got {align}")
+        if not is_numeric and align & (align - 1):
+            raise ValueError(f"Struct array alignment must be a power of two, got {align}")
 
         cache_key = (dtype, size, align)
         cached = cls._cache.get(cache_key)
@@ -2166,11 +2196,19 @@ class Array:
             return cached
 
         name = getattr(dtype, "__name__", repr(dtype))
-        suffix = f", {align}" if align != elem_byte_size else ""
+        suffix = f", {align}" if align != elem_align else ""
         array_type = type(
             f"Array[{name}, {size}{suffix}]",
             (cls._Base,),
-            {"dtype": dtype, "size": size, "align": align},
+            {
+                "dtype": dtype,
+                "size": size,
+                "align": align,
+                "_is_numeric": is_numeric,
+                "_element_size": elem_byte_size,
+                "_element_align": elem_align,
+                "_nbytes": max(1, dtype.width * size // 8) if is_numeric else elem_byte_size * size,
+            },
         )
         cls._cache[cache_key] = array_type
         return array_type
