@@ -132,6 +132,16 @@ _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_COMPILE_LLVM_DIR",
     "FLYDSL_DEBUG_ENABLE_DEBUG_INFO",
     "FLYDSL_EXTRA_SOURCE_DIRS",
+    # ktrace instrumentation changes the emitted kernel, so a traced build must not be
+    # served from -- or serve -- a cache entry produced with different settings.
+    "FLYDSL_KTRACE_ENABLE",
+    "FLYDSL_KTRACE_EVENTS_PER_WAVE",
+    "FLYDSL_KTRACE_BLOCKS",
+    # Compiled in as the store-bounds constant (rocdl.ktrace_emit._buffer_capacity_slots), so a
+    # cached binary carries the capacity of whatever buffer it was built against. Shrinking
+    # the buffer and reusing that binary lets the device write past the new allocation --
+    # the guard passes, because it is still checking the old, larger bound.
+    "FLYDSL_KTRACE_BUFFER_BYTES",
 )
 
 
@@ -1086,12 +1096,18 @@ def _resolve_jit_arg_type(arg, annotation):
     return constructor
 
 
-def _build_call_state(sig, args_tuple, func_exe):
+def _build_call_state(sig, args_tuple, func_exe, *, ktrace_enabled=None):
     """Build a CallState for fast repeated dispatch.
 
     Resolves each parameter's JitArgument type using the same registry as
     convert_to_jit_arguments, then asks it for a reusable slot specification.
     This ensures a single source of truth for argument packing.
+
+    *ktrace_enabled* must carry the decision the COMPILE path made.  This function runs
+    outside the ``compile_hints`` scope, so re-deriving it here would miss a ``ktrace``
+    hint and pack one slot fewer than the kernel declares -- the kernel would then read a
+    trace-buffer pointer from past the end of the packed array.  None means "no compile
+    happened on this path" and falls back to the ambient decision.
     """
 
     slot_specs = []
@@ -1126,7 +1142,25 @@ def _build_call_state(sig, args_tuple, func_exe):
     if not has_user_stream:
         slot_specs.append((-1, ctypes.c_void_p, None))
 
-    return CallState(slot_specs, func_exe)
+    # ktrace: the trace buffer is an implicit trailing argument, so it has no entry in the
+    # signature. Its slot needs a real address -- unlike the auto-stream slot above, whose
+    # NULL selects the HIP default stream, this pointer is dereferenced by the kernel, so a
+    # null fill is an illegal memory access rather than a default.
+    # It must come after the stream slot, matching the trace-time argument order.
+    from ..expr import ktrace as _ktrace
+
+    presets = {}
+    if _ktrace.tracing_enabled() if ktrace_enabled is None else ktrace_enabled:
+        from ..expr.rocdl import ktrace_emit as _ktrace_emit
+        from ..utils import env as _env
+
+        if not _env.compile.compile_only:
+            # A preset, not a fill: fills index the caller's argument tuple, and this
+            # argument is implicit -- there is no tuple entry to read.
+            presets[len(slot_specs)] = _ktrace_emit.ensure_buffer().device_ptr
+            slot_specs.append((-1, ctypes.c_void_p, None))
+
+    return CallState(slot_specs, func_exe, presets)
 
 
 class JitFunction:
@@ -1362,6 +1396,13 @@ class JitFunction:
         if ir.Context.current is not None:
             return self.func(*args, **kwargs)
 
+        # A launch is about to happen, so any records cached from an earlier one are
+        # stale. This is the per-launch hook the host side otherwise lacks: the device
+        # cursor cannot stand in for it, because a launch whose every wave is filtered out
+        # claims no slots and leaves the cursor at zero, indistinguishable from no launch
+        # at all -- and the reader would then be handed the previous kernel's records.
+        _invalidate_ktrace_records()
+
         self._ensure_sig()
 
         bound_self = None
@@ -1426,11 +1467,18 @@ class JitFunction:
         if cached_func is not None:
             if env.compile.compile_only:
                 return None
-            # Build CallState via JitArgument registry (same dispatch as compile path)
+            # The kernel body is NOT re-traced on a cache hit, so the emitter's name table
+            # is empty here while the cached binary still writes the ids it was compiled
+            # with. Restore them or the host decodes every record against {}.
+            _restore_ktrace_names(cached_func)
+            # Build CallState via JitArgument registry (same dispatch as compile path).
+            # The cached binary's signature is fixed, so the slot count must match what it
+            # was COMPILED with, not what the current environment would choose.
             state = _build_call_state(
                 sig,
                 args_tuple,
                 cached_func._get_func_exe(),
+                ktrace_enabled=getattr(cached_func, "_ktrace_traced", None),
             )
             self._call_state_cache[cache_key] = state
             return state(args_tuple)
@@ -1455,6 +1503,11 @@ class JitFunction:
 
         _hints_ctx = CompilationContext.compile_hints(effective_hints) if effective_hints else nullcontext()
 
+        # The compile path's tracing decision, recorded so the ABI path below packs the
+        # same number of slots. It is resolved inside _hints_ctx, where a ``ktrace``
+        # compile hint is visible; _build_call_state runs after that scope has closed.
+        _ktrace_compiled = None
+
         compiled_func = None  # will be set inside lock or compile path
 
         # Determine whether to use compile_lock for cross-process safety.
@@ -1469,6 +1522,14 @@ class JitFunction:
             if _lock_result is not None and not getattr(_lock_result, "_link_libs", None):
                 # Cache hit after waiting for another process to compile.
                 compiled_func = _lock_result
+                # Another process compiled this while we waited; its name table arrived
+                # with the artifact, and our own emitter never ran.
+                _restore_ktrace_names(compiled_func)
+                # Its ABI must come from the artifact too. Leaving this None would send
+                # _build_call_state back to the ambient env, which by then is outside the
+                # compile_hints scope and cannot see a `ktrace` hint -- so a hint-enabled
+                # binary would be dispatched one slot short of the parameter it declares.
+                _ktrace_compiled = getattr(compiled_func, "_ktrace_traced", None)
                 self._mem_cache[cache_key] = compiled_func
                 self._last_compiled = (cache_key, compiled_func)
             else:
@@ -1484,6 +1545,8 @@ class JitFunction:
                         ):
                             warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
                     has_user_stream = _ensure_stream_arg(jit_args)
+                    has_ktrace_buf = _ensure_ktrace_buffer_arg(jit_args)
+                    _ktrace_compiled = has_ktrace_buf
                     ir_types = get_ir_types(jit_args)
                     loc = func_def_location(self.func, ctx)
 
@@ -1507,8 +1570,12 @@ class JitFunction:
 
                             with ir.InsertionPoint(entry_block):
                                 ir_args = list(func_op.regions[0].blocks[0].arguments)
+                                # The ktrace buffer is appended after the stream, so it is
+                                # last when present.
+                                if has_ktrace_buf:
+                                    comp_ctx.ktrace_buf_arg = ir_args[-1]
                                 if not has_user_stream:
-                                    comp_ctx.stream_arg = ir_args[-1]
+                                    comp_ctx.stream_arg = ir_args[-2] if has_ktrace_buf else ir_args[-1]
                                 user_jit_args = jit_args[: len(param_names)]
                                 dsl_args = construct_from_ir_values(dsl_types, user_jit_args, ir_args)
                                 log().info(f"dsl_args={dsl_args}")
@@ -1566,6 +1633,15 @@ class JitFunction:
                         uses_explicit_module=extern_linked,
                     )
 
+                    # Snapshot the ktrace name table INTO the artifact, so a later cache
+                    # hit -- which never re-runs the kernel body -- can restore the ids
+                    # baked into this binary. Taken here, inside the compile path, because
+                    # this is the only point where the table is guaranteed populated.
+                    _capture_ktrace_names(compiled_func, has_ktrace_buf)
+                    # Record whether the trailing buffer parameter is in this binary's
+                    # signature, so a later cache hit packs the matching slot count.
+                    compiled_func._ktrace_traced = bool(has_ktrace_buf)
+
                     # Always keep a reference to the latest compilation result so
                     # flyc.compile() can retrieve it even when caching is disabled.
                     self._last_compiled = (cache_key, compiled_func)
@@ -1591,6 +1667,7 @@ class JitFunction:
             sig,
             args_tuple,
             compiled_func._get_func_exe(),
+            ktrace_enabled=_ktrace_compiled,
         )
         self._call_state_cache[cache_key] = state
         return state(args_tuple)
@@ -1604,6 +1681,75 @@ def _ensure_stream_arg(jit_args: list) -> bool:
         return True
     jit_args.append(Stream(None))
     return False
+
+
+def _invalidate_ktrace_records() -> None:
+    """Drop any host-side record cache before a launch.
+
+    Runs on every jit call, so it stays cheap: a module-global read and, in the common
+    untraced case, nothing else.
+    """
+    from ..expr import ktrace as _ktrace
+
+    if _ktrace._CACHED_RECORDS is not None:
+        _ktrace._CACHED_RECORDS = None
+
+
+def _capture_ktrace_names(artifact, traced: bool) -> None:
+    """Store the ktrace name table on *artifact* so it survives the disk cache.
+
+    A record carries only a 24-bit id; the names live host-side. On a cache hit the kernel
+    body is never re-traced, so without this the ids in the cached binary decode against an
+    empty table and ``summary()`` reports zero phases for a trace full of records.
+
+    *traced* comes from the compile path rather than being re-derived: this runs after the
+    ``compile_hints`` scope has closed, where a ``ktrace`` hint is no longer visible.
+    """
+    if not traced:
+        return
+    from ..expr.rocdl import ktrace_emit as _ktrace_emit
+
+    artifact._ktrace_names = _ktrace_emit.name_table()
+
+
+def _restore_ktrace_names(artifact) -> None:
+    """Re-publish a cached artifact's ktrace names into the emitter's table."""
+    names = getattr(artifact, "_ktrace_names", None)
+    if not names:
+        return
+    from ..expr.rocdl import ktrace_emit as _ktrace_emit
+
+    _ktrace_emit.merge_names(names)
+
+
+def _ensure_ktrace_buffer_arg(jit_args: list) -> bool:
+    """Append the trace-buffer pointer to *jit_args* when tracing is enabled.
+
+    Passing the buffer as an argument rather than binding a device global keeps the kernel
+    disk-cacheable: registering a ``post_load_processors`` callback sets ``extern_linked``
+    (see :func:`_build_compiled`), which disables the disk cache for that kernel.
+
+    The pointer must be a real device address whenever the kernel can actually run: the
+    kernel dereferences it, so a null there segfaults at launch rather than raising
+    anything diagnosable.  Under ``COMPILE_ONLY`` no launch happens, and allocating would
+    require a live HIP device for an address nothing reads.
+    """
+    from ..expr import ktrace as _ktrace
+
+    if not _ktrace.tracing_enabled():
+        return False
+    from ..expr.numeric import Int8
+    from ..expr.rocdl import ktrace_emit as _ktrace_emit
+    from ..utils import env
+    from .jit_argument import PointerJitArg
+
+    # Under COMPILE_ONLY nothing launches, so skip the allocation: it would need a live
+    # HIP device purely to produce an address the kernel never dereferences.
+    address = None
+    if not env.compile.compile_only:
+        address = ctypes.c_void_p(_ktrace_emit.ensure_buffer().device_ptr)
+    jit_args.append(PointerJitArg(Int8, address))
+    return True
 
 
 def jit(func: Optional[Callable] = None) -> JitFunction:
@@ -1688,7 +1834,15 @@ def _compile_impl(func, *args) -> Optional[CompiledFunction]:
 
     call_state = jf._call_state_cache.get(cache_key)
     if call_state is None:
-        call_state = _build_call_state(sig, args_tuple, artifact._get_func_exe())
+        # Match the artifact's own signature, not the ambient env: this runs outside any
+        # compile_hints scope, so re-deriving would drop a ``ktrace`` hint and pack one
+        # slot fewer than the binary declares.
+        call_state = _build_call_state(
+            sig,
+            args_tuple,
+            artifact._get_func_exe(),
+            ktrace_enabled=getattr(artifact, "_ktrace_traced", None),
+        )
 
     return CompiledFunction(call_state, artifact)
 
