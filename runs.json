@@ -1,8 +1,138 @@
 {
  "schema": 1,
- "updated": "2026-09-15T12:41:14Z",
+ "updated": "2026-09-15T15:22:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34980382662,
+   "pr": 1128,
+   "commit": "b898b104acacfab74c0b3ad2f22e4b6692703c3a",
+   "branch": "codex/scaled-tiled-gemm",
+   "event": "pull_request",
+   "title": "Support variadic operands in fully expanded tiled GEMM",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34980382662",
+   "created_at": "2026-09-15T14:15:17Z",
+   "updated_at": "2026-09-15T15:07:06Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-15T15:07:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34980382662/job/104438994127"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-15T15:07:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34980382662/job/104438994161"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-15T15:07:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34980382662/job/104438994297"
+    }
+   ]
+  },
+  {
+   "run_id": 34978452193,
+   "pr": 1139,
+   "commit": "090e2ced45a4b6071930b2660d53adc89d573e7a",
+   "branch": "opus-fa4-align-bf16-perf",
+   "event": "pull_request",
+   "title": "Opus fa4 align bf16 perf",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978452193",
+   "created_at": "2026-09-15T13:58:01Z",
+   "updated_at": "2026-09-15T14:16:26Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-15T14:13:17Z",
+     "completed_at": "2026-09-15T14:28:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978452193/job/104417930643",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-15T14:16:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978452193/job/104417930736"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-15T14:13:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978452193/job/104417930758"
+    }
+   ]
+  },
+  {
+   "run_id": 34978126920,
+   "pr": null,
+   "commit": "f8b07eeacdd46f97a12d4bfd86407028ac143a69",
+   "branch": "main",
+   "event": "push",
+   "title": "[DSL] Support struct as the elemType of Array (#1138)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978126920",
+   "created_at": "2026-09-15T13:55:01Z",
+   "updated_at": "2026-09-15T15:07:28Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-15T14:29:02Z",
+     "completed_at": "2026-09-15T14:41:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978126920/job/104419090450"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-15T15:07:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978126920/job/104419090531"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-15T14:16:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978126920/job/104419090572"
+    }
+   ]
+  },
   {
    "run_id": 34953196725,
    "pr": 1138,
@@ -10,21 +140,22 @@
    "branch": "pr/feat-coop",
    "event": "pull_request",
    "title": "[DSL] Support struct as the elemType of Array",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725",
    "created_at": "2026-09-15T09:33:57Z",
-   "updated_at": "2026-09-15T09:54:13Z",
+   "updated_at": "2026-09-15T15:20:21Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-15T09:54:13Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725/job/104335021591"
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-15T14:13:34Z",
+     "completed_at": "2026-09-15T15:20:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725/job/104335021591",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -50,7 +181,7 @@
   },
   {
    "run_id": 34951330148,
-   "pr": 1138,
+   "pr": null,
    "commit": "59af6ec5664d3d9130c92c99060a464ba17fd7e1",
    "branch": "pr/feat-coop",
    "event": "pull_request",
@@ -428,7 +559,7 @@
   },
   {
    "run_id": 34862944061,
-   "pr": 1134,
+   "pr": 1139,
    "commit": "029ae8b9cc4bc55a435bbed6215582da225b876b",
    "branch": "opus-fa4-align-bf16-perf",
    "event": "pull_request",
@@ -535,7 +666,7 @@
   },
   {
    "run_id": 34851278681,
-   "pr": null,
+   "pr": 1139,
    "commit": "ea8ac83330a3bcb851c96d1b2f39890e679ca596",
    "branch": "opus-fa4-align-bf16-perf",
    "event": "pull_request",
@@ -1892,7 +2023,7 @@
   },
   {
    "run_id": 34691668348,
-   "pr": 1123,
+   "pr": null,
    "commit": "3340fcc81c8b63154de52bdfc2b12f63679ce73e",
    "branch": "codex/minimax-mxfp8-moe-8wave",
    "event": "pull_request",
@@ -2025,7 +2156,7 @@
   },
   {
    "run_id": 34690942760,
-   "pr": 1123,
+   "pr": null,
    "commit": "93f65a447776bb599029a62eea68d40d5a55ec10",
    "branch": "codex/minimax-mxfp8-moe-8wave",
    "event": "pull_request",
@@ -2084,7 +2215,7 @@
   },
   {
    "run_id": 34669097321,
-   "pr": 1123,
+   "pr": null,
    "commit": "5efe4c4d964d14a2236a487ab945d3c7eeb4e084",
    "branch": "codex/minimax-mxfp8-moe-8wave",
    "event": "pull_request",
@@ -2126,82 +2257,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34669097321/job/103490124665"
     }
    ]
-  },
-  {
-   "run_id": 34645855663,
-   "pr": null,
-   "commit": "66346338b4ebc555997ace801a5d6f16cfaf23b2",
-   "branch": "codex/topk-gating-mi355",
-   "event": "pull_request",
-   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645855663",
-   "created_at": "2026-09-11T20:45:05Z",
-   "updated_at": "2026-09-12T03:42:28Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T21:04:59Z",
-     "completed_at": "2026-09-11T21:19:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645855663/job/103421751343",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-11T21:05:16Z",
-     "completed_at": "2026-09-11T22:22:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645855663/job/103421751394",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-12T02:45:17Z",
-     "completed_at": "2026-09-12T03:42:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645855663/job/103421751427",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34645835867,
-   "pr": null,
-   "commit": "7a91b26d0ca2c27f9883e6ddc1ddbad1259ffdbe",
-   "branch": "codex/topk-gating-mi355",
-   "event": "pull_request",
-   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34645835867",
-   "created_at": "2026-09-11T20:44:52Z",
-   "updated_at": "2026-09-11T20:45:07Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 34637167614,
-   "pr": 1125,
-   "commit": "a205f72077d5be6963c7dc378e13f36e4b9e70ab",
-   "branch": "perf/gemm-bf16-cross-tile-carry",
-   "event": "pull_request",
-   "title": "[Perf] gemm_bf16 gfx1250: cross-tile carry to hide K-tile prologue ds\u2026",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34637167614",
-   "created_at": "2026-09-11T19:07:59Z",
-   "updated_at": "2026-09-11T19:09:36Z",
-   "actor": "amd-hhashemi",
-   "jobs": []
   }
  ]
 }
