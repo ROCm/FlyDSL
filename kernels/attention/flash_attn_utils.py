@@ -483,6 +483,13 @@ def _scale_sub_score_pair(v_s, row_max_raw, scale, zero_f, fm_fast, bias=None, e
 
 
 def _exp2_score_slice(v_s, start, length):
+    """Two-phase exp2: a low-half head, then the complementary tail to 32.
+
+    The head retains vector form for loop-carried state; the tail returns
+    scalar lists for row reduction and P packing. Keep unprocessed scores
+    intact when the split is below 16.
+    """
+    assert (start == 0 and 0 < length <= 16) or (0 < start <= 16 and start + length == 32)
     if const_expr(start == 0):
         s_lo = [Vec(v_s[0])[r] for r in range_constexpr(16)]
         lo_partial = []

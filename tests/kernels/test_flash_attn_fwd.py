@@ -3888,11 +3888,11 @@ def test_dualwave_dense_pipeline_matches_torch(S, H, Hkv, D, dtype, causal):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("S", [513, 577])
+@pytest.mark.parametrize("S", [256, 257, 513, 577])
 @pytest.mark.parametrize("return_lse", [False, True])
 @pytest.mark.parametrize("disabled", [None, "enable_stagger", "setprio", "lazy_rescale"])
 def test_dualwave_gqa_phase_paths_match_torch(S, return_lse, disabled):
-    """Cover both KV-tail parities and the wave-pipeline fallback switches."""
+    """Cover zero/one loop iteration, KV-tail parities and pipeline fallbacks."""
     torch.manual_seed(321)
     B, H, Hkv, D = 1, 16, 4, 128
     q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)

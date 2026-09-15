@@ -173,10 +173,8 @@ def build_flash_attn_dualwave_swp_module(
         return_lse=return_lse,
         xcd_swizzle=_xcd_swizzle,
     )
-    traits.BLOCK_N_OUT // traits.BLOCK_N
-
     # Also invalidate older runtimes' disk caches when helper-only math changes.
-    _dualwave_swp_cache_tag = (traits.cache_tag, HAS_BIAS, HAS_ALIBI, HAS_SINK, "opus_gqa_pipeline_v2")
+    _dualwave_swp_cache_tag = (traits.cache_tag, HAS_BIAS, HAS_ALIBI, HAS_SINK, "opus_gqa_pipeline_v3")
 
     # BF16 d128 uses a tighter VALU budget at the subtraction/exp2 transition.
     # Check the emitted schedule: source scalar-op counts need not match the
@@ -420,6 +418,20 @@ def build_flash_attn_dualwave_swp_module(
                     _sched_barrier(0)
             return scored
 
+        def _memory_phase_delay(stagger_const, *, pv_phase):
+            # s_nop N delays N+1 cycles: group A waits 48 cycles before QK,
+            # group B waits 22 before PV. The runtime-stagger path keeps 8.
+            if const_expr(stagger_const is None):
+                _s_nop(7)
+            elif const_expr(stagger_const == pv_phase):
+                _s_nop(15)
+                if const_expr(pv_phase):
+                    _s_nop(5)
+                else:
+                    _s_nop(15)
+                    _s_nop(15)
+            _sched_barrier(0)
+
         def _main_body(stagger_const=None):
             # A scalar branch keeps each whole wave on one code path. Both paths
             # use the same barrier count, with complementary open/close barriers.
@@ -533,12 +545,8 @@ def build_flash_attn_dualwave_swp_module(
                 init_args.append(page_ids.finish_page_id(_init_v_pid_lds))
             loop_results = init_args
             v_pid_arg_idx = 3 + traits.D_CHUNKS
-            for j, loop_args in range(
-                loop_lb,
-                split_t_end - fx.Index(1),
-                fx.Index(2),
-                init=init_args,
-            ):
+
+            def _loop_body(j, loop_args):
                 m_row = loop_args[0]
                 l_row = loop_args[1]
                 v_o = [loop_args[2 + i] for i in range_constexpr(traits.D_CHUNKS)]
@@ -547,15 +555,9 @@ def build_flash_attn_dualwave_swp_module(
                     cur_pageid = loop_args[v_pid_arg_idx]
                 j_idx = j
 
-                # Cluster 0: prefetch V buf1, read resident K for MMA0, and use carried page ids.
-                if const_expr(stagger_const is not None):
-                    if const_expr(not stagger_const):
-                        _s_nop(15)
-                        _s_nop(15)
-                        _s_nop(15)
-                else:
-                    _s_nop(7)
-                _sched_barrier(0)
+                # C0/C4: stage V and read resident K. Specialized groups read
+                # LDS first; preserve DMA-first ordering on the fallback path.
+                _memory_phase_delay(stagger_const, pv_phase=False)
                 if const_expr(stagger_const is not None):
                     v_k = kv_lds_to_regs.load_k(1)
                 if const_expr(traits.PAGED):
@@ -586,14 +588,8 @@ def build_flash_attn_dualwave_swp_module(
                 c2_pageid = page_ids.finish_page_id(c2_pageid_lds) if const_expr(traits.PAGED) else fx.Index(0)
                 _dualwave_sync_barrier()
 
-                # Cluster 2 prefetches next K, reads this tile's V for P*V, then waits and syncs.
-                if const_expr(stagger_const is not None):
-                    if const_expr(stagger_const):
-                        _s_nop(15)
-                        _s_nop(5)
-                else:
-                    _s_nop(7)
-                _sched_barrier(0)
+                # C2/C6: stage the next K and read V for P*V.
+                _memory_phase_delay(stagger_const, pv_phase=True)
                 if const_expr(stagger_const is not None):
                     v_v = kv_lds_to_regs.load_v(0)
                 if const_expr(traits.PAGED):
@@ -645,15 +641,8 @@ def build_flash_attn_dualwave_swp_module(
                 # sched_barrier(0) pins priority and real sync at the cluster boundary without emitting ISA.
                 _dualwave_sync_barrier()
 
-                # Cluster 4 mirrors C0: prefetch V, read K into v_k, wait, and sync.
-                if const_expr(stagger_const is not None):
-                    if const_expr(not stagger_const):
-                        _s_nop(15)
-                        _s_nop(15)
-                        _s_nop(15)
-                else:
-                    _s_nop(7)
-                _sched_barrier(0)
+                # Cluster 4 mirrors C0 on the other buffer.
+                _memory_phase_delay(stagger_const, pv_phase=False)
                 if const_expr(stagger_const is not None):
                     v_k = kv_lds_to_regs.load_k(0, urk_base=urk_pong)
                 if const_expr(traits.PAGED):
@@ -684,14 +673,8 @@ def build_flash_attn_dualwave_swp_module(
                 _c6_kpid = page_ids.finish_page_id(_c6_kpid_lds) if const_expr(traits.PAGED) else fx.Index(0)
                 _dualwave_sync_barrier()
 
-                # Cluster 6 prefetches next K, reads V packs, optionally masks v_s_0, waits, and syncs.
-                if const_expr(stagger_const is not None):
-                    if const_expr(stagger_const):
-                        _s_nop(15)
-                        _s_nop(5)
-                else:
-                    _s_nop(7)
-                _sched_barrier(0)
+                # Cluster 6 mirrors C2 on the other buffer.
+                _memory_phase_delay(stagger_const, pv_phase=True)
                 if const_expr(stagger_const is not None):
                     v_v = kv_lds_to_regs.load_v(1)
                 if const_expr(traits.PAGED):
@@ -744,7 +727,17 @@ def build_flash_attn_dualwave_swp_module(
                 yield_args = [m_row, l_row] + v_o + [_v_pair_to_vec32(v_p_0)]
                 if const_expr(traits.PAGED):
                     yield_args.append(next_pageid)
-                loop_results = yield yield_args
+                return yield_args
+
+            if const_expr(opus_gqa_pipeline):
+                # A tile counter derived from the i32 sequence length fits i32.
+                # Auto-carried range keeps its compare scalar; explicit init=
+                # uses index bounds and emits a 64-bit vector compare here.
+                for j in range(fx.Int32(loop_lb), fx.Int32(split_t_end) - 1, fx.Int32(2)):
+                    loop_results = _loop_body(fx.Index(j), loop_results)
+            else:
+                for j, loop_args in range(loop_lb, split_t_end - fx.Index(1), fx.Index(2), init=init_args):
+                    loop_results = yield _loop_body(j, loop_args)
 
             # Epilogue drains the final in-flight tiles without further prefetch-ahead.
             m_row = loop_results[0]
