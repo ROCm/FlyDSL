@@ -93,10 +93,11 @@ BufferCopy64b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(64, cache
 BufferCopy128b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(128, cache_modifier)
 
 
-def BufferCopyLDS(bit_size):
+def BufferCopyLDS(bit_size, cache_modifier=0):
     """Create a CDNA3 buffer-to-LDS copy atom.
 
     ``bit_size`` must be 32 or 128. Only supports BufferDesc -> Shared address space direction.
+    ``cache_modifier`` is the LLVM raw-buffer cachepolicy (0=cached, 2=SC1, 4=NT).
 
     This atom is synchronous in the sense that the compiler inserts the ``vmcnt`` wait for you
     before the staged LDS data is read. If you want to insert ``vmcnt``, use the async counterparts
@@ -108,11 +109,11 @@ def BufferCopyLDS(bit_size):
     - `soffset` (`i32`), default zero
     - `imm_offset` (`i32`), default zero
     """
-    return CopyOpCDNA3BufferCopyLDSType.get(bit_size)
+    return CopyOpCDNA3BufferCopyLDSType.get(bit_size, cache_modifier)
 
 
-BufferCopyLDS32b = lambda: CopyOpCDNA3BufferCopyLDSType.get(32)
-BufferCopyLDS128b = lambda: CopyOpCDNA3BufferCopyLDSType.get(128)
+BufferCopyLDS32b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyLDSType.get(32, cache_modifier)
+BufferCopyLDS128b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyLDSType.get(128, cache_modifier)
 
 
 def BufferCopyLDS64b():

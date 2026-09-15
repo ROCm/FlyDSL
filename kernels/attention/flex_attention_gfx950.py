@@ -20,6 +20,7 @@ gfx950 LDS swizzles; it is NOT expected to run on gfx942.
 
 from typing import Optional
 
+import struct
 import torch
 
 import flydsl.compiler as flyc
@@ -31,6 +32,9 @@ from flydsl.expr.typing import T
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from flydsl.runtime.device import get_rocm_arch
 from kernels.attention.flash_attn_utils import (
+    _attn_mask_vec2_imm,
+    _bitcast_f32,
+    _bitcast_i32,
     _fused_o_128_dwords,
     _read_exec_i64,
     _stagger_extra_barrier_if_one,
@@ -162,8 +166,40 @@ _FLASH_LAZY_RESCALE_THRESHOLD = 8.0
 # Match flash's priority window around the long PV + softmax cluster.
 _FLASH_SETPRIO_PV = True
 # Causal only: apply lazy O rescale at the start of C3 (before PV[n-1]).
-# Dense wants this in C0 next to K LDS; moving it regresses ~7 us.
+# Dense C3 preamble (blob before PV) regresses ~7 us.
 _FLASH_SCALE_O_IN_C3 = True
+# Dense: apply corr_pending O-scale in C1 (QK MFMA shadow) instead of C0.
+# QK does not read O, so the 4 x v16 muls can hide behind 16 QK MFMAs.
+# Causal stays on C3. Epilogue has no QK and still scales in C0.
+_FLASH_SCALE_O_IN_C1 = False
+# Perf-only: skip the lazy rebase (no ballot, no m/l update, no O *= corr).
+# Scores still reduce-max so C2 VALU stays; results are numerically wrong.
+_FLASH_ELIDE_RESCALE = False
+# Flash-style steady state: consume pending PV pack 0, establish the current
+# tile max, lazily rebase O/l/pending-P, then consume pending PV packs 1..3.
+_FLASH_C3_LAZY_RESCALE = True
+_FLASH_8C_SCHED = True
+# 8c only: C0/C4 read K that a previous cluster staged via buffer_load_lds.
+# Drain that DMA (leaving this cluster's V in flight) before the LDS read.
+# Without it the read can beat the write and the output is wrong.
+# The steady-state trips do not strictly need it: each memory cluster closes on
+# vmcnt(2 tiles), which retires that K two memory clusters before its reader
+# runs. Only the first trip is unordered, because the prologue leaves its
+# K[lo+1] in flight, so PRELOOP_VMWAIT alone is sufficient for ordering.
+# Keep the per-trip drains enabled: warm and power-capped ATT both show that
+# they improve downstream scheduling by about 0.25% (roughly 240 cycles/wave).
+# Front/back power measurements both remain pinned at the same 1000 W cap.
+_FLASH_8C_KREAD_VMWAIT = True
+_FLASH_8C_KREAD_PRELOOP_VMWAIT = False
+# Power probe: skip v_mfma (C passthrough) while still consuming A/B so LDS/DMA
+# are not DCE'd. Numerically wrong. Default off.
+_FLASH_8C_MFMA_PASSTHROUGH = False
+# Power probe: one s_nop IMM after every cluster barrier. -1 = off, 0..15 = ISA imm
+# (s_nop 0 waits 1 cycle, s_nop 15 waits 16).
+_FLASH_8C_CLUSTER_NOP_IMM = -1
+# Power probe: 64× s_nop 15 in exactly one 8c cluster (0..7). -1 = off.
+_FLASH_8C_CLUSTER_STALL_ONLY = -1
+_FLASH_8C_CLUSTER_STALL_NOPS = 64
 # s_waitcnt: lgkmcnt=0, vmcnt=63, expcnt=7. Drain LDS without killing in-flight DMA.
 _LGKMCNT_0_ONLY = 0xC07F
 FLEX_DTYPE_BF16 = 2
@@ -176,6 +212,19 @@ MASK_NONE = 0
 MASK_CAUSAL = 1
 MASK_SLIDING_WINDOW = 2
 MASK_PREFIX_LM = 3
+# Compile-time 8-cluster cutoff. Masked paths skip KV tiles, so the 8c body
+# only pays once the tensor Skv is long enough for the last Q tiles.
+_LONG_SEQ_8C_SKV_DENSE = 768
+_LONG_SEQ_8C_SKV_MASKED = 2048
+# Causal mask: WG-uniform skip (flash's q_min_wg predicate) + packed
+# attn_mask_vec2_imm on the taken path. Per-wave q_start made the scf.if
+# diverge across dualwave groups before s_barrier.
+_CAUSAL_WG_UNIFORM_PACKED_MASK = True
+# Keep the C0..C7 steady state branch-free: only pairs wholly below the
+# bottom-right causal diagonal use 8c.  The short diagonal band falls through
+# to the 4c deferred step, which applies the packed mask before softmax.
+_CAUSAL_8C_FULL_TILES_ONLY = True
+_CAUSAL_NEG_INF_F32_BITS = struct.unpack("<I", struct.pack("<f", -1e9))[0]
 
 SCORE_NONE = 0
 SCORE_ALIBI = 1
@@ -350,6 +399,8 @@ class FlexAttnParam:
     gqa_group: fx.Constexpr[int]
     in_data_bytes: fx.Constexpr[int]
     n_kv_tiles: fx.Constexpr[int]  # seqlen_kv // block_n
+    # Dedicated flash-shaped 8-cluster schedule for long n64 sequences.
+    long_seq_8c: fx.Constexpr[bool]
     pipe_depth: fx.Constexpr[int]  # 1 = monolithic, 2 = decomposed pipeline
     pipe_stages: fx.Constexpr[int]  # deprecated: stagger follows num_groups/pipe_depth/m_waves
     # True = exact per-row softmax; False = approximate column softmax (mma_m=32 only)
@@ -391,6 +442,7 @@ def make_flex_attn_param(
     score_alibi_slope: float = 0.0,
     num_kv_splits: int = 1,
     paged: bool = False,
+    long_seq_8c: Optional[bool] = None,
 ) -> FlexAttnParam:
     if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16):
         raise ValueError(f"unsupported dtype_id={dtype_id}")
@@ -458,6 +510,23 @@ def make_flex_attn_param(
         gqa_group=num_heads_q // num_heads_kv,
         in_data_bytes=in_dbytes,
         n_kv_tiles=seqlen_kv // block_n,
+        long_seq_8c=(
+            (
+                seqlen_kv
+                >= (
+                    _LONG_SEQ_8C_SKV_MASKED
+                    if mask_type
+                    in (MASK_CAUSAL, MASK_SLIDING_WINDOW, MASK_PREFIX_LM)
+                    else _LONG_SEQ_8C_SKV_DENSE
+                )
+                if long_seq_8c is None
+                else bool(long_seq_8c)
+            )
+            and block_n == 64
+            and head_dim == 128
+            and block_threads == 512
+            and not paged
+        ),
         pipe_depth=pipe_depth,
         pipe_stages=pipe_stages,
         accurate_softmax=accurate_softmax,
@@ -497,6 +566,8 @@ def make_flex_attn_kernel_name(param: FlexAttnParam) -> str:
     name += "_dense"
     name += "_rsm" if param.accurate_softmax else "_csm"
     name += f"_pd{param.pipe_depth}"
+    if bool(param.long_seq_8c):
+        name += "_8c"
     if flex_layout_stagger_enabled(param):
         name += "_stg"
     return name
@@ -553,10 +624,38 @@ def _permlane32_reduce(x, mode):
         return lhs.addf(rhs, fastmath=_FM)
 
 
+def _cluster_power_stall(cluster_index):
+    """Insert a large s_nop burst at the start of one named 8c cluster."""
+    if _FLASH_8C_CLUSTER_STALL_ONLY != cluster_index:
+        return
+    n = int(_FLASH_8C_CLUSTER_STALL_NOPS)
+    if n <= 0:
+        return
+    llvm.inline_asm(
+        None,
+        [],
+        "\n".join(["s_nop 15"] * n),
+        "",
+        has_side_effects=True,
+    )
+    rocdl.sched_barrier(0)
+
+
+def _mfma_passthrough(a, b, c):
+    """Keep A/B/C live without issuing v_mfma. Returns C unchanged."""
+    av = as_mlir_value(a)
+    bv = as_mlir_value(b)
+    cv = as_mlir_value(c)
+    llvm.inline_asm(None, [av, bv, cv], "", "v,v,v", has_side_effects=True)
+    return c
+
+
 def _mfma_acc(a, b, c, mma_atom):
     """Single MFMA call: C += A × B. Returns updated accumulator."""
     from flydsl._mlir.dialects import fly
 
+    if _FLASH_8C_MFMA_PASSTHROUGH:
+        return _mfma_passthrough(a, b, c)
     acc_ty = c.type
     return fly.mma_atom_call_ssa([acc_ty], mma_atom, a, b, c)
 
@@ -598,20 +697,26 @@ def flex_attn_fwd_gfx950_kernel(
     group_threads = param.group_threads  # 128 (m_waves*n_waves*wave_size)
     group = tid // group_threads
     local_tid = tid % group_threads
-    # Dense: grid.x = q_tile, grid.y = head.
-    # Causal/prefix: grid.x = head (fastest), grid.y = q_tile reversed so the
-    # longest KV loops of every head are enqueued before lighter Q tiles.
-    # grid.z = batch (or batch * num_kv_splits if split-K).
+    # One SGPR wave id for the whole kernel. Deriving wave from `tid` inside
+    # each buffer_load_lds makes LLVM emit v_readfirstlane per DMA (~66/wave).
+    _wave_id_uni_s = rocdl.readfirstlane(
+        fx.Int32.ir_type,
+        fx.Int32(tid // GFX950_WAVE_SIZE).ir_value(),
+    )
+    _wave_id_uni = fx.Int32(_wave_id_uni_s)
+    # Head-fast grid so linear_id % 8 (XCD) is the head, not the Q tile.
+    # gfx950 L2 is private per XCD: Q tiles of one head then replay the same KV
+    # on one XCD.  Causal/prefix still reverse q_tile on grid.y so the longest
+    # KV loops of every head enqueue first.  grid.z = batch (or batch * splits).
     _SPLITK = int(param.num_kv_splits) > 1
     _num_kv_splits = int(param.num_kv_splits)
     _is_causal = int(param.mask_type) in (MASK_CAUSAL, MASK_PREFIX_LM)
+    h_idx = fx.block_idx.x
     if const_expr(_is_causal):
         _num_q_tiles = (seqlen_q + fx.Int32(num_groups * block_m - 1)) // fx.Int32(num_groups * block_m)
-        h_idx = fx.block_idx.x
         q_tile = fx.Index(arith.index_cast(T.index, _num_q_tiles - fx.Int32(1) - _idx_to_i32(fx.block_idx.y)))
     else:
-        q_tile = fx.block_idx.x
-        h_idx = fx.block_idx.y
+        q_tile = fx.block_idx.y
     if const_expr(_SPLITK):
         b_idx = fx.block_idx.z // fx.Index(_num_kv_splits)
         split_idx = _idx_to_i32(fx.block_idx.z % fx.Index(_num_kv_splits))
@@ -732,6 +837,8 @@ def flex_attn_fwd_gfx950_kernel(
     # Each group runs the validated 128-thread MMA partition via local_tid.
     thr_qk = tiled_mma_qk.thr_slice(local_tid)
 
+    # Q is loaded once into VGPRs. Cached (0): SC1/NT Q did not beat this
+    # occupancy-held and 18s-clock sweep.
     ca = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_dtype)
     uca = fx.make_copy_atom(fx.UniversalCopy128b(), elem_dtype)
 
@@ -830,7 +937,7 @@ def flex_attn_fwd_gfx950_kernel(
     def _stage_flash_lds(tile_idx, buf, do_k, do_v):
         """Flash dual-wave's non-vectorized wave-linear padded K/V DMA map."""
         lane = fx.Int32(tid % GFX950_WAVE_SIZE)
-        wave = fx.Int32(tid // GFX950_WAVE_SIZE)
+        wave = _wave_id_uni
         n_in_warp = lane // fx.Int32(8)
         d_bucket = lane % fx.Int32(8)
         tile_row = n_in_warp * fx.Int32(8) + wave
@@ -893,9 +1000,7 @@ def flex_attn_fwd_gfx950_kernel(
 
     # ── Stage: DMA K+V global → LDS ─────────────────────────────────────
     def _stage_kv_to_lds_contiguous(kv_idx, buf, do_k, do_v, ops=_dma_ops_per_thread, op_offset=0):
-        wave_off = rocdl.readfirstlane(
-            fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes)
-        )
+        wave_off = _wave_id_uni * fx.Int32(GFX950_WAVE_SIZE * _dma_bytes)
         _step_bytes = block_threads * _dma_bytes
         if const_expr(do_k):
             k_global_base = k_off * param.in_data_bytes + kv_idx * block_n * _k_row_stride_bytes
@@ -931,9 +1036,7 @@ def flex_attn_fwd_gfx950_kernel(
                 )
 
     def _stage_kv_to_lds_paged(page_id, buf, ops=_dma_ops_per_thread, op_offset=0, do_k=True, do_v=True):
-        wave_off = rocdl.readfirstlane(
-            fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes)
-        )
+        wave_off = _wave_id_uni * fx.Int32(GFX950_WAVE_SIZE * _dma_bytes)
         _step_bytes = block_threads * _dma_bytes
         if const_expr(do_k):
             k_global_base = page_id * fx.Int32(_page_byte_stride) + _kv_head_byte_offset
@@ -993,9 +1096,7 @@ def flex_attn_fwd_gfx950_kernel(
                     )
                 _if = scf.IfOp(in_phase, [], has_else=False)
                 with ir.InsertionPoint(_if.then_block):
-                    _wave_off = rocdl.readfirstlane(
-                        fx.Int32.ir_type, fx.Int32(tid // GFX950_WAVE_SIZE * GFX950_WAVE_SIZE * _dma_bytes)
-                    )
+                    _wave_off = _wave_id_uni * fx.Int32(GFX950_WAVE_SIZE * _dma_bytes)
                     _lds_off = _wave_off + (op_offset + i) * block_threads * _dma_bytes
                     if const_expr(_K_HALF_BANK_SKEW_BYTES > 0 and stride_phase == 1):
                         _lds_off = _lds_off + _K_HALF_BANK_SKEW_BYTES
@@ -1202,13 +1303,20 @@ def flex_attn_fwd_gfx950_kernel(
         """All M×N MFMAs for one K-group ki. Caller controls ki scheduling."""
         for m in range_constexpr(_qk_a_m_reps):
             for n in range_constexpr(_qk_b_n_reps):
-                fx.mma_atom_call(
-                    _qk_mma_atom,
-                    frag_S_acc[None, m, n],
-                    frag_K_in[None, m, ki],
-                    frag_Q_in[None, n, ki],
-                    frag_S_acc[None, m, n],
-                )
+                if const_expr(_FLASH_8C_MFMA_PASSTHROUGH):
+                    _mfma_passthrough(
+                        frag_K_in[None, m, ki].load(),
+                        frag_Q_in[None, n, ki].load(),
+                        frag_S_acc[None, m, n].load(),
+                    )
+                else:
+                    fx.mma_atom_call(
+                        _qk_mma_atom,
+                        frag_S_acc[None, m, n],
+                        frag_K_in[None, m, ki],
+                        frag_Q_in[None, n, ki],
+                        frag_S_acc[None, m, n],
+                    )
 
     def gemm1_qk_unrolled(frag_Q_in, frag_K_in):
         """QK GEMM with explicit per-ki MFMA calls (register-only, no bank concerns)."""
@@ -1285,6 +1393,11 @@ def flex_attn_fwd_gfx950_kernel(
     q_idx_mod = _idx_to_i32(q_start) + fx.Int32(local_tid % 32) + _causal_q_shift
     lane_group_off = fx.Int32((local_tid // 32) * 4)
     kv_offsets = [8 * (e // 4) + (e % 4) for e in range(n_c)]
+    # Same predicate as flash causal_mask_prologue_if_needed: first live row of
+    # the whole WG, not this group's q_start. Uniform across the 8 dualwave groups.
+    _causal_wg_q_min = _idx_to_i32(q_tile) * fx.Int32(num_groups * block_m) + _causal_q_shift
+    _causal_neg_inf_i32 = fx.Int32(_CAUSAL_NEG_INF_F32_BITS)
+    _causal_pair_thresholds = [(kv_offsets[i], kv_offsets[i + 1]) for i in range(0, n_c, 2)]
 
     def apply_score_mods(frag_S_in, kv_tile_idx):
         kv_base = kv_tile_idx * fx.Int32(block_n) + lane_group_off
@@ -1307,18 +1420,47 @@ def flex_attn_fwd_gfx950_kernel(
             for e in range_constexpr(n_c)
         ]
 
+    def _mask_scores_packed(s_in, kv_tile_idx):
+        """Flash attn_mask_vec2_imm on flex's C-fragment KV offsets."""
+        kv_base = kv_tile_idx * fx.Int32(block_n) + lane_group_off
+        rel_i32 = q_idx_mod - kv_base
+        s_out = [s_in[e] for e in range_constexpr(n_c)]
+        for p in range_constexpr(len(_causal_pair_thresholds)):
+            thr_x, thr_y = _causal_pair_thresholds[p]
+            idx_x = p * 2
+            idx_y = p * 2 + 1
+            new_x, new_y = _attn_mask_vec2_imm(
+                rel_i32,
+                _causal_neg_inf_i32,
+                thr_x,
+                thr_y,
+                _bitcast_i32(s_out[idx_x]),
+                _bitcast_i32(s_out[idx_y]),
+            )
+            s_out[idx_x] = _bitcast_f32(new_x)
+            s_out[idx_y] = _bitcast_f32(new_y)
+        return s_out
+
     def apply_mods(frag_S_in, kv_tile_idx):
         if const_expr(mod_has_score):
             apply_score_mods(frag_S_in, kv_tile_idx)
         if const_expr(mod_has_mask):
             if const_expr(int(param.mask_type) == MASK_CAUSAL):
-                # Skip when the whole group is strictly after this KV tile.
                 s_out = [frag_S_in[e] for e in range_constexpr(n_c)]
-                needs_mask = flex_mod.tile_needs_mask(
-                    kv_tile_idx, _idx_to_i32(q_start) + _causal_q_shift, block_n
-                )
+                if const_expr(_CAUSAL_WG_UNIFORM_PACKED_MASK):
+                    # Flash predicate: mask if any row in the WG can see this tile.
+                    needs_mask = flex_mod.tile_needs_mask(
+                        kv_tile_idx, _causal_wg_q_min, block_n
+                    )
+                else:
+                    needs_mask = flex_mod.tile_needs_mask(
+                        kv_tile_idx, _idx_to_i32(q_start) + _causal_q_shift, block_n
+                    )
                 if needs_mask:
-                    s_out = _mask_scores(s_out, kv_tile_idx)
+                    if const_expr(_CAUSAL_WG_UNIFORM_PACKED_MASK and n_c % 2 == 0):
+                        s_out = _mask_scores_packed(s_out, kv_tile_idx)
+                    else:
+                        s_out = _mask_scores(s_out, kv_tile_idx)
                 for e in range_constexpr(n_c):
                     frag_S_in[e] = s_out[e]
             elif const_expr(int(param.mask_type) == MASK_SLIDING_WINDOW):
@@ -1478,6 +1620,110 @@ def flex_attn_fwd_gfx950_kernel(
             for pk in range_constexpr(_pv_packs)
         ]
 
+    def _p_packs_to_vec(p_packs):
+        return Vec.from_elements(
+            [
+                Vec(p_packs[pk])[i]
+                for pk in range_constexpr(_pv_packs)
+                for i in range_constexpr(8)
+            ],
+            elem_dtype,
+        ).ir_value()
+
+    def _p_vec_to_packs(p_all):
+        p_vec = Vec(p_all, (n_c,), elem_dtype)
+        return [
+            p_vec.shuffle(p_vec, [pk * 8 + i for i in range(8)]).ir_value()
+            for pk in range_constexpr(_pv_packs)
+        ]
+
+    def _scale_p_packs(p_packs, corr):
+        p_all = _p_packs_to_vec(p_packs)
+        p_f32_ty = Vec.make_type(n_c, fx.Float32)
+        p_elem_ty = Vec.make_type(n_c, elem_dtype)
+        fm_fast = ir.Attribute.parse("#llvm.fastmath<fast>")
+        p_f32_op = llvm.FPExtOp(p_f32_ty, as_mlir_value(p_all))
+        p_f32_op.operation.attributes["fastmathFlags"] = fm_fast
+        corr_vec = Vec.from_elements([corr], fx.Float32).broadcast_to(n_c)
+        p_scaled = as_mlir_value(corr_vec * Vec(p_f32_op.result))
+        p_elem_op = llvm.FPTruncOp(p_elem_ty, p_scaled)
+        p_elem_op.operation.attributes["fastmathFlags"] = fm_fast
+        return _p_vec_to_packs(p_elem_op.result)
+
+    def _anchor_p_packs(p_packs):
+        p_all = as_mlir_value(_p_packs_to_vec(p_packs))
+        anchored = llvm.inline_asm(
+            p_all.type,
+            [p_all],
+            "",
+            "=v,0",
+            has_side_effects=True,
+        )
+        return _p_vec_to_packs(anchored)
+
+    def _flash_c3_lazy_rescale(o_accs, m_i, l_i, tile_max, p_packs):
+        """Flash-style wave-uniform rebase of O/l and pending packed P."""
+
+        @flyc.jit
+        def _run(o_in, m_row, l_row, tile_max_i, p_in):
+            below = (fx.Float32(tile_max_i) - fx.Float32(m_row)) <= fx.Float32(
+                _FLASH_LAZY_RESCALE_THRESHOLD
+            )
+            below_lanes = rocdl.ballot(T.i64, as_mlir_value(below))
+            all_below = arith.cmpi(
+                arith.CmpIPredicate.eq,
+                as_mlir_value(below_lanes),
+                _read_exec_i64(),
+            )
+            all_below = llvm.intr_expect(
+                all_below,
+                arith.constant(1, type=ir.IntegerType.get_signless(1)),
+            )
+            p_all = _p_packs_to_vec(p_in)
+            state = [as_mlir_value(o_in[dc]) for dc in range(_n_d_chunks)]
+            state += [
+                as_mlir_value(p_all),
+                as_mlir_value(l_row),
+                as_mlir_value(m_row),
+            ]
+            names = tuple(f"_c3_lr{i}" for i in range(_n_d_chunks + 3))
+
+            def _rescale(_n, *_st):
+                m_new = _f32_max(m_row, tile_max_i)
+                corr = _hw_exp2(fx.Float32(m_row) - m_new)
+                o_scaled = _scale_o_vec(o_in, corr)
+                p_scaled = _scale_p_packs(p_in, corr)
+                out = [as_mlir_value(o_scaled[dc]) for dc in range(_n_d_chunks)]
+                out += [
+                    as_mlir_value(_p_packs_to_vec(p_scaled)),
+                    as_mlir_value(fx.Float32(l_row) * corr),
+                    as_mlir_value(m_new),
+                ]
+                return out
+
+            result = scf_if_dispatch(
+                all_below,
+                lambda *_a: None,
+                _rescale,
+                state_names=names,
+                state_values=state,
+            )
+            o_out = list(result[:_n_d_chunks])
+            p_out = _p_vec_to_packs(result[_n_d_chunks])
+            l_out = result[_n_d_chunks + 1]
+            m_out = result[_n_d_chunks + 2]
+            return o_out, p_out, l_out, m_out
+
+        o_out, p_out, l_out, m_out = _run(
+            o_accs, m_i[0], l_i[0], tile_max, p_packs
+        )
+        return (
+            o_out,
+            [fx.Float32(m_out)] + [m_i[r] for r in range_constexpr(1, npair)],
+            [fx.Float32(l_out)] + [l_i[r] for r in range_constexpr(1, npair)],
+            p_out,
+        )
+
     def pv_gemm_register_packs(frag_P_in, v_regs, o_accs):
         """PV GEMM for flattened V packs (n64 flash LDS)."""
         p_packs = _pack_p_b(frag_P_in)
@@ -1552,6 +1798,15 @@ def flex_attn_fwd_gfx950_kernel(
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
         rocdl.sched_barrier(0)
+        if const_expr(_FLASH_8C_CLUSTER_NOP_IMM >= 0):
+            llvm.inline_asm(
+                None,
+                [],
+                f"s_nop {int(_FLASH_8C_CLUSTER_NOP_IMM)}",
+                "",
+                has_side_effects=True,
+            )
+            rocdl.sched_barrier(0)
 
     def sched_interleave_lds_math(groups, *, ds, trans=0, valu=0, sync_id=0):
         """Alternate LDS reads with softmax arithmetic in a memory cluster.
@@ -1586,6 +1841,16 @@ def flex_attn_fwd_gfx950_kernel(
                 if const_expr(trans):
                     rocdl.sched_group_barrier(0x400, trans, 3)
 
+    def sched_flash_pairs(pairs, *, valu=0, trans=0, group):
+        """Flash dualwave's exact MFMA/VALU-or-EXP scheduling recipe."""
+        if const_expr(_FLASH_8C_SCHED):
+            for _ in range_constexpr(pairs):
+                rocdl.sched_group_barrier(0x008, 1, group)
+                if const_expr(valu):
+                    rocdl.sched_group_barrier(0x002, valu, group)
+                if const_expr(trans):
+                    rocdl.sched_group_barrier(0x400, trans, group)
+
     if const_expr(_is_32x32):
         _enable_stagger = True
     else:
@@ -1599,15 +1864,13 @@ def flex_attn_fwd_gfx950_kernel(
     if const_expr(_enable_stagger):
         if const_expr(_is_32x32):
             _stagger_div = _flex_stagger_divisor(int(param.block_threads))
-            _wave_id = fx.Int32(tid // GFX950_WAVE_SIZE)
-            infra.stagger_i32 = rocdl.readfirstlane(
-                fx.Int32.ir_type,
-                _wave_id // fx.Int32(_stagger_div),
+            infra.stagger_i32 = arith.divsi(
+                _wave_id_uni_s, as_mlir_value(fx.Int32(_stagger_div))
             )
         else:
-            infra.stagger_i32 = rocdl.readfirstlane(
-                fx.Int32.ir_type,
-                fx.Int32(local_tid // GFX950_WAVE_SIZE),
+            infra.stagger_i32 = arith.remsi(
+                _wave_id_uni_s,
+                as_mlir_value(fx.Int32(group_threads // GFX950_WAVE_SIZE)),
             )
 
     # ── Paged KV: load block table into LDS ──────────────────────────────
@@ -1663,6 +1926,24 @@ def flex_attn_fwd_gfx950_kernel(
         _kv_lo = _kv_lo + split_idx * _chunk
         _kv_hi_split = _kv_lo + _chunk
         _kv_hi = _i32_min(_kv_hi_split, _kv_hi)
+    _causal_full_tile_8c = (
+        _CAUSAL_8C_FULL_TILES_ONLY
+        and int(param.mask_type) == MASK_CAUSAL
+        and bool(param.long_seq_8c)
+        and not _SPLITK
+    )
+    if const_expr(_causal_full_tile_8c):
+        # Tile t is fully visible to every row in the WG iff
+        # t*block_n + block_n-1 <= q_min.  Therefore the number of full tiles
+        # before the diagonal is floor((q_min+1)/block_n).  Clamp it to this
+        # WG's live range; _kv_hi already excludes wholly masked future tiles.
+        _kv_full_hi_raw = (_q_min_wg + fx.Int32(1)) // fx.Int32(block_n)
+        _kv_full_hi = _i32_min(
+            _i32_max(_kv_full_hi_raw, _kv_lo),
+            _kv_hi,
+        )
+    else:
+        _kv_full_hi = _kv_hi
     rocdl.s_barrier()
     rocdl.s_barrier()
 
@@ -1857,10 +2138,21 @@ def flex_attn_fwd_gfx950_kernel(
             s_scaled = [scaled_vec[i] for i in range_constexpr(n_c)]
         else:
             s_scaled = [s_raw[i] for i in range_constexpr(n_c)]
+        if const_expr(_FLASH_C3_LAZY_RESCALE):
+            return s_scaled, m_i, l_i, o_accs, p_prev, fx.Float32(1.0)
         tile_max = s_scaled[0]
         for i in range_constexpr(1, n_c):
             tile_max = _f32_max(tile_max, s_scaled[i])
         tile_max = _permlane32_reduce(tile_max, "max")
+        if const_expr(_FLASH_ELIDE_RESCALE):
+            llvm.inline_asm(
+                None,
+                [as_mlir_value(tile_max)],
+                "",
+                "v",
+                has_side_effects=True,
+            )
+            return s_scaled, m_i, l_i, o_accs, p_prev, fx.Float32(1.0)
 
         @flyc.jit
         def _lazy_state(m_row, l_row, tile_max_i):
@@ -1970,9 +2262,13 @@ def flex_attn_fwd_gfx950_kernel(
         load_v(kv_i32, cur_slot)
         k_regs = read_k_flash(cur_slot)
         p_prev = _flash_finish_deferred_exp(p_mixed_prev)
-        if const_expr(not (_FLASH_SCALE_O_IN_C3 and _is_causal)):
-            # Apply the max correction established by the prior tile after its
-            # pending PV was accumulated, and before this tile's PV is added.
+        if const_expr(
+            not _FLASH_ELIDE_RESCALE
+            and not _FLASH_C3_LAZY_RESCALE
+            and not (_FLASH_SCALE_O_IN_C3 and _is_causal)
+            and not (_FLASH_SCALE_O_IN_C1 and not _is_causal)
+        ):
+            # Fallback: corr on O in C0 (neither C1 dense nor C3 causal).
             o_accs = _scale_o_if_needed(o_accs, corr_pending)
         # Lazy rescale leaves eight independent exp2 operations in this region.
         # Pair two K reads with each exp: asking for 16 EXP groups delays the
@@ -1987,6 +2283,15 @@ def flex_attn_fwd_gfx950_kernel(
         s_raw = [frag_S[i] for i in range_constexpr(n_c)]
         s_raw = _flash_apply_mods_and_mask(s_raw, kv_i32)
         l_i = _flash_add_deferred_sum(p_prev, l_i)
+        if const_expr(
+            not _FLASH_ELIDE_RESCALE
+            and not _FLASH_C3_LAZY_RESCALE
+            and _FLASH_SCALE_O_IN_C1
+            and not _is_causal
+        ):
+            # O is idle during QK. Hide corr_pending behind the 16 QK MFMAs
+            # instead of paying it next to K LDS / exp2 in C0.
+            o_accs = _scale_o_if_needed(o_accs, corr_pending)
         # One requested VALU expands to roughly two ISA ops, spreading the
         # reduction across all 16 QK MFMAs without leaving an MFMA-only tail.
         sched_interleave_qk_sum(16, mfma=1, valu=1)
@@ -2009,9 +2314,33 @@ def flex_attn_fwd_gfx950_kernel(
         # accumulator in the next C0 (or here, just before PV).
         if const_expr(_FLASH_SETPRIO_PV):
             rocdl.s_setprio(1)
-        if const_expr(_FLASH_SCALE_O_IN_C3 and _is_causal):
-            o_accs = _scale_o_if_needed(o_accs, corr_pending)
-        pv_gemm_register_packs(p_prev, v_prev, o_accs)
+        if const_expr(_FLASH_C3_LAZY_RESCALE):
+            p_packs = _pack_p_b(p_prev)
+            for dc in range_constexpr(_n_d_chunks):
+                o_accs[dc] = _mfma_acc(
+                    v_prev[dc], p_packs[0], o_accs[dc], _pv_mma_atom
+                )
+            tile_max = s_scaled[0]
+            for i in range_constexpr(1, n_c):
+                tile_max = _f32_max(tile_max, s_scaled[i])
+            tile_max = _permlane32_reduce(tile_max, "max")
+            o_accs, m_i, l_i, p_packs = _flash_c3_lazy_rescale(
+                o_accs, m_i, l_i, tile_max, p_packs
+            )
+            for pk in range_constexpr(1, _pv_packs):
+                for dc in range_constexpr(_n_d_chunks):
+                    o_accs[dc] = _mfma_acc(
+                        v_prev[pk * _n_d_chunks + dc],
+                        p_packs[pk],
+                        o_accs[dc],
+                        _pv_mma_atom,
+                    )
+        else:
+            if const_expr(
+                not _FLASH_ELIDE_RESCALE and _FLASH_SCALE_O_IN_C3 and _is_causal
+            ):
+                o_accs = _scale_o_if_needed(o_accs, corr_pending)
+            pv_gemm_register_packs(p_prev, v_prev, o_accs)
         p_mixed, p_head = _flash_make_deferred_p(s_scaled, m_i)
         # Only the exp2 chain pays here. Pinning the subtracts and bf16 packs
         # too costs ~1%, the same way it did for the O rescale in C0.
@@ -2022,10 +2351,168 @@ def flex_attn_fwd_gfx950_kernel(
         dualwave_cluster_sync(3)
         return m_i, l_i, o_accs, p_mixed, corr_scalar
 
+    def _flash_deferred_step_8c(
+        kv_odd, m_i, l_i, o_accs, p_mixed_prev
+    ):
+        """Flash-shaped C0..C7 pipeline for two consecutive KV tiles."""
+        kv_even = kv_odd + fx.Int32(1)
+
+        # C0: V[odd] DMA and resident K[odd] read. K[even] is already in slot 0.
+        _cluster_power_stall(0)
+        llvm.inline_asm(None, [], "s_nop 7", "", has_side_effects=True)
+        rocdl.sched_barrier(0)
+        load_v(kv_odd, 1)
+        # K in slot 1 was staged earlier; leave only this cluster's V DMA
+        # outstanding before issuing its LDS read.
+        if const_expr(_FLASH_8C_KREAD_VMWAIT):
+            _waitcnt_vm_n(_dma_ops_per_thread)
+        k_odd = read_k_flash(1)
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(2 * _dma_ops_per_thread)
+        dualwave_cluster_sync(0)
+
+        # C1: QK[odd], finish/sum P[odd-1], and carry packed P into C3.
+        _cluster_power_stall(1)
+        (frag_s_odd,) = gemm1_qk_unrolled(frag_Q, k_odd)
+        s_odd = [frag_s_odd[i] for i in range_constexpr(n_c)]
+        if const_expr(_causal_full_tile_8c and mod_has_score):
+            apply_score_mods(s_odd, kv_odd)
+        elif const_expr(not _causal_full_tile_8c):
+            s_odd = _flash_apply_mods_and_mask(s_odd, kv_odd)
+        p_prev = _flash_finish_deferred_exp(p_mixed_prev)
+        l_i = _flash_add_deferred_sum(p_prev, l_i)
+        p_prev_packs = _anchor_p_packs(_pack_p_b(p_prev))
+        sched_flash_pairs(6, trans=3, group=1)
+        sched_flash_pairs(10, valu=5, group=1)
+        dualwave_cluster_sync(1)
+
+        # C2: prefetch K[odd+2] into the consumed odd slot and read V[odd-1].
+        _cluster_power_stall(2)
+        llvm.inline_asm(None, [], "s_nop 7", "", has_side_effects=True)
+        rocdl.sched_barrier(0)
+        if (kv_odd + fx.Int32(2)) < _kv_hi:
+            load_k(kv_odd + fx.Int32(2), 1)
+        v_prev = read_v_flash(0)
+        s_odd, m_i, l_i, o_accs, _p_prev, _corr = (
+            _flash_rescale_for_current(s_odd, m_i, l_i, o_accs, p_prev)
+        )
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(2 * _dma_ops_per_thread)
+        dualwave_cluster_sync(2)
+
+        # C3: PV[odd-1], lazy rebase from S[odd], then begin P[odd].
+        _cluster_power_stall(3)
+        if const_expr(_FLASH_SETPRIO_PV):
+            rocdl.s_setprio(1)
+        for dc in range_constexpr(_n_d_chunks):
+            o_accs[dc] = _mfma_acc(
+                v_prev[dc], p_prev_packs[0], o_accs[dc], _pv_mma_atom
+            )
+        tile_max_odd = s_odd[0]
+        for i in range_constexpr(1, n_c):
+            tile_max_odd = _f32_max(tile_max_odd, s_odd[i])
+        tile_max_odd = _permlane32_reduce(tile_max_odd, "max")
+        sched_flash_pairs(4, valu=6, group=2)
+        o_accs, m_i, l_i, p_prev_packs = _flash_c3_lazy_rescale(
+            o_accs, m_i, l_i, tile_max_odd, p_prev_packs
+        )
+        for pk in range_constexpr(1, _pv_packs):
+            for dc in range_constexpr(_n_d_chunks):
+                o_accs[dc] = _mfma_acc(
+                    v_prev[pk * _n_d_chunks + dc],
+                    p_prev_packs[pk],
+                    o_accs[dc],
+                    _pv_mma_atom,
+                )
+        p_mixed_odd, p_head_odd = _flash_make_deferred_p(s_odd, m_i)
+        sched_flash_pairs(6, valu=6, group=2)
+        sched_flash_pairs(6, trans=3, group=2)
+        _pin_in_cluster(p_head_odd)
+        if const_expr(_FLASH_SETPRIO_PV):
+            rocdl.s_setprio(0)
+        dualwave_cluster_sync(3)
+
+        # C4: V[even] DMA and resident K[even] read.
+        _cluster_power_stall(4)
+        llvm.inline_asm(None, [], "s_nop 7", "", has_side_effects=True)
+        rocdl.sched_barrier(0)
+        load_v(kv_even, 0)
+        # K in slot 0 was staged earlier; leave only this cluster's V DMA
+        # outstanding before issuing its LDS read.
+        if const_expr(_FLASH_8C_KREAD_VMWAIT):
+            _waitcnt_vm_n(_dma_ops_per_thread)
+        k_even = read_k_flash(0)
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(2 * _dma_ops_per_thread)
+        dualwave_cluster_sync(4)
+
+        # C5: QK[even], finish/sum P[odd], and carry packed P into C7.
+        _cluster_power_stall(5)
+        (frag_s_even,) = gemm1_qk_unrolled(frag_Q, k_even)
+        s_even = [frag_s_even[i] for i in range_constexpr(n_c)]
+        if const_expr(_causal_full_tile_8c and mod_has_score):
+            apply_score_mods(s_even, kv_even)
+        elif const_expr(not _causal_full_tile_8c):
+            s_even = _flash_apply_mods_and_mask(s_even, kv_even)
+        p_odd = _flash_finish_deferred_exp(p_mixed_odd)
+        l_i = _flash_add_deferred_sum(p_odd, l_i)
+        p_odd_packs = _anchor_p_packs(_pack_p_b(p_odd))
+        sched_flash_pairs(6, trans=3, group=3)
+        sched_flash_pairs(10, valu=5, group=3)
+        dualwave_cluster_sync(5)
+
+        # C6: prefetch K[even+2] into the consumed even slot and read V[odd].
+        _cluster_power_stall(6)
+        llvm.inline_asm(None, [], "s_nop 7", "", has_side_effects=True)
+        rocdl.sched_barrier(0)
+        if (kv_even + fx.Int32(2)) < _kv_hi:
+            load_k(kv_even + fx.Int32(2), 0)
+        v_odd = read_v_flash(1)
+        s_even, m_i, l_i, o_accs, _p_odd, corr_scalar = (
+            _flash_rescale_for_current(s_even, m_i, l_i, o_accs, p_odd)
+        )
+        rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+        _waitcnt_vm_n(2 * _dma_ops_per_thread)
+        dualwave_cluster_sync(6)
+
+        # C7: PV[odd], lazy rebase from S[even], then begin P[even].
+        _cluster_power_stall(7)
+        if const_expr(_FLASH_SETPRIO_PV):
+            rocdl.s_setprio(1)
+        for dc in range_constexpr(_n_d_chunks):
+            o_accs[dc] = _mfma_acc(
+                v_odd[dc], p_odd_packs[0], o_accs[dc], _pv_mma_atom
+            )
+        tile_max_even = s_even[0]
+        for i in range_constexpr(1, n_c):
+            tile_max_even = _f32_max(tile_max_even, s_even[i])
+        tile_max_even = _permlane32_reduce(tile_max_even, "max")
+        sched_flash_pairs(4, valu=6, group=4)
+        o_accs, m_i, l_i, p_odd_packs = _flash_c3_lazy_rescale(
+            o_accs, m_i, l_i, tile_max_even, p_odd_packs
+        )
+        for pk in range_constexpr(1, _pv_packs):
+            for dc in range_constexpr(_n_d_chunks):
+                o_accs[dc] = _mfma_acc(
+                    v_odd[pk * _n_d_chunks + dc],
+                    p_odd_packs[pk],
+                    o_accs[dc],
+                    _pv_mma_atom,
+                )
+        p_mixed_even, p_head_even = _flash_make_deferred_p(s_even, m_i)
+        sched_flash_pairs(6, valu=5, group=4)
+        sched_flash_pairs(6, trans=3, group=4)
+        _pin_in_cluster(p_head_even)
+        if const_expr(_FLASH_SETPRIO_PV):
+            rocdl.s_setprio(0)
+        dualwave_cluster_sync(7)
+        return m_i, l_i, o_accs, p_mixed_even, corr_scalar
+
     def _flash_deferred_epilogue(last_slot, m_i, l_i, o_accs, p_mixed, corr_pending):
         """Drain the final pending P/V tile."""
         p_last = _flash_finish_deferred_exp(p_mixed)
-        o_accs = _scale_o_if_needed(o_accs, corr_pending)
+        if const_expr(not _FLASH_ELIDE_RESCALE and not _FLASH_C3_LAZY_RESCALE):
+            o_accs = _scale_o_if_needed(o_accs, corr_pending)
         dualwave_cluster_sync(0)
         l_i = _flash_add_deferred_sum(p_last, l_i)
         dualwave_cluster_sync(1)
@@ -2245,9 +2732,26 @@ def flex_attn_fwd_gfx950_kernel(
         m_i, l_i, o_accs, p_mixed, corr_pending = _flash_deferred_prologue(
             _kv_lo, m_i, l_i, o_accs
         )
+        if const_expr(param.long_seq_8c):
+            # Flash keeps K two tiles ahead: K0/K1 are primed by the prologue,
+            # and K2 is launched before C0 starts consuming K1.
+            # For causal full-tile splitting, only prime K2 when an 8c pair
+            # actually exists.  Otherwise the first 4c tail step will stage it.
+            if (_kv_lo + fx.Int32(2)) < _kv_full_hi:
+                load_k(_kv_lo + fx.Int32(2), 0)
+                # Retire the prologue's K[lo+1] before the first C0 reads it,
+                # leaving only this K[lo+2] in flight. Later trips are ordered
+                # by the memory clusters' own closing waits. A shorter range
+                # than this leaves _steady_pairs at 0, so no C0 read happens.
+                if const_expr(_FLASH_8C_KREAD_PRELOOP_VMWAIT):
+                    _waitcnt_vm_n(_dma_ops_per_thread)
 
-        _remaining = _kv_range - fx.Int32(1)
-        _steady_pairs = _remaining // fx.Int32(2)
+        # Dense keeps the old all-8c range.  Bottom-right causal stops 8c at
+        # _kv_full_hi, so C1/C5 never need a mask predicate.  The following
+        # 4c loop consumes the diagonal band without draining p_mixed.
+        _full_remaining = _kv_full_hi - (_kv_lo + fx.Int32(1))
+        _full_remaining = _i32_max(_full_remaining, fx.Int32(0))
+        _steady_pairs = _full_remaining // fx.Int32(2)
         _p_arg = _o + _n_d_chunks
         _corr_arg = _p_arg + 1
         init_args = (
@@ -2269,12 +2773,19 @@ def flex_attn_fwd_gfx950_kernel(
             p_mixed = pair_args[_p_arg]
             corr_pending = pair_args[_corr_arg]
             kv_odd = _kv_lo + fx.Int32(1) + _idx_to_i32(pair_i) * fx.Int32(2)
-            m_i, l_i, o_accs, p_mixed, corr_pending = _flash_deferred_step(
-                kv_odd, 1, 0, m_i, l_i, o_accs, p_mixed, corr_pending
-            )
-            m_i, l_i, o_accs, p_mixed, corr_pending = _flash_deferred_step(
-                kv_odd + fx.Int32(1), 0, 1, m_i, l_i, o_accs, p_mixed, corr_pending
-            )
+            if const_expr(param.long_seq_8c):
+                m_i, l_i, o_accs, p_mixed, corr_pending = (
+                    _flash_deferred_step_8c(
+                        kv_odd, m_i, l_i, o_accs, p_mixed
+                    )
+                )
+            else:
+                m_i, l_i, o_accs, p_mixed, corr_pending = _flash_deferred_step(
+                    kv_odd, 1, 0, m_i, l_i, o_accs, p_mixed, corr_pending
+                )
+                m_i, l_i, o_accs, p_mixed, corr_pending = _flash_deferred_step(
+                    kv_odd + fx.Int32(1), 0, 1, m_i, l_i, o_accs, p_mixed, corr_pending
+                )
             pair_results = yield (
                 [m_i[r] for r in range_constexpr(npair)]
                 + [l_i[r] for r in range_constexpr(npair)]
@@ -2288,8 +2799,64 @@ def flex_attn_fwd_gfx950_kernel(
         p_mixed = pair_results[_p_arg]
         corr_pending = pair_results[_corr_arg]
 
-        # An odd remaining count leaves one tile in slot 1. Process and drain it.
-        _tail_count = _remaining - _steady_pairs * fx.Int32(2)
+        # 8c pairs leave the pending even tile in slot 0 and the next K in
+        # slot 1.  Consume the rest (an optional unpaired full tile followed by
+        # the causal diagonal) as ordinary 4c pairs.  apply_mods cheaply skips
+        # the optional full tile and masks each diagonal tile before softmax.
+        _tail_start = _kv_lo + fx.Int32(1) + _steady_pairs * fx.Int32(2)
+        _tail_remaining = _kv_hi - _tail_start
+        _tail_pairs = _tail_remaining // fx.Int32(2)
+        tail_pair_init = (
+            [m_i[r] for r in range_constexpr(npair)]
+            + [l_i[r] for r in range_constexpr(npair)]
+            + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
+            + [p_mixed, corr_pending]
+        )
+        tail_pair_results = tail_pair_init
+        for tail_pair_i, tail_pair_args in range(
+            fx.Int32(0),
+            _tail_pairs,
+            fx.Int32(1),
+            init=tail_pair_init,
+        ):
+            m_i = [tail_pair_args[r] for r in range_constexpr(npair)]
+            l_i = [tail_pair_args[npair + r] for r in range_constexpr(npair)]
+            o_accs = [
+                tail_pair_args[_o + dc] for dc in range_constexpr(_n_d_chunks)
+            ]
+            p_mixed = tail_pair_args[_p_arg]
+            corr_pending = tail_pair_args[_corr_arg]
+            kv_tail_even = _tail_start + _idx_to_i32(tail_pair_i) * fx.Int32(2)
+            m_i, l_i, o_accs, p_mixed, corr_pending = _flash_deferred_step(
+                kv_tail_even, 1, 0, m_i, l_i, o_accs, p_mixed, corr_pending
+            )
+            m_i, l_i, o_accs, p_mixed, corr_pending = _flash_deferred_step(
+                kv_tail_even + fx.Int32(1),
+                0,
+                1,
+                m_i,
+                l_i,
+                o_accs,
+                p_mixed,
+                corr_pending,
+            )
+            tail_pair_results = yield (
+                [m_i[r] for r in range_constexpr(npair)]
+                + [l_i[r] for r in range_constexpr(npair)]
+                + [o_accs[dc] for dc in range_constexpr(_n_d_chunks)]
+                + [p_mixed, corr_pending]
+            )
+
+        m_i = [tail_pair_results[r] for r in range_constexpr(npair)]
+        l_i = [tail_pair_results[npair + r] for r in range_constexpr(npair)]
+        o_accs = [
+            tail_pair_results[_o + dc] for dc in range_constexpr(_n_d_chunks)
+        ]
+        p_mixed = tail_pair_results[_p_arg]
+        corr_pending = tail_pair_results[_corr_arg]
+
+        # An odd tail leaves one tile in slot 1. Process and drain it.
+        _tail_count = _tail_remaining - _tail_pairs * fx.Int32(2)
         tail_init = (
             [m_i[r] for r in range_constexpr(npair)]
             + [l_i[r] for r in range_constexpr(npair)]
@@ -2308,7 +2875,7 @@ def flex_attn_fwd_gfx950_kernel(
             o_accs = [tail_args[_o + dc] for dc in range_constexpr(_n_d_chunks)]
             p_mixed = tail_args[_p_arg]
             corr_pending = tail_args[_corr_arg]
-            kv_tail = _kv_lo + fx.Int32(1) + _steady_pairs * fx.Int32(2)
+            kv_tail = _tail_start + _tail_pairs * fx.Int32(2)
             m_i, l_i, o_accs, p_mixed, corr_pending = _flash_deferred_step(
                 kv_tail, 1, 0, m_i, l_i, o_accs, p_mixed, corr_pending
             )
@@ -2869,7 +3436,9 @@ def launch_flex_attn_gfx950(
         else:
             _grid = (hq, num_q_tiles, grid_z)
     else:
-        _grid = (num_q_tiles, hq, grid_z)
+        # Dense (and other non-causal masks): same head-fast mapping as causal
+        # so Q tiles of one head share an XCD and replay KV from its L2.
+        _grid = (hq, num_q_tiles, grid_z)
 
     flex_attn_fwd_gfx950_kernel(
         o,
@@ -2950,6 +3519,7 @@ def flydsl_flex_attention_layout(
     score_alibi_slope: float = 0.0,
     num_kv_splits: int = 1,
     stream: Optional[torch.cuda.Stream] = None,
+    long_seq_8c: Optional[bool] = None,
 ) -> torch.Tensor:
     """Flash-attention forward on the layout API (gfx950) with flex score/mask mods.
 
@@ -3012,6 +3582,7 @@ def flydsl_flex_attention_layout(
         mask_prefix_len=mask_prefix_len,
         score_alibi_slope=score_alibi_slope,
         num_kv_splits=num_kv_splits,
+        long_seq_8c=long_seq_8c,
     )
 
     if num_kv_splits > 1:

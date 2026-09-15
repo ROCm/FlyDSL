@@ -31,11 +31,13 @@ import pytest  # noqa: E402
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention.flex_attention_gfx950 import (  # noqa: E402
     MASK_CAUSAL,
+    MASK_NONE,
     MASK_PREFIX_LM,
     MASK_SLIDING_WINDOW,
     SCORE_ALIBI,
     flydsl_flex_attention_layout,
     flydsl_flex_attention_layout_paged,
+    make_flex_attn_param,
 )
 
 _requires_gfx950 = pytest.mark.skipif(
@@ -138,6 +140,66 @@ _SHAPES = [
 def test_flex_attention_layout(B, Sq, Skv, H, D, dtype_str):
     max_err, cos = _run(B, Sq, Skv, H, D, dtype_str)
     assert max_err < 8e-2 and cos > 0.98, f"B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
+
+
+def _n64_long_seq_8c(skv, mask_type):
+    return bool(
+        make_flex_attn_param(
+            seqlen_kv=skv,
+            block_n=64,
+            head_dim=128,
+            num_groups=8,
+            mask_type=mask_type,
+        ).long_seq_8c
+    )
+
+
+def test_n64_long_seq_8c_cutoffs():
+    """Dense 8c at Skv>=768; masked 8c at Skv>=2048."""
+    assert not _n64_long_seq_8c(704, MASK_NONE)
+    assert _n64_long_seq_8c(768, MASK_NONE)
+    for mask in (MASK_CAUSAL, MASK_SLIDING_WINDOW, MASK_PREFIX_LM):
+        assert not _n64_long_seq_8c(1984, mask)
+        assert _n64_long_seq_8c(2048, mask)
+        assert not _n64_long_seq_8c(1024, mask)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize(
+    "Skv,causal",
+    [
+        (704, False),
+        (768, False),
+        (1984, True),
+        (2048, True),
+    ],
+)
+def test_flex_attention_n64_long_sequence_threshold(Skv, causal):
+    """Exercise the dense (768) and causal (2048) 8-cluster boundaries."""
+    q, k, v, scale = _make_qkv(1, 1024, Skv, 4, 128, torch.bfloat16)
+    mask_type = MASK_CAUSAL if causal else MASK_NONE
+    assert _n64_long_seq_8c(Skv, mask_type) == (Skv >= (2048 if causal else 768))
+    out = flydsl_flex_attention_layout(
+        q,
+        k,
+        v,
+        scale=scale,
+        block_n=64,
+        num_groups=8,
+        mask_type=mask_type,
+    )
+    ref = (
+        _bottom_right_causal_ref(q, k, v, scale)
+        if causal
+        else _sdpa_ref(q, k, v, scale)
+    )
+    _check(
+        out,
+        ref,
+        max_err_tol=8e-2,
+        cos_tol=0.999,
+        label=f"n64 threshold Skv={Skv} causal={causal}",
+    )
 
 
 @_requires_gfx950
