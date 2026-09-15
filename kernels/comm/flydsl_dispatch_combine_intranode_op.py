@@ -773,7 +773,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
     def _check_lds_capacity(self):
         """Reject configs whose combine-kernel LDS overflows the GPU."""
-        from flydsl.utils.smem_allocator import SMEM_CAPACITY_MAP
+        from flydsl.runtime.device import SMEM_CAPACITY_MAP
 
         cfg = self.cfg
 
