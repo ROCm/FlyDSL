@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-09-15T01:04:52Z",
+ "updated": "2026-09-15T01:20:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 34916514498,
+   "pr": null,
+   "commit": "67e3b9d3dd2fb20abe87dc959c8f10f9824ff50b",
+   "branch": "main",
+   "event": "push",
+   "title": "docs: remove function-level typed arithmetic section (#1135)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34916514498",
+   "created_at": "2026-09-15T01:15:04Z",
+   "updated_at": "2026-09-15T01:17:02Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-15T01:16:56Z",
+     "completed_at": "2026-09-15T01:16:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34916514498/job/104215495105",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-15T01:16:56Z",
+     "completed_at": "2026-09-15T01:16:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34916514498/job/104215495128",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-15T01:16:56Z",
+     "completed_at": "2026-09-15T01:17:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34916514498/job/104215495228",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 34893237957,
    "pr": 1106,
@@ -2277,21 +2323,6 @@
      "log_fetch_failed": true
     }
    ]
-  },
-  {
-   "run_id": 34585436487,
-   "pr": null,
-   "commit": "097452786ef9181dcaab8aab87157635806dc2bc",
-   "branch": "pr/docs-dsl-protocols",
-   "event": "pull_request",
-   "title": "[Doc] Introduction for DSL procotols",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34585436487",
-   "created_at": "2026-09-11T09:40:57Z",
-   "updated_at": "2026-09-11T09:54:36Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
