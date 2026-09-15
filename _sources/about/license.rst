@@ -1,0 +1,5 @@
+**************
+FlyDSL license
+**************
+
+.. include:: ../../LICENSE
