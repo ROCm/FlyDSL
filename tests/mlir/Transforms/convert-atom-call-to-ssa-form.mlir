@@ -177,7 +177,7 @@ gpu.module @convert_atom_call_to_ssa_form {
 
     %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>
 
-    fly.mma_atom_call(%atom, %d_view, [%a_view], [%b_view], %c_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, 4:1>) -> ()
+    fly.mma_atom_call(%atom, %d_view, %a_view, %b_view, %c_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, 4:1>) -> ()
     gpu.return
   }
 
@@ -216,7 +216,7 @@ gpu.module @convert_atom_call_to_ssa_form {
 
     %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>
 
-    fly.mma_atom_call(%atom, %d_view, [%a_view], [%b_view], %c_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, (4,1):(1,0)>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, (4,1):(1,0)>) -> ()
+    fly.mma_atom_call(%atom, %d_view, %a_view, %b_view, %c_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, (4,1):(1,0)>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, (4,1):(1,0)>) -> ()
     gpu.return
   }
 
@@ -255,7 +255,7 @@ gpu.module @convert_atom_call_to_ssa_form {
 
     %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>
 
-    fly.mma_atom_call(%atom, %d_view, [%a_view], [%b_view], %c_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, (4,2):(1,8)>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, (4,2):(1,8)>) -> ()
+    fly.mma_atom_call(%atom, %d_view, %a_view, %b_view, %c_view) : (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>, !fly.memref<f32, register, (4,2):(1,8)>, !fly.memref<f16, register, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<f32, register, (4,2):(1,8)>) -> ()
     gpu.return
   }
 }

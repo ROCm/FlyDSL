@@ -83,9 +83,6 @@ class MxMfma:
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
 
-    def idx(self, i, j):
-        return i * self.n_tiles_b + j
-
     def _operand(self, values, words=8):
         frag = fx.make_rmem_tensor(fx.make_layout((words, len(values)), (1, words)), fx.Int32)
         for i in range_constexpr(len(values)):
