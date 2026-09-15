@@ -203,6 +203,26 @@ def create_wmma_int8_gemm_module(
     grid_m = -(-M // BLOCK_M)
     grid_n = N // BLOCK_N
 
+    # Buffer descriptor offsets are 32-bit (BufferFatPtr.h: kOffsetBitWidth = 32) and the
+    # element-to-byte scaling happens in 32 bits too. At or above 4 GiB the offset of a
+    # tail-block row wraps to a small value that compares as in-range, so a checked
+    # descriptor (max_size=False, OOB_SELECT=3) would silently redirect the access
+    # near the start of the buffer instead of dropping it. Reject those shapes on the
+    # host rather than ship a checked-but-unsafe descriptor.
+    padded_m = grid_m * BLOCK_M
+    in_bytes = elem_dtype.width // 8
+    out_bytes = out_elem_cls.width // 8
+    for operand, span_bytes in (
+        ("A", ((padded_m - 1) * ld_a + K) * in_bytes),
+        ("B", ((N - 1) * ld_b + K) * in_bytes),
+        ("C", ((padded_m - 1) * ld_c + N) * out_bytes),
+    ):
+        if span_bytes >= 2**32:
+            raise ValueError(
+                f"{operand} spans {span_bytes} bytes, which overflows the 32-bit buffer "
+                f"offset; keep each operand under 4 GiB (M={M}, N={N}, K={K})"
+            )
+
     group_width = _group_width(grid_m, group_m)
 
     assert stagger >= 0
