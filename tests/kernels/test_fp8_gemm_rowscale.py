@@ -197,50 +197,84 @@ def _bench_fp8_gemm(
     return tflops
 
 
-@pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n",
-    [
-        pytest.param(512, 2112, 7168, 64, 64, id="512x2112x7168"),
-        pytest.param(5120, 5120, 8320, 256, 256, id="5120x5120x8320"),
-        pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
-        pytest.param(9728, 8192, 8320, 256, 256, marks=pytest.mark.large_shape, id="9728x8192x8320"),
-        pytest.param(16384, 16384, 16384, 256, 256, marks=pytest.mark.large_shape, id="16384x16384x16384"),
-    ],
+_FP8_GEMM_SHAPES = (
+    (512, 2112, 7168),
+    (5120, 5120, 8320),
+    (8192, 8192, 8192),
+    (9728, 8192, 8320),
+    (16384, 16384, 16384),
 )
-@pytest.mark.parametrize("preshuffle_b", [False, True], ids=["rowmajor", "preshuffle_b"])
-def test_fp8_gemm_4wave(M, N, K, tile_m, tile_n, preshuffle_b):
+
+
+def _fp8_gemm_case(use_8w, shape_index, preshuffle_b):
+    m, n, k = _FP8_GEMM_SHAPES[shape_index]
+    tile_m, tile_n = ((128, 256) if use_8w else (64, 64)) if shape_index == 0 else (256, 256)
+    layout = "preshuffle" if preshuffle_b else "rowmajor"
+    wave = "8w" if use_8w else "4w"
+    marks = pytest.mark.large_shape if shape_index >= 2 else ()
+    return pytest.param(
+        use_8w,
+        shape_index,
+        m,
+        n,
+        k,
+        tile_m,
+        tile_n,
+        preshuffle_b,
+        marks=marks,
+        id=f"{wave}-{m}x{n}x{k}-{layout}",
+    )
+
+
+# Pairwise covering array over wave count, shape, and B layout.  Each shape is
+# still exercised by both kernels and both layouts, while avoiding the redundant
+# three-factor Cartesian product (20 correctness launches -> 10).
+_FP8_GEMM_CASES = tuple(
+    _fp8_gemm_case(use_8w, shape_index, bool(shape_index % 2) ^ use_8w)
+    for shape_index in range(len(_FP8_GEMM_SHAPES))
+    for use_8w in (False, True)
+)
+_FP8_GEMM_CASE_VALUES = tuple(
+    (use_8w, shape_index, bool(shape_index % 2) ^ use_8w)
+    for shape_index in range(len(_FP8_GEMM_SHAPES))
+    for use_8w in (False, True)
+)
+
+
+@pytest.mark.parametrize(
+    "use_8w,shape_index,M,N,K,tile_m,tile_n,preshuffle_b",
+    _FP8_GEMM_CASES,
+)
+def test_fp8_gemm_rowscale(use_8w, shape_index, M, N, K, tile_m, tile_n, preshuffle_b):
     _bench_fp8_gemm(
         M=M,
         N=N,
         K=K,
-        use_8w=False,
+        use_8w=use_8w,
         tile_m=tile_m,
         tile_n=tile_n,
         b_preshuffled=preshuffle_b,
     )
 
 
-@pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n",
-    [
-        pytest.param(512, 2112, 7168, 128, 256, id="512x2112x7168"),
-        pytest.param(5120, 5120, 8320, 256, 256, id="5120x5120x8320"),
-        pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
-        pytest.param(9728, 8192, 8320, 256, 256, marks=pytest.mark.large_shape, id="9728x8192x8320"),
-        pytest.param(16384, 16384, 16384, 256, 256, marks=pytest.mark.large_shape, id="16384x16384x16384"),
-    ],
-)
-@pytest.mark.parametrize("preshuffle_b", [False, True], ids=["rowmajor", "preshuffle_b"])
-def test_fp8_gemm_8wave(M, N, K, tile_m, tile_n, preshuffle_b):
-    _bench_fp8_gemm(
-        M=M,
-        N=N,
-        K=K,
-        use_8w=True,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        b_preshuffled=preshuffle_b,
+def test_fp8_gemm_case_list_preserves_pairwise_coverage():
+    def _projection(cases):
+        return {
+            (left_axis, left, right_axis, right)
+            for case in cases
+            for left_axis in range(len(case))
+            for right_axis in range(left_axis + 1, len(case))
+            for left, right in [(case[left_axis], case[right_axis])]
+        }
+
+    exhaustive = (
+        (use_8w, shape_index, preshuffle_b)
+        for use_8w in (False, True)
+        for shape_index in range(len(_FP8_GEMM_SHAPES))
+        for preshuffle_b in (False, True)
     )
+    missing = _projection(exhaustive) - _projection(_FP8_GEMM_CASE_VALUES)
+    assert not missing, f"FP8 row-scale matrix is missing pairwise interactions: {sorted(missing, key=repr)}"
 
 
 if __name__ == "__main__":

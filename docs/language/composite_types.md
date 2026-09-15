@@ -129,8 +129,8 @@ underlying IR values or storage.
 
 ## Closure over the protocols
 
-FlyDSL's three protocols — `DslType`, `JitArgument`, `Storable` describe what a value can do at a
-boundary. Composites are **closed under each of them, independently**:
+FlyDSL's [three protocols](dsl_protocols.md) — `DslType`, `JitArgument`, `Storable` describe what
+a value can do at a boundary. Composites are **closed under each of them, independently**:
 
 > a composite satisfies protocol `P` if and only if every non-`Constexpr` field satisfies `P`; its
 > implementation of `P` is the concatenation of the fields' implementations, in declaration order.

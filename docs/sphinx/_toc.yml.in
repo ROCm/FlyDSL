@@ -25,6 +25,8 @@ subtrees:
         title: Composite types
       - file: language/storage_and_allocator
         title: Storage and allocator
+      - file: language/dsl_protocols
+        title: DSL protocols
   - caption: Extension
     entries:
       - file: extension/rand

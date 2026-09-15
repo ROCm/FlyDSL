@@ -1211,86 +1211,80 @@ def test_a16w4_moe_e2e_native_layout(tokens, model_dim, inter_dim, experts, topk
     assert verify_output(out, ref2, rtol=2e-3, atol=2e-3, logits_diff_threshold=2e-3)
 
 
+_MOE_2STAGE_CASES = [
+    # This test used to form a 6x3x3x2x2x2x2 Cartesian product.  Of its 864
+    # cases, 840 were skipped and 16 were non-running xfails.  Keep the eight
+    # valid a16w4 correctness paths; the broken fp4/a8w4 paths are already
+    # tracked by test_mxfp_moe_variants.
+    pytest.param(
+        129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, "a16w4", "f16", False, False, False, -1, id="M-eager"
+    ),
+    pytest.param(
+        129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, "a16w4", "f16", False, False, True, -1, id="M-graph"
+    ),
+    pytest.param(
+        333,
+        4096,
+        2048,
+        17,
+        9,
+        64,
+        128,
+        128,
+        256,
+        128,
+        False,
+        "a16w4",
+        "f16",
+        False,
+        False,
+        False,
+        -1,
+        id="L-eager",
+        marks=pytest.mark.large_shape,
+    ),
+    pytest.param(
+        333,
+        4096,
+        2048,
+        17,
+        9,
+        64,
+        128,
+        128,
+        256,
+        128,
+        False,
+        "a16w4",
+        "f16",
+        False,
+        False,
+        True,
+        -1,
+        id="L-graph",
+        marks=pytest.mark.large_shape,
+    ),
+    pytest.param(
+        64, 512, 256, 4, 2, 32, 128, 256, 128, 256, False, "a16w4", "f16", False, False, False, -1, id="FP4-S-eager"
+    ),
+    pytest.param(
+        64, 512, 256, 4, 2, 32, 128, 256, 128, 256, False, "a16w4", "f16", False, False, True, -1, id="FP4-S-graph"
+    ),
+    pytest.param(
+        128, 1024, 256, 8, 2, 64, 128, 256, 256, 256, False, "a16w4", "f16", False, False, False, -1, id="FP4-M-eager"
+    ),
+    pytest.param(
+        128, 1024, 256, 8, 2, 64, 128, 256, 256, 256, False, "a16w4", "f16", False, False, True, -1, id="FP4-M-graph"
+    ),
+]
+
+
+@pytest.mark.skipif("gfx95" not in ARCH, reason="A16W4 requires gfx950+")
 @pytest.mark.parametrize(
-    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2, doweight_stage1",
-    [
-        # Small smoke (fast compile + run) for all in_dtype.
-        pytest.param(64, 256, 128, 4, 2, 16, 64, 128, 64, 128, False, id="S"),
-        # Medium (more realistic) for all in_dtype (skip_ref will auto-enable).
-        pytest.param(129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, id="M"),
-        # Large (aiter-style) mainly for perf smoke; reference is too expensive here.
-        pytest.param(333, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L", marks=pytest.mark.large_shape),
-        # FP4-compatible shape (model_dim >= 256, tile_k >= 256, tile_k2 >= 256).
-        # NOTE: To fit within GPU memory during tests, we reduce batch sizes and sequence lengths
-        pytest.param(
-            64,
-            512,
-            256,
-            4,
-            2,
-            32,
-            128,
-            256,
-            128,
-            256,
-            False,
-            id="FP4-S",
-            marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+"),
-        ),
-        pytest.param(
-            128,
-            1024,
-            256,
-            8,
-            2,
-            64,
-            128,
-            256,
-            256,
-            256,
-            False,
-            id="FP4-M",
-            marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+"),
-        ),
-        pytest.param(
-            256,
-            1024,
-            256,
-            8,
-            2,
-            128,
-            128,
-            256,
-            256,
-            256,
-            False,
-            id="FP4-L",
-            marks=[
-                pytest.mark.large_shape,
-                pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+"),
-            ],
-        ),
-    ],
+    "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n1,tile_k1,tile_n2,tile_k2,"
+    "doweight_stage1,in_dtype,out_dtype,use_reduce,use_valid_mask,test_graph,group_size",
+    _MOE_2STAGE_CASES,
 )
-@pytest.mark.parametrize(
-    "in_dtype",
-    [
-        pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
-        pytest.param("a8w4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="A8W4 requires gfx950+")),
-        pytest.param("a16w4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="A16W4 requires gfx950+")),
-    ],
-)
-@pytest.mark.parametrize("out_dtype", ["f16", "bf16", "f32"], ids=["out_f16", "out_bf16", "out_f32"])
-@pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
-@pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
-@pytest.mark.parametrize(
-    "test_graph",
-    [
-        pytest.param(False, id="eager"),
-        pytest.param(True, id="graph"),
-    ],
-)
-@pytest.mark.parametrize("group_size", [-1, 32], ids=["perrow", "g32"])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1311,8 +1305,8 @@ def test_moe_gemm_2stage(
     group_size: int,
     *,
     seed: int = 0,
-    num_iters: int = 5,
-    num_warmup: int = 2,
+    num_iters: int = 0,
+    num_warmup: int = 0,
     moe_sort_mode: Optional[str] = None,
     compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,

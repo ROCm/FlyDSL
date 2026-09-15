@@ -5,7 +5,7 @@
 # Fail-fast: exits immediately on first test failure.
 #
 # Local (default): skips large_shape tests for fast iteration.
-# CI:              RUN_TESTS_FULL=1 bash scripts/run_tests.sh
+# CI/full:         RUN_TESTS_FULL=1 bash scripts/run_tests.sh
 
 set -euo pipefail
 
@@ -39,13 +39,18 @@ if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
   export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
-pytest_args=(-v --no-header --tb=short)
+pytest_markers="not multi_gpu and not benchmark"
 if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
-    pytest_args+=(-m "not large_shape")
+    pytest_markers+=" and not large_shape"
 fi
+# pytest.ini already enables verbose mode; -q brings the broad suite back to
+# compact per-file progress instead of emitting thousands of node IDs to CI.
+pytest_args=(-q --no-header --tb=short -m "${pytest_markers}")
 
 # ---------------------------------------------------------------------------
-# 1. All pytest-based tests (kernels + language + unit + system + extension + examples)
+# 1. Single-GPU correctness tests (kernels + language + unit + system + extension + examples)
+# Multi-GPU and benchmark tests have dedicated CI jobs/steps and must not be
+# repeated here, especially on single-GPU jobs backed by an 8-GPU host.
 # ---------------------------------------------------------------------------
 echo "========================================================================"
 echo "Pytest: kernels + language + unit + system + extension + examples"
