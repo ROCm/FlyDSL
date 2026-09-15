@@ -207,10 +207,8 @@ def emit_direct_fixed_slot_payload(
                 remote_running = buffer_ops.buffer_load(
                     crfa(p_running), destination, vec_width=1, dtype=fx.Int64
                 )
-                offset_lane = fx.Int32(
-                    comm_ops.atomic_add_system(
-                        remote_running + fx.Int64(local_expert) * fx.Int64(4), fx.Int32(1)
-                    )
+                offset_lane = comm_ops.atomic_add_system(
+                    remote_running + fx.Int64(local_expert) * fx.Int64(4), fx.Int32(1)
                 )
         expert_offset = fx.Int32(fx.rocdl.readlane(T.i32, offset_lane, 0))
         publish = assigned & (expert_offset < fx.Int32(fz_cap))
@@ -246,10 +244,8 @@ def emit_direct_fixed_slot_payload(
     fx.barrier()
     if tid == fx.Int32(0):
         comm_ops.fence_system_release()
-        done = fx.Int32(
-            comm_ops.atomic_add_agent(
-                a_producer_done + fx.Int64(producer_group) * fx.Int64(4), fx.Int32(1)
-            )
+        done = comm_ops.atomic_add_agent(
+            a_producer_done + fx.Int64(producer_group) * fx.Int64(4), fx.Int32(1)
         )
         if done == fx.Int32(producers_per_group - 1):
             comm_ops.fence_agent_acquire()
@@ -586,9 +582,7 @@ def emit_dispatch_plan(
                 expert = buffer_ops.buffer_load(r_idx, wk, vec_width=1, dtype=fx.Int32)
                 valid = (expert >= fx.Int32(0)) & (expert < fx.Int32(fz_total_experts))
                 if valid:
-                    position = fx.Int32(
-                        comm_ops.atomic_add_agent(a_lc + fx.Int64(expert) * fx.Int64(4), fx.Int32(1))
-                    )
+                    position = comm_ops.atomic_add_agent(a_lc + fx.Int64(expert) * fx.Int64(4), fx.Int32(1))
                     buffer_ops.buffer_store(wk, r_pair, position)
 
     fx.rocdl.s_waitcnt(0)
@@ -664,9 +658,7 @@ def emit_dispatch_group(
             expert = buffer_ops.buffer_load(r_idx, route, vec_width=1, dtype=fx.Int32)
             valid = (expert >= fx.Int32(0)) & (expert < fx.Int32(fz_total_experts))
             if valid:
-                position = fx.Int32(
-                    comm_ops.atomic_add_agent(a_local_cursor + fx.Int64(expert) * fx.Int64(4), fx.Int32(1))
-                )
+                position = comm_ops.atomic_add_agent(a_local_cursor + fx.Int64(expert) * fx.Int64(4), fx.Int32(1))
                 buffer_ops.buffer_store(route, r_pair, position)
         fx.rocdl.s_waitcnt(0)
         fx.barrier()
@@ -731,9 +723,7 @@ def emit_dispatch_payload(
     def _finish_task(destination, local_expert, ge, num_chunks):
         if const_expr(payload_chunk_rows > 0):
             comm_ops.fence_system_release()
-            completed = fx.Int32(
-                comm_ops.atomic_add_agent(a_chunk_done + fx.Int64(ge) * fx.Int64(4), fx.Int32(1))
-            )
+            completed = comm_ops.atomic_add_agent(a_chunk_done + fx.Int64(ge) * fx.Int64(4), fx.Int32(1))
             if completed == num_chunks - fx.Int32(1):
                 comm_ops.fence_agent_acquire()
                 buffer_ops.buffer_store(fx.Int32(0), r_chunk_done, ge)
