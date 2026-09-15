@@ -71,7 +71,7 @@ FlyDSL/
 │   └── extension/<library>/       # one folder per extension library (extension/coop/)
 ├── scripts/                       # build, test, benchmark, wheel, debug helper scripts
 ├── docs/                          # Sphinx documentation source
-├── thirdparty/                    # Vendored dlpack and tvm-ffi
+├── thirdparty/                    # Vendored dlpack and tvm-ffi; llvm-extensions/ (local LLVM changes; order = LLVM_EXTENSIONS in scripts/build_llvm.sh)
 └── build-fly/                     # Generated build output; do not edit
 ```
 
@@ -95,7 +95,8 @@ Public docs are deployed from `.github/workflows/docs.yml` to
 ## Build & Test
 
 ```bash
-bash scripts/build_llvm.sh -j64       # Build LLVM/MLIR once
+bash scripts/build_llvm.sh -j64       # Build LLVM/MLIR once (resets ../llvm-project tracked files, then applies the LLVM_EXTENSIONS series)
+                                      #   FLYDSL_LLVM_NO_EXT=1 builds stock upstream (control arm; all-or-nothing)
 bash scripts/build.sh -j64            # Build FlyDSL C++ + Python bindings
 pip install -e .                      # Editable Python install
 

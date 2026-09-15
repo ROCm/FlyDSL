@@ -193,20 +193,33 @@ jobs:
             echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
             exit 0
           fi
-          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+          for f in thirdparty/llvm-build-info.json scripts/build_llvm.sh; do
             if ! git -C flydsl-test show "FETCH_HEAD:${f}" >"base-pin/${f}"; then
               echo "Base commit has no ${f}; treating LLVM pin as unchanged."
               echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
               exit 0
             fi
           done
+          # The extension set is a directory with a varying number of files, so it is
+          # extracted wholesale rather than named file by file. `git show` on a
+          # tree prints a listing, not the contents, so it cannot be used here.
+          if ! git -C flydsl-test archive FETCH_HEAD thirdparty/llvm-extensions \
+               | tar -x -C base-pin 2>/dev/null; then
+            echo "Base commit has no thirdparty/llvm-extensions; treating LLVM pin as unchanged."
+            echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
           changed=false
-          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+          for f in thirdparty/llvm-build-info.json scripts/build_llvm.sh; do
             if ! diff -q "flydsl-test/${f}" "base-pin/${f}" >/dev/null; then
               echo "LLVM input differs from base: ${f}"
               changed=true
             fi
           done
+          if ! diff -qr "flydsl-test/thirdparty/llvm-extensions" "base-pin/thirdparty/llvm-extensions" >/dev/null; then
+            echo "LLVM input differs from base: thirdparty/llvm-extensions"
+            changed=true
+          fi
           # sed, not python3: every other python call here runs in the container
           # and the runners promise no host interpreter. Scoped to "upstream" so a
           # second entry carrying its own llvm_hash cannot be picked up.
