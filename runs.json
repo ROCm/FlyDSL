@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-16T14:42:02Z",
+ "updated": "2026-09-16T15:28:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,42 @@
    "branch": "main",
    "event": "push",
    "title": "Fly DSL test",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35109940420",
    "created_at": "2026-09-16T14:38:46Z",
-   "updated_at": "2026-09-16T14:39:39Z",
+   "updated_at": "2026-09-16T14:53:30Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-16T14:53:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35109940420/job/104846474952"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-16T14:53:51Z",
+     "completed_at": "2026-09-16T15:08:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35109940420/job/104846474995",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-16T14:53:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35109940420/job/104846475011"
+    }
+   ]
   },
   {
    "run_id": 35109793469,
@@ -40,11 +69,11 @@
    "branch": "pr/enh-specialized-storable",
    "event": "pull_request",
    "title": "[Enh] Make specialized Vector and Pointer types Storable",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243",
    "created_at": "2026-09-16T12:01:11Z",
-   "updated_at": "2026-09-16T12:18:28Z",
+   "updated_at": "2026-09-16T14:54:07Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -70,9 +99,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-16T12:18:28Z",
+     "started_at": "2026-09-16T14:54:07Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243/job/104790244229"
     }
