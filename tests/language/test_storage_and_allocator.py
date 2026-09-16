@@ -838,7 +838,7 @@ class TestArrayLeaf:
     @pytest.mark.parametrize(
         "make, match",
         [
-            (lambda: fx.Array[object, 4], "Numeric subclass"),
+            (lambda: fx.Array[object, 4], "Storable"),
             (lambda: fx.Array[fx.Int32, 0], "positive integer"),
             (lambda: fx.Array[fx.Int32, -1], "positive integer"),
             (lambda: fx.Array[fx.Int32, 4, 0], "positive integer"),
@@ -848,6 +848,52 @@ class TestArrayLeaf:
     def test_parameter_errors(self, make, match):
         with pytest.raises(TypeError, match=match):
             make()
+
+
+@pytest.mark.l1a_compile_no_target_dialect
+class TestArrayStorable:
+    def test_custom_element_layout_and_access_use_the_protocol(self, ctx, symbolic_offsets, monkeypatch):
+        class Payload(Word):
+            @classmethod
+            def __dsl_size_of__(cls):
+                return 12
+
+        typing_module = importlib.import_module("flydsl.expr.typing")
+        monkeypatch.setattr(typing_module, "recast_iter", lambda dtype, ptr: ptr)
+        monkeypatch.setattr(typing_module, "add_offset", lambda ptr, offset: (ptr, offset))
+
+        array = fx.Array[Payload, 3]
+        assert array is fx.Array[Payload, 3, 4]
+        assert (dsl_size_of(array), dsl_align_of(array)) == (36, 4)
+        aligned = fx.Array[Payload, 3, 16]
+        assert (dsl_size_of(aligned), dsl_align_of(aligned)) == (36, 16)
+        items = aligned.__peek_from_ptr__("base")
+        assert items[2] == Payload(("peek", ("base", 24)))
+        items[2] = Payload(7)
+        assert Word.poked == [(("base", 24), 7)]
+
+    @pytest.mark.parametrize(
+        "missing", ["__dsl_size_of__", "__dsl_align_of__", "__peek_from_ptr__", "__poke_into_ptr__"]
+    )
+    def test_all_storable_hooks_are_required(self, missing):
+        incomplete = type(
+            "Incomplete",
+            (),
+            {name: hook for name, hook in vars(Word).items() if isinstance(hook, classmethod) and name != missing},
+        )
+        with pytest.raises(TypeError, match="Storable"):
+            fx.Array[incomplete, 4]
+
+    @pytest.mark.parametrize("dtype", [fx.Boolean, fx.Int4, fx.Float4E2M1FN, fx.Float6E2M3FN])
+    def test_element_layout_must_be_storable(self, dtype):
+        with pytest.raises(TypeError, match="Storable"):
+            fx.Array[dtype, 4]
+
+    @pytest.mark.parametrize("dtype", [fx.Float32, Word])
+    @pytest.mark.parametrize("alignment", [2, 12])
+    def test_alignment_rules_apply_to_all_storable_elements(self, dtype, alignment):
+        with pytest.raises(ValueError, match="multiple of the element alignment|power of two"):
+            fx.Array[dtype, 4, alignment]
 
 
 @pytest.mark.l1a_compile_no_target_dialect
@@ -1071,9 +1117,18 @@ class TestArrayStruct:
         with pytest.raises(TypeError, match="field 'value'.*Storable"):
             fx.Array[Item, 4]
 
-    def test_union_elements_are_rejected(self):
-        with pytest.raises(TypeError, match="storable Struct"):
-            fx.Array[Scratch, 4]
+    def test_element_access_preserves_unsupported_operation_errors(self):
+        array = fx.Array[Scratch, 4]
+        assert dsl_size_of(array) == 4 * dsl_size_of(Scratch)
+
+        def body():
+            items = array.__peek_from_ptr__(fx.get_iter(fx.make_rmem_tensor(dsl_size_of(array), fx.Uint8)))
+            with pytest.raises(NotImplementedError, match="does not support __peek_from_ptr__"):
+                items[0]
+            with pytest.raises(NotImplementedError, match="does not support __poke_into_ptr__"):
+                items[0] = None
+
+        source_ir(body)
 
     def test_nested_field_addresses_use_aos_stride(self, ctx, symbolic_offsets, monkeypatch):
         typing_module = importlib.import_module("flydsl.expr.typing")

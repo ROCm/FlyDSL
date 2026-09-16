@@ -110,11 +110,14 @@ value = loaded[0]                        # Float32
 
 ### `fx.Array[E, N, A]`
 
-The fixed-size storage view: an element type `E` (`Numeric`, storable `Struct`, or storable
-specialized `Vector`/`Pointer`), a positive `int` count `N`, and an optional positive byte
-alignment `A`. Array types are cached, so the same parameters yield the same class.
-After `peek` it supports static and run-time element indexing; numeric arrays also support
-`.view(layout)`.
+The fixed-size storage view: an element type `E` implementing `Storable`, a positive `int`
+count `N`, and an optional byte alignment `A`, defaulting to `dsl_align_of(E)`.
+Array types are cached, so the same parameters yield the same class.
+After `peek`, static and run-time indexing delegate to `E`'s storage access hooks;
+numeric arrays also support `.view(layout)`.
+
+Each element occupies `dsl_size_of(E)` bytes. `A` must be a positive power of two and a
+multiple of `dsl_align_of(E)`; it aligns the array base without changing element stride.
 
 ```python
 Tile = fx.Array[fx.Float32, 32, 16]
@@ -131,9 +134,7 @@ value = vectors[index]                   # Vec
 Pointers = fx.Array[fx.Pointer[fx.Float32, fx.AddressSpace.Global], 64]
 ```
 
-Struct elements use an **array-of-structures (AoS)** layout. Each element occupies
-`dsl_size_of(E)` bytes, including its trailing padding, and indexing delegates to the element's
-recursive storage reads/writes. Nested structs with storable numeric fields work the same way:
+For example, an **array-of-structures (AoS)** layout includes each element's trailing padding:
 
 ```python
 @fx.struct
@@ -151,11 +152,6 @@ index = fx.thread_idx.x                   # caller keeps indices in [0, 128)
 items[index] = Item(index, 1.0)
 item = items[index]                       # an Item value
 ```
-
-For Struct, Vector, and Pointer elements, each element occupies `dsl_size_of(E)` bytes.
-Indexing reads or writes one `E`, preserving the vector's logical shape or the pointer's
-element type, address space, and pointee alignment. An explicit `A` must be a power of two
-and a multiple of `dsl_align_of(E)`; it aligns the array base without changing element stride.
 
 ### `fx.Align[T, A]`
 

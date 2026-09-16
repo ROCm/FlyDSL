@@ -2231,24 +2231,19 @@ class Array:
             byte_offset = (
                 offset * self._element_size if isinstance(offset, int) else int_tuple_mul(offset, self._element_size)
             )
-            return add_offset(self.ptr, byte_offset)
+            return add_offset(recast_iter(Uint8, self.ptr), byte_offset)
 
         @dsl_loc_tracing
         def __getitem__(self, offset):
-            if self._is_numeric:
-                return self.ptr.__getitem__(offset)
             from ..compiler.protocol import peek_from_ptr
 
             return peek_from_ptr(self.dtype, self._element_ptr(offset))
 
         @dsl_loc_tracing
         def __setitem__(self, offset, value):
-            if self._is_numeric:
-                self.ptr.__setitem__(offset, value)
-            else:
-                from ..compiler.protocol import poke_into_ptr
+            from ..compiler.protocol import poke_into_ptr
 
-                poke_into_ptr(self.dtype, self._element_ptr(offset), value)
+            poke_into_ptr(self.dtype, self._element_ptr(offset), value)
 
         def view(self, layout):
             if not self._is_numeric:
@@ -2266,31 +2261,23 @@ class Array:
         else:
             raise TypeError("Array expects Array[dtype, size] or Array[dtype, size, align]")
 
-        is_numeric = isinstance(dtype, type) and issubclass(dtype, Numeric)
-        if not is_numeric:
-            # struct imports Array, so resolve the composite predicate lazily.
-            from ..compiler.protocol import dsl_align_of, dsl_size_of
-            from .struct import is_struct_type
+        from ..compiler.protocol import Storable, dsl_align_of, dsl_size_of
 
-            is_vector_or_pointer = isinstance(dtype, type) and issubclass(dtype, (Vector, Pointer))
-            if not is_struct_type(dtype) and not is_vector_or_pointer:
-                raise TypeError(
-                    f"Array dtype must be a Numeric subclass, a storable Struct, "
-                    f"or a specialized Vector/Pointer, got {dtype!r}"
-                )
+        if not isinstance(dtype, type) or not issubclass(dtype, Storable):
+            raise TypeError(f"Array element type must implement the Storable protocol, got {dtype!r}")
         if not isinstance(size, int) or size <= 0:
             raise TypeError(f"Array size must be a positive integer, got {size!r}")
 
-        elem_byte_size = max(1, dtype.width // 8) if is_numeric else dsl_size_of(dtype)
-        elem_align = elem_byte_size if is_numeric else dsl_align_of(dtype)
+        elem_byte_size = dsl_size_of(dtype)
+        elem_align = dsl_align_of(dtype)
         if align is None:
             align = elem_align
         else:
             if not isinstance(align, int) or align <= 0:
                 raise TypeError(f"Array align must be a positive integer, got {align!r}")
-            if not is_numeric and align % elem_align != 0:
+            if align % elem_align != 0:
                 raise ValueError(f"Array align must be a multiple of the element alignment {elem_align}, got {align}")
-        if not is_numeric and align & (align - 1):
+        if align & (align - 1):
             raise ValueError(f"Array alignment must be a power of two, got {align}")
 
         cache_key = (dtype, size, align)
@@ -2307,10 +2294,10 @@ class Array:
                 "dtype": dtype,
                 "size": size,
                 "align": align,
-                "_is_numeric": is_numeric,
+                "_is_numeric": issubclass(dtype, Numeric),
                 "_element_size": elem_byte_size,
                 "_element_align": elem_align,
-                "_nbytes": max(1, dtype.width * size // 8) if is_numeric else elem_byte_size * size,
+                "_nbytes": elem_byte_size * size,
             },
         )
         cls._cache[cache_key] = array_type
