@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-09-16T21:27:35Z",
+ "updated": "2026-09-16T22:01:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35155219219,
+   "pr": 1150,
+   "commit": "1deeb691b46c99401fc71b69578eaf2fb6880d84",
+   "branch": "fix/ci-dashboard-log-ingest",
+   "event": "pull_request",
+   "title": "[CI] Restore dashboard benchmark log ingestion",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35155219219",
+   "created_at": "2026-09-16T21:58:04Z",
+   "updated_at": "2026-09-16T21:59:51Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-16T21:59:47Z",
+     "completed_at": "2026-09-16T21:59:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35155219219/job/104993352683",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-16T21:59:47Z",
+     "completed_at": "2026-09-16T21:59:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35155219219/job/104993352706",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-16T21:59:47Z",
+     "completed_at": "2026-09-16T21:59:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35155219219/job/104993352725",
+     "log_fetch_failed": true
+    }
+   ]
+  },
   {
    "run_id": 35131817286,
    "pr": 1149,
@@ -2160,49 +2206,6 @@
    "updated_at": "2026-09-14T07:21:22Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 34817329648,
-   "pr": 1013,
-   "commit": "1bf0e69f0b30ace7f18b95a52853f1664c0de7ba",
-   "branch": "pr/enh-cdna5-tiled-tdm-atom",
-   "event": "pull_request",
-   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817329648",
-   "created_at": "2026-09-14T07:19:27Z",
-   "updated_at": "2026-09-14T09:39:45Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-14T07:41:02Z",
-     "completed_at": "2026-09-14T08:48:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817329648/job/103895868213"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-14T08:38:41Z",
-     "completed_at": "2026-09-14T09:39:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817329648/job/103895868236"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-14T08:00:01Z",
-     "completed_at": "2026-09-14T08:03:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817329648/job/103895868280"
-    }
-   ]
   }
  ]
 }
