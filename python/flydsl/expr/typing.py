@@ -945,6 +945,95 @@ class ComposedLayout(BuiltinDslType):
 
 @ir.register_value_caster(PointerType.static_typeid, replace=True)
 class Pointer(BuiltinDslType):
+    _alias_cache = {}
+
+    def __class_getitem__(cls, params):
+        """Specialize a storable pointer as ``Pointer[dtype, space, alignment]``.
+
+        ``space`` is Global or Shared; ``alignment`` describes the pointee address
+        in bytes and defaults to the element byte width rounded up. Swizzled
+        pointers are unsupported. Global/Shared addresses occupy 8/4 storage bytes.
+        """
+        if cls is not Pointer:
+            raise TypeError(f"{cls.__name__} is already specialized; use Pointer[dtype, space, alignment]")
+        if not isinstance(params, tuple) or len(params) not in (2, 3):
+            raise TypeError("Pointer expects Pointer[dtype, space] or Pointer[dtype, space, alignment]")
+        dtype, space = params[:2]
+        alignment = params[2] if len(params) == 3 else None
+        if (
+            not isinstance(dtype, type)
+            or not issubclass(dtype, Numeric)
+            or dtype._ir_type is None
+            or issubclass(dtype, Index)
+        ):
+            raise TypeError("Pointer dtype must be a concrete fixed-width Numeric type")
+
+        if isinstance(space, bool):
+            raise TypeError("Pointer address space must be Global or Shared")
+        space = address_space_from_attr(space)
+        if space not in (AddressSpace.Global, AddressSpace.Shared):
+            raise TypeError("Storable Pointer supports only Global and Shared address spaces")
+
+        elem_bytes = (dtype.width + 7) // 8
+        if alignment is None:
+            alignment = elem_bytes
+        if isinstance(alignment, bool) or not isinstance(alignment, int):
+            raise TypeError("Pointer alignment must be an integer byte count")
+        if alignment <= 0 or alignment > 0x7FFFFFFF or alignment % elem_bytes:
+            raise ValueError(f"Pointer alignment must be a positive int32 multiple of element byte size {elem_bytes}")
+
+        key = (dtype, space, alignment)
+        cached = Pointer._alias_cache.get(key)
+        if cached is not None:
+            return cached
+
+        pointer_bytes = 8 if space == AddressSpace.Global else 4
+
+        def __init__(self, value):
+            if not isinstance(value, Pointer):
+                raise TypeError(f"{type(self).__name__} expects a Pointer, got {type(value).__name__}")
+            if value.type.element_type != dtype.ir_type or value.address_space != space:
+                raise TypeError(
+                    f"{type(self).__name__} expects matching element type and address space, got {value.type}"
+                )
+            if value.type.swizzle.mask != 0:
+                raise TypeError(f"{type(self).__name__} does not support swizzled pointers")
+            if value.alignment % alignment:
+                raise TypeError(f"{type(self).__name__} requires alignment {alignment}, got {value.alignment}")
+            target = type(self).ir_type
+            if value.type != target:
+                # Weaken the alignment promise in the IR type as well as in Python.
+                value = recast_iter(target, value)
+            Pointer.__init__(self, value)
+
+        def __coerce__(cls, value):
+            return value if isinstance(value, cls) else cls(value)
+
+        def __peek_from_ptr__(cls, ptr):
+            return ptr_load(ptr, cls)
+
+        def __poke_into_ptr__(cls, ptr, value):
+            ptr_store(cls.__coerce__(value), ptr)
+
+        suffix = f", {alignment}" if alignment != elem_bytes else ""
+        alias = type(
+            f"Pointer[{dtype.__name__}, {space}{suffix}]",
+            (Pointer,),
+            {
+                "__module__": Pointer.__module__,
+                "__init__": __init__,
+                "__coerce__": classmethod(__coerce__),
+                "ir_type": lazy_classattr(lambda: PointerType.get(dtype.ir_type, space, alignment)),
+                "element_type": property(lambda self: dtype),
+                "__dsl_size_of__": classmethod(lambda cls: pointer_bytes),
+                "__dsl_align_of__": classmethod(lambda cls: pointer_bytes),
+                "__peek_from_ptr__": classmethod(__peek_from_ptr__),
+                "__poke_into_ptr__": classmethod(__poke_into_ptr__),
+            },
+        )
+        Pointer._alias_cache[key] = alias
+        return alias
+
     @property
     def element_type(self):
         return Numeric.from_ir_type(self.type.element_type)
@@ -1446,6 +1535,16 @@ class Vector(ArithValue):
     Arithmetic operators are inherited from ArithValue; scalar operands
     are auto-broadcast via ``_coerce_other``.
     """
+
+    _alias_cache = {}
+
+    def __class_getitem__(cls, params):
+        """Return the cached fixed-dtype, fixed-shape ``VectorAlias`` type."""
+        if cls is not Vector:
+            raise TypeError(f"{cls.__name__} is already specialized; use Vector[dtype, lanes]")
+        if not isinstance(params, tuple) or len(params) != 2:
+            raise TypeError("Vector expects Vector[dtype, lanes]")
+        return VectorAlias(*params)
 
     def __init__(self, value, shape=None, dtype=None):
         if not isinstance(value, ir.Value) and hasattr(value, "ir_value"):
@@ -1999,7 +2098,7 @@ class Vector(ArithValue):
         vec_ty = cls.make_type(len(elements), dtype)
         raw_elements = [_to_raw(cls._coerce_element(element, dtype)) for element in elements]
         res = vector.from_elements(vec_ty, raw_elements)
-        return cls(res, (len(elements),), dtype)
+        return cls(res, dtype=dtype)
 
     @classmethod
     @dsl_loc_tracing
@@ -2014,7 +2113,7 @@ class Vector(ArithValue):
                 index = Index(index)
             raw_indices.append(_to_raw(index))
         res = vector.LoadOp(result_type, _to_raw(memref), raw_indices).result
-        return cls(res, tuple(vty.shape), dtype)
+        return cls(res, dtype=dtype)
 
     @dsl_loc_tracing
     def store(self, memref, indices, *, alignment=None):
@@ -2219,8 +2318,74 @@ class Array:
 # ===========================================================================
 
 
-def VectorAlias(alias_dtype: Type[Numeric], lanes: int):
-    expected_shape = (lanes,)
+def VectorAlias(
+    alias_dtype: Type[Numeric],
+    lanes: int | tuple | list,
+) -> type[Vector]:
+    """Return the same specialized type as ``Vector[alias_dtype, lanes]``.
+
+    ``lanes`` accepts a count or a logical shape, including nested tuples/lists,
+    using Vector's shape normalization. Type identity and names retain the full
+    logical shape; only the MLIR representation is flattened.
+    """
+    if not isinstance(alias_dtype, type) or not issubclass(alias_dtype, Numeric) or alias_dtype._ir_type is None:
+        raise TypeError(f"Vector dtype must be a concrete Numeric type, got {alias_dtype!r}")
+    if not isinstance(lanes, (int, tuple, list)):
+        raise TypeError(f"Vector lanes must be a positive integer or a nested tuple/list shape, got {lanes!r}")
+    expected_shape = Vector._canonical_shape(lanes)
+
+    def _validate_shape(shape):
+        if not shape:
+            raise TypeError(f"Vector shape must be non-empty at every level, got {lanes!r}")
+        for dim in shape:
+            if isinstance(dim, tuple):
+                _validate_shape(dim)
+            elif isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+                raise TypeError(f"Vector shape dimensions must be positive integers, got {lanes!r}")
+
+    _validate_shape(expected_shape)
+    cache_key = (alias_dtype, expected_shape)
+    cached = Vector._alias_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    numel = Vector._numel_from_shape(expected_shape)
+    # Keep the established one-dimensional names. Other shapes need their full
+    # tuple structure: equal element counts do not imply equal indexing semantics.
+    alias_name = (
+        f"{alias_dtype.__name__}x{numel}"
+        if expected_shape == (numel,)
+        else f"Vector[{alias_dtype.__name__}, {expected_shape}]"
+    )
+
+    def _payload_bytes():
+        if issubclass(alias_dtype, Index):
+            raise TypeError("Index vectors are not Storable; use a fixed-width integer element type")
+        bits = alias_dtype.width * numel
+        if bits % 8:
+            raise TypeError(f"{alias_name} is not Storable: total bit width must be a multiple of 8")
+        return bits // 8
+
+    def __dsl_align_of__(cls):
+        _payload_bytes()
+        return max(1, (alias_dtype.width + 7) // 8)
+
+    def __dsl_size_of__(cls):
+        return _payload_bytes()
+
+    def __peek_from_ptr__(cls, ptr):
+        payload_bytes = _payload_bytes()
+        if alias_dtype.is_float and alias_dtype.width < 16:
+            # Transport narrow float packed bits through bytes, then recover the dtype.
+            bits = ptr_load(ptr, Vector.make_type(payload_bytes, Uint8))
+            return cls(bits.bitcast(alias_dtype))
+        return ptr_load(ptr, cls)
+
+    def __poke_into_ptr__(cls, ptr, value):
+        _payload_bytes()
+        value = cls.__coerce__(value)
+        if alias_dtype.is_float and alias_dtype.width < 16:
+            value = value.bitcast(Uint8)
+        ptr_store(value, ptr)
 
     def __init__(self, value, shape=None, dtype=None):
         if shape is not None and Vector._canonical_shape(shape) != expected_shape:
@@ -2233,15 +2398,21 @@ def VectorAlias(alias_dtype: Type[Numeric], lanes: int):
             value = Vector.from_elements(value, alias_dtype)
         Vector.__init__(self, value, expected_shape, alias_dtype)
 
-    return type(
-        f"{alias_dtype.__name__}x{lanes}",
+    alias_type = type(
+        alias_name,
         (Vector,),
         {
             "__module__": Vector.__module__,
             "__init__": __init__,
-            "ir_type": lazy_classattr(lambda: Vector.make_type(lanes, alias_dtype)),
+            "ir_type": lazy_classattr(lambda: Vector.make_type(expected_shape, alias_dtype)),
+            "__dsl_size_of__": classmethod(__dsl_size_of__),
+            "__dsl_align_of__": classmethod(__dsl_align_of__),
+            "__peek_from_ptr__": classmethod(__peek_from_ptr__),
+            "__poke_into_ptr__": classmethod(__poke_into_ptr__),
         },
     )
+    Vector._alias_cache[cache_key] = alias_type
+    return alias_type
 
 
 Float4E2M1FNx2 = VectorAlias(Float4E2M1FN, 2)

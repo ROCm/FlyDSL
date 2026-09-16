@@ -62,17 +62,56 @@ a traced pointer. This applies equally to built-in and user-defined types. Built
 | `T` | Size | Alignment |
 |---|---|---|
 | `Numeric` at least one byte wide (`fx.Int32`, `fx.Float32`, `fx.Int64`, …) | its byte width | its byte width |
-| `fx.Array[E, N]` / `fx.Array[E, N, A]` | `N × dsl_size_of(E)` bytes | `A`, defaulting to the element's natural alignment |
+| specialized `fx.Vector[E, Shape]` | `E.width × numel(Shape) / 8` bytes, no trailing padding | element byte width; 1 byte for packed sub-byte elements |
+| specialized `fx.Pointer[E, Space]` / `fx.Pointer[E, Space, A]` | 8 bytes for Global; 4 for Shared | 8 bytes for Global; 4 for Shared |
+| `fx.Array[E, N]` / `fx.Array[E, N, A]`, where `E` is `Storable` | `N × dsl_size_of(E)` bytes | `A`, defaulting to the element's natural alignment |
 | a composite whose non-`Constexpr` fields are all `Storable` | see *Byte layout* | see *Byte layout* |
 
 Builtin types without this contract include sub-byte numerics such as `fx.Boolean` and `fx.Int4`,
-plus `fx.Vector`, `fx.Pointer`, and `fx.Tensor`; asking for their storage size is a `TypeError`.
+plus unspecialized `fx.Vector` and `fx.Pointer`, and `fx.Tensor`; asking for their storage size is a `TypeError`.
 One such field is enough to make the whole composite non-storable.
+
+### `fx.Vector[E, Shape]`
+
+A [specialized vector](arithmetic_types.md#vector) can be allocated directly or
+stored in Struct fields. Its element type must be a concrete `Numeric` other than
+`Index`, and its total bit width must be a multiple of eight. Packed vectors such
+as `Vector[Int4, 2]` and `Vector[Boolean, 8]` are supported.
+
+Alignment is the element byte width rounded up, at least one byte, regardless of lane count or
+logical shape. For example, `Float32x4` occupies 16 bytes with 4-byte alignment. Use `Align[T, A]`
+for stronger placement alignment and wider memory accesses where supported by the target.
+
+```python
+Vec4 = fx.Vector[fx.Float32, 4]
+
+# Inside a kernel; works with static or dynamic SharedAllocator:
+storage = fx.SharedAllocator().allocate(fx.Align[Vec4, 16])
+storage.poke(Vec4(1.0) + 2.0)             # accepts a plain Vector result
+value = storage.peek()                   # returns Vec4
+```
+
+### `fx.Pointer[E, Space, A]`
+
+A specialized Pointer stores an address and returns a typed Pointer from `peek`.
+Specify a fixed-width `Numeric` element type `E` and `AddressSpace.Global` or
+`AddressSpace.Shared`. Optional pointee address alignment `A` defaults to the
+element byte width rounded up. Swizzled pointers are unsupported.
+
+```python
+P = fx.Pointer[fx.Float32, fx.AddressSpace.Global]  # alignment 4
+
+# Inside a kernel, with a compatible global pointer ptr:
+slot = fx.SharedAllocator().allocate(P)
+slot.poke(ptr)
+loaded = slot.peek()                     # P, with pointee alignment 4
+value = loaded[0]                        # Float32
+```
 
 ### `fx.Array[E, N, A]`
 
-The fixed-size storage view: a `Numeric` subclass or storable `Struct` type `E`, a positive `int`
-count `N`, and an optional positive byte alignment `A`. Array types are cached, so the same
+The fixed-size storage view: an element type `E` (`Numeric` or `Struct`) that implements
+`Storable`, a positive `int` count `N`, and an optional positive byte alignment `A`. Array types are cached, so the same
 parameters yield the same class. After `peek` it supports static and run-time element indexing;
 numeric arrays also support `.view(layout)`.
 

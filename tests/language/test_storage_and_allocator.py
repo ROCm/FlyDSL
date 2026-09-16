@@ -16,24 +16,27 @@ that produce one. Keep the two in sync when either changes.
 
 Declaring the composites themselves is ``test_composite_types.py``.
 
-Checks run through the real DSL frontend (frontend-only; see ``conftest.py``),
-so tracing needs no GPU. Only ``SharedAllocator`` requires a ``@flyc.kernel``
-trace (``launch_ir``); everything else runs in a plain ``@flyc.jit`` body, over a
-register-memory pointer where an address is needed.
+Frontend cases trace without a GPU; target and device cases exercise the full
+compiler and runtime through the matching verification-tier markers.
 """
 
 import importlib
+import re
 
 import pytest
 from lang_utils import launch_ir, source_ir
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.compiler.protocol import construct_from_ir_values, dsl_align_of, dsl_size_of, extract_to_ir_values
+from flydsl._mlir import ir
+from flydsl.compiler.protocol import (
+    Storable,
+    construct_from_ir_values,
+    dsl_align_of,
+    dsl_size_of,
+    extract_to_ir_values,
+)
 from flydsl.expr.struct import _storage_layout
-
-pytestmark = pytest.mark.l1a_compile_no_target_dialect
-
 
 # ###########################################################################
 # Shared fixtures & helpers
@@ -137,12 +140,33 @@ def _make_ptr_lines(ir_text):
     return [line.strip() for line in ir_text.splitlines() if "fly.make_ptr" in line]
 
 
+@pytest.fixture(
+    params=[
+        pytest.param("gfx942", marks=pytest.mark.l1b_target_dialect, id="compile-gfx942"),
+        pytest.param("gfx1100", marks=pytest.mark.l1b_target_dialect, id="compile-gfx1100"),
+        pytest.param("device", marks=pytest.mark.l2_device, id="gpu"),
+    ]
+)
+def storage_target(request, monkeypatch):
+    """Run each storage scenario through both target compilers and on the GPU."""
+    torch = pytest.importorskip("torch")
+    on_device = request.param == "device"
+    if on_device and not torch.cuda.is_available():
+        pytest.skip("requires GPU")
+    if not on_device:
+        monkeypatch.setenv("ARCH", request.param)
+    monkeypatch.setenv("COMPILE_ONLY", "0" if on_device else "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    return torch, "cuda" if on_device else "cpu"
+
+
 # ###########################################################################
 # Part 1 — fx.Storage[T]: a typed address
 #   (docs/language/storage_and_allocator.md → ## fx.Storage[T]: a typed address)
 # ###########################################################################
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestTypedAddress:
     """`Storage[T]` is the DSL's `T*`: one MLIR pointer plus a trace-time `T`."""
 
@@ -166,6 +190,7 @@ class TestTypedAddress:
         source_ir(body)
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestStorageView:
 
     def test_storage_targets_its_type_and_is_cached(self):
@@ -254,6 +279,7 @@ class TestStorageView:
 # ###########################################################################
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestStorableLeaves:
 
     @pytest.mark.parametrize(
@@ -274,6 +300,506 @@ class TestStorableLeaves:
             dsl_size_of(dtype)
 
 
+@pytest.mark.l1a_compile_no_target_dialect
+class TestVectorLeaf:
+    @pytest.mark.parametrize(
+        "dtype, lanes, size, alignment",
+        [
+            (fx.Float32, 1, 4, 4),
+            (fx.Float32, 3, 12, 4),
+            (fx.Float32, 4, 16, 4),
+            (fx.Float32, 8, 32, 4),
+            (fx.Float16, 8, 16, 2),
+            (fx.Float64, 3, 24, 8),
+            (fx.Uint8, 5, 5, 1),
+            (fx.Int4, 2, 1, 1),
+            (fx.Boolean, 8, 1, 1),
+            (fx.Float4E2M1FN, 2, 1, 1),
+            (fx.Float6E2M3FN, 4, 3, 1),
+            (fx.Float32, (2, 3), 24, 4),
+            (fx.Uint32, ((2, 2),), 16, 4),
+            (fx.Float6E2M3FN, ((2,), (2,)), 3, 1),
+        ],
+    )
+    def test_layout_without_mlir_context(self, dtype, lanes, size, alignment):
+        target = fx.Vector[dtype, lanes]
+        assert issubclass(target, Storable)
+        assert (dsl_size_of(target), dsl_align_of(target)) == (size, alignment)
+        assert fx.Storage[target] is fx.Storage[fx.VectorAlias(dtype, lanes)]
+        assert not issubclass(fx.Vector, Storable)
+
+    def test_vector_fields_use_element_alignment_and_no_payload_padding(self):
+        vector_type = fx.Vector[fx.Float32, 3]
+        record = fx.Struct["tag" : fx.Uint8, "value":vector_type, "tail" : fx.Uint8]
+        assert _storage_layout(record) == (20, 4, {"tag": 0, "value": 4, "tail": 16})
+        assert dsl_size_of(fx.Array[record, 2]) == 40
+
+        aligned = fx.Align[vector_type, 16]
+        assert (dsl_size_of(aligned), dsl_align_of(aligned)) == (12, 16)
+        record = fx.Struct["tag" : fx.Uint8, "value":aligned, "tail" : fx.Uint8]
+        assert _storage_layout(record) == (32, 16, {"tag": 0, "value": 16, "tail": 28})
+
+    @pytest.mark.parametrize("static", [True, False])
+    def test_explicit_alignment_is_preserved_on_vector_access(self, static):
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(1)
+            storage = allocator.allocate(fx.Align[fx.Float32x4, 16])
+            assert storage._ptr.alignment == 16
+            assert allocator.allocated_bytes == 32
+            storage.poke(fx.Float32x4(1.0))
+            assert type(storage.peek()) is fx.Float32x4
+
+        text = launch_ir(kernel)
+        if static:
+            assert "allocAlign = 16" in text
+
+    @pytest.mark.parametrize(
+        "target",
+        [fx.Vector[fx.Index, 4], fx.Vector[fx.Int4, 3], fx.Vector[fx.Boolean, 1], fx.Vector[fx.Int4, ((1, 3),)]],
+    )
+    def test_unsupported_layout_is_rejected_before_pointer_access(self, target):
+        for query in (dsl_size_of, dsl_align_of):
+            with pytest.raises(TypeError, match="not Storable"):
+                query(target)
+        with pytest.raises(TypeError, match="not Storable"):
+            target.__peek_from_ptr__(None)
+        with pytest.raises(TypeError, match="not Storable"):
+            target.__poke_into_ptr__(None, None)
+
+    @pytest.mark.parametrize("static", [True, False])
+    def test_allocation_coercion_and_jit_annotation(self, static):
+        @flyc.jit
+        def carry(value: fx.Vector[fx.Float32, 4]):
+            return value
+
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(3)
+            storage = allocator.allocate(fx.Vector[fx.Float32, 4])
+            storage.poke(carry(fx.Float32x4(1.0)) + 2.0)
+            loaded = storage.peek()
+            assert type(loaded) is fx.Float32x4
+            assert loaded.shape == (4,) and loaded.dtype is fx.Float32
+            assert allocator.allocated_bytes == 20
+            storage.poke([1.0, 2.0, 3.0, 4.0])
+            with pytest.raises(TypeError, match="expects Float32x4"):
+                storage.poke(fx.Vector[fx.Float32, 2](0.0))
+            with pytest.raises(TypeError, match="expects Float32x4"):
+                storage.poke(fx.Vector[fx.Int32, 4](0))
+
+        text = launch_ir(kernel)
+        assert "fly.ptr.load" in text and "fly.ptr.store" in text
+        assert "vector<4xf32>" in text
+
+    @pytest.mark.parametrize("shape", [4, (2, 2), ((2, 2),)])
+    @pytest.mark.parametrize("static", [True, False])
+    def test_storage_and_explicit_load_type_restore_specialization(self, shape, static):
+        target = fx.Vector[fx.Float32, shape]
+        expected_shape = (shape,) if isinstance(shape, int) else shape
+
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator(static=static)
+            storage = allocator.allocate(target)
+            value = target(1.0) + 2.0
+            assert type(value) is fx.Vector
+            with pytest.raises(TypeError, match="Storable"):
+                allocator.allocate(type(value))
+            storage.poke(value)
+            assert type(value) is fx.Vector
+            loaded = storage.peek()
+            assert type(loaded) is target and loaded.shape == expected_shape
+            loaded = fx.generic_load(storage._ptr, dtype=target)
+            assert type(loaded) is target and loaded.shape == expected_shape
+            assert type(fx.generic_load(storage._ptr, dtype=fx.Float32, count=4)) is fx.Vector
+
+        launch_ir(kernel)
+
+
+@pytest.mark.rocm_lower
+class TestVectorStorage:
+    @pytest.mark.l1b_target_dialect
+    @pytest.mark.parametrize("static", [True, False], ids=["static", "dynamic"])
+    def test_explicit_alignment_enables_ds_read_b128(self, monkeypatch, tmp_path, static):
+        torch = pytest.importorskip("torch")
+        monkeypatch.setenv("FLYDSL_COMPILE_BACKEND", "rocm")
+        monkeypatch.setenv("FLYDSL_RUNTIME_KIND", "rocm")
+        monkeypatch.setenv("ARCH", "gfx942")
+        monkeypatch.setenv("COMPILE_ONLY", "1")
+        monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+        monkeypatch.setenv("FLYDSL_DUMP_IR", "1")
+        monkeypatch.setenv("FLYDSL_DUMP_DIR", str(tmp_path))
+
+        @flyc.kernel
+        def kernel(src: fx.Tensor, dst: fx.Tensor):
+            tid = fx.thread_idx.x
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(3)
+            value = allocator.allocate(fx.Align[fx.Float32x4, 16])
+            if tid == 0:
+                fx.Storage[fx.Float32x4](value._ptr).poke(fx.generic_load(src.iter, dtype=fx.Float32x4))
+            fx.barrier()
+            # Read another thread's data and write it globally to retain the LDS read.
+            fx.generic_store(dst.iter + tid * 4, value.peek())
+
+        @flyc.jit
+        def launch(src: fx.Tensor, dst: fx.Tensor):
+            kernel(src, dst).launch(grid=1, block=64)
+
+        # CPU tensors suffice for target compilation; this does not launch on a GPU.
+        launch(torch.empty(256, dtype=torch.float32), torch.empty(256, dtype=torch.float32))
+        files = list(tmp_path.glob("*/*_final_isa.s"))
+        assert len(files) == 1
+        isa = files[0].read_text()
+        assert re.search(r"^\s*ds_read_b128\s", isa, re.MULTILINE), isa
+
+    @pytest.mark.parametrize("static", [True, False])
+    @pytest.mark.parametrize(
+        "dtype, shape, numel",
+        [
+            (fx.Float32, 3, 3),
+            (fx.Uint32, 4, 4),
+            (fx.Float8E4M3FN, 4, 4),
+            (fx.Float4E2M1FN, 2, 2),
+            (fx.Float6E2M3FN, 4, 4),
+            (fx.Int4, 2, 2),
+            (fx.Float32, (2, 3), 6),
+            (fx.Uint32, ((2, 2),), 4),
+            (fx.Float4E2M1FN, (1, 2), 2),
+            (fx.Float6E2M3FN, ((2,), (2,)), 4),
+        ],
+    )
+    def test_shared_and_struct_array_preserve_payload_bytes(self, storage_target, static, dtype, shape, numel):
+        torch, device = storage_target
+        vector_type = fx.Vector[dtype, shape]
+        expected_shape = (shape,) if isinstance(shape, int) else shape
+        payload = dtype.width * numel // 8
+        # Keep a guard after each payload, even for types with no trailing padding.
+        stride = dsl_size_of(vector_type) + dsl_align_of(vector_type)
+        block_size = 64
+
+        @fx.struct
+        class Item:
+            tag: fx.Int32
+            value: vector_type
+
+        @flyc.kernel
+        def kernel(raw: fx.Tensor, out: fx.Tensor, tags: fx.Tensor):
+            tid = fx.thread_idx.x
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(3)
+            direct = allocator.allocate(vector_type)
+            items = allocator.allocate(fx.Array[Item, block_size]).peek()
+            value = fx.Storage[vector_type](raw.iter + tid * stride).peek()
+            assert type(value) is vector_type and value.shape == expected_shape
+            items[tid] = Item(tid, value)
+            if tid == 0:
+                fx.Storage[vector_type](direct._ptr).poke(value)
+            fx.barrier()
+            peer = items[block_size - 1 - tid]
+            assert type(peer.value) is vector_type and peer.value.shape == expected_shape
+            fx.Storage[vector_type](out.iter + tid * stride).poke(peer.value)
+            tags[tid] = peer.tag
+            if tid == block_size - 1:
+                loaded = fx.Storage[vector_type](direct._ptr).peek()
+                fx.Storage[vector_type](out.iter + block_size * stride).poke(loaded)
+
+        @flyc.jit
+        def launch(raw: fx.Tensor, out: fx.Tensor, tags: fx.Tensor):
+            kernel(raw, out, tags).launch(grid=1, block=block_size)
+
+        raw = torch.arange(block_size * stride, dtype=torch.int32, device=device).to(torch.uint8)
+        out = torch.full(((block_size + 1) * stride,), 0x5A, dtype=torch.uint8, device=device)
+        tags = torch.empty(block_size, dtype=torch.int32, device=device)
+        launch(raw, out, tags)
+        assert launch._last_compiled is not None
+        if device == "cpu":
+            return
+
+        # A vector store must leave the guard bytes and adjacent payloads intact.
+        expected = torch.full_like(out.cpu(), 0x5A).reshape(block_size + 1, stride)
+        source = raw.cpu().reshape(block_size, stride)
+        expected[:block_size, :payload] = source.flip(0)[:, :payload]
+        expected[block_size, :payload] = source[0, :payload]
+        torch.testing.assert_close(out.cpu().reshape_as(expected), expected, rtol=0, atol=0)
+        torch.testing.assert_close(tags.cpu(), torch.arange(block_size - 1, -1, -1, dtype=torch.int32))
+
+
+@pytest.mark.l1a_compile_no_target_dialect
+class TestPointerLeaf:
+    @pytest.mark.parametrize("space", [fx.AddressSpace.Global, fx.AddressSpace.Shared])
+    @pytest.mark.parametrize(
+        "dtype, elem_bytes",
+        [
+            (fx.Boolean, 1),
+            (fx.Int4, 1),
+            (fx.Float6E2M3FN, 1),
+            (fx.Uint8, 1),
+            (fx.Float16, 2),
+            (fx.Float32, 4),
+            (fx.Float64, 8),
+        ],
+    )
+    def test_default_alignment_and_type_names(self, space, dtype, elem_bytes):
+        target = fx.Pointer[dtype, space]
+        assert target is fx.Pointer[dtype, space, elem_bytes] is fx.Pointer[dtype, space, None]
+        name = f"Pointer[{dtype.__name__}, {space}]"
+        assert target.__name__ == name
+        assert str(target) == f"<class 'flydsl.expr.typing.{name}'>"
+        stronger = fx.Pointer[dtype, space, elem_bytes * 2]
+        assert stronger is not target
+        assert stronger.__name__ == f"Pointer[{dtype.__name__}, {space}, {elem_bytes * 2}]"
+        with ir.Context(), ir.Location.unknown():
+            assert target.ir_type.alignment == elem_bytes
+            assert target.ir_type.swizzle.mask == 0
+
+    @pytest.mark.parametrize("space, size", [(fx.AddressSpace.Global, 8), (fx.AddressSpace.Shared, 4)])
+    @pytest.mark.parametrize("alignment", [4, 16, 128])
+    def test_layout_and_identity_without_mlir_context(self, space, size, alignment):
+        target = fx.Pointer[fx.Float32, space, alignment]
+        assert issubclass(target, fx.Pointer) and issubclass(target, Storable)
+        assert (dsl_size_of(target), dsl_align_of(target)) == (size, size)
+        assert target is fx.Pointer[fx.Float32, int(space), alignment]
+        assert target is not fx.Pointer[fx.Int32, space, alignment]
+        assert not issubclass(fx.Pointer, Storable)
+        record = fx.Struct["tag" : fx.Uint8, "ptr":target]
+        assert _storage_layout(record) == (2 * size, size, {"tag": 0, "ptr": size})
+
+    @pytest.mark.parametrize("params", [fx.Float32, (), (fx.Float32,), (fx.Float32, fx.AddressSpace.Global, 4, None)])
+    def test_subscription_requires_two_or_three_parameters(self, params):
+        with pytest.raises(TypeError, match="Pointer expects"):
+            fx.Pointer[params]
+
+    @pytest.mark.parametrize("dtype", [None, float, fx.Numeric, fx.Index, fx.Vector, [fx.Float32]])
+    def test_invalid_element_type(self, dtype):
+        with pytest.raises(TypeError, match="fixed-width Numeric"):
+            fx.Pointer[dtype, fx.AddressSpace.Global, 4]
+
+    @pytest.mark.parametrize("space", [fx.AddressSpace.Register, fx.AddressSpace.Generic, None, True])
+    def test_unsupported_address_space(self, space):
+        with pytest.raises(TypeError, match="Global.*Shared"):
+            fx.Pointer[fx.Float32, space, 4]
+
+    @pytest.mark.parametrize("alignment", [True, 4.0, 0, -4, 2, 6, 2**31])
+    def test_invalid_alignment(self, alignment):
+        with pytest.raises((TypeError, ValueError), match="alignment"):
+            fx.Pointer[fx.Float32, fx.AddressSpace.Global, alignment]
+
+    def test_cached_class_rebuilds_ir_type_in_current_context(self):
+        target = fx.Pointer[fx.Uint32, fx.AddressSpace.Shared]
+        with ir.Context() as first, ir.Location.unknown():
+            first_type = target.ir_type
+            assert isinstance(first_type, fx.PointerType) and first_type.context is first
+            assert first_type.element_type == fx.Uint32.ir_type
+            assert first_type.alignment == 4
+            assert target is fx.Pointer[fx.Uint32, first_type.address_space, 4]
+        with ir.Context() as second, ir.Location.unknown():
+            assert target.ir_type.context is second and target.ir_type != first_type
+            assert target is fx.Pointer[fx.Uint32, fx.AddressSpace.Shared]
+        with pytest.raises(TypeError, match="already specialized"):
+            target[fx.Int32, fx.AddressSpace.Global]
+
+    def test_typed_construction_coercion_and_pointer_arithmetic(self):
+        strong = fx.Pointer[fx.Uint32, fx.AddressSpace.Global, 16]
+        weak = fx.Pointer[fx.Uint32, fx.AddressSpace.Global]
+
+        def body(offset: fx.Int32):
+            raw = fx.inttoptr(strong.ir_type, fx.Uint64(0x8000000000001000))
+            value = strong(raw)
+            assert type(value) is strong and value.dtype is fx.Uint32
+            assert strong.__coerce__(value) is value
+            reduced = weak(value)
+            assert type(reduced) is weak and reduced.type == weak.ir_type
+            for result, alignment in (
+                (value + 1, 4),
+                (1 + value, 4),
+                (value - 1, 4),
+                (value + offset, 4),
+                (value - offset, 4),
+                (value + 0, 16),
+                (value + 4, 16),
+            ):
+                assert type(result) is fx.Pointer
+                assert result.alignment == alignment
+                assert not isinstance(result, Storable)
+                assert type(weak(result)) is weak
+            assert type(strong(value + 4)) is strong
+            assert type(reduced.load()) is fx.Uint32
+            rebuilt = construct_from_ir_values(strong, value, extract_to_ir_values(value))
+            assert type(rebuilt) is strong and rebuilt.type == strong.ir_type
+            with pytest.raises(TypeError, match="requires alignment"):
+                strong(reduced)
+            with pytest.raises(TypeError, match="requires alignment"):
+                strong(value + 1)
+            with pytest.raises(TypeError, match="expects a Pointer"):
+                strong(0)
+
+        source_ir(body, 1)
+
+    def test_storage_rejects_incompatible_pointers(self):
+        target = fx.Pointer[fx.Float32, fx.AddressSpace.Global, 16]
+
+        @flyc.kernel
+        def kernel():
+            storage = fx.SharedAllocator().allocate(target)
+            for wrong in (
+                fx.Pointer[fx.Int32, fx.AddressSpace.Global, 16],
+                fx.Pointer[fx.Float32, fx.AddressSpace.Shared, 16],
+                fx.Pointer[fx.Float32, fx.AddressSpace.Global, 4],
+                fx.Pointer[fx.Float32, fx.AddressSpace.Global, 24],
+            ):
+                address = fx.Uint32(0) if wrong.ir_type.address_space == fx.AddressSpace.Shared else fx.Uint64(0)
+                value = fx.inttoptr(wrong.ir_type, address)
+                with pytest.raises(TypeError, match="expects matching|requires alignment"):
+                    storage.poke(value)
+
+        launch_ir(kernel)
+
+    def test_swizzled_pointer_is_rejected_before_storage(self):
+        target = fx.Pointer[fx.Float32, fx.AddressSpace.Shared]
+
+        @flyc.kernel
+        def kernel():
+            storage = fx.SharedAllocator().allocate(target)
+            raw = fx.inttoptr(target.ir_type, fx.Uint32(128))
+            swizzled = fx.apply_swizzle(raw, fx.static(fx.SwizzleType.get(2, 2, 2)))
+            with pytest.raises(TypeError, match="does not support swizzled pointers"):
+                target(swizzled)
+            with pytest.raises(TypeError, match="does not support swizzled pointers"):
+                storage.poke(swizzled)
+
+        launch_ir(kernel)
+
+    @pytest.mark.parametrize("static", [True, False])
+    def test_storage_preserves_type_through_struct_and_kernel(self, static):
+        target = fx.Pointer[fx.Uint32, fx.AddressSpace.Shared]
+        record = fx.Struct["ptr":target]
+
+        @flyc.kernel
+        def consume(value: fx.Pointer, item: record):
+            assert type(value) is target and value.type == target.ir_type
+            assert type(item.ptr) is target and item.ptr.dtype is fx.Uint32
+            for _ in range(fx.Int32(2)):
+                value = value + 1
+                assert type(value) is fx.Pointer
+            assert type(value) is target and value.type == target.ir_type
+
+        def body():
+            value = target(fx.inttoptr(target.ir_type, fx.Uint32(128)))
+            consume(value, record(value)).launch(grid=1, block=64)
+
+        source_ir(body)
+
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(1)
+            storage = allocator.allocate(fx.Align[target, 16])
+            original = target(fx.inttoptr(target.ir_type, fx.Uint32(128)))
+            storage.poke(original)
+            loaded = storage.peek()
+            assert type(loaded) is target and loaded.type == target.ir_type
+            assert storage._ptr.alignment == 16 and loaded.alignment == 4
+            assert loaded.dtype is fx.Uint32
+            assert type(fx.ptrtoint(loaded).to(fx.Uint32).to(fx.Int64)) is fx.Int64
+            assert allocator.allocated_bytes == 20
+
+        text = launch_ir(kernel)
+        assert "fly.ptrtoint" in text and "fly.inttoptr" in text
+        assert "fly.ptr.store" in text and "fly.ptr.load" in text
+        assert "arith.extui" in text and "arith.extsi" not in text
+
+
+@pytest.mark.rocm_lower
+class TestPointerStorage:
+    @pytest.mark.parametrize("static", [True, False])
+    def test_address_high_bits_are_preserved(self, storage_target, static):
+        torch, device = storage_target
+        global_type = fx.Pointer[fx.Uint8, fx.AddressSpace.Global]
+        shared_type = fx.Pointer[fx.Uint8, fx.AddressSpace.Shared]
+        record = fx.Struct["global_ptr":global_type, "shared_ptr":shared_type]
+
+        @flyc.kernel
+        def kernel(raw: fx.Tensor, out: fx.Tensor):
+            allocator = fx.SharedAllocator(static=static)
+            slots = allocator.allocate(fx.Array[record, 64]).peek()
+            tid = fx.thread_idx.x
+            global_bits = raw[tid * 2].to(fx.Uint64)
+            shared_bits = raw[tid * 2 + 1].to(fx.Uint32)
+            slots[tid] = record(
+                fx.inttoptr(global_type.ir_type, global_bits), fx.inttoptr(shared_type.ir_type, shared_bits)
+            )
+            fx.barrier()
+            peer = slots[63 - tid]
+            # Synthetic addresses are compared as bits and never dereferenced.
+            out[tid * 2] = fx.ptrtoint(peer.global_ptr).to(fx.Uint64).to(fx.Int64)
+            out[tid * 2 + 1] = fx.ptrtoint(peer.shared_ptr).to(fx.Uint32).to(fx.Int64)
+
+        @flyc.jit
+        def launch(raw: fx.Tensor, out: fx.Tensor):
+            kernel(raw, out).launch(grid=1, block=64)
+
+        raw = torch.tensor([-(2**63) + 0x1000, 0x80001000], dtype=torch.int64, device=device).repeat(64)
+        raw += torch.arange(64, device=device).repeat_interleave(2)
+        out = torch.empty_like(raw)
+        launch(raw, out)
+        if device != "cpu":
+            torch.testing.assert_close(out.cpu().reshape(64, 2), raw.cpu().reshape(64, 2).flip(0), rtol=0, atol=0)
+
+    @pytest.mark.parametrize("static", [True, False])
+    def test_global_and_shared_pointer_round_trip(self, storage_target, static):
+        torch, device = storage_target
+        global_type = fx.Pointer[fx.Int32, fx.AddressSpace.Global]
+        shared_type = fx.Pointer[fx.Int32, fx.AddressSpace.Shared]
+        record = fx.Struct["global_ptr":global_type, "shared_ptr":shared_type]
+
+        @flyc.kernel
+        def kernel(src: fx.Tensor, out: fx.Tensor, addresses: fx.Tensor):
+            tid = fx.thread_idx.x
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(1)
+            values = allocator.allocate(fx.Array[fx.Int32, 64, 64]).peek()
+            global_ptr = src.iter + tid
+            shared_ptr = values.ptr + tid
+            global_ptr = global_type(global_ptr)
+            shared_ptr = shared_type(shared_ptr)
+            shared_ptr[0] = tid * 7
+            direct = allocator.allocate(global_type)
+            if tid == 0:
+                fx.Storage[global_type](direct._ptr).poke(global_ptr)
+            items = allocator.allocate(fx.Array[record, 64]).peek()
+            items[tid] = record(global_ptr, shared_ptr)
+            fx.barrier()
+            peer = items[63 - tid]
+            assert type(peer.global_ptr) is global_type and peer.global_ptr.type == global_type.ir_type
+            assert type(peer.shared_ptr) is shared_type and peer.shared_ptr.type == shared_type.ir_type
+            out[tid] = peer.global_ptr[0]
+            out[64 + tid] = peer.shared_ptr[0]
+            out[128 + tid] = direct.peek()[0]
+            addresses[tid] = fx.ptrtoint(peer.global_ptr).to(fx.Int64)
+            addresses[64 + tid] = (fx.ptrtoint(peer.shared_ptr) == fx.ptrtoint(values.ptr + 63 - tid)).to(fx.Int64)
+
+        @flyc.jit
+        def launch(src: fx.Tensor, out: fx.Tensor, addresses: fx.Tensor):
+            kernel(src, out, addresses).launch(grid=1, block=64)
+
+        src = torch.arange(64, dtype=torch.int32, device=device) * 11
+        out = torch.empty(192, dtype=torch.int32, device=device)
+        addresses = torch.empty(128, dtype=torch.int64, device=device)
+        launch(src, out, addresses)
+        if device == "cpu":
+            return
+        peer = torch.arange(63, -1, -1)
+        expected = torch.cat([src.cpu()[peer], (peer * 7).to(torch.int32), src.cpu()[0].expand(64)])
+        torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+        torch.testing.assert_close(addresses[:64].cpu(), src.data_ptr() + peer * 4)
+        assert torch.all(addresses[64:].cpu() == 1)
+
+
+@pytest.mark.l1a_compile_no_target_dialect
 class TestArrayLeaf:
 
     def test_size_and_alignment(self):
@@ -324,6 +850,7 @@ class TestArrayLeaf:
             make()
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestArrayStruct:
 
     @pytest.mark.parametrize("dtype, stride, align", [(Pair, 8, 4), (Outer, 16, 4), (Padded, 32, 16)])
@@ -435,6 +962,7 @@ class TestArrayStruct:
 # ── fx.Align[T, A] ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestAlignModifier:
     """`Align` only overrides alignment; it delegates size and access to `T`."""
 
@@ -482,6 +1010,7 @@ class TestAlignModifier:
 # ###########################################################################
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestProductLayout:
     """Sequential placement, per-field alignment, trailing padding."""
 
@@ -515,6 +1044,7 @@ class TestProductLayout:
         assert "tile" not in _offsets(Params)
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestUnionLayout:
     """Every field at offset zero; max size and max alignment."""
 
@@ -560,6 +1090,7 @@ class TestUnionLayout:
 # ── fx.Arena — the target-neutral bump allocator ────────────────────────────
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestArena:
 
     def test_starts_empty(self):
@@ -573,6 +1104,7 @@ class TestArena:
 # ── fx.SharedAllocator — the LDS allocator ──────────────────────────────────
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestAllocate:
 
     def test_allocate_returns_a_storage_tree(self):
@@ -680,6 +1212,7 @@ class TestAllocate:
             launch_ir(two_allocators_kernel)
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestStaticPlacement:
     """`static=True` (default): one LDS allocation per struct leaf."""
 
@@ -738,6 +1271,7 @@ class TestStaticPlacement:
         launch_ir(base_ptr_kernel)
 
 
+@pytest.mark.l1a_compile_no_target_dialect
 class TestDynamicPlacement:
     """`static=False`: one dynamic base pointer, sized at launch."""
 

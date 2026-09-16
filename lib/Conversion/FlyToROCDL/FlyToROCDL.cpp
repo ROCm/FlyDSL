@@ -405,7 +405,9 @@ public:
     if (!flyPtrTy)
       return failure();
 
-    Type loadTy = op.getResult().getType();
+    Type loadTy = getTypeConverter()->convertType(op.getResult().getType());
+    if (!loadTy)
+      return rewriter.notifyMatchFailure(op, "failed to convert ptr.load result type");
 
     if (auto vecTy = dyn_cast<VectorType>(loadTy)) {
       auto swizzle = flyPtrTy.getSwizzle();
