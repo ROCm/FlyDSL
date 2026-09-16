@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-16T10:24:38Z",
+ "updated": "2026-09-16T10:36:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35084557354",
    "created_at": "2026-09-16T10:21:45Z",
-   "updated_at": "2026-09-16T10:22:23Z",
+   "updated_at": "2026-09-16T10:23:29Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -722,21 +722,22 @@
    "branch": "qiangpan/fix_rdna3_int8_gemm",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix rdna3_int8_gemm RDNA bounds checks",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593",
    "created_at": "2026-09-15T07:37:33Z",
-   "updated_at": "2026-09-16T09:20:36Z",
+   "updated_at": "2026-09-16T10:34:23Z",
    "actor": "qiangpan2",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T09:20:36Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104736997486"
+     "completed_at": "2026-09-16T10:34:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104736997486",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
