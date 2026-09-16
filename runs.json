@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-16T07:35:53Z",
+ "updated": "2026-09-16T07:58:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "xudoyuan/for-range-unroll",
    "event": "pull_request",
    "title": "Support unroll/unroll_full on dynamic for-range loops",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384",
    "created_at": "2026-09-16T06:58:19Z",
-   "updated_at": "2026-09-16T07:00:08Z",
+   "updated_at": "2026-09-16T07:40:17Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-16T07:40:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384/job/104708097117"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-16T07:44:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384/job/104708097302"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-16T07:40:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384/job/104708097331"
+    }
+   ]
   },
   {
    "run_id": 35066165199,
@@ -40,11 +68,11 @@
    "branch": "main",
    "event": "push",
    "title": "pyproject: bound nanobind below 3, as MLIR requires (#1143)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920",
    "created_at": "2026-09-16T06:36:05Z",
-   "updated_at": "2026-09-16T06:58:40Z",
+   "updated_at": "2026-09-16T07:40:40Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -59,18 +87,19 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T07:29:25Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985087"
+     "completed_at": "2026-09-16T07:43:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985087",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-16T06:58:40Z",
+     "started_at": "2026-09-16T07:40:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985131"
     }
@@ -508,21 +537,22 @@
    "branch": "qiangpan/fix_rdna3_int8_gemm",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix rdna3_int8_gemm RDNA bounds checks",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593",
    "created_at": "2026-09-15T07:37:33Z",
-   "updated_at": "2026-09-16T07:00:27Z",
+   "updated_at": "2026-09-16T07:55:00Z",
    "actor": "qiangpan2",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T06:57:08Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104696508303"
+     "completed_at": "2026-09-16T07:54:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104696508303",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
