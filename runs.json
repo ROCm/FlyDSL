@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-16T08:00:25Z",
+ "updated": "2026-09-16T08:18:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35072819965,
+   "pr": 1145,
+   "commit": "2aea9ad9c6e649ab8728133e1df323517cbf1896",
+   "branch": "jli/gfx1250/bump-llvm-unclausevmem",
+   "event": "pull_request",
+   "title": "[WIP][LLVM] bump llvm which improve the sequence for initial unclaused vmem",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965",
+   "created_at": "2026-09-16T08:15:47Z",
+   "updated_at": "2026-09-16T08:16:14Z",
+   "actor": "Boss2002n",
+   "jobs": []
+  },
+  {
+   "run_id": 35071960853,
+   "pr": 1145,
+   "commit": "e10dc7d603719914e524d440597b7ed458183688",
+   "branch": "jli/gfx1250/bump-llvm-unclausevmem",
+   "event": "pull_request",
+   "title": "[WIP][LLVM] bump llvm which improve the sequence for initial unclaused vmem",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35071960853",
+   "created_at": "2026-09-16T08:06:10Z",
+   "updated_at": "2026-09-16T08:16:01Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 35066191384,
    "pr": 1144,
@@ -29,11 +59,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T07:44:02Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384/job/104708097302"
+     "completed_at": "2026-09-16T08:13:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384/job/104708097302",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -78,11 +109,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T06:59:06Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985035"
+     "completed_at": "2026-09-16T08:07:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985035",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -2284,97 +2316,6 @@
      "completed_at": "2026-09-12T18:43:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34706688929/job/103589636795",
      "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34696227243,
-   "pr": 1123,
-   "commit": "7799d4d62f6d0d1d67f00e4d6298cc555311da36",
-   "branch": "codex/minimax-mxfp8-moe-8wave",
-   "event": "pull_request",
-   "title": "Add grouped MXFP8/A8W4 MoE GEMMs and fused GEMM1 quantization",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34696227243",
-   "created_at": "2026-09-12T13:21:57Z",
-   "updated_at": "2026-09-12T18:03:40Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-12T15:19:23Z",
-     "completed_at": "2026-09-12T16:04:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34696227243/job/103562972473",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-12T17:08:48Z",
-     "completed_at": "2026-09-12T18:03:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34696227243/job/103562972496",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-12T13:46:33Z",
-     "completed_at": "2026-09-12T15:20:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34696227243/job/103562972515",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34695147133,
-   "pr": null,
-   "commit": "e41c748722557c21d5290ecb7ae1dbe7669741fc",
-   "branch": "upstream/fa-paged-fp8-asymmetric-v",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V head dim on gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133",
-   "created_at": "2026-09-12T12:59:01Z",
-   "updated_at": "2026-09-12T15:19:00Z",
-   "actor": "sammysun0711",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-12T14:37:45Z",
-     "completed_at": "2026-09-12T15:18:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842356",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-12T13:46:31Z",
-     "completed_at": "2026-09-12T14:39:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842365",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-12T13:20:37Z",
-     "completed_at": "2026-09-12T14:25:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842377"
     }
    ]
   }
