@@ -536,7 +536,7 @@ class TestStructArrayStorage:
             return
 
         tag, bits, weight, tail = out.cpu().reshape(4, block_size)
-        peer = torch.arange(block_size - 1, -1, -1, dtype=torch.float64)
+        peer = torch.arange(block_size - 1, -1, -1, dtype=torch.float64, device="cpu")
         torch.testing.assert_close(tag, peer - 32, rtol=0, atol=0)
         torch.testing.assert_close(bits, peer + 0x80000000, rtol=0, atol=0)
         torch.testing.assert_close(weight, peer * 0.25 + 0.5, rtol=0, atol=0)
@@ -976,7 +976,7 @@ class TestAlignedStorage:
             return
 
         weight, key = out.cpu().reshape(2, block_size)
-        peer = torch.arange(block_size - 1, -1, -1, dtype=torch.float64)
+        peer = torch.arange(block_size - 1, -1, -1, dtype=torch.float64, device="cpu")
         expected_weight = peer + 0.5 + (peer % 2 == 0) * 2 + peer % 3 + (peer % 2) * 4
         torch.testing.assert_close(weight, expected_weight, rtol=0, atol=0)
         torch.testing.assert_close(key, peer + 0x80000000, rtol=0, atol=0)
@@ -1033,7 +1033,7 @@ class TestAlignedStorage:
             return
 
         weight, key = out.cpu().reshape(2, block_size)
-        peer = torch.arange(block_size - 1, -1, -1, dtype=torch.float64)
+        peer = torch.arange(block_size - 1, -1, -1, dtype=torch.float64, device="cpu")
         torch.testing.assert_close(weight, peer + 0.5, rtol=0, atol=0)
         torch.testing.assert_close(key, peer + 0x80000000, rtol=0, atol=0)
         addresses = addresses.cpu()
