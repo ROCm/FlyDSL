@@ -2231,16 +2231,21 @@ class Array:
             byte_offset = (
                 offset * self._element_size if isinstance(offset, int) else int_tuple_mul(offset, self._element_size)
             )
-            return add_offset(recast_iter(Uint8, self.ptr), byte_offset)
+            return add_offset(self.ptr, byte_offset)
 
         @dsl_loc_tracing
         def __getitem__(self, offset):
+            if self._is_numeric:
+                return self.ptr.__getitem__(offset)
             from ..compiler.protocol import peek_from_ptr
 
             return peek_from_ptr(self.dtype, self._element_ptr(offset))
 
         @dsl_loc_tracing
         def __setitem__(self, offset, value):
+            if self._is_numeric:
+                self.ptr.__setitem__(offset, value)
+                return
             from ..compiler.protocol import poke_into_ptr
 
             poke_into_ptr(self.dtype, self._element_ptr(offset), value)
@@ -2268,16 +2273,19 @@ class Array:
         if not isinstance(size, int) or size <= 0:
             raise TypeError(f"Array size must be a positive integer, got {size!r}")
 
-        elem_byte_size = dsl_size_of(dtype)
-        elem_align = dsl_align_of(dtype)
+        # Keep Numeric's packed layout and typed-pointer access unchanged.
+        # The protocol extends element support without redefining that path.
+        is_numeric = issubclass(dtype, Numeric)
+        elem_byte_size = max(1, dtype.width // 8) if is_numeric else dsl_size_of(dtype)
+        elem_align = elem_byte_size if is_numeric else dsl_align_of(dtype)
         if align is None:
             align = elem_align
         else:
             if not isinstance(align, int) or align <= 0:
                 raise TypeError(f"Array align must be a positive integer, got {align!r}")
-            if align % elem_align != 0:
+            if not is_numeric and align % elem_align != 0:
                 raise ValueError(f"Array align must be a multiple of the element alignment {elem_align}, got {align}")
-        if align & (align - 1):
+        if not is_numeric and align & (align - 1):
             raise ValueError(f"Array alignment must be a power of two, got {align}")
 
         cache_key = (dtype, size, align)
@@ -2294,10 +2302,10 @@ class Array:
                 "dtype": dtype,
                 "size": size,
                 "align": align,
-                "_is_numeric": issubclass(dtype, Numeric),
+                "_is_numeric": is_numeric,
                 "_element_size": elem_byte_size,
                 "_element_align": elem_align,
-                "_nbytes": elem_byte_size * size,
+                "_nbytes": max(1, dtype.width * size // 8) if is_numeric else elem_byte_size * size,
             },
         )
         cls._cache[cache_key] = array_type

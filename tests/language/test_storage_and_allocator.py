@@ -29,6 +29,7 @@ from lang_utils import launch_ir, source_ir
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import func
 from flydsl.compiler.protocol import (
     Storable,
     construct_from_ir_values,
@@ -850,6 +851,127 @@ class TestArrayLeaf:
             make()
 
 
+def _numeric_array_access_ir(dtype, space, alignment, array_type=None):
+    """Emit unoptimized MLIR for Array access or its typed-Pointer equivalent."""
+    module = ir.Module.create()
+    with ir.InsertionPoint(module.body):
+        ptr_type = fx.PointerType.get(fx.Uint8.ir_type, space, alignment)
+        function = func.FuncOp("array_access", ([ptr_type, fx.Int32.ir_type, dtype.ir_type], []))
+        with ir.InsertionPoint(function.add_entry_block()):
+            ptr, index_value, value = function.entry_block.arguments
+            items = array_type.__peek_from_ptr__(ptr) if array_type else fx.recast_iter(dtype, ptr)
+            index = fx.Int32(index_value)
+            literal = 1.0 if dtype.is_float else 1
+            items[0] = literal
+            items[2] = dtype(value)
+            items[index] = value
+            items[fx.make_int_tuple(index)] = dtype(literal)
+            # A differently typed Numeric must retain Pointer.store's behavior.
+            items[1] = fx.Int32(index_value)
+            for offset in (0, 2, index, index_value, fx.make_int_tuple(index)):
+                items[offset]
+            items.view(fx.make_layout(8, 1))
+            if array_type:
+                rebuilt = construct_from_ir_values(array_type, items, extract_to_ir_values(items))
+                rebuilt[index]
+            else:
+                items[index]
+            func.ReturnOp([])
+    module.operation.verify()
+    return module.operation.get_asm(enable_debug_info=False)
+
+
+def _numeric_array_allocation_ir(dtype, count, alignment, static, array_type=None):
+    def allocate_items(allocator):
+        if array_type is not None:
+            return allocator.allocate(array_type).peek()
+        storage = allocator.allocate(max(1, dtype.width * count // 8), alignment=alignment)
+        return fx.recast_iter(dtype, object.__getattribute__(storage, "_ptr"))
+
+    @flyc.kernel
+    def kernel():
+        allocator = fx.SharedAllocator(static=static)
+        allocator.allocate(3)
+        items = allocate_items(allocator)
+        index = fx.thread_idx.x % count
+        items[index] = 1.0 if dtype.is_float else 1
+        items[index]
+        items.view(fx.make_layout(count, 1))
+        allocator.allocate(4)
+
+    source = launch_ir(kernel)
+    with ir.Context():
+        module = ir.Module.parse(source)
+        return module.operation.get_asm(enable_debug_info=False)
+
+
+@pytest.mark.l1a_compile_no_target_dialect
+class TestNumericArrayCompatibility:
+    @pytest.mark.parametrize(
+        "dtype",
+        [
+            fx.Boolean,
+            fx.Int4,
+            fx.Float4E2M1FN,
+            fx.Int8,
+            fx.Uint8,
+            fx.Int16,
+            fx.Uint16,
+            fx.Int32,
+            fx.Uint32,
+            fx.Float16,
+            fx.BFloat16,
+            fx.Float32,
+            fx.Float64,
+            fx.Int64,
+            fx.Uint64,
+        ],
+    )
+    @pytest.mark.parametrize("space", [fx.AddressSpace.Global, fx.AddressSpace.Shared])
+    @pytest.mark.parametrize("alignment_factor", [1, 3, 4])
+    def test_mlir_is_identical_to_typed_pointer_access(self, ctx, dtype, space, alignment_factor):
+        alignment = max(1, dtype.width // 8) * alignment_factor
+        actual = _numeric_array_access_ir(dtype, space, alignment, fx.Array[dtype, 8, alignment])
+        expected = _numeric_array_access_ir(dtype, space, alignment)
+        assert actual == expected
+
+    @pytest.mark.parametrize(
+        "dtype, count, alignment",
+        [(fx.Float32, 8, 4), (fx.Float32, 8, 12), (fx.Float16, 3, 2), (fx.Int4, 9, 1), (fx.Boolean, 9, 1)],
+    )
+    @pytest.mark.parametrize("static", [True, False])
+    def test_allocation_mlir_is_identical_to_packed_bytes(self, dtype, count, alignment, static):
+        array = fx.Array[dtype, count, alignment]
+        actual = _numeric_array_allocation_ir(dtype, count, alignment, static, array)
+        expected = _numeric_array_allocation_ir(dtype, count, alignment, static)
+        assert actual == expected
+
+    @pytest.mark.parametrize(
+        "dtype, count, nbytes",
+        [(fx.Boolean, 9, 1), (fx.Int4, 3, 1), (fx.Float4E2M1FN, 4, 2), (fx.Float6E2M3FN, 3, 2)],
+    )
+    def test_packed_layout(self, dtype, count, nbytes):
+        array = fx.Array[dtype, count]
+        assert dsl_size_of(array) == nbytes
+        assert dsl_align_of(array) == 1
+        assert array is fx.Array[dtype, count, 1]
+        assert array.__name__ == f"Array[{dtype.__name__}, {count}]"
+
+    @pytest.mark.parametrize("alignment", [1, 2, 3, 12])
+    def test_explicit_alignment_accepts_any_positive_integer(self, alignment):
+        array = fx.Array[fx.Float32, 4, alignment]
+        assert (dsl_size_of(array), dsl_align_of(array)) == (16, alignment)
+
+    @pytest.mark.parametrize("alignment", [1, 2])
+    def test_invalid_pointer_alignment_keeps_the_pointer_error(self, ctx, alignment):
+        array = fx.Array[fx.Float32, 8, alignment]
+        with pytest.raises(ValueError) as actual:
+            _numeric_array_access_ir(fx.Float32, fx.AddressSpace.Shared, alignment, array)
+        with pytest.raises(ValueError) as expected:
+            _numeric_array_access_ir(fx.Float32, fx.AddressSpace.Shared, alignment)
+        assert str(actual.value) == str(expected.value)
+
+
 @pytest.mark.l1a_compile_no_target_dialect
 class TestArrayStorable:
     def test_custom_element_layout_and_access_use_the_protocol(self, ctx, symbolic_offsets, monkeypatch):
@@ -884,16 +1006,10 @@ class TestArrayStorable:
         with pytest.raises(TypeError, match="Storable"):
             fx.Array[incomplete, 4]
 
-    @pytest.mark.parametrize("dtype", [fx.Boolean, fx.Int4, fx.Float4E2M1FN, fx.Float6E2M3FN])
-    def test_element_layout_must_be_storable(self, dtype):
-        with pytest.raises(TypeError, match="Storable"):
-            fx.Array[dtype, 4]
-
-    @pytest.mark.parametrize("dtype", [fx.Float32, Word])
     @pytest.mark.parametrize("alignment", [2, 12])
-    def test_alignment_rules_apply_to_all_storable_elements(self, dtype, alignment):
+    def test_alignment_must_preserve_element_alignment_and_be_a_power_of_two(self, alignment):
         with pytest.raises(ValueError, match="multiple of the element alignment|power of two"):
-            fx.Array[dtype, 4, alignment]
+            fx.Array[Word, 4, alignment]
 
 
 @pytest.mark.l1a_compile_no_target_dialect

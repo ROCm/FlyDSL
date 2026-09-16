@@ -64,7 +64,7 @@ a traced pointer. This applies equally to built-in and user-defined types. Built
 | `Numeric` at least one byte wide (`fx.Int32`, `fx.Float32`, `fx.Int64`, …) | its byte width | its byte width |
 | specialized `fx.Vector[E, Shape]` | `E.width × numel(Shape) / 8` bytes, no trailing padding | element byte width; 1 byte for packed sub-byte elements |
 | specialized `fx.Pointer[E, Space]` / `fx.Pointer[E, Space, A]` | 8 bytes for Global; 4 for Shared | 8 bytes for Global; 4 for Shared |
-| `fx.Array[E, N]` / `fx.Array[E, N, A]`, where `E` is `Storable` | `N × dsl_size_of(E)` bytes | `A`, defaulting to the element's natural alignment |
+| `fx.Array[E, N]` / `fx.Array[E, N, A]`, with `Storable` elements | see *Array* below | `A`, defaulting to the element's natural alignment |
 | a composite whose non-`Constexpr` fields are all `Storable` | see *Byte layout* | see *Byte layout* |
 
 Builtin types without this contract include sub-byte numerics such as `fx.Boolean` and `fx.Int4`,
@@ -110,14 +110,18 @@ value = loaded[0]                        # Float32
 
 ### `fx.Array[E, N, A]`
 
-The fixed-size storage view: an element type `E` implementing `Storable`, a positive `int`
-count `N`, and an optional byte alignment `A`, defaulting to `dsl_align_of(E)`.
-Array types are cached, so the same parameters yield the same class.
-After `peek`, static and run-time indexing delegate to `E`'s storage access hooks;
-numeric arrays also support `.view(layout)`.
+The fixed-size storage view supports `Storable` element types `E`, a positive `int` count `N`,
+and an optional positive byte alignment `A`. Array types are cached, so the same parameters
+yield the same class. `A` aligns the array base without changing element stride.
 
-Each element occupies `dsl_size_of(E)` bytes. `A` must be a positive power of two and a
-multiple of `dsl_align_of(E)`; it aligns the array base without changing element stride.
+Numeric arrays occupy `max(1, E.width * N // 8)` bytes, including packed sub-byte arrays.
+Their default alignment is `max(1, E.width // 8)`; an explicit `A` may be any positive integer.
+After `peek`, indexing and `.view(layout)` operate through the typed element pointer and
+follow its access and alignment requirements.
+
+For other `Storable` elements, each element occupies `dsl_size_of(E)` bytes and indexing
+delegates to `E`'s storage access hooks. `A` defaults to `dsl_align_of(E)` and must be a
+power of two and a multiple of that alignment.
 
 ```python
 Tile = fx.Array[fx.Float32, 32, 16]
