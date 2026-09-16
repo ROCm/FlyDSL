@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-16T15:28:56Z",
+ "updated": "2026-09-16T16:02:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,11 +20,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T14:53:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35109940420/job/104846474952"
+     "completed_at": "2026-09-16T15:59:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35109940420/job/104846474952",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -69,11 +70,11 @@
    "branch": "pr/enh-specialized-storable",
    "event": "pull_request",
    "title": "[Enh] Make specialized Vector and Pointer types Storable",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243",
    "created_at": "2026-09-16T12:01:11Z",
-   "updated_at": "2026-09-16T14:54:07Z",
+   "updated_at": "2026-09-16T16:00:24Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -99,11 +100,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T14:54:07Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243/job/104790244229"
+     "completed_at": "2026-09-16T16:00:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243/job/104790244229",
+     "log_fetch_failed": true
     }
    ]
   },
