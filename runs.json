@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-16T12:03:58Z",
+ "updated": "2026-09-16T12:06:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243",
    "created_at": "2026-09-16T12:01:11Z",
-   "updated_at": "2026-09-16T12:01:23Z",
+   "updated_at": "2026-09-16T12:02:56Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -114,21 +114,22 @@
    "branch": "ci/fix-mlir-lit-skip",
    "event": "pull_request",
    "title": "[CI] Fix silent skip of the MLIR lit stage",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251",
    "created_at": "2026-09-16T08:57:56Z",
-   "updated_at": "2026-09-16T10:38:32Z",
+   "updated_at": "2026-09-16T12:04:19Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T10:38:32Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251/job/104737604491"
+     "completed_at": "2026-09-16T12:04:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251/job/104737604491",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi35x-1",
