@@ -59,7 +59,7 @@ On first call, ``@flyc.jit`` runs the following pipeline:
       - ``fly-promote-regmem-to-vectorssa``
       - ``convert-fly-to-rocdl``
       - ``canonicalize``
-      - ``gpu.module(convert-scf-to-cf, cse, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)``
+      - ``gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)``
 
    B. ``binary_prep_fragments`` (→ LLVM):
 

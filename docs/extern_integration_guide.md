@@ -5,9 +5,10 @@ its pre-compiled LLVM bitcode into FlyDSL's JIT pipeline and participates in
 post-load device-side initialisation, **without** FlyDSL's compiler ever
 importing the framework.
 
-For the mori-side view — cold-start cost, ABI metadata, the three-piece
-contract, and user-level `@flyc.kernel` examples — see
-[mori/python/mori/ir/flydsl/README.md](https://github.com/ROCm/mori/blob/main/python/mori/ir/flydsl/README.md).
+For the MORI-side bitcode locator and device-function ABI metadata, see the
+[MORI IR guide](https://github.com/ROCm/mori/blob/main/python/mori/ir/README.md).
+The [FlyDSL adapter implementation](https://github.com/ROCm/mori/tree/main/python/mori/ir/flydsl)
+shows how MORI wraps those interfaces for FlyDSL.
 
 ## 1. The expression-level `ffi` surface
 
@@ -87,7 +88,7 @@ The short version:
   exposes and calls its own FlyDSL ROCm module loader functions.
 
 On the Python side,
-[`jit_executor.py::CompiledArtifact._ensure_engine`](../python/flydsl/compiler/jit_executor.py)
+[`jit_executor.py::CompiledArtifact._ensure_engine`](https://github.com/ROCm/FlyDSL/blob/main/python/flydsl/compiler/jit_executor.py)
 enforces a **post-condition**: if any `post_load_processors` were registered
 but explicit module loading produced zero observed module loads, it raises
 `RuntimeError` immediately. This turns a silent contract violation into a
@@ -127,9 +128,9 @@ method closing over runtime state), you should either:
 
 | File | Role |
 |---|---|
-| [`python/flydsl/compiler/extern_link.py`](../python/flydsl/compiler/extern_link.py) | `link_extern`, linked extern wrapper, resolver registration |
-| [`python/flydsl/expr/extern.py`](../python/flydsl/expr/extern.py) | Pure FFI `ExternFunction` class + `llvm.call` emitter |
-| [`python/flydsl/compiler/kernel_function.py`](../python/flydsl/compiler/kernel_function.py) | `CompilationContext` (carries `link_libs`, `post_load_processors`) |
-| [`python/flydsl/compiler/jit_function.py`](../python/flydsl/compiler/jit_function.py) | Passes `link_libs` into `MlirCompiler.compile` and propagates `post_load_processors` to `CompiledArtifact` |
-| [`python/flydsl/compiler/jit_executor.py`](../python/flydsl/compiler/jit_executor.py) | Looks up FlyDSL ROCm module loader symbols, owns `GpuJitModule`, and runs `post_load_processors` |
-| [`lib/Runtime/ROCm/FlyRocmRuntimeWrappers.cpp`](../lib/Runtime/ROCm/FlyRocmRuntimeWrappers.cpp) | C++ runtime: stateless `mgpuModuleLoad` wrapper |
+| [`python/flydsl/compiler/extern_link.py`](https://github.com/ROCm/FlyDSL/blob/main/python/flydsl/compiler/extern_link.py) | `link_extern`, linked extern wrapper, resolver registration |
+| [`python/flydsl/expr/extern.py`](https://github.com/ROCm/FlyDSL/blob/main/python/flydsl/expr/extern.py) | Pure FFI `ExternFunction` class + `llvm.call` emitter |
+| [`python/flydsl/compiler/kernel_function.py`](https://github.com/ROCm/FlyDSL/blob/main/python/flydsl/compiler/kernel_function.py) | `CompilationContext` (carries `link_libs`, `post_load_processors`) |
+| [`python/flydsl/compiler/jit_function.py`](https://github.com/ROCm/FlyDSL/blob/main/python/flydsl/compiler/jit_function.py) | Passes `link_libs` into `MlirCompiler.compile` and propagates `post_load_processors` to `CompiledArtifact` |
+| [`python/flydsl/compiler/jit_executor.py`](https://github.com/ROCm/FlyDSL/blob/main/python/flydsl/compiler/jit_executor.py) | Looks up FlyDSL ROCm module loader symbols, owns `GpuJitModule`, and runs `post_load_processors` |
+| [`lib/Runtime/ROCm/FlyRocmRuntimeWrappers.cpp`](https://github.com/ROCm/FlyDSL/blob/main/lib/Runtime/ROCm/FlyRocmRuntimeWrappers.cpp) | C++ runtime: stateless `mgpuModuleLoad` wrapper |
