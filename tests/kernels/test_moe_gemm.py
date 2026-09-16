@@ -940,7 +940,9 @@ def test_mxfp_moe_variants(a_dtype, variant):
     )
 
 
-@pytest.mark.skipif("gfx95" not in ARCH, reason="a16w4 requires gfx950+")
+@pytest.mark.skipif(
+    not _A16WMIX_GFX, reason="a16w4 requires CDNA3 (gfx942) or CDNA4 (gfx95*)"
+)
 @pytest.mark.parametrize("w_dtype", ["mxfp4", "bf16"], ids=["a16w4", "a16w16"])
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m",
@@ -992,7 +994,9 @@ def test_a16w4_moe_e2e(tokens, model_dim, inter_dim, experts, topk, tile_m, w_dt
     )
 
 
-@pytest.mark.skipif("gfx95" not in ARCH, reason="a16w4 requires gfx950+")
+@pytest.mark.skipif(
+    not _A16WMIX_GFX, reason="a16w4 requires CDNA3 (gfx942) or CDNA4 (gfx95*)"
+)
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m",
     [pytest.param(128, 1024, 256, 8, 2, 32, id="small")],
@@ -1083,7 +1087,9 @@ def test_a16w4_gemm1_guinterleave_parity(tokens, model_dim, inter_dim, experts, 
     ), f"guinterleave stage1 mismatch: max|Δ|={(inter_std.float() - inter_gu.float()).abs().max().item()}"
 
 
-@pytest.mark.skipif("gfx95" not in ARCH, reason="a16w4 requires gfx950+")
+@pytest.mark.skipif(
+    not _A16WMIX_GFX, reason="a16w4 requires CDNA3 (gfx942) or CDNA4 (gfx95*)"
+)
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m",
     [pytest.param(128, 1024, 256, 8, 2, 32, id="small")],
@@ -1717,10 +1723,12 @@ if __name__ == "__main__":
     if "all" in in_dtypes:
         in_dtypes = ["a16w4", "fp4", "a8w4"]
     for dt in in_dtypes:
-        if dt in ("fp4", "a8w4", "a16w4") and "gfx95" not in ARCH:
+        # fp4/a8w4 stay gfx950+: the mxfp_moe family feeds MX-FP4 straight into the
+        # F8F6F4 MFMA, which CDNA3 does not have, and has no software decode.
+        if dt in ("fp4", "a8w4") and "gfx95" not in ARCH:
             print(f"Skipped: {dt}: requires gfx950+, got {ARCH}")
             continue
-        if dt == "int4_bf16" and not _A16WMIX_GFX:
+        if dt in ("a16w4", "int4_bf16") and not _A16WMIX_GFX:
             print(f"Skipped: {dt}: requires gfx942 or gfx950+, got {ARCH}")
             continue
         # mxfp_moe (fp4/a8w4) stage2 mode is coupled to tile_m: atomic for tile_m<128,

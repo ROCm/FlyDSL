@@ -26,6 +26,7 @@ from .utils import (
     _global_i32_buffer_tiles,
     _global_i32_buffer_view,
     _int4_nibble_to_bf16x8,
+    _fp4_nibble_to_bf16x8_lut,
     _int4_nibble_to_bf16x8_raw,
     _raw,
     _udiv,
@@ -398,6 +399,10 @@ def _gemm1_body_a16w4(
         if const_expr(_is_int4):
             return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32, use_k16=use_k16)
         # raw[ku//4][ku%4] i32 holds 8 fp4 -> 4x cvt (v2bf16, sel 0..3) -> v8bf16.
+        if const_expr(use_k16):
+            # gfx942 (CDNA3) has no v_cvt_scalef32_pk_bf16_fp4 and no fp4 MFMA:
+            # decode E2M1 to bf16 with a v_perm_b32 byte lookup instead.
+            return _fp4_nibble_to_bf16x8_lut(fx.Int32(i32_val), scale_f32)
         s_raw = _raw(scale_f32)
         i32s = []
         for sel in range_constexpr(4):

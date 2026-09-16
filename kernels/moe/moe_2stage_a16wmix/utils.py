@@ -11,6 +11,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import range_constexpr, rocdl
+from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.moe.mxfp_moe.mxfp4_gemm_common import (  # noqa: F401
     _gep1,
@@ -132,6 +133,92 @@ def _int4_nibble_to_bf16x8_raw(raw_i32, *, use_k16=False):
     v4i32 = fx.Vector.from_elements([_raw(x) for x in i32s], fx.Int32)
     return v4i32.bitcast(fx.BFloat16)  # v8bf16
 
+
+# FP4 (E2M1) -> bf16 byte-lookup decode.
+#
+# Every E2M1 value is exactly representable in bf16 (2 mantissa bits against bf16's 8),
+# so the decode carries no arithmetic -- only the bit pattern:
+#
+#   nibble & 7  0       1       2       3       4       5       6       7
+#   value       0.0     0.5     1.0     1.5     2.0     3.0     4.0     6.0
+#   bf16 bits   0x0000  0x3F00  0x3F80  0x3FC0  0x4000  0x4040  0x4080  0x40C0
+#
+# Three distinct high bytes and four distinct low bytes, so one v_perm_b32 pair decodes
+# four nibbles. The sign is bit 7 of the bf16 high byte, which is where it already sits
+# in the nibble, so it folds in with a mask and a shift rather than a select.
+#
+# This replaces the per-element reconstruction in _fp4_nibble_to_bf16x8_sw, which built
+# an f32 through two compares and two selects and then round-tripped it to bf16 with a
+# full round-to-nearest -- including a NaN check that E2M1 can never trigger
+# (v_cmp_u_f32 appeared 1664 times in the gemm1 ISA). On MI308X the two stages are
+# 92-94% VALU instructions, so removing that work is worth 2.5-2.8x on gemm1.
+_FP4_MAG_HI_LO = 0x3F3F3F00  # bf16 high bytes for nibble&7 = 0,1,2,3
+_FP4_MAG_HI_HI = 0x40404040  # bf16 high bytes for nibble&7 = 4,5,6,7
+_FP4_MAG_LO_LO = 0xC0800000  # bf16 low bytes  for nibble&7 = 0,1,2,3
+_FP4_MAG_LO_HI = 0xC0804000  # bf16 low bytes  for nibble&7 = 4,5,6,7
+
+
+def _perm(src_hi, src_lo, sel):
+    """v_perm_b32: result byte i = pool[sel.byte(i)], pool = {src_hi:src_lo}.
+
+    Selector bytes 0..3 index src_lo bytes 0..3, selector bytes 4..7 index src_hi.
+    """
+    return fx.Int32(rocdl.perm_b32(_raw(fx.Int32(src_hi)), _raw(fx.Int32(src_lo)), _raw(sel)))
+
+
+def _fp4_mag_dwords(raw_i32):
+    """Decode 8 FP4 nibbles to 4 dwords, each holding 2 bf16, scale not applied.
+
+    ``raw_i32`` holds 8 nibbles in bits[4n+3:4n], the same K order as the gfx950
+    ``sel 0..3`` path, so element j lands in dword j//2 half j%2 and the MMA operand
+    layout is unchanged.
+    """
+    raw = fx.Int32(raw_i32)
+    # Magnitude selectors, one per byte. v_perm only honours selector values 0..7, so
+    # the sign bit is masked off here and folded back into the high byte below.
+    sel_even = raw & fx.Int32(0x07070707)  # low nibble of each byte -> elements 0,2,4,6
+    sel_odd = raw.shrui(fx.Int32(4)) & fx.Int32(0x07070707)  # -> elements 1,3,5,7
+
+    hb_even = _perm(_FP4_MAG_HI_HI, _FP4_MAG_HI_LO, sel_even)
+    lb_even = _perm(_FP4_MAG_LO_HI, _FP4_MAG_LO_LO, sel_even)
+    hb_odd = _perm(_FP4_MAG_HI_HI, _FP4_MAG_HI_LO, sel_odd)
+    lb_odd = _perm(_FP4_MAG_LO_HI, _FP4_MAG_LO_LO, sel_odd)
+
+    # Sign: nibble bit 3 -> bf16 bit 15, i.e. bit 7 of the high byte.
+    hb_even = hb_even | ((raw & fx.Int32(0x08080808)) << fx.Int32(4))
+    hb_odd = hb_odd | (raw & fx.Int32(0x80808080))
+
+    # dword d = [lb_even[d], hb_even[d], lb_odd[d], hb_odd[d]].
+    ev01 = _perm(hb_even, lb_even, fx.Int32(0x05010400))  # bf16 of elements 0 and 2
+    od01 = _perm(hb_odd, lb_odd, fx.Int32(0x05010400))  # elements 1 and 3
+    ev23 = _perm(hb_even, lb_even, fx.Int32(0x07030602))  # elements 4 and 6
+    od23 = _perm(hb_odd, lb_odd, fx.Int32(0x07030602))  # elements 5 and 7
+    return [
+        _perm(od01, ev01, fx.Int32(0x05040100)),
+        _perm(od01, ev01, fx.Int32(0x07060302)),
+        _perm(od23, ev23, fx.Int32(0x05040100)),
+        _perm(od23, ev23, fx.Int32(0x07060302)),
+    ]
+
+def _fp4_nibble_to_bf16x8_lut(raw_i32, scale_f32):
+    """FP4 (E2M1) -> v8bf16 for one MFMA K32 step, with the groupwise scale applied.
+
+    Same result as the gfx950 ``cvt_scalef32_pk_bf16_fp4`` path in
+    :func:`gemm1.upconvert_b`. The magnitudes come from
+    the byte lookup; the e8m0 scale is a power of two, so the product stays exactly
+    representable in bf16 and the f32 -> bf16 step is a truncation, not a
+    round-to-nearest. bf16 <-> f32 is just a 16-bit shift, so each half is scaled in
+    place without unpacking to a vector.
+    """
+    scale = fx.Float32(scale_f32)
+    out = []
+    for d in _fp4_mag_dwords(raw_i32):
+        lo_f = fx.Float32(_raw(d << fx.Int32(16)).bitcast(T.f32))
+        hi_f = fx.Float32(_raw(d & fx.Int32(0xFFFF0000)).bitcast(T.f32))
+        lo_b = fx.Int32(_raw(lo_f * scale).bitcast(T.i32)).shrui(fx.Int32(16))
+        hi_b = fx.Int32(_raw(hi_f * scale).bitcast(T.i32)) & fx.Int32(0xFFFF0000)
+        out.append(lo_b | hi_b)
+    return fx.Vector.from_elements([_raw(x) for x in out], fx.Int32).bitcast(fx.BFloat16)
 
 def kmchunks_for(BM):
     return BM // 16
