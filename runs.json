@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-16T06:47:08Z",
+ "updated": "2026-09-16T07:01:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35066191384,
+   "pr": 1144,
+   "commit": "6f5ac84ec7628844dbd09d5736f94507b1446e95",
+   "branch": "xudoyuan/for-range-unroll",
+   "event": "pull_request",
+   "title": "Support unroll/unroll_full on dynamic for-range loops",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384",
+   "created_at": "2026-09-16T06:58:19Z",
+   "updated_at": "2026-09-16T06:58:36Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 35066165199,
+   "pr": 1144,
+   "commit": "864b4d59a61f2e221c796f4b91dfa6917755b079",
+   "branch": "xudoyuan/for-range-unroll",
+   "event": "pull_request",
+   "title": "Support unroll/unroll_full on dynamic for-range loops",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066165199",
+   "created_at": "2026-09-16T06:58:00Z",
+   "updated_at": "2026-09-16T06:58:36Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 35064460920,
    "pr": null,
@@ -10,13 +40,41 @@
    "branch": "main",
    "event": "push",
    "title": "pyproject: bound nanobind below 3, as MLIR requires (#1143)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920",
    "created_at": "2026-09-16T06:36:05Z",
-   "updated_at": "2026-09-16T06:37:40Z",
+   "updated_at": "2026-09-16T06:58:40Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-16T06:58:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985035"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-16T06:58:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985087"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-16T06:58:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985131"
+    }
+   ]
   },
   {
    "run_id": 35057489241,
@@ -449,13 +507,41 @@
    "branch": "qiangpan/fix_rdna3_int8_gemm",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix rdna3_int8_gemm RDNA bounds checks",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593",
    "created_at": "2026-09-15T07:37:33Z",
-   "updated_at": "2026-09-16T06:41:11Z",
+   "updated_at": "2026-09-16T06:56:44Z",
    "actor": "qiangpan2",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-16T06:57:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104696508303"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-16T06:56:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104696508333"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-16T06:56:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104696508339"
+    }
+   ]
   },
   {
    "run_id": 34942569433,
@@ -464,31 +550,21 @@
    "branch": "fp8-attention-tune-20260915",
    "event": "pull_request",
    "title": "[Kernel][Perf] Fix and tune gfx950 dense FP8 attention",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433",
    "created_at": "2026-09-15T07:36:32Z",
-   "updated_at": "2026-09-15T10:07:45Z",
+   "updated_at": "2026-09-16T06:47:37Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-15T09:41:56Z",
-     "completed_at": "2026-09-15T09:52:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104299777574"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T07:56:14Z",
-     "completed_at": "2026-09-15T08:10:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104299777583",
-     "log_fetch_failed": true
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-16T06:47:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104694108122"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -497,7 +573,17 @@
      "conclusion": "success",
      "started_at": "2026-09-15T09:26:45Z",
      "completed_at": "2026-09-15T10:07:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104299777619",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104694108729",
+     "log_fetch_failed": true
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-15T07:56:14Z",
+     "completed_at": "2026-09-15T08:10:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942569433/job/104694109284",
      "log_fetch_failed": true
     }
    ]
@@ -2258,66 +2344,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34695147133/job/103559842377"
     }
    ]
-  },
-  {
-   "run_id": 34694422124,
-   "pr": 1128,
-   "commit": "e23305640386c0197eecaaa2c3f478928a139076",
-   "branch": "codex/scaled-tiled-gemm",
-   "event": "pull_request",
-   "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34694422124",
-   "created_at": "2026-09-12T12:42:48Z",
-   "updated_at": "2026-09-14T06:50:02Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-14T06:49:54Z",
-     "completed_at": "2026-09-14T06:50:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34694422124/job/103883949050"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-12T13:20:34Z",
-     "completed_at": "2026-09-12T14:27:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34694422124/job/103883949706",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-12T13:49:11Z",
-     "completed_at": "2026-09-12T14:37:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34694422124/job/103883950156",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34693306560,
-   "pr": 1128,
-   "commit": "aa7e0e4d2a0a14da6e17c5fa4bfea33a83fc9c8b",
-   "branch": "codex/scaled-tiled-gemm",
-   "event": "pull_request",
-   "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34693306560",
-   "created_at": "2026-09-12T12:18:15Z",
-   "updated_at": "2026-09-12T12:47:50Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
