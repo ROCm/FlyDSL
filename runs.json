@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-16T07:01:23Z",
+ "updated": "2026-09-16T07:35:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "xudoyuan/for-range-unroll",
    "event": "pull_request",
    "title": "Support unroll/unroll_full on dynamic for-range loops",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384",
    "created_at": "2026-09-16T06:58:19Z",
-   "updated_at": "2026-09-16T06:58:36Z",
+   "updated_at": "2026-09-16T07:00:08Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -50,18 +50,18 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-16T06:58:40Z",
+     "started_at": "2026-09-16T06:59:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985035"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-16T06:58:40Z",
+     "started_at": "2026-09-16T07:29:25Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985087"
     },
@@ -83,11 +83,11 @@
    "branch": "pr/enh-align-value-semantics",
    "event": "pull_request",
    "title": "[Enh] Give Align fields alignas-like value semantics",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35057489241",
    "created_at": "2026-09-16T04:55:27Z",
-   "updated_at": "2026-09-16T06:06:57Z",
+   "updated_at": "2026-09-16T07:33:28Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -113,11 +113,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T06:06:57Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35057489241/job/104673167679"
+     "completed_at": "2026-09-16T07:33:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35057489241/job/104673167679",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -507,11 +508,11 @@
    "branch": "qiangpan/fix_rdna3_int8_gemm",
    "event": "pull_request",
    "title": "[Bugfix][Kernel] Fix rdna3_int8_gemm RDNA bounds checks",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593",
    "created_at": "2026-09-15T07:37:33Z",
-   "updated_at": "2026-09-16T06:56:44Z",
+   "updated_at": "2026-09-16T07:00:27Z",
    "actor": "qiangpan2",
    "jobs": [
     {
@@ -526,19 +527,20 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T06:56:55Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104696508333"
+     "completed_at": "2026-09-16T07:29:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104696508333",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-16T06:56:44Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-16T07:00:26Z",
+     "completed_at": "2026-09-16T07:09:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104696508339"
     }
    ]
@@ -656,11 +658,11 @@
    "branch": "yanbo/cleancode",
    "event": "pull_request",
    "title": "refactor communication ops",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/34920869749",
    "created_at": "2026-09-15T02:21:37Z",
-   "updated_at": "2026-09-16T03:42:59Z",
+   "updated_at": "2026-09-16T07:28:27Z",
    "actor": "yanboshao",
    "jobs": [
     {
@@ -696,9 +698,9 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-16T03:42:59Z",
+     "started_at": "2026-09-16T07:28:26Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34920869749/job/104656737512"
     },
