@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-16T09:31:48Z",
+ "updated": "2026-09-16T09:57:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35081241559,
+   "pr": 1148,
+   "commit": "a6b8f7bf4767379a9b5ee29d7a2712a9132d2a93",
+   "branch": "pr/enh-specialized-storable",
+   "event": "pull_request",
+   "title": "[Enh] Make specialized Vector and Pointer types Storable",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35081241559",
+   "created_at": "2026-09-16T09:45:48Z",
+   "updated_at": "2026-09-16T09:48:58Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 35076698251,
    "pr": 1146,
@@ -38,11 +53,12 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T09:20:24Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251/job/104737604568"
+     "completed_at": "2026-09-16T09:38:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251/job/104737604568",
+     "log_fetch_failed": true
     }
    ]
   },
@@ -93,20 +109,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T08:54:07Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965/job/104729346934"
+     "completed_at": "2026-09-16T09:56:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965/job/104729346934",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T09:18:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965/job/104729346943"
+     "completed_at": "2026-09-16T09:56:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965/job/104729346943",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -142,21 +160,22 @@
    "branch": "xudoyuan/for-range-unroll",
    "event": "pull_request",
    "title": "Support unroll/unroll_full on dynamic for-range loops",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384",
    "created_at": "2026-09-16T06:58:19Z",
-   "updated_at": "2026-09-16T08:53:59Z",
+   "updated_at": "2026-09-16T09:56:00Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T08:53:58Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384/job/104708097117"
+     "completed_at": "2026-09-16T09:55:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384/job/104708097117",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -2238,52 +2257,6 @@
      "started_at": "2026-09-13T08:16:28Z",
      "completed_at": "2026-09-13T08:32:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34746696030/job/103697368000",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34736351838,
-   "pr": 1127,
-   "commit": "e7b717d060847ce4968464abf928b9f041b65b80",
-   "branch": "codex/vector-api-migration",
-   "event": "pull_request",
-   "title": "Migrate vector consumers and consolidate kernel helpers",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34736351838",
-   "created_at": "2026-09-13T03:47:37Z",
-   "updated_at": "2026-09-13T06:47:29Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-13T05:37:44Z",
-     "completed_at": "2026-09-13T06:47:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34736351838/job/103669715901",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-13T04:00:40Z",
-     "completed_at": "2026-09-13T04:15:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34736351838/job/103669715912",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-13T04:00:56Z",
-     "completed_at": "2026-09-13T05:30:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34736351838/job/103669715917",
      "log_fetch_failed": true
     }
    ]
