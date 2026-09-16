@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-16T08:22:22Z",
+ "updated": "2026-09-16T08:29:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -99,11 +99,11 @@
    "branch": "main",
    "event": "push",
    "title": "pyproject: bound nanobind below 3, as MLIR requires (#1143)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920",
    "created_at": "2026-09-16T06:36:05Z",
-   "updated_at": "2026-09-16T07:40:40Z",
+   "updated_at": "2026-09-16T08:26:34Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -129,11 +129,12 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T07:40:39Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985131"
+     "completed_at": "2026-09-16T08:26:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985131",
+     "log_fetch_failed": true
     }
    ]
   },
