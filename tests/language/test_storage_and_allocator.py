@@ -146,19 +146,24 @@ def _make_ptr_lines(ir_text):
         pytest.param("gfx942", marks=pytest.mark.l1b_target_dialect, id="compile-gfx942"),
         pytest.param("gfx1100", marks=pytest.mark.l1b_target_dialect, id="compile-gfx1100"),
         pytest.param("device", marks=pytest.mark.l2_device, id="gpu"),
+        pytest.param("device-default-cuda", marks=pytest.mark.l2_device, id="gpu-default-cuda"),
     ]
 )
 def storage_target(request, monkeypatch):
-    """Run each storage scenario through both target compilers and on the GPU."""
+    """Compile both targets and run on the GPU with CPU and CUDA tensor defaults."""
     torch = pytest.importorskip("torch")
-    on_device = request.param == "device"
+    on_device = request.param in ("device", "device-default-cuda")
     if on_device and not torch.cuda.is_available():
         pytest.skip("requires GPU")
     if not on_device:
         monkeypatch.setenv("ARCH", request.param)
     monkeypatch.setenv("COMPILE_ONLY", "0" if on_device else "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    return torch, "cuda" if on_device else "cpu"
+    # Kernel tests can leave CUDA as the process default. Exercise both defaults
+    # in isolation, restoring the caller's device context after each scenario.
+    default_device = "cuda" if request.param == "device-default-cuda" else "cpu"
+    with torch.device(default_device):
+        yield torch, "cuda" if on_device else "cpu"
 
 
 # ###########################################################################
@@ -451,7 +456,7 @@ class TestVectorStorage:
             kernel(src, dst).launch(grid=1, block=64)
 
         # CPU tensors suffice for target compilation; this does not launch on a GPU.
-        launch(torch.empty(256, dtype=torch.float32), torch.empty(256, dtype=torch.float32))
+        launch(torch.empty(256, dtype=torch.float32, device="cpu"), torch.empty(256, dtype=torch.float32, device="cpu"))
         files = list(tmp_path.glob("*/*_final_isa.s"))
         assert len(files) == 1
         isa = files[0].read_text()
@@ -526,7 +531,7 @@ class TestVectorStorage:
         expected[:block_size, :payload] = source.flip(0)[:, :payload]
         expected[block_size, :payload] = source[0, :payload]
         torch.testing.assert_close(out.cpu().reshape_as(expected), expected, rtol=0, atol=0)
-        torch.testing.assert_close(tags.cpu(), torch.arange(block_size - 1, -1, -1, dtype=torch.int32))
+        torch.testing.assert_close(tags.cpu(), torch.arange(block_size - 1, -1, -1, dtype=torch.int32, device="cpu"))
 
 
 @pytest.mark.l1a_compile_no_target_dialect
@@ -793,7 +798,7 @@ class TestPointerStorage:
         launch(src, out, addresses)
         if device == "cpu":
             return
-        peer = torch.arange(63, -1, -1)
+        peer = torch.arange(63, -1, -1, device="cpu")
         expected = torch.cat([src.cpu()[peer], (peer * 7).to(torch.int32), src.cpu()[0].expand(64)])
         torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
         torch.testing.assert_close(addresses[:64].cpu(), src.data_ptr() + peer * 4)
@@ -1150,9 +1155,9 @@ class TestArraySpecializedStorage:
         if device != "cpu":
             expected = torch.cat(
                 [
-                    torch.tensor([0xA5], dtype=torch.uint8),
+                    torch.tensor([0xA5], dtype=torch.uint8, device="cpu"),
                     raw.cpu().reshape(64, stride).flip(0).flatten(),
-                    torch.tensor([0x5A], dtype=torch.uint8),
+                    torch.tensor([0x5A], dtype=torch.uint8, device="cpu"),
                 ]
             )
             torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
@@ -1196,7 +1201,7 @@ class TestArraySpecializedStorage:
         addresses = torch.empty(128, dtype=torch.int64, device=device)
         launch(flyc.from_dlpack(src, assumed_align=16), out, addresses)
         if device != "cpu":
-            peer = torch.arange(63, -1, -1)
+            peer = torch.arange(63, -1, -1, device="cpu")
             expected = torch.cat([src.cpu()[peer * 4], (peer * 7).to(torch.int32)])
             torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
             torch.testing.assert_close(addresses[:64].cpu(), src.data_ptr() + peer * 16)
