@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-16T10:36:06Z",
+ "updated": "2026-09-16T10:38:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35085784580,
+   "pr": 1148,
+   "commit": "ee65242631fa1ef1a03afcab94ac791670c5cfec",
+   "branch": "pr/enh-specialized-storable",
+   "event": "pull_request",
+   "title": "[Enh] Make specialized Vector and Pointer types Storable",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35085784580",
+   "created_at": "2026-09-16T10:35:16Z",
+   "updated_at": "2026-09-16T10:36:02Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 35084557354,
    "pr": 1148,
@@ -10,11 +25,11 @@
    "branch": "pr/enh-specialized-storable",
    "event": "pull_request",
    "title": "[Enh] Make specialized Vector and Pointer types Storable",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35084557354",
    "created_at": "2026-09-16T10:21:45Z",
-   "updated_at": "2026-09-16T10:23:29Z",
+   "updated_at": "2026-09-16T10:35:40Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -74,11 +89,12 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-16T09:20:41Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251/job/104737604492"
+     "completed_at": "2026-09-16T10:35:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251/job/104737604492",
+     "log_fetch_failed": true
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -2182,52 +2198,6 @@
      "started_at": "2026-09-13T16:41:45Z",
      "completed_at": "2026-09-13T17:50:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34768581777/job/103755784285"
-    }
-   ]
-  },
-  {
-   "run_id": 34757308848,
-   "pr": 1129,
-   "commit": "539c4c4ce0e640a015d4967121e95ad6eed4c008",
-   "branch": "feature/iket-frontend",
-   "event": "pull_request",
-   "title": "[WIP][DSL][Feature] Add in-kernel event tracing for gfx950",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34757308848",
-   "created_at": "2026-09-13T12:31:06Z",
-   "updated_at": "2026-09-13T17:33:18Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-13T12:45:23Z",
-     "completed_at": "2026-09-13T14:14:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34757308848/job/103725473958",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-13T16:40:31Z",
-     "completed_at": "2026-09-13T17:33:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34757308848/job/103725473979",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-13T12:45:08Z",
-     "completed_at": "2026-09-13T13:02:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34757308848/job/103725474064",
-     "log_fetch_failed": true
     }
    ]
   }
