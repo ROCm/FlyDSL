@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Correctness test for the layout-API flex/flash attention forward (gfx950).
+"""Correctness test for the layout-API flex attention forward (gfx950).
 
 Compares flydsl_flex_attention_layout against torch scaled_dot_product_attention
 (non-causal). gfx950-only (uses cdna4-era MFMA + the layout API); skipped elsewhere.
 
-Phase 0 kernel constraints (see the kernel's make_flex_attn_param): block_m=32,
-block_n multiple of 32, head_dim multiple of 32, seqlen_kv multiple of block_n.
+Kernel constraints (see make_flex_attn_param): block_m=32, block_n=64,
+head_dim=128, 512-thread CTA (num_groups=8), seqlen_kv multiple of 64.
 """
 
 import math
@@ -35,6 +35,7 @@ from kernels.attention.flex_attention_gfx950 import (  # noqa: E402
     MASK_PREFIX_LM,
     MASK_SLIDING_WINDOW,
     SCORE_ALIBI,
+    _effective_causal_kv_splits,
     flydsl_flex_attention_layout,
     flydsl_flex_attention_layout_paged,
     make_flex_attn_param,
@@ -128,7 +129,7 @@ _SHAPES = [
     (1, 256, 256, 4, 128),
     (1, 256, 512, 4, 128),  # Sq != Skv
     (2, 256, 256, 8, 128),
-    (1, 256, 32, 4, 128),  # single KV tile (Skv == block_n)
+    (1, 256, 64, 4, 128),  # single KV tile (Skv == block_n)
     (1, 512, 1024, 4, 128),  # larger sequences
     (1, 256, 256, 8, 128),  # GQA: Hq=8, but uses default Hkv=Hq; see GQA test below
 ]
@@ -162,6 +163,46 @@ def test_n64_long_seq_8c_cutoffs():
         assert not _n64_long_seq_8c(1984, mask)
         assert _n64_long_seq_8c(2048, mask)
         assert not _n64_long_seq_8c(1024, mask)
+
+
+def test_effective_causal_kv_splits():
+    common = dict(rows_per_wg=256, block_n=64, num_cus=256)
+    # The unsplit grid already fills the device.
+    assert (
+        _effective_causal_kv_splits(
+            requested_splits=4,
+            batch=2,
+            seqlen_q=3072,
+            seqlen_kv=3072,
+            num_heads_q=32,
+            **common,
+        )
+        == 1
+    )
+    # Half-full grid, but four KV tiles per split cannot repay combine.
+    assert (
+        _effective_causal_kv_splits(
+            requested_splits=2,
+            batch=2,
+            seqlen_q=512,
+            seqlen_kv=512,
+            num_heads_q=32,
+            **common,
+        )
+        == 1
+    )
+    # A small Q grid with long KV retains the requested useful fan-out.
+    assert (
+        _effective_causal_kv_splits(
+            requested_splits=4,
+            batch=1,
+            seqlen_q=256,
+            seqlen_kv=8192,
+            num_heads_q=4,
+            **common,
+        )
+        == 4
+    )
 
 
 @_requires_gfx950
@@ -215,7 +256,7 @@ _MOD_SHAPES = [
     (1, 256, 256, 4, 128),
     (2, 256, 256, 8, 128),
     (1, 256, 512, 4, 128),  # Sq < Skv (prefill with longer KV)
-    (1, 256, 32, 4, 128),  # single KV tile
+    (1, 256, 64, 4, 128),  # single KV tile
     (1, 512, 512, 4, 128),  # larger sequence (tile-range clamping exercises more tiles)
 ]
 
@@ -281,13 +322,43 @@ def test_flex_attention_layout_gqa(Hq, Hkv):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("num_groups", [4, 8])
-def test_flex_attention_layout_multi_group(num_groups):
-    B, Sq, Skv, H, D = 1, num_groups * 32, 128, 4, 128
+def test_flex_attention_layout_multi_group():
+    B, Sq, Skv, H, D = 1, 256, 128, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, num_groups=num_groups)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, num_groups=8)
     ref = _sdpa_ref(q, k, v, scale)
-    _check(out, ref, label=f"groups={num_groups}")
+    _check(out, ref, label="groups=8")
+
+
+@_requires_gfx950
+@pytest.mark.parametrize(
+    "Sq,Skv,splits,causal",
+    [
+        (256, 512, 4, False),  # min-chunk folds extra requested splits
+        (256, 256, 4, True),  # auto-bypasses an uneconomic split request
+        (512, 8192, 4, False),  # long 8c partitions
+        (3072, 3072, 4, True),  # retained split-K with empty early partitions
+        (1024, 768, 2, True),  # bottom-right dead Q rows plus combine
+    ],
+)
+def test_flex_attention_layout_splitk(Sq, Skv, splits, causal):
+    B, H, D = 1, 4, 128
+    q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
+    mask_type = MASK_CAUSAL if causal else MASK_NONE
+    out = flydsl_flex_attention_layout(
+        q,
+        k,
+        v,
+        scale=scale,
+        mask_type=mask_type,
+        num_kv_splits=splits,
+    )
+    ref = (
+        _bottom_right_causal_ref(q, k, v, scale)
+        if causal
+        else _sdpa_ref(q, k, v, scale)
+    )
+    _check(out, ref, label=f"splitk Sq={Sq} Skv={Skv} splits={splits}")
 
 
 @_requires_gfx950
@@ -318,13 +389,12 @@ def test_flex_attention_layout_prefix_lm(B, Sq, Skv, H, D, dtype_str):
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("num_groups", [4, 8])
-def test_flex_attention_layout_causal_multi_group(num_groups):
-    B, Sq, Skv, H, D = 1, num_groups * 32, num_groups * 32, 4, 128
+def test_flex_attention_layout_causal_multi_group():
+    B, Sq, Skv, H, D = 1, 256, 256, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_CAUSAL, num_groups=num_groups)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_CAUSAL, num_groups=8)
     ref = _sdpa_ref(q, k, v, scale, is_causal=True)
-    _check(out, ref, label=f"causal groups={num_groups}")
+    _check(out, ref, label="causal groups=8")
 
 
 _PAGED_SHAPES = [
@@ -332,7 +402,7 @@ _PAGED_SHAPES = [
     (1, 256, 256, 4, 128),
     (2, 256, 256, 8, 128),
     (1, 256, 512, 4, 128),
-    (1, 256, 32, 4, 128),
+    (1, 256, 64, 4, 128),
 ]
 
 
@@ -381,7 +451,7 @@ def _make_block_table(B, Skv, block_n, device):
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _PAGED_SHAPES)
 def test_flex_attention_layout_paged(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
-    block_n = 32
+    block_n = 64
     ref = _sdpa_ref(q, k, v, scale)
     block_table, context_lens, _ = _make_block_table(B, Skv, block_n, q.device)
     k_cache, v_cache = _scatter_to_paged(k, v, block_n, block_table, context_lens)
@@ -393,7 +463,7 @@ def test_flex_attention_layout_paged(B, Sq, Skv, H, D, dtype_str):
 @pytest.mark.parametrize("B,Sq,Skv,H,D,dtype_str", _paged_causal_cases())
 def test_flex_attention_layout_paged_causal(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
-    block_n = 32
+    block_n = 64
     ref = _sdpa_ref(q, k, v, scale, is_causal=True)
     block_table, context_lens, _ = _make_block_table(B, Skv, block_n, q.device)
     k_cache, v_cache = _scatter_to_paged(k, v, block_n, block_table, context_lens)
