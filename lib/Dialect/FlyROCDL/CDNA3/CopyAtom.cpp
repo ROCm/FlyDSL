@@ -328,7 +328,7 @@ LogicalResult CopyOpCDNA3BufferCopyLDSType::emitAtomCall(OpBuilder &builder, Loc
   Value srcOff = bp.swizzleByteOffset(builder, loc);
 
   ArrayAttr noAttrs;
-  auto auxAttr = builder.getI32IntegerAttr(getCacheModifier());
+  auto auxAttr = builder.getI32IntegerAttr(0);
   ROCDL::RawPtrBufferLoadLdsOp::create(builder, loc, srcRsrc, dst, size, srcOff, soffset, immOffset,
                                        auxAttr, noAttrs, noAttrs, noAttrs);
   return success();

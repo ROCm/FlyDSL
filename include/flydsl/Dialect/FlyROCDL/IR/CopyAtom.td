@@ -17,11 +17,9 @@ def FlyROCDL_CopyOpBufferCopy : FlyROCDL_StatefulCopyOp<"CopyOpCDNA3BufferCopy",
 
 def FlyROCDL_CopyOpBufferCopyLDS : FlyROCDL_StatefulCopyOp<"CopyOpCDNA3BufferCopyLDS", "cdna3.buffer_copy_lds",[]> {
   let parameters = (ins
-    "int32_t":$bitSize,
-    // raw buffer load-to-LDS cachepolicy: 0=cached, 2=SC1, 4=NT
-    DefaultValuedParameter<"int32_t", "0">:$cacheModifier
+    "int32_t":$bitSize
   );
-  let assemblyFormat = "`<` $bitSize (`,` `cache` `=` $cacheModifier^)? `>`";
+  let assemblyFormat = "`<` $bitSize `>`";
   let genVerifyDecl = 1;
 }
 
