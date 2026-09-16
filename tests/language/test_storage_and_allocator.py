@@ -851,6 +851,197 @@ class TestArrayLeaf:
 
 
 @pytest.mark.l1a_compile_no_target_dialect
+class TestArraySpecialized:
+    @pytest.mark.parametrize(
+        "dtype, stride, alignment",
+        [
+            (fx.Vector[fx.Float32, 3], 12, 4),
+            (fx.Vector[fx.Uint32, (2, (1, 2))], 16, 4),
+            (fx.Vector[fx.Float6E2M3FN, 4], 3, 1),
+            (fx.Vector[fx.Boolean, 8], 1, 1),
+            (fx.Pointer[fx.Int32, fx.AddressSpace.Global, 16], 8, 8),
+            (fx.Pointer[fx.Int32, fx.AddressSpace.Shared, 16], 4, 4),
+        ],
+    )
+    def test_layout_and_cache(self, dtype, stride, alignment):
+        array = fx.Array[dtype, 5]
+        assert array is fx.Array[dtype, 5, alignment]
+        assert array.dtype is dtype
+        assert (dsl_size_of(array), dsl_align_of(array)) == (5 * stride, alignment)
+        stronger = fx.Array[dtype, 5, 32]
+        assert (dsl_size_of(stronger), dsl_align_of(stronger)) == (5 * stride, 32)
+
+    @pytest.mark.parametrize(
+        "dtype", [fx.Vector, fx.Pointer, fx.Vector[fx.Index, 4], fx.Vector[fx.Int4, 3], fx.Vector[fx.Boolean, 1]]
+    )
+    def test_non_storable_elements_are_rejected_at_declaration(self, dtype):
+        with pytest.raises(TypeError, match="Storable"):
+            fx.Array[dtype, 4]
+
+    @pytest.mark.parametrize("dtype", [fx.Float32x4, fx.Pointer[fx.Float32, fx.AddressSpace.Global]])
+    @pytest.mark.parametrize("alignment", [2, 12])
+    def test_alignment_must_preserve_elements_and_be_a_power_of_two(self, dtype, alignment):
+        with pytest.raises(ValueError, match="multiple of the element alignment|power of two"):
+            fx.Array[dtype, 4, alignment]
+
+    @pytest.mark.parametrize("static", [True, False])
+    def test_vector_indexing_and_reconstruction_inside_struct(self, static):
+        vector = fx.Vector[fx.Uint32, (2, (1, 2))]
+        array = fx.Array[vector, 4, 32]
+        record = fx.Struct["values":array]
+
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(3)
+            values = allocator.allocate(record).peek().values
+            index = fx.thread_idx.x % 4
+            values[0] = vector(1)
+            values[index] = vector(2) + fx.Uint32(3)
+            rebuilt = construct_from_ir_values(array, values, extract_to_ir_values(values))
+            assert type(rebuilt) is array and rebuilt.ptr.type.element_type == fx.Uint8.ir_type
+            assert values.ptr.alignment == 32 and values._element_ptr(index).alignment == 16
+            for value in (rebuilt[0], rebuilt[index]):
+                assert type(value) is vector and value.shape == (2, (1, 2)) and value.dtype is fx.Uint32
+            with pytest.raises(TypeError, match="expects"):
+                values[index] = fx.Vector[fx.Uint32, 2](0)
+            with pytest.raises(TypeError, match="expects"):
+                values[index] = fx.Vector[fx.Float32, (2, (1, 2))](0.0)
+            with pytest.raises(TypeError, match="requires Numeric elements"):
+                values.view(fx.make_layout(4, 1))
+
+        launch_ir(kernel)
+
+    @pytest.mark.parametrize("space", [fx.AddressSpace.Global, fx.AddressSpace.Shared])
+    def test_pointer_assignment_keeps_pointee_alignment_separate(self, space):
+        pointer = fx.Pointer[fx.Int32, space, 16]
+        array = fx.Array[pointer, 4, 32]
+
+        @flyc.kernel
+        def kernel():
+            items = fx.SharedAllocator().allocate(fx.Struct["items":array]).peek().items
+            index = fx.thread_idx.x % 4
+            raw = fx.inttoptr(pointer.ir_type, fx.Uint64(128))
+            assert type(raw) is fx.Pointer
+            items[0] = raw
+            items[index] = pointer(raw)
+            rebuilt = construct_from_ir_values(array, items, extract_to_ir_values(items))
+            for value in (rebuilt[0], rebuilt[index]):
+                assert type(value) is pointer and value.type == pointer.ir_type
+                assert value.alignment == 16
+            assert items._element_ptr(index).alignment == dsl_size_of(pointer)
+            with pytest.raises(TypeError, match="requires alignment"):
+                items[index] = raw + 1
+            wrong = fx.Pointer[fx.Float32, space, 16]
+            with pytest.raises(TypeError, match="matching element type"):
+                items[index] = fx.inttoptr(wrong.ir_type, fx.Uint64(128))
+
+        launch_ir(kernel)
+
+
+@pytest.mark.rocm_lower
+class TestArraySpecializedStorage:
+    @pytest.mark.parametrize("static", [True, False])
+    @pytest.mark.parametrize(
+        "dtype, shape",
+        [
+            (fx.Float32, 3),
+            (fx.Uint32, (2, (1, 2))),
+            (fx.Float4E2M1FN, 2),
+            (fx.Float6E2M3FN, 4),
+            (fx.Boolean, 8),
+        ],
+    )
+    def test_vector_array_preserves_dense_payloads_and_guards(self, storage_target, static, dtype, shape):
+        torch, device = storage_target
+        vector = fx.Vector[dtype, shape]
+        stride = dsl_size_of(vector)
+        array = fx.Array[vector, 64, 32]
+
+        @flyc.kernel
+        def kernel(raw: fx.Tensor, out: fx.Tensor):
+            tid = fx.thread_idx.x
+            allocator = fx.SharedAllocator(static=static)
+            before = allocator.allocate(fx.Uint8)
+            items = allocator.allocate(array).peek()
+            after = allocator.allocate(fx.Uint8)
+            if tid == 0:
+                fx.Storage[fx.Uint8](before._ptr).poke(fx.Uint8(0xA5))
+                fx.Storage[fx.Uint8](after._ptr).poke(fx.Uint8(0x5A))
+            fx.barrier()
+            items[tid] = fx.Storage[vector](raw.iter + tid * stride).peek()
+            fx.barrier()
+            value = items[63 - tid]
+            assert type(value) is vector and value.dtype is dtype
+            fx.Storage[vector](out.iter + 1 + tid * stride).poke(value)
+            if tid == 0:
+                out[0] = fx.Storage[fx.Uint8](before._ptr).peek()
+                out[1 + 64 * stride] = fx.Storage[fx.Uint8](after._ptr).peek()
+
+        @flyc.jit
+        def launch(raw: fx.Tensor, out: fx.Tensor):
+            kernel(raw, out).launch(grid=1, block=64)
+
+        raw = torch.arange(64 * stride, dtype=torch.int32, device=device).to(torch.uint8)
+        out = torch.empty(64 * stride + 2, dtype=torch.uint8, device=device)
+        launch(raw, out)
+        if device != "cpu":
+            expected = torch.cat(
+                [
+                    torch.tensor([0xA5], dtype=torch.uint8),
+                    raw.cpu().reshape(64, stride).flip(0).flatten(),
+                    torch.tensor([0x5A], dtype=torch.uint8),
+                ]
+            )
+            torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("static", [True, False])
+    def test_pointer_arrays_round_trip_and_dereference(self, storage_target, static):
+        torch, device = storage_target
+        global_pointer = fx.Pointer[fx.Int32, fx.AddressSpace.Global, 16]
+        shared_pointer = fx.Pointer[fx.Int32, fx.AddressSpace.Shared, 16]
+
+        @flyc.kernel
+        def kernel(src: fx.Tensor, out: fx.Tensor, addresses: fx.Tensor):
+            tid = fx.thread_idx.x
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(3)
+            values = allocator.allocate(fx.Array[fx.Int32, 256, 64]).peek()
+            global_ptrs = allocator.allocate(fx.Array[global_pointer, 64, 32]).peek()
+            shared_ptrs = allocator.allocate(fx.Array[shared_pointer, 64, 16]).peek()
+            # Preserve the offset's divisibility in the pointer alignment metadata.
+            offset = fx.int_tuple_mul(tid, 4)
+            global_ptrs[tid] = src.iter + offset
+            shared_ptrs[tid] = values.ptr + offset
+            values[tid * 4] = tid * 7
+            fx.barrier()
+            g = global_ptrs[63 - tid]
+            s = shared_ptrs[63 - tid]
+            assert type(g) is global_pointer and type(s) is shared_pointer
+            assert g.alignment == s.alignment == 16
+            assert global_ptrs._element_ptr(tid).alignment == 8 and shared_ptrs._element_ptr(tid).alignment == 4
+            out[tid] = g[0]
+            out[64 + tid] = s[0]
+            addresses[tid] = fx.ptrtoint(g).to(fx.Int64)
+            addresses[64 + tid] = (fx.ptrtoint(s) == fx.ptrtoint(values.ptr + (63 - tid) * 4)).to(fx.Int64)
+
+        @flyc.jit
+        def launch(src: fx.Tensor, out: fx.Tensor, addresses: fx.Tensor):
+            kernel(src, out, addresses).launch(grid=1, block=64)
+
+        src = torch.arange(256, dtype=torch.int32, device=device) * 11
+        out = torch.empty(128, dtype=torch.int32, device=device)
+        addresses = torch.empty(128, dtype=torch.int64, device=device)
+        launch(flyc.from_dlpack(src, assumed_align=16), out, addresses)
+        if device != "cpu":
+            peer = torch.arange(63, -1, -1)
+            expected = torch.cat([src.cpu()[peer * 4], (peer * 7).to(torch.int32)])
+            torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+            torch.testing.assert_close(addresses[:64].cpu(), src.data_ptr() + peer * 16)
+            assert torch.all(addresses[64:].cpu() == 1)
+
+
+@pytest.mark.l1a_compile_no_target_dialect
 class TestArrayStruct:
 
     @pytest.mark.parametrize("dtype, stride, align", [(Pair, 8, 4), (Outer, 16, 4), (Padded, 32, 16)])

@@ -110,15 +110,25 @@ value = loaded[0]                        # Float32
 
 ### `fx.Array[E, N, A]`
 
-The fixed-size storage view: an element type `E` (`Numeric` or `Struct`) that implements
-`Storable`, a positive `int` count `N`, and an optional positive byte alignment `A`. Array types are cached, so the same
-parameters yield the same class. After `peek` it supports static and run-time element indexing;
-numeric arrays also support `.view(layout)`.
+The fixed-size storage view: an element type `E` (`Numeric`, storable `Struct`, or storable
+specialized `Vector`/`Pointer`), a positive `int` count `N`, and an optional positive byte
+alignment `A`. Array types are cached, so the same parameters yield the same class.
+After `peek` it supports static and run-time element indexing; numeric arrays also support
+`.view(layout)`.
 
 ```python
 Tile = fx.Array[fx.Float32, 32, 16]
 Tile.size, Tile.align                      # ⇒ (32, 16)
 dsl_size_of(Tile), dsl_align_of(Tile)      # ⇒ (128, 16)
+
+# Inside a kernel:
+Vec = fx.Vector[fx.Float32, 4]
+vectors = fx.SharedAllocator().allocate(fx.Array[Vec, 64]).peek()
+vectors[index] = Vec(1.0) + 2.0
+value = vectors[index]                   # Vec
+
+# Pointer arrays use the same indexing API:
+Pointers = fx.Array[fx.Pointer[fx.Float32, fx.AddressSpace.Global], 64]
 ```
 
 Struct elements use an **array-of-structures (AoS)** layout. Each element occupies
@@ -142,8 +152,10 @@ items[index] = Item(index, 1.0)
 item = items[index]                       # an Item value
 ```
 
-For Struct elements, an explicit `A` must be a positive multiple of the element's natural
-alignment.
+For Struct, Vector, and Pointer elements, each element occupies `dsl_size_of(E)` bytes.
+Indexing reads or writes one `E`, preserving the vector's logical shape or the pointer's
+element type, address space, and pointee alignment. An explicit `A` must be a power of two
+and a multiple of `dsl_align_of(E)`; it aligns the array base without changing element stride.
 
 ### `fx.Align[T, A]`
 

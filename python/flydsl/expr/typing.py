@@ -2186,8 +2186,8 @@ class Array:
         align = None
 
         def __init__(self, ptr_value):
-            # Struct field offsets and the array stride are byte offsets. The
-            # caller may supply a pointer whose original element is wider.
+            # Non-numeric elements use byte strides. The caller may supply a
+            # pointer whose original element is wider.
             self._ptr_value = ptr_value if self._is_numeric else recast_iter(Uint8, ptr_value)
 
         def __repr__(self):
@@ -2252,7 +2252,7 @@ class Array:
 
         def view(self, layout):
             if not self._is_numeric:
-                raise TypeError("Array.view(layout) requires Numeric elements; index a Struct array directly")
+                raise TypeError("Array.view(layout) requires Numeric elements; index the array directly")
             return make_view(self._ptr_value, layout)
 
     def __class_getitem__(cls, params):
@@ -2272,8 +2272,12 @@ class Array:
             from ..compiler.protocol import dsl_align_of, dsl_size_of
             from .struct import is_struct_type
 
-            if not is_struct_type(dtype):
-                raise TypeError(f"Array dtype must be a Numeric subclass or a storable Struct, got {dtype!r}")
+            is_vector_or_pointer = isinstance(dtype, type) and issubclass(dtype, (Vector, Pointer))
+            if not is_struct_type(dtype) and not is_vector_or_pointer:
+                raise TypeError(
+                    f"Array dtype must be a Numeric subclass, a storable Struct, "
+                    f"or a specialized Vector/Pointer, got {dtype!r}"
+                )
         if not isinstance(size, int) or size <= 0:
             raise TypeError(f"Array size must be a positive integer, got {size!r}")
 
@@ -2287,7 +2291,7 @@ class Array:
             if not is_numeric and align % elem_align != 0:
                 raise ValueError(f"Array align must be a multiple of the element alignment {elem_align}, got {align}")
         if not is_numeric and align & (align - 1):
-            raise ValueError(f"Struct array alignment must be a power of two, got {align}")
+            raise ValueError(f"Array alignment must be a power of two, got {align}")
 
         cache_key = (dtype, size, align)
         cached = cls._cache.get(cache_key)
