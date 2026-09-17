@@ -21,7 +21,8 @@ produced (typically an `i8` one) and carries `T` alongside it, in Python. Field 
 overlays, and typed loads/stores are all computed from that trace-time `T`, never from the MLIR
 pointer type.
 
-The layout rules a `Storage` navigates come from the `Storable` protocol. Composites acquire them by
+The layout rules a `Storage` navigates come from the
+[`Storable` protocol](dsl_protocols.md#storable). Composites acquire them by
 [closure over their fields](composite_types.md#closure-over-the-protocols) — grouping is a
 composite's job, addressing is this page's.
 
@@ -39,8 +40,8 @@ The correspondence with C++ is close enough to use as a lookup table:
 
 Three things follow from `allocate` returning an address rather than a value:
 
-- **the memory has no contents yet** — `peek()` is a load you ask for, not something allocation did
-  for you;
+- **allocation does not initialize memory** — `peek()` delegates to `T`'s `Storable` access
+  contract to obtain a value; allocation itself does not perform that access;
 - **not every `T` has a value form** — a `@fx.union` never does, so it exists only as
   `Storage[Union]` and is reached one variant at a time;
 - **a composite is not one SSA value** — `Storage[T]` navigates its fields by offset, which is
@@ -55,30 +56,55 @@ reaches the type's fields — which is why they, along with `replace` and any `_
 
 ## What a `Storage` can point at
 
-`T` must be `Storable`: able to state a static size and alignment, and to be read from (and usually
-written to) a traced pointer.
+`T` must implement the `Storable` contract: a static size and alignment, plus typed access through
+a traced pointer. This applies equally to built-in and user-defined types. Builtin support includes:
 
 | `T` | Size | Alignment |
 |---|---|---|
 | `Numeric` at least one byte wide (`fx.Int32`, `fx.Float32`, `fx.Int64`, …) | its byte width | its byte width |
-| `fx.Array[E, N]` / `fx.Array[E, N, A]` | `N` elements of `E` | `A`, defaulting to the element byte size |
+| `fx.Array[E, N]` / `fx.Array[E, N, A]` | `N × dsl_size_of(E)` bytes | `A`, defaulting to the element's natural alignment |
 | a composite whose non-`Constexpr` fields are all `Storable` | see *Byte layout* | see *Byte layout* |
 
-Everything else is deliberately excluded, and asking for its size is a `TypeError`:
-sub-byte numerics including `fx.Boolean` and `fx.Int4`, plus `fx.Vector`, `fx.Pointer`, and
-`fx.Tensor`. One such field is enough to make the whole composite non-storable.
+Builtin types without this contract include sub-byte numerics such as `fx.Boolean` and `fx.Int4`,
+plus `fx.Vector`, `fx.Pointer`, and `fx.Tensor`; asking for their storage size is a `TypeError`.
+One such field is enough to make the whole composite non-storable.
 
 ### `fx.Array[E, N, A]`
 
-The fixed-size leaf: a `Numeric` subclass `E`, a positive `int` count `N`, and an optional positive
-byte alignment `A`. Array types are cached, so the same parameters yield the same class. After
-`peek` it behaves as a typed pointer view supporting indexing and `.view(layout)`.
+The fixed-size storage view: a `Numeric` subclass or storable `Struct` type `E`, a positive `int`
+count `N`, and an optional positive byte alignment `A`. Array types are cached, so the same
+parameters yield the same class. After `peek` it supports static and run-time element indexing;
+numeric arrays also support `.view(layout)`.
 
 ```python
 Tile = fx.Array[fx.Float32, 32, 16]
 Tile.size, Tile.align                      # ⇒ (32, 16)
 dsl_size_of(Tile), dsl_align_of(Tile)      # ⇒ (128, 16)
 ```
+
+Struct elements use an **array-of-structures (AoS)** layout. Each element occupies
+`dsl_size_of(E)` bytes, including its trailing padding, and indexing delegates to the element's
+recursive storage reads/writes. Nested structs with storable numeric fields work the same way:
+
+```python
+@fx.struct
+class Item:
+    key: fx.Int32
+    weight: fx.Float64
+
+Items = fx.Array[Item, 128]
+dsl_size_of(Item), dsl_align_of(Item)      # ⇒ (16, 8)
+dsl_size_of(Items), dsl_align_of(Items)    # ⇒ (2048, 8)
+
+# Inside a kernel; valid for static or dynamic SharedAllocator placement:
+items = fx.SharedAllocator().allocate(Items).peek()
+index = fx.thread_idx.x                   # caller keeps indices in [0, 128)
+items[index] = Item(index, 1.0)
+item = items[index]                       # an Item value
+```
+
+For Struct elements, an explicit `A` must be a positive multiple of the element's natural
+alignment.
 
 ### `fx.Align[T, A]`
 
