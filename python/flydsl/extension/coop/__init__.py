@@ -3,20 +3,10 @@
 
 """Cooperative algorithms over the threads of one kernel launch.
 
-Layout — one subpackage per scope, one module per algorithm::
-
-    coop/
-    ├── _common.py     glue both scopes need
-    ├── universal.py   the portable forms, dispatch turned off
-    ├── warp/
-    │   ├── reduce.py      warp_reduce
-    │   ├── scan.py        warp_inclusive_scan, warp_exclusive_scan, warp_scan,
-    │   │                      warp_scan_with_aggregate
-    │   └── rocdl.py       ROCm overrides for the above
-    └── block/
-        ├── _spec.py       shared [...] specialization machinery
-        ├── reduce.py      BlockReduce
-        └── scan.py        BlockScan
+Each scope has one module per primitive family. Block collectives share the
+specialization machinery in ``block/_spec.py``. ROCm warp overrides live in
+``warp/rocdl.py``; every portable implementation remains available in
+``universal``.
 
 That surface is flat — ``fx.coop.<name>`` — so callers never spell the scope
 out twice (``fx.coop.warp_reduce``, not ``fx.coop.warp.warp_reduce``).
@@ -33,15 +23,6 @@ from .block import *
 from .warp import *
 
 __all__ = [
-    # warp scope
-    "warp_reduce",
-    "warp_inclusive_scan",
-    "warp_exclusive_scan",
-    "warp_scan",
-    "warp_scan_with_aggregate",
-    # block scope
-    "BlockReduceAlgorithm",
-    "BlockReduce",
-    "BlockScanAlgorithm",
-    "BlockScan",
+    *warp.__all__,
+    *block.__all__,
 ]

@@ -21,8 +21,9 @@ for that to be a safe swap, and they are what this file checks:
   value that is not a 32-bit ``Numeric`` — has to reach the portable
   implementation instead.
 
-The functional coverage of the collectives themselves lives in
-``test_warp_scan.py``; nothing here duplicates it.
+The primitive contracts live in ``test_warp_reduce.py``,
+``test_warp_reduce_batched.py`` and ``test_warp_scan.py``. This module focuses
+on agreement between backend implementations and their generated instructions.
 """
 
 from __future__ import annotations
@@ -66,15 +67,15 @@ requires_dpp = pytest.mark.skipif(not _is_gfx9(), reason="the DPP sequence is gf
 
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
-def test_rocm_resolves_every_warp_collective_to_the_override():
-    """On the ROCm backend the public names are the target's, not the portable ones."""
+def test_rocm_declares_its_implemented_warp_overrides():
+    """ROCm overrides are public names; newer families may use portable fallbacks."""
     from flydsl.extension.coop import warp
     from flydsl.extension.coop.warp import rocdl
 
     assert fx.coop.warp.rocdl is rocdl
-    # The override covers the whole warp-scope surface, so nothing in it is
-    # left resolving to a shuffle by accident.
-    assert set(rocdl.__all__) == set(warp.__all__)
+    # The target only advertises algorithms it implements. Other public warp
+    # families retain the portable implementation through Dispatcher.
+    assert set(rocdl.__all__) <= set(warp.__all__)
     # The portable implementations are still reachable, which is what lets the
     # override fall back to them and this file compare against them.
     assert portable.warp_reduce is not rocdl.warp_reduce
@@ -209,7 +210,7 @@ def test_max_keeps_its_identity_inside_the_group(form, width):
     if form == "reduce":
         expected = per_group.amax(1).repeat_interleave(group)
     else:
-        identity = torch.full((per_group.shape[0], 1), -(2**31), dtype=torch.int32)
+        identity = torch.full((per_group.shape[0], 1), -(2**31), dtype=torch.int32, device="cpu")
         expected = torch.cat([identity, per_group.cummax(1).values[:, :-1]], dim=1).reshape(-1)
     assert torch.equal(fast, expected)
 

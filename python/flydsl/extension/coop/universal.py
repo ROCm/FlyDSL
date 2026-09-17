@@ -1,48 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""The portable implementations, under the public names, never displaced.
+"""Expose portable collectives under the same names as the dispatched API.
 
-``fx.coop.warp_reduce`` resolves through ``extension/_dispatch.py``: on the ROCm
-backend it is the DPP sequence in ``warp/rocdl.py``, not the shuffle butterfly in
-``warp/reduce.py``. ``fx.coop.universal.warp_reduce`` is that butterfly, and stays
-it on every target.
+``fx.coop.universal.warp_reduce`` always uses the portable warp implementation.
+``fx.coop.warp_reduce`` may select a backend override when its requirements are
+met. Both expose the same argument and result contracts; floating-point
+rounding can depend on the reduction tree.
 
-The names, the signatures and the results are the same either way — a target
-override is only ever a faster route to the same answer — so ``universal`` is not
-a second API to learn. It is the same one with dispatch turned off, which two
-callers want:
-
-- **A kernel that measured it.** An override is faster on the shapes it was
-  tuned for, not on every shape; a caller that found the portable form better on
-  its own can say so, rather than being stuck with whatever the target picked.
-- **A test.** Running both and comparing them against each other is what catches
-  an override that is wrong in a way a host reference would not show, and it is
-  the only way to reach the portable code at all once an override exists for the
-  target being tested.
+The block subclasses in this module also route their internal warp operations
+and scans through portable implementations. This namespace supports explicit
+implementation selection and comparison in correctness tests and benchmarks.
 """
 
 from types import SimpleNamespace
 
 from .block import reduce as _block_reduce
 from .block import scan as _block_scan
+
+# Portable implementations of the additional warp primitive families.
+from .warp import __all__ as _warp_names
 from .warp import reduce as _warp_reduce
 from .warp import scan as _warp_scan
-
-__all__ = [
-    # warp scope
-    "warp_reduce",
-    "warp_inclusive_scan",
-    "warp_exclusive_scan",
-    "warp_scan",
-    "warp_scan_with_aggregate",
-    # block scope
-    "BlockReduceAlgorithm",
-    "BlockReduce",
-    "BlockScanAlgorithm",
-    "BlockScan",
-]
-
+from .warp.bitonic_sort import *
+from .warp.exchange import *
+from .warp.load import *
+from .warp.merge_sort import *
+from .warp.reduce_batched import *
+from .warp.store import *
 
 warp_reduce = _warp_reduce.warp_reduce
 warp_inclusive_scan = _warp_scan.warp_inclusive_scan
@@ -56,6 +41,7 @@ warp_scan_with_aggregate = _warp_scan.warp_scan_with_aggregate
 # warp primitive that gains a block-scope caller has to be added deliberately.
 _UNIVERSAL_WARP = SimpleNamespace(
     warp_reduce=warp_reduce,
+    warp_inclusive_scan=warp_inclusive_scan,
     warp_scan_with_aggregate=warp_scan_with_aggregate,
 )
 
@@ -77,3 +63,15 @@ class BlockScan(_block_scan.BlockScan):
     """:class:`~flydsl.extension.coop.BlockScan`, folding through portable warps."""
 
     warp_ops = _UNIVERSAL_WARP
+
+
+warp_head_segmented_reduce = _warp_reduce.warp_head_segmented_reduce
+warp_tail_segmented_reduce = _warp_reduce.warp_tail_segmented_reduce
+warp_broadcast = _warp_scan.warp_broadcast
+__all__ = [
+    *_warp_names,
+    "BlockReduceAlgorithm",
+    "BlockReduce",
+    "BlockScanAlgorithm",
+    "BlockScan",
+]
