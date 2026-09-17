@@ -84,45 +84,17 @@ from flydsl.runtime.device import get_rocm_arch
 
 scf_if_dispatch = ReplaceIfWithDispatch.scf_if_dispatch
 
-if not hasattr(fx, "max"):
-    from flydsl._mlir.dialects import arith as _arith_mlir
-
-    def _fx_max(a, b):
-        if hasattr(a, "maximumf"):
-            return a.maximumf(b)
-        return type(a)(_arith_mlir.maxsi(a.ir_value(), b.ir_value()))
-
-    def _fx_min(a, b):
-        if hasattr(a, "minimumf"):
-            return a.minimumf(b)
-        return type(a)(_arith_mlir.minsi(a.ir_value(), b.ir_value()))
-
-    fx.max = _fx_max
-    fx.min = _fx_min
-
 
 def _i32_min(a, b):
-    from flydsl._mlir.dialects import arith as _am
-
-    def _v(x):
-        return x.ir_value() if hasattr(x, "ir_value") else x
-
-    return fx.Int32(_am.minsi(_v(a), _v(b)))
+    return fx.min(a, b)
 
 
 def _i32_max(a, b):
-    from flydsl._mlir.dialects import arith as _am
-
-    def _v(x):
-        return x.ir_value() if hasattr(x, "ir_value") else x
-
-    return fx.Int32(_am.maxsi(_v(a), _v(b)))
+    return fx.max(a, b)
 
 
 def _f32_max(a, b):
-    if hasattr(a, "maximumf"):
-        return a.maximumf(b)
-    return fx.Float32(a).maximumf(fx.Float32(b))
+    return fx.max(a, b)
 
 
 def pipeline_stagger_enabled(*, depth: int, num_groups: int, m_waves: int) -> bool:
