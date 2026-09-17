@@ -1,15 +1,91 @@
 {
  "schema": 1,
- "updated": "2026-09-17T02:45:38Z",
+ "updated": "2026-09-17T02:59:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 35175377780,
+   "run_id": 35176277481,
+   "pr": 1154,
+   "commit": "27d7fc46185d20fc96e9670085d96a833bdcea55",
+   "branch": "phil/llvm-skill-only",
+   "event": "pull_request",
+   "title": "[wip][llvm][Skill] Add an llvm skill for picking and verifying LLVM knobs",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176277481",
+   "created_at": "2026-09-17T02:56:09Z",
+   "updated_at": "2026-09-17T02:57:40Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-17T02:57:36Z",
+     "completed_at": "2026-09-17T02:57:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176277481/job/105058824182"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-17T02:57:36Z",
+     "completed_at": "2026-09-17T02:57:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176277481/job/105058824201",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-17T02:57:36Z",
+     "completed_at": "2026-09-17T02:57:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176277481/job/105058824205"
+    }
+   ]
+  },
+  {
+   "run_id": 35176257769,
+   "pr": 1153,
+   "commit": "017731571783ece022c10e2996db8e9d87b4eadf",
+   "branch": "phil/drop-inert-llvm-knobs",
+   "event": "pull_request",
+   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176257769",
+   "created_at": "2026-09-17T02:55:51Z",
+   "updated_at": "2026-09-17T02:57:34Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 35175632955,
    "pr": 1152,
+   "commit": "e1137f3e60ca5121d4d3b03aac674d56d50f41ea",
+   "branch": "phil/llvm-skill",
+   "event": "pull_request",
+   "title": "[llvm] Add llvm skill and drop four inert LLVM knobs",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955",
+   "created_at": "2026-09-17T02:45:41Z",
+   "updated_at": "2026-09-17T02:47:21Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 35175377780,
+   "pr": null,
    "commit": "8a5def7dc12142e43b9e94dc9f81f898e30b71a4",
    "branch": "phil/llvm-skill",
    "event": "pull_request",
-   "title": "[llvm][Skill] Add llvm skill and drop four inert LLVM knobs",
+   "title": "[llvm] Add llvm skill and drop four inert LLVM knobs",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175377780",
@@ -25,13 +101,41 @@
    "branch": "codex/topk-gating-mi355",
    "event": "pull_request",
    "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119",
    "created_at": "2026-09-17T02:41:19Z",
-   "updated_at": "2026-09-17T02:43:12Z",
+   "updated_at": "2026-09-17T02:56:04Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-17T02:56:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119/job/105058554132"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T02:56:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119/job/105058554134"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T02:56:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119/job/105058554274"
+    }
+   ]
   },
   {
    "run_id": 35174161224,
@@ -40,11 +144,11 @@
    "branch": "feature/ktrace-v4",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add an in-kernel wave tracing feature (fx.ktrace) for gfx942/gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35174161224",
    "created_at": "2026-09-17T02:22:24Z",
-   "updated_at": "2026-09-17T02:35:48Z",
+   "updated_at": "2026-09-17T02:45:54Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -59,18 +163,18 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T02:36:13Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T02:51:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35174161224/job/105054703822"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-17T02:35:48Z",
+     "started_at": "2026-09-17T02:45:53Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35174161224/job/105054703833"
     }
@@ -2091,113 +2195,6 @@
    "updated_at": "2026-09-14T11:15:17Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 34835721501,
-   "pr": 1131,
-   "commit": "f4216b6c6634a3d90efab813e6c7dc5715199093",
-   "branch": "codex/port-preshuffle-layout-algebra",
-   "event": "pull_request",
-   "title": "[Kernel] Refactor preshuffle GEMM indexing with layout algebra",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835721501",
-   "created_at": "2026-09-14T10:57:19Z",
-   "updated_at": "2026-09-14T13:12:10Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T11:31:57Z",
-     "completed_at": "2026-09-14T13:12:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835721501/job/103953283348"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T11:13:33Z",
-     "completed_at": "2026-09-14T12:36:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835721501/job/103953283391",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T11:27:25Z",
-     "completed_at": "2026-09-14T11:42:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835721501/job/103953283470"
-    }
-   ]
-  },
-  {
-   "run_id": 34835443408,
-   "pr": 1131,
-   "commit": "7c8ec0baf7cefc89de2db956d5ce88d5e5e68261",
-   "branch": "codex/port-preshuffle-layout-algebra",
-   "event": "pull_request",
-   "title": "[Kernel] Refactor preshuffle GEMM indexing with layout algebra",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835443408",
-   "created_at": "2026-09-14T10:53:55Z",
-   "updated_at": "2026-09-14T10:57:37Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 34835262589,
-   "pr": null,
-   "commit": "d6221d19cfdd7f0b060e15b09bf5cb366b3ff2e3",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix] Include captured types in the JIT cache key (#1130)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835262589",
-   "created_at": "2026-09-14T10:51:43Z",
-   "updated_at": "2026-09-14T12:30:35Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T11:14:20Z",
-     "completed_at": "2026-09-14T12:13:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835262589/job/103951827453"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T11:08:23Z",
-     "completed_at": "2026-09-14T12:30:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835262589/job/103951827492",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T11:08:15Z",
-     "completed_at": "2026-09-14T11:27:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835262589/job/103951827513"
-    }
-   ]
   }
  ]
 }
