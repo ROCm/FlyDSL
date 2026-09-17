@@ -45,6 +45,7 @@ from kernels.norm.rmsnorm_common import store_scalar as _store_scalar
 from kernels.norm.rmsnorm_common import store_vec as _store_vec
 from kernels.norm.rmsnorm_common import to_elem_scalar as _to_elem_scalar
 from kernels.norm.rmsnorm_common import to_elem_vec as _to_elem_vec
+from kernels.norm.rmsnorm_common import validate_norm_operand_dtypes as _validate_norm_operand_dtypes
 from kernels.norm.rmsnorm_common import weight_vec_width as _weight_vec_width
 
 try:
@@ -1410,6 +1411,7 @@ def _build_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
+            _validate_norm_operand_dtypes(Input, Gamma=Gamma, XScale=XScale)
             launcher = rmsnorm_quant_kernel(Input, Gamma, XScale, YScale, Output)
             launcher.launch(
                 grid=(m_in, 1, 1),
@@ -1430,6 +1432,7 @@ def _build_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
+            _validate_norm_operand_dtypes(Input, Gamma=Gamma)
             launcher = rmsnorm_quant_kernel(Input, Gamma, Gamma, YScale, Output)
             launcher.launch(
                 grid=(m_in, 1, 1),
@@ -1819,6 +1822,9 @@ def _build_fused_add_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
+            _validate_norm_operand_dtypes(
+                Input, ResidualIn=ResidualIn, Gamma=Gamma, XScale=XScale, ResidualOut=ResidualOut
+            )
             launcher = fused_add_rmsnorm_quant_kernel(Input, ResidualIn, Gamma, XScale, YScale, Output, ResidualOut)
             launcher.launch(
                 grid=(m_in, 1, 1),
@@ -1841,6 +1847,7 @@ def _build_fused_add_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
+            _validate_norm_operand_dtypes(Input, ResidualIn=ResidualIn, Gamma=Gamma, ResidualOut=ResidualOut)
             launcher = fused_add_rmsnorm_quant_kernel(Input, ResidualIn, Gamma, Gamma, YScale, Output, ResidualOut)
             launcher.launch(
                 grid=(m_in, 1, 1),

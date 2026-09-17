@@ -52,6 +52,21 @@ def make_single_reduction_storage(red_slots: int):
     return SharedStorage
 
 
+def validate_norm_operand_dtypes(input_tensor, **operands) -> None:
+    """Validate quantized-norm operands against the input dtype.
+
+    Quantized norm kernels specialize every non-quantized operand on the activation
+    dtype, so a mismatched tensor is reinterpreted bit-for-bit instead of failing.
+    """
+    mismatched = {name: t.dtype for name, t in operands.items() if t.dtype != input_tensor.dtype}
+    if mismatched:
+        got = ", ".join(f"{name}={dtype}" for name, dtype in mismatched.items())
+        raise ValueError(
+            f"quantized norm kernels require {'/'.join(operands)} to match the input dtype "
+            f"{input_tensor.dtype}, got {got}"
+        )
+
+
 def load_scalar(copy_atom, elem_dtype, divided_tensor, index):
     view = fx.slice(divided_tensor, (None, index))
     r = fx.make_rmem_tensor(1, elem_dtype)

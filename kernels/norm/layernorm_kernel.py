@@ -20,6 +20,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import atomic_add, dtype_to_elem_type, get_warp_size
+from kernels.norm.rmsnorm_common import validate_norm_operand_dtypes
 
 try:
     import torch
@@ -1104,6 +1105,7 @@ def _build_layernorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
+            validate_norm_operand_dtypes(Input, Gamma=Gamma, Beta=Beta, XScale=XScale)
             launcher = layernorm_quant_kernel(Input, Gamma, Beta, XScale, YScale, Output)
             launcher.launch(
                 grid=(m_in, 1, 1),
@@ -1125,6 +1127,7 @@ def _build_layernorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
+            validate_norm_operand_dtypes(Input, Gamma=Gamma, Beta=Beta)
             launcher = layernorm_quant_kernel(Input, Gamma, Beta, Gamma, YScale, Output)
             launcher.launch(
                 grid=(m_in, 1, 1),
@@ -1492,6 +1495,9 @@ def _build_fused_add_layernorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
+            validate_norm_operand_dtypes(
+                Input, ResidualIn=ResidualIn, Gamma=Gamma, Beta=Beta, XScale=XScale, ResidualOut=ResidualOut
+            )
             launcher = fused_add_layernorm_quant_kernel(
                 Input, ResidualIn, Gamma, Beta, XScale, YScale, Output, ResidualOut
             )
@@ -1517,6 +1523,7 @@ def _build_fused_add_layernorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
+            validate_norm_operand_dtypes(Input, ResidualIn=ResidualIn, Gamma=Gamma, Beta=Beta, ResidualOut=ResidualOut)
             launcher = fused_add_layernorm_quant_kernel(
                 Input, ResidualIn, Gamma, Beta, Gamma, YScale, Output, ResidualOut
             )
