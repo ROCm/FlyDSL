@@ -19,6 +19,8 @@ import os
 import pytest
 
 from kernels.moe.topk_gating_softmax_kernel import (
+    _build_topk_gating_softmax_module,
+    _compute_topk_gating_layout,
     build_topk_gating_softmax_module,
 )
 from tests.kernels.benchmark_common import (
@@ -305,6 +307,42 @@ def test_topk_runtime_dispatch_contract(num_experts, topk, dtype_str, renormaliz
         poison_outputs()
         graph.replay()
         check_outputs(num_tokens)
+
+
+@pytest.mark.parametrize("max_vpt", (1, 2, 4, 8, 16))
+def test_non_ballot_local_tournament_layouts(max_vpt):
+    """Exercise every local tournament width without the ballot reduction."""
+    num_tokens, num_experts, topk = 2, 16, 8
+    layout = _compute_topk_gating_layout(num_experts, topk, "f32", max_vpt=max_vpt)
+    assert layout["VPT"] == max_vpt
+
+    logits = torch.full((num_tokens, num_experts), -4.0, dtype=torch.float32, device="cpu")
+    logits[0] = 0.0
+    logits[1, :max_vpt] = torch.arange(max_vpt, 0, -1, dtype=torch.float32, device="cpu")
+    expected_indices = torch.argsort(logits, dim=-1, descending=True, stable=True)[:, :topk].to(torch.int32)
+
+    gating = logits.to(device="cuda")
+    weights = torch.empty((num_tokens, topk), dtype=torch.float32, device="cuda")
+    indices = torch.empty((num_tokens, topk), dtype=torch.int32, device="cuda")
+    tei = torch.empty((num_tokens, topk), dtype=torch.int32, device="cuda")
+    launch_fn = _build_topk_gating_softmax_module(
+        num_experts,
+        topk,
+        "f32",
+        False,
+        max_vpt=max_vpt,
+        ballot_argmax=False,
+    )
+
+    launch_fn(gating, weights, indices, tei, num_tokens, stream=torch.cuda.current_stream())
+    torch.cuda.synchronize()
+
+    assert torch.equal(indices.cpu(), expected_indices)
+    expected_tei = (
+        torch.arange(topk, dtype=torch.int32, device="cpu")[None, :] * num_tokens
+        + torch.arange(num_tokens, dtype=torch.int32, device="cpu")[:, None]
+    )
+    assert torch.equal(tei.cpu(), expected_tei)
 
 
 def test_topk_contract_with_cuda_default_device():

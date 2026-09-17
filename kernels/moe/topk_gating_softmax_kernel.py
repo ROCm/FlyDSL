@@ -618,28 +618,18 @@ def _build_topk_gating_softmax_module(
 
         for k_idx in range_constexpr(topk):
             # A balanced local tournament shortens the dependent compare /
-            # select chain. Equal probabilities retain the left (lower-index)
-            # leaf, exactly like the original increasing-index linear scan.
-            thread_best_val = c_neg_inf
-            thread_best_idx = fx.Int32(-1)
-            if ballot_argmax:
-                best_vals = list(prob_list)
-                best_indices = list(col_idx_list)
-                for level in range_constexpr(int(math.log2(VPT))):
-                    stride = 1 << level
-                    for v in range_constexpr(0, VPT, 2 * stride):
-                        take_right = best_vals[v + stride] > best_vals[v]
-                        best_vals[v] = take_right.select(best_vals[v + stride], best_vals[v])
-                        best_indices[v] = take_right.select(best_indices[v + stride], best_indices[v])
-                thread_best_val = best_vals[0]
-                thread_best_idx = best_indices[0]
-            else:
-                for v in range_constexpr(VPT):
-                    pv = prob_list[v]
-                    ci = col_idx_list[v]
-                    is_better = pv > thread_best_val
-                    thread_best_val = is_better.select(pv, thread_best_val)
-                    thread_best_idx = is_better.select(ci, thread_best_idx)
+            # select chain. VPT is a power of two by the layout contract;
+            # equal probabilities retain the left (lower-index) leaf.
+            best_vals = list(prob_list)
+            best_indices = list(col_idx_list)
+            for level in range_constexpr(int(math.log2(VPT))):
+                stride = 1 << level
+                for v in range_constexpr(0, VPT, 2 * stride):
+                    take_right = best_vals[v + stride] > best_vals[v]
+                    best_vals[v] = take_right.select(best_vals[v + stride], best_vals[v])
+                    best_indices[v] = take_right.select(best_indices[v + stride], best_indices[v])
+            thread_best_val = best_vals[0]
+            thread_best_idx = best_indices[0]
 
             # Sub-warp argmax → all THREADS_PER_TOKEN lanes hold the winner.
             global_best_val, global_best_idx = group_reduce_argmax(thread_best_val, thread_best_idx)
@@ -718,7 +708,7 @@ def build_topk_gating_softmax_module(
     Returns a JIT launcher accepting gating logits, weights, expert indices,
     token-expert indices, token count, and stream. For gfx95, 128/256 experts,
     and top-K in {4, 6, 8}, batches of at most 2048 tokens use eight values per
-    thread to shorten the serial selection chain. Larger batches retain the
+    thread to reduce the local tournament depth. Larger batches retain the
     wider layout to avoid increasing total wave work. The token count remains
     dynamic: the same compiled launcher supports both layouts.
     """
