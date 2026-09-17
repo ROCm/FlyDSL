@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-17T02:59:27Z",
+ "updated": "2026-09-17T03:35:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -9,7 +9,7 @@
    "commit": "27d7fc46185d20fc96e9670085d96a833bdcea55",
    "branch": "phil/llvm-skill-only",
    "event": "pull_request",
-   "title": "[wip][llvm][Skill] Add an llvm skill for picking and verifying LLVM knobs",
+   "title": "[wip][llvm][skill] Add an llvm skill for picking and verifying LLVM knobs",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176277481",
@@ -56,13 +56,41 @@
    "branch": "phil/drop-inert-llvm-knobs",
    "event": "pull_request",
    "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176257769",
    "created_at": "2026-09-17T02:55:51Z",
-   "updated_at": "2026-09-17T02:57:34Z",
+   "updated_at": "2026-09-17T03:20:24Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T03:20:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176257769/job/105063233885"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-17T03:20:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176257769/job/105063233895"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-17T03:20:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176257769/job/105063233992"
+    }
+   ]
   },
   {
    "run_id": 35175632955,
@@ -75,9 +103,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955",
    "created_at": "2026-09-17T02:45:41Z",
-   "updated_at": "2026-09-17T02:47:21Z",
+   "updated_at": "2026-09-17T03:25:41Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T03:25:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955/job/105059218237"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T03:17:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955/job/105059218242"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T03:00:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955/job/105059218283"
+    }
+   ]
   },
   {
    "run_id": 35175377780,
@@ -101,29 +157,29 @@
    "branch": "codex/topk-gating-mi355",
    "event": "pull_request",
    "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119",
    "created_at": "2026-09-17T02:41:19Z",
-   "updated_at": "2026-09-17T02:56:04Z",
+   "updated_at": "2026-09-17T03:00:54Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-17T02:56:03Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-17T03:00:53Z",
+     "completed_at": "2026-09-17T03:30:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119/job/105058554132"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T02:56:23Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T03:17:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119/job/105058554134"
     },
     {
@@ -172,10 +228,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T02:45:53Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T03:24:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35174161224/job/105054703833"
     }
    ]
