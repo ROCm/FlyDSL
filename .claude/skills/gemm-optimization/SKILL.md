@@ -606,6 +606,12 @@ gfx908/CDNA1. In LLVM this is `getTotalNumVGPRs(has90AInsts, NumAGPR, NumVGPR)`
 `alignTo(NumVGPR, 4) + NumAGPR` when the target has GFX90AInsts — gfx90a, gfx942
 and gfx950 all do — and `max(NumVGPR, NumAGPR)` otherwise.
 
+To *change* these numbers rather than only model them — `waves_per_eu`,
+`flat_work_group_size`, `agpr-alloc`, scheduler flags — and to prove the knob
+reached codegen, use `/llvm`. ⚠ Note especially that `amdgpu-num-vgpr` is
+silently doubled on gfx942/gfx950, so it does **not** cap arch VGPRs the way it
+reads.
+
 Measured on gfx950 (MI355X) with `hipcc -Rpass-analysis=kernel-resource-usage`:
 an MFMA kernel at arch=36/accum=32 reports 7 waves (combined model predicts 7;
 separate-file model predicts 6) and at arch=84/accum=80 reports 3 waves

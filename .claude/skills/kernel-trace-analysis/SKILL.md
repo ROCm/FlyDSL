@@ -22,6 +22,10 @@ Do **not** use GUI tools.
 > LDS?", use `/isa-resource-diff` first — it is compile-only, needs no GPU or
 > profiler run, and answers in seconds. Come here when you need to know *why* a
 > kernel is slow rather than *what resources it uses*.
+>
+> To pick an LLVM knob that changes what the compiler emits — a compile hint, a
+> function attribute, an `-mllvm` flag — and to prove it took effect, use
+> `/llvm`. That is also compile-only.
 
 ## Arguments
 
