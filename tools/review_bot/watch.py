@@ -820,15 +820,18 @@ class SourceManager:
         return engine_sha
 
     def prepare_engine(self, destination: Path, engine_sha: str) -> Path:
+        destination.mkdir(mode=0o700)
+        self.git(destination, "init", "--quiet")
+        self.git(destination, "remote", "add", "origin", PUBLIC_GIT_URL)
         self.git(
-            None,
-            "clone",
+            destination,
+            "fetch",
             "--quiet",
-            "--no-checkout",
-            "--no-local",
-            str(self.config.engine_root),
-            str(destination),
-            timeout=600,
+            "--no-tags",
+            "--filter=blob:none",
+            "origin",
+            f"+{engine_sha}:refs/review-bot/engine",
+            timeout=1200,
         )
         self.git(destination, "checkout", "--quiet", "--detach", engine_sha, timeout=600)
         observed = self.git(destination, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
