@@ -20,8 +20,7 @@ Optional B preshuffle uses the same on-disk layout as
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects import vector as _vector
-from flydsl.expr import arith, as_ir_value, const_expr, range_constexpr
+from flydsl.expr import as_ir_value, const_expr, range_constexpr
 from flydsl.expr.typing import T as _T
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
@@ -35,6 +34,7 @@ from kernels.gemm.fp8_gemm_utils import (
     pack_i32x4_i32x8,
     swizzle_128,
     wait_barrier,
+    xcd_remap_pid,
 )
 
 
@@ -46,12 +46,12 @@ class Mfma16x16x128AGPR(Mfma16x16x128):
     scale is left default (=0); the real per-token scale is applied in StoreC."""
 
     def _do_mma(self, a, b, c):
-        a_i32x8 = _vector.bitcast(_T.vec(8, _T.i32), as_ir_value(a))
-        b_i32x8 = _vector.bitcast(_T.vec(8, _T.i32), as_ir_value(b))
+        a_i32x8 = fx.Vector(a).bitcast(fx.Int32)
+        b_i32x8 = fx.Vector(b).bitcast(fx.Int32)
         res_ty = _T.vec(4, _T.f32)
         return _llvm.inline_asm(
             res_ty,
-            [arith._to_raw(a_i32x8), arith._to_raw(b_i32x8), arith._to_raw(c)],
+            [a_i32x8.ir_value(), b_i32x8.ir_value(), as_ir_value(c)],
             "v_mfma_f32_16x16x128_f8f6f4 $0, $1, $2, $0",
             "=a,v,v,0",
             has_side_effects=True,
@@ -128,37 +128,6 @@ class LayoutS2R:
         return self._vec_load_16xf8(lds_src, lds_offset).bitcast(fx.Int32)
 
 
-def _min(a, b):
-    return arith.select(a < b, a, b)
-
-
-def _xcd_swizzle(num_pid_m, num_pid_n):
-    NUM_XCDS = 8
-    WGM = 4
-    NUM_CUS = 32 * NUM_XCDS
-    SWIZZLE_THRESHOLD = 4 * NUM_CUS
-
-    wgid = fx.block_idx.x
-
-    num_wg = num_pid_m * num_pid_n
-
-    # Simple path: no XCD remapping.
-    simple_m, simple_n = divmod(wgid, num_pid_n)
-
-    # XCD-remapped path.
-    intra_xcd, xcd = divmod(wgid, NUM_XCDS)
-    wgid_remap = xcd * (num_wg // NUM_XCDS) + intra_xcd
-    num_wgid_in_group = WGM * num_pid_n
-    group_id, intra_group = divmod(wgid_remap, num_wgid_in_group)
-    first_pid_m = group_id * WGM
-    group_size_m = _min(num_pid_m - first_pid_m, WGM)
-    pid_n, intra_group_m = divmod(intra_group, group_size_m)
-    pid_m = first_pid_m + intra_group_m
-
-    use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
-    return (arith.select(use_simple, simple_m, pid_m), arith.select(use_simple, simple_n, pid_n))
-
-
 def compile_fp8_gemm_4w(
     *,
     K: int,
@@ -221,7 +190,7 @@ def compile_fp8_gemm_4w(
 
         n_blocks = ceildiv(c_n, BLOCK_N)
         if const_expr(use_xcd_remap):
-            tile_i, tile_j = _xcd_swizzle(ceildiv(c_m, BLOCK_M), n_blocks)
+            tile_i, tile_j = xcd_remap_pid(ceildiv(c_m, BLOCK_M), n_blocks, group_m=4)
         else:
             tile_i, tile_j = divmod(fx.block_idx.x, n_blocks)
 

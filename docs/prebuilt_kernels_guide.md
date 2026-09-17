@@ -367,40 +367,24 @@ Shared kernel utilities used across GEMM/MoE/norm kernels.
 | `atomic_add(...)` | Emit an atomic add |
 | `_if_then(if_op, scf=None)` / `_if_else(if_op, scf=None)` | SCF `if`/`else` region context managers |
 
-### 4.2 MFMA epilogues (`kernels/mma/mfma_epilogues.py`)
+### 4.2 Preshuffle layout (`kernels/common/mma/mfma_preshuffle_pipeline.py`)
 
-Configurable epilogue strategies for MFMA 16x16 kernels.
-
-| Function | Description |
-|---|---|
-| `default_epilog(...)` | Standard row-iterator: `row = bx_m + mi*16 + lane_div_16*4 + ii` |
-| `c_shuffle_epilog(...)` | CK-style LDS CShuffle: write to LDS → barrier → remap threads → half2 store |
-| `mfma_epilog(use_cshuffle, ...)` | Dispatcher: calls default or CShuffle based on flag |
-
-### 4.3 Preshuffle pipeline (`kernels/mma/mfma_preshuffle_pipeline.py`)
-
-Shared data movement and layout utilities for preshuffle GEMM kernels.
+Shared layout and block-remapping utilities for preshuffle GEMM and MoE kernels.
 
 | Function | Description |
 |---|---|
 | `make_preshuffle_b_layout(...)` | Build B-preshuffle layout: (N/16, K/64, 4, 16, kpack_bytes) |
-| `load_b_pack_k32(...)` | Load B pack for K32 MFMA micro-step (returns i64) |
-| `tile_chunk_coord_i32(...)` | Map (thread, chunk) → (row, col) for tile loads |
-| `buffer_copy_gmem16_dwordx4(...)` | 16-byte global load via buffer-load dwordx4 |
-| `lds_store_16b_xor16(...)` | Store 16B to LDS with XOR16 swizzle |
-| `lds_load_pack_k32(...)` | Load A-pack from LDS for K32 micro-step |
-| `swizzle_xor16(...)` | XOR-based swizzle for LDS bank-conflict avoidance |
+| `xcd_remap_bx_by(...)` | Remap blocks across XCDs and group tiles along M |
 
-### 4.4 Layout coordinate helpers
+### 4.3 Layout coordinate helpers
 
-Native Fly dialect coordinate mapping (in `flydsl.expr` and `kernels/mma/mfma_preshuffle_pipeline.py`):
+Coordinate mapping in `flydsl.expr`:
 
 | Function | Description |
 |---|---|
 | `fx.crd2idx(crd, layout)` | Coordinate → flat index (Fly dialect op) |
 | `fx.idx2crd(idx, layout)` | Flat index → coordinate tuple (Fly dialect op) |
 | `fx.get(int_tuple, mode)` | Extract element at index from `!fly.int_tuple` |
-| `crd2idx(crd, layout)` | Wrapper in `kernels/mma/mfma_preshuffle_pipeline.py` (auto index cast) |
 
 ---
 
@@ -454,9 +438,8 @@ What operation do you need?
 │       └── → kernels/moe/moe_gemm_2stage.py
 │
 └── Building blocks
-    ├── Common kernel helpers    → kernels/common/kernels_common.py
-    ├── MFMA epilogue selection  → kernels/mma/mfma_epilogues.py
-    └── Preshuffle data movement → kernels/mma/mfma_preshuffle_pipeline.py
+    ├── Common kernel helpers → kernels/common/kernels_common.py
+    └── Preshuffle layout     → kernels/common/mma/mfma_preshuffle_pipeline.py
 ```
 
 ---
@@ -484,8 +467,7 @@ What operation do you need?
 | `kernels/gemm/gemm_common_gfx1250.py` | GFX1250 GEMM common |
 | `kernels/gemm/gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
 | `kernels/gemm/wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
-| `kernels/mma/mfma_epilogues.py` | MFMA epilogue helpers |
-| `kernels/mma/mfma_preshuffle_pipeline.py` | Preshuffle data movement and layout utilities |
+| `kernels/common/mma/mfma_preshuffle_pipeline.py` | Preshuffle layout and block remapping |
 | `kernels/mma/pipeline_utils.py` | Pipeline utility helpers |
 | `kernels/common/kernels_common.py` | Common kernel utilities |
 | `kernels/common/tensor_shim.py` | GTensor/STensor abstraction |

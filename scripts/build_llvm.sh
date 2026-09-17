@@ -175,6 +175,26 @@ if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
     exit 1
   fi
 
+  # The install tree is ~80% bin/, and those binaries carry a symbol table the
+  # build does not need: stripping takes ~20% off the tarball, which the CI
+  # cache transfers on every job. Static archives are left alone - they gained
+  # nothing when measured, and stripping an archive can drop symbols the link
+  # still needs. Set LLVM_STRIP_INSTALL=0 to keep symbols for crash backtraces.
+  if [[ "${LLVM_STRIP_INSTALL:-1}" == "1" ]] && command -v strip >/dev/null 2>&1; then
+    echo "Stripping installed binaries and shared libraries..."
+    before_kb=$(du -sk "${LLVM_INSTALL_DIR}" | cut -f1)
+    # -type f skips the symlinks in bin/; non-ELF entries (the Python and Perl
+    # helper scripts) simply fail to strip and are skipped.
+    find "${LLVM_INSTALL_DIR}/bin" "${LLVM_INSTALL_DIR}/lib" \
+         "${LLVM_INSTALL_DIR}/python_packages" \
+         -type f ! -name '*.a' -print0 2>/dev/null |
+      while IFS= read -r -d '' f; do
+        strip --strip-unneeded "${f}" 2>/dev/null || true
+      done
+    after_kb=$(du -sk "${LLVM_INSTALL_DIR}" | cut -f1)
+    echo "Install tree: $((before_kb / 1024)) MB -> $((after_kb / 1024)) MB"
+  fi
+
   echo "Creating tarball..."
   # The install tree may still have files whose mtimes change (e.g. Python bytecode caches),
   # which can cause GNU tar to exit(1) with "file changed as we read it". Treat those as
