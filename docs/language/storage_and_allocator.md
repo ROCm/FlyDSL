@@ -159,17 +159,43 @@ item = items[index]                       # an Item value
 
 ### `fx.Align[T, A]`
 
-A *placement modifier*, not a composite form: it delegates size and access to `T` and overrides only
-the alignment.
+`fx.Align[T, A]` sets the storage placement alignment to `A`, a positive power of two at least as
+large as `T`'s natural alignment, while delegating size and access to `T`. When used as a Struct
+field annotation, construction and replacement coerce through `T`, and field access returns a `T`
+value directly. The annotation retains the alignment for storage layout; no intermediate Align
+value is introduced.
 
 ```python
-Aligned = fx.Align[fx.Int32, 16]
-dsl_size_of(Aligned), dsl_align_of(Aligned)   # ⇒ (4, 16)
+Weight = fx.Align[fx.Float64, 16]
+Item = fx.Struct["weight": Weight]
+item = Item(1.0)
+
+assert type(item.weight) is fx.Float64
+assert dsl_size_of(Weight) == dsl_size_of(fx.Float64) == 8
+assert dsl_align_of(Weight) == 16
+assert dsl_align_of(Item) == 16
+assert dsl_size_of(Item) == 16  # 8-byte weight + 8-byte trailing padding
 ```
 
-`A` must be a positive power of two and at least `T`'s natural alignment; violations are
-`ValueError`s, and a non-`int` `A` or a missing second parameter is a
-`TypeError`.
+This field placement behavior is analogous to the member declaration
+`alignas(A) T field;` in C++. The 16-byte-aligned example above can be compared with:
+
+```cpp
+#include <cstddef>
+#include <type_traits>
+
+struct Item {
+    alignas(16) double weight;
+};
+Item item{1.0};  // item.weight is still a double
+
+static_assert(std::is_same_v<decltype(item.weight), double>);
+static_assert(offsetof(Item, weight) == 0);
+static_assert(sizeof(double) == 8 && alignof(double) == 8);
+static_assert(alignof(Item) == 16);
+static_assert(sizeof(Item) == 16);
+```
+
 
 ## Byte layout
 
@@ -249,6 +275,6 @@ Its two placement modes differ only in where the bytes come from:
 | Union | one allocation, sized to the widest variant, shared by every variant | one region, variants at offset zero |
 | `kernel.launch(smem=...)` | left unset; the compiler sizes each allocation | inferred from `allocated_bytes` when `smem=None`; an explicit `smem` must be at least that size |
 
-In both modes the field-view API and `allocated_bytes` follow the same logical layout, so switching
-modes does not change the addressing a kernel writes. In static mode a nested struct emits one
-allocation per leaf, which is why it has no single contiguous base pointer.
+Both modes expose the same field-view API, and `allocated_bytes` follows the same logical layout
+in both modes. In static mode a nested struct emits one allocation per leaf, which is why it has
+no single contiguous base pointer.

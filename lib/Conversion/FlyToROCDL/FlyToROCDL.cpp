@@ -3,11 +3,14 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/ControlFlow/Transforms/StructuralTypeConversions.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -859,6 +862,21 @@ public:
   }
 };
 
+/// Select is type-agnostic, but its operands/results must follow FlyTypeConverter.
+class SelectOpTypeConversion : public OpConversionPattern<arith::SelectOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(arith::SelectOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto attrs = op->getAttrs();
+    auto replacement = rewriter.replaceOpWithNewOp<arith::SelectOp>(
+        op, adaptor.getCondition(), adaptor.getTrueValue(), adaptor.getFalseValue());
+    replacement->setAttrs(attrs);
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -880,6 +898,15 @@ public:
     target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeComposedLayoutOp>();
 
     FlyTypeConverter typeConverter;
+
+    // Convert every control-flow boundary along with its users.
+    scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
+    cf::populateCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
+
+    target.addDynamicallyLegalOp<arith::SelectOp>(
+        [&](arith::SelectOp op) { return typeConverter.isLegal(op.getOperation()); });
+    target.addDynamicallyLegalOp<func::CallOp, func::ReturnOp>(
+        [&](Operation *op) { return typeConverter.isLegal(op); });
 
     // Ensure function signatures are type-converted; otherwise conversions may rely on
     // inserted unrealized casts that remain live.
@@ -932,11 +959,16 @@ public:
     patterns.add<CopyAtomCallSSALowering, MmaAtomCallSSALowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
 
+    patterns.add<SelectOpTypeConversion>(typeConverter, context);
+
     // TODO: deprecated in the future
     patterns.add<ExtractAlignedPointerAsIndexLowering>(typeConverter, context);
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateFunctionOpInterfaceTypeConversionPattern<gpu::GPUFuncOp>(patterns, typeConverter);
+
+    populateCallOpTypeConversionPattern(patterns, typeConverter);
+    populateReturnOpTypeConversionPattern(patterns, typeConverter);
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();

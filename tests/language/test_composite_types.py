@@ -409,14 +409,16 @@ class TestDslTypeClosure:
 
         source_ir(body, 1, 2.0)
 
-    def test_round_trip_preserves_field_metadata(self):
+    @pytest.mark.parametrize("dtype, shape", [(fx.Float32, (4,)), (fx.Uint32, (2, 2))])
+    def test_round_trip_preserves_field_metadata(self, dtype, shape):
         """A `Vector` field keeps its shape/dtype through the exemplar."""
 
         def body(a: fx.Int32):
-            value = WithVector(scalar=a, vector=fx.Vector.filled(4, 1.0, fx.Float32))
+            value = WithVector(scalar=a, vector=fx.Vector.filled(shape, 1, dtype))
             rebuilt = construct_from_ir_values(type(value), value, extract_to_ir_values(value))
             assert isinstance(rebuilt.vector, fx.Vector)
-            assert rebuilt.vector.dtype is fx.Float32
+            assert rebuilt.vector.dtype is dtype
+            assert rebuilt.vector.shape == shape
 
         source_ir(body, 1)
 

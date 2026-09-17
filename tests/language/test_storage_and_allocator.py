@@ -1326,12 +1326,91 @@ class TestArrayStruct:
             assert "dynamic_shared_memory_size %c96_i32" in ir_text
 
 
+@pytest.mark.rocm_lower
+class TestStructArrayStorage:
+    """### fx.Array[E, N, A]: nested Struct elements use their padded byte stride."""
+
+    @pytest.mark.parametrize("static", [True, False])
+    @pytest.mark.parametrize("dtype", ["uint8", "int32"])
+    def test_nested_fields_and_padding_survive_shared_memory_copy(self, storage_target, static, dtype):
+        torch, device = storage_target
+        block_size = 64
+
+        @fx.struct
+        class Nested:
+            bits: fx.Uint32
+            weight: fx.Float64
+
+        @fx.struct
+        class Item:
+            tag: fx.Int8
+            nested: Nested
+            tail: fx.Int32
+
+        @fx.struct
+        class ScratchArray:
+            items: fx.Array[Item, block_size]
+
+        @flyc.jit
+        def carry(items):
+            return items
+
+        @flyc.kernel(known_block_size=[block_size, 1, 1])
+        def kernel(raw: fx.Tensor, out: fx.Tensor):
+            tid = fx.thread_idx.x
+            # Both byte and i32 backing pointers must index by Item's byte stride.
+            items = fx.Array[Item, block_size].__peek_from_ptr__(raw.iter)
+            items[tid] = Item(
+                (tid - 32).to(fx.Int8),
+                Nested(fx.Uint32(0x80000000) + tid.to(fx.Uint32), tid.to(fx.Float64) * 0.25 + 0.5),
+                -(tid * 7 + 1),
+            )
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(3)
+            shared = carry(allocator.allocate(ScratchArray).peek().items)
+            shared[tid] = items[tid]
+            fx.barrier()
+            value = shared[block_size - 1 - tid]
+            out[tid] = value.tag.to(fx.Float64)
+            out[block_size + tid] = value.nested.bits.to(fx.Float64)
+            out[2 * block_size + tid] = value.nested.weight
+            out[3 * block_size + tid] = value.tail.to(fx.Float64)
+
+        @flyc.jit
+        def launch(raw: fx.Tensor, out: fx.Tensor):
+            kernel(raw, out).launch(grid=(1, 1, 1), block=(block_size, 1, 1))
+
+        # Item: tag at 0, nested at 8, tail at 24, then padding to a 32-byte stride.
+        # The sentinel makes both internal and trailing padding observable.
+        raw = torch.full((block_size * 32,), 0x5A, dtype=torch.uint8, device=device).view(getattr(torch, dtype))
+        out = torch.empty(block_size * 4, dtype=torch.float64, device=device)
+        launch(flyc.from_dlpack(raw, assumed_align=8), out)
+        assert launch._last_compiled is not None
+        if device == "cpu":
+            return
+
+        tag, bits, weight, tail = out.cpu().reshape(4, block_size)
+        peer = torch.arange(block_size - 1, -1, -1, dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(tag, peer - 32, rtol=0, atol=0)
+        torch.testing.assert_close(bits, peer + 0x80000000, rtol=0, atol=0)
+        torch.testing.assert_close(weight, peer * 0.25 + 0.5, rtol=0, atol=0)
+        torch.testing.assert_close(tail, -(peer * 7 + 1), rtol=0, atol=0)
+
+        expected_bytes = bytearray([0x5A] * block_size * 32)
+        for i in range(block_size):
+            struct.pack_into("<b", expected_bytes, i * 32, i - 32)
+            struct.pack_into("<I", expected_bytes, i * 32 + 8, 0x80000000 + i)
+            struct.pack_into("<d", expected_bytes, i * 32 + 16, i * 0.25 + 0.5)
+            struct.pack_into("<i", expected_bytes, i * 32 + 24, -(i * 7 + 1))
+        assert bytes(raw.cpu().view(torch.uint8).tolist()) == expected_bytes
+
+
 # ── fx.Align[T, A] ──────────────────────────────────────────────────────────
 
 
 @pytest.mark.l1a_compile_no_target_dialect
 class TestAlignModifier:
-    """`Align` only overrides alignment; it delegates size and access to `T`."""
+    """### fx.Align[T, A]: placement, underlying values, and parameter constraints."""
 
     def test_size_is_unchanged_and_alignment_is_raised(self):
         Aligned = fx.Align[fx.Int32, 16]
@@ -1350,7 +1429,9 @@ class TestAlignModifier:
             (0, "positive"),
             (-1, "positive"),
             (3, "power of two"),
+            (12, "power of two"),
             (24, "power of two"),
+            (40, "power of two"),
             (2, "smaller than natural alignment"),
         ],
     )
@@ -1369,6 +1450,69 @@ class TestAlignModifier:
     def test_alignment_type_errors(self, make, match):
         with pytest.raises(TypeError, match=match):
             make()
+
+    @pytest.mark.parametrize("alignment", [8, 16, 32])
+    def test_documented_field_value_and_layout(self, alignment):
+        """Align example: the field stays Float64; only the Struct adds padding."""
+        Field = fx.Align[fx.Float64, alignment]
+        Item = fx.Struct["weight":Field]
+        item = Item(1.0)
+        assert type(item.weight) is fx.Float64
+        assert item.weight == 1.0
+        assert item.replace(weight=2.0).weight == 2.0
+        assert Item.__annotations__["weight"] is Field
+        assert (dsl_size_of(Field), dsl_align_of(Field)) == (8, alignment)
+        assert (dsl_size_of(Item), dsl_align_of(Item)) == (alignment, alignment)
+        with pytest.raises(TypeError, match="weight"):
+            Item(object())
+
+    def test_nested_field_reconstruction_returns_the_inner_type(self):
+        """Align delegates to T, including reconstruction of a nested Struct value."""
+        Pair = fx.Struct["key" : fx.Uint32, "weight" : fx.Float64]
+        Field = fx.Align[Pair, 16]
+        Item = fx.Struct["pair":Field, "tail" : fx.Int32]
+
+        def body(key: fx.Uint32):
+            value = Item(Pair(key, 2.0), 3)
+            assert type(value.pair) is Pair
+            assert Item.__annotations__["pair"] is Field
+            flat = extract_to_ir_values(value)
+            assert len(flat) == 3
+            for exemplar in (value, Item):
+                rebuilt = construct_from_ir_values(Item, exemplar, flat)
+                assert type(rebuilt.pair) is Pair
+                assert type(rebuilt.pair.key) is fx.Uint32
+                assert type(rebuilt.pair.weight) is fx.Float64
+
+        source_ir(body, 0x80000000)
+
+    def test_nested_field_preserves_constexpr_specialization(self):
+        """The underlying Struct retains its compile-time fields through Align."""
+        Config = fx.Struct["n" : fx.Constexpr[int], "value" : fx.Int32]
+        Item = fx.Struct["config" : fx.Align[Config, 8]]
+
+        def body(value: fx.Int32):
+            item = Item(Config(3, value))
+            assert type(item) is type(Item(Config(3, value)))
+            rebuilt = construct_from_ir_values(type(item), item, extract_to_ir_values(item))
+            assert rebuilt.config.n == 3
+            assert type(rebuilt.config.value) is fx.Int32
+            assert dsl_align_of(type(rebuilt)) == 8
+
+        source_ir(body, 7)
+
+    def test_host_argument_uses_the_inner_value(self):
+        """No intermediate Align value or extra ABI slot is introduced at a JIT boundary."""
+        Item = fx.Struct["weight" : fx.Align[fx.Float64, 16]]
+        item = Item(1.0)
+        with ir.Context(), ir.Location.unknown():
+            assert len(c_abi_spec(item)) == 1
+
+        def body(arg: Item):
+            assert type(arg.weight) is fx.Float64
+            _ = arg.weight + 1.0
+
+        source_ir(body, item)
 
 
 # ###########################################################################
@@ -1446,6 +1590,12 @@ class TestUnionLayout:
 
         assert _offsets(WithStruct) == {"pair": 0, "single": 0}
         assert (dsl_size_of(WithStruct), dsl_align_of(WithStruct)) == (8, 4)
+
+    def test_aligned_struct_variant_uses_maximum_alignment(self):
+        """Byte layout: union variants start at zero and share the maximum alignment."""
+        Item = fx.Struct["x" : fx.Align[fx.Int32, 16], "y" : fx.Int64]
+        Overlay = fx.Union["item":Item, "other" : fx.Align[fx.Int32, 32]]
+        assert _storage_layout(Overlay) == (32, 32, {"item": 0, "other": 0})
 
 
 # ###########################################################################
@@ -1578,6 +1728,104 @@ class TestAllocate:
         with pytest.raises(RuntimeError, match="Only one SharedAllocator"):
             launch_ir(two_allocators_kernel)
 
+    @pytest.mark.parametrize("static", [True, False])
+    def test_aligned_nested_struct_preserves_values_in_both_modes(self, static):
+        """SharedAllocator exposes the same nested field values in static and dynamic modes."""
+        Config = fx.Struct["n" : fx.Constexpr[int], "value" : fx.Int32]
+        Item = fx.Struct["config" : fx.Align[Config, 8]]
+
+        @flyc.kernel
+        def kernel():
+            item = Item(Config(3, fx.thread_idx.x))
+            storage = fx.SharedAllocator(static=static).allocate(type(item))
+            storage.poke(item)
+            rebuilt = storage.peek()
+            assert type(rebuilt) is type(item)
+            assert rebuilt.config.n == 3
+            assert type(rebuilt.config.value) is fx.Int32
+
+        launch_ir(kernel)
+
+
+@pytest.mark.rocm_lower
+class TestAlignedStorage:
+    """## Allocators: honor field and array alignment after a preceding allocation."""
+
+    @pytest.mark.parametrize("mode", ["static", "dynamic", "global"])
+    @pytest.mark.parametrize("alignment", [16, 32])
+    def test_aligned_fields_keep_underlying_values(self, storage_target, mode, alignment):
+        """### fx.Align[T, A]: storage and control flow expose T values directly."""
+        torch, device = storage_target
+        block_size = 64
+        Item = fx.Struct["weight" : fx.Align[fx.Float64, alignment], "key" : fx.Align[fx.Uint32, 16]]
+        Items = fx.Array[Item, block_size]
+        stride = dsl_size_of(Item)
+
+        @flyc.jit
+        def carry(item):
+            return item
+
+        @flyc.kernel(known_block_size=[block_size, 1, 1])
+        def kernel(raw: fx.Tensor, out: fx.Tensor, addresses: fx.Tensor):
+            tid = fx.thread_idx.x
+            if fx.const_expr(mode == "global"):
+                allocator = _GlobalArena(raw.iter)
+            else:
+                allocator = fx.SharedAllocator(static=mode == "static")
+            allocator.allocate(3)
+            items = allocator.allocate(Items).peek()
+            item = carry(Item(tid.to(fx.Float64) + 0.5, fx.Uint32(0x80000000) + tid.to(fx.Uint32)))
+            if tid % 2 == 0:
+                item = item.replace(weight=item.weight + 2.0)
+            for step in range(tid % 3):
+                item = item.replace(weight=item.weight + 1.0)
+            remaining = tid % 2
+            while remaining > 0:
+                item = item.replace(weight=item.weight + 4.0)
+                remaining = remaining - 1
+            assert type(item.weight) is fx.Float64
+            assert type(item.key) is fx.Uint32
+            items[tid] = item
+            ptr = fx.add_offset(items.ptr, fx.int_tuple_mul(tid, stride))
+            weight_ptr = fx.recast_iter(fx.Float64, ptr)
+            fx.generic_store(weight_ptr, fx.generic_load(weight_ptr, dtype=fx.Float64))
+            addresses[tid] = fx.ptrtoint(ptr).to(fx.Int64)
+            fx.barrier()
+            peer = items[block_size - 1 - tid]
+            out[tid] = peer.weight
+            out[block_size + tid] = peer.key.to(fx.Float64)
+
+        @flyc.jit
+        def launch(raw: fx.Tensor, out: fx.Tensor, addresses: fx.Tensor):
+            kernel(raw, out, addresses).launch(grid=(1, 1, 1), block=(block_size, 1, 1))
+
+        raw = torch.empty(alignment + block_size * stride, dtype=torch.uint8, device=device)
+        out = torch.empty(block_size * 2, dtype=torch.float64, device=device)
+        addresses = torch.empty(block_size, dtype=torch.int64, device=device)
+        # A global Arena uses the caller's aligned base pointer.
+        assert raw.data_ptr() % alignment == 0
+        launch(flyc.from_dlpack(raw, assumed_align=alignment), out, addresses)
+        assert launch._last_compiled is not None
+        if device == "cpu":
+            return
+
+        weight, key = out.cpu().reshape(2, block_size)
+        peer = torch.arange(block_size - 1, -1, -1, dtype=torch.float64, device="cpu")
+        expected_weight = peer + 0.5 + (peer % 2 == 0) * 2 + peer % 3 + (peer % 2) * 4
+        torch.testing.assert_close(weight, expected_weight, rtol=0, atol=0)
+        torch.testing.assert_close(key, peer + 0x80000000, rtol=0, atol=0)
+        addresses = addresses.cpu()
+        assert torch.all(addresses % alignment == 0)
+        assert torch.all(addresses[1:] - addresses[:-1] == stride)
+        if mode == "global":
+            assert addresses[0].item() == raw.data_ptr() + alignment
+
+    @pytest.mark.parametrize("mode", ["static", "dynamic", "global"])
+    @pytest.mark.parametrize("alignment", [16, 32])
+    def test_array_alignment_changes_base_but_not_element_stride(self, storage_target, mode, alignment):
+        """### fx.Array[E, N, A]: A aligns the base; elements remain sizeof(E) apart."""
+        torch, device = storage_target
+        block_size = 64
 
 @pytest.mark.l1a_compile_no_target_dialect
 class TestStaticPlacement:
@@ -1637,6 +1885,22 @@ class TestStaticPlacement:
 
         launch_ir(base_ptr_kernel)
 
+    @pytest.mark.parametrize("alignment", [16, 32])
+    def test_aligned_leaf_uses_declared_size_and_alignment(self, alignment):
+        """Static placement allocates one leaf at its declared size and alignment."""
+        Field = fx.Align[fx.Float32, alignment]
+
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator()
+            storage = allocator.allocate(Field)
+            storage.poke(fx.Float32(1.0))
+            assert type(storage.peek()) is fx.Float32
+            assert allocator.allocated_bytes == 4
+
+        text = launch_ir(kernel)
+        assert "allocBytes = 4" in text
+        assert f"allocAlign = {alignment}" in text
 
 @pytest.mark.l1a_compile_no_target_dialect
 class TestDynamicPlacement:
@@ -1662,3 +1926,19 @@ class TestDynamicPlacement:
             assert allocator.base_ptr.address_space == fx.AddressSpace.Shared
 
         launch_ir(base_ptr_kernel)
+
+    def test_aligned_leaf_padding_is_included_in_allocated_bytes(self):
+        """Dynamic placement includes alignment padding in allocated_bytes and launch smem."""
+        Field = fx.Align[fx.Float64, 16]
+
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator(static=False)
+            allocator.allocate(fx.Array[fx.Uint8, 3])
+            storage = allocator.allocate(Field)
+            storage.poke(fx.Float64(1.0))
+            assert type(storage.peek()) is fx.Float64
+            assert allocator.allocated_bytes == 24
+
+        text = launch_ir(kernel)
+        assert "dynamic_shared_memory_size %c24_i32" in text

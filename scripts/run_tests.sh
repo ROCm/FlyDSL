@@ -110,7 +110,17 @@ fi
 [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ] && FILECHECK="$(which FileCheck 2>/dev/null || true)"
 
 if [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ]; then
-    echo "  SKIP  FileCheck not found; skipping MLIR lit tests."
+    # Fail-open by default for local runs without a built FileCheck, but say so
+    # loudly: a green run_tests.sh does NOT mean the MLIR tests passed when this
+    # fires. Set FLYDSL_REQUIRE_FILECHECK=1 (CI should) to make it an error.
+    case "${FLYDSL_REQUIRE_FILECHECK:-0}" in
+        1 | [Tt]rue | [Yy]es | [Oo]n)
+            echo "  FAIL  FileCheck not found and FLYDSL_REQUIRE_FILECHECK is set; MLIR lit tests cannot run."
+            exit 1
+            ;;
+    esac
+    echo "  SKIP  FileCheck not found; MLIR lit tests DID NOT RUN (not a pass)."
+    MLIR_TESTS_SKIPPED=1
 else
 
 for f in $(find "${REPO_ROOT}/tests/mlir" -name "*.mlir" -type f 2>/dev/null | sort); do
@@ -146,5 +156,11 @@ fi
 
 echo ""
 echo "========================================================================"
-echo "All tests passed."
+if [ "${MLIR_TESTS_SKIPPED:-0}" = "1" ]; then
+    # Never claim a clean run when a whole stage was skipped -- that is the
+    # exact confusion this guard exists to prevent.
+    echo "All tests passed EXCEPT the MLIR lit stage, which DID NOT RUN."
+else
+    echo "All tests passed."
+fi
 echo "========================================================================"
