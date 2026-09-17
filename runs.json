@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-17T07:04:07Z",
+ "updated": "2026-09-17T07:05:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35192606834,
+   "pr": 1145,
+   "commit": "31eb61a43cb9c328f1ec98129ac9411d41744f90",
+   "branch": "jli/gfx1250/bump-llvm-unclausevmem",
+   "event": "pull_request",
+   "title": "[LLVM] bump llvm which improve the sequence for initial unclaused vmem",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35192606834",
+   "created_at": "2026-09-17T07:02:46Z",
+   "updated_at": "2026-09-17T07:04:14Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 35192517970,
    "pr": 1148,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35192517970",
    "created_at": "2026-09-17T07:01:40Z",
-   "updated_at": "2026-09-17T07:02:16Z",
+   "updated_at": "2026-09-17T07:03:39Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -889,11 +904,11 @@
    "branch": "jli/gfx1250/bump-llvm-unclausevmem",
    "event": "pull_request",
    "title": "[LLVM] bump llvm which improve the sequence for initial unclaused vmem",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965",
    "created_at": "2026-09-16T08:15:47Z",
-   "updated_at": "2026-09-17T06:52:32Z",
+   "updated_at": "2026-09-17T07:03:03Z",
    "actor": "Boss2002n",
    "jobs": [
     {
@@ -917,10 +932,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-17T06:52:55Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T07:03:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965/job/105105806772"
     }
    ]
@@ -2122,52 +2137,6 @@
      "started_at": "2026-09-14T13:15:01Z",
      "completed_at": "2026-09-14T13:15:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847855493/job/103988759206"
-    }
-   ]
-  },
-  {
-   "run_id": 34847600065,
-   "pr": 1128,
-   "commit": "d72488fe24415886de6b426f2583e95cd665f545",
-   "branch": "codex/scaled-tiled-gemm",
-   "event": "pull_request",
-   "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065",
-   "created_at": "2026-09-14T13:10:31Z",
-   "updated_at": "2026-09-14T15:03:12Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T13:39:06Z",
-     "completed_at": "2026-09-14T14:58:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939083",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T13:38:52Z",
-     "completed_at": "2026-09-14T13:57:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939232"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T14:08:06Z",
-     "completed_at": "2026-09-14T15:03:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847600065/job/103996939240"
     }
    ]
   }
