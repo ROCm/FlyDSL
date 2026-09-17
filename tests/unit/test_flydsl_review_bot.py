@@ -184,35 +184,6 @@ def test_model_gateway_requires_both_named_variables(monkeypatch):
         watch.require_model_environment()
 
 
-@pytest.mark.parametrize(
-    ("listener", "accepted"),
-    [
-        ("LISTEN 0 5 127.0.0.1:8882 0.0.0.0:*\n", True),
-        ("LISTEN 0 5 [::1]:8882 [::]:*\n", False),
-        (
-            "LISTEN 0 5 127.0.0.1:8882 0.0.0.0:*\n" "LISTEN 0 5 [::1]:8882 [::]:*\n",
-            True,
-        ),
-        ("LISTEN 0 5 0.0.0.0:8882 0.0.0.0:*\n", False),
-        ("LISTEN 0 5 172.16.0.1:8882 0.0.0.0:*\n", False),
-        ("", False),
-    ],
-)
-def test_model_gateway_must_be_loopback_only(tmp_path, listener, accepted):
-    cfg = config(tmp_path)
-
-    class ListenerProcess:
-        def run(self, argv, **_):
-            assert argv == [cfg.ss_bin, "-H", "-ltn", "sport = :8882"]
-            return subprocess.CompletedProcess(argv, 0, listener, "")
-
-    if accepted:
-        watch.require_loopback_gateway(cfg, ListenerProcess())
-    else:
-        with pytest.raises(watch.ConfigurationError, match="loopback"):
-            watch.require_loopback_gateway(cfg, ListenerProcess())
-
-
 def test_first_scan_seeds_all_existing_heads_without_review(tmp_path):
     first, second = pull(7, "a" * 40), pull(9, "c" * 40)
     _, state, github, source, docker, publisher, operator = make_watcher(tmp_path, [first, second])

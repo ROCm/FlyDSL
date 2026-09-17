@@ -99,7 +99,6 @@ class Config:
     git_bin: str = "/usr/bin/git"
     docker_bin: str = "/usr/bin/docker"
     python_bin: str = "/usr/bin/python3"
-    ss_bin: str = "/usr/bin/ss"
     memory_limit: str = "16g"
     cpu_limit: str = "8"
     pids_limit: int = 512
@@ -154,7 +153,7 @@ class Config:
             raise ConfigurationError("memory_limit must be a positive Docker memory value")
         if not re.fullmatch(r"[1-9][0-9]*(?:\.[0-9]+)?", self.cpu_limit):
             raise ConfigurationError("cpu_limit must be a positive Docker CPU value")
-        for name in ("gh_bin", "git_bin", "docker_bin", "python_bin", "ss_bin"):
+        for name in ("gh_bin", "git_bin", "docker_bin", "python_bin"):
             value = getattr(self, name)
             if not isinstance(value, str) or not Path(value).is_absolute():
                 raise ConfigurationError(f"{name} must be an absolute executable path")
@@ -744,23 +743,6 @@ def require_model_environment() -> None:
         or endpoint.password is not None
     ):
         raise ConfigurationError("model gateway endpoint does not match the local deployment")
-
-
-def require_loopback_gateway(config: Config, process: ProcessRunner) -> None:
-    result = process.run(
-        [config.ss_bin, "-H", "-ltn", "sport = :8882"],
-        timeout=30,
-    )
-    listeners = []
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) < 4 or ":" not in fields[3]:
-            raise ConfigurationError("cannot parse model gateway listener")
-        host, port = fields[3].rsplit(":", 1)
-        if port == "8882":
-            listeners.append(host.strip("[]"))
-    if "127.0.0.1" not in listeners or any(host not in {"127.0.0.1", "::1"} for host in listeners):
-        raise ConfigurationError("model gateway must listen only on loopback")
 
 
 class SourceManager:
@@ -1558,7 +1540,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 summary_line("scan_skipped", reason="lock_busy")
                 return 0
             process = ProcessRunner()
-            require_loopback_gateway(config, process)
             state = StateStore(config.state_root)
             watcher = Watcher(
                 config,

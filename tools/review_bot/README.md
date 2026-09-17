@@ -23,8 +23,8 @@ The host must provide:
 - the node's normal Claude gateway environment: `ANTHROPIC_AUTH_TOKEN` and
   `ANTHROPIC_BASE_URL`. The watcher checks only presence and passes variable
   names to Docker; it never prints or stores either value. The pilot requires
-  the verified local endpoint `http://127.0.0.1:8882`, and the watcher refuses
-  to start unless port 8882 is listening only on loopback;
+  the verified local endpoint `http://127.0.0.1:8882`. Listener binding and
+  host-firewall policy belong to the existing gateway deployment, not this bot;
 - an AppArmor configuration that permits the pinned sandbox runtime to create
   the required `bubblewrap` user namespace, verified with non-value canaries;
 - a review image pinned by repository digest, built from a Debian-compatible
