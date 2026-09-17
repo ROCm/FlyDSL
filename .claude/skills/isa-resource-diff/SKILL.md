@@ -25,6 +25,7 @@ catch resource regressions that functional tests do not surface.
 | *Why* is this kernel slow — which instructions stall, and on what? | `/kernel-trace-analysis` (needs a GPU run + rocprofv3 ATT trace) |
 | Which commit made it slow? | `/bisect-perf-regression` (needs a runnable benchmark) |
 | How do I collect a trace at all? | `/capture-kernel-trace` |
+| Which LLVM knob moves these numbers, and did it apply? | `/llvm` (compile hints, function attributes, `-mllvm` flags) |
 
 This skill measures **resources, not time**. A clean result here does not mean
 performance is unchanged — it means register/LDS/spill pressure is unchanged.
