@@ -563,13 +563,9 @@ def build_flash_attn_func_module_primary(
     # Best MI355X FMHA numbers were measured with ROCm/llvm-project `felix/tune_fmha`;
     # other LLVM revisions usually leave a few percent of peak throughput on the table.
     _llvm_opts = {
-        "enable-post-misched": os.getenv("FLYDSL_LLVM_ENABLE_POST_MISChed", "0") == "1",
+        "enable-post-misched": os.getenv("FLYDSL_LLVM_ENABLE_POST_MISCHED", "0") == "1",
         "lsr-drop-solution": True,
     }
-    if gpu_arch.startswith("gfx942"):
-        _llvm_opts["amdgpu-expert-scheduling-mode"] = os.getenv("FLYDSL_LLVM_EXPERT_SCHED", "1") == "1"
-        if os.getenv("FLYDSL_LLVM_SCHEDULE_REGION", "0") == "1":
-            _llvm_opts["amdgpu-schedule-regions"] = True
     _fmha_compile_hints = {
         "fast_fp_math": fast_fp_math,
         "unsafe_fp_math": unsafe_fp_math,
