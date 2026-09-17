@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-17T03:35:15Z",
+ "updated": "2026-09-17T04:02:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35179578655,
+   "pr": null,
+   "commit": "f8cd97bd2e7549f750a327aa3e75e61aeebbdf34",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix][Kernel] Fix rdna3_int8_gemm RDNA bounds checks (#1136)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35179578655",
+   "created_at": "2026-09-17T03:49:10Z",
+   "updated_at": "2026-09-17T03:51:10Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 35176277481,
    "pr": 1154,
@@ -84,10 +99,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-17T03:20:24Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-17T03:36:46Z",
+     "completed_at": "2026-09-17T03:53:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176257769/job/105063233992"
     }
    ]
@@ -99,39 +114,42 @@
    "branch": "phil/llvm-skill",
    "event": "pull_request",
    "title": "[llvm] Add llvm skill and drop four inert LLVM knobs",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955",
    "created_at": "2026-09-17T02:45:41Z",
-   "updated_at": "2026-09-17T03:25:41Z",
+   "updated_at": "2026-09-17T04:00:37Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T03:25:41Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T03:56:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955/job/105059218237"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T03:17:32Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T03:36:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955/job/105059218242"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T03:00:04Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955/job/105059218283"
+     "completed_at": "2026-09-17T04:00:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955/job/105059218283",
+     "machine": "smci350-rck-g03-d14-21",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -2236,21 +2254,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34837262103/job/103958177764"
     }
    ]
-  },
-  {
-   "run_id": 34835910972,
-   "pr": null,
-   "commit": "b49d10b6bb22a08f78705b7fca072cf863e6f0d1",
-   "branch": "codex/reduce-ci-test-runtime",
-   "event": "pull_request",
-   "title": "[CI] Reduce full test runtime without dropping edge coverage",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34835910972",
-   "created_at": "2026-09-14T10:59:44Z",
-   "updated_at": "2026-09-14T11:15:17Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
