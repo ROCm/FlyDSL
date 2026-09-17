@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-17T09:33:26Z",
+ "updated": "2026-09-17T09:55:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -68,30 +68,33 @@
    "branch": "main",
    "event": "push",
    "title": "[Enh] Make specialized Vector and Pointer types Storable (#1148)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199871362",
    "created_at": "2026-09-17T08:28:42Z",
-   "updated_at": "2026-09-17T09:12:27Z",
+   "updated_at": "2026-09-17T09:53:53Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T09:12:26Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T09:51:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199871362/job/105138621012"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T08:51:59Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199871362/job/105138621091"
+     "completed_at": "2026-09-17T09:53:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199871362/job/105138621091",
+     "machine": "smci350-rck-g03-f19-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
