@@ -3,7 +3,7 @@
 
 """Independent flex-attention forward on the FlyDSL layout API (gfx950).
 
-This is an attention kernel written on the CuTe-style layout API
+This is an attention kernel written on the FlyDSL layout API
 (``fx.make_tiled_mma`` / ``make_fragment_{A,B,C}`` / ``fx.copy`` /
 swizzled LDS views).
 
@@ -11,26 +11,74 @@ One workgroup computes ``num_groups`` independent ``[BLOCK_M, D]`` query tiles:
 load Q resident, loop over KV ``[BLOCK_N, D]`` tiles doing GEMM1 (S = Q@K^T),
 online softmax, the C->B bridge (scores packed as MFMA B operand), then
 GEMM2 (O += P@V with V=A, P=B); epilogue normalizes O by the row sum and
-stores it.  Supports optional flex score/mask mods (causal, sliding window, prefix LM,
-alibi). The KV loop is the n64 4-cluster deferred-softmax pipeline, or the
+stores it. The KV loop is the n64 4-cluster deferred-softmax pipeline, or the
 8-cluster schedule when ``long_seq_8c`` is on.
 
 Target arch: gfx950 (CDNA4). Uses the cdna4 LDS transpose-read atom and the
 gfx950 LDS swizzles; it is NOT expected to run on gfx942.
+
+Score and mask modifiers
+------------------------
+Pass PyTorch FlexAttention-style callables into
+``flydsl_flex_attention_layout`` / ``flydsl_flex_attention_layout_paged``:
+
+    mask_mod(b, h, q_idx, kv_idx) -> bool   # True = keep this Q/KV pair
+    score_mod(score, b, h, q_idx, kv_idx) -> score
+
+``None`` is dense (all positions visible, logits unmodified). The same
+callables can be used with ``torch.nn.attention.flex_attention``.
+
+They are traced into the kernel, so they must be Python functions with no
+closures and no global/attribute loads (no ``torch.tanh``, no tensor
+lookups). Bind extra scalars as positional defaults:
+
+    def causal(b, h, q_idx, kv_idx, offset=0):
+        return kv_idx <= q_idx + offset
+
+    def alibi(score, b, h, q_idx, kv_idx, slope=0.125):
+        return score + slope * (kv_idx - q_idx)
+
+    def quadratic(score, b, h, q_idx, kv_idx, inv_var=1e-4):
+        dist = q_idx - kv_idx
+        return score - dist * dist * inv_var
+
+Named functions are rewritten to a constexpr-friendly lambda clone; the
+math is unchanged. Combine both kwargs when a mask and a score apply
+together (document + ALiBi, causal + quadratic, ...).
+
+Host inspection does not replace the formulas. It only classifies layout
+or an equivalent score lowering:
+
+- ``mask_mod`` matching ``kv <= q + offset`` (offset 0 or Skv-Sq; paged
+  forces 0) enables packed vec2 masking, reverse Q grid, skip-dead-Q, and
+  a 4c diagonal tail under 8c. A sliding-window band or prefix-LM union
+  keeps those structure opts with their own kv_range. Anything else stays
+  generic: the callable still runs per element, plus a host-inferred
+  per-workgroup KV envelope so fully masked tiles can be skipped.
+- ``score_mod`` matching ``score + slope*(kv-q)`` is applied as a packed
+  log2-space add (no natural-log round trip). Other scores, including
+  quadratic bias, run the callable after converting pipeline logits to
+  natural log and back. Disable inference with ``infer_score_mod=False``,
+  ``score_mod.flex_infer = False``, or
+  ``score_mod.flex_score_kind = "exact"``.
 """
 
-from typing import Optional
-
+import dis
+import math
 import struct
+import types
+from functools import lru_cache
+from typing import Callable, Optional
+
 import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
-from flydsl.expr.typing import T
 from flydsl.compiler.ast_rewriter import ReplaceIfWithDispatch
+from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr.typing import Constexpr, T
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from flydsl.runtime.device import get_rocm_arch
 
@@ -217,140 +265,483 @@ FLEX_DTYPE_FP16 = 3
 _LOG2E = 1.4426950408889634
 _MAX_BUFFER_BYTES = 0x7FFFFFFF
 
-MASK_NONE = 0
-MASK_CAUSAL = 1
-MASK_SLIDING_WINDOW = 2
-MASK_PREFIX_LM = 3
 # Compile-time 8-cluster cutoff. Masked paths skip KV tiles, so the 8c body
 # only pays once the tensor Skv is long enough for the last Q tiles.
 _LONG_SEQ_8C_SKV_DENSE = 768
 _LONG_SEQ_8C_SKV_MASKED = 2048
-# Causal 8c is branch-free: only pairs wholly below the bottom-right diagonal
+# Lower-tri 8c is branch-free: only pairs wholly below the diagonal
 # use C0..C7. The diagonal band is a 4c tail with packed attn_mask_vec2_imm.
-_CAUSAL_NEG_INF_F32_BITS = struct.unpack("<I", struct.pack("<f", -1e9))[0]
-# Dual-tile pipeline: a split shorter than this repeats Q/O traffic for too
-# little KV work. Fold a leftover tail shorter than four tiles into the
-# previous partition so residual CTAs stay on the empty fast path.
+_MASK_NEG_INF_F32_BITS = struct.unpack("<I", struct.pack("<f", -1e9))[0]
+# Split-K host cap: keep a split only while each partition has at least
+# six n64 tiles. The kernel then folds a leftover live range shorter than
+# four tiles into the previous partition so residual workgroups stay empty.
 _SPLITK_MIN_CHUNK_TILES = 6
 _SPLITK_MIN_LIVE_TILES = 4
 
-SCORE_NONE = 0
-SCORE_ALIBI = 1
+_IDENTITY_SCORE_MOD = lambda score, b, h, q, kv: score
+_VISIBLE_MASK_MOD = lambda b, h, q, kv: q == q
 
 
-class FlexMod:
-    has_mask = False
-    has_score = False
-    needs_safe_norm = False
+def _prepare_constexpr_callable(fn, fallback):
+    if fn is None:
+        return fallback
+    prepared = fn
+    # FlyDSL constexprs key anonymous functions by bytecode. Preserve a normal
+    # Python function's exact code/defaults while presenting it through that
+    # supported callable representation.
+    if isinstance(fn, types.FunctionType) and fn.__name__ != "<lambda>":
+        prepared = types.FunctionType(
+            fn.__code__,
+            fn.__globals__,
+            name="<lambda>",
+            argdefs=fn.__defaults__,
+            closure=fn.__closure__,
+        )
+        prepared.__kwdefaults__ = fn.__kwdefaults__
+    try:
+        Constexpr.value_signature(prepared)
+    except TypeError as exc:
+        raise TypeError(
+            "score_mod/mask_mod must be a Python function without closures or "
+            "global references; bind scalar parameters as positional defaults"
+        ) from exc
+    return prepared
+
+
+class _InspectedMod:
+    """Callable spec plus host-derived equivalent math/layout lowerings."""
+
+    def __init__(
+        self,
+        score_mod,
+        mask_mod,
+        *,
+        has_score=False,
+        has_mask=False,
+        lower_tri=False,
+        banded=False,
+        has_prefix=False,
+        q_offset=0,
+        window=0,
+        prefix_len=0,
+        affine_score=False,
+        score_slope=0.0,
+    ):
+        self.score_mod = score_mod
+        self.mask_mod = mask_mod
+        self.has_score = has_score
+        self.has_mask = has_mask
+        self.needs_safe_norm = has_mask
+        self.lower_tri = lower_tri
+        self.banded = banded
+        self.has_prefix = has_prefix
+        self.q_offset = q_offset
+        self.window = window
+        self.prefix_len = prefix_len
+        self.affine_score = affine_score
+        self.score_slope = score_slope
+        self.score_slope_log2 = score_slope * _LOG2E
+        self.lpt_q_grid = lower_tri
+        self.packed_lower_tri_mask = lower_tri and not banded and not has_prefix
+        # Predictable masks derive their bounds arithmetically in kv_range().
+        # Generic masks instead use a host-inferred per-Q-workgroup envelope.
+        self.needs_kv_bounds = has_mask and not lower_tri
+        self._device_kv_bounds = {}
+
+    def get_kv_bounds(
+        self,
+        *,
+        seqlen_q,
+        seqlen_kv,
+        num_batches,
+        num_heads,
+        rows_per_wg,
+        block_n,
+        device,
+    ):
+        key = (
+            seqlen_q,
+            seqlen_kv,
+            num_batches,
+            num_heads,
+            rows_per_wg,
+            block_n,
+            device.type,
+            device.index,
+        )
+        if key not in self._device_kv_bounds:
+            host_bounds = _infer_generic_kv_bounds(
+                self.mask_mod,
+                seqlen_q=seqlen_q,
+                seqlen_kv=seqlen_kv,
+                num_batches=num_batches,
+                num_heads=num_heads,
+                rows_per_wg=rows_per_wg,
+                block_n=block_n,
+            )
+            self._device_kv_bounds[key] = host_bounds.to(device=device)
+        return self._device_kv_bounds[key]
 
     def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
+        if const_expr(self.lower_tri):
+            q_hi = q_max_wg
+            if const_expr(self.has_prefix):
+                q_hi = _i32_max(q_hi, fx.Int32(self.prefix_len - 1))
+            raw_hi = (q_hi + fx.Int32(block_n)) // fx.Int32(block_n)
+            kv_hi = _i32_min(raw_hi, fx.Int32(n_kv_tiles))
+            if const_expr(self.banded):
+                raw_lo = (q_min_wg - fx.Int32(self.window)) // fx.Int32(block_n)
+                return _i32_max(raw_lo, fx.Int32(0)), kv_hi
+            return fx.Int32(0), kv_hi
         return fx.Int32(0), fx.Int32(n_kv_tiles)
 
     def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
-        return fx.Int32(0) != fx.Int32(0)
-
-    def apply_mask(self, score, q_idx, kv_idx):
-        return score
-
-    def apply_score(self, score, b, h, q_idx, kv_idx):
-        return score
-
-
-class CausalMask(FlexMod):
-    has_mask = True
-    needs_safe_norm = True
-
-    def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
-        raw_hi = (q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n)
-        kv_hi = _i32_min(raw_hi, fx.Int32(n_kv_tiles))
-        return fx.Int32(0), kv_hi
-
-    def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
         kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
-        return kv_tile_end > q_idx
+        needs_mask = kv_tile_end > q_idx
+        if const_expr(self.banded):
+            kv_tile_start = kv_tile_idx * fx.Int32(block_n)
+            needs_mask = needs_mask | ((q_idx - kv_tile_start) > fx.Int32(self.window))
+        return needs_mask
 
-    def apply_mask(self, score, q_idx, kv_idx):
-        return (kv_idx <= q_idx).select(score, fx.Float32(-1e9))
-
-
-class SlidingWindowMask(FlexMod):
-    has_mask = True
-    needs_safe_norm = True
-
-    def __init__(self, window):
-        self.window = window
-
-    def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
-        raw_hi = (q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n)
-        kv_hi = _i32_min(raw_hi, fx.Int32(n_kv_tiles))
-        raw_lo = (q_min_wg - fx.Int32(self.window)) // fx.Int32(block_n)
-        kv_lo = _i32_max(raw_lo, fx.Int32(0))
-        return kv_lo, kv_hi
-
-    def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
-        kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
-        kv_tile_start = kv_tile_idx * fx.Int32(block_n)
-        too_far = kv_tile_end > q_idx
-        out_of_window = (q_idx - kv_tile_start) > fx.Int32(self.window)
-        return too_far | out_of_window
-
-    def apply_mask(self, score, q_idx, kv_idx):
-        causal = kv_idx <= q_idx
-        in_window = (q_idx - kv_idx) <= fx.Int32(self.window)
-        return (causal & in_window).select(score, fx.Float32(-1e9))
-
-
-class PrefixLMMask(FlexMod):
-    has_mask = True
-    needs_safe_norm = True
-
-    def __init__(self, prefix_len):
-        self.prefix_len = prefix_len
-
-    def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
-        raw_hi = (q_max_wg + fx.Int32(block_n)) // fx.Int32(block_n)
-        kv_hi = _i32_min(raw_hi, fx.Int32(n_kv_tiles))
-        return fx.Int32(0), kv_hi
-
-    def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
-        kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
-        return kv_tile_end > q_idx
-
-    def apply_mask(self, score, q_idx, kv_idx):
-        visible = (kv_idx <= q_idx) | (kv_idx < fx.Int32(self.prefix_len))
+    def apply_mask(self, score, b, h, q_idx, kv_idx):
+        visible = self.mask_mod(b, h, q_idx, kv_idx)
         return visible.select(score, fx.Float32(-1e9))
 
-
-class AlibiScore(FlexMod):
-    has_score = True
-
-    def __init__(self, slope):
-        self.slope = slope
-
     def apply_score(self, score, b, h, q_idx, kv_idx):
-        bias = (kv_idx - q_idx).to(fx.Float32) * fx.Float32(self.slope) * fx.Float32(_LOG2E)
-        return fx.Float32(score) + bias
+        if const_expr(self.affine_score):
+            # The pipeline stores logits in log2 space. The inspected
+            # score + slope*(kv-q) form can be applied directly without the
+            # generic natural-log round trip.
+            relative = fx.Float32(kv_idx - q_idx)
+            return fx.Float32(score) + relative * fx.Float32(self.score_slope_log2)
+        # The pipeline stores logits in log2 space. Present the PyTorch
+        # callable with its natural-log score and convert its result back.
+        natural_score = fx.Float32(score) / fx.Float32(_LOG2E)
+        modified = self.score_mod(natural_score, b, h, q_idx, kv_idx)
+        return fx.Float32(modified) * fx.Float32(_LOG2E)
 
 
-class CompositeMod(FlexMod):
-    def __init__(self, score_mod, mask_mod):
-        self._score = score_mod
-        self._mask = mask_mod
-        self.has_score = score_mod.has_score
-        self.has_mask = mask_mod.has_mask
-        self.needs_safe_norm = mask_mod.needs_safe_norm
+class _ScoreExpr:
+    """Small expression tree used to recognize affine score modifiers."""
 
-    def kv_range(self, q_min_wg, q_max_wg, n_kv_tiles, block_n):
-        return self._mask.kv_range(q_min_wg, q_max_wg, n_kv_tiles, block_n)
+    def __init__(self, op, *args):
+        self.op = op
+        self.args = args
 
-    def tile_needs_mask(self, kv_tile_idx, q_idx, block_n):
-        return self._mask.tile_needs_mask(kv_tile_idx, q_idx, block_n)
+    @staticmethod
+    def variable(name):
+        return _ScoreExpr("var", name)
 
-    def apply_mask(self, score, q_idx, kv_idx):
-        return self._mask.apply_mask(score, q_idx, kv_idx)
+    @staticmethod
+    def coerce(value):
+        if isinstance(value, _ScoreExpr):
+            return value
+        if isinstance(value, (int, float)):
+            return _ScoreExpr("const", float(value))
+        raise TypeError(f"unsupported symbolic score value {type(value)!r}")
 
-    def apply_score(self, score, b, h, q_idx, kv_idx):
-        return self._score.apply_score(score, b, h, q_idx, kv_idx)
+    def __add__(self, other):
+        return _ScoreExpr("add", self, self.coerce(other))
+
+    def __radd__(self, other):
+        return _ScoreExpr("add", self.coerce(other), self)
+
+    def __sub__(self, other):
+        return _ScoreExpr("sub", self, self.coerce(other))
+
+    def __rsub__(self, other):
+        return _ScoreExpr("sub", self.coerce(other), self)
+
+    def __mul__(self, other):
+        return _ScoreExpr("mul", self, self.coerce(other))
+
+    def __rmul__(self, other):
+        return _ScoreExpr("mul", self.coerce(other), self)
+
+    def __neg__(self):
+        return _ScoreExpr("neg", self)
+
+
+def _affine_score_tree(expr):
+    """Return ({variable: coefficient}, constant) or raise for non-affine trees."""
+    expr = _ScoreExpr.coerce(expr)
+    if expr.op == "const":
+        return {}, expr.args[0]
+    if expr.op == "var":
+        return {expr.args[0]: 1.0}, 0.0
+    if expr.op == "neg":
+        coeffs, constant = _affine_score_tree(expr.args[0])
+        return {name: -value for name, value in coeffs.items()}, -constant
+    if expr.op in ("add", "sub"):
+        lhs, lhs_c = _affine_score_tree(expr.args[0])
+        rhs, rhs_c = _affine_score_tree(expr.args[1])
+        sign = 1.0 if expr.op == "add" else -1.0
+        coeffs = dict(lhs)
+        for name, value in rhs.items():
+            coeffs[name] = coeffs.get(name, 0.0) + sign * value
+        return coeffs, lhs_c + sign * rhs_c
+    if expr.op == "mul":
+        lhs, lhs_c = _affine_score_tree(expr.args[0])
+        rhs, rhs_c = _affine_score_tree(expr.args[1])
+        if lhs and rhs:
+            raise TypeError("non-affine score product")
+        if lhs:
+            return {name: value * rhs_c for name, value in lhs.items()}, lhs_c * rhs_c
+        if rhs:
+            return {name: value * lhs_c for name, value in rhs.items()}, rhs_c * lhs_c
+        return {}, lhs_c * rhs_c
+    raise TypeError(f"unsupported symbolic score op {expr.op!r}")
+
+
+def _infer_affine_score(score_mod, *, enabled=True):
+    """Recognize score + slope*(kv-q), then verify it on numeric holdouts."""
+    if score_mod is None or not enabled:
+        return False, 0.0
+    if getattr(score_mod, "flex_infer", True) is False:
+        return False, 0.0
+    if getattr(score_mod, "flex_score_kind", None) == "exact":
+        return False, 0.0
+
+    unsupported = (
+        "LOAD_GLOBAL",
+        "LOAD_ATTR",
+        "CALL",
+        "JUMP",
+        "FOR_ITER",
+    )
+    for inst in dis.get_instructions(score_mod):
+        if any(inst.opname.startswith(prefix) for prefix in unsupported):
+            return False, 0.0
+
+    try:
+        result = score_mod(
+            _ScoreExpr.variable("score"),
+            _ScoreExpr.variable("b"),
+            _ScoreExpr.variable("h"),
+            _ScoreExpr.variable("q"),
+            _ScoreExpr.variable("kv"),
+        )
+        coeffs, constant = _affine_score_tree(result)
+    except (TypeError, ValueError, AttributeError):
+        return False, 0.0
+
+    slope = coeffs.get("kv", 0.0)
+    if not math.isclose(coeffs.get("score", 0.0), 1.0):
+        return False, 0.0
+    if not math.isclose(coeffs.get("q", 0.0), -slope):
+        return False, 0.0
+    if not math.isclose(coeffs.get("b", 0.0), 0.0):
+        return False, 0.0
+    if not math.isclose(coeffs.get("h", 0.0), 0.0):
+        return False, 0.0
+    if not math.isclose(constant, 0.0):
+        return False, 0.0
+    if any(name not in ("score", "b", "h", "q", "kv") for name in coeffs):
+        return False, 0.0
+
+    q = torch.tensor([0, 1, 7, 31, 127], dtype=torch.float64).reshape(-1, 1)
+    kv = torch.tensor([0, 2, 13, 63, 191], dtype=torch.float64).reshape(1, -1)
+    score = torch.linspace(-0.75, 0.75, q.numel() * kv.numel(), dtype=torch.float64).reshape(q.numel(), kv.numel())
+    try:
+        actual = torch.as_tensor(score_mod(score, 0, 0, q, kv), dtype=torch.float64)
+        expected = score + slope * (kv - q)
+    except Exception:
+        return False, 0.0
+    if not torch.allclose(actual, expected, rtol=1e-7, atol=1e-9):
+        return False, 0.0
+    return True, float(slope)
+
+
+@lru_cache(maxsize=256)
+def _infer_generic_kv_bounds(
+    mask_mod,
+    *,
+    seqlen_q,
+    seqlen_kv,
+    num_batches,
+    num_heads,
+    rows_per_wg,
+    block_n,
+):
+    """Infer a conservative [lo, hi) KV-tile envelope for each Q workgroup.
+
+    This is only used for masks that the inspector cannot represent with a
+    predictable lower-tri/band/prefix formula. Interior holes remain in the
+    envelope and are still handled by the original mask callable.
+    """
+    n_q_tiles = (seqlen_q + rows_per_wg - 1) // rows_per_wg
+    n_kv_tiles = (seqlen_kv + block_n - 1) // block_n
+    bounds = torch.empty((num_batches, num_heads, n_q_tiles, 2), dtype=torch.int32)
+    kv_values = list(range(seqlen_kv))
+
+    def infer_one(b, h):
+        bh_bounds = torch.empty((n_q_tiles, 2), dtype=torch.int32)
+        for q_tile in range(n_q_tiles):
+            q_lo = q_tile * rows_per_wg
+            q_hi = min(q_lo + rows_per_wg, seqlen_q)
+            visible_cols = _mask_values(mask_mod, list(range(q_lo, q_hi)), kv_values, b=b, h=h).any(dim=0)
+            visible = visible_cols.nonzero().flatten()
+            if len(visible):
+                kv_lo = int(visible[0]) // block_n
+                kv_hi = int(visible[-1]) // block_n + 1
+            else:
+                # The deferred-softmax pipeline requires at least one
+                # iteration. Keep one tile and let mask_mod produce the
+                # existing all-masked safe-normalization result.
+                kv_lo, kv_hi = 0, min(1, n_kv_tiles)
+            bh_bounds[q_tile, 0] = kv_lo
+            bh_bounds[q_tile, 1] = kv_hi
+        return bh_bounds
+
+    # Avoid repeating the potentially large Q×KV host evaluation only when
+    # bytecode proves that the callable never reads its B/H arguments.
+    arg_names = mask_mod.__code__.co_varnames[: mask_mod.__code__.co_argcount]
+    batch_arg = arg_names[0] if len(arg_names) > 0 else None
+    head_arg = arg_names[1] if len(arg_names) > 1 else None
+    used_args = {inst.argval for inst in dis.get_instructions(mask_mod) if inst.opname == "LOAD_FAST"}
+    batch_head_invariant = batch_arg not in used_args and head_arg not in used_args
+    if batch_head_invariant:
+        shared = infer_one(0, 0)
+        bounds.copy_(shared)
+    else:
+        for b in range(num_batches):
+            for h in range(num_heads):
+                bounds[b, h].copy_(infer_one(b, h))
+    return bounds
+
+
+def _mask_values(mask_mod, q_values, kv_values, b=0, h=0):
+    q = torch.tensor(q_values, dtype=torch.int64).reshape(-1, 1)
+    kv = torch.tensor(kv_values, dtype=torch.int64).reshape(1, -1)
+    try:
+        values = mask_mod(
+            torch.full_like(q, b),
+            torch.full_like(q, h),
+            q,
+            kv,
+        )
+        values = torch.as_tensor(values, dtype=torch.bool)
+        return values.expand(len(q_values), len(kv_values))
+    except Exception:
+        return torch.tensor(
+            [[bool(mask_mod(b, h, qv, kvv)) for kvv in kv_values] for qv in q_values],
+            dtype=torch.bool,
+        )
+
+
+@lru_cache(maxsize=256)
+def inspect_flex_mods(
+    score_mod,
+    mask_mod,
+    *,
+    seqlen_q,
+    seqlen_kv,
+    num_batches=1,
+    num_heads=1,
+    paged=False,
+    infer_score_mod=True,
+):
+    """Classify mask/score structure for equivalent optimized lowerings.
+
+    ``infer_score_mod=False``, ``score_mod.flex_infer=False``, or
+    ``score_mod.flex_score_kind="exact"`` disables score-math inference.
+    The original callable remains stored on this mod in every case.
+    """
+    score_callable = _prepare_constexpr_callable(score_mod, _IDENTITY_SCORE_MOD)
+    mask_callable = _prepare_constexpr_callable(mask_mod, _VISIBLE_MASK_MOD)
+    affine_score, score_slope = _infer_affine_score(score_mod, enabled=infer_score_mod)
+    score_kwargs = {
+        "has_score": score_mod is not None,
+        "affine_score": affine_score,
+        "score_slope": score_slope,
+    }
+    if mask_mod is None:
+        return _InspectedMod(score_callable, mask_callable, **score_kwargs)
+
+    q_values = {round(i * (seqlen_q - 1) / 16) for i in range(17)}
+    q_values.update(min(boundary, seqlen_q - 1) for boundary in (0, 1, 31, 32, 63, 64, 127, 128, 255, 256))
+    q_values = sorted(q_values)
+    kv_values = list(range(seqlen_kv))
+    actual = _mask_values(mask_callable, q_values, kv_values)
+    # Layout skipping is legal only when the predicate is batch/head invariant.
+    for b, h in ((max(num_batches - 1, 0), 0), (0, max(num_heads - 1, 0))):
+        if not torch.equal(actual, _mask_values(mask_callable, q_values, kv_values, b, h)):
+            return _InspectedMod(
+                score_callable,
+                mask_callable,
+                has_mask=True,
+                **score_kwargs,
+            )
+
+    offsets = [0] if paged else list(dict.fromkeys((0, seqlen_kv - seqlen_q)))
+    q_grid = torch.tensor(q_values, dtype=torch.int64).reshape(-1, 1)
+    kv_grid = torch.arange(seqlen_kv, dtype=torch.int64).reshape(1, -1)
+    for offset in offsets:
+        upper = q_grid + offset
+        lower_tri = kv_grid <= upper
+        if torch.equal(actual, lower_tri):
+            return _InspectedMod(
+                score_callable,
+                mask_callable,
+                has_mask=True,
+                lower_tri=True,
+                q_offset=offset,
+                **score_kwargs,
+            )
+
+        # A band has the same upper edge and one constant inclusive width.
+        visible = actual & lower_tri
+        if torch.equal(actual, visible):
+            first_visible = []
+            for row in actual:
+                indices = row.nonzero().flatten()
+                if len(indices) == 0:
+                    first_visible.append(None)
+                else:
+                    first_visible.append(int(indices[0]))
+            windows = [
+                qv + offset - first for qv, first in zip(q_values, first_visible) if first is not None and first > 0
+            ]
+            for window in set(windows):
+                expected = lower_tri & (kv_grid >= upper - window)
+                if torch.equal(actual, expected):
+                    return _InspectedMod(
+                        score_callable,
+                        mask_callable,
+                        has_mask=True,
+                        lower_tri=True,
+                        banded=True,
+                        q_offset=offset,
+                        window=window,
+                        **score_kwargs,
+                    )
+
+        # Prefix-LM is a lower triangle union a fixed leading prefix.
+        prefix_candidates = set()
+        for qv, row in zip(q_values, actual):
+            indices = row.nonzero().flatten()
+            if len(indices) and int(indices[-1]) > qv + offset:
+                prefix_candidates.add(int(indices[-1]) + 1)
+        for prefix_len in prefix_candidates:
+            expected = lower_tri | (kv_grid < prefix_len)
+            if torch.equal(actual, expected):
+                return _InspectedMod(
+                    score_callable,
+                    mask_callable,
+                    has_mask=True,
+                    lower_tri=True,
+                    has_prefix=True,
+                    q_offset=offset,
+                    prefix_len=prefix_len,
+                    **score_kwargs,
+                )
+
+    return _InspectedMod(
+        score_callable,
+        mask_callable,
+        has_mask=True,
+        **score_kwargs,
+    )
 
 
 def _make_k_lds_layout(block_n, head_dim):
@@ -361,22 +752,6 @@ def _make_k_lds_layout(block_n, head_dim):
         k_swizzle = fx.static(fx.SwizzleType.get(3, 3, 3))
         return fx.make_composed_layout(k_swizzle, base_layout)
     return base_layout
-
-
-def _build_mod(mask_type, score_type, mask_window=0, score_alibi_slope=0.0, mask_prefix_len=0):
-    _mask = {
-        MASK_NONE: FlexMod(),
-        MASK_CAUSAL: CausalMask(),
-        MASK_SLIDING_WINDOW: SlidingWindowMask(mask_window),
-        MASK_PREFIX_LM: PrefixLMMask(mask_prefix_len),
-    }[mask_type]
-    _score = {
-        SCORE_NONE: FlexMod(),
-        SCORE_ALIBI: AlibiScore(score_alibi_slope),
-    }[score_type]
-    if _mask.has_mask or _score.has_score:
-        return CompositeMod(_score, _mask)
-    return FlexMod()
 
 
 @fx.struct
@@ -413,12 +788,19 @@ class FlexAttnParam:
     pipe_stages: fx.Constexpr[int]  # deprecated: stagger follows num_groups/pipe_depth/m_waves
     # True = exact per-row softmax; False = approximate column softmax (mma_m=32 only)
     accurate_softmax: fx.Constexpr[bool]
-    # flex mods: integer type IDs (MASK_NONE/CAUSAL/SLIDING_WINDOW/PREFIX_LM, SCORE_NONE/ALIBI)
-    mask_type: fx.Constexpr[int]
-    score_type: fx.Constexpr[int]
-    mask_window: fx.Constexpr[int]  # sliding window size (only used when mask_type==MASK_SLIDING_WINDOW)
-    mask_prefix_len: fx.Constexpr[int]  # prefix length (only used when mask_type==MASK_PREFIX_LM)
-    score_alibi_slope: fx.Constexpr[float]  # alibi slope (only used when score_type==SCORE_ALIBI)
+    has_mask: fx.Constexpr[bool]
+    has_score: fx.Constexpr[bool]
+    affine_score: fx.Constexpr[bool]
+    score_slope_log2: fx.Constexpr[float]
+    lower_tri: fx.Constexpr[bool]
+    banded: fx.Constexpr[bool]
+    has_prefix: fx.Constexpr[bool]
+    packed_lower_tri_mask: fx.Constexpr[bool]
+    lpt_q_grid: fx.Constexpr[bool]
+    has_kv_bounds: fx.Constexpr[bool]
+    q_offset: fx.Constexpr[int]
+    mask_window: fx.Constexpr[int]
+    mask_prefix_len: fx.Constexpr[int]
     num_kv_splits: fx.Constexpr[int]  # split-K: partition KV range across this many WGs (1=disabled)
     paged: fx.Constexpr[bool]  # True = paged KV cache, False = contiguous
 
@@ -426,7 +808,7 @@ class FlexAttnParam:
 _PAGED_BT_LDS_SIZE = 2048
 
 
-def _effective_causal_kv_splits(
+def _effective_lower_tri_kv_splits(
     *,
     requested_splits: int,
     batch: int,
@@ -437,10 +819,10 @@ def _effective_causal_kv_splits(
     block_n: int,
     num_cus: int,
 ) -> int:
-    """Cap causal split-K to splits that can add useful device parallelism.
+    """Cap lower-tri split-K to splits that can add useful device parallelism.
 
-    A split is useful only while the unsplit causal grid underfills the CUs,
-    and only when the largest causal KV range leaves a substantial n64 chunk
+    A split is useful only while the unsplit lower-tri grid underfills the CUs,
+    and only when the largest lower-tri KV range leaves a substantial n64 chunk
     per split.  Six tiles matches the minimum useful dual-tile pipeline chunk
     and avoids paying workspace/combine overhead for very short partitions.
     """
@@ -453,11 +835,11 @@ def _effective_causal_kv_splits(
     dead_q_rows = max(seqlen_q - seqlen_kv, 0)
     first_live_q_tile = dead_q_rows // rows_per_wg
     active_q_tiles = max(num_q_tiles - first_live_q_tile, 0)
-    base_ctas = batch * num_heads_q * active_q_tiles
-    if base_ctas <= 0 or base_ctas >= num_cus:
+    base_wgs = batch * num_heads_q * active_q_tiles
+    if base_wgs <= 0 or base_wgs >= num_cus:
         return 1
 
-    occupancy_splits = (num_cus + base_ctas - 1) // base_ctas
+    occupancy_splits = (num_cus + base_wgs - 1) // base_wgs
     effective = min(requested_splits, occupancy_splits)
     n_kv_tiles = (seqlen_kv + block_n - 1) // block_n
     while effective > 1:
@@ -486,16 +868,21 @@ def make_flex_attn_param(
     pipe_depth: int = 1,
     pipe_stages: int = 1,
     accurate_softmax: bool = True,
-    mask_type: int = MASK_NONE,
-    score_type: int = SCORE_NONE,
-    mask_window: int = 0,
-    mask_prefix_len: int = 0,
-    score_alibi_slope: float = 0.0,
+    flex_mod: Optional[_InspectedMod] = None,
     num_kv_splits: int = 1,
     paged: bool = False,
     long_seq_8c: Optional[bool] = None,
     seqlen_q: Optional[int] = None,
+    has_kv_bounds: bool = False,
 ) -> FlexAttnParam:
+    if flex_mod is None:
+        flex_mod = inspect_flex_mods(
+            None,
+            None,
+            seqlen_q=seqlen_q if seqlen_q is not None else seqlen_kv,
+            seqlen_kv=seqlen_kv,
+            paged=paged,
+        )
     if dtype_id not in (FLEX_DTYPE_BF16, FLEX_DTYPE_FP16):
         raise ValueError(f"unsupported dtype_id={dtype_id}")
     if block_m <= 0 or block_n <= 0 or head_dim <= 0:
@@ -544,8 +931,7 @@ def make_flex_attn_param(
         )
     if block_threads != 512:
         raise ValueError(
-            f"gfx950 flex requires a 512-thread CTA for the 4c/8c path "
-            f"(got block_threads={block_threads})"
+            f"gfx950 flex requires a 512-thread workgroup for the 4c/8c path " f"(got block_threads={block_threads})"
         )
 
     return FlexAttnParam(
@@ -569,22 +955,12 @@ def make_flex_attn_param(
         long_seq_8c=(
             (
                 (
-                    seqlen_kv
-                    >= (
-                        _LONG_SEQ_8C_SKV_MASKED
-                        if mask_type
-                        in (MASK_CAUSAL, MASK_SLIDING_WINDOW, MASK_PREFIX_LM)
-                        else _LONG_SEQ_8C_SKV_DENSE
-                    )
+                    seqlen_kv >= (_LONG_SEQ_8C_SKV_MASKED if flex_mod.has_mask else _LONG_SEQ_8C_SKV_DENSE)
                     # Short-Q split-K benefits from the lower-power,
                     # finer-grained 4c body even when the full Skv would
                     # normally select 8c. Long-Q remains throughput-bound
                     # and keeps 8c.
-                    and (
-                        num_kv_splits == 1
-                        or seqlen_q is None
-                        or seqlen_q > 512
-                    )
+                    and (num_kv_splits == 1 or seqlen_q is None or seqlen_q > 512)
                 )
                 if long_seq_8c is None
                 else bool(long_seq_8c)
@@ -594,11 +970,19 @@ def make_flex_attn_param(
         pipe_depth=pipe_depth,
         pipe_stages=pipe_stages,
         accurate_softmax=accurate_softmax,
-        mask_type=mask_type,
-        score_type=score_type,
-        mask_window=mask_window,
-        mask_prefix_len=mask_prefix_len,
-        score_alibi_slope=score_alibi_slope,
+        has_mask=flex_mod.has_mask,
+        has_score=flex_mod.has_score,
+        affine_score=flex_mod.affine_score,
+        score_slope_log2=flex_mod.score_slope_log2,
+        lower_tri=flex_mod.lower_tri,
+        banded=flex_mod.banded,
+        has_prefix=flex_mod.has_prefix,
+        packed_lower_tri_mask=flex_mod.packed_lower_tri_mask,
+        lpt_q_grid=flex_mod.lpt_q_grid,
+        has_kv_bounds=has_kv_bounds,
+        q_offset=flex_mod.q_offset,
+        mask_window=flex_mod.window,
+        mask_prefix_len=flex_mod.prefix_len,
         num_kv_splits=num_kv_splits,
         paged=paged,
     )
@@ -697,11 +1081,14 @@ def flex_attn_fwd_gfx950_kernel(
     scale: fx.Float32,
     tiled_mma_qk: fx.TiledMma,
     param: FlexAttnParam,
+    score_mod: fx.Constexpr[Callable],
+    mask_mod: fx.Constexpr[Callable],
     ws_o: fx.Tensor = fx.Tensor,
     ws_ml: fx.Tensor = fx.Tensor,
     block_table: fx.Tensor = fx.Tensor,  # [B * max_pages_per_seq] i32, flat
     block_table_stride: fx.Int32 = fx.Int32(0),
     context_lens: fx.Tensor = fx.Tensor,  # [B] i32
+    kv_bounds: fx.Tensor = fx.Tensor,  # [B, Hq, Q-workgroups, 2] i32, flat
 ):
     block_m = param.block_m
     block_n = param.block_n
@@ -710,12 +1097,12 @@ def flex_attn_fwd_gfx950_kernel(
     _paged = bool(param.paged)
 
     tid = fx.thread_idx.x
-    # Strategy A: num_groups independent 2-wave query subtiles per workgroup, all
+    # Strategy A: num_groups independent 1-wave query subtiles per workgroup, all
     # driving the SAME KV loop so K/V (staged in LDS) is reused across groups. Each
-    # group runs the validated 128-thread body via local_tid; group g owns query rows
-    # [(q_tile*num_groups + g)*block_m : +block_m).
+    # group runs the 64-thread (m_waves=1) body via local_tid; group g owns query
+    # rows [(q_tile*num_groups + g)*block_m : +block_m).
     num_groups = param.num_groups
-    group_threads = param.group_threads  # 128 (m_waves*n_waves*wave_size)
+    group_threads = param.group_threads  # 64 (m_waves*n_waves*wave_size)
     group = tid // group_threads
     local_tid = tid % group_threads
     # One SGPR wave id for the whole kernel. Deriving wave from `tid` inside
@@ -727,13 +1114,13 @@ def flex_attn_fwd_gfx950_kernel(
     _wave_id_uni = fx.Int32(_wave_id_uni_s)
     # Head-fast grid so linear_id % 8 (XCD) is the head, not the Q tile.
     # gfx950 L2 is private per XCD: Q tiles of one head then replay the same KV
-    # on one XCD.  Causal/prefix still reverse q_tile on grid.y so the longest
+    # on one XCD.  Lower-tri masks reverse q_tile on grid.y so the longest
     # KV loops of every head enqueue first.  grid.z = batch (or batch * splits).
     _SPLITK = int(param.num_kv_splits) > 1
     _num_kv_splits = int(param.num_kv_splits)
-    _is_causal = int(param.mask_type) in (MASK_CAUSAL, MASK_PREFIX_LM)
+    _lower_tri_grid = bool(param.lpt_q_grid)
     h_idx = fx.block_idx.x
-    if const_expr(_is_causal):
+    if const_expr(_lower_tri_grid):
         _num_q_tiles = (seqlen_q + fx.Int32(num_groups * block_m - 1)) // fx.Int32(num_groups * block_m)
         q_tile = fx.Index(arith.index_cast(T.index, _num_q_tiles - fx.Int32(1) - _idx_to_i32(fx.block_idx.y)))
     else:
@@ -746,17 +1133,14 @@ def flex_attn_fwd_gfx950_kernel(
     kv_head = h_idx // param.gqa_group
 
     q_start = (q_tile * num_groups + group) * block_m
-    # Bottom-right causal alignment for contiguous
+    # Bottom-right lower-tri alignment for contiguous
     # cross-seqlen inputs.  When Skv < Sq, the first Sq-Skv query rows are
     # fully masked; the launcher removes whole dead workgroups and the output
     # store below zeros any dead rows in the first partially-live workgroup.
     # Paged KV keeps its existing top-left convention until it has a per-batch
     # active guard (context lengths may differ across batches).
-    _bottom_right_causal = int(param.mask_type) == MASK_CAUSAL and not _paged
-    if const_expr(_bottom_right_causal):
-        _causal_q_shift = seqlen_kv - seqlen_q
-    else:
-        _causal_q_shift = fx.Int32(0)
+    _bottom_right_lower_tri = bool(param.packed_lower_tri_mask) and int(param.q_offset) < 0 and not _paged
+    _layout_q_offset = fx.Int32(int(param.q_offset))
 
     if const_expr(_paged):
         _ctx_len_it = fx.recast_iter(fx.Int32, fx.get_iter(context_lens))
@@ -765,18 +1149,35 @@ def flex_attn_fwd_gfx950_kernel(
     else:
         n_kv_tiles = param.n_kv_tiles
 
-    # Build the mod and split bounds before loading Q. Empty split CTAs still
+    # Build the mod and split bounds before loading Q. Empty split workgroups still
     # publish an (m=-inf,l=0) sentinel, but do not need any query data.
-    flex_mod = _build_mod(
-        int(param.mask_type),
-        int(param.score_type),
-        int(param.mask_window),
-        float(param.score_alibi_slope),
-        int(param.mask_prefix_len),
+    flex_mod = _InspectedMod(
+        score_mod,
+        mask_mod,
+        has_score=bool(param.has_score),
+        affine_score=bool(param.affine_score),
+        score_slope=float(param.score_slope_log2) / _LOG2E,
+        has_mask=bool(param.has_mask),
+        lower_tri=bool(param.lower_tri),
+        banded=bool(param.banded),
+        has_prefix=bool(param.has_prefix),
+        q_offset=int(param.q_offset),
+        window=int(param.mask_window),
+        prefix_len=int(param.mask_prefix_len),
     )
-    _q_min_wg = _idx_to_i32(q_tile) * fx.Int32(num_groups * block_m) + _causal_q_shift
+    _q_min_wg = _idx_to_i32(q_tile) * fx.Int32(num_groups * block_m) + _layout_q_offset
     _q_max_wg = _q_min_wg + fx.Int32(num_groups * block_m - 1)
-    _kv_lo, _kv_hi = flex_mod.kv_range(_q_min_wg, _q_max_wg, n_kv_tiles, block_n)
+    if const_expr(bool(param.has_kv_bounds)):
+        _num_q_tiles = (seqlen_q + fx.Int32(num_groups * block_m - 1)) // fx.Int32(num_groups * block_m)
+        _bounds_idx = (
+            (_idx_to_i32(b_idx) * fx.Int32(int(param.num_heads_q)) + _idx_to_i32(h_idx)) * _num_q_tiles
+            + _idx_to_i32(q_tile)
+        ) * fx.Int32(2)
+        _bounds_it = fx.recast_iter(fx.Int32, fx.get_iter(kv_bounds))
+        _kv_lo = fx.Int32(fx.ptr_load(_bounds_it + _bounds_idx))
+        _kv_hi = fx.Int32(fx.ptr_load(_bounds_it + _bounds_idx + fx.Int32(1)))
+    else:
+        _kv_lo, _kv_hi = flex_mod.kv_range(_q_min_wg, _q_max_wg, n_kv_tiles, block_n)
     if const_expr(_SPLITK):
         _kv_hi_full = _kv_hi
         _total_tiles = _kv_hi - _kv_lo
@@ -785,26 +1186,18 @@ def flex_attn_fwd_gfx950_kernel(
         _chunk = _i32_max(_chunk, fx.Int32(_SPLITK_MIN_CHUNK_TILES))
         _kv_lo_candidate = _kv_lo + split_idx * _chunk
         _kv_hi = _i32_min(_kv_lo_candidate + _chunk, _kv_hi_full)
-        _kv_hi = ((_kv_hi_full - _kv_hi) < fx.Int32(_SPLITK_MIN_LIVE_TILES)).select(
-            _kv_hi_full, _kv_hi
-        )
+        _kv_hi = ((_kv_hi_full - _kv_hi) < fx.Int32(_SPLITK_MIN_LIVE_TILES)).select(_kv_hi_full, _kv_hi)
         _split_nonempty = (_kv_lo_candidate < _kv_hi_full) & (
-            (split_idx == fx.Int32(0))
-            | (_kv_lo_candidate + fx.Int32(_SPLITK_MIN_LIVE_TILES) <= _kv_hi_full)
+            (split_idx == fx.Int32(0)) | (_kv_lo_candidate + fx.Int32(_SPLITK_MIN_LIVE_TILES) <= _kv_hi_full)
         )
-        _split_tiles = _split_nonempty.select(
-            _kv_hi - _kv_lo_candidate, fx.Int32(0)
-        )
+        _split_tiles = _split_nonempty.select(_kv_hi - _kv_lo_candidate, fx.Int32(0))
         _empty_fallback = _i32_max(_kv_hi_full - fx.Int32(1), fx.Int32(0))
         _kv_lo = _split_nonempty.select(_kv_lo_candidate, _empty_fallback)
 
-    # ── LDS: K/V staging (shared across all groups) + per-group P bridge ──────
     kv_tile_elems = block_n * head_dim
     _lds_ring_slots = max(2, int(param.pipe_depth))
-    # Padded wave-linear LDS map (n64, 512-thread CTA):
-    # 8 wave-linear repetitions, 2 D repetitions, with one 16B pad per K
-    # line and one 64B pad per V line. KV loop is 4c deferred softmax, or 8c
-    # when long_seq_8c.
+    # Shared K/V LDS, padded wave-linear (n64, 512 threads):
+    # 8 N-reps × 2 D-reps, +16B pad per K line and +64B pad per V line.
     _lds_n_rpt = 8
     _lds_d_rpt = 2
     _k_lds_line = 520  # 512 bf16 payload + 8 bf16 (16B) pad
@@ -813,6 +1206,7 @@ def flex_attn_fwd_gfx950_kernel(
     _v_storage_elems = _lds_n_rpt * _lds_d_rpt * _v_lds_line
 
     if const_expr(_paged):
+
         @fx.struct
         class SharedStorage:
             k_lds_0: fx.Array[elem_dtype, _k_storage_elems, 16]
@@ -823,6 +1217,7 @@ def flex_attn_fwd_gfx950_kernel(
             bt: fx.Array[fx.Int32, _PAGED_BT_LDS_SIZE, 16]
 
     else:
+
         @fx.struct
         class SharedStorage:
             k_lds_0: fx.Array[elem_dtype, _k_storage_elems, 16]
@@ -835,7 +1230,7 @@ def flex_attn_fwd_gfx950_kernel(
     sK_ptr = [storage.k_lds_0.peek().ptr, storage.k_lds_1.peek().ptr]
     sV_ptr = [storage.v_lds_0.peek().ptr, storage.v_lds_1.peek().ptr]
 
-    # K LDS: D-contiguous tile with GEMM-style XOR swizzle (Swizzle 2,4,3 when D=128).
+    # Fragment overlay only. Payload addressing is the padded wave-linear map.
     _k_base_layout = _make_k_lds_layout(block_n, head_dim)
     sK = [fx.make_view(sK_ptr[i], _k_base_layout) for i in range_constexpr(_lds_ring_slots)]
     # QK C-fragment template. After the operand swap (K=A, Q=B) the score tile is
@@ -847,21 +1242,15 @@ def flex_attn_fwd_gfx950_kernel(
         fx.make_layout((block_n, block_m), (block_m, 1)),
     )
 
-    # ── per-(batch,head) [S, D] views of the BSHD tensors ─────────────────────
-    # Element (b,s,h,d) at b*Sq*Hq*D + s*Hq*D + h*D + d.  q/o slice: base offset
-    # b*Sq*Hq*D + h*D + q_start*Hq*D, row-stride Hq*D. k slice uses Hkv/kv_head.
+    # BSHD element (b,s,h,d); Q/O start at q_start, K/V share this head's base.
     hq = param.num_heads_q
     hkv = param.num_heads_kv
     q_off = b_idx * seqlen_q * hq * head_dim + h_idx * head_dim + q_start * hq * head_dim
     o_off = q_off
     k_off = b_idx * seqlen_kv * hkv * head_dim + kv_head * head_dim
-    # V is [B, Skv, Hkv, D] (un-transposed): element (b,s,h,d) at
-    # b*Skv*Hkv*D + s*Hkv*D + h*D + d.  This head's base:
-    v_off = b_idx * seqlen_kv * hkv * head_dim + kv_head * head_dim
 
-    # Bounded Q descriptor: the tiled copy B (BufferCopy128b) can overshoot
-    # head_dim for the last K-group's final 128b load. Use total tensor size
-    # as num_records so the HW clamps OOB reads to 0.
+    # BufferCopy128b can overshoot head_dim on the last K-group; bound the
+    # descriptor to the full tensor so hardware clamps OOB reads to 0.
     _q_total_bytes = num_batches * seqlen_q * fx.Int32(hq * head_dim * param.in_data_bytes)
     q_it = _make_buffer_ptr(
         fx.recast_iter(elem_dtype, fx.get_iter(q)),
@@ -869,11 +1258,8 @@ def flex_attn_fwd_gfx950_kernel(
     )
     gQ = fx.make_view(q_it + fx.Int32(q_off), fx.make_layout((block_m, head_dim), (hq * head_dim, 1)))
 
-    # Each group runs the validated 128-thread MMA partition via local_tid.
     thr_qk = tiled_mma_qk.thr_slice(local_tid)
 
-    # Q is loaded once into VGPRs. Cached (0): SC1/NT Q did not beat this
-    # occupancy-held and 18s-clock sweep.
     ca = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_dtype)
     uca = fx.make_copy_atom(fx.UniversalCopy128b(), elem_dtype)
 
@@ -911,16 +1297,10 @@ def flex_attn_fwd_gfx950_kernel(
     _pv_packs = block_n // int(param.mma_k)
     o_accs_init = [Vec.filled(16, 0.0, fx.Float32).ir_value() for _ in range_constexpr(_n_d_chunks)]
 
-    # Per-slot row map: thr_qk.partition_C partitions by THIS thread's wave, so
-    # n_c is always this lane's slot count (not the full tile). For MFMA 16x16
-    # with n_waves=1, each lane has 4 M-values × (block_n/mma_n) N-repeats slots.
-    # The first half and second half are the two column-groups of the same rows,
-    # so npair = n_c // 2 gives the number of distinct row-indices this lane owns,
-    # and i % npair maps each slot to its row. This holds for any m_waves because
-    # thr_slice already selects the per-wave partition.
     n_c = _size_scalar(thr_qk.partition_C(sP).shape)
     # After QK operand swap (K=A, Q=B), C's M-rows = score indices, N-cols = query.
-    # Each lane has 16 score values at 1 query column. npair=1: single max/sum per lane.
+    # 32×32×16, one wave: each lane has 16 score values at 1 query column.
+    # npair=1: single max/sum per lane.
     npair = 1
 
     # m_i lives in log2-scaled space (Q is pre-multiplied by scale*log2e) so exp2
@@ -929,30 +1309,11 @@ def flex_attn_fwd_gfx950_kernel(
     m_i = [fx.Float32(_M_NEG_FLOOR_SCALED) for _ in range_constexpr(npair)]
     l_i = [fx.Float32(0.0) for _ in range_constexpr(npair)]
 
-    # ── KV-loop helpers ────────────────────────────────────────────────
-
-    # ── K LDS read (QK GEMM A operand) ─────────────────────────────────────
-    # LDS logical tile: [block_n score, head_dim D] D-contiguous + Swizzle(3,3,3).
-    # NO transpose — UniversalCopy128b → ds_read_b128 (8 bf16 / lane / ki).
-    #
-    # QK uses K=A, Q=B with MFMA 32×32×16, m_waves=2 (128 threads / query group):
-    #   • M = 32 score rows; each wave owns 16 rows (local_tid // 64 → wave 0|1).
-    #   • K depth = head_dim; one ki index = one mma_k=16 panel (D cols [ki*16, ki*16+15]).
-    #   • _k_iters = head_dim/16 = 8; read_k_work_split loads _k_half=4 ki per call.
-    #
-    # tcA_k_lds[slot].partition_S(sK[slot]) gives this lane's LDS source coords
-    #   (score_row, d_col) for each ki — layout from tiled_copy_A × swizzled sK view.
-    # retile(frag_K[slot]) is the MFMA A fragment register target for gemm1_qk_unrolled.
+    # K LDS read: padded wave-linear payload; sK/tcA are MFMA A overlay only.
     tcA_k_lds = [fx.make_tiled_copy_A(uca, tiled_mma_qk).get_slice(local_tid) for _ in range_constexpr(_lds_ring_slots)]
     frag_K = [thr_qk.make_fragment_A(sK[i]) for i in range_constexpr(_lds_ring_slots)]
 
-    # V is loaded as A operand for PV GEMM (V=A, P=B).
-    # V LDS has 4 compact sub-tiles [block_n, 32]:(32, 1). LDSReadTrans16_64b
-    # transposes each [block_n, 32] → [32, block_n] = A[M=D_chunk, K=score].
     _v_tr_atom = fx.make_copy_atom(rocdl.cdna4.LDSReadTrans16_64b(), elem_dtype)
-    # View sub-tiles as [M=32(D), K=block_n(score)]:(1, 32) — column-major.
-    # The transpose atom reads score-contiguous data from LDS and delivers A[M=D, K=score].
-    # DMA infrastructure
     block_threads = param.block_threads
     _dma_bytes = GFX950_DMA_BYTES
     _kv_tile_bytes = kv_tile_elems * param.in_data_bytes
@@ -967,9 +1328,9 @@ def flex_attn_fwd_gfx950_kernel(
         """Non-vectorized wave-linear padded K/V DMA map."""
         lane = fx.Int32(tid % GFX950_WAVE_SIZE)
         wave = _wave_id_uni
-        n_in_warp = lane // fx.Int32(8)
+        n_in_wave = lane // fx.Int32(8)
         d_bucket = lane % fx.Int32(8)
-        tile_row = n_in_warp * fx.Int32(8) + wave
+        tile_row = n_in_wave * fx.Int32(8) + wave
         if const_expr(_paged):
             page_id = _load_page_id(tile_idx)
             src_base = page_id * fx.Int32(_page_byte_stride) + _kv_head_byte_offset
@@ -1026,28 +1387,8 @@ def flex_attn_fwd_gfx950_kernel(
         _stage_kv_lds(tile_idx, slot, False, True)
         return []
 
-    # ── V transpose read ────────────────────────────────────────────────────
-    # LDS stores V as padded [block_n score, 32 D] sub-tiles per dc (D-chunk).
-    # read path: LDS [score,D] ──ds_read_tr16_b64──► 4 bf16/lane ──shuffle──► v8elem MFMA A.
-    #
-    # ds_read_tr16_b64 copy atom (LDSReadTrans16_64b):
-    #   • 16 consecutive lanes (local_tid // 16, lanes local_tid % 16) cooperate per op.
-    #   • Each lane reads 64b (4 bf16) from LDS; HW transposes a 16×16 bf16 tile.
-    #   • 128 threads → 8 tr16 groups per (k_sub, dc) iteration.
-    #
-    # Per-lane origin within a [32,32] sub-tile (score row, D col in elems).
-    # Example (local_tid → score_row, d_col) for first tr16 group (local_tid 0..15):
-    #   tid  0→(0, 0)   1→(0, 4)   2→(0, 8)   3→(0,12)
-    #   tid  4→(1, 0)   5→(1, 4)   6→(1, 8)   7→(1,12)
-    #   tid  8→(2, 0)   9→(2, 4)  10→(2, 8)  11→(2,12)
-    #   tid 12→(3, 0)  13→(3, 4)  14→(3, 8)  15→(3,12)
-    # Second tr16 group (local_tid 16..31): score rows 0..3, d_col + 16:
-    #   tid 16→(0,16)  17→(0,20) …  31→(3,28)
-    # Quarter-wave row bias (local_tid // 32 → ×4 on score_row):
-    #   tid 0..31   → score rows 0..3    (wave 0, top half of 32 scores)
-    #   tid 32..63  → score rows 4..7
-    #   tid 64..95  → score rows 8..11   (wave 1)
-    #   tid 96..127 → score rows 12..15
+    # V LDS: ds_read_tr16_b64 then shuffle to v8 MFMA A. Half-wave (local_tid//32)
+    # selects score rows 0..3 vs 4..7.
     _v_tr_layout = fx.make_layout(4, 1)  # dst/src tile: 4 bf16 (64b) per lane per copy
     _k_frag_retile_0 = tcA_k_lds[0].retile(frag_K[0])
     _k_frag_retile_1 = tcA_k_lds[1].retile(frag_K[1])
@@ -1104,24 +1445,22 @@ def flex_attn_fwd_gfx950_kernel(
                 _k_frag_retile_1[None, 1, ki].store(hi)
         return frag_K[slot]
 
-    # ── Flex score/mask mod application ────────────────────────────────────
-    # MFMA 32x32x16 C fragment with K=A, Q=B swap:
-    #   q_idx = q_start + local_tid % 32 (same for all 16 elements)
-    #   kv_in_tile(e) = 8*(e//4) + e%4 + 4*(local_tid//32)
+    # Score/mask indices after K=A,Q=B: q = q_start + local_tid%32;
+    # kv_in_tile(e) = 8*(e//4) + e%4 + 4*(local_tid//32).
     mod_has_score = flex_mod.has_score
     mod_has_mask = flex_mod.has_mask
     _mod_apply_score = flex_mod.apply_score
     _mod_apply_mask = flex_mod.apply_mask
     b_i32 = _idx_to_i32(b_idx)
     h_i32 = _idx_to_i32(h_idx)
-    q_idx_mod = _idx_to_i32(q_start) + fx.Int32(local_tid % 32) + _causal_q_shift
+    q_idx_mod = _idx_to_i32(q_start) + fx.Int32(local_tid % 32)
     lane_group_off = fx.Int32((local_tid // 32) * 4)
     kv_offsets = [8 * (e // 4) + (e % 4) for e in range(n_c)]
     # Mask if any row in the WG can see this tile, not this group's q_start.
     # Uniform across the 8 groups.
-    _causal_wg_q_min = _idx_to_i32(q_tile) * fx.Int32(num_groups * block_m) + _causal_q_shift
-    _causal_neg_inf_i32 = fx.Int32(_CAUSAL_NEG_INF_F32_BITS)
-    _causal_pair_thresholds = [(kv_offsets[i], kv_offsets[i + 1]) for i in range(0, n_c, 2)]
+    _lower_tri_wg_q_min = _idx_to_i32(q_tile) * fx.Int32(num_groups * block_m) + _layout_q_offset
+    _mask_neg_inf_i32 = fx.Int32(_MASK_NEG_INF_F32_BITS)
+    _packed_pair_thresholds = [(kv_offsets[i], kv_offsets[i + 1]) for i in range(0, n_c, 2)]
 
     def apply_score_mods(frag_S_in, kv_tile_idx):
         kv_base = kv_tile_idx * fx.Int32(block_n) + lane_group_off
@@ -1133,29 +1472,27 @@ def flex_attn_fwd_gfx950_kernel(
         kv_base = kv_tile_idx * fx.Int32(block_n) + lane_group_off
         for e in range_constexpr(n_c):
             kv_idx = kv_base + fx.Int32(kv_offsets[e])
-            frag_S_in[e] = _mod_apply_mask(frag_S_in[e], q_idx_mod, kv_idx)
+            frag_S_in[e] = _mod_apply_mask(frag_S_in[e], b_i32, h_i32, q_idx_mod, kv_idx)
 
     def _mask_scores(s_in, kv_tile_idx):
         kv_base = kv_tile_idx * fx.Int32(block_n) + lane_group_off
         return [
-            _mod_apply_mask(
-                s_in[e], q_idx_mod, kv_base + fx.Int32(kv_offsets[e])
-            )
+            _mod_apply_mask(s_in[e], b_i32, h_i32, q_idx_mod, kv_base + fx.Int32(kv_offsets[e]))
             for e in range_constexpr(n_c)
         ]
 
     def _mask_scores_packed(s_in, kv_tile_idx):
         """Packed vec2 mask on this C-fragment's KV offsets."""
         kv_base = kv_tile_idx * fx.Int32(block_n) + lane_group_off
-        rel_i32 = q_idx_mod - kv_base
+        rel_i32 = q_idx_mod + _layout_q_offset - kv_base
         s_out = [s_in[e] for e in range_constexpr(n_c)]
-        for p in range_constexpr(len(_causal_pair_thresholds)):
-            thr_x, thr_y = _causal_pair_thresholds[p]
+        for p in range_constexpr(len(_packed_pair_thresholds)):
+            thr_x, thr_y = _packed_pair_thresholds[p]
             idx_x = p * 2
             idx_y = p * 2 + 1
             new_x, new_y = _attn_mask_vec2_imm(
                 rel_i32,
-                _causal_neg_inf_i32,
+                _mask_neg_inf_i32,
                 thr_x,
                 thr_y,
                 _bitcast_i32(s_out[idx_x]),
@@ -1169,21 +1506,19 @@ def flex_attn_fwd_gfx950_kernel(
         if const_expr(mod_has_score):
             apply_score_mods(frag_S_in, kv_tile_idx)
         if const_expr(mod_has_mask):
-            if const_expr(int(param.mask_type) == MASK_CAUSAL):
+            if const_expr(bool(param.packed_lower_tri_mask)):
                 s_out = [frag_S_in[e] for e in range_constexpr(n_c)]
                 # Mask if any row in the WG can see this tile.
-                needs_mask = flex_mod.tile_needs_mask(
-                    kv_tile_idx, _causal_wg_q_min, block_n
-                )
+                needs_mask = flex_mod.tile_needs_mask(kv_tile_idx, _lower_tri_wg_q_min, block_n)
                 if needs_mask:
                     s_out = _mask_scores_packed(s_out, kv_tile_idx)
                 for e in range_constexpr(n_c):
                     frag_S_in[e] = s_out[e]
-            elif const_expr(int(param.mask_type) == MASK_SLIDING_WINDOW):
-                # Interior band tiles need no mask. Use q_start for the causal
+            elif const_expr(bool(param.banded)):
+                # Interior band tiles need no mask. Use q_start for the lower-tri
                 # edge and the last row in the group for the left window edge.
                 s_out = [frag_S_in[e] for e in range_constexpr(n_c)]
-                q_lo = _idx_to_i32(q_start)
+                q_lo = _idx_to_i32(q_start) + _layout_q_offset
                 q_hi = q_lo + fx.Int32(int(block_m) - 1)
                 kv_tile_end = kv_tile_idx * fx.Int32(block_n) + fx.Int32(block_n - 1)
                 kv_tile_start = kv_tile_idx * fx.Int32(block_n)
@@ -1196,8 +1531,6 @@ def flex_attn_fwd_gfx950_kernel(
                     frag_S_in[e] = s_out[e]
             else:
                 apply_mask_mods(frag_S_in, kv_tile_idx)
-
-    # _n_d_chunks defined above as head_dim // 32 (= 4 for D=128).
 
     def _scale_o_vec(o_accs_in, scale_scalar):
         """Vectorized O rescale: broadcast scalar to vec16, multiply per D-chunk."""
@@ -1265,10 +1598,7 @@ def flex_attn_fwd_gfx950_kernel(
         o_accs_out = _scale_o_vec(o_accs_in, corr_scalar)
         return [p_elems, m_i_in, l_i_out, o_accs_out, corr]
 
-    # ── Register-only PV GEMM (V=A, P=B) ──────────────────────────────────
-    # After QK swap (K=A, Q=B), C's M-rows = score indices.
-    # C→B is register-local: pack 16 f32 → 2 × v8bf16.
-    # V is loaded as A from LDS per D-chunk.
+    # PV GEMM (V=A, P=B): pack 16 f32 scores to 2×v8 in registers.
     _pv_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(param.mma_m, param.mma_n, param.mma_k, elem_dtype))
 
     _is_bf16 = int(param.dtype_id) == FLEX_DTYPE_BF16
@@ -1288,27 +1618,17 @@ def flex_attn_fwd_gfx950_kernel(
 
     def _pack_p_b(frag_P_in):
         """Pack the C fragment into one v8elem MFMA B pack per PV step."""
-        return [
-            _pack_8_f32_to_v8elem([frag_P_in[pk * 8 + i] for i in range(8)])
-            for pk in range_constexpr(_pv_packs)
-        ]
+        return [_pack_8_f32_to_v8elem([frag_P_in[pk * 8 + i] for i in range(8)]) for pk in range_constexpr(_pv_packs)]
 
     def _p_packs_to_vec(p_packs):
         return Vec.from_elements(
-            [
-                Vec(p_packs[pk])[i]
-                for pk in range_constexpr(_pv_packs)
-                for i in range_constexpr(8)
-            ],
+            [Vec(p_packs[pk])[i] for pk in range_constexpr(_pv_packs) for i in range_constexpr(8)],
             elem_dtype,
         ).ir_value()
 
     def _p_vec_to_packs(p_all):
         p_vec = Vec(p_all, (n_c,), elem_dtype)
-        return [
-            p_vec.shuffle(p_vec, [pk * 8 + i for i in range(8)]).ir_value()
-            for pk in range_constexpr(_pv_packs)
-        ]
+        return [p_vec.shuffle(p_vec, [pk * 8 + i for i in range(8)]).ir_value() for pk in range_constexpr(_pv_packs)]
 
     def _scale_p_packs(p_packs, corr):
         p_all = _p_packs_to_vec(p_packs)
@@ -1339,9 +1659,7 @@ def flex_attn_fwd_gfx950_kernel(
 
         @flyc.jit
         def _run(o_in, m_row, l_row, tile_max_i, p_in):
-            below = (fx.Float32(tile_max_i) - fx.Float32(m_row)) <= fx.Float32(
-                _LAZY_RESCALE_THRESHOLD
-            )
+            below = (fx.Float32(tile_max_i) - fx.Float32(m_row)) <= fx.Float32(_LAZY_RESCALE_THRESHOLD)
             below_lanes = rocdl.ballot(T.i64, as_mlir_value(below))
             all_below = arith.cmpi(
                 arith.CmpIPredicate.eq,
@@ -1387,9 +1705,7 @@ def flex_attn_fwd_gfx950_kernel(
             m_out = result[_n_d_chunks + 2]
             return o_out, p_out, l_out, m_out
 
-        o_out, p_out, l_out, m_out = _run(
-            o_accs, m_i[0], l_i[0], tile_max, p_packs
-        )
+        o_out, p_out, l_out, m_out = _run(o_accs, m_i[0], l_i[0], tile_max, p_packs)
         return (
             o_out,
             [fx.Float32(m_out)] + [m_i[r] for r in range_constexpr(1, npair)],
@@ -1402,9 +1718,7 @@ def flex_attn_fwd_gfx950_kernel(
         p_packs = _pack_p_b(frag_P_in)
         for pk in range_constexpr(_pv_packs):
             for dc in range_constexpr(_n_d_chunks):
-                o_accs[dc] = _mfma_acc(
-                    v_regs[pk * _n_d_chunks + dc], p_packs[pk], o_accs[dc], _pv_mma_atom
-                )
+                o_accs[dc] = _mfma_acc(v_regs[pk * _n_d_chunks + dc], p_packs[pk], o_accs[dc], _pv_mma_atom)
 
     def read_v_mfma_step(slot, pk):
         """One PV pack of V from LDS: 2 transpose steps × all D-chunks."""
@@ -1484,11 +1798,9 @@ def flex_attn_fwd_gfx950_kernel(
 
     _stagger_div = _flex_stagger_divisor(int(param.block_threads))
     infra = _InfraContext()
-    infra.stagger_i32 = arith.divsi(
-        _wave_id_uni_s, as_mlir_value(fx.Int32(_stagger_div))
-    )
+    infra.stagger_i32 = arith.divsi(_wave_id_uni_s, as_mlir_value(fx.Int32(_stagger_div)))
 
-    # ── Paged KV: load block table into LDS ──────────────────────────────
+    # Paged: stage the block table in LDS.
     if const_expr(_paged):
         _bt_lds_ptr = storage.bt.peek().ptr
         _bt_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
@@ -1531,11 +1843,8 @@ def flex_attn_fwd_gfx950_kernel(
         def _load_page_id(tile_idx):
             return fx.Int32(0)
 
-    _causal_full_tile_8c = (
-        int(param.mask_type) == MASK_CAUSAL
-        and bool(param.long_seq_8c)
-    )
-    if const_expr(_causal_full_tile_8c):
+    _lower_tri_full_tile_8c = bool(param.packed_lower_tri_mask) and bool(param.long_seq_8c)
+    if const_expr(_lower_tri_full_tile_8c):
         # Tile t is fully visible to every row in the WG iff
         # t*block_n + block_n-1 <= q_min.  Therefore the number of full tiles
         # before the diagonal is floor((q_min+1)/block_n).  Clamp it to this
@@ -1572,10 +1881,7 @@ def flex_attn_fwd_gfx950_kernel(
         """C0: first half is P; second half still holds (S-m)."""
         p_mixed = Vec(p_mixed_vec)
         p_out = [p_mixed[i] for i in range_constexpr(_p_half)]
-        p_out += [
-            _hw_exp2(p_mixed[_p_half + i])
-            for i in range_constexpr(n_c - _p_half)
-        ]
+        p_out += [_hw_exp2(p_mixed[_p_half + i]) for i in range_constexpr(n_c - _p_half)]
         return p_out
 
     def _add_deferred_sum(p_prev, l_i):
@@ -1592,17 +1898,7 @@ def flex_attn_fwd_gfx950_kernel(
         return s_scaled, m_i, l_i, o_accs, p_prev, fx.Float32(1.0)
 
     def _pin_in_cluster(values):
-        """Give pure VALU results a use here so they cannot sink downstream.
-
-        MachineSink runs before the `sched_barrier` in `cluster_sync`
-        is honoured, so it is free to move the exp2 chain across the cluster
-        boundary to shorten live ranges. It does exactly that in one of the two
-        unrolled copies of the KV loop, which dumps C3's 16 exp2 into the next
-        C0 on top of its own 16. An empty side-effecting asm consuming the
-        results anchors them in this block. Emit it after the
-        `sched_group_barrier` requests, since it also ends the scheduling
-        region.
-        """
+        """Give pure VALU results a use here so they cannot sink downstream."""
         vals = [as_mlir_value(v) for v in values]
         llvm.inline_asm(
             None,
@@ -1617,9 +1913,7 @@ def flex_attn_fwd_gfx950_kernel(
         m_new = m_i[0]
         shifted = [s_scaled[i] - m_new for i in range_constexpr(n_c)]
         p_head = [_hw_exp2(shifted[i]) for i in range_constexpr(_p_half)]
-        p_mixed = p_head + [
-            shifted[i] for i in range_constexpr(_p_half, n_c)
-        ]
+        p_mixed = p_head + [shifted[i] for i in range_constexpr(_p_half, n_c)]
         return Vec.from_elements(p_mixed, fx.Float32).ir_value(), p_head
 
     def _deferred_prologue(kv_i32, m_i, l_i, o_accs):
@@ -1653,18 +1947,13 @@ def flex_attn_fwd_gfx950_kernel(
         cluster_sync(3)
         return m_i, l_i, o_accs, p_mixed, corr_scalar
 
-    def _deferred_step(
-        kv_i32, cur_slot, prev_slot, m_i, l_i, o_accs, p_mixed_prev, corr_pending
-    ):
+    def _deferred_step(kv_i32, cur_slot, prev_slot, m_i, l_i, o_accs, p_mixed_prev, corr_pending):
         """Steady tile n: QK/P preparation for n while consuming PV[n-1]."""
         # C0: launch V[n], issue K[n] LDS, then fill LDS latency with exp(P[n-1]).
         rocdl.s_waitcnt(vmcnt=0)
         load_v(kv_i32, cur_slot)
         k_regs = read_k_lds(cur_slot)
         p_prev = _finish_deferred_exp(p_mixed_prev)
-        # Lazy rescale leaves eight independent exp2 operations in this region.
-        # Pair two K reads with each exp: asking for 16 EXP groups delays the
-        # last read and creates a ~44-cycle lgkmcnt tail.
         sched_interleave_lds_math(_qk_k_reps, ds=2, trans=1, sync_id=0)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         _waitcnt_vm_n(_dma_ops_per_thread)
@@ -1685,9 +1974,7 @@ def flex_attn_fwd_gfx950_kernel(
         if has_next:
             load_k(kv_i32 + fx.Int32(1), prev_slot)
         v_prev = read_v_lds(prev_slot)
-        s_scaled, m_i, l_i, o_accs, p_prev, corr_scalar = _rescale_for_current(
-            s_raw, m_i, l_i, o_accs, p_prev
-        )
+        s_scaled, m_i, l_i, o_accs, p_prev, corr_scalar = _rescale_for_current(s_raw, m_i, l_i, o_accs, p_prev)
         sched_interleave_lds_math(_pv_packs * 2, ds=_n_d_chunks, valu=2, sync_id=1)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         _waitcnt_vm_n(_dma_ops_per_thread)
@@ -1698,16 +1985,12 @@ def flex_attn_fwd_gfx950_kernel(
         rocdl.s_setprio(1)
         p_packs = _pack_p_b(p_prev)
         for dc in range_constexpr(_n_d_chunks):
-            o_accs[dc] = _mfma_acc(
-                v_prev[dc], p_packs[0], o_accs[dc], _pv_mma_atom
-            )
+            o_accs[dc] = _mfma_acc(v_prev[dc], p_packs[0], o_accs[dc], _pv_mma_atom)
         tile_max = s_scaled[0]
         for i in range_constexpr(1, n_c):
             tile_max = _f32_max(tile_max, s_scaled[i])
         tile_max = _permlane32_reduce(tile_max, "max")
-        o_accs, m_i, l_i, p_packs = _c3_lazy_rescale(
-            o_accs, m_i, l_i, tile_max, p_packs
-        )
+        o_accs, m_i, l_i, p_packs = _c3_lazy_rescale(o_accs, m_i, l_i, tile_max, p_packs)
         for pk in range_constexpr(1, _pv_packs):
             for dc in range_constexpr(_n_d_chunks):
                 o_accs[dc] = _mfma_acc(
@@ -1717,17 +2000,13 @@ def flex_attn_fwd_gfx950_kernel(
                     _pv_mma_atom,
                 )
         p_mixed, p_head = _make_deferred_p(s_scaled, m_i)
-        # Only the exp2 chain pays here. Pinning the subtracts and bf16 packs
-        # too costs ~1%, the same way it did for the O rescale in C0.
         sched_interleave_pv_softmax(_pv_packs * _n_d_chunks, mfma=1, trans=1)
         _pin_in_cluster(p_head)
         rocdl.s_setprio(0)
         cluster_sync(3)
         return m_i, l_i, o_accs, p_mixed, corr_scalar
 
-    def _deferred_step_8c(
-        kv_odd, m_i, l_i, o_accs, p_mixed_prev
-    ):
+    def _deferred_step_8c(kv_odd, m_i, l_i, o_accs, p_mixed_prev):
         """C0..C7 pipeline for two consecutive KV tiles."""
         kv_even = kv_odd + fx.Int32(1)
 
@@ -1746,9 +2025,9 @@ def flex_attn_fwd_gfx950_kernel(
         # C1: QK[odd], finish/sum P[odd-1], and carry packed P into C3.
         (frag_s_odd,) = gemm1_qk_unrolled(frag_Q, k_odd)
         s_odd = [frag_s_odd[i] for i in range_constexpr(n_c)]
-        if const_expr(_causal_full_tile_8c and mod_has_score):
+        if const_expr(_lower_tri_full_tile_8c and mod_has_score):
             apply_score_mods(s_odd, kv_odd)
-        elif const_expr(not _causal_full_tile_8c):
+        elif const_expr(not _lower_tri_full_tile_8c):
             s_odd = _apply_mods_and_mask(s_odd, kv_odd)
         p_prev = _finish_deferred_exp(p_mixed_prev)
         l_i = _add_deferred_sum(p_prev, l_i)
@@ -1763,9 +2042,7 @@ def flex_attn_fwd_gfx950_kernel(
         if (kv_odd + fx.Int32(2)) < _kv_hi:
             load_k(kv_odd + fx.Int32(2), 1)
         v_prev = read_v_lds(0)
-        s_odd, m_i, l_i, o_accs, _p_prev, _corr = (
-            _rescale_for_current(s_odd, m_i, l_i, o_accs, p_prev)
-        )
+        s_odd, m_i, l_i, o_accs, _p_prev, _corr = _rescale_for_current(s_odd, m_i, l_i, o_accs, p_prev)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         _waitcnt_vm_n(2 * _dma_ops_per_thread)
         cluster_sync(2)
@@ -1773,17 +2050,13 @@ def flex_attn_fwd_gfx950_kernel(
         # C3: PV[odd-1], lazy rebase from S[odd], then begin P[odd].
         rocdl.s_setprio(1)
         for dc in range_constexpr(_n_d_chunks):
-            o_accs[dc] = _mfma_acc(
-                v_prev[dc], p_prev_packs[0], o_accs[dc], _pv_mma_atom
-            )
+            o_accs[dc] = _mfma_acc(v_prev[dc], p_prev_packs[0], o_accs[dc], _pv_mma_atom)
         tile_max_odd = s_odd[0]
         for i in range_constexpr(1, n_c):
             tile_max_odd = _f32_max(tile_max_odd, s_odd[i])
         tile_max_odd = _permlane32_reduce(tile_max_odd, "max")
         sched_mfma_pairs(4, valu=6, group=2)
-        o_accs, m_i, l_i, p_prev_packs = _c3_lazy_rescale(
-            o_accs, m_i, l_i, tile_max_odd, p_prev_packs
-        )
+        o_accs, m_i, l_i, p_prev_packs = _c3_lazy_rescale(o_accs, m_i, l_i, tile_max_odd, p_prev_packs)
         for pk in range_constexpr(1, _pv_packs):
             for dc in range_constexpr(_n_d_chunks):
                 o_accs[dc] = _mfma_acc(
@@ -1814,9 +2087,9 @@ def flex_attn_fwd_gfx950_kernel(
         # C5: QK[even], finish/sum P[odd], and carry packed P into C7.
         (frag_s_even,) = gemm1_qk_unrolled(frag_Q, k_even)
         s_even = [frag_s_even[i] for i in range_constexpr(n_c)]
-        if const_expr(_causal_full_tile_8c and mod_has_score):
+        if const_expr(_lower_tri_full_tile_8c and mod_has_score):
             apply_score_mods(s_even, kv_even)
-        elif const_expr(not _causal_full_tile_8c):
+        elif const_expr(not _lower_tri_full_tile_8c):
             s_even = _apply_mods_and_mask(s_even, kv_even)
         p_odd = _finish_deferred_exp(p_mixed_odd)
         l_i = _add_deferred_sum(p_odd, l_i)
@@ -1831,9 +2104,7 @@ def flex_attn_fwd_gfx950_kernel(
         if (kv_even + fx.Int32(2)) < _kv_hi:
             load_k(kv_even + fx.Int32(2), 0)
         v_odd = read_v_lds(1)
-        s_even, m_i, l_i, o_accs, _p_odd, corr_scalar = (
-            _rescale_for_current(s_even, m_i, l_i, o_accs, p_odd)
-        )
+        s_even, m_i, l_i, o_accs, _p_odd, corr_scalar = _rescale_for_current(s_even, m_i, l_i, o_accs, p_odd)
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
         _waitcnt_vm_n(2 * _dma_ops_per_thread)
         cluster_sync(6)
@@ -1841,17 +2112,13 @@ def flex_attn_fwd_gfx950_kernel(
         # C7: PV[odd], lazy rebase from S[even], then begin P[even].
         rocdl.s_setprio(1)
         for dc in range_constexpr(_n_d_chunks):
-            o_accs[dc] = _mfma_acc(
-                v_odd[dc], p_odd_packs[0], o_accs[dc], _pv_mma_atom
-            )
+            o_accs[dc] = _mfma_acc(v_odd[dc], p_odd_packs[0], o_accs[dc], _pv_mma_atom)
         tile_max_even = s_even[0]
         for i in range_constexpr(1, n_c):
             tile_max_even = _f32_max(tile_max_even, s_even[i])
         tile_max_even = _permlane32_reduce(tile_max_even, "max")
         sched_mfma_pairs(4, valu=6, group=4)
-        o_accs, m_i, l_i, p_odd_packs = _c3_lazy_rescale(
-            o_accs, m_i, l_i, tile_max_even, p_odd_packs
-        )
+        o_accs, m_i, l_i, p_odd_packs = _c3_lazy_rescale(o_accs, m_i, l_i, tile_max_even, p_odd_packs)
         for pk in range_constexpr(1, _pv_packs):
             for dc in range_constexpr(_n_d_chunks):
                 o_accs[dc] = _mfma_acc(
@@ -1919,16 +2186,11 @@ def flex_attn_fwd_gfx950_kernel(
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
             _stagger_extra_barrier_if_one(infra.stagger_i32)
-            _m, _l, _o, _p, _corr = _deferred_prologue(
-                _kv_lo, m_i, l_i, o_accs
-            )
+            _m, _l, _o, _p, _corr = _deferred_prologue(_kv_lo, m_i, l_i, o_accs)
             return (
                 [as_mlir_value(_m[r]) for r in range_constexpr(npair)]
                 + [as_mlir_value(_l[r]) for r in range_constexpr(npair)]
-                + [
-                    as_mlir_value(_o[dc])
-                    for dc in range_constexpr(_n_d_chunks)
-                ]
+                + [as_mlir_value(_o[dc]) for dc in range_constexpr(_n_d_chunks)]
                 + [as_mlir_value(_p), as_mlir_value(_corr)]
             )
 
@@ -1941,16 +2203,9 @@ def flex_attn_fwd_gfx950_kernel(
                 state_values=_prologue_state,
             )
         )
-        m_i = [
-            _prologue_result[r] for r in range_constexpr(npair)
-        ]
-        l_i = [
-            _prologue_result[npair + r] for r in range_constexpr(npair)
-        ]
-        o_accs = [
-            _prologue_result[2 * npair + dc]
-            for dc in range_constexpr(_n_d_chunks)
-        ]
+        m_i = [_prologue_result[r] for r in range_constexpr(npair)]
+        l_i = [_prologue_result[npair + r] for r in range_constexpr(npair)]
+        o_accs = [_prologue_result[2 * npair + dc] for dc in range_constexpr(_n_d_chunks)]
         p_mixed = _prologue_result[2 * npair + _n_d_chunks]
         corr_pending = _prologue_result[2 * npair + _n_d_chunks + 1]
     else:
@@ -1959,13 +2214,11 @@ def flex_attn_fwd_gfx950_kernel(
         rocdl.s_barrier()
         rocdl.sched_barrier(0)
         _stagger_extra_barrier_if_one(infra.stagger_i32)
-        m_i, l_i, o_accs, p_mixed, corr_pending = _deferred_prologue(
-            _kv_lo, m_i, l_i, o_accs
-        )
+        m_i, l_i, o_accs, p_mixed, corr_pending = _deferred_prologue(_kv_lo, m_i, l_i, o_accs)
     if const_expr(param.long_seq_8c):
         # Keep K two tiles ahead: K0/K1 are primed by the prologue,
         # and K2 is launched before C0 starts consuming K1.
-        # For causal full-tile splitting, only prime K2 when an 8c pair
+        # For lower-tri full-tile splitting, only prime K2 when an 8c pair
         # actually exists.  Otherwise the first 4c tail step will stage it.
         if (_kv_lo + fx.Int32(2)) < _kv_full_hi:
             load_k(_kv_lo + fx.Int32(2), 0)
@@ -1974,7 +2227,7 @@ def flex_attn_fwd_gfx950_kernel(
             # by the memory clusters' own closing waits. A shorter range
             # than this leaves _steady_pairs at 0, so no C0 read happens.
 
-    # Dense keeps the old all-8c range.  Bottom-right causal stops 8c at
+    # Dense keeps the old all-8c range.  Bottom-right lower-tri stops 8c at
     # _kv_full_hi, so C1/C5 never need a mask predicate.  The following
     # 4c loop consumes the diagonal band without draining p_mixed.
     _full_remaining = _kv_full_hi - (_kv_lo + fx.Int32(1))
@@ -2002,11 +2255,7 @@ def flex_attn_fwd_gfx950_kernel(
         corr_pending = pair_args[_corr_arg]
         kv_odd = _kv_lo + fx.Int32(1) + _idx_to_i32(pair_i) * fx.Int32(2)
         if const_expr(param.long_seq_8c):
-            m_i, l_i, o_accs, p_mixed, corr_pending = (
-                _deferred_step_8c(
-                    kv_odd, m_i, l_i, o_accs, p_mixed
-                )
-            )
+            m_i, l_i, o_accs, p_mixed, corr_pending = _deferred_step_8c(kv_odd, m_i, l_i, o_accs, p_mixed)
         else:
             m_i, l_i, o_accs, p_mixed, corr_pending = _deferred_step(
                 kv_odd, 1, 0, m_i, l_i, o_accs, p_mixed, corr_pending
@@ -2029,7 +2278,7 @@ def flex_attn_fwd_gfx950_kernel(
 
     # 8c pairs leave the pending even tile in slot 0 and the next K in
     # slot 1.  Consume the rest (an optional unpaired full tile followed by
-    # the causal diagonal) as ordinary 4c pairs.  apply_mods cheaply skips
+    # the lower-tri diagonal) as ordinary 4c pairs.  apply_mods cheaply skips
     # the optional full tile and masks each diagonal tile before softmax.
     _tail_start = _kv_lo + fx.Int32(1) + _steady_pairs * fx.Int32(2)
     _tail_remaining = _kv_hi - _tail_start
@@ -2049,9 +2298,7 @@ def flex_attn_fwd_gfx950_kernel(
     ):
         m_i = [tail_pair_args[r] for r in range_constexpr(npair)]
         l_i = [tail_pair_args[npair + r] for r in range_constexpr(npair)]
-        o_accs = [
-            tail_pair_args[_o + dc] for dc in range_constexpr(_n_d_chunks)
-        ]
+        o_accs = [tail_pair_args[_o + dc] for dc in range_constexpr(_n_d_chunks)]
         p_mixed = tail_pair_args[_p_arg]
         corr_pending = tail_pair_args[_corr_arg]
         kv_tail_even = _tail_start + _idx_to_i32(tail_pair_i) * fx.Int32(2)
@@ -2077,9 +2324,7 @@ def flex_attn_fwd_gfx950_kernel(
 
     m_i = [tail_pair_results[r] for r in range_constexpr(npair)]
     l_i = [tail_pair_results[npair + r] for r in range_constexpr(npair)]
-    o_accs = [
-        tail_pair_results[_o + dc] for dc in range_constexpr(_n_d_chunks)
-    ]
+    o_accs = [tail_pair_results[_o + dc] for dc in range_constexpr(_n_d_chunks)]
     p_mixed = tail_pair_results[_p_arg]
     corr_pending = tail_pair_results[_corr_arg]
 
@@ -2104,12 +2349,8 @@ def flex_attn_fwd_gfx950_kernel(
         p_mixed = tail_args[_p_arg]
         corr_pending = tail_args[_corr_arg]
         kv_tail = _tail_start + _tail_pairs * fx.Int32(2)
-        m_i, l_i, o_accs, p_mixed, corr_pending = _deferred_step(
-            kv_tail, 1, 0, m_i, l_i, o_accs, p_mixed, corr_pending
-        )
-        m_i, l_i, o_accs = _deferred_epilogue(
-            1, m_i, l_i, o_accs, p_mixed, corr_pending
-        )
+        m_i, l_i, o_accs, p_mixed, corr_pending = _deferred_step(kv_tail, 1, 0, m_i, l_i, o_accs, p_mixed, corr_pending)
+        m_i, l_i, o_accs = _deferred_epilogue(1, m_i, l_i, o_accs, p_mixed, corr_pending)
         tail_results = yield (
             [m_i[r] for r in range_constexpr(npair)]
             + [l_i[r] for r in range_constexpr(npair)]
@@ -2147,9 +2388,7 @@ def flex_attn_fwd_gfx950_kernel(
         o_accs = [drain_args[_o + dc] for dc in range_constexpr(_n_d_chunks)]
         p_mixed = drain_args[_p_arg]
         corr_pending = drain_args[_corr_arg]
-        m_i, l_i, o_accs = _deferred_epilogue(
-            0, m_i, l_i, o_accs, p_mixed, corr_pending
-        )
+        m_i, l_i, o_accs = _deferred_epilogue(0, m_i, l_i, o_accs, p_mixed, corr_pending)
         drain_results = yield (
             [m_i[r] for r in range_constexpr(npair)]
             + [l_i[r] for r in range_constexpr(npair)]
@@ -2181,10 +2420,7 @@ def flex_attn_fwd_gfx950_kernel(
         l0_ssa = l0.ir_value() if hasattr(l0, "ir_value") else l0
         inv_l = fx.Float32(rocdl.rcp(T.f32, l0_ssa))
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
-        return [
-            as_mlir_value((Vec(o_accs[dc]) * inv_l_vec).ir_value())
-            for dc in range_constexpr(_n_d_chunks)
-        ]
+        return [as_mlir_value((Vec(o_accs[dc]) * inv_l_vec).ir_value()) for dc in range_constexpr(_n_d_chunks)]
 
     if const_expr(_SPLITK):
         o_accs = list(
@@ -2192,13 +2428,8 @@ def flex_attn_fwd_gfx950_kernel(
                 as_mlir_value(_split_nonempty),
                 _normalize_partial,
                 lambda *_a: None,
-                state_names=tuple(
-                    f"_split_norm_o{dc}" for dc in range(_n_d_chunks)
-                ),
-                state_values=[
-                    as_mlir_value(o_accs[dc])
-                    for dc in range_constexpr(_n_d_chunks)
-                ],
+                state_names=tuple(f"_split_norm_o{dc}" for dc in range(_n_d_chunks)),
+                state_values=[as_mlir_value(o_accs[dc]) for dc in range_constexpr(_n_d_chunks)],
             )
         )
     else:
@@ -2251,11 +2482,7 @@ def flex_attn_fwd_gfx950_kernel(
                 for sg in range_constexpr(2):
                     k = 2 * g + sg
                     elems = [o_vec[k * 4 + e] for e in range_constexpr(4)]
-                    packed = (
-                        Vec.from_elements(elems, fx.Float32)
-                        .to(_out_elem_dtype)
-                        .bitcast(fx.Int32)
-                    )
+                    packed = Vec.from_elements(elems, fx.Float32).to(_out_elem_dtype).bitcast(fx.Int32)
                     dwords.extend([packed[0], packed[1]])
                 fused = _fused_o_128_dwords(
                     _lane_div_32,
@@ -2264,15 +2491,8 @@ def flex_attn_fwd_gfx950_kernel(
                     dwords[2],
                     dwords[3],
                 )
-                packed_o = (
-                    Vec.from_elements([fx.Int32(w) for w in fused], fx.Int32)
-                    .bitcast(_out_elem_dtype)
-                )
-                col = (
-                    dc * 32
-                    + fx.Int32((2 * g) * 8)
-                    + fx.Int32(local_tid // 32) * fx.Int32(8)
-                )
+                packed_o = Vec.from_elements([fx.Int32(w) for w in fused], fx.Int32).bitcast(_out_elem_dtype)
+                col = dc * 32 + fx.Int32((2 * g) * 8) + fx.Int32(local_tid // 32) * fx.Int32(8)
                 off = _ws_o_base + col
                 fx.memref_store_vec(packed_o, ws_o_reg)
 
@@ -2333,18 +2553,13 @@ def flex_attn_fwd_gfx950_kernel(
             fx.make_layout(1, 1),
         )
         o_base = o_off + _qrow * _o_row_stride
-        _causal_row_active = (
-            _idx_to_i32(q_start) + _qrow + _causal_q_shift
-        ) >= fx.Int32(0)
+        _lower_tri_row_active = (_idx_to_i32(q_start) + _qrow + _layout_q_offset) >= fx.Int32(0)
         _lane_div_32 = fx.Index(local_tid // 32)
         for dc in range_constexpr(_n_d_chunks):
             o_vec = Vec(o_accs[dc])
-            if const_expr(_bottom_right_causal):
+            if const_expr(_bottom_right_lower_tri):
                 o_vec = Vec.from_elements(
-                    [
-                        _causal_row_active.select(o_vec[e], fx.Float32(0.0))
-                        for e in range_constexpr(16)
-                    ]
+                    [_lower_tri_row_active.select(o_vec[e], fx.Float32(0.0)) for e in range_constexpr(16)]
                 )
             for g in range_constexpr(2):
                 dwords = []
@@ -2381,7 +2596,7 @@ def flex_splitk_combine_kernel(
     first_live_q: fx.Int32,
     combine_partials: fx.Constexpr[bool] = True,
 ):
-    """Combine split-K partials, and/or GPU-zero a bottom-right causal prefix.
+    """Combine split-K partials, and/or GPU-zero a bottom-right lower-tri prefix.
 
     Each thread handles 4 D-values at one query row. Block covers
     head_dim/4 lanes × (256 / (head_dim/4)) rows per workgroup.
@@ -2423,12 +2638,7 @@ def flex_splitk_combine_kernel(
     _split_ml_stride = _B * _Hq * _Sq * fx.Int32(2)
 
     d_col = fx.Int32(lane_in_row) * fx.Int32(4)
-    _o_off = (
-        _b * _Sq * _Hq * fx.Int32(head_dim)
-        + _sq * _Hq * fx.Int32(head_dim)
-        + _h * fx.Int32(head_dim)
-        + d_col
-    )
+    _o_off = _b * _Sq * _Hq * fx.Int32(head_dim) + _sq * _Hq * fx.Int32(head_dim) + _h * fx.Int32(head_dim) + d_col
     _out_elem = fx.BFloat16 if const_expr(out_dtype_id == FLEX_DTYPE_BF16) else fx.Float16
     o_it = fx.recast_iter(_out_elem, fx.get_iter(o))
     _in_range = compact_row < _total_rows
@@ -2462,11 +2672,7 @@ def flex_splitk_combine_kernel(
 
             def _load_live_o(_n2, *_st2):
                 return [
-                    as_mlir_value(
-                        fx.ptr_load(
-                            ws_o_it + fx.Int32(o_off + fx.Int32(e))
-                        ).to(fx.Float32)
-                    )
+                    as_mlir_value(fx.ptr_load(ws_o_it + fx.Int32(o_off + fx.Int32(e))).to(fx.Float32))
                     for e in range_constexpr(4)
                 ]
 
@@ -2524,6 +2730,8 @@ def launch_flex_attn_gfx950(
     v: fx.Tensor,
     scale: fx.Float32,
     param: FlexAttnParam,
+    score_mod: fx.Constexpr[Callable],
+    mask_mod: fx.Constexpr[Callable],
     stream: fx.Stream = fx.Stream(None),
     ws_o: fx.Tensor = fx.Tensor,
     ws_ml: fx.Tensor = fx.Tensor,
@@ -2531,6 +2739,7 @@ def launch_flex_attn_gfx950(
     block_table_stride: fx.Int32 = fx.Int32(0),
     context_lens: fx.Tensor = fx.Tensor,
     max_seqlen_kv: fx.Int32 = fx.Int32(0),
+    kv_bounds: fx.Tensor = fx.Tensor,
 ):
     b = fx.Int32(fx.get_scalar(q.shape[0]))
     seqlen_q = fx.Int32(fx.get_scalar(q.shape[1]))
@@ -2561,19 +2770,17 @@ def launch_flex_attn_gfx950(
         grid_z = b * fx.Int32(_num_kv_splits)
     else:
         grid_z = b
-    _causal_grid = int(param.mask_type) in (MASK_CAUSAL, MASK_PREFIX_LM)
+    _lower_tri_grid = bool(param.lpt_q_grid)
     _first_live_q = fx.Int32(0)
-    if const_expr(_causal_grid):
-        if const_expr(int(param.mask_type) == MASK_CAUSAL and not _paged):
-            # Bottom-right causal has max(Sq-Skv, 0) fully-masked leading
+    if const_expr(_lower_tri_grid):
+        if const_expr(bool(param.packed_lower_tri_mask) and int(param.q_offset) < 0 and not _paged):
+            # Bottom-right lower-tri has max(Sq-Skv, 0) fully-masked leading
             # query rows.  Drop every workgroup wholly contained in that
             # prefix.  Kernel-side reverse mapping still starts from the last
             # full-grid q_tile, so reducing grid.y naturally selects the live
             # tail without another kernel argument.
             _dead_q_rows = seqlen_q - seqlen_kv
-            _dead_q_rows = (_dead_q_rows > fx.Int32(0)).select(
-                _dead_q_rows, fx.Int32(0)
-            )
+            _dead_q_rows = (_dead_q_rows > fx.Int32(0)).select(_dead_q_rows, fx.Int32(0))
             _first_live_q = _dead_q_rows
             _first_live_q_tile = _dead_q_rows // fx.Int32(rows_per_wg)
             _active_q_tiles = num_q_tiles - _first_live_q_tile
@@ -2581,8 +2788,8 @@ def launch_flex_attn_gfx950(
         else:
             _grid = (hq, num_q_tiles, grid_z)
     else:
-        # Dense (and other non-causal masks): same head-fast mapping as causal
-        # so Q tiles of one head share an XCD and replay KV from its L2.
+        # Dense (and other non-lower-tri masks): same head-fast mapping as
+        # lower-tri so Q tiles of one head share an XCD and replay KV from its L2.
         _grid = (hq, num_q_tiles, grid_z)
 
     flex_attn_fwd_gfx950_kernel(
@@ -2596,11 +2803,14 @@ def launch_flex_attn_gfx950(
         scale,
         tiled_mma_qk,
         param,
+        score_mod,
+        mask_mod,
         ws_o,
         ws_ml,
         block_table,
         block_table_stride,
         context_lens,
+        kv_bounds,
         value_attrs={
             "rocdl.waves_per_eu": _waves_per_eu,
             "rocdl.flat_work_group_size": f"{param.block_threads},{param.block_threads}",
@@ -2611,8 +2821,8 @@ def launch_flex_attn_gfx950(
         stream=stream,
     )
 
-    _causal_prefix_zero = int(param.mask_type) == MASK_CAUSAL and not _paged
-    if const_expr(_SPLITK) or const_expr(_causal_prefix_zero):
+    _lower_tri_prefix_zero = bool(param.packed_lower_tri_mask) and int(param.q_offset) < 0 and not _paged
+    if const_expr(_SPLITK) or const_expr(_lower_tri_prefix_zero):
         _head_dim = int(param.head_dim)
         _lanes_per_row = _head_dim // 4
         _rows_per_block = _COMBINE_BLOCK // _lanes_per_row
@@ -2621,10 +2831,8 @@ def launch_flex_attn_gfx950(
             _total_rows = b * hq * seqlen_q
         else:
             _total_rows = b * hq * _first_live_q
-        _combine_blocks = (_total_rows + fx.Int32(_rows_per_block - 1)) // fx.Int32(
-            _rows_per_block
-        )
-        # HIP rejects a 0-block grid (square causal, no dead prefix).
+        _combine_blocks = (_total_rows + fx.Int32(_rows_per_block - 1)) // fx.Int32(_rows_per_block)
+        # HIP rejects a 0-block grid (square lower-tri, no dead prefix).
         _combine_blocks = _i32_max(_combine_blocks, fx.Int32(1))
         flex_splitk_combine_kernel(
             o,
@@ -2668,11 +2876,9 @@ def flydsl_flex_attention_layout(
     pipe_depth: int = 1,
     pipe_stages: int = 1,
     accurate_softmax: bool = True,
-    mask_type: int = MASK_NONE,
-    score_type: int = SCORE_NONE,
-    mask_window: int = 0,
-    mask_prefix_len: int = 0,
-    score_alibi_slope: float = 0.0,
+    score_mod: Optional[Callable] = None,
+    mask_mod: Optional[Callable] = None,
+    infer_score_mod: bool = True,
     num_kv_splits: int = 1,
     stream: Optional[torch.cuda.Stream] = None,
     long_seq_8c: Optional[bool] = None,
@@ -2681,15 +2887,25 @@ def flydsl_flex_attention_layout(
 
     q/k/v: ``[B, S, H, D]`` (BSHD), bf16/f16. Returns ``[B, Sq, Hq, D]``.
 
+    ``score_mod`` remains the source of truth. By default, a callable exactly
+    matching ``score + slope * (kv_idx - q_idx)`` may be represented inside
+    ``_InspectedMod`` by an equivalent direct log2-space affine lowering.
+    Set ``infer_score_mod=False``, ``score_mod.flex_infer=False``, or
+    ``score_mod.flex_score_kind="exact"`` to force the callable's exact traced
+    operations. PyTorch ignores attributes attached to the function object.
+    Non-affine score mods (for example a quadratic relative-position bias)
+    always use the exact callable path. Callables must be arithmetic on the
+    ``(score, b, h, q, kv)`` arguments; they cannot load globals.
+
     The KV loop is n64 only: 4-cluster deferred softmax, or 8-cluster
     when ``long_seq_8c`` (dense Skv>=768, masked Skv>=2048). Requires
-    ``block_n=64``, ``head_dim=128``, and a 512-thread CTA.
+    ``block_n=64``, ``head_dim=128``, and a 512-thread workgroup.
     """
     arch = get_rocm_arch()
     if not arch.startswith("gfx950"):
         raise RuntimeError(f"flex_attention_layout targets gfx950; got {arch!r}")
     if not (q.is_cuda and k.is_cuda and v.is_cuda):
-        raise ValueError("q/k/v must be CUDA tensors")
+        raise ValueError("q/k/v must be GPU tensors")
     if q.dtype != k.dtype or q.dtype != v.dtype:
         raise ValueError("q/k/v must share dtype")
     if q.dim() != 4:
@@ -2708,6 +2924,40 @@ def flydsl_flex_attention_layout(
         raise ValueError(f"seqlen_q ({Sq}) must be a multiple of block_m*num_groups ({rows_per_wg})")
     if scale is None:
         scale = 1.0 / (D**0.5)
+    flex_mod = inspect_flex_mods(
+        score_mod,
+        mask_mod,
+        seqlen_q=Sq,
+        seqlen_kv=Skv,
+        num_batches=B,
+        num_heads=Hq,
+        infer_score_mod=infer_score_mod,
+    )
+    use_kv_bounds = flex_mod.needs_kv_bounds
+    if use_kv_bounds:
+        host_kv_bounds = _infer_generic_kv_bounds(
+            flex_mod.mask_mod,
+            seqlen_q=Sq,
+            seqlen_kv=Skv,
+            num_batches=B,
+            num_heads=Hq,
+            rows_per_wg=rows_per_wg,
+            block_n=block_n,
+        )
+        if long_seq_8c is None:
+            max_kv_tiles = int((host_kv_bounds[..., 1] - host_kv_bounds[..., 0]).max().item())
+            long_seq_8c = max_kv_tiles * block_n >= _LONG_SEQ_8C_SKV_MASKED
+        kv_bounds = flex_mod.get_kv_bounds(
+            seqlen_q=Sq,
+            seqlen_kv=Skv,
+            num_batches=B,
+            num_heads=Hq,
+            rows_per_wg=rows_per_wg,
+            block_n=block_n,
+            device=q.device,
+        )
+    else:
+        kv_bounds = torch.empty(1, dtype=torch.int32, device=q.device)
 
     if stream is None:
         stream = torch.cuda.current_stream()
@@ -2717,8 +2967,8 @@ def flydsl_flex_attention_layout(
         raise ValueError("pipe_depth>=2 requires num_groups>=2 (Strategy A staggered pipeline)")
 
     effective_kv_splits = int(num_kv_splits)
-    if mask_type == MASK_CAUSAL and effective_kv_splits > 1:
-        effective_kv_splits = _effective_causal_kv_splits(
+    if flex_mod.packed_lower_tri_mask and effective_kv_splits > 1:
+        effective_kv_splits = _effective_lower_tri_kv_splits(
             requested_splits=effective_kv_splits,
             batch=B,
             seqlen_q=Sq,
@@ -2741,14 +2991,11 @@ def flydsl_flex_attention_layout(
         pipe_depth=pipe_depth,
         pipe_stages=pipe_stages,
         accurate_softmax=accurate_softmax,
-        mask_type=mask_type,
-        score_type=score_type,
-        mask_window=mask_window,
-        mask_prefix_len=mask_prefix_len,
-        score_alibi_slope=score_alibi_slope,
+        flex_mod=flex_mod,
         num_kv_splits=effective_kv_splits,
         long_seq_8c=long_seq_8c,
         seqlen_q=Sq,
+        has_kv_bounds=use_kv_bounds,
     )
 
     if effective_kv_splits > 1:
@@ -2769,6 +3016,8 @@ def flydsl_flex_attention_layout(
         v.contiguous(),
         fx.Float32(scale),
         param,
+        flex_mod.score_mod,
+        flex_mod.mask_mod,
         stream,
         ws_o=ws_o,
         ws_ml=ws_ml,
@@ -2776,6 +3025,7 @@ def flydsl_flex_attention_layout(
         block_table_stride=fx.Int32(0),
         context_lens=_dummy_ctx,
         max_seqlen_kv=fx.Int32(Skv),
+        kv_bounds=kv_bounds,
     )
     return out
 
@@ -2793,11 +3043,9 @@ def flydsl_flex_attention_layout_paged(
     block_m: int = 32,
     num_groups: int = 8,
     accurate_softmax: bool = True,
-    mask_type: int = MASK_NONE,
-    score_type: int = SCORE_NONE,
-    mask_window: int = 0,
-    mask_prefix_len: int = 0,
-    score_alibi_slope: float = 0.0,
+    score_mod: Optional[Callable] = None,
+    mask_mod: Optional[Callable] = None,
+    infer_score_mod: bool = True,
     stream: Optional[torch.cuda.Stream] = None,
 ) -> torch.Tensor:
     """Paged-KV-cache flex attention forward (gfx950).
@@ -2812,7 +3060,7 @@ def flydsl_flex_attention_layout_paged(
     if not arch.startswith("gfx950"):
         raise RuntimeError(f"flex_attention_layout_paged targets gfx950; got {arch!r}")
     if not (q.is_cuda and k_cache.is_cuda and v_cache.is_cuda):
-        raise ValueError("q/k_cache/v_cache must be CUDA tensors")
+        raise ValueError("q/k_cache/v_cache must be GPU tensors")
     if q.dtype != k_cache.dtype or q.dtype != v_cache.dtype:
         raise ValueError("q/k_cache/v_cache must share dtype")
     if q.dim() != 4:
@@ -2845,6 +3093,16 @@ def flydsl_flex_attention_layout_paged(
 
     max_ctx = int(context_lens.max().item())
     max_seqlen_kv = ((max_ctx + block_n - 1) // block_n) * block_n
+    flex_mod = inspect_flex_mods(
+        score_mod,
+        mask_mod,
+        seqlen_q=Sq,
+        seqlen_kv=max_seqlen_kv,
+        num_batches=B,
+        num_heads=Hq,
+        paged=True,
+        infer_score_mod=infer_score_mod,
+    )
 
     bt_i32 = block_table.to(torch.int32).contiguous().reshape(-1)
     bt_stride = block_table.shape[1]
@@ -2860,17 +3118,15 @@ def flydsl_flex_attention_layout_paged(
         num_heads_kv=Hkv,
         num_groups=num_groups,
         accurate_softmax=accurate_softmax,
-        mask_type=mask_type,
-        score_type=score_type,
-        mask_window=mask_window,
-        mask_prefix_len=mask_prefix_len,
-        score_alibi_slope=score_alibi_slope,
+        flex_mod=flex_mod,
         paged=True,
         seqlen_q=Sq,
+        has_kv_bounds=False,
     )
 
     ws_o = torch.empty(1, dtype=torch.float32, device=q.device)
     ws_ml = torch.empty(1, dtype=torch.float32, device=q.device)
+    _dummy_kv_bounds = torch.empty(1, dtype=torch.int32, device=q.device)
 
     launch_flex_attn_gfx950(
         out.contiguous(),
@@ -2879,6 +3135,8 @@ def flydsl_flex_attention_layout_paged(
         v_cache.contiguous(),
         fx.Float32(scale),
         param,
+        flex_mod.score_mod,
+        flex_mod.mask_mod,
         stream,
         ws_o=ws_o,
         ws_ml=ws_ml,
@@ -2886,5 +3144,6 @@ def flydsl_flex_attention_layout_paged(
         block_table_stride=fx.Int32(bt_stride),
         context_lens=ctx_i32,
         max_seqlen_kv=fx.Int32(max_seqlen_kv),
+        kv_bounds=_dummy_kv_bounds,
     )
     return out

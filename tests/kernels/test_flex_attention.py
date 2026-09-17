@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Correctness test for the layout-API flex attention forward (gfx950).
 
-Compares flydsl_flex_attention_layout against torch scaled_dot_product_attention
-(non-causal). gfx950-only (uses cdna4-era MFMA + the layout API); skipped elsewhere.
+Compares against torch.nn.attention.flex_attention using the same score/mask
+callables. gfx950-only (uses cdna4-era MFMA + the layout API); skipped elsewhere.
 
 Kernel constraints (see make_flex_attn_param): block_m=32, block_n=64,
-head_dim=128, 512-thread CTA (num_groups=8), seqlen_kv multiple of 64.
+head_dim=128, 512-thread workgroup (num_groups=8), seqlen_kv multiple of 64.
 """
 
 import math
@@ -18,26 +18,24 @@ sys.path.insert(0, str(_repo))
 try:
     import torch
     import torch.nn.functional as F
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 except ImportError:
     print("PyTorch not available")
     sys.exit(1)
 
 if not torch.cuda.is_available():
-    print("CUDA/ROCm not available")
+    print("ROCm not available")
     sys.exit(1)
 
 import pytest  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention.flex_attention_gfx950 import (  # noqa: E402
-    MASK_CAUSAL,
-    MASK_NONE,
-    MASK_PREFIX_LM,
-    MASK_SLIDING_WINDOW,
-    SCORE_ALIBI,
-    _effective_causal_kv_splits,
+    _effective_lower_tri_kv_splits,
+    _infer_generic_kv_bounds,
     flydsl_flex_attention_layout,
     flydsl_flex_attention_layout_paged,
+    inspect_flex_mods,
     make_flex_attn_param,
 )
 
@@ -61,36 +59,81 @@ def _make_qkv(B, Sq, Skv, Hq, D, dtype, *, Hkv=None):
     return q, k, v, scale
 
 
-def _sdpa_ref(q, k, v, scale, *, attn_mask=None, is_causal=False):
-    qh = q.permute(0, 2, 1, 3).float()
-    kh = k.permute(0, 2, 1, 3).float()
-    vh = v.permute(0, 2, 1, 3).float()
-    out = F.scaled_dot_product_attention(
+def _flex_ref(q, k, v, scale, *, score_mod=None, mask_mod=None):
+    # create_block_mask/compile caches Python callable code objects. Parameterized
+    # lambdas reuse one code object with different default constants, so reset
+    # between references to keep those constants from leaking across test cases.
+    torch.compiler.reset()
+    qh = q.permute(0, 2, 1, 3)
+    kh = k.permute(0, 2, 1, 3)
+    vh = v.permute(0, 2, 1, 3)
+    block_mask = None
+    if mask_mod is not None:
+        block_mask = create_block_mask(
+            mask_mod,
+            B=qh.shape[0],
+            H=qh.shape[1],
+            Q_LEN=qh.shape[2],
+            KV_LEN=kh.shape[2],
+            device=q.device,
+        )
+    out = flex_attention(
         qh,
         kh,
         vh,
         scale=scale,
-        attn_mask=attn_mask,
-        is_causal=is_causal,
+        score_mod=score_mod,
+        block_mask=block_mask,
     )
     return out.permute(0, 2, 1, 3).contiguous()
 
 
-def _bottom_right_causal_mask(Sq, Skv, device):
-    qi = torch.arange(Sq, device=device).unsqueeze(1)
-    ki = torch.arange(Skv, device=device).unsqueeze(0)
-    return ki <= qi + (Skv - Sq)
-
-
 def _bottom_right_causal_ref(q, k, v, scale):
     Sq, Skv = q.shape[1], k.shape[1]
-    return _sdpa_ref(
-        q,
-        k,
-        v,
-        scale,
-        attn_mask=_bottom_right_causal_mask(Sq, Skv, q.device),
-    )
+    mask_mod = lambda b, h, q, kv, offset=Skv - Sq: kv <= q + offset
+    return _flex_ref(q, k, v, scale, mask_mod=mask_mod)
+
+
+def _make_doc_mask_mod(spans, *, causal):
+    """Document mask for packed/jagged sequences (pytorch.org/blog/flexattention).
+
+    The blog looks up ``document_id[q_idx] == document_id[kv_idx]``. A tensor
+    read is not traceable here, so the same block-diagonal predicate is built
+    from the document spans, bound as constexpr defaults so the callable keeps
+    no closure or global references.
+    """
+
+    def doc_mask(b, h, q_idx, kv_idx, spans=spans, causal=causal):
+        same_doc = None
+        for lo, hi in spans:
+            in_doc = (q_idx >= lo) & (q_idx < hi) & (kv_idx >= lo) & (kv_idx < hi)
+            same_doc = in_doc if same_doc is None else (same_doc | in_doc)
+        if causal:
+            return same_doc & (kv_idx <= q_idx)
+        return same_doc
+
+    return doc_mask
+
+
+def _quadratic_rel_score(score, b, h, q_idx, kv_idx, inv_var=1e-4):
+    """Bespoke non-affine score_mod: Gaussian relative-position bias.
+
+    Same signature as torch.nn.attention.flex_attention score mods. The
+    kernel traces this callable as-is (no ALiBi/affine lowering): a distance
+    term ``(q-kv)^2`` is not score + slope*(kv-q). Bind extra scalars as
+    defaults so FlyDSL constexprs see no closures or globals.
+    """
+    dist = q_idx - kv_idx
+    return score - dist * dist * inv_var
+
+
+def _doc_spans(lengths):
+    spans = []
+    start = 0
+    for length in lengths:
+        spans.append((start, start + length))
+        start += length
+    return tuple(spans)
 
 
 def _check(out, ref, *, max_err_tol=8e-2, cos_tol=0.98, label=""):
@@ -98,14 +141,6 @@ def _check(out, ref, *, max_err_tol=8e-2, cos_tol=0.98, label=""):
     cos = F.cosine_similarity(out.float().reshape(-1), ref.float().reshape(-1), dim=0).item()
     assert max_err < max_err_tol and cos > cos_tol, f"{label}: max_err={max_err} cos={cos}"
     return max_err, cos
-
-
-def _sliding_window_mask(Sq, Skv, window, device):
-    qi = torch.arange(Sq, device=device).unsqueeze(1)
-    ki = torch.arange(Skv, device=device).unsqueeze(0)
-    visible = (ki <= qi) & ((qi - ki) <= window)
-    mask = visible.float().unsqueeze(0).unsqueeze(0)
-    return mask.masked_fill(mask == 0, float("-inf")).masked_fill(mask == 1, 0.0)
 
 
 def _run(B, Sq, Skv, H, D, dtype_str, *, num_groups=8, accurate_softmax=True):
@@ -118,7 +153,7 @@ def _run(B, Sq, Skv, H, D, dtype_str, *, num_groups=8, accurate_softmax=True):
         num_groups=num_groups,
         accurate_softmax=accurate_softmax,
     ).float()
-    ref = _sdpa_ref(q, k, v, scale).float()
+    ref = _flex_ref(q, k, v, scale).float()
     max_err = (out - ref).abs().max().item()
     cos = F.cosine_similarity(out.reshape(-1), ref.reshape(-1), dim=0).item()
     return max_err, cos
@@ -131,7 +166,7 @@ _SHAPES = [
     (2, 256, 256, 8, 128),
     (1, 256, 64, 4, 128),  # single KV tile (Skv == block_n)
     (1, 512, 1024, 4, 128),  # larger sequences
-    (1, 256, 256, 8, 128),  # GQA: Hq=8, but uses default Hkv=Hq; see GQA test below
+    (1, 256, 256, 8, 128),  # more heads; GQA is a separate test with Hkv < Hq
 ]
 
 
@@ -143,33 +178,113 @@ def test_flex_attention_layout(B, Sq, Skv, H, D, dtype_str):
     assert max_err < 8e-2 and cos > 0.98, f"B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}: max_err={max_err} cos={cos}"
 
 
-def _n64_long_seq_8c(skv, mask_type):
+def _n64_long_seq_8c(skv, masked):
+    flex_mod = inspect_flex_mods(
+        None,
+        (lambda b, h, q, kv: kv <= q) if masked else None,
+        seqlen_q=skv,
+        seqlen_kv=skv,
+    )
     return bool(
         make_flex_attn_param(
             seqlen_kv=skv,
             block_n=64,
             head_dim=128,
             num_groups=8,
-            mask_type=mask_type,
+            flex_mod=flex_mod,
         ).long_seq_8c
     )
 
 
 def test_n64_long_seq_8c_cutoffs():
     """Dense 8c at Skv>=768; masked 8c at Skv>=2048."""
-    assert not _n64_long_seq_8c(704, MASK_NONE)
-    assert _n64_long_seq_8c(768, MASK_NONE)
-    for mask in (MASK_CAUSAL, MASK_SLIDING_WINDOW, MASK_PREFIX_LM):
-        assert not _n64_long_seq_8c(1984, mask)
-        assert _n64_long_seq_8c(2048, mask)
-        assert not _n64_long_seq_8c(1024, mask)
+    assert not _n64_long_seq_8c(704, False)
+    assert _n64_long_seq_8c(768, False)
+    assert not _n64_long_seq_8c(1984, True)
+    assert _n64_long_seq_8c(2048, True)
+    assert not _n64_long_seq_8c(1024, True)
 
 
-def test_effective_causal_kv_splits():
+def test_inspect_flex_mods():
+    causal = inspect_flex_mods(None, lambda b, h, q, kv: kv <= q, seqlen_q=512, seqlen_kv=512)
+    assert causal.packed_lower_tri_mask and causal.q_offset == 0
+    banded = inspect_flex_mods(
+        None,
+        lambda b, h, q, kv, window=33: (kv <= q) & ((q - kv) <= window),
+        seqlen_q=512,
+        seqlen_kv=512,
+    )
+    assert banded.banded and banded.window == 33
+    prefix = inspect_flex_mods(
+        None,
+        lambda b, h, q, kv, prefix_len=64: (kv <= q) | (kv < prefix_len),
+        seqlen_q=512,
+        seqlen_kv=512,
+    )
+    assert prefix.has_prefix and prefix.prefix_len == 64
+    generic = inspect_flex_mods(
+        None,
+        lambda b, h, q, kv: (kv % 3) == (q % 2),
+        seqlen_q=128,
+        seqlen_kv=128,
+    )
+    assert generic.has_mask and not generic.lower_tri
+
+    def named_causal(b, h, q, kv):
+        return kv <= q
+
+    named = inspect_flex_mods(None, named_causal, seqlen_q=128, seqlen_kv=128)
+    assert named.packed_lower_tri_mask
+
+
+def test_inspect_affine_score_mod():
+    score_mod = lambda score, b, h, q, kv, slope=0.125: score + slope * (kv - q)
+    affine = inspect_flex_mods(score_mod, None, seqlen_q=128, seqlen_kv=128)
+    assert affine.has_score and affine.affine_score
+    assert math.isclose(affine.score_slope, 0.125)
+
+    reverse = inspect_flex_mods(
+        lambda score, b, h, q, kv, slope=0.25: score + slope * (q - kv),
+        None,
+        seqlen_q=128,
+        seqlen_kv=128,
+    )
+    assert reverse.affine_score
+    assert math.isclose(reverse.score_slope, -0.25)
+
+    exact = lambda score, b, h, q, kv, slope=0.125: score + slope * (kv - q)
+    exact.flex_infer = False
+    exact_mod = inspect_flex_mods(exact, None, seqlen_q=128, seqlen_kv=128)
+    assert exact_mod.has_score and not exact_mod.affine_score
+
+    exact_kind = lambda score, b, h, q, kv, slope=0.125: score + slope * (kv - q)
+    exact_kind.flex_score_kind = "exact"
+    exact_kind_mod = inspect_flex_mods(exact_kind, None, seqlen_q=128, seqlen_kv=128)
+    assert exact_kind_mod.has_score and not exact_kind_mod.affine_score
+
+    kwarg_exact = inspect_flex_mods(
+        score_mod,
+        None,
+        seqlen_q=128,
+        seqlen_kv=128,
+        infer_score_mod=False,
+    )
+    assert kwarg_exact.has_score and not kwarg_exact.affine_score
+
+    nonlinear = inspect_flex_mods(
+        _quadratic_rel_score,
+        None,
+        seqlen_q=128,
+        seqlen_kv=128,
+    )
+    assert nonlinear.has_score and not nonlinear.affine_score
+
+
+def test_effective_lower_tri_kv_splits():
     common = dict(rows_per_wg=256, block_n=64, num_cus=256)
     # The unsplit grid already fills the device.
     assert (
-        _effective_causal_kv_splits(
+        _effective_lower_tri_kv_splits(
             requested_splits=4,
             batch=2,
             seqlen_q=3072,
@@ -181,7 +296,7 @@ def test_effective_causal_kv_splits():
     )
     # Half-full grid, but four KV tiles per split cannot repay combine.
     assert (
-        _effective_causal_kv_splits(
+        _effective_lower_tri_kv_splits(
             requested_splits=2,
             batch=2,
             seqlen_q=512,
@@ -193,7 +308,7 @@ def test_effective_causal_kv_splits():
     )
     # A small Q grid with long KV retains the requested useful fan-out.
     assert (
-        _effective_causal_kv_splits(
+        _effective_lower_tri_kv_splits(
             requested_splits=4,
             batch=1,
             seqlen_q=256,
@@ -218,8 +333,8 @@ def test_effective_causal_kv_splits():
 def test_flex_attention_n64_long_sequence_threshold(Skv, causal):
     """Exercise the dense (768) and causal (2048) 8-cluster boundaries."""
     q, k, v, scale = _make_qkv(1, 1024, Skv, 4, 128, torch.bfloat16)
-    mask_type = MASK_CAUSAL if causal else MASK_NONE
-    assert _n64_long_seq_8c(Skv, mask_type) == (Skv >= (2048 if causal else 768))
+    mask_mod = (lambda b, h, q, kv, offset=Skv - 1024: kv <= q + offset) if causal else None
+    assert _n64_long_seq_8c(Skv, causal) == (Skv >= (2048 if causal else 768))
     out = flydsl_flex_attention_layout(
         q,
         k,
@@ -227,13 +342,9 @@ def test_flex_attention_n64_long_sequence_threshold(Skv, causal):
         scale=scale,
         block_n=64,
         num_groups=8,
-        mask_type=mask_type,
+        mask_mod=mask_mod,
     )
-    ref = (
-        _bottom_right_causal_ref(q, k, v, scale)
-        if causal
-        else _sdpa_ref(q, k, v, scale)
-    )
+    ref = _bottom_right_causal_ref(q, k, v, scale) if causal else _flex_ref(q, k, v, scale)
     _check(
         out,
         ref,
@@ -266,8 +377,9 @@ _MOD_SHAPES = [
 @pytest.mark.parametrize("B,Sq,Skv,H,D", _MOD_SHAPES)
 def test_flex_attention_layout_causal(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_CAUSAL)
-    ref = _bottom_right_causal_ref(q, k, v, scale)
+    mask_mod = lambda b, h, q, kv, offset=Skv - Sq: kv <= q + offset
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_mod=mask_mod)
+    ref = _flex_ref(q, k, v, scale, mask_mod=mask_mod)
     _check(out, ref, label=f"causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}")
 
 
@@ -277,13 +389,61 @@ def test_flex_attention_layout_causal(B, Sq, Skv, H, D, dtype_str):
 def test_flex_attention_layout_alibi(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
     slope = 0.125
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, score_type=SCORE_ALIBI, score_alibi_slope=slope)
-    dev = q.device
-    qi = torch.arange(Sq, device=dev).unsqueeze(1)
-    ki = torch.arange(Skv, device=dev).unsqueeze(0)
-    alibi_bias = (slope * (ki - qi)).float().unsqueeze(0).unsqueeze(0)
-    ref = _sdpa_ref(q, k, v, scale, attn_mask=alibi_bias)
+    score_mod = lambda score, b, h, q, kv, slope=slope: score + slope * (kv - q)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, score_mod=score_mod)
+    ref = _flex_ref(q, k, v, scale, score_mod=score_mod)
     _check(out, ref, label=f"alibi B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}")
+
+
+@_requires_gfx950
+def test_flex_attention_layout_alibi_exact_override():
+    """The explicit override executes the original callable math."""
+    B, Sq, Skv, H, D = 1, 256, 512, 4, 128
+    q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
+    score_mod = lambda score, b, h, q, kv, slope=0.125: score + slope * (kv - q)
+    out = flydsl_flex_attention_layout(
+        q,
+        k,
+        v,
+        scale=scale,
+        score_mod=score_mod,
+        infer_score_mod=False,
+    )
+    ref = _flex_ref(q, k, v, scale, score_mod=score_mod)
+    _check(out, ref, label="alibi exact override")
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
+@pytest.mark.parametrize("B,Sq,Skv,H,D", _MOD_SHAPES)
+def test_flex_attention_layout_quadratic_score(B, Sq, Skv, H, D, dtype_str):
+    """User-defined score_mod that is not ALiBi and is not affine-inferred."""
+    q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, score_mod=_quadratic_rel_score)
+    ref = _flex_ref(q, k, v, scale, score_mod=_quadratic_rel_score)
+    _check(
+        out,
+        ref,
+        label=f"quadratic score B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}",
+    )
+
+
+@_requires_gfx950
+def test_flex_attention_layout_quadratic_score_causal():
+    """Bespoke score composed with a causal mask_mod."""
+    B, Sq, Skv, H, D = 1, 256, 512, 4, 128
+    q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
+    mask_mod = lambda b, h, q, kv, offset=Skv - Sq: kv <= q + offset
+    out = flydsl_flex_attention_layout(
+        q,
+        k,
+        v,
+        scale=scale,
+        score_mod=_quadratic_rel_score,
+        mask_mod=mask_mod,
+    )
+    ref = _flex_ref(q, k, v, scale, score_mod=_quadratic_rel_score, mask_mod=mask_mod)
+    _check(out, ref, label="quadratic score + causal")
 
 
 @_requires_gfx950
@@ -292,8 +452,9 @@ def test_flex_attention_layout_alibi(B, Sq, Skv, H, D, dtype_str):
 def test_flex_attention_layout_sliding_window(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
     window = 16
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=window)
-    ref = _sdpa_ref(q, k, v, scale, attn_mask=_sliding_window_mask(Sq, Skv, window, q.device))
+    mask_mod = lambda b, h, q, kv, window=window: (kv <= q) & ((q - kv) <= window)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_mod=mask_mod)
+    ref = _flex_ref(q, k, v, scale, mask_mod=mask_mod)
     _check(out, ref, cos_tol=0.97, label=f"sw B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}")
 
 
@@ -303,8 +464,9 @@ def test_flex_attention_layout_sliding_window_odd(window):
     """Non-block-aligned windows that straddle tile boundaries."""
     B, Sq, Skv, H, D = 2, 256, 256, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=window)
-    ref = _sdpa_ref(q, k, v, scale, attn_mask=_sliding_window_mask(Sq, Skv, window, q.device))
+    mask_mod = lambda b, h, q, kv, window=window: (kv <= q) & ((q - kv) <= window)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_mod=mask_mod)
+    ref = _flex_ref(q, k, v, scale, mask_mod=mask_mod)
     _check(out, ref, cos_tol=0.97, label=f"sw_odd w={window}")
 
 
@@ -317,7 +479,7 @@ def test_flex_attention_layout_gqa(Hq, Hkv):
     qh = q.permute(0, 2, 1, 3).float()
     kh = k.permute(0, 2, 1, 3).float().repeat_interleave(Hq // Hkv, dim=1)
     vh = v.permute(0, 2, 1, 3).float().repeat_interleave(Hq // Hkv, dim=1)
-    ref = F.scaled_dot_product_attention(qh, kh, vh, scale=scale).permute(0, 2, 1, 3).contiguous()
+    ref = flex_attention(qh, kh, vh, scale=scale).permute(0, 2, 1, 3).contiguous()
     _check(out, ref, label=f"gqa Hq{Hq} Hkv{Hkv}")
 
 
@@ -326,7 +488,7 @@ def test_flex_attention_layout_multi_group():
     B, Sq, Skv, H, D = 1, 256, 128, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
     out = flydsl_flex_attention_layout(q, k, v, scale=scale, num_groups=8)
-    ref = _sdpa_ref(q, k, v, scale)
+    ref = _flex_ref(q, k, v, scale)
     _check(out, ref, label="groups=8")
 
 
@@ -344,30 +506,27 @@ def test_flex_attention_layout_multi_group():
 def test_flex_attention_layout_splitk(Sq, Skv, splits, causal):
     B, H, D = 1, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
-    mask_type = MASK_CAUSAL if causal else MASK_NONE
+    mask_mod = (lambda b, h, q, kv, offset=Skv - Sq: kv <= q + offset) if causal else None
     out = flydsl_flex_attention_layout(
         q,
         k,
         v,
         scale=scale,
-        mask_type=mask_type,
+        mask_mod=mask_mod,
         num_kv_splits=splits,
     )
-    ref = (
-        _bottom_right_causal_ref(q, k, v, scale)
-        if causal
-        else _sdpa_ref(q, k, v, scale)
-    )
+    ref = _bottom_right_causal_ref(q, k, v, scale) if causal else _flex_ref(q, k, v, scale)
     _check(out, ref, label=f"splitk Sq={Sq} Skv={Skv} splits={splits}")
 
 
 @_requires_gfx950
 def test_flex_attention_layout_sliding_window_full():
-    """Window >= Skv: everything visible, should match dense."""
+    """Window >= Skv: the band constraint is idle; still causal vs Torch."""
     B, Sq, Skv, H, D = 1, 256, 256, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_SLIDING_WINDOW, mask_window=Skv)
-    ref = _sdpa_ref(q, k, v, scale, is_causal=True)
+    mask_mod = lambda b, h, q, kv, window=Skv: (kv <= q) & ((q - kv) <= window)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_mod=mask_mod)
+    ref = _flex_ref(q, k, v, scale, mask_mod=mask_mod)
     _check(out, ref, label="sw_full")
 
 
@@ -377,23 +536,157 @@ def test_flex_attention_layout_sliding_window_full():
 def test_flex_attention_layout_prefix_lm(B, Sq, Skv, H, D, dtype_str):
     prefix_len = max(1, Sq // 4)
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_PREFIX_LM, mask_prefix_len=prefix_len)
-    dev = q.device
-    qi = torch.arange(Sq, device=dev).unsqueeze(1)
-    ki = torch.arange(Skv, device=dev).unsqueeze(0)
-    visible = (ki <= qi) | (ki < prefix_len)
-    mask = visible.float().unsqueeze(0).unsqueeze(0)
-    mask = mask.masked_fill(mask == 0, float("-inf")).masked_fill(mask == 1, 0.0)
-    ref = _sdpa_ref(q, k, v, scale, attn_mask=mask)
+    mask_mod = lambda b, h, q, kv, prefix_len=prefix_len: (kv <= q) | (kv < prefix_len)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_mod=mask_mod)
+    ref = _flex_ref(q, k, v, scale, mask_mod=mask_mod)
     _check(out, ref, label=f"prefix_lm B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}")
+
+
+_DOC_LENGTHS = [
+    # Packed documents summing to Sq: uneven, and not block-aligned.
+    (96, 32, 96, 32),
+    (64, 64, 64, 64),
+    (200, 24, 32),
+    (1, 255),
+]
+
+
+def test_inspect_doc_mask_is_generic():
+    """Document masks are block-diagonal, so no lower-tri layout opt applies."""
+    for lengths in _DOC_LENGTHS:
+        spans = _doc_spans(lengths)
+        for causal in (False, True):
+            mod = inspect_flex_mods(
+                None,
+                _make_doc_mask_mod(spans, causal=causal),
+                seqlen_q=256,
+                seqlen_kv=256,
+            )
+            assert mod.has_mask, (lengths, causal)
+            assert not mod.lower_tri, (lengths, causal)
+            assert not mod.packed_lower_tri_mask, (lengths, causal)
+            assert mod.needs_kv_bounds, (lengths, causal)
+
+
+@pytest.mark.parametrize(
+    "causal,expected",
+    [
+        (
+            False,
+            [
+                [0, 8],
+                [0, 8],
+                [8, 12],
+                [12, 24],
+                [12, 24],
+                [12, 24],
+                [24, 32],
+                [24, 32],
+            ],
+        ),
+        (
+            True,
+            [
+                [0, 4],
+                [0, 8],
+                [8, 12],
+                [12, 16],
+                [12, 20],
+                [12, 24],
+                [24, 28],
+                [24, 32],
+            ],
+        ),
+    ],
+)
+def test_infer_document_kv_bounds(causal, expected):
+    """Generic document masks get an exact per-workgroup KV envelope."""
+    spans = _doc_spans((512, 256, 768, 512))
+    mod = inspect_flex_mods(
+        None,
+        _make_doc_mask_mod(spans, causal=causal),
+        seqlen_q=2048,
+        seqlen_kv=2048,
+        num_batches=2,
+        num_heads=4,
+    )
+    bounds = _infer_generic_kv_bounds(
+        mod.mask_mod,
+        seqlen_q=2048,
+        seqlen_kv=2048,
+        num_batches=2,
+        num_heads=4,
+        rows_per_wg=256,
+        block_n=64,
+    )
+    expected_tensor = torch.tensor(expected, dtype=torch.int32)
+    assert bounds.shape == (2, 4, 8, 2)
+    assert torch.equal(bounds[0, 0], expected_tensor)
+    assert torch.equal(bounds, expected_tensor.expand_as(bounds))
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize("lengths", _DOC_LENGTHS)
+def test_flex_attention_layout_document_mask(lengths, causal, dtype_str):
+    """Sample packing: each token only attends within its own document."""
+    B, Sq, H, D = 2, 256, 4, 128
+    assert sum(lengths) == Sq
+    q, k, v, scale = _make_qkv(B, Sq, Sq, H, D, _DTYPES[dtype_str])
+    mask_mod = _make_doc_mask_mod(_doc_spans(lengths), causal=causal)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_mod=mask_mod)
+    ref = _flex_ref(q, k, v, scale, mask_mod=mask_mod)
+    _check(out, ref, label=f"doc {lengths} causal={causal} {dtype_str}")
+
+
+@_requires_gfx950
+def test_flex_attention_layout_document_mask_long():
+    """Longer packed sequence that crosses the masked 8c cutoff."""
+    B, Sq, H, D = 1, 2048, 4, 128
+    lengths = (512, 256, 768, 512)
+    assert sum(lengths) == Sq
+    q, k, v, scale = _make_qkv(B, Sq, Sq, H, D, torch.bfloat16)
+    mask_mod = _make_doc_mask_mod(_doc_spans(lengths), causal=True)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_mod=mask_mod)
+    ref = _flex_ref(q, k, v, scale, mask_mod=mask_mod)
+    _check(out, ref, label="doc long causal")
+
+
+@_requires_gfx950
+def test_flex_attention_layout_document_mask_empty_workgroups():
+    """A packed Q document with no matching K keeps one safely masked tile."""
+    B, Sq, Skv, H, D = 1, 512, 256, 4, 128
+    q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
+    mask_mod = _make_doc_mask_mod(_doc_spans((256, 256)), causal=False)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_mod=mask_mod)
+    ref = _flex_ref(q, k, v, scale, mask_mod=mask_mod)
+    _check(out, ref, label="doc empty Q workgroup")
+
+
+@_requires_gfx950
+def test_flex_attention_layout_document_mask_alibi():
+    """Document mask composed with a score_mod, as the blog composes mods."""
+    B, Sq, H, D = 1, 256, 4, 128
+    slope = 0.125
+    q, k, v, scale = _make_qkv(B, Sq, Sq, H, D, torch.bfloat16)
+    mask_mod = _make_doc_mask_mod(_doc_spans((96, 32, 96, 32)), causal=True)
+    score_mod = lambda score, b, h, q, kv, slope=slope: score + slope * (kv - q)
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, score_mod=score_mod, mask_mod=mask_mod)
+    ref = _flex_ref(q, k, v, scale, score_mod=score_mod, mask_mod=mask_mod)
+    _check(out, ref, label="doc + alibi")
 
 
 @_requires_gfx950
 def test_flex_attention_layout_causal_multi_group():
     B, Sq, Skv, H, D = 1, 256, 256, 4, 128
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, torch.bfloat16)
-    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_type=MASK_CAUSAL, num_groups=8)
-    ref = _sdpa_ref(q, k, v, scale, is_causal=True)
+
+    def mask_mod(b, h, q, kv):
+        return kv <= q
+
+    out = flydsl_flex_attention_layout(q, k, v, scale=scale, mask_mod=mask_mod, num_groups=8)
+    ref = _flex_ref(q, k, v, scale, mask_mod=mask_mod)
     _check(out, ref, label="causal groups=8")
 
 
@@ -452,7 +745,7 @@ def _make_block_table(B, Skv, block_n, device):
 def test_flex_attention_layout_paged(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
     block_n = 64
-    ref = _sdpa_ref(q, k, v, scale)
+    ref = _flex_ref(q, k, v, scale)
     block_table, context_lens, _ = _make_block_table(B, Skv, block_n, q.device)
     k_cache, v_cache = _scatter_to_paged(k, v, block_n, block_table, context_lens)
     out = flydsl_flex_attention_layout_paged(q, k_cache, v_cache, block_table, context_lens, scale=scale)
@@ -464,11 +757,12 @@ def test_flex_attention_layout_paged(B, Sq, Skv, H, D, dtype_str):
 def test_flex_attention_layout_paged_causal(B, Sq, Skv, H, D, dtype_str):
     q, k, v, scale = _make_qkv(B, Sq, Skv, H, D, _DTYPES[dtype_str])
     block_n = 64
-    ref = _sdpa_ref(q, k, v, scale, is_causal=True)
+    mask_mod = lambda b, h, q, kv: kv <= q
+    ref = _flex_ref(q, k, v, scale, mask_mod=mask_mod)
     block_table, context_lens, _ = _make_block_table(B, Skv, block_n, q.device)
     k_cache, v_cache = _scatter_to_paged(k, v, block_n, block_table, context_lens)
     out = flydsl_flex_attention_layout_paged(
-        q, k_cache, v_cache, block_table, context_lens, scale=scale, mask_type=MASK_CAUSAL
+        q, k_cache, v_cache, block_table, context_lens, scale=scale, mask_mod=mask_mod
     )
     _check(out, ref, max_err_tol=1.2e-1, cos_tol=0.97, label=f"paged_causal B{B} Sq{Sq} Skv{Skv} H{H} D{D} {dtype_str}")
 
