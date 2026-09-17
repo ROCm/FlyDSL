@@ -133,6 +133,8 @@ _RMSNORM_CONFIGS = (
     (64, 2001, "f32"),  # small-N scalar path with an unaligned tail
     (16, 512, "bf16"),  # small-N one-row vec8 path
     (64, 8192, "bf16"),  # large-N aligned vec8 path
+    (32, 5120, "bf16"),  # vec8 path with a partially active final iteration
+    (32, 7168, "bf16"),  # same, at the DeepSeek-V3 hidden size
 )
 
 _RMSNORM_FORWARD_EXTRA_CONFIGS = (

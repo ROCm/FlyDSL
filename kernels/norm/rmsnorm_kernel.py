@@ -837,10 +837,12 @@ def build_fused_add_rmsnorm_module(
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
-    tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
     weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
+    USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
+    VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
+    NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
 
@@ -916,9 +918,8 @@ def build_fused_add_rmsnorm_module(
 
             return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
-        # Fast path for complete 128-bit tiles.
-        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
-            num_tiles = N // tile_cols
+        # Vector path for every complete f16/bf16 vec8 row.
+        if const_expr(USE_VEC_N):
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -945,19 +946,22 @@ def build_fused_add_rmsnorm_module(
             add_local = []
 
             # Pass 1: add + cache + sumsq (also write residual_out)
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
-                x = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx).to(fx.Float32)
-                residual = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, residual_in_div, idx).to(fx.Float32)
+                is_valid = idx < VEC_TILES
+                idx_safe = is_valid.select(idx, 0)
+                x = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe).to(fx.Float32)
+                residual = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, residual_in_div, idx_safe).to(fx.Float32)
                 added_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, x + residual)
                 add_local.append(added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
 
                 added2 = added * added
                 red2 = added2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sumsq = thread_sumsq + red2
+                thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
 
-                _store_vec(copy_atom, VEC_WIDTH, elem_dtype, added_e, residual_out_div, idx)
+                if idx < VEC_TILES:
+                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, added_e, residual_out_div, idx)
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -969,13 +973,14 @@ def build_fused_add_rmsnorm_module(
                     _store_scalar(rstd_copy_atom, fx.Float32, rstd_div, bid, rrms)
 
             # Pass 2: normalize + gamma + store (reuse cached added values)
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
-                g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
-                added = add_local[tile_i] if dtype_str == "f32" else add_local[tile_i].to(fx.Float32)
-                y = (added * rrms) * g
-                y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
-                _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, idx)
+                if idx < VEC_TILES:
+                    g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
+                    added = add_local[tile_i] if dtype_str == "f32" else add_local[tile_i].to(fx.Float32)
+                    y = (added * rrms) * g
+                    y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
+                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, idx)
 
         else:
             # Scalar fallback for arbitrary N.
@@ -1093,10 +1098,12 @@ def _build_rmsnorm_quant_module(
     quant_dtype_str: str = "i8",
     eps: float = EPS,
 ):
-    tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
     quant_dtype_max = _quant_dtype_max(quant_dtype_str)
+    USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
+    VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
+    NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
 
@@ -1211,9 +1218,8 @@ def _build_rmsnorm_quant_module(
 
             return fx.memref_load(s_red, 0)
 
-        # Fast path for complete 128-bit tiles.
-        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
-            num_tiles = N // tile_cols
+        # Vector path for every complete f16/bf16 vec8 row.
+        if const_expr(USE_VEC_N):
             quant_half_width = VEC_WIDTH // 2
             abs_mask = fx.Vector.filled(VEC_WIDTH, 0x7FFFFFFF, fx.Uint32)
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
@@ -1241,14 +1247,16 @@ def _build_rmsnorm_quant_module(
             in_local = []
 
             # Pass 1: load + cache + sumsq
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
-                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx)
+                is_valid = idx < VEC_TILES
+                idx_safe = is_valid.select(idx, 0)
+                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe)
                 in_local.append(vec)
                 x = vec.to(fx.Float32)
                 x2 = x * x
                 red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sumsq = thread_sumsq + red2
+                thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -1259,20 +1267,22 @@ def _build_rmsnorm_quant_module(
             y_local = []
 
             # Pass 2: normalize + gamma (+ optional smooth scale), cache output, and accumulate row max
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
+                is_valid = idx < VEC_TILES
+                idx_safe = is_valid.select(idx, 0)
 
-                g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx).to(fx.Float32)
+                g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx_safe).to(fx.Float32)
                 x = in_local[tile_i].to(fx.Float32)
                 y = (x * rrms) * g
                 if const_expr(is_smooth):
-                    s = _load_vec(copy_atom_xs, VEC_WIDTH, elem_dtype, xscale_div, idx).to(fx.Float32)
+                    s = _load_vec(copy_atom_xs, VEC_WIDTH, elem_dtype, xscale_div, idx_safe).to(fx.Float32)
                     y = y * s
 
                 y_local.append(y)
                 y_abs = (y.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
                 tile_max = y_abs.reduce(ReductionOp.MAX)
-                thread_row_max = fx.max(thread_row_max, tile_max)
+                thread_row_max = fx.max(thread_row_max, is_valid.select(tile_max, c_zero_f))
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
@@ -1284,14 +1294,16 @@ def _build_rmsnorm_quant_module(
             inv_scale = c_one_f / final_scale
 
             # Pass 3: quantize + store using per-row scale
-            for tile_i in range_constexpr(num_tiles):
-                q = y_local[tile_i] * inv_scale
-                q_i8 = q.to(quant_dtype)
-                q_lo = q_i8.shuffle(q_i8, [0, 1, 2, 3])
-                q_hi = q_i8.shuffle(q_i8, [4, 5, 6, 7])
-                out_idx = tid * 2 + tile_i * BLOCK_THREADS * 2
-                _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_lo, out_div_q, out_idx)
-                _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_hi, out_div_q, out_idx + 1)
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
+                idx = tid + tile_i * BLOCK_THREADS
+                if idx < VEC_TILES:
+                    q = y_local[tile_i] * inv_scale
+                    q_i8 = q.to(quant_dtype)
+                    q_lo = q_i8.shuffle(q_i8, [0, 1, 2, 3])
+                    q_hi = q_i8.shuffle(q_i8, [4, 5, 6, 7])
+                    out_idx = idx * 2
+                    _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_lo, out_div_q, out_idx)
+                    _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_hi, out_div_q, out_idx + 1)
 
         else:
             # Scalar fallback for arbitrary N.
@@ -1469,10 +1481,12 @@ def _build_fused_add_rmsnorm_quant_module(
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
-    tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
     quant_dtype_max = _quant_dtype_max(quant_dtype_str)
+    USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
+    VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
+    NUM_VEC_ITERS = (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
 
@@ -1589,9 +1603,8 @@ def _build_fused_add_rmsnorm_quant_module(
 
             return fx.memref_load(s_red, 0)
 
-        # Fast path for complete 128-bit tiles.
-        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
-            num_tiles = N // tile_cols
+        # Vector path for every complete f16/bf16 vec8 row.
+        if const_expr(USE_VEC_N):
             quant_half_width = VEC_WIDTH // 2
             abs_mask = fx.Vector.filled(VEC_WIDTH, 0x7FFFFFFF, fx.Uint32)
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
@@ -1625,17 +1638,20 @@ def _build_fused_add_rmsnorm_quant_module(
             add_local = []
 
             # Pass 1: add + cache + sumsq (also write residual_out)
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
-                x = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx).to(fx.Float32)
-                residual = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, residual_in_div, idx).to(fx.Float32)
+                is_valid = idx < VEC_TILES
+                idx_safe = is_valid.select(idx, 0)
+                x = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe).to(fx.Float32)
+                residual = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, residual_in_div, idx_safe).to(fx.Float32)
                 added_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, x + residual)
                 add_local.append(added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added2 = added * added
                 red2 = added2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sumsq = thread_sumsq + red2
-                _store_vec(copy_atom, VEC_WIDTH, elem_dtype, added_e, residual_out_div, idx)
+                thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
+                if idx < VEC_TILES:
+                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, added_e, residual_out_div, idx)
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -1646,19 +1662,21 @@ def _build_fused_add_rmsnorm_quant_module(
             y_local = []
 
             # Pass 2: normalize + gamma (+ optional smooth scale), cache output, and accumulate row max
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
-                g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx).to(fx.Float32)
+                is_valid = idx < VEC_TILES
+                idx_safe = is_valid.select(idx, 0)
+                g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx_safe).to(fx.Float32)
                 added = add_local[tile_i] if dtype_str == "f32" else add_local[tile_i].to(fx.Float32)
                 y = (added * rrms) * g
                 if const_expr(is_smooth):
-                    s = _load_vec(copy_atom_xs, VEC_WIDTH, elem_dtype, xscale_div, idx).to(fx.Float32)
+                    s = _load_vec(copy_atom_xs, VEC_WIDTH, elem_dtype, xscale_div, idx_safe).to(fx.Float32)
                     y = y * s
 
                 y_local.append(y)
                 y_abs = (y.bitcast(fx.Uint32) & abs_mask).bitcast(fx.Float32)
                 tile_max = y_abs.reduce(ReductionOp.MAX)
-                thread_row_max = fx.max(thread_row_max, tile_max)
+                thread_row_max = fx.max(thread_row_max, is_valid.select(tile_max, c_zero_f))
 
             row_max = block_reduce_max(thread_row_max)
             scale = row_max / c_dtype_max
@@ -1670,14 +1688,16 @@ def _build_fused_add_rmsnorm_quant_module(
             inv_scale = c_one_f / final_scale
 
             # Pass 3: quantize + store using per-row scale
-            for tile_i in range_constexpr(num_tiles):
-                q = y_local[tile_i] * inv_scale
-                q_i8 = q.to(quant_dtype)
-                q_lo = q_i8.shuffle(q_i8, [0, 1, 2, 3])
-                q_hi = q_i8.shuffle(q_i8, [4, 5, 6, 7])
-                out_idx = tid * 2 + tile_i * BLOCK_THREADS * 2
-                _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_lo, out_div_q, out_idx)
-                _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_hi, out_div_q, out_idx + 1)
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
+                idx = tid + tile_i * BLOCK_THREADS
+                if idx < VEC_TILES:
+                    q = y_local[tile_i] * inv_scale
+                    q_i8 = q.to(quant_dtype)
+                    q_lo = q_i8.shuffle(q_i8, [0, 1, 2, 3])
+                    q_hi = q_i8.shuffle(q_i8, [4, 5, 6, 7])
+                    out_idx = idx * 2
+                    _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_lo, out_div_q, out_idx)
+                    _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_hi, out_div_q, out_idx + 1)
 
         else:
             # Scalar fallback for arbitrary N.
