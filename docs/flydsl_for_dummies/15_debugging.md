@@ -18,7 +18,7 @@ exactly one of them, and *where* it shows up dictates *how* you debug it.
 | Layer | When it runs | Typical symptom | Primary tools |
 |-------|--------------|-----------------|---------------|
 | **Trace-time** | Python builds the IR (host) | normal Python exception, traceback at the `fx.*` line | read the traceback; `pdb`; print layouts |
-| **Compile-time** | C++ pass pipeline lowers the IR (host) | **C++ assertion → `SIGABRT`** that kills the process (and any `pytest` run) | `FLYDSL_DUMP_IR`, `FLYDSL_DEBUG_PRINT_AFTER_ALL`, isolate + bisect, `fly-opt` |
+| **Compile-time** | C++ pass pipeline lowers the IR (host) | **C++ assertion → `SIGABRT`** that kills the process (and any `pytest` run) | IR dumps (§15.3); isolate + bisect; `fly-opt` |
 | **Run-time** | kernel executes on the GPU | wrong numbers, `NaN`/`inf`, or an illegal-address fault | `fx.printf`, host comparison, all-ones test, shrink the launch |
 
 The rule of thumb: **the deeper the layer, the less the error message tells you.**

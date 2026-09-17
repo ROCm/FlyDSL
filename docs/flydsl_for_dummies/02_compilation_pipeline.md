@@ -171,9 +171,14 @@ All upstream MLIR passes; nothing Fly-specific:
 
 ### Stage C — LLVM dialect → HSACO
 
-| # | Pass | What it does |
-|---|------|--------------|
-| 19 | `gpu-module-to-binary{format=fatbin opts="…"}` | Invoke the LLVM AMDGPU back-end (the MC layer) to produce AMDGCN machine code and embed the HSACO/ELF code object as a `gpu.binary` blob |
+A single pass, number 19:
+
+```
+gpu-module-to-binary{format=fatbin opts="…"}
+```
+
+It invokes the LLVM AMDGPU back-end (the MC layer) to produce AMDGCN machine code,
+and embeds the resulting HSACO/ELF code object as a `gpu.binary` blob.
 
 This single pass is the boundary between MLIR and the LLVM AMDGPU code generator —
 the analogue of the LLVM back-end that `hipcc` invokes. CLI options can include

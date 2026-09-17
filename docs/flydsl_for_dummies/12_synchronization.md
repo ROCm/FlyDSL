@@ -124,11 +124,13 @@ it.
 There are exactly three situations where the compiler steps back and hands you the
 job:
 
-| Mechanism | You must | Wait with |
-|-----------|----------|-----------|
-| `cdna4.BufferLoadAsyncLDS*` / `GlobalLoadAsyncLDS*` (§8.6) | bracket the group | `fx.rocdl.asyncmark()` then `fx.rocdl.wait_asyncmark(n)` |
-| gfx1250 TDM copies | wait on the tensor counter | `tdm_ops.tensor_wait(n)` → `s_wait_tensorcnt` |
-| gfx1250 cluster async loads | wait on the async counter | `fx.rocdl.s_wait_asynccnt(n)` |
+- **Async LDS DMA on CDNA4** — the `BufferLoadAsyncLDS*` / `GlobalLoadAsyncLDS*`
+  atoms (§8.6). Close a group with `fx.rocdl.asyncmark()`, drain it with
+  `fx.rocdl.wait_asyncmark(n)`.
+- **TDM copies on gfx1250** — wait on the tensor counter with
+  `tdm_ops.tensor_wait(n)`, which emits `s_wait_tensorcnt`.
+- **Cluster async loads on gfx1250** — wait on the async counter with
+  `fx.rocdl.s_wait_asynccnt(n)`.
 
 These exist because the whole point of an *async* copy is that the data
 dependence is deliberately hidden from the backend — if it could see it, it would
@@ -234,11 +236,11 @@ The canonical shape, from the multi-GPU dispatch kernel
 **arrive-and-wait on a ticket counter**:
 
 ```python
-fx.barrier()                                    # 1. this block is internally consistent
+fx.barrier()                                # 1. this block is internally consistent
 if tid == 0:
-    atomic_add_global_at(addr_disp_bar, 1)      # 2. publish arrival (release side)
+    atomic_add_global_at(addr_disp_bar, 1)  # 2. publish arrival (release side)
     mori_shmem.int32_wait_until_equals(addr_disp_bar, block_num)   # 3. spin
-    fence_system_acquire()                      # 4. now the peers' writes are visible
+    fence_system_acquire()                  # 4. peers' writes are now visible
 ```
 
 Read it as the three-part contract it is: the *atomic* makes the counter update
@@ -274,17 +276,30 @@ atoms; synchronization is orthogonal to all three, so the DSL emits the standard
 sync primitives pass through the Fly→ROCDL lowering untouched, so what you write
 is what the backend sees.
 
-| Level | You write | MLIR op | ISA |
-|-------|-----------|---------|-----|
-| Workgroup execution | `fx.barrier()` | `gpu.barrier` | `s_barrier` |
-| Workgroup execution | `fx.rocdl.s_barrier()` | `rocdl.s_barrier` | `s_barrier` |
-| Split barrier (gfx1250) | `rocdl.s_barrier_signal/_wait(id)` | `rocdl.s_barrier_signal/_wait` | `s_barrier_signal/_wait` |
-| Completion | `fx.rocdl.s_waitcnt(vmcnt=, lgkmcnt=)` | `rocdl.s_waitcnt` | `s_waitcnt imm16` |
-| Completion (async LDS) | `fx.rocdl.asyncmark()` / `wait_asyncmark(n)` | `rocdl.asyncmark` / `rocdl.wait.asyncmark` | tracked group |
-| Completion (TDM) | `tdm_ops.tensor_wait(n)` | `rocdl.s_wait_tensorcnt` | `s_wait_tensorcnt` |
-| Visibility | `fx.memory_fence(...)` | `llvm.fence` | scope-dependent wait + cache op |
-| Visibility | `fx.atomic_*`, `fx.generic_load/store` | `llvm.atomicrmw` / `llvm.load` | `global_atomic_*` / `global_load_*` |
-| Scheduling (not sync) | `fx.rocdl.sched_barrier(mask)` | `rocdl.sched_barrier` | `s_sched_barrier` |
+```
+Execution
+  fx.barrier()                → gpu.barrier            → s_barrier
+  fx.rocdl.s_barrier()        → rocdl.s_barrier        → s_barrier
+  rocdl.s_barrier_signal(id)  → rocdl.s_barrier_signal → s_barrier_signal
+  rocdl.s_barrier_wait(id)    → rocdl.s_barrier_wait   → s_barrier_wait
+
+Completion
+  fx.rocdl.s_waitcnt(...)     → rocdl.s_waitcnt        → s_waitcnt imm16
+  fx.rocdl.asyncmark()        → rocdl.asyncmark        → group marker
+  fx.rocdl.wait_asyncmark(n)  → rocdl.wait.asyncmark   → group wait
+  tdm_ops.tensor_wait(n)      → rocdl.s_wait_tensorcnt → s_wait_tensorcnt
+
+Visibility
+  fx.memory_fence(...)        → llvm.fence             → wait + cache op
+  fx.atomic_add(ptr, v)       → llvm.atomicrmw         → global_atomic_add
+  fx.generic_load(ptr, ...)   → llvm.load              → global_load_*
+
+Scheduling — a compiler hint, not synchronization
+  fx.rocdl.sched_barrier(m)   → rocdl.sched_barrier    → s_sched_barrier
+```
+
+(The split-barrier and `s_wait_tensorcnt` rows are gfx1250-only; everything else
+is available on every supported target.)
 
 The one place the *atom* layer interacts with this is the synchronous/asynchronous
 distinction of §8.6: a `BufferCopyLDS` atom is "synchronous" only in the sense

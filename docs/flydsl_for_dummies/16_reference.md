@@ -19,7 +19,7 @@ alternate spellings.
 | IR dump directory | `FLYDSL_DUMP_DIR=/tmp/ir` | pairs with `FLYDSL_DUMP_IR` |
 | Print IR after every pass | `FLYDSL_DEBUG_PRINT_AFTER_ALL` | very verbose; pinpoints a failing pass |
 | Show AST rewrite (§2.3) | `FLYDSL_DEBUG_AST_DIFF` | see `if/for/while` → dispatch rewrite |
-| Line info for profiler | `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` | incompatible with `FLYDSL_RUNTIME_RUN_ONLY` |
+| Line info for profiler | `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` | excludes AOT-only mode |
 | JIT cache directory | `FLYDSL_RUNTIME_CACHE_DIR` | on-disk artifact location |
 | Enable/disable disk cache | `FLYDSL_RUNTIME_ENABLE_CACHE` | `0`/`false` → in-memory only |
 | Disk-cache-only (AOT) | `FLYDSL_RUNTIME_RUN_ONLY=1` | load from disk, error on miss; no JIT |
@@ -198,47 +198,63 @@ fx.printf("tid={} val={}", tid, value)
 
 ## HIP / CK-Tile ↔ FlyDSL glossary
 
+### Kernels, launch, and compile-time parameters
+
 | You know (HIP / CK-Tile / CuTe) | FlyDSL |
 |---------------------------------|--------|
 | `__global__` function | `@flyc.kernel` (→ `gpu.func`) |
-| host launch + `hipLaunchKernelGGL` | `@flyc.jit` + `.launch(grid,block,stream)` |
+| host launch + `hipLaunchKernelGGL` | `@flyc.jit` + `.launch(grid, block)` |
 | `dim3 grid/block` | `grid=(x,y,z)`, `block=(x,y,z)` tuples |
 | dynamic LDS bytes arg | `.launch(smem=nbytes)` |
 | `threadIdx` / `blockIdx` | `fx.thread_idx` / `fx.block_idx` |
 | non-type template param `<int A>` | `A: fx.Constexpr` |
 | type template param `<typename T>` | `T: type[fx.Float16]` |
-| `#pragma unroll` fixed loop | `for i in fx.range_constexpr(N)` |
-| runtime `for` loop | `for iv, state in range(..., init=[...])` (`scf.for`) |
+| `#pragma unroll` fixed loop | `fx.range_constexpr(N)` loop |
+| runtime `for` loop | `for iv, state in range(..., init=[...])` |
+| `hipModuleLoadData` / `LaunchKernel` | `mgpuModuleLoad` / `mgpuLaunchKernel` |
+| fat binary (`.hsaco`) | `gpu.binary` blob in the module |
+
+### Layouts, tiling, and distribution
+
+| You know (HIP / CK-Tile / CuTe) | FlyDSL |
+|---------------------------------|--------|
 | tensor descriptor `(lengths,strides)` | `fx.make_layout(shape, stride)` |
 | `descriptor.CalculateOffset` | `fx.crd2idx(coord, layout)` |
 | `Sequence<>` / `Tuple<>` extents | IntTuple (`fx.make_shape`, nested) |
-| `make_tile_window` + advance to block | `fx.zipped_divide` + `fx.slice(_, (None,bid))` |
+| `make_tile_window` + advance | `fx.zipped_divide` + `fx.slice(_, (None,bid))` |
 | `tile_distribution` / TV layout | `fx.make_layout_tv` → TV layout |
 | coalesced thread mapping | `raked_product` (via TiledCopy) |
 | contiguous per-thread mapping | `blocked_product` |
 | `load_tile` distributed slice | `thr_copy.partition_S(tile)` |
-| `buffer_load_dwordx4` (buffer desc) | `fx.rocdl.BufferCopy128b()` atom |
+
+### Copies and matrix multiply
+
+| You know (HIP / CK-Tile / CuTe) | FlyDSL |
+|---------------------------------|--------|
+| `buffer_load_dwordx4` (buffer desc) | `rocdl.BufferCopy128b()` atom |
 | `global_load` (no descriptor) | `fx.UniversalCopy128b()` atom |
+| `buffer_load … lds` | `rocdl.BufferCopyLDS128b()` atom |
+| `cp.async` + `wait_group N` | `cdna4.BufferLoadAsyncLDS*` + `asyncmark` |
 | `pad_tensor_view` / masked load | `fx.copy(..., pred=...)` |
 | operand/accumulator VGPR arrays | `make_fragment_A/B/C` |
 | pack VGPRs into MFMA operand order | `thr_copy.retile(frag)` |
 | `__builtin_amdgcn_mfma_*` | `fx.rocdl.MFMA(...)` atom + `fx.gemm` |
 | `WarpGemmAttribute` / warp tiling | `make_tiled_mma(atom, atom_layout)` |
-| `__syncthreads()` | `fx.barrier()` / `fx.gpu.barrier()` |
-| `__builtin_amdgcn_s_waitcnt` | `fx.rocdl.s_waitcnt(vmcnt=, lgkmcnt=)` |
-| `__threadfence_block()` / `_system()` | `fx.memory_fence(syncscope=Workgroup / System)` |
-| `__shared__ float buf[N];` | `@fx.struct` field + `SharedAllocator(static=True)` |
-| `extern __shared__ char buf[];` | `SharedAllocator(static=False)` + `launch(smem=)` |
+
+### Shared memory and synchronization
+
+| You know (HIP / CK-Tile / CuTe) | FlyDSL |
+|---------------------------------|--------|
+| `__shared__ float buf[N];` | `@fx.struct` field + `SharedAllocator()` |
+| `extern __shared__ char buf[];` | `SharedAllocator(static=False)` allocator |
 | `alignas(16)` on an LDS member | `fx.Array[dtype, N, 16]` / `fx.Align[T, 16]` |
+| `__syncthreads()` | `fx.barrier()` |
+| `__builtin_amdgcn_s_waitcnt` | `fx.rocdl.s_waitcnt(vmcnt=, lgkmcnt=)` |
+| `__threadfence()` (+ scope) | `fx.memory_fence(ordering=, syncscope=)` |
+| `atomicAdd` / `atomicCAS` | `fx.atomic_add` / `fx.atomic_cas` |
 | `__shfl_xor` | `w.shuffle_xor(off, WARP_SIZE)` |
 | `__lane_id()` | `fx.lane_id()` |
-| `cub::BlockReduce` / rocPRIM collective | `fx.coop.BlockReduce[dtype, block]` + its `SharedStorage` |
-| `atomicAdd` / `atomicCAS` | `fx.atomic_add` / `fx.atomic_cas` |
-| `__threadfence()` (+ scope) | `fx.memory_fence(ordering=..., syncscope=...)` |
-| `buffer_load … lds` | `fx.rocdl.BufferCopyLDS128b()` atom |
-| `cp.async` + `wait_group N` | `cdna4.BufferLoadAsyncLDS*` + `asyncmark` / `wait_asyncmark(N)` |
-| `hipModuleLoadData` / `LaunchKernel` | `mgpuModuleLoad` / `mgpuLaunchKernel` (auto) |
-| fat binary (`.hsaco`) | `gpu.binary` blob in the compiled module |
+| `cub::BlockReduce` / rocPRIM | `fx.coop.BlockReduce[dtype, block]` |
 
 ## Where to go next
 
