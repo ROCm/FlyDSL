@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-17T04:10:54Z",
+ "updated": "2026-09-17T04:12:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -221,21 +221,24 @@
    "branch": "feature/ktrace-v4",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add an in-kernel wave tracing feature (fx.ktrace) for gfx942/gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35174161224",
    "created_at": "2026-09-17T02:22:24Z",
-   "updated_at": "2026-09-17T02:45:54Z",
+   "updated_at": "2026-09-17T04:10:01Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T02:39:02Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35174161224/job/105054703786"
+     "completed_at": "2026-09-17T04:10:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35174161224/job/105054703786",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
