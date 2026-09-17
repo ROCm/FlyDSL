@@ -26,11 +26,11 @@ So attention kernels build the fragments by hand and issue a single MFMA via the
 form of the atom call, which keeps the accumulator as a plain `vector<…f32>` SSA value:
 
 ```python
-# kernels/attention/flash_attn_utils.py:148
+# kernels/attention/flash_attn_utils.py:122
 def _mfma_acc(a, b, c, _mma_atom, mfma_acc_vec_type):
     return fly.mma_atom_call_ssa([mfma_acc_vec_type], _mma_atom, a, b, c)
 
-# :2738 — dispatch straight to a rocdl MFMA builtin for the chosen dtype
+# :3047 — dispatch straight to a rocdl MFMA builtin for the chosen dtype
 def mfma_acc(self, a, b, c):
     return self._mfma(rocdl.mfma_f32_32x32x8f16, a, b, c)   # one instruction
 ```
@@ -69,27 +69,63 @@ express it.
 ## Cross-lane / warp primitives
 
 Reductions (softmax max/sum, RMS norm, absmax for quantization) move values *between
-lanes' registers*, which is not a memory movement and has no tile layout. FlyDSL
-exposes three mechanisms:
+lanes' registers*, which is not a memory movement and has no tile layout. The layout
+algebra has no vocabulary for it: copy atoms move data to/from memory, and a
+register-to-register lane exchange has no address space and no tile.
 
-- `x.shuffle_xor(offset, width)` (`expr/utils/arith.py:515`) → `ds_swizzle`, the
+### First try the `coop` library
+
+Before hand-rolling a butterfly, check whether `fx.coop`
+(`python/flydsl/extension/coop/`, lazily loaded like the other extension libraries)
+already has the collective. Its surface is flat — `fx.coop.<name>`:
+
+```python
+# warp scope: all-to-all, no shared memory
+total = fx.coop.warp_reduce(x, fx.ReductionOp.ADD, width=32)
+rank  = fx.coop.warp_exclusive_scan(keep, fx.ReductionOp.ADD, width=32)
+incl, excl, agg = fx.coop.warp_scan_with_aggregate(x, fx.ReductionOp.ADD)
+
+# block scope: specialize, allocate its storage, call it
+block_reduce = fx.coop.BlockReduce[fx.Float32, 256]
+storage = fx.SharedAllocator().allocate(block_reduce.SharedStorage).peek()
+total = block_reduce(value, fx.ReductionOp.ADD, storage=storage)
+```
+
+Two things earn their keep here. **`width` is explicit**: left alone a warp
+collective spans a full warp, which is 64 lanes on CDNA and 32 on RDNA, so the same
+source computes a different thing per target; naming the width pins it.
+**The names are dispatched**: `fx.coop.warp_reduce` picks up the ROCm override where
+one exists, and `fx.coop.universal.*` is the same surface with dispatch off if you
+want the portable form on purpose. `BlockReduce[dtype, block_size]` /
+`BlockScan[dtype, block_size]` take `fx.known_block_size()` directly so the
+collective and the launch cannot drift apart. `kernels/moe/moe_sorting_kernel.py`
+is the production user; `examples/extension/coop/` has two runnable examples.
+
+### Then the raw mechanisms
+
+When the collective you need is not there — a fused online-softmax step, a
+lane-indexed gather — drop to the primitives:
+
+- `x.shuffle_xor(offset, width)` (`expr/utils/arith.py:533`) → `ds_swizzle`, the
   butterfly-reduce step.
 - `fx.rocdl.ds_bpermute(ty, byte_idx, v)` — an arbitrary cross-lane read (any lane
   reads any lane's VGPR by absolute address), which `shuffle_xor`'s mask cannot express.
 - `fx.rocdl.permlane32_swap(...)`, and DPP via `kernels/common/dpp_utils.py`
   (`dpp_xor_f32`) for row/bank-masked cross-lane math.
+- `fx.lane_id()` — the calling thread's index within its warp, when you need to
+  address lanes rather than exchange with them.
 
 ```python
-# kernels/attention/pa_decode_tile.py:631 — online-softmax max reduction
-for sh in (32, 16, 8, 4, 2, 1):
+# kernels/attention/pa_decode_tile.py:719 — online-softmax max reduction
+for sh in (16, 32):
     pv_max = fx.maxnumf(pv_max, pv_max.shuffle_xor(sh, WAVE))
 ```
 
-**Why:** copy atoms move data to/from memory. A register-to-register lane exchange has
-no address space and no tile — the layout algebra simply has no vocabulary for it.
-
-> **HIP/CK-Tile → FlyDSL.** `__shfl_xor` / `__builtin_amdgcn_ds_bpermute` / DPP
-> modifiers — the warp-reduce you already hand-roll in HIP.
+> **HIP/CK-Tile → FlyDSL.** The raw list is `__shfl_xor` /
+> `__builtin_amdgcn_ds_bpermute` / DPP modifiers — the warp-reduce you already
+> hand-roll in HIP. `fx.coop` is the layer above it, and the closest thing in your
+> world is `cub::BlockReduce` / `rocPRIM`: a specialized collective plus the shared
+> storage it asks you to allocate.
 
 ## Inline assembly
 
@@ -101,10 +137,10 @@ would otherwise disturb. Real, well-commented cases in the tree:
   `"v_mfma_f32_16x16x128_f8f6f4 $0,$1,$2,$0"` with constraints `"=a,v,v,0"` pins the
   accumulator in an AGPR across iterations, eliminating the `v_accvgpr_mov`/`s_nop`
   shuffle that the SSA-lowered path emits — the dominant stall on that kernel.
-- **`op_sel` MX-scaled MFMA** (`fp4_gemm_4wave.py:229`): the `op_sel`/`op_sel_hi`
+- **`op_sel` MX-scaled MFMA** (`fp4_gemm_4wave.py:450`): the `op_sel`/`op_sel_hi`
   nibble-select immediates on `v_mfma_scale_*` are not surfaced by the ROCDL op.
-- **`s_nop` scheduling spacers** (`flash_attn_utils.py:75`) and **adjacent
-  `s_waitcnt`+`s_barrier`** (`fp8_gemm_utils.py:201`), where the two instructions must
+- **`s_nop` scheduling spacers** (`flash_attn_utils.py:65`) and **adjacent
+  `s_waitcnt`+`s_barrier`** (`fp8_gemm_utils.py:229`), where the two instructions must
   stay adjacent in the ISA stream.
 - **Missing ISA ops** — `ds_read_b64_tr_b16` (gfx950), and the target-neutral converter
   wrappers in `expr/rocdl/inline_asm.py`, which carry an explicit *"TODO: remove once
@@ -133,11 +169,11 @@ as an opaque pass *after* lowering, so FlyDSL exposes hints to steer it:
   polished `fx.rocdl.` call.
 
 ```python
-# kernels/gemm/preshuffle_gemm.py:362 — hot_loop_scheduler(): interleave the main loop
+# kernels/gemm/preshuffle_gemm.py:398 — hot_loop_scheduler(): interleave the main loop
 rocdl.sched_dsrd(2); rocdl.sched_mfma(1); rocdl.sched_vmem(1); rocdl.sched_mfma(1)
 ```
 
-The dualwave attention pipeline (`kernels/attention/flash_attn_gfx950.py:356`) sets
+The dualwave attention pipeline (`kernels/attention/flash_attn_gfx950.py:540`) sets
 wave priority `1` around MFMAs and `0` around memory ops so two wave groups
 time-multiplex — one computes while the other moves data.
 
@@ -154,14 +190,17 @@ is nothing at that level to attach a schedule to.
   the work is a tile-shaped copy or a tiled GEMM with one accumulator layout. This is
   the default and buys you portability (swap the atom for another subtarget) and
   inspectability (dump the layout ops).
+- **Reach for an extension library** (`fx.coop`) when you need a standard collective —
+  a warp/block reduce or scan. It is not an escape hatch at all; it is the layer the
+  atom API does not cover, and it stays portable across wave32/wave64.
 - **Drop to `fx.rocdl.*`** for a single MFMA interleaved with other math, per-lane
-  type conversion, cross-lane reductions, or scheduling hints.
+  type conversion, a cross-lane exchange no collective expresses, or scheduling hints.
 - **Drop to `llvm.inline_asm`** only when there is no ROCDL op, or you must pin a
   register class (AGPR) or force instruction adjacency/scheduling.
 
 Dropping lower is a *local* decision: it forfeits the portability and inspectability
 the atom layer gives you, so confine it to the few lines that need it and keep the
 surrounding kernel in the high-level dialect. When a lowered kernel misbehaves,
-Chapter 14 (debugging) shows how to dump and read the `rocdl.*`/`llvm.*` your escape
-hatch produced. Chapter 13 next reads three complete kernels that stay on the
+Chapter 15 (debugging) shows how to dump and read the `rocdl.*`/`llvm.*` your escape
+hatch produced. Chapter 14 next reads three complete kernels that stay on the
 high-level path from start to finish.

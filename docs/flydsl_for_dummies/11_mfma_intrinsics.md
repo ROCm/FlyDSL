@@ -9,7 +9,7 @@ the same instruction.
 
 ## The MFMA op type and which instruction it picks
 
-`fx.rocdl.MFMA(M, N, K, ab_dtype, acc_dtype=f32)` (`rocdl/universal.py:106`) selects
+`fx.rocdl.MFMA(M, N, K, ab_dtype, acc_dtype=f32)` (`rocdl/universal.py:155`) selects
 one hardware MFMA shape; `M == N` is required. The shape plus the operand dtype maps
 to exactly one `rocdl.mfma.*` op and one `__builtin_amdgcn_mfma_*` builtin (dispatch
 table in `lib/Dialect/FlyROCDL/CDNA3/MmaAtom.cpp:170`). The shapes this book uses:
@@ -68,7 +68,7 @@ the retiled copy derive from the *same atom*, so they match by construction.
 ## One instruction: `fx.mma_atom_call`, and how `fx.gemm` decomposes
 
 `fx.gemm` over a TiledMma unrolls into one MFMA per atom in the tile. The single-atom
-primitive underneath is `fx.mma_atom_call(atom, d, a, b, c)` (`primitive.py:1058`),
+primitive underneath is `fx.mma_atom_call(atom, d, a, b, c)` (`primitive.py:1055`),
 which emits one `fly.mma_atom_call`:
 
 ```mlir
@@ -77,7 +77,7 @@ fly.mma_atom_call(%atom, %d, %a, %b, %c)
   : (!fly.mma_atom<…>, !fly.memref<f32, register, 4:1>, …) -> ()
 ```
 
-which `MmaAtomCallLowering` (`FlyToROCDL.cpp:627`) turns into
+which `MmaAtomCallLowering` (`FlyToROCDL.cpp:680`) turns into
 `rocdl.mfma.f32.16x16x4f32`. The operand/result vector types you see there
 (`vector<4xf16>` for f16 operands, `vector<4xf32>` for the accumulator) *are* the
 builtin's argument types.
@@ -207,7 +207,7 @@ This is the useful escape hatch: keep the high-level fragment/copy machinery for
 loading and storing (where the layout algebra earns its keep), and drop to the raw
 `rocdl.mfma_*` only for the instruction itself — for example to pass an `op_sel`
 modifier, pin the accumulator in an AGPR, or issue an instruction the atom does not
-yet cover (Chapter 12).
+yet cover (Chapter 13).
 
 > **HIP/CK-Tile → FlyDSL.** `frag.load()` / `frag.store()` around a raw
 > `rocdl.mfma_*` is the CK-Tile move of reading a `WarpGemm`'s register spans as a
@@ -236,7 +236,7 @@ well-defined SSA value across iterations.
 ## MFMA-scale and other subtargets
 
 CDNA4 (gfx950) adds *scaled* MFMA for microscaled fp8/fp6/fp4:
-`fx.rocdl.cdna4.MFMA_Scale(M, N, K, dtype)` (`rocdl/cdna4.py:19`) is a **stateful**
+`fx.rocdl.cdna4.MFMA_Scale(M, N, K, dtype)` (`rocdl/cdna4.py:80`) is a **stateful**
 atom carrying E8M0 block scales, injected per call:
 
 ```python
@@ -245,7 +245,7 @@ fx.gemm(scale_atom, cf, av, bv, cf, scale_a=sa, scale_b=sb)   # -> rocdl.mfma.sc
 
 `16x16x128` / `32x32x64` fp8/fp6/fp4 lower to
 `rocdl.mfma.scale.f32.16x16x128.f8f6f4` (real use:
-`kernels/gemm/fp8_gemm_utils.py:211`). The matrix core differs by subtarget:
+`kernels/gemm/fp8_gemm_utils.py:239`). The matrix core differs by subtarget:
 
 | Arch | Wave | Op | C/D acc (16×16) |
 |------|------|----|-----------------|
@@ -257,6 +257,8 @@ fx.gemm(scale_atom, cf, av, bv, cf, scale_a=sa, scale_b=sb)   # -> rocdl.mfma.sc
 The atom is architecture-independent in your Python; only the chosen instruction and
 its fragment layout change per subtarget. This book targets CDNA MFMA.
 
-With the copy and MMA instructions both opened up, Chapter 12 turns to the cases where
-even this atom layer is not enough — small MFMAs outside a GEMM, cross-lane ops, and
-inline assembly. Chapter 13 then reads three complete kernels end to end.
+With the copy and MMA instructions both opened up, Chapter 12 covers the machinery
+that makes them safe to combine — barriers, wait counters, fences, and scopes — and
+Chapter 13 then turns to the cases where even this atom layer is not enough: small
+MFMAs outside a GEMM, cross-lane ops, and inline assembly. Chapter 14 reads three
+complete kernels end to end.

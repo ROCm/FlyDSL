@@ -62,7 +62,7 @@ that cuts the block's threads into waves and hands each wave its `(m, n, k)` ato
 That rule is one line in the compiler. FlyDSL takes the atom's *own* thread layout —
 `64:1` for a CDNA MFMA (`CDNA3/MmaAtom.cpp:44`) — and `tiled_product`s it with your
 atom layout to get the **VMNK thread layout** (`TiledOpTraits.cpp:202`,
-`LayoutLowering.cpp:1987`):
+`LayoutLowering.cpp:1995`):
 
 ```
 thr_layout_vmnk = tiled_product( 64:1 , (2,2,1):(1,2,0) )
@@ -77,7 +77,7 @@ thr_layout_vmnk = tiled_product( 64:1 , (2,2,1):(1,2,0) )
 Its size *is* the block's thread count: **64 × 2 × 2 × 1 = 256 threads = 4 waves**.
 Launch this TiledMma with fewer threads and the missing waves simply never compute
 their atoms. A thread id is decomposed back through that layout (`idx2crd`,
-`LayoutLowering.cpp:1997`) into `(v, m, n, k)`:
+`LayoutLowering.cpp:2005`) into `(v, m, n, k)`:
 
 ```
  tid ──idx2crd──▶ (v, m, n, k)     shape (64,2,2,1)  stride (1,64,128,0)
@@ -213,7 +213,7 @@ depends on, and is broadcast along the one it does not.**
 `fx.gemm`'s A operand does not depend on N, its B operand does not depend on M, and
 its C operand does not depend on K. FlyDSL encodes that literally: when it slices the
 thread's operand view it picks two of the four VMNK coordinates and drops the third
-(`LayoutLowering.cpp:2008-2024`), and it builds the M/N thread mode with a **stride of
+(`LayoutLowering.cpp:2016-2024`), and it builds the M/N thread mode with a **stride of
 0** on the unused axis (`TiledOpTraits.cpp:126-144`). A stride of 0 is the layout
 algebra's spelling of "broadcast".
 
@@ -259,7 +259,7 @@ Reading it off:
 
 That duplicated A/B traffic is not a bug, it is the reuse trade the wave grid buys: 2×
 the operand reads for 4× the output area. It is also exactly why real GEMMs stage A
-and B through LDS — the duplicate reader hits shared memory, not HBM (Chapter 13).
+and B through LDS — the duplicate reader hits shared memory, not HBM (Chapter 14).
 
 The K axis of the atom layout is the one case that *would* need a reduction: a `K`
 extent above 1 splits the contraction across waves, leaving each with a partial sum.
@@ -316,7 +316,7 @@ factor does *not* come from the atom layout — it appears as **rest modes** on 
 fragments. Partitioning a `(64, 64)` C tile with a `(32, 32)` wave tile leaves
 `(2, 2)`, so `frag_C` becomes rank-3 `(val, rest_m, rest_n)` and `fx.gemm` expands
 into one MFMA per rest coordinate (`ExpandGemmOpLowering`,
-`LayoutLowering.cpp:2275`). *This* is the per-wave sequential repetition:
+`LayoutLowering.cpp:2283`). *This* is the per-wave sequential repetition:
 
 ```
 block tile 64x64  /  wave tile 32x32  ->  each wave owns 4 interleaved 16x16 blocks
@@ -346,7 +346,7 @@ is the usual source of "my kernel computes a quarter of the output" bugs.
 
 ### The production pattern: split N, share A
 
-Real CDNA GEMMs rarely use a square wave grid. `kernels/gemm/preshuffle_gemm.py:699`
+Real CDNA GEMMs rarely use a square wave grid. `kernels/gemm/preshuffle_gemm.py:745`
 and `examples/04-preshuffle_gemm.py:176` both use:
 
 ```python
@@ -684,7 +684,7 @@ well-defined.
 > `range_constexpr` unroll is your `#pragma unroll` K-loop; the loop-carried
 > `range(..., init=[...])` form (§3.2) is the runtime K-loop with the accumulator
 > kept in registers across iterations. Software pipelining (prefetch next K while
-> MFMA-ing current) is layered on top in Chapter 13 and the GEMM puzzles — the atom
+> MFMA-ing current) is layered on top in Chapter 14 and the GEMM puzzles — the atom
 > and fragment contract does not change.
 
 ## Where subtargets differ
@@ -712,7 +712,8 @@ first-class object.
 With layouts (Ch. 6), tiling/partitioning (Ch. 7), copy atoms (Ch. 8), and MMA
 atoms (Ch. 9) defined, you have the full high-level vocabulary. Chapters 10–11 open
 the copy and MFMA atoms down to the actual `rocdl.*` instructions and VGPR layouts,
-and Chapter 12 covers the escape hatches for when the atom layer is not enough.
-Chapter 13 then reads three complete kernels line by line; Chapter 14 is how you
-debug them when they break; Chapter 15 is the reference you keep open while working
+Chapter 12 covers barriers and the rest of the synchronization machinery, and
+Chapter 13 covers the escape hatches for when the atom layer is not enough.
+Chapter 14 then reads three complete kernels line by line; Chapter 15 is how you
+debug them when they break; Chapter 16 is the reference you keep open while working
 the puzzles.

@@ -103,7 +103,7 @@ col_block = A[None, bid, None]    # fix dim 1 to bid -> shape (M, K)
 row       = A[r, None, None]      # fix dim 0 to r   -> shape (N, K)
 ```
 
-This is the `fx.slice` function under the hood (`primitive.py:777`). The same
+This is the `fx.slice` function under the hood (`primitive.py:774`). The same
 `None`-indexing applies to register tensors, LDS tensors, and partitioned fragments —
 which is why tiling expressions like `bA[None, k]` ("the k-th K-tile of block A")
 appear throughout the kernel examples.

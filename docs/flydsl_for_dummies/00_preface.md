@@ -67,18 +67,19 @@ CK-Tile) equivalent, the `HIP/CK-Tile → FlyDSL` boxes call it out; the reposit
    partitioning (Chapter 7), data movement / copy atoms (Chapter 8), and MMA
    atoms (Chapter 9), each with small worked examples and a mapping to the
    CK-Tile / CuTe concept you already know.
-5. **Close to the metal** — the intrinsic level beneath the atoms: loads and stores
+6. **Close to the metal** — the intrinsic level beneath the atoms: loads and stores
    down to `buffer_load`/`ds_read` (Chapter 10), MFMA down to the `rocdl.mfma.*`
-   instruction and its operand/accumulator VGPRs (Chapter 11), and the escape
-   hatches for when the high-level dialect is not enough — small MFMAs outside a
-   GEMM, cross-lane ops, inline asm (Chapter 12).
-6. **Worked examples** — three complete kernels annotated line by line
-   (Chapter 13).
-7. **Debugging** — how (and how far) you can actually debug a FlyDSL kernel:
+   instruction and its operand/accumulator VGPRs (Chapter 11), the synchronization
+   machinery — barriers, wait counters, fences and scopes (Chapter 12) — and the
+   escape hatches for when the high-level dialect is not enough: small MFMAs
+   outside a GEMM, cross-lane ops, inline asm (Chapter 13).
+7. **Worked examples** — three complete kernels annotated line by line
+   (Chapter 14).
+8. **Debugging** — how (and how far) you can actually debug a FlyDSL kernel:
    the three layers of failure, the IR-dump and `printf` tools, a repeatable
-   isolation loop, and two real worked failures (Chapter 14).
-8. **A reference appendix** — environment variables, an API cheat-sheet, and a
-   HIP/CK-Tile ↔ FlyDSL glossary (Chapter 15).
+   isolation loop, and two real worked failures (Chapter 15).
+9. **A reference appendix** — environment variables, an API cheat-sheet, and a
+   HIP/CK-Tile ↔ FlyDSL glossary (Chapter 16).
 
 ## How to read it
 
@@ -105,7 +106,7 @@ import flydsl.expr as fx         # types, layout algebra, atoms, ops
 ```
 
 File references point at the actual source, e.g.
-`python/flydsl/compiler/jit_function.py:1618`, so you can read the implementation
+`python/flydsl/compiler/jit_function.py:1609`, so you can read the implementation
 when the prose is not enough.
 
 Everything targets **CDNA (gfx942 / gfx950)** — MI300X / MI350, wave size 64,

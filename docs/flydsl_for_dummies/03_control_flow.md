@@ -49,7 +49,7 @@ The transformers responsible (all in
 
 ### Unrolled: `range_constexpr`
 
-`range_constexpr` is literally `range` (`python/flydsl/expr/primitive.py:331`); its
+`range_constexpr` is literally `range` (`python/flydsl/expr/primitive.py:328`); its
 only job is to *signal intent* to the rewriter, which leaves the loop as plain
 Python. Python then executes it during tracing, emitting the body once per
 iteration. The bound must be known at trace time.
@@ -88,7 +88,7 @@ For the common kernel pattern — carrying an accumulator register tile across a
 K-loop — make the carried state explicit with `init=[...]` and `yield`:
 
 ```python
-# adapted from kernels/gemm/preshuffle_gemm.py:516
+# adapted from kernels/gemm/preshuffle_gemm.py:556
 for iv, state in range(0, num_tiles - 1, 1, init=[frag_C.load()]):
     frag_C.store(state[0])        # unpack the carried accumulator
     mma_kloop(iv)                 # ... do work, updating frag_C ...
@@ -199,7 +199,10 @@ When you just need to pick one of two scalar values and there are no side effect
 divergence penalty:
 
 ```python
-# kernels/attention/pa_metadata.py:983 style
+# kernels/attention/pa_metadata.py:176 — the idiomatic form, a method on the predicate
+qi_val = (qi_raw < qlen_minus1).select(qi_raw, qlen_minus1)
+
+# the raw-builder form, when you already hold ir.Values
 out = fx.Int32(fx.arith.select(cond.ir_value(), a.ir_value(), b.ir_value()))
 ```
 

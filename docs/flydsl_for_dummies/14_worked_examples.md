@@ -243,5 +243,5 @@ this into an efficient kernel.
 
 Read these three side by side and the pattern is unmistakable: **describe layouts
 and distributions, then issue one copy/gemm per action.** With that internalized,
-Chapter 14 (debugging), Chapter 15's reference tables, and the puzzles are all you
+Chapter 15 (debugging), Chapter 16's reference tables, and the puzzles are all you
 need.

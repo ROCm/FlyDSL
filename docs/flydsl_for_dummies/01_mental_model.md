@@ -92,10 +92,10 @@ argument inspection → cache lookup → (on a miss) trace → compile → load 
 launch. Calling `add_kernel(...)` on its own only makes sense *inside* a
 `@flyc.jit` trace; it returns a launcher object, it does not run anything.
 
-- `@flyc.jit` is defined at `python/flydsl/compiler/jit_function.py:1618`
-  (class `JitFunction`, `python/flydsl/compiler/jit_function.py:1139`).
-- `@flyc.kernel` is defined at `python/flydsl/compiler/kernel_function.py:614`
-  (class `KernelFunction`, `python/flydsl/compiler/kernel_function.py:431`).
+- `@flyc.jit` is defined at `python/flydsl/compiler/jit_function.py:1609`
+  (class `JitFunction`, `python/flydsl/compiler/jit_function.py:1132`).
+- `@flyc.kernel` is defined at `python/flydsl/compiler/kernel_function.py:648`
+  (class `KernelFunction`, `python/flydsl/compiler/kernel_function.py:453`).
 
 > **HIP/CK-Tile → FlyDSL.** `add_kernel(...).launch(grid=..., block=..., stream=...)`
 > is the FlyDSL `hipLaunchKernelGGL(add_kernel, grid, block, 0, stream, ...)`.

@@ -43,10 +43,11 @@ CHAPTERS=(
   09_mma.md
   10_loads_stores_intrinsics.md
   11_mfma_intrinsics.md
-  12_escape_hatches.md
-  13_worked_examples.md
-  14_debugging.md
-  15_reference.md
+  12_synchronization.md
+  13_escape_hatches.md
+  14_worked_examples.md
+  15_debugging.md
+  16_reference.md
 )
 
 if [[ "${1:-}" == "--html" ]]; then

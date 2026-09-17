@@ -109,6 +109,10 @@ A = fx.rocdl.make_buffer_tensor(A_ptr)                         # buffer tensor
 fx.copy(copy_atom, src_part, dst_part[, pred=pred])            # tiled copy
 fx.copy_atom_call(copy_atom, src, dst)                         # single atom
 fx.elem_less(coord_tensor, (M,N))                              # in-bounds mask
+
+fx.rocdl.BufferCopyLDS128b()                        # Global->LDS, compiler waits
+fx.rocdl.cdna4.BufferLoadAsyncLDS128b()             # gfx950 async Global->LDS
+fx.rocdl.asyncmark(); fx.rocdl.wait_asyncmark(0)    # ... you wait (§8.6)
 ```
 
 ### MMA atoms and gemm (Ch. 9)
@@ -133,16 +137,57 @@ if dyn_cond: ...                       # runtime branch -> scf.if
 ### LDS / shared memory (§8.6)
 
 ```python
-smem = fx.SharedAllocator().allocate(SharedStorage).peek()
-fx.gpu.barrier()
+@fx.struct                                   # one storage type per kernel
+class SharedStorage:
+    a: fx.Array[fx.Float16, LDS_A_ELEMS, 16]   # flat, element-counted, 16B-aligned
+    b: fx.Array[fx.Float16, LDS_B_ELEMS, 16]
+
+alloc = fx.SharedAllocator()                 # exactly ONE per @flyc.kernel
+lds   = alloc.allocate(SharedStorage).peek()
+sA    = lds.a.view(fx.make_layout((BM, BK), (BK, 1)))     # give it a shape
+alloc.allocated_bytes                        # running total (trace time)
+# fx.SharedAllocator(static=False)           # dynamic: launch(smem=) auto-inferred
+# @fx.union                                  # deliberately overlap two phases
+```
+
+### Synchronization (Ch. 12)
+
+```python
+fx.barrier()                           # == fx.gpu.barrier(); s_barrier. NOT divergent!
+fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0) # hand-written completion wait
+fx.rocdl.asyncmark(); fx.rocdl.wait_asyncmark(0)   # async LDS DMA group (§8.6)
+fx.memory_fence(ordering=fx.AtomicOrdering.Release,
+                syncscope=fx.rocdl.SyncScope.AgentOneAs)
+# scopes:  fx.SyncScope.System / SingleThread
+#          fx.rocdl.SyncScope.Agent / Workgroup / Wavefront (+ ...OneAs variants)
+fx.rocdl.sched_barrier(0)              # scheduling hint — NOT synchronization
 ```
 
 ### Reductions (softmax/norm pattern)
 
 ```python
-w.shuffle_xor(off, WARP_SIZE)          # warp-level reduce step
-x.reduce(ReductionOp.MAX)              # in-fragment reduce
+x.reduce(fx.ReductionOp.MAX)           # in-fragment (per-thread) reduce
+fx.coop.warp_reduce(x, fx.ReductionOp.ADD, width=32)     # warp collective (Ch. 13)
+fx.coop.warp_scan(x, fx.ReductionOp.ADD)                 # -> (inclusive, exclusive)
+br = fx.coop.BlockReduce[fx.Float32, fx.known_block_size()]
+st = fx.SharedAllocator().allocate(br.SharedStorage).peek()
+total = br(x, fx.ReductionOp.ADD, storage=st)            # block collective
+w.shuffle_xor(off, WARP_SIZE)          # raw butterfly step, when coop has no fit
+fx.lane_id()                           # lane index within the warp
 fmath.exp2(x, fastmath=...)            # from flydsl.expr import math as fmath
+```
+
+### Atomics and the memory model (§10.7)
+
+```python
+fx.atomic_add(ptr, v)                  # _sub/_min/_max/_and/_or/_xor/_xchg too
+fx.atomic_fmax(ptr, x); fx.atomic_fmin(ptr, x)           # float, via int atomics
+old, ok = fx.atomic_cas(ptr, expected, desired)          # integers only
+fx.memory_fence(ordering=fx.AtomicOrdering.Release)
+v = fx.generic_load(ptr, dtype=fx.Float32, count=4)      # ordering-aware load
+fx.generic_store(ptr, v, memory_order=fx.AtomicOrdering.Release,
+                 syncscope=fx.rocdl.SyncScope.Agent)
+fx.copy(fx.make_copy_atom(fx.rocdl.BufferAtomicAdd(fx.Float32), fx.Float32), s, d)
 ```
 
 ### Debug
@@ -179,8 +224,19 @@ fx.printf("tid={} val={}", tid, value)
 | pack VGPRs into MFMA operand order | `thr_copy.retile(frag)` |
 | `__builtin_amdgcn_mfma_*` | `fx.rocdl.MFMA(...)` atom + `fx.gemm` |
 | `WarpGemmAttribute` / warp tiling | `make_tiled_mma(atom, atom_layout)` |
-| `__syncthreads()` | `fx.gpu.barrier()` |
+| `__syncthreads()` | `fx.barrier()` / `fx.gpu.barrier()` |
+| `__builtin_amdgcn_s_waitcnt` | `fx.rocdl.s_waitcnt(vmcnt=, lgkmcnt=)` |
+| `__threadfence_block()` / `_system()` | `fx.memory_fence(syncscope=Workgroup / System)` |
+| `__shared__ float buf[N];` | `@fx.struct` field + `SharedAllocator(static=True)` |
+| `extern __shared__ char buf[];` | `SharedAllocator(static=False)` + `launch(smem=)` |
+| `alignas(16)` on an LDS member | `fx.Array[dtype, N, 16]` / `fx.Align[T, 16]` |
 | `__shfl_xor` | `w.shuffle_xor(off, WARP_SIZE)` |
+| `__lane_id()` | `fx.lane_id()` |
+| `cub::BlockReduce` / rocPRIM collective | `fx.coop.BlockReduce[dtype, block]` + its `SharedStorage` |
+| `atomicAdd` / `atomicCAS` | `fx.atomic_add` / `fx.atomic_cas` |
+| `__threadfence()` (+ scope) | `fx.memory_fence(ordering=..., syncscope=...)` |
+| `buffer_load … lds` | `fx.rocdl.BufferCopyLDS128b()` atom |
+| `cp.async` + `wait_group N` | `cdna4.BufferLoadAsyncLDS*` + `asyncmark` / `wait_asyncmark(N)` |
 | `hipModuleLoadData` / `LaunchKernel` | `mgpuModuleLoad` / `mgpuLaunchKernel` (auto) |
 | fat binary (`.hsaco`) | `gpu.binary` blob in the compiled module |
 
@@ -194,5 +250,9 @@ fx.printf("tid={} val={}", tid, value)
   reduction pattern, the GEMM/MoE families for the full pipeline.
 - **Deepen the algebra** with `docs/cute_layout_algebra_guide.md` (mathematical
   background) and `docs/layout_system_guide.md` (complete API).
+- **Learn the type rules** from `docs/language/dsl_protocols.md` (JitArgument /
+  DslType / Storable, §4.5) and `docs/language/storage_and_allocator.md`.
+- **Use the extension libraries** in `python/flydsl/extension/` — `fx.coop` for
+  warp/block collectives (runnable examples in `examples/extension/coop/`).
 - **Tune** with `docs/kernel_tuning_guide.md` (LDS swizzle, double-buffering,
   MFMA scheduling, occupancy, ATT/PMC profiling).

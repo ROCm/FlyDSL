@@ -44,7 +44,7 @@ frequently manifest as an **LLVM/MLIR assertion failure** — a raw abort with a
 C++ `file:line` and a terse message, for example:
 
 ```
-IntTupleUtils.h:943 ... Assertion `!collector.empty() && "not support empty IntTuple"' failed.
+IntTupleUtils.h:956 ... Assertion `!collector.empty() && "not support empty IntTuple"' failed.
 Casting.h:566     ... cast<TypedValue<LLVMPointerType>>() argument of incompatible type!
 ```
 
@@ -99,7 +99,7 @@ GPU behavior, so the tools are the classic ones:
 
 ## The micro-repro loop
 
-The single most effective technique — indispensable for the §14.3 aborts — is a
+The single most effective technique — indispensable for the §15.3 aborts — is a
 tight isolation loop:
 
 1. **Extract** the failing kernel into a ~30-line standalone script, *outside*
@@ -114,10 +114,10 @@ tight isolation loop:
 
 ## Worked failure #1 — the empty-`IntTuple` abort
 
-*A compile-time abort (§14.3).* A `pytest` run died mid-suite with a `SIGABRT`:
+*A compile-time abort (§15.3).* A `pytest` run died mid-suite with a `SIGABRT`:
 
 ```
-IntTupleUtils.h:943 ... Assertion `... "not support empty IntTuple"' failed.
+IntTupleUtils.h:956 ... Assertion `... "not support empty IntTuple"' failed.
 ```
 
 Running the one suspect kernel standalone reproduced it at trace time, on:
@@ -147,7 +147,7 @@ asserts, two different DSL mistakes — both found by the same contrast method.)
 
 ## Worked failure #2 — the Storable-protocol error
 
-*A trace-time error (§14.2) that reads worse than it is.* Allocating LDS failed at
+*A trace-time error (§15.2) that reads worse than it is.* Allocating LDS failed at
 `.allocate(SharedStorage)` with:
 
 ```
@@ -314,5 +314,5 @@ Yes — FlyDSL is not a black box, and every layer is inspectable in text:
 **Bottom line.** Trace-time and run-time bugs debug like ordinary Python and
 ordinary GPU code. Compile-time aborts are the one rough patch — the message is a
 C++ assertion, not a Python error — so you fall back to IR dumps and the
-micro-repro loop of §14.5. But nothing is truly opaque: Python source, MLIR at
+micro-repro loop of §15.5. But nothing is truly opaque: Python source, MLIR at
 every stage, and the final ISA are all readable end to end.

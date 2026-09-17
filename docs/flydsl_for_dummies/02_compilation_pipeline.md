@@ -104,7 +104,7 @@ it captured (§2.7).
 ## Stage 2 — Tracing (host, once)
 
 Calling a `@flyc.jit` function from ordinary Python (no MLIR context active) drives
-tracing in `JitFunction.__call__` (`python/flydsl/compiler/jit_function.py:1367`):
+tracing in `JitFunction.__call__` (`python/flydsl/compiler/jit_function.py:1361`):
 
 1. Create an MLIR `Context` and a top-level `Module` marked
    `gpu.container_module`.
@@ -123,9 +123,9 @@ The result is an MLIR module mixing the `fly`, `gpu`, `arith`, `scf`, `memref`, 
 
 ## Stage 3 — The pass pipeline
 
-`MlirCompiler.compile()` (`python/flydsl/compiler/jit_function.py:788`) runs a pass
+`MlirCompiler.compile()` (`python/flydsl/compiler/jit_function.py:782`) runs a pass
 pipeline assembled by `RocmBackend._pipeline_parts()`
-(`python/flydsl/compiler/backends/rocm.py:36`). It has three stages.
+(`python/flydsl/compiler/backends/rocm.py:50`). It has three stages.
 
 ### Stage A — Fly dialect → ROCDL
 
@@ -256,7 +256,7 @@ compiles to.
 Other useful switches: `FLYDSL_DEBUG_PRINT_AFTER_ALL` (print IR after every pass),
 `FLYDSL_DEBUG_AST_DIFF` (see the AST rewrite from §2.3), and
 `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1` (line info for the profiler; incompatible with
-`FLYDSL_RUNTIME_RUN_ONLY`). See Chapter 15 for the full table. Chapter 14 puts these
+`FLYDSL_RUNTIME_RUN_ONLY`). See Chapter 16 for the full table. Chapter 15 puts these
 switches to work on real failures.
 
 With the pipeline in hand, we can now look at the objects that flow through it: the

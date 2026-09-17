@@ -21,22 +21,22 @@ becomes.
 | `fx.rocdl.LDSReadTrans*` (CDNA4) | LDS → reg | `ds_read_tr*` (transpose load) |
 | `fx.rocdl.TDM(...)` (gfx1250) | Global ↔ LDS | `tensor_load_to_lds` (N-D descriptor DMA) |
 
-- **`UniversalCopy`** (`python/flydsl/expr/primitive.py:202`) is target-neutral: it
+- **`UniversalCopy`** (`python/flydsl/expr/primitive.py:199`) is target-neutral: it
   emits a plain `llvm.load`/`llvm.store`, and the AMDGPU backend selects
   `global_load_dwordx4` (from global), `ds_read_b128` (from LDS), or `ds_write_b128`
   (to LDS) purely from the pointer's address space. One op type, three possible
   instructions.
-- **`BufferCopy`** (`python/flydsl/expr/rocdl/universal.py:57`) is the CDNA
+- **`BufferCopy`** (`python/flydsl/expr/rocdl/universal.py:80`) is the CDNA
   buffer-descriptor path: `rocdl.raw.ptr.buffer.load/store` →
   `buffer_load/store_dwordx{1,2,4}`. It carries a per-atom `soffset` SGPR state field
   (used to fold a K-loop byte offset into an SGPR) and a `cache_modifier` (0 =
   cached, 2 = non-temporal). Load vs. store is inferred from which side is the buffer
   descriptor.
-- **`BufferCopyLDS`** (`rocdl/universal.py:73`) is the direct DRAM→LDS DMA
+- **`BufferCopyLDS`** (`rocdl/universal.py:96`) is the direct DRAM→LDS DMA
   (`buffer_load_dwordx4 … lds`) that skips the VGPR round-trip; CDNA3/4 only.
-- **`LDSReadTrans*`** (`rocdl/cdna4.py:8`) are the gfx950 `ds_read_tr*`
+- **`LDSReadTrans*`** (`rocdl/cdna4.py:31`) are the gfx950 `ds_read_tr*`
   transpose-on-load instructions.
-- **`TDM`** (`rocdl/cdna5.py:64`) is the gfx1250 tensor-descriptor async DMA; it is a
+- **`TDM`** (`rocdl/cdna5.py:70`) is the gfx1250 tensor-descriptor async DMA; it is a
   whole different mechanism (out of scope on CDNA), noted here only for completeness.
 
 The width in the name is the **access width** of one instruction: `128b` = `dwordx4`
@@ -52,11 +52,53 @@ tile and TV layout divide evenly by it.
 
 ## Buffer tensors are the V# descriptor
 
-`fx.rocdl.make_buffer_tensor(t)` (`rocdl/universal.py:203`) is what turns an ordinary
-global pointer into the hardware buffer resource that `BufferCopy` needs. It wraps
-the pointer in a `!fly.ptr<…, BufferDesc>` (LLVM address space 8) carrying the base,
-a record count, and format flags; that lowers via `rocdl.make.buffer.rsrc` to the
-128-bit SGPR buffer descriptor (base / stride / num-records / flags) — the V#.
+### What a V# is
+
+**V#** is AMD ISA shorthand for a *vector-memory buffer resource descriptor*: a
+128-bit value held in an aligned quad of scalar registers (`s[0:3]`) that describes
+a region of memory to the vector-memory unit. (The family also has **T#** for image
+descriptors and **S#** for samplers; V# is the one a compute kernel meets.) It is
+four dwords:
+
+| Dword | Field | What FlyDSL puts there |
+|-------|-------|------------------------|
+| 0 + low 16 of 1 | **base address** (48-bit VA) | the global pointer you passed in |
+| high of 1 | **stride** (structured-buffer records) | `0` — FlyDSL uses raw, not structured, buffers |
+| 2 | **num_records** | the byte bound: `0xFFFFFFFF`, or the count you asked for (§8.2) |
+| 3 | **flags** | data format + `OOB_SELECT` + arch bits |
+
+A buffer instruction then forms its address as
+
+```
+address = base + voffset + soffset + inst_offset
+                 ^per-lane  ^scalar   ^12-bit immediate
+```
+
+and — this is the point — compares it against `num_records` **in hardware, for
+free**. An out-of-range `buffer_load` returns zero; an out-of-range `buffer_store`
+is discarded. No predicate register, no branch, no VGPRs spent on a mask. That one
+property is why CK-Tile, CUTLASS's AMD backend, and FlyDSL all prefer buffer
+addressing for tiles whose edges do not divide evenly.
+
+### How FlyDSL builds one
+
+`fx.rocdl.make_buffer_tensor(t)` (`rocdl/universal.py`) wraps the tensor's pointer
+in a `!fly.ptr<…, BufferDesc>` (LLVM address space 8) carrying base, record count,
+and flags; that lowers via `rocdl.make.buffer.rsrc` to the physical V#. The flag
+word is assembled in `make_buffer_ptr`:
+
+```python
+flags = (7 << 12) | (4 << 15)          # dst_sel / num_format: raw dword access
+if is_rdna_arch(arch):
+    flags |= 1 << 24                   # reserved bit, must be 1 on RDNA
+    flags |= (3 if check_bounds else 2) << 28   # OOB_SELECT
+```
+
+`OOB_SELECT` is the field that decides *what counts as out of bounds*: mode `3`
+("raw buffer, compare the whole computed offset against num_records") is the
+checked behavior, mode `2` is the permissive historical one. FlyDSL only selects
+mode 3 when you actually supplied a bound — which is the mechanical reason behind
+the gotcha below.
 
 Contrast the two global-memory handles:
 
@@ -66,25 +108,41 @@ Contrast the two global-memory handles:
   `buffer_load_dwordx4`, which gives hardware OOB (loads past `num_records` return 0,
   stores are dropped) and an SGPR `soffset` path for cheap K-loop stepping.
 
-The legacy `buffer_ops.create_buffer_resource()` builds the same V# by hand and is
-discouraged for new kernels (`CLAUDE.md` → Kernel Authoring Conventions); prefer
-`make_buffer_tensor`, which keeps the layout attached so the Chapters 7–7 algebra
-still applies.
+> **Gotcha — the bound is opt-in.** `make_buffer_tensor(t)` defaults to
+> `max_size=True`, which sets `num_records` to `0xFFFFFFFF`: the descriptor exists,
+> but nothing is actually out of bounds, so you get the `soffset` path without the
+> OOB protection. To get a real bound, pass `num_records_bytes=` (a compile-time
+> byte count, folded into the IR) or `max_size=False` (derived at runtime from
+> `cosize(layout) * elem_bytes`). On RDNA this also flips the descriptor's
+> `OOB_SELECT` to the checked mode — an unbounded descriptor there checks nothing.
+
+The legacy `create_buffer_resource()` in `kernels/common/buffer_ops.py` builds the
+same V# by hand and is discouraged for new kernels (`CLAUDE.md` → Kernel Authoring
+Conventions); prefer `make_buffer_tensor`, which keeps the layout attached so the
+Chapters 6–7 algebra still applies.
+
+Note that the descriptor is a *scalar* object: the V# lives in SGPRs and is
+uniform across the wave, so a buffer tensor is only usable when every lane reads
+the same region — which is always true for a tile. Per-lane variation goes in
+`voffset`, per-iteration variation in `soffset`, and the descriptor itself stays
+put for the life of the kernel.
 
 > **HIP/CK-Tile → FlyDSL.** `make_buffer_tensor(t)` is
 > `__builtin_amdgcn_make_buffer_rsrc` / CK-Tile's `make_buffer_view` — assembling the
-> `s[0:3]` buffer descriptor you otherwise fill field by field.
+> `s[0:3]` buffer descriptor you otherwise fill field by field. `num_records` is the
+> `buffer_size` you pass to `make_buffer_view`, and the OOB behavior is the same
+> hardware feature CK-Tile's `pad_tensor_view` leans on.
 
 ## One atom at a time: `fx.copy_atom_call`
 
 `fx.copy` loops one atom over an entire TiledCopy distribution. When you manage the
 per-thread pointer yourself, `fx.copy_atom_call(atom, src, dst, pred=None)`
-(`primitive.py:1052`) issues **exactly one** hardware instruction — no loop, no
+(`primitive.py:1050`) issues **exactly one** hardware instruction — no loop, no
 thread distribution. This is the primitive `fx.copy` is built from.
 
 ```python
-# kernels/attention/fused_rope_cache_kernel.py:142 — one load per slice, caller-driven
-fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
+# kernels/moe/moe_2stage_a16wmix/gemm1.py:304 — one load per slice, caller-driven
+fx.copy_atom_call(a_copy_atom, fx.slice(s_x_i32x4_tiles, (None, byte_off // fx.Int32(16))), r)
 ```
 
 Reach for it when the access pattern is not a clean tiled distribution — a single row
@@ -103,23 +161,23 @@ primitive that everything else compiles through.
 
 ### The pointer type and its origin
 
-A `Pointer` (`python/flydsl/expr/typing.py:877`) is a layout-free typed pointer to
+A `Pointer` (`python/flydsl/expr/typing.py:947`) is a layout-free typed pointer to
 any address space (global, shared, register). You get one from:
 
 - `fx.get_iter(tensor)` — strip the layout from a `Tensor`, returning a pointer to
   its first element (used internally; also reachable from
   `tensor.ptr + offset` patterns).
 - `fx.get_dyn_shared(dtype)` — the base of the kernel's dynamic LDS allocation
-  (`primitive.py:1144`).
+  (`primitive.py:1141`).
 - `fx.recast_iter(dtype, ptr)` — reinterpret a pointer's element type (like
   `reinterpret_cast<T*>`).
 - `ptr + offset` — element-count pointer arithmetic, emitting `fly.add_offset`
-  (`primitive.py:1188`).
+  (`primitive.py:1198`).
 
 ### `ptr_load` and `ptr_store`
 
 ```python
-# primitive.py:1207
+# primitive.py:1216
 v = fx.ptr_load(ptr)                       # load ptr's element type
 v = fx.ptr_load(ptr, result_type=fx.Int64) # load as a specific type/width
 
@@ -129,7 +187,7 @@ fx.ptr_store(value, ptr)                   # store value into ptr
 `Pointer` objects also expose these as methods: `ptr.load()`, `ptr.store(v)`, and
 `ptr[offset]` (load after arithmetic shift). They lower to `fly.ptr_load` /
 `fly.ptr_store`, which the `PtrLoadOpLowering` and `PtrStoreOpLowering` patterns in
-`FlyToROCDL.cpp:351` turn into:
+`FlyToROCDL.cpp:398` turn into:
 
 - `LLVM::LoadOp` / `LLVM::StoreOp` for global (→ `global_load_*`) and shared (→
   `ds_read_*` / `ds_write_*`) address spaces.
@@ -173,6 +231,11 @@ q_v1 = fx.ptr_load(
     result_type=fx.Vector.make_type(1, fx.Int64),
 )
 ```
+
+If that access also needs an *ordering* or a *scope* — an acquire load of a flag,
+a release store of a ready bit — use `fx.generic_load` / `fx.generic_store`
+instead (§10.7). They take the same kind of pointer and add the memory-model
+knobs `ptr_load`/`ptr_store` do not have.
 
 ### Worked example: replacing ptr_load/ptr_store with the high-level path
 
@@ -373,7 +436,7 @@ for i in fx.range_constexpr(N_TILES_M):
 results = [c_frags[k].load().ir_value() for k in fx.range_constexpr(N_ATOMS)]
 ```
 
-This is the exact pattern used in `kernels/gemm/fp8_gemm_utils.py:211`
+This is the exact pattern used in `kernels/gemm/fp8_gemm_utils.py:266`
 (`Mfma16x16x128.call`), which manages `n_tiles_a × n_tiles_b` accumulators as a
 flat list. The loop body is unrolled at trace time by `range_constexpr`, so the
 compiler sees all four `fx.gemm` calls simultaneously and can schedule them with
@@ -418,16 +481,60 @@ double-buffer/swizzle mechanics.
 > the first two into one `buffer_load … lds`, exactly as `__builtin_amdgcn_raw_buffer_
 > load_lds` does.
 
-## Atomics and waits, briefly
+## Atomics, orderings, and fences
 
-For reductions into global memory, FlyDSL exposes buffer atomics as copy-atom
-factories: `fx.rocdl.BufferAtomicAdd/Max/Min(dtype)` (`rocdl/universal.py:90`) lower
-to `buffer_atomic_add_f32` / `_max` / `_min`; `fx.rocdl.UniversalAtomic(op, dtype)`
-lowers to a target-neutral `flat`/`ds` atomic. Ordering and visibility come from
-`fx.gpu.barrier()` (`s_barrier`) and the `s_waitcnt` machinery the compiler inserts.
+There are two ways to do an atomic, and they sit at different layers.
+
+**As a copy atom, for tile-shaped reductions into global memory.**
+`fx.rocdl.BufferAtomicAdd/Max/Min(dtype)` (`rocdl/universal.py`) lower to
+`buffer_atomic_add_f32` / `_max` / `_min`; `fx.rocdl.UniversalAtomic(op, dtype)`
+lowers to a target-neutral `flat`/`ds` atomic. These plug into `fx.copy` /
+`fx.copy_atom_call` like any other atom, so a whole partitioned fragment can be
+atomically accumulated in one call.
+
+**As a pointer primitive, for one location at a time.** `python/flydsl/expr/llvm.py`
+exposes the LLVM memory model directly, and every symbol lands at top level
+(`fx.atomic_add`, not `fx.llvm.atomic_add`):
+
+```python
+old = fx.atomic_add(ptr, value)                    # also _sub/_min/_max/_and/_or/_xor/_xchg
+old = fx.atomic_fmax(ptr, x)                       # float min/max, done safely via int atomics
+old, ok = fx.atomic_cas(ptr, expected, desired)    # integers only; returns (old, Boolean)
+fx.memory_fence(ordering=fx.AtomicOrdering.Release)
+```
+
+Each takes `ordering=` (an `fx.AtomicOrdering`: `Monotonic`, `Acquire`, `Release`,
+`AcqRel`, `SeqCst`; `NotAtomic`/`Unordered` exist for loads and stores) and
+`syncscope=` — `fx.SyncScope.System` / `SingleThread`, or the AMD-specific
+`fx.rocdl.SyncScope.Agent` / `.Workgroup` / `.OneAs` when you want to pay only for
+the coherence you need.
+
+The same module gives the ordering-aware load/store that plain `fx.ptr_load` /
+`fx.ptr_store` (§10.4) cannot express:
+
+```python
+v = fx.generic_load(ptr, dtype=fx.Float32, count=4)          # -> Float32x4
+v = fx.generic_load(ptr, dtype=fx.Int64,
+                    memory_order=fx.AtomicOrdering.Acquire,
+                    syncscope=fx.rocdl.SyncScope.OneAs)      # acquire load
+fx.generic_store(ptr, v, memory_order=fx.AtomicOrdering.Release,
+                 syncscope=fx.rocdl.SyncScope.OneAs)
+```
+
+`count` vectorizes (`count=4` on an `f32` pointer gives one `dwordx4`), and
+`nontemporal=True` / `volatile=True` set the corresponding LLVM flags. These are the
+building blocks for cross-workgroup flags and spin-wait handshakes — see
+`kernels/comm/flydsl_dispatch_combine_intranode_kernel.py` and
+`tests/unit/test_llvm_wrapper.py`.
+
+Everything else about visibility still comes from `fx.gpu.barrier()` (`s_barrier`)
+and the `s_waitcnt` machinery the compiler inserts.
 
 > **HIP/CK-Tile → FlyDSL.** `BufferAtomicAdd(fx.Float32)` ≡ `buffer_atomic_add_f32` /
-> `atomicAdd` on a buffer resource.
+> `atomicAdd` on a buffer resource; `fx.atomic_add(ptr, v)` ≡ a plain
+> `atomicAdd(p, v)`; `fx.atomic_cas` ≡ `atomicCAS`; `fx.memory_fence` ≡
+> `__threadfence()` / `__builtin_amdgcn_fence`, with the scope spelled out instead
+> of implied by which `__threadfence*` variant you picked.
 
 ## The lowering ladder
 
@@ -435,7 +542,7 @@ Putting it together, each copy op type is one step from Python to ISA:
 
 ```
 fx.copy(BufferCopy128b(), gA_buf, frag)
-  → fly.copy_atom_call        (CopyAtomCallLowering, FlyToROCDL.cpp:541)
+  → fly.copy_atom_call        (CopyAtomCallLowering, FlyToROCDL.cpp:594)
   → rocdl.raw.ptr.buffer.load (CDNA3/CopyAtom.cpp:68)
   → buffer_load_dwordx4 v[0:3], v_off, s[0:3], s_soff offen
 
@@ -452,6 +559,14 @@ T[coord]  (tensor element access)
 fx.ptr_store(v, ptr) / fx.ptr_load(ptr)   (raw pointer, no layout)
   → fly.ptr_store / fly.ptr_load          (PtrStoreOpLowering / PtrLoadOpLowering)
   → llvm.store / llvm.load  →  ds_write_* / ds_read_* / global_store / global_load
+
+fx.generic_load(ptr, ...) / fx.generic_store(ptr, v, ...)   (ordering + scope)
+  → llvm.load / llvm.store with ordering+syncscope attributes
+  → global_load_* / ds_read_* + the cache-control sequence the scope demands
+
+fx.atomic_add(ptr, v) / fx.atomic_cas(...) / fx.memory_fence(...)
+  → llvm.atomicrmw / llvm.cmpxchg / llvm.fence
+  → global_atomic_add / global_atomic_cmpswap / the scope's wait+invalidate pair
 ```
 
 To *see* it for any kernel, dump the IR after Stage A: `FLYDSL_DUMP_IR=1` (§2.8)

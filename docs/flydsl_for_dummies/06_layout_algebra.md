@@ -419,9 +419,9 @@ For **f32 data, `tile_k` contiguous** (row-major LDS tile):
 swz = fx.SwizzleType.get(3, 3, 3)   # period = 2^(3+3+3) = 512 elements = 2048 B
 ```
 
-This is the canonical f32/f16 GEMM swizzle in `preshuffle_gemm.py:274`. For
+This is the canonical f32/f16 GEMM swizzle in `preshuffle_gemm.py:301`. For
 **8-bit data** the tile is narrower, so the swizzle must be narrower too —
-`preshuffle_gemm.py:272` computes:
+`preshuffle_gemm.py:289` computes:
 
 ```python
 k_blocks16 = (tile_k * elem_bytes) // 16   # number of 16-byte blocks per row
@@ -509,7 +509,7 @@ sufficient for acceptable performance on both architectures.
 
 #### Putting it all together
 
-The complete LDS-A pattern from `preshuffle_gemm.py:277`:
+The complete LDS-A pattern from `preshuffle_gemm.py:303` (`_make_sA`):
 
 ```python
 swz = fx.SwizzleType.get(3, 3, 3)
@@ -665,7 +665,7 @@ CS<...> o (0,0,0) o layout1  o (offset2) o layout2
 ```
 
 Evaluation during address calculation (`decomposeComposedLayoutValue` in
-`LayoutLowering.cpp:2560`):
+`LayoutLowering.cpp:2568`):
 
 1. Start with the logical coordinate `c`.
 2. Apply the **outermost** linear layout (`layout2`) → offset₂.
