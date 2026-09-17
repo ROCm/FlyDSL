@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-17T07:10:31Z",
+ "updated": "2026-09-17T07:59:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35195556583,
+   "pr": 987,
+   "commit": "29a282364f1a6583ca9db78431a8c9b15adb4e4c",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35195556583",
+   "created_at": "2026-09-17T07:38:38Z",
+   "updated_at": "2026-09-17T07:40:37Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 35193019090,
    "pr": 1145,
@@ -14,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35193019090",
    "created_at": "2026-09-17T07:07:47Z",
-   "updated_at": "2026-09-17T07:08:27Z",
+   "updated_at": "2026-09-17T07:49:06Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T07:32:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35193019090/job/105116000017"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T07:49:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35193019090/job/105116000069"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T07:34:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35193019090/job/105116000098"
+    }
+   ]
   },
   {
    "run_id": 35192606834,
@@ -44,9 +87,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35192517970",
    "created_at": "2026-09-17T07:01:40Z",
-   "updated_at": "2026-09-17T07:03:39Z",
+   "updated_at": "2026-09-17T07:32:12Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-17T07:26:05Z",
+     "completed_at": "2026-09-17T07:48:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35192517970/job/105114375143"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T07:26:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35192517970/job/105114375167"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T07:32:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35192517970/job/105114375226"
+    }
+   ]
   },
   {
    "run_id": 35191951586,
@@ -85,38 +156,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Enh] Give Align fields alignas-like value semantics (#1141)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612",
    "created_at": "2026-09-17T06:36:18Z",
-   "updated_at": "2026-09-17T06:53:43Z",
+   "updated_at": "2026-09-17T07:57:05Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T06:53:42Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T07:57:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612/job/105105140685"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T06:50:11Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612/job/105105140686"
+     "completed_at": "2026-09-17T07:50:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612/job/105105140686",
+     "machine": "smci350-rck-g03-f19-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T06:50:06Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T07:09:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612/job/105105140742"
     }
    ]
@@ -2093,21 +2167,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 34847992862,
-   "pr": 891,
-   "commit": "f3a624be5bfe8b01c9010e2c5e7c37afe6470fce",
-   "branch": "add-wmma-tests-gfx1250",
-   "event": "pull_request",
-   "title": "[Test] Add gfx1250 WMMA lowering tests for additional dtypes",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34847992862",
-   "created_at": "2026-09-14T13:14:14Z",
-   "updated_at": "2026-09-14T13:14:38Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
