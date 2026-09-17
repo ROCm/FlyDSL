@@ -16,8 +16,10 @@ that produce one. Keep the two in sync when either changes.
 
 Declaring the composites themselves is ``test_composite_types.py``.
 
-Frontend cases trace without a GPU; target and device cases exercise the full
-compiler and runtime through the matching verification-tier markers.
+Cases stay beside their documented topic across verification tiers: L1a checks
+frontend semantics, L1b runs full target compilation, and L2 verifies GPU results.
+The markers select the matching harness in ``conftest.py``. GPU availability is
+checked only by the L2 cases, so ordinary language checks still run without a GPU.
 """
 
 import importlib

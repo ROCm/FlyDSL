@@ -3,8 +3,10 @@
 
 """Shared pytest configuration for the language conformance suite (tests/language).
 
-Frontend cases trace through the real DSL with backend compilation disabled.
-Cases marked l1b_target_dialect or l2_device use the full compiler and runtime.
+Tests are grouped by their language documentation. L1a cases use the real DSL
+frontend via ``@flyc.jit`` with backend compilation replaced by a no-op.
+Cases marked ``l1b_target_dialect`` or ``l2_device`` use the full compiler and
+runtime, so one documentation topic can include all three verification tiers.
 """
 
 import pytest
