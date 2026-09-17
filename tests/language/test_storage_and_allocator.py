@@ -22,6 +22,7 @@ compiler and runtime through the matching verification-tier markers.
 
 import importlib
 import re
+import struct
 
 import pytest
 from lang_utils import launch_ir, source_ir
@@ -32,6 +33,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import func
 from flydsl.compiler.protocol import (
     Storable,
+    c_abi_spec,
     construct_from_ir_values,
     dsl_align_of,
     dsl_size_of,
@@ -164,6 +166,16 @@ def storage_target(request, monkeypatch):
     default_device = "cuda" if request.param == "device-default-cuda" else "cpu"
     with torch.device(default_device):
         yield torch, "cuda" if on_device else "cpu"
+
+
+class _GlobalArena(fx.Arena):
+    def __init__(self, ptr):
+        super().__init__()
+        self._ptr = ptr
+
+    @property
+    def base_ptr(self):
+        return self._ptr
 
 
 # ###########################################################################
@@ -1554,6 +1566,26 @@ class TestProductLayout:
         assert dsl_size_of(Params) == 4
         assert "tile" not in _offsets(Params)
 
+    def test_aligned_array_fields_preserve_element_stride_and_trailing_padding(self):
+        """Byte layout: Array size includes element padding; the outer Struct pads to its alignment."""
+        Item = fx.Struct["x" : fx.Align[fx.Int32, 16], "y" : fx.Int64]
+        assert _storage_layout(Item) == (16, 16, {"x": 0, "y": 8})
+        Array = fx.Array[Item, 3]
+        assert (dsl_size_of(Array), dsl_align_of(Array)) == (48, 16)
+        Outer = fx.Struct["items":Array, "tail" : fx.Align[fx.Int32, 32]]
+        assert _storage_layout(Outer) == (96, 32, {"items": 0, "tail": 64})
+
+    def test_legacy_numeric_array_alignment_is_preserved(self):
+        """Byte layout uses the maximum field alignment, including existing Numeric Arrays."""
+        # Legacy Numeric Array declarations retain their original layout rules.
+        Legacy = fx.Struct["items" : fx.Array[fx.Int32, 2, 12], "tail" : fx.Align[fx.Int32, 16]]
+        assert _storage_layout(Legacy) == (32, 16, {"items": 0, "tail": 16})
+        # Power-of-two Align previously checked only that A >= natural alignment.
+        Wrapped = fx.Align[fx.Array[fx.Int32, 2, 12], 16]
+        assert (dsl_size_of(Wrapped), dsl_align_of(Wrapped)) == (8, 16)
+        Outer = fx.Struct["items":Wrapped, "tail" : fx.Int32]
+        assert _storage_layout(Outer) == (16, 16, {"items": 0, "tail": 8})
+
 
 @pytest.mark.l1a_compile_no_target_dialect
 class TestUnionLayout:
@@ -1827,6 +1859,57 @@ class TestAlignedStorage:
         torch, device = storage_target
         block_size = 64
 
+        @fx.struct
+        class Item:
+            weight: fx.Float64
+            key: fx.Uint32
+
+        Items = fx.Array[Item, block_size, alignment]
+        assert (dsl_size_of(Item), dsl_align_of(Item)) == (16, 8)
+        assert (dsl_size_of(Items), dsl_align_of(Items)) == (block_size * 16, alignment)
+
+        @flyc.kernel(known_block_size=[block_size, 1, 1])
+        def kernel(raw: fx.Tensor, out: fx.Tensor, addresses: fx.Tensor):
+            tid = fx.thread_idx.x
+            if fx.const_expr(mode == "global"):
+                allocator = _GlobalArena(raw.iter)
+            else:
+                allocator = fx.SharedAllocator(static=mode == "static")
+            allocator.allocate(3)
+            items = allocator.allocate(Items).peek()
+            items[tid] = Item(tid.to(fx.Float64) + 0.5, fx.Uint32(0x80000000) + tid.to(fx.Uint32))
+            ptr = fx.add_offset(items.ptr, fx.int_tuple_mul(tid, 16))
+            addresses[tid] = fx.ptrtoint(ptr).to(fx.Int64)
+            fx.barrier()
+            peer = items[block_size - 1 - tid]
+            out[tid] = peer.weight
+            out[block_size + tid] = peer.key.to(fx.Float64)
+
+        @flyc.jit
+        def launch(raw: fx.Tensor, out: fx.Tensor, addresses: fx.Tensor):
+            kernel(raw, out, addresses).launch(grid=(1, 1, 1), block=(block_size, 1, 1))
+
+        raw = torch.empty(alignment + block_size * 16, dtype=torch.uint8, device=device)
+        out = torch.empty(block_size * 2, dtype=torch.float64, device=device)
+        addresses = torch.empty(block_size, dtype=torch.int64, device=device)
+        assert raw.data_ptr() % alignment == 0
+        launch(flyc.from_dlpack(raw, assumed_align=alignment), out, addresses)
+        assert launch._last_compiled is not None
+        if device == "cpu":
+            return
+
+        weight, key = out.cpu().reshape(2, block_size)
+        peer = torch.arange(block_size - 1, -1, -1, dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(weight, peer + 0.5, rtol=0, atol=0)
+        torch.testing.assert_close(key, peer + 0x80000000, rtol=0, atol=0)
+        addresses = addresses.cpu()
+        assert addresses[0].item() % alignment == 0
+        assert torch.all(addresses % 8 == 0)
+        assert torch.all(addresses[1:] - addresses[:-1] == 16)
+        if mode == "global":
+            assert addresses[0].item() == raw.data_ptr() + alignment
+
+
 @pytest.mark.l1a_compile_no_target_dialect
 class TestStaticPlacement:
     """`static=True` (default): one LDS allocation per struct leaf."""
@@ -1901,6 +1984,7 @@ class TestStaticPlacement:
         text = launch_ir(kernel)
         assert "allocBytes = 4" in text
         assert f"allocAlign = {alignment}" in text
+
 
 @pytest.mark.l1a_compile_no_target_dialect
 class TestDynamicPlacement:
