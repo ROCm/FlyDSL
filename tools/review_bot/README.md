@@ -38,6 +38,9 @@ The deployed review engine must support these runner options:
 --execution-profile untrusted-container
 --model opus
 --effort max
+--concurrency 9
+--agent-timeout 1200
+--phase-timeout 3600
 --claude-path /usr/local/bin/claude
 --run-dir /review-run
 ```

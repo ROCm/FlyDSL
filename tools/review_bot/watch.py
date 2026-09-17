@@ -46,6 +46,9 @@ GRACEFUL_REVIEW_SECONDS = 80 * 60
 HARD_REVIEW_SECONDS = 90 * 60
 CONTAINER_STOP_SECONDS = HARD_REVIEW_SECONDS - GRACEFUL_REVIEW_SECONDS
 MAX_RESULT_BYTES = 64 * 1024 * 1024
+REVIEW_CONCURRENCY = 9
+AGENT_TIMEOUT_SECONDS = 20 * 60
+PHASE_TIMEOUT_SECONDS = 60 * 60
 
 CONTROL_PATHS = (".github", ".claude", "CLAUDE.md", "tools/review_bot")
 ACTIVE_STATES = ("CLAIMED", "PREPARING", "RUNNING", "VALIDATING", "PUBLISHING")
@@ -99,7 +102,7 @@ class Config:
     git_bin: str = "/usr/bin/git"
     docker_bin: str = "/usr/bin/docker"
     python_bin: str = "/usr/bin/python3"
-    memory_limit: str = "16g"
+    memory_limit: str = "64g"
     cpu_limit: str = "8"
     pids_limit: int = 512
     publish_enabled: bool = False
@@ -1144,6 +1147,12 @@ def build_docker_argv(
         "opus",
         "--effort",
         "max",
+        "--concurrency",
+        str(REVIEW_CONCURRENCY),
+        "--agent-timeout",
+        str(AGENT_TIMEOUT_SECONDS),
+        "--phase-timeout",
+        str(PHASE_TIMEOUT_SECONDS),
         "--claude-path",
         "/usr/local/bin/claude",
         "--run-dir",
