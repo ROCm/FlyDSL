@@ -29,7 +29,7 @@ from lang_utils import launch_ir, source_ir
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.compiler.protocol import dsl_align_of, dsl_size_of
+from flydsl.compiler.protocol import construct_from_ir_values, dsl_align_of, dsl_size_of, extract_to_ir_values
 from flydsl.expr.struct import _storage_layout
 
 pytestmark = pytest.mark.l1a_compile_no_target_dialect
@@ -322,6 +322,114 @@ class TestArrayLeaf:
     def test_parameter_errors(self, make, match):
         with pytest.raises(TypeError, match=match):
             make()
+
+
+class TestArrayStruct:
+
+    @pytest.mark.parametrize("dtype, stride, align", [(Pair, 8, 4), (Outer, 16, 4), (Padded, 32, 16)])
+    def test_layout_includes_element_padding(self, dtype, stride, align):
+        Array = fx.Array[dtype, 3]
+        assert (dsl_size_of(Array), dsl_align_of(Array)) == (3 * stride, align)
+        assert Array is fx.Array[dtype, 3, align]
+        assert (Array.dtype, Array.size) == (dtype, 3)
+
+    def test_array_alignment_does_not_change_element_stride(self):
+        Array = fx.Array[Pair, 3, 32]
+        assert (dsl_size_of(Array), dsl_align_of(Array)) == (24, 32)
+
+    @pytest.mark.parametrize("align", [4, 8, 24])
+    def test_alignment_must_preserve_element_alignment(self, align):
+        with pytest.raises(ValueError, match="multiple of the element alignment 16"):
+            fx.Array[Padded, 3, align]
+
+    @pytest.mark.parametrize("align", [12, 24])
+    def test_alignment_must_be_a_power_of_two(self, align):
+        with pytest.raises(ValueError, match="power of two"):
+            fx.Array[Pair, 3, align]
+
+    @pytest.mark.parametrize("field_type", [fx.Vector, fx.Pointer, fx.Boolean])
+    def test_non_storable_fields_are_rejected(self, field_type):
+        Item = fx.Struct["value":field_type]
+        with pytest.raises(TypeError, match="field 'value'.*Storable"):
+            fx.Array[Item, 4]
+
+    def test_union_elements_are_rejected(self):
+        with pytest.raises(TypeError, match="storable Struct"):
+            fx.Array[Scratch, 4]
+
+    def test_nested_field_addresses_use_aos_stride(self, ctx, symbolic_offsets, monkeypatch):
+        typing_module = importlib.import_module("flydsl.expr.typing")
+        monkeypatch.setattr(typing_module, "recast_iter", lambda dtype, ptr: ptr)
+        monkeypatch.setattr(typing_module, "add_offset", lambda ptr, offset: (ptr, offset))
+        Fields = fx.Struct["small":Word, "wide":Wide]
+        Item = fx.Struct["tag":Word, "fields":Fields]
+        items = fx.Array[Item, 4].__peek_from_ptr__("base")
+
+        # Item has offsets 0, 8, 16, size 24 and alignment 8.
+        value = items[2]
+        assert value.tag == Word(("peek", (("base", 48), 0)))
+        assert value.fields.small == Word(("peek", ((("base", 48), 8), 0)))
+        assert value.fields.wide == Wide(("peek", ((("base", 48), 8), 8)))
+        items[2] = Item(Word(7), Fields(Word(11), Wide(13)))
+        assert Word.poked == [
+            ((("base", 48), 0), 7),
+            (((("base", 48), 8), 0), 11),
+            (((("base", 48), 8), 8), 13),
+        ]
+
+    def test_dynamic_indexing_and_ir_round_trip(self):
+        def body(index: fx.Int32):
+            # Start with an i32 pointer: struct indexing must first make it a
+            # byte pointer rather than multiplying the byte stride by four.
+            ptr = fx.get_iter(fx.make_rmem_tensor(16, fx.Int32))
+            Array = fx.Array[Outer, 4]
+            items = Array.__peek_from_ptr__(ptr)
+            assert items.ptr.type.element_type == fx.Uint8.ir_type
+            assert items._element_ptr(index).alignment == 4
+            items[index] = Outer(1, Inner(2, 3), 4.0)
+            flat = extract_to_ir_values(items)
+            assert len(flat) == 1
+            rebuilt = construct_from_ir_values(Array, items, flat)
+            assert rebuilt.dtype is Outer and rebuilt.size == 4
+            assert "Array[Outer, 4]" in repr(rebuilt)
+            value = rebuilt[index]
+            assert isinstance(value, Outer) and isinstance(value.inner, Inner)
+            assert isinstance(value.tail, fx.Float32)
+
+        ir_text = source_ir(body, 2)
+        assert ir_text.count("fly.ptr.store") == 4
+        assert ir_text.count("fly.ptr.load") == 4
+        assert "fly.int_tuple_mul" in ir_text
+
+    def test_mismatched_assignment_and_tensor_view_are_rejected(self):
+        def body():
+            ptr = fx.get_iter(fx.make_rmem_tensor(4, fx.Int32))
+            items = fx.Array[Pair, 2].__peek_from_ptr__(ptr)
+            with pytest.raises(TypeError, match="expects Pair value"):
+                items[0] = Inner(1, 2)
+            with pytest.raises(TypeError, match="requires Numeric elements"):
+                items.view(fx.make_layout(2, 1))
+
+        source_ir(body)
+
+    @pytest.mark.parametrize("static", [True, False])
+    def test_shared_allocation_is_contiguous_even_inside_a_struct(self, static):
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator(static=static)
+            ScratchArray = fx.Struct["items" : fx.Array[Padded, 3]]
+            items = allocator.allocate(ScratchArray).peek().items
+            assert allocator.allocated_bytes == 96
+            assert items.ptr.address_space == fx.AddressSpace.Shared
+
+        ir_text = launch_ir(kernel)
+        if static:
+            make_ptrs = _make_ptr_lines(ir_text)
+            assert len(make_ptrs) == 1
+            assert "allocBytes = 96" in make_ptrs[0]
+            assert "allocAlign = 16" in make_ptrs[0]
+        else:
+            assert "dynamic_shared_memory_size %c96_i32" in ir_text
 
 
 # ── fx.Align[T, A] ──────────────────────────────────────────────────────────
