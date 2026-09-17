@@ -104,6 +104,17 @@ class WithVector:
 # ── Product form ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("decorator", [fx.struct, fx.union])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_decorator_ignores_unknown_keyword_options(decorator, deferred):
+    class Declared:
+        x: fx.Int32
+
+    schema = decorator(legacy_option=True)(Declared) if deferred else decorator(Declared, legacy_option=True)
+    assert schema.__annotations__ == Declared.__annotations__
+    assert dsl_size_of(schema) == 4
+
+
 class TestProductForm:
     """`@fx.struct` is an ordered product with an immutable value form."""
 
@@ -1249,6 +1260,19 @@ def test_field_wrapper_keys_include_type_size_and_alignment():
 
 class TestReservedFieldNames:
     """A field may not collide with a real member of the value or its `Storage` view."""
+
+    @pytest.mark.parametrize("decorator", [fx.struct, fx.union])
+    @pytest.mark.parametrize("descriptor", [lambda f: f, property, staticmethod, classmethod])
+    def test_user_member_names_cannot_shadow_fields(self, decorator, descriptor):
+        class Conflict:
+            x: fx.Int32
+
+            @descriptor
+            def x(self):
+                return 1
+
+        with pytest.raises(ValueError, match=r"Conflict: members conflict with fields: \['x'\]"):
+            decorator(Conflict)
 
     def test_the_reserved_names_really_are_members(self):
         assert callable(Pair(1, 2.0).replace)

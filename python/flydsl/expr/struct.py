@@ -450,6 +450,9 @@ def _make_composite_class(
     doc=None,
 ):
     members = members or {}
+    conflicts = members.keys() & {field.name for field in fields}
+    if conflicts:
+        raise ValueError(f"{name}: members conflict with fields: {sorted(conflicts)}")
     identity = _make_type_identity(policy, fields)
     has_members = bool(members) or any(_has_member_behavior(field.type_spec) for field in fields)
 
@@ -639,7 +642,8 @@ class CompositeMeta(type):
         cls._display = display or name
         return cls
 
-    def __call__(cls, klass=None, /):
+    def __call__(cls, klass=None, /, **kwargs):
+        # Preserve the decorator API's acceptance of ignored keyword options.
         policy = cls._policy
 
         def wrap(wrapped):
