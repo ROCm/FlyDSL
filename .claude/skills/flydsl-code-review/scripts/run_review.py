@@ -299,9 +299,22 @@ def pin_scope(root: Path, run_dir: Path, config: dict, cancelled: threading.Even
     include_worktree = not (manifest or pr or base_ref or head_ref)
     if manifest:
         base_oid, head_oid = base_ref, head_ref
-        for oid in (base_oid, head_oid):
-            revision(root, oid, **control)
-        scope_git(snapshot, "fetch", "--quiet", "--no-tags", str(root), base_oid, head_oid)
+        if config.get("execution_profile") == "untrusted-container":
+            scope_git(snapshot, "remote", "add", "origin", f"https://github.com/{repo}.git")
+            scope_git(
+                snapshot,
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--filter=blob:none",
+                "origin",
+                base_oid,
+                head_oid,
+            )
+        else:
+            for oid in (base_oid, head_oid):
+                revision(root, oid, **control)
+            scope_git(snapshot, "fetch", "--quiet", "--no-tags", str(root), base_oid, head_oid)
         saved_manifest = run_dir / "scope-manifest.json"
         saved_manifest.write_text(canonical(manifest) + "\n", encoding="utf-8")
     elif pr:
