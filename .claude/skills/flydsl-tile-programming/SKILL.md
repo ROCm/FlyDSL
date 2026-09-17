@@ -27,8 +27,8 @@ Ask the user what kind of kernel they need. Map to one of these patterns:
 
 | Pattern | Examples | Key Primitives |
 |---------|----------|---------------|
-| **Elementwise** | vecadd, scale, relu, abs | `logical_divide` + `copy_atom_call` |
-| **Reduction** | sum, max, softmax, layernorm | `buffer_load` + warp shuffle + LDS |
+| **Elementwise** | vecadd, scale, relu, abs | `logical_divide` + `fx.copy` |
+| **Reduction** | sum, max, softmax, layernorm | `make_buffer_tensor` + warp shuffle + LDS |
 | **Tiled Copy** | transpose, permute, gather | `zipped_divide` + `TiledCopy` |
 | **GEMM** | matmul, batched gemm | `TiledMma` + `TiledCopy` + LDS |
 | **Fused** | fused attention, GEMM+epilogue | Combine GEMM + elementwise |
@@ -105,7 +105,7 @@ def elementwise_kernel(
     rOut = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
 
     # === Step 5: Load -> Compute -> Store ===
-    fx.copy_atom_call(copy_atom, fx.slice(tA, (None, tid)), rA)
+    fx.copy(copy_atom, fx.slice(tA, (None, tid)), rA)
 
     vA = Vec(fx.memref_load_vec(rA))
     # --- YOUR COMPUTE HERE ---
@@ -113,7 +113,7 @@ def elementwise_kernel(
     # --- END COMPUTE ---
     fx.memref_store_vec(vOut, rOut)
 
-    fx.copy_atom_call(copy_atom, rOut, fx.slice(tOut, (None, tid)))
+    fx.copy(copy_atom, rOut, fx.slice(tOut, (None, tid)))
 
 @flyc.jit
 def elementwise_launch(
@@ -148,10 +148,11 @@ def tiled_copy_kernel(A: fx.Tensor, B: fx.Tensor):
     bid = fx.block_idx.x
 
     block_m, block_n = 8, 24
-    tile = fx.make_tile([
+    # make_tile is varargs -- passing a list raises ValueError
+    tile = fx.make_tile(
         fx.make_layout(block_m, 1),
-        fx.make_layout(block_n, 1)
-    ])
+        fx.make_layout(block_n, 1),
+    )
 
     # Wrap as buffer tensors (AMD buffer descriptors)
     A = fx.rocdl.make_buffer_tensor(A)
@@ -167,11 +168,13 @@ def tiled_copy_kernel(A: fx.Tensor, B: fx.Tensor):
     thr_layout = fx.make_layout((4, 1), (1, 1))   # 4 threads along M
     val_layout = fx.make_layout((1, 8), (1, 1))    # each loads 8 along N
     copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-    layout_tv = fx.raked_product(thr_layout, val_layout)
-    tile_mn = fx.make_tile(4, 8)
+    # Build the TV layout with make_layout_tv -- do NOT hand-build it from
+    # raked_product alone: make_layout_tv also derives the TV mapping via
+    # composition(right_inverse(layout_mn), ...). See examples/02-tiledCopy.py.
+    tile_mn, tv_layout = fx.make_layout_tv(thr_layout, val_layout)
 
     # Build tiled copy and get thread's partition
-    tiled_copy = fx.make_tiled_copy(copy_atom, layout_tv, tile_mn)
+    tiled_copy = fx.make_tiled_copy(copy_atom, tv_layout, tile_mn)
     thr_copy = tiled_copy.get_slice(tid)
     src = thr_copy.partition_S(bA)
     dst = thr_copy.partition_D(bB)
@@ -212,7 +215,8 @@ def gemm_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
     bC = fx.slice(fx.zipped_divide(C, tileC), (None, bid))
 
     # === MMA setup ===
-    # MFMA(M, N, K, AccType) -- hardware instruction shape
+    # MFMA(M, N, K, ABType[, AccType]) -- 4th arg is the A/B operand type;
+    # the accumulator defaults to f32. Here operand and acc coincide.
     mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
 
     # Tile the MMA atom across threads: 2x2 = 4 MMA atoms per warp
@@ -260,12 +264,16 @@ def gemm_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
     fx.copy(copy_atom, copy_frag_C, copy_dst_C, pred=None)
 ```
 
-### Pattern D: Buffer Load/Store (Low-level)
+### Pattern D: Raw Buffer Load/Store (Low-level Escape Hatch)
 
-Direct AMD buffer intrinsics for maximum control. Bypasses the layout algebra.
+Direct AMD buffer intrinsics, bypassing the layout algebra. Reach for this only
+when the access has no layout form — typically a scalar base with a per-thread
+element offset. For anything with a tile structure, use Pattern A/B/C, which go
+through `make_buffer_tensor` + copy atoms and get an OOB-checked V# descriptor
+built for you.
 
 ```python
-from flydsl.expr import buffer_ops
+from kernels.common import buffer_ops   # moved out of flydsl.expr in #880
 
 @flyc.kernel
 def buffer_kernel(A: fx.Tensor, B: fx.Tensor, N: fx.Constexpr[int]):
@@ -277,10 +285,14 @@ def buffer_kernel(A: fx.Tensor, B: fx.Tensor, N: fx.Constexpr[int]):
     rsrc_b = buffer_ops.create_buffer_resource(B)
 
     # offset is in ELEMENTS (not bytes!) -- buffer_load converts internally
-    data = buffer_ops.buffer_load(rsrc_a, gid * 4, vec_width=4, dtype=fx.T.f32())
+    # fx.T.* are properties on Types -- reference them, do not call them
+    data = buffer_ops.buffer_load(rsrc_a, gid * 4, vec_width=4, dtype=fx.T.f32)
     # ... compute on data ...
     buffer_ops.buffer_store(data, rsrc_b, gid * 4)
 ```
+
+The element-vs-byte offset is a classic source of bugs; see the
+**kernel-code-cleanup** skill to migrate an existing kernel onto the layout API.
 
 ---
 
@@ -359,10 +371,24 @@ if bid == 0:
 # Workgroup barrier (__syncthreads)
 fx.gpu.barrier()
 
-# Fine-grained waitcnt (CDNA3)
-fx.rocdl.s_waitcnt(0)
+# Fine-grained waitcnt. The keyword form is arch-dispatched over gfx942,
+# gfx950, gfx11xx and gfx120x, and packs the correct bitfield per arch.
+# An unset counter encodes as "already satisfied", so name every counter you
+# actually need to wait on -- vmcnt+lgkmcnt does NOT cover expcnt.
+fx.rocdl.s_waitcnt(lgkmcnt=0)                        # LDS/SMEM only
+fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)     # all three counters
 
-# Fine-grained waitcnt (CDNA4 / gfx950)
+# gfx1250 is NOT in that dispatch list -- the keyword form raises ValueError
+# there. Use the split wait counters below instead; do not fall back to a raw
+# positional bitfield, whose bit layout differs per arch (cdna3 packs
+# lgkmcnt<<8 | expcnt<<4, rdna3 packs vmcnt<<10 | lgkmcnt<<4 | expcnt), so the
+# same literal means different waits on different targets.
+
+# Split wait counters: gfx12-class targets only -- NOT gfx942 or gfx950.
+# These are upstream ROCDL ops re-exported through fx.rocdl. In this repo every
+# caller is a gfx1250 kernel (kernels/gemm/gemm_a8w8_gfx1250.py and friends);
+# confirm support before using them on gfx120x (RDNA4), which is a separate
+# target that the keyword s_waitcnt form does dispatch.
 fx.rocdl.s_wait_loadcnt(0)
 fx.rocdl.s_wait_storecnt(0)
 fx.rocdl.s_wait_dscnt(0)

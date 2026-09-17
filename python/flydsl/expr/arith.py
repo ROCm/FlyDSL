@@ -55,6 +55,7 @@ __all__ = [
     "max",
     "min",
     "maxnumf",
+    "minnumf",
     "maximumf",
     "minimumf",
     "ceildiv",
@@ -290,17 +291,17 @@ def ceildiv(lhs, rhs, **kwargs):
 
 
 @dsl_loc_tracing
-def maxnumf(a, b, **kwargs):
+@dsl_math_wrap_result
+def maxnumf(a, b, *, fastmath=None, **kwargs):
     """Floating-point maximum, returning the non-NaN operand when one input is NaN (libm ``fmax``)."""
-    from .numeric import Numeric
-    from .typing import Vector
+    return arith.maxnumf(as_ir_value(a), as_ir_value(b), fastmath=fastmath, **kwargs)
 
-    result = arith.maxnumf(as_ir_value(a), as_ir_value(b), **kwargs)
-    if isinstance(a, Vector):
-        return Vector(result, a.shape, a.dtype)
-    if isinstance(a, Numeric):
-        return Numeric.from_ir_type(result.type)(result)
-    return result
+
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def minnumf(a, b, *, fastmath=None, **kwargs):
+    """Floating-point minimum, returning the non-NaN operand when one input is NaN (libm ``fmin``)."""
+    return arith.minnumf(as_ir_value(a), as_ir_value(b), fastmath=fastmath, **kwargs)
 
 
 @dsl_loc_tracing

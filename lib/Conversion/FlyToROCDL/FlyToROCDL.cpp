@@ -3,11 +3,14 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/ControlFlow/Transforms/StructuralTypeConversions.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -15,6 +18,9 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/bit.h"
+
+#include <numeric>
 
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
@@ -56,6 +62,23 @@ unsigned mapAttrToLLVMAddressSpace(Attribute attr) {
   if (isTargetAddressSpace<BufferDescAddressAttr>(attr))
     return 8;
   return 0; // default to generic address space
+}
+
+/// Byte alignment that still holds after `applySwizzleOnPtr`.
+///
+/// The swizzle XORs address bits at and above `base`, so only the low `base`
+/// bits of the address survive; whatever the pointer type promises above that
+/// no longer holds. `llvm::Align` additionally requires a power of two, which
+/// the divisibility arithmetic behind `AlignAttr` does not guarantee, so what
+/// is left is the greatest power-of-two divisor.
+static unsigned getLLVMAlignment(fly::PointerType ptrTy) {
+  int32_t align = ptrTy.getAlignment().getAlignment();
+  if (align <= 0)
+    return 0;
+  auto swizzle = ptrTy.getSwizzle();
+  if (!swizzle.isTrivialSwizzle())
+    align = std::gcd(align, int32_t{1} << swizzle.getBase());
+  return 1u << llvm::countr_zero(static_cast<unsigned>(align));
 }
 
 // Create a freshly named LDS global of `[nbytes x i8]` in `addrSpace`, inserted
@@ -385,7 +408,9 @@ public:
     if (!flyPtrTy)
       return failure();
 
-    Type loadTy = op.getResult().getType();
+    Type loadTy = getTypeConverter()->convertType(op.getResult().getType());
+    if (!loadTy)
+      return rewriter.notifyMatchFailure(op, "failed to convert ptr.load result type");
 
     if (auto vecTy = dyn_cast<VectorType>(loadTy)) {
       auto swizzle = flyPtrTy.getSwizzle();
@@ -412,7 +437,8 @@ public:
     } else {
       ptr = applySwizzleOnPtr(rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
                               flyPtrTy.getSwizzle());
-      Value loaded = LLVM::LoadOp::create(rewriter, loc, loadTy, ptr);
+      unsigned align = getLLVMAlignment(flyPtrTy);
+      Value loaded = LLVM::LoadOp::create(rewriter, loc, loadTy, ptr, align);
       rewriter.replaceOp(op, loaded);
       return success();
     }
@@ -458,7 +484,8 @@ public:
     } else {
       ptr = applySwizzleOnPtr(rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(ptr),
                               flyPtrTy.getSwizzle());
-      LLVM::StoreOp::create(rewriter, loc, value, ptr);
+      unsigned align = getLLVMAlignment(flyPtrTy);
+      LLVM::StoreOp::create(rewriter, loc, value, ptr, align);
       rewriter.eraseOp(op);
       return success();
     }
@@ -835,6 +862,21 @@ public:
   }
 };
 
+/// Select is type-agnostic, but its operands/results must follow FlyTypeConverter.
+class SelectOpTypeConversion : public OpConversionPattern<arith::SelectOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(arith::SelectOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto attrs = op->getAttrs();
+    auto replacement = rewriter.replaceOpWithNewOp<arith::SelectOp>(
+        op, adaptor.getCondition(), adaptor.getTrueValue(), adaptor.getFalseValue());
+    replacement->setAttrs(attrs);
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -856,6 +898,15 @@ public:
     target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeComposedLayoutOp>();
 
     FlyTypeConverter typeConverter;
+
+    // Convert every control-flow boundary along with its users.
+    scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
+    cf::populateCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
+
+    target.addDynamicallyLegalOp<arith::SelectOp>(
+        [&](arith::SelectOp op) { return typeConverter.isLegal(op.getOperation()); });
+    target.addDynamicallyLegalOp<func::CallOp, func::ReturnOp>(
+        [&](Operation *op) { return typeConverter.isLegal(op); });
 
     // Ensure function signatures are type-converted; otherwise conversions may rely on
     // inserted unrealized casts that remain live.
@@ -908,11 +959,16 @@ public:
     patterns.add<CopyAtomCallSSALowering, MmaAtomCallSSALowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
 
+    patterns.add<SelectOpTypeConversion>(typeConverter, context);
+
     // TODO: deprecated in the future
     patterns.add<ExtractAlignedPointerAsIndexLowering>(typeConverter, context);
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateFunctionOpInterfaceTypeConversionPattern<gpu::GPUFuncOp>(patterns, typeConverter);
+
+    populateCallOpTypeConversionPattern(patterns, typeConverter);
+    populateReturnOpTypeConversionPattern(patterns, typeConverter);
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();

@@ -204,8 +204,15 @@ LogicalResult CopyOpCDNA3BufferCopyType::emitAtomCall(OpBuilder &builder, Locati
 
 LogicalResult CopyOpCDNA3BufferCopyLDSType::verify(function_ref<InFlightDiagnostic()> emitError,
                                                    int32_t bitSize) {
-  if (bitSize != 32 && bitSize != 64 && bitSize != 128)
-    return emitError() << "unsupported bitSize = " << bitSize << " for BufferCopyLDS";
+  // LDS DMA transfer widths are 1/2/4 bytes, plus 12/16 bytes on gfx950
+  // (hasLDSLoadB96_B128). There is no 8-byte form on any target, so 64 is
+  // rejected here rather than silently failing instruction selection. The
+  // 96/128-bit forms still require gfx950 at run time, which a static type
+  // verifier cannot check.
+  if (bitSize != 32 && bitSize != 128)
+    return emitError() << "unsupported bitSize = " << bitSize
+                       << " for BufferCopyLDS; expected 32 or 128 (there is no 8-byte LDS DMA "
+                          "instruction, and 128 requires gfx950)";
   return success();
 }
 

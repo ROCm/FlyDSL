@@ -77,11 +77,15 @@ MLIR
 build_wheel() {
   local source_dir="$1"
   local label="$2"
+  # The baseline wheel needs the base commit's own MLIR: on a pin bump the base
+  # source predates the API change the new pin requires. The default keeps every
+  # other wheel on the shared install.
+  local mlir_path="${3:-${MLIR_PATH}}"
   local destination="${OUTPUT_DIR}/${label}"
   local wheels=()
   local fly_opt="${source_dir}/build-fly/build_py${PYTHON_SUFFIX}/bin/fly-opt"
 
-  echo "Building ${label} wheel from ${source_dir}"
+  echo "Building ${label} wheel from ${source_dir} (MLIR: ${mlir_path})"
   if ! (
     cd "${source_dir}"
     env \
@@ -89,7 +93,7 @@ build_wheel() {
       "${PYTHON_BIN_ENV}=${PYTHON_BIN}" \
       VENV_ROOT="${VENV_ROOT}" \
       ALLOW_ANY_GLIBC=1 \
-      MLIR_PATH="${MLIR_PATH}" \
+      MLIR_PATH="${mlir_path}" \
       bash scripts/build_wheels.sh
   ); then
     return 1
@@ -146,7 +150,7 @@ build_base_wheel() {
   fi
 
   trap cleanup_base_worktree EXIT
-  if ! build_wheel "${BASE_WORKTREE}" base; then
+  if ! build_wheel "${BASE_WORKTREE}" base "${BASE_MLIR_PATH:-${MLIR_PATH}}"; then
     cleanup_base_worktree
     trap - EXIT
     return 1

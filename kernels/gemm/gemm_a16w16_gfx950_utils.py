@@ -7,7 +7,7 @@ from typing import Any, Callable
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, scf, vector
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import (
     arith,
     const_expr,
@@ -23,14 +23,9 @@ GFX950_WAVE_SIZE = 64
 SPLIT_K_SEMAPHORE_MAX_LEN = 256
 
 
-def __barrier(vmcnt=0):
-    llvm.InlineAsmOp(
-        None,
-        [],
-        f"s_waitcnt vmcnt({vmcnt})\n\ts_barrier",
-        "",
-        has_side_effects=True,
-    )
+def wait_vmcnt_and_barrier(vmcnt=0):
+    rocdl.s_waitcnt(vmcnt=vmcnt)
+    rocdl.s_barrier()
 
 
 _compiled_cache_lock = Lock()
@@ -73,15 +68,10 @@ def run_cached(
 
 def store_global_f32_vec(c_ptr, global_offset, vec, vec_size):
     rocdl.s_waitcnt(0)
+    vec = fx.Vector(vec)
     for vec_idx in range_constexpr(vec_size // 4):
-        vals = [arith.constant(0.0, type=T.f32)] * 4
-        for elem_idx in range_constexpr(4):
-            vals[elem_idx] = vector.extract(
-                vec,
-                static_position=[vec_idx * 4 + elem_idx],
-                dynamic_position=[],
-            )
-        chunk = vector.from_elements(T.f32x4, vals)
+        vals = [vec[vec_idx * 4 + elem_idx] for elem_idx in range_constexpr(4)]
+        chunk = fx.Vector.from_elements(vals, fx.Float32)
         chunk_ptr = get_llvm_ptr(
             c_ptr,
             global_offset + vec_idx * 4,
@@ -90,7 +80,7 @@ def store_global_f32_vec(c_ptr, global_offset, vec, vec_size):
         )
         llvm.InlineAsmOp(
             None,
-            [chunk_ptr, chunk],
+            [chunk_ptr, chunk.ir_value()],
             "global_store_dwordx4 $0, $1, off sc0 sc1",
             "v,v",
             has_side_effects=True,
@@ -209,7 +199,7 @@ class SplitKProtocol:
                         store_global_f32_vec(
                             self.c_ptr,
                             c_offset,
-                            fx.as_ir_value(init_vec),
+                            init_vec,
                             self.STG_VEC_SIZE,
                         )
                     else:
@@ -232,7 +222,7 @@ class SplitKProtocol:
                             "v,v",
                             has_side_effects=True,
                         )
-            __barrier(0)
+            wait_vmcnt_and_barrier(0)
             if self.tid == 0:
                 signal_ptr = get_llvm_ptr(
                     self.signal_ptr,
@@ -251,33 +241,28 @@ class SplitKProtocol:
     @flyc.jit
     def wait_until_initialized(self):
         if self.tid == 0:
-            init_cur = arith.constant(0, type=T.i32)
-            wait_loop = scf.WhileOp([T.i32], [init_cur])
-            before = ir.Block.create_at_start(wait_loop.before, [T.i32])
-            after = ir.Block.create_at_start(wait_loop.after, [T.i32])
-            with ir.InsertionPoint(before):
-                cur = before.arguments[0]
-                need_wait = arith.CmpIOp(
-                    arith.CmpIPredicate.eq,
-                    cur,
-                    arith.constant(0, type=T.i32),
-                ).result
-                scf.ConditionOp(need_wait, [cur])
-            with ir.InsertionPoint(after):
-                signal_ptr = get_llvm_ptr(
-                    self.signal_ptr,
-                    self.signal_idx,
-                    4,
-                    ir.Type.parse("!llvm.ptr<1>"),
+            signal_ptr = get_llvm_ptr(
+                self.signal_ptr,
+                self.signal_idx,
+                4,
+                ir.Type.parse("!llvm.ptr<1>"),
+            )
+
+            def _load_signal():
+                return fx.Int32(
+                    llvm.LoadOp(
+                        T.i32,
+                        signal_ptr,
+                        alignment=4,
+                        ordering=llvm.AtomicOrdering.monotonic,
+                        syncscope="agent",
+                    ).result
                 )
-                cur = llvm.LoadOp(
-                    T.i32,
-                    signal_ptr,
-                    alignment=4,
-                    ordering=llvm.AtomicOrdering.monotonic,
-                    syncscope="agent",
-                ).result
-                scf.YieldOp([cur])
+
+            # spin until signal != 0; reload stays in the loop body
+            cur = _load_signal()
+            while cur == fx.Int32(0):
+                cur = _load_signal()
         rocdl.sched_barrier(0)
         gpu.barrier()
 
@@ -365,10 +350,6 @@ def get_wave_lds_offset(tid, async_load_bytes):
     )
 
 
-def make_wave_lds_ptr(ptr, wave_offset):
-    return fx.recast_iter(fx.Int8, ptr) + fx.Int32(wave_offset)
-
-
 def swizzled_col_idx(row, col, layout, block_k):
     elem_offset = fx.get_scalar(fx.crd2idx((row, col), layout))
     return elem_offset % block_k
@@ -380,25 +361,3 @@ def transposed_contiguous_idx(idx, k_idx, layout, rows):
     # vector that belongs at that position.
     elem_offset = fx.get_scalar(fx.crd2idx((idx, k_idx), layout))
     return elem_offset % rows
-
-
-def buffer_load_lds_inline(rsrc, lds_ptr, global_offset, DMA_BYTES):
-    buffer_load_asm_dict = {
-        16: "buffer_load_dwordx4",
-        8: "buffer_load_dwordx2",
-        4: "buffer_load_dword",
-    }
-    llvm.InlineAsmOp(
-        None,
-        [
-            llvm.IntToPtrOp(
-                ir.Type.parse("!llvm.ptr<3>"),
-                fx.as_ir_value(fx.ptrtoint(lds_ptr)),
-            ).result,
-            fx.as_ir_value(global_offset),
-            fx.as_ir_value(rsrc),
-        ],
-        f"s_mov_b32 m0, $0\n\t{buffer_load_asm_dict[DMA_BYTES]} $1, $2, 0 offen sc0 lds",
-        "s,v,s",
-        has_side_effects=True,
-    )

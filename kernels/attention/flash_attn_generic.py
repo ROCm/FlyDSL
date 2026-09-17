@@ -21,11 +21,9 @@ import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator
 from kernels.attention.flash_attn_utils import (
     GenericFlashAttnContext,
     GenericGemmHelper,
@@ -37,8 +35,8 @@ from kernels.attention.flash_attn_utils import (
     GenericStoreHelper,
     _make_flash_attn_generic_traits,
     _waitcnt_vm_n,
-    scf_if_dispatch,
 )
+from kernels.common.kernels_common import dtype_to_elem_type
 
 
 def build_flash_attn_func_module_primary(
@@ -236,13 +234,11 @@ def build_flash_attn_func_module_primary(
     if sm_scale is None:
         sm_scale = 1.0 / host_math.sqrt(head_dim)
 
-    allocator = SmemAllocator(
-        None,
-        arch=gpu_arch,
-        global_sym_name=f"flash_attn_func_smem_{traits.PATH_TAG}",
-    )
-    lds_kv_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_kv_offset + traits.LDS_KV_TOTAL_SIZE * 2
+    _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
+
+    @fx.struct
+    class SharedStorage:
+        kv: fx.Array[_lds_elem_dtype, traits.LDS_KV_TOTAL_SIZE, 16]
 
     @flyc.kernel(known_block_size=[traits.BLOCK_SIZE, 1, 1])
     def flash_attn_generic_kernel(
@@ -260,7 +256,7 @@ def build_flash_attn_func_module_primary(
     ):
         # Make shape/mode traits visible to the JIT cache key.
         _ = _flash_attn_generic_cache_tag
-        ctx = GenericFlashAttnContext(traits, K, V, seq_len, seq_len_kv, allocator, lds_kv_offset)
+        ctx = GenericFlashAttnContext(traits, K, V, seq_len, seq_len_kv)
         ctx.init_types_and_pointers()
         gemm_helper = GenericGemmHelper(ctx)
         softmax_helper = GenericSoftmaxHelper(ctx)
@@ -270,7 +266,7 @@ def build_flash_attn_func_module_primary(
         store_helper = GenericStoreHelper(ctx)
 
         ctx.init_sequence_indices()
-        ctx.init_lds_view()
+        ctx.init_lds_view(SharedStorage)
         ctx.init_thread_mapping()
         ctx.init_block_mapping()
         ctx.init_sequence_lengths(CuSeqQ, CuSeqKv)
@@ -365,11 +361,9 @@ def build_flash_attn_func_module_primary(
                     else:
                         _next_kv = kv_block_start + fx.Index(traits.BLOCK_N_OUT)
                         _has_next = _next_kv < kv_upper
-
-                        def _prefetch_next_k():
-                            kv_gmem_to_lds.coop_dma_k(_next_kv, _next_k_buf_id)
-
-                        scf_if_dispatch(_has_next, _prefetch_next_k)
+                        _prefetch_next_k = kv_gmem_to_lds.coop_dma_k
+                        if _has_next:
+                            _prefetch_next_k(_next_kv, _next_k_buf_id)
                     rocdl.sched_barrier(0)
                     k_base = kv_gmem_to_lds.k_buf_base(_k_buf_id)
                 else:
@@ -525,11 +519,6 @@ def build_flash_attn_func_module_primary(
         seq_len_kv: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
-
         bs_idx = fx.Index(batch_size)
         sl_idx = fx.Index(seq_len)
         num_q_tiles = (sl_idx + traits.BLOCK_M - 1) // traits.BLOCK_M

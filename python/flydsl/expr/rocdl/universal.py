@@ -55,6 +55,28 @@ def s_waitcnt(bitfield=None, *, vmcnt=None, lgkmcnt=None, expcnt=None):
     )
 
 
+@dsl_loc_tracing
+def asyncmark():
+    """Close the current group of async operations (``rocdl.asyncmark``).
+
+    Async LDS DMA copies (the ``*LoadAsyncLDS`` atoms, gfx1250 TDM / async global loads) are not
+    tracked by the compiler's automatic wait insertion. Group them with this and drain them with
+    :func:`wait_asyncmark`.
+    """
+    return mlir_rocdl.asyncmark()
+
+
+@dsl_loc_tracing
+def wait_asyncmark(count=0):
+    """Wait until at most ``count`` async groups remain outstanding.
+
+    ``count`` must be a compile time value: a Python ``int`` or a static DSL integer. ``count=0``
+    drains every outstanding group; ``None`` maps to the maximum, which waits for nothing.
+    """
+    n = normalize_s_waitcnt_field("count", count, 0xFFFF)
+    return mlir_rocdl.wait_asyncmark(ir.IntegerAttr.get(ir.IntegerType.get_signless(16), n))
+
+
 def BufferCopy(bit_size, cache_modifier=0):
     """Create a CDNA3 buffer copy atom (cache_modifier: 0=cached, 2=nt).
 
@@ -74,7 +96,13 @@ BufferCopy128b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(128, cac
 def BufferCopyLDS(bit_size):
     """Create a CDNA3 buffer-to-LDS copy atom.
 
-    Only supports BufferDesc -> Shared address space direction.
+    ``bit_size`` must be 32 or 128. Only supports BufferDesc -> Shared address space direction.
+
+    This atom is synchronous in the sense that the compiler inserts the ``vmcnt`` wait for you
+    before the staged LDS data is read. If you want to insert ``vmcnt``, use the async counterparts
+    instead: :func:`flydsl.expr.rocdl.cdna4.BufferLoadAsyncLDS` (same direction and state) or
+    :func:`flydsl.expr.rocdl.cdna4.GlobalLoadAsyncLDS` (Global -> Shared). Those require explicit
+    ``fx.rocdl.asyncmark()`` / ``fx.rocdl.wait_asyncmark(n)`` tracking.
 
     Current atom state:
     - `soffset` (`i32`), default zero
@@ -84,8 +112,28 @@ def BufferCopyLDS(bit_size):
 
 
 BufferCopyLDS32b = lambda: CopyOpCDNA3BufferCopyLDSType.get(32)
-BufferCopyLDS64b = lambda: CopyOpCDNA3BufferCopyLDSType.get(64)
 BufferCopyLDS128b = lambda: CopyOpCDNA3BufferCopyLDSType.get(128)
+
+
+def BufferCopyLDS64b():
+    """Create a 64-bit CDNA3 buffer-to-LDS copy atom.
+
+    .. deprecated::
+        There is no 8-byte LDS DMA instruction on any AMD target: the transfer
+        widths are 1/2/4 bytes, plus 12/16 bytes on gfx950. This entry point
+        previously produced an atom that passed verification and then silently
+        failed instruction selection, so the copy never happened. It now raises.
+
+        Use :func:`BufferCopyLDS32b` or :func:`BufferCopyLDS128b` (gfx950)
+        instead. Kept as a named export for one deprecation window; see
+        ``docs/api_stability.md`` section 3.
+    """
+    raise ValueError(
+        "BufferCopyLDS64b is deprecated and unsupported: there is no 8-byte LDS DMA "
+        "instruction on any AMD target (widths are 1/2/4 bytes, plus 12/16 bytes on "
+        "gfx950). It previously verified but silently failed instruction selection. "
+        "Use BufferCopyLDS32b, or BufferCopyLDS128b on gfx950."
+    )
 
 
 def BufferAtomic(atomic_op, val_type):
@@ -117,17 +165,24 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
 def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     """Create an arch-appropriate WMMA atom.
 
-    Supported kwargs (integer paths only — iu8 / iu4):
-        sign_a (bool, default False): treat A operand as signed.
-        sign_b (bool, default False): treat B operand as signed.
-        clamp  (bool, default False): saturate integer accumulator.
+    Supported kwargs:
+        elem_ty_b: optional B operand type for mixed-type instructions; defaults
+            to ``elem_ty_ab``. RDNA4 accepts every FP8(E4M3FN)/BF8(E5M2)
+            combination.
+        sign_a  (bool, default False): treat A operand as signed (iu8/iu4 only).
+        sign_b  (bool, default False): treat B operand as signed (iu8/iu4 only).
+        clamp   (bool, default False): saturate integer accumulator (iu8/iu4 only).
+        mod_c   (int,  default 0):     I16 C-operand modifier (gfx1250 only).
     Forwarded to the arch-specific WMMA atom (MmaOpGFX11_WMMAType on gfx11,
     MmaOpGFX120X_WMMAType on gfx120x, MmaOpGFX1250_WMMAType on gfx1250); the
-    atom's verify() rejects them on the float (fp16/bf16/fp8) paths, where the
-    intrinsic has no such operands. Future WMMA ops for new architectures
-    should extend kwargs here rather than growing the positional signature.
+    atom's verify() rejects sign_a/sign_b/clamp on the float (fp16/bf16/fp8)
+    paths, where the intrinsic has no such operands. Future WMMA ops for new
+    architectures should extend kwargs here rather than growing the positional
+    signature.
     """
-    ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    ty_a = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    elem_ty_b = kwargs.pop("elem_ty_b", None)
+    ty_b = ty_a if elem_ty_b is None else (elem_ty_b.ir_type if hasattr(elem_ty_b, "ir_type") else elem_ty_b)
     if elem_ty_acc is None:
         ty_acc = ir.F32Type.get()
     else:
@@ -143,26 +198,27 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
 
     arch = get_rocm_arch() or ""
     if arch.startswith("gfx11"):
-        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
+        return MmaOpGFX11_WMMAType.get(m, n, k, ty_a, ty_b, ty_acc, **kwargs)
     if arch.startswith("gfx1250"):
         return MmaOpGFX1250_WMMAType.get(
             m,
             n,
             k,
-            ty_ab,
-            ty_ab,
+            ty_a,
+            ty_b,
             ty_acc,
             sign_a=bool(kwargs.get("sign_a", False)),
             sign_b=bool(kwargs.get("sign_b", False)),
             clamp=bool(kwargs.get("clamp", False)),
+            mod_c=int(kwargs.get("mod_c", 0)),
         )
     if arch.startswith("gfx120"):
         return MmaOpGFX120X_WMMAType.get(
             m,
             n,
             k,
-            ty_ab,
-            ty_ab,
+            ty_a,
+            ty_b,
             ty_acc,
             sign_a=bool(kwargs.get("sign_a", False)),
             sign_b=bool(kwargs.get("sign_b", False)),
@@ -177,14 +233,18 @@ def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):
     """Construct a new buffer-resource (``BufferDesc``) pointer from a global
     pointer, for hardware OOB-checked loads / stores.
 
-    ``num_records_bytes`` is the descriptor byte count.  When ``None``
-    (default) it falls back to the max size ``0xFFFFFFFF``.
+    ``num_records_bytes`` is the descriptor byte count. When supplied, RDNA
+    selects descriptor ``OOB_SELECT=3`` so a raw buffer access outside that
+    bound is suppressed. When ``None`` (default), the descriptor uses the max
+    size ``0xFFFFFFFF`` and preserves the historical unchecked
+    ``OOB_SELECT=2`` behavior.
     """
     if not is_generic_address_space(ptr.address_space, AddressSpace.Global):
         raise ValueError(f"make_buffer_ptr requires a global-address-space pointer, got {ptr.address_space}")
 
     elem_ty = ptr.element_type
 
+    check_bounds = num_records_bytes is not None
     if num_records_bytes is None:
         num_records_bytes = Int64(0xFFFFFFFF)
     elif not isinstance(num_records_bytes, Int64):
@@ -197,7 +257,7 @@ def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):
     flags = (7 << 12) | (4 << 15)
     if is_rdna_arch(arch):
         flags |= 1 << 24  # reserved bit, must be 1 on RDNA
-        flags |= 2 << 28  # OOB_SELECT = 2 (no bounds checking)
+        flags |= (3 if check_bounds else 2) << 28
 
     buf_ptr_ty = PointerType.get(
         elem_ty=elem_ty.ir_type,
@@ -226,10 +286,11 @@ def make_buffer_tensor(
     (CDNA buffer copy); layout is unchanged. For the gfx1250 TDM DMA use
     :func:`make_tdm_atom` instead — TDM needs a raw VA, not a buffer resource.
 
-    ``max_size=True`` (default) sets the descriptor to ``0xFFFFFFFF``.
-    Pass ``num_records_bytes`` when the byte count is a compile-time
-    constant (folds to a constant in IR).  Otherwise with ``max_size=False``
-    it is derived at runtime from ``cosize(layout) * elem_bytes``.
+    ``max_size=True`` (default) leaves RDNA bounds checking disabled and sets
+    the descriptor size to ``0xFFFFFFFF``. Pass ``num_records_bytes`` to enable
+    checking against an explicit byte count. Otherwise, with
+    ``max_size=False``, the byte count is derived at runtime from
+    ``cosize(layout) * elem_bytes`` and checking is enabled.
     """
     elem_ty = tensor.element_type
 

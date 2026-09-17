@@ -23,6 +23,7 @@ import argparse
 import math
 import os
 import sys
+from itertools import combinations, product
 from typing import Tuple
 
 import pytest
@@ -949,14 +950,14 @@ def _skip_if_invalid_gemm2(*, model_dim, inter_dim, tile_m, tile_n, tile_k):
 # Shape coverage. model_dim/inter_dim kept small (128/256) to stay fast; the
 # variety lives in tokens (ragged M), experts, topk, and the tile_* triples.
 #
-# Split into a small FAST core (default CI) and an exhaustive `large_shape` sweep.
+# Split into a small FAST core (default CI) and a pairwise `large_shape` sweep.
 #
 # The fast core is crossed over ALL FOUR input dtypes (fp8, int8, int8smooth,
 # int4) so the CI-default selection exercises every code path, not just int8.
 # To keep the dtype dimension inside the ~2min fast budget the shape list is
 # TRIMMED to a ragged-M core (tokens not a multiple of tile_m -- the M-safety
-# that this coverage exists for); the full shape x tile x dim cross lives in the
-# `large_shape` sweep below.
+# that this coverage exists for); pairwise dtype x shape x tile x dim coverage
+# lives in the `large_shape` sweep below.
 
 _FAST_DTYPES = ["fp8", "int8", "int8smooth", "int4"]
 # gemm2 has only THREE distinct code paths: fp8 (E4M3 elem), int8 (i32 acc), int4
@@ -978,7 +979,10 @@ _FAST_GEMM2 = _FAST_GEMM1 + [
     (17, 8, 2, 16, 64, 256),  # tile_k=256 path (requires inter_dim % 256 == 0)
 ]
 
-# Exhaustive (large_shape): full cross of M cases x tile triples x dims.
+# Large-shape factor values.  The selected cases below cover every valid pair of
+# logical factors instead of paying for the full Cartesian product.  M cases and
+# tile triples stay grouped because the values within each tuple describe one
+# intentional edge/configuration (for example, tokens=31 with experts=32/topk=6).
 _M_CASES = [
     (1, 8, 1),
     (3, 4, 2),
@@ -999,6 +1003,120 @@ _DIM_CASES = [
     (256, 256),  # gemm2 K=256 exercises tile_k=256
 ]
 
+_GEMM1_DTYPES = ["fp8", "int8", "int8smooth", "int4"]
+_GEMM2_DTYPES = ["fp8", "int8", "int4"]
+
+# gemm1 rejects tile_k=256 for model_dim=256 because K/tile_k must be even.
+# The remaining three tile triples are valid with both dimension cases.
+_GEMM1_VALID_TILES = _TILE_CASES[:3]
+
+# (dtype, (model_dim, inter_dim), (tile_m, tile_n, tile_k),
+#  (tokens, experts, topk))
+#
+# 24 cases is the lower bound for pairwise coverage here: dtype x M alone has
+# 4 x 6 distinct pairs.  Each appears exactly once while all other valid
+# two-factor interactions are also covered.
+_GEMM1_LARGE_CASES = [
+    ("int4", (256, 256), (16, 64, 128), (1, 8, 1)),
+    ("int8", (256, 128), (32, 64, 128), (1, 8, 1)),
+    ("int8smooth", (256, 128), (64, 128, 128), (1, 8, 1)),
+    ("fp8", (256, 256), (16, 64, 128), (1, 8, 1)),
+    ("int8", (256, 128), (16, 64, 128), (3, 4, 2)),
+    ("fp8", (256, 256), (64, 128, 128), (3, 4, 2)),
+    ("int4", (256, 256), (32, 64, 128), (3, 4, 2)),
+    ("int8smooth", (256, 128), (32, 64, 128), (3, 4, 2)),
+    ("fp8", (256, 128), (32, 64, 128), (7, 8, 2)),
+    ("int8smooth", (256, 256), (16, 64, 128), (7, 8, 2)),
+    ("int8", (256, 128), (64, 128, 128), (7, 8, 2)),
+    ("int4", (256, 128), (16, 64, 128), (7, 8, 2)),
+    ("int8smooth", (256, 256), (32, 64, 128), (31, 32, 6)),
+    ("int4", (256, 128), (64, 128, 128), (31, 32, 6)),
+    ("int8", (256, 256), (16, 64, 128), (31, 32, 6)),
+    ("fp8", (256, 256), (32, 64, 128), (31, 32, 6)),
+    ("int8smooth", (256, 128), (64, 128, 128), (33, 8, 2)),
+    ("fp8", (256, 256), (16, 64, 128), (33, 8, 2)),
+    ("int4", (256, 128), (32, 64, 128), (33, 8, 2)),
+    ("int8", (256, 256), (32, 64, 128), (33, 8, 2)),
+    ("int8", (256, 256), (64, 128, 128), (129, 128, 8)),
+    ("int4", (256, 128), (32, 64, 128), (129, 128, 8)),
+    ("fp8", (256, 256), (16, 64, 128), (129, 128, 8)),
+    ("int8smooth", (256, 128), (32, 64, 128), (129, 128, 8)),
+]
+
+# (dtype, accumulate, (model_dim, inter_dim), (tile_m, tile_n, tile_k),
+#  (tokens, experts, topk))
+#
+# 30 cases is the lower bound because all 5 tile x 6 M pairs are valid in at
+# least one dimension configuration.  The list covers each exactly once, plus
+# every other valid two-factor interaction (including both epilogue modes).
+_GEMM2_LARGE_CASES = [
+    ("int8", False, (256, 256), (128, 256, 256), (1, 8, 1)),
+    ("int4", False, (256, 256), (16, 64, 128), (1, 8, 1)),
+    ("int8", False, (256, 128), (64, 128, 128), (1, 8, 1)),
+    ("fp8", False, (256, 128), (32, 64, 128), (1, 8, 1)),
+    ("int4", True, (256, 256), (16, 64, 256), (1, 8, 1)),
+    ("int8", False, (256, 128), (16, 64, 128), (3, 4, 2)),
+    ("int4", True, (256, 256), (64, 128, 128), (3, 4, 2)),
+    ("fp8", False, (256, 256), (16, 64, 256), (3, 4, 2)),
+    ("int4", True, (256, 256), (128, 256, 256), (3, 4, 2)),
+    ("int8", True, (256, 128), (32, 64, 128), (3, 4, 2)),
+    ("int4", False, (256, 128), (32, 64, 128), (7, 8, 2)),
+    ("fp8", True, (256, 256), (16, 64, 128), (7, 8, 2)),
+    ("int8", True, (256, 256), (128, 256, 256), (7, 8, 2)),
+    ("int8", False, (256, 128), (64, 128, 128), (7, 8, 2)),
+    ("fp8", True, (256, 256), (16, 64, 256), (7, 8, 2)),
+    ("fp8", False, (256, 256), (128, 256, 256), (31, 32, 6)),
+    ("int4", True, (256, 128), (16, 64, 128), (31, 32, 6)),
+    ("int8", True, (256, 256), (64, 128, 128), (31, 32, 6)),
+    ("fp8", False, (256, 256), (16, 64, 256), (31, 32, 6)),
+    ("int4", False, (256, 256), (32, 64, 128), (31, 32, 6)),
+    ("int8", True, (256, 256), (32, 64, 128), (33, 8, 2)),
+    ("int4", False, (256, 256), (128, 256, 256), (33, 8, 2)),
+    ("fp8", True, (256, 128), (64, 128, 128), (33, 8, 2)),
+    ("int8", False, (256, 256), (16, 64, 128), (33, 8, 2)),
+    ("int4", False, (256, 256), (16, 64, 256), (33, 8, 2)),
+    ("fp8", True, (256, 128), (64, 128, 128), (129, 128, 8)),
+    ("int8", False, (256, 256), (16, 64, 256), (129, 128, 8)),
+    ("int4", True, (256, 256), (16, 64, 128), (129, 128, 8)),
+    ("int4", True, (256, 256), (128, 256, 256), (129, 128, 8)),
+    ("fp8", False, (256, 128), (32, 64, 128), (129, 128, 8)),
+]
+
+
+def _pairwise_projection(cases):
+    return {
+        (left_index, left, right_index, right)
+        for case in cases
+        for left_index, right_index in combinations(range(len(case)), 2)
+        for left, right in [(case[left_index], case[right_index])]
+    }
+
+
+def _assert_pairwise_coverage(selected, all_valid, label):
+    missing = _pairwise_projection(all_valid) - _pairwise_projection(selected)
+    assert not missing, f"{label} pairwise matrix is missing {sorted(missing, key=repr)}"
+
+
+_GEMM1_EXHAUSTIVE_VALID_CASES = list(product(_GEMM1_DTYPES, _DIM_CASES, _GEMM1_VALID_TILES, _M_CASES))
+_GEMM2_EXHAUSTIVE_VALID_CASES = [
+    case
+    for case in product(_GEMM2_DTYPES, [True, False], _DIM_CASES, _TILE_CASES, _M_CASES)
+    if case[2][1] % case[3][2] == 0 and case[2][0] % case[3][1] == 0
+]
+
+
+def _large_case_id(case):
+    if len(case) == 4:
+        in_dtype, dims, tile, m_case = case
+        mode = ""
+    else:
+        in_dtype, accumulate, dims, tile, m_case = case
+        mode = "atomic-" if accumulate else "reduce-"
+    return (
+        f"{in_dtype}-{mode}dims{dims[0]}x{dims[1]}-"
+        f"tile{tile[0]}x{tile[1]}x{tile[2]}-M{m_case[0]}xE{m_case[1]}xK{m_case[2]}"
+    )
+
 
 @_requires_fp8
 @pytest.mark.parametrize("in_dtype", _FAST_DTYPES)
@@ -1007,7 +1125,8 @@ def test_moe_gemm1_shapes_fast(in_dtype, tokens, experts, topk, tile_m, tile_n, 
     """FAST stage1 shape coverage across all four input dtypes (fp8, int8,
     int8smooth, int4): ragged M tails against tile_m 16/32/64. int8smooth uses the
     slot-major A/scale_x gather path. The shape list is trimmed (dtype x shape must
-    fit the fast budget); the full shape x tile x dim cross is in the large_shape sweep."""
+    fit the fast budget); pairwise shape x tile x dim coverage is in the
+    large_shape sweep."""
     _skip_if_invalid_gemm1(model_dim=256, inter_dim=128, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
     out, ref = _run_gemm1_any(
         in_dtype=in_dtype,
@@ -1062,14 +1181,12 @@ def test_moe_gemm2_shapes_fast(in_dtype, accumulate, tokens, experts, topk, tile
 
 @pytest.mark.large_shape
 @_requires_fp8
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int8smooth", "int4"])
-@pytest.mark.parametrize("model_dim,inter_dim", _DIM_CASES)
-@pytest.mark.parametrize("tile_m,tile_n,tile_k", _TILE_CASES)
-@pytest.mark.parametrize("tokens,experts,topk", _M_CASES)
-def test_moe_gemm1_shapes(in_dtype, model_dim, inter_dim, tile_m, tile_n, tile_k, tokens, experts, topk):
-    """Exhaustive stage1 shape sweep across all four dtype-capable inputs (fp8, int8,
-    int8smooth, int4), dims, tile triples, and ragged M cases (large_shape: excluded
-    from fast CI). int8smooth uses the slot-major A/scale_x gather path."""
+@pytest.mark.parametrize("case", _GEMM1_LARGE_CASES, ids=_large_case_id)
+def test_moe_gemm1_shapes(case):
+    """Pairwise stage1 shape sweep across all four dtype-capable inputs (fp8,
+    int8, int8smooth, int4), valid dims/tile triples, and every M edge case.
+    int8smooth uses the slot-major A/scale_x gather path."""
+    in_dtype, (model_dim, inter_dim), (tile_m, tile_n, tile_k), (tokens, experts, topk) = case
     _skip_if_invalid_gemm1(model_dim=model_dim, inter_dim=inter_dim, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
     out, ref = _run_gemm1_any(
         in_dtype=in_dtype,
@@ -1092,17 +1209,13 @@ def test_moe_gemm1_shapes(in_dtype, model_dim, inter_dim, tile_m, tile_n, tile_k
 
 @pytest.mark.large_shape
 @_requires_fp8
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
-@pytest.mark.parametrize("accumulate", [True, False])
-@pytest.mark.parametrize("model_dim,inter_dim", _DIM_CASES)
-@pytest.mark.parametrize("tile_m,tile_n,tile_k", _TILE_CASES)
-@pytest.mark.parametrize("tokens,experts,topk", _M_CASES)
-def test_moe_gemm2_shapes(in_dtype, accumulate, model_dim, inter_dim, tile_m, tile_n, tile_k, tokens, experts, topk):
-    """Exhaustive stage2 shape sweep (atomic + reduce) across all four dtype-capable
-    inputs (fp8, int8, int8smooth, int4), dims, tile triples, and ragged M cases
-    (large_shape: excluded from fast CI). int8smooth shares the int8 stage2 path but
-    is built from a distinct host-side (smooth-folded A2) fixture, so it is swept here
-    (in the fast CI it is pinned once by test_moe_gemm2_int8smooth_dispatch_equiv)."""
+@pytest.mark.parametrize("case", _GEMM2_LARGE_CASES, ids=_large_case_id)
+def test_moe_gemm2_shapes(case):
+    """Pairwise stage2 shape sweep (atomic + reduce) across the three distinct
+    dtype paths, every valid tile/dimension configuration, and every M edge case.
+    int8smooth shares the int8 path and is pinned separately by
+    test_moe_gemm2_int8smooth_dispatch_equiv."""
+    in_dtype, accumulate, (model_dim, inter_dim), (tile_m, tile_n, tile_k), (tokens, experts, topk) = case
     _skip_if_invalid_gemm2(model_dim=model_dim, inter_dim=inter_dim, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
     got, ref = _run_gemm2_any(
         in_dtype=in_dtype,
@@ -1123,6 +1236,12 @@ def test_moe_gemm2_shapes(in_dtype, accumulate, model_dim, inter_dim, tile_m, ti
         f"stage2 shapes cos={cos:.5f} ({mode}, in={in_dtype}, dims=({model_dim},{inter_dim}), "
         f"tile=({tile_m},{tile_n},{tile_k}), M=({tokens},{experts},{topk}))"
     )
+
+
+def test_large_shape_case_lists_preserve_pairwise_coverage():
+    """Keep future edits from silently dropping a valid two-factor interaction."""
+    _assert_pairwise_coverage(_GEMM1_LARGE_CASES, _GEMM1_EXHAUSTIVE_VALID_CASES, "gemm1")
+    _assert_pairwise_coverage(_GEMM2_LARGE_CASES, _GEMM2_EXHAUSTIVE_VALID_CASES, "gemm2")
 
 
 # ===========================================================================
@@ -1917,8 +2036,8 @@ def test_moe_gemm2_num_valid_ids_guard_int8smooth():
 # When invoked with args (e.g. `python test_moe_gemm_2stage.py --in_dtype fp8
 # -dim 8192,8192 -t 32768 ...`) this file becomes a benchmark harness for the
 # moe_gemm_2stage package: it times stage1, and stage2 in both atomic and reduce
-# modes, printing the log lines that scripts/run_benchmark.sh already parses
-# (see _emit_moe_s2_rows and the stage1 grep block in that script). With no args
+# modes, printing ``FlyDSL MoE stage{1,2}[...]`` lines with ``TFLOPS=`` / ``TB/s=``
+# fields that scripts/run_benchmark.sh parses via _emit_moe_rows. With no args
 # it falls back to pytest so `pytest` and direct invocation both keep working.
 # ---------------------------------------------------------------------------
 
@@ -2126,9 +2245,9 @@ def _bench_stage1(args, *, dtype_tag):
     tflops = flops / (us * 1e-6) / 1e12
     tbps = tb / (us * 1e-6) / 1e12
     print(
-        f"FlyDSL MoE stage1[{dtype_tag}]: cos={cos:.5f} | "
-        f"t{tokens}-d{model_dim}x{inter_dim}-e{experts}k{topk} | "
-        f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+        f"FlyDSL MoE stage1[{dtype_tag}]: cos={cos:.5f} "
+        f"t{tokens}-d{model_dim}x{inter_dim}-e{experts}k{topk} "
+        f"{us:.1f} us TFLOPS={tflops:.2f} TB/s={tbps:.3f}"
     )
 
 
@@ -2235,8 +2354,8 @@ def _bench_stage2(args, *, dtype_tag, accumulate):
     mode = "atomic" if accumulate else "reduce"
     shape = f"t{tokens}-d{model_dim}x{inter_dim}-e{experts}k{topk}"
     print(
-        f"FlyDSL MoE stage2 [moe_gemm2] {dtype_tag} {mode} | {shape} | "
-        f"cos={cos:.5f} | {us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+        f"FlyDSL MoE stage2[{dtype_tag}] {mode}: {shape} cos={cos:.5f} "
+        f"{us:.1f} us TFLOPS={tflops:.2f} TB/s={tbps:.3f}"
     )
 
 

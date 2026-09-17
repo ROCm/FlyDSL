@@ -239,22 +239,31 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         # arch.
         from flydsl.runtime.device import get_rocm_arch as _get_arch
 
-        if str(_get_arch() or "").startswith("gfx11"):
-            from kernels.gemm.rdna3_f16_gemm import create_wmma_gemm_module
-        else:
-            from kernels.gemm.rdna_f16_gemm import create_wmma_gemm_module
-
         K = N  # square by default; caller can override via config
         torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float16
-        launch, *_ = create_wmma_gemm_module(M, N, K, in_dtype=dtype, out_dtype="bf16")
         A = torch.randn(M, K, dtype=torch_dtype, device="cuda")
         B_T = torch.randn(N, K, dtype=torch_dtype, device="cuda")
         C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
-        return bench_gpu_us_torch(
-            lambda: launch(C, A, B_T, torch.cuda.current_stream()),
-            warmup=warmup,
-            iters=iters,
-        )
+
+        if str(_get_arch() or "").startswith("gfx11"):
+            # Through the autotune wrapper, so the number reflects the tile
+            # chosen for the shape rather than the kernel's 128x128x32 default.
+            # With nothing configured that resolution still benchmarks nothing,
+            # and warmup absorbs the one-off dispatch through the tuner.
+            from kernels.gemm.rdna3_f16_gemm_autotune import rdna3_gemm_autotuned
+
+            def run():
+                rdna3_gemm_autotuned(C, A, B_T, in_dtype=dtype, out_dtype="bf16")
+
+        else:
+            from kernels.gemm.rdna_f16_gemm import create_wmma_gemm_module
+
+            launch, *_ = create_wmma_gemm_module(M, N, K, in_dtype=dtype, out_dtype="bf16")
+
+            def run():
+                launch(C, A, B_T, torch.cuda.current_stream())
+
+        return bench_gpu_us_torch(run, warmup=warmup, iters=iters)
 
     if op == "wmma_fp8_gemm":
         from kernels.gemm.rdna_fp8_preshuffle_gemm import (

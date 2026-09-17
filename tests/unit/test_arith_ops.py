@@ -5,8 +5,9 @@
 
 """Tests for flydsl.expr.arith DSL wrappers.
 
-Currently focused on ``maxnumf`` (libm ``fmax`` semantics), which lowers to the
-MLIR ``arith.maxnumf`` op and preserves the DSL type of its first operand.
+Currently focused on ``maxnumf`` / ``minnumf`` (libm ``fmax`` / ``fmin``
+semantics), which lower to the MLIR ``arith.maxnumf`` / ``arith.minnumf`` ops
+and preserve the DSL type of the first operand.
 """
 
 import sys
@@ -61,7 +62,6 @@ def test_maxnumf_op():
 def test_maxnumf_wrapper_overrides_raw():
     """fly_arith.maxnumf must be our wrapper, not the raw MLIR binding."""
     assert fly_arith.maxnumf is not _raw_arith.maxnumf, "fly_arith.maxnumf is still the raw MLIR function"
-    assert fly_arith.maxnumf.__closure__ is not None, "fly_arith.maxnumf has no closure (not wrapped)"
 
 
 @pytest.mark.l0_backend_agnostic
@@ -139,6 +139,122 @@ def test_maxnumf_raw_value_passthrough():
 
     def build(x_raw):
         y = fly_arith.maxnumf(x_raw, x_raw)
+        assert not isinstance(y, Float32), f"raw input should not produce Float32, got {type(y).__name__}"
+
+    _build_module(build)
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize("op_name", ["maxnumf", "minnumf"])
+def test_numf_operand_order(op_name):
+    """Pin SSA operand order so a swapped a/b implementation cannot hide."""
+    op = getattr(fly_arith, op_name)
+
+    def build(a, b):
+        op(a, b)
+
+    ir_text = _build_module(build, arg_types=[ir.F32Type.get, ir.F32Type.get])
+    assert f"arith.{op_name} %arg0, %arg1" in ir_text
+    assert f"arith.{op_name} %arg1, %arg0" not in ir_text
+
+
+# ---------------------------------------------------------------------------
+# minnumf — compile-tier tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.l0_backend_agnostic
+def test_minnumf_op():
+    """minnumf emits the arith.minnumf op."""
+
+    def build(x):
+        fly_arith.minnumf(x, x)
+
+    ir_text = _build_module(build)
+    assert "arith.minnumf" in ir_text
+
+
+@pytest.mark.l0_backend_agnostic
+def test_minnumf_wrapper_overrides_raw():
+    """fly_arith.minnumf must be our wrapper, not the raw MLIR binding."""
+    assert fly_arith.minnumf is not _raw_arith.minnumf, "fly_arith.minnumf is still the raw MLIR function"
+
+
+@pytest.mark.l0_backend_agnostic
+def test_minnumf_exported_via_fx():
+    """fx.minnumf should resolve to the arith wrapper (exported through expr.__init__)."""
+    import flydsl.expr as fx
+
+    assert fx.minnumf is fly_arith.minnumf
+
+
+@pytest.mark.l0_backend_agnostic
+def test_minnumf_numeric_unwrap():
+    """minnumf should accept Float32 DSL inputs and auto-unwrap them."""
+
+    def build(x_raw):
+        x = Float32(x_raw)
+        fly_arith.minnumf(x, x)
+
+    ir_text = _build_module(build)
+    assert "arith.minnumf" in ir_text
+
+
+@pytest.mark.l0_backend_agnostic
+def test_minnumf_class_invariance():
+    """Float32 in → Float32 out, so results can be chained with DSL ops."""
+
+    def build(x_raw):
+        x = Float32(x_raw)
+        y = fly_arith.minnumf(x, x)
+        assert isinstance(y, Float32), f"minnumf: expected Float32, got {type(y).__name__}"
+
+    _build_module(build)
+
+
+@pytest.mark.l0_backend_agnostic
+def test_minnumf_vector():
+    """minnumf works elementwise on vector<4xf32> inputs."""
+
+    def build(x):
+        vtype = ir.VectorType.get([4], ir.F32Type.get())
+        splat = _raw_arith.ConstantOp(
+            vtype,
+            ir.DenseElementsAttr.get_splat(vtype, ir.FloatAttr.get(ir.F32Type.get(), 1.0)),
+        ).result
+        fly_arith.minnumf(splat, splat)
+
+    ir_text = _build_module(build)
+    assert "vector<4xf32>" in ir_text
+    assert "arith.minnumf" in ir_text
+
+
+@pytest.mark.l0_backend_agnostic
+def test_minnumf_vector_preserves_shape():
+    """A Vector operand's logical shape/dtype must survive (not collapse to the flat shape)."""
+    from flydsl.expr.typing import Vector
+
+    def build(x):
+        vtype = ir.VectorType.get([4], ir.F32Type.get())
+        splat = _raw_arith.ConstantOp(
+            vtype,
+            ir.DenseElementsAttr.get_splat(vtype, ir.FloatAttr.get(ir.F32Type.get(), 1.0)),
+        ).result
+        v = Vector(splat, (2, 2), Float32)
+        y = fly_arith.minnumf(v, v)
+        assert isinstance(y, Vector), f"expected Vector, got {type(y).__name__}"
+        assert tuple(y.shape) == (2, 2), f"expected shape (2, 2), got {tuple(y.shape)}"
+        assert y.dtype is Float32, f"expected Float32 dtype, got {y.dtype}"
+
+    _build_module(build)
+
+
+@pytest.mark.l0_backend_agnostic
+def test_minnumf_raw_value_passthrough():
+    """Raw ir.Value input should NOT be wrapped in a Numeric."""
+
+    def build(x_raw):
+        y = fly_arith.minnumf(x_raw, x_raw)
         assert not isinstance(y, Float32), f"raw input should not produce Float32, got {type(y).__name__}"
 
     _build_module(build)

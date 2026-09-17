@@ -11,6 +11,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, range_constexpr
 from kernels.common import buffer_ops
+from kernels.common.utils import copy_load
 
 # PA Q-tiling constants (identical across all PA decode kernels).
 MFMA_N = 16
@@ -52,4 +53,25 @@ def _prefetch_q_chunks(
                 dtype=fx.BFloat16 if query_load_is_bf16 else fx.Float16,
             )
         )
+    return q_chunks
+
+
+@flyc.jit
+def _prefetch_q_chunks_tile(
+    q_tiles,
+    q_copy_atom,
+    q_reg,
+    q_base,
+    lane16id,
+    *,
+    q_lanes_per_head,
+):
+    q_load_lane = lane16id
+    if const_expr(q_lanes_per_head < MFMA_N):
+        q_load_lane = (lane16id < fx.Int32(q_lanes_per_head)).select(lane16id, fx.Int32(0))
+    q_elem = q_base + q_load_lane * fx.Int32(Q_ELEMS_PER_LANE)
+    q_tile = q_elem // fx.Int32(4)
+    q_chunks = []
+    for qwi in range_constexpr(Q_CHUNKS_PER_LANE):
+        q_chunks.append(copy_load(q_tiles, q_tile + fx.Int32(qwi), q_copy_atom, q_reg))
     return q_chunks

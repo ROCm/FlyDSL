@@ -180,6 +180,11 @@ Limits: 64 KB on gfx942, 160 KB on gfx950.
 
 ## 3. LDS XOR Bank-Conflict Swizzle
 
+This section is the GEMM-specific implementation. For the general method --
+diagnosing bank conflicts from ATT trace data, choosing swizzle vs padding, and
+the gfx942 (32-bank) vs gfx950 (64-bank) differences -- see the
+**lds-optimization** skill.
+
 ### 3.1 The Problem
 
 A tile stored row-major in LDS with stride = tile_k creates bank conflicts when
@@ -223,6 +228,10 @@ uses swizzle but the other doesn't, data will be read from wrong positions.
 ---
 
 ## 4. Data Prefetch Pipeline
+
+This section is the GEMM-specific pipeline. For the general transformation --
+prologue, `range(..., init=...)` loop-carried state, epilogue -- see the
+**prefetch-data-load** skill, and 10.2 below for the register budget.
 
 ### 4.1 A Matrix: Global → LDS
 
@@ -377,7 +386,7 @@ for ku in range_constexpr(k_unroll):           # K dimension (K64 steps)
 | Data Type | K per MFMA | Instruction | Accumulator |
 |-----------|-----------|-------------|-------------|
 | FP8 | K=32 | `mfma_f32_16x16x32_fp8_fp8` | f32×4 |
-| INT8 | K=32 | `mfma_i32_16x16x32i8` | i32×4 |
+| INT8 | K=32 | `mfma_i32_16x16x32_i8` | i32×4 |
 | BF16 | K=16 | `mfma_f32_16x16x16bf16_1k` | f32×4 |
 | FP16 | K=16 | `mfma_f32_16x16x16f16` | f32×4 |
 | FP4 (gfx950) | K=128 | `mfma_scale_f32_16x16x128_f8f6f4` | f32×4 |
@@ -571,16 +580,38 @@ Total:        ~148 arch_vgpr
 
 ### 10.2 Occupancy Impact
 
-On gfx942 (256 arch_vgpr + 256 accum_vgpr per SIMD):
+On gfx942 and gfx950, `arch_vgpr` and `accum_vgpr` are two physical files that
+share **one combined 512-entry occupancy budget per SIMD** — they *do* compete:
 
-| arch_vgpr | accum_vgpr | Waves/SIMD | Assessment |
-|-----------|-----------|------------|------------|
-| ≤ 128 | ≤ 128 | 2 | Good |
-| 129-256 | ≤ 256 | 1 | Acceptable for compute-bound |
-| > 256 | any | SPILL | Critical regression |
+| arch_vgpr + accum_vgpr | Waves/SIMD | Assessment |
+|------------------------|------------|------------|
+| <= 64 | 8 | Maximum (the per-SIMD cap) |
+| <= 72 | 7 | |
+| <= 96 | 5 | |
+| <= 128 | 4 | High occupancy |
+| <= 168 | 3 | Good |
+| <= 256 | 2 | Moderate |
+| <= 512 | 1 | Minimum |
 
-MFMA accumulators use **accum_vgpr** (separate file). Prefetch buffers, B tile,
-and A tile use **arch_vgpr**. These do not compete.
+Occupancy is `min(8, 512 / alignTo(arch_vgpr + accum_vgpr, 8))`. Both constants
+come from LLVM for GFX90AInsts targets: `getMaxWavesPerEU` returns 8 and
+`getVGPRAllocGranule` returns 8 (`Utils/AMDGPUBaseInfo.cpp`). The granule matters
+at the boundaries -- a combined 170 rounds up to 176 and yields **2** waves, not
+the 3 that `512/170` alone suggests. MFMA accumulators live in `accum_vgpr` and prefetch
+buffers / A / B tiles in `arch_vgpr`, but growing either one costs occupancy.
+
+The separate 256-per-file model (`max(arch, accum)`) applies only to
+gfx908/CDNA1. In LLVM this is `getTotalNumVGPRs(has90AInsts, NumAGPR, NumVGPR)`
+(`llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp`), which returns
+`alignTo(NumVGPR, 4) + NumAGPR` when the target has GFX90AInsts — gfx90a, gfx942
+and gfx950 all do — and `max(NumVGPR, NumAGPR)` otherwise.
+
+Measured on gfx950 (MI355X) with `hipcc -Rpass-analysis=kernel-resource-usage`:
+an MFMA kernel at arch=36/accum=32 reports 7 waves (combined model predicts 7;
+separate-file model predicts 6) and at arch=84/accum=80 reports 3 waves
+(combined predicts 3; separate predicts 2). Spilling first appears at
+arch=256/accum=256, i.e. when the combined 512 is exhausted, not when either
+file alone passes 256.
 
 ---
 

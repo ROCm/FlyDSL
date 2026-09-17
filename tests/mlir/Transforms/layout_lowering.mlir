@@ -262,6 +262,25 @@ func.func @test_crd2idx_dynamic(%c0: i32, %c1: i32) -> i32 {
   return %scalar : i32
 }
 
+// Dynamic crd2idx onto scaled basis strides: the 48 scale of 48E1 must survive lowering,
+// i.e. mode 1 of the result is c0*1 + c1*48, not c0 + c1.
+// CHECK-LABEL: @test_crd2idx_dynamic_scaled_basis
+// CHECK-SAME: (%[[C0:.*]]: i32, %[[C1:.*]]: i32)
+func.func @test_crd2idx_dynamic_scaled_basis(%c0: i32, %c1: i32) -> i32 {
+  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(48, 21)>
+  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1, 48E1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(48, 21)>, !fly.int_tuple<(1E1, 48E1)>) -> !fly.layout<(48, 21) : (1E1, 48E1)>
+  %coord = fly.make_int_tuple(%c0, %c1) : (i32, i32) -> !fly.int_tuple<(?, ?)>
+  %idx = fly.crd2idx(%coord, %layout) : (!fly.int_tuple<(?, ?)>, !fly.layout<(48, 21) : (1E1, 48E1)>) -> !fly.int_tuple<(0, ?)>
+  // CHECK: %[[C48:.*]] = arith.constant 48 : i32
+  // CHECK: %[[MUL:.*]] = arith.muli %[[C1]], %[[C48]] : i32
+  // CHECK: %[[ADD:.*]] = arith.addi %[[C0]], %[[MUL]] : i32
+  // CHECK: return %[[ADD]]
+  %elem = fly.select(%idx) {indices = array<i32: 1>} : (!fly.int_tuple<(0, ?)>) -> !fly.int_tuple<?>
+  %scalar = fly.get_scalar(%elem) : (!fly.int_tuple<?>) -> i32
+  return %scalar : i32
+}
+
 // -----
 
 // === IntTuple Binary Ops Lowering ===

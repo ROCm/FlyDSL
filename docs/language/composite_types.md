@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright (c) 2026 FlyDSL Project Contributors -->
+
 # Composite Types
 
 A composite gives one name to several DSL values. There are exactly two forms — `@fx.struct`, a
@@ -87,6 +90,7 @@ as trace-time configuration.
 | `fx.Pointer` | yes | one SSA value |
 | `fx.Tensor` | yes, when built from a traced tensor | one SSA value |
 | `fx.Array[E, N]` | yes | one SSA value |
+| `fx.Align[T, A]` | whenever `T` has a value form | the underlying `T` value; alignment affects storage only |
 | another `@fx.struct` | yes | its own fields, recursively |
 | a `@fx.union` type | **no** — it has no value form | storage only |
 | `fx.Constexpr[T]` | yes, as a Python value | nothing at run time |
@@ -126,8 +130,8 @@ underlying IR values or storage.
 
 ## Closure over the protocols
 
-FlyDSL's three protocols — `DslType`, `JitArgument`, `Storable` describe what a value can do at a
-boundary. Composites are **closed under each of them, independently**:
+FlyDSL's [three protocols](dsl_protocols.md) — `DslType`, `JitArgument`, `Storable` describe what
+a value can do at a boundary. Composites are **closed under each of them, independently**:
 
 > a composite satisfies protocol `P` if and only if every non-`Constexpr` field satisfies `P`; its
 > implementation of `P` is the concatenation of the fields' implementations, in declaration order.

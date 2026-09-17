@@ -46,6 +46,36 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
 }
 
 //===----------------------------------------------------------------------===//
+// CopyOp CDNA4 — async direct-to-LDS DMA (asyncmark-tracked).
+//
+// Same LDS DMA instructions as the non-async atoms, but the backend does not
+// insert the `vmcnt` wait before the staged LDS data is read. Completion must be
+// tracked explicitly with `rocdl.asyncmark` / `rocdl.wait.asyncmark`, which is
+// what lets a kernel keep several prefetch stages in flight and wait only on the
+// oldest one.
+//===----------------------------------------------------------------------===//
+
+// Buffer resource -> LDS.
+def FlyROCDL_CopyOpBufferLoadAsyncLDS
+    : FlyROCDL_StatefulCopyOp<"CopyOpCDNA4BufferLoadAsyncLDS", "cdna4.buffer_load_async_lds",[]> {
+  let parameters = (ins
+    "int32_t":$bitSize
+  );
+  let assemblyFormat = "`<` $bitSize `>`";
+  let genVerifyDecl = 1;
+}
+
+// Global pointer -> LDS.
+def FlyROCDL_CopyOpGlobalLoadAsyncLDS
+    : FlyROCDL_CopyOp<"CopyOpCDNA4GlobalLoadAsyncLDS", "cdna4.global_load_async_lds",[]> {
+  let parameters = (ins
+    "int32_t":$bitSize
+  );
+  let assemblyFormat = "`<` $bitSize `>`";
+  let genVerifyDecl = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // CopyOp GFX1250 — N-D TDM (Tensor Data Mover) async Global<->LDS copy (1-5D).
 //
 // Whole-tile DMA. The global operand of the copy_atom_call supplies the base
