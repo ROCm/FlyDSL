@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-17T01:49:21Z",
+ "updated": "2026-09-17T02:24:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35174161224,
+   "pr": 1151,
+   "commit": "2728a1b7a7a0a41c3c227ba6d2f15ef5a41f8f6f",
+   "branch": "feature/ktrace-v4",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add an in-kernel wave tracing feature (fx.ktrace) for gfx942/gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35174161224",
+   "created_at": "2026-09-17T02:22:24Z",
+   "updated_at": "2026-09-17T02:22:46Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35171585669,
    "pr": null,
@@ -56,20 +71,20 @@
    "branch": "feature/ktrace-v4",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add an in-kernel wave tracing feature (fx.ktrace) for gfx942/gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35165112455",
    "created_at": "2026-09-17T00:05:47Z",
-   "updated_at": "2026-09-17T00:17:28Z",
+   "updated_at": "2026-09-17T02:22:26Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-17T00:17:28Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T02:22:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35165112455/job/105026934345"
     },
     {
@@ -2217,21 +2232,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 34821549524,
-   "pr": null,
-   "commit": "574338b9b95a44bc7827b8dfd745fec6b0eab7d9",
-   "branch": "jit-cache-key-captured-types",
-   "event": "pull_request",
-   "title": "[Bugfix] Include captured types in the JIT cache key",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34821549524",
-   "created_at": "2026-09-14T08:12:37Z",
-   "updated_at": "2026-09-14T08:12:37Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
