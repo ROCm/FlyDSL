@@ -12,6 +12,7 @@ from .._mlir import ir
 from ..compiler.protocol import (
     c_abi_spec,
     cache_signature,
+    construct_from_ir_values,
     dsl_align_of,
     dsl_size_of,
     extract_to_ir_values,
@@ -280,14 +281,16 @@ def _carrier_for_field(eff_type: Any, value: Any) -> Any:
     return value
 
 
-def _construct_field_from_ir(type_spec: Any, values):
+def _construct_field_from_ir(type_spec: Any, values, exemplar=None):
     ctor = getattr(type_spec, "__construct_from_ir_values__", None)
     if ctor is None:
         raise TypeError(f"struct field type {_type_name(type_spec)} does not implement __construct_from_ir_values__")
-    return ctor(values)
+    return ctor(values, exemplar) if exemplar is not None else ctor(values)
 
 
 def _ir_value_count_from_type(type_spec: Any) -> int:
+    if getattr(type_spec, "__dsl_align_wrapper__", False):
+        return _ir_value_count_from_type(type_spec.dtype)
     if is_struct_type(type_spec):
         return sum(_ir_value_count_from_type(eff) for _, eff in _effective_field_defs(type_spec))
     types_fn = getattr(type_spec, "__get_ir_types__", None)
@@ -335,6 +338,8 @@ def _inline_display_name(display: str, params, fields: tuple[FieldDef, ...]) -> 
 
 def is_specializable_struct_type(tp: Any) -> bool:
     """True if *tp* is a struct type carrying a (possibly nested) Constexpr field."""
+    if getattr(tp, "__dsl_align_wrapper__", False):
+        return is_specializable_struct_type(tp.dtype)
     if not is_struct_type(tp):
         return False
     for _name, eff in _effective_field_defs(tp):
@@ -415,8 +420,13 @@ def _make_composite_class(
         rebuilt = {}
         cursor = 0
         for name, eff_type in _effective_field_defs(cls):
-            nvalues = _ir_value_count_from_type(eff_type)
-            rebuilt[name] = _construct_field_from_ir(eff_type, values[cursor : cursor + nvalues])
+            field_exemplar = getattr(exemplar, name) if exemplar is not None else None
+            nvalues = (
+                len(get_ir_types(_carrier_for_field(eff_type, field_exemplar)))
+                if field_exemplar is not None
+                else _ir_value_count_from_type(eff_type)
+            )
+            rebuilt[name] = _construct_field_from_ir(eff_type, values[cursor : cursor + nvalues], field_exemplar)
             cursor += nvalues
         if cursor != len(values):
             raise ValueError(f"struct {_display_name(cls)} expected {cursor} ir.Values, got {len(values)}")
@@ -595,7 +605,7 @@ class Align:
             raise TypeError(f"struct.Align alignment must be an int, got {requested_align!r}")
         if requested_align <= 0:
             raise ValueError(f"struct.Align alignment must be positive, got {requested_align}")
-        if not (requested_align > 0 and (requested_align & (requested_align - 1)) == 0):
+        if requested_align & (requested_align - 1):
             raise ValueError(f"struct.Align alignment must be a power of two, got {requested_align}")
         natural = dsl_align_of(dtype)
         if requested_align < natural:
@@ -603,6 +613,32 @@ class Align:
                 f"struct.Align[{_type_name(dtype)}, {requested_align}]: requested alignment {requested_align} "
                 f"is smaller than natural alignment {natural} of {_type_name(dtype)}; use a value >= {natural}."
             )
+
+        def _coerce(cls, value):
+            coerce = getattr(dtype, "__coerce__", None)
+            if coerce is not None:
+                return coerce(value)
+            if not isinstance(value, dtype):
+                raise TypeError(f"expects {_type_name(dtype)}, got {type(value).__name__}")
+            return value
+
+        specializations = {}
+
+        def _specialize_for_value(cls, value):
+            specializer = getattr(dtype, "__specialize_for_value__", None)
+            inner = (
+                specializer(value)
+                if specializer is not None
+                else type(value) if is_composite_type(type(value)) else dtype
+            )
+            if inner is dtype:
+                return cls
+            if inner not in specializations:
+                specializations[inner] = Align[inner, requested_align]
+            return specializations[inner]
+
+        def _construct(cls, values, exemplar=None):
+            return construct_from_ir_values(dtype, dtype if exemplar is None else exemplar, values)
 
         def _aligned_size_of(inner=dtype):
             return dsl_size_of(inner)
@@ -628,6 +664,9 @@ class Align:
                 "dtype": dtype,
                 "align": requested_align,
                 "__dsl_align_wrapper__": True,
+                "__coerce__": classmethod(_coerce),
+                "__specialize_for_value__": classmethod(_specialize_for_value),
+                "__construct_from_ir_values__": classmethod(_construct),
                 "__cache_signature__": classmethod(lambda cls, _f=_cache_sig: _f()),
                 "__dsl_size_of__": classmethod(lambda cls, _f=_aligned_size_of: _f()),
                 "__dsl_align_of__": classmethod(lambda cls, _f=_aligned_align_of: _f()),
