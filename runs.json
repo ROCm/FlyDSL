@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-17T12:41:22Z",
+ "updated": "2026-09-17T15:25:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35237940327,
+   "pr": 1109,
+   "commit": "e358149173ec0a4c1db2fc4ae1b13abc600ca908",
+   "branch": "feat/rocdl-cvt-f32-fp8",
+   "event": "pull_request",
+   "title": "[DSL] Expose F32_FP8 conversion from packed_i32",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35237940327",
+   "created_at": "2026-09-17T15:05:29Z",
+   "updated_at": "2026-09-17T15:05:29Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
+  {
+   "run_id": 35231034319,
+   "pr": null,
+   "commit": "e181f2b4085c62c236b67ad92495a68b8849f58d",
+   "branch": "main",
+   "event": "push",
+   "title": "Support unroll/unroll_full on dynamic for-range loops (#1144)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35231034319",
+   "created_at": "2026-09-17T14:03:18Z",
+   "updated_at": "2026-09-17T14:40:07Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T14:40:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35231034319/job/105248888750"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-17T14:40:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35231034319/job/105248888804"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-17T14:40:14Z",
+     "completed_at": "2026-09-17T14:55:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35231034319/job/105248888869"
+    }
+   ]
+  },
   {
    "run_id": 35210617651,
    "pr": 1155,
@@ -10,20 +68,20 @@
    "branch": "rchamber/flex-tile16-2wave",
    "event": "pull_request",
    "title": "gfx950 flex attention with user score/mask mods",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35210617651",
    "created_at": "2026-09-17T10:27:54Z",
-   "updated_at": "2026-09-17T10:48:58Z",
+   "updated_at": "2026-09-17T15:22:46Z",
    "actor": "RichardChamberlain1",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-17T10:48:58Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-17T14:41:34Z",
+     "completed_at": "2026-09-17T15:22:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35210617651/job/105172913069"
     },
     {
@@ -158,7 +216,7 @@
   },
   {
    "run_id": 35199150440,
-   "pr": 1144,
+   "pr": null,
    "commit": "5195831401950c07cd903d8829fb93927ad57518",
    "branch": "xudoyuan/for-range-unroll",
    "event": "pull_request",
@@ -445,7 +503,7 @@
   },
   {
    "run_id": 35188472955,
-   "pr": 1109,
+   "pr": null,
    "commit": "ef6255cc8d1beaa6747e8fb18afe9000e680ce54",
    "branch": "feat/rocdl-cvt-f32-fp8",
    "event": "pull_request",
@@ -1279,7 +1337,7 @@
   },
   {
    "run_id": 35066191384,
-   "pr": 1144,
+   "pr": null,
    "commit": "6f5ac84ec7628844dbd09d5736f94507b1446e95",
    "branch": "xudoyuan/for-range-unroll",
    "event": "pull_request",
@@ -1325,7 +1383,7 @@
   },
   {
    "run_id": 35066165199,
-   "pr": 1144,
+   "pr": null,
    "commit": "864b4d59a61f2e221c796f4b91dfa6917755b079",
    "branch": "xudoyuan/for-range-unroll",
    "event": "pull_request",
@@ -2110,95 +2168,6 @@
      "started_at": "2026-09-15T02:48:50Z",
      "completed_at": "2026-09-15T03:25:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34893237957/job/104145546331"
-    }
-   ]
-  },
-  {
-   "run_id": 34880575937,
-   "pr": null,
-   "commit": "1cac3c82f8aa8d80b88174b831624886e5041bdb",
-   "branch": "codex/topk-gating-mi355",
-   "event": "pull_request",
-   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34880575937",
-   "created_at": "2026-09-14T18:24:13Z",
-   "updated_at": "2026-09-17T01:47:54Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-17T01:47:47Z",
-     "completed_at": "2026-09-17T01:47:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34880575937/job/105045142515"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T18:38:37Z",
-     "completed_at": "2026-09-14T18:53:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34880575937/job/105045143466"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T20:44:15Z",
-     "completed_at": "2026-09-14T23:04:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34880575937/job/105045143600"
-    }
-   ]
-  },
-  {
-   "run_id": 34874379031,
-   "pr": 1135,
-   "commit": "cb5b619af0dfd3c4cfc606088ff9f2c0a58f4510",
-   "branch": "pr/docs-remove-typed-arithmetic",
-   "event": "pull_request",
-   "title": "[Docs] Remove tedious typed arithmetic section",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874379031",
-   "created_at": "2026-09-14T17:22:43Z",
-   "updated_at": "2026-09-14T17:26:15Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T17:24:25Z",
-     "completed_at": "2026-09-14T17:24:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874379031/job/104078232135"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T17:24:27Z",
-     "completed_at": "2026-09-14T17:24:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874379031/job/104078232152"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T17:24:26Z",
-     "completed_at": "2026-09-14T17:26:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34874379031/job/104078232161",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
     }
    ]
   }
