@@ -48,8 +48,8 @@ python3 .claude/skills/flydsl-code-review/scripts/run_review.py --resume /tmp/fl
 ```
 
 Do not invoke Workflow or improvise an inline Agent sequence. The runner requires
-Python 3.10+, Git, and Claude Code CLI with `--json-schema`; PR targets also need
-authenticated `gh`. If it cannot run, report INCOMPLETE with the actual error.
+Python 3.10+, Git, and Claude Code CLI with `--json-schema`; direct PR targets need
+authenticated `gh`, while offline bot scopes use a trusted manifest and local objects.
 
 The runner prints its run ID and directory immediately. Its default directory is
 under `/tmp`; use `--run-dir <new-empty-directory>` outside the checkout for
@@ -82,7 +82,7 @@ exit `0` means no leads in the supported scope, `1` means leads need inspection.
 The runner requests `--json` and requires a COMPLETE result whose exit code
 matches the process exit code. An exception, missing/malformed result or timeout
 makes the review INCOMPLETE; exit code `1` alone never proves success. Artifact
-schema v4 requires this explicit completion record and verified severity, so older results must be rerun.
+schema v5 requires this completion record, verified severity, and offline bot scope identity.
 The artifact retains each scanner's output, exit status and run history; resume
 reuses completed checks.
 Neither scanner executes or imports the reviewed code.

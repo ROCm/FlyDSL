@@ -16,7 +16,7 @@ import re
 import sys
 import traceback
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 PER_ANGLE = 6
 SWEEP_MAX = 8
 MAX_FINDINGS = 12
@@ -368,6 +368,16 @@ def validate_report(report: dict) -> dict:
             raise ValueError(f"missing or invalid scope.{key}")
     if not re.fullmatch(r"[0-9a-f]{64}", scope.get("diff_sha256", "")):
         raise ValueError("missing diff hash")
+    if "scope_manifest_sha256" in scope:
+        if not re.fullmatch(r"[0-9a-f]{64}", scope.get("scope_manifest_sha256", "")):
+            raise ValueError("missing or invalid scope manifest hash")
+        for key in ("repository_id", "pr", "author_id"):
+            if type(scope.get(key)) is not int or scope[key] < 1:
+                raise ValueError(f"missing or invalid scope.{key}")
+        if not re.fullmatch(r"[A-Za-z0-9-]+", scope.get("author_login", "")) or scope.get("head_repo") != scope.get(
+            "repo"
+        ):
+            raise ValueError("invalid manifest-backed PR identity")
     if not isinstance(scope.get("files"), list):
         raise ValueError("missing changed files")
     for file in scope["files"]:

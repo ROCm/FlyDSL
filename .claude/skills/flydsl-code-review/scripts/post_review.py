@@ -16,15 +16,27 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import html
 import json
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 from review_common import MAX_FINDINGS, SEVERITIES, canonical, digest, finding_order, validate_report
 
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+MARKDOWN_TARGET = r"(?:(?:https?|mailto|ftp|file|javascript|data):|//)"
+MARKDOWN_LINK = re.compile(rf"\[([^\]\n]{{0,500}})\]\({MARKDOWN_TARGET}[^)\s]*\)", re.IGNORECASE)
+RAW_LINK = re.compile(
+    r"(?:(?:https?|ftp|file)://[^\s<>()]+|mailto:[^\s<>()]+|"
+    r"(?:javascript|data):[^\s<>()]+|(?<![\w/])//(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}[^\s<>()]*)",
+    re.IGNORECASE,
+)
+MAX_SUMMARY = 500
+MAX_SCENARIO = 3000
+MAX_EVIDENCE = 10000
 
 
 def gh(*args: str, stdin: str | None = None) -> str:
@@ -56,6 +68,24 @@ def pages(endpoint: str) -> list[dict]:
     return [item for page in documents for item in page]
 
 
+def sanitize_text(value: str, *, limit: int) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("published model text must be a nonempty string")
+    if len(value) > limit:
+        raise ValueError(f"published model text exceeds {limit} characters")
+    value = unicodedata.normalize("NFC", value)
+    value = "".join(char for char in value if char in "\n\t" or not unicodedata.category(char).startswith("C"))
+    value = MARKDOWN_LINK.sub(r"\1 [external link removed]", value)
+    value = RAW_LINK.sub("[external link removed]", value)
+    value = value.replace("@", "＠")
+    return html.escape(value, quote=False)
+
+
+def sanitize_location(path: str, line: int | None) -> str:
+    location = path + (f":{line}" if line is not None else "")
+    return sanitize_text(location, limit=4096).replace("`", "ˋ").replace("\n", " ").replace("\t", " ")
+
+
 def commentable_lines(patch: str) -> set[int]:
     """RIGHT-side added and context lines; deleted lines have no RIGHT-side number."""
     lines: set[int] = set()
@@ -74,10 +104,13 @@ def commentable_lines(patch: str) -> set[int]:
 
 
 def body_for(f: dict) -> str:
+    summary = sanitize_text(f["summary"], limit=MAX_SUMMARY)
+    scenario = sanitize_text(f["failure_scenario"], limit=MAX_SCENARIO)
+    evidence = sanitize_text(f["evidence"], limit=MAX_EVIDENCE)
     return (
-        f"**{f['verdict']} · {f['severity']} · {f['kind']}** — {f['summary'].strip()}\n\n"
-        f"_Failure scenario:_ {f['failure_scenario'].strip()}\n\n"
-        f"<details><summary>Verifier evidence</summary>\n\n{f['evidence'].strip()}\n\n</details>\n\n"
+        f"**{f['verdict']} · {f['severity']} · {f['kind']}** — {summary}\n\n"
+        f"_Failure scenario:_ {scenario}\n\n"
+        f"<details><summary>Verifier evidence</summary>\n\n{evidence}\n\n</details>\n\n"
         f"Candidate: `{f['id']}`\n<!-- flydsl-code-review-finding:{f['id']} -->"
     )
 
@@ -135,15 +168,15 @@ def payload_for(report: dict, files: list[dict], publish_severity: str = "P1") -
     if deferred:
         body.append("#### Confirmed findings outside the diff")
         for finding in deferred:
-            location = finding["file"] + (f":{finding['line']}" if finding["line"] is not None else "")
+            location = sanitize_location(finding["file"], finding["line"])
             body.append(f"`{location}`\n\n" + body_for(finding))
     provenance = {
         "run_id": report["run_id"],
         "status": report["status"],
         "implementation_sha256": report["implementation_sha256"],
-        "config": report["config"],
-        "paths": scope.get("paths", []),
-        "instructions": scope.get("instructions", ""),
+        "model": report["config"].get("model"),
+        "effort": report["config"].get("effort"),
+        "execution_profile": report["config"].get("execution_profile", "local"),
         "base_oid": scope["base_oid"],
         "merge_base_oid": scope["merge_base_oid"],
         "diff_base_oid": scope["diff_base_oid"],
@@ -168,17 +201,43 @@ def payload_for(report: dict, files: list[dict], publish_severity: str = "P1") -
     return payload
 
 
-def check_pr(scope: dict) -> None:
+def check_pr(
+    scope: dict,
+    *,
+    expected_repository_id: int | None = None,
+    expected_author_id: int | None = None,
+    expected_author_login: str | None = None,
+) -> None:
     pr = json.loads(gh("api", f"repos/{scope['repo']}/pulls/{scope['pr']}"))
     if pr["state"] != "open":
         raise ValueError(f"PR is {pr['state']}; refusing to post")
+    if pr.get("draft") is not False:
+        raise ValueError("PR is draft; refusing to post")
     if pr["head"]["sha"] != scope["head_oid"] or pr["base"]["sha"] != scope["base_oid"]:
         raise ValueError("PR base/head changed since this review; start a new run")
+    if scope.get("head_repo") is not None and pr["head"]["repo"]["full_name"] != scope["head_repo"]:
+        raise ValueError("PR head repository identity changed")
+    if expected_repository_id is not None and pr["base"]["repo"]["id"] != expected_repository_id:
+        raise ValueError("repository identity changed")
+    if expected_author_id is not None and pr["user"]["id"] != expected_author_id:
+        raise ValueError("PR author identity changed")
+    if expected_author_login is not None and pr["user"]["login"] != expected_author_login:
+        raise ValueError("PR author login changed")
 
 
-def existing_review(endpoint: str, marker: str, head: str) -> dict | None:
+def check_publisher(expected_publisher_id: int | None) -> None:
+    if expected_publisher_id is None:
+        return
+    user = json.loads(gh("api", "user"))
+    if user.get("id") != expected_publisher_id:
+        raise ValueError("authenticated publisher identity changed")
+
+
+def existing_review(endpoint: str, marker: str, head: str, expected_publisher_id: int | None = None) -> dict | None:
     for review in pages(endpoint):
         if marker in (review.get("body") or ""):
+            if expected_publisher_id is not None and review.get("user", {}).get("id") != expected_publisher_id:
+                continue
             if review.get("commit_id") != head or review.get("state") == "PENDING":
                 raise ValueError(
                     "matching marker is on an unexpected head or pending review; inspect it before retrying"
@@ -187,9 +246,38 @@ def existing_review(endpoint: str, marker: str, head: str) -> dict | None:
     return None
 
 
-def publish(report: dict, *, dry_run: bool, publish_severity: str = "P1") -> int:
+def publish(
+    report: dict,
+    *,
+    dry_run: bool,
+    publish_severity: str = "P1",
+    expected_implementation_sha256: str | None = None,
+    expected_publisher_id: int | None = None,
+    expected_repository_id: int | None = None,
+    expected_author_id: int | None = None,
+    expected_author_login: str | None = None,
+) -> int:
     validate_report(report)
+    if expected_implementation_sha256 is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_implementation_sha256):
+            raise ValueError("expected implementation hash must be SHA-256")
+        if report["implementation_sha256"] != expected_implementation_sha256:
+            raise ValueError("review artifact came from an unexpected implementation")
+    for name, value in (
+        ("publisher", expected_publisher_id),
+        ("repository", expected_repository_id),
+        ("author", expected_author_id),
+    ):
+        if value is not None and (type(value) is not int or value < 1):
+            raise ValueError(f"expected {name} id must be a positive integer")
     scope = report["scope"]
+    for expected, key in (
+        (expected_repository_id, "repository_id"),
+        (expected_author_id, "author_id"),
+        (expected_author_login, "author_login"),
+    ):
+        if expected is not None and scope.get(key) != expected:
+            raise ValueError(f"review artifact {key} does not match the deployment policy")
     if not isinstance(scope.get("repo"), str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", scope["repo"]):
         raise ValueError("artifact is not a GitHub PR review")
     if type(scope.get("pr")) is not int or scope["pr"] < 1:
@@ -201,15 +289,22 @@ def publish(report: dict, *, dry_run: bool, publish_severity: str = "P1") -> int
     endpoint = f"repos/{scope['repo']}/pulls/{scope['pr']}"
     reviews = endpoint + "/reviews"
     marker = finding_set_marker(report)
-    check_pr(scope)
-    existing = existing_review(reviews, marker, scope["head_oid"])
+    check_publisher(expected_publisher_id)
+    identity = {
+        "expected_repository_id": expected_repository_id,
+        "expected_author_id": expected_author_id,
+        "expected_author_login": expected_author_login,
+    }
+    check_pr(scope, **identity)
+    existing = existing_review(reviews, marker, scope["head_oid"], expected_publisher_id)
     if existing:
         print(f"Already posted: {existing.get('html_url', existing['id'])}")
         return 0
     payload = payload_for(report, pages(endpoint + "/files"), publish_severity)
     # Pins both routing and the live write. commit_id still pins the review if a
     # push races the final GET; GitHub provides no compare-and-swap POST primitive.
-    check_pr(scope)
+    check_publisher(expected_publisher_id)
+    check_pr(scope, **identity)
     if dry_run:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
@@ -217,7 +312,7 @@ def publish(report: dict, *, dry_run: bool, publish_severity: str = "P1") -> int
         response = json.loads(gh("api", "--method", "POST", reviews, "--input", "-", stdin=canonical(payload)))
     except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
         # A lost response does not mean the write failed. Reconcile, never repost.
-        existing = existing_review(reviews, marker, scope["head_oid"])
+        existing = existing_review(reviews, marker, scope["head_oid"], expected_publisher_id)
         if existing:
             print(f"Posted (response recovered): {existing.get('html_url', existing['id'])}")
             return 0
@@ -232,6 +327,11 @@ def main() -> int:
     parser.add_argument("--pr", type=int, help="optional assertion; must match the artifact")
     parser.add_argument("--repo", help="optional assertion; must match the artifact")
     parser.add_argument("--expected-head", help="optional assertion; the artifact's reviewed head is always required")
+    parser.add_argument("--expected-implementation-sha256")
+    parser.add_argument("--expected-publisher-id", type=int)
+    parser.add_argument("--expected-repository-id", type=int)
+    parser.add_argument("--expected-author-id", type=int)
+    parser.add_argument("--expected-author-login")
     parser.add_argument(
         "--publish-severity",
         choices=SEVERITIES,
@@ -249,7 +349,16 @@ def main() -> int:
         # Serialize local invocations sharing an artifact; remote retries use the marker.
         with args.result.with_suffix(".publish.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return publish(report, dry_run=args.dry_run, publish_severity=args.publish_severity)
+            return publish(
+                report,
+                dry_run=args.dry_run,
+                publish_severity=args.publish_severity,
+                expected_implementation_sha256=args.expected_implementation_sha256,
+                expected_publisher_id=args.expected_publisher_id,
+                expected_repository_id=args.expected_repository_id,
+                expected_author_id=args.expected_author_id,
+                expected_author_login=args.expected_author_login,
+            )
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"Review was not published: {exc}", file=sys.stderr)
         return 1

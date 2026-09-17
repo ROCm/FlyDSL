@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll FlyDSL pull requests every two minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Persistent=false
+Unit=flydsl-review-bot.service
+
+[Install]
+WantedBy=timers.target
