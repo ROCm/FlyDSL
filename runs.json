@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-17T08:23:26Z",
+ "updated": "2026-09-17T08:31:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35199871362,
+   "pr": null,
+   "commit": "9a5cbc97a6d85b15601eeb66ebfcfb47387eb4d4",
+   "branch": "main",
+   "event": "push",
+   "title": "[Enh] Make specialized Vector and Pointer types Storable (#1148)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199871362",
+   "created_at": "2026-09-17T08:28:42Z",
+   "updated_at": "2026-09-17T08:29:01Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 35199150440,
    "pr": 1144,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199150440",
    "created_at": "2026-09-17T08:20:31Z",
-   "updated_at": "2026-09-17T08:20:46Z",
+   "updated_at": "2026-09-17T08:22:44Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -53,10 +68,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T08:09:46Z",
-     "completed_at": null,
+     "completed_at": "2026-09-17T08:22:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35195556583/job/105124562975"
     }
    ]
@@ -68,21 +83,24 @@
    "branch": "jli/gfx1250/bump-llvm-unclausevmem",
    "event": "pull_request",
    "title": "[LLVM] bump llvm which improve the sequence for initial unclaused vmem",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35193019090",
    "created_at": "2026-09-17T07:07:47Z",
-   "updated_at": "2026-09-17T07:49:06Z",
+   "updated_at": "2026-09-17T08:29:33Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T07:32:07Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35193019090/job/105116000017"
+     "completed_at": "2026-09-17T08:29:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35193019090/job/105116000017",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -167,7 +185,7 @@
   },
   {
    "run_id": 35191951586,
-   "pr": 1148,
+   "pr": null,
    "commit": "bb71e913f7c45febcc89cf8be6676277f72fa68e",
    "branch": "pr/enh-specialized-storable",
    "event": "pull_request",
@@ -182,7 +200,7 @@
   },
   {
    "run_id": 35190913120,
-   "pr": 1148,
+   "pr": null,
    "commit": "6dc63cf4efbd0be35eeb8066c094e0a340276eb3",
    "branch": "pr/enh-specialized-storable",
    "event": "pull_request",
@@ -824,7 +842,7 @@
   },
   {
    "run_id": 35093450243,
-   "pr": 1148,
+   "pr": null,
    "commit": "5e6635351086271810625d1f1c11247da9db4776",
    "branch": "pr/enh-specialized-storable",
    "event": "pull_request",
@@ -870,7 +888,7 @@
   },
   {
    "run_id": 35085784580,
-   "pr": 1148,
+   "pr": null,
    "commit": "ee65242631fa1ef1a03afcab94ac791670c5cfec",
    "branch": "pr/enh-specialized-storable",
    "event": "pull_request",
@@ -913,7 +931,7 @@
   },
   {
    "run_id": 35084557354,
-   "pr": 1148,
+   "pr": null,
    "commit": "d933c724e887cbea18d3be664a5e6f2bd466097d",
    "branch": "pr/enh-specialized-storable",
    "event": "pull_request",
@@ -928,7 +946,7 @@
   },
   {
    "run_id": 35083540534,
-   "pr": 1148,
+   "pr": null,
    "commit": "a7cc46c89330207c94198688dbe9c94219cc9285",
    "branch": "pr/enh-specialized-storable",
    "event": "pull_request",
@@ -943,7 +961,7 @@
   },
   {
    "run_id": 35081241559,
-   "pr": 1148,
+   "pr": null,
    "commit": "a6b8f7bf4767379a9b5ee29d7a2712a9132d2a93",
    "branch": "pr/enh-specialized-storable",
    "event": "pull_request",
@@ -2152,21 +2170,6 @@
      "bench_skipped": "host unidentified != MI355"
     }
    ]
-  },
-  {
-   "run_id": 34852987816,
-   "pr": null,
-   "commit": "04810f06dc010cff7c0e7dd40c3598ab9d238209",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Reduce full test runtime without dropping edge coverage (#1132)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34852987816",
-   "created_at": "2026-09-14T14:02:15Z",
-   "updated_at": "2026-09-14T14:08:47Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
