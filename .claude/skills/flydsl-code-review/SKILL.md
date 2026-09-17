@@ -27,11 +27,13 @@ below supply its review method; they are not an alternative manual execution pat
 /flydsl-code-review 1100                  # a PR number
 /flydsl-code-review kernels/attention/    # restrict to a path
 /flydsl-code-review focus on the LDS changes   # free-form instruction
-/flydsl-code-review 1100 --comment         # also publish the completed PR review
+/flydsl-code-review 1100 --comment         # publish confirmed P0/P1 findings
+/flydsl-code-review 1100 --comment --publish-severity P0
 ```
 
-Pass the target and options to the runner; handle `--comment` after it returns.
-Honor user scope restrictions verbatim. Use `--instructions` for free-form focus,
+Pass only review scope and runner options to `run_review.py`; `--comment` and
+`--publish-severity` belong to `post_review.py` after a COMPLETE result. Honor
+user scope restrictions verbatim. Use `--instructions` for free-form focus,
 `--path` for paths, and explicit `--base`/`--head` for a frozen comparison.
 
 ## Step 1 — Run the review
@@ -80,7 +82,7 @@ exit `0` means no leads in the supported scope, `1` means leads need inspection.
 The runner requests `--json` and requires a COMPLETE result whose exit code
 matches the process exit code. An exception, missing/malformed result or timeout
 makes the review INCOMPLETE; exit code `1` alone never proves success. Artifact
-schema v3 requires this explicit completion record, so older results must be rerun.
+schema v4 requires this explicit completion record and verified severity, so older results must be rerun.
 The artifact retains each scanner's output, exit status and run history; resume
 reuses completed checks.
 Neither scanner executes or imports the reviewed code.
@@ -128,6 +130,20 @@ For a finding based on a shared rule, cite the source file and section in
 `failure_scenario`, alongside the code evidence and concrete consequence.
 Verifiers and challengers must read that source and check its applicability.
 
+## Severity and publication
+
+Severity measures impact **if the candidate is true**; verdict measures confidence. Finders propose
+severity, but the verifier owns it and a challenger may only keep or lower it.
+
+- **P0** — broad critical failure: widespread silent corruption, an unsafe boundary, or a primary path unusable with no practical escape.
+- **P1** — concrete merge blocker on a supported path: wrong output, OOB, crash/hang, API break, required CI failure, or measured contract regression.
+- **P2** — real but non-blocking localized defect, unproven performance concern, or bounded diagnostic/test/documentation/convention gap.
+- **P3** — optional cleanup or maintainability improvement with no demonstrated present correctness, compatibility, CI, or performance effect.
+
+`result.json` retains every candidate and adjudication. GitHub publication defaults to CONFIRMED
+P0/P1, filtering the full verified set before its 12-item cap. `--publish-severity
+P0|P1|P2|P3` changes the threshold; PLAUSIBLE and lower severities remain artifact-only.
+
 ## Step 2 — Run the nine angles
 
 The runner starts nine independent finders, **up to 6 candidates each**, one
@@ -140,8 +156,6 @@ integer `line` (or null), a one-line `summary`, a specific `mechanism`/root caus
 Angles A–F hunt correctness bugs. Angles G–I hunt convention violations and
 cleanup; for those, `failure_scenario` states the concrete cost (what breaks in
 CI, what is duplicated, what becomes arch-fragile) rather than a crash.
-
----
 
 ## Angle A — trace-time vs runtime semantics
 
@@ -194,9 +208,17 @@ Read [CLAUDE.md](../../../CLAUDE.md)'s **GPU Architecture Support** and the
 §3b and §§6–7, for pointer boundaries, fragments, and TV layouts.
 
 When the diff implements backend atoms, also apply the **add-target-atom-op**
-skill ([SKILL.md](../add-target-atom-op/SKILL.md)), §1 **Inherent Design**.
+skill ([SKILL.md](../add-target-atom-op/SKILL.md)), §1 **Inherent Design** and
+§6 **Review and verification**.
 Check lane math, dtype support, dispatch, and operand/layout assumptions against
 every target the changed code claims to support.
+
+### Compiler target decisions
+
+For compiler-side target selection, identify each target property's owner and every architecture
+admitted by the predicate. Compare wave size, dialect/intrinsic support, address-space mapping, and
+pass options with the selected backend and `CLAUDE.md`; do not infer one property from another
+classification. Name an admitted target and the wrong emitted IR, option, diagnostic, ISA, or result.
 
 ## Angle E — removed-behavior auditor
 
@@ -227,6 +249,25 @@ Touch** and the applicable recipe's integration and verification steps.
 
 Check that the affected layers, supported targets, and FileCheck expectations
 remain consistent with the changed behavior.
+
+### Compiler, dialect, and conversion changes
+
+Classify the changed boundary: target-neutral compiler protocol/Fly interface
+or transform; backend-shared ROCm pipeline/conversion; or target-specific
+FlyROCDL payload and `expr/rocdl` factory. Backend payloads, intrinsics, address
+spaces, and chip options must not leak into neutral owners. Inspect every
+in-tree implementation/consumer of a neutral contract and every target admitted
+by a changed backend dispatch.
+
+Trace the contract through Python producer, TableGen verifier/type inference,
+neutral transforms, type conversion/legality, backend payload and intrinsic,
+pass registration/order, final ISA, and observable output. Derive scenario
+families from real predicates and overloads: applicable static/dynamic,
+scalar/vector, pointer/memref, predicate, reachable memref/full-SSA/mixed,
+supported/rejected type/layout, shape boundary, and target dispatch. Cover one
+reachable representative per distinct path and interacting pairs, not an
+irrelevant Cartesian product; name the uncovered family and prove it reaches
+the changed assumption.
 
 ## Angle G — repo conventions and API stability
 
@@ -266,6 +307,16 @@ their actual call sites. For a special case added to shared infrastructure,
 identify whether the underlying mechanism should handle it generally and state
 the concrete maintenance or performance cost.
 
+### Compiler extension generality
+
+Search sibling overloads, interfaces, type converters, mapping tables, and
+callers before accepting a local special case. Put the rule at the lowest layer
+that owns the invariant; use backend data/interfaces instead of arch strings in
+neutral code. Check paired overloads for drift, rewrites for a decreasing
+measure and multi-use values, and unsupported states for an early verifier or
+diagnostic. “Could be more general” alone is not a finding: name the missed
+sibling/caller, duplicated owner, non-converging rewrite, or reachable invalid IR.
+
 ## Angle I — test and documentation contract
 
 Read `tests/README.md` and `tests/pytest.ini` for tier, backend, and marker
@@ -281,6 +332,18 @@ described in `tests/README.md`.
 
 Do not flag general "needs more tests" — only these specific contract breaks.
 
+### Compiler regression coverage
+
+Map changed predicates, overloads, legality rules, and target dispatch to tests.
+For each distinct reachable path, identify a test or prove another case exercises
+the same branch. Include the trigger, unaffected boundary, sibling-target
+control for shared code, and positive/negative verifier or dispatch cases. Use
+`tests/mlir/Transforms` for neutral rewrites,
+`tests/mlir/Conversion` for ROCm lowering, Python unit/system tests for tracing,
+protocol/cache behavior, and L2 only for a hardware-observable contract. Verify
+each MLIR `RUN` line reaches the changed pass and FileCheck asserts the semantic
+invariant and absence of the old failure.
+
 ---
 
 ## Step 3 — Verify every candidate
@@ -290,9 +353,10 @@ preserving all source observations. Different mechanisms on nearby or identical
 lines remain distinct. It verifies every remaining candidate, without a shared
 admission budget, in a deterministic order that puts correctness first.
 
-Each assigned **independent verifier** reads the fixed diff, relevant files and
-the candidate's source observations, then returns exactly one verdict. A verifier
-judges its assigned candidate; it does not launch other agents.
+Each assigned **independent verifier** receives the owning angle text, reads the
+fixed diff and relevant files, and returns one verdict, one independently assigned
+severity, and evidence. A verifier judges its assigned candidate; it does not
+launch other agents.
 
 - **CONFIRMED** — can name the inputs, state, or target that trigger it and the
   resulting wrong output, crash, hang, or CI failure. Quote the line.
@@ -339,6 +403,14 @@ garbage for rows past `c_m` and rely on the C descriptor to drop the stores;
 that is the design, not a bug. If every affected element turns out to be
 discarded, the verdict is REFUTED.
 
+**Do not promote evidence across compiler layers.** A type round-trip proves
+construction; Fly/ROCDL FileCheck proves only the checked intermediate lowering;
+resource counts prove resources, not instruction identity; normalized final ISA
+proves opcode/operand/modifier equivalence for that specialization; target
+execution against an independent oracle proves observable semantics. Atom
+layout, operand, state, signedness, predicate, or packing changes require both
+the relevant lowering/ISA evidence and hardware numerics before CONFIRMED.
+
 ### Challenge the CONFIRMED ones
 
 The runner gives every candidate marked CONFIRMED one more agent whose only job is
@@ -354,7 +426,7 @@ challenger evidence are retained, including when they agree.
 
 ## Step 4 — Sweep for gaps
 
-The runner starts one more finder holding the verified list. Re-read the
+The runner injects this section into one more finder holding the verified list. Re-read the
 diff and the enclosing functions looking **only** for defects not already
 listed — do not re-derive or re-confirm anything on it.
 
@@ -364,11 +436,14 @@ way; setup/teardown asymmetry in tests; a default value flipped; a constant
 changed in one place but not its mirror; an interaction between two separately
 correct hunks. Up to 8 additional candidates, each verified like the rest. If
 nothing new, return nothing — do not pad.
+For compiler scopes, sweep for an uncovered scenario family, stale sibling
+implementation, neutral/backend ownership leak, or test that stops before the
+changed pass, final ISA, or observable boundary.
 
 ## Step 5 — Report
 
-Synthesis is deterministic code. It retains candidate IDs, kinds, severities,
-source observations, verdicts and evidence; a model cannot add an unverified
+Synthesis is deterministic code. It retains candidate IDs, kinds, independently
+adjudicated severities, source observations, verdicts and evidence; a model cannot add an unverified
 finding or upgrade a verdict while rewriting the report. **Correctness findings
 (A–F) always outrank convention findings (G–I) when the cap forces a cut.**
 CONFIRMED outranks PLAUSIBLE within each group, then severity and stable location
@@ -393,11 +468,12 @@ extract a findings array, rewrite the artifact, or hand-roll API calls.
 
 ```bash
 python3 .claude/skills/flydsl-code-review/scripts/post_review.py \
-    --findings /tmp/flydsl-review-<run-directory>/result.json --dry-run
+    --findings /tmp/flydsl-review-<run-directory>/result.json \
+    --publish-severity P1 --dry-run
 ```
 
 Show the dry-run payload and routing. Independently recheck the load-bearing
-step of each CONFIRMED finding before publication, executing arithmetic where
+step of each finding selected for publication, executing arithmetic where
 needed; retain the artifact's verdict and evidence. Publish the checked payload
 only with the user's authorization, using the same command without `--dry-run`.
 Existing explicit authorization applies; do not ask for it again unnecessarily.
@@ -408,15 +484,15 @@ that artifact; optional `--repo`, `--pr` and `--expected-head` assert equality.
 It checks both PR OIDs again after reading the patches and immediately before
 posting. A moved or closed PR requires a new review.
 
-All inline findings and deferred text go in one `POST /pulls/{pr}/reviews` with
-`event: COMMENT` and the reviewed `commit_id`. Plausible risks stay in a separate
-section of the review body. Deferred findings retain the verdict, scenario and
-verifier/challenger evidence. The body includes candidate IDs, run ID, reviewed
-OIDs, diff hash and usage metrics.
+All selected inline findings and deferred text go in one
+`POST /pulls/{pr}/reviews` with `event: COMMENT` and the reviewed `commit_id`.
+Deferred findings retain verdict, scenario and verifier/challenger evidence.
+Plausible and below-threshold records never enter the GitHub payload. The body
+includes published candidate IDs, threshold, run ID, reviewed OIDs, diff hash,
+counts and usage metrics.
 
-A deterministic finding-set marker prevents sequential retries from duplicating
-an existing review. After a lost POST response the script checks for that marker;
-it never retries the POST automatically or switches to individual comments.
+A pinned-diff marker ignores unrelated base-tip movement and stochastic reruns; the first successful
+threshold owns that merge-base/head/diff. Lost responses are reconciled by marker, never by retrying or switching routes.
 GitHub has no conditional review-write API: a push racing the final check may
 make the review outdated, but cannot change its pinned commit. Stop and report
 any publication error with the artifact path. A denied write is not permission

@@ -293,7 +293,11 @@ def output_schema(limit: int | None) -> dict:
             "items": {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False},
         }
     else:
-        properties.update(verdict={"enum": list(VERDICTS)}, evidence={"type": "string"})
+        properties.update(
+            verdict={"enum": list(VERDICTS)},
+            severity={"enum": list(SEVERITIES)},
+            evidence={"type": "string"},
+        )
     return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
 
 
@@ -342,6 +346,7 @@ def cli_agent(
         "Bash(git show *)",
         "Bash(git status *)",
         "Bash(python3 -c *)",
+        "Bash(rg *)",
     ]
     if config["model"]:
         argv += ["--model", config["model"]]
@@ -441,6 +446,8 @@ class ReviewRun:
             f"Changed files: {canonical(scope['files'])}\nUser scope/instructions: {scope['instructions']}\n\n"
             + section(self.skill, "Reusing existing skills")
             + "\n\n"
+            + section(self.skill, "Severity and publication")
+            + "\n\n"
             "The supplied skill excerpts describe the review method. Apply repository rules only where "
             "they exist and apply at the reviewed revision; do not impose later migrations on old code.\n"
             "Resolve relative links in these excerpts from .claude/skills/flydsl-code-review/SKILL.md; "
@@ -450,6 +457,19 @@ class ReviewRun:
             "status INCOMPLETE with explicit limitations, never a successful empty list. "
             "An uncertain bug trigger is PLAUSIBLE; that alone is not an execution failure.\n\n"
         )
+
+    def candidate_guidance(self, candidate: dict) -> str:
+        """Carry each source angle's rules into independent adjudication."""
+        angle_titles = {f"find:{label}": title for label, _, title in ANGLES}
+        titles = []
+        for source in candidate["sources"]:
+            stage = source["stage"]
+            title = angle_titles.get(stage)
+            if stage == "sweep":
+                title = "Step 4 — Sweep for gaps"
+            if title and title not in titles:
+                titles.append(title)
+        return "\n\nOwning review guidance:\n\n" + "\n\n".join(section(self.skill, title) for title in titles)
 
     def task(self, label: str, prompt: str, limit: int | None = None) -> dict:
         return {"label": label, "prompt": self.context() + prompt, "limit": limit, "schema": output_schema(limit)}
@@ -590,13 +610,15 @@ class ReviewRun:
         tasks = []
         for c in candidates:
             observations = [self.state["stages"][s["stage"]]["output"]["candidates"][s["index"]] for s in c["sources"]]
+            guidance = self.candidate_guidance(c)
             tasks.append(
                 self.task(
                     "verify:" + c["id"],
-                    "Independently verify this candidate.\n"
+                    "Independently verify this candidate and assign severity from the supplied contract.\n"
                     + canonical(c)
                     + "\nOriginal observations:\n"
                     + canonical(observations)
+                    + guidance
                     + "\n\n"
                     + ladder,
                 )
@@ -607,15 +629,18 @@ class ReviewRun:
         for c in candidates:
             verdict = stage_output(self.state["stages"], "verify:" + c["id"])
             if verdict["verdict"] == "CONFIRMED":
+                guidance = self.candidate_guidance(c)
                 challenges.append(
                     self.task(
                         "challenge:" + c["id"],
                         "Challenge this CONFIRMED finding. Try to refute it. Independently execute its arithmetic "
                         "and trace the defect to an observable output, checking downstream masks and bounds. "
-                        "Keep CONFIRMED only if both checks succeed; otherwise return PLAUSIBLE or REFUTED with evidence.\n"
+                        "Independently assign severity and never increase the verifier's impact rating. Keep "
+                        "CONFIRMED only if both checks succeed; otherwise return PLAUSIBLE or REFUTED with evidence.\n"
                         + canonical(c)
                         + "\nPrior verifier:\n"
                         + canonical(verdict)
+                        + guidance
                         + "\n\n"
                         + ladder,
                     )
@@ -645,7 +670,7 @@ class ReviewRun:
                     + section(self.skill, title)
                     + self.preflight_context(label)
                     + f"\nReturn up to {PER_ANGLE} candidates with a specific mechanism/root cause, "
-                    "severity (P0 critical, P1 high, P2 normal, P3 low), exact file/line and failure scenario. "
+                    "severity from the supplied contract, exact file/line and failure scenario. "
                     "Pass every candidate with a nameable failure scenario to independent verification. "
                     "For conventions, describe the concrete CI or maintenance cost. Do not invent crashes.",
                     PER_ANGLE,
@@ -661,9 +686,8 @@ class ReviewRun:
             known = judged_candidates({k: v for k, v in stages.items() if k != "sweep"})
             sweep = self.task(
                 "sweep",
-                "Hunt only for correctness defects absent from the known candidates. Check removed guards, "
-                "setup/teardown asymmetry, changed defaults, cross-layer interactions, and unchanged lines "
-                "of touched functions. Do not re-confirm known candidates.\nKnown candidates:\n"
+                section(self.skill, "Step 4 — Sweep for gaps")
+                + "\n\nKnown candidates:\n"
                 + canonical(known)
                 + f"\nReturn at most {SWEEP_MAX} new candidates.",
                 SWEEP_MAX,
@@ -729,7 +753,13 @@ def main() -> int:
     )
     parser.add_argument("--run-dir", type=Path, help="new empty directory; defaults to a temporary directory")
     parser.add_argument("--resume", type=Path, help="existing run directory; retries only incomplete stages")
+    parser.add_argument("--comment", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--publish-severity", choices=SEVERITIES, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.comment or args.publish_severity:
+        parser.error(
+            "--comment and --publish-severity are publisher options; run the review first, then use post_review.py"
+        )
     if args.resume:
         if any(
             (
@@ -760,6 +790,8 @@ def main() -> int:
             parser.error("this run is active; cancel it before resuming")
         if args.resume:
             state = json.loads((run_dir / "state.json").read_text())
+            if state.get("schema_version") != SCHEMA_VERSION:
+                parser.error("saved review schema changed; start a new run")
             if state["implementation_sha256"] != implementation_hash():
                 parser.error("runner or skill changed since the checkpoint; start a new run")
         else:

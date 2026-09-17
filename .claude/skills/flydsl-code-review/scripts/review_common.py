@@ -16,7 +16,7 @@ import re
 import sys
 import traceback
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 PER_ANGLE = 6
 SWEEP_MAX = 8
 MAX_FINDINGS = 12
@@ -47,6 +47,20 @@ def digest(value) -> str:
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
+def severity_rank(value: str) -> int:
+    try:
+        return SEVERITIES.index(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid severity: {value!r}") from exc
+
+
+def conservative_severity(*values: str) -> str:
+    """Return the least severe independently assigned impact."""
+    if not values:
+        raise ValueError("at least one severity is required")
+    return max(values, key=severity_rank)
+
+
 def normalize_path(value: str, snapshot: str | None = None) -> str:
     if not isinstance(value, str) or not value or "\0" in value:
         raise ValueError("a finding needs a repository-relative file path")
@@ -66,8 +80,12 @@ def validate_output(output: dict, *, candidate_limit: int | None = None, snapsho
     if output.get("limitations") != []:
         raise ValueError(f"agent reported unresolved limitations: {output.get('limitations')!r}")
     if candidate_limit is None:
-        if output.get("verdict") not in VERDICTS or not isinstance(output.get("evidence"), str):
-            raise ValueError("invalid verifier verdict or evidence")
+        if (
+            output.get("verdict") not in VERDICTS
+            or output.get("severity") not in SEVERITIES
+            or not isinstance(output.get("evidence"), str)
+        ):
+            raise ValueError("invalid verifier verdict, severity or evidence")
         if not output["evidence"].strip():
             raise ValueError("empty verifier evidence")
     else:
@@ -155,7 +173,7 @@ def collect_candidates(stages: dict) -> list[dict]:
             source = {"stage": label, "index": index}
             if cid in unique:
                 unique[cid]["sources"].append(source)
-                unique[cid]["severity"] = min(unique[cid]["severity"], raw["severity"])
+                unique[cid]["severity"] = min(unique[cid]["severity"], raw["severity"], key=severity_rank)
                 if kind == "correctness":
                     unique[cid]["kind"] = kind
                 continue
@@ -170,7 +188,12 @@ def collect_candidates(stages: dict) -> list[dict]:
 
 
 def candidate_order(c: dict) -> tuple:
-    return (c["kind"] == "convention", SEVERITIES.index(c["severity"]), c["file"], c["line"] or 0, c["id"])
+    severity = c.get("severity") or c.get("source_severity")
+    return (c["kind"] == "convention", severity_rank(severity), c["file"], c["line"] or 0, c["id"])
+
+
+def finding_order(c: dict) -> tuple:
+    return (c["kind"] == "convention", c["verdict"] == "PLAUSIBLE", *candidate_order(c)[1:])
 
 
 def judged_candidates(stages: dict) -> list[dict]:
@@ -178,7 +201,14 @@ def judged_candidates(stages: dict) -> list[dict]:
     for c in candidates:
         verification = stage_output(stages, "verify:" + c["id"])
         challenge = stage_output(stages, "challenge:" + c["id"])
-        c.update(verification=verification, challenge=challenge, verdict=None, evidence=None)
+        c.update(
+            source_severity=c["severity"],
+            severity=None,
+            verification=verification,
+            challenge=challenge,
+            verdict=None,
+            evidence=None,
+        )
         if verification is None:
             continue
         validate_output(verification)
@@ -187,19 +217,18 @@ def judged_candidates(stages: dict) -> list[dict]:
                 continue  # An unchallenged CONFIRMED is unresolved, never reportable.
             validate_output(challenge)
             c["verdict"] = challenge["verdict"]
+            c["severity"] = conservative_severity(verification["severity"], challenge["severity"])
             c["evidence"] = verification["evidence"] + "\n\nChallenger: " + challenge["evidence"]
         else:
             c["verdict"] = verification["verdict"]
+            c["severity"] = verification["severity"]
             c["evidence"] = verification["evidence"]
     return candidates
 
 
 def rank_findings(candidates: list[dict]) -> list[dict]:
     surviving = [c for c in candidates if c["verdict"] in ("CONFIRMED", "PLAUSIBLE")]
-    return sorted(
-        surviving,
-        key=lambda c: (c["kind"] == "convention", c["verdict"] == "PLAUSIBLE", *candidate_order(c)[1:]),
-    )[:MAX_FINDINGS]
+    return sorted(surviving, key=finding_order)[:MAX_FINDINGS]
 
 
 def required_stages(scope: dict | None, candidates: list[dict]) -> list[str]:
@@ -263,6 +292,9 @@ def build_report(state: dict) -> dict:
         if label not in required and stage.get("status") != "COMPLETE"
     ]
     complete = not failed
+    surviving = [c for c in candidates if c["verdict"] in ("CONFIRMED", "PLAUSIBLE")]
+    all_confirmed = [c for c in surviving if c["verdict"] == "CONFIRMED"]
+    all_risks = [c for c in surviving if c["verdict"] == "PLAUSIBLE"]
     ranked = rank_findings(candidates)
     reported = ranked if complete else []
     confirmed = [c for c in reported if c["verdict"] == "CONFIRMED"]
@@ -271,10 +303,15 @@ def build_report(state: dict) -> dict:
         summary = f"Review INCOMPLETE: {len(failed)} required stage(s) failed or have not completed."
     elif not scope["files"]:
         summary = "No changes in the pinned review scope."
-    elif not ranked:
+    elif not surviving:
         summary = "Review complete. No findings survived verification."
+    elif len(surviving) > len(ranked):
+        summary = (
+            f"Review complete. {len(all_confirmed)} confirmed finding(s); {len(all_risks)} plausible risk(s); "
+            f"{len(ranked)} selected for the capped artifact view."
+        )
     else:
-        summary = f"Review complete. {len(confirmed)} confirmed finding(s); {len(risks)} plausible risk(s)."
+        summary = f"Review complete. {len(all_confirmed)} confirmed finding(s); {len(all_risks)} plausible risk(s)."
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": state["run_id"],
@@ -301,8 +338,17 @@ def build_report(state: dict) -> dict:
             "verified": sum(c["verification"] is not None for c in candidates),
             "challenged": sum(c["challenge"] is not None for c in candidates),
             "challenge_downgraded": sum(
-                c["challenge"] is not None and c["challenge"]["verdict"] != "CONFIRMED" for c in candidates
+                c["challenge"] is not None
+                and (
+                    c["challenge"]["verdict"] != "CONFIRMED"
+                    or severity_rank(c["challenge"]["severity"]) > severity_rank(c["verification"]["severity"])
+                )
+                for c in candidates
             ),
+            "confirmed": len(all_confirmed),
+            "plausible": len(all_risks),
+            "survived": len(surviving),
+            "selected": len(ranked),
             "refuted": sum(c["verdict"] == "REFUTED" for c in candidates),
             "reported": len(reported),
         },

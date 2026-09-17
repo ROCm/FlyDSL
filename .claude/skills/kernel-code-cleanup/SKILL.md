@@ -419,8 +419,12 @@ fx.gemm(mma, frag_C, frag_A, frag_B, frag_C, scale_a=sa, scale_b=sb)   # atom st
 - **Keep** `copy_atom_call_ssa` / `mma_atom_call_ssa` (the SSA-*returning* variants
   are a different primitive) and any raw atom call whose operands have no tensor/
   partition form to pass. Prefer `fx.copy` / `fx.gemm` for supported tensor forms.
-- Diff numerics and ISA; for scheduler-sensitive hot loops compare repeated,
-  paired graph timings. Unchanged resources alone do not prove unchanged time.
+- Compare the same target and specialization through the full default pipeline.
+  Require numerical equivalence and normalized final ISA for an atom-call
+  migration; use resource diff only as complementary evidence. Identical ISA
+  does not prove unchanged layout-to-lane mapping, and identical sample outputs
+  do not prove identical ISA. For scheduler-sensitive hot loops also compare
+  repeated, paired graph timings.
 
 ---
 
