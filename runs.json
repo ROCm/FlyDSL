@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-16T22:01:38Z",
+ "updated": "2026-09-17T00:08:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35165112455,
+   "pr": 1151,
+   "commit": "ae8073a6651f757c6bfa1b531c9b1bcf33f9e9d8",
+   "branch": "feature/ktrace-v4",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add an in-kernel wave tracing feature (fx.ktrace) for gfx942/gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35165112455",
+   "created_at": "2026-09-17T00:05:47Z",
+   "updated_at": "2026-09-17T00:06:08Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 35164629531,
+   "pr": 1151,
+   "commit": "31cc493aaede73ef080d81fb2a2a282642f28243",
+   "branch": "feature/ktrace-v4",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add an in-kernel wave tracing feature (fx.ktrace) for gfx942/gfx950",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35164629531",
+   "created_at": "2026-09-16T23:59:13Z",
+   "updated_at": "2026-09-17T00:05:49Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35155219219,
    "pr": 1150,
@@ -2144,67 +2174,6 @@
    "created_at": "2026-09-14T07:37:30Z",
    "updated_at": "2026-09-14T10:51:41Z",
    "actor": "LWenH",
-   "jobs": []
-  },
-  {
-   "run_id": 34817455358,
-   "pr": null,
-   "commit": "49cbefb45707e3ce84b7c1a7e7d6aa8022807362",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Skip GPU tests for more non-code path changes (#1121)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817455358",
-   "created_at": "2026-09-14T07:21:06Z",
-   "updated_at": "2026-09-14T09:13:24Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T07:50:27Z",
-     "completed_at": "2026-09-14T09:13:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817455358/job/103894209780",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T07:34:09Z",
-     "completed_at": "2026-09-14T07:59:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817455358/job/103894209827",
-     "log_fetch_failed": true
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T07:34:14Z",
-     "completed_at": "2026-09-14T08:51:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817455358/job/103894209831",
-     "log_fetch_failed": true
-    }
-   ]
-  },
-  {
-   "run_id": 34817395047,
-   "pr": null,
-   "commit": "11374979fc0789c542754274bee7deebd9e33a00",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel][FA] Support paged FP8 Flash attention with asymmetric K/V he\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34817395047",
-   "created_at": "2026-09-14T07:20:19Z",
-   "updated_at": "2026-09-14T07:21:22Z",
-   "actor": "coderfeli",
    "jobs": []
   }
  ]
