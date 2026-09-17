@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-09-17T18:37:42Z",
+ "updated": "2026-09-17T19:27:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35264614275,
+   "pr": 1156,
+   "commit": "6af292a385a059429383935875f2c2921f5107f4",
+   "branch": "pr/enh-struct-members",
+   "event": "pull_request",
+   "title": "[Enh] Support expr struct member methods",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275",
+   "created_at": "2026-09-17T19:23:38Z",
+   "updated_at": "2026-09-17T19:25:07Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 35263068650,
+   "pr": 1156,
+   "commit": "c9a70d0fde055f4baa6ae73d0a5a922839d52710",
+   "branch": "pr/enh-struct-members",
+   "event": "pull_request",
+   "title": "[Enh] Support expr struct member methods",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35263068650",
+   "created_at": "2026-09-17T19:08:12Z",
+   "updated_at": "2026-09-17T19:24:55Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 35262952233,
+   "pr": 1106,
+   "commit": "c9c0af328ecda62e2ee1d479adef39aa4fe567bb",
+   "branch": "add-flydsl-code-review-skill",
+   "event": "pull_request",
+   "title": "[Skills] Add flydsl-code-review skill and workflow",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35262952233",
+   "created_at": "2026-09-17T19:07:02Z",
+   "updated_at": "2026-09-17T19:23:48Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-17T19:23:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35262952233/job/105348587585"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T19:24:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35262952233/job/105348587608"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-17T19:23:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35262952233/job/105348587678"
+    }
+   ]
+  },
   {
    "run_id": 35237940327,
    "pr": 1109,
@@ -2020,159 +2093,6 @@
    "updated_at": "2026-09-15T02:33:13Z",
    "actor": "big-yellow-duck",
    "jobs": []
-  },
-  {
-   "run_id": 34920869749,
-   "pr": 1116,
-   "commit": "c649857435e4d4c3fae24fbf808dabb63bf18c55",
-   "branch": "yanbo/cleancode",
-   "event": "pull_request",
-   "title": "refactor communication ops",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34920869749",
-   "created_at": "2026-09-15T02:21:37Z",
-   "updated_at": "2026-09-16T08:20:59Z",
-   "actor": "yanboshao",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T02:40:17Z",
-     "completed_at": "2026-09-16T03:42:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34920869749/job/104640720333"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T02:20:30Z",
-     "completed_at": "2026-09-16T02:43:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34920869749/job/104640720334"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T02:20:45Z",
-     "completed_at": "2026-09-16T03:30:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34920869749/job/104640720515",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T07:28:26Z",
-     "completed_at": "2026-09-16T08:20:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34920869749/job/104656737512"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T03:43:24Z",
-     "completed_at": "2026-09-16T04:06:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34920869749/job/104656737519"
-    }
-   ]
-  },
-  {
-   "run_id": 34916514498,
-   "pr": null,
-   "commit": "67e3b9d3dd2fb20abe87dc959c8f10f9824ff50b",
-   "branch": "main",
-   "event": "push",
-   "title": "docs: remove function-level typed arithmetic section (#1135)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34916514498",
-   "created_at": "2026-09-15T01:15:04Z",
-   "updated_at": "2026-09-15T01:17:02Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T01:16:56Z",
-     "completed_at": "2026-09-15T01:16:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34916514498/job/104215495105"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T01:16:56Z",
-     "completed_at": "2026-09-15T01:16:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34916514498/job/104215495128",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T01:16:56Z",
-     "completed_at": "2026-09-15T01:17:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34916514498/job/104215495228"
-    }
-   ]
-  },
-  {
-   "run_id": 34893237957,
-   "pr": 1106,
-   "commit": "8874cbf969493f6c15eb1c3652648322a2828f03",
-   "branch": "add-flydsl-code-review-skill",
-   "event": "pull_request",
-   "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34893237957",
-   "created_at": "2026-09-14T20:29:33Z",
-   "updated_at": "2026-09-15T03:25:25Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-14T20:43:46Z",
-     "completed_at": "2026-09-15T03:24:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34893237957/job/104145546285"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T20:44:03Z",
-     "completed_at": "2026-09-14T20:58:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34893237957/job/104145546317"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-15T02:48:50Z",
-     "completed_at": "2026-09-15T03:25:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34893237957/job/104145546331"
-    }
-   ]
   }
  ]
 }
