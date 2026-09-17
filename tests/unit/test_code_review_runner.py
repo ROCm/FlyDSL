@@ -68,13 +68,16 @@ def configuration(**overrides):
         "repo": None,
         "base": None,
         "head": None,
+        "scope_manifest": None,
         "paths": [],
         "instructions": "",
         "model": None,
         "effort": None,
+        "claude_path": None,
         "concurrency": 3,
         "agent_timeout": 1,
         "phase_timeout": 10,
+        "execution_profile": "local",
         **overrides,
     }
 
@@ -316,6 +319,60 @@ def test_pinned_scope_survives_source_push(tmp_path, source_repo):
     assert head in scope["diff_command"] and base in scope["diff_command"]
 
 
+def test_offline_scope_manifest_pins_pr_identity_without_gh(tmp_path, source_repo):
+    root, base, head = source_repo
+    manifest = {
+        "schema_version": runner.SCOPE_MANIFEST_VERSION,
+        "repository_id": 1102472199,
+        "repo": "ROCm/FlyDSL",
+        "pr": 1137,
+        "author_id": 184409145,
+        "author_login": "coderfeli",
+        "head_repo": "ROCm/FlyDSL",
+        "base_oid": base,
+        "head_oid": head,
+    }
+    manifest_path = tmp_path / "scope.json"
+    manifest_path.write_text(json.dumps(manifest))
+    run_dir = tmp_path / "offline"
+    run_dir.mkdir()
+    scope = runner.pin_scope(root, run_dir, configuration(scope_manifest=str(manifest_path)))
+    assert scope["repo"] == "ROCm/FlyDSL"
+    assert scope["pr"] == 1137
+    assert scope["repository_id"] == 1102472199
+    assert scope["author_id"] == 184409145
+    assert scope["author_login"] == "coderfeli"
+    assert scope["head_repo"] == scope["repo"]
+    assert scope["base_oid"] == base and scope["head_oid"] == head
+    assert json.loads((run_dir / "scope-manifest.json").read_text()) == manifest
+    runner.check_snapshot(run_dir, scope)
+    manifest["author_login"] = "other"
+    (run_dir / "scope-manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="scope manifest changed"):
+        runner.check_snapshot(run_dir, scope)
+
+
+def test_offline_scope_manifest_is_fail_closed(tmp_path, source_repo):
+    root, base, head = source_repo
+    manifest = {
+        "schema_version": runner.SCOPE_MANIFEST_VERSION,
+        "repository_id": 1102472199,
+        "repo": "ROCm/FlyDSL",
+        "pr": 1137,
+        "author_id": 184409145,
+        "author_login": "coderfeli",
+        "head_repo": "attacker/FlyDSL",
+        "base_oid": base,
+        "head_oid": head,
+    }
+    manifest_path = tmp_path / "scope.json"
+    manifest_path.write_text(json.dumps(manifest))
+    run_dir = tmp_path / "offline-invalid"
+    run_dir.mkdir()
+    with pytest.raises(ValueError, match="same-repository"):
+        runner.pin_scope(root, run_dir, configuration(scope_manifest=str(manifest_path)))
+
+
 def test_working_tree_gets_own_commit_without_mutating_source(tmp_path, source_repo):
     root, _, head = source_repo
     (root / "kernel.py").write_text("x = 4\n")
@@ -417,6 +474,81 @@ def test_cli_requires_success_footer_and_no_permission_denials(tmp_path, monkeyp
         assert attempt["usage"]["total_cost_usd"] == 0.25
     else:
         assert attempt["usage"] == {}
+
+
+def test_untrusted_container_profile_hardens_cli_argv_environment_and_sandbox(tmp_path, monkeypatch):
+    capture = tmp_path / "capture.json"
+    snapshot = tmp_path / "repo"
+    snapshot.mkdir()
+    envelope = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "structured_output": found(),
+        "permission_denials": [],
+    }
+    install_fake_cli(
+        tmp_path,
+        monkeypatch,
+        "import json, os, sys\nfrom pathlib import Path\n"
+        f"Path({str(capture)!r}).write_text(json.dumps({{'argv': sys.argv[1:], "
+        "'has_gh': 'GH_TOKEN' in os.environ, 'has_github': 'GITHUB_TOKEN' in os.environ, "
+        "'has_openai': 'OPENAI_API_KEY' in os.environ, 'has_ssh': 'SSH_AUTH_SOCK' in os.environ, "
+        "'has_anthropic': 'ANTHROPIC_AUTH_TOKEN' in os.environ, "
+        "'has_custom_headers': 'ANTHROPIC_CUSTOM_HEADERS' in os.environ, "
+        "'has_managed_settings': 'CLAUDE_CODE_MANAGED_SETTINGS_PATH' in os.environ, "
+        "'has_process_wrapper': 'CLAUDE_CODE_PROCESS_WRAPPER' in os.environ, "
+        "'scrub': os.environ.get('CLAUDE_CODE_SUBPROCESS_ENV_SCRUB')}))\n"
+        f"print(json.dumps({envelope!r}))\n",
+    )
+    monkeypatch.setenv("GH_TOKEN", "synthetic-gh")
+    monkeypatch.setenv("GITHUB_TOKEN", "synthetic-github")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/synthetic-agent.sock")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "synthetic-anthropic")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "synthetic-custom")
+    monkeypatch.setenv("CLAUDE_CODE_MANAGED_SETTINGS_PATH", "/tmp/synthetic-settings")
+    monkeypatch.setenv("CLAUDE_CODE_PROCESS_WRAPPER", "/tmp/synthetic-wrapper")
+    task = {"prompt": "test", "schema": runner.output_schema(6), "limit": 6}
+    attempt = runner.cli_agent(
+        task,
+        configuration(execution_profile="untrusted-container", claude_path=str(tmp_path / "claude")),
+        snapshot,
+        tmp_path / "hardened",
+        time.monotonic() + 3,
+        threading.Event(),
+    )
+    assert attempt["status"] == "COMPLETE", (attempt, Path(attempt["stderr"]).read_text())
+    recorded = json.loads(capture.read_text())
+    assert recorded["has_anthropic"] is True
+    assert recorded["scrub"] == "1"
+    assert not any(
+        recorded[key]
+        for key in (
+            "has_gh",
+            "has_github",
+            "has_openai",
+            "has_ssh",
+            "has_custom_headers",
+            "has_managed_settings",
+            "has_process_wrapper",
+        )
+    )
+    argv = recorded["argv"]
+    assert "--safe-mode" in argv and "--restricted" in argv and "--no-chrome" in argv
+    assert argv[argv.index("--add-dir") + 1] == str(runner.ENGINE_ROOT)
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    sandbox = settings["sandbox"]
+    assert sandbox["enabled"] is sandbox["failIfUnavailable"] is True
+    assert sandbox["autoAllowBashIfSandboxed"] is sandbox["allowUnsandboxedCommands"] is False
+    assert sandbox["network"] == {"allowedDomains": [], "strictAllowlist": True}
+    assert sandbox["filesystem"]["denyRead"] == ["/"]
+    assert sandbox["filesystem"]["denyWrite"] == ["/"]
+    assert str(snapshot) in sandbox["filesystem"]["allowRead"]
+    assert str(runner.ENGINE_ROOT) in sandbox["filesystem"]["allowRead"]
+    assert str(tmp_path) not in sandbox["filesystem"]["allowRead"]
+    denied = {entry["name"] for entry in sandbox["credentials"]["envVars"]}
+    assert {"ANTHROPIC_AUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} <= denied
 
 
 def test_timeout_cancels_agent_and_its_tool_process(tmp_path, monkeypatch):
@@ -523,6 +655,18 @@ def test_skill_change_invalidates_implementation_hash(tmp_path, monkeypatch):
     assert runner.implementation_hash() != before
 
 
+def test_linked_policy_change_invalidates_implementation_hash(tmp_path, monkeypatch):
+    engine = tmp_path / "engine"
+    linked = engine / ".claude/skills/linked/SKILL.md"
+    linked.parent.mkdir(parents=True)
+    linked.write_text("first policy\n")
+    (engine / "CLAUDE.md").write_text("repository policy\n")
+    monkeypatch.setattr(runner, "ENGINE_ROOT", engine)
+    before = runner.implementation_hash()
+    linked.write_text("changed policy\n")
+    assert runner.implementation_hash() != before
+
+
 @pytest.fixture
 def complete_report():
     scope = {
@@ -582,20 +726,44 @@ def rebuild_report(template, finder_candidates, adjudications):
     return common.build_report(state)
 
 
+def manifest_backed_report(template):
+    state = copy.deepcopy(template)
+    identity = {
+        "repository_id": 1102472199,
+        "author_id": 184409145,
+        "author_login": "coderfeli",
+        "head_repo": "ROCm/FlyDSL",
+        "scope_manifest_sha256": "f" * 64,
+    }
+    state["scope"].update(identity)
+    state["stages"]["scope"]["output"].update(identity)
+    return common.build_report(state)
+
+
 class GitHub:
     def __init__(self, report, *, advance_at=None, lost_response=False):
         self.scope = report["scope"]
         self.advance_at, self.lost_response = advance_at, lost_response
         self.head_reads, self.posts, self.reviews = 0, [], []
+        self.publisher_id = 47354855
+        self.draft = False
 
     def __call__(self, *args, stdin=None):
+        if args[-1] == "user":
+            return json.dumps({"id": self.publisher_id, "login": "jhinpan"})
         endpoint = next(a for a in args if a.startswith("repos/"))
         if "POST" in args:
             assert endpoint.endswith("/reviews")
             payload = json.loads(stdin)
             self.posts.append(payload)
             self.reviews.append(
-                {"id": 1, "body": payload["body"], "commit_id": payload["commit_id"], "state": "COMMENTED"}
+                {
+                    "id": 1,
+                    "body": payload["body"],
+                    "commit_id": payload["commit_id"],
+                    "state": "COMMENTED",
+                    "user": {"id": self.publisher_id},
+                }
             )
             if self.lost_response:
                 raise RuntimeError("response lost after server committed the review")
@@ -606,7 +774,21 @@ class GitHub:
             return json.dumps([{"filename": "kernel.py", "patch": "@@ -10,2 +10,2 @@\n-old\n+new\n context"}]) + "[]"
         self.head_reads += 1
         head = "e" * 40 if self.head_reads == self.advance_at else self.scope["head_oid"]
-        return json.dumps({"state": "open", "head": {"sha": head}, "base": {"sha": self.scope["base_oid"]}})
+        return json.dumps(
+            {
+                "state": "open",
+                "draft": self.draft,
+                "head": {"sha": head, "repo": {"full_name": self.scope["repo"]}},
+                "base": {
+                    "sha": self.scope["base_oid"],
+                    "repo": {"id": self.scope.get("repository_id", 1102472199)},
+                },
+                "user": {
+                    "id": self.scope.get("author_id", 184409145),
+                    "login": self.scope.get("author_login", "coderfeli"),
+                },
+            }
+        )
 
 
 def test_publish_severity_thresholds_are_inclusive(complete_report):
@@ -672,6 +854,81 @@ def test_marker_ignores_unrelated_base_tip_advance(complete_report):
     assert publisher.finding_set_marker(advanced) == publisher.finding_set_marker(complete_report)
 
 
+def test_unattended_publisher_binds_implementation_and_live_identities(monkeypatch, complete_report):
+    report = manifest_backed_report(complete_report)
+    api = GitHub(report)
+    marker = publisher.finding_set_marker(report)
+    api.reviews.append(
+        {
+            "id": 99,
+            "body": marker,
+            "commit_id": report["scope"]["head_oid"],
+            "state": "COMMENTED",
+            "user": {"id": 999},
+        }
+    )
+    monkeypatch.setattr(publisher, "gh", api)
+    options = {
+        "expected_implementation_sha256": report["implementation_sha256"],
+        "expected_publisher_id": 47354855,
+        "expected_repository_id": 1102472199,
+        "expected_author_id": 184409145,
+        "expected_author_login": "coderfeli",
+    }
+    assert publisher.publish(report, dry_run=False, **options) == 0
+    assert len(api.posts) == 1
+    assert publisher.publish(report, dry_run=False, **options) == 0
+    assert len(api.posts) == 1
+    with pytest.raises(ValueError, match="unexpected implementation"):
+        publisher.publish(report, dry_run=False, expected_implementation_sha256="0" * 64)
+    api.publisher_id = 1
+    with pytest.raises(ValueError, match="publisher identity"):
+        publisher.publish(report, dry_run=False, **options)
+
+
+def test_publisher_sanitizes_model_controlled_text(complete_report):
+    report = copy.deepcopy(complete_report)
+    candidate_id = report["reported_ids"][0]
+    source = report["candidates"][0]["sources"][0]
+    raw = report["stages"][source["stage"]]["output"]["candidates"][source["index"]]
+    raw["summary"] = (
+        "@maintainer <script>alert(1)</script> https://evil.example "
+        "[open](//example.invalid/path) [mail](mailto:team@example.invalid)"
+    )
+    report["stages"]["verify:" + candidate_id]["output"]["evidence"] = "proof\u202e [click](https://evil.example)"
+    report = common.build_report(report)
+    payload = publisher.payload_for(
+        report,
+        [{"filename": "kernel.py", "patch": "@@ -10,1 +10,1 @@\n+new"}],
+    )
+    rendered = payload["body"] + "\n" + "\n".join(comment["body"] for comment in payload["comments"])
+    assert "@maintainer" not in rendered
+    assert "https://evil.example" not in rendered
+    assert "\u202e" not in rendered
+    assert "&lt;script&gt;" in rendered
+    assert "＠maintainer" in rendered
+    assert "[external link removed]" in rendered
+    location = publisher.sanitize_location("kernel.py`\n\n@reviewers [open](//example.invalid/path)", 7)
+    assert "`" not in location and "\n" not in location
+    assert "@reviewers" not in location and "//example.invalid" not in location
+
+
+def test_publisher_preserves_non_link_technical_text():
+    text = "index = offset // tile; source file: kernel.py"
+    assert publisher.sanitize_text(text, limit=publisher.MAX_EVIDENCE) == text
+
+
+def test_publisher_rejects_oversized_model_text(complete_report):
+    report = copy.deepcopy(complete_report)
+    source = report["candidates"][0]["sources"][0]
+    report["stages"][source["stage"]]["output"]["candidates"][source["index"]]["summary"] = "x" * (
+        publisher.MAX_SUMMARY + 1
+    )
+    report = common.build_report(report)
+    with pytest.raises(ValueError, match="exceeds"):
+        publisher.payload_for(report, [])
+
+
 def test_single_review_preserves_deferred_evidence_and_omits_risks(monkeypatch, complete_report):
     api = GitHub(complete_report)
     monkeypatch.setattr(publisher, "gh", api)
@@ -694,6 +951,15 @@ def test_post_rejects_a_changed_head_before_or_during_routing(monkeypatch, compl
     api = GitHub(complete_report, advance_at=advance_at)
     monkeypatch.setattr(publisher, "gh", api)
     with pytest.raises(ValueError, match="base/head changed"):
+        publisher.publish(complete_report, dry_run=False)
+    assert api.posts == []
+
+
+def test_post_rejects_pr_that_became_draft(monkeypatch, complete_report):
+    api = GitHub(complete_report)
+    api.draft = True
+    monkeypatch.setattr(publisher, "gh", api)
+    with pytest.raises(ValueError, match="draft"):
         publisher.publish(complete_report, dry_run=False)
     assert api.posts == []
 
