@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-17T06:39:00Z",
+ "updated": "2026-09-17T06:43:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35190913120,
+   "pr": 1148,
+   "commit": "6dc63cf4efbd0be35eeb8066c094e0a340276eb3",
+   "branch": "pr/enh-specialized-storable",
+   "event": "pull_request",
+   "title": "[Enh] Make specialized Vector and Pointer types Storable",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190913120",
+   "created_at": "2026-09-17T06:41:00Z",
+   "updated_at": "2026-09-17T06:42:20Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 35190568612,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Enh] Give Align fields alignas-like value semantics (#1141)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612",
    "created_at": "2026-09-17T06:36:18Z",
-   "updated_at": "2026-09-17T06:36:23Z",
+   "updated_at": "2026-09-17T06:37:52Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -2156,52 +2171,6 @@
      "started_at": "2026-09-14T12:58:47Z",
      "completed_at": "2026-09-14T14:05:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34844925217/job/103982712958"
-    }
-   ]
-  },
-  {
-   "run_id": 34843870117,
-   "pr": 1133,
-   "commit": "6bfc1e17ab4e81ae1779dde0013a2b7eff115a6b",
-   "branch": "pr/enh-pre-commit-style",
-   "event": "pull_request",
-   "title": "[CI] Align pre-commit Python and C++ style checks with CI",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34843870117",
-   "created_at": "2026-09-14T12:31:17Z",
-   "updated_at": "2026-09-14T12:33:03Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T12:32:58Z",
-     "completed_at": "2026-09-14T12:33:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34843870117/job/103975356515",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T12:32:58Z",
-     "completed_at": "2026-09-14T12:33:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34843870117/job/103975356552"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T12:32:58Z",
-     "completed_at": "2026-09-14T12:33:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34843870117/job/103975356707"
     }
    ]
   }
