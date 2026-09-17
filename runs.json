@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-09-17T05:10:46Z",
+ "updated": "2026-09-17T06:39:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35190568612,
+   "pr": null,
+   "commit": "4541dd908acf4b91564b3bde2344f8c90b27f984",
+   "branch": "main",
+   "event": "push",
+   "title": "[Enh] Give Align fields alignas-like value semantics (#1141)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612",
+   "created_at": "2026-09-17T06:36:18Z",
+   "updated_at": "2026-09-17T06:36:23Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 35189483341,
+   "pr": 1110,
+   "commit": "fabcc7c412c0088fed1e75e82fca23f77b8e6123",
+   "branch": "fix/llvm-amdgpu-cvt-pk-f32-f8-true16",
+   "event": "pull_request",
+   "title": "[LLVM] Fix true16 lowering for packed FP8 conversions",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35189483341",
+   "created_at": "2026-09-17T06:21:40Z",
+   "updated_at": "2026-09-17T06:21:40Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
+  {
+   "run_id": 35188472955,
+   "pr": 1109,
+   "commit": "ef6255cc8d1beaa6747e8fb18afe9000e680ce54",
+   "branch": "feat/rocdl-cvt-f32-fp8",
+   "event": "pull_request",
+   "title": "[DSL] Expose F32_FP8 conversion from packed_i32",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35188472955",
+   "created_at": "2026-09-17T06:07:20Z",
+   "updated_at": "2026-09-17T06:07:20Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 35179578655,
    "pr": null,
@@ -10,11 +55,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix][Kernel] Fix rdna3_int8_gemm RDNA bounds checks (#1136)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35179578655",
    "created_at": "2026-09-17T03:49:10Z",
-   "updated_at": "2026-09-17T04:20:55Z",
+   "updated_at": "2026-09-17T06:36:23Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -29,19 +74,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-17T04:21:27Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35179578655/job/105074687610"
+     "completed_at": "2026-09-17T05:27:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35179578655/job/105074687610",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-17T04:20:55Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-17T06:35:36Z",
+     "completed_at": "2026-09-17T06:36:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35179578655/job/105074687664"
     }
    ]
@@ -767,45 +815,14 @@
    "commit": "2aea9ad9c6e649ab8728133e1df323517cbf1896",
    "branch": "jli/gfx1250/bump-llvm-unclausevmem",
    "event": "pull_request",
-   "title": "[WIP][LLVM] bump llvm which improve the sequence for initial unclaused vmem",
-   "status": "completed",
-   "conclusion": "success",
+   "title": "[LLVM] bump llvm which improve the sequence for initial unclaused vmem",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965",
    "created_at": "2026-09-16T08:15:47Z",
-   "updated_at": "2026-09-16T09:56:27Z",
+   "updated_at": "2026-09-17T06:27:56Z",
    "actor": "Boss2002n",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T08:54:07Z",
-     "completed_at": "2026-09-16T09:56:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965/job/104729346934",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T09:18:58Z",
-     "completed_at": "2026-09-16T09:56:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965/job/104729346943"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T08:53:45Z",
-     "completed_at": "2026-09-16T09:19:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965/job/104729346959"
-    }
-   ]
+   "jobs": []
   },
   {
    "run_id": 35071960853,
@@ -813,7 +830,7 @@
    "commit": "e10dc7d603719914e524d440597b7ed458183688",
    "branch": "jli/gfx1250/bump-llvm-unclausevmem",
    "event": "pull_request",
-   "title": "[WIP][LLVM] bump llvm which improve the sequence for initial unclaused vmem",
+   "title": "[LLVM] bump llvm which improve the sequence for initial unclaused vmem",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35071960853",
@@ -1069,7 +1086,7 @@
   },
   {
    "run_id": 35007821488,
-   "pr": 1141,
+   "pr": null,
    "commit": "49c173b3e2c2d1641acb89692a0e357f2a45fc3d",
    "branch": "pr/enh-align-value-semantics",
    "event": "pull_request",
@@ -1492,7 +1509,7 @@
   },
   {
    "run_id": 34921623966,
-   "pr": 1109,
+   "pr": null,
    "commit": "2bceb650cde202c5de12d4e4ae5911ac4ed99d0e",
    "branch": "feat/rocdl-cvt-f32-fp8",
    "event": "pull_request",
@@ -2185,110 +2202,6 @@
      "started_at": "2026-09-14T12:32:58Z",
      "completed_at": "2026-09-14T12:33:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/34843870117/job/103975356707"
-    }
-   ]
-  },
-  {
-   "run_id": 34842937541,
-   "pr": 1013,
-   "commit": "b9b46c5d8eb2de13676ba84c4b1070f691e650a3",
-   "branch": "pr/enh-cdna5-tiled-tdm-atom",
-   "event": "pull_request",
-   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34842937541",
-   "created_at": "2026-09-14T12:21:01Z",
-   "updated_at": "2026-09-14T13:28:56Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-14T12:35:13Z",
-     "completed_at": "2026-09-14T13:27:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34842937541/job/103975643383"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-14T12:56:55Z",
-     "completed_at": "2026-09-14T13:28:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34842937541/job/103975643446"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T12:33:43Z",
-     "completed_at": "2026-09-14T12:52:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34842937541/job/103975643582"
-    }
-   ]
-  },
-  {
-   "run_id": 34841903383,
-   "pr": 1013,
-   "commit": "fc04171712e6f76b84b29509c32444ef0adbc51f",
-   "branch": "pr/enh-cdna5-tiled-tdm-atom",
-   "event": "pull_request",
-   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34841903383",
-   "created_at": "2026-09-14T12:09:47Z",
-   "updated_at": "2026-09-14T12:11:48Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 34837262103,
-   "pr": null,
-   "commit": "123ce0707e8254089b8a26b232d24d8d67a96cf7",
-   "branch": "codex/reduce-ci-test-runtime",
-   "event": "pull_request",
-   "title": "[CI] Reduce full test runtime without dropping edge coverage",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34837262103",
-   "created_at": "2026-09-14T11:15:10Z",
-   "updated_at": "2026-09-14T12:43:14Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T11:31:59Z",
-     "completed_at": "2026-09-14T12:32:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34837262103/job/103958177684",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-14T12:33:54Z",
-     "completed_at": "2026-09-14T12:43:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34837262103/job/103958177739"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-14T11:42:26Z",
-     "completed_at": "2026-09-14T11:58:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34837262103/job/103958177764"
     }
    ]
   }
