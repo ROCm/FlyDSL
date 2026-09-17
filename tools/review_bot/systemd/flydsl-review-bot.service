@@ -1,0 +1,22 @@
+[Unit]
+Description=Scan for one-shot FlyDSL pull-request reviews
+Documentation=file:@REVIEW_BOT_ROOT@/tools/review_bot/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@PYTHON@ @REVIEW_BOT_ROOT@/tools/review_bot/watch.py --config @CONFIG_PATH@
+TimeoutStartSec=130min
+UMask=0077
+PassEnvironment=ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
