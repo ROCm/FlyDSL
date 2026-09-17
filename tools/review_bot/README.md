@@ -68,9 +68,9 @@ run with `--dry-run`. Changing it to `true` is the explicit live-publication gat
 
 The review container has no GPU request, GitHub config, GitHub token, or
 Docker socket. It uses the host network only so the trusted Claude core can
-reach the loopback-only model gateway; the `untrusted-container` sandbox denies network to
+reach the node-local model gateway; the `untrusted-container` sandbox denies network to
 PR-influenced tool commands. The root is read-only; capabilities are dropped;
-privilege gain is disabled; PID, memory, CPU, and file-descriptor limits are
+privilege gain is disabled; PID, 64 GiB memory, CPU, and file-descriptor limits are
 applied. The engine, source, and manifest mounts are read-only. Only the local
 run artifact directory is a persistent writable mount. Claude's subprocess
 scrubber and sandbox credential deny rules remove the model token from every

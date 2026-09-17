@@ -4,7 +4,7 @@
   "implementation_sha256": "REPLACE_WITH_64_LOWERCASE_HEX_IMPLEMENTATION_HASH",
   "state_root": "/home/USER/.local/state/flydsl-review-bot",
   "retention_days": 30,
-  "memory_limit": "16g",
+  "memory_limit": "64g",
   "cpu_limit": "8",
   "pids_limit": 512,
   "publish_enabled": false

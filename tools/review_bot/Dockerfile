@@ -27,7 +27,6 @@ RUN apt-get update \
         python3 \
         ripgrep \
         socat \
-        tini \
     && rm -rf /var/lib/apt/lists/*
 
 RUN test "$(npm view "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" dist.integrity)" = "${CLAUDE_CODE_INTEGRITY}" \
@@ -51,4 +50,4 @@ COPY --chmod=0555 run-review.sh /usr/local/bin/run-review.sh
 USER reviewer:reviewer
 WORKDIR /workspace/source
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/run-review.sh"]
+ENTRYPOINT ["/usr/local/bin/run-review.sh"]
