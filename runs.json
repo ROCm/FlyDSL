@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-18T05:51:18Z",
+ "updated": "2026-09-18T06:18:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35314191043,
+   "pr": 1153,
+   "commit": "a14afdf020e1610cd66c97fafdcd8a4cb0a6e63d",
+   "branch": "phil/drop-inert-llvm-knobs",
+   "event": "pull_request",
+   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314191043",
+   "created_at": "2026-09-18T06:16:41Z",
+   "updated_at": "2026-09-18T06:17:15Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 35313745575,
+   "pr": 1153,
+   "commit": "4f572fd5fb32555eaac89d3a792746eacb8fddc6",
+   "branch": "phil/drop-inert-llvm-knobs",
+   "event": "pull_request",
+   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35313745575",
+   "created_at": "2026-09-18T06:10:16Z",
+   "updated_at": "2026-09-18T06:16:58Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35310916796,
    "pr": 1161,
@@ -325,21 +355,21 @@
    "branch": "pr/enh-struct-members",
    "event": "pull_request",
    "title": "[Enh] Support expr struct member methods",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275",
    "created_at": "2026-09-17T19:23:38Z",
-   "updated_at": "2026-09-18T01:28:03Z",
+   "updated_at": "2026-09-18T06:16:50Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-17T19:37:57Z",
-     "completed_at": "2026-09-17T19:39:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275/job/105353101969"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-18T06:17:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275/job/105502258229"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -348,7 +378,7 @@
      "conclusion": "success",
      "started_at": "2026-09-18T00:30:24Z",
      "completed_at": "2026-09-18T01:28:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275/job/105353101982"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275/job/105502259260"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -357,7 +387,7 @@
      "conclusion": "success",
      "started_at": "2026-09-17T19:38:41Z",
      "completed_at": "2026-09-17T19:53:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275/job/105353102093"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275/job/105502259573"
     }
    ]
   },
@@ -1999,95 +2029,6 @@
      "started_at": "2026-09-15T23:16:32Z",
      "completed_at": "2026-09-16T00:23:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35007890807/job/104519452918"
-    }
-   ]
-  },
-  {
-   "run_id": 35007821488,
-   "pr": null,
-   "commit": "49c173b3e2c2d1641acb89692a0e357f2a45fc3d",
-   "branch": "pr/enh-align-value-semantics",
-   "event": "pull_request",
-   "title": "[Enh] Give Align fields alignas-like value semantics",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35007821488",
-   "created_at": "2026-09-15T18:29:39Z",
-   "updated_at": "2026-09-15T19:28:40Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-15T18:51:45Z",
-     "completed_at": "2026-09-15T19:10:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35007821488/job/104518836083"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-15T18:50:24Z",
-     "completed_at": "2026-09-15T19:28:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35007821488/job/104518836084"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T18:49:54Z",
-     "completed_at": "2026-09-15T19:07:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35007821488/job/104518836159"
-    }
-   ]
-  },
-  {
-   "run_id": 35001342058,
-   "pr": 1140,
-   "commit": "a0ae573748a1589acc7f9625275a8146feebfc69",
-   "branch": "pr/fix-pointer-control-flow",
-   "event": "pull_request",
-   "title": "[Fix] Convert fly pointer types across control-flow boundaries",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35001342058",
-   "created_at": "2026-09-15T17:27:04Z",
-   "updated_at": "2026-09-15T19:31:03Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T17:48:27Z",
-     "completed_at": "2026-09-15T18:04:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35001342058/job/104497426020"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T17:49:21Z",
-     "completed_at": "2026-09-15T19:01:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35001342058/job/104497426057",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T18:50:13Z",
-     "completed_at": "2026-09-15T19:31:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35001342058/job/104497426156"
     }
    ]
   }
