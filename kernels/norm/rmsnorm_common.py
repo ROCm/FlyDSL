@@ -67,21 +67,6 @@ def validate_norm_operand_dtypes(input_tensor, **operands) -> None:
         )
 
 
-def load_scalar(copy_atom, elem_dtype, divided_tensor, index):
-    view = fx.slice(divided_tensor, (None, index))
-    r = fx.make_rmem_tensor(1, elem_dtype)
-    fx.copy(copy_atom, view, r)
-    return fx.memref_load_vec(r)[0]
-
-
-def store_scalar(copy_atom, elem_dtype, divided_tensor, index, val):
-    r = fx.make_rmem_tensor(1, elem_dtype)
-    ts = fx.Vector.filled(1, val, elem_dtype)
-    fx.memref_store_vec(ts, r)
-    view = fx.slice(divided_tensor, (None, index))
-    fx.copy(copy_atom, r, view)
-
-
 def load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
     r = fx.make_rmem_tensor(vec_width, elem_dtype)
     fx.copy(copy_atom, fx.slice(div_tensor, (None, idx)), r)
