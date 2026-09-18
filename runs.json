@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-18T11:45:04Z",
+ "updated": "2026-09-18T12:38:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35341001055",
    "created_at": "2026-09-18T11:43:02Z",
-   "updated_at": "2026-09-18T11:43:24Z",
+   "updated_at": "2026-09-18T12:06:18Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-18T12:06:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35341001055/job/105592743698"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-18T12:06:23Z",
+     "completed_at": "2026-09-18T12:31:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35341001055/job/105592743724"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-18T12:09:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35341001055/job/105592743798"
+    }
+   ]
   },
   {
    "run_id": 35339232190,
@@ -55,19 +83,19 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011",
    "created_at": "2026-09-18T10:22:32Z",
-   "updated_at": "2026-09-18T10:52:01Z",
+   "updated_at": "2026-09-18T12:06:37Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T10:52:01Z",
+     "started_at": "2026-09-18T12:06:36Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105573423947"
     },
