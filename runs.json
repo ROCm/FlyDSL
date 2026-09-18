@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-18T09:06:34Z",
+ "updated": "2026-09-18T09:10:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -275,11 +275,11 @@
    "branch": "main",
    "event": "push",
    "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition (#1013)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35318091631",
    "created_at": "2026-09-18T07:09:27Z",
-   "updated_at": "2026-09-18T08:25:55Z",
+   "updated_at": "2026-09-18T09:08:19Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -306,10 +306,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T08:10:13Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T09:08:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35318091631/job/105524632515"
     }
    ]
