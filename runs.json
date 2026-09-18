@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-09-18T06:44:23Z",
+ "updated": "2026-09-18T06:55:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35316818779,
+   "pr": null,
+   "commit": "cfeb6d7d1dba141d75b8343d69e0669a911dd183",
+   "branch": "main",
+   "event": "push",
+   "title": "bump version to 0.3.4 (#1163)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316818779",
+   "created_at": "2026-09-18T06:52:47Z",
+   "updated_at": "2026-09-18T06:53:09Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35316781680,
+   "pr": 1163,
+   "commit": "da7fbd156c827a1767b31e7e245f984fa604aa51",
+   "branch": "bump-version-0.3.4",
+   "event": "pull_request",
+   "title": "bump version to 0.3.4",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680",
+   "created_at": "2026-09-18T06:52:18Z",
+   "updated_at": "2026-09-18T06:52:23Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35316496300,
+   "pr": 1162,
+   "commit": "447758e02840a51631253900a22bd2ca859f5482",
+   "branch": "feature/ktrace-dialect-squashed",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316496300",
+   "created_at": "2026-09-18T06:48:27Z",
+   "updated_at": "2026-09-18T06:52:15Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35316064189,
    "pr": null,
@@ -10,11 +55,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950 (#1119)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316064189",
    "created_at": "2026-09-18T06:42:40Z",
-   "updated_at": "2026-09-18T06:43:01Z",
+   "updated_at": "2026-09-18T06:53:04Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1887,82 +1932,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35072819965/job/105105806772"
     }
    ]
-  },
-  {
-   "run_id": 35071960853,
-   "pr": 1145,
-   "commit": "e10dc7d603719914e524d440597b7ed458183688",
-   "branch": "jli/gfx1250/bump-llvm-unclausevmem",
-   "event": "pull_request",
-   "title": "[LLVM] bump llvm which improve the sequence for initial unclaused vmem",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35071960853",
-   "created_at": "2026-09-16T08:06:10Z",
-   "updated_at": "2026-09-16T08:16:01Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 35066191384,
-   "pr": null,
-   "commit": "6f5ac84ec7628844dbd09d5736f94507b1446e95",
-   "branch": "xudoyuan/for-range-unroll",
-   "event": "pull_request",
-   "title": "Support unroll/unroll_full on dynamic for-range loops",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384",
-   "created_at": "2026-09-16T06:58:19Z",
-   "updated_at": "2026-09-16T09:56:00Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T08:53:58Z",
-     "completed_at": "2026-09-16T09:55:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384/job/104708097117"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T07:44:02Z",
-     "completed_at": "2026-09-16T08:13:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384/job/104708097302"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T07:40:45Z",
-     "completed_at": "2026-09-16T08:37:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066191384/job/104708097331",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35066165199,
-   "pr": null,
-   "commit": "864b4d59a61f2e221c796f4b91dfa6917755b079",
-   "branch": "xudoyuan/for-range-unroll",
-   "event": "pull_request",
-   "title": "Support unroll/unroll_full on dynamic for-range loops",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35066165199",
-   "created_at": "2026-09-16T06:58:00Z",
-   "updated_at": "2026-09-16T06:58:36Z",
-   "actor": "xudoyuan",
-   "jobs": []
   }
  ]
 }
