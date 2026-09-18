@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-18T07:55:57Z",
+ "updated": "2026-09-18T08:03:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35322267759,
+   "pr": 1161,
+   "commit": "33837306f255939723cbf9c0cc2d26ab2bf4449e",
+   "branch": "convert-atom-call-pred-ssa",
+   "event": "pull_request",
+   "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322267759",
+   "created_at": "2026-09-18T08:01:29Z",
+   "updated_at": "2026-09-18T08:01:29Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 35322221682,
+   "pr": 1153,
+   "commit": "be7c6433155895bd618b85e67df2ba1b1c77c064",
+   "branch": "phil/drop-inert-llvm-knobs",
+   "event": "pull_request",
+   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322221682",
+   "created_at": "2026-09-18T08:00:55Z",
+   "updated_at": "2026-09-18T08:01:35Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35321561532,
    "pr": 1164,
@@ -51,7 +81,7 @@
   },
   {
    "run_id": 35319218075,
-   "pr": 1161,
+   "pr": null,
    "commit": "700c10081c85c6773e85ae4b018aeb96a8939e18",
    "branch": "convert-atom-call-pred-ssa",
    "event": "pull_request",
@@ -176,10 +206,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T07:39:33Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T07:58:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35317834282/job/105520829568"
     },
     {
@@ -228,9 +258,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T07:51:15Z",
+     "started_at": "2026-09-18T07:58:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316878446/job/105524630399"
     }
@@ -407,11 +437,11 @@
    "branch": "phil/drop-inert-llvm-knobs",
    "event": "pull_request",
    "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314191043",
    "created_at": "2026-09-18T06:16:41Z",
-   "updated_at": "2026-09-18T06:42:10Z",
+   "updated_at": "2026-09-18T08:01:28Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -429,10 +459,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-18T06:42:09Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T08:01:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314191043/job/105506234620"
     },
     {
@@ -1995,64 +2025,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243/job/104790244229"
     }
    ]
-  },
-  {
-   "run_id": 35085784580,
-   "pr": null,
-   "commit": "ee65242631fa1ef1a03afcab94ac791670c5cfec",
-   "branch": "pr/enh-specialized-storable",
-   "event": "pull_request",
-   "title": "[Enh] Make specialized Vector and Pointer types Storable",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35085784580",
-   "created_at": "2026-09-16T10:35:16Z",
-   "updated_at": "2026-09-16T12:01:13Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-16T10:51:58Z",
-     "completed_at": "2026-09-16T11:34:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35085784580/job/104764769738"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-16T10:51:24Z",
-     "completed_at": "2026-09-16T12:01:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35085784580/job/104764769765"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T10:51:33Z",
-     "completed_at": "2026-09-16T11:10:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35085784580/job/104764769946"
-    }
-   ]
-  },
-  {
-   "run_id": 35084557354,
-   "pr": null,
-   "commit": "d933c724e887cbea18d3be664a5e6f2bd466097d",
-   "branch": "pr/enh-specialized-storable",
-   "event": "pull_request",
-   "title": "[Enh] Make specialized Vector and Pointer types Storable",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35084557354",
-   "created_at": "2026-09-16T10:21:45Z",
-   "updated_at": "2026-09-16T10:35:40Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
