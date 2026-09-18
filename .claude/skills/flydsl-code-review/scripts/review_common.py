@@ -16,8 +16,10 @@ import re
 import sys
 import traceback
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 PER_ANGLE = 6
+GROUPED_FINDER_MAX = 12
+GROUPED_FINDER_STAGE = "find-group:all"
 SWEEP_MAX = 8
 MAX_FINDINGS = 12
 ANGLES = (
@@ -105,6 +107,21 @@ def validate_output(output: dict, *, candidate_limit: int | None = None, snapsho
                 raise ValueError("line must be a positive integer or null")
             if c.get("severity") not in SEVERITIES:
                 raise ValueError("candidate needs a P0/P1/P2/P3 severity")
+    return output
+
+
+def validate_grouped_output(output: dict, angles: tuple[str, ...], *, snapshot: str | None = None) -> dict:
+    validate_output(output, candidate_limit=GROUPED_FINDER_MAX, snapshot=snapshot)
+    if output.get("coverage") != list(angles):
+        raise ValueError("grouped finder must report every angle once in assigned order")
+    counts = {angle: 0 for angle in angles}
+    for candidate in output["candidates"]:
+        angle = candidate.get("angle")
+        if angle not in counts:
+            raise ValueError("grouped finder candidate has an invalid owning angle")
+        counts[angle] += 1
+    if any(count > PER_ANGLE for count in counts.values()):
+        raise ValueError("grouped finder exceeded the per-angle candidate limit")
     return output
 
 
@@ -231,10 +248,12 @@ def rank_findings(candidates: list[dict]) -> list[dict]:
     return sorted(surviving, key=finding_order)[:MAX_FINDINGS]
 
 
-def required_stages(scope: dict | None, candidates: list[dict]) -> list[str]:
+def required_stages(scope: dict | None, candidates: list[dict], grouped_finder: bool = False) -> list[str]:
     labels = ["scope"]
     if scope and scope.get("files"):
         labels += [label for label, _ in PREFLIGHTS]
+        if grouped_finder:
+            labels.append(GROUPED_FINDER_STAGE)
         labels += ["find:" + label for label, _, _ in ANGLES]
         labels += ["verify:" + c["id"] for c in candidates]
         labels += [
@@ -272,7 +291,8 @@ def build_report(state: dict) -> dict:
     stages = state["stages"]
     scope = state.get("scope")
     candidates = judged_candidates(stages)
-    required = required_stages(scope, candidates)
+    grouped_finder = state.get("config", {}).get("group_finders") is True
+    required = required_stages(scope, candidates, grouped_finder)
     failed = [
         {"stage": label, "reason": stages.get(label, {}).get("error", "stage has not completed")}
         for label in required
@@ -285,6 +305,35 @@ def build_report(state: dict) -> dict:
                 validate_preflight(output)
             except ValueError as exc:
                 failed.append({"stage": label, "reason": str(exc)})
+    grouped = stage_output(stages, GROUPED_FINDER_STAGE)
+    if grouped_finder and grouped is not None:
+        angle_labels = tuple(label for label, _, _ in ANGLES)
+        grouped_stage = stages[GROUPED_FINDER_STAGE]
+        try:
+            validate_grouped_output(grouped, angle_labels)
+            for angle in angle_labels:
+                expected = {
+                    "status": "COMPLETE",
+                    "limitations": [],
+                    "candidates": [
+                        {key: value for key, value in candidate.items() if key != "angle"}
+                        for candidate in grouped["candidates"]
+                        if candidate["angle"] == angle
+                    ],
+                }
+                derived_stage = stages.get("find:" + angle, {})
+                if (
+                    stage_output(stages, "find:" + angle) != expected
+                    or derived_stage.get("derived_from") != GROUPED_FINDER_STAGE
+                    or derived_stage.get("input_sha256") != grouped_stage.get("input_sha256")
+                ):
+                    failed.append(
+                        {"stage": "find:" + angle, "reason": "derived finder output does not match grouped finder"}
+                    )
+        except ValueError as exc:
+            failed.append({"stage": GROUPED_FINDER_STAGE, "reason": str(exc)})
+    elif not grouped_finder and GROUPED_FINDER_STAGE in stages:
+        failed.append({"stage": GROUPED_FINDER_STAGE, "reason": "grouped finder is not enabled in saved config"})
     # Integrity checks and cancellation can fail outside an agent stage.
     failed += [
         {"stage": label, "reason": stage.get("error", "stage failed")}

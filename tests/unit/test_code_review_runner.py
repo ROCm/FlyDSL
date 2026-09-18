@@ -47,6 +47,34 @@ def found(*candidates):
     return {"status": "COMPLETE", "limitations": [], "candidates": list(candidates)}
 
 
+ANGLE_LABELS = tuple(label for label, _, _ in common.ANGLES)
+
+
+def grouped_found(*candidates):
+    return {
+        "status": "COMPLETE",
+        "limitations": [],
+        "candidates": list(candidates),
+        "coverage": list(ANGLE_LABELS),
+    }
+
+
+def sync_grouped_finder(stages):
+    candidates = []
+    for angle in ANGLE_LABELS:
+        output = common.stage_output(stages, "find:" + angle)
+        if output is not None:
+            candidates.extend({**copy.deepcopy(candidate), "angle": angle} for candidate in output["candidates"])
+        stages["find:" + angle].update(
+            derived_from=common.GROUPED_FINDER_STAGE,
+            input_sha256="grouped-fingerprint",
+        )
+    stages[common.GROUPED_FINDER_STAGE] = {
+        **done(grouped_found(*candidates)),
+        "input_sha256": "grouped-fingerprint",
+    }
+
+
 def verdict(value="CONFIRMED", evidence="Executed probe: row 9 stores the incorrect value 17.", severity="P1"):
     return {
         "status": "COMPLETE",
@@ -73,6 +101,7 @@ def configuration(**overrides):
         "instructions": "",
         "model": None,
         "effort": None,
+        "group_finders": True,
         "claude_path": None,
         "concurrency": 3,
         "agent_timeout": 1,
@@ -128,7 +157,10 @@ class Backend:
             self.calls.append(label)
             self.active += 1
             self.peak = max(self.peak, self.active)
-            fail = self.failure and label.startswith(self.failure)
+            fail = self.failure and (
+                label.startswith(self.failure)
+                or (label == common.GROUPED_FINDER_STAGE and self.failure.startswith("find:"))
+            )
             if fail and self.fail_once:
                 self.failure = None
         try:
@@ -136,7 +168,18 @@ class Backend:
                 time.sleep(self.delay)
             if fail or cancelled.is_set() or time.monotonic() >= deadline:
                 return {"status": "INCOMPLETE", "error": "injected stage failure", "usage": {}}
-            if label.startswith("find:"):
+            if label == common.GROUPED_FINDER_STAGE:
+                if self.many:
+                    output = grouped_found(
+                        *(
+                            {**candidate(i + 1, angle + str(i)), "angle": angle}
+                            for angle in ANGLE_LABELS[:2]
+                            for i in range(6)
+                        )
+                    )
+                else:
+                    output = grouped_found({**candidate(), "angle": "trace-time"})
+            elif label.startswith("find:"):
                 if self.many:
                     output = found(*(candidate(i + 1, label + str(i)) for i in range(6)))
                 else:
@@ -201,6 +244,23 @@ def test_verifier_schema_requires_independent_severity():
         common.validate_output({"status": "COMPLETE", "limitations": [], "verdict": "CONFIRMED", "evidence": "proof"})
 
 
+def test_grouped_finder_requires_ordered_coverage_and_per_angle_cap():
+    schema = runner.grouped_output_schema(ANGLE_LABELS)
+    assert schema["properties"]["candidates"]["maxItems"] == common.GROUPED_FINDER_MAX
+    assert "angle" in schema["properties"]["candidates"]["items"]["required"]
+    assert "coverage" in schema["required"]
+    output = grouped_found({**candidate(), "angle": "trace-time"})
+    assert common.validate_grouped_output(output, ANGLE_LABELS) is output
+    output["coverage"] = list(reversed(ANGLE_LABELS))
+    with pytest.raises(ValueError, match="every angle"):
+        common.validate_grouped_output(output, ANGLE_LABELS)
+    over_limit = grouped_found(
+        *({**candidate(line=index + 1, mechanism=f"candidate {index}"), "angle": "trace-time"} for index in range(7))
+    )
+    with pytest.raises(ValueError, match="per-angle"):
+        common.validate_grouped_output(over_limit, ANGLE_LABELS)
+
+
 @pytest.mark.parametrize("failure", ["find:addressing", "verify:", "challenge:", "sweep"])
 def test_required_failure_never_returns_clean_review(tmp_path, source_repo, failure):
     review = new_run(tmp_path, source_repo, Backend(failure))
@@ -217,15 +277,28 @@ def test_required_failure_never_returns_clean_review(tmp_path, source_repo, fail
         publisher.publish(report, dry_run=False)
 
 
-def test_all_54_candidates_verified_and_correctness_has_priority(tmp_path, source_repo):
+def test_all_12_grouped_candidates_are_verified_and_correctness_has_priority(tmp_path, source_repo):
     backend = Backend(many=True)
     report = new_run(tmp_path, source_repo, backend).run()
     assert report["status"] == "COMPLETE"
-    assert sum(c.startswith("verify:") for c in backend.calls) == 54
-    assert report["stats"]["verified"] == 54
+    assert sum(c.startswith("verify:") for c in backend.calls) == common.GROUPED_FINDER_MAX
+    assert report["stats"]["verified"] == common.GROUPED_FINDER_MAX
     assert len(report["risks"]) == 12
     assert all(c["kind"] == "correctness" for c in report["risks"])
     assert backend.peak <= 3
+    assert len(report["stages"][common.GROUPED_FINDER_STAGE]["attempts"]) == 1
+    assert all(
+        report["stages"]["find:" + angle]["derived_from"] == common.GROUPED_FINDER_STAGE for angle in ANGLE_LABELS
+    )
+
+
+def test_ungrouped_mode_keeps_nine_independent_finder_stages(tmp_path, source_repo):
+    backend = Backend()
+    report = new_run(tmp_path, source_repo, backend, group_finders=False).run()
+    assert report["status"] == "COMPLETE"
+    assert common.GROUPED_FINDER_STAGE not in report["stages"]
+    assert all(backend.calls.count("find:" + angle) == 1 for angle in ANGLE_LABELS)
+    assert report["metrics"]["agent_attempts"] == 12
 
 
 def test_challenge_downgrade_and_evidence_survive_synthesis(tmp_path, source_repo):
@@ -263,7 +336,7 @@ def test_resume_retries_only_failed_stages_and_keeps_prior_usage(tmp_path, sourc
     state = json.loads((review.run_dir / "state.json").read_text())
     resumed = runner.ReviewRun(review.run_dir, state, backend).run()
     assert resumed["status"] == "COMPLETE"
-    assert all(backend.calls.count("find:" + label) == 1 for label, _, _ in common.ANGLES)
+    assert backend.calls.count(common.GROUPED_FINDER_STAGE) == 1
     assert backend.calls.count("verify:" + resumed["candidates"][0]["id"]) == 2
     assert resumed["metrics"]["attempts_without_cost"] == 1
     assert resumed["metrics"]["cost_is_complete"] is False
@@ -536,7 +609,10 @@ def test_untrusted_container_profile_hardens_cli_argv_environment_and_sandbox(tm
     )
     argv = recorded["argv"]
     assert "--safe-mode" in argv and "--restricted" in argv and "--no-chrome" in argv
-    assert argv[argv.index("--add-dir") + 1] == str(runner.ENGINE_ROOT)
+    add_dirs = [argv[index + 1] for index, value in enumerate(argv) if value == "--add-dir"]
+    assert add_dirs == [str(runner.ENGINE_ROOT), str(snapshot.parent), "/tmp"]
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+    assert not any(value.startswith("Bash(") for value in argv)
     settings = json.loads(argv[argv.index("--settings") + 1])
     sandbox = settings["sandbox"]
     assert sandbox["enabled"] is sandbox["failIfUnavailable"] is True
@@ -545,6 +621,7 @@ def test_untrusted_container_profile_hardens_cli_argv_environment_and_sandbox(tm
     assert sandbox["filesystem"]["denyRead"] == ["/"]
     assert sandbox["filesystem"]["denyWrite"] == ["/"]
     assert str(snapshot) in sandbox["filesystem"]["allowRead"]
+    assert str(snapshot.parent / "diff.patch") in sandbox["filesystem"]["allowRead"]
     assert str(runner.ENGINE_ROOT) in sandbox["filesystem"]["allowRead"]
     assert str(tmp_path) not in sandbox["filesystem"]["allowRead"]
     denied = {entry["name"] for entry in sandbox["credentials"]["envVars"]}
@@ -592,14 +669,17 @@ def test_command_line_entry_persists_one_result_and_resumes(tmp_path, source_rep
         "import json, sys\n"
         "schema = json.loads(sys.argv[sys.argv.index('--json-schema') + 1])\n"
         "sys.stdin.read()\n"
-        f"output = {found(record)!r} if 'candidates' in schema['properties'] else {verdict()!r}\n"
+        f"grouped = {grouped_found({**record, 'angle': 'trace-time'})!r}\n"
+        f"found = {found(record)!r}\n"
+        f"output = grouped if 'coverage' in schema['properties'] else "
+        f"(found if 'candidates' in schema['properties'] else {verdict()!r})\n"
         "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
         "'structured_output': output, 'total_cost_usd': 0.01, 'usage': {'output_tokens': 10}}))\n",
     )
     run_dir = tmp_path / "cli-run"
     entry = [sys.executable, str(SCRIPTS / "run_review.py")]
     process = subprocess.run(
-        [*entry, "--base", base, "--head", head, "--run-dir", str(run_dir)],
+        [*entry, "--base", base, "--head", head, "--group-finders", "--run-dir", str(run_dir)],
         cwd=root,
         capture_output=True,
         text=True,
@@ -609,14 +689,14 @@ def test_command_line_entry_persists_one_result_and_resumes(tmp_path, source_rep
     report = json.loads(process.stdout)
     assert report == json.loads((run_dir / "result.json").read_text())
     assert report["status"] == "COMPLETE"
-    assert report["metrics"]["agent_attempts"] == 12
+    assert report["metrics"]["agent_attempts"] == 4
     assert report["stats"]["verified"] == report["stats"]["challenged"] == 1
     resumed = subprocess.run([*entry, "--resume", str(run_dir)], cwd=root, capture_output=True, text=True, timeout=10)
     assert resumed.returncode == 0, resumed.stderr
     second = json.loads(resumed.stdout)
     assert second["run_id"] == report["run_id"]
     assert second["reported_ids"] == report["reported_ids"]
-    assert second["metrics"]["agent_attempts"] == 12
+    assert second["metrics"]["agent_attempts"] == 4
 
 
 def test_runner_rejects_publisher_options_with_actionable_error(tmp_path):
@@ -690,6 +770,7 @@ def complete_report():
     stages["find:trace-time"] = done(
         found(candidate(10), candidate(90, "second defect"), candidate(11, "uncertain race"))
     )
+    sync_grouped_finder(stages)
     for c in common.collect_candidates(stages):
         if c["mechanism"] == "uncertain race":
             stages["verify:" + c["id"]] = done(verdict("PLAUSIBLE"))
@@ -700,7 +781,7 @@ def complete_report():
         "schema_version": common.SCHEMA_VERSION,
         "run_id": "test-run",
         "implementation_sha256": "d" * 64,
-        "config": {},
+        "config": {"group_finders": True},
         "scope": scope,
         "stages": stages,
     }
@@ -717,7 +798,11 @@ def rebuild_report(template, finder_candidates, adjudications):
             stages[label] = done(found())
     stages["sweep"] = done(found())
     for label, candidates in finder_candidates.items():
-        stages["find:" + label] = done(found(*candidates))
+        if label == "sweep":
+            stages["sweep"] = done(found(*candidates))
+        else:
+            stages["find:" + label] = done(found(*candidates))
+    sync_grouped_finder(stages)
     for item in common.collect_candidates(stages):
         verdict_value, verify_severity, challenge_verdict, challenge_severity = adjudications[item["mechanism"]]
         stages["verify:" + item["id"]] = done(verdict(verdict_value, severity=verify_severity))
@@ -807,8 +892,9 @@ def test_publish_filter_precedes_artifact_cap(complete_report):
     blocker = candidate(line=100, mechanism="confirmed blocker", severity="P3")
     finder_candidates = {
         "trace-time": correctness[:6],
-        "addressing": correctness[6:],
+        "addressing": correctness[6:11],
         "conventions": [blocker],
+        "sweep": correctness[11:],
     }
     adjudications = {
         **{item["mechanism"]: ("PLAUSIBLE", "P3", "REFUTED", "P3") for item in correctness},
@@ -988,6 +1074,13 @@ def test_publisher_rejects_changed_provenance(complete_report, field):
         common.validate_report(report)
 
 
+def test_publisher_rejects_grouped_finder_provenance_mismatch(complete_report):
+    report = copy.deepcopy(complete_report)
+    report["stages"][common.GROUPED_FINDER_STAGE]["output"]["candidates"][0]["summary"] = "tampered"
+    with pytest.raises(ValueError, match="required stages"):
+        common.validate_report(report)
+
+
 def test_unpublished_candidate_tampering_is_rejected(complete_report):
     item = candidate(mechanism="hidden p2", severity="P0")
     report = rebuild_report(
@@ -1011,7 +1104,8 @@ def test_preflight_routes_raw_leads_without_promoting_them(tmp_path, source_repo
 
     def backend(task, *_):
         prompts[task["label"]] = task["prompt"]
-        return {**done(found()), "usage": {"total_cost_usd": 0}}
+        output = grouped_found() if task["label"] == common.GROUPED_FINDER_STAGE else found()
+        return {**done(output), "usage": {"total_cost_usd": 0}}
 
     review = new_run(tmp_path, (root, base, runner.revision(root, "HEAD")), backend)
     report = review.run()
@@ -1019,18 +1113,17 @@ def test_preflight_routes_raw_leads_without_promoting_them(tmp_path, source_repo
     for label, _ in common.PREFLIGHTS:
         assert report["stages"][label]["output"]["exit_code"] == 1
         assert len(report["stages"][label]["runs"]) == 1
-    assert "kernels/example.py:1" in prompts["find:conventions"]
-    assert "test_unwired:1" in prompts["find:test-doc"]
-    assert "test_unwired:1" not in prompts["find:conventions"]
-    assert "kernels/example.py:1" not in prompts["find:addressing"]
-    assert "Compiler target decisions" in prompts["find:arch-atom"]
-    assert "Compiler, dialect, and conversion changes" in prompts["find:cross-layer"]
-    assert "Compiler extension generality" in prompts["find:reuse"]
-    assert "Compiler regression coverage" in prompts["find:test-doc"]
+    finder_prompt = prompts[common.GROUPED_FINDER_STAGE]
+    assert "kernels/example.py:1" in finder_prompt
+    assert "test_unwired:1" in finder_prompt
+    assert "Compiler target decisions" in finder_prompt
+    assert "Compiler, dialect, and conversion changes" in finder_prompt
+    assert "Compiler extension generality" in finder_prompt
+    assert "Compiler regression coverage" in finder_prompt
     assert "code that moved between files" in prompts["sweep"]
     assert "For compiler scopes, sweep" in prompts["sweep"]
     assert report["findings"] == report["risks"] == report["candidates"] == []
-    assert report["metrics"]["agent_attempts"] == 10
+    assert report["metrics"]["agent_attempts"] == 2
     assert report["metrics"]["cost_is_complete"] is True
     common.validate_report(report)
 
@@ -1047,10 +1140,15 @@ def test_actual_verifier_challenger_and_sweep_prompts_receive_owning_guidance(tm
     def backend(task, *_):
         label = task["label"]
         prompts[label] = task["prompt"]
-        if label.startswith("find:"):
-            angle = label.removeprefix("find:")
-            output = (
-                found(candidate(line=len(prompts), mechanism="candidate " + angle)) if angle in headings else found()
+        if label == common.GROUPED_FINDER_STAGE:
+            output = grouped_found(
+                *(
+                    {
+                        **candidate(line=index + 1, mechanism="candidate " + angle),
+                        "angle": angle,
+                    }
+                    for index, angle in enumerate(headings)
+                )
             )
         elif label == "sweep":
             output = found(candidate(line=99, mechanism="sweep gap"))
