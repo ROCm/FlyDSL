@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-18T08:03:27Z",
+ "updated": "2026-09-18T08:10:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35322878227,
+   "pr": 1153,
+   "commit": "acf533140950be835c0fdb63c153c2b0b8d5bb7a",
+   "branch": "phil/drop-inert-llvm-knobs",
+   "event": "pull_request",
+   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227",
+   "created_at": "2026-09-18T08:08:36Z",
+   "updated_at": "2026-09-18T08:09:16Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35322267759,
    "pr": 1161,
@@ -25,11 +40,11 @@
    "branch": "phil/drop-inert-llvm-knobs",
    "event": "pull_request",
    "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322221682",
    "created_at": "2026-09-18T08:00:55Z",
-   "updated_at": "2026-09-18T08:01:35Z",
+   "updated_at": "2026-09-18T08:08:57Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -172,9 +187,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T07:51:15Z",
+     "started_at": "2026-09-18T08:04:54Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35317989107/job/105524629601"
     }
@@ -187,11 +202,11 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35317834282",
    "created_at": "2026-09-18T07:06:03Z",
-   "updated_at": "2026-09-18T07:36:15Z",
+   "updated_at": "2026-09-18T08:02:06Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -215,9 +230,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T07:36:15Z",
+     "started_at": "2026-09-18T08:02:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35317834282/job/105520829573"
     }
@@ -316,11 +331,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T07:08:36Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680/job/105513800345"
+     "completed_at": "2026-09-18T08:04:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680/job/105513800345",
+     "machine": "smci350-rck-g03-f19-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -1979,52 +1997,6 @@
    "updated_at": "2026-09-16T14:39:08Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 35093450243,
-   "pr": null,
-   "commit": "5e6635351086271810625d1f1c11247da9db4776",
-   "branch": "pr/enh-specialized-storable",
-   "event": "pull_request",
-   "title": "[Enh] Make specialized Vector and Pointer types Storable",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243",
-   "created_at": "2026-09-16T12:01:11Z",
-   "updated_at": "2026-09-16T16:00:24Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T12:20:51Z",
-     "completed_at": "2026-09-16T13:39:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243/job/104790244177",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T12:18:53Z",
-     "completed_at": "2026-09-16T12:37:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243/job/104790244219"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T14:54:07Z",
-     "completed_at": "2026-09-16T16:00:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35093450243/job/104790244229"
-    }
-   ]
   }
  ]
 }
