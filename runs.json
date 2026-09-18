@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-18T09:05:24Z",
+ "updated": "2026-09-18T09:06:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,11 +25,11 @@
    "branch": "jli/gfx1250/bump-llvm-unclausevmem",
    "event": "pull_request",
    "title": "[LLVM] bump llvm which improve the sequence for initial unclaused vmem",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35324537801",
    "created_at": "2026-09-18T08:28:21Z",
-   "updated_at": "2026-09-18T09:03:09Z",
+   "updated_at": "2026-09-18T09:03:37Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -117,9 +117,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T08:38:40Z",
+     "started_at": "2026-09-18T09:04:11Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323032607/job/105537210493"
     },
@@ -364,11 +364,11 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35317834282",
    "created_at": "2026-09-18T07:06:03Z",
-   "updated_at": "2026-09-18T08:02:06Z",
+   "updated_at": "2026-09-18T09:03:38Z",
    "actor": "Phil-amd",
    "jobs": [
     {
