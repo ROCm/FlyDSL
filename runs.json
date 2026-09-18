@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-18T09:13:04Z",
+ "updated": "2026-09-18T09:31:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -74,10 +74,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T08:56:03Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T09:12:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323971253/job/105538961722"
     },
     {
@@ -98,20 +98,20 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323032607",
    "created_at": "2026-09-18T08:10:26Z",
-   "updated_at": "2026-09-18T08:38:40Z",
+   "updated_at": "2026-09-18T09:13:15Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-18T08:38:40Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-18T09:13:15Z",
+     "completed_at": "2026-09-18T09:26:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323032607/job/105537210457"
     },
     {
@@ -160,11 +160,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T08:25:43Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227/job/105533597639"
+     "completed_at": "2026-09-18T09:26:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227/job/105533597639",
+     "machine": "smci350-rck-g03-d14-21",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
