@@ -15,6 +15,10 @@ from .arith import *
 from .math import *
 from .llvm import *
 
+# `range` shadows the builtin, so it is kept out of primitive's __all__ (modules
+# that star-import primitive rely on the builtin) and re-exported explicitly here.
+from .primitive import range as range
+
 from . import utils as utils
 from . import arith as arith
 from . import gpu as gpu

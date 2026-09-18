@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import builtins
 import inspect
 from enum import IntEnum
 from functools import wraps
@@ -326,7 +327,30 @@ def const_expr(x):
 
 
 def range_constexpr(*args):
-    return range(*args)
+    return builtins.range(*args)
+
+
+def range(*args, **kwargs):
+    """Loop iterator that becomes an ``scf.for`` inside a traced function.
+
+    Inside ``@flyc.kernel`` / ``@flyc.jit`` the AST rewriter matches the
+    ``range(...)`` call and rewrites the whole ``for`` statement into an
+    ``scf.for``. This function is never executed there, and the keywords are
+    read off the call site by the rewriter: ``init`` for loop-carried values,
+    ``unroll`` / ``unroll_full`` for the unrolling hint.
+
+    Outside a traced function there is no loop to build, so it degrades to the
+    plain Python ``range`` and every keyword is rejected: none of them can be
+    honored by an untraced loop, and silently dropping one would hide the
+    mistake.
+    """
+    if kwargs:
+        given = ", ".join(f"{k}=..." for k in kwargs)
+        raise TypeError(
+            f"range({given}) only works inside @flyc.kernel / @flyc.jit, where the loop is "
+            f"rewritten into an scf.for; an untraced range takes positional arguments only"
+        )
+    return builtins.range(*args)
 
 
 def rank(int_or_tuple):
@@ -586,7 +610,7 @@ def get_leaves(input, dynamic_only=False):
         if ty.is_leaf:
             yield ty
             return
-        for i in range(ty.rank):
+        for i in builtins.range(ty.rank):
             yield from _walk_int_tuple_leaves(ty.at(i))
 
     ty = IntTupleType(input.type)
