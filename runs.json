@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-18T09:31:59Z",
+ "updated": "2026-09-18T10:07:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35330249452,
+   "pr": 1109,
+   "commit": "82c543ab9dd88962d81e49438891ab21143f2a82",
+   "branch": "feat/rocdl-cvt-f32-fp8",
+   "event": "pull_request",
+   "title": "[DSL] Expose F32_FP8 conversion from packed_i32",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35330249452",
+   "created_at": "2026-09-18T09:34:35Z",
+   "updated_at": "2026-09-18T09:34:35Z",
+   "actor": "big-yellow-duck",
+   "jobs": []
+  },
   {
    "run_id": 35326568840,
    "pr": 1145,
@@ -55,19 +70,19 @@
    "branch": "convert-atom-call-pred-ssa",
    "event": "pull_request",
    "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323971253",
    "created_at": "2026-09-18T08:21:36Z",
-   "updated_at": "2026-09-18T08:45:09Z",
+   "updated_at": "2026-09-18T09:55:05Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T08:45:09Z",
+     "started_at": "2026-09-18T09:55:05Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323971253/job/105538961666"
     },
@@ -83,11 +98,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T08:45:24Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323971253/job/105538961776"
+     "completed_at": "2026-09-18T09:46:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323971253/job/105538961776",
+     "machine": "smci350-rck-g03-d14-21",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -126,11 +144,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T08:39:00Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323032607/job/105537210497"
+     "completed_at": "2026-09-18T09:56:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323032607/job/105537210497",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -141,11 +162,11 @@
    "branch": "phil/drop-inert-llvm-knobs",
    "event": "pull_request",
    "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227",
    "created_at": "2026-09-18T08:08:36Z",
-   "updated_at": "2026-09-18T09:09:12Z",
+   "updated_at": "2026-09-18T10:05:07Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -172,10 +193,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T09:09:12Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T10:05:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227/job/105533597709"
     }
    ]
@@ -1098,7 +1119,7 @@
   },
   {
    "run_id": 35237940327,
-   "pr": 1109,
+   "pr": null,
    "commit": "e358149173ec0a4c1db2fc4ae1b13abc600ca908",
    "branch": "feat/rocdl-cvt-f32-fp8",
    "event": "pull_request",
@@ -1946,52 +1967,6 @@
      "machine": null,
      "host_model": null,
      "bench_skipped": "host unidentified != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35165112455,
-   "pr": null,
-   "commit": "ae8073a6651f757c6bfa1b531c9b1bcf33f9e9d8",
-   "branch": "feature/ktrace-v4",
-   "event": "pull_request",
-   "title": "[DSL][Runtime][Kernel] Add an in-kernel wave tracing feature (fx.ktrace) for gfx942/gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35165112455",
-   "created_at": "2026-09-17T00:05:47Z",
-   "updated_at": "2026-09-17T02:22:26Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-17T00:17:28Z",
-     "completed_at": "2026-09-17T02:22:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35165112455/job/105026934345"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T00:17:57Z",
-     "completed_at": "2026-09-17T01:30:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35165112455/job/105026934359",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-17T00:17:48Z",
-     "completed_at": "2026-09-17T00:35:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35165112455/job/105026934362"
     }
    ]
   }
