@@ -153,6 +153,10 @@ shows how to pre-compile preshuffle GEMM kernels into a cache directory:
 At runtime, FlyDSL loads compiled kernels from the cache automatically when
 ``FLYDSL_RUNTIME_CACHE_DIR`` is set.
 
+The on-disk cache stores only the compressed compiled IR required to recreate
+the runtime module. Pre-lowering source IR remains available in the compiling
+process for inspection, but is intentionally omitted from AOT cache files.
+
 Next steps
 ----------
 
