@@ -160,7 +160,6 @@ class BlockScan(_block_scan.BlockScan):
     warp_ops = _UNIVERSAL_WARP
 
 
-
 __all__ = [
     *_warp.__all__,
     *_block.__all__,
