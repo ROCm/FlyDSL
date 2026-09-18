@@ -347,9 +347,16 @@ def Fly_MakeMmaAtomOp : Fly_Op<"make_mma_atom", [Pure]> {
 }
 
 def Fly_MakeCopyAtomOp : Fly_Op<"make_copy_atom", [Pure]> {
-  let arguments = (ins I32Attr:$valBits);
+  let arguments = (ins Variadic<AnyType>:$args, I32Attr:$valBits);
   let results = (outs Fly_CopyAtom:$result);
-  let assemblyFormat = "attr-dict `:` qualified(type($result))";
+  let assemblyFormat = [{
+    (`(` $args^ `:` type($args) `)`)? attr-dict `:` qualified(type($result))
+  }];
+  let builders = [
+    OpBuilder<(ins "::mlir::Type":$result, "int32_t":$valBits), [{
+      build($_builder, $_state, result, ::mlir::ValueRange{}, valBits);
+    }]>
+  ];
 }
 
 def Fly_AtomSetValueOp : Fly_Op<"atom.set_value", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
@@ -359,7 +366,8 @@ def Fly_AtomSetValueOp : Fly_Op<"atom.set_value", [Pure, DeclareOpInterfaceMetho
 }
 
 def Fly_CopyAtomCall : Fly_Op<"copy_atom_call"> {
-  let arguments = (ins Fly_CopyAtom:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, Optional<Fly_MemRef>:$pred);
+  let arguments = (ins Fly_CopyAtom:$copyAtom, Fly_TensorLikeType:$src,
+                       Fly_TensorLikeType:$dst, Optional<Fly_MemRef>:$pred);
 }
 def Fly_MmaAtomCall : Fly_Op<"mma_atom_call"> {
   let arguments = (ins Fly_MmaAtom:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c);
@@ -416,7 +424,8 @@ def Fly_MmaMakeFragmentOp : Fly_Op<"mma.make_fragment", [Pure, DeclareOpInterfac
 }
 
 def Fly_CopyOp : Fly_Op<"copy"> {
-  let arguments = (ins AnyType:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, Optional<Fly_MemRef>:$pred);
+  let arguments = (ins AnyType:$copyAtom, Fly_TensorLikeType:$src, Fly_TensorLikeType:$dst,
+                       Optional<Fly_MemRef>:$pred);
   let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`,` $pred^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_GemmOp : Fly_Op<"gemm"> {
