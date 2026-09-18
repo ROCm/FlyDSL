@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-18T05:32:07Z",
+ "updated": "2026-09-18T05:51:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -9,7 +9,7 @@
    "commit": "3a3bea1725beb07f79c0490a6026d9652cea49a3",
    "branch": "convert-atom-call-pred-ssa",
    "event": "pull_request",
-   "title": "[Bugfix] Promote register pred on copy_atom_call without register src\u2026",
+   "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
    "status": "completed",
    "conclusion": "action_required",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35310916796",
@@ -24,7 +24,7 @@
    "commit": "702f28b911b686a3045c3d9810f2b3027507b63e",
    "branch": "convert-atom-call-pred-ssa",
    "event": "pull_request",
-   "title": "[Bugfix] Promote register pred on copy_atom_call without register src\u2026",
+   "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
    "status": "completed",
    "conclusion": "action_required",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35310779877",
@@ -40,30 +40,33 @@
    "branch": "main",
    "event": "push",
    "title": "fix(release): harden dev tag generation (#1160)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35307358724",
    "created_at": "2026-09-18T04:32:34Z",
-   "updated_at": "2026-09-18T05:06:41Z",
+   "updated_at": "2026-09-18T05:48:46Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T05:06:40Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T05:44:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35307358724/job/105485629788"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T04:51:54Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35307358724/job/105485629844"
+     "completed_at": "2026-09-18T05:48:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35307358724/job/105485629844",
+     "machine": "smci350-rck-g03-d14-21",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -82,7 +85,7 @@
    "commit": "dc2caa90e8e6bee259ca691f68559b805ebf7e14",
    "branch": "convert-atom-call-pred-ssa",
    "event": "pull_request",
-   "title": "[Bugfix] Promote register pred on copy_atom_call without register src\u2026",
+   "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35304411081",
