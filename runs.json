@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-18T06:42:54Z",
+ "updated": "2026-09-18T06:44:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35316064189,
+   "pr": null,
+   "commit": "cba978a2706b2671b677113b48336a308d39d9ab",
+   "branch": "main",
+   "event": "push",
+   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950 (#1119)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316064189",
+   "created_at": "2026-09-18T06:42:40Z",
+   "updated_at": "2026-09-18T06:43:01Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 35315870212,
    "pr": 1162,
@@ -83,11 +98,11 @@
    "branch": "phil/drop-inert-llvm-knobs",
    "event": "pull_request",
    "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314191043",
    "created_at": "2026-09-18T06:16:41Z",
-   "updated_at": "2026-09-18T06:35:19Z",
+   "updated_at": "2026-09-18T06:42:10Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -102,9 +117,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T06:35:19Z",
+     "started_at": "2026-09-18T06:42:09Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314191043/job/105506234620"
     },
@@ -1948,52 +1963,6 @@
    "updated_at": "2026-09-16T06:58:36Z",
    "actor": "xudoyuan",
    "jobs": []
-  },
-  {
-   "run_id": 35064460920,
-   "pr": null,
-   "commit": "18dd12f329f494286eb0857d69b273d9d55d3d8b",
-   "branch": "main",
-   "event": "push",
-   "title": "pyproject: bound nanobind below 3, as MLIR requires (#1143)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920",
-   "created_at": "2026-09-16T06:36:05Z",
-   "updated_at": "2026-09-16T08:26:34Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T06:59:06Z",
-     "completed_at": "2026-09-16T08:07:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985035",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T07:29:25Z",
-     "completed_at": "2026-09-16T07:43:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985087"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T07:40:39Z",
-     "completed_at": "2026-09-16T08:26:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985131"
-    }
-   ]
   }
  ]
 }
