@@ -4,7 +4,8 @@ description: >
   Review a FlyDSL diff, branch, commit range, or PR for correctness bugs and
   convention violations using the repository's existing skills and policy docs.
   Uses one resumable runner to pin the reviewed tree, run deterministic checks
-  and nine independent review angles, verify every candidate, and preserve the evidence.
+  and all nine review angles, optionally in one grouped pass, verify every candidate,
+  and preserve the evidence.
   Pass --comment to publish a completed PR review. Use when asked to review a diff,
   review a PR, or check changes before pushing.
 allowed-tools: Read Bash
@@ -14,8 +15,8 @@ allowed-tools: Read Bash
 
 Find real defects in a change, then prove each one before reporting it.
 
-The sole execution entry is `.claude/skills/flydsl-code-review/scripts/run_review.py`. It runs a deterministic preflight, independent finders,
-one verifier per candidate, a challenger for every CONFIRMED, and a fresh sweep.
+The sole execution entry is `.claude/skills/flydsl-code-review/scripts/run_review.py`. It runs a deterministic preflight, independent or grouped
+finders, one verifier per candidate, a challenger for every CONFIRMED, and a fresh sweep.
 Code constructs the final ranked report directly from those records. The sections
 below supply its review method; they are not an alternative manual execution path.
 
@@ -44,6 +45,7 @@ Invoke the runner with Bash from the repository root:
 python3 .claude/skills/flydsl-code-review/scripts/run_review.py 1100
 python3 .claude/skills/flydsl-code-review/scripts/run_review.py --base HEAD~3 --head HEAD
 python3 .claude/skills/flydsl-code-review/scripts/run_review.py --path kernels/attention --instructions 'focus on LDS'
+python3 .claude/skills/flydsl-code-review/scripts/run_review.py 1100 --group-finders
 python3 .claude/skills/flydsl-code-review/scripts/run_review.py --resume /tmp/flydsl-review-<run-directory>
 ```
 
@@ -69,6 +71,12 @@ incomplete stages with the saved scope, model and configuration. Changed runner,
 scanner or skill content requires a new run. Model and effort use the CLI defaults unless
 the user supplies `--model`/`--effort`; do not silently select a different model.
 
+The untrusted-container profile gives model sessions only Read, Grep, and Glob.
+They read the authoritative saved `diff.patch` directly and cannot invoke Bash
+or code from the reviewed tree. Small arithmetic is written out by the finder
+and independently recomputed during adjudication; without executable evidence,
+an arithmetic-dependent verdict remains PLAUSIBLE.
+
 Read `result.json` after the runner exits. Exit 0 means COMPLETE; exit 1 means
 INCOMPLETE. A missing result, running process, task notification or partial
 transcript is not a completed review. Preserve the run directory when reporting
@@ -82,7 +90,8 @@ exit `0` means no leads in the supported scope, `1` means leads need inspection.
 The runner requests `--json` and requires a COMPLETE result whose exit code
 matches the process exit code. An exception, missing/malformed result or timeout
 makes the review INCOMPLETE; exit code `1` alone never proves success. Artifact
-schema v5 requires this completion record, verified severity, and offline bot scope identity.
+schema v6 requires this completion record, grouped-finder provenance, verified
+severity, and offline bot scope identity.
 The artifact retains each scanner's output, exit status and run history; resume
 reuses completed checks.
 Neither scanner executes or imports the reviewed code.
@@ -146,12 +155,16 @@ P0|P1|P2|P3` changes the threshold; PLAUSIBLE and lower severities remain artifa
 
 ## Step 2 — Run the nine angles
 
-The runner starts nine independent finders, **up to 6 candidates each**, one
-angle per agent. It collects every result before admission. Do not let one angle's
-conclusions suppress another's: if two angles flag the same line for different
-reasons, record both. Each candidate needs a repository-relative `file`, a positive
-integer `line` (or null), a one-line `summary`, a specific `mechanism`/root cause,
-`severity` (P0–P3), and a concrete `failure_scenario`.
+By default the runner starts nine independent finders, one per angle, with up
+to 6 candidates each. `--group-finders` instead gives all nine checklists to one
+finder so source reads are shared. Its structured result must acknowledge every
+angle and assign each candidate one primary owning angle; the grouped limits are
+**up to 6 candidates per angle and 12 overall**. Group observations with the
+same root cause instead of duplicating them across angles; keep genuinely
+different mechanisms even on the same line. Each candidate needs a
+repository-relative `file`, a positive integer `line` (or null), a one-line
+`summary`, a specific `mechanism`/root cause, `severity` (P0–P3), and a concrete
+`failure_scenario`.
 
 Angles A–F hunt correctness bugs. Angles G–I hunt convention violations and
 cleanup; for those, `failure_scenario` states the concrete cost (what breaks in
