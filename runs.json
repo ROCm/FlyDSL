@@ -1,8 +1,124 @@
 {
  "schema": 1,
- "updated": "2026-09-18T03:44:50Z",
+ "updated": "2026-09-18T05:32:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35310916796,
+   "pr": 1161,
+   "commit": "3a3bea1725beb07f79c0490a6026d9652cea49a3",
+   "branch": "convert-atom-call-pred-ssa",
+   "event": "pull_request",
+   "title": "[Bugfix] Promote register pred on copy_atom_call without register src\u2026",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35310916796",
+   "created_at": "2026-09-18T05:28:10Z",
+   "updated_at": "2026-09-18T05:28:10Z",
+   "actor": "LWenH",
+   "jobs": []
+  },
+  {
+   "run_id": 35310779877,
+   "pr": null,
+   "commit": "702f28b911b686a3045c3d9810f2b3027507b63e",
+   "branch": "convert-atom-call-pred-ssa",
+   "event": "pull_request",
+   "title": "[Bugfix] Promote register pred on copy_atom_call without register src\u2026",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35310779877",
+   "created_at": "2026-09-18T05:26:03Z",
+   "updated_at": "2026-09-18T05:26:03Z",
+   "actor": "LWenH",
+   "jobs": []
+  },
+  {
+   "run_id": 35307358724,
+   "pr": null,
+   "commit": "6360d987d39a38419da942d5c80d593fde00cae6",
+   "branch": "main",
+   "event": "push",
+   "title": "fix(release): harden dev tag generation (#1160)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35307358724",
+   "created_at": "2026-09-18T04:32:34Z",
+   "updated_at": "2026-09-18T05:06:41Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-18T05:06:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35307358724/job/105485629788"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-18T04:51:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35307358724/job/105485629844"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-18T05:00:31Z",
+     "completed_at": "2026-09-18T05:12:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35307358724/job/105485629853"
+    }
+   ]
+  },
+  {
+   "run_id": 35304411081,
+   "pr": null,
+   "commit": "dc2caa90e8e6bee259ca691f68559b805ebf7e14",
+   "branch": "convert-atom-call-pred-ssa",
+   "event": "pull_request",
+   "title": "[Bugfix] Promote register pred on copy_atom_call without register src\u2026",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35304411081",
+   "created_at": "2026-09-18T03:45:40Z",
+   "updated_at": "2026-09-18T05:29:52Z",
+   "actor": "LWenH",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-18T04:51:58Z",
+     "completed_at": "2026-09-18T05:09:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35304411081/job/105485133076"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-18T04:48:53Z",
+     "completed_at": "2026-09-18T05:29:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35304411081/job/105485133098"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-18T04:48:46Z",
+     "completed_at": "2026-09-18T05:00:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35304411081/job/105485133122"
+    }
+   ]
+  },
   {
    "run_id": 35296707147,
    "pr": 1160,
@@ -51,7 +167,7 @@
   },
   {
    "run_id": 35296538700,
-   "pr": 1160,
+   "pr": null,
    "commit": "b3c9299830524634045d004eab1ad2b0c757bc8d",
    "branch": "codex/fix-release-tag-generation",
    "event": "pull_request",
@@ -1969,187 +2085,6 @@
      "started_at": "2026-09-15T18:50:13Z",
      "completed_at": "2026-09-15T19:31:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35001342058/job/104497426156"
-    }
-   ]
-  },
-  {
-   "run_id": 34980382662,
-   "pr": 1128,
-   "commit": "b898b104acacfab74c0b3ad2f22e4b6692703c3a",
-   "branch": "codex/scaled-tiled-gemm",
-   "event": "pull_request",
-   "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34980382662",
-   "created_at": "2026-09-15T14:15:17Z",
-   "updated_at": "2026-09-15T18:52:58Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T17:48:43Z",
-     "completed_at": "2026-09-15T18:52:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34980382662/job/104438994127"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-15T15:07:24Z",
-     "completed_at": "2026-09-15T16:01:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34980382662/job/104438994161"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T15:07:13Z",
-     "completed_at": "2026-09-15T15:21:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34980382662/job/104438994297"
-    }
-   ]
-  },
-  {
-   "run_id": 34978452193,
-   "pr": 1139,
-   "commit": "090e2ced45a4b6071930b2660d53adc89d573e7a",
-   "branch": "opus-fa4-align-bf16-perf",
-   "event": "pull_request",
-   "title": "Opus fa4 align bf16 perf",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978452193",
-   "created_at": "2026-09-15T13:58:01Z",
-   "updated_at": "2026-09-15T15:46:44Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T14:13:17Z",
-     "completed_at": "2026-09-15T14:28:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978452193/job/104417930643"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T14:16:25Z",
-     "completed_at": "2026-09-15T15:46:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978452193/job/104417930736"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T14:13:27Z",
-     "completed_at": "2026-09-15T15:41:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978452193/job/104417930758",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 34978126920,
-   "pr": null,
-   "commit": "f8b07eeacdd46f97a12d4bfd86407028ac143a69",
-   "branch": "main",
-   "event": "push",
-   "title": "[DSL] Support struct as the elemType of Array (#1138)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978126920",
-   "created_at": "2026-09-15T13:55:01Z",
-   "updated_at": "2026-09-15T15:56:18Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-15T14:29:02Z",
-     "completed_at": "2026-09-15T14:41:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978126920/job/104419090450"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T15:07:27Z",
-     "completed_at": "2026-09-15T15:56:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978126920/job/104419090531"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T14:16:12Z",
-     "completed_at": "2026-09-15T15:24:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34978126920/job/104419090572",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 34953196725,
-   "pr": 1138,
-   "commit": "c02cb7915d7259390e2722213e961085c1fb0f61",
-   "branch": "pr/feat-coop",
-   "event": "pull_request",
-   "title": "[DSL] Support struct as the elemType of Array",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725",
-   "created_at": "2026-09-15T09:33:57Z",
-   "updated_at": "2026-09-15T15:20:21Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T14:13:34Z",
-     "completed_at": "2026-09-15T15:20:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725/job/104335021591"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T09:54:19Z",
-     "completed_at": "2026-09-15T10:12:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725/job/104335021607"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-15T09:54:33Z",
-     "completed_at": "2026-09-15T11:05:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34953196725/job/104335021618",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
