@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-18T11:19:08Z",
+ "updated": "2026-09-18T11:45:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35341001055,
+   "pr": 1167,
+   "commit": "db7eaa6310e8004b94fdda24c07ae99413de048d",
+   "branch": "pr/enh-coop-warp-primitives",
+   "event": "pull_request",
+   "title": "[Ext][Coop] Add more warp-level primitives",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35341001055",
+   "created_at": "2026-09-18T11:43:02Z",
+   "updated_at": "2026-09-18T11:43:24Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 35339232190,
+   "pr": 1167,
+   "commit": "11e4e23c9f5079f9f4eee84815f48685821a195f",
+   "branch": "pr/enh-coop-warp-primitives",
+   "event": "pull_request",
+   "title": "[Ext][Coop] Add more warp-level primitives",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35339232190",
+   "created_at": "2026-09-18T11:21:31Z",
+   "updated_at": "2026-09-18T11:43:24Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 35338711925,
    "pr": 1167,
@@ -53,10 +83,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-18T10:52:18Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T11:34:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105573424014"
     }
    ]
@@ -1870,67 +1900,6 @@
      "completed_at": "2026-09-17T04:00:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175632955/job/105059218283",
      "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35175377780,
-   "pr": null,
-   "commit": "8a5def7dc12142e43b9e94dc9f81f898e30b71a4",
-   "branch": "phil/llvm-skill",
-   "event": "pull_request",
-   "title": "[llvm] Add llvm skill and drop four inert LLVM knobs",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175377780",
-   "created_at": "2026-09-17T02:41:36Z",
-   "updated_at": "2026-09-17T02:42:54Z",
-   "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 35175360119,
-   "pr": 1119,
-   "commit": "a3e7cd643a8696259755049cf518b2852381ca0f",
-   "branch": "codex/topk-gating-mi355",
-   "event": "pull_request",
-   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119",
-   "created_at": "2026-09-17T02:41:19Z",
-   "updated_at": "2026-09-17T04:08:15Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T03:00:53Z",
-     "completed_at": "2026-09-17T03:30:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119/job/105058554132"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T02:56:23Z",
-     "completed_at": "2026-09-17T03:17:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119/job/105058554134"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T02:56:32Z",
-     "completed_at": "2026-09-17T04:08:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35175360119/job/105058554274",
-     "machine": "smci350-rck-g03-b17-12",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
     }
