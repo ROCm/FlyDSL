@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-18T02:55:05Z",
+ "updated": "2026-09-18T03:16:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "codex/fix-release-tag-generation",
    "event": "pull_request",
    "title": "Fix monotonic dev tag generation in shallow worktrees",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296707147",
    "created_at": "2026-09-18T01:46:56Z",
-   "updated_at": "2026-09-18T02:19:45Z",
+   "updated_at": "2026-09-18T02:54:13Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -29,9 +29,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T02:19:45Z",
+     "started_at": "2026-09-18T02:54:13Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296707147/job/105457149461"
     },
@@ -68,30 +68,33 @@
    "branch": "main",
    "event": "push",
    "title": "Reduce AOT cache artifact size (#1159)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35295424924",
    "created_at": "2026-09-18T01:28:05Z",
-   "updated_at": "2026-09-18T02:20:11Z",
+   "updated_at": "2026-09-18T03:15:14Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T02:20:10Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T02:59:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35295424924/job/105455471866"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T02:11:32Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35295424924/job/105455471889"
+     "completed_at": "2026-09-18T03:15:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35295424924/job/105455471889",
+     "machine": "smci350-rck-g03-d07-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
