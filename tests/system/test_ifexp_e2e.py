@@ -148,7 +148,7 @@ def test_ifexp_in_for_loop(monkeypatch):
     @flyc.kernel
     def ifexp_loop_kernel(Out: fx.Tensor, x: fx.Int32):
         acc = fx.Int32(0)
-        for i in range(fx.Int32(4)):
+        for i in fx.range(fx.Int32(4)):
             acc = acc + fx.Int32(1) if x > fx.Int32(0) else acc - fx.Int32(1)
         Out[0] = acc
 

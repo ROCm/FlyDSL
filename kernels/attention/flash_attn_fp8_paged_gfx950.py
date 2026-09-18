@@ -384,7 +384,7 @@ def build_flash_attn_paged_fp8_module(
 
         if const_expr(BOUNDED_MAX):
             first_end = fx.min(fx.Int64(t_end), fx.Int64(t0) + 2)
-            for j, loop_args in range(fx.Int64(t0), first_end, fx.Int64(2), init=init_args):
+            for j, loop_args in fx.range(fx.Int64(t0), first_end, fx.Int64(2), init=init_args):
                 next_args = _iterate(j, loop_args, True, initialize=True)
                 loop_results = yield next_args
             sealed = _query_bound_is_safe(ctx, upper_bound, fx.Float32(loop_results[0]))
@@ -392,21 +392,21 @@ def build_flash_attn_paged_fp8_module(
             fast_prefix_end = fx.min(fast_end, fx.max(first_end, v_prefix_end))
             first_state = loop_results
             # Waves can choose different loops, but pair order and barrier count agree.
-            for j, loop_args in range(first_end, fast_prefix_end, fx.Int64(2), init=first_state):
+            for j, loop_args in fx.range(first_end, fast_prefix_end, fx.Int64(2), init=first_state):
                 next_args = _iterate(j, loop_args, True, skip_max=True, mask_v=False)
                 loop_results = yield next_args
             fast_tail_state = loop_results
-            for j, loop_args in range(fast_prefix_end, fast_end, fx.Int64(2), init=fast_tail_state):
+            for j, loop_args in fx.range(fast_prefix_end, fast_end, fx.Int64(2), init=fast_tail_state):
                 next_args = _iterate(j, loop_args, True, skip_max=True)
                 loop_results = yield next_args
             slow_start = sealed.select(fx.Int64(t_end), first_end)
             slow_prefix_end = fx.min(fx.Int64(t_end), fx.max(slow_start, v_prefix_end))
             slow_state = loop_results
-            for j, loop_args in range(slow_start, slow_prefix_end, fx.Int64(2), init=slow_state):
+            for j, loop_args in fx.range(slow_start, slow_prefix_end, fx.Int64(2), init=slow_state):
                 next_args = _iterate(j, loop_args, True, mask_v=False)
                 loop_results = yield next_args
             slow_tail_state = loop_results
-            for j, loop_args in range(slow_prefix_end, fx.Int64(t_end), fx.Int64(2), init=slow_tail_state):
+            for j, loop_args in fx.range(slow_prefix_end, fx.Int64(t_end), fx.Int64(2), init=slow_tail_state):
                 next_args = _iterate(j, loop_args, True)
                 loop_results = yield next_args
         else:
@@ -418,11 +418,11 @@ def build_flash_attn_paged_fp8_module(
                 causal_prefix_end = fx.Int64(ctx.q_start_pos_i32 + ctx.delta_i32) // (2 * BN) * 2
                 prefix_end = fx.min(causal_prefix_end, v_prefix_end)
             prefix_end = fx.min(fx.Int64(t_end), fx.max(fx.Int64(t0), prefix_end))
-            for j, loop_args in range(fx.Int64(t0), prefix_end, fx.Int64(2), init=init_args):
+            for j, loop_args in fx.range(fx.Int64(t0), prefix_end, fx.Int64(2), init=init_args):
                 next_args = _iterate(j, loop_args, mask_prefix, mask_v=False)
                 loop_results = yield next_args
             tail_init = loop_results
-            for j, loop_args in range(prefix_end, fx.Int64(t_end), fx.Int64(2), init=tail_init):
+            for j, loop_args in fx.range(prefix_end, fx.Int64(t_end), fx.Int64(2), init=tail_init):
                 next_args = _iterate(j, loop_args, True)
                 loop_results = yield next_args
         m_row = loop_results[0]

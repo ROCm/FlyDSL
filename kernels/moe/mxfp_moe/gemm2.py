@@ -248,7 +248,7 @@ def compile_gemm2_a4w4_port(
                 rocdl.sched_barrier(0)
                 _run_tile(tile)
 
-            for iv in range(bx_i32 + grid_nb, bound, gpu.grid_dim.x):
+            for iv in fx.range(bx_i32 + grid_nb, bound, gpu.grid_dim.x):
                 wu = fx.Int32(iv)
                 gpu.barrier()
                 tile = _xcd(wu)

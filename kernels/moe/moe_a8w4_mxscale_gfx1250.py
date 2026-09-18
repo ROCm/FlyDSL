@@ -419,7 +419,7 @@ def launch_moe_gemm_a8w4(
                 for i in range_constexpr(num_buffers):
                     issue(i, i)
                 n_steady = K_TILES - num_buffers
-                for kt in range(n_steady):
+                for kt in fx.range(n_steady):
                     s = kt % num_buffers
                     buf = ptr_to_idx(buf_ptr(s))
                     tdm_ops.tensor_wait(TDM_PER * (num_buffers - 1))
@@ -437,7 +437,7 @@ def launch_moe_gemm_a8w4(
                 for i in range_constexpr(num_buffers - 1):
                     issue(i, i)
                 n_steady = K_TILES - (num_buffers - 1)
-                for kt in range(n_steady):
+                for kt in fx.range(n_steady):
                     s = kt % num_buffers
                     buf = ptr_to_idx(buf_ptr(s))
                     pipeline_fence(outstanding=TDM_PER * (num_buffers - 2))

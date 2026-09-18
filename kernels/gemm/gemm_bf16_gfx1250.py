@@ -241,7 +241,7 @@ def launch_gemm_bf16(
         for i in range_constexpr(num_buffers - 1):
             issue(i, i)
         n_steady = K_TILES - (num_buffers - 1)
-        for kt in range(n_steady):
+        for kt in fx.range(n_steady):
             buf = _bidx(_buf_ptr(kt % num_buffers))
             pipeline_fence(outstanding=TDM_PW * (num_buffers - 2), use_cluster=False)
             compute_ktile(buf, kt + (num_buffers - 1))

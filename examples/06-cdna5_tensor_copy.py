@@ -51,7 +51,7 @@ def tdm_copy_kernel(
     tBsB, tBgB = fx.rocdl.cdna5.tdm_partition(tdm_store_atom, warp_crd, warp_layout, smem_tensor, blk_tdmB)
 
     # Runtime loop bound keeps tile coordinates dynamic during DSL lowering.
-    for k in range(k_tiles):
+    for k in fx.range(k_tiles):
         fx.copy(tdm_load_atom, tAgA[None, k], tAsA[None, 0])  # global tile k -> LDS box
         fx.rocdl.s_wait_tensorcnt(0)
         fx.barrier()

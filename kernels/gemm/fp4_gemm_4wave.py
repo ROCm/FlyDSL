@@ -911,7 +911,7 @@ def compile_fp4_gemm_4w(
             + [_R(x) for x in accs[2]]
             + [_R(x) for x in accs[3]]
         )
-        for kk, state in range(2, K_ITERS - 2, UNROLL, init=init_state):
+        for kk, state in fx.range(2, K_ITERS - 2, UNROLL, init=init_state):
             off = 0
             a0f = _unflat_frag(state[off : off + n_a], N_TILES_A)
             off += n_a

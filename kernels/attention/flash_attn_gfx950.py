@@ -481,7 +481,7 @@ def build_flash_attn_dualwave_swp_module(
                 init_args.append(page_ids.finish_page_id(_init_v_pid_lds))
             loop_results = init_args
             v_pid_arg_idx = 3 + traits.D_CHUNKS
-            for j, loop_args in range(
+            for j, loop_args in fx.range(
                 loop_lb,
                 split_t_end - fx.Index(1),
                 fx.Index(2),

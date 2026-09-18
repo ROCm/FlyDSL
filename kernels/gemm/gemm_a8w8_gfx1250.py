@@ -469,7 +469,7 @@ def launch_gemm_a8w8(
         for i in range_constexpr(num_buffers - 1):
             issue(i, i)
         n_steady = K_TILES - (num_buffers - 1)
-        for kt in range(n_steady):
+        for kt in fx.range(n_steady):
             s = kt % num_buffers
             pbuf = _buf_ptr(s)
             buf = _bidx(pbuf)

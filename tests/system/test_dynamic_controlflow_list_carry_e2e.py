@@ -69,7 +69,7 @@ def _run_if_inplace_list(Out: fx.Tensor, flag: fx.Int32, stream: fx.Stream = fx.
 @flyc.kernel
 def _kernel_for_list(Out: fx.Tensor, n: fx.Int32):
     lst = [fx.Int32(0), fx.Int32(100)]
-    for i in range(n):
+    for i in fx.range(n):
         lst = [lst[0] + fx.Int32(1), lst[1] - fx.Int32(1)]
     Out[0] = lst[0]
     Out[1] = lst[1]
@@ -135,7 +135,7 @@ def _run_if_dict(Out: fx.Tensor, flag: fx.Int32, stream: fx.Stream = fx.Stream(N
 @flyc.kernel
 def _kernel_for_tuple(Out: fx.Tensor, n: fx.Int32):
     t = (fx.Int32(0), fx.Int32(100))
-    for i in range(n):
+    for i in fx.range(n):
         t = (t[0] + fx.Int32(1), t[1] - fx.Int32(1))
     Out[0] = t[0]
     Out[1] = t[1]
@@ -186,7 +186,7 @@ def _run_if_nested(Out: fx.Tensor, flag: fx.Int32, stream: fx.Stream = fx.Stream
 @flyc.kernel
 def _kernel_for_bare_acc(Out: fx.Tensor, n: fx.Int32):
     acc = 0  # bare python int, promoted to an MLIR constant, carried as a DSL numeric
-    for i in range(n):
+    for i in fx.range(n):
         acc = acc + fx.Int32(1)
     Out[0] = acc
 
@@ -248,7 +248,7 @@ def _deep_store(s, Out):
 @flyc.kernel
 def _kernel_for_deep(Out: fx.Tensor, n: fx.Int32):
     s = _deep_init()
-    for i in range(n):
+    for i in fx.range(n):
         s = _deep_bump(s, 1)  # rewrite all 6 leaves each iteration
     _deep_store(s, Out)
 

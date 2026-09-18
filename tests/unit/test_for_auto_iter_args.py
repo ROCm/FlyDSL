@@ -26,7 +26,7 @@ if torch is None or not torch.cuda.is_available():
 @flyc.kernel
 def _kernel_simple_acc(n: fx.Int32):
     acc = fx.Int32(0)
-    for i in range(n):
+    for i in fx.range(n):
         acc = acc + fx.Int32(1)
     fx.printf("acc={}", acc)
 
@@ -43,7 +43,7 @@ def _run_simple_acc(n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
 def _kernel_multi_vars(n: fx.Int32):
     a = fx.Int32(0)
     b = fx.Int32(100)
-    for i in range(n):
+    for i in fx.range(n):
         a = a + fx.Int32(1)
         b = b - fx.Int32(1)
     fx.printf("a={} b={}", a, b)
@@ -59,7 +59,7 @@ def _run_multi_vars(n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
 
 @flyc.kernel
 def _kernel_no_iter_args(n: fx.Int32):
-    for i in range(n):
+    for i in fx.range(n):
         fx.printf("i={}", i)
 
 
@@ -74,7 +74,7 @@ def _run_no_iter_args(n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
 @flyc.kernel
 def _kernel_range_3args(n: fx.Int32):
     acc = fx.Int32(0)
-    for i in range(fx.Int32(0), n, fx.Int32(2)):
+    for i in fx.range(fx.Int32(0), n, fx.Int32(2)):
         acc = acc + fx.Int32(1)
     fx.printf("acc={}", acc)
 
@@ -91,7 +91,7 @@ def _run_range_3args(n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
 def _kernel_iv_liveout(Out: fx.Tensor, n: fx.Int32):
     i = fx.Int32(999)
     acc = fx.Int32(0)
-    for i in range(n):
+    for i in fx.range(n):
         acc = acc + fx.Int32(1)
     Out[0] = i
     Out[1] = acc
@@ -108,7 +108,7 @@ def _run_iv_liveout(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(N
 @flyc.kernel
 def _kernel_iv_assign(Out: fx.Tensor, start: fx.Int32, stop: fx.Int32):
     count = fx.Int32(0)
-    for iv in range(start, stop):
+    for iv in fx.range(start, stop):
         count = iv
     Out[0] = count
 

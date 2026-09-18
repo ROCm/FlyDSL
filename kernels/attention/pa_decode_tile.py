@@ -669,7 +669,7 @@ def compile_pa_decode_tile(
         init_state = [k_pf0, v_page_pf0]
         for _m in range_constexpr(M_TILES):
             init_state.extend([o_zero] * VHE_CHUNKS + [NEG_INF, ZERO_F])
-        for tt, ostate in range(part_start, part_end, 1, init=init_state):
+        for tt, ostate in fx.range(part_start, part_end, 1, init=init_state):
             k_cur = ostate[K_SLOT]  # this tile's prefetched K, as one (NCHUNK*N_SUBCHUNKS,) i64 vector
             v_page_cur = ostate[V_SLOT]  # this tile's V pages, as one PAGES_PER_CHUNK-wide i32 vector
             tt = fx.Int32(tt)

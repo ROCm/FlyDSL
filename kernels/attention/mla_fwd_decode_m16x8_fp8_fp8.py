@@ -1585,7 +1585,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     # ==================================================================
     # Main kernel body: persistent-thread work loop (arch-unified)
     # ==================================================================
-    for work_idx in range(work_start_idx, work_end_idx):
+    for work_idx in fx.range(work_start_idx, work_end_idx):
         # Load MlaWorkInfo
         wi_base = work_idx * SIZE_MLA_WORK_INFO_IN_DW
         wi_dw1_4 = buffer_ops.buffer_load(
@@ -1881,7 +1881,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 ]
             )
 
-            for tile_iv, state in range(_idx(1), _idx(num_tiles_m1), _idx(1), init=init_args):
+            for tile_iv, state in fx.range(_idx(1), _idx(num_tiles_m1), _idx(1), init=init_args):
                 tile_iv_i32 = ArithValue(fx.Int32(tile_iv))
                 kv_tile_start_i32 = _raw(kv_start_v + tile_iv_i32 * BLOCK_N)
 

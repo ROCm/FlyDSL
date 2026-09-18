@@ -494,7 +494,7 @@ def _build_rmsnorm_bwd_two_stage_module(
                 )
 
         dweight_partial = fx.Vector.filled(PARTIAL_ACC_SIZE, 0.0, fx.Float32)
-        for row in range(bid, MIn, num_programs):
+        for row in fx.range(bid, MIn, num_programs):
             row_source = fx.slice(Source_buf, (row, None))
             row_dy = fx.slice(DY_buf, (row, None))
             row_dx = fx.slice(DX_buf, (row, None))
@@ -630,7 +630,7 @@ def _build_rmsnorm_bwd_two_stage_module(
 
         c_zero_f = fx.Float32(0.0)
         acc = c_zero_f
-        for partial_base in range(0, num_programs, DWEIGHT_REDUCE_ROW_LANES):
+        for partial_base in fx.range(0, num_programs, DWEIGHT_REDUCE_ROW_LANES):
             partial_row = partial_base + partial_lane
             partial_valid = partial_row < num_programs
             partial_row_safe = partial_valid.select(partial_row, 0)

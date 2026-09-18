@@ -459,7 +459,7 @@ def gemm2_compute(
 
     if const_expr(BM == 64 and BN == 256 and not g2_b2stage):
         # Explicit g2_b2stage=False retains the one-stage fallback.
-        for kt_iv, state in range(
+        for kt_iv, state in fx.range(
             fx.Int32(0),
             K_TILES_RT,
             fx.Int32(1),
@@ -573,7 +573,7 @@ def gemm2_compute(
                     for sub in range_constexpr(kScaleSubBlocks):
                         nxt_saf[sub].store(cur_saf[sub].load())
 
-        for kt_iv, state in range(
+        for kt_iv, state in fx.range(
             fx.Int32(0),
             K_TILES_RT,
             fx.Int32(1),

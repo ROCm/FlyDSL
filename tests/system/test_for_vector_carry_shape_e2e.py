@@ -35,7 +35,7 @@ def _k_vec_carry(Out: fx.Tensor, n: fx.Int32):
     # Loop-carried Vector with a *multi-dim* shape (4, 1) -- the shape that the
     # bug collapsed to (4,). Each element starts at 1.0.
     vec_sum = fx.Vector.filled((4, 1), 1.0, fx.Float32)
-    for _ in range(1, n):  # dynamic bound -> scf.for, so vec_sum is loop-carried
+    for _ in fx.range(1, n):  # dynamic bound -> scf.for, so vec_sum is loop-carried
         vec_sum += fx.Vector.filled((4, 1), 1.0, fx.Float32)
     # After 1 init + (n-1) adds, every element == n; reduce over the 4 lanes -> 4*n.
     s = vec_sum.reduce(fx.ReductionOp.ADD)

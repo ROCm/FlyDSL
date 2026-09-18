@@ -116,7 +116,7 @@ def _k_while_with_for(Out: fx.Tensor, n: fx.Int32):
     offset = n
     acc = fx.Int32(0)
     while offset > fx.Int32(0):
-        for i in range(offset):
+        for i in fx.range(offset):
             acc = acc + fx.Int32(1)
         offset = offset - fx.Int32(1)
     Out[0] = acc
@@ -141,7 +141,7 @@ def test_while_with_inner_for():
 @flyc.kernel
 def _k_for_with_while(Out: fx.Tensor, n: fx.Int32):
     acc = fx.Int32(0)
-    for i in range(n):
+    for i in fx.range(n):
         x = fx.Int32(4)
         while x > fx.Int32(0):
             acc = acc + fx.Int32(1)

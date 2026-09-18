@@ -463,7 +463,7 @@ def create_wmma_int8_gemm_module(
 
             init_state = [zero_acc for _ in range_constexpr(n_acc)]
 
-            for iv, state in range(0, K_STEPS - 1, 1, init=init_state):
+            for iv, state in fx.range(0, K_STEPS - 1, 1, init=init_state):
                 s_accs = list(state[:n_acc])
                 s_accs = _one_k_tile(
                     pA_g,
@@ -560,7 +560,7 @@ def create_wmma_int8_gemm_module(
             t_first = pid32 * num_tiles // persist_wgs
             t_last = (pid32 + 1) * num_tiles // persist_wgs - 1
 
-            for t, _carry in range(t_first, t_last + 1, 1, init=[fx.Int32(0)]):
+            for t, _carry in fx.range(t_first, t_last + 1, 1, init=[fx.Int32(0)]):
                 t32 = fx.Int32(t)
                 bid_m, bid_n = _swizzle_tile_id(t32, grid_n, group_width)
                 pA_g, pB_g = _tile_operands(bid_m, bid_n)

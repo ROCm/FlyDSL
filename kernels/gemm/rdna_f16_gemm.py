@@ -223,7 +223,7 @@ def create_wmma_gemm_module(
 
         # ── Main tile loop: 2 tiles per iteration ─────────────────────
         if const_expr(loop_end > 0):
-            for iv, state in range(0, loop_end, 1, init=[frag_C.load()]):
+            for iv, state in fx.range(0, loop_end, 1, init=[frag_C.load()]):
                 frag_C.store(state[0])
                 k_base = iv * 2
                 compute_tile(0, fx.Int32(k_base + 1))

@@ -702,7 +702,7 @@ class TestPointerLeaf:
         def consume(value: fx.Pointer, item: record):
             assert type(value) is target and value.type == target.ir_type
             assert type(item.ptr) is target and item.ptr.dtype is fx.Uint32
-            for _ in range(fx.Int32(2)):
+            for _ in fx.range(fx.Int32(2)):
                 value = value + 1
                 assert type(value) is fx.Pointer
             assert type(value) is target and value.type == target.ir_type
@@ -1811,7 +1811,7 @@ class TestAlignedStorage:
             item = carry(Item(tid.to(fx.Float64) + 0.5, fx.Uint32(0x80000000) + tid.to(fx.Uint32)))
             if tid % 2 == 0:
                 item = item.replace(weight=item.weight + 2.0)
-            for step in range(tid % 3):
+            for step in fx.range(tid % 3):
                 item = item.replace(weight=item.weight + 1.0)
             remaining = tid % 2
             while remaining > 0:

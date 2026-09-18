@@ -50,7 +50,7 @@ def _zero_moe_buf_grid_stride(moe_buf_rsrc, gid_v4, stride_v4, total_v4, oob_idx
     niters = (total_v4 + stride_v4 - c_one) // stride_v4
     c_zero_v4 = fx.Vector.filled(4, 0, fx.Int32)
     c4 = fx.Int32(4)
-    for _z in range(fx.Index(0), ArithValue(niters).index_cast(T.index), fx.Index(1)):
+    for _z in fx.range(fx.Index(0), ArithValue(niters).index_cast(T.index), fx.Index(1)):
         idx = gid_v4 + fx.Int32(_z) * stride_v4
         valid = idx < total_v4
         buffer_ops.buffer_store(c_zero_v4, moe_buf_rsrc, valid.select(idx * c4, oob_idx))
@@ -74,7 +74,7 @@ def _extend_prefix_sum_serial(mr, start_block, E, load_fn, store_fn):
 @flyc.jit
 def _write_expert_id_blocks(sorted_e_rsrc, local_eid, blk_start, n_blks):
     """Write local_eid to sorted_expert_ids[blk_start .. blk_start+n_blks)."""
-    for _jb in range(fx.Index(0), ArithValue(n_blks).index_cast(T.index), fx.Index(1)):
+    for _jb in fx.range(fx.Index(0), ArithValue(n_blks).index_cast(T.index), fx.Index(1)):
         blk_idx = blk_start + fx.Int32(_jb)
         buffer_ops.buffer_store(local_eid, sorted_e_rsrc, blk_idx)
 
@@ -85,7 +85,7 @@ def _fill_sentinel_slots(sorted_ids_rsrc, sorted_w_rsrc, start, count, sentinel,
     c_zero = fx.Int32(0)
     end = start + count
     niters = (count + fx.Int32(block_size) - fx.Int32(1)) // fx.Int32(block_size)
-    for _p in range(fx.Index(0), ArithValue(niters).index_cast(T.index), fx.Index(1)):
+    for _p in fx.range(fx.Index(0), ArithValue(niters).index_cast(T.index), fx.Index(1)):
         slot = start + fx.Int32(_p) * fx.Int32(block_size) + tid
         safe = (slot < end).select(slot, oob_idx)
         buffer_ops.buffer_store(sentinel, sorted_ids_rsrc, safe)
@@ -697,7 +697,7 @@ def compile_moe_sorting_oneshot_fused(
             _z1 = fx.Index(1)
             c_zero_v4 = fx.Vector.filled(4, 0, fx.Int32)
             c4_i32 = fx.Int32(4)
-            for _z in range(_zs, _ze, _z1):
+            for _z in fx.range(_zs, _ze, _z1):
                 z_idx_v4 = zero_gid_v4 + fx.Int32(_z) * zero_stride_v4
                 z_valid = z_idx_v4 < i32_moe_buf_v4
                 z_elem = z_valid.select(z_idx_v4 * c4_i32, c_oob_idx)
@@ -1112,7 +1112,7 @@ def _compile_moe_sorting_multiphase(
             (i32_words_per_row + fx.Int32(K4_BLOCK - 1)) // fx.Int32(K4_BLOCK), c_zero
         )
         mesh_row_i32_base = (my_expert * i32_mesh_stride) >> fx.Int32(2)
-        for _si, state in range(
+        for _si, state in fx.range(
             fx.Index(0), ArithValue(n_mesh_iters).index_cast(T.index), fx.Index(1), init=[my_start]
         ):
             position = state[0]
@@ -1245,7 +1245,7 @@ def _compile_moe_sorting_multiphase(
         _s = fx.Index(0)
         _e = ArithValue(i32_niters).index_cast(T.index)
         _one = fx.Index(1)
-        for _i in range(_s, _e, _one):
+        for _i in fx.range(_s, _e, _one):
             flat = gid + fx.Int32(_i) * stride
             valid = flat < total
             safe_flat = valid.select(flat, c_zero)
@@ -1317,7 +1317,7 @@ def _compile_moe_sorting_multiphase(
             buffer_ops.buffer_store(c_zero, ws_rsrc, p1_should_zero.select(i32_mesh_size + eid, fx.Int32(0x7FFFFFFF)))
             n_iters = p1_is_local.select(n_iters, c_zero)
 
-        for _i, state in range(fx.Index(0), ArithValue(n_iters).index_cast(T.index), fx.Index(1), init=[c_zero]):
+        for _i, state in fx.range(fx.Index(0), ArithValue(n_iters).index_cast(T.index), fx.Index(1), init=[c_zero]):
             cnt_so_far = state[0]
 
             word_base = fx.Int32(_i) * fx.Int32(K3_WORDS_PER_ITER) + tid * fx.Int32(K3_VEC_WIDTH)
@@ -1437,7 +1437,7 @@ def _compile_moe_sorting_multiphase(
             scatter_niters = is_local_expert.select(scatter_niters, c_zero)
 
         # ---- Phase 1: Clear this expert's mesh row ----
-        for _ci in range(fx.Index(0), ArithValue(clear_niters).index_cast(T.index), fx.Index(1)):
+        for _ci in fx.range(fx.Index(0), ArithValue(clear_niters).index_cast(T.index), fx.Index(1)):
             word_idx = fx.Int32(_ci) * c_block + tid
             valid = word_idx < i32_words_per_row
             safe_idx = mesh_row_i32_base + valid.select(word_idx, c_zero)
@@ -1446,7 +1446,7 @@ def _compile_moe_sorting_multiphase(
         gpu.barrier()
 
         # ---- Phase 2: Scatter (scan all T*topk, filter by expert) ----
-        for _si in range(fx.Index(0), ArithValue(scatter_niters).index_cast(T.index), fx.Index(1)):
+        for _si in fx.range(fx.Index(0), ArithValue(scatter_niters).index_cast(T.index), fx.Index(1)):
             flat = fx.Int32(_si) * c_block + tid
             valid = flat < total_assignments
             safe_flat = valid.select(flat, c_zero)
@@ -1468,7 +1468,9 @@ def _compile_moe_sorting_multiphase(
 
         # ---- Phase 3: Count non-zero bytes + warp/cross-wave reduce ----
         count_niters = clear_niters  # same loop structure, reuse (already EP-gated)
-        for _ki, state in range(fx.Index(0), ArithValue(count_niters).index_cast(T.index), fx.Index(1), init=[c_zero]):
+        for _ki, state in fx.range(
+            fx.Index(0), ArithValue(count_niters).index_cast(T.index), fx.Index(1), init=[c_zero]
+        ):
             cnt_so_far = state[0]
 
             word_base = fx.Int32(_ki) * c_block + tid

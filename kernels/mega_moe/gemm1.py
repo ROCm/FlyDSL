@@ -77,7 +77,7 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
                 a_scale_lds,
                 fx.Int32(0),
             )
-        for sp_i, state in range(0, K_ITERS - 1, 1, init=init):
+        for sp_i, state in fx.range(0, K_ITERS - 1, 1, init=init):
             sp = fx.Int32(sp_i)
             acc = [Vec(a) for a in state[:N_ACC]]
             b_prev = [
@@ -219,7 +219,7 @@ def do_tile(m_tile, n_tile_base, expert, sched, a_gather, a_s2r, b_loader, b_sca
         a_scale.stage(a_scale_lds, tile_row_base)
         wait_lds_barrier(0 if async_a_copy else 63)
         init = [mfma.zero_value for _ in range(N_ACC)]
-        for sp_i, state in range(0, K_ITERS, 1, init=init):
+        for sp_i, state in fx.range(0, K_ITERS, 1, init=init):
             sp = fx.Int32(sp_i)
             acc = [Vec(a) for a in state]
             cur_off = (sp & fx.Int32(1)) * fx.Int32(a_lds_i32)
@@ -424,7 +424,7 @@ def compile_gemm1(
             swiglu_limit=swiglu_limit,
         )
         total_work = (num_valid // fx.Int32(sort_block_m)) * fx.Int32(n_tiles)
-        for flat in range(fx.block_idx.x, total_work, grid_x):
+        for flat in fx.range(fx.block_idx.x, total_work, grid_x):
             run_tile(flat)
 
     @flyc.jit

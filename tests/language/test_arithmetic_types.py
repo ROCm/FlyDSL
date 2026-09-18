@@ -1916,7 +1916,7 @@ class TestVectorSpecialization:
         @flyc.kernel
         def kernel(value: fx.Vector, count: fx.Int32):
             assert type(value) is target and value.shape == (2, (1, 2))
-            for _ in range(count):
+            for _ in fx.range(count):
                 value = value + 1.0
             assert type(value) is target and value.shape == (2, (1, 2))
 

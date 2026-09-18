@@ -287,7 +287,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
 
         init_args = [m_row, l_row] + v_o + [t0 % fx.Index(NPF)]
         loop_results = init_args
-        for j, loop_args in range(fx.Index(t0), t_end, fx.Index(2), init=init_args):
+        for j, loop_args in fx.range(fx.Index(t0), t_end, fx.Index(2), init=init_args):
             m_row = loop_args[0]
             l_row = loop_args[1]
             v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]

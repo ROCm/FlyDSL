@@ -675,7 +675,7 @@ def gemm_a16w16_gfx950_kernel(
     rocdl.sched_barrier(0)
 
     main_loop_end = k_tiles - (stages - 1)
-    for k_tile in range(0, main_loop_end, 1):
+    for k_tile in fx.range(0, main_loop_end, 1):
         current_stage = k_tile % stages
         write_stage = (current_stage + stages - 1) % stages
         rocdl.wait_asyncmark(stages - 2)
@@ -1041,7 +1041,7 @@ def gemm_a16w16_hti_gfx950_kernel(
     wait_vmcnt_and_barrier(half_ldg_b_iters + half_ldg_a_iters)
 
     main_loop_end = k_tiles - 2
-    for k_tile in range(0, main_loop_end, 2):
+    for k_tile in fx.range(0, main_loop_end, 2):
         next_k_tile = k_tile + 2
         # 0
         b0 = load_b_fragment(0, 0)

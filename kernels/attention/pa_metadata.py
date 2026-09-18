@@ -1089,7 +1089,7 @@ def compile_pa_decode_metadata(
         work_start = copy_load(work_indptr, cu_id, copy_i32, i32_reg)[0]
         work_end = copy_load(work_indptr, cu_id + 1, copy_i32, i32_reg)[0]
 
-        for work_idx in range(work_start, work_end, fx.Int32(1)):
+        for work_idx in fx.range(work_start, work_end, fx.Int32(1)):
             # Two naturally aligned dwordx4 loads cover the eight work fields.
             info_tile = work_idx * 2
             wi_lo_v = copy_load(work_info, info_tile, copy_i32x4, i32x4_reg)
@@ -1211,7 +1211,7 @@ def compile_pa_decode_metadata(
                 for _ in range(_mtp_groups)
             ]
 
-            for ib, state in range(
+            for ib, state in fx.range(
                 fx.Int32(0),
                 num_parts_in_work,
                 fx.Int32(1),
@@ -1473,7 +1473,7 @@ def compile_pa_metadata_reduce(
             qo_start = copy_load(reduce_final_map, g * 2, copy_i32, reg_i32)[0]
             out_row = qo_start + qi
 
-            for slot, st in range(
+            for slot, st in fx.range(
                 lo,
                 hi,
                 fx.Int32(1),

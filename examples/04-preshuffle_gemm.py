@@ -141,7 +141,7 @@ def gemm_kernel(
     fx.copy(uni_copy_128b, copy_frag_A, thr_sA[None, None, None, 0])
     fx.gpu.barrier()
 
-    for k_iter in range(0, K // BLOCK_K - 2, 2):
+    for k_iter in fx.range(0, K // BLOCK_K - 2, 2):
         run_pipeline_stage(read_stage=0, next_k=k_iter + 1)
         run_pipeline_stage(read_stage=1, next_k=k_iter + 2)
 

@@ -359,7 +359,7 @@ def launch_gemm_a8w4_mxscale(
         for i in range_constexpr(num_buffers - 1):
             issue(i, i)
         n_steady = K_TILES - (num_buffers - 1)
-        for kt in range(n_steady):
+        for kt in fx.range(n_steady):
             s = kt % num_buffers
             buf = _bidx(_buf_ptr(s))
             pipeline_fence(outstanding=(num_buffers - 2), use_cluster=False)

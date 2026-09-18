@@ -186,7 +186,7 @@ def test_block_aggregate(block_size, inclusive):
         items = fx.Vector.from_elements([A[base + i] for i in range(ITEMS)])
         form = block_scan.inclusive_with_aggregate if inclusive else block_scan.exclusive_with_aggregate
         out, aggregate = form(items, fx.ReductionOp.ADD, storage=storage)
-        for i in range(ITEMS):
+        for i in fx.range(ITEMS):
             Out[base + i] = out[i]
         Agg[tid] = aggregate
 

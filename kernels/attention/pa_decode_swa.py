@@ -834,7 +834,7 @@ def compile_pa_decode_sw_reduce(
         else:
             # Fallback for unusually large sliding-window partition counts.
             global_max = c_neg_inf
-            for chunk_base in range(0, max_context_partition_num, block_threads):
+            for chunk_base in fx.range(0, max_context_partition_num, block_threads):
                 chunk_size = min(block_threads, max_context_partition_num - chunk_base)
                 c_chunk_size = fx.Int32(chunk_size)
                 c_chunk_base = fx.Int32(chunk_base)
@@ -852,7 +852,7 @@ def compile_pa_decode_sw_reduce(
                 global_max = global_max.maximumf(chunk_max)
 
             global_exp_sum = c_zero_f
-            for chunk_base in range(0, max_context_partition_num, block_threads):
+            for chunk_base in fx.range(0, max_context_partition_num, block_threads):
                 chunk_size = min(block_threads, max_context_partition_num - chunk_base)
                 c_chunk_size = fx.Int32(chunk_size)
                 c_chunk_base = fx.Int32(chunk_base)
@@ -883,7 +883,7 @@ def compile_pa_decode_sw_reduce(
             )
             inv_global_exp_sum = rcp_f32(safe_global_exp_sum)
 
-            for chunk_base in range(0, max_context_partition_num, block_threads):
+            for chunk_base in fx.range(0, max_context_partition_num, block_threads):
                 chunk_size = min(block_threads, max_context_partition_num - chunk_base)
                 c_chunk_size = fx.Int32(chunk_size)
                 c_chunk_base = fx.Int32(chunk_base)

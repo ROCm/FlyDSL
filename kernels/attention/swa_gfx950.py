@@ -855,7 +855,7 @@ def build_gqa_attn(
         init_flat = _flatten(k_reg, att_block[0], o_reg, max_vec_prev, norm_vec, scale_vec, pending_scale)
 
         UNROLL = 2
-        for jv, iter_args in range(3, nt_rt - 1, 2 * UNROLL, init=init_flat):
+        for jv, iter_args in fx.range(3, nt_rt - 1, 2 * UNROLL, init=init_flat):
             j0 = i32(jv)
             state = _unflatten(list(iter_args))
             for u in range_constexpr(UNROLL):

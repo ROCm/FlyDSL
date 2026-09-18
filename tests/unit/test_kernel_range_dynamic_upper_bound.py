@@ -19,7 +19,7 @@ if torch is None or not torch.cuda.is_available():
 @flyc.kernel
 def _range_kernel(loop_count: fx.Int32):
     fx.printf("kernel loop_count={}", loop_count)
-    for i in range(loop_count):
+    for i in fx.range(loop_count):
         fx.printf("helper i={}", i)
 
 

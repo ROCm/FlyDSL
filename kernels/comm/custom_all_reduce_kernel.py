@@ -374,7 +374,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         in_rsrc_desc = _make_rsrc(_extract_i64(in_ptrs_vec, warp_id))
 
         parity = 0
-        for p in range(thread_pack_start, num_packs, pack_stride):
+        for p in fx.range(thread_pack_start, num_packs, pack_stride):
             elem_off_i32 = p * _ELEMS_PER_PACK
             raw = _load_v4i32(in_rsrc_desc, elem_off_i32)
             smem_base = parity * threads
@@ -514,7 +514,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         thread_start_pack = start_pack + thread_pack_start
         if const_expr(_use_single_buf_2stage):
             # Single buffer: 8KB LDS, 2 barriers per iteration.
-            for cur in range(thread_start_pack, end_pack, pack_stride):
+            for cur in fx.range(thread_start_pack, end_pack, pack_stride):
                 _build_reduce_body(cur, smem_base_expr=None)
                 gpu.barrier()  # barrier 2: protect smem before next iter's writes
         else:
@@ -522,7 +522,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             # The parity alternates between the two smem halves so warp-0 reads
             # from half-A while all warps write the next pack to half-B.
             parity = 0
-            for cur in range(thread_start_pack, end_pack, pack_stride):
+            for cur in fx.range(thread_start_pack, end_pack, pack_stride):
                 smem_base = parity * threads
                 _build_reduce_body(cur, smem_base_expr=smem_base)
                 # No barrier 2: parity ensures next iteration writes to opposite
@@ -547,7 +547,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             thread_pack_start_s2 = bid_i32 * threads_per_rank_i32 + lane_id
             pack_stride_s2 = fx.grid_dim.x * threads_per_rank_i32
             tmp_src_rsrc_desc = _make_rsrc(_extract_i64(tmp_ptrs_vec, warp_id))
-            for cur in range(thread_pack_start_s2, part_p, pack_stride_s2):
+            for cur in fx.range(thread_pack_start_s2, part_p, pack_stride_s2):
                 # Circular rank mapping for all-gather shard placement.
                 rank_plus_warp = rank_i32 + warp_id
                 if const_expr(world_size in {2, 4, 8}):
@@ -564,7 +564,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             thread_linear_idx = bid_i32 * threads + lane_i32
             thread_linear_stride = fx.grid_dim.x * threads
 
-            for cur in range(thread_linear_idx, largest_part_p, thread_linear_stride):
+            for cur in fx.range(thread_linear_idx, largest_part_p, thread_linear_stride):
                 for p in range_constexpr(world_size):
                     if const_expr(p == world_size - 1):
                         ok = True
@@ -640,7 +640,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         dst_tmp_rsrc_desc = _make_rsrc(dst_tmp_i64)
 
         stage1_thread_start_pack = start_pack_for_warp + thread_pack_start
-        for cur in range(stage1_thread_start_pack, end_pack_for_warp, pack_stride):
+        for cur in fx.range(stage1_thread_start_pack, end_pack_for_warp, pack_stride):
             cur_elem_off_i32 = cur * _ELEMS_PER_PACK
             raw = _load_v4i32(inp_rsrc, cur_elem_off_i32)
             pack_rel_idx = cur - start_pack_for_warp
@@ -680,7 +680,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         is_out_misaligned = dst_ptr_low4 != _c64(0)
         bad_out_addr = is_out_null | is_out_misaligned
 
-        for cur in range(thread_pack_start, stage2_end_pack, pack_stride):
+        for cur in fx.range(thread_pack_start, stage2_end_pack, pack_stride):
             # All warps load their chunk from tmp into smem
             src_pack_idx = warp_id * part_p + cur
             src_off_i32 = src_pack_idx * _ELEMS_PER_PACK

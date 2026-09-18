@@ -553,7 +553,7 @@ def compile_preshuffle_gemm(
         if const_expr(lds_stage == 1 and num_tiles > 1):
             frag_Bc = frag_B_stages[0]
             frag_Bc_retile = frag_B_retile_stages[0]
-            for iv, state in range(0, num_tiles - 1, 1, init=[frag_C.load()]):
+            for iv, state in fx.range(0, num_tiles - 1, 1, init=[frag_C.load()]):
                 frag_C.store(state[0])
                 k_next = fx.Int32(iv + 1)
                 mma_kloop(0, frag_Bc)
@@ -586,7 +586,7 @@ def compile_preshuffle_gemm(
                 for iv in range_constexpr(loop_end):
                     two_tiles(fx.Int32(iv * 2))
             elif const_expr(loop_end > 0):
-                for iv, state in range(0, loop_end, 1, init=[frag_C.load()]):
+                for iv, state in fx.range(0, loop_end, 1, init=[frag_C.load()]):
                     frag_C.store(state[0])
                     two_tiles(fx.Int32(iv * 2))
                     results = yield [frag_C.load()]

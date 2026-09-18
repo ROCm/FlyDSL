@@ -633,7 +633,7 @@ def compile_gemm2_a16w4_port(
             grid_nb = fx.Int32(gpu.grid_dim.x)
             if bx_i32 < bound:
                 _run_tile(_xcd_np(bx_i32))
-            for iv in range(bx_i32 + grid_nb, bound, gpu.grid_dim.x):
+            for iv in fx.range(bx_i32 + grid_nb, bound, gpu.grid_dim.x):
                 gpu.barrier()
                 _run_tile(_xcd_np(fx.Int32(iv)))
         else:

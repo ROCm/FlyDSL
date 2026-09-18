@@ -332,7 +332,7 @@ def compile_fp8_gemm(
 
         # Main K-loop: SCF outer with constexpr inner unroll
         if const_expr(full_outer_iters > 0):
-            for iv, state in range(0, full_outer_iters * k_unroll, k_unroll, init=init_state):
+            for iv, state in fx.range(0, full_outer_iters * k_unroll, k_unroll, init=init_state):
                 s_a = _unflatten_a(list(state[:n_a]))
                 s_accs = list(state[n_a : n_a + n_acc])
                 s_b = _unflatten_b(list(state[n_a + n_acc :]))

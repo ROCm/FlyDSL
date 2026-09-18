@@ -550,7 +550,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
             )
             n_iters = skewed.select(strided_iters, contiguous_iters)
             active = m_slot < active_cu
-            for _it in range(n_iters):
+            for _it in fx.range(n_iters):
                 strided_m = m_slot + _it * active_cu
                 contiguous_m = m_tile0 + _it
                 m_block = skewed.select(strided_m, contiguous_m)
@@ -576,7 +576,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 diff = total_m_blocks - m_tile0
                 rem = (diff > fx.Int32(0)).select(diff, fx.Int32(0))
                 n_iters = (rem < tiles_per_slot).select(rem, tiles_per_slot)
-            for _it in range(n_iters):
+            for _it in fx.range(n_iters):
                 if const_expr(persist_strided):
                     m_block = m_slot + _it * fx.Int32(cu_num)
                 else:

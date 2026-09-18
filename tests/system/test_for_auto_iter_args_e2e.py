@@ -35,7 +35,7 @@ def _make_out_tensor(n=1, dtype=torch.int32):
 @flyc.kernel
 def _k_single_acc(Out: fx.Tensor, n: fx.Int32):
     acc = fx.Int32(0)
-    for i in range(n):
+    for i in fx.range(n):
         acc = acc + fx.Int32(1)
     Out[0] = acc
 
@@ -60,7 +60,7 @@ def test_single_acc_result():
 def _k_multi_vars(OutA: fx.Tensor, OutB: fx.Tensor, n: fx.Int32):
     a = fx.Int32(0)
     b = fx.Int32(100)
-    for i in range(n):
+    for i in fx.range(n):
         a = a + fx.Int32(1)
         b = b - fx.Int32(1)
     OutA[0] = a
@@ -88,7 +88,7 @@ def test_multi_vars_result():
 @flyc.kernel
 def _k_range_step(Out: fx.Tensor, n: fx.Int32):
     acc = fx.Int32(0)
-    for i in range(fx.Int32(0), n, fx.Int32(2)):
+    for i in fx.range(fx.Int32(0), n, fx.Int32(2)):
         acc = acc + fx.Int32(1)
     Out[0] = acc
 
@@ -112,7 +112,7 @@ def test_range_step_result():
 @flyc.kernel
 def _k_acc_expr(Out: fx.Tensor, n: fx.Int32):
     acc = fx.Int32(1)
-    for i in range(n):
+    for i in fx.range(n):
         acc = acc * fx.Int32(2)
     Out[0] = acc
 
@@ -150,7 +150,7 @@ def test_zero_iterations_preserves_init():
 def _k_per_thread_acc(Out: fx.Tensor, n: fx.Int32, block_dim: fx.Constexpr[int]):
     tid = fx.thread_idx.x
     acc = fx.Int32(0)
-    for i in range(n):
+    for i in fx.range(n):
         acc = acc + fx.Int32(1)
     Out[tid] = acc
 
@@ -178,7 +178,7 @@ def test_per_thread_acc_result():
 def _k_iv_liveout(Out: fx.Tensor, n: fx.Int32):
     i = fx.Int32(999)
     acc = fx.Int32(0)
-    for i in range(n):
+    for i in fx.range(n):
         acc = acc + fx.Int32(1)
     Out[0] = i
     Out[1] = acc
@@ -247,7 +247,7 @@ def test_comprehension_target_dynamic_range_not_leaked():
     def kernel(Out: fx.Tensor, n: fx.Int32):
         acc = fx.Int32(0)
 
-        for ni in range(n):
+        for ni in fx.range(n):
             acc = acc + fx.Int32(100)
 
         if n > fx.Int32(0):

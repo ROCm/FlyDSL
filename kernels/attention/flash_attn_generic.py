@@ -314,7 +314,7 @@ def build_flash_attn_func_module_primary(
                 init_args.append(_k0_vecs[_kb])
 
         loop_results = init_args
-        for kv_block_start, inner_iter_args in range(0, kv_upper, traits.BLOCK_N_OUT, init=init_args):
+        for kv_block_start, inner_iter_args in fx.range(0, kv_upper, traits.BLOCK_N_OUT, init=init_args):
             m_running = inner_iter_args[0]
             l_running = inner_iter_args[1]
             o_accs = [inner_iter_args[2 + i] for i in range_constexpr(traits.D_CHUNKS)]
