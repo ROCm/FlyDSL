@@ -28,6 +28,10 @@ catch resource regressions that functional tests do not surface.
 
 This skill measures **resources, not time**. A clean result here does not mean
 performance is unchanged — it means register/LDS/spill pressure is unchanged.
+A clean result also does not establish ISA equivalence: equal resource values
+and instruction-category counts can hide a different opcode, operand order,
+modifier, or schedule. Compare normalized final ISA or disassembled `.text`
+separately when instruction identity is the contract.
 A regression here is a strong, cheap signal that is usually worth acting on
 before profiling, because spilling and occupancy cliffs dominate most kernel
 slowdowns. See §7 of `docs/kernel_tuning_guide.md` for what to do about one.
@@ -117,7 +121,7 @@ untrustworthy items is printed above it.
 | `lds_static_bytes` | yes | `.group_segment_fixed_size` metadata | Statically allocated LDS per work-group |
 | `lds_read` / `lds_write` | no | instruction count | `ds_read`/`ds_load` and `ds_write`/`ds_store` sites |
 | `scratch_store` / `scratch_load` | no | instruction count | `scratch_*` sites; `n/a` where spilling goes through `buffer_*` |
-| `matrix_ops` | no | instruction count | MFMA / WMMA / sparse-MFMA (`v_smfmac_*`) sites |
+| `matrix_ops` | no | instruction count | MFMA / WMMA / sparse-MFMA (`v_smfmac_*`) sites; equal counts do not prove equal instructions |
 
 Three things are easy to misread:
 
