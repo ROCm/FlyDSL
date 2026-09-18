@@ -25,6 +25,19 @@ if(FLYDSL_HAS_ROCDL)
     DIALECT_NAME fly_rocdl
     GEN_ENUM_BINDINGS
   )
+
+  # ktrace is gated to CDNA3/CDNA4 and registers with the ROCDL backend, so its
+  # bindings live behind the same guard: import flydsl.expr must still work on a
+  # build without FlyROCDL (tests/unit/test_expr_optional_rocdl.py).
+  # No GEN_ENUM_BINDINGS -- the dialect defines no enums.
+  declare_mlir_dialect_python_bindings(
+    ADD_TO_PARENT FlyPythonSources
+    ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/"
+    TD_FILE dialects/FlyKtrace.td
+    SOURCES
+      dialects/fly_ktrace.py
+    DIALECT_NAME fly_ktrace
+  )
 endif()
 
 # NOTE: Do NOT link MLIRFlyDialect/MLIRFlyROCDLDialect here via PRIVATE_LINK_LIBS.
@@ -232,6 +245,11 @@ if(FLYDSL_HAS_ROCDL)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_rocdl_enum_gen.py"
       "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_rocdl_enum_gen.py"
+    # Generated but not copied means never importable: declare_mlir_dialect_python_bindings
+    # only emits into the build dir. No enum_gen counterpart -- the dialect has no enums.
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_ktrace_ops_gen.py"
+      "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_ktrace_ops_gen.py"
   )
 else()
   set(_FLY_COPY_ROCDL_TABLEGEN "")

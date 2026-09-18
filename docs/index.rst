@@ -42,6 +42,8 @@ to GPU/ROCDL.
 
       * :doc:`Kernel tuning <kernel_tuning_guide>`
 
+      * :doc:`In-kernel wave tracing <ktrace_guide>`
+
       * :doc:`Offline autotune configs <autotune_guide>`
 
       * :doc:`Prebuilt kernel library <prebuilt_kernels_guide>`

@@ -8,6 +8,19 @@ from ...utils import env
 from .base import BaseBackend, GPUTarget
 
 
+def _ktrace_tracing_enabled(compile_hints: dict) -> bool:
+    """Whether this compilation instruments kernels with ktrace.
+
+    Mirrors the precedence in expr/ktrace.py: a per-kernel ``ktrace`` compile hint
+    overrides the environment. The hint is read from the dict passed in rather than
+    from the ambient hint context, which has already closed by the time the pipeline
+    is built.
+    """
+    if "ktrace" in compile_hints:
+        return bool(compile_hints["ktrace"])
+    return bool(env.ktrace.enable)
+
+
 class RocmBackend(BaseBackend):
     """ROCm / AMDGPU compile backend (HIP runtime, ROCDL lowering)."""
 
@@ -75,6 +88,21 @@ class RocmBackend(BaseBackend):
             "wave64": "true" if get_warp_size(chip) == 64 else "false",
         }
 
+        # ktrace annotations are expanded before convert-fly-to-rocdl: the pass
+        # emits fly.to_llvm_ptr for the trace buffer, which only that pass lowers,
+        # and scf.if, which must survive until convert-scf-to-cf. A kernel with no
+        # annotations is left untouched, so gating on the ktrace switch is only to
+        # keep an untraced compile byte-identical.
+        #
+        # Not gated on the arch: the frontend emits annotations whatever the target,
+        # so dropping the pass on RDNA would leave them to reach LLVM translation and
+        # fail there as "cannot be converted to LLVM IR", naming neither ktrace nor
+        # the arch. The pass itself refuses a non-CDNA3/CDNA4 target with a
+        # diagnostic that says s_memrealtime is the reason.
+        ktrace_fragments = []
+        if _ktrace_tracing_enabled(compile_hints):
+            ktrace_fragments = ["convert-fly-ktrace-to-rocdl"]
+
         pre_binary_fragments = [
             "fly-rewrite-func-signature",
             "fly-canonicalize",
@@ -84,6 +112,7 @@ class RocmBackend(BaseBackend):
             "canonicalize",
             "fly-convert-atom-call-to-ssa-form",
             "fly-promote-regmem-to-vectorssa",
+            *ktrace_fragments,
             "convert-fly-to-rocdl",
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
