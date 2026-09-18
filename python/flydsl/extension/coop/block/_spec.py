@@ -10,6 +10,7 @@ its policy enum, its default policy, and the shared storage each policy needs.
 
 from ....compiler.backends import current_target
 from ....expr.gpu import num_warp_threads
+from .._common import _require_power_of_two
 
 # Specializations are cached across algorithms, keyed by the root class as well
 # as the parameters, so two algorithms cannot collide on an identical key.
@@ -36,7 +37,8 @@ class BlockAlgorithmMeta(type):
     what :func:`~flydsl.expr.gpu.known_block_size` hands back.
 
     The product of the dimensions must be a positive multiple of the target
-    physical warp size. A smaller block or an incomplete final warp is rejected.
+    physical warp size. Collectives that opt into subwarp blocks also accept
+    smaller power-of-two sizes by narrowing their logical warp to the block.
 
     A concrete metaclass sets ``_algorithms`` and ``_shared_storage``, and
     implements :meth:`_default_algorithm_for`.
@@ -45,6 +47,7 @@ class BlockAlgorithmMeta(type):
     _algorithms = None
     _shared_storage = None
     _supports_pairs = False
+    _supports_subwarp = False
 
     def _default_algorithm_for(cls, target):
         """The policy to use when the caller does not name one."""
@@ -70,7 +73,10 @@ class BlockAlgorithmMeta(type):
         block_size = _block_shape(block_size)
         block_threads = block_size[0] * block_size[1] * block_size[2]
         warp_threads = num_warp_threads()
-        if block_threads % warp_threads:
+        if cls._supports_subwarp and block_threads < warp_threads:
+            _require_power_of_two(block_threads, "subwarp block thread count")
+            warp_threads = block_threads
+        elif block_threads % warp_threads:
             raise ValueError(
                 f"{cls.__name__} block_size must contain a multiple of the target warp size "
                 f"({warp_threads}) threads, got {block_threads}"
@@ -156,8 +162,8 @@ class BlockPrimitive:
             otherwise ``None``. Some primitives give this extent a specific
             meaning, such as ``bins`` or ``runs_per_thread``.
         algorithm: Selected member of the primitive's algorithm enum.
-        warp_threads: Physical warp width of the compilation target.
-        num_warps: Number of complete physical warps in the block.
+        warp_threads: Logical warp width, narrowed for supported subwarp blocks.
+        num_warps: Number of logical warps in the block.
         SharedStorage: DSL type describing the caller-allocated shared memory.
     """
 

@@ -107,7 +107,7 @@ def _reduce_warps(partial, tid, storage, op, warp_reduce, warp_threads, block_th
 @jit
 def _reduce_raking(partial, tid, storage, op, warp_reduce, warp_threads, block_threads, commutative, valid_threads):
     if const_expr(valid_threads is None):
-        # Full-warps-only block shapes make every segment complete. Do not
+        # Complete logical warps make every raking segment complete. Do not
         # manufacture a valid_items argument: that would disable the DPP path.
         if const_expr(block_threads == warp_threads):
             return warp_reduce(partial, op, width=warp_threads)
@@ -185,6 +185,7 @@ def _storage_raking(dtype, block_threads, warp_threads):
 
 
 class _BlockReduceMeta(BlockAlgorithmMeta):
+    _supports_subwarp = True
     _algorithms = BlockReduceAlgorithm
     _shared_storage = {
         BlockReduceAlgorithm.WARP_REDUCTIONS: _storage_warps,
@@ -314,10 +315,10 @@ class BlockReduce(metaclass=_BlockReduceMeta):
     thread must enter the collective with uniform options. Use one shared
     allocation of ``SharedStorage`` and synchronize before reusing it.
 
-    The total thread count must be a positive multiple of the compilation
-    target's physical warp size (64 on CDNA, 32 on RDNA); otherwise
-    specialization raises ValueError. Partial tiles remain supported where
-    the API provides valid-item counts. All launched threads still participate.
+    A block smaller than the target's physical warp (64 on CDNA, 32 on RDNA)
+    must have a power-of-two thread count; its logical warp narrows to that
+    count. Larger blocks must contain complete physical warps. valid_items
+    controls a partial input tile; all launched threads still participate.
 
     Attributes:
         dtype: Specialized reduction element type.
@@ -325,7 +326,7 @@ class BlockReduce(metaclass=_BlockReduceMeta):
         block_threads: Number of participating threads.
         algorithm: Selected reduction policy.
         warp_threads: Logical warp width selected for the target and block.
-        num_warps: Number of complete physical warps in the block.
+        num_warps: Number of logical warps in the block.
         SharedStorage: Shared-memory Struct type required by the specialization.
 
     Examples:

@@ -221,6 +221,7 @@ def _storage_raking(dtype, block_threads, warp_threads):
 
 
 class _BlockScanMeta(BlockAlgorithmMeta):
+    _supports_subwarp = True
     _algorithms = BlockScanAlgorithm
     _shared_storage = {
         BlockScanAlgorithm.WARP_SCANS: _storage_warp_scans,
@@ -273,10 +274,10 @@ class BlockScan(metaclass=_BlockScanMeta):
     of ``SharedStorage``. Synchronize the block before reusing storage for
     another collective. Result values retain the input item count and shape.
 
-    The total thread count must be a positive multiple of the compilation
-    target's physical warp size (64 on CDNA, 32 on RDNA); otherwise
-    specialization raises ValueError. Partial tiles remain supported where
-    the API provides valid-item counts. All launched threads still participate.
+    A block smaller than the target's physical warp (64 on CDNA, 32 on RDNA)
+    must have a power-of-two thread count; its logical warp narrows to that
+    count. Larger blocks must contain complete physical warps. valid_items
+    controls a partial input tile; all launched threads still participate.
 
     Attributes:
         dtype: Specialized scan element type.
@@ -284,7 +285,7 @@ class BlockScan(metaclass=_BlockScanMeta):
         block_threads: Number of participating threads.
         algorithm: Selected scan policy.
         warp_threads: Logical warp width selected for the target and block.
-        num_warps: Number of complete physical warps in the block.
+        num_warps: Number of logical warps in the block.
         SharedStorage: Shared-memory Struct type required by the specialization.
 
     Examples:

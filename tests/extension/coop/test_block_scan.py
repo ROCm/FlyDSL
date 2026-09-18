@@ -5,8 +5,8 @@
 
 """Block-wide prefix scan over numeric types, policies and item shapes.
 
-Block sizes must contain complete physical warps. Smaller blocks are tested
-for rejection; scalar and Vector inputs retain their block-wide semantics.
+Blocks use complete physical warps or a smaller power-of-two logical warp.
+Scalar and Vector inputs retain their block-wide semantics.
 """
 
 from __future__ import annotations
@@ -380,9 +380,10 @@ def test_block_scan_single_warp_skips_shared_memory():
 
 @pytest.mark.l1a_compile_no_target_dialect
 @pytest.mark.parametrize("block_threads", SUB_WARP_BLOCK_THREADS, ids=lambda n: f"t{n}")
-def test_sub_wave_blocks_are_rejected(block_threads):
-    with pytest.raises(ValueError, match="multiple of the target warp size"):
-        fx.coop.BlockScan[fx.Int32, block_threads]
+def test_sub_wave_blocks_narrow_the_logical_warp(block_threads):
+    primitive = fx.coop.BlockScan[fx.Int32, block_threads]
+    assert primitive.warp_threads == block_threads
+    assert primitive.num_warps == 1
 
 
 @pytest.mark.l2_device

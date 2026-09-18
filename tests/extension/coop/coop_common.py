@@ -30,11 +30,11 @@ WARP_SIZE = current_target().warp_size
 # form can read it off the end.
 WARP_WIDTHS = (*_powers_of_two(2, WARP_SIZE // 2), None)
 
-# Block collectives require complete physical warps. Include three warps to
-# exercise legal non-power-of-two thread counts as well as powers of two.
-BLOCK_THREADS = tuple(sorted({*_powers_of_two(WARP_SIZE, 1024), 3 * WARP_SIZE}))
+# Include subwarp powers of two and complete physical warps. Three warps
+# exercise legal non-power-of-two thread counts.
+BLOCK_THREADS = tuple(sorted({*_powers_of_two(1, 1024), 3 * WARP_SIZE}))
 
-# Unsupported sizes retained for explicit rejection tests.
+# Subwarp blocks narrow their logical warp to the launched thread count.
 SUB_WARP_BLOCK_THREADS = _powers_of_two(1, WARP_SIZE // 2)
 
 # The element types the collectives are exercised over, each paired with the

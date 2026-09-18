@@ -216,3 +216,26 @@ def test_the_portable_collectives_inherit_the_same_hook(target):
         assert type(portable)._default_algorithm_for(portable, target) is type(dispatched)._default_algorithm_for(
             dispatched, target
         )
+
+
+@pytest.mark.l1a_compile_no_target_dialect
+@pytest.mark.parametrize("target", (CDNA, RDNA), ids=lambda t: t.arch)
+def test_subwarp_support_is_explicit(monkeypatch, target):
+    from flydsl.extension.coop.block import _spec
+
+    monkeypatch.setattr(_spec, "current_target", lambda: target)
+    monkeypatch.setattr(_spec, "num_warp_threads", lambda: target.warp_size)
+    # A future block primitive must opt in before using narrower warp widths.
+    with pytest.raises(ValueError, match="multiple of the target warp size"):
+        Pinned[fx.Int32, target.warp_size // 2]
+    for namespace in (fx.coop, fx.coop.universal):
+        for primitive in (namespace.BlockReduce, namespace.BlockScan):
+            for threads in (1, 2, target.warp_size // 2):
+                specialized = primitive[fx.Int32, threads]
+                assert specialized.warp_threads == threads
+                assert specialized.num_warps == 1
+            for threads in (3, target.warp_size - 1):
+                with pytest.raises(ValueError, match="power of two"):
+                    primitive[fx.Int32, threads]
+            with pytest.raises(ValueError, match="multiple of the target warp size"):
+                primitive[fx.Int32, target.warp_size + 1]
