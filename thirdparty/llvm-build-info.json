@@ -1,6 +1,7 @@
 {
   "upstream": {
     "repository": "https://github.com/llvm/llvm-project.git",
-    "llvm_hash": "e2a39f504fee836e4def9581bed817ecc327b9dc"
+    "llvm_hash": "739eaa08d45e5f6e5d13b1dd82daf0e5dc27e344",
+    "description": "[AMDGPU] Improve the sequence for initial unclaused VMEM (#216897)"
   }
 }

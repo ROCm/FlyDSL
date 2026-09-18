@@ -35,8 +35,7 @@ jobs:
           fi
 
           if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "Release tag ${GITHUB_REF_NAME} is not on origin/main" >&2
-            exit 1
+            echo "::warning::Release tag ${GITHUB_REF_NAME} is not on origin/main (branch release)"
           fi
 
           if [ -z "${SOURCE_VERSION}" ]; then

@@ -2987,7 +2987,7 @@ static std::optional<uint64_t> narrowUpperBound(Value v, unsigned depth,
   // A value reached twice on one walk (cyclic chain) cannot be bounded here.
   if (!visited.insert(def).second)
     return std::nullopt;
-  auto pop = llvm::make_scope_exit([&] { visited.erase(def); });
+  llvm::scope_exit pop([&] { visited.erase(def); });
 
   // Launch coordinates: ask the op for its own range.  Every gpu index op
   // implements InferIntRangeInterface, and that implementation already prefers
