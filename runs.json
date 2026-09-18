@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-18T01:30:11Z",
+ "updated": "2026-09-18T01:48:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35296707147,
+   "pr": 1160,
+   "commit": "7b8eabbe661869830b21271f2e6faa55add4bff8",
+   "branch": "codex/fix-release-tag-generation",
+   "event": "pull_request",
+   "title": "Fix monotonic dev tag generation in shallow worktrees",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296707147",
+   "created_at": "2026-09-18T01:46:56Z",
+   "updated_at": "2026-09-18T01:47:14Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35296538700,
+   "pr": 1160,
+   "commit": "b3c9299830524634045d004eab1ad2b0c757bc8d",
+   "branch": "codex/fix-release-tag-generation",
+   "event": "pull_request",
+   "title": "Fix monotonic dev tag generation in shallow worktrees",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296538700",
+   "created_at": "2026-09-18T01:44:26Z",
+   "updated_at": "2026-09-18T01:47:01Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 35295424924,
    "pr": null,
@@ -14,7 +44,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35295424924",
    "created_at": "2026-09-18T01:28:05Z",
-   "updated_at": "2026-09-18T01:28:33Z",
+   "updated_at": "2026-09-18T01:44:00Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2055,67 +2085,6 @@
      "machine": "gbt350-odcdh1-b09-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 34951330148,
-   "pr": null,
-   "commit": "59af6ec5664d3d9130c92c99060a464ba17fd7e1",
-   "branch": "pr/feat-coop",
-   "event": "pull_request",
-   "title": "[DSL] Support struct as the elemType of Array",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34951330148",
-   "created_at": "2026-09-15T09:13:17Z",
-   "updated_at": "2026-09-15T09:35:02Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 34942656593,
-   "pr": 1136,
-   "commit": "9584102fba3b4f2f1b9b5f83a97773fd56d8b18d",
-   "branch": "qiangpan/fix_rdna3_int8_gemm",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix rdna3_int8_gemm RDNA bounds checks",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593",
-   "created_at": "2026-09-15T07:37:33Z",
-   "updated_at": "2026-09-16T10:34:23Z",
-   "actor": "qiangpan2",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T09:20:36Z",
-     "completed_at": "2026-09-16T10:34:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104736997486"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T06:57:08Z",
-     "completed_at": "2026-09-16T07:54:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104736998492",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T06:56:55Z",
-     "completed_at": "2026-09-16T07:29:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/34942656593/job/104736999217"
     }
    ]
   }
