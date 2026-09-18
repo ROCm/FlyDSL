@@ -27,6 +27,7 @@ from .typing import Array, Constexpr, Pointer
 __all__ = [
     "struct",
     "Struct",
+    "Empty",
     "union",
     "Union",
     "Array",
@@ -113,7 +114,10 @@ def _storage_layout(schema: type) -> tuple[int, int, dict[str, int]]:
 
     def _field_layout(field: FieldDef) -> tuple[int, int]:
         try:
-            return dsl_size_of(field.type_spec), dsl_align_of(field.type_spec)
+            size = dsl_size_of(field.type_spec)
+            align = dsl_align_of(field.type_spec)
+            # Empty fields, including nested containers, add neither bytes nor padding.
+            return size, align if size else 1
         except TypeError as exc:
             raise TypeError(
                 f"Cannot compute layout for type {_display_name(schema)}: field '{field.name}' has type "
@@ -590,6 +594,65 @@ Struct = struct
 Union = union
 
 
+class Empty:
+    """Zero-size value with alignment 1 and no runtime IR values.
+
+    Use ``Empty`` for storage that requires no memory. Allocating it returns a
+    pointer-free ``Storage[Empty]``; ``peek()`` returns ``Empty()`` and
+    ``poke(Empty())`` is a no-op, with no allocation or alignment padding.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return f"{type(self).__name__}()"
+
+    def __eq__(self, other):
+        return True if type(self) is type(other) else NotImplemented
+
+    def __hash__(self):
+        return hash(type(self))
+
+    @classmethod
+    def __construct_from_ir_values__(cls, values, exemplar=None):
+        if values:
+            raise ValueError(f"{cls.__name__} expected 0 ir.Values, got {len(values)}")
+        return cls()
+
+    def __extract_to_ir_values__(self):
+        return []
+
+    @classmethod
+    def __get_ir_types__(cls):
+        return []
+
+    @classmethod
+    def __cache_signature__(cls):
+        return (cls.__module__, cls.__qualname__)
+
+    def __c_abi_spec__(self):
+        return []
+
+    @classmethod
+    def __dsl_size_of__(cls):
+        return 0
+
+    @classmethod
+    def __dsl_align_of__(cls):
+        return 1
+
+    @classmethod
+    def __peek_from_ptr__(cls, ptr):
+        return cls()
+
+    @classmethod
+    def __poke_into_ptr__(cls, ptr, value):
+        if not isinstance(value, cls):
+            raise TypeError(
+                f"{cls.__name__}.__poke_into_ptr__ expects {cls.__name__} value, got {type(value).__name__}."
+            )
+
+
 class Align:
     __dsl_align_wrapper__: bool = False
     dtype: Any = None
@@ -705,6 +768,8 @@ class Storage:
 
             def peek(self):
                 dsl_type = type(self)._target_type
+                if dsl_type is Empty:
+                    return Empty()
                 prebuilt = object.__getattribute__(self, "_prebuilt")
                 if prebuilt and is_struct_type(dsl_type):
                     values = {}
@@ -725,6 +790,8 @@ class Storage:
 
             def poke(self, value):
                 dsl_type = type(self)._target_type
+                if dsl_type is Empty:
+                    return poke_into_ptr(Empty, None, value)
                 prebuilt = object.__getattribute__(self, "_prebuilt")
                 if prebuilt and is_struct_type(dsl_type):
                     for name, eff_type in _effective_field_defs(dsl_type):
@@ -805,7 +872,9 @@ class Arena:
 
     def _bump(self, nbytes: int, align: int) -> int:
         offset = _align_up(self._offset, align)
-        self._offset = offset + nbytes
+        # A zero-size allocation must not consume alignment padding either.
+        if nbytes:
+            self._offset = offset + nbytes
         return offset
 
     @dsl_loc_tracing
@@ -830,5 +899,7 @@ class Arena:
             nbytes = dsl_size_of(storable)
             align = dsl_align_of(storable) if alignment is None else max(dsl_align_of(storable), alignment)
             offset = self._bump(nbytes, align)
+            if storable is Empty:
+                return Storage[Empty](None)
             base = add_offset(self.base_ptr, offset)
             return Storage[storable](base)

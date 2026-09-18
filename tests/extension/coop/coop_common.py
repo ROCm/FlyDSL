@@ -30,14 +30,11 @@ WARP_SIZE = current_target().warp_size
 # form can read it off the end.
 WARP_WIDTHS = (*_powers_of_two(2, WARP_SIZE // 2), None)
 
-# A single thread up to the 1024-thread launch limit, which is the whole range
-# the block collectives are defined over. Below a wave they narrow their
-# logical warp to the block rather than refusing it, so the widths under
-# ``WARP_SIZE`` are the ones that exercise that narrowing.
-BLOCK_THREADS = _powers_of_two(1, 1024)
+# Block collectives require complete physical warps. Include three warps to
+# exercise legal non-power-of-two thread counts as well as powers of two.
+BLOCK_THREADS = tuple(sorted({*_powers_of_two(WARP_SIZE, 1024), 3 * WARP_SIZE}))
 
-# Just the block widths that fall inside a wave, for the tests that are about
-# the narrowing itself rather than about width in general.
+# Unsupported sizes retained for explicit rejection tests.
 SUB_WARP_BLOCK_THREADS = _powers_of_two(1, WARP_SIZE // 2)
 
 # The element types the collectives are exercised over, each paired with the
@@ -116,7 +113,7 @@ def wrap(total, name):
 def linear_tid(block_size):
     """Linear thread id inside *block_size*, ordered as ``gpu.thread_id`` is.
 
-    Mirrors ``coop/_common.py:linear_thread_id``, which is what the collectives
+    Mirrors ``coop/_common.py:_linear_thread_id``, which is what the collectives
     themselves index by — a test that ordered its threads differently would
     compare against the wrong permutation.
     """

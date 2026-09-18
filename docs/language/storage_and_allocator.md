@@ -61,6 +61,7 @@ a traced pointer. This applies equally to built-in and user-defined types. Built
 
 | `T` | Size | Alignment |
 |---|---|---|
+| `fx.Empty` | 0 bytes | 1 byte |
 | `Numeric` at least one byte wide (`fx.Int32`, `fx.Float32`, `fx.Int64`, …) | its byte width | its byte width |
 | specialized `fx.Vector[E, Shape]` | `E.width × numel(Shape) / 8` bytes, no trailing padding | element byte width; 1 byte for packed sub-byte elements |
 | specialized `fx.Pointer[E, Space]` / `fx.Pointer[E, Space, A]` | 8 bytes for Global; 4 for Shared | 8 bytes for Global; 4 for Shared |
@@ -70,6 +71,12 @@ a traced pointer. This applies equally to built-in and user-defined types. Built
 Builtin types without this contract include sub-byte numerics such as `fx.Boolean` and `fx.Int4`,
 plus unspecialized `fx.Vector` and `fx.Pointer`, and `fx.Tensor`; asking for their storage size is a `TypeError`.
 One such field is enough to make the whole composite non-storable.
+
+### `fx.Empty`
+
+`fx.Empty` represents storage that requires no memory and carries no runtime IR values.
+Allocating it returns a pointer-free `Storage[fx.Empty]` without allocating bytes or adding
+alignment padding. `peek()` returns `fx.Empty()`, and `poke(fx.Empty())` is a no-op.
 
 ### `fx.Vector[E, Shape]`
 
@@ -110,14 +117,11 @@ value = loaded[0]                        # Float32
 
 ### `fx.Array[E, N, A]`
 
-The fixed-size storage view supports `Storable` element types `E`, a positive `int` count `N`,
-and an optional positive byte alignment `A`. Array types are cached, so the same parameters
-yield the same class. `A` aligns the array base without changing element stride.
+The fixed-size storage view supports `Storable` element types `E`, a positive `int` count `N`, and
+an optional positive byte alignment `A`. `A` aligns the array base without changing element stride.
 
 Numeric arrays occupy `max(1, E.width * N // 8)` bytes, including packed sub-byte arrays.
 Their default alignment is `max(1, E.width // 8)`; an explicit `A` may be any positive integer.
-After `peek`, indexing and `.view(layout)` operate through the typed element pointer and
-follow its access and alignment requirements.
 
 For other `Storable` elements, each element occupies `dsl_size_of(E)` bytes and indexing
 delegates to `E`'s storage access hooks. `A` defaults to `dsl_align_of(E)` and must be a

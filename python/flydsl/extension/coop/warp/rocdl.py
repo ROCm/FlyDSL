@@ -11,9 +11,16 @@ less to gain, since LLVM's own rewrite already reaches pure DPP there.
 
 from ....compiler.backends import current_target
 from ....expr.gpu import lane_id
-from ....expr.numeric import Int32, Numeric
+from ....expr.numeric import Int32, Integer, Numeric
 from ....expr.rocdl import ds_swizzle, readlane, update_dpp
-from .._common import combine, identity, resolve_warp_width, seed
+from ....expr.typing import ReductionOp
+from .._common import (
+    _combine,
+    _identity,
+    _resolve_warp_width,
+    _seed,
+    _thread_partial,
+)
 from . import scan as _universal_scan
 from .reduce import warp_reduce as _portable_warp_reduce
 
@@ -112,27 +119,27 @@ def _wave64_reduce(value, op):
 
     Requires a commutative *op*, and in a different way from the portable
     butterfly: ``row_shr`` brings in the value from *below*, and it is folded
-    in as ``combine(op, acc, moved)`` -- the accumulator on the left. So the
+    in as ``_combine(op, acc, moved)`` -- the accumulator on the left. So the
     total lane 63 accumulates, and that ``readlane`` then broadcasts, is the
     wave folded in reverse lane order. Every lane agrees on it, unlike the
     butterfly below; it is simply the mirror image of the lane order a caller
-    would expect. Writing ``combine(op, moved, acc)`` instead would put it back
+    would expect. Writing ``_combine(op, moved, acc)`` instead would put it back
     in order at no cost -- the scan further down uses the same DPP sequence
     that way -- but the two are indistinguishable for the commutative ops this
     library accepts, so the flip is left for whoever needs it.
     """
-    neutral = identity(op, value.dtype)
+    neutral = _identity(op, value.dtype)
 
     acc = value
     for shift in (1, 2, 4, 8):
-        acc = combine(op, acc, _dpp(acc, _ROW_SHR[shift], _ALL_ROWS, neutral))
+        acc = _combine(op, acc, _dpp(acc, _ROW_SHR[shift], _ALL_ROWS, neutral))
     # Each 16-lane row now holds its own running fold, so its last lane -- 15,
     # 31, 47, 63 -- holds that row's total. ``row_bcast15`` hands each of those
     # to the row above (rows 1 and 3, hence row_mask 0xa) and ``row_bcast31``
     # hands lane 31 to the upper half (rows 2 and 3, row_mask 0xc), which
     # leaves lane 63 holding all four rows.
-    acc = combine(op, acc, _dpp(acc, _ROW_BCAST15, 0xA, neutral))
-    acc = combine(op, acc, _dpp(acc, _ROW_BCAST31, 0xC, neutral))
+    acc = _combine(op, acc, _dpp(acc, _ROW_BCAST15, 0xA, neutral))
+    acc = _combine(op, acc, _dpp(acc, _ROW_BCAST31, 0xC, neutral))
 
     return value.dtype(readlane(value.dtype.ir_type, acc, 63))
 
@@ -145,7 +152,7 @@ def _butterfly_reduce(value, op, width):
     and every one of its steps stays inside the group, so no step leaves a lane
     without a source and the identity ``_dpp`` takes is never read. It is
     passed for the other reason ``_dpp`` gives: it is what lets each move fold
-    into the ``combine`` that consumes it.
+    into the ``_combine`` that consumes it.
 
     Requires a commutative *op*, and needs it harder than the portable
     butterfly does. There, lane 0 at least folds the group in lane order; here
@@ -157,7 +164,7 @@ def _butterfly_reduce(value, op, width):
     lane order. Restoring that would mean a different sequence, not a different
     operand order.
     """
-    neutral = identity(op, value.dtype)
+    neutral = _identity(op, value.dtype)
     acc = value
     offset = 1
     while offset < width:
@@ -165,19 +172,76 @@ def _butterfly_reduce(value, op, width):
             partner = _dpp(acc, _BUTTERFLY_DPP[offset], _ALL_ROWS, neutral)
         else:
             partner = _swizzle(acc, _SWIZZLE_XOR16)
-        acc = combine(op, acc, partner)
+        acc = _combine(op, acc, partner)
         offset <<= 1
     return acc
 
 
-def warp_reduce(value, op, *, width=None):
-    """Reduce *value* across *width* lanes; every participating lane gets the result.
+def warp_reduce(
+    value,
+    op,
+    *,
+    width: int | None = None,
+    valid_items: int | Integer | None = None,
+):
+    """Reduce lane-local values and return the aggregate to every lane.
 
-    Same contract as the portable implementation this displaces -- see
-    :func:`~flydsl.extension.coop.warp.reduce.warp_reduce`.
+    All lanes of each logical warp must participate. A final partially populated
+    warp is supported when valid_items gives its active lane count. Invalid lanes
+    skip the binary operator. Empty groups have unspecified results.
+
+    Args:
+        value: This lane's input value. Local items must be nonempty. Reduction folds local items first, then
+            combines lanes in blocked order. Use warp_reduce_batched for independent
+            reductions of register columns.
+        op: ReductionOp or associative binary callable. Operand order follows ascending
+            lanes; reassociation is allowed.
+        width: Compile-time power-of-two logical width, at most the native warp width. None
+            uses the native width.
+        valid_items: Uniform number of leading contributing lanes in [0, width], or None for
+            all lanes. Runtime counts must stay in range. Only the single-item overload accepts this argument;
+            omit it when reducing a per-lane item range.
+
+    Returns:
+        The aggregate in every lane of the logical warp, including lanes outside
+        valid_items. Empty groups have unspecified results. This preserves FlyDSL
+        all-lane results and extends CUB's lane-zero output guarantee.
+
+    Examples:
+        # Each group of four lanes reduces independently; every lane gets its aggregate.
+
+        y = fx.coop.warp_reduce(x, fx.ReductionOp.ADD, width=4)
+
+        # Group |      group 0      ||      group 1
+        # Data  | L0 | L1 | L2 | L3 || L4 | L5 | L6 | L7
+        # ------+----+----+----+----++----+----+----+---
+        # x in  | 1  | 2  | 3  | 4  || 5  | 6  | 7  | 8
+        # y out | 10 | 10 | 10 | 10 || 26 | 26 | 26 | 26
+
+        # Array inputs fold all items across participating lanes into one value.
+
+        # Include the first two lanes of each group: L0/L1 and L4/L5. All eight lanes call.
+        partial = fx.coop.warp_reduce(
+            x, fx.ReductionOp.ADD, width=4, valid_items=2
+        )
+        # L0..L3 receive 3; L4..L7 receive 11. valid_items counts contributing lanes in each group.
+
+        # items in L0..L7 are {[1,10], [2,20], [3,30], [4,40],
+        #                        [5,50], [6,60], [7,70], [8,80]}.
+        total = fx.coop.warp_reduce(items, fx.ReductionOp.ADD, width=4)
+        # L0..L3 receive 110; L4..L7 receive 286.
+        # A guarded item range first folds its local items explicitly.
+        local_total = items[0] + items[1]
+        partial_tile = fx.coop.warp_reduce(
+            local_total, fx.ReductionOp.ADD, width=4, valid_items=2
+        )
+        # L0..L3 receive 33; L4..L7 receive 121.
     """
-    width = resolve_warp_width(width, "warp_reduce width")
-    if not _dpp_applies(value):
+    width = _resolve_warp_width(width, "warp_reduce width")
+    if valid_items is not None:
+        return _portable_warp_reduce(value, op, width=width, valid_items=valid_items)
+    value = _thread_partial(value, op)
+    if not _dpp_applies(value) or not isinstance(op, ReductionOp):
         return _portable_warp_reduce(value, op, width=width)
     if width == 64:
         return _wave64_reduce(value, op)
@@ -189,7 +253,7 @@ def warp_reduce(value, op, *, width=None):
 
 def _inclusive_scan(value, op, width):
     """The raw inclusive scan: ``log2(width)`` rounds, all of them DPP moves."""
-    neutral = identity(op, value.dtype)
+    neutral = _identity(op, value.dtype)
     # Within a 16-lane row ``row_shr:k`` is exactly the round's shift, and the
     # lanes at the row's start read nothing, so ``_dpp`` hands them the identity
     # and they fold away for free. A group narrower than a row shares that row
@@ -203,7 +267,7 @@ def _inclusive_scan(value, op, width):
         moved = _dpp(acc, _ROW_SHR[shift], _ALL_ROWS, neutral)
         if in_group is not None:
             moved = (in_group >= shift).select(moved, neutral)
-        acc = combine(op, moved, acc)
+        acc = _combine(op, moved, acc)
         shift <<= 1
 
     # Row ``r`` now holds its own prefix, so its last lane holds the row's
@@ -211,9 +275,9 @@ def _inclusive_scan(value, op, width):
     # and 3, whose lanes are the ones missing a row -- and ``row_bcast31``
     # hands lane 31's running total to the wave's upper half.
     if width > 16:
-        acc = combine(op, _dpp(acc, _ROW_BCAST15, 0xA, neutral), acc)
+        acc = _combine(op, _dpp(acc, _ROW_BCAST15, 0xA, neutral), acc)
     if width > 32:
-        acc = combine(op, _dpp(acc, _ROW_BCAST31, 0xC, neutral), acc)
+        acc = _combine(op, _dpp(acc, _ROW_BCAST31, 0xC, neutral), acc)
     return acc
 
 
@@ -226,7 +290,7 @@ def _shift_up(inclusive, op, width):
     group starts where the row (or the wave) does, so the two widths that sit
     inside a larger unit -- under 16 lanes, or 32 -- name their own first lane.
     """
-    neutral = identity(op, inclusive.dtype)
+    neutral = _identity(op, inclusive.dtype)
     ctrl = _ROW_SHR[1] if width <= 16 else _WAVE_SHR1
     shifted = _dpp(inclusive, ctrl, _ALL_ROWS, neutral)
     if width < 16 or width == 32:
@@ -247,53 +311,174 @@ def _aggregate(inclusive, width):
     return _swizzle(inclusive, _swizzle_broadcast(width))
 
 
-def warp_inclusive_scan(value, op, *, width=None, init=None):
-    """Scan *value* across *width* lanes; lane ``k`` gets lanes ``0..k`` folded.
+def warp_inclusive_scan(
+    value,
+    op,
+    *,
+    width: int | None = None,
+    init=None,
+    valid_items: int | Integer | None = None,
+):
+    """Compute the inclusive prefix in ascending lane order.
 
-    Same contract as the portable implementation this displaces -- see
-    :func:`~flydsl.extension.coop.warp.scan.warp_inclusive_scan`.
+    All lanes of the logical warp participate; a final partial warp can specify its
+    contributing count with valid_items. Invalid lanes do not evaluate the binary
+    operator; their outputs and empty-group aggregates are unspecified. The
+    aggregate excludes init. Without init, ADD has a zero first exclusive output;
+    for other operators the first exclusive output is unspecified.
+
+    Args:
+        value: This lane's input value. Its items are scanned independently.
+        op: ReductionOp or associative binary callable. Operand order follows ascending
+            lanes; reassociation is allowed.
+        width: Compile-time power-of-two logical width, at most the native warp width. None
+            uses the native width.
+        init: Optional initial value combined on the left of each prefix, converted
+            to the input value type.
+        valid_items: Uniform number of leading contributing lanes in [0, width], or None for
+            all lanes. Runtime counts must stay in range.
+
+    Returns:
+        This lane's inclusive prefix, with the input value type and shape.
     """
-    width = resolve_warp_width(width, "warp_inclusive_scan width")
-    if not _dpp_applies(value):
-        return _universal_scan.warp_inclusive_scan(value, op, width=width, init=init)
-    return seed(_inclusive_scan(value, op, width), op, init)
+    width = _resolve_warp_width(width, "warp_inclusive_scan width")
+    if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
+        return _universal_scan.warp_inclusive_scan(
+            value,
+            op,
+            width=width,
+            init=init,
+            valid_items=valid_items,
+        )
+    return _seed(_inclusive_scan(value, op, width), op, init)
 
 
-def warp_exclusive_scan(value, op, *, width=None, init=None):
-    """Scan *value* across *width* lanes; lane ``k`` gets lanes ``0..k-1`` folded.
+def warp_exclusive_scan(
+    value,
+    op,
+    *,
+    width: int | None = None,
+    init=None,
+    valid_items: int | Integer | None = None,
+):
+    """Compute the exclusive prefix in ascending lane order.
 
-    Same contract as the portable implementation this displaces -- see
-    :func:`~flydsl.extension.coop.warp.scan.warp_exclusive_scan`.
+    All lanes of the logical warp participate; a final partial warp can specify its
+    contributing count with valid_items. Invalid lanes do not evaluate the binary
+    operator; their outputs and empty-group aggregates are unspecified. The
+    aggregate excludes init. Without init, ADD has a zero first exclusive output;
+    for other operators the first exclusive output is unspecified.
+
+    Args:
+        value: This lane's input value. Its items are scanned independently.
+        op: ReductionOp or associative binary callable. Operand order follows ascending
+            lanes; reassociation is allowed.
+        width: Compile-time power-of-two logical width, at most the native warp width. None
+            uses the native width.
+        init: Optional initial value combined on the left of each prefix, converted
+            to the input value type.
+        valid_items: Uniform number of leading contributing lanes in [0, width], or None for
+            all lanes. Runtime counts must stay in range.
+
+    Returns:
+        This lane's exclusive prefix, with the input value type and shape.
     """
-    width = resolve_warp_width(width, "warp_exclusive_scan width")
-    if not _dpp_applies(value):
-        return _universal_scan.warp_exclusive_scan(value, op, width=width, init=init)
-    return seed(_shift_up(_inclusive_scan(value, op, width), op, width), op, init)
+    width = _resolve_warp_width(width, "warp_exclusive_scan width")
+    if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
+        return _universal_scan.warp_exclusive_scan(
+            value,
+            op,
+            width=width,
+            init=init,
+            valid_items=valid_items,
+        )
+    return _seed(_shift_up(_inclusive_scan(value, op, width), op, width), op, init)
 
 
-def warp_scan(value, op, *, width=None, init=None):
-    """Return ``(inclusive, exclusive)`` for this lane, sharing one scan.
+def warp_scan(
+    value,
+    op,
+    *,
+    width: int | None = None,
+    init=None,
+    valid_items: int | Integer | None = None,
+):
+    """Compute inclusive and exclusive prefixes with one scan.
 
-    Same contract as the portable implementation this displaces -- see
-    :func:`~flydsl.extension.coop.warp.scan.warp_scan`.
+    All lanes of the logical warp participate; a final partial warp can specify its
+    contributing count with valid_items. Invalid lanes do not evaluate the binary
+    operator; their outputs and empty-group aggregates are unspecified. The
+    aggregate excludes init. Without init, ADD has a zero first exclusive output;
+    for other operators the first exclusive output is unspecified.
+
+    Args:
+        value: This lane's input value. Its items are scanned independently.
+        op: ReductionOp or associative binary callable. Operand order follows ascending
+            lanes; reassociation is allowed.
+        width: Compile-time power-of-two logical width, at most the native warp width. None
+            uses the native width.
+        init: Optional initial value combined on the left of each prefix, converted
+            to the input value type.
+        valid_items: Uniform number of leading contributing lanes in [0, width], or None for
+            all lanes. Runtime counts must stay in range.
+
+    Returns:
+        A tuple (inclusive, exclusive) of this lane's prefixes.
     """
-    width = resolve_warp_width(width, "warp_scan width")
-    if not _dpp_applies(value):
-        return _universal_scan.warp_scan(value, op, width=width, init=init)
+    width = _resolve_warp_width(width, "warp_scan width")
+    if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
+        return _universal_scan.warp_scan(
+            value,
+            op,
+            width=width,
+            init=init,
+            valid_items=valid_items,
+        )
     raw = _inclusive_scan(value, op, width)
-    return seed(raw, op, init), seed(_shift_up(raw, op, width), op, init)
+    return _seed(raw, op, init), _seed(_shift_up(raw, op, width), op, init)
 
 
-def warp_scan_with_aggregate(value, op, *, width=None, init=None):
-    """Return ``(inclusive, exclusive, aggregate)``, sharing one scan.
+def warp_scan_with_aggregate(
+    value,
+    op,
+    *,
+    width: int | None = None,
+    init=None,
+    valid_items: int | Integer | None = None,
+):
+    """Compute both prefixes and the unseeded group aggregate.
 
-    Same contract as the portable implementation this displaces -- see
-    :func:`~flydsl.extension.coop.warp.scan.warp_scan_with_aggregate`.
+    All lanes of the logical warp participate; a final partial warp can specify its
+    contributing count with valid_items. Invalid lanes do not evaluate the binary
+    operator; their outputs and empty-group aggregates are unspecified. The
+    aggregate excludes init. Without init, ADD has a zero first exclusive output;
+    for other operators the first exclusive output is unspecified.
+
+    Args:
+        value: This lane's input value. Its items are scanned independently.
+        op: ReductionOp or associative binary callable. Operand order follows ascending
+            lanes; reassociation is allowed.
+        width: Compile-time power-of-two logical width, at most the native warp width. None
+            uses the native width.
+        init: Optional initial value combined on the left of each prefix, converted
+            to the input value type.
+        valid_items: Uniform number of leading contributing lanes in [0, width], or None for
+            all lanes. Runtime counts must stay in range.
+
+    Returns:
+        A tuple (inclusive, exclusive, aggregate). The aggregate is available in every
+        participating lane.
     """
-    width = resolve_warp_width(width, "warp_scan_with_aggregate width")
-    if not _dpp_applies(value):
-        return _universal_scan.warp_scan_with_aggregate(value, op, width=width, init=init)
+    width = _resolve_warp_width(width, "warp_scan_with_aggregate width")
+    if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
+        return _universal_scan.warp_scan_with_aggregate(
+            value,
+            op,
+            width=width,
+            init=init,
+            valid_items=valid_items,
+        )
     raw = _inclusive_scan(value, op, width)
-    inclusive = seed(raw, op, init)
-    exclusive = seed(_shift_up(raw, op, width), op, init)
+    inclusive = _seed(raw, op, init)
+    exclusive = _seed(_shift_up(raw, op, width), op, init)
     return inclusive, exclusive, _aggregate(raw, width)

@@ -142,8 +142,17 @@ def test_a_policy_that_is_not_implemented_is_refused_by_name():
     Only a caller who went looking past the default can reach this — the
     default is always a policy that is implemented.
     """
-    with pytest.raises(NotImplementedError, match="BlockScanAlgorithm.RAKING_MEMOIZE is not implemented"):
-        fx.coop.BlockScan[fx.Float32, 64, fx.coop.BlockScanAlgorithm.RAKING_MEMOIZE]
+
+    class _MissingMeta(_PinnedMeta):
+        _shared_storage = {_Policy.ALPHA: _storage}
+
+    class Missing(metaclass=_MissingMeta):
+        block_threads = None
+
+    with pytest.raises(NotImplementedError, match="_Policy.BETA is not implemented"):
+        Missing[fx.Float32, 64, _Policy.BETA]
+    for policy in fx.coop.BlockScanAlgorithm:
+        assert fx.coop.BlockScan[fx.Float32, 64, policy].SharedStorage is not None
 
 
 # ── the cache keeps the answers apart ─────────────────────────────────────
@@ -178,8 +187,7 @@ def test_the_shipped_defaults_are_target_independent(target):
     """Neither collective overrides the hook yet, and this is what says so.
 
     ``BlockReduce`` measured ``WARP_REDUCTIONS`` ahead of ``RAKING`` on both a
-    wave64 and a wave32 target, and ``BlockScan`` has only one policy
-    implemented. A target that inverts either is what would make an override
+    wave64 and a wave32 target, and ``BlockScan`` defaults to WARP_SCANS. A target that inverts either is what would make an override
     the right change — and would land here first.
     """
     assert (

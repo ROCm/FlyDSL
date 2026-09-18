@@ -3,25 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Block-wide prefix scan.
+"""Block-wide prefix scan over numeric types, policies and item shapes.
 
-Covered below: the sum scan over the dtype list at one and at nine items per
-thread, the block aggregate, and the initial-value form. Out of reach for lack
-of API surface: an arbitrary callable as the scan op (*op* is a
-``ReductionOp``, see ``coop/_common.py``), a callback carrying a running
-prefix across calls, and vector or user-defined element types.
-
-``BlockScan`` needs a power-of-two thread count (``coop/block/_spec.py``); a
-block that does not fill a wave narrows the logical warp to itself rather than
-being refused, so the widths below run from one thread up and
-``items_per_thread`` is unconstrained. int16 stands in for uint16, which the
-runtime cannot hand to a memref.
-
-``RAKING`` and ``RAKING_MEMOIZE`` are named by the enum but not implemented, so
-the algorithm axis collapses to ``WARP_SCANS``.
-
-The tests at the bottom came from ``test_coop.py`` when the algorithm tests
-were split out by algorithm.
+Block sizes must contain complete physical warps. Smaller blocks are tested
+for rejection; scalar and Vector inputs retain their block-wide semantics.
 """
 
 from __future__ import annotations
@@ -393,19 +378,11 @@ def test_block_scan_single_warp_skips_shared_memory():
     assert torch.equal(out, torch.arange(1, warp_threads + 1, dtype=torch.float32))
 
 
-@pytest.mark.l0_backend_agnostic
+@pytest.mark.l1a_compile_no_target_dialect
 @pytest.mark.parametrize("block_threads", SUB_WARP_BLOCK_THREADS, ids=lambda n: f"t{n}")
-def test_a_sub_wave_block_narrows_its_logical_warp(block_threads):
-    """The warp the scan folds over is the block, not the target's wave.
-
-    Same contract as the reduction's, and for the same reason: a wave-wide
-    scan in a block that only fills part of the wave would shuffle from lanes
-    the launch never started.
-    """
-    block_scan = fx.coop.BlockScan[fx.Int32, block_threads]
-
-    assert block_scan.warp_threads == block_threads
-    assert block_scan.num_warps == 1
+def test_sub_wave_blocks_are_rejected(block_threads):
+    with pytest.raises(ValueError, match="multiple of the target warp size"):
+        fx.coop.BlockScan[fx.Int32, block_threads]
 
 
 @pytest.mark.l2_device
