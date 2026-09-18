@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-18T06:38:36Z",
+ "updated": "2026-09-18T06:42:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35315870212,
+   "pr": 1162,
+   "commit": "c1403684d185b7306e112dc7dcac99de5ca3db48",
+   "branch": "feature/ktrace-dialect-squashed",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35315870212",
+   "created_at": "2026-09-18T06:40:03Z",
+   "updated_at": "2026-09-18T06:41:29Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35315558168,
    "pr": 1162,
@@ -25,13 +40,41 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314725147",
    "created_at": "2026-09-18T06:24:14Z",
-   "updated_at": "2026-09-18T06:26:20Z",
+   "updated_at": "2026-09-18T06:40:42Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-18T06:40:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314725147/job/105507422722"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-18T06:40:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314725147/job/105507422771"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-18T06:41:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314725147/job/105507422783"
+    }
+   ]
   },
   {
    "run_id": 35314191043,
@@ -1365,7 +1408,7 @@
   },
   {
    "run_id": 35165112455,
-   "pr": 1151,
+   "pr": null,
    "commit": "ae8073a6651f757c6bfa1b531c9b1bcf33f9e9d8",
    "branch": "feature/ktrace-v4",
    "event": "pull_request",
@@ -1411,7 +1454,7 @@
   },
   {
    "run_id": 35164629531,
-   "pr": 1151,
+   "pr": null,
    "commit": "31cc493aaede73ef080d81fb2a2a282642f28243",
    "branch": "feature/ktrace-v4",
    "event": "pull_request",
@@ -1949,52 +1992,6 @@
      "started_at": "2026-09-16T07:40:39Z",
      "completed_at": "2026-09-16T08:26:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35064460920/job/104696985131"
-    }
-   ]
-  },
-  {
-   "run_id": 35057489241,
-   "pr": 1141,
-   "commit": "3d8e913874b8ecd2039f6c7876f206d2ff0365bd",
-   "branch": "pr/enh-align-value-semantics",
-   "event": "pull_request",
-   "title": "[Enh] Give Align fields alignas-like value semantics",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35057489241",
-   "created_at": "2026-09-16T04:55:27Z",
-   "updated_at": "2026-09-16T07:33:28Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T05:09:00Z",
-     "completed_at": "2026-09-16T05:27:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35057489241/job/104673167638"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T05:09:09Z",
-     "completed_at": "2026-09-16T06:17:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35057489241/job/104673167676",
-     "machine": "smci350-rck-g03-d07-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T06:06:57Z",
-     "completed_at": "2026-09-16T07:33:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35057489241/job/104673167679"
     }
    ]
   }
