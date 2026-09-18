@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-18T09:10:10Z",
+ "updated": "2026-09-18T09:13:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,11 +25,11 @@
    "branch": "jli/gfx1250/bump-llvm-unclausevmem",
    "event": "pull_request",
    "title": "[LLVM] bump llvm which improve the sequence for initial unclaused vmem",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35324537801",
    "created_at": "2026-09-18T08:28:21Z",
-   "updated_at": "2026-09-18T09:03:37Z",
+   "updated_at": "2026-09-18T09:11:52Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -141,11 +141,11 @@
    "branch": "phil/drop-inert-llvm-knobs",
    "event": "pull_request",
    "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227",
    "created_at": "2026-09-18T08:08:36Z",
-   "updated_at": "2026-09-18T08:25:13Z",
+   "updated_at": "2026-09-18T09:09:12Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -169,9 +169,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T08:25:13Z",
+     "started_at": "2026-09-18T09:09:12Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227/job/105533597709"
     }
