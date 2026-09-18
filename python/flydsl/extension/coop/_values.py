@@ -10,6 +10,7 @@ Shared scratch uses expr.Array or a Struct of native arrays for sub-byte fields.
 
 from functools import lru_cache
 
+from ..._mlir import ir
 from ...compiler.protocol import (
     construct_from_ir_values,
     dsl_size_of,
@@ -20,6 +21,17 @@ from ...expr.numeric import Int32, Integer, Numeric, Uint32, Uint64, Uint128
 from ...expr.primitive import inttoptr, ptrtoint
 from ...expr.struct import Struct, is_struct_type
 from ...expr.typing import Array, Constexpr, Pointer, Vector
+from ...expr.utils.arith import ArithValue
+
+
+def _normalize_value(value):
+    """Wrap scalar arithmetic inputs without changing their SSA value."""
+    if not isinstance(value, ArithValue) or isinstance(value, Vector):
+        return value
+    dtype = Numeric.from_ir_type(value.type)
+    if issubclass(dtype, Integer) and dtype.width > 1 and value.signed is False:
+        dtype = Numeric.from_ir_type(ir.IntegerType.get_unsigned(dtype.width))
+    return dtype(value)
 
 
 def _fields(dtype):
@@ -169,8 +181,10 @@ def _is_items(value):
 
 
 def _as_items(value):
+    value = _normalize_value(value)
     # Vector indexing need not raise IndexError, so explicitly bound iteration.
     items = tuple(value[i] for i in range(len(value))) if _is_items(value) else (value,)
+    items = tuple(_normalize_value(item) for item in items)
     if not items:
         raise ValueError("a cooperative tile must contain at least one item")
     dtype = _item_dtype(items[0])

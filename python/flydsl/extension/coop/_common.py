@@ -21,6 +21,7 @@ from ._values import (
     _is_struct_items,
     _item_dtype,
     _items_dtype,
+    _normalize_value,
     _record_cast,
     _record_default,
     _record_select,
@@ -50,7 +51,7 @@ def _convert_value(value, dtype):
 
 def _normalize_columns(value):
     """Use the same numeric Vector or Struct tuple for both warp API forms."""
-    return _from_items(value) if isinstance(value, (tuple, list)) else value
+    return _from_items(value) if isinstance(value, (tuple, list)) else _normalize_value(value)
 
 
 def _cast_seed(value, init):
