@@ -482,6 +482,7 @@ def test_container_argv_has_fixed_interface_mounts_limits_and_no_host_credential
         "opus",
         "--effort",
         "max",
+        "--group-finders",
         "--concurrency",
         str(watch.REVIEW_CONCURRENCY),
         "--agent-timeout",

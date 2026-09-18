@@ -46,7 +46,7 @@ GRACEFUL_REVIEW_SECONDS = 80 * 60
 HARD_REVIEW_SECONDS = 90 * 60
 CONTAINER_STOP_SECONDS = HARD_REVIEW_SECONDS - GRACEFUL_REVIEW_SECONDS
 MAX_RESULT_BYTES = 64 * 1024 * 1024
-REVIEW_CONCURRENCY = 9
+REVIEW_CONCURRENCY = 1
 AGENT_TIMEOUT_SECONDS = 20 * 60
 PHASE_TIMEOUT_SECONDS = 60 * 60
 
@@ -1147,6 +1147,7 @@ def build_docker_argv(
         "opus",
         "--effort",
         "max",
+        "--group-finders",
         "--concurrency",
         str(REVIEW_CONCURRENCY),
         "--agent-timeout",

@@ -25,8 +25,6 @@ The host must provide:
   names to Docker; it never prints or stores either value. The pilot requires
   the verified local endpoint `http://127.0.0.1:8882`. Listener binding and
   host-firewall policy belong to the existing gateway deployment, not this bot;
-- an AppArmor configuration that permits the pinned sandbox runtime to create
-  the required `bubblewrap` user namespace, verified with non-value canaries;
 - a review image pinned by repository digest, built from a Debian-compatible
   Node/npm base image pinned by digest and exact versions of Claude Code and
   `@anthropic-ai/sandbox-runtime`.
@@ -38,12 +36,17 @@ The deployed review engine must support these runner options:
 --execution-profile untrusted-container
 --model opus
 --effort max
---concurrency 9
+--group-finders
+--concurrency 1
 --agent-timeout 1200
 --phase-timeout 3600
 --claude-path /usr/local/bin/claude
 --run-dir /review-run
 ```
+
+The fixed concurrency is one because the measured gateway serializes concurrent
+Opus/max requests: nine simultaneous requests increased per-request latency by
+about 11.7 times and made aggregate completion slower than serial submission.
 
 Its trusted publisher must support
 `--expected-implementation-sha256` and `--expected-publisher-id`, in addition
@@ -66,15 +69,17 @@ The implementation hash is the exact value the deployed runner writes to
 `publish_enabled` defaults to `false`, causing the trusted publisher itself to
 run with `--dry-run`. Changing it to `true` is the explicit live-publication gate.
 
-The review container has no GPU request, GitHub config, GitHub token, or
-Docker socket. It uses the host network only so the trusted Claude core can
-reach the node-local model gateway; the `untrusted-container` sandbox denies network to
-PR-influenced tool commands. The root is read-only; capabilities are dropped;
-privilege gain is disabled; PID, 64 GiB memory, CPU, and file-descriptor limits are
-applied. The engine, source, and manifest mounts are read-only. Only the local
-run artifact directory is a persistent writable mount. Claude's subprocess
-scrubber and sandbox credential deny rules remove the model token from every
-PR-influenced tool command while retaining it in the trusted CLI core.
+The review container has no GPU request, GitHub config, GitHub token, or Docker
+socket. It uses the host network only so the trusted Claude core can reach the
+node-local model gateway. Model sessions expose only Read, Grep, and Glob; their
+filesystem policy denies root and permits only the pinned checkout, diff,
+trusted engine, and runtime paths. No Bash or reviewed-tree code execution is
+available. The root is read-only; capabilities are dropped; privilege gain is
+disabled; PID, 64 GiB memory, CPU, and file-descriptor limits are applied. The
+engine, source, and manifest mounts are read-only. Only the local run artifact
+directory is a persistent writable mount. Claude's subprocess scrubber and
+sandbox credential deny rules retain the model token only in the trusted CLI
+core.
 
 Run one existing eligible PR as a publication-disabled canary only after the
 engine interfaces and pinned image have passed deployment validation. This

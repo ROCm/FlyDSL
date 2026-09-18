@@ -4,7 +4,7 @@
 set -eu
 umask 077
 
-if [ "$#" -ne 18 ] \
+if [ "$#" -ne 19 ] \
     || [ "$1" != "--scope-manifest" ] \
     || [ "$2" != "/review-input/scope-manifest.json" ] \
     || [ "$3" != "--execution-profile" ] \
@@ -13,16 +13,17 @@ if [ "$#" -ne 18 ] \
     || [ "$6" != "opus" ] \
     || [ "$7" != "--effort" ] \
     || [ "$8" != "max" ] \
-    || [ "$9" != "--concurrency" ] \
-    || [ "${10}" != "9" ] \
-    || [ "${11}" != "--agent-timeout" ] \
-    || [ "${12}" != "1200" ] \
-    || [ "${13}" != "--phase-timeout" ] \
-    || [ "${14}" != "3600" ] \
-    || [ "${15}" != "--claude-path" ] \
-    || [ "${16}" != "/usr/local/bin/claude" ] \
-    || [ "${17}" != "--run-dir" ] \
-    || [ "${18}" != "/review-run" ]; then
+    || [ "$9" != "--group-finders" ] \
+    || [ "${10}" != "--concurrency" ] \
+    || [ "${11}" != "1" ] \
+    || [ "${12}" != "--agent-timeout" ] \
+    || [ "${13}" != "1200" ] \
+    || [ "${14}" != "--phase-timeout" ] \
+    || [ "${15}" != "3600" ] \
+    || [ "${16}" != "--claude-path" ] \
+    || [ "${17}" != "/usr/local/bin/claude" ] \
+    || [ "${18}" != "--run-dir" ] \
+    || [ "${19}" != "/review-run" ]; then
     echo "invalid fixed review invocation" >&2
     exit 64
 fi
