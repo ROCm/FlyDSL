@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-18T07:08:12Z",
+ "updated": "2026-09-18T07:11:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35318091631,
+   "pr": null,
+   "commit": "6bb37ba4e23c3a2729e3af244251b55fc5938237",
+   "branch": "main",
+   "event": "push",
+   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition (#1013)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35318091631",
+   "created_at": "2026-09-18T07:09:27Z",
+   "updated_at": "2026-09-18T07:09:57Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35317989107,
+   "pr": 1145,
+   "commit": "1528b69b9456080afe79ccfe63214ab61402a1a8",
+   "branch": "jli/gfx1250/bump-llvm-unclausevmem",
+   "event": "pull_request",
+   "title": "[LLVM] bump llvm which improve the sequence for initial unclaused vmem",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35317989107",
+   "created_at": "2026-09-18T07:08:06Z",
+   "updated_at": "2026-09-18T07:09:35Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 35317834282,
    "pr": 1162,
@@ -14,7 +44,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35317834282",
    "created_at": "2026-09-18T07:06:03Z",
-   "updated_at": "2026-09-18T07:06:31Z",
+   "updated_at": "2026-09-18T07:08:34Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -40,11 +70,11 @@
    "branch": "main",
    "event": "push",
    "title": "bump version to 0.3.4 (#1163)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316818779",
    "created_at": "2026-09-18T06:52:47Z",
-   "updated_at": "2026-09-18T06:54:17Z",
+   "updated_at": "2026-09-18T07:09:45Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -55,13 +85,41 @@
    "branch": "bump-version-0.3.4",
    "event": "pull_request",
    "title": "bump version to 0.3.4",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680",
    "created_at": "2026-09-18T06:52:18Z",
-   "updated_at": "2026-09-18T06:54:04Z",
+   "updated_at": "2026-09-18T07:08:07Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-18T07:08:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680/job/105513800131"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-18T07:08:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680/job/105513800209"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-18T07:08:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680/job/105513800345"
+    }
+   ]
   },
   {
    "run_id": 35316496300,
@@ -130,11 +188,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314725147",
    "created_at": "2026-09-18T06:24:14Z",
-   "updated_at": "2026-09-18T06:40:42Z",
+   "updated_at": "2026-09-18T07:08:40Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -149,9 +207,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T06:40:42Z",
+     "started_at": "2026-09-18T07:08:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314725147/job/105507422771"
     },
@@ -1842,67 +1900,6 @@
    "created_at": "2026-09-16T09:45:48Z",
    "updated_at": "2026-09-16T10:10:43Z",
    "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 35076698251,
-   "pr": 1146,
-   "commit": "0de225bf5aa67ec69623702b2dbbd91014521296",
-   "branch": "ci/fix-mlir-lit-skip",
-   "event": "pull_request",
-   "title": "[CI] Fix silent skip of the MLIR lit stage",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251",
-   "created_at": "2026-09-16T08:57:56Z",
-   "updated_at": "2026-09-16T12:04:19Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T10:38:32Z",
-     "completed_at": "2026-09-16T12:04:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251/job/104737604491"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T09:20:41Z",
-     "completed_at": "2026-09-16T10:35:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251/job/104737604492",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-16T09:20:24Z",
-     "completed_at": "2026-09-16T09:38:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076698251/job/104737604568"
-    }
-   ]
-  },
-  {
-   "run_id": 35076649971,
-   "pr": 1147,
-   "commit": "ac8c0c128884a48cc98bc61feb13ee101c182248",
-   "branch": "gfx942-a16w4-fp4-software-decode",
-   "event": "pull_request",
-   "title": "[a16w4] gfx942: software E2M1 decode so the mxfp4 path builds on CDNA3",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35076649971",
-   "created_at": "2026-09-16T08:57:22Z",
-   "updated_at": "2026-09-16T08:59:23Z",
-   "actor": "MHYangAMD",
    "jobs": []
   }
  ]
