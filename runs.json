@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-18T03:34:30Z",
+ "updated": "2026-09-18T03:44:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "codex/fix-release-tag-generation",
    "event": "pull_request",
    "title": "Fix monotonic dev tag generation in shallow worktrees",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296707147",
    "created_at": "2026-09-18T01:46:56Z",
-   "updated_at": "2026-09-18T02:54:13Z",
+   "updated_at": "2026-09-18T03:42:37Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -32,10 +32,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T02:54:13Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T03:42:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296707147/job/105457149461"
     },
     {
