@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-18T08:10:20Z",
+ "updated": "2026-09-18T08:12:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35323032607,
+   "pr": 848,
+   "commit": "9f2357fc26f04d450ca8b3710c6f7cc8a3acded2",
+   "branch": "cjl/norm_perf",
+   "event": "pull_request",
+   "title": "[Perf] Optimize rmsnorm/layernorm",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35323032607",
+   "created_at": "2026-09-18T08:10:26Z",
+   "updated_at": "2026-09-18T08:10:27Z",
+   "actor": "cschenjunlin",
+   "jobs": []
+  },
   {
    "run_id": 35322878227,
    "pr": 1153,
@@ -10,11 +25,11 @@
    "branch": "phil/drop-inert-llvm-knobs",
    "event": "pull_request",
    "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227",
    "created_at": "2026-09-18T08:08:36Z",
-   "updated_at": "2026-09-18T08:09:16Z",
+   "updated_at": "2026-09-18T08:09:51Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -144,9 +159,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-18T07:51:16Z",
+     "started_at": "2026-09-18T08:10:13Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35318091631/job/105524632515"
     }
@@ -245,11 +260,11 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316878446",
    "created_at": "2026-09-18T06:53:37Z",
-   "updated_at": "2026-09-18T07:51:15Z",
+   "updated_at": "2026-09-18T08:10:27Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
@@ -264,10 +279,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-18T07:51:15Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T08:10:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316878446/job/105524630368"
     },
     {
@@ -409,11 +424,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314725147",
    "created_at": "2026-09-18T06:24:14Z",
-   "updated_at": "2026-09-18T07:08:40Z",
+   "updated_at": "2026-09-18T08:09:46Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -428,10 +443,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-18T07:08:39Z",
-     "completed_at": null,
+     "completed_at": "2026-09-18T08:09:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314725147/job/105507422771"
     },
     {
@@ -1982,21 +1997,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35109940420/job/104846475011"
     }
    ]
-  },
-  {
-   "run_id": 35109793469,
-   "pr": null,
-   "commit": "47309a32a2803ad82c84542060c05de9bef96550",
-   "branch": "main",
-   "event": "push",
-   "title": "Fly DSL test",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35109793469",
-   "created_at": "2026-09-16T14:37:27Z",
-   "updated_at": "2026-09-16T14:39:08Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
