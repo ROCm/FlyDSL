@@ -3858,6 +3858,58 @@ def test_lse_dense(dtype, causal, B, S, H, Hkv, D):
 
 
 @_requires_gfx950
+@pytest.mark.parametrize(
+    "S,H,Hkv,D,dtype",
+    [
+        (513, 8, 8, 128, torch.bfloat16),
+        (1024, 8, 2, 128, torch.bfloat16),
+        (1024, 8, 8, 64, torch.bfloat16),
+        (1024, 8, 8, 128, torch.float16),
+        (2049, 64, 8, 128, torch.bfloat16),
+        (513, 16, 4, 128, torch.bfloat16),
+    ],
+)
+@pytest.mark.parametrize("causal", [False, True])
+def test_dualwave_dense_pipeline_matches_torch(S, H, Hkv, D, dtype, causal):
+    """Exercise the steady-state pipeline, including a partial last Q/KV tile."""
+    torch.manual_seed(123)
+    q = torch.randn(1, S, H, D, device="cuda", dtype=dtype)
+    k = torch.randn(1, S, Hkv, D, device="cuda", dtype=dtype)
+    v = torch.randn_like(k)
+    actual = flydsl_flash_attn_func(q, k, v, causal=causal, num_kv_heads=Hkv)
+    expected = F.scaled_dot_product_attention(
+        q.transpose(1, 2).float(),
+        k.transpose(1, 2).float(),
+        v.transpose(1, 2).float(),
+        is_causal=causal,
+        enable_gqa=Hkv != H,
+    ).transpose(1, 2)
+    torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-2)
+
+
+@_requires_gfx950
+@pytest.mark.parametrize("S", [256, 257, 513, 577])
+@pytest.mark.parametrize("return_lse", [False, True])
+@pytest.mark.parametrize("disabled", [None, "enable_stagger", "setprio", "lazy_rescale"])
+def test_dualwave_gqa_phase_paths_match_torch(S, return_lse, disabled):
+    """Cover zero/one loop iteration, KV-tail parities and pipeline fallbacks."""
+    torch.manual_seed(321)
+    B, H, Hkv, D = 1, 16, 4, 128
+    q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(B, S, Hkv, D, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    options = {} if disabled is None else {f"dualwave_swp_{disabled}": False}
+    result = flydsl_flash_attn_func(q, k, v, causal=False, num_kv_heads=Hkv, return_lse=return_lse, **options)
+    actual = result[0] if return_lse else result
+    expected = F.scaled_dot_product_attention(
+        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float(), enable_gqa=True
+    ).transpose(1, 2)
+    torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-2)
+    if return_lse:
+        _assert_lse_matches(result[1], _reference_lse(q, k, False, Hkv), _ATOL_BF16)
+
+
+@_requires_gfx950
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("D,num_kv_splits", [(64, 2), (128, 3)])
 def test_lse_splitk(causal, num_kv_splits, D):
@@ -6474,28 +6526,28 @@ def test_paged_fp8_cache_offsets_above_4gib(head_dim, value_head_dim, page_size,
 
 
 @_requires_gfx950
-@pytest.mark.parametrize("H", [8, 64])
-def test_xcd_swizzle_is_bit_identical(H):
+@pytest.mark.parametrize("B,S,H", [(1, 8192, 8), (4, 8192, 64), (1, 16384, 8), (1, 16384, 64)])
+def test_xcd_swizzle_is_bit_identical(B, S, H):
     """The head-slow remap must not change a single bit of the output.
 
     It only re-derives (head, q_block) from the same linear workgroup id, so it
     is bijective by construction -- but a mistake in the derivation would show
     up as a permuted or partially-recomputed output rather than as an error, so
-    this pins it. S clears the auto-dispatch threshold (num_q_blocks >= 64 at
-    BLOCK_M=256) so both settings run on the shapes the remap targets.
+    this pins it. Cover both the 8K large-MHA threshold and the general 16K
+    threshold, plus a small 8K workload that retains the original mapping.
     """
-    S = 64 * 256
     dtype = torch.bfloat16
     torch.manual_seed(H)
-    q = _rand_lse(1, S, H, 128, dtype=dtype)
+    q = _rand_lse(B, S, H, 128, dtype=dtype)
     k, v = torch.randn_like(q), torch.randn_like(q)
 
     def run(flag):
         return flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_xcd_swizzle=flag).clone()
 
-    off, on = run(False), run(True)
+    off, on, auto = run(False), run(True), run(None)
     torch.cuda.synchronize()
     assert torch.equal(off, on)
+    assert torch.equal(off, auto)
 
 
 @_requires_gfx950
@@ -6695,7 +6747,8 @@ def test_sink_lse_cross_attn_skipped_blocks(Sq, Skv):
 
 @_requires_gfx950
 @pytest.mark.parametrize("k_scale", [8.0, 32.0, 64.0])
-def test_lazy_rescale_survives_a_wide_score_range(k_scale):
+@pytest.mark.parametrize("Hkv", [8, 2])
+def test_lazy_rescale_survives_a_wide_score_range(k_scale, Hkv):
     """A widened logit spread must not break the lazy rescale.
 
     Every other test here uses near-uniform attention, which never reaches the
@@ -6704,11 +6757,11 @@ def test_lazy_rescale_survives_a_wide_score_range(k_scale):
     B, S, H, D = 1, 4096, 8, 128
     torch.manual_seed(0)
     q = torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16)
-    k = (torch.randn_like(q).float() * k_scale).to(torch.bfloat16)
-    v = torch.randn_like(q)
+    k = (torch.randn(B, S, Hkv, D, device="cuda", dtype=torch.bfloat16).float() * k_scale).to(torch.bfloat16)
+    v = torch.randn_like(k)
 
-    lazy = flydsl_flash_attn_func(q, k, v, causal=False)
-    eager = flydsl_flash_attn_func(q, k, v, causal=False, dualwave_swp_lazy_rescale=False)
+    lazy = flydsl_flash_attn_func(q, k, v, causal=False, num_kv_heads=Hkv)
+    eager = flydsl_flash_attn_func(q, k, v, causal=False, num_kv_heads=Hkv, dualwave_swp_lazy_rescale=False)
     torch.cuda.synchronize()
 
     assert torch.isfinite(eager).all(), f"the eager baseline is not finite at k_scale={k_scale}"
@@ -6718,7 +6771,7 @@ def test_lazy_rescale_survives_a_wide_score_range(k_scale):
         lazy
     ).all(), f"lazy rescale produced {n_nan} NaN and {n_inf} inf of {lazy.numel()} at k_scale={k_scale}"
     ref = torch.nn.functional.scaled_dot_product_attention(
-        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float()
+        q.transpose(1, 2).float(), k.transpose(1, 2).float(), v.transpose(1, 2).float(), enable_gqa=Hkv != H
     ).transpose(1, 2)
     rel = lambda o: ((o.float() - ref).norm() / ref.norm()).item()  # noqa: E731
     assert (
