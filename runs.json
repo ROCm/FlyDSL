@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-19T02:20:35Z",
+ "updated": "2026-09-19T02:28:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35415648096,
+   "pr": null,
+   "commit": "b5906a457c3b1d7e46ae0f3fb49f7368d32f9410",
+   "branch": "main",
+   "event": "push",
+   "title": "[Bugfix] Promote register pred on copy_atom_call without register src\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415648096",
+   "created_at": "2026-09-19T02:26:24Z",
+   "updated_at": "2026-09-19T02:26:41Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 35415290665,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Enh] Support expr struct member methods (#1156)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415290665",
    "created_at": "2026-09-19T02:19:04Z",
-   "updated_at": "2026-09-19T02:19:16Z",
+   "updated_at": "2026-09-19T02:26:40Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -432,10 +447,10 @@
    "event": "pull_request",
    "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
    "status": "completed",
-   "conclusion": "action_required",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322267759",
    "created_at": "2026-09-18T08:01:29Z",
-   "updated_at": "2026-09-18T08:01:29Z",
+   "updated_at": "2026-09-19T02:26:22Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -508,10 +523,10 @@
    "event": "pull_request",
    "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
    "status": "completed",
-   "conclusion": "action_required",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35319218075",
    "created_at": "2026-09-18T07:23:52Z",
-   "updated_at": "2026-09-18T07:23:52Z",
+   "updated_at": "2026-09-19T02:26:22Z",
    "actor": "LWenH",
    "jobs": []
   },
@@ -1855,52 +1870,6 @@
    "updated_at": "2026-09-17T06:07:20Z",
    "actor": "big-yellow-duck",
    "jobs": []
-  },
-  {
-   "run_id": 35179578655,
-   "pr": null,
-   "commit": "f8cd97bd2e7549f750a327aa3e75e61aeebbdf34",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix][Kernel] Fix rdna3_int8_gemm RDNA bounds checks (#1136)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35179578655",
-   "created_at": "2026-09-17T03:49:10Z",
-   "updated_at": "2026-09-17T06:36:23Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T04:21:19Z",
-     "completed_at": "2026-09-17T04:40:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35179578655/job/105074687581"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T04:21:27Z",
-     "completed_at": "2026-09-17T05:27:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35179578655/job/105074687610",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-17T06:35:36Z",
-     "completed_at": "2026-09-17T06:36:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35179578655/job/105074687664"
-    }
-   ]
   }
  ]
 }
