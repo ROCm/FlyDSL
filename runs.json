@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-18T21:26:39Z",
+ "updated": "2026-09-19T01:00:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -126,13 +126,22 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011",
    "created_at": "2026-09-18T10:22:32Z",
-   "updated_at": "2026-09-18T12:47:25Z",
+   "updated_at": "2026-09-19T00:19:07Z",
    "actor": "Phil-amd",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-19T00:19:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105804369930"
+    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
@@ -140,7 +149,7 @@
      "conclusion": "success",
      "started_at": "2026-09-18T12:06:36Z",
      "completed_at": "2026-09-18T12:47:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105573423947"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105804370536"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -149,16 +158,7 @@
      "conclusion": "success",
      "started_at": "2026-09-18T10:52:11Z",
      "completed_at": "2026-09-18T11:11:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105573423994"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-18T10:52:18Z",
-     "completed_at": "2026-09-18T11:34:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105573424014"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105804370576"
     }
    ]
   },
