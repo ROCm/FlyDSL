@@ -3,11 +3,14 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/ControlFlow/Transforms/StructuralTypeConversions.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -29,7 +32,6 @@
 
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
-#define GEN_PASS_DEF_FLYROCDLCLUSTERATTRPASS
 #include "flydsl/Conversion/FlyToROCDL/Passes.h.inc"
 } // namespace mlir
 
@@ -379,16 +381,10 @@ public:
 
   LogicalResult matchAndRewrite(MakeViewOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    if (isa<fly::CoordTensorType>(op.getResult().getType())) {
-      if (!op.getResult().use_empty())
-        return rewriter.notifyMatchFailure(op, "coord_tensor result should have no uses");
-      rewriter.eraseOp(op);
-      return success();
-    } else {
-      Value base = adaptor.getIter();
-      rewriter.replaceOp(op, base);
-      return success();
-    }
+    // A view's runtime value is its iterator: a pointer for a memref, a coordinate
+    // for a coordinate tensor.
+    rewriter.replaceOp(op, adaptor.getIter());
+    return success();
   }
 };
 
@@ -405,7 +401,9 @@ public:
     if (!flyPtrTy)
       return failure();
 
-    Type loadTy = op.getResult().getType();
+    Type loadTy = getTypeConverter()->convertType(op.getResult().getType());
+    if (!loadTy)
+      return rewriter.notifyMatchFailure(op, "failed to convert ptr.load result type");
 
     if (auto vecTy = dyn_cast<VectorType>(loadTy)) {
       auto swizzle = flyPtrTy.getSwizzle();
@@ -500,8 +498,12 @@ public:
 
     auto statefulOp = dyn_cast<StatefulOpTypeInterface>(copyAtomTy.getCopyOp());
     if (statefulOp) {
-      Value state = statefulOp.getDefaultState(rewriter, op.getLoc());
+      Value state = statefulOp.getAtomState(rewriter, op.getLoc(), adaptor.getArgs());
+      if (!state)
+        return failure();
       rewriter.replaceOp(op, state);
+    } else if (!adaptor.getArgs().empty()) {
+      return rewriter.notifyMatchFailure(op, "stateless copy atom takes no construction arguments");
     } else {
       rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
     }
@@ -522,6 +524,8 @@ public:
     auto statefulOp = dyn_cast<StatefulOpTypeInterface>(mmaAtomTy.getMmaOp());
     if (statefulOp) {
       Value state = statefulOp.getDefaultState(rewriter, op.getLoc());
+      if (!state)
+        return failure();
       rewriter.replaceOp(op, state);
     } else {
       rewriter.replaceOpWithNewOp<LLVM::UndefOp>(op, convertedTy);
@@ -613,12 +617,15 @@ public:
     Value dst = adaptor.getDst();
     Value pred = adaptor.getPred();
 
-    auto srcMemTy = dyn_cast<fly::MemRefType>(op.getSrc().getType());
-    auto dstMemTy = dyn_cast<fly::MemRefType>(op.getDst().getType());
-
-    if (!srcMemTy || !dstMemTy)
-      return rewriter.notifyMatchFailure(op, "expected MemRef types on original op");
-    if (srcMemTy.getElemTy() != dstMemTy.getElemTy())
+    Type srcTy = op.getSrc().getType();
+    Type dstTy = op.getDst().getType();
+    auto srcMemTy = dyn_cast<fly::MemRefType>(srcTy);
+    auto dstMemTy = dyn_cast<fly::MemRefType>(dstTy);
+    if (!srcMemTy && !isa<fly::CoordTensorType>(srcTy))
+      return rewriter.notifyMatchFailure(op, "src is neither a MemRef nor a coord tensor");
+    if (!dstMemTy && !isa<fly::CoordTensorType>(dstTy))
+      return rewriter.notifyMatchFailure(op, "dst is neither a MemRef nor a coord tensor");
+    if (srcMemTy && dstMemTy && srcMemTy.getElemTy() != dstMemTy.getElemTy())
       return rewriter.notifyMatchFailure(op, "src/dst element types mismatch");
 
     Location loc = op.getLoc();
@@ -631,12 +638,12 @@ public:
     }
 
     if (pred) {
-      if (failed(copyAtom.emitAtomCall(rewriter, loc, copyAtomType, srcMemTy, dstMemTy, predMemTy,
+      if (failed(copyAtom.emitAtomCall(rewriter, loc, copyAtomType, srcTy, dstTy, predMemTy,
                                        copyAtomVal, src, dst, pred)))
         return failure();
     } else {
-      if (failed(copyAtom.emitAtomCall(rewriter, loc, copyAtomType, srcMemTy, dstMemTy, copyAtomVal,
-                                       src, dst)))
+      if (failed(copyAtom.emitAtomCall(rewriter, loc, copyAtomType, srcTy, dstTy, copyAtomVal, src,
+                                       dst)))
         return failure();
     }
     rewriter.eraseOp(op);
@@ -663,11 +670,27 @@ public:
     Type resultTy = hasResult ? op.getResult(0).getType() : Type{};
     Type dstTy = op.getDst() ? op.getDst().getType() : Type{};
 
+    // SSA-form copies may retain a register memref predicate. Normalize it
+    // here so every SSA emitter receives a scalar i1 condition.
+    if (pred) {
+      if (auto predMemTy = dyn_cast<fly::MemRefType>(op.getPred().getType())) {
+        if (!isGenericAddressSpace<AddressSpace::Register>(predMemTy.getAddressSpace()) ||
+            !predMemTy.getElemTy().isInteger(1) || !isa<LLVM::LLVMPointerType>(pred.getType()))
+          return op.emitOpError(
+              "expected an i1 register memref predicate with a lowered LLVM pointer");
+        auto predPtr = applySwizzleOnPtr(
+            rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(pred), predMemTy.getSwizzle());
+        pred = LLVM::LoadOp::create(rewriter, loc, rewriter.getI1Type(), predPtr);
+      }
+      if (!pred.getType().isInteger(1))
+        return op.emitOpError("expected a scalar i1 predicate after SSA lowering");
+    }
+
     FailureOr<Value> result;
     if (pred) {
       result = copyAtom.emitAtomCallSSA(rewriter, loc, resultTy, copyAtomType, srcTy, dstTy,
-                                        op.getPred().getType(), adaptor.getCopyAtom(),
-                                        adaptor.getSrc(), adaptor.getDst(), pred);
+                                        pred.getType(), adaptor.getCopyAtom(), adaptor.getSrc(),
+                                        adaptor.getDst(), pred);
     } else {
       result = copyAtom.emitAtomCallSSA(rewriter, loc, resultTy, copyAtomType, srcTy, dstTy,
                                         adaptor.getCopyAtom(), adaptor.getSrc(), adaptor.getDst());
@@ -816,6 +839,9 @@ public:
       unsigned as = mapAttrToLLVMAddressSpace(flyMemRefTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyMemRefTy.getContext(), as);
     });
+    addConversion([&](fly::CoordTensorType coordTy) -> Type {
+      return fly::IntTupleType::get(coordTy.getBase());
+    });
     addConversion([&](fly::PointerType flyPtrTy) -> Type {
       if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace()))
         return BufferFatPtr::getType(flyPtrTy.getContext());
@@ -858,6 +884,21 @@ public:
   }
 };
 
+/// Select is type-agnostic, but its operands/results must follow FlyTypeConverter.
+class SelectOpTypeConversion : public OpConversionPattern<arith::SelectOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(arith::SelectOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto attrs = op->getAttrs();
+    auto replacement = rewriter.replaceOpWithNewOp<arith::SelectOp>(
+        op, adaptor.getCondition(), adaptor.getTrueValue(), adaptor.getFalseValue());
+    replacement->setAttrs(attrs);
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -879,6 +920,15 @@ public:
     target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeComposedLayoutOp>();
 
     FlyTypeConverter typeConverter;
+
+    // Convert every control-flow boundary along with its users.
+    scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
+    cf::populateCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
+
+    target.addDynamicallyLegalOp<arith::SelectOp>(
+        [&](arith::SelectOp op) { return typeConverter.isLegal(op.getOperation()); });
+    target.addDynamicallyLegalOp<func::CallOp, func::ReturnOp>(
+        [&](Operation *op) { return typeConverter.isLegal(op); });
 
     // Ensure function signatures are type-converted; otherwise conversions may rely on
     // inserted unrealized casts that remain live.
@@ -931,54 +981,19 @@ public:
     patterns.add<CopyAtomCallSSALowering, MmaAtomCallSSALowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
 
+    patterns.add<SelectOpTypeConversion>(typeConverter, context);
+
     // TODO: deprecated in the future
     patterns.add<ExtractAlignedPointerAsIndexLowering>(typeConverter, context);
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateFunctionOpInterfaceTypeConversionPattern<gpu::GPUFuncOp>(patterns, typeConverter);
 
+    populateCallOpTypeConversionPattern(patterns, typeConverter);
+    populateReturnOpTypeConversionPattern(patterns, typeConverter);
+
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();
-  }
-};
-
-// ---------------------------------------------------------------------------
-// FlyROCDLClusterAttrPass — inject amdgpu-cluster-dims into llvm.func
-// passthrough.  Run inside gpu.module() AFTER convert-gpu-to-rocdl.
-//
-// The upstream ROCDL dialect does not translate `rocdl.cluster_dims` to the
-// LLVM IR function attribute `amdgpu-cluster-dims`.  This pass bridges the
-// gap by converting the discardable attribute that `GPUFuncOpLowering`
-// copied from gpu.func into an LLVM passthrough entry that the LLVM IR
-// emitter honours.
-// ---------------------------------------------------------------------------
-class FlyROCDLClusterAttrPass
-    : public mlir::impl::FlyROCDLClusterAttrPassBase<FlyROCDLClusterAttrPass> {
-public:
-  using mlir::impl::FlyROCDLClusterAttrPassBase<
-      FlyROCDLClusterAttrPass>::FlyROCDLClusterAttrPassBase;
-
-  void runOnOperation() override {
-    getOperation()->walk([&](LLVM::LLVMFuncOp func) {
-      auto clusterAttr = func->getAttrOfType<StringAttr>("rocdl.cluster_dims");
-      if (!clusterAttr)
-        return;
-
-      MLIRContext *ctx = func.getContext();
-
-      // Build the new passthrough entry: ["amdgpu-cluster-dims", "2,2,1"].
-      auto key = StringAttr::get(ctx, "amdgpu-cluster-dims");
-      auto entry = ArrayAttr::get(ctx, {key, clusterAttr});
-
-      // Append to existing passthrough list (if any).
-      SmallVector<Attribute, 4> passthroughAttrs;
-      if (auto existing = func.getPassthroughAttr())
-        passthroughAttrs.append(existing.begin(), existing.end());
-      passthroughAttrs.push_back(entry);
-
-      func.setPassthroughAttr(ArrayAttr::get(ctx, passthroughAttrs));
-      func->removeAttr("rocdl.cluster_dims");
-    });
   }
 };
 

@@ -14,9 +14,8 @@ into the INT32 output atomically, which is exact.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import fly, vector
-from flydsl.expr import as_ir_value, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import T
+from flydsl._mlir.dialects import fly
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.mem_ops import atomic_add
 
@@ -204,6 +203,26 @@ def create_wmma_int8_gemm_module(
     grid_m = -(-M // BLOCK_M)
     grid_n = N // BLOCK_N
 
+    # Buffer descriptor offsets are 32-bit (BufferFatPtr.h: kOffsetBitWidth = 32) and the
+    # element-to-byte scaling happens in 32 bits too. At or above 4 GiB the offset of a
+    # tail-block row wraps to a small value that compares as in-range, so a checked
+    # descriptor (max_size=False, OOB_SELECT=3) would silently redirect the access
+    # near the start of the buffer instead of dropping it. Reject those shapes on the
+    # host rather than ship a checked-but-unsafe descriptor.
+    padded_m = grid_m * BLOCK_M
+    in_bytes = elem_dtype.width // 8
+    out_bytes = out_elem_cls.width // 8
+    for operand, span_bytes in (
+        ("A", ((padded_m - 1) * ld_a + K) * in_bytes),
+        ("B", ((N - 1) * ld_b + K) * in_bytes),
+        ("C", ((padded_m - 1) * ld_c + N) * out_bytes),
+    ):
+        if span_bytes >= 2**32:
+            raise ValueError(
+                f"{operand} spans {span_bytes} bytes, which overflows the 32-bit buffer "
+                f"offset; keep each operand under 4 GiB (M={M}, N={N}, K={K})"
+            )
+
     group_width = _group_width(grid_m, group_m)
 
     assert stagger >= 0
@@ -331,7 +350,7 @@ def create_wmma_int8_gemm_module(
 
         def _tile_operands(bid_m, bid_n):
             tA = fx.flat_divide(
-                fx.rocdl.make_buffer_tensor(arg_a, max_size=not partial_m, bounds_checked=partial_m),
+                fx.rocdl.make_buffer_tensor(arg_a, max_size=not partial_m),
                 fx.make_tile(BLOCK_M, BLOCK_K),
             )[None, None, bid_m, None]
             tB = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_bt), fx.make_tile(BLOCK_N, BLOCK_K))[
@@ -496,7 +515,7 @@ def create_wmma_int8_gemm_module(
                 return
 
             tC = fx.flat_divide(
-                fx.rocdl.make_buffer_tensor(arg_c, max_size=not partial_m, bounds_checked=partial_m),
+                fx.rocdl.make_buffer_tensor(arg_c, max_size=not partial_m),
                 fx.make_tile(BLOCK_M, BLOCK_N),
             )[None, None, bid_m, bid_n]
             frag_C = thr_mma.make_fragment_C(tC)
@@ -528,9 +547,7 @@ def create_wmma_int8_gemm_module(
                 else:
                     out_elems = [acc[si].to(out_elem_cls) for acc in ordered_accs for si in range_constexpr(8)]
 
-            frag_C_out.store(
-                vector.from_elements(T.vec(8 * n_acc, out_elem_cls.ir_type), [as_ir_value(e) for e in out_elems])
-            )
+            frag_C_out.store(fx.Vector.from_elements(out_elems, out_elem_cls))
             fx.copy(copy_out, frag_C_retile, pC_g)
 
         if const_expr(not persist_wgs):

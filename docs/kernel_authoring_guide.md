@@ -138,7 +138,8 @@ launch(data, stream=fx.Stream(stream))
 
 ### 2.5 Custom argument types
 
-Register new Python types for the JIT boundary:
+Register a raw Python type with a `JitArgument` adapter and the `DslType` that
+will appear inside the traced function:
 
 ```python
 from flydsl.compiler import JitArgumentRegistry
@@ -151,9 +152,15 @@ class MyCustomAdaptor:
     def __get_ir_types__(self):
         return [...]  # MLIR types for this argument
 
-    def __get_c_pointers__(self):
-        return [...]  # ctypes pointers for invocation
+    def __cache_signature__(self):
+        return (...)  # every property that can change generated code
+
+    def __c_abi_spec__(self):
+        return [...]  # ordered (ctypes storage type, fill(argument, storage)) slots
 ```
+
+The adapter's C-ABI slots may outnumber its MLIR types (for example, a dynamic
+memref has data and layout slots).
 
 ---
 
@@ -270,7 +277,7 @@ where out-of-range reads return zero and writes are suppressed. The byte count
 may be dynamic. Omitting it keeps the default unchecked descriptor; passing
 `max_size=False` derives the count from the tensor layout and enables checking.
 
-See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma-tdm-atoms-wave32) below for the
+See [gfx1250 WMMA & TDM atoms](#wmma-tdm-atoms) below for the
 gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.
 
 #### MFMA instructions
@@ -322,6 +329,8 @@ val = rocdl.ds_bpermute(idx, src)
 data = rocdl.raw_ptr_buffer_load(rsrc, offset, soffset, aux)
 rocdl.raw_ptr_buffer_store(data, rsrc, offset, soffset, aux)
 ```
+
+(wmma-tdm-atoms)=
 
 #### gfx1250 WMMA & TDM atoms (wave32)
 
@@ -726,7 +735,7 @@ Writing a new kernel?
 │
 ├── Matrix multiply (GEMM)?
 │   ├── Use @flyc.kernel + fx.SharedAllocator + MFMA
-│   ├── B-preshuffle layout from kernels/mma/mfma_preshuffle_pipeline.py
+│   ├── B-preshuffle layout from kernels/common/mma/mfma_preshuffle_pipeline.py
 │   └── See kernels/gemm/preshuffle_gemm.py
 │
 ├── Need shared memory?

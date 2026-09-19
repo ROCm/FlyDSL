@@ -32,7 +32,7 @@ The following methods apply to both `Numeric` and `Vector`, and are elementwise 
 | Method | Meaning | Example |
 |--------|---------|---------|
 | `Type(x)` | construct or cast — the type class is its own constructor. A `Vector` alias type (`Float32x4`, …) broadcasts a scalar across every lane | `Int32(5)`, `Float32(thread_idx.x)`; `Float32x4(1.0)` → all four lanes `1.0` |
-| Arithmetic — `+` `-` `*` `/` `//` `%` `**`, unary `+x` `-x` `abs(x)`, `divmod(x, y)` | result type follows *Type interoperability* | `Int32(3) + Int32(4)` → `Int32(7)`; `vec * 2.0` |
+| Arithmetic — `+` `-` `*` `/` `//` `%` `**`, unary `+x` `-x` `abs(x)`, `divmod(x, y)`, `fx.min(x, ...)`, `fx.max(x, ...)` | result type follows *Type interoperability* | `Int32(3) + Int32(4)` → `Int32(7)`; `vec * 2.0` |
 | Bitwise/shift — `&` `\|` `^` `<<` `>>`, unary `~x` | integer-only | `Int32(6) & Int32(3)` → `Int32(2)` |
 | Comparison — `<` `<=` `>` `>=` `==` `!=` | result is `Boolean` | `a < b` |
 | `x.bitcast(dtype)` | reinterpret the bits: `Numeric` equal width; `Vector` equal *total* width, recomputing the lane count | `Float32(1.0).bitcast(Int32)`; `Float32x4(0.0).bitcast(Int8)` → `Int8x16` |
@@ -50,41 +50,18 @@ The following methods apply to both `Numeric` and `Vector`, and are elementwise 
 | `as_numeric` / `Numeric.from_python_value(value)` | build a `Numeric` from a Python value | `as_numeric(5)` → `Int32(5)` |
 | `Numeric.from_ir_type(ir_type)` | the `Numeric` type for an MLIR type | `Numeric.from_ir_type(T.f32())` → `Float32` |
 
-### Function-level typed arithmetic
-
-`fx.max`, `fx.min`, and `fx.ceildiv` normalize Python literals and DSL operands,
-resolve one common type, broadcast scalar operands to `Vector` shapes, and emit
-the dedicated MLIR operation for that type:
-
-| API | Float | Signed integer | Unsigned integer |
-|---|---|---|---|
-| `fx.max` | `arith.maximumf` | `arith.maxsi` | `arith.maxui` |
-| `fx.min` | `arith.minimumf` | `arith.minsi` | `arith.minui` |
-| `fx.ceildiv` | unsupported | `arith.ceildivsi` | `arith.ceildivui` |
-
-`fx.max` and `fx.min` are variadic and accept nested lists/tuples. Their float
-forms propagate NaN and order signed zero as `-0.0 < +0.0`. This is deliberately
-different from `fx.maxnumf` / `fx.minnumf`, which return the non-NaN input when
-exactly one operand is NaN.
-
-`fx.ceildiv` rounds integer division toward positive infinity. It does not use
-`(a + b - 1) // b`, whose intermediate addition can overflow at run time, and
-it does not change the floor-division meaning of `//`. The similarly named
-`fx.ceil_div` remains the layout/int-tuple operation.
-
-Boolean inputs to `fx.max` / `fx.min` widen to `Int32`. Boolean, `Index`, float,
-and narrow storage-float inputs to `fx.ceildiv` are rejected. `Index` and narrow
-storage floats are also rejected by `fx.max` / `fx.min`; cast them to an
-explicit supported arithmetic type first.
-
 ### Vector
 
 `Vector` is a fixed-length sequence of `N` elements of a single `Numeric`
 element type. It has value semantics and inherits the scalar operators, applied
 elementwise; a scalar operand is auto-broadcast across the lanes.
 
-- **Type aliases** — `Float32x4`, `BFloat16x8`, `Int32x4`, … name a
-  `dtype`×`N` vector type directly (`<dtype>x<N>`).
+`Vector[dtype, shape]` returns a specialized `Vector` subclass. Predefined aliases such as
+`Float32x4` name the same types.
+
+```python
+assert Vector[Float32, 4] is VectorAlias(Float32, 4) is Float32x4
+```
 
 ## Compile-time and run-time values
 

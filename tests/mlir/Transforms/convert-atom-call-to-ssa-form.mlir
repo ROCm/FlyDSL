@@ -92,6 +92,58 @@ gpu.module @convert_atom_call_to_ssa_form {
     gpu.return
   }
 
+  // Test 2b: non-register src/dst with a register pred MUST still be promoted.
+  // The pred is the only register memref; leaving the copy as copy_atom_call
+  // strands a register pointer that promote-regmem cannot rewrite.
+  // CHECK-LABEL: gpu.func @copy_global_register_pred
+  // CHECK-NOT: fly.copy_atom_call(
+  // CHECK: %[[PRED_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i1, register>
+  // CHECK: %[[PRED:.*]] = fly.ptr.load(%[[PRED_PTR]]) : (!fly.ptr<i1, register>) -> i1
+  // CHECK: fly.copy_atom_call_ssa(%{{.*}}, %{{.*}}, %{{.*}}, %[[PRED]]) {operandSegmentSizes = array<i32: 1, 1, 1, 1>}
+  // CHECK-SAME: : (!fly.copy_atom<!fly.universal_copy<64>, 16>, !fly.memref<f16, global, 4:1>, !fly.memref<f16, global, 4:1>, i1) -> ()
+  gpu.func @copy_global_register_pred(%src: !fly.ptr<f16, global>, %dst: !fly.ptr<f16, global>) kernel {
+    %shape4 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
+    %stride1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
+    %vec4 = fly.make_layout(%shape4, %stride1) : (!fly.int_tuple<4>, !fly.int_tuple<1>) -> !fly.layout<4:1>
+    %shape1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
+    %pred_layout = fly.make_layout(%shape1, %stride1) : (!fly.int_tuple<1>, !fly.int_tuple<1>) -> !fly.layout<1:1>
+
+    %src_view = fly.make_view(%src, %vec4) : (!fly.ptr<f16, global>, !fly.layout<4:1>) -> !fly.memref<f16, global, 4:1>
+    %dst_view = fly.make_view(%dst, %vec4) : (!fly.ptr<f16, global>, !fly.layout<4:1>) -> !fly.memref<f16, global, 4:1>
+    %copy = fly.make_copy_atom {valBits = 16 : i32} : !fly.copy_atom<!fly.universal_copy<64>, 16>
+
+    %pred_ptr = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i1, register>
+    %pred_view = fly.make_view(%pred_ptr, %pred_layout) : (!fly.ptr<i1, register>, !fly.layout<1:1>) -> !fly.memref<i1, register, 1:1>
+
+    fly.copy_atom_call(%copy, %src_view, %dst_view, %pred_view) : (!fly.copy_atom<!fly.universal_copy<64>, 16>, !fly.memref<f16, global, 4:1>, !fly.memref<f16, global, 4:1>, !fly.memref<i1, register, 1:1>) -> ()
+    gpu.return
+  }
+
+  // Test 2c: same hole on the AMD G2S path (buffer_copy_lds: global -> shared).
+  // CHECK-LABEL: gpu.func @copy_g2s_register_pred
+  // CHECK-NOT: fly.copy_atom_call(
+  // CHECK: %[[PRED_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i1, register>
+  // CHECK: %[[PRED:.*]] = fly.ptr.load(%[[PRED_PTR]]) : (!fly.ptr<i1, register>) -> i1
+  // CHECK: fly.copy_atom_call_ssa(%{{.*}}, %{{.*}}, %{{.*}}, %[[PRED]]) {operandSegmentSizes = array<i32: 1, 1, 1, 1>}
+  // CHECK-SAME: : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 16>, !fly.memref<f16, #fly_rocdl.buffer_desc, 4:1>, !fly.memref<f16, shared, 4:1>, i1) -> ()
+  gpu.func @copy_g2s_register_pred(%src: !fly.ptr<f16, #fly_rocdl.buffer_desc>, %dst: !fly.ptr<f16, shared>) kernel {
+    %shape4 = fly.make_int_tuple() : () -> !fly.int_tuple<4>
+    %stride1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
+    %vec4 = fly.make_layout(%shape4, %stride1) : (!fly.int_tuple<4>, !fly.int_tuple<1>) -> !fly.layout<4:1>
+    %shape1 = fly.make_int_tuple() : () -> !fly.int_tuple<1>
+    %pred_layout = fly.make_layout(%shape1, %stride1) : (!fly.int_tuple<1>, !fly.int_tuple<1>) -> !fly.layout<1:1>
+
+    %src_view = fly.make_view(%src, %vec4) : (!fly.ptr<f16, #fly_rocdl.buffer_desc>, !fly.layout<4:1>) -> !fly.memref<f16, #fly_rocdl.buffer_desc, 4:1>
+    %dst_view = fly.make_view(%dst, %vec4) : (!fly.ptr<f16, shared>, !fly.layout<4:1>) -> !fly.memref<f16, shared, 4:1>
+    %copy = fly.make_copy_atom {valBits = 16 : i32} : !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 16>
+
+    %pred_ptr = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i1, register>
+    %pred_view = fly.make_view(%pred_ptr, %pred_layout) : (!fly.ptr<i1, register>, !fly.layout<1:1>) -> !fly.memref<i1, register, 1:1>
+
+    fly.copy_atom_call(%copy, %src_view, %dst_view, %pred_view) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy_lds<32>, 16>, !fly.memref<f16, #fly_rocdl.buffer_desc, 4:1>, !fly.memref<f16, shared, 4:1>, !fly.memref<i1, register, 1:1>) -> ()
+    gpu.return
+  }
+
   // Test 3: copy_atom_call with register dst, non-leaf layout that coalesces to rank=1 stride=1
   // (4,1):(1,0) coalesces to 4:1, so should be promoted
   // CHECK-LABEL: gpu.func @copy_dst_register_coalescable

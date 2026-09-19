@@ -78,6 +78,7 @@ class RocmBackend(BaseBackend):
         pre_binary_fragments = [
             "fly-rewrite-func-signature",
             "fly-canonicalize",
+            "fly-rocdl-expand-ops",
             "fly-layout-lowering",
             "fly-int-swizzle-simplify",
             "canonicalize",

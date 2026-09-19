@@ -135,6 +135,10 @@ _CACHE_INVALIDATING_ENV_VARS = (
 )
 
 
+_SNAPSHOT_SCALARS = (int, float, bool, str, bytes, type(None))
+_SNAPSHOT_CONTAINERS = (tuple, list, set, frozenset, dict)
+_CLOSURE_SCALARS = (int, float, bool, str, type(None), tuple, enum.Enum)
+
 # os._Environ keeps the live mapping in a plain dict (``_data``) keyed by the
 # OS-encoded bytes of each name; mutations to os.environ update it in place.
 # Reading it with pre-encoded keys skips os.environ.get's per-call key encoding,
@@ -172,9 +176,9 @@ def _snapshot_global_value(val, *, stable, _path=()):
     value**, recursively, in both modes — so different contents produce different
     keys (cross-process) and in-place mutation is detected (in-process).
     """
-    if isinstance(val, (int, float, bool, str, bytes, type(None))):
+    if isinstance(val, _SNAPSHOT_SCALARS):
         return ("scalar", val)
-    if isinstance(val, (tuple, list, set, frozenset, dict)):
+    if isinstance(val, _SNAPSHOT_CONTAINERS):
         if id(val) in _path:
             return ("cycle", type(val).__qualname__)
         _path = _path + (id(val),)
@@ -199,6 +203,8 @@ def _snapshot_global_value(val, *, stable, _path=()):
         return (kind, tuple(elems))
     if callable(val):
         if stable:
+            if isinstance(val, type) and getattr(val, "__dsl_member_behavior__", False):
+                return ("type", val.__cache_signature__())
             # qualname+module is stable across processes; repr would bake in
             # <0x...> addresses for many callables.
             qualname = getattr(val, "__qualname__", None) or getattr(val, "__name__", "?")
@@ -439,7 +445,10 @@ def _collect_class_member_dependency_sources(
             continue
 
         visited.add(id(underlying))
-        sources.append(f"class:{owner_cls.__qualname__}.{name}:{_get_func_source(underlying)}")
+        sources.append(
+            f"class:{owner_cls.__qualname__}.{name}:{_get_func_source(underlying)}"
+            f",closure:{_collect_closure_scalar_vals(underlying)!r}"
+        )
         sources.extend(_collect_dependency_sources(underlying, rootFile, visited, owner_cls=owner_cls))
 
     return sources
@@ -467,8 +476,13 @@ def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -
             val = cell.cell_contents
         except ValueError:
             continue
-        if isinstance(val, (int, float, bool, str, type(None), tuple, enum.Enum)):
+        if isinstance(val, _CLOSURE_SCALARS):
             vals.append(f"{name}={val!r}")
+        elif isinstance(val, type):
+            if getattr(val, "__dsl_member_behavior__", False):
+                vals.append(f"{name}={val.__cache_signature__()}")
+            else:
+                vals.append(f"{name}={val.__module__}.{val.__qualname__}")
         else:
             # Recurse into callable deps (KernelFunction, JitFunction, plain functions)
             underlying = _get_underlying_func(val)
@@ -518,7 +532,9 @@ def _collect_dependency_sources(
             val._ensure_cache_manager()
             sources.append(f"{prefix}jit:{name}:{val.manager_key}")
             return False  # do not recurse: manager_key already covers transitive deps
-        sources.append(f"{prefix}{name}:{_get_func_source(underlying)}")
+        sources.append(
+            f"{prefix}{name}:{_get_func_source(underlying)}" f",closure:{_collect_closure_scalar_vals(underlying)!r}"
+        )
         return True  # recurse to pick up nested helpers
 
     # 1) Scan global name references (co_names → __globals__)
@@ -1303,6 +1319,8 @@ class JitFunction:
                     key_parts.append((name, Constexpr.value_signature(arg)))
                     continue
                 if is_type_param_annotation(ann):
+                    if getattr(arg, "__dsl_member_behavior__", False):
+                        arg = (arg, arg.__cache_signature__())
                     key_parts.append((name, arg))
                     continue
 

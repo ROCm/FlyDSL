@@ -3,15 +3,20 @@
 
 from __future__ import annotations
 
+import dis
+import hashlib
+import inspect
 from dataclasses import FrozenInstanceError, dataclass
 from enum import Enum
 from itertools import chain
+from types import CodeType, FunctionType
 from typing import Any, List
 
 from .._mlir import ir
 from ..compiler.protocol import (
     c_abi_spec,
     cache_signature,
+    construct_from_ir_values,
     dsl_align_of,
     dsl_size_of,
     extract_to_ir_values,
@@ -76,6 +81,86 @@ _RESERVED_FIELD_NAMES = frozenset(
         "poke",  # used by Storage
     }
 )
+
+
+def _field_type_signature(dtype):
+    """Stable field/specialization keys, without inspecting Python object state."""
+    if is_composite_type(dtype):
+        return dtype.__cache_signature__()
+    if _is_constexpr_type(dtype) and dtype.is_specialized:
+        return ("constexpr", Constexpr.value_signature(dtype.value))
+    if issubclass(dtype, Array._Base):
+        return ("array", _field_type_signature(dtype.dtype), dtype.size, dtype.align)
+    if issubclass(dtype, Align):
+        return ("align", _field_type_signature(dtype.dtype), dtype.align)
+    if issubclass(dtype, Storage):
+        return ("storage", _field_type_signature(dtype._target_type))
+    return (dtype.__module__, dtype.__qualname__)
+
+
+def _has_member_behavior(dtype):
+    if not isinstance(dtype, type):
+        return False
+    if is_composite_type(dtype):
+        return dtype.__dsl_member_behavior__
+    return any(_has_member_behavior(getattr(dtype, name, None)) for name in ("dtype", "_target_type"))
+
+
+def _make_cache_signature(definition, fields, has_members):
+    """Capture a concrete schema's definition once; instances add field metadata."""
+    field_keys = tuple((name, _field_type_signature(dtype)) for name, dtype in fields)
+    signature = ("composite", hashlib.sha256(repr((definition, field_keys)).encode()).hexdigest())
+    runtime_fields = tuple(name for name, dtype in fields if not _is_constexpr_type(dtype))
+
+    def __cache_signature__(self=None):
+        if self is None:
+            return signature
+        parts = [type(self), signature] if has_members else [type(self)]
+        for name in runtime_fields:
+            parts.append((name, cache_signature(getattr(self, name))))
+        return tuple(parts)
+
+    return __cache_signature__
+
+
+def _member_dependencies(function):
+    """Snapshot directly named Structs, preserving each name's type binding."""
+    refs = {
+        ("closure", name): cell.cell_contents
+        for name, cell in zip(function.__code__.co_freevars, function.__closure__ or ())
+    }
+    pending = [function.__code__]
+    while pending:
+        code = pending.pop()
+        for instruction in dis.get_instructions(code):
+            if instruction.opname == "LOAD_GLOBAL":
+                refs[("global", instruction.argval)] = function.__globals__.get(instruction.argval)
+        pending.extend(constant for constant in code.co_consts if isinstance(constant, CodeType))
+    return tuple(
+        (scope, name, value.__cache_signature__())
+        for (scope, name), value in sorted(refs.items())
+        if is_composite_type(value)
+    )
+
+
+def _normalize_members(klass):
+    """Install native descriptors and snapshot source/type dependencies once.
+
+    Definitions and external constants should be immutable by contract. Only directly
+    referenced Struct types are tracked; other globals/closures are ignored.
+    """
+    members, sources = {}, []
+    for name, member in vars(klass).items():
+        function = member.fget if isinstance(member, property) else getattr(member, "__func__", member)
+        original = getattr(function, "_original_func", function)
+        if not isinstance(original, FunctionType):
+            continue
+        sources.append((name, type(member).__name__, inspect.getsource(original), _member_dependencies(original)))
+        members[name] = member
+    if "__eq__" in members and vars(klass).get("__hash__") is None:
+        members["__hash__"] = None
+    digest = hashlib.sha256(repr(sources).encode()).hexdigest() if sources else None
+    return members, digest
 
 
 def _validate_field_name(name: str, context: str):
@@ -256,10 +341,13 @@ def _specialize_type(base_cls: type, fields: tuple[FieldDef, ...], values: dict[
         if isinstance(eff_type, type) and issubclass(eff_type, Constexpr) and eff_type.is_specialized:
             suffix_parts.append(f"{name}={eff_type.value!r}")
     suffix = f"[{', '.join(suffix_parts)}]" if suffix_parts else ""
+    has_members = base_cls.__dsl_member_behavior__ or any(_has_member_behavior(dtype) for _, dtype in effective)
     namespace: dict[str, Any] = {
         "__dsl_effective_field_defs__": tuple(effective),
         "__dsl_base_type__": base_cls,
         "__dsl_display_name__": _display_name(base_cls) + suffix,
+        "__dsl_member_behavior__": has_members,
+        "__cache_signature__": _make_cache_signature(base_cls.__cache_signature__(), effective, has_members),
     }
     specialized = type(base_cls.__name__ + suffix, (base_cls,), namespace)
     _specialization_cache[cache_key] = specialized
@@ -280,14 +368,16 @@ def _carrier_for_field(eff_type: Any, value: Any) -> Any:
     return value
 
 
-def _construct_field_from_ir(type_spec: Any, values):
+def _construct_field_from_ir(type_spec: Any, values, exemplar=None):
     ctor = getattr(type_spec, "__construct_from_ir_values__", None)
     if ctor is None:
         raise TypeError(f"struct field type {_type_name(type_spec)} does not implement __construct_from_ir_values__")
-    return ctor(values)
+    return ctor(values, exemplar) if exemplar is not None else ctor(values)
 
 
 def _ir_value_count_from_type(type_spec: Any) -> int:
+    if getattr(type_spec, "__dsl_align_wrapper__", False):
+        return _ir_value_count_from_type(type_spec.dtype)
     if is_struct_type(type_spec):
         return sum(_ir_value_count_from_type(eff) for _, eff in _effective_field_defs(type_spec))
     types_fn = getattr(type_spec, "__get_ir_types__", None)
@@ -335,6 +425,8 @@ def _inline_display_name(display: str, params, fields: tuple[FieldDef, ...]) -> 
 
 def is_specializable_struct_type(tp: Any) -> bool:
     """True if *tp* is a struct type carrying a (possibly nested) Constexpr field."""
+    if getattr(tp, "__dsl_align_wrapper__", False):
+        return is_specializable_struct_type(tp.dtype)
     if not is_struct_type(tp):
         return False
     for _name, eff in _effective_field_defs(tp):
@@ -352,8 +444,17 @@ def _make_composite_class(
     fields: tuple[FieldDef, ...],
     policy: CompositeKind,
     display_name: str,
+    members=None,
+    member_digest=None,
+    qualname=None,
+    doc=None,
 ):
+    members = members or {}
+    conflicts = members.keys() & {field.name for field in fields}
+    if conflicts:
+        raise ValueError(f"{name}: members conflict with fields: {sorted(conflicts)}")
     identity = _make_type_identity(policy, fields)
+    has_members = bool(members) or any(_has_member_behavior(field.type_spec) for field in fields)
 
     def __init__(self, *args, **kwargs):
         if policy == CompositeKind.Sum:
@@ -415,8 +516,13 @@ def _make_composite_class(
         rebuilt = {}
         cursor = 0
         for name, eff_type in _effective_field_defs(cls):
-            nvalues = _ir_value_count_from_type(eff_type)
-            rebuilt[name] = _construct_field_from_ir(eff_type, values[cursor : cursor + nvalues])
+            field_exemplar = getattr(exemplar, name) if exemplar is not None else None
+            nvalues = (
+                len(get_ir_types(_carrier_for_field(eff_type, field_exemplar)))
+                if field_exemplar is not None
+                else _ir_value_count_from_type(eff_type)
+            )
+            rebuilt[name] = _construct_field_from_ir(eff_type, values[cursor : cursor + nvalues], field_exemplar)
             cursor += nvalues
         if cursor != len(values):
             raise ValueError(f"struct {_display_name(cls)} expected {cursor} ir.Values, got {len(values)}")
@@ -492,22 +598,15 @@ def _make_composite_class(
                 )
             poke_into_ptr(eff_type, add_offset(ptr, offsets[field.name]), getattr(value, field.name))
 
-    def __cache_signature__(self):
-        parts = [type(self)]
-        for field in fields:
-            if _is_constexpr_type(field.type_spec):
-                # Constexpr fields are already folded into type(self) by _specialize_type,
-                # so only the non-constexpr field values need to be encoded here.
-                continue
-            parts.append((field.name, cache_signature(getattr(self, field.name))))
-        return tuple(parts)
-
     namespace = {
         "__module__": module,
+        "__qualname__": qualname or name,
+        "__doc__": doc,
         "__annotations__": {field.name: field.type_spec for field in fields},
         "__dsl_composite_kind__": policy,
         "__dsl_field_defs__": fields,
         "__dsl_type_identity__": identity,
+        "__dsl_member_behavior__": has_members,
         "__dsl_display_name__": display_name,
         "__init__": __init__,
         "__setattr__": __setattr__,
@@ -517,7 +616,11 @@ def _make_composite_class(
         "__hash__": __hash__,
         "__extract_to_ir_values__": __extract_to_ir_values__,
         "__construct_from_ir_values__": __construct_from_ir_values__,
-        "__cache_signature__": __cache_signature__,
+        "__cache_signature__": _make_cache_signature(
+            (module, qualname, policy.name, member_digest),
+            tuple((field.name, field.type_spec) for field in fields),
+            has_members,
+        ),
         "__get_ir_types__": __get_ir_types__,
         "__c_abi_spec__": __c_abi_spec__,
         "__dsl_size_of__": __dsl_size_of__,
@@ -526,6 +629,7 @@ def _make_composite_class(
         "__poke_into_ptr__": __poke_into_ptr__,
         "replace": replace,
     }
+    namespace.update(members)
     schema = type(name, (), namespace)
     schema.__dsl_base_type__ = schema
     return schema
@@ -539,16 +643,22 @@ class CompositeMeta(type):
         return cls
 
     def __call__(cls, klass=None, /, **kwargs):
+        # Preserve the decorator API's acceptance of ignored keyword options.
         policy = cls._policy
 
         def wrap(wrapped):
             fields = _normalize_decorator_fields(wrapped)
+            members, member_digest = _normalize_members(wrapped)
             return _make_composite_class(
                 name=wrapped.__name__,
                 module=wrapped.__module__,
                 fields=fields,
                 policy=policy,
                 display_name=wrapped.__name__,
+                members=members,
+                member_digest=member_digest,
+                qualname=wrapped.__qualname__,
+                doc=wrapped.__doc__,
             )
 
         if klass is None:
@@ -595,7 +705,7 @@ class Align:
             raise TypeError(f"struct.Align alignment must be an int, got {requested_align!r}")
         if requested_align <= 0:
             raise ValueError(f"struct.Align alignment must be positive, got {requested_align}")
-        if not (requested_align > 0 and (requested_align & (requested_align - 1)) == 0):
+        if requested_align & (requested_align - 1):
             raise ValueError(f"struct.Align alignment must be a power of two, got {requested_align}")
         natural = dsl_align_of(dtype)
         if requested_align < natural:
@@ -603,6 +713,32 @@ class Align:
                 f"struct.Align[{_type_name(dtype)}, {requested_align}]: requested alignment {requested_align} "
                 f"is smaller than natural alignment {natural} of {_type_name(dtype)}; use a value >= {natural}."
             )
+
+        def _coerce(cls, value):
+            coerce = getattr(dtype, "__coerce__", None)
+            if coerce is not None:
+                return coerce(value)
+            if not isinstance(value, dtype):
+                raise TypeError(f"expects {_type_name(dtype)}, got {type(value).__name__}")
+            return value
+
+        specializations = {}
+
+        def _specialize_for_value(cls, value):
+            specializer = getattr(dtype, "__specialize_for_value__", None)
+            inner = (
+                specializer(value)
+                if specializer is not None
+                else type(value) if is_composite_type(type(value)) else dtype
+            )
+            if inner is dtype:
+                return cls
+            if inner not in specializations:
+                specializations[inner] = Align[inner, requested_align]
+            return specializations[inner]
+
+        def _construct(cls, values, exemplar=None):
+            return construct_from_ir_values(dtype, dtype if exemplar is None else exemplar, values)
 
         def _aligned_size_of(inner=dtype):
             return dsl_size_of(inner)
@@ -628,6 +764,9 @@ class Align:
                 "dtype": dtype,
                 "align": requested_align,
                 "__dsl_align_wrapper__": True,
+                "__coerce__": classmethod(_coerce),
+                "__specialize_for_value__": classmethod(_specialize_for_value),
+                "__construct_from_ir_values__": classmethod(_construct),
                 "__cache_signature__": classmethod(lambda cls, _f=_cache_sig: _f()),
                 "__dsl_size_of__": classmethod(lambda cls, _f=_aligned_size_of: _f()),
                 "__dsl_align_of__": classmethod(lambda cls, _f=_aligned_align_of: _f()),

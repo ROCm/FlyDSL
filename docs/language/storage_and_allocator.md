@@ -21,7 +21,8 @@ produced (typically an `i8` one) and carries `T` alongside it, in Python. Field 
 overlays, and typed loads/stores are all computed from that trace-time `T`, never from the MLIR
 pointer type.
 
-The layout rules a `Storage` navigates come from the `Storable` protocol. Composites acquire them by
+The layout rules a `Storage` navigates come from the
+[`Storable` protocol](dsl_protocols.md#storable). Composites acquire them by
 [closure over their fields](composite_types.md#closure-over-the-protocols) — grouping is a
 composite's job, addressing is this page's.
 
@@ -39,8 +40,8 @@ The correspondence with C++ is close enough to use as a lookup table:
 
 Three things follow from `allocate` returning an address rather than a value:
 
-- **the memory has no contents yet** — `peek()` is a load you ask for, not something allocation did
-  for you;
+- **allocation does not initialize memory** — `peek()` delegates to `T`'s `Storable` access
+  contract to obtain a value; allocation itself does not perform that access;
 - **not every `T` has a value form** — a `@fx.union` never does, so it exists only as
   `Storage[Union]` and is reached one variant at a time;
 - **a composite is not one SSA value** — `Storage[T]` navigates its fields by offset, which is
@@ -55,44 +56,146 @@ reaches the type's fields — which is why they, along with `replace` and any `_
 
 ## What a `Storage` can point at
 
-`T` must be `Storable`: able to state a static size and alignment, and to be read from (and usually
-written to) a traced pointer.
+`T` must implement the `Storable` contract: a static size and alignment, plus typed access through
+a traced pointer. This applies equally to built-in and user-defined types. Builtin support includes:
 
 | `T` | Size | Alignment |
 |---|---|---|
 | `Numeric` at least one byte wide (`fx.Int32`, `fx.Float32`, `fx.Int64`, …) | its byte width | its byte width |
-| `fx.Array[E, N]` / `fx.Array[E, N, A]` | `N` elements of `E` | `A`, defaulting to the element byte size |
+| specialized `fx.Vector[E, Shape]` | `E.width × numel(Shape) / 8` bytes, no trailing padding | element byte width; 1 byte for packed sub-byte elements |
+| specialized `fx.Pointer[E, Space]` / `fx.Pointer[E, Space, A]` | 8 bytes for Global; 4 for Shared | 8 bytes for Global; 4 for Shared |
+| `fx.Array[E, N]` / `fx.Array[E, N, A]`, with `Storable` elements | see *Array* below | `A`, defaulting to the element's natural alignment |
 | a composite whose non-`Constexpr` fields are all `Storable` | see *Byte layout* | see *Byte layout* |
 
-Everything else is deliberately excluded, and asking for its size is a `TypeError`:
-sub-byte numerics including `fx.Boolean` and `fx.Int4`, plus `fx.Vector`, `fx.Pointer`, and
-`fx.Tensor`. One such field is enough to make the whole composite non-storable.
+Builtin types without this contract include sub-byte numerics such as `fx.Boolean` and `fx.Int4`,
+plus unspecialized `fx.Vector` and `fx.Pointer`, and `fx.Tensor`; asking for their storage size is a `TypeError`.
+One such field is enough to make the whole composite non-storable.
+
+### `fx.Vector[E, Shape]`
+
+A [specialized vector](arithmetic_types.md#vector) can be allocated directly or
+stored in Struct fields. Its element type must be a concrete `Numeric` other than
+`Index`, and its total bit width must be a multiple of eight. Packed vectors such
+as `Vector[Int4, 2]` and `Vector[Boolean, 8]` are supported.
+
+Alignment is the element byte width rounded up, at least one byte, regardless of lane count or
+logical shape. For example, `Float32x4` occupies 16 bytes with 4-byte alignment. Use `Align[T, A]`
+for stronger placement alignment and wider memory accesses where supported by the target.
+
+```python
+Vec4 = fx.Vector[fx.Float32, 4]
+
+# Inside a kernel; works with static or dynamic SharedAllocator:
+storage = fx.SharedAllocator().allocate(fx.Align[Vec4, 16])
+storage.poke(Vec4(1.0) + 2.0)             # accepts a plain Vector result
+value = storage.peek()                   # returns Vec4
+```
+
+### `fx.Pointer[E, Space, A]`
+
+A specialized Pointer stores an address and returns a typed Pointer from `peek`.
+Specify a fixed-width `Numeric` element type `E` and `AddressSpace.Global` or
+`AddressSpace.Shared`. Optional pointee address alignment `A` defaults to the
+element byte width rounded up. Swizzled pointers are unsupported.
+
+```python
+P = fx.Pointer[fx.Float32, fx.AddressSpace.Global]  # alignment 4
+
+# Inside a kernel, with a compatible global pointer ptr:
+slot = fx.SharedAllocator().allocate(P)
+slot.poke(ptr)
+loaded = slot.peek()                     # P, with pointee alignment 4
+value = loaded[0]                        # Float32
+```
 
 ### `fx.Array[E, N, A]`
 
-The fixed-size leaf: a `Numeric` subclass `E`, a positive `int` count `N`, and an optional positive
-byte alignment `A`. Array types are cached, so the same parameters yield the same class. After
-`peek` it behaves as a typed pointer view supporting indexing and `.view(layout)`.
+The fixed-size storage view supports `Storable` element types `E`, a positive `int` count `N`,
+and an optional positive byte alignment `A`. Array types are cached, so the same parameters
+yield the same class. `A` aligns the array base without changing element stride.
+
+Numeric arrays occupy `max(1, E.width * N // 8)` bytes, including packed sub-byte arrays.
+Their default alignment is `max(1, E.width // 8)`; an explicit `A` may be any positive integer.
+After `peek`, indexing and `.view(layout)` operate through the typed element pointer and
+follow its access and alignment requirements.
+
+For other `Storable` elements, each element occupies `dsl_size_of(E)` bytes and indexing
+delegates to `E`'s storage access hooks. `A` defaults to `dsl_align_of(E)` and must be a
+power of two and a multiple of that alignment.
 
 ```python
 Tile = fx.Array[fx.Float32, 32, 16]
 Tile.size, Tile.align                      # ⇒ (32, 16)
 dsl_size_of(Tile), dsl_align_of(Tile)      # ⇒ (128, 16)
+
+# Inside a kernel:
+Vec = fx.Vector[fx.Float32, 4]
+vectors = fx.SharedAllocator().allocate(fx.Array[Vec, 64]).peek()
+vectors[index] = Vec(1.0) + 2.0
+value = vectors[index]                   # Vec
+
+# Pointer arrays use the same indexing API:
+Pointers = fx.Array[fx.Pointer[fx.Float32, fx.AddressSpace.Global], 64]
+```
+
+For example, an **array-of-structures (AoS)** layout includes each element's trailing padding:
+
+```python
+@fx.struct
+class Item:
+    key: fx.Int32
+    weight: fx.Float64
+
+Items = fx.Array[Item, 128]
+dsl_size_of(Item), dsl_align_of(Item)      # ⇒ (16, 8)
+dsl_size_of(Items), dsl_align_of(Items)    # ⇒ (2048, 8)
+
+# Inside a kernel; valid for static or dynamic SharedAllocator placement:
+items = fx.SharedAllocator().allocate(Items).peek()
+index = fx.thread_idx.x                   # caller keeps indices in [0, 128)
+items[index] = Item(index, 1.0)
+item = items[index]                       # an Item value
 ```
 
 ### `fx.Align[T, A]`
 
-A *placement modifier*, not a composite form: it delegates size and access to `T` and overrides only
-the alignment.
+`fx.Align[T, A]` sets the storage placement alignment to `A`, a positive power of two at least as
+large as `T`'s natural alignment, while delegating size and access to `T`. When used as a Struct
+field annotation, construction and replacement coerce through `T`, and field access returns a `T`
+value directly. The annotation retains the alignment for storage layout; no intermediate Align
+value is introduced.
 
 ```python
-Aligned = fx.Align[fx.Int32, 16]
-dsl_size_of(Aligned), dsl_align_of(Aligned)   # ⇒ (4, 16)
+Weight = fx.Align[fx.Float64, 16]
+Item = fx.Struct["weight": Weight]
+item = Item(1.0)
+
+assert type(item.weight) is fx.Float64
+assert dsl_size_of(Weight) == dsl_size_of(fx.Float64) == 8
+assert dsl_align_of(Weight) == 16
+assert dsl_align_of(Item) == 16
+assert dsl_size_of(Item) == 16  # 8-byte weight + 8-byte trailing padding
 ```
 
-`A` must be a positive power of two and at least `T`'s natural alignment; violations are
-`ValueError`s, and a non-`int` `A` or a missing second parameter is a
-`TypeError`.
+This field placement behavior is analogous to the member declaration
+`alignas(A) T field;` in C++. The 16-byte-aligned example above can be compared with:
+
+```cpp
+#include <cstddef>
+#include <type_traits>
+
+struct Item {
+    alignas(16) double weight;
+};
+Item item{1.0};  // item.weight is still a double
+
+static_assert(std::is_same_v<decltype(item.weight), double>);
+static_assert(offsetof(Item, weight) == 0);
+static_assert(sizeof(double) == 8 && alignof(double) == 8);
+static_assert(alignof(Item) == 16);
+static_assert(sizeof(Item) == 16);
+```
+
 
 ## Byte layout
 
@@ -172,6 +275,6 @@ Its two placement modes differ only in where the bytes come from:
 | Union | one allocation, sized to the widest variant, shared by every variant | one region, variants at offset zero |
 | `kernel.launch(smem=...)` | left unset; the compiler sizes each allocation | inferred from `allocated_bytes` when `smem=None`; an explicit `smem` must be at least that size |
 
-In both modes the field-view API and `allocated_bytes` follow the same logical layout, so switching
-modes does not change the addressing a kernel writes. In static mode a nested struct emits one
-allocation per leaf, which is why it has no single contiguous base pointer.
+Both modes expose the same field-view API, and `allocated_bytes` follows the same logical layout
+in both modes. In static mode a nested struct emits one allocation per leaf, which is why it has
+no single contiguous base pointer.
