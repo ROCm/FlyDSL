@@ -355,8 +355,7 @@ LogicalResult CopyOpCDNA3BufferCopyLDSType::emitAtomCall(OpBuilder &builder, Loc
 
 static int32_t getAtomicValueBitWidth(Type valType) {
   if (auto vectorType = dyn_cast<VectorType>(valType))
-    return vectorType.getNumElements() *
-           vectorType.getElementType().getIntOrFloatBitWidth();
+    return vectorType.getNumElements() * vectorType.getElementType().getIntOrFloatBitWidth();
   return valType.getIntOrFloatBitWidth();
 }
 
