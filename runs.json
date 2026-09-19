@@ -1,8 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-09-19T01:23:36Z",
+ "updated": "2026-09-19T02:20:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35415290665,
+   "pr": null,
+   "commit": "ec0fe7d8cdc48c5781309e6da38e0fb81668aa03",
+   "branch": "main",
+   "event": "push",
+   "title": "[Enh] Support expr struct member methods (#1156)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415290665",
+   "created_at": "2026-09-19T02:19:04Z",
+   "updated_at": "2026-09-19T02:19:16Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35415198758,
+   "pr": null,
+   "commit": "6385aef98ec5b152836a76e8a01ff06b0fd852d7",
+   "branch": "main",
+   "event": "push",
+   "title": "docs: refresh compatibility guidance and repair web references (#1149)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415198758",
+   "created_at": "2026-09-19T02:17:07Z",
+   "updated_at": "2026-09-19T02:19:08Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-19T02:18:29Z",
+     "completed_at": "2026-09-19T02:18:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415198758/job/105822546074"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-19T02:19:04Z",
+     "completed_at": "2026-09-19T02:19:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415198758/job/105822546076"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-19T02:18:29Z",
+     "completed_at": "2026-09-19T02:18:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415198758/job/105822546124",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    }
+   ]
+  },
   {
    "run_id": 35352041978,
    "pr": 1167,
@@ -1220,7 +1281,7 @@
   },
   {
    "run_id": 35263068650,
-   "pr": 1156,
+   "pr": null,
    "commit": "c9a70d0fde055f4baa6ae73d0a5a922839d52710",
    "branch": "pr/enh-struct-members",
    "event": "pull_request",
@@ -1838,98 +1899,6 @@
      "started_at": "2026-09-17T06:35:36Z",
      "completed_at": "2026-09-17T06:36:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35179578655/job/105074687664"
-    }
-   ]
-  },
-  {
-   "run_id": 35176277481,
-   "pr": 1154,
-   "commit": "27d7fc46185d20fc96e9670085d96a833bdcea55",
-   "branch": "phil/llvm-skill-only",
-   "event": "pull_request",
-   "title": "[wip][llvm][skill] Add an llvm skill for picking and verifying LLVM knobs",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176277481",
-   "created_at": "2026-09-17T02:56:09Z",
-   "updated_at": "2026-09-17T02:57:40Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T02:57:36Z",
-     "completed_at": "2026-09-17T02:57:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176277481/job/105058824182"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T02:57:36Z",
-     "completed_at": "2026-09-17T02:57:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176277481/job/105058824201",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T02:57:36Z",
-     "completed_at": "2026-09-17T02:57:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176277481/job/105058824205"
-    }
-   ]
-  },
-  {
-   "run_id": 35176257769,
-   "pr": 1153,
-   "commit": "017731571783ece022c10e2996db8e9d87b4eadf",
-   "branch": "phil/drop-inert-llvm-knobs",
-   "event": "pull_request",
-   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176257769",
-   "created_at": "2026-09-17T02:55:51Z",
-   "updated_at": "2026-09-17T05:07:51Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T03:20:41Z",
-     "completed_at": "2026-09-17T04:24:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176257769/job/105063233885",
-     "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T04:22:46Z",
-     "completed_at": "2026-09-17T05:07:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176257769/job/105063233895"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T03:36:46Z",
-     "completed_at": "2026-09-17T03:53:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35176257769/job/105063233992"
     }
    ]
   }
