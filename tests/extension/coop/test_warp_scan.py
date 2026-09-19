@@ -3,31 +3,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Warp-wide prefix scan.
+"""Warp-wide prefix scans, partial groups and structured values.
 
-Covered below: the sum scan over the dtype list, the combined
-``(inclusive, exclusive)`` pair, the warp aggregate, and the initial-value
-form. Out of reach for lack of API surface: an arbitrary callable as the scan
-op (*op* is a ``ReductionOp``, see ``coop/_common.py``), vector and
-user-defined element types, and a partial scan — every lane of the logical
-warp always participates.
+Coverage includes built-in and callable operations, inclusive/exclusive
+forms, aggregates, initial values, nested records.
+Combined reduction/scan checks cover Boolean identities and 128-bit values.
 
-The width axis is :data:`~coop_common.WARP_WIDTHS`: every width that
-``resolve_warp_width`` accepts (``coop/_common.py``), which is the powers of
-two up to the target's own wave. Each test launches two physical warps, so a
-width that leaked past its group would show up as a scan crossing the
-boundary.
-
-The tests at the bottom came from ``test_coop.py`` when the algorithm tests
-were split out by algorithm. ``warp_reduce`` has no file of its own: what
-covers it is ``test_warp_rocdl.py``, which runs every fold through both the
-dispatched override and the portable form and compares the two.
-"""
+The common width axis includes every supported power of two through the
+target wave size. Each width test launches two physical warps so results
+also expose scans that incorrectly cross logical group boundaries."""
 
 from __future__ import annotations
 
+import coop_warp_utils as checks
 import pytest
 from coop_common import WARP_WIDTHS, dtype_id, sample, wrap
+from coop_test_utils import run_kernel
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -241,8 +232,8 @@ def test_initial_value_stays_out_of_the_aggregate():
     torch.cuda.synchronize()
 
     # The scan carries init; the aggregate is the inputs alone.
-    assert torch.equal(out.cpu(), torch.arange(1, warp_threads + 1, dtype=torch.int32) + INIT)
-    assert torch.equal(agg.cpu(), torch.full((warp_threads,), warp_threads, dtype=torch.int32))
+    assert torch.equal(out.cpu(), torch.arange(1, warp_threads + 1, dtype=torch.int32, device="cpu") + INIT)
+    assert torch.equal(agg.cpu(), torch.full((warp_threads,), warp_threads, dtype=torch.int32, device="cpu"))
 
 
 # ── from test_coop.py ─────────────────────────────────────────────────────
@@ -305,4 +296,162 @@ def test_warp_width_defaults_to_the_whole_warp():
 
     per_warp = values.cpu().reshape(-1, warp_threads)
     assert torch.equal(inc.cpu(), per_warp.cumsum(1, dtype=torch.int32).reshape(-1))
-    assert torch.equal(total.cpu(), per_warp.sum(1, dtype=torch.int32).repeat_interleave(warp_threads))
+    assert torch.equal(total.cpu()[::warp_threads], per_warp.sum(1, dtype=torch.int32))
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("universal", [False, True])
+@pytest.mark.parametrize("valid", [0, 1, 5, 8])
+@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+def test_warp_valid_counts_seed_broadcast(universal, valid, default_device):
+    with torch.device(default_device):
+        checks.check_warp_valid_counts_seed_broadcast(universal, valid)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("valid", [1, 5, 8])
+@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+def test_warp_partial_scan_semigroup_without_identity(valid, default_device):
+    with torch.device(default_device):
+        checks.check_warp_partial_scan_semigroup_without_identity(valid)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("policy", ["warp"])
+@pytest.mark.parametrize("op", [fx.ReductionOp.MIN, fx.ReductionOp.MAX])
+@pytest.mark.parametrize("valid", [0, 5])
+@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+def test_boolean_partial_identities(policy, op, valid, default_device):
+    with torch.device(default_device):
+        checks.check_boolean_partial_identities(policy, op, valid)
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("dtype", [fx.Int128, fx.Uint128])
+@pytest.mark.parametrize("op", [fx.ReductionOp.ADD, fx.ReductionOp.MIN, fx.ReductionOp.MAX])
+@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+def test_warp_128_bit_reduce_scan(dtype, op, default_device):
+    with torch.device(default_device):
+        checks.check_warp_128_bit_reduce_scan(dtype, op)
+
+
+@pytest.mark.rocm_lower
+@pytest.mark.l2_device
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("case", ["scan"])
+@pytest.mark.parametrize("universal", [False, True])
+@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+def test_nested_record_scan(case, universal, default_device):
+    with torch.device(default_device):
+        checks.check_nested_record_warp_collectives(case, universal)
+
+
+ScanPair = fx.Struct["first" : fx.Int32, "second" : fx.Int32]
+
+
+def _counted_scan(universal, form, prefix, entry, valid):
+    namespace = fx.coop.universal if universal else fx.coop
+    count = 1 if form == "scalar" else 2
+    stride = 3 * count + 1
+
+    def apply(a, out):
+        tid = fx.thread_idx.x
+        out[tid * stride + 3 * count] = fx.Int32(0)
+
+        def add(lhs, rhs):
+            # Count calls even when their numerical results would be discarded.
+            out[tid * stride + 3 * count] = out[tid * stride + 3 * count] + 1
+            if form == "record":
+                return ScanPair(lhs.first + rhs.first, lhs.second + rhs.second)
+            return lhs + rhs
+
+        items = tuple(a[16 + tid * count + i] for i in range(count))
+        value = (
+            items[0] if form == "scalar" else fx.Vector.from_elements(items) if form == "vector" else ScanPair(*items)
+        )
+        limit = a[tid // 4] if valid == "runtime" else valid
+        initial = (
+            (ScanPair(fx.Int32(10), fx.Int32(10)) if form == "record" else fx.Int32(10)) if prefix == "init" else None
+        )
+        result = getattr(namespace, entry)(
+            value,
+            add,
+            width=4,
+            valid_items=limit,
+            init=initial,
+        )
+        results = (result,) if entry in ("warp_inclusive_scan", "warp_exclusive_scan") else result
+        for slot, scanned in enumerate(results):
+            if form == "record":
+                scanned = (scanned.first, scanned.second)
+            for i in range(count):
+                out[tid * stride + slot * count + i] = scanned if form == "scalar" else scanned[i]
+
+    return apply
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("universal", [False, True], ids=["dispatched", "universal"])
+@pytest.mark.parametrize("form,prefix", [("scalar", "none"), ("vector", "init"), ("record", "init")])
+@pytest.mark.parametrize(
+    "entry", ["warp_inclusive_scan", "warp_exclusive_scan", "warp_scan", "warp_scan_with_aggregate"]
+)
+@pytest.mark.parametrize("valid", [0, 1, 3, 4, "runtime"])
+@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+def test_warp_scan_skips_invalid_operators(universal, form, prefix, entry, valid, default_device):
+    with torch.device(default_device):
+        block, width = 64, 4
+        count = 1 if form == "scalar" else 2
+        limits = [0, 1, 3, 4] * 4 if valid == "runtime" else [valid] * 16
+        host = torch.arange(1, block * count + 1, dtype=torch.int32, device="cpu")
+        values = torch.cat((torch.tensor(limits, dtype=torch.int32, device="cpu"), host)).cuda()
+        actual = run_kernel(
+            _counted_scan(universal, form, prefix, entry, valid), values, block * (3 * count + 1), block
+        )
+        actual = actual.reshape(-1, width, 3 * count + 1)
+        grouped = host.reshape(-1, width, count)
+        seed = 0 if prefix == "none" else 10
+        for group, limit in enumerate(limits):
+            assert torch.count_nonzero(actual[group, limit:, -1]).item() == 0
+            if limit == 0:
+                continue
+            inclusive = grouped[group, :limit].cumsum(0, dtype=torch.int32)
+            exclusive = inclusive - grouped[group, :limit]
+            start = 1 if prefix == "none" else 0
+            if entry != "warp_exclusive_scan":
+                torch.testing.assert_close(actual[group, :limit, :count], inclusive + seed)
+            if entry != "warp_inclusive_scan":
+                slot = 0 if entry == "warp_exclusive_scan" else count
+                torch.testing.assert_close(actual[group, start:limit, slot : slot + count], exclusive[start:] + seed)
+            if entry == "warp_scan_with_aggregate":
+                torch.testing.assert_close(actual[group, :, 2 * count : 3 * count], inclusive[-1].expand(width, -1))
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+@pytest.mark.parametrize("arch", ["gfx942", "gfx1100"])
+@pytest.mark.parametrize("form,prefix", [("scalar", "none"), ("vector", "init"), ("record", "init")])
+def test_warp_scan_valid_compile(monkeypatch, arch, form, prefix):
+    monkeypatch.setenv("ARCH", arch)
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+    apply = _counted_scan(False, form, prefix, "warp_scan_with_aggregate", "runtime")
+
+    @flyc.kernel(known_block_size=[64, 1, 1])
+    def kernel(a: fx.Tensor, out: fx.Tensor):
+        apply(a, out)
+
+    @flyc.jit
+    def launch(a: fx.Tensor, out: fx.Tensor):
+        kernel(a, out).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+    launch(torch.empty(144, dtype=torch.int32, device="cpu"), torch.empty(448, dtype=torch.int32, device="cpu"))
