@@ -1130,6 +1130,7 @@ def test_preflight_routes_raw_leads_without_promoting_them(tmp_path, source_repo
     assert "Compiler, dialect, and conversion changes" in finder_prompt
     assert "Compiler extension generality" in finder_prompt
     assert "Compiler regression coverage" in finder_prompt
+    assert "overwrites earlier results before they are observed" in finder_prompt
     assert "code that moved between files" in prompts["sweep"]
     assert "For compiler scopes, sweep" in prompts["sweep"]
     assert report["findings"] == report["risks"] == report["candidates"] == []
