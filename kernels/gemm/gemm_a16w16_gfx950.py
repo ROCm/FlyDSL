@@ -9,7 +9,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, ktrace, range_constexpr, rocdl
 from flydsl.runtime.device import get_rocm_arch
 
 from .gemm_a16w16_gfx950_utils import (
@@ -485,6 +485,11 @@ def gemm_a16w16_gfx950_kernel(
             param.has_bias,
         )
 
+    # In-kernel wave tracing. Stripped entirely unless FLYDSL_KTRACE_ENABLE=1 (or the
+    # `ktrace` compile hint), so these calls cost nothing in a normal build.
+    wave_lifetime = ktrace.range_start("wave_lifetime")
+    ktrace.range_push("prologue")
+
     tid = fx.thread_idx.x
     threads_per_k_slice = param.m_waves * param.n_waves * GFX950_WAVE_SIZE
     tid_in_k_slice = tid % threads_per_k_slice
@@ -674,17 +679,35 @@ def gemm_a16w16_gfx950_kernel(
         rocdl.asyncmark()
     rocdl.sched_barrier(0)
 
+    ktrace.range_pop()  # prologue
+    ktrace.range_push("mainloop")
+
     main_loop_end = k_tiles - (stages - 1)
     for k_tile in range(0, main_loop_end, 1):
+        # Phase granularity only. This loop is a software pipeline -- it prefetches k-tile
+        # `k_tile + (stages - 1)` while computing `current_stage` and keeps that traffic in
+        # flight across the body via wait_asyncmark -- so sub-phase probes inside it would
+        # drain the very overlap being measured. See docs/ktrace_guide.md, "Software-
+        # pipelined loops". The payload is the tile index, which orders iterations in the
+        # trace; it does not identify the wave's K-slice.
+        ktrace.range_push("k_tile", k_tile)
         current_stage = k_tile % stages
         write_stage = (current_stage + stages - 1) % stages
+
         rocdl.wait_asyncmark(stages - 2)
         rocdl.s_barrier()
+
         async_load_b_to_lds(k_tile + (stages - 1), write_stage)
         async_load_a_to_lds(k_tile + (stages - 1), write_stage)
         rocdl.asyncmark()
+
         compute_stage(current_stage, k_tile)
+
         rocdl.sched_barrier(0)
+        ktrace.range_pop()  # k_tile
+
+    ktrace.range_pop()  # mainloop
+    ktrace.range_push("drain")
 
     current_stage = main_loop_end % stages
     for s in range_constexpr(0, stages - 1):
@@ -692,6 +715,9 @@ def gemm_a16w16_gfx950_kernel(
         rocdl.s_barrier()
         compute_stage(current_stage, main_loop_end + s)
         current_stage = (current_stage + 1) % stages
+
+    ktrace.range_pop()  # drain
+    ktrace.range_push("epilogue")
 
     frag_C_out = fx.make_fragment_like(frag_C, elem_dtype)
     frag_C_out.store(frag_C.load().to(elem_dtype))
@@ -740,6 +766,9 @@ def gemm_a16w16_gfx950_kernel(
     if const_expr(is_split_k):
         splitk_protocol.finish_split(split_k)
 
+    ktrace.range_pop()  # epilogue
+    ktrace.range_end(wave_lifetime)
+
 
 @flyc.kernel
 def gemm_a16w16_hti_gfx950_kernel(
@@ -782,6 +811,13 @@ def gemm_a16w16_hti_gfx950_kernel(
             block_threads,
             param.has_bias,
         )
+
+    # Same instrumentation scheme as gemm_a16w16_gfx950_kernel; stripped entirely unless
+    # FLYDSL_KTRACE_ENABLE=1. Phase granularity only: the half-tile interleave below is
+    # hand-scheduled around sched_barrier, and annotating inside it would distort the very
+    # overlap it exists to create.
+    wave_lifetime = ktrace.range_start("wave_lifetime")
+    ktrace.range_push("prologue")
 
     tid = fx.thread_idx.x
     wid = tid // GFX950_WAVE_SIZE
@@ -1040,8 +1076,14 @@ def gemm_a16w16_hti_gfx950_kernel(
     rocdl.sched_barrier(0)
     wait_vmcnt_and_barrier(half_ldg_b_iters + half_ldg_a_iters)
 
+    ktrace.range_pop()  # prologue
+    ktrace.range_push("mainloop")
+
     main_loop_end = k_tiles - 2
     for k_tile in range(0, main_loop_end, 2):
+        # The loop advances two k-tiles per iteration (half-tile interleaved), so the
+        # payload is the first tile of the pair.
+        ktrace.range_push("k_tile_pair", k_tile)
         next_k_tile = k_tile + 2
         # 0
         b0 = load_b_fragment(0, 0)
@@ -1085,6 +1127,11 @@ def gemm_a16w16_hti_gfx950_kernel(
         wait_vmcnt_and_barrier(half_ldg_b_iters + half_ldg_a_iters)
         consume(c11, a1, b1, True)
         rocdl.s_barrier()
+
+        ktrace.range_pop()  # k_tile_pair
+
+    ktrace.range_pop()  # mainloop
+    ktrace.range_push("drain_epilogue")
 
     k_tile = main_loop_end
     # 0
@@ -1150,6 +1197,9 @@ def gemm_a16w16_hti_gfx950_kernel(
         wait_vmcnt_and_barrier(0)
         store_half_tile_to_global(1, 0)
         store_half_tile_to_global(1, 1)
+
+    ktrace.range_pop()  # drain_epilogue
+    ktrace.range_end(wave_lifetime)
 
 
 @flyc.jit
