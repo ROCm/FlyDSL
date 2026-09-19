@@ -338,6 +338,12 @@ Entry Points** for multi-GPU requirements and new-kernel test/documentation
 coverage. Check new or moved tests against their actual dependencies and device
 requirements.
 
+Audit test observability, not only execution count. Count how many distinct
+operation results can affect an assertion. In loops, graph capture/replay, or
+repeated launches that write the same buffer, check whether a later write
+overwrites earlier results before they are observed; replaying ten operations
+but asserting only the final buffer is one observation, not ten.
+
 For changed atoms, use the **add-target-atom-op** skill
 ([SKILL.md](../add-target-atom-op/SKILL.md))'s applicable verification steps.
 For other changed ops or lowerings, inspect the corresponding FileCheck coverage
