@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-19T02:30:05Z",
+ "updated": "2026-09-19T03:27:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix] Promote register pred on copy_atom_call without register src\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415648096",
    "created_at": "2026-09-19T02:26:24Z",
-   "updated_at": "2026-09-19T02:28:32Z",
+   "updated_at": "2026-09-19T03:24:59Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-19T02:41:58Z",
+     "completed_at": "2026-09-19T03:14:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415648096/job/105825799348"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-19T03:10:53Z",
+     "completed_at": "2026-09-19T03:24:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415648096/job/105825799366"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-19T02:41:56Z",
+     "completed_at": "2026-09-19T03:16:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415648096/job/105825799412"
+    }
+   ]
   },
   {
    "run_id": 35415290665,
