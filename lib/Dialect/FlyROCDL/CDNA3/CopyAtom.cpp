@@ -353,6 +353,13 @@ LogicalResult CopyOpCDNA3BufferCopyLDSType::emitAtomCall(OpBuilder &builder, Loc
 
 // --- CopyOpCDNA3BufferAtomic ---
 
+static int32_t getAtomicValueBitWidth(Type valType) {
+  if (auto vectorType = dyn_cast<VectorType>(valType))
+    return vectorType.getNumElements() *
+           vectorType.getElementType().getIntOrFloatBitWidth();
+  return valType.getIntOrFloatBitWidth();
+}
+
 std::optional<unsigned> CopyOpCDNA3BufferAtomicType::getFieldIndex(AtomStateField field) {
   switch (field) {
   case AtomStateField::Soffset:
@@ -391,15 +398,15 @@ Value CopyOpCDNA3BufferAtomicType::setAtomState(OpBuilder &builder, Location loc
 Attribute CopyOpCDNA3BufferAtomicType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
 Attribute CopyOpCDNA3BufferAtomicType::getThrBitLayoutSrc() const {
-  int32_t bits = getValType().getIntOrFloatBitWidth();
+  int32_t bits = getAtomicValueBitWidth(getValType());
   return FxLayout(FxShape(FxC(1), FxC(bits)), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyOpCDNA3BufferAtomicType::getThrBitLayoutDst() const {
-  int32_t bits = getValType().getIntOrFloatBitWidth();
+  int32_t bits = getAtomicValueBitWidth(getValType());
   return FxLayout(FxShape(FxC(1), FxC(bits)), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyOpCDNA3BufferAtomicType::getThrBitLayoutRef() const {
-  int32_t bits = getValType().getIntOrFloatBitWidth();
+  int32_t bits = getAtomicValueBitWidth(getValType());
   return FxLayout(FxShape(FxC(1), FxC(bits)), FxStride(FxC(1), FxC(1)));
 }
 
