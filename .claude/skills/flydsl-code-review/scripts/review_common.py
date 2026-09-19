@@ -281,7 +281,7 @@ def usage_metrics(stages: dict, elapsed_seconds: float) -> dict:
         "wall_time_seconds": elapsed_seconds,
         "agent_attempts": len(attempts),
         "tokens": tokens,
-        "known_cost_usd": sum(c for c in costs if c is not None),
+        "known_cost_usd": math.fsum(c for c in costs if c is not None),
         "cost_is_complete": all(c is not None for c in costs),
         "attempts_without_cost": sum(c is None for c in costs),
     }

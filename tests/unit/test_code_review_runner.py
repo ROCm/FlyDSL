@@ -379,6 +379,16 @@ def test_interrupted_attempt_keeps_its_log_and_unknown_cost_on_resume(tmp_path, 
     assert resumed["metrics"]["attempts_without_cost"] == 1
 
 
+def test_cost_metric_is_independent_of_stage_insertion_order():
+    def stages(costs):
+        return {str(index): {"attempts": [{"usage": {"total_cost_usd": cost}}]} for index, cost in enumerate(costs)}
+
+    costs = [1.0, 1e-16, 1e-16]
+    forward = common.usage_metrics(stages(costs), 1)["known_cost_usd"]
+    reverse = common.usage_metrics(stages(reversed(costs)), 1)["known_cost_usd"]
+    assert forward == reverse == 1.0000000000000002
+
+
 def test_pinned_scope_survives_source_push(tmp_path, source_repo):
     root, base, head = source_repo
     run_dir = tmp_path / "pin"
