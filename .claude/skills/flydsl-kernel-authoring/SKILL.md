@@ -915,7 +915,7 @@ def myKernel(A, C, n: fx.Int32, const_n: fx.Constexpr[int],
 ```
 
 - `Config` kwargs become `Constexpr` args injected into `@jit` call
-- `Config.num_warps`, `waves_per_eu`, `maxnreg` are special compiler-level options
+- `Config.num_warps` and `waves_per_eu` are special compiler-level options
 - First call benchmarks all configs; subsequent calls use cached best
 - Disk cache at `~/.flydsl/autotune/{func_name}.json`
 - `do_bench(fn, warmup=5, rep=25)` benchmarks using CUDA/HIP events, returns median ms

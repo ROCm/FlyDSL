@@ -310,10 +310,10 @@ WHERE ks.KernelName LIKE '%target_kernel%'
 LIMIT 5;
 ```
 
-**WARNING**: Do NOT use `maxnreg` to force `accum_vgpr=0` in hopes of freeing
-register space for prefetch. This forces MFMA results through arch_vgpr via
-`v_accvgpr_read` spills, causing massive slowdown (measured 4.5x GPU kernel
-regression).
+**NOTE**: `maxnreg` has been removed (it never reached LLVM). Forcing
+`accum_vgpr=0` to free register space for prefetch was never viable anyway: it
+pushes MFMA results through arch_vgpr via `v_accvgpr_read` spills, measured at a
+4.5x GPU kernel regression. Target occupancy with `waves_per_eu`.
 
 ### What Prefetch Can and Cannot Do
 
