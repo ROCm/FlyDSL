@@ -1,15 +1,30 @@
 {
  "schema": 1,
- "updated": "2026-09-19T05:20:36Z",
+ "updated": "2026-09-19T05:22:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35423626028,
+   "pr": 1168,
+   "commit": "6932213e848e672c419a4e08cbeb61fa9414ce4d",
+   "branch": "fix/vector-buffer-atomic-layout",
+   "event": "pull_request",
+   "title": "[Bugfix] Release 0.3.4.1 with vector buffer atomic layout fix",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35423626028",
+   "created_at": "2026-09-19T05:19:00Z",
+   "updated_at": "2026-09-19T05:20:15Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 35423520040,
    "pr": 1168,
    "commit": "e349e7ca97da856046cdbdedc21ff550fb953984",
    "branch": "fix/vector-buffer-atomic-layout",
    "event": "pull_request",
-   "title": "[Bugfix] Handle vector-valued CDNA3 buffer atomic layouts",
+   "title": "[Bugfix] Release 0.3.4.1 with vector buffer atomic layout fix",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35423520040",
@@ -1880,52 +1895,6 @@
    "updated_at": "2026-09-17T06:42:20Z",
    "actor": "sjfeng1999",
    "jobs": []
-  },
-  {
-   "run_id": 35190568612,
-   "pr": null,
-   "commit": "4541dd908acf4b91564b3bde2344f8c90b27f984",
-   "branch": "main",
-   "event": "push",
-   "title": "[Enh] Give Align fields alignas-like value semantics (#1141)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612",
-   "created_at": "2026-09-17T06:36:18Z",
-   "updated_at": "2026-09-17T07:57:05Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T06:53:42Z",
-     "completed_at": "2026-09-17T07:57:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612/job/105105140685"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T06:50:11Z",
-     "completed_at": "2026-09-17T07:50:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612/job/105105140686",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T06:50:06Z",
-     "completed_at": "2026-09-17T07:09:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612/job/105105140742"
-    }
-   ]
   }
  ]
 }
