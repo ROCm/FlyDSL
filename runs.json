@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-19T03:33:07Z",
+ "updated": "2026-09-19T05:20:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35423520040,
+   "pr": 1168,
+   "commit": "e349e7ca97da856046cdbdedc21ff550fb953984",
+   "branch": "fix/vector-buffer-atomic-layout",
+   "event": "pull_request",
+   "title": "[Bugfix] Handle vector-valued CDNA3 buffer atomic layouts",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35423520040",
+   "created_at": "2026-09-19T05:16:35Z",
+   "updated_at": "2026-09-19T05:18:14Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35422104515,
+   "pr": 1128,
+   "commit": "efa3a93efcf942ff0085a10ba7598fbc102484a9",
+   "branch": "codex/scaled-tiled-gemm",
+   "event": "pull_request",
+   "title": "Support variadic operands in fully expanded tiled GEMM",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35422104515",
+   "created_at": "2026-09-19T04:44:29Z",
+   "updated_at": "2026-09-19T05:01:26Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-19T05:01:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35422104515/job/105843514818"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-19T05:03:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35422104515/job/105843514849"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-19T05:01:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35422104515/job/105843514852"
+    }
+   ]
+  },
   {
    "run_id": 35415648096,
    "pr": null,
@@ -1868,36 +1926,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35190568612/job/105105140742"
     }
    ]
-  },
-  {
-   "run_id": 35189483341,
-   "pr": 1110,
-   "commit": "fabcc7c412c0088fed1e75e82fca23f77b8e6123",
-   "branch": "fix/llvm-amdgpu-cvt-pk-f32-f8-true16",
-   "event": "pull_request",
-   "title": "[LLVM] Fix true16 lowering for packed FP8 conversions",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35189483341",
-   "created_at": "2026-09-17T06:21:40Z",
-   "updated_at": "2026-09-17T06:21:40Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
-  },
-  {
-   "run_id": 35188472955,
-   "pr": null,
-   "commit": "ef6255cc8d1beaa6747e8fb18afe9000e680ce54",
-   "branch": "feat/rocdl-cvt-f32-fp8",
-   "event": "pull_request",
-   "title": "[DSL] Expose F32_FP8 conversion from packed_i32",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35188472955",
-   "created_at": "2026-09-17T06:07:20Z",
-   "updated_at": "2026-09-17T06:07:20Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
   }
  ]
 }
