@@ -387,6 +387,35 @@ mma = fx.atom_set_value(mma, "scale_b", fx.Int32(scale_b))
 fx.gemm(mma, frag_C, frag_A, frag_B, frag_C)
 ```
 
+For per-tile scales, pass each operand as a list or tuple containing its data
+and scale fragments:
+
+```python
+fx.gemm(tiled_mma, frag_D, [frag_A, scales_A], [frag_B, scales_B], frag_C)
+```
+
+If A has shape `(V, M, K)`, its scale fragment has shape `(1, M, K)`; B uses
+`(1, N, K)`. Rank-2 operands omit the K mode. Scales use i32 for CDNA4 MFMA
+and block-32 WMMA, or i64 for block-16 WMMA. Use zero strides in tile modes
+to broadcast a scale. The compiler slices all tensors in each operand group
+together and fully expands the static M/N/K dimensions.
+
+The first tensor is always the primary operand. Further tensors are defined
+by the MMA atom; the interface can also represent a three-input group such
+as `[data, scales, metadata]` when an atom supports it. Single Tensor operands
+and scalar atom-state keywords remain supported for both bare atoms and tiled
+MMA. `tiled_mma.set_value("scale_a", scale)` returns a new tiled MMA with the
+same layout and permutation. Explicit scale tensors override the corresponding
+atom-state fields; omitted scale tensors use those fields. The current scaled atoms
+accept data and an optional scale; they do not consume sparsity metadata.
+
+The low-level Python dialect builders also accept the legacy single-value form
+for A and B and normalize it to singleton groups. Textual MLIR keeps the legacy
+bare operand syntax for singleton groups and uses brackets only for multi-value
+groups, for example `%a, %b` versus
+`[%a, %scale_a], [%b, %scale_b]`. The parser accepts either spelling for a
+singleton group.
+
 **TDM async copy atom** — the **base pointer comes from the `copy_atom_call` global
 operand** (its pointer); the per-dim extent (HW out-of-bounds handling), per-dim
 stride, `imm_offset` (K-loop tile bump), and MCAST `workgroup_mask` are runtime

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
+#include "../MmaScaleUtils.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
@@ -205,11 +207,18 @@ static Type getScaledWmmaABType(MLIRContext *ctx, int32_t rows, int32_t k, Type 
   return VectorType::get({i32count}, IntegerType::get(ctx, 32));
 }
 
-FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc,
-                                                             Type resultTy, Type mmaAtomTyArg,
-                                                             Type dTyArg, Type aTyArg, Type bTyArg,
-                                                             Type cTyArg, Value atomVal, Value d,
-                                                             Value a, Value b, Value c) const {
+FailureOr<Value>
+MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type resultTy,
+                                            Type mmaAtomTyArg, Type dTyArg, TypeRange aTyArgs,
+                                            TypeRange bTyArgs, Type cTyArg, Value atomVal, Value d,
+                                            ValueRange aValues, ValueRange bValues, Value c) const {
+  if (aValues.empty() || aValues.size() > 2 || bValues.empty() || bValues.size() > 2) {
+    emitError(loc, "scaled MMA expects [data] or [data, scale] for each operand");
+    return failure();
+  }
+  Value a = aValues.front();
+  Value b = bValues.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -231,10 +240,13 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
   if (c.getType() != accTy)
     c = LLVM::BitcastOp::create(builder, loc, accTy, c);
 
-  Value scaleA = LLVM::ExtractValueOp::create(
-      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});
-  Value scaleB = LLVM::ExtractValueOp::create(
-      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
+  Type scaleType = builder.getIntegerType(getBlockSize() == 16 ? 64 : 32);
+  auto scaleA = getMmaScale(builder, loc, aTyArgs, aValues, scaleType, atomVal,
+                            *getFieldIndex(AtomStateField::ScaleA));
+  auto scaleB = getMmaScale(builder, loc, bTyArgs, bValues, scaleType, atomVal,
+                            *getFieldIndex(AtomStateField::ScaleB));
+  if (failed(scaleA) || failed(scaleB))
+    return failure();
 
   // fmtScaleA / fmtScaleB default to 0 (E8M0). modC / reuseA / reuseB come from
   // the atom's compile-time params. block-16 selects the V_WMMA_SCALE16 form
@@ -248,12 +260,12 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
   if (m == 32 && n == 16 && k == 128) {
     if (block16)
       return ROCDL::wmma_scale16_f32_32x16x128_f4::create(
-                 builder, loc, accTy, a, b, modC, c, scaleAType, fmtScale0, scaleA, scaleBType,
-                 fmtScale0, scaleB, getReuseA(), getReuseB())
+                 builder, loc, accTy, a, b, modC, c, scaleAType, fmtScale0, *scaleA, scaleBType,
+                 fmtScale0, *scaleB, getReuseA(), getReuseB())
           .getResult();
     return ROCDL::wmma_scale_f32_32x16x128_f4::create(builder, loc, accTy, a, b, modC, c,
-                                                      scaleAType, fmtScale0, scaleA, scaleBType,
-                                                      fmtScale0, scaleB, getReuseA(), getReuseB())
+                                                      scaleAType, fmtScale0, *scaleA, scaleBType,
+                                                      fmtScale0, *scaleB, getReuseA(), getReuseB())
         .getResult();
   }
 
@@ -267,20 +279,28 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
 
   if (block16)
     return ROCDL::wmma_scale16_f32_16x16x128_f8f6f4::create(
-               builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, scaleA,
-               scaleBType, fmtScale0, scaleB, getReuseA(), getReuseB())
+               builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, *scaleA,
+               scaleBType, fmtScale0, *scaleB, getReuseA(), getReuseB())
         .getResult();
   return ROCDL::wmma_scale_f32_16x16x128_f8f6f4::create(
-             builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, scaleA,
-             scaleBType, fmtScale0, scaleB, getReuseA(), getReuseB())
+             builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, *scaleA,
+             scaleBType, fmtScale0, *scaleB, getReuseA(), getReuseB())
       .getResult();
 }
 
 LogicalResult MmaOpGFX1250_WMMAScaleType::emitAtomCall(OpBuilder &builder, Location loc,
-                                                       Type mmaAtomTy, Type dMemTy, Type aMemTy,
-                                                       Type bMemTy, Type cMemTy, Value atomVal,
-                                                       Value dPtr, Value aPtr, Value bPtr,
+                                                       Type mmaAtomTy, Type dMemTy,
+                                                       TypeRange aMemTys, TypeRange bMemTys,
+                                                       Type cMemTy, Value atomVal, Value dPtr,
+                                                       ValueRange aPtrs, ValueRange bPtrs,
                                                        Value cPtr) const {
+  if (aPtrs.empty() || aPtrs.size() > 2 || bPtrs.empty() || bPtrs.size() > 2) {
+    emitError(loc, "scaled MMA expects [data] or [data, scale] for each operand");
+    return failure();
+  }
+  Value aPtr = aPtrs.front();
+  Value bPtr = bPtrs.front();
+
   MLIRContext *ctx = builder.getContext();
   Type abTyA = getScaledWmmaABType(ctx, getM(), getK(), getElemTyA());
   Type abTyB = getScaledWmmaABType(ctx, getN(), getK(), getElemTyB());
@@ -292,8 +312,14 @@ LogicalResult MmaOpGFX1250_WMMAScaleType::emitAtomCall(OpBuilder &builder, Locat
   Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
   Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
   Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
-  auto res = emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, abTyA, abTyB, accTy, atomVal,
-                             Value{}, a, b, c);
+  SmallVector<Value> aValues{a}, bValues{b};
+  SmallVector<Type> aTypes{abTyA}, bTypes{abTyB};
+  llvm::append_range(aValues, aPtrs.drop_front());
+  llvm::append_range(bValues, bPtrs.drop_front());
+  llvm::append_range(aTypes, aMemTys.drop_front());
+  llvm::append_range(bTypes, bMemTys.drop_front());
+  auto res = emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, aTypes, bTypes, accTy, atomVal,
+                             Value{}, aValues, bValues, c);
   if (failed(res))
     return failure();
   LLVM::StoreOp::create(builder, loc, *res, dPtr);

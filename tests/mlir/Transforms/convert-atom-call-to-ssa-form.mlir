@@ -281,7 +281,7 @@ gpu.module @convert_atom_call_to_ssa_form {
   // CHECK-DAG: %[[B_PTR:.*]] = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<f16, register>
   // CHECK: %[[A:.*]] = fly.ptr.load(%[[A_PTR]]) : (!fly.ptr<f16, register>) -> vector<4xf16>
   // CHECK: %[[B:.*]] = fly.ptr.load(%[[B_PTR]]) : (!fly.ptr<f16, register>) -> vector<4xf16>
-  // CHECK: fly.mma_atom_call_ssa(%{{.*}}, %{{.*}}, %[[A]], %[[B]], %{{.*}}) :
+  // CHECK: fly.mma_atom_call_ssa(%{{.*}}, %[[A]], %[[B]], %{{.*}}) dst = %{{.*}} :
   // CHECK-SAME: (!fly.mma_atom<!fly_rocdl.cdna3.mfma<16x16x16, (f16, f16) -> f32>>,
   // CHECK-SAME: !fly.memref<f32, register, (4,2):(1,8)>, vector<4xf16>, vector<4xf16>,
   // CHECK-SAME: !fly.memref<f32, register, (4,2):(1,8)>) -> ()
