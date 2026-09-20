@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-09-20T03:33:56Z",
+ "updated": "2026-09-20T04:55:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35490230567,
+   "pr": 1154,
+   "commit": "6bf71b0a7ebdac89fece602b66e521ce964cf3f8",
+   "branch": "phil/llvm-skill-only",
+   "event": "pull_request",
+   "title": "[llvm][Skill] Add an LLVM kernel-tuning and verification skill",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35490230567",
+   "created_at": "2026-09-20T04:52:25Z",
+   "updated_at": "2026-09-20T04:54:05Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T04:54:01Z",
+     "completed_at": "2026-09-20T04:54:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35490230567/job/106023937873"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T04:53:59Z",
+     "completed_at": "2026-09-20T04:54:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35490230567/job/106023937877",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T04:53:59Z",
+     "completed_at": "2026-09-20T04:54:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35490230567/job/106023937880"
+    }
+   ]
+  },
   {
    "run_id": 35485245160,
    "pr": 1162,
@@ -10,19 +56,19 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160",
    "created_at": "2026-09-20T02:55:26Z",
-   "updated_at": "2026-09-20T03:19:59Z",
+   "updated_at": "2026-09-20T04:53:16Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-20T03:19:59Z",
+     "started_at": "2026-09-20T04:53:15Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160/job/106013176538"
     },
@@ -38,11 +84,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-20T03:20:11Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160/job/106013176561"
+     "completed_at": "2026-09-20T04:17:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160/job/106013176561",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -1949,21 +1998,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296707147/job/105457149502"
     }
    ]
-  },
-  {
-   "run_id": 35296538700,
-   "pr": null,
-   "commit": "b3c9299830524634045d004eab1ad2b0c757bc8d",
-   "branch": "codex/fix-release-tag-generation",
-   "event": "pull_request",
-   "title": "Fix monotonic dev tag generation in shallow worktrees",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296538700",
-   "created_at": "2026-09-18T01:44:26Z",
-   "updated_at": "2026-09-18T01:47:01Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
