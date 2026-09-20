@@ -333,8 +333,9 @@ Worked example (PA decode, gfx942): arch 144 + accum 136 = 280 combined → `512
 wave/SIMD, VGPR-bound (LDS allows 5, SGPR allows 7). Reaching 2 waves needs
 combined ≤ 256, e.g. freeing ~24 VGPRs.
 
-**Warning**: `maxnreg` forcing `accum_vgpr=0` doubles occupancy but causes MFMA spills through
-arch_vgpr — measured 4.5x GPU slowdown. Do not use `maxnreg` for MFMA-heavy kernels.
+**Note**: `maxnreg` has been removed (it never reached LLVM). Forcing
+`accum_vgpr=0` with it doubled occupancy but caused MFMA spills through
+arch_vgpr — measured 4.5x GPU slowdown. Use `waves_per_eu` instead.
 
 ### L2 / HBM efficiency analysis (PMC, not ATT)
 

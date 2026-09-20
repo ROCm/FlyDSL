@@ -277,7 +277,7 @@ where out-of-range reads return zero and writes are suppressed. The byte count
 may be dynamic. Omitting it keeps the default unchecked descriptor; passing
 `max_size=False` derives the count from the tensor layout and enables checking.
 
-See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma-tdm-atoms-wave32) below for the
+See [gfx1250 WMMA & TDM atoms](#wmma-tdm-atoms) below for the
 gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.
 
 #### MFMA instructions
@@ -329,6 +329,8 @@ val = rocdl.ds_bpermute(idx, src)
 data = rocdl.raw_ptr_buffer_load(rsrc, offset, soffset, aux)
 rocdl.raw_ptr_buffer_store(data, rsrc, offset, soffset, aux)
 ```
+
+(wmma-tdm-atoms)=
 
 #### gfx1250 WMMA & TDM atoms (wave32)
 

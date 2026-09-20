@@ -659,11 +659,27 @@ public:
     Type resultTy = hasResult ? op.getResult(0).getType() : Type{};
     Type dstTy = op.getDst() ? op.getDst().getType() : Type{};
 
+    // SSA-form copies may retain a register memref predicate. Normalize it
+    // here so every SSA emitter receives a scalar i1 condition.
+    if (pred) {
+      if (auto predMemTy = dyn_cast<fly::MemRefType>(op.getPred().getType())) {
+        if (!isGenericAddressSpace<AddressSpace::Register>(predMemTy.getAddressSpace()) ||
+            !predMemTy.getElemTy().isInteger(1) || !isa<LLVM::LLVMPointerType>(pred.getType()))
+          return op.emitOpError(
+              "expected an i1 register memref predicate with a lowered LLVM pointer");
+        auto predPtr = applySwizzleOnPtr(
+            rewriter, loc, cast<TypedValue<LLVM::LLVMPointerType>>(pred), predMemTy.getSwizzle());
+        pred = LLVM::LoadOp::create(rewriter, loc, rewriter.getI1Type(), predPtr);
+      }
+      if (!pred.getType().isInteger(1))
+        return op.emitOpError("expected a scalar i1 predicate after SSA lowering");
+    }
+
     FailureOr<Value> result;
     if (pred) {
       result = copyAtom.emitAtomCallSSA(rewriter, loc, resultTy, copyAtomType, srcTy, dstTy,
-                                        op.getPred().getType(), adaptor.getCopyAtom(),
-                                        adaptor.getSrc(), adaptor.getDst(), pred);
+                                        pred.getType(), adaptor.getCopyAtom(), adaptor.getSrc(),
+                                        adaptor.getDst(), pred);
     } else {
       result = copyAtom.emitAtomCallSSA(rewriter, loc, resultTy, copyAtomType, srcTy, dstTy,
                                         adaptor.getCopyAtom(), adaptor.getSrc(), adaptor.getDst());

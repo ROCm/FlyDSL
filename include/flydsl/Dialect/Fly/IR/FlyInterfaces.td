@@ -133,7 +133,8 @@ def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface"> {
            "::mlir::Value":$src,
            "::mlir::Value":$dst)>,
     InterfaceMethod<
-      "Emit SSA-form predicated copy: reads src under predicate, returns vector result.",
+      "Emit SSA-form predicated copy with a scalar i1 predicate (normalized by lowering); "
+      "reads src under predicate and returns a result when resultTy is present.",
       "::mlir::FailureOr<::mlir::Value>",
       "emitAtomCallSSA",
       (ins "::mlir::OpBuilder &":$builder,

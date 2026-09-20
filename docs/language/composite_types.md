@@ -7,9 +7,10 @@ A composite gives one name to several DSL values. There are exactly two forms �
 **product** in which every declared field is present, and `@fx.union`, a **storage overlay** in
 which every field starts at byte offset zero.
 
-A composite adds no capability of its own. Its whole semantics is *inheritance by field*: a
-composite supports exactly the protocols all of its fields support, recursively. Everything below is
-a consequence of that one rule.
+A composite's generated DSL protocols follow *inheritance by field*: it supports exactly the
+protocols all of its fields support, recursively. A struct can also define member methods and
+properties that operate on those fields. These members add behavior without changing the fields,
+their storage layout, or the generated protocol implementations.
 
 A composite is also a trace-time Python type, not a value in the generated MLIR program: grouping
 fields emits no aggregate operation.
@@ -60,6 +61,57 @@ fx.Struct[fx.Int32, fx.Float32] # ⇒ generated field names `_0`, `_1`
 | `value.replace(⟨field⟩=new)` | method | a new value with that field replaced | `pair.replace(left=3)` |
 
 
+## Member methods and properties
+
+The decorator form preserves user-defined Python methods, read-only `property` getters,
+`staticmethod` and `classmethod` descriptors, and supported operators. Private helper methods
+such as `_sum` are allowed.
+
+```python
+@fx.struct
+class Item:
+    key: fx.Int32
+    weight: fx.Float32
+
+    @property
+    def score(self):
+        return self.key.to(fx.Float32) * self.weight
+
+    def scaled(self, factor):
+        return self.replace(weight=self.weight * factor)
+
+    @classmethod
+    def unit(cls, key):
+        return cls(key, 1.0)
+
+    def __lt__(self, other):
+        return self.key < other.key
+
+item = Item.unit(3)
+updated = item.scaled(2.0)      # a new Item; item.weight remains 1.0
+```
+
+Only annotations declare data fields. Methods do not add ABI arguments or storage bytes. Ordinary
+methods execute as Python while tracing and emit the same DSL operations as a free function. Use
+`@flyc.jit` on a method whose body contains dynamic DSL control flow:
+
+```python
+@fx.struct
+class Position:
+    x: fx.Int32
+
+    @flyc.jit
+    def abs_x(self):
+        result = self.x
+        if result < 0:
+            result = -result
+        return result
+```
+
+Struct definitions are immutable by contract. After declaration, do not change fields,
+methods, annotations, compile hints or referenced class bindings.
+
+
 ### Reserved field names
 
 A field is read as an ordinary attribute, and Python resolves a real class member before it ever
@@ -68,13 +120,14 @@ shadowed by it, so those names are rejected at declaration instead of failing my
 
 | Reserved | Why the name is taken |
 |---|---|
-| `replace` | the only public member of a `@fx.struct` value |
+| `replace` | the generated member for immutable field replacement |
 | `peek`, `poke` | the public members of the `Storage[T]` view a composite type is reached through (see [Storage and Allocator](storage_and_allocator.md#fxstoraget-a-typed-address)) |
 | any name starting with `_` | the implementation's own namespace |
 
-The rule covers `@fx.union` and the inline `fx.Struct[...]` / `fx.Union[...]` forms equally — a
-union is reached through the same `Storage` view. Only the names generated for anonymous inline
-fields (`_0`, `_1`, …) are exempt from the underscore rule; it applies to every name you write.
+User method/property names also cannot collide with declared fields. The rule covers `@fx.union` and
+the inline `fx.Struct[...]` / `fx.Union[...]` forms equally — a union is reached through the same
+`Storage` view. Only the names generated for anonymous inline fields (`_0`, `_1`, …) are exempt from
+the underscore rule; it applies to every name you write.
 
 
 ## What can be a field

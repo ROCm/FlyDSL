@@ -54,7 +54,13 @@ public:
     SmallVector<MmaAtomCall> mmaOpsToConvert;
 
     moduleOp->walk([&](CopyAtomCall op) {
-      if (isEligibleToPromote(op.getSrc().getType()) || isEligibleToPromote(op.getDst().getType()))
+      // A register-space pred needs promoting on its own account: a global ->
+      // shared copy has neither operand in registers, but leaving the pred
+      // behind strands a register pointer that the later rmem-to-vector-SSA
+      // pass cannot rewrite.
+      bool predEligible = op.getPred() && isEligibleToPromote(op.getPred().getType());
+      if (isEligibleToPromote(op.getSrc().getType()) ||
+          isEligibleToPromote(op.getDst().getType()) || predEligible)
         copyOpsToConvert.push_back(op);
     });
 

@@ -972,8 +972,11 @@ FailureOr<Value> CopyOpCDNA5TensorLoadType::emitAtomCallSSA(OpBuilder &builder, 
 FailureOr<Value> CopyOpCDNA5TensorLoadType::emitAtomCallSSA(
     OpBuilder &builder, Location loc, Type resultTy, Type copyAtomTyArg, Type srcTyArg,
     Type dstTyArg, Type predTyArg, Value atomVal, Value src, Value dst, Value pred) const {
-  if (failed(emitAtomCall(builder, loc, copyAtomTyArg, srcTyArg, dstTyArg, predTyArg, atomVal, src,
-                          dst, pred)))
+  // src/dst remain in memory; the SSA predicate controls instruction issue.
+  OpBuilder::InsertionGuard guard(builder);
+  auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, pred, /*withElse=*/false);
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  if (failed(emitAtomCall(builder, loc, copyAtomTyArg, srcTyArg, dstTyArg, atomVal, src, dst)))
     return failure();
   return Value{};
 }
@@ -1059,8 +1062,11 @@ FailureOr<Value> CopyOpCDNA5TensorStoreType::emitAtomCallSSA(OpBuilder &builder,
 FailureOr<Value> CopyOpCDNA5TensorStoreType::emitAtomCallSSA(
     OpBuilder &builder, Location loc, Type resultTy, Type copyAtomTyArg, Type srcTyArg,
     Type dstTyArg, Type predTyArg, Value atomVal, Value src, Value dst, Value pred) const {
-  if (failed(emitAtomCall(builder, loc, copyAtomTyArg, srcTyArg, dstTyArg, predTyArg, atomVal, src,
-                          dst, pred)))
+  // src/dst remain in memory; the SSA predicate controls instruction issue.
+  OpBuilder::InsertionGuard guard(builder);
+  auto ifOp = scf::IfOp::create(builder, loc, TypeRange{}, pred, /*withElse=*/false);
+  builder.setInsertionPointToStart(&ifOp.getThenRegion().front());
+  if (failed(emitAtomCall(builder, loc, copyAtomTyArg, srcTyArg, dstTyArg, atomVal, src, dst)))
     return failure();
   return Value{};
 }
