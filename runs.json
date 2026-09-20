@@ -1,8 +1,68 @@
 {
  "schema": 1,
- "updated": "2026-09-20T01:08:40Z",
+ "updated": "2026-09-20T01:10:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35480648735,
+   "pr": 1167,
+   "commit": "e011da818d9a3fd9cf1de0c54b82927ed05143e5",
+   "branch": "pr/enh-coop-warp-primitives",
+   "event": "pull_request",
+   "title": "[Ext][Coop] Add more warp-level primitives",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480648735",
+   "created_at": "2026-09-20T01:09:22Z",
+   "updated_at": "2026-09-20T01:09:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35480600803,
+   "pr": 1174,
+   "commit": "e2a92f1974965af531eee12a018042d000187546",
+   "branch": "codex/bump-version-0.4.0",
+   "event": "pull_request",
+   "title": "[Release] Bump version to 0.4.0",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600803",
+   "created_at": "2026-09-20T01:08:15Z",
+   "updated_at": "2026-09-20T01:08:38Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35480600260,
+   "pr": null,
+   "commit": "4acdec678e592ab0f9d69c9b58b2f22ff2a28e6f",
+   "branch": "main",
+   "event": "push",
+   "title": "test: align cache IR assertion with serialization (#1171)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600260",
+   "created_at": "2026-09-20T01:08:14Z",
+   "updated_at": "2026-09-20T01:09:25Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35480587161,
+   "pr": null,
+   "commit": "6c5e39d4bf1b1fd3c2375c365ad248192295b3ae",
+   "branch": "main",
+   "event": "push",
+   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen (#1153)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480587161",
+   "created_at": "2026-09-20T01:07:57Z",
+   "updated_at": "2026-09-20T01:08:15Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 35479964600,
    "pr": 1171,
@@ -14,9 +74,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35479964600",
    "created_at": "2026-09-20T00:53:51Z",
-   "updated_at": "2026-09-20T00:55:50Z",
+   "updated_at": "2026-09-20T01:08:29Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-20T01:08:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35479964600/job/105997471615"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-20T01:07:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35479964600/job/105997471616"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-20T01:07:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35479964600/job/105997471635"
+    }
+   ]
   },
   {
    "run_id": 35425940335,
@@ -25,11 +113,11 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Restore aiter tests in PyPI workflow (#1169)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35425940335",
    "created_at": "2026-09-19T06:11:35Z",
-   "updated_at": "2026-09-19T06:28:33Z",
+   "updated_at": "2026-09-20T01:07:59Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -53,10 +141,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-19T06:28:33Z",
-     "completed_at": null,
+     "completed_at": "2026-09-20T01:07:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35425940335/job/105853785049"
     }
    ]
@@ -787,7 +875,7 @@
   },
   {
    "run_id": 35322221682,
-   "pr": 1153,
+   "pr": null,
    "commit": "be7c6433155895bd618b85e67df2ba1b1c77c064",
    "branch": "phil/drop-inert-llvm-knobs",
    "event": "pull_request",
@@ -1205,7 +1293,7 @@
   },
   {
    "run_id": 35314191043,
-   "pr": 1153,
+   "pr": null,
    "commit": "a14afdf020e1610cd66c97fafdcd8a4cb0a6e63d",
    "branch": "phil/drop-inert-llvm-knobs",
    "event": "pull_request",
@@ -1251,7 +1339,7 @@
   },
   {
    "run_id": 35313745575,
-   "pr": 1153,
+   "pr": null,
    "commit": "4f572fd5fb32555eaac89d3a792746eacb8fddc6",
    "branch": "phil/drop-inert-llvm-knobs",
    "event": "pull_request",
@@ -1790,156 +1878,6 @@
      "started_at": "2026-09-17T10:49:22Z",
      "completed_at": "2026-09-17T11:03:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35210617651/job/105172913188"
-    }
-   ]
-  },
-  {
-   "run_id": 35202518937,
-   "pr": 1155,
-   "commit": "32293a75eaa865ef394abe8d4c8160ca419eca5c",
-   "branch": "rchamber/flex-tile16-2wave",
-   "event": "pull_request",
-   "title": "gfx950 flex attention with user score/mask mods",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35202518937",
-   "created_at": "2026-09-17T08:57:49Z",
-   "updated_at": "2026-09-17T08:59:07Z",
-   "actor": "RichardChamberlain1",
-   "jobs": []
-  },
-  {
-   "run_id": 35200931130,
-   "pr": 1144,
-   "commit": "d4f891c591f26d717eead2a83d9d6f21affb5920",
-   "branch": "xudoyuan/for-range-unroll",
-   "event": "pull_request",
-   "title": "Support unroll/unroll_full on dynamic for-range loops",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35200931130",
-   "created_at": "2026-09-17T08:40:19Z",
-   "updated_at": "2026-09-17T11:24:54Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T09:11:34Z",
-     "completed_at": "2026-09-17T09:23:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35200931130/job/105140357858"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T10:49:33Z",
-     "completed_at": "2026-09-17T11:24:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35200931130/job/105140358014"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T08:58:11Z",
-     "completed_at": "2026-09-17T10:11:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35200931130/job/105140358024",
-     "machine": "smci350-rck-g03-d07-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35199871362,
-   "pr": null,
-   "commit": "9a5cbc97a6d85b15601eeb66ebfcfb47387eb4d4",
-   "branch": "main",
-   "event": "push",
-   "title": "[Enh] Make specialized Vector and Pointer types Storable (#1148)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199871362",
-   "created_at": "2026-09-17T08:28:42Z",
-   "updated_at": "2026-09-17T09:53:53Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T09:12:26Z",
-     "completed_at": "2026-09-17T09:51:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199871362/job/105138621012"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T08:51:59Z",
-     "completed_at": "2026-09-17T09:53:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199871362/job/105138621091",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T08:51:53Z",
-     "completed_at": "2026-09-17T09:11:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199871362/job/105138621153"
-    }
-   ]
-  },
-  {
-   "run_id": 35199150440,
-   "pr": null,
-   "commit": "5195831401950c07cd903d8829fb93927ad57518",
-   "branch": "xudoyuan/for-range-unroll",
-   "event": "pull_request",
-   "title": "Support unroll/unroll_full on dynamic for-range loops",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199150440",
-   "created_at": "2026-09-17T08:20:31Z",
-   "updated_at": "2026-09-17T08:40:45Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-17T08:39:35Z",
-     "completed_at": "2026-09-17T08:40:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199150440/job/105134932369"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-17T08:39:41Z",
-     "completed_at": "2026-09-17T08:40:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199150440/job/105134932398"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-17T08:39:20Z",
-     "completed_at": "2026-09-17T08:40:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199150440/job/105134932448"
     }
    ]
   }
