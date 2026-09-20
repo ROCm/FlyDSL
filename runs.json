@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-19T21:24:46Z",
+ "updated": "2026-09-20T01:08:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35479964600,
+   "pr": 1171,
+   "commit": "bf2e7e3cb6dbf9f3e709d881d560275dc578c364",
+   "branch": "codex/fix-cross-process-cache-test",
+   "event": "pull_request",
+   "title": "[CI] Fix cross-process cache IR assertion",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35479964600",
+   "created_at": "2026-09-20T00:53:51Z",
+   "updated_at": "2026-09-20T00:55:50Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 35425940335,
    "pr": null,
@@ -1925,52 +1940,6 @@
      "started_at": "2026-09-17T08:39:20Z",
      "completed_at": "2026-09-17T08:40:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35199150440/job/105134932448"
-    }
-   ]
-  },
-  {
-   "run_id": 35195556583,
-   "pr": 987,
-   "commit": "29a282364f1a6583ca9db78431a8c9b15adb4e4c",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35195556583",
-   "created_at": "2026-09-17T07:38:38Z",
-   "updated_at": "2026-09-17T09:11:53Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T08:03:48Z",
-     "completed_at": "2026-09-17T09:00:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35195556583/job/105124562887",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T08:11:57Z",
-     "completed_at": "2026-09-17T09:11:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35195556583/job/105124562971"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T08:09:46Z",
-     "completed_at": "2026-09-17T08:22:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35195556583/job/105124562975"
     }
    ]
   }
