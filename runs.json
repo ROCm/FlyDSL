@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-20T04:55:32Z",
+ "updated": "2026-09-20T05:47:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -56,20 +56,20 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160",
    "created_at": "2026-09-20T02:55:26Z",
-   "updated_at": "2026-09-20T04:53:16Z",
+   "updated_at": "2026-09-20T05:45:33Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-20T04:53:15Z",
-     "completed_at": null,
+     "completed_at": "2026-09-20T05:45:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160/job/106013176538"
     },
     {
