@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-20T02:40:16Z",
+ "updated": "2026-09-20T02:41:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -56,11 +56,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484149350",
    "created_at": "2026-09-20T02:30:10Z",
-   "updated_at": "2026-09-20T02:32:03Z",
+   "updated_at": "2026-09-20T02:39:09Z",
    "actor": "jli-melchior",
    "jobs": []
   },
