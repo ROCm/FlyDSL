@@ -756,7 +756,8 @@ def test_definition_cache_keys_are_stable_across_processes(tmp_path, monkeypatch
     assert first["compiled"] and first["hits"] == 0
     assert not reused["compiled"] and reused["hits"] == 1
     assert changed["compiled"] and changed["hits"] == 0
-    assert "arith.constant 1" in reused["ir"]
+    assert "arith.constant 1" in first["ir"]
+    assert reused["ir"] is None
     assert "arith.constant 9" in changed["ir"]
 
 
