@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-20T01:10:55Z",
+ "updated": "2026-09-20T01:12:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35480673166,
+   "pr": null,
+   "commit": "7ce8ad56cb4bb23ac9b705f9161a45e5257ee6d1",
+   "branch": "main",
+   "event": "push",
+   "title": "Version: bump version to 0.4.0 (#1174)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480673166",
+   "created_at": "2026-09-20T01:09:57Z",
+   "updated_at": "2026-09-20T01:10:51Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 35480648735,
    "pr": 1167,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480648735",
    "created_at": "2026-09-20T01:09:22Z",
-   "updated_at": "2026-09-20T01:09:22Z",
+   "updated_at": "2026-09-20T01:10:49Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -24,12 +39,12 @@
    "commit": "e2a92f1974965af531eee12a018042d000187546",
    "branch": "codex/bump-version-0.4.0",
    "event": "pull_request",
-   "title": "[Release] Bump version to 0.4.0",
+   "title": "[Verion] Bump version to 0.4.0",
    "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600803",
    "created_at": "2026-09-20T01:08:15Z",
-   "updated_at": "2026-09-20T01:08:38Z",
+   "updated_at": "2026-09-20T01:10:14Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "main",
    "event": "push",
    "title": "test: align cache IR assertion with serialization (#1171)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600260",
    "created_at": "2026-09-20T01:08:14Z",
-   "updated_at": "2026-09-20T01:09:25Z",
+   "updated_at": "2026-09-20T01:09:58Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1832,52 +1847,6 @@
      "started_at": "2026-09-17T14:40:14Z",
      "completed_at": "2026-09-17T14:55:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35231034319/job/105248888869"
-    }
-   ]
-  },
-  {
-   "run_id": 35210617651,
-   "pr": 1155,
-   "commit": "531b88dc69311047433bfcec4bb2d948773d7a6d",
-   "branch": "rchamber/flex-tile16-2wave",
-   "event": "pull_request",
-   "title": "gfx950 flex attention with user score/mask mods",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35210617651",
-   "created_at": "2026-09-17T10:27:54Z",
-   "updated_at": "2026-09-17T15:22:46Z",
-   "actor": "RichardChamberlain1",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T14:41:34Z",
-     "completed_at": "2026-09-17T15:22:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35210617651/job/105172913069"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T10:49:36Z",
-     "completed_at": "2026-09-17T11:54:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35210617651/job/105172913125",
-     "machine": "cv350-odcdh2-b11-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T10:49:22Z",
-     "completed_at": "2026-09-17T11:03:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35210617651/job/105172913188"
     }
    ]
   }
