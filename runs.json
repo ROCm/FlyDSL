@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-20T05:47:16Z",
+ "updated": "2026-09-20T06:01:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35493044476,
+   "pr": 1162,
+   "commit": "96f01ec51041c7ab6af1eb242f3b915c645178a5",
+   "branch": "feature/ktrace-dialect-squashed",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35493044476",
+   "created_at": "2026-09-20T05:59:21Z",
+   "updated_at": "2026-09-20T05:59:49Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35490230567,
    "pr": 1154,
@@ -57,29 +72,20 @@
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160",
    "created_at": "2026-09-20T02:55:26Z",
-   "updated_at": "2026-09-20T05:45:33Z",
+   "updated_at": "2026-09-20T05:59:32Z",
    "actor": "Phil-amd",
    "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-20T04:53:15Z",
-     "completed_at": "2026-09-20T05:45:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160/job/106013176538"
-    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-20T03:20:19Z",
-     "completed_at": "2026-09-20T03:29:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160/job/106013176558"
+     "conclusion": "cancelled",
+     "started_at": "2026-09-20T05:46:52Z",
+     "completed_at": "2026-09-20T05:59:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160/job/106029809450"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -88,10 +94,19 @@
      "conclusion": "success",
      "started_at": "2026-09-20T03:20:11Z",
      "completed_at": "2026-09-20T04:17:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160/job/106013176561",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160/job/106029809906",
      "machine": "cv350-odcdh2-a06-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T04:53:15Z",
+     "completed_at": "2026-09-20T05:45:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160/job/106029810084"
     }
    ]
   },
@@ -1950,52 +1965,6 @@
      "started_at": "2026-09-18T04:48:46Z",
      "completed_at": "2026-09-18T05:00:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35304411081/job/105485133122"
-    }
-   ]
-  },
-  {
-   "run_id": 35296707147,
-   "pr": 1160,
-   "commit": "7b8eabbe661869830b21271f2e6faa55add4bff8",
-   "branch": "codex/fix-release-tag-generation",
-   "event": "pull_request",
-   "title": "Fix monotonic dev tag generation in shallow worktrees",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296707147",
-   "created_at": "2026-09-18T01:46:56Z",
-   "updated_at": "2026-09-18T03:42:37Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T02:20:02Z",
-     "completed_at": "2026-09-18T03:22:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296707147/job/105457149444",
-     "machine": "smci350-rck-g03-d07-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T02:54:13Z",
-     "completed_at": "2026-09-18T03:42:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296707147/job/105457149461"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T02:30:42Z",
-     "completed_at": "2026-09-18T02:48:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35296707147/job/105457149502"
     }
    ]
   }
