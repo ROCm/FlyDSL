@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-20T01:59:20Z",
+ "updated": "2026-09-20T02:03:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -142,11 +142,11 @@
    "branch": "codex/bump-version-0.4.0",
    "event": "pull_request",
    "title": "[Verion] Bump version to 0.4.0",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600803",
    "created_at": "2026-09-20T01:08:15Z",
-   "updated_at": "2026-09-20T01:37:42Z",
+   "updated_at": "2026-09-20T02:01:57Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -161,10 +161,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-20T01:22:46Z",
-     "completed_at": null,
+     "completed_at": "2026-09-20T02:01:56Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600803/job/105999270530"
     },
     {
