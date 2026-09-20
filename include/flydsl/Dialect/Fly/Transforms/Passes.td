@@ -92,6 +92,22 @@ def FlyIntSwizzleSimplifyPass : Pass<"fly-int-swizzle-simplify"> {
   ];
 }
 
+def FlyFixBitcastWidthPass : Pass<"fly-fix-bitcast-width"> {
+  let summary = "Fix width-mismatched llvm.bitcast ops after canonicalization";
+  let description = [{
+    Rewrites llvm.bitcast ops where the source is wider than the destination
+    (e.g. i128 -> vector<4xi16>) into llvm.trunc + llvm.bitcast with matching
+    widths. This prevents LLVM codegen assertion failures when the MLIR
+    canonicalizer folds register load/store chains into direct bitcasts that
+    cross bit-width boundaries (e.g. BufferCopy128b load feeding a 16x16x16
+    MFMA operand).
+  }];
+
+  let dependentDialects = [
+    "LLVM::LLVMDialect"
+  ];
+}
+
 def FlyPromoteRegMemToVectorSSAPass : Pass<"fly-promote-regmem-to-vectorssa"> {
   let summary = "Promote register memory to vector SSA values";
   let description = [{
