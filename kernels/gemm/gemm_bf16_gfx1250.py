@@ -190,6 +190,16 @@ def launch_gemm_bf16(
         for cf in c_frags:
             cf.store(Vec.filled(8, 0.0, fx.Float32))
 
+        # Cross-tile carry: each tile defers its LAST K-step's WMMAs to the next tile so the
+        # next tile's step-0 read latency hides behind them. carry_* hold that deferred K-step's
+        # A/B fragments; zeroed so the first tile's carry-WMMA adds 0 (no prologue peel needed).
+        carry_act = [fx.make_rmem_tensor(8, fx.Int32) for _ in range_constexpr(wmma_m_rep)]
+        carry_wt = [fx.make_rmem_tensor(8, fx.Int32) for _ in range_constexpr(wmma_n_rep)]
+        for t in carry_act:
+            t.store(Vec.filled(8, 0, fx.Int32))
+        for t in carry_wt:
+            t.store(Vec.filled(8, 0, fx.Int32))
+
         def _rmem(n, v):
             t = fx.make_rmem_tensor(n, fx.Int32)
             t.store(v)
@@ -213,20 +223,37 @@ def launch_gemm_bf16(
                     # B is the instruction's A operand: the accumulator's fast dim is N.
                     fx.gemm(wmma_atom, c_frags[idx], wt[wn], act[wm], c_frags[idx])
 
-        def compute_ktile(buf, prefetch_kt):
-            cur = _load_ks(buf, 0)
-            for ks in range_constexpr(K_WS):
-                nxt = _load_ks(buf, ks + 1) if const_expr(ks + 1 < K_WS) else None
-                rocdl.s_wait_dscnt(KS_DS if const_expr(nxt is not None) else 0)
-                if const_expr(ks == 0 and prefetch_kt is not None and wmma_m_rep > 1):
+        def _mma_carry():
+            for wm in range_constexpr(wmma_m_rep):
+                for wn_raw in range_constexpr(wmma_n_rep):
+                    wn = (wmma_n_rep - 1 - wn_raw) if (wm % 2 == 1) else wn_raw
+                    idx = wm * wmma_n_rep + wn
+                    fx.gemm(wmma_atom, c_frags[idx], carry_wt[wn], carry_act[wm], c_frags[idx])
+
+        def _load_ks_carry(buf):
+            # Issue this tile's LAST K-step reads directly into the persistent carry tensors
+            # (no copy); consumed by the next tile's _mma_carry after its s_wait_dscnt.
+            for wm in range_constexpr(wmma_m_rep):
+                carry_act[wm].store(load_a(buf, wm, K_WS - 1))
+            for wn in range_constexpr(wmma_n_rep):
+                carry_wt[wn].store(load_b(buf, wn, K_WS - 1))
+
+        def compute_head(buf, prefetch_kt):
+            cur = _load_ks(buf, 0)                       # this tile's step-0 reads
+            rocdl.s_wait_dscnt(KS_DS)                    # prev tile's carry reads done; step-0 in flight
+            _mma_carry()                                 # prev tile's deferred K-step -> hides step-0 latency
+            for ks in range_constexpr(K_WS - 1):         # compute steps 0 .. K_WS-2
+                if const_expr(ks < K_WS - 2):
+                    nxt = _load_ks(buf, ks + 1)          # next head step (fresh)
+                else:
+                    _load_ks_carry(buf)                  # step K_WS-1 -> carry (deferred to next tile)
+                    nxt = None
+                rocdl.s_wait_dscnt(KS_DS)
+                if const_expr(ks == 0 and prefetch_kt is not None):
                     rocdl.sched_barrier(0)
                     issue(prefetch_kt % num_buffers, prefetch_kt)
                     rocdl.sched_barrier(0)
                 _mma_ks(cur)
-                if const_expr(ks == 0 and prefetch_kt is not None and wmma_m_rep == 1):
-                    rocdl.sched_barrier(0)
-                    issue(prefetch_kt % num_buffers, prefetch_kt)
-                    rocdl.sched_barrier(0)
                 if const_expr(nxt is not None):
                     cur = nxt
             rocdl.sched_dsrd(KS_DS)  # prologue group
@@ -244,15 +271,17 @@ def launch_gemm_bf16(
         for kt in range(n_steady):
             buf = _bidx(_buf_ptr(kt % num_buffers))
             pipeline_fence(outstanding=TDM_PW * (num_buffers - 2), use_cluster=False)
-            compute_ktile(buf, kt + (num_buffers - 1))
+            compute_head(buf, kt + (num_buffers - 1))
             if const_expr(use_cluster) and kt % num_buffers == num_buffers - 1:
                 cluster.cluster_barrier()
         for j in range_constexpr(num_buffers - 1):
             kt = n_steady + j
             buf = _bidx(_buf_ptr(kt % num_buffers))
             pipeline_fence(outstanding=TDM_PW * (num_buffers - 2 - j), use_cluster=False)
-            compute_ktile(buf, None)
+            compute_head(buf, None)
 
+        rocdl.s_wait_dscnt(0)   # drain the final tile's deferred K-step
+        _mma_carry()
         accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]
         pipeline_fence(outstanding=0, use_cluster=use_cluster)
         for wm in range_constexpr(wmma_m_rep):
