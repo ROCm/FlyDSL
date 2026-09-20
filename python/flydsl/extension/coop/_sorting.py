@@ -3,6 +3,7 @@
 
 """Shape and strict-order helpers shared by cooperative sorting algorithms."""
 
+from ...compiler import jit
 from ...expr.numeric import Int32
 from ._values import _as_items, _from_items, _is_items, _item_dtype, _items_dtype, _record_default, _record_select
 
@@ -32,9 +33,13 @@ def _before(a, b, descending=False, compare_op=None):
     return compare_op(b, a) if descending else compare_op(a, b)
 
 
+@jit
 def _valid_before(a, b, va, vb, descending=False, compare_op=None):
-    # Invalid entries follow every valid key even when no numeric sentinel exists.
-    return ((va != 0) & (vb == 0)) | ((va == vb) & _before(a, b, descending, compare_op))
+    # Invalid entries follow every valid key and never reach the comparator.
+    before = (va != 0) & (vb == 0)
+    if (va != 0) & (vb != 0):
+        before = _before(a, b, descending, compare_op)
+    return before
 
 
 def _prepare(items, payload, indices, valid_items=None, oob_default=None):

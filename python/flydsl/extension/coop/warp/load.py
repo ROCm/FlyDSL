@@ -5,10 +5,10 @@
 
 import enum
 
-from ....expr.gpu import known_block_size
+from ....expr.gpu import lane_id
 from ....expr.numeric import Integer
 from ....expr.typing import Vector
-from .._common import _linear_thread_id, _validate_valid_items
+from .._common import _validate_valid_items
 from .._io import _load_item, _load_vectorized
 from .._values import _from_items, _record_default
 from ._spec import WarpPrimitive
@@ -133,8 +133,7 @@ class WarpLoad(WarpPrimitive):
         fill = 0 if default is None else default
         width = cls.warp_threads
         _validate_valid_items(valid_items, width * items_per_thread)
-        tid = _linear_thread_id(known_block_size())
-        lane = tid % width
+        lane = lane_id() % width
         if algorithm is WarpLoadAlgorithm.VECTORIZE:
             return _load_vectorized(
                 source,

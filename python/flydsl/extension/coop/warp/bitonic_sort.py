@@ -90,7 +90,7 @@ def warp_bitonic_sort(
     """Sort a striped logical-warp tile with a bitonic network.
 
     All lanes of the logical warp participate. Any positive per-lane item count
-    is supported. Invalid entries sort after valid keys in either direction.
+    is supported. Invalid entries sort after valid keys in either direction and never reach compare_op.
     Equal keys may be reordered; this operation does not guarantee stability.
 
     Args:
@@ -183,7 +183,7 @@ class WarpBitonicSort(WarpPrimitive):
         """Sort a striped logical-warp tile with a bitonic network.
 
         All lanes of the logical warp participate. Any positive per-lane item count
-        is supported. Invalid entries sort after valid keys in either direction.
+        is supported. Invalid entries sort after valid keys in either direction and never reach compare_op.
         Equal keys may be reordered; this operation does not guarantee stability.
 
         The logical width is fixed by the operator specialization.

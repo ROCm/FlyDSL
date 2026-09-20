@@ -12,7 +12,6 @@ from .._common import (
     _combine,
     _normalize_columns,
     _resolve_warp_width,
-    _select_value,
     _shuffle_value,
     _thread_partial,
     _validate_valid_items,
@@ -47,19 +46,21 @@ def _reduce_valid(value, op, width, valid_items):
     return _shuffle_value(partial, base + last, width)
 
 
+@jit
 def _segmented_reduce(value, tail_flag, op, width):
     """Suffix doubling: the aggregate is valid at each segment's head lane."""
     value = _normalize_columns(value)
     lane = lane_id() % width
-    ended = Int32(tail_flag) | Int32(lane == width - 1)
-    offset = 1
-    while offset < width:
+    ended = Int32(tail_flag != 0) | Int32(lane == width - 1)
+    for stage in range_constexpr(width.bit_length() - 1):
+        offset = 1 << stage
         other = _shuffle_value(value, offset, width, mode="down")
         other_end = shuffle_down(ended, offset, width)
         take = (ended == 0) & (lane + offset < width)
-        value = _select_value(take, _combine(op, value, other), value)
+        # Shuffles stay converged; the operator only sees this segment's values.
+        if take:
+            value = _combine(op, value, other)
         ended = take.select(other_end, ended)
-        offset <<= 1
     return value
 
 
@@ -185,7 +186,7 @@ def warp_head_segmented_reduce(
         # Only segment heads L0, L2 and L4 own valid results. L0 implicitly starts the first segment.
     """
     width = _resolve_warp_width(width, "warp_head_segmented_reduce width")
-    tail = shuffle_down(Int32(head_flag), 1, width)
+    tail = shuffle_down(Int32(head_flag != 0), 1, width)
     return _segmented_reduce(value, tail, op, width)
 
 

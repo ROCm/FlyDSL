@@ -33,7 +33,7 @@ def warp_merge_sort(
     """Stably sort a blocked logical-warp tile, optionally carrying payloads.
 
     All lanes of the logical warp participate. Any positive per-lane item count
-    is supported. Invalid entries sort after valid keys in either direction.
+    is supported. Invalid entries sort after valid keys in either direction and never reach compare_op.
     Comparator-equivalent keys retain their original blocked order.
 
     Args:
@@ -172,7 +172,7 @@ class WarpMergeSort(WarpPrimitive):
         """Stably sort a blocked logical-warp tile, optionally carrying payloads.
 
         All lanes of the logical warp participate. Any positive per-lane item count
-        is supported. Invalid entries sort after valid keys in either direction.
+        is supported. Invalid entries sort after valid keys in either direction and never reach compare_op.
         Comparator-equivalent keys retain their original blocked order.
 
         The logical width is fixed by the operator specialization.
