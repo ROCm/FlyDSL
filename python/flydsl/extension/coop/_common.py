@@ -40,6 +40,7 @@ def _cast_value(dtype, value):
 
 def _convert_value(value, dtype):
     """Apply a specialization's element type to a scalar or blocked item range."""
+    value = _normalize_value(value)
     if isinstance(value, (Numeric, Vector)):
         return value.to(dtype)
     if isinstance(value, (tuple, list)):

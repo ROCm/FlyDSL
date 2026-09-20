@@ -16,7 +16,7 @@ try:
 except ImportError:
     torch = None
 import coop_warp_utils as checks
-from coop_common import DTYPES, WARP_WIDTHS, dtype_id
+from coop_common import DTYPES, WARP_SIZE, WARP_WIDTHS, dtype_id
 
 
 @pytest.mark.l2_device
@@ -46,7 +46,7 @@ def test_warp_exchange(width, count, inverse):
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 @pytest.mark.parametrize("algorithm", list(WarpExchangeAlgorithm))
-@pytest.mark.parametrize("width", [1, 8, 32, 64])
+@pytest.mark.parametrize("width", [width for width in (1, 8, 32, 64) if width <= WARP_SIZE])
 @pytest.mark.parametrize("method", ["blocked_to_striped", "striped_to_blocked", "scatter_to_striped"])
 @pytest.mark.usefixtures("warp_default_device")
 def test_warp_exchange_policies(algorithm, width, method):
@@ -77,7 +77,7 @@ def test_warp_exchange_policies(algorithm, width, method):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("width", [8, 64])
+@pytest.mark.parametrize("width", [width for width in (8, 64) if width <= WARP_SIZE])
 def test_warp_smem_independent_branches(width):
     block, count = 128, 3
     values = torch.arange(block * count, device="cuda", dtype=torch.int32)

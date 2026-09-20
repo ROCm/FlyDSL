@@ -17,7 +17,7 @@ import flydsl.expr as fx
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("width", [1, 2, 8, 32, 64])
+@pytest.mark.parametrize("width", [width for width in (1, 2, 8, 32, 64) if width <= WARP_SIZE])
 @pytest.mark.parametrize("head", [False, True])
 @pytest.mark.usefixtures("coop_default_device")
 def test_segmented_ordered_reduction(width, head):
