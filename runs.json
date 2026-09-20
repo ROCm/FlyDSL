@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-09-20T02:10:27Z",
+ "updated": "2026-09-20T02:16:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35483381239,
+   "pr": 1154,
+   "commit": "87616b43e08a68c8c504d3d43578d891d7c606c5",
+   "branch": "phil/llvm-skill-only",
+   "event": "pull_request",
+   "title": "[llvm][Skill] Add an LLVM kernel-tuning and verification skill",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35483381239",
+   "created_at": "2026-09-20T02:12:27Z",
+   "updated_at": "2026-09-20T02:14:41Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T02:14:35Z",
+     "completed_at": "2026-09-20T02:14:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35483381239/job/106005348602"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T02:14:35Z",
+     "completed_at": "2026-09-20T02:14:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35483381239/job/106005348618",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T02:14:35Z",
+     "completed_at": "2026-09-20T02:14:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35483381239/job/106005348702"
+    }
+   ]
+  },
   {
    "run_id": 35483155879,
    "pr": 1154,
@@ -207,10 +253,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-20T01:22:43Z",
-     "completed_at": null,
+     "completed_at": "2026-09-20T02:13:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480648735/job/105999067808"
     },
     {
@@ -1946,21 +1992,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275/job/105502259573"
     }
    ]
-  },
-  {
-   "run_id": 35263068650,
-   "pr": null,
-   "commit": "c9a70d0fde055f4baa6ae73d0a5a922839d52710",
-   "branch": "pr/enh-struct-members",
-   "event": "pull_request",
-   "title": "[Enh] Support expr struct member methods",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35263068650",
-   "created_at": "2026-09-17T19:08:12Z",
-   "updated_at": "2026-09-17T19:24:55Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
