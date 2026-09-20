@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-09-20T09:28:39Z",
+ "updated": "2026-09-20T11:43:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35508477181,
+   "pr": null,
+   "commit": "12a96131d5b434d119cda2be99fdd63cd1edf2e4",
+   "branch": "main",
+   "event": "push",
+   "title": "[Misc] Fix 5 Dependabot vulnerabilities (#1164)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35508477181",
+   "created_at": "2026-09-20T11:40:10Z",
+   "updated_at": "2026-09-20T11:41:29Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T11:41:26Z",
+     "completed_at": "2026-09-20T11:41:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35508477181/job/106072304050"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T11:41:26Z",
+     "completed_at": "2026-09-20T11:41:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35508477181/job/106072304053",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T11:41:26Z",
+     "completed_at": "2026-09-20T11:41:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35508477181/job/106072304131"
+    }
+   ]
+  },
   {
    "run_id": 35499695540,
    "pr": 1167,
@@ -29,19 +75,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-20T08:53:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35499695540/job/106052026113"
+     "completed_at": "2026-09-20T10:19:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35499695540/job/106052026113",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-20T08:53:01Z",
-     "completed_at": null,
+     "completed_at": "2026-09-20T09:27:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35499695540/job/106052026348"
     }
    ]
@@ -1978,21 +2027,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35310916796",
    "created_at": "2026-09-18T05:28:10Z",
    "updated_at": "2026-09-18T05:28:10Z",
-   "actor": "LWenH",
-   "jobs": []
-  },
-  {
-   "run_id": 35310779877,
-   "pr": null,
-   "commit": "702f28b911b686a3045c3d9810f2b3027507b63e",
-   "branch": "convert-atom-call-pred-ssa",
-   "event": "pull_request",
-   "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35310779877",
-   "created_at": "2026-09-18T05:26:03Z",
-   "updated_at": "2026-09-18T05:26:03Z",
    "actor": "LWenH",
    "jobs": []
   }
