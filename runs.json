@@ -1,8 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-09-20T02:26:57Z",
+ "updated": "2026-09-20T02:40:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35484415773,
+   "pr": 1154,
+   "commit": "66e138b1433d7b9b729ca349f0bdc10ac9985496",
+   "branch": "phil/llvm-skill-only",
+   "event": "pull_request",
+   "title": "[llvm][Skill] Add an LLVM kernel-tuning and verification skill",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484415773",
+   "created_at": "2026-09-20T02:36:14Z",
+   "updated_at": "2026-09-20T02:38:28Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T02:38:23Z",
+     "completed_at": "2026-09-20T02:38:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484415773/job/106008250757",
+     "machine": null,
+     "host_model": null,
+     "bench_skipped": "host unidentified != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T02:38:25Z",
+     "completed_at": "2026-09-20T02:38:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484415773/job/106008250765"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-20T02:38:23Z",
+     "completed_at": "2026-09-20T02:38:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484415773/job/106008250773"
+    }
+   ]
+  },
+  {
+   "run_id": 35484149350,
+   "pr": 987,
+   "commit": "9287e17c90b77e997a1cdf63e6890e674e51469f",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484149350",
+   "created_at": "2026-09-20T02:30:10Z",
+   "updated_at": "2026-09-20T02:32:03Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 35483381239,
    "pr": 1154,
@@ -210,11 +271,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-20T01:24:44Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480673166/job/105999478359"
+     "completed_at": "2026-09-20T02:34:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480673166/job/105999478359",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1904,95 +1968,6 @@
      "started_at": "2026-09-18T02:11:37Z",
      "completed_at": "2026-09-18T02:52:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35292691721/job/105442336218"
-    }
-   ]
-  },
-  {
-   "run_id": 35290426138,
-   "pr": null,
-   "commit": "0532a536d75a69e44b0d613c1fce689d084d74fd",
-   "branch": "codex/reduce-aot-cache-size",
-   "event": "pull_request",
-   "title": "Reduce AOT cache artifact size",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35290426138",
-   "created_at": "2026-09-18T00:15:39Z",
-   "updated_at": "2026-09-18T00:48:25Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T00:29:25Z",
-     "completed_at": "2026-09-18T00:46:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35290426138/job/105434796707"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-18T00:29:16Z",
-     "completed_at": "2026-09-18T00:48:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35290426138/job/105434796720"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-18T00:29:31Z",
-     "completed_at": "2026-09-18T00:48:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35290426138/job/105434796777"
-    }
-   ]
-  },
-  {
-   "run_id": 35264614275,
-   "pr": 1156,
-   "commit": "6af292a385a059429383935875f2c2921f5107f4",
-   "branch": "pr/enh-struct-members",
-   "event": "pull_request",
-   "title": "[Enh] Support expr struct member methods",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275",
-   "created_at": "2026-09-17T19:23:38Z",
-   "updated_at": "2026-09-18T07:16:25Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T06:17:21Z",
-     "completed_at": "2026-09-18T07:16:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275/job/105502258229",
-     "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T00:30:24Z",
-     "completed_at": "2026-09-18T01:28:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275/job/105502259260"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T19:38:41Z",
-     "completed_at": "2026-09-17T19:53:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35264614275/job/105502259573"
     }
    ]
   }
