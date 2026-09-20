@@ -1,15 +1,73 @@
 {
  "schema": 1,
- "updated": "2026-09-20T02:03:14Z",
+ "updated": "2026-09-20T02:09:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35483155879,
+   "pr": 1154,
+   "commit": "2672f3d909d9c74ec49e4e3e569a116b7681c45a",
+   "branch": "phil/llvm-skill-only",
+   "event": "pull_request",
+   "title": "[llvm][Skill] Add an LLVM kernel-tuning and verification skill",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35483155879",
+   "created_at": "2026-09-20T02:07:25Z",
+   "updated_at": "2026-09-20T02:08:05Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 35483130797,
+   "pr": 1154,
+   "commit": "ab09b20779650e5a96d228b1ef1b1e5e68feb55e",
+   "branch": "phil/llvm-skill-only",
+   "event": "pull_request",
+   "title": "[llvm][Skill] Add an LLVM kernel-tuning and verification skill",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35483130797",
+   "created_at": "2026-09-20T02:06:55Z",
+   "updated_at": "2026-09-20T02:08:05Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-20T02:08:00Z",
+     "completed_at": "2026-09-20T02:08:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35483130797/job/106004518689"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-20T02:08:00Z",
+     "completed_at": "2026-09-20T02:08:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35483130797/job/106004518725"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-20T02:08:00Z",
+     "completed_at": "2026-09-20T02:08:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35483130797/job/106004518744"
+    }
+   ]
+  },
   {
    "run_id": 35482646437,
    "pr": 1154,
    "commit": "2108e96f72a22d6a9d57d21a05d94458499e3ee5",
    "branch": "phil/llvm-skill-only",
    "event": "pull_request",
-   "title": "[wip][llvm][skill] Add an llvm skill for picking and verifying LLVM knobs",
+   "title": "[llvm][Skill] Add an LLVM kernel-tuning and verification skill",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35482646437",
@@ -1871,67 +1929,6 @@
    "created_at": "2026-09-17T19:08:12Z",
    "updated_at": "2026-09-17T19:24:55Z",
    "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 35262952233,
-   "pr": 1106,
-   "commit": "c9c0af328ecda62e2ee1d479adef39aa4fe567bb",
-   "branch": "add-flydsl-code-review-skill",
-   "event": "pull_request",
-   "title": "[Skills] Add flydsl-code-review skill and workflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35262952233",
-   "created_at": "2026-09-17T19:07:02Z",
-   "updated_at": "2026-09-17T20:40:51Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T19:43:09Z",
-     "completed_at": "2026-09-17T20:40:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35262952233/job/105348587585"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T19:24:06Z",
-     "completed_at": "2026-09-17T20:24:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35262952233/job/105348587608",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-17T19:23:58Z",
-     "completed_at": "2026-09-17T19:38:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35262952233/job/105348587678"
-    }
-   ]
-  },
-  {
-   "run_id": 35237940327,
-   "pr": null,
-   "commit": "e358149173ec0a4c1db2fc4ae1b13abc600ca908",
-   "branch": "feat/rocdl-cvt-f32-fp8",
-   "event": "pull_request",
-   "title": "[DSL] Expose F32_FP8 conversion from packed_i32",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35237940327",
-   "created_at": "2026-09-17T15:05:29Z",
-   "updated_at": "2026-09-17T15:05:29Z",
-   "actor": "big-yellow-duck",
    "jobs": []
   }
  ]
