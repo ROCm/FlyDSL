@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-20T02:41:35Z",
+ "updated": "2026-09-20T02:56:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35485245160,
+   "pr": 1162,
+   "commit": "56c4143bc45266b634bfa00d68b888abccef38c9",
+   "branch": "feature/ktrace-dialect-squashed",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35485245160",
+   "created_at": "2026-09-20T02:55:26Z",
+   "updated_at": "2026-09-20T02:55:48Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 35484649345,
+   "pr": 1162,
+   "commit": "98399cd3043147d124bc2b467b2b7abe214252af",
+   "branch": "feature/ktrace-dialect-squashed",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484649345",
+   "created_at": "2026-09-20T02:41:45Z",
+   "updated_at": "2026-09-20T02:55:27Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-20T02:55:15Z",
+     "completed_at": "2026-09-20T02:55:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484649345/job/106010266528"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-20T02:55:15Z",
+     "completed_at": "2026-09-20T02:55:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484649345/job/106010266549"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-20T02:55:15Z",
+     "completed_at": "2026-09-20T02:55:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484649345/job/106010266590"
+    }
+   ]
+  },
   {
    "run_id": 35484415773,
    "pr": 1154,
@@ -252,11 +310,11 @@
    "branch": "main",
    "event": "push",
    "title": "Version: bump version to 0.4.0 (#1174)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480673166",
    "created_at": "2026-09-20T01:09:57Z",
-   "updated_at": "2026-09-20T01:24:10Z",
+   "updated_at": "2026-09-20T02:46:29Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -283,9 +341,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-20T01:24:10Z",
+     "started_at": "2026-09-20T02:46:28Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480673166/job/105999478378"
     }
@@ -1878,98 +1936,6 @@
    "updated_at": "2026-09-18T01:47:01Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 35295424924,
-   "pr": null,
-   "commit": "336d6ff1aa89abcebcbe8d5d7c3cd5ed48348148",
-   "branch": "main",
-   "event": "push",
-   "title": "Reduce AOT cache artifact size (#1159)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35295424924",
-   "created_at": "2026-09-18T01:28:05Z",
-   "updated_at": "2026-09-18T03:15:14Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T02:20:10Z",
-     "completed_at": "2026-09-18T02:59:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35295424924/job/105455471866"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T02:11:32Z",
-     "completed_at": "2026-09-18T03:15:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35295424924/job/105455471889",
-     "machine": "smci350-rck-g03-d07-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T02:11:25Z",
-     "completed_at": "2026-09-18T02:30:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35295424924/job/105455472484"
-    }
-   ]
-  },
-  {
-   "run_id": 35292691721,
-   "pr": 1159,
-   "commit": "d4d43b222cf98496bead51e56aa02fc92bbe2d9a",
-   "branch": "codex/reduce-aot-cache-size",
-   "event": "pull_request",
-   "title": "Reduce AOT cache artifact size",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35292691721",
-   "created_at": "2026-09-18T00:47:59Z",
-   "updated_at": "2026-09-18T02:52:26Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T01:05:53Z",
-     "completed_at": "2026-09-18T01:22:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35292691721/job/105442336166"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T01:05:59Z",
-     "completed_at": "2026-09-18T02:04:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35292691721/job/105442336182",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T02:11:37Z",
-     "completed_at": "2026-09-18T02:52:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35292691721/job/105442336218"
-    }
-   ]
   }
  ]
 }
