@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-20T06:32:47Z",
+ "updated": "2026-09-20T06:40:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35494788619,
+   "pr": 1167,
+   "commit": "dd1042a86d8fb6a4a5fa0db33d25cc971ec89e5a",
+   "branch": "pr/enh-coop-warp-primitives",
+   "event": "pull_request",
+   "title": "[Ext][Coop] Add more warp-level primitives",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35494788619",
+   "created_at": "2026-09-20T06:39:20Z",
+   "updated_at": "2026-09-20T06:39:46Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 35493044476,
    "pr": 1162,
@@ -1950,49 +1965,6 @@
      "started_at": "2026-09-18T05:00:31Z",
      "completed_at": "2026-09-18T05:12:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35307358724/job/105485629853"
-    }
-   ]
-  },
-  {
-   "run_id": 35304411081,
-   "pr": null,
-   "commit": "dc2caa90e8e6bee259ca691f68559b805ebf7e14",
-   "branch": "convert-atom-call-pred-ssa",
-   "event": "pull_request",
-   "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35304411081",
-   "created_at": "2026-09-18T03:45:40Z",
-   "updated_at": "2026-09-18T05:29:52Z",
-   "actor": "LWenH",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-18T04:51:58Z",
-     "completed_at": "2026-09-18T05:09:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35304411081/job/105485133076"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-18T04:48:53Z",
-     "completed_at": "2026-09-18T05:29:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35304411081/job/105485133098"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-18T04:48:46Z",
-     "completed_at": "2026-09-18T05:00:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35304411081/job/105485133122"
     }
    ]
   }
