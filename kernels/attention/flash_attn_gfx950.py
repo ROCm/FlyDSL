@@ -58,6 +58,7 @@ from kernels.attention.flash_attn_utils import (
     _v_vec32_to_pair,
     _waitcnt_vm_n,
     bias_addressing_error,
+    daz_denormal_attr,
 )
 from kernels.common.kernels_common import LOG2E as BIAS_LOG2E
 from kernels.common.kernels_common import dtype_to_elem_type
@@ -967,7 +968,6 @@ def build_flash_attn_dualwave_swp_module(
 
         passthrough_entries = (
             [
-                ["denormal-fp-math-f32", "preserve-sign,preserve-sign"],
                 ["no-nans-fp-math", "true"],
                 ["unsafe-fp-math", "true"],
             ]
@@ -999,6 +999,7 @@ def build_flash_attn_dualwave_swp_module(
                 "rocdl.waves_per_eu": traits.WAVES_PER_EU,
                 "rocdl.flat_work_group_size": f"{traits.BLOCK_SIZE},{traits.BLOCK_SIZE}",
                 "passthrough": passthrough_entries,
+                "llvm.denormal_fpenv": (daz_denormal_attr() if const_expr(traits.DAZ) else None),
             },
         ).launch(
             grid=(traits.NUM_HEADS_Q, num_q_blocks, grid_z),
