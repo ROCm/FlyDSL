@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-21T08:38:13Z",
+ "updated": "2026-09-21T09:08:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,10 +29,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-21T08:18:59Z",
-     "completed_at": null,
+     "completed_at": "2026-09-21T08:57:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35576104129/job/106261729528"
     },
     {
@@ -111,20 +111,20 @@
    "branch": "jli/relax-tag-condition",
    "event": "pull_request",
    "title": "[CI] Remove ancestor-of-main gate from PyPI publish workflow",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579",
    "created_at": "2026-09-21T07:04:20Z",
-   "updated_at": "2026-09-21T07:48:12Z",
+   "updated_at": "2026-09-21T09:06:42Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-21T07:48:11Z",
-     "completed_at": null,
+     "completed_at": "2026-09-21T09:06:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579/job/106247046402"
     },
     {
