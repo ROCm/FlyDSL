@@ -100,6 +100,126 @@ Contributions should align with FlyDSL's goal of providing a Python DSL and MLIR
 * For Fly dialect (C++/MLIR) changes, update headers in `include/flydsl/` and implementation in `lib/`.
 * Add MLIR lit tests and/or Python-level pytest tests covering the new functionality.
 
+### Add an LLVM Extension
+
+FlyDSL's codegen quality is bounded by what LLVM does with the IR it emits, so
+some end-to-end performance work lands in LLVM rather than in the DSL. This is
+where those changes live: FlyDSL builds a stock upstream LLVM at the commit
+pinned in `thirdparty/llvm-build-info.json` and applies a small series of local
+extensions on top. The LLVM source tree is never forked or vendored.
+
+**What belongs here.** Only two kinds of change:
+
+1. A change already submitted upstream, carried locally while it is in review.
+2. A change genuinely specific to FlyDSL that upstream would not accept.
+
+Anything else belongs upstream first. A local extension is a maintenance cost paid
+on every pin bump, by whoever bumps it — usually not its author — so the series
+is kept small on purpose. Record which of the two cases an extension is, and
+its upstream link, in its `LLVM_EXTENSIONS` comment; that is what tells the next
+person whether it can be dropped.
+
+Extensions live in `thirdparty/llvm-extensions/` as `.patch` files. The **apply
+order is the `LLVM_EXTENSIONS` array in `scripts/build_llvm.sh`** — a file that
+is not listed there is not applied, and the build fails rather than ignoring it.
+Each entry carries a comment saying what the extension does and its upstream
+status.
+
+**Every extension must be switchable at run time.** An extension changes a
+compiler FlyDSL does not own, and when one turns out to regress a kernel,
+finding that out costs a full LLVM rebuild unless the behavior can be turned off
+in place. So introduce an `llvm::cl::opt` (default off) or a `getenv` guard, and
+branch on it — do not change behavior unconditionally:
+
+```cpp
+static cl::opt<bool> EnableFlyThing(
+    "fly-thing", cl::Hidden, cl::init(false),
+    cl::desc("FlyDSL: enable the thing"));
+
+if (EnableFlyThing) { /* new behavior */ }
+```
+
+`scripts/check_llvm_extensions.py` enforces this and runs in CI through
+`scripts/check_repo.py`. It checks that the diff adds a switch and branches on
+it; it cannot tell a real switch from one wired to a constant, so that part is
+on review. The one extension that pre-dates the rule is listed as grandfathered
+in the checker — add a switch to a new extension rather than an exemption.
+
+To add one:
+
+```bash
+# 1. Prepare llvm-project: reset to the pin, replay the existing patches
+bash scripts/llvm_extension.sh my-fix-slug
+
+# 2. Edit files under ../llvm-project/
+
+# 3. Capture the edits as thirdparty/llvm-extensions/my-fix-slug.patch
+bash scripts/llvm_extension.sh --finish
+
+# 4. Add it to the LLVM_EXTENSIONS array in scripts/build_llvm.sh, with a comment
+```
+
+Do not generate it with a bare `git diff`. Because the preceding extensions
+are left as uncommitted work-tree edits, a plain `git diff` produces a
+*cumulative* diff that re-applies their hunks; replaying such a series fails
+with `patch does not apply`, which looks like staleness but is not.
+`scripts/llvm_extension.sh` makes a throwaway commit first so the diff is
+incremental.
+
+Order matters: each extension is a diff against the tree with its predecessors
+applied. Append to the array rather than inserting, unless the new one genuinely
+has to precede an existing one.
+
+**Two pins.** `thirdparty/llvm-build-info.json` carries two, advanced
+independently:
+
+| Pin | Contents | When it moves |
+|---|---|---|
+| `baseline` (default) | upstream + `REQUIRED_PATCHES` | freely, to track upstream |
+| `extended` | baseline's patches + every `LLVM_EXTENSIONS` entry | once the extensions apply to the new commit |
+
+This is what keeps a stale extension from blocking an upgrade: bump `baseline`
+and test the new LLVM now, rebase the extensions and move `extended` after.
+They are expected to converge again once that lands.
+
+`REQUIRED_PATCHES` are not extensions — they make LLVM work at all for FlyDSL
+rather than making it faster, so both profiles carry them and the run-time
+switch rule does not apply to them. Keep that list closed: a new patch belongs
+in `LLVM_EXTENSIONS` unless the build is broken without it.
+
+```bash
+bash scripts/build_llvm.sh -j64                              # baseline (default)
+FLYDSL_LLVM_PROFILE=extended bash scripts/build_llvm.sh -j64  # with extensions
+
+# Is this regression ours? Same pin, extensions the only variable.
+FLYDSL_LLVM_PROFILE=extended FLYDSL_LLVM_NO_EXT=1 bash scripts/build_llvm.sh -j64
+
+# Build any commit, optionally from another remote, without editing a pin.
+FLYDSL_LLVM_REF=<sha> \
+FLYDSL_LLVM_REMOTE=https://github.com/ROCm/llvm-project.git \
+  bash scripts/build_llvm.sh -j64
+```
+
+An explicit `FLYDSL_LLVM_REF` overrides the pin; patches still apply per the
+profile, so a custom ref is built the same way a pin would be.
+
+`FLYDSL_LLVM_NO_EXT` is all-or-nothing by design; there is no per-extension
+skip. A stale extension is meant to be rebased rather than routed around, and
+two possible answers to "which extensions were in this build?" are easier to
+reason about than many. The profile and the knob both feed the CI cache key, so
+one profile's build never restores the other's install, and neither suppresses
+the checks on the tree itself: a `.patch` file listed in neither array still
+fails the build.
+
+**When a pin bump breaks an extension**, CI names the one that failed. Either
+rebase it with `bash scripts/llvm_extension.sh --rebase <name>`, or, if the
+change landed upstream, delete the file and drop it from `LLVM_EXTENSIONS`.
+
+> **Note**: `scripts/build_llvm.sh` resets the tracked files in `../llvm-project`
+> on every run (`git checkout --force`) so the extensions always replay from a
+> pristine tree. Uncommitted edits you made there by hand are discarded without
+> a prompt. Build outputs (`build-flydsl/`, `mlir_install/`) are left untouched.
+
 ---
 
 ## Testing

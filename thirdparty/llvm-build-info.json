@@ -1,5 +1,15 @@
 {
+  "_comment": "Two pins, advanced independently. 'baseline' is upstream LLVM carrying only the required patches; 'extended' is the commit every extension has been rebased onto. Upgrading moves baseline first, then extended once the extensions apply again -- so a stale extension no longer blocks trying a newer LLVM. Keep baseline's hash stable unless you mean to move it: it is the default build and the CI cache key.",
+  "baseline": {
+    "repository": "https://github.com/llvm/llvm-project.git",
+    "llvm_hash": "e2a39f504fee836e4def9581bed817ecc327b9dc"
+  },
+  "extended": {
+    "repository": "https://github.com/llvm/llvm-project.git",
+    "llvm_hash": "e2a39f504fee836e4def9581bed817ecc327b9dc"
+  },
   "upstream": {
+    "_comment": "Deprecated alias for baseline, kept so an older checkout's tooling still resolves a pin. Remove once nothing reads it.",
     "repository": "https://github.com/llvm/llvm-project.git",
     "llvm_hash": "e2a39f504fee836e4def9581bed817ecc327b9dc"
   }

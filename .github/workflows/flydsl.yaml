@@ -193,20 +193,38 @@ jobs:
             echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
             exit 0
           fi
-          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+          for f in thirdparty/llvm-build-info.json scripts/build_llvm.sh; do
             if ! git -C flydsl-test show "FETCH_HEAD:${f}" >"base-pin/${f}"; then
               echo "Base commit has no ${f}; treating LLVM pin as unchanged."
               echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
               exit 0
             fi
           done
+          # The extension set is a directory with a varying number of files, so it
+          # is extracted wholesale rather than named file by file. `git show` on a
+          # tree prints a listing, not the contents, so it cannot be used here.
+          #
+          # A base that predates the directory has an EMPTY extension set, not an
+          # undecidable one -- every PR opened before this landed is such a base.
+          # Leaving the empty dir for `diff -qr` gives the right answer; bailing
+          # out with pin_changed=false here would hide a real change to the other
+          # LLVM inputs, which is exactly the silent-skip shape #1146 removed.
+          mkdir -p base-pin/thirdparty/llvm-extensions
+          if git -C flydsl-test cat-file -e "FETCH_HEAD:thirdparty/llvm-extensions" 2>/dev/null; then
+            git -C flydsl-test archive FETCH_HEAD thirdparty/llvm-extensions \
+              | tar -x -C base-pin
+          fi
           changed=false
-          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+          for f in thirdparty/llvm-build-info.json scripts/build_llvm.sh; do
             if ! diff -q "flydsl-test/${f}" "base-pin/${f}" >/dev/null; then
               echo "LLVM input differs from base: ${f}"
               changed=true
             fi
           done
+          if ! diff -qr "flydsl-test/thirdparty/llvm-extensions" "base-pin/thirdparty/llvm-extensions" >/dev/null; then
+            echo "LLVM input differs from base: thirdparty/llvm-extensions"
+            changed=true
+          fi
           # sed, not python3: every other python call here runs in the container
           # and the runners promise no host interpreter. Scoped to "upstream" so a
           # second entry carrying its own llvm_hash cannot be picked up.

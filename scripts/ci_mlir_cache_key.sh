@@ -18,13 +18,38 @@ set -euo pipefail
 TREE_ROOT="${1:?usage: ci_mlir_cache_key.sh <tree-root>}"
 
 INPUTS=(
-  thirdparty/llvm-build-info.json
-  thirdparty/llvm-rocdl-lld-argv0.patch
   scripts/build_llvm.sh
 )
 
+# Which pin this build uses. Hashing the whole pin file would make bumping
+# baseline discard extended's cache and vice versa, which defeats advancing the
+# two independently -- so only the selected pin's own entry is folded in.
+PROFILE="${FLYDSL_LLVM_PROFILE:-baseline}"
+
+# The extension set is a directory, so it is enumerated rather than listed. Sorted
+# under LC_ALL=C so the PR tree and the extracted base tree hash identically,
+# and the name is folded in alongside the contents so that adding, removing or
+# renaming one moves the key -- not just editing it. The apply *order*
+# lives in build_llvm.sh, which is already hashed above, so reordering the
+# LLVM_EXTENSIONS array moves the key too.
+EXT_DIR="thirdparty/llvm-extensions"
+
 # Per-file digests, so moving bytes across a file boundary changes the key.
 digests=""
+
+# The profile name and its resolved pin, rather than the pin file's bytes: an
+# edit to the other profile's entry must not move this profile's key.
+digests+="profile:${PROFILE}"$'\n'
+if [[ -f "${TREE_ROOT}/thirdparty/llvm-build-info.json" ]]; then
+  digests+="pin:$(python3 -c "
+import json, sys
+d = json.load(open('${TREE_ROOT}/thirdparty/llvm-build-info.json'))
+e = d.get('${PROFILE}') or d.get('upstream') or {}
+sys.stdout.write(str(e.get('llvm_hash', 'absent')) + ':' + str(e.get('repository', '')))
+")"$'\n'
+else
+  digests+="pin:absent"$'\n'
+fi
 for input in "${INPUTS[@]}"; do
   if [[ -f "${TREE_ROOT}/${input}" ]]; then
     digests+="${input}:$(sha256sum <"${TREE_ROOT}/${input}" | cut -d' ' -f1)"$'\n'
@@ -32,6 +57,21 @@ for input in "${INPUTS[@]}"; do
     digests+="${input}:absent"$'\n'
   fi
 done
+
+# Only the extensions themselves are hashed -- an absent directory and an empty
+# one describe the same build, so neither contributes a marker. Depth 1, matching
+# the `"${LLVM_EXT_DIR}"/*.patch` glob that build_llvm.sh actually applies.
+while IFS= read -r ext_file; do
+  rel="${ext_file#"${TREE_ROOT}/"}"
+  digests+="${rel}:$(sha256sum <"${ext_file}" | cut -d' ' -f1)"$'\n'
+done < <(find "${TREE_ROOT}/${EXT_DIR}" -maxdepth 1 -type f -name '*.patch' -print 2>/dev/null | LC_ALL=C sort)
+# A no-extension build produces a different install, so it needs its own entry:
+# otherwise the control arm silently restores an install that HAS the extensions
+# applied, destroying the comparison it exists to make. Contributed only when
+# the knob is on, so the ordinary key is unchanged and existing caches still hit.
+if [[ "${FLYDSL_LLVM_NO_EXT:-0}" == "1" ]]; then
+  digests+="FLYDSL_LLVM_NO_EXT:1"$'\n'
+fi
 digest="$(printf '%s' "${digests}" | sha256sum | cut -c1-40)"
 
 printf 'mlir-install-%s-%s-%s-%s-%s\n' \

@@ -13,11 +13,78 @@ LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
-# Read LLVM commit hash from thirdparty/llvm-build-info.json (upstream entry)
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
-LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
-LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
-LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+LLVM_EXT_DIR="${REPO_ROOT}/thirdparty/llvm-extensions"
+
+# Which pin to build, and therefore which patches to apply.
+#
+#   baseline (default)  thirdparty/llvm-build-info.json -> baseline.llvm_hash,
+#                       carrying REQUIRED_PATCHES only. This is what CI builds
+#                       and what the cache key is keyed on.
+#   extended            -> extended.llvm_hash, carrying REQUIRED_PATCHES plus
+#                       every entry in LLVM_EXTENSIONS.
+#
+# The two pins advance independently. That is the point: when upstream moves and
+# an extension no longer applies, baseline can still be bumped and tested while
+# the extension is rebased, instead of one stale patch blocking the upgrade.
+# They are expected to converge again once the rebase lands.
+FLYDSL_LLVM_PROFILE="${FLYDSL_LLVM_PROFILE:-baseline}"
+
+case "${FLYDSL_LLVM_PROFILE}" in
+  baseline|extended) ;;
+  *)
+    echo "Error: FLYDSL_LLVM_PROFILE must be 'baseline' or 'extended': ${FLYDSL_LLVM_PROFILE}" >&2
+    exit 2
+    ;;
+esac
+
+# An explicit ref wins over the pin file, so a developer can build any commit --
+# including one from another remote, e.g. a ROCm fork or a local LLVM branch --
+# without editing a tracked file. Patches still apply per the profile, so a
+# custom ref is built the same way a pin would be.
+LLVM_REMOTE_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['${FLYDSL_LLVM_PROFILE}'].get('repository', 'https://github.com/llvm/llvm-project.git'))")
+LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['${FLYDSL_LLVM_PROFILE}']['llvm_hash'])")
+LLVM_REF="${FLYDSL_LLVM_REF:-${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}}"
+LLVM_REMOTE="${FLYDSL_LLVM_REMOTE:-${LLVM_REMOTE:-$LLVM_REMOTE_DEFAULT}}"
+
+# FLYDSL_LLVM_NO_EXT=1 drops the extensions from an `extended` build, leaving
+# the required patches. It is the control arm for "is this regression ours?":
+# same pin, same everything, extensions the only variable. All-or-nothing on
+# purpose -- a per-extension skip would make "which extensions were in this
+# build?" a question with more than two answers, and a stale extension is meant
+# to be rebased (scripts/llvm_extension.sh --rebase), not routed around. An
+# extension that IS applied can still be switched off at run time; see below.
+LLVM_NO_EXT="${FLYDSL_LLVM_NO_EXT:-0}"
+
+# Patches both profiles carry. These are not extensions: they make LLVM work at
+# all for FlyDSL rather than making it faster, so a baseline build needs them
+# too, and check_llvm_extensions.py does not require a run-time switch for them.
+# Keep this list closed -- a new patch belongs in LLVM_EXTENSIONS unless the
+# build is broken without it.
+REQUIRED_PATCHES=(
+    # Pass the resolved lld path as argv[0] instead of the literal "ld.lld", so
+    # MLIR's ROCDL target finds the linker when it is not on PATH under that
+    # name. Case 1 (upstreamable). Upstream: not yet submitted.
+    rocdl-lld-argv0.patch
+)
+
+# Local LLVM extensions, applied in the order listed here. These carry the parts
+# of FlyDSL's end-to-end performance work that belong in LLVM rather than in the
+# DSL. Only two kinds of change belong here: one already submitted upstream and
+# waiting on review, or one specific enough to FlyDSL that upstream would not
+# take it. Every entry says which, so the next pin bump can drop what landed.
+# Every entry must also be switchable at run time (cl::opt or getenv), so a
+# regression can be turned off without rebuilding LLVM -- enforced by
+# scripts/check_llvm_extensions.py.
+#
+# Each extension is a diff against the tree with its predecessors already
+# applied, so the order is part of their meaning -- keep it deliberate, and
+# append rather than insert unless a new one genuinely has to precede another.
+#
+# To add one: bash scripts/llvm_extension.sh <slug>
+# See CONTRIBUTING.md, "Add an LLVM Extension".
+LLVM_EXTENSIONS=(
+)
 LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
 
 case "${LLVM_BUILD_PROFILE}" in
@@ -44,13 +111,14 @@ echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
 echo "LLVM Ref:       $LLVM_REF"
-echo "LLVM Profile:   $LLVM_BUILD_PROFILE"
+echo "LLVM Pin:       $FLYDSL_LLVM_PROFILE"
+echo "LLVM Remote:    $LLVM_REMOTE"
+echo "Build Profile:  $LLVM_BUILD_PROFILE"
 echo "LLVM Projects:  $LLVM_ENABLE_PROJECTS"
 echo "LLVM Targets:   $LLVM_TARGETS_TO_BUILD"
 echo "LLVM Runtimes:  ${LLVM_ENABLE_RUNTIMES:-<none>}"
 
 # 1. Clone LLVM
-LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
 
 # A leftover partial ("promisor") clone is unusable here: every checkout, patch
 # and rev-parse would trigger per-blob lazy fetches against github.com. Unsetting
@@ -86,20 +154,86 @@ if [[ "$LLVM_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
         echo "LLVM commit ${LLVM_REF} is already available locally."
     fi
     echo "Checking out LLVM commit ${LLVM_REF} ..."
-    git checkout "${LLVM_REF}"
+    git checkout --force "${LLVM_REF}"
 else
     echo "Fetching ref ${LLVM_REF} ..."
     git fetch "${LLVM_FETCH_ARGS[@]}" origin "${LLVM_REF}"
-    git checkout FETCH_HEAD
+    git checkout --force FETCH_HEAD
 fi
 
-if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
-    echo "LLVM patch already applied: ${LLVM_PATCH}"
-else
-    echo "Applying LLVM patch: ${LLVM_PATCH}"
-    git apply --check "${LLVM_PATCH}"
-    git apply "${LLVM_PATCH}"
+# Patches are replayed from a pristine tree rather than detected as
+# already-applied. A per-patch `git apply --reverse --check` probe cannot work
+# for a series: once patch N+1 has rewritten the same lines, patch N no longer
+# reverse-applies, so the probe reports it as missing and the re-apply fails.
+# The forced checkout above is what makes the replay total: it discards the
+# previous run's applied extensions and moves HEAD even when the authoring
+# script left a commit behind. A plain checkout refuses both, and `set -e`
+# would then abort here on every subsequent run with no way to recover.
+#
+# Tracked files only -- deliberately NOT `git clean -fd`, which would delete
+# build-flydsl/ and mlir_install/ (both live inside this checkout, and
+# mlir_install/ is not covered by LLVM's ignore rules) and turn every
+# incremental build into a full one.
+
+# A .patch file listed in neither array would be silently ignored, which is the
+# most likely way an added patch goes missing (the array edit is forgotten in
+# review). Check both directions before applying.
+LLVM_ALL_PATCHES=("${REQUIRED_PATCHES[@]}" "${LLVM_EXTENSIONS[@]}")
+for patch_file in "${LLVM_EXT_DIR}"/*.patch; do
+    [ -e "${patch_file}" ] || continue
+    patch_base="$(basename "${patch_file}")"
+    listed=0
+    for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
+        [ "${patch_name}" = "${patch_base}" ] && listed=1 && break
+    done
+    if [ "${listed}" -eq 0 ]; then
+        echo "Error: patch file is listed in neither array: ${patch_base}" >&2
+        echo "       Add it to LLVM_EXTENSIONS (or REQUIRED_PATCHES, if the build" >&2
+        echo "       is broken without it) in scripts/build_llvm.sh, or delete it." >&2
+        exit 1
+    fi
+done
+for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
+    if [ ! -f "${LLVM_EXT_DIR}/${patch_name}" ]; then
+        echo "Error: a patch array lists a file that does not exist: ${patch_name}" >&2
+        echo "       Expected at: ${LLVM_EXT_DIR}/${patch_name}" >&2
+        exit 1
+    fi
+done
+
+# Validation above is deliberately unconditional: building a profile that omits
+# the extensions must not also suppress "this file is listed nowhere", which is
+# a mistake in the tree rather than a choice made at build time.
+#
+# Required patches apply to both profiles. Extensions apply only to `extended`,
+# and only when they have not been switched off.
+LLVM_APPLY=("${REQUIRED_PATCHES[@]}")
+if [[ "${FLYDSL_LLVM_PROFILE}" == "extended" && "${LLVM_NO_EXT}" != "1" ]]; then
+    LLVM_APPLY+=("${LLVM_EXTENSIONS[@]}")
 fi
+
+echo "LLVM Profile:    ${FLYDSL_LLVM_PROFILE}"
+echo "LLVM Required:   ${#REQUIRED_PATCHES[@]}"
+if [[ "${FLYDSL_LLVM_PROFILE}" != "extended" ]]; then
+    echo "LLVM Extensions: none (profile=${FLYDSL_LLVM_PROFILE})"
+elif [[ "${LLVM_NO_EXT}" == "1" ]]; then
+    echo "LLVM Extensions: none (FLYDSL_LLVM_NO_EXT=1)"
+else
+    echo "LLVM Extensions: ${#LLVM_EXTENSIONS[@]}"
+fi
+for ext_name in "${LLVM_APPLY[@]}"; do
+    echo "  applying ${ext_name}"
+    if ! git apply "${LLVM_EXT_DIR}/${ext_name}"; then
+        echo "" >&2
+        echo "Error: LLVM extension failed to apply: ${ext_name}" >&2
+        echo "       LLVM pin: ${LLVM_REF}" >&2
+        echo "" >&2
+        echo "  Either the extension is stale against this pin, or it landed upstream." >&2
+        echo "  To rebase it:   bash scripts/llvm_extension.sh --rebase ${ext_name}" >&2
+        echo "  If it landed:   delete it and drop it from LLVM_EXTENSIONS in scripts/build_llvm.sh" >&2
+        exit 1
+    fi
+done
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd
