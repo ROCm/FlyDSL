@@ -21,6 +21,7 @@ BINARY_PASS_NAME = "fly-emit-gpu-binary"
 #: packaged build output.  Absent when CMake could not locate a ROCm install.
 BUNDLED_ROCM_PATH = Path(__file__).resolve().parents[2] / "_mlir" / "_rocm"
 
+
 @lru_cache(maxsize=1)
 def _has_inprocess_lld() -> bool:
     """Query the C library for in-process LLD support (``FLYDSL_HAS_LLD_LIBRARY``)."""
