@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-21T10:21:09Z",
+ "updated": "2026-09-21T10:23:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35588299456,
+   "pr": 987,
+   "commit": "ec211a3b5ab69aa4e5e6d650b5071180ea084de9",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588299456",
+   "created_at": "2026-09-21T10:21:24Z",
+   "updated_at": "2026-09-21T10:21:56Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 35588085232,
    "pr": 987,
@@ -10,11 +25,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588085232",
    "created_at": "2026-09-21T10:18:59Z",
-   "updated_at": "2026-09-21T10:20:07Z",
+   "updated_at": "2026-09-21T10:21:30Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -25,13 +40,41 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548",
    "created_at": "2026-09-21T10:01:24Z",
-   "updated_at": "2026-09-21T10:07:26Z",
+   "updated_at": "2026-09-21T10:21:38Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-21T10:21:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548/job/106296753820"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-21T10:21:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548/job/106296753871"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-21T10:21:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548/job/106296754469"
+    }
+   ]
   },
   {
    "run_id": 35585674989,
@@ -2039,52 +2082,6 @@
    "updated_at": "2026-09-18T08:08:57Z",
    "actor": "Phil-amd",
    "jobs": []
-  },
-  {
-   "run_id": 35321561532,
-   "pr": 1164,
-   "commit": "685ede08b9155cfa4f095d7488800873171a6398",
-   "branch": "fix/gitpython-cve",
-   "event": "pull_request",
-   "title": "[Misc] Fix 5 Dependabot vulnerabilities",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35321561532",
-   "created_at": "2026-09-18T07:52:41Z",
-   "updated_at": "2026-09-18T07:54:05Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T07:53:59Z",
-     "completed_at": "2026-09-18T07:54:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35321561532/job/105525272700"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T07:53:58Z",
-     "completed_at": "2026-09-18T07:54:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35321561532/job/105525272794"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T07:53:59Z",
-     "completed_at": "2026-09-18T07:54:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35321561532/job/105525272815",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    }
-   ]
   }
  ]
 }
