@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-21T11:27:36Z",
+ "updated": "2026-09-21T11:33:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,19 +25,19 @@
    "branch": "smem-capacity-decouple",
    "event": "pull_request",
    "title": "smem cleanup: move capacity helpers off legacy allocator, migrate tes\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35589028444",
    "created_at": "2026-09-21T10:29:36Z",
-   "updated_at": "2026-09-21T10:40:49Z",
+   "updated_at": "2026-09-21T11:27:54Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-21T10:40:49Z",
+     "started_at": "2026-09-21T11:27:53Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35589028444/job/106302061311"
     },
