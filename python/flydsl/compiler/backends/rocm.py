@@ -14,7 +14,7 @@ from .base import BaseBackend, GPUTarget
 #: FlyDSL wrapper around ``gpu-module-to-binary`` that links the HSA code object
 #: with the in-process LLD library instead of spawning ``ld.lld`` from the ROCm
 #: toolkit path.  See ``lib/Conversion/FlyToROCDL/FlyEmitGPUBinary.cpp``.
-BINARY_PASS_NAME = "fly-emit-gpu-binary"
+FLY_GPU_BINARY_PASS = "fly-emit-gpu-binary"
 
 #: ROCm toolkit root bundled with the package; holds ``amdgcn/bitcode/*.bc``
 #: copied in at build time.  Lives under ``_mlir`` because that subtree is the
@@ -207,7 +207,7 @@ class RocmBackend(BaseBackend):
         # The external toolchain drives an upstream mlir-opt that does not know
         # about FlyDSL passes, so that path keeps using gpu-module-to-binary.
         binary_fragment = (
-            f"gpu-module-to-binary{{format=fatbin {opts}}}" if external else f"{BINARY_PASS_NAME}{{{opts}}}"
+            f"gpu-module-to-binary{{format=fatbin {opts}}}" if external else f"{FLY_GPU_BINARY_PASS}{{{opts}}}"
         )
         return [*pre_binary_fragments, *binary_prep_fragments], binary_fragment
 

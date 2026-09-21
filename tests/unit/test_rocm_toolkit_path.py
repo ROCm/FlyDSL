@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from flydsl.compiler.backends.rocm import BINARY_PASS_NAME, RocmBackend, rocm_toolkit_path
+from flydsl.compiler.backends.rocm import FLY_GPU_BINARY_PASS, RocmBackend, rocm_toolkit_path
 
 pytestmark = [pytest.mark.l0_backend_agnostic]
 
@@ -73,5 +73,5 @@ def test_binary_fragment_carries_the_resolved_toolkit(monkeypatch, tmp_path):
     backend = RocmBackend(RocmBackend.make_target("gfx942"))
     binary_fragment = backend.pipeline_fragments(compile_hints={})[-1]
 
-    assert binary_fragment.startswith(BINARY_PASS_NAME)
+    assert binary_fragment.startswith(FLY_GPU_BINARY_PASS)
     assert f"toolkit={tmp_path}" in binary_fragment
