@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-09-21T15:28:19Z",
+ "updated": "2026-09-21T18:19:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35627307918,
+   "pr": 1062,
+   "commit": "1f6ef44a88d645b5bd221e4dd05474ec0d5bf85a",
+   "branch": "smem-capacity-decouple",
+   "event": "pull_request",
+   "title": "smem cleanup: move capacity helpers off legacy allocator, migrate tes\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35627307918",
+   "created_at": "2026-09-21T16:42:23Z",
+   "updated_at": "2026-09-21T17:19:10Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-21T17:19:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35627307918/job/106437680022"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-21T17:19:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35627307918/job/106437680127"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-21T17:19:17Z",
+     "completed_at": "2026-09-21T17:33:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35627307918/job/106437680135"
+    }
+   ]
+  },
   {
    "run_id": 35597726373,
    "pr": 1154,
@@ -56,20 +99,20 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35593412890",
    "created_at": "2026-09-21T11:19:05Z",
-   "updated_at": "2026-09-21T11:35:14Z",
+   "updated_at": "2026-09-21T18:17:59Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-21T11:35:14Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-21T17:19:31Z",
+     "completed_at": "2026-09-21T18:17:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35593412890/job/106317185673"
     },
     {
@@ -2130,21 +2173,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35324537801",
    "created_at": "2026-09-18T08:28:21Z",
    "updated_at": "2026-09-18T09:11:52Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 35324289216,
-   "pr": 1145,
-   "commit": "49b9f07753906b080b164816e56f444dce018037",
-   "branch": "jli/gfx1250/bump-llvm-unclausevmem",
-   "event": "pull_request",
-   "title": "[LLVM] bump llvm which improve the sequence for initial unclaused vmem",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35324289216",
-   "created_at": "2026-09-18T08:25:22Z",
-   "updated_at": "2026-09-18T08:28:24Z",
    "actor": "jli-melchior",
    "jobs": []
   }
