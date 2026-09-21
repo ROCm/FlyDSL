@@ -252,9 +252,12 @@ fx.rocdl.s_waitcnt(lgkmcnt=0)
 
 ## 4. `SmemAllocator` / `SmemPtr` → `SharedAllocator`
 
-Legacy LDS path uses a manual base pointer, byte offsets, and `finalize()`. New
-kernels declare an `@fx.struct` of `fx.Array` fields and allocate via
-`fx.SharedAllocator` — the compiler sizes the LDS global; **no finalize**.
+The legacy LDS path used a manual base pointer, byte offsets, and `finalize()`.
+It has been **removed** — `flydsl.utils.smem_allocator` no longer exists, so code
+still importing `SmemAllocator` / `SmemPtr` fails at import and must be migrated,
+not merely preferred away. Declare an `@fx.struct` of `fx.Array` fields and
+allocate via `fx.SharedAllocator` — the compiler sizes the LDS global; **no
+finalize**.
 
 ```python
 # Before
@@ -276,9 +279,9 @@ lds_b = lds.b.view(fx.make_layout((BLOCK_K, BLOCK_N), (BLOCK_N, 1)))
 
 - Default `static=True` leaves `launch(smem=...)` unset; only `static=False`
   auto-infers `smem` from `allocated_bytes`.
-- `SmemPtr.get()` caches its view — reusing it in an epilogue after a `scf.for`
-  causes a dominance error. `SharedAllocator` avoids this (view taken per use); for
-  legacy code, clear `ptr._view_cache = None`.
+- Build each `.view(...)` at the top of the kernel. A view created inside the
+  `scf.for` body is defined in the loop scope, so reusing it in the epilogue
+  causes an SSA dominance error; building it once up front dominates both.
 - Structural change — migrate a kernel's whole LDS at once and re-run its test.
 
 ---

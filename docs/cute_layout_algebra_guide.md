@@ -282,8 +282,9 @@ lds_tile = lds.tile.view(fx.make_layout((128, 64), (64, 1)))
 ```
 
 The compiler sizes the per-leaf static LDS global automatically (default
-``static=True``), so ``launch(smem=...)`` is normally left unset. The legacy
-``flydsl.utils.smem_allocator.SmemAllocator`` remains for un-migrated kernels.
+``static=True``), so ``launch(smem=...)`` is normally left unset.
+``SharedAllocator`` is the only LDS allocator; the former
+``flydsl.utils.smem_allocator`` path has been removed.
 
 ### 5.3 Swizzling (bank conflict avoidance)
 
@@ -509,7 +510,6 @@ for a production-quality GEMM implementation.
 - `python/flydsl/expr/rocdl/` — ROCDL-specific operations
 - `python/flydsl/compiler/` — JIT compilation pipeline (`kernel_function.py`, `jit_function.py`)
 - `python/flydsl/expr/gpu.py` — `SharedAllocator` for LDS allocation (`fx.SharedAllocator`)
-- `python/flydsl/utils/smem_allocator.py` — legacy `SmemAllocator`
 - `examples/01-vectorAdd.py` — VecAdd example with layout algebra
 - `examples/02-tiledCopy.py` — Tiled copy example
 - `examples/03-tiledMma.py` — Tiled MFMA GEMM example

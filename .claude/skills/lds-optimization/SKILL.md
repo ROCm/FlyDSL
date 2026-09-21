@@ -242,8 +242,8 @@ def my_kernel(...):
     fx.memref_store(data, lds_key, [row_idx, swizzled_col])
 ```
 
-The legacy `flydsl.utils.smem_allocator.SmemAllocator` path remains for
-un-migrated kernels but is not recommended for new code.
+`fx.SharedAllocator` is the only LDS allocator; the former
+`flydsl.utils.smem_allocator` path has been removed.
 
 ### Choosing Swizzle Parameters
 

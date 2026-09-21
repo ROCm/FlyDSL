@@ -422,8 +422,8 @@ def kernel_with_lds(A: fx.Tensor, ...):
     fx.gpu.barrier()
 ```
 
-(The legacy `flydsl.utils.smem_allocator.SmemAllocator` path still exists for
-un-migrated kernels but is not recommended for new code.)
+(`fx.SharedAllocator` is the only LDS allocator; the former
+`flydsl.utils.smem_allocator` path has been removed.)
 
 LDS capacity: gfx942 (MI300X) = 64KB, gfx950 (MI350) = 160KB.
 

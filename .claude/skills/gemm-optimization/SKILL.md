@@ -125,8 +125,8 @@ def kernel_gemm(...):
     lds_a_ping = lds.a1.view(fx.make_layout((tile_m, tile_k), (tile_k, 1)))
 ```
 
-The legacy `flydsl.utils.smem_allocator.SmemAllocator` path remains for un-migrated
-kernels but is not recommended for new code.
+`fx.SharedAllocator` is the only LDS allocator; the former
+`flydsl.utils.smem_allocator` path has been removed.
 
 ### 2.3 Main Loop Structure (2-Stage)
 
