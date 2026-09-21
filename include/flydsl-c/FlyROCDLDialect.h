@@ -16,7 +16,6 @@ MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl);
 MLIR_CAPI_EXPORTED void mlirRegisterConvertROCDLFastMathOpsPass(void);
 MLIR_CAPI_EXPORTED void mlirRegisterFlyToROCDLConversionPass(void);
 MLIR_CAPI_EXPORTED void mlirRegisterFlyEmitGPUBinaryPass(void);
-MLIR_CAPI_EXPORTED void mlirRegisterFlyROCDLClusterAttrPass(void);
 
 /// Backend plugin registration: insert all ROCDL dialects into \p registry.
 MLIR_CAPI_EXPORTED void flydsl_register_rocdl_dialects(MlirDialectRegistry registry);
