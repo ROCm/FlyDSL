@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-09-21T01:07:52Z",
+ "updated": "2026-09-21T02:17:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35553592497,
+   "pr": 987,
+   "commit": "a49b9bad7dd8404b350a3729fca7040fefbe387d",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35553592497",
+   "created_at": "2026-09-21T02:15:44Z",
+   "updated_at": "2026-09-21T02:16:15Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 35553451200,
+   "pr": 987,
+   "commit": "54020daa2c390cc0b13c0d9d7e2fb66b39f17bb3",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35553451200",
+   "created_at": "2026-09-21T02:13:13Z",
+   "updated_at": "2026-09-21T02:15:49Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 35551010112,
+   "pr": null,
+   "commit": "2aa5e35724a088f593392fb6293cd6ade7c66079",
+   "branch": "main",
+   "event": "push",
+   "title": "[Ext][Coop] Add more warp-level primitives (#1167)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35551010112",
+   "created_at": "2026-09-21T01:28:32Z",
+   "updated_at": "2026-09-21T01:39:31Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-21T01:39:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35551010112/job/106187261183"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-21T01:39:46Z",
+     "completed_at": "2026-09-21T02:08:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35551010112/job/106187261187"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-21T01:40:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35551010112/job/106187261216"
+    }
+   ]
+  },
   {
    "run_id": 35508477181,
    "pr": null,
@@ -56,19 +129,19 @@
    "branch": "pr/enh-coop-warp-primitives",
    "event": "pull_request",
    "title": "[Ext][Coop] Add more warp-level primitives",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35499695540",
    "created_at": "2026-09-20T08:29:29Z",
-   "updated_at": "2026-09-20T08:52:52Z",
+   "updated_at": "2026-09-21T01:39:58Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-20T08:52:52Z",
+     "started_at": "2026-09-21T01:39:58Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35499695540/job/106052026102"
     },
@@ -97,7 +170,7 @@
   },
   {
    "run_id": 35494788619,
-   "pr": 1167,
+   "pr": null,
    "commit": "dd1042a86d8fb6a4a5fa0db33d25cc971ec89e5a",
    "branch": "pr/enh-coop-warp-primitives",
    "event": "pull_request",
@@ -609,7 +682,7 @@
   },
   {
    "run_id": 35480648735,
-   "pr": 1167,
+   "pr": null,
    "commit": "e011da818d9a3fd9cf1de0c54b82927ed05143e5",
    "branch": "pr/enh-coop-warp-primitives",
    "event": "pull_request",
@@ -1163,7 +1236,7 @@
   },
   {
    "run_id": 35352041978,
-   "pr": 1167,
+   "pr": null,
    "commit": "d6dc9c5569bbd8a150d7fe50db80c1d0c71af2f1",
    "branch": "pr/enh-coop-warp-primitives",
    "event": "pull_request",
@@ -1206,7 +1279,7 @@
   },
   {
    "run_id": 35341001055,
-   "pr": 1167,
+   "pr": null,
    "commit": "db7eaa6310e8004b94fdda24c07ae99413de048d",
    "branch": "pr/enh-coop-warp-primitives",
    "event": "pull_request",
@@ -1249,7 +1322,7 @@
   },
   {
    "run_id": 35339232190,
-   "pr": 1167,
+   "pr": null,
    "commit": "11e4e23c9f5079f9f4eee84815f48685821a195f",
    "branch": "pr/enh-coop-warp-primitives",
    "event": "pull_request",
@@ -1264,7 +1337,7 @@
   },
   {
    "run_id": 35338711925,
-   "pr": 1167,
+   "pr": null,
    "commit": "749dd522710ae1b5de018cd9d7634699ada2b58d",
    "branch": "pr/enh-coop-warp-primitives",
    "event": "pull_request",
@@ -1953,82 +2026,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 35314191043,
-   "pr": null,
-   "commit": "a14afdf020e1610cd66c97fafdcd8a4cb0a6e63d",
-   "branch": "phil/drop-inert-llvm-knobs",
-   "event": "pull_request",
-   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314191043",
-   "created_at": "2026-09-18T06:16:41Z",
-   "updated_at": "2026-09-18T08:01:28Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T06:35:33Z",
-     "completed_at": "2026-09-18T07:33:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314191043/job/105506234569",
-     "machine": "smci350-rck-g03-d07-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-18T06:42:09Z",
-     "completed_at": "2026-09-18T08:01:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314191043/job/105506234620"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T06:35:28Z",
-     "completed_at": "2026-09-18T06:55:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35314191043/job/105506234627"
-    }
-   ]
-  },
-  {
-   "run_id": 35313745575,
-   "pr": null,
-   "commit": "4f572fd5fb32555eaac89d3a792746eacb8fddc6",
-   "branch": "phil/drop-inert-llvm-knobs",
-   "event": "pull_request",
-   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35313745575",
-   "created_at": "2026-09-18T06:10:16Z",
-   "updated_at": "2026-09-18T06:16:58Z",
-   "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 35310916796,
-   "pr": null,
-   "commit": "3a3bea1725beb07f79c0490a6026d9652cea49a3",
-   "branch": "convert-atom-call-pred-ssa",
-   "event": "pull_request",
-   "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35310916796",
-   "created_at": "2026-09-18T05:28:10Z",
-   "updated_at": "2026-09-18T05:28:10Z",
-   "actor": "LWenH",
-   "jobs": []
   }
  ]
 }
