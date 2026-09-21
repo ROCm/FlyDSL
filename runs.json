@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-09-21T06:57:16Z",
+ "updated": "2026-09-21T07:20:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35572352299,
+   "pr": 1162,
+   "commit": "2bacd2eb4775dc838b2e8cba0b3d8f1740fd7e7d",
+   "branch": "feature/ktrace-dialect-squashed",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35572352299",
+   "created_at": "2026-09-21T07:18:35Z",
+   "updated_at": "2026-09-21T07:19:18Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 35571210579,
+   "pr": 1175,
+   "commit": "b27a7e9449765340de4332d56cb883fd3dc3c0b0",
+   "branch": "jli/relax-tag-condition",
+   "event": "pull_request",
+   "title": "[CI] Remove ancestor-of-main gate from PyPI publish workflow",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579",
+   "created_at": "2026-09-21T07:04:20Z",
+   "updated_at": "2026-09-21T07:06:14Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 35571032178,
+   "pr": 1162,
+   "commit": "2846690ebb7ff331183c839e16188da672deed5f",
+   "branch": "feature/ktrace-dialect-squashed",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571032178",
+   "created_at": "2026-09-21T07:01:58Z",
+   "updated_at": "2026-09-21T07:18:56Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-21T07:14:57Z",
+     "completed_at": "2026-09-21T07:18:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571032178/job/106245543764"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-21T07:15:10Z",
+     "completed_at": "2026-09-21T07:18:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571032178/job/106245543775"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-21T07:14:45Z",
+     "completed_at": "2026-09-21T07:18:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571032178/job/106245543866"
+    }
+   ]
+  },
   {
    "run_id": 35567101986,
    "pr": 987,
@@ -10,28 +83,28 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986",
    "created_at": "2026-09-21T06:08:06Z",
-   "updated_at": "2026-09-21T06:22:38Z",
+   "updated_at": "2026-09-21T07:15:14Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-21T06:23:34Z",
-     "completed_at": null,
+     "completed_at": "2026-09-21T06:58:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986/job/106234148020"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-21T06:22:38Z",
+     "started_at": "2026-09-21T07:15:14Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986/job/106234148031"
     },
@@ -2012,51 +2085,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 35316496300,
-   "pr": 1162,
-   "commit": "447758e02840a51631253900a22bd2ca859f5482",
-   "branch": "feature/ktrace-dialect-squashed",
-   "event": "pull_request",
-   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316496300",
-   "created_at": "2026-09-18T06:48:27Z",
-   "updated_at": "2026-09-18T07:06:22Z",
-   "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 35316064189,
-   "pr": null,
-   "commit": "cba978a2706b2671b677113b48336a308d39d9ab",
-   "branch": "main",
-   "event": "push",
-   "title": "[Perf] Reduce small-batch TopK selection overhead on gfx950 (#1119)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316064189",
-   "created_at": "2026-09-18T06:42:40Z",
-   "updated_at": "2026-09-18T06:53:04Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 35315870212,
-   "pr": 1162,
-   "commit": "c1403684d185b7306e112dc7dcac99de5ca3db48",
-   "branch": "feature/ktrace-dialect-squashed",
-   "event": "pull_request",
-   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35315870212",
-   "created_at": "2026-09-18T06:40:03Z",
-   "updated_at": "2026-09-18T06:41:29Z",
-   "actor": "Phil-amd",
-   "jobs": []
   }
  ]
 }
