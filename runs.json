@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-21T07:20:53Z",
+ "updated": "2026-09-21T07:32:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35573341144,
+   "pr": 1162,
+   "commit": "045817a841f0e838d50afb55727f070ecae73f52",
+   "branch": "feature/ktrace-dialect-squashed",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35573341144",
+   "created_at": "2026-09-21T07:31:09Z",
+   "updated_at": "2026-09-21T07:31:15Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35572352299,
    "pr": 1162,
@@ -10,11 +25,11 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35572352299",
    "created_at": "2026-09-21T07:18:35Z",
-   "updated_at": "2026-09-21T07:19:18Z",
+   "updated_at": "2026-09-21T07:31:15Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -25,13 +40,41 @@
    "branch": "jli/relax-tag-condition",
    "event": "pull_request",
    "title": "[CI] Remove ancestor-of-main gate from PyPI publish workflow",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579",
    "created_at": "2026-09-21T07:04:20Z",
-   "updated_at": "2026-09-21T07:06:14Z",
+   "updated_at": "2026-09-21T07:20:58Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-21T07:20:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579/job/106247046402"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-21T07:21:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579/job/106247046423"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-21T07:21:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579/job/106247046493"
+    }
+   ]
   },
   {
    "run_id": 35571032178,
@@ -2039,52 +2082,6 @@
    "updated_at": "2026-09-18T07:09:45Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 35316781680,
-   "pr": 1163,
-   "commit": "da7fbd156c827a1767b31e7e245f984fa604aa51",
-   "branch": "bump-version-0.3.4",
-   "event": "pull_request",
-   "title": "bump version to 0.3.4",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680",
-   "created_at": "2026-09-18T06:52:18Z",
-   "updated_at": "2026-09-18T08:40:21Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T07:13:53Z",
-     "completed_at": "2026-09-18T07:39:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680/job/105513800131"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T07:38:16Z",
-     "completed_at": "2026-09-18T08:40:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680/job/105513800209"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T07:08:36Z",
-     "completed_at": "2026-09-18T08:04:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35316781680/job/105513800345",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
