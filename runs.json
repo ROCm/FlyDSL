@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-21T09:54:25Z",
+ "updated": "2026-09-21T10:08:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35586471548,
+   "pr": 1162,
+   "commit": "ae834afca97b54c41dee3c2a9e5f320a26459c20",
+   "branch": "feature/ktrace-dialect-squashed",
+   "event": "pull_request",
+   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548",
+   "created_at": "2026-09-21T10:01:24Z",
+   "updated_at": "2026-09-21T10:06:54Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35585674989,
    "pr": 1128,
@@ -10,13 +25,41 @@
    "branch": "codex/scaled-tiled-gemm",
    "event": "pull_request",
    "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35585674989",
    "created_at": "2026-09-21T09:52:26Z",
-   "updated_at": "2026-09-21T09:53:05Z",
+   "updated_at": "2026-09-21T10:05:59Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-21T10:05:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35585674989/job/106292215967"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-21T10:05:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35585674989/job/106292215980"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-21T10:06:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35585674989/job/106292215999"
+    }
+   ]
   },
   {
    "run_id": 35584905132,
@@ -40,19 +83,19 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35583778218",
    "created_at": "2026-09-21T09:31:24Z",
-   "updated_at": "2026-09-21T09:44:26Z",
+   "updated_at": "2026-09-21T10:06:49Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-21T09:44:26Z",
+     "started_at": "2026-09-21T10:06:48Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35583778218/job/106286040498"
     },
@@ -83,11 +126,11 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35576104129",
    "created_at": "2026-09-21T08:05:40Z",
-   "updated_at": "2026-09-21T09:11:21Z",
+   "updated_at": "2026-09-21T10:06:25Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -114,10 +157,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-21T09:11:21Z",
-     "completed_at": null,
+     "completed_at": "2026-09-21T10:06:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35576104129/job/106261729596"
     }
    ]
@@ -2042,52 +2085,6 @@
    "updated_at": "2026-09-19T02:26:22Z",
    "actor": "LWenH",
    "jobs": []
-  },
-  {
-   "run_id": 35318091631,
-   "pr": null,
-   "commit": "6bb37ba4e23c3a2729e3af244251b55fc5938237",
-   "branch": "main",
-   "event": "push",
-   "title": "[ROCDL] Add make_tiled_tdm_atom op and tdm_partition (#1013)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35318091631",
-   "created_at": "2026-09-18T07:09:27Z",
-   "updated_at": "2026-09-18T09:08:19Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T07:51:40Z",
-     "completed_at": "2026-09-18T08:51:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35318091631/job/105524632497",
-     "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T08:25:54Z",
-     "completed_at": "2026-09-18T08:42:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35318091631/job/105524632509"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T08:10:13Z",
-     "completed_at": "2026-09-18T09:08:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35318091631/job/105524632515"
-    }
-   ]
   }
  ]
 }
