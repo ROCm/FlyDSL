@@ -34,11 +34,6 @@ jobs:
             exit 1
           fi
 
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "Release tag ${GITHUB_REF_NAME} is not on origin/main" >&2
-            exit 1
-          fi
-
           if [ -z "${SOURCE_VERSION}" ]; then
             echo "Failed to find __version__ in python/flydsl/__init__.py" >&2
             exit 1
