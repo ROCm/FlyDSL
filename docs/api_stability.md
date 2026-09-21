@@ -95,6 +95,14 @@ is stable, while `fx.rocdl.cluster.*` is unstable when `cluster` is not listed
 in `rocdl.__all__`. An upstream-MLIR ODS builder that is re-exported but omitted
 from the final `__all__` is unstable as well.
 
+Everything under `fx.experimental.*` is unstable, and by two independent means. The
+package name says so, and nothing under it defines `__all__`, so no member qualifies
+under the rule above. `fx.experimental.ktrace` -- in-kernel wave tracing -- is the
+current occupant: its record format, trace schema and entry points may change in any
+minor release. Adding an `__all__` to a module there would silently make it stable;
+do not add one. A feature that is ready to make a compatibility commitment moves out
+of `experimental`, which is a reviewable change rather than a silent promotion.
+
 `__all__` is not access control: an attribute may exist and be callable while
 still failing the stability test above.
 

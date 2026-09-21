@@ -23,6 +23,10 @@ from . import math as math
 _BACKEND_MODULES = {
     "rocdl": ".rocdl",
     "tdm_ops": ".rocdl.tdm_ops",  # deprecated, use .rocdl.tdm_ops instead
+    # Single-dot: experimental lives at expr/experimental/. The two-dot form used
+    # by _LIBRARY_MODULES resolves out of expr/ into flydsl.extension and would not
+    # find it.
+    "experimental": ".experimental",
 }
 
 _LIBRARY_MODULES = {
@@ -33,6 +37,8 @@ _LIBRARY_MODULES = {
 if TYPE_CHECKING:
     from ..extension import coop as coop
     from ..extension import random as random
+
+    from . import experimental as experimental
 
 
 # lazy load backend subpackages and extension libraries
