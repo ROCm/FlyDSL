@@ -172,6 +172,29 @@ extern "C" void mgpuMemset16(void *dst, int shortValue, size_t count, hipStream_
       hipMemsetD16Async(reinterpret_cast<hipDeviceptr_t>(dst), shortValue, count, stream));
 }
 
+// --- ktrace trace buffer -------------------------------------------------------
+//
+// Synchronous counterparts to mgpuMemset32 / mgpuMemcpy above. ktrace has no stream to
+// order against -- its buffer is a trailing implicit kernel argument, and the kernels
+// writing it launch on a user-supplied stream -- so an async clear can erase records
+// the next launch just wrote, and an async copy can read the buffer mid-flight.
+// Allocation needs no counterpart and uses mgpuMemAlloc.
+//
+// They return hipError_t rather than using HIP_REPORT_IF_ERROR, which prints and
+// continues: a short read would decode as a truncated trace instead of failing.
+
+extern "C" int mgpuTraceBufferClear(void *ptr, uint64_t sizeBytes) {
+  return hipMemset(ptr, 0, sizeBytes);
+}
+
+extern "C" int mgpuTraceBufferRead(void *dst, void *src, uint64_t sizeBytes) {
+  // Device-wide: mgpuStreamSynchronize(nullptr) would cover only the null stream.
+  hipError_t err = hipDeviceSynchronize();
+  if (err != hipSuccess)
+    return err;
+  return hipMemcpy(dst, src, sizeBytes, hipMemcpyDeviceToHost);
+}
+
 extern "C" void mgpuMemHostRegister(void *ptr, uint64_t sizeBytes) {
   HIP_REPORT_IF_ERROR(hipHostRegister(ptr, sizeBytes, /*flags=*/0));
 }
