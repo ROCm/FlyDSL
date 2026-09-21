@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-21T10:08:24Z",
+ "updated": "2026-09-21T10:21:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35588085232,
+   "pr": 987,
+   "commit": "f3ddda0f5304b7ce46bad3b05356c002a90d0631",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588085232",
+   "created_at": "2026-09-21T10:18:59Z",
+   "updated_at": "2026-09-21T10:20:07Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 35586471548,
    "pr": 1162,
@@ -10,11 +25,11 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548",
    "created_at": "2026-09-21T10:01:24Z",
-   "updated_at": "2026-09-21T10:06:54Z",
+   "updated_at": "2026-09-21T10:07:26Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -35,9 +50,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-21T10:05:59Z",
+     "started_at": "2026-09-21T10:19:41Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35585674989/job/106292215967"
     },
@@ -83,38 +98,38 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35583778218",
    "created_at": "2026-09-21T09:31:24Z",
-   "updated_at": "2026-09-21T10:06:49Z",
+   "updated_at": "2026-09-21T10:19:43Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-21T10:06:48Z",
-     "completed_at": null,
+     "completed_at": "2026-09-21T10:19:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35583778218/job/106286040498"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-21T09:46:23Z",
-     "completed_at": null,
+     "completed_at": "2026-09-21T10:19:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35583778218/job/106286040515"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-21T09:44:59Z",
-     "completed_at": null,
+     "completed_at": "2026-09-21T10:19:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35583778218/job/106286040526"
     }
    ]
@@ -2070,21 +2085,6 @@
      "bench_skipped": "host unidentified != MI355"
     }
    ]
-  },
-  {
-   "run_id": 35319218075,
-   "pr": null,
-   "commit": "700c10081c85c6773e85ae4b018aeb96a8939e18",
-   "branch": "convert-atom-call-pred-ssa",
-   "event": "pull_request",
-   "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35319218075",
-   "created_at": "2026-09-18T07:23:52Z",
-   "updated_at": "2026-09-19T02:26:22Z",
-   "actor": "LWenH",
-   "jobs": []
   }
  ]
 }
