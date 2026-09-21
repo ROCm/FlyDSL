@@ -2171,8 +2171,8 @@ public:
     auto *ctx = rewriter.getContext();
 
     Value copyAtomVal = op.getCopyAtom();
-    if (auto tiledCopyOp = copyAtomVal.getDefiningOp<MakeTiledCopyOp>())
-      copyAtomVal = tiledCopyOp.getCopyAtom();
+    if (isa<TiledCopyType>(copyAtomVal.getType()))
+      copyAtomVal = GetCopyAtomOp::create(rewriter, loc, copyAtomVal);
 
     Value src = op.getSrc();
     Value dst = op.getDst();
@@ -2320,14 +2320,12 @@ public:
   using OpRewritePattern<GemmOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(GemmOp op, PatternRewriter &rewriter) const override {
-    if (failed(op.verify()))
-      return failure();
     Location loc = op.getLoc();
     auto *ctx = rewriter.getContext();
 
     Value mmaAtomVal = op.getMmaAtom();
     if (isa<TiledMmaType>(mmaAtomVal.getType()))
-      mmaAtomVal = rewriter.createOrFold<GetMmaAtomOp>(loc, mmaAtomVal);
+      mmaAtomVal = GetMmaAtomOp::create(rewriter, loc, mmaAtomVal);
 
     Value d = op.getD();
     Value a = op.getA().front();

@@ -8,7 +8,6 @@
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Matchers.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
@@ -49,6 +48,9 @@ namespace mlir::fly_rocdl {
 
 //===----------------------------------------------------------------------===//
 // MmaOpCDNA4_MFMAScaleType
+//
+// An extra scale operand in an atom-call group overrides the corresponding
+// ScaleA / ScaleB state for that call. Omitted scale operands use atom state.
 //===----------------------------------------------------------------------===//
 
 std::optional<unsigned> MmaOpCDNA4_MFMAScaleType::getFieldIndex(AtomStateField field) {
@@ -199,28 +201,6 @@ static int64_t getScaledMfmaAccVecSize(int32_t m, int32_t n) {
   return 0;
 }
 
-static void foldScaleByteShift(Value &scale, uint32_t &opsel) {
-  Value word, amount;
-  if (auto shift = scale.getDefiningOp<arith::ShRSIOp>()) {
-    word = shift.getLhs();
-    amount = shift.getRhs();
-  } else if (auto shift = scale.getDefiningOp<arith::ShRUIOp>()) {
-    word = shift.getLhs();
-    amount = shift.getRhs();
-  } else {
-    return;
-  }
-  APInt bits;
-  if (!matchPattern(amount, m_ConstantInt(&bits)) || bits.isNegative())
-    return;
-  uint64_t shift = bits.getZExtValue();
-  if (shift % 8 || shift / 8 + opsel > 3)
-    return;
-  // MFMA selects one E8M0 byte directly from the packed scale word.
-  opsel += shift / 8;
-  scale = word;
-}
-
 FailureOr<Value>
 MmaOpCDNA4_MFMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type resultTy,
                                           Type mmaAtomTyArg, Type dTyArg, TypeRange aTyArgs,
@@ -276,8 +256,6 @@ MmaOpCDNA4_MFMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type
   auto blgp = static_cast<ROCDL::MatrixFormat>(*bTypeCode);
   uint32_t opselA = getOpselA();
   uint32_t opselB = getOpselB();
-  foldScaleByteShift(*scaleA, opselA);
-  foldScaleByteShift(*scaleB, opselB);
 
   if (m == 16 && n == 16 && k == 128) {
     return ROCDL::mfma_scale_f32_16x16x128_f8f6f4::create(builder, loc, accTy, a, b, c, cbsz, blgp,

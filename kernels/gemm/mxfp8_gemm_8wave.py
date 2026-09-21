@@ -83,19 +83,19 @@ class MxMfma:
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
 
+    def idx(self, i, j):
+        return i * self.n_tiles_b + j
+
     def _operand(self, values, words=8):
         frag = fx.make_rmem_tensor(fx.make_layout((words, len(values)), (1, words)), fx.Int32)
         for i in range_constexpr(len(values)):
             fx.slice(frag, (None, i)).store(Vec(values[i]))
         return frag
 
-    def _scales(self, values, k_pack):
+    def _scales(self, values):
         frag = fx.make_rmem_tensor(fx.make_layout((1, len(values)), (0, 1)), fx.Int32)
         for i in range_constexpr(len(values)):
-            # shuffle_scale_w4 packs two adjacent row tiles and two K steps
-            # into each word. CDNA4 folds this byte selection into MFMA opsel.
-            scale = values[i] >> (8 * (k_pack * 2 + i % 2))
-            fx.slice(frag, (None, i)).store(Vec.filled(1, scale, fx.Int32))
+            fx.slice(frag, (None, i)).store(Vec.filled(1, values[i], fx.Int32))
         return frag
 
     def call(self, a, b, c, sa, sb, *, k_pack, set_prio=True):
@@ -109,10 +109,27 @@ class MxMfma:
         )
         for i in range_constexpr(len(c)):
             fx.slice(cf, (None, i // self.n_tiles_b, i % self.n_tiles_b)).store(Vec(c[i]))
-        saf, sbf = self._scales(sa, k_pack), self._scales(sb, k_pack)
+        saf, sbf = self._scales(sa), self._scales(sb)
         if const_expr(set_prio):
             rocdl.s_setprio(1)
-        fx.gemm(self.mma, cf, [af, saf], [bf, sbf], cf)
+        # Each scale word packs two row tiles and two K steps.
+        fx.gemm(
+            self.mma,
+            cf,
+            [af, saf],
+            [bf, sbf],
+            cf,
+            atom_callback=lambda atom, mnk: fx.make_mma_atom(
+                fx.rocdl.cdna4.MFMA_Scale(
+                    16,
+                    16,
+                    128,
+                    fx.Float8E4M3FN,
+                    opsel_a=k_pack * 2 + mnk[0] % 2,
+                    opsel_b=k_pack * 2 + mnk[1] % 2,
+                )
+            ),
+        )
         if const_expr(set_prio):
             rocdl.s_setprio(0)
             rocdl.s_barrier()

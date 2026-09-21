@@ -24,8 +24,9 @@ namespace mlir::fly_rocdl {
 // MmaOpGFX1250_WMMAScaleType — MX-scaled WMMA (E8M0 block scale)
 //
 // gfx1250 wave32 scaled WMMA for the unified f8/f6/f4 operand format. Per-operand
-// E8M0 scales are carried as atom state (ScaleA / ScaleB, i32), mirroring
-// MmaOpCDNA4_MFMAScaleType.
+// E8M0 scales are carried as atom state (ScaleA / ScaleB): i32 for block-32,
+// i64 for block-16. An extra scale operand in an atom-call group overrides the
+// corresponding state for that call. Omitted scale operands use atom state.
 //===----------------------------------------------------------------------===//
 
 std::optional<unsigned> MmaOpGFX1250_WMMAScaleType::getFieldIndex(AtomStateField field) {

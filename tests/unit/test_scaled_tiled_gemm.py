@@ -37,8 +37,7 @@ def _build_gemm(
     packed=False,
     *,
     call=fx.gemm,
-    metadata_operands=(),
-    metadata_v=(2,),
+    atom_callback=None,
 ):
     m, n, k = (1, 1, 1) if rank == 1 else (2, 3, 2 if rank == 3 else 1)
     module = ir.Module.create()
@@ -51,8 +50,6 @@ def _build_gemm(
             )
             with ir.InsertionPoint(function.add_entry_block()):
                 atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
-                if invalid_scale == "stateless":
-                    atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
                 mma = fx.make_tiled_mma(atom, fx.make_layout((1, 1, 1), (1, 1, 1))) if rank > 1 else atom
                 v = 8 if packed else 32
                 a_shape = (v,) if rank == 1 else ((v, m) if rank == 2 else (v, m, k))
@@ -66,12 +63,8 @@ def _build_gemm(
                 b.fill(1 if packed else 1.0)
                 c.fill(2.0)
                 sa_shape = (1,) + a_shape[1:]
-                if invalid_scale == "rank":
-                    sa_shape = (1,)
-                elif invalid_scale == "mode0":
+                if invalid_scale == "mode0":
                     sa_shape = (2,) + a_shape[1:]
-                elif invalid_scale == "tiles":
-                    sa_shape = (1, m + 1) + a_shape[2:]
                 sa_layout = fx.make_layout(sa_shape, (0,) * rank) if scale_mode == "broadcast_a" else sa_shape
                 sb_shape = (1,) + b_shape[1:]
                 sb_layout = fx.make_layout(sb_shape, (0,) * rank) if scale_mode == "broadcast_b" else sb_shape
@@ -83,8 +76,12 @@ def _build_gemm(
                     for kt, nt in itertools.product(range(k), range(n)):
                         sb[(0, nt, kt)[:rank]] = fx.Int32(120 if scale_mode == "broadcast_b" else 120 + nt + n * kt)
                 kwargs = {}
+                if atom_callback is not None:
+                    kwargs["atom_callback"] = atom_callback
                 if traversal == "layout":
                     kwargs["traversal_layout"] = fx.make_layout((m, n, k), (n * k, k, 1))
+                elif traversal == "nested_layout":
+                    kwargs["traversal_layout"] = fx.make_layout(((m, n), k), ((n * k, k), 1))
                 elif traversal is not None:
                     kwargs["traversal_order"] = getattr(fx.GemmTraversalOrder, traversal)
                 a_group, b_group = [a, sa], [b, sb]
@@ -96,12 +93,6 @@ def _build_gemm(
                     kwargs.update(scale_a=117, scale_b=fx.Int32(120))
                 elif scale_mode == "override_state":
                     kwargs.update(scale_a=110, scale_b=fx.Int32(111))
-                for operand, group, shape, tiles in (("a", a_group, a_shape, m), ("b", b_group, b_shape, n)):
-                    if operand in metadata_operands:
-                        metadata = fx.make_rmem_tensor(metadata_v if rank == 1 else (metadata_v,) + shape[1:], fx.Int16)
-                        for kt, tile, element in itertools.product(range(k), range(tiles), range(2)):
-                            metadata[(element, tile, kt)[:rank]] = fx.Int16(200 + element + 2 * (tile + tiles * kt))
-                        group.append(metadata)
                 if scale_mode == "tuple":
                     a_group, b_group = tuple(a_group), tuple(b_group)
                 call(mma, d, a_group, b_group, c, **kwargs)
@@ -165,10 +156,7 @@ def test_tiled_gemm_broadcast_and_optional_scales(mode):
     "invalid,diagnostic",
     [
         ("dtype", "i32.*elements"),
-        ("rank", "operand rank"),
         ("mode0", "mode-0 size 1"),
-        ("tiles", "tile dimensions"),
-        ("stateless", "does not support auxiliary operands"),
     ],
 )
 def test_scaled_gemm_rejects_invalid_fragments(invalid, diagnostic):
@@ -220,20 +208,32 @@ def test_tiled_gemm_forwards_atom_state(rank, mode):
         assert sorted(scales) == sorted(expected)
 
 
-def test_tiled_mma_state_preserves_tiling_and_runtime_atom():
+@pytest.mark.parametrize("tiled", [False, True])
+@pytest.mark.parametrize("setter", ["field", "dict", "primitive"])
+@pytest.mark.parametrize("numeric", [False, True])
+def test_mma_set_value_preserves_type_and_runtime_atom(tiled, setter, numeric):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
-            tiled = fx.make_tiled_mma(atom, fx.make_layout((2, 2, 1), (1, 2, 4)), (32, 32, 128))
+            mma = fx.make_tiled_mma(atom, fx.make_layout((2, 2, 1), (1, 2, 4)), (32, 32, 128)) if tiled else atom
             data_type = ir.VectorType.get([8], fx.Int32.ir_type)
             acc_type = ir.VectorType.get([4], fx.Float32.ir_type)
-            function = func.FuncOp("update", ([tiled.type, fx.Int32.ir_type, data_type, acc_type], [acc_type]))
+            function = func.FuncOp("update", ([mma.type, fx.Int32.ir_type, data_type, acc_type], [acc_type]))
             with ir.InsertionPoint(function.add_entry_block()):
                 original, scale, data, acc = function.arguments
-                updated = original.set_value("scale_a", scale)
+                value = fx.Int32(scale) if numeric else scale
+                if setter == "field":
+                    updated = original.set_value("scale_a", value)
+                elif setter == "dict":
+                    updated = original.set_value({"scale_a": value})
+                else:
+                    updated = fx.atom_set_value(original, "scale_a", value)
                 assert updated.type == original.type
-                result = fly.mma_atom_call_ssa([acc_type], fly.get_mma_atom(updated), [data], [data], acc)
+                assert updated.owner.name == "fly.atom.set_value"
+                assert updated.owner.operands[0] == original
+                updated_atom = fly.get_mma_atom(updated) if tiled else updated
+                result = fly.mma_atom_call_ssa([acc_type], updated_atom, [data], [data], acc)
                 func.ReturnOp([result])
         assert module.operation.verify()
         PassManager.parse("builtin.module(canonicalize,convert-fly-to-rocdl,canonicalize)").run(module.operation)
@@ -244,49 +244,7 @@ def test_tiled_mma_state_preserves_tiling_and_runtime_atom():
         assert call.operands[4].owner.operands[0] == function.arguments[0]
 
 
-@pytest.mark.parametrize("rank,metadata_v", [(1, 2), (1, (2,)), (1, ((2,),)), (2, 2), (3, 2)])
-@pytest.mark.parametrize("metadata_operands", [("a",), ("b",), ("a", "b")])
-def test_three_tensor_operand_groups_survive_expansion_and_ssa(rank, metadata_v, metadata_operands):
-    with ir.Context(), ir.Location.unknown():
-        module, (m, n, k) = _build_gemm(rank, metadata_operands=metadata_operands, metadata_v=metadata_v)
-        # Check the public builder and textual IR preserve the group boundaries.
-        module = ir.Module.parse(str(module))
-        assert module.operation.verify()
-        PassManager.parse(PIPELINE.replace(",convert-fly-to-rocdl,canonicalize", "")).run(module.operation)
-        calls = [op.opview for op in _walk(module.operation) if op.name == "fly.mma_atom_call_ssa"]
-        assert len(calls) == m * n * k
-        assert not any(op.name in ("fly.gemm", "scf.for", "scf.while") for op in _walk(module.operation))
-        for call in calls:
-            for operand, group, tiles, base in (("a", call.a, m, 117), ("b", call.b, n, 120)):
-                has_metadata = operand in metadata_operands
-                assert len(group) == (3 if has_metadata else 2)
-                if has_metadata:
-                    scale = ir.IntegerAttr(group[1].owner.attributes["value"]).value
-                    kt, tile = divmod(scale - base, tiles)
-                    metadata = list(ir.DenseIntElementsAttr(group[2].owner.attributes["value"]))
-                    assert metadata == [200 + element + 2 * (tile + tiles * kt) for element in range(2)]
-        # The generic path carries three inputs; this particular hardware atom
-        # consumes only data and scales and must diagnose unsupported metadata.
-        with pytest.raises(ir.MLIRError, match="scaled MMA expects"):
-            PassManager.parse("builtin.module(convert-fly-to-rocdl)").run(module.operation)
-
-
-@pytest.mark.parametrize("call", [fx.gemm, fx.mma_atom_call])
-@pytest.mark.parametrize("operand", ["a", "b"])
-@pytest.mark.parametrize("invalid,error", [(None, TypeError), ([], ValueError), ([1], TypeError), ((), ValueError)])
-def test_mma_operand_group_validation(call, operand, invalid, error):
-    with ir.Context(), ir.Location.unknown():
-        module = ir.Module.create()
-        with ir.InsertionPoint(module.body):
-            atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
-            tensor = fx.make_rmem_tensor(1, fx.Int32)
-            args = dict(a=tensor, b=tensor)
-            args[operand] = invalid
-            with pytest.raises(error, match=f"'{operand}'"):
-                call(atom, tensor, c=tensor, **args)
-
-
-@pytest.mark.parametrize("call", [fly.gemm, fly.mma_atom_call, fly.mma_atom_call_ssa])
+@pytest.mark.parametrize("call", [fly.mma_atom_call, fly.mma_atom_call_ssa])
 @pytest.mark.parametrize("operand", ["a", "b"])
 def test_ir_rejects_empty_operand_groups(call, operand):
     with ir.Context(), ir.Location.unknown():
@@ -305,26 +263,26 @@ def test_ir_rejects_empty_operand_groups(call, operand):
 
 
 @pytest.mark.parametrize("call", [fly.gemm, fly.mma_atom_call])
-def test_low_level_memref_builders_accept_legacy_single_operands(call):
+def test_low_level_memref_builders_accept_singleton_groups(call):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
             data = fx.make_rmem_tensor(8, fx.Int32)
             acc = fx.make_rmem_tensor(4, fx.Float32)
-            op = call(atom, acc, data, data, acc)
+            op = call(atom, acc, [data], [data], acc)
         assert module.operation.verify()
         assert "[" not in str(op).split(":", 1)[0]
 
 
-def test_low_level_ssa_builder_accepts_legacy_single_operands():
+def test_low_level_ssa_builder_accepts_singleton_groups():
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
             data = fx.Vector.filled(8, 1, fx.Int32).ir_value()
             acc = fx.Vector.filled(4, 0.0, fx.Float32).ir_value()
-            result = fly.mma_atom_call_ssa([acc.type], atom, data, data, acc)
+            result = fly.mma_atom_call_ssa([acc.type], atom, [data], [data], acc)
         assert module.operation.verify()
         assert "[" not in str(result.owner).split(":", 1)[0]
 
@@ -355,24 +313,6 @@ def test_textual_ir_prints_multi_operand_groups_with_brackets():
         assert module.operation.verify()
         text = str(module)
         assert "fly.mma_atom_call_ssa(%0, [%arg0, %arg3], [%arg1, %arg4], %arg2)" in text
-
-
-@pytest.mark.parametrize("layout", ["(1,?):(1,1)", "(1,2):(1,?)"])
-def test_gemm_rejects_dynamic_auxiliary_layouts(layout):
-    with ir.Context(), ir.Location.unknown():
-        with pytest.raises(ir.MLIRError, match="auxiliary operands must have static layouts"):
-            module = ir.Module.parse(
-                f"""
-            !atom = !fly.mma_atom<!fly_rocdl.cdna4.mfma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>
-            !data = !fly.memref<i32, register, (8,2):(1,8)>
-            !acc = !fly.memref<f32, register, (4,2,2):(1,4,8)>
-            !scale = !fly.memref<i32, register, {layout}>
-            func.func @test(%atom: !atom, %a: !data, %b: !data, %c: !acc, %s: !scale) {{
-              fly.gemm(%atom, %c, [%a, %s], [%b], %c) : (!atom, !acc, !data, !scale, !data, !acc) -> ()
-              return
-            }}""",
-            )
-            module.operation.verify()
 
 
 @pytest.mark.parametrize("block_size", [16, 32])
@@ -412,21 +352,8 @@ def test_gfx1250_scale_operand_types(block_size, representation):
 
 
 @pytest.mark.parametrize("scale_source", ["operand", "state"])
-@pytest.mark.parametrize(
-    "shift,opsel,folded",
-    [
-        (8, 0, 1),
-        (16, 0, 2),
-        (24, 0, 3),
-        (8, 2, 3),
-        (8, 3, None),
-        (24, 1, None),
-        (7, 0, None),
-        (-8, 0, None),
-        (32, 0, None),
-    ],
-)
-def test_scale_byte_shift_uses_mfma_selector(shift, opsel, folded, scale_source):
+@pytest.mark.parametrize("shift,opsel", [(8, 0), (16, 1), (24, 0), (8, 3)])
+def test_scale_byte_shift_preserves_explicit_selector(shift, opsel, scale_source):
     atom = f"!fly.mma_atom<!fly_rocdl.cdna4.mfma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = {opsel}, opselB = {opsel}>>"
     call = (
         f"fly.mma_atom_call_ssa(%atom, [%a, %as], [%b, %bs], %c) : ({atom}, vector<8xi32>, i32, vector<8xi32>, i32, vector<4xf32>) -> vector<4xf32>"
@@ -448,11 +375,150 @@ def test_scale_byte_shift_uses_mfma_selector(shift, opsel, folded, scale_source)
         PassManager.parse("builtin.module(convert-fly-to-rocdl)").run(module.operation)
         function = module.body.operations[0]
         call = next(op for op in _walk(function.operation) if op.name == MFMA)
-        assert ir.IntegerAttr(call.attributes["opselA"]).value == (opsel if folded is None else folded)
-        assert ir.IntegerAttr(call.attributes["opselB"]).value == (opsel if folded is None else folded)
-        if folded is not None:
-            assert call.operands[3] == function.body.blocks[0].arguments[3]
-            assert call.operands[4] == function.body.blocks[0].arguments[4]
-        else:
-            assert call.operands[3].owner.name == "arith.shrsi"
-            assert call.operands[4].owner.name == "arith.shrui"
+        assert ir.IntegerAttr(call.attributes["opselA"]).value == opsel
+        assert ir.IntegerAttr(call.attributes["opselB"]).value == opsel
+        assert call.operands[3].owner.name == "arith.shrsi"
+        assert call.operands[4].owner.name == "arith.shrui"
+
+
+@pytest.mark.parametrize("rank", [1, 2, 3])
+@pytest.mark.parametrize(
+    "traversal", [None, "layout", "nested_layout"] + [order.name for order in fx.GemmTraversalOrder]
+)
+def test_atom_callback_matches_compiler_traversal_and_accumulation(rank, traversal):
+    with ir.Context(), ir.Location.unknown():
+        reference, (m, n, k) = _build_gemm(rank, traversal)
+        visits = []
+
+        def callback(atom, mnk):
+            assert isinstance(atom.type, fx.MmaAtomType)
+            assert all(isinstance(index, int) for index in mnk)
+            visits.append(mnk)
+            return fx.make_mma_atom(
+                fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN, opsel_a=mnk[0] % 2, opsel_b=mnk[1] % 4)
+            )
+
+        expanded, _ = _build_gemm(rank, traversal, atom_callback=callback)
+        assert not any(op.name == "fly.gemm" for op in _walk(expanded.operation))
+        assert len(visits) == m * n * k
+        assert set(visits) == set(itertools.product(range(m), range(n), range(k)))
+
+        signatures = []
+        for module in (reference, expanded):
+            assert module.operation.verify()
+            PassManager.parse(PIPELINE).run(module.operation)
+            calls = [op for op in _walk(module.operation) if op.name == MFMA]
+            last = {}
+            signature = []
+            for op in calls:
+                sa, sb = [ir.IntegerAttr(v.owner.attributes["value"]).value for v in op.operands[3:]]
+                kt, mt = divmod(sa - 117, m)
+                kb, nt = divmod(sb - 120, n)
+                assert kt == kb
+                signature.append((mt, nt, kt))
+                if (mt, nt) in last:
+                    assert op.operands[2] == last[mt, nt]
+                else:
+                    assert op.operands[2].owner.name == "arith.constant"
+                    assert set(ir.DenseFPElementsAttr(op.operands[2].owner.attributes["value"])) == {2.0}
+                last[mt, nt] = op.results[0]
+                if module is expanded:
+                    assert ir.IntegerAttr(op.attributes["opselA"]).value == mt % 2
+                    assert ir.IntegerAttr(op.attributes["opselB"]).value == nt % 4
+            signatures.append(signature)
+        assert signatures[0] == signatures[1] == visits
+
+
+@pytest.mark.parametrize("rank", [1, 2, 3])
+@pytest.mark.parametrize("mode", ["state", "override_state"])
+@pytest.mark.parametrize("callback", [False, True])
+@pytest.mark.parametrize("promote", [False, True])
+def test_gemm_preserves_callback_state(rank, mode, callback, promote):
+    with ir.Context(), ir.Location.unknown():
+        module, (m, n, k) = _build_gemm(
+            rank, scale_mode=mode, packed=True, atom_callback=(lambda atom, mnk: atom) if callback else None
+        )
+        pipeline = (
+            PIPELINE
+            if promote
+            else "builtin.module(fly-layout-lowering,canonicalize,convert-fly-to-rocdl,canonicalize)"
+        )
+        PassManager.parse(pipeline).run(module.operation)
+        calls = [op for op in _walk(module.operation) if op.name == MFMA]
+        assert len(calls) == m * n * k
+        if mode != "override_state":
+            assert all(
+                [ir.IntegerAttr(v.owner.attributes["value"]).value for v in op.operands[3:]] == [117, 120]
+                for op in calls
+            )
+        elif promote:
+            assert sorted(
+                tuple(ir.IntegerAttr(v.owner.attributes["value"]).value for v in op.operands[3:]) for op in calls
+            ) == sorted(
+                (117 + mt + m * kt, 120 + nt + n * kt) for mt, nt, kt in itertools.product(range(m), range(n), range(k))
+            )
+
+
+def test_atom_callback_requires_atom_result():
+    with ir.Context(), ir.Location.unknown():
+        with pytest.raises(TypeError, match="atom_callback must return an MmaAtom"):
+            _build_gemm(1, atom_callback=lambda atom, mnk: None)
+
+
+@pytest.mark.parametrize("callback", [False, True])
+@pytest.mark.parametrize(
+    "operand,shape,diagnostic",
+    [
+        ("a", (32, 2), "rank-1 fragments or rank-2/3"),
+        ("d", (4, 2), "rank-1 fragments or rank-2/3"),
+        ("a", (32, 4, 2), "M/N tile dimensions must match"),
+        ("b", (32, 4, 2), "M/N tile dimensions must match"),
+        ("c", (4, 4, 3), "M/N tile dimensions must match"),
+        ("c", (4, 2, 4), "M/N tile dimensions must match"),
+        ("b", (32, 3, 4), "K tile dimensions must match"),
+    ],
+)
+def test_gemm_validates_shapes_before_callback_dispatch(callback, operand, shape, diagnostic):
+    with ir.Context(), ir.Location.unknown():
+        module = ir.Module.create()
+        visits = []
+
+        def atom_callback(atom, mnk):
+            visits.append(mnk)
+            return atom
+
+        with ir.InsertionPoint(module.body):
+            atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
+            shapes = dict(d=(4, 2, 3), a=(32, 2, 2), b=(32, 3, 2), c=(4, 2, 3))
+            shapes[operand] = shape
+            tensors = {
+                key: fx.make_rmem_tensor(value, fx.Float8E4M3FN if key in ("a", "b") else fx.Float32)
+                for key, value in shapes.items()
+            }
+            with pytest.raises(ValueError, match=diagnostic):
+                fx.gemm(atom, **tensors, atom_callback=atom_callback if callback else None)
+        assert not visits
+        assert not any(op.name in ("fly.gemm", "fly.mma_atom_call") for op in _walk(module.operation))
+
+
+@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+@pytest.mark.parametrize("preshuffled", [False, True])
+def test_mxfp8_callback_kernel_compiles(monkeypatch, default_device, preshuffled):
+    import torch
+
+    import flydsl.compiler as flyc
+    from kernels.gemm.mxfp8_gemm_8wave import compile_mxfp8_gemm_8w
+
+    monkeypatch.setenv("ARCH", "gfx950")
+    monkeypatch.setenv("FLYDSL_GPU_ARCH", "gfx950")
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    with torch.device(default_device):
+        launch = compile_mxfp8_gemm_8w(K=256, b_preshuffled=preshuffled)
+        a = torch.empty(256 * 256, dtype=torch.int8, device="cpu")
+        b = torch.empty_like(a, device="cpu")
+        c = torch.empty(256 * 256, dtype=torch.bfloat16, device="cpu")
+        sa = torch.empty(256 * 8, dtype=torch.uint8, device="cpu")
+        sb = torch.empty_like(sa, device="cpu")
+        flyc.compile(launch, a, b, c, sa, sb, 256, 256, fx.Stream(None))
+        assert launch._last_compiled is not None

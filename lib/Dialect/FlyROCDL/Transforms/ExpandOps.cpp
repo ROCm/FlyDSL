@@ -267,7 +267,10 @@ template <typename OpT> LogicalResult expandOne(OpT op, IRRewriter &rewriter) {
 /// The CDNA5 TDM atom a `fly.atom.set_value` is setting, or a null pair if it is setting
 /// something else's state.
 std::pair<IntTupleAttr, int32_t> tdmAtomShape(Value atom) {
-  auto atomTy = dyn_cast<CopyAtomType>(atom.getType());
+  Type type = atom.getType();
+  if (auto tiledCopyTy = dyn_cast<TiledCopyType>(type))
+    type = tiledCopyTy.getCopyAtom();
+  auto atomTy = dyn_cast<CopyAtomType>(type);
   if (!atomTy)
     return {};
   if (auto load = dyn_cast<CopyOpCDNA5TensorLoadType>(atomTy.getCopyOp()))

@@ -398,23 +398,39 @@ If A has shape `(V, M, K)`, its scale fragment has shape `(1, M, K)`; B uses
 `(1, N, K)`. Rank-2 operands omit the K mode. Scales use i32 for CDNA4 MFMA
 and block-32 WMMA, or i64 for block-16 WMMA. Use zero strides in tile modes
 to broadcast a scale. The compiler slices all tensors in each operand group
-together and fully expands the static M/N/K dimensions.
+together and fully expands the static M/N/K dimensions. All operands in each
+group must be Tensors.
 
-The first tensor is always the primary operand. Further tensors are defined
-by the MMA atom; the interface can also represent a three-input group such
-as `[data, scales, metadata]` when an atom supports it. Single Tensor operands
-and scalar atom-state keywords remain supported for both bare atoms and tiled
-MMA. `tiled_mma.set_value("scale_a", scale)` returns a new tiled MMA with the
-same layout and permutation. Explicit scale tensors override the corresponding
-atom-state fields; omitted scale tensors use those fields. The current scaled atoms
-accept data and an optional scale; they do not consume sparsity metadata.
+The first tensor is always the primary operand. Further tensors are defined by the MMA atom; Single
+Tensor operands and scalar atom-state keywords remain supported for both bare atoms and tiled MMA.
+`tiled_mma.set_value("scale_a", scale)` returns a new tiled MMA with the same layout and
+permutation. Explicit scale tensors override the corresponding atom-state fields; omitted scale
+tensors use those fields. The current scaled atoms accept data and an optional scale; they do not
+consume sparsity metadata.
 
-The low-level Python dialect builders also accept the legacy single-value form
-for A and B and normalize it to singleton groups. Textual MLIR keeps the legacy
-bare operand syntax for singleton groups and uses brackets only for multi-value
-groups, for example `%a, %b` versus
-`[%a, %scale_a], [%b, %scale_b]`. The parser accepts either spelling for a
-singleton group.
+Tiled copies support the same state update API: `tiled_copy.set_value("soffset", offset)`
+returns a new TiledCopy with its original tile and thread/value layout. Passing it to
+`fx.copy` uses the updated atom state. Both tiled types also accept a dictionary of fields.
+
+Use `atom_callback` to select a different atom for each static tile, for example
+to choose a byte from packed CDNA4 scale words explicitly:
+
+```python
+fx.gemm(
+    tiled_mma, frag_D, [frag_A, scales_A], [frag_B, scales_B], frag_C,
+    atom_callback=lambda atom, mnk: fx.make_mma_atom(
+        fx.rocdl.cdna4.MFMA_Scale(
+            16, 16, 128, fx.Float8E4M3FN,
+            opsel_a=mnk[0] % 2, opsel_b=mnk[1] % 4,
+        )
+    ),
+)
+```
+
+When a callback is present, the callback receives the original atom with its runtime state and a
+tuple of integer tile indices `(m, n, k)`, and returns the atom for that tile. Rank-2 operands use
+`k=0`; rank-1 calls use `(0, 0, 0)`.
+
 
 **TDM async copy atom** — the **base pointer comes from the `copy_atom_call` global
 operand** (its pointer); the per-dim extent (HW out-of-bounds handling), per-dim

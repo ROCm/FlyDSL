@@ -556,6 +556,17 @@ public:
   }
 };
 
+class GetCopyAtomOpLowering : public OpConversionPattern<GetCopyAtomOp> {
+public:
+  using OpConversionPattern<GetCopyAtomOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(GetCopyAtomOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, adaptor.getTiledCopy());
+    return success();
+  }
+};
+
 class GetMmaAtomOpLowering : public OpConversionPattern<GetMmaAtomOp> {
 public:
   using OpConversionPattern<GetMmaAtomOp>::OpConversionPattern;
@@ -574,6 +585,10 @@ public:
   LogicalResult matchAndRewrite(AtomSetValueOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Type origAtomTy = op.getAtom().getType();
+    if (auto tiledCopyTy = dyn_cast<TiledCopyType>(origAtomTy))
+      origAtomTy = tiledCopyTy.getCopyAtom();
+    else if (auto tiledMmaTy = dyn_cast<TiledMmaType>(origAtomTy))
+      origAtomTy = tiledMmaTy.getMmaAtom();
     StringAttr fieldAttr = op.getFieldAttr();
     Location loc = op.getLoc();
 
@@ -976,7 +991,8 @@ public:
     patterns.add<PtrLoadOpLowering, PtrStoreOpLowering>(typeConverter, context);
     patterns.add<MakeCopyAtomOpLowering, MakeMmaAtomOpLowering>(typeConverter, context);
     patterns.add<MakeTiledCopyOpLowering, MakeTiledMmaOpLowering>(typeConverter, context);
-    patterns.add<GetMmaAtomOpLowering, AtomSetValueOpLowering>(typeConverter, context);
+    patterns.add<GetCopyAtomOpLowering, GetMmaAtomOpLowering, AtomSetValueOpLowering>(typeConverter,
+                                                                                      context);
     patterns.add<CopyAtomCallLowering, MmaAtomCallLowering>(typeConverter, context);
     patterns.add<CopyAtomCallSSALowering, MmaAtomCallSSALowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);

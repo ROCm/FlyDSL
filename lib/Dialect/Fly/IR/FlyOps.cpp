@@ -15,12 +15,6 @@
 #include <mlir/IR/Attributes.h>
 #include <mlir/IR/BuiltinAttributes.h>
 
-namespace mlir::fly {
-ParseResult parseMmaOperandGroup(OpAsmParser &parser,
-                                 SmallVectorImpl<OpAsmParser::UnresolvedOperand> &operands);
-void printMmaOperandGroup(OpAsmPrinter &printer, Operation *op, OperandRange operands);
-} // namespace mlir::fly
-
 #define GET_OP_CLASSES
 #include "flydsl/Dialect/Fly/IR/FlyOps.cpp.inc"
 
@@ -29,36 +23,6 @@ void printMmaOperandGroup(OpAsmPrinter &printer, Operation *op, OperandRange ope
 
 using namespace mlir;
 using namespace mlir::fly;
-
-namespace mlir::fly {
-
-ParseResult parseMmaOperandGroup(OpAsmParser &parser,
-                                 SmallVectorImpl<OpAsmParser::UnresolvedOperand> &operands) {
-  if (succeeded(parser.parseOptionalLSquare())) {
-    if (parser.parseOperandList(operands) || parser.parseRSquare())
-      return failure();
-    return success();
-  }
-
-  OpAsmParser::UnresolvedOperand operand;
-  if (parser.parseOperand(operand))
-    return failure();
-  operands.push_back(operand);
-  return success();
-}
-
-void printMmaOperandGroup(OpAsmPrinter &printer, Operation *, OperandRange operands) {
-  if (operands.size() == 1) {
-    printer << operands.front();
-    return;
-  }
-
-  printer << '[';
-  printer.printOperands(operands);
-  printer << ']';
-}
-
-} // namespace mlir::fly
 
 namespace {
 
@@ -1515,15 +1479,14 @@ FLY_INFER_RETURN_TYPES(MakeTiledMmaOp) {
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(GetMmaAtomOp) {
-  inferredReturnTypes.assign({cast<TiledMmaType>(operands[0].getType()).getMmaAtom()});
+FLY_INFER_RETURN_TYPES(GetCopyAtomOp) {
+  inferredReturnTypes.assign({cast<TiledCopyType>(operands[0].getType()).getCopyAtom()});
   return success();
 }
 
-OpFoldResult GetMmaAtomOp::fold(FoldAdaptor) {
-  if (auto tiledMma = getTiledMma().getDefiningOp<MakeTiledMmaOp>())
-    return tiledMma.getMmaAtom();
-  return {};
+FLY_INFER_RETURN_TYPES(GetMmaAtomOp) {
+  inferredReturnTypes.assign({cast<TiledMmaType>(operands[0].getType()).getMmaAtom()});
+  return success();
 }
 
 FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
@@ -1983,29 +1946,6 @@ static LogicalResult verifyMmaOperandGroups(Operation *op, ValueRange a, ValueRa
 LogicalResult MmaAtomCall::verify() { return verifyMmaOperandGroups(*this, getA(), getB()); }
 
 LogicalResult MmaAtomCallSSA::verify() { return verifyMmaOperandGroups(*this, getA(), getB()); }
-
-LogicalResult GemmOp::verify() {
-  if (failed(verifyMmaOperandGroups(*this, getA(), getB())))
-    return failure();
-  auto checkGroup = [&](ValueRange operands) -> LogicalResult {
-    auto primaryLayout =
-        dyn_cast<LayoutAttr>(cast<fly::MemRefType>(operands.front().getType()).getLayout());
-    for (Value auxiliary : operands.drop_front()) {
-      auto layout = dyn_cast<LayoutAttr>(cast<fly::MemRefType>(auxiliary.getType()).getLayout());
-      if (!layout || !layout.isStaticShape() || !layout.isStaticStride())
-        return emitOpError("auxiliary operands must have static layouts");
-      if (!primaryLayout || layout.rank() == 0 || layout.rank() != primaryLayout.rank())
-        return emitOpError("auxiliary operands must match the primary operand rank");
-      for (int32_t i = 1; i < layout.rank(); ++i)
-        if (layout.getShape().at(i) != primaryLayout.getShape().at(i))
-          return emitOpError("auxiliary operand tile dimensions must match its primary operand");
-    }
-    return success();
-  };
-  if (failed(checkGroup(getA())) || failed(checkGroup(getB())))
-    return failure();
-  return success();
-}
 
 FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
   if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {

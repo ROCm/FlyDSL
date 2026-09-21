@@ -1051,26 +1051,14 @@ def copy_atom_call(copy_atom, src, dst, *, pred=None):
     return fly.copy_atom_call(copy_atom, src, dst, pred=pred)
 
 
-def _normalize_mma_operand(operand, name):
-    from .typing import Tensor
-
-    tensors = list(operand) if isinstance(operand, (list, tuple)) else [operand]
-    if not tensors:
-        raise ValueError(f"'{name}' must contain at least one Tensor")
-    for index, tensor in enumerate(tensors):
-        if not isinstance(tensor, Tensor):
-            raise TypeError(f"'{name}' operand {index} must be a Tensor, got {type(tensor).__name__}")
-    return tensors
-
-
 @dsl_loc_tracing
 def mma_atom_call(mma_atom, d, a, b, c, **kwargs):
-    """Apply one MMA atom to Tensor or list/tuple operands, with optional atom state."""
+    """Apply one MMA atom to a Tensor or list/tuple of Tensors, with optional atom state."""
     return fly.mma_atom_call(
         mma_atom if not kwargs else mma_atom.set_value(kwargs),
         d,
-        _normalize_mma_operand(a, "a"),
-        _normalize_mma_operand(b, "b"),
+        a if isinstance(a, (list, tuple)) else [a],
+        b if isinstance(b, (list, tuple)) else [b],
         c,
     )
 
@@ -1129,37 +1117,87 @@ def copy(copy_atom, src, dst, *, pred=None, **kwargs):
 
 
 @dsl_loc_tracing
-def gemm(mma_atom, d, a, b, c, *, traversal_order=None, traversal_layout=None, **kwargs):
+def gemm(
+    mma_atom,
+    d,
+    a,
+    b,
+    c,
+    *,
+    traversal_order=None,
+    traversal_layout=None,
+    atom_callback=None,
+    **kwargs,
+):
     """Multiply register tiles, fully unrolling their static M/N/K dimensions.
 
-    ``a`` and ``b`` each accept a Tensor or a nonempty list/tuple containing
-    the primary tensor followed by the atom's auxiliary tensors. For scaled
-    MMA, use ``gemm(mma, d, [a, scale_a], [b, scale_b], c)``. Scale fragments
-    have shape ``(1, M[, K])`` for A and ``(1, N[, K])`` for B. Broadcast a
-    scale across tiles with zero strides in the corresponding tile modes.
+    ``a`` and ``b`` accept a Tensor or a nonempty list/tuple of Tensors whose first value is the
+    primary tensor. Auxiliary Tensors are sliced at the same tile coordinate.
+    For scaled MMA, use ``gemm(mma, d, [a, scale_a], [b, scale_b], c)``. Scale
+    fragments have shape ``(1, M[, K])`` for A and ``(1, N[, K])`` for B.
 
-    Operand groups can contain more than two tensors (for example, data,
-    scales, and sparsity metadata) when supported by the MMA atom. Each
-    group's tensors share the tile dimensions after mode 0 and are sliced
-    together. The atom defines their order, element types, and mode-0 sizes.
-
-    Scalar atom-state keywords update the atom for both MmaAtom and TiledMma;
-    explicit auxiliary tensors take precedence over the corresponding state.
-    Traversal order changes the order of expanded calls without introducing a
-    runtime loop.
+    With ``atom_callback``, Python expands the GEMM and calls ``atom_callback(atom, (m, n, k))`` for
+    each atom call. It receives the original MMA atom (including updated state) and static integer
+    tile coordinates, and must return the MmaAtom for that call.
     """
+    from .typing import MmaAtom, TiledMma
+    from .utils.expand_ops import _gemm_tile_coords
 
     if traversal_order is not None and traversal_layout is not None:
         raise ValueError("Only one of 'traversal_order' or 'traversal_layout' can be specified, not both")
-    return fly.gemm(
-        mma_atom if not kwargs else mma_atom.set_value(kwargs),
-        d,
-        _normalize_mma_operand(a, "a"),
-        _normalize_mma_operand(b, "b"),
-        c,
-        traversal_order=traversal_order,
-        traversal_layout=traversal_layout,
-    )
+    mma_atom = mma_atom if not kwargs else mma_atom.set_value(kwargs)
+    a = a if isinstance(a, (list, tuple)) else [a]
+    b = b if isinstance(b, (list, tuple)) else [b]
+    ranks = tuple(rank(tensor.shape) for tensor in (d, a[0], b[0], c))
+
+    if ranks not in ((1, 1, 1, 1), (3, 2, 2, 3), (3, 3, 3, 3)):
+        raise ValueError("GEMM requires rank-1 fragments or rank-2/3 A/B with rank-3 C/D")
+
+    if ranks[0] == 3:
+
+        def extent(tensor, mode):
+            return size(tensor.shape[mode]).get_static_leaf_int
+
+        m, n = extent(d, 1), extent(d, 2)
+        if (m, n) != (extent(a[0], 1), extent(b[0], 1)) or (m, n) != (extent(c, 1), extent(c, 2)):
+            raise ValueError("GEMM M/N tile dimensions must match")
+        bounds = (m, n)
+        if ranks[1] == 3:
+            k = extent(a[0], 2)
+            if k != extent(b[0], 2):
+                raise ValueError("GEMM K tile dimensions must match")
+            bounds += (k,)
+
+    if atom_callback is None:
+        return fly.gemm(mma_atom, d, a, b, c, traversal_order=traversal_order, traversal_layout=traversal_layout)
+
+    atom = fly.get_mma_atom(mma_atom) if isinstance(mma_atom, TiledMma) else mma_atom
+
+    def emit(d_tile, a_tiles, b_tiles, c_tile, mnk):
+        tmp_atom = atom_callback(atom, mnk)
+        if not isinstance(tmp_atom, MmaAtom):
+            raise TypeError("atom_callback must return an MmaAtom")
+        fly.mma_atom_call(tmp_atom, d_tile, a_tiles, b_tiles, c_tile)
+
+    if ranks[0] == 1:
+        emit(d, a, b, c, (0, 0, 0))
+        return
+
+    def slice_group(group, coord):
+        return [slice(value, coord) for value in group]
+
+    visited = set()
+    for coord in _gemm_tile_coords(bounds, traversal_order, traversal_layout):
+        mt, nt = coord[:2]
+        kt = coord[2] if len(coord) == 3 else 0
+        a_coord = (None, mt) + coord[2:]
+        b_coord = (None, nt) + coord[2:]
+        c_coord = (None, mt, nt)
+        c_source = d if (mt, nt) in visited else c
+        visited.add((mt, nt))
+        emit(
+            slice(d, c_coord), slice_group(a, a_coord), slice_group(b, b_coord), slice(c_source, c_coord), (mt, nt, kt)
+        )
 
 
 # ===----------------------------------------------------------------------=== #

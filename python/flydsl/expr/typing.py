@@ -1216,8 +1216,12 @@ class CopyAtom(BuiltinDslType):
         if isinstance(field, dict):
             result = self
             for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
                 result = atom_set_value(result, k, v)
             return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
         return atom_set_value(self, field, value)
 
 
@@ -1257,13 +1261,35 @@ class MmaAtom(BuiltinDslType):
         if isinstance(field, dict):
             result = self
             for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
                 result = atom_set_value(result, k, v)
             return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
         return atom_set_value(self, field, value)
 
 
 @ir.register_value_caster(TiledCopyType.static_typeid, replace=True)
 class TiledCopy(BuiltinDslType):
+    @overload
+    def set_value(self, field: str, value): ...
+    @overload
+    def set_value(self, field: dict): ...
+
+    @dsl_loc_tracing
+    def set_value(self, field, value=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
+                result = atom_set_value(result, k, v)
+            return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
+        return atom_set_value(self, field, value)
+
     @property
     def tile_mn(self):
         return static(self.type.tile_mn)
@@ -1298,11 +1324,16 @@ class TiledMma(BuiltinDslType):
 
     @dsl_loc_tracing
     def set_value(self, field, value=None):
-        """Return a tiled MMA with updated atom state and the same tiling."""
-        from .._mlir.dialects import fly
-
-        atom = fly.get_mma_atom(self).set_value(field, value)
-        return make_tiled_mma(atom, self.atom_layout, self.permutation_mnk)
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
+                result = atom_set_value(result, k, v)
+            return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
+        return atom_set_value(self, field, value)
 
     @property
     def mma_atom(self):
