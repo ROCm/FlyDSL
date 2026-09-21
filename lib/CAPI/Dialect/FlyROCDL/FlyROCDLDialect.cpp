@@ -15,6 +15,14 @@ void mlirRegisterConvertROCDLFastMathOpsPass(void) { mlir::registerConvertROCDLF
 void mlirRegisterFlyToROCDLConversionPass(void) { mlir::registerFlyToROCDLConversionPass(); }
 void mlirRegisterFlyEmitGPUBinaryPass(void) { mlir::registerFlyEmitGPUBinaryPass(); }
 
+bool flydsl_has_inprocess_lld(void) {
+#ifdef FLYDSL_HAS_LLD_LIBRARY
+  return true;
+#else
+  return false;
+#endif
+}
+
 void flydsl_register_rocdl_dialects(MlirDialectRegistry registry) {
   unwrap(registry)->insert<mlir::fly_rocdl::FlyROCDLDialect>();
 }
