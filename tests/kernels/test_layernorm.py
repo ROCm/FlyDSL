@@ -1461,6 +1461,41 @@ def test_layernorm_dtype_mismatch():
     print("  -> PASSED")
 
 
+def test_quantized_layernorm_builder_dtype_mismatch():
+    """Quantized launchers must reject an operand set that disagrees with ``dtype_str``."""
+    print("=" * 80)
+    print("Running quantized LayerNorm builder-dtype guard Test")
+    print("=" * 80)
+    M, N = 4, 256
+    stream = torch.cuda.current_stream()
+    # Self-consistent FP16 operands: only the builder specialization disagrees.
+    x = torch.randn((M, N), device="cuda", dtype=DTYPE_FP16)
+    residual = torch.randn((M, N), device="cuda", dtype=DTYPE_FP16)
+    gamma = torch.rand((N,), device="cuda", dtype=DTYPE_FP16)
+    beta = torch.rand((N,), device="cuda", dtype=DTYPE_FP16)
+    xscale = torch.rand((N,), device="cuda", dtype=DTYPE_FP16)
+    residual_out = torch.empty((M, N), device="cuda", dtype=DTYPE_FP16)
+    out = torch.empty((M, N), device="cuda", dtype=DTYPE_INT8)
+    yscale = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
+
+    cases = (
+        (build_layernorm_dynamicquant_module(N, "bf16"), (x, gamma, beta, out, yscale, M, stream)),
+        (build_layernorm_smoothquant_module(N, "bf16"), (x, gamma, beta, xscale, out, yscale, M, stream)),
+        (
+            build_fused_add_layernorm_dynamicquant_module(N, "bf16"),
+            (x, residual, gamma, beta, out, residual_out, yscale, M, stream),
+        ),
+        (
+            build_fused_add_layernorm_smoothquant_module(N, "bf16"),
+            (x, residual, gamma, beta, xscale, out, residual_out, yscale, M, stream),
+        ),
+    )
+    for launch_fn, args in cases:
+        with pytest.raises(ValueError, match="dtype_str"):
+            flyc.compile(launch_fn, *args)
+    print("  -> PASSED")
+
+
 def test_layernorm_affine_shape_mismatch():
     """Pointer views require exactly N affine elements, not merely a trailing N."""
     N = 256
@@ -1485,6 +1520,7 @@ if __name__ == "__main__":
     test_layernorm_eps_honored()
     test_layernorm_multi_gpu()
     test_layernorm_dtype_mismatch()
+    test_quantized_layernorm_builder_dtype_mismatch()
     test_fused_add_layernorm()
     test_layernorm_dynamicquant()
     test_layernorm_smoothquant()

@@ -1262,6 +1262,40 @@ def test_fused_add_rmsnorm_dtype_mismatch():
     print("  -> PASSED")
 
 
+def test_quantized_rmsnorm_builder_dtype_mismatch():
+    """Quantized launchers must reject an operand set that disagrees with ``dtype_str``."""
+    print("=" * 80)
+    print("Running quantized RMSNorm builder-dtype guard Test")
+    print("=" * 80)
+    M, N = 4, 256
+    stream = torch.cuda.current_stream()
+    # Self-consistent FP16 operands: only the builder specialization disagrees.
+    x = torch.randn((M, N), device="cuda", dtype=DTYPE_FP16)
+    residual = torch.randn((M, N), device="cuda", dtype=DTYPE_FP16)
+    gamma = torch.rand((N,), device="cuda", dtype=DTYPE_FP16)
+    xscale = torch.rand((N,), device="cuda", dtype=DTYPE_FP16)
+    residual_out = torch.empty((M, N), device="cuda", dtype=DTYPE_FP16)
+    out = torch.empty((M, N), device="cuda", dtype=DTYPE_INT8)
+    yscale = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
+
+    cases = (
+        (build_rmsnorm_dynamicquant_module(N, "bf16"), (x, gamma, out, yscale, M, stream)),
+        (build_rmsnorm_smoothquant_module(N, "bf16"), (x, gamma, xscale, out, yscale, M, stream)),
+        (
+            build_fused_add_rmsnorm_dynamicquant_module(N, "bf16"),
+            (x, residual, gamma, out, residual_out, yscale, M, stream),
+        ),
+        (
+            build_fused_add_rmsnorm_smoothquant_module(N, "bf16"),
+            (x, residual, gamma, xscale, out, residual_out, yscale, M, stream),
+        ),
+    )
+    for launch_fn, args in cases:
+        with pytest.raises(ValueError, match="dtype_str"):
+            flyc.compile(launch_fn, *args)
+    print("  -> PASSED")
+
+
 @pytest.mark.multi_gpu
 def test_fused_add_rmsnorm_device_mismatch():
     """Operands on different devices must be rejected (kernel binds to x.device)."""
@@ -2167,6 +2201,7 @@ if __name__ == "__main__":
     test_fused_add_rmsnorm_backward()
     test_fused_add_rmsnorm_autograd()
     test_fused_add_rmsnorm_dtype_mismatch()
+    test_quantized_rmsnorm_builder_dtype_mismatch()
     test_fused_add_rmsnorm_dynamicquant()
     test_fused_add_rmsnorm_smoothquant()
     if os.environ.get("ROCDSL_COMPARE_TORCH", "0") == "1":

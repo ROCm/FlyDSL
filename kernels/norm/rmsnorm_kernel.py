@@ -1327,7 +1327,7 @@ def _build_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            _validate_norm_operand_dtypes(Input, Gamma=Gamma, XScale=XScale)
+            _validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma, XScale=XScale)
             launcher = rmsnorm_quant_kernel(Input, Gamma, XScale, YScale, Output)
             launcher.launch(
                 grid=(m_in, 1, 1),
@@ -1348,7 +1348,7 @@ def _build_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            _validate_norm_operand_dtypes(Input, Gamma=Gamma)
+            _validate_norm_operand_dtypes(Input, dtype_str, Gamma=Gamma)
             launcher = rmsnorm_quant_kernel(Input, Gamma, Gamma, YScale, Output)
             launcher.launch(
                 grid=(m_in, 1, 1),
@@ -1718,7 +1718,7 @@ def _build_fused_add_rmsnorm_quant_module(
             stream: fx.Stream = fx.Stream(None),
         ):
             _validate_norm_operand_dtypes(
-                Input, ResidualIn=ResidualIn, Gamma=Gamma, XScale=XScale, ResidualOut=ResidualOut
+                Input, dtype_str, ResidualIn=ResidualIn, Gamma=Gamma, XScale=XScale, ResidualOut=ResidualOut
             )
             launcher = fused_add_rmsnorm_quant_kernel(Input, ResidualIn, Gamma, XScale, YScale, Output, ResidualOut)
             launcher.launch(
@@ -1742,7 +1742,7 @@ def _build_fused_add_rmsnorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            _validate_norm_operand_dtypes(Input, ResidualIn=ResidualIn, Gamma=Gamma, ResidualOut=ResidualOut)
+            _validate_norm_operand_dtypes(Input, dtype_str, ResidualIn=ResidualIn, Gamma=Gamma, ResidualOut=ResidualOut)
             launcher = fused_add_rmsnorm_quant_kernel(Input, ResidualIn, Gamma, Gamma, YScale, Output, ResidualOut)
             launcher.launch(
                 grid=(m_in, 1, 1),

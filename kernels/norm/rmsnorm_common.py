@@ -12,7 +12,7 @@ have to import from each other. Keeping these here follows the topical
 
 import flydsl.expr as fx
 from flydsl.expr import const_expr
-from kernels.common.kernels_common import get_warp_size
+from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "rmsnorm"
 
@@ -52,12 +52,20 @@ def make_single_reduction_storage(red_slots: int):
     return SharedStorage
 
 
-def validate_norm_operand_dtypes(input_tensor, **operands) -> None:
-    """Validate quantized-norm operands against the input dtype.
+def validate_norm_operand_dtypes(input_tensor, dtype_str: str, **operands) -> None:
+    """Validate quantized-norm operands against the builder specialization.
 
-    Quantized norm kernels specialize every non-quantized operand on the activation
-    dtype, so a mismatched tensor is reinterpreted bit-for-bit instead of failing.
+    Quantized norm kernels specialize every non-quantized operand on ``dtype_str``,
+    so a mismatched tensor is reinterpreted bit-for-bit instead of failing.
+    ``Input`` and each operand are checked against ``dtype_str`` itself rather than
+    against one another.
     """
+    expected = dtype_to_elem_type(dtype_str)
+    if input_tensor.dtype != expected:
+        raise ValueError(
+            f"quantized norm kernels specialize on dtype_str={dtype_str!r}, so Input must be "
+            f"{expected}, got {input_tensor.dtype}"
+        )
     mismatched = {name: t.dtype for name, t in operands.items() if t.dtype != input_tensor.dtype}
     if mismatched:
         got = ", ".join(f"{name}={dtype}" for name, dtype in mismatched.items())
