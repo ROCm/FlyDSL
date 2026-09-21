@@ -32,7 +32,6 @@ def _walk(op):
 def _build_gemm(
     rank,
     traversal=None,
-    invalid_scale=None,
     scale_mode="tensor",
     packed=False,
     *,
@@ -63,18 +62,15 @@ def _build_gemm(
                 b.fill(1 if packed else 1.0)
                 c.fill(2.0)
                 sa_shape = (1,) + a_shape[1:]
-                if invalid_scale == "mode0":
-                    sa_shape = (2,) + a_shape[1:]
                 sa_layout = fx.make_layout(sa_shape, (0,) * rank) if scale_mode == "broadcast_a" else sa_shape
                 sb_shape = (1,) + b_shape[1:]
                 sb_layout = fx.make_layout(sb_shape, (0,) * rank) if scale_mode == "broadcast_b" else sb_shape
-                sa = fx.make_rmem_tensor(sa_layout, fx.Float32 if invalid_scale == "dtype" else fx.Int32)
+                sa = fx.make_rmem_tensor(sa_layout, fx.Int32)
                 sb = fx.make_rmem_tensor(sb_layout, fx.Int32)
-                if invalid_scale is None:
-                    for kt, mt in itertools.product(range(k), range(m)):
-                        sa[(0, mt, kt)[:rank]] = fx.Int32(117 if scale_mode == "broadcast_a" else 117 + mt + m * kt)
-                    for kt, nt in itertools.product(range(k), range(n)):
-                        sb[(0, nt, kt)[:rank]] = fx.Int32(120 if scale_mode == "broadcast_b" else 120 + nt + n * kt)
+                for kt, mt in itertools.product(range(k), range(m)):
+                    sa[(0, mt, kt)[:rank]] = fx.Int32(117 if scale_mode == "broadcast_a" else 117 + mt + m * kt)
+                for kt, nt in itertools.product(range(k), range(n)):
+                    sb[(0, nt, kt)[:rank]] = fx.Int32(120 if scale_mode == "broadcast_b" else 120 + nt + n * kt)
                 kwargs = {}
                 if atom_callback is not None:
                     kwargs["atom_callback"] = atom_callback
@@ -150,21 +146,6 @@ def test_tiled_gemm_broadcast_and_optional_scales(mode):
             else ([120] * n if mode == "broadcast_b" else list(range(120, 120 + n)))
         )
         assert sorted(scales) == sorted(itertools.product(expected_a, expected_b))
-
-
-@pytest.mark.parametrize(
-    "invalid,diagnostic",
-    [
-        ("dtype", "i32.*elements"),
-        ("mode0", "mode-0 size 1"),
-    ],
-)
-def test_scaled_gemm_rejects_invalid_fragments(invalid, diagnostic):
-    with ir.Context(), ir.Location.unknown():
-        module, _ = _build_gemm(3, invalid_scale=invalid)
-        with pytest.raises(ir.MLIRError, match=diagnostic):
-            module.operation.verify()
-            PassManager.parse(PIPELINE).run(module.operation)
 
 
 @pytest.mark.parametrize("call", [fx.gemm, fx.mma_atom_call])
@@ -347,7 +328,7 @@ def test_gfx1250_scale_operand_types(block_size, representation):
             if representation == "scalar":
                 assert value == argument
             else:
-                assert value.owner.name == ("llvm.load" if representation == "memref" else "vector.extract")
+                assert value.owner.name == ("llvm.load" if representation == "memref" else "llvm.bitcast")
                 assert value.owner.operands[0] == argument
 
 

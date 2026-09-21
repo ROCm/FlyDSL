@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-#include "../MmaScaleUtils.h"
-
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
-#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
@@ -242,12 +239,18 @@ MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Ty
     c = LLVM::BitcastOp::create(builder, loc, accTy, c);
 
   Type scaleType = builder.getIntegerType(getBlockSize() == 16 ? 64 : 32);
-  auto scaleA = getMmaScale(builder, loc, aTyArgs, aValues, scaleType, atomVal,
-                            *getFieldIndex(AtomStateField::ScaleA));
-  auto scaleB = getMmaScale(builder, loc, bTyArgs, bValues, scaleType, atomVal,
-                            *getFieldIndex(AtomStateField::ScaleB));
-  if (failed(scaleA) || failed(scaleB))
-    return failure();
+  Value scaleA = aValues.size() == 2
+                     ? aValues[1]
+                     : builder.createOrFold<LLVM::ExtractValueOp>(
+                           loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});
+  Value scaleB = bValues.size() == 2
+                     ? bValues[1]
+                     : builder.createOrFold<LLVM::ExtractValueOp>(
+                           loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
+  if (scaleA.getType() != scaleType)
+    scaleA = LLVM::BitcastOp::create(builder, loc, scaleType, scaleA);
+  if (scaleB.getType() != scaleType)
+    scaleB = LLVM::BitcastOp::create(builder, loc, scaleType, scaleB);
 
   // fmtScaleA / fmtScaleB default to 0 (E8M0). modC / reuseA / reuseB come from
   // the atom's compile-time params. block-16 selects the V_WMMA_SCALE16 form
@@ -261,12 +264,12 @@ MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Ty
   if (m == 32 && n == 16 && k == 128) {
     if (block16)
       return ROCDL::wmma_scale16_f32_32x16x128_f4::create(
-                 builder, loc, accTy, a, b, modC, c, scaleAType, fmtScale0, *scaleA, scaleBType,
-                 fmtScale0, *scaleB, getReuseA(), getReuseB())
+                 builder, loc, accTy, a, b, modC, c, scaleAType, fmtScale0, scaleA, scaleBType,
+                 fmtScale0, scaleB, getReuseA(), getReuseB())
           .getResult();
     return ROCDL::wmma_scale_f32_32x16x128_f4::create(builder, loc, accTy, a, b, modC, c,
-                                                      scaleAType, fmtScale0, *scaleA, scaleBType,
-                                                      fmtScale0, *scaleB, getReuseA(), getReuseB())
+                                                      scaleAType, fmtScale0, scaleA, scaleBType,
+                                                      fmtScale0, scaleB, getReuseA(), getReuseB())
         .getResult();
   }
 
@@ -280,12 +283,12 @@ MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Ty
 
   if (block16)
     return ROCDL::wmma_scale16_f32_16x16x128_f8f6f4::create(
-               builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, *scaleA,
-               scaleBType, fmtScale0, *scaleB, getReuseA(), getReuseB())
+               builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, scaleA,
+               scaleBType, fmtScale0, scaleB, getReuseA(), getReuseB())
         .getResult();
   return ROCDL::wmma_scale_f32_16x16x128_f8f6f4::create(
-             builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, *scaleA,
-             scaleBType, fmtScale0, *scaleB, getReuseA(), getReuseB())
+             builder, loc, accTy, fmtA, a, fmtB, b, modC, c, scaleAType, fmtScale0, scaleA,
+             scaleBType, fmtScale0, scaleB, getReuseA(), getReuseB())
       .getResult();
 }
 
@@ -314,13 +317,14 @@ LogicalResult MmaOpGFX1250_WMMAScaleType::emitAtomCall(OpBuilder &builder, Locat
   Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
   Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
   SmallVector<Value> aValues{a}, bValues{b};
-  SmallVector<Type> aTypes{abTyA}, bTypes{abTyB};
-  llvm::append_range(aValues, aPtrs.drop_front());
-  llvm::append_range(bValues, bPtrs.drop_front());
-  llvm::append_range(aTypes, aMemTys.drop_front());
-  llvm::append_range(bTypes, bMemTys.drop_front());
-  auto res = emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, aTypes, bTypes, accTy, atomVal,
-                             Value{}, aValues, bValues, c);
+  Type scaleType = builder.getIntegerType(getBlockSize() == 16 ? 64 : 32);
+  if (aPtrs.size() == 2)
+    aValues.push_back(LLVM::LoadOp::create(builder, loc, scaleType, aPtrs[1]));
+  if (bPtrs.size() == 2)
+    bValues.push_back(LLVM::LoadOp::create(builder, loc, scaleType, bPtrs[1]));
+  auto res =
+      emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, ValueRange(aValues).getTypes(),
+                      ValueRange(bValues).getTypes(), accTy, atomVal, Value{}, aValues, bValues, c);
   if (failed(res))
     return failure();
   LLVM::StoreOp::create(builder, loc, *res, dPtr);
