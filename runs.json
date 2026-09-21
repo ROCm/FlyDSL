@@ -1,8 +1,53 @@
 {
  "schema": 1,
- "updated": "2026-09-21T10:23:26Z",
+ "updated": "2026-09-21T10:30:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35589028444,
+   "pr": 1062,
+   "commit": "53819aa92b2a1a8f42075df68674f36e89bd0630",
+   "branch": "smem-capacity-decouple",
+   "event": "pull_request",
+   "title": "smem cleanup: move capacity helpers off legacy allocator, migrate tes\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35589028444",
+   "created_at": "2026-09-21T10:29:36Z",
+   "updated_at": "2026-09-21T10:29:36Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 35588987712,
+   "pr": 987,
+   "commit": "eb44c41b32a620e5d33857ee085ec857cc4abc94",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588987712",
+   "created_at": "2026-09-21T10:29:08Z",
+   "updated_at": "2026-09-21T10:29:26Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 35588596933,
+   "pr": null,
+   "commit": "effd112d5dfce9451c875d69c693acd6b8827d93",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Remove ancestor-of-main gate from PyPI publish workflow (#1175)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588596933",
+   "created_at": "2026-09-21T10:24:44Z",
+   "updated_at": "2026-09-21T10:26:25Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 35588299456,
    "pr": 987,
@@ -10,11 +55,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588299456",
    "created_at": "2026-09-21T10:21:24Z",
-   "updated_at": "2026-09-21T10:21:56Z",
+   "updated_at": "2026-09-21T10:29:26Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -50,9 +95,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-21T10:21:38Z",
+     "started_at": "2026-09-21T10:22:12Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548/job/106296753820"
     },
@@ -83,11 +128,11 @@
    "branch": "codex/scaled-tiled-gemm",
    "event": "pull_request",
    "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35585674989",
    "created_at": "2026-09-21T09:52:26Z",
-   "updated_at": "2026-09-21T10:05:59Z",
+   "updated_at": "2026-09-21T10:22:10Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -102,9 +147,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-21T10:05:59Z",
+     "started_at": "2026-09-21T10:22:09Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35585674989/job/106292215980"
     },
@@ -2006,82 +2051,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 35322878227,
-   "pr": 1153,
-   "commit": "acf533140950be835c0fdb63c153c2b0b8d5bb7a",
-   "branch": "phil/drop-inert-llvm-knobs",
-   "event": "pull_request",
-   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227",
-   "created_at": "2026-09-18T08:08:36Z",
-   "updated_at": "2026-09-18T10:05:07Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T08:42:36Z",
-     "completed_at": "2026-09-18T08:55:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227/job/105533597587"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T08:25:43Z",
-     "completed_at": "2026-09-18T09:26:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227/job/105533597639",
-     "machine": "smci350-rck-g03-d14-21",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T09:09:12Z",
-     "completed_at": "2026-09-18T10:05:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322878227/job/105533597709"
-    }
-   ]
-  },
-  {
-   "run_id": 35322267759,
-   "pr": null,
-   "commit": "33837306f255939723cbf9c0cc2d26ab2bf4449e",
-   "branch": "convert-atom-call-pred-ssa",
-   "event": "pull_request",
-   "title": "[Bugfix] Promote register pred on copy_atom_call without register src/dst",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322267759",
-   "created_at": "2026-09-18T08:01:29Z",
-   "updated_at": "2026-09-19T02:26:22Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 35322221682,
-   "pr": null,
-   "commit": "be7c6433155895bd618b85e67df2ba1b1c77c064",
-   "branch": "phil/drop-inert-llvm-knobs",
-   "event": "pull_request",
-   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35322221682",
-   "created_at": "2026-09-18T08:00:55Z",
-   "updated_at": "2026-09-18T08:08:57Z",
-   "actor": "Phil-amd",
-   "jobs": []
   }
  ]
 }
