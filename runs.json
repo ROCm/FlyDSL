@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-21T11:20:58Z",
+ "updated": "2026-09-21T11:27:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feature/ktrace-dialect-squashed",
    "event": "pull_request",
    "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35593412890",
    "created_at": "2026-09-21T11:19:05Z",
-   "updated_at": "2026-09-21T11:19:41Z",
+   "updated_at": "2026-09-21T11:21:01Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -53,9 +53,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-21T10:40:49Z",
+     "started_at": "2026-09-21T11:21:13Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35589028444/job/106302061361"
     }
@@ -111,11 +111,11 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Remove ancestor-of-main gate from PyPI publish workflow (#1175)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588596933",
    "created_at": "2026-09-21T10:24:44Z",
-   "updated_at": "2026-09-21T10:35:39Z",
+   "updated_at": "2026-09-21T11:21:03Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -130,18 +130,18 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-21T10:51:15Z",
-     "completed_at": null,
+     "completed_at": "2026-09-21T11:20:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588596933/job/106300644463"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-21T10:35:39Z",
+     "started_at": "2026-09-21T11:21:02Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588596933/job/106300644540"
     }
@@ -432,11 +432,11 @@
    "branch": "jli/relax-tag-condition",
    "event": "pull_request",
    "title": "[CI] Remove ancestor-of-main gate from PyPI publish workflow",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579",
    "created_at": "2026-09-21T07:04:20Z",
-   "updated_at": "2026-09-21T09:45:25Z",
+   "updated_at": "2026-09-21T11:26:15Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -454,10 +454,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-21T09:45:24Z",
-     "completed_at": null,
+     "completed_at": "2026-09-21T11:26:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579/job/106275992207"
     },
     {
