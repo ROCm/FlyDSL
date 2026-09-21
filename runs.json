@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-21T08:08:06Z",
+ "updated": "2026-09-21T08:38:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35576104129",
    "created_at": "2026-09-21T08:05:40Z",
-   "updated_at": "2026-09-21T08:06:08Z",
+   "updated_at": "2026-09-21T08:18:45Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-21T08:19:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35576104129/job/106261729493"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-21T08:18:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35576104129/job/106261729528"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-21T08:18:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35576104129/job/106261729596"
+    }
+   ]
   },
   {
    "run_id": 35573341144,
@@ -169,11 +197,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986",
    "created_at": "2026-09-21T06:08:06Z",
-   "updated_at": "2026-09-21T07:15:14Z",
+   "updated_at": "2026-09-21T08:36:30Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -188,10 +216,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-21T07:15:14Z",
-     "completed_at": null,
+     "completed_at": "2026-09-21T08:36:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986/job/106234148031"
     },
     {
