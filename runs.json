@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-21T21:27:38Z",
+ "updated": "2026-09-21T22:54:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -106,26 +106,17 @@
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35593412890",
    "created_at": "2026-09-21T11:19:05Z",
-   "updated_at": "2026-09-21T18:17:59Z",
+   "updated_at": "2026-09-21T22:53:09Z",
    "actor": "Phil-amd",
    "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T17:19:31Z",
-     "completed_at": "2026-09-21T18:17:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35593412890/job/106317185673"
-    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "completed",
      "conclusion": "failure",
-     "started_at": "2026-09-21T12:22:40Z",
-     "completed_at": "2026-09-21T12:52:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35593412890/job/106317185683"
+     "started_at": "2026-09-21T22:41:40Z",
+     "completed_at": "2026-09-21T22:53:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35593412890/job/106545414415"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
@@ -134,10 +125,19 @@
      "conclusion": "success",
      "started_at": "2026-09-21T11:35:41Z",
      "completed_at": "2026-09-21T12:48:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35593412890/job/106317185685",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35593412890/job/106545415331",
      "machine": "smci350-rck-g03-f19-31",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-21T17:19:31Z",
+     "completed_at": "2026-09-21T18:17:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35593412890/job/106545415341"
     }
    ]
   },
