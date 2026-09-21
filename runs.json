@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-09-21T03:57:14Z",
+ "updated": "2026-09-21T06:57:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35567101986,
+   "pr": 987,
+   "commit": "c7926fff1d15a3a7da3e97b0b144d65b93853c93",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986",
+   "created_at": "2026-09-21T06:08:06Z",
+   "updated_at": "2026-09-21T06:22:38Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-21T06:23:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986/job/106234148020"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-21T06:22:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986/job/106234148031"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-21T06:23:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986/job/106234148122"
+    }
+   ]
+  },
   {
    "run_id": 35553659425,
    "pr": 987,
@@ -2012,21 +2055,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35315870212",
    "created_at": "2026-09-18T06:40:03Z",
    "updated_at": "2026-09-18T06:41:29Z",
-   "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 35315558168,
-   "pr": 1162,
-   "commit": "09e6c7e0b5291c57a94b08d38e130c895ff214c7",
-   "branch": "feature/ktrace-dialect-squashed",
-   "event": "pull_request",
-   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35315558168",
-   "created_at": "2026-09-18T06:35:43Z",
-   "updated_at": "2026-09-18T06:37:01Z",
    "actor": "Phil-amd",
    "jobs": []
   }
