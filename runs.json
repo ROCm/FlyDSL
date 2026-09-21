@@ -1,20 +1,20 @@
 {
  "schema": 1,
- "updated": "2026-09-21T09:30:23Z",
+ "updated": "2026-09-21T09:37:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 35583346673,
+   "run_id": 35583778218,
    "pr": 987,
-   "commit": "98db60c73c1f5348f958b980ca33934dd88cb64d",
+   "commit": "79ec8eede39f71fcf153511cf0f1452fbe5a33da",
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[WIP][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35583346673",
-   "created_at": "2026-09-21T09:27:01Z",
-   "updated_at": "2026-09-21T09:28:23Z",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35583778218",
+   "created_at": "2026-09-21T09:31:24Z",
+   "updated_at": "2026-09-21T09:33:15Z",
    "actor": "jli-melchior",
    "jobs": []
   },
@@ -35,11 +35,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-21T08:19:04Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35576104129/job/106261729493"
+     "completed_at": "2026-09-21T09:32:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35576104129/job/106261729493",
+     "machine": "smci350-rck-g03-f12-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
