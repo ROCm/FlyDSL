@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-22T04:12:23Z",
+ "updated": "2026-09-22T06:45:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35696156911,
+   "pr": 1178,
+   "commit": "0ddc531724f2398f5ce84530a86ca2bd5a5a9093",
+   "branch": "pr/fix-warp-array-contracts",
+   "event": "pull_request",
+   "title": "[Fix][Coop] Align warp array collective semantics",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35696156911",
+   "created_at": "2026-09-22T06:43:45Z",
+   "updated_at": "2026-09-22T06:44:27Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 35672215969,
    "pr": 1177,
@@ -2191,52 +2206,6 @@
    "updated_at": "2026-09-18T11:16:41Z",
    "actor": "sjfeng1999",
    "jobs": []
-  },
-  {
-   "run_id": 35334367011,
-   "pr": 1162,
-   "commit": "d7ea0304d350dcac07f5eeb6c679214f36fb5be3",
-   "branch": "feature/ktrace-dialect-squashed",
-   "event": "pull_request",
-   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011",
-   "created_at": "2026-09-18T10:22:32Z",
-   "updated_at": "2026-09-19T01:21:32Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-19T00:19:07Z",
-     "completed_at": "2026-09-19T01:21:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105804369930",
-     "machine": "cv350-1e707-c03-2",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T12:06:36Z",
-     "completed_at": "2026-09-18T12:47:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105804370536"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-18T10:52:11Z",
-     "completed_at": "2026-09-18T11:11:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105804370576"
-    }
-   ]
   }
  ]
 }
