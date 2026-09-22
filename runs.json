@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-22T11:07:25Z",
+ "updated": "2026-09-22T11:10:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35719721262,
+   "pr": null,
+   "commit": "a3cb59788cb11f334dc48645c52659fc21e37c53",
+   "branch": "main",
+   "event": "push",
+   "title": "[llvm][Skill] Add an LLVM kernel-tuning and verification skill (#1154)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35719721262",
+   "created_at": "2026-09-22T11:07:38Z",
+   "updated_at": "2026-09-22T11:09:18Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 35719378633,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel][FA] Fix the DAZ flag never reaching the hardware (#1177)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35719378633",
    "created_at": "2026-09-22T11:03:57Z",
-   "updated_at": "2026-09-22T11:05:21Z",
+   "updated_at": "2026-09-22T11:08:40Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -68,10 +83,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-22T10:41:32Z",
-     "completed_at": null,
+     "completed_at": "2026-09-22T11:08:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290/job/106711649208"
     }
    ]
@@ -1385,7 +1400,7 @@
   },
   {
    "run_id": 35490230567,
-   "pr": 1154,
+   "pr": null,
    "commit": "6bf71b0a7ebdac89fece602b66e521ce964cf3f8",
    "branch": "phil/llvm-skill-only",
    "event": "pull_request",
@@ -1520,7 +1535,7 @@
   },
   {
    "run_id": 35484415773,
-   "pr": 1154,
+   "pr": null,
    "commit": "66e138b1433d7b9b729ca349f0bdc10ac9985496",
    "branch": "phil/llvm-skill-only",
    "event": "pull_request",
@@ -1581,7 +1596,7 @@
   },
   {
    "run_id": 35483381239,
-   "pr": 1154,
+   "pr": null,
    "commit": "87616b43e08a68c8c504d3d43578d891d7c606c5",
    "branch": "phil/llvm-skill-only",
    "event": "pull_request",
@@ -1627,7 +1642,7 @@
   },
   {
    "run_id": 35483155879,
-   "pr": 1154,
+   "pr": null,
    "commit": "2672f3d909d9c74ec49e4e3e569a116b7681c45a",
    "branch": "phil/llvm-skill-only",
    "event": "pull_request",
@@ -1673,7 +1688,7 @@
   },
   {
    "run_id": 35483130797,
-   "pr": 1154,
+   "pr": null,
    "commit": "ab09b20779650e5a96d228b1ef1b1e5e68feb55e",
    "branch": "phil/llvm-skill-only",
    "event": "pull_request",
@@ -1716,7 +1731,7 @@
   },
   {
    "run_id": 35482646437,
-   "pr": 1154,
+   "pr": null,
    "commit": "2108e96f72a22d6a9d57d21a05d94458499e3ee5",
    "branch": "phil/llvm-skill-only",
    "event": "pull_request",
@@ -2195,21 +2210,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35423626028",
    "created_at": "2026-09-19T05:19:00Z",
    "updated_at": "2026-09-19T05:20:15Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 35423520040,
-   "pr": null,
-   "commit": "e349e7ca97da856046cdbdedc21ff550fb953984",
-   "branch": "fix/vector-buffer-atomic-layout",
-   "event": "pull_request",
-   "title": "[Bugfix] Release 0.3.4.1 with vector buffer atomic layout fix",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35423520040",
-   "created_at": "2026-09-19T05:16:35Z",
-   "updated_at": "2026-09-19T05:18:14Z",
    "actor": "coderfeli",
    "jobs": []
   }
