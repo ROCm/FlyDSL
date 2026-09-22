@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-22T06:45:50Z",
+ "updated": "2026-09-22T07:32:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35699853914,
+   "pr": 1178,
+   "commit": "1796cfd2ac9fb77971972c58d6827ff4c3c50288",
+   "branch": "pr/fix-warp-array-contracts",
+   "event": "pull_request",
+   "title": "[Fix][Coop] Align warp array collective semantics",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35699853914",
+   "created_at": "2026-09-22T07:29:27Z",
+   "updated_at": "2026-09-22T07:30:30Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 35698487283,
+   "pr": 1128,
+   "commit": "897c7620be867e2e7ee741278f3b120bcc8b8136",
+   "branch": "codex/scaled-tiled-gemm",
+   "event": "pull_request",
+   "title": "Support variadic operands in fully expanded tiled GEMM",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35698487283",
+   "created_at": "2026-09-22T07:12:56Z",
+   "updated_at": "2026-09-22T07:29:20Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-22T07:30:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35698487283/job/106654989579"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-22T07:30:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35698487283/job/106654989603"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-22T07:29:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35698487283/job/106654989665"
+    }
+   ]
+  },
   {
    "run_id": 35696156911,
    "pr": 1178,
@@ -10,13 +68,41 @@
    "branch": "pr/fix-warp-array-contracts",
    "event": "pull_request",
    "title": "[Fix][Coop] Align warp array collective semantics",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35696156911",
    "created_at": "2026-09-22T06:43:45Z",
-   "updated_at": "2026-09-22T06:44:27Z",
+   "updated_at": "2026-09-22T07:30:12Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-22T06:58:16Z",
+     "completed_at": "2026-09-22T07:29:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35696156911/job/106646728394"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-22T06:57:51Z",
+     "completed_at": "2026-09-22T07:29:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35696156911/job/106646728402"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-22T06:58:09Z",
+     "completed_at": "2026-09-22T07:30:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35696156911/job/106646728463"
+    }
+   ]
   },
   {
    "run_id": 35672215969,
@@ -2176,36 +2262,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35341001055/job/105592743798"
     }
    ]
-  },
-  {
-   "run_id": 35339232190,
-   "pr": null,
-   "commit": "11e4e23c9f5079f9f4eee84815f48685821a195f",
-   "branch": "pr/enh-coop-warp-primitives",
-   "event": "pull_request",
-   "title": "[Ext][Coop] Add more warp-level primitives",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35339232190",
-   "created_at": "2026-09-18T11:21:31Z",
-   "updated_at": "2026-09-18T11:43:24Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 35338711925,
-   "pr": null,
-   "commit": "749dd522710ae1b5de018cd9d7634699ada2b58d",
-   "branch": "pr/enh-coop-warp-primitives",
-   "event": "pull_request",
-   "title": "[Ext][Coop] Add more warp-level primitives",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35338711925",
-   "created_at": "2026-09-18T11:15:15Z",
-   "updated_at": "2026-09-18T11:16:41Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
