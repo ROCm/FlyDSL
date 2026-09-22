@@ -21,6 +21,7 @@ from .._common import (
     _seed,
     _thread_partial,
 )
+from .._values import _as_items
 from . import scan as _universal_scan
 from .reduce import warp_reduce as _portable_warp_reduce
 
@@ -199,13 +200,12 @@ def warp_reduce(
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-            all lanes. Runtime counts must stay in range. Only the single-item overload accepts this argument;
-            omit it when reducing a per-lane item range.
+            all lanes. Only single-item inputs accept this argument; omit it for
+            an item range. Runtime counts must stay in range.
 
     Returns:
         The aggregate in every lane of the logical warp, including lanes outside
-        valid_items. Empty groups have unspecified results. This preserves FlyDSL
-        all-lane results and extends CUB's lane-zero output guarantee.
+        valid_items. Empty groups have unspecified results.
 
     Examples:
         # Each group of four lanes reduces independently; every lane gets its aggregate.
@@ -240,9 +240,11 @@ def warp_reduce(
     width = _resolve_warp_width(width, "warp_reduce width")
     if valid_items is not None:
         return _portable_warp_reduce(value, op, width=width, valid_items=valid_items)
-    value = _thread_partial(value, op)
-    if not _dpp_applies(value) or not isinstance(op, ReductionOp):
+    # Dispatch before folding: a partial may itself be an item range, which
+    # the portable entry point would otherwise interpret and reduce again.
+    if not isinstance(op, ReductionOp) or not _dpp_applies(_as_items(value)[0]):
         return _portable_warp_reduce(value, op, width=width)
+    value = _thread_partial(value, op)
     if width == 64:
         return _wave64_reduce(value, op)
     return _butterfly_reduce(value, op, width)
@@ -328,20 +330,23 @@ def warp_inclusive_scan(
     for other operators the first exclusive output is unspecified.
 
     Args:
-        value: This lane's input value. Its items are scanned independently.
+        value: This lane's input value. An item range forms part of one blocked
+            sequence: all of this lane's items precede the next lane's items.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
-        init: Optional initial value combined on the left of each prefix, converted
-            to the input value type.
+        init: One initial item combined on the left of each prefix, converted
+            to the input element type. Array inputs reject per-item seed ranges.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-            all lanes. Runtime counts must stay in range.
+            all lanes. Only single-item inputs accept this argument; omit it for
+            an item range. Runtime counts must stay in range.
 
     Returns:
         This lane's inclusive prefix, with the input value type and shape.
     """
     width = _resolve_warp_width(width, "warp_inclusive_scan width")
+    _universal_scan._validate_scan(value, init, valid_items, width)
     if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
         return _universal_scan.warp_inclusive_scan(
             value,
@@ -370,20 +375,23 @@ def warp_exclusive_scan(
     for other operators the first exclusive output is unspecified.
 
     Args:
-        value: This lane's input value. Its items are scanned independently.
+        value: This lane's input value. An item range forms part of one blocked
+            sequence: all of this lane's items precede the next lane's items.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
-        init: Optional initial value combined on the left of each prefix, converted
-            to the input value type.
+        init: One initial item combined on the left of each prefix, converted
+            to the input element type. Array inputs reject per-item seed ranges.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-            all lanes. Runtime counts must stay in range.
+            all lanes. Only single-item inputs accept this argument; omit it for
+            an item range. Runtime counts must stay in range.
 
     Returns:
         This lane's exclusive prefix, with the input value type and shape.
     """
     width = _resolve_warp_width(width, "warp_exclusive_scan width")
+    _universal_scan._validate_scan(value, init, valid_items, width)
     if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
         return _universal_scan.warp_exclusive_scan(
             value,
@@ -412,20 +420,23 @@ def warp_scan(
     for other operators the first exclusive output is unspecified.
 
     Args:
-        value: This lane's input value. Its items are scanned independently.
+        value: This lane's input value. An item range forms part of one blocked
+            sequence: all of this lane's items precede the next lane's items.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
-        init: Optional initial value combined on the left of each prefix, converted
-            to the input value type.
+        init: One initial item combined on the left of each prefix, converted
+            to the input element type. Array inputs reject per-item seed ranges.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-            all lanes. Runtime counts must stay in range.
+            all lanes. Only single-item inputs accept this argument; omit it for
+            an item range. Runtime counts must stay in range.
 
     Returns:
         A tuple (inclusive, exclusive) of this lane's prefixes.
     """
     width = _resolve_warp_width(width, "warp_scan width")
+    _universal_scan._validate_scan(value, init, valid_items, width)
     if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
         return _universal_scan.warp_scan(
             value,
@@ -455,21 +466,24 @@ def warp_scan_with_aggregate(
     for other operators the first exclusive output is unspecified.
 
     Args:
-        value: This lane's input value. Its items are scanned independently.
+        value: This lane's input value. An item range forms part of one blocked
+            sequence: all of this lane's items precede the next lane's items.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
-        init: Optional initial value combined on the left of each prefix, converted
-            to the input value type.
+        init: One initial item combined on the left of each prefix, converted
+            to the input element type. Array inputs reject per-item seed ranges.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-            all lanes. Runtime counts must stay in range.
+            all lanes. Only single-item inputs accept this argument; omit it for
+            an item range. Runtime counts must stay in range.
 
     Returns:
         A tuple (inclusive, exclusive, aggregate). The aggregate is available in every
-        participating lane.
+        participating lane and has the input element type, even for an item range.
     """
     width = _resolve_warp_width(width, "warp_scan_with_aggregate width")
+    _universal_scan._validate_scan(value, init, valid_items, width)
     if not _dpp_applies(value) or not isinstance(op, ReductionOp) or valid_items is not None:
         return _universal_scan.warp_scan_with_aggregate(
             value,

@@ -402,7 +402,7 @@ def _counted_scan(universal, form, prefix, entry, valid):
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 @pytest.mark.parametrize("universal", [False, True], ids=["dispatched", "universal"])
-@pytest.mark.parametrize("form,prefix", [("scalar", "none"), ("vector", "init"), ("record", "init")])
+@pytest.mark.parametrize("form,prefix", [("scalar", "none"), ("scalar", "init"), ("record", "init")])
 @pytest.mark.parametrize(
     "entry", ["warp_inclusive_scan", "warp_exclusive_scan", "warp_scan", "warp_scan_with_aggregate"]
 )
@@ -440,7 +440,7 @@ def test_warp_scan_skips_invalid_operators(universal, form, prefix, entry, valid
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
 @pytest.mark.parametrize("arch", ["gfx942", "gfx1100"])
-@pytest.mark.parametrize("form,prefix", [("scalar", "none"), ("vector", "init"), ("record", "init")])
+@pytest.mark.parametrize("form,prefix", [("scalar", "none"), ("scalar", "init"), ("record", "init")])
 def test_warp_scan_valid_compile(monkeypatch, arch, form, prefix):
     monkeypatch.setenv("ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
