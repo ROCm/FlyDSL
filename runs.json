@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-22T12:40:44Z",
+ "updated": "2026-09-22T12:44:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "gfx942-a16w4-fp4-software-decode",
    "event": "pull_request",
    "title": "[a16w4] Sync moe_2stage_a16wmix from aiter (gfx942 MXFP4 + 7 earlier \u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35728249041",
    "created_at": "2026-09-22T12:36:55Z",
-   "updated_at": "2026-09-22T12:38:22Z",
+   "updated_at": "2026-09-22T12:38:58Z",
    "actor": "MHYangAMD",
    "jobs": []
   },
@@ -223,11 +223,11 @@
    "branch": "pr/fix-warp-array-contracts",
    "event": "pull_request",
    "title": "[Fix][Coop] Align warp array collective semantics",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35699853914",
    "created_at": "2026-09-22T07:29:27Z",
-   "updated_at": "2026-09-22T10:42:13Z",
+   "updated_at": "2026-09-22T12:42:20Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -245,10 +245,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-22T10:42:12Z",
-     "completed_at": null,
+     "completed_at": "2026-09-22T12:42:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35699853914/job/106660532541"
     },
     {
