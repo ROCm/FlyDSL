@@ -256,14 +256,18 @@ def test_low_level_memref_builders_accept_singleton_groups(call):
         assert "[" not in str(op).split(":", 1)[0]
 
 
-def test_low_level_ssa_builder_accepts_singleton_groups():
+@pytest.mark.parametrize("group_a", [False, True])
+@pytest.mark.parametrize("group_b", [False, True])
+def test_low_level_ssa_builder_accepts_single_values_and_groups(group_a, group_b):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
             atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
             data = fx.Vector.filled(8, 1, fx.Int32).ir_value()
             acc = fx.Vector.filled(4, 0.0, fx.Float32).ir_value()
-            result = fly.mma_atom_call_ssa([acc.type], atom, [data], [data], acc)
+            a = [data] if group_a else data
+            b = [data] if group_b else data
+            result = fly.mma_atom_call_ssa([acc.type], atom, a, b, acc)
         assert module.operation.verify()
         assert "[" not in str(result.owner).split(":", 1)[0]
 
