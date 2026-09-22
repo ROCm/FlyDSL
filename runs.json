@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-09-22T09:45:06Z",
+ "updated": "2026-09-22T11:07:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35719378633,
+   "pr": null,
+   "commit": "e1e1d3489e25e528da304380656320b01c9f934e",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel][FA] Fix the DAZ flag never reaching the hardware (#1177)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35719378633",
+   "created_at": "2026-09-22T11:03:57Z",
+   "updated_at": "2026-09-22T11:05:21Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35719221404,
+   "pr": null,
+   "commit": "0a73097ef4123f98b18f879f7efd14dbf3b6c39f",
+   "branch": "main",
+   "event": "push",
+   "title": "smem cleanup: move capacity helpers off legacy allocator, migrate tes\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35719221404",
+   "created_at": "2026-09-22T11:02:15Z",
+   "updated_at": "2026-09-22T11:05:10Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35715457290,
+   "pr": 1181,
+   "commit": "92619bc0d5be7f1d625a3b2a0039d93263cd9b9e",
+   "branch": "pr/enh-release-api-check",
+   "event": "pull_request",
+   "title": "[API] Add extension as stable, exclude experimental module paths",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290",
+   "created_at": "2026-09-22T10:20:42Z",
+   "updated_at": "2026-09-22T10:47:23Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-22T10:47:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290/job/106711649098"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-22T10:46:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290/job/106711649144"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-22T10:41:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290/job/106711649208"
+    }
+   ]
+  },
   {
    "run_id": 35711225833,
    "pr": 1180,
@@ -86,11 +159,11 @@
    "branch": "pr/fix-warp-array-contracts",
    "event": "pull_request",
    "title": "[Fix][Coop] Align warp array collective semantics",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35699853914",
    "created_at": "2026-09-22T07:29:27Z",
-   "updated_at": "2026-09-22T07:49:30Z",
+   "updated_at": "2026-09-22T10:42:13Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -108,9 +181,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-22T07:49:30Z",
+     "started_at": "2026-09-22T10:42:12Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35699853914/job/106660532541"
     },
@@ -262,7 +335,7 @@
   },
   {
    "run_id": 35671761257,
-   "pr": 1177,
+   "pr": null,
    "commit": "ddd34db9d3b314024f65bdb6e75f1ebf8320e352",
    "branch": "phil/fix-daz-attributes",
    "event": "pull_request",
@@ -277,7 +350,7 @@
   },
   {
    "run_id": 35670420826,
-   "pr": 1177,
+   "pr": null,
    "commit": "73607243b5200641c2cc31ac169f2186dc57598c",
    "branch": "phil/fix-daz-attributes",
    "event": "pull_request",
@@ -320,7 +393,7 @@
   },
   {
    "run_id": 35627307918,
-   "pr": 1062,
+   "pr": null,
    "commit": "1f6ef44a88d645b5bd221e4dd05474ec0d5bf85a",
    "branch": "smem-capacity-decouple",
    "event": "pull_request",
@@ -458,7 +531,7 @@
   },
   {
    "run_id": 35589028444,
-   "pr": 1062,
+   "pr": null,
    "commit": "53819aa92b2a1a8f42075df68674f36e89bd0630",
    "branch": "smem-capacity-decouple",
    "event": "pull_request",
@@ -2137,107 +2210,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35423520040",
    "created_at": "2026-09-19T05:16:35Z",
    "updated_at": "2026-09-19T05:18:14Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 35422104515,
-   "pr": 1128,
-   "commit": "efa3a93efcf942ff0085a10ba7598fbc102484a9",
-   "branch": "codex/scaled-tiled-gemm",
-   "event": "pull_request",
-   "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35422104515",
-   "created_at": "2026-09-19T04:44:29Z",
-   "updated_at": "2026-09-19T05:42:12Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-19T05:35:10Z",
-     "completed_at": "2026-09-19T05:42:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35422104515/job/105843514818"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-19T05:03:52Z",
-     "completed_at": "2026-09-19T05:42:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35422104515/job/105843514849"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-19T05:01:32Z",
-     "completed_at": "2026-09-19T05:36:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35422104515/job/105843514852"
-    }
-   ]
-  },
-  {
-   "run_id": 35415648096,
-   "pr": null,
-   "commit": "b5906a457c3b1d7e46ae0f3fb49f7368d32f9410",
-   "branch": "main",
-   "event": "push",
-   "title": "[Bugfix] Promote register pred on copy_atom_call without register src\u2026",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415648096",
-   "created_at": "2026-09-19T02:26:24Z",
-   "updated_at": "2026-09-19T03:24:59Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-19T02:41:58Z",
-     "completed_at": "2026-09-19T03:14:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415648096/job/105825799348"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-19T03:10:53Z",
-     "completed_at": "2026-09-19T03:24:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415648096/job/105825799366"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-19T02:41:56Z",
-     "completed_at": "2026-09-19T03:16:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415648096/job/105825799412"
-    }
-   ]
-  },
-  {
-   "run_id": 35415290665,
-   "pr": null,
-   "commit": "ec0fe7d8cdc48c5781309e6da38e0fb81668aa03",
-   "branch": "main",
-   "event": "push",
-   "title": "[Enh] Support expr struct member methods (#1156)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35415290665",
-   "created_at": "2026-09-19T02:19:04Z",
-   "updated_at": "2026-09-19T02:26:40Z",
    "actor": "coderfeli",
    "jobs": []
   }
