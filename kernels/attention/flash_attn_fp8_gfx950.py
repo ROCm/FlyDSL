@@ -104,6 +104,20 @@ def build_flash_attn_dualwave_swp_fp8_module(
     DEFAULT_STRIDE_O_N = traits.DEFAULT_STRIDE_O_N
     DEFAULT_STRIDE_KV_N = traits.DEFAULT_STRIDE_KV_N
     _dualwave_swp_fp8_cache_tag = traits.cache_tag
+    # Evaluate the mode gate in Python, outside the kernel AST rewriter.
+    _use_i32_counters = (
+        traits.BLOCK_M == 128
+        and traits.HEAD_DIM == 128
+        and traits.HEAD_DIM_V == 128
+        and not traits.CAUSAL
+        and not traits.SPLITK
+        and not traits.VARLEN
+        and not traits.CROSS_SEQLEN
+        and traits.DUALWAVE_SWP_LAZY_RESCALE
+        and int(os.environ.get("FA_PP", "1"))
+        and int(os.environ.get("FA_TPV", "1"))
+        and not int(os.environ.get("FA_PP_PRIO", "0"))
+    )
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
 
     # fx.Array rejects a length of 0.
@@ -195,7 +209,8 @@ def build_flash_attn_dualwave_swp_fp8_module(
         DMA_PER_ITER = const_expr(dualwave_fp8_dma_per_iter(traits))
 
         def _iter_end_bar():
-            _waitcnt_vm_n(DMA_PER_ITER)
+            if const_expr(not PP):
+                _waitcnt_vm_n(DMA_PER_ITER)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
@@ -280,23 +295,41 @@ def build_flash_attn_dualwave_swp_fp8_module(
         l_row = ctx.c_zero_f
         v_o = [ctx.c_zero_v16f32 for _ in range_constexpr(D_CHUNKS)]
 
-        NPF_I = const_expr(fx.Index(NPF))
+        # i32 counters improve the four-wave dense D128 pipeline. The eight-wave
+        # pipeline schedules better with index counters after the prefetch fix.
+        I32_COUNTERS = const_expr(_use_i32_counters)
+        if const_expr(I32_COUNTERS):
+            NPF_I = const_expr(fx.Int32(NPF))
+            ring_start = fx.Int32(t0) % fx.Int32(NPF)
+        else:
+            NPF_I = const_expr(fx.Index(NPF))
+            ring_start = t0 % fx.Index(NPF)
 
         def _ring_wrap(x):
             return (x >= NPF_I).select(x - NPF_I, x)
 
-        init_args = [m_row, l_row] + v_o + [t0 % fx.Index(NPF)]
+        init_args = [m_row, l_row] + v_o + [ring_start]
         loop_results = init_args
-        for j, loop_args in range(fx.Index(t0), t_end, fx.Index(2), init=init_args):
+
+        def _loop_body(j, loop_args):
             m_row = loop_args[0]
             l_row = loop_args[1]
             v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
 
-            a_buf = loop_args[2 + D_CHUNKS]
-            b_buf = _ring_wrap(a_buf + fx.Index(1))
-            nn_a_buf = _ring_wrap(a_buf + fx.Index(2))
-            f_a_buf = _ring_wrap(a_buf + fx.Index(4))
-            f_b_buf = _ring_wrap(a_buf + fx.Index(5))
+            if const_expr(I32_COUNTERS):
+                # Slots stay in [0, NPF); address consumers keep index arithmetic.
+                a_slot = loop_args[2 + D_CHUNKS]
+                a_buf = fx.Index(a_slot)
+                b_buf = fx.Index(_ring_wrap(a_slot + fx.Int32(1)))
+                nn_a_buf = _ring_wrap(a_slot + fx.Int32(2))
+                f_a_buf = fx.Index(_ring_wrap(a_slot + fx.Int32(4)))
+                f_b_buf = fx.Index(_ring_wrap(a_slot + fx.Int32(5)))
+            else:
+                a_buf = loop_args[2 + D_CHUNKS]
+                b_buf = _ring_wrap(a_buf + fx.Index(1))
+                nn_a_buf = _ring_wrap(a_buf + fx.Index(2))
+                f_a_buf = _ring_wrap(a_buf + fx.Index(4))
+                f_b_buf = _ring_wrap(a_buf + fx.Index(5))
 
             v_k_a = kv_lds_to_regs.load_k(a_buf)
             v_k_b = kv_lds_to_regs.load_k(b_buf)
@@ -329,6 +362,11 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 _pp_prio(1)
                 v_v_b = kv_lds_to_regs.load_v(b_buf)
                 v_o = _pv_part(v_p_a, v_v_a, v_o)
+                # Staggered groups are one barrier apart. The leading group can
+                # read the next pair after its end barrier meets the trailing
+                # group's barrier here, before that group reaches its own end.
+                # Complete the older prefetches before publishing this barrier.
+                _waitcnt_vm_n(DMA_PER_ITER)
                 _phase_bar()
                 _pp_prio(0)
                 v_p_b, l_row = _softmax_part(v_s_b, l_row, m_new)
@@ -354,7 +392,16 @@ def build_flash_attn_dualwave_swp_fp8_module(
 
                 _iter_end_bar()
 
-            loop_results = yield [m_row, l_row] + v_o + [nn_a_buf]
+            return [m_row, l_row] + v_o + [nn_a_buf]
+
+        if const_expr(I32_COUNTERS):
+            # Tile bounds derive from Int32 sequence lengths. Auto-carried range
+            # preserves i32 induction; explicit-init range in FlyDSL 0.3.2 uses index.
+            for j in range(fx.Int32(t0), fx.Int32(t_end), fx.Int32(2)):
+                loop_results = _loop_body(fx.Index(j), loop_results)
+        else:
+            for j, loop_args in range(fx.Index(t0), t_end, fx.Index(2), init=init_args):
+                loop_results = yield _loop_body(j, loop_args)
         m_row = loop_results[0]
         l_row = loop_results[1]
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
