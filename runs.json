@@ -1,8 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-09-22T07:32:08Z",
+ "updated": "2026-09-22T09:31:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35708273637,
+   "pr": 1179,
+   "commit": "122b20aad39adfcd5a25626201b23ea559698537",
+   "branch": "ffi-llvm-pointer-types",
+   "event": "pull_request",
+   "title": "[Enh] Accept LLVM pointer types in ffi declarations",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35708273637",
+   "created_at": "2026-09-22T09:04:08Z",
+   "updated_at": "2026-09-22T09:04:08Z",
+   "actor": "LWenH",
+   "jobs": []
+  },
+  {
+   "run_id": 35700013488,
+   "pr": 1062,
+   "commit": "bebff0d3b73f2ed36cd7de6c1070debd93ff1f5e",
+   "branch": "smem-capacity-decouple",
+   "event": "pull_request",
+   "title": "smem cleanup: move capacity helpers off legacy allocator, migrate tes\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35700013488",
+   "created_at": "2026-09-22T07:31:17Z",
+   "updated_at": "2026-09-22T08:10:00Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-22T07:48:11Z",
+     "completed_at": "2026-09-22T09:05:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35700013488/job/106659985745",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-22T08:10:00Z",
+     "completed_at": "2026-09-22T08:40:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35700013488/job/106659985770"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-22T07:50:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35700013488/job/106659985824"
+    }
+   ]
+  },
   {
    "run_id": 35699853914,
    "pr": 1178,
@@ -10,13 +71,44 @@
    "branch": "pr/fix-warp-array-contracts",
    "event": "pull_request",
    "title": "[Fix][Coop] Align warp array collective semantics",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35699853914",
    "created_at": "2026-09-22T07:29:27Z",
-   "updated_at": "2026-09-22T07:30:30Z",
+   "updated_at": "2026-09-22T07:49:30Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-22T07:50:07Z",
+     "completed_at": "2026-09-22T09:05:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35699853914/job/106660532494",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-22T07:49:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35699853914/job/106660532541"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-22T08:40:41Z",
+     "completed_at": "2026-09-22T09:15:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35699853914/job/106660532858"
+    }
+   ]
   },
   {
    "run_id": 35698487283,
@@ -25,37 +117,40 @@
    "branch": "codex/scaled-tiled-gemm",
    "event": "pull_request",
    "title": "Support variadic operands in fully expanded tiled GEMM",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35698487283",
    "created_at": "2026-09-22T07:12:56Z",
-   "updated_at": "2026-09-22T07:29:20Z",
+   "updated_at": "2026-09-22T07:48:58Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-22T07:30:26Z",
-     "completed_at": null,
+     "completed_at": "2026-09-22T08:09:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35698487283/job/106654989579"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-22T07:30:23Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35698487283/job/106654989603"
+     "completed_at": "2026-09-22T08:48:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35698487283/job/106654989603",
+     "machine": "smci350-rck-g03-b17-12",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-22T07:29:20Z",
+     "started_at": "2026-09-22T07:48:57Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35698487283/job/106654989665"
     }
@@ -2174,92 +2269,6 @@
      "machine": null,
      "host_model": null,
      "bench_skipped": "host unidentified != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35352041978,
-   "pr": null,
-   "commit": "d6dc9c5569bbd8a150d7fe50db80c1d0c71af2f1",
-   "branch": "pr/enh-coop-warp-primitives",
-   "event": "pull_request",
-   "title": "[Ext][Coop] Add more warp-level primitives",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35352041978",
-   "created_at": "2026-09-18T13:45:00Z",
-   "updated_at": "2026-09-18T15:01:11Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-18T14:08:33Z",
-     "completed_at": "2026-09-18T14:51:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35352041978/job/105629422165"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-18T14:06:40Z",
-     "completed_at": "2026-09-18T14:23:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35352041978/job/105629422179"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-18T14:07:02Z",
-     "completed_at": "2026-09-18T15:01:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35352041978/job/105629422186"
-    }
-   ]
-  },
-  {
-   "run_id": 35341001055,
-   "pr": null,
-   "commit": "db7eaa6310e8004b94fdda24c07ae99413de048d",
-   "branch": "pr/enh-coop-warp-primitives",
-   "event": "pull_request",
-   "title": "[Ext][Coop] Add more warp-level primitives",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35341001055",
-   "created_at": "2026-09-18T11:43:02Z",
-   "updated_at": "2026-09-18T13:45:02Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-18T12:06:18Z",
-     "completed_at": "2026-09-18T13:45:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35341001055/job/105592743698"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-18T12:06:23Z",
-     "completed_at": "2026-09-18T12:31:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35341001055/job/105592743724"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-18T12:09:11Z",
-     "completed_at": "2026-09-18T13:01:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35341001055/job/105592743798"
     }
    ]
   }
