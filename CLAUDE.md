@@ -49,7 +49,7 @@ FlyDSL/
 │   ├── flydsl/                    # Python DSL core
 │   │   ├── expr/                  # DSL expression API; direct children are TARGET-NEUTRAL (typing, primitive, gpu, derived, struct, numeric, math, enum, arith, meta, extern; + utils/)
 │   │   │   └── rocdl/             # Target-specific ROCDL package (cdna3, cdna4, cdna5, rdna3, rdna4, cluster, inline_asm, tdm_ops, universal); lazy-loaded via __init__'s _BACKEND_MODULES
-│   │   ├── extension/             # Extension libraries on top of expr; lazy-loaded via expr/__init__'s _LIBRARY_MODULES
+│   │   ├── extension/             # Extension libraries on top of expr; lazy-loaded via expr/__init__'s _EXTENSION_MODULES
 │   │   ├── compiler/              # @flyc.kernel / @flyc.jit, AST rewriting, JIT cache, backends
 │   │   ├── runtime/               # Device runtime and GPU arch detection
 │   │   ├── utils/                 # EnvManager, SmemAllocator (legacy), logger
