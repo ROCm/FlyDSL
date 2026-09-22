@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-22T00:27:03Z",
+ "updated": "2026-09-22T00:32:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35672215969,
+   "pr": 1177,
+   "commit": "11e91532dfeb09e62ada8a654c4a0fcfe4e9e2db",
+   "branch": "phil/fix-daz-attributes",
+   "event": "pull_request",
+   "title": "[Kernel][FA] Fix the DAZ flag never reaching the hardware",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35672215969",
+   "created_at": "2026-09-22T00:30:09Z",
+   "updated_at": "2026-09-22T00:31:52Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35671761257,
    "pr": 1177,
@@ -10,11 +25,11 @@
    "branch": "phil/fix-daz-attributes",
    "event": "pull_request",
    "title": "[Kernel][FA] Fix the DAZ flag never reaching the hardware",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35671761257",
    "created_at": "2026-09-22T00:23:36Z",
-   "updated_at": "2026-09-22T00:25:32Z",
+   "updated_at": "2026-09-22T00:30:41Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -2191,21 +2206,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35334367011/job/105804370576"
     }
    ]
-  },
-  {
-   "run_id": 35330249452,
-   "pr": 1109,
-   "commit": "82c543ab9dd88962d81e49438891ab21143f2a82",
-   "branch": "feat/rocdl-cvt-f32-fp8",
-   "event": "pull_request",
-   "title": "[DSL] Expose F32_FP8 conversion from packed_i32",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35330249452",
-   "created_at": "2026-09-18T09:34:35Z",
-   "updated_at": "2026-09-18T09:34:35Z",
-   "actor": "big-yellow-duck",
-   "jobs": []
   }
  ]
 }
