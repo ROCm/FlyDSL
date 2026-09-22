@@ -283,8 +283,9 @@ lds_tile = lds.tile.view(fx.make_layout((128, 64), (64, 1)))
 
 The compiler sizes the per-leaf static LDS global automatically (default
 ``static=True``), so ``launch(smem=...)`` is normally left unset.
-``SharedAllocator`` is the only LDS allocator; the former
-``flydsl.utils.smem_allocator`` path has been removed.
+``SharedAllocator`` is the allocator for new kernels; the legacy
+``flydsl.utils.smem_allocator`` path is kept for backward compatibility, but it
+is not recommended and warns when used.
 
 ### 5.3 Swizzling (bank conflict avoidance)
 

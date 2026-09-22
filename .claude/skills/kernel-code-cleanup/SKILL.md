@@ -253,11 +253,11 @@ fx.rocdl.s_waitcnt(lgkmcnt=0)
 ## 4. `SmemAllocator` / `SmemPtr` → `SharedAllocator`
 
 The legacy LDS path used a manual base pointer, byte offsets, and `finalize()`.
-It has been **removed** — `flydsl.utils.smem_allocator` no longer exists, so code
-still importing `SmemAllocator` / `SmemPtr` fails at import and must be migrated,
-not merely preferred away. Declare an `@fx.struct` of `fx.Array` fields and
-allocate via `fx.SharedAllocator` — the compiler sizes the LDS global; **no
-finalize**.
+`flydsl.utils.smem_allocator` still exists so existing kernels keep working, but
+it is **not recommended** and warns on use: migrate when you touch such a kernel
+rather than leaving it on the old path. Declare an `@fx.struct` of `fx.Array`
+fields and allocate via `fx.SharedAllocator` — the compiler sizes the LDS global;
+**no finalize**.
 
 ```python
 # Before

@@ -652,11 +652,11 @@ def my_kernel(A: fx.Tensor, ...):
 For the dynamic mode (``static=False``), the launch wrapper auto-infers
 ``smem`` from ``SharedAllocator.allocated_bytes`` when ``smem=None``.
 
-`SharedAllocator` is the only LDS allocator. The former
+`SharedAllocator` is the allocator for new kernels. The legacy
 `flydsl.utils.smem_allocator` module (`SmemAllocator` / `SmemPtr`, with its
-`finalize()` step) has been removed — allocate through `fx.SharedAllocator()`
-over a `@fx.struct` storage layout and build each `.view(...)` at the top of the
-kernel.
+`finalize()` step) is kept so existing kernels keep working, but it is not
+recommended and warns when used — allocate through `fx.SharedAllocator()` over a
+`@fx.struct` storage layout and build each `.view(...)` at the top of the kernel.
 
 ### LDS Capacity
 | Architecture | GPU | LDS per CU |
