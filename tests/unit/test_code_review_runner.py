@@ -47,6 +47,34 @@ def found(*candidates):
     return {"status": "COMPLETE", "limitations": [], "candidates": list(candidates)}
 
 
+ANGLE_LABELS = tuple(label for label, _, _ in common.ANGLES)
+
+
+def grouped_found(*candidates):
+    return {
+        "status": "COMPLETE",
+        "limitations": [],
+        "candidates": list(candidates),
+        "coverage": list(ANGLE_LABELS),
+    }
+
+
+def sync_grouped_finder(stages):
+    candidates = []
+    for angle in ANGLE_LABELS:
+        output = common.stage_output(stages, "find:" + angle)
+        if output is not None:
+            candidates.extend({**copy.deepcopy(candidate), "angle": angle} for candidate in output["candidates"])
+        stages["find:" + angle].update(
+            derived_from=common.GROUPED_FINDER_STAGE,
+            input_sha256="grouped-fingerprint",
+        )
+    stages[common.GROUPED_FINDER_STAGE] = {
+        **done(grouped_found(*candidates)),
+        "input_sha256": "grouped-fingerprint",
+    }
+
+
 def verdict(value="CONFIRMED", evidence="Executed probe: row 9 stores the incorrect value 17.", severity="P1"):
     return {
         "status": "COMPLETE",
@@ -68,13 +96,17 @@ def configuration(**overrides):
         "repo": None,
         "base": None,
         "head": None,
+        "scope_manifest": None,
         "paths": [],
         "instructions": "",
         "model": None,
         "effort": None,
+        "group_finders": True,
+        "claude_path": None,
         "concurrency": 3,
         "agent_timeout": 1,
         "phase_timeout": 10,
+        "execution_profile": "local",
         **overrides,
     }
 
@@ -125,7 +157,10 @@ class Backend:
             self.calls.append(label)
             self.active += 1
             self.peak = max(self.peak, self.active)
-            fail = self.failure and label.startswith(self.failure)
+            fail = self.failure and (
+                label.startswith(self.failure)
+                or (label == common.GROUPED_FINDER_STAGE and self.failure.startswith("find:"))
+            )
             if fail and self.fail_once:
                 self.failure = None
         try:
@@ -133,7 +168,18 @@ class Backend:
                 time.sleep(self.delay)
             if fail or cancelled.is_set() or time.monotonic() >= deadline:
                 return {"status": "INCOMPLETE", "error": "injected stage failure", "usage": {}}
-            if label.startswith("find:"):
+            if label == common.GROUPED_FINDER_STAGE:
+                if self.many:
+                    output = grouped_found(
+                        *(
+                            {**candidate(i + 1, angle + str(i)), "angle": angle}
+                            for angle in ANGLE_LABELS[:2]
+                            for i in range(6)
+                        )
+                    )
+                else:
+                    output = grouped_found({**candidate(), "angle": "trace-time"})
+            elif label.startswith("find:"):
                 if self.many:
                     output = found(*(candidate(i + 1, label + str(i)) for i in range(6)))
                 else:
@@ -198,6 +244,23 @@ def test_verifier_schema_requires_independent_severity():
         common.validate_output({"status": "COMPLETE", "limitations": [], "verdict": "CONFIRMED", "evidence": "proof"})
 
 
+def test_grouped_finder_requires_ordered_coverage_and_per_angle_cap():
+    schema = runner.grouped_output_schema(ANGLE_LABELS)
+    assert schema["properties"]["candidates"]["maxItems"] == common.GROUPED_FINDER_MAX
+    assert "angle" in schema["properties"]["candidates"]["items"]["required"]
+    assert "coverage" in schema["required"]
+    output = grouped_found({**candidate(), "angle": "trace-time"})
+    assert common.validate_grouped_output(output, ANGLE_LABELS) is output
+    output["coverage"] = list(reversed(ANGLE_LABELS))
+    with pytest.raises(ValueError, match="every angle"):
+        common.validate_grouped_output(output, ANGLE_LABELS)
+    over_limit = grouped_found(
+        *({**candidate(line=index + 1, mechanism=f"candidate {index}"), "angle": "trace-time"} for index in range(7))
+    )
+    with pytest.raises(ValueError, match="per-angle"):
+        common.validate_grouped_output(over_limit, ANGLE_LABELS)
+
+
 @pytest.mark.parametrize("failure", ["find:addressing", "verify:", "challenge:", "sweep"])
 def test_required_failure_never_returns_clean_review(tmp_path, source_repo, failure):
     review = new_run(tmp_path, source_repo, Backend(failure))
@@ -214,15 +277,28 @@ def test_required_failure_never_returns_clean_review(tmp_path, source_repo, fail
         publisher.publish(report, dry_run=False)
 
 
-def test_all_54_candidates_verified_and_correctness_has_priority(tmp_path, source_repo):
+def test_all_12_grouped_candidates_are_verified_and_correctness_has_priority(tmp_path, source_repo):
     backend = Backend(many=True)
     report = new_run(tmp_path, source_repo, backend).run()
     assert report["status"] == "COMPLETE"
-    assert sum(c.startswith("verify:") for c in backend.calls) == 54
-    assert report["stats"]["verified"] == 54
+    assert sum(c.startswith("verify:") for c in backend.calls) == common.GROUPED_FINDER_MAX
+    assert report["stats"]["verified"] == common.GROUPED_FINDER_MAX
     assert len(report["risks"]) == 12
     assert all(c["kind"] == "correctness" for c in report["risks"])
     assert backend.peak <= 3
+    assert len(report["stages"][common.GROUPED_FINDER_STAGE]["attempts"]) == 1
+    assert all(
+        report["stages"]["find:" + angle]["derived_from"] == common.GROUPED_FINDER_STAGE for angle in ANGLE_LABELS
+    )
+
+
+def test_ungrouped_mode_keeps_nine_independent_finder_stages(tmp_path, source_repo):
+    backend = Backend()
+    report = new_run(tmp_path, source_repo, backend, group_finders=False).run()
+    assert report["status"] == "COMPLETE"
+    assert common.GROUPED_FINDER_STAGE not in report["stages"]
+    assert all(backend.calls.count("find:" + angle) == 1 for angle in ANGLE_LABELS)
+    assert report["metrics"]["agent_attempts"] == 12
 
 
 def test_challenge_downgrade_and_evidence_survive_synthesis(tmp_path, source_repo):
@@ -260,7 +336,7 @@ def test_resume_retries_only_failed_stages_and_keeps_prior_usage(tmp_path, sourc
     state = json.loads((review.run_dir / "state.json").read_text())
     resumed = runner.ReviewRun(review.run_dir, state, backend).run()
     assert resumed["status"] == "COMPLETE"
-    assert all(backend.calls.count("find:" + label) == 1 for label, _, _ in common.ANGLES)
+    assert backend.calls.count(common.GROUPED_FINDER_STAGE) == 1
     assert backend.calls.count("verify:" + resumed["candidates"][0]["id"]) == 2
     assert resumed["metrics"]["attempts_without_cost"] == 1
     assert resumed["metrics"]["cost_is_complete"] is False
@@ -303,6 +379,16 @@ def test_interrupted_attempt_keeps_its_log_and_unknown_cost_on_resume(tmp_path, 
     assert resumed["metrics"]["attempts_without_cost"] == 1
 
 
+def test_cost_metric_is_independent_of_stage_insertion_order():
+    def stages(costs):
+        return {str(index): {"attempts": [{"usage": {"total_cost_usd": cost}}]} for index, cost in enumerate(costs)}
+
+    costs = [1.0, 1e-16, 1e-16]
+    forward = common.usage_metrics(stages(costs), 1)["known_cost_usd"]
+    reverse = common.usage_metrics(stages(reversed(costs)), 1)["known_cost_usd"]
+    assert forward == reverse == 1.0000000000000002
+
+
 def test_pinned_scope_survives_source_push(tmp_path, source_repo):
     root, base, head = source_repo
     run_dir = tmp_path / "pin"
@@ -314,6 +400,60 @@ def test_pinned_scope_survives_source_push(tmp_path, source_repo):
     assert scope["head_oid"] == head != runner.revision(root, "HEAD")
     assert (run_dir / "repo/kernel.py").read_text() == "x = 2\n"
     assert head in scope["diff_command"] and base in scope["diff_command"]
+
+
+def test_offline_scope_manifest_pins_pr_identity_without_gh(tmp_path, source_repo):
+    root, base, head = source_repo
+    manifest = {
+        "schema_version": runner.SCOPE_MANIFEST_VERSION,
+        "repository_id": 1102472199,
+        "repo": "ROCm/FlyDSL",
+        "pr": 1137,
+        "author_id": 184409145,
+        "author_login": "coderfeli",
+        "head_repo": "ROCm/FlyDSL",
+        "base_oid": base,
+        "head_oid": head,
+    }
+    manifest_path = tmp_path / "scope.json"
+    manifest_path.write_text(json.dumps(manifest))
+    run_dir = tmp_path / "offline"
+    run_dir.mkdir()
+    scope = runner.pin_scope(root, run_dir, configuration(scope_manifest=str(manifest_path)))
+    assert scope["repo"] == "ROCm/FlyDSL"
+    assert scope["pr"] == 1137
+    assert scope["repository_id"] == 1102472199
+    assert scope["author_id"] == 184409145
+    assert scope["author_login"] == "coderfeli"
+    assert scope["head_repo"] == scope["repo"]
+    assert scope["base_oid"] == base and scope["head_oid"] == head
+    assert json.loads((run_dir / "scope-manifest.json").read_text()) == manifest
+    runner.check_snapshot(run_dir, scope)
+    manifest["author_login"] = "other"
+    (run_dir / "scope-manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="scope manifest changed"):
+        runner.check_snapshot(run_dir, scope)
+
+
+def test_offline_scope_manifest_is_fail_closed(tmp_path, source_repo):
+    root, base, head = source_repo
+    manifest = {
+        "schema_version": runner.SCOPE_MANIFEST_VERSION,
+        "repository_id": 1102472199,
+        "repo": "ROCm/FlyDSL",
+        "pr": 1137,
+        "author_id": 184409145,
+        "author_login": "coderfeli",
+        "head_repo": "attacker/FlyDSL",
+        "base_oid": base,
+        "head_oid": head,
+    }
+    manifest_path = tmp_path / "scope.json"
+    manifest_path.write_text(json.dumps(manifest))
+    run_dir = tmp_path / "offline-invalid"
+    run_dir.mkdir()
+    with pytest.raises(ValueError, match="same-repository"):
+        runner.pin_scope(root, run_dir, configuration(scope_manifest=str(manifest_path)))
 
 
 def test_working_tree_gets_own_commit_without_mutating_source(tmp_path, source_repo):
@@ -419,6 +559,85 @@ def test_cli_requires_success_footer_and_no_permission_denials(tmp_path, monkeyp
         assert attempt["usage"] == {}
 
 
+def test_untrusted_container_profile_hardens_cli_argv_environment_and_sandbox(tmp_path, monkeypatch):
+    capture = tmp_path / "capture.json"
+    snapshot = tmp_path / "repo"
+    snapshot.mkdir()
+    envelope = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "structured_output": found(),
+        "permission_denials": [],
+    }
+    install_fake_cli(
+        tmp_path,
+        monkeypatch,
+        "import json, os, sys\nfrom pathlib import Path\n"
+        f"Path({str(capture)!r}).write_text(json.dumps({{'argv': sys.argv[1:], "
+        "'has_gh': 'GH_TOKEN' in os.environ, 'has_github': 'GITHUB_TOKEN' in os.environ, "
+        "'has_openai': 'OPENAI_API_KEY' in os.environ, 'has_ssh': 'SSH_AUTH_SOCK' in os.environ, "
+        "'has_anthropic': 'ANTHROPIC_AUTH_TOKEN' in os.environ, "
+        "'has_custom_headers': 'ANTHROPIC_CUSTOM_HEADERS' in os.environ, "
+        "'has_managed_settings': 'CLAUDE_CODE_MANAGED_SETTINGS_PATH' in os.environ, "
+        "'has_process_wrapper': 'CLAUDE_CODE_PROCESS_WRAPPER' in os.environ, "
+        "'scrub': os.environ.get('CLAUDE_CODE_SUBPROCESS_ENV_SCRUB')}))\n"
+        f"print(json.dumps({envelope!r}))\n",
+    )
+    monkeypatch.setenv("GH_TOKEN", "synthetic-gh")
+    monkeypatch.setenv("GITHUB_TOKEN", "synthetic-github")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/synthetic-agent.sock")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "synthetic-anthropic")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "synthetic-custom")
+    monkeypatch.setenv("CLAUDE_CODE_MANAGED_SETTINGS_PATH", "/tmp/synthetic-settings")
+    monkeypatch.setenv("CLAUDE_CODE_PROCESS_WRAPPER", "/tmp/synthetic-wrapper")
+    task = {"prompt": "test", "schema": runner.output_schema(6), "limit": 6}
+    attempt = runner.cli_agent(
+        task,
+        configuration(execution_profile="untrusted-container", claude_path=str(tmp_path / "claude")),
+        snapshot,
+        tmp_path / "hardened",
+        time.monotonic() + 3,
+        threading.Event(),
+    )
+    assert attempt["status"] == "COMPLETE", (attempt, Path(attempt["stderr"]).read_text())
+    recorded = json.loads(capture.read_text())
+    assert recorded["has_anthropic"] is True
+    assert recorded["scrub"] == "1"
+    assert not any(
+        recorded[key]
+        for key in (
+            "has_gh",
+            "has_github",
+            "has_openai",
+            "has_ssh",
+            "has_custom_headers",
+            "has_managed_settings",
+            "has_process_wrapper",
+        )
+    )
+    argv = recorded["argv"]
+    assert "--safe-mode" in argv and "--restricted" in argv and "--no-chrome" in argv
+    add_dirs = [argv[index + 1] for index, value in enumerate(argv) if value == "--add-dir"]
+    assert add_dirs == [str(runner.ENGINE_ROOT), str(snapshot.parent), "/tmp"]
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+    assert not any(value.startswith("Bash(") for value in argv)
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    sandbox = settings["sandbox"]
+    assert sandbox["enabled"] is sandbox["failIfUnavailable"] is True
+    assert sandbox["autoAllowBashIfSandboxed"] is sandbox["allowUnsandboxedCommands"] is False
+    assert sandbox["network"] == {"allowedDomains": [], "strictAllowlist": True}
+    assert sandbox["filesystem"]["denyRead"] == ["/"]
+    assert sandbox["filesystem"]["denyWrite"] == ["/"]
+    assert str(snapshot) in sandbox["filesystem"]["allowRead"]
+    assert str(snapshot.parent / "diff.patch") in sandbox["filesystem"]["allowRead"]
+    assert str(runner.ENGINE_ROOT) in sandbox["filesystem"]["allowRead"]
+    assert str(tmp_path) not in sandbox["filesystem"]["allowRead"]
+    denied = {entry["name"] for entry in sandbox["credentials"]["envVars"]}
+    assert {"ANTHROPIC_AUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} <= denied
+
+
 def test_timeout_cancels_agent_and_its_tool_process(tmp_path, monkeypatch):
     child_pid = tmp_path / "child.pid"
     install_fake_cli(
@@ -460,14 +679,17 @@ def test_command_line_entry_persists_one_result_and_resumes(tmp_path, source_rep
         "import json, sys\n"
         "schema = json.loads(sys.argv[sys.argv.index('--json-schema') + 1])\n"
         "sys.stdin.read()\n"
-        f"output = {found(record)!r} if 'candidates' in schema['properties'] else {verdict()!r}\n"
+        f"grouped = {grouped_found({**record, 'angle': 'trace-time'})!r}\n"
+        f"found = {found(record)!r}\n"
+        f"output = grouped if 'coverage' in schema['properties'] else "
+        f"(found if 'candidates' in schema['properties'] else {verdict()!r})\n"
         "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
         "'structured_output': output, 'total_cost_usd': 0.01, 'usage': {'output_tokens': 10}}))\n",
     )
     run_dir = tmp_path / "cli-run"
     entry = [sys.executable, str(SCRIPTS / "run_review.py")]
     process = subprocess.run(
-        [*entry, "--base", base, "--head", head, "--run-dir", str(run_dir)],
+        [*entry, "--base", base, "--head", head, "--group-finders", "--run-dir", str(run_dir)],
         cwd=root,
         capture_output=True,
         text=True,
@@ -477,14 +699,14 @@ def test_command_line_entry_persists_one_result_and_resumes(tmp_path, source_rep
     report = json.loads(process.stdout)
     assert report == json.loads((run_dir / "result.json").read_text())
     assert report["status"] == "COMPLETE"
-    assert report["metrics"]["agent_attempts"] == 12
+    assert report["metrics"]["agent_attempts"] == 4
     assert report["stats"]["verified"] == report["stats"]["challenged"] == 1
     resumed = subprocess.run([*entry, "--resume", str(run_dir)], cwd=root, capture_output=True, text=True, timeout=10)
     assert resumed.returncode == 0, resumed.stderr
     second = json.loads(resumed.stdout)
     assert second["run_id"] == report["run_id"]
     assert second["reported_ids"] == report["reported_ids"]
-    assert second["metrics"]["agent_attempts"] == 12
+    assert second["metrics"]["agent_attempts"] == 4
 
 
 def test_runner_rejects_publisher_options_with_actionable_error(tmp_path):
@@ -523,6 +745,18 @@ def test_skill_change_invalidates_implementation_hash(tmp_path, monkeypatch):
     assert runner.implementation_hash() != before
 
 
+def test_linked_policy_change_invalidates_implementation_hash(tmp_path, monkeypatch):
+    engine = tmp_path / "engine"
+    linked = engine / ".claude/skills/linked/SKILL.md"
+    linked.parent.mkdir(parents=True)
+    linked.write_text("first policy\n")
+    (engine / "CLAUDE.md").write_text("repository policy\n")
+    monkeypatch.setattr(runner, "ENGINE_ROOT", engine)
+    before = runner.implementation_hash()
+    linked.write_text("changed policy\n")
+    assert runner.implementation_hash() != before
+
+
 @pytest.fixture
 def complete_report():
     scope = {
@@ -546,6 +780,7 @@ def complete_report():
     stages["find:trace-time"] = done(
         found(candidate(10), candidate(90, "second defect"), candidate(11, "uncertain race"))
     )
+    sync_grouped_finder(stages)
     for c in common.collect_candidates(stages):
         if c["mechanism"] == "uncertain race":
             stages["verify:" + c["id"]] = done(verdict("PLAUSIBLE"))
@@ -556,7 +791,7 @@ def complete_report():
         "schema_version": common.SCHEMA_VERSION,
         "run_id": "test-run",
         "implementation_sha256": "d" * 64,
-        "config": {},
+        "config": {"group_finders": True},
         "scope": scope,
         "stages": stages,
     }
@@ -573,7 +808,11 @@ def rebuild_report(template, finder_candidates, adjudications):
             stages[label] = done(found())
     stages["sweep"] = done(found())
     for label, candidates in finder_candidates.items():
-        stages["find:" + label] = done(found(*candidates))
+        if label == "sweep":
+            stages["sweep"] = done(found(*candidates))
+        else:
+            stages["find:" + label] = done(found(*candidates))
+    sync_grouped_finder(stages)
     for item in common.collect_candidates(stages):
         verdict_value, verify_severity, challenge_verdict, challenge_severity = adjudications[item["mechanism"]]
         stages["verify:" + item["id"]] = done(verdict(verdict_value, severity=verify_severity))
@@ -582,20 +821,44 @@ def rebuild_report(template, finder_candidates, adjudications):
     return common.build_report(state)
 
 
+def manifest_backed_report(template):
+    state = copy.deepcopy(template)
+    identity = {
+        "repository_id": 1102472199,
+        "author_id": 184409145,
+        "author_login": "coderfeli",
+        "head_repo": "ROCm/FlyDSL",
+        "scope_manifest_sha256": "f" * 64,
+    }
+    state["scope"].update(identity)
+    state["stages"]["scope"]["output"].update(identity)
+    return common.build_report(state)
+
+
 class GitHub:
     def __init__(self, report, *, advance_at=None, lost_response=False):
         self.scope = report["scope"]
         self.advance_at, self.lost_response = advance_at, lost_response
         self.head_reads, self.posts, self.reviews = 0, [], []
+        self.publisher_id = 47354855
+        self.draft = False
 
     def __call__(self, *args, stdin=None):
+        if args[-1] == "user":
+            return json.dumps({"id": self.publisher_id, "login": "jhinpan"})
         endpoint = next(a for a in args if a.startswith("repos/"))
         if "POST" in args:
             assert endpoint.endswith("/reviews")
             payload = json.loads(stdin)
             self.posts.append(payload)
             self.reviews.append(
-                {"id": 1, "body": payload["body"], "commit_id": payload["commit_id"], "state": "COMMENTED"}
+                {
+                    "id": 1,
+                    "body": payload["body"],
+                    "commit_id": payload["commit_id"],
+                    "state": "COMMENTED",
+                    "user": {"id": self.publisher_id},
+                }
             )
             if self.lost_response:
                 raise RuntimeError("response lost after server committed the review")
@@ -606,7 +869,21 @@ class GitHub:
             return json.dumps([{"filename": "kernel.py", "patch": "@@ -10,2 +10,2 @@\n-old\n+new\n context"}]) + "[]"
         self.head_reads += 1
         head = "e" * 40 if self.head_reads == self.advance_at else self.scope["head_oid"]
-        return json.dumps({"state": "open", "head": {"sha": head}, "base": {"sha": self.scope["base_oid"]}})
+        return json.dumps(
+            {
+                "state": "open",
+                "draft": self.draft,
+                "head": {"sha": head, "repo": {"full_name": self.scope["repo"]}},
+                "base": {
+                    "sha": self.scope["base_oid"],
+                    "repo": {"id": self.scope.get("repository_id", 1102472199)},
+                },
+                "user": {
+                    "id": self.scope.get("author_id", 184409145),
+                    "login": self.scope.get("author_login", "coderfeli"),
+                },
+            }
+        )
 
 
 def test_publish_severity_thresholds_are_inclusive(complete_report):
@@ -625,8 +902,9 @@ def test_publish_filter_precedes_artifact_cap(complete_report):
     blocker = candidate(line=100, mechanism="confirmed blocker", severity="P3")
     finder_candidates = {
         "trace-time": correctness[:6],
-        "addressing": correctness[6:],
+        "addressing": correctness[6:11],
         "conventions": [blocker],
+        "sweep": correctness[11:],
     }
     adjudications = {
         **{item["mechanism"]: ("PLAUSIBLE", "P3", "REFUTED", "P3") for item in correctness},
@@ -672,6 +950,81 @@ def test_marker_ignores_unrelated_base_tip_advance(complete_report):
     assert publisher.finding_set_marker(advanced) == publisher.finding_set_marker(complete_report)
 
 
+def test_unattended_publisher_binds_implementation_and_live_identities(monkeypatch, complete_report):
+    report = manifest_backed_report(complete_report)
+    api = GitHub(report)
+    marker = publisher.finding_set_marker(report)
+    api.reviews.append(
+        {
+            "id": 99,
+            "body": marker,
+            "commit_id": report["scope"]["head_oid"],
+            "state": "COMMENTED",
+            "user": {"id": 999},
+        }
+    )
+    monkeypatch.setattr(publisher, "gh", api)
+    options = {
+        "expected_implementation_sha256": report["implementation_sha256"],
+        "expected_publisher_id": 47354855,
+        "expected_repository_id": 1102472199,
+        "expected_author_id": 184409145,
+        "expected_author_login": "coderfeli",
+    }
+    assert publisher.publish(report, dry_run=False, **options) == 0
+    assert len(api.posts) == 1
+    assert publisher.publish(report, dry_run=False, **options) == 0
+    assert len(api.posts) == 1
+    with pytest.raises(ValueError, match="unexpected implementation"):
+        publisher.publish(report, dry_run=False, expected_implementation_sha256="0" * 64)
+    api.publisher_id = 1
+    with pytest.raises(ValueError, match="publisher identity"):
+        publisher.publish(report, dry_run=False, **options)
+
+
+def test_publisher_sanitizes_model_controlled_text(complete_report):
+    report = copy.deepcopy(complete_report)
+    candidate_id = report["reported_ids"][0]
+    source = report["candidates"][0]["sources"][0]
+    raw = report["stages"][source["stage"]]["output"]["candidates"][source["index"]]
+    raw["summary"] = (
+        "@maintainer <script>alert(1)</script> https://evil.example "
+        "[open](//example.invalid/path) [mail](mailto:team@example.invalid)"
+    )
+    report["stages"]["verify:" + candidate_id]["output"]["evidence"] = "proof\u202e [click](https://evil.example)"
+    report = common.build_report(report)
+    payload = publisher.payload_for(
+        report,
+        [{"filename": "kernel.py", "patch": "@@ -10,1 +10,1 @@\n+new"}],
+    )
+    rendered = payload["body"] + "\n" + "\n".join(comment["body"] for comment in payload["comments"])
+    assert "@maintainer" not in rendered
+    assert "https://evil.example" not in rendered
+    assert "\u202e" not in rendered
+    assert "&lt;script&gt;" in rendered
+    assert "＠maintainer" in rendered
+    assert "[external link removed]" in rendered
+    location = publisher.sanitize_location("kernel.py`\n\n@reviewers [open](//example.invalid/path)", 7)
+    assert "`" not in location and "\n" not in location
+    assert "@reviewers" not in location and "//example.invalid" not in location
+
+
+def test_publisher_preserves_non_link_technical_text():
+    text = "index = offset // tile; source file: kernel.py"
+    assert publisher.sanitize_text(text, limit=publisher.MAX_EVIDENCE) == text
+
+
+def test_publisher_rejects_oversized_model_text(complete_report):
+    report = copy.deepcopy(complete_report)
+    source = report["candidates"][0]["sources"][0]
+    report["stages"][source["stage"]]["output"]["candidates"][source["index"]]["summary"] = "x" * (
+        publisher.MAX_SUMMARY + 1
+    )
+    report = common.build_report(report)
+    with pytest.raises(ValueError, match="exceeds"):
+        publisher.payload_for(report, [])
+
+
 def test_single_review_preserves_deferred_evidence_and_omits_risks(monkeypatch, complete_report):
     api = GitHub(complete_report)
     monkeypatch.setattr(publisher, "gh", api)
@@ -694,6 +1047,15 @@ def test_post_rejects_a_changed_head_before_or_during_routing(monkeypatch, compl
     api = GitHub(complete_report, advance_at=advance_at)
     monkeypatch.setattr(publisher, "gh", api)
     with pytest.raises(ValueError, match="base/head changed"):
+        publisher.publish(complete_report, dry_run=False)
+    assert api.posts == []
+
+
+def test_post_rejects_pr_that_became_draft(monkeypatch, complete_report):
+    api = GitHub(complete_report)
+    api.draft = True
+    monkeypatch.setattr(publisher, "gh", api)
+    with pytest.raises(ValueError, match="draft"):
         publisher.publish(complete_report, dry_run=False)
     assert api.posts == []
 
@@ -722,6 +1084,13 @@ def test_publisher_rejects_changed_provenance(complete_report, field):
         common.validate_report(report)
 
 
+def test_publisher_rejects_grouped_finder_provenance_mismatch(complete_report):
+    report = copy.deepcopy(complete_report)
+    report["stages"][common.GROUPED_FINDER_STAGE]["output"]["candidates"][0]["summary"] = "tampered"
+    with pytest.raises(ValueError, match="required stages"):
+        common.validate_report(report)
+
+
 def test_unpublished_candidate_tampering_is_rejected(complete_report):
     item = candidate(mechanism="hidden p2", severity="P0")
     report = rebuild_report(
@@ -745,7 +1114,8 @@ def test_preflight_routes_raw_leads_without_promoting_them(tmp_path, source_repo
 
     def backend(task, *_):
         prompts[task["label"]] = task["prompt"]
-        return {**done(found()), "usage": {"total_cost_usd": 0}}
+        output = grouped_found() if task["label"] == common.GROUPED_FINDER_STAGE else found()
+        return {**done(output), "usage": {"total_cost_usd": 0}}
 
     review = new_run(tmp_path, (root, base, runner.revision(root, "HEAD")), backend)
     report = review.run()
@@ -753,18 +1123,18 @@ def test_preflight_routes_raw_leads_without_promoting_them(tmp_path, source_repo
     for label, _ in common.PREFLIGHTS:
         assert report["stages"][label]["output"]["exit_code"] == 1
         assert len(report["stages"][label]["runs"]) == 1
-    assert "kernels/example.py:1" in prompts["find:conventions"]
-    assert "test_unwired:1" in prompts["find:test-doc"]
-    assert "test_unwired:1" not in prompts["find:conventions"]
-    assert "kernels/example.py:1" not in prompts["find:addressing"]
-    assert "Compiler target decisions" in prompts["find:arch-atom"]
-    assert "Compiler, dialect, and conversion changes" in prompts["find:cross-layer"]
-    assert "Compiler extension generality" in prompts["find:reuse"]
-    assert "Compiler regression coverage" in prompts["find:test-doc"]
+    finder_prompt = prompts[common.GROUPED_FINDER_STAGE]
+    assert "kernels/example.py:1" in finder_prompt
+    assert "test_unwired:1" in finder_prompt
+    assert "Compiler target decisions" in finder_prompt
+    assert "Compiler, dialect, and conversion changes" in finder_prompt
+    assert "Compiler extension generality" in finder_prompt
+    assert "Compiler regression coverage" in finder_prompt
+    assert "overwrites earlier results before they are observed" in finder_prompt
     assert "code that moved between files" in prompts["sweep"]
     assert "For compiler scopes, sweep" in prompts["sweep"]
     assert report["findings"] == report["risks"] == report["candidates"] == []
-    assert report["metrics"]["agent_attempts"] == 10
+    assert report["metrics"]["agent_attempts"] == 2
     assert report["metrics"]["cost_is_complete"] is True
     common.validate_report(report)
 
@@ -781,10 +1151,15 @@ def test_actual_verifier_challenger_and_sweep_prompts_receive_owning_guidance(tm
     def backend(task, *_):
         label = task["label"]
         prompts[label] = task["prompt"]
-        if label.startswith("find:"):
-            angle = label.removeprefix("find:")
-            output = (
-                found(candidate(line=len(prompts), mechanism="candidate " + angle)) if angle in headings else found()
+        if label == common.GROUPED_FINDER_STAGE:
+            output = grouped_found(
+                *(
+                    {
+                        **candidate(line=index + 1, mechanism="candidate " + angle),
+                        "angle": angle,
+                    }
+                    for index, angle in enumerate(headings)
+                )
             )
         elif label == "sweep":
             output = found(candidate(line=99, mechanism="sweep gap"))
