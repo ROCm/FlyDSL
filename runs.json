@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-22T13:42:19Z",
+ "updated": "2026-09-22T13:57:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35734412361",
    "created_at": "2026-09-22T13:34:58Z",
-   "updated_at": "2026-09-22T13:40:15Z",
+   "updated_at": "2026-09-22T13:41:50Z",
    "actor": "sjfeng1999",
    "jobs": []
   },
@@ -174,20 +174,20 @@
    "branch": "pr/enh-release-api-check",
    "event": "pull_request",
    "title": "[API] Add extension as stable, exclude experimental module paths",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290",
    "created_at": "2026-09-22T10:20:42Z",
-   "updated_at": "2026-09-22T13:22:39Z",
+   "updated_at": "2026-09-22T13:55:39Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-22T13:22:38Z",
-     "completed_at": null,
+     "completed_at": "2026-09-22T13:55:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290/job/106759081427"
     },
     {
