@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-23T03:35:30Z",
+ "updated": "2026-09-23T03:41:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35815211205,
+   "pr": null,
+   "commit": "76ca04c92a9b7459d63a9f8fded6a1f35257b723",
+   "branch": "main",
+   "event": "push",
+   "title": "[Fix][Coop] Align warp array collective semantics (#1178)",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35815211205",
+   "created_at": "2026-09-23T03:39:46Z",
+   "updated_at": "2026-09-23T03:39:46Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35815081519,
+   "pr": null,
+   "commit": "cf0ea56113c6b723a83c70de2f0fe45f037c6b8b",
+   "branch": "main",
+   "event": "push",
+   "title": "[a16w4] Sync moe_2stage_a16wmix from aiter (gfx942 MXFP4 + 7 earlier \u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35815081519",
+   "created_at": "2026-09-23T03:37:45Z",
+   "updated_at": "2026-09-23T03:39:46Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 35810783011,
    "pr": 1183,
@@ -460,7 +490,7 @@
   },
   {
    "run_id": 35696156911,
-   "pr": 1178,
+   "pr": null,
    "commit": "0ddc531724f2398f5ce84530a86ca2bd5a5a9093",
    "branch": "pr/fix-warp-array-contracts",
    "event": "pull_request",
@@ -2135,95 +2165,6 @@
    "updated_at": "2026-09-20T01:13:16Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 35479964600,
-   "pr": 1171,
-   "commit": "bf2e7e3cb6dbf9f3e709d881d560275dc578c364",
-   "branch": "codex/fix-cross-process-cache-test",
-   "event": "pull_request",
-   "title": "[CI] Fix cross-process cache IR assertion",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35479964600",
-   "created_at": "2026-09-20T00:53:51Z",
-   "updated_at": "2026-09-20T02:17:06Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-20T01:08:28Z",
-     "completed_at": "2026-09-20T01:55:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35479964600/job/105997471615"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-20T01:07:33Z",
-     "completed_at": "2026-09-20T01:37:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35479964600/job/105997471616"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-20T01:07:49Z",
-     "completed_at": "2026-09-20T02:17:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35479964600/job/105997471635",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35425940335,
-   "pr": null,
-   "commit": "9dda109684ce26b97d2504503378df5266fb41b0",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Restore aiter tests in PyPI workflow (#1169)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35425940335",
-   "created_at": "2026-09-19T06:11:35Z",
-   "updated_at": "2026-09-20T01:07:59Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-19T07:28:20Z",
-     "completed_at": "2026-09-19T07:42:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35425940335/job/105853785021"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-19T06:29:05Z",
-     "completed_at": "2026-09-19T07:08:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35425940335/job/105853785037"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-19T06:28:33Z",
-     "completed_at": "2026-09-20T01:07:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35425940335/job/105853785049"
-    }
-   ]
   }
  ]
 }
