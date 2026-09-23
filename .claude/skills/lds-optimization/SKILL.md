@@ -28,6 +28,10 @@ Run `/kernel-trace-analysis` first. Apply this skill when the trace shows:
 | Multiple `s_barrier` between `ds_write` and `ds_read` | Barrier stall > 5000 | `L606: stall=17024 s_barrier` |
 | Total LDS-related stall > 15% of kernel stall | Sum all lgkmcnt + ds stalls | Softmax reduce phase in PA decode |
 
+For the LLVM side of an LDS problem — `sched_group_barrier` masks to interleave
+`ds_read` with MFMA, `s_waitcnt` placement, or the per-arch LDS capacity limits
+the compiler enforces — use `/llvm`.
+
 ## LDS Architecture on CDNA3 (gfx942)
 
 ### Hardware Facts
@@ -242,8 +246,9 @@ def my_kernel(...):
     fx.memref_store(data, lds_key, [row_idx, swizzled_col])
 ```
 
-The legacy `flydsl.utils.smem_allocator.SmemAllocator` path remains for
-un-migrated kernels but is not recommended for new code.
+`fx.SharedAllocator` is the allocator for new kernels; the legacy
+`flydsl.utils.smem_allocator` path is kept for backward compatibility, but it is
+not recommended and warns when used.
 
 ### Choosing Swizzle Parameters
 

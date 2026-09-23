@@ -34,12 +34,16 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import func
 from flydsl.compiler.protocol import (
+    DslType,
+    JitArgument,
     Storable,
     c_abi_spec,
+    cache_signature,
     construct_from_ir_values,
     dsl_align_of,
     dsl_size_of,
     extract_to_ir_values,
+    get_ir_types,
 )
 from flydsl.expr.struct import _storage_layout
 
@@ -1650,6 +1654,193 @@ class TestArena:
     def test_base_pointer_is_supplied_by_a_subclass(self):
         with pytest.raises(NotImplementedError):
             fx.Arena().base_ptr
+
+
+@pytest.mark.l1a_compile_no_target_dialect
+class TestEmptyStorage:
+    def test_layout_and_runtime_representation(self):
+        empty = fx.Empty()
+        assert not fx.is_struct_type(fx.Empty)
+        assert not hasattr(empty, "__dict__")
+        assert isinstance(empty, DslType)
+        assert isinstance(empty, JitArgument)
+        assert isinstance(empty, Storable)
+        assert dsl_size_of(fx.Empty) == 0
+        assert dsl_align_of(fx.Empty) == 1
+        assert extract_to_ir_values(empty) == []
+        assert get_ir_types(empty) == get_ir_types(fx.Empty) == []
+        assert cache_signature(empty) == cache_signature(fx.Empty()) == cache_signature(fx.Empty)
+        assert c_abi_spec(empty) == []
+        assert construct_from_ir_values(fx.Empty, empty, []) == empty
+        assert dsl_size_of(fx.Array[fx.Empty, 64]) == 0
+        Item = fx.Struct["head" : fx.Empty, "value" : fx.Int32, "tail" : fx.Empty]
+        assert dsl_size_of(Item) == 4
+        assert _offsets(Item) == {"head": 0, "value": 0, "tail": 4}
+
+    def test_reconstruction_rejects_runtime_values(self):
+        with pytest.raises(ValueError, match="expected 0 ir.Values"):
+            construct_from_ir_values(fx.Empty, fx.Empty(), [object()])
+
+    @pytest.mark.parametrize(
+        "empty_type",
+        [
+            fx.Empty,
+            fx.Array[fx.Empty, 7],
+            fx.Array[fx.Array[fx.Empty, 3], 5],
+            fx.Struct["empty" : fx.Empty],
+            fx.Struct["items" : fx.Array[fx.Empty, 5], "tail" : fx.Empty],
+            fx.Align[fx.Empty, 64],
+            fx.Array[fx.Empty, 5, 64],
+            fx.Align[fx.Struct["items" : fx.Array[fx.Empty, 5]], 64],
+        ],
+    )
+    def test_empty_containers_do_not_change_enclosing_layout(self, empty_type):
+        assert dsl_size_of(empty_type) == 0
+        OnlyEmpty = fx.Struct["first":empty_type, "last" : fx.Empty]
+        assert (dsl_size_of(OnlyEmpty), dsl_align_of(OnlyEmpty)) == (0, 1)
+        assert dsl_size_of(fx.Array[OnlyEmpty, 64]) == 0
+        Mixed = fx.Struct["head" : fx.Uint8, "empty":empty_type, "tail" : fx.Uint8]
+        assert _storage_layout(Mixed) == (2, 1, {"head": 0, "empty": 1, "tail": 1})
+        assert dsl_size_of(fx.Array[Mixed, 64]) == 128
+        Overlay = fx.Union["empty":empty_type, "value" : fx.Int32]
+        assert (dsl_size_of(Overlay), dsl_align_of(Overlay)) == (4, 4)
+
+    def test_pointer_free_storage_checks_value_type(self):
+        storage = fx.Storage[fx.Empty](None)
+        assert storage.peek() == fx.Empty()
+        storage.poke(fx.Empty())
+        with pytest.raises(TypeError, match="expects Empty value"):
+            storage.poke(object())
+
+    def test_arena_needs_no_base_pointer(self, insert_point):
+        # Arena.base_ptr is deliberately unimplemented: Empty must not use it.
+        allocator = fx.Arena()
+        storage = allocator.allocate(fx.Empty, alignment=64)
+        assert storage.peek() == fx.Empty()
+        assert allocator.allocated_bytes == 0
+
+    @pytest.mark.parametrize("static", [True, False])
+    def test_empty_only_kernel_needs_no_shared_bytes(self, static):
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator(static=static)
+            storage = allocator.allocate(fx.Empty)
+            storage.poke(storage.peek())
+            assert allocator.allocated_bytes == 0
+
+        text = launch_ir(kernel)
+        assert not _make_ptr_lines(text)
+        assert "dynamic_shared_memory_size" not in text
+
+    def test_static_struct_skips_empty_fields(self):
+        Item = fx.Struct["head" : fx.Empty, "value" : fx.Int32, "tail" : fx.Empty]
+
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator()
+            storage = allocator.allocate(Item)
+            storage.poke(Item(fx.Empty(), fx.Int32(7), fx.Empty()))
+            value = storage.peek()
+            assert isinstance(value.head, fx.Empty) and isinstance(value.tail, fx.Empty)
+            assert allocator.allocated_bytes == 4
+
+        pointers = _make_ptr_lines(launch_ir(kernel))
+        assert len(pointers) == 1
+        assert "allocBytes = 4" in pointers[0]
+
+    @pytest.mark.parametrize("static", [True, False])
+    @pytest.mark.parametrize(
+        "empty_type",
+        [fx.Empty, fx.Align[fx.Empty, 32], fx.Array[fx.Empty, 64, 32], fx.Struct["empty" : fx.Empty]],
+    )
+    def test_empty_allocation_does_not_add_padding(self, static, empty_type):
+        @flyc.kernel
+        def kernel():
+            allocator = fx.SharedAllocator(static=static)
+            allocator.allocate(3)
+            allocator.allocate(empty_type, alignment=64).peek()
+            assert allocator.allocated_bytes == 3
+            allocator.allocate(fx.Uint8)
+            assert allocator.allocated_bytes == 4
+
+        launch_ir(kernel)
+
+    @pytest.mark.rocm_lower
+    @pytest.mark.parametrize("static", [True, False])
+    def test_empty_and_live_storage_round_trip(self, storage_target, static):
+        torch, device = storage_target
+        Item = fx.Struct["empty" : fx.Empty, "value" : fx.Int32]
+
+        @flyc.jit
+        def carry(empty: fx.Empty):
+            return empty
+
+        @flyc.kernel
+        def kernel(out: fx.Tensor):
+            tid = fx.thread_idx.x
+            allocator = fx.SharedAllocator(static=static)
+            empty = allocator.allocate(fx.Empty)
+            value = carry(empty.peek())
+            empty.poke(value)
+            empties = allocator.allocate(fx.Array[fx.Empty, 64]).peek()
+            empties[tid] = value
+            assert allocator.allocated_bytes == 0
+            items = allocator.allocate(fx.Array[Item, 64]).peek()
+            items[tid] = Item(empties[tid], tid + 1)
+            assert allocator.allocated_bytes == 256
+            fx.barrier()
+            out[tid] = items[63 - tid].value
+
+        @flyc.jit
+        def launch(out: fx.Tensor):
+            kernel(out).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+        out = torch.empty(64, dtype=torch.int32, device=device)
+        launch(out)
+        if device == "cuda":
+            torch.cuda.synchronize()
+            expected = torch.arange(64, 0, -1, dtype=torch.int32, device="cpu")
+            torch.testing.assert_close(out.cpu(), expected)
+
+    @pytest.mark.rocm_lower
+    @pytest.mark.parametrize("static", [True, False])
+    def test_nested_empty_arrays_between_live_fields(self, storage_target, static):
+        torch, device = storage_target
+        EmptyRecord = fx.Struct["items" : fx.Array[fx.Empty, 3, 32], "single" : fx.Empty]
+        Tile = fx.Struct[
+            "head" : fx.Array[fx.Uint8, 64],
+            "empty" : fx.Array[EmptyRecord, 2, 64],
+            "tail" : fx.Array[fx.Uint8, 64],
+        ]
+        assert (dsl_size_of(Tile), dsl_align_of(Tile)) == (128, 1)
+
+        @flyc.kernel
+        def kernel(out: fx.Tensor):
+            tid = fx.thread_idx.x
+            allocator = fx.SharedAllocator(static=static)
+            zeros = allocator.allocate(fx.Array[EmptyRecord, 2]).peek()
+            zeros[tid // 32].items[tid % 3] = fx.Empty()
+            assert allocator.allocated_bytes == 0
+            # The outer array puts all Tile fields in one contiguous allocation.
+            tile = allocator.allocate(fx.Array[Tile, 1]).peek()[0]
+            tile.empty[tid // 32].items[tid % 3] = zeros[tid // 32].single
+            tile.head[tid] = tid.to(fx.Uint8)
+            tile.tail[tid] = (tid + 64).to(fx.Uint8)
+            assert allocator.allocated_bytes == 128
+            fx.barrier()
+            out[tid] = tile.head[63 - tid].to(fx.Int32)
+            out[64 + tid] = tile.tail[63 - tid].to(fx.Int32)
+
+        @flyc.jit
+        def launch(out: fx.Tensor):
+            kernel(out).launch(grid=(1, 1, 1), block=(64, 1, 1))
+
+        out = torch.empty(128, dtype=torch.int32, device=device)
+        launch(out)
+        if device == "cuda":
+            torch.cuda.synchronize()
+            expected = torch.arange(128, dtype=torch.int32, device="cpu").reshape(2, 64).flip(1).reshape(-1)
+            torch.testing.assert_close(out.cpu(), expected)
 
 
 # ── fx.SharedAllocator — the LDS allocator ──────────────────────────────────

@@ -34,11 +34,6 @@ jobs:
             exit 1
           fi
 
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "Release tag ${GITHUB_REF_NAME} is not on origin/main" >&2
-            exit 1
-          fi
-
           if [ -z "${SOURCE_VERSION}" ]; then
             echo "Failed to find __version__ in python/flydsl/__init__.py" >&2
             exit 1
@@ -103,6 +98,7 @@ jobs:
     uses: ./.github/workflows/test-whl.yaml
     with:
       docker_image: rocm/pytorch:rocm7.14_ubuntu24.04_py3.11_pytorch_release_2.12.0@sha256:05743468394cc8f9cce06822635836a31ddfd5956bac36976666d7057713441d
+      aiter_ref: main
     permissions:
       contents: read
 

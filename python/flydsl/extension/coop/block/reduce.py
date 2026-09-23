@@ -1,211 +1,343 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Block-wide reduction."""
+"""Block reductions with ordered, commutative, and arrival-order policies."""
 
 import enum
 
 from ....compiler import jit
 from ....expr.gpu import barrier
+from ....expr.llvm import atomic_add
+from ....expr.numeric import Int32, Integer
 from ....expr.primitive import const_expr, range_constexpr
 from ....expr.struct import Struct
 from ....expr.typing import Array
 from .. import warp as _dispatched_warp
-from .._common import combine, linear_thread_id, thread_partial
+from .._common import (
+    _combine,
+    _convert_value,
+    _linear_thread_id,
+    _optional_identity,
+    _require_commutative,
+    _select_value,
+    _thread_partial,
+    _validate_valid_items,
+)
+from .._values import _as_items, _from_items, _shared_array, _shared_load, _shared_store
 from ._spec import BlockAlgorithmMeta
 
-__all__ = [
-    "BlockReduceAlgorithm",
-    "BlockReduce",
-]
+__all__ = ["BlockReduceAlgorithm", "BlockReduce"]
 
 
 class BlockReduceAlgorithm(enum.Enum):
-    """How a block folds its per-thread partials into one value.
+    """Shared-memory policies for block reduction.
 
-    Every policy implemented so far needs a commutative *op*, whatever its name suggests. The block
-    layer itself folds in order — a raking lane walks its segment by ascending index, and the
-    per-warp totals are combined lowest warp first — but the warp-scope reduction underneath does
-    not, so the requirement belongs to the collective rather than to any one policy.
+    All policies require associative operators. Ordered policies preserve
+    flattened thread and register-item order but may regroup operations.
 
-    So no member below is currently distinguished by accepting a non-commutative *op*, and none can
-    be while every :class:`~flydsl.expr.typing.ReductionOp` on offer is commutative.
-
-    ``RAKING``
-        Stage every thread's partial in shared memory, then let a single warp walk ("rake")
-        equal-length segments of it. ``block_threads`` slots of shared memory, but the cross-lane
-        work collapses to one warp. Named for the variant that honours operand order, which this
-        one does not yet.
-    ``RAKING_COMMUTATIVE_ONLY``
-        *Planned, not implemented.* Raking that spends the freedom to reorder: the first warp keeps
-        its partial in registers rather than staging it, and the rake strides by the warp width
-        instead of walking a contiguous segment, which is bank-conflict-free where a contiguous
-        walk is not. That access pattern is what it would add — the relaxed ordering it is named
-        for is already in force above.
-    ``WARP_REDUCTIONS``
-        Reduce inside each warp with shuffles, then fold the per-warp aggregates through shared
-        memory. Only ``num_warps`` slots of shared memory and one barrier.
-    ``WARP_REDUCTIONS_NONDETERMINISTIC``
-        *Planned, not implemented.* Warp reductions whose combining order may vary between runs,
-        which makes floating-point results irreproducible.
+    Attributes:
+        RAKING: Reduce contiguous segments in order using shared memory.
+        RAKING_COMMUTATIVE_ONLY: Rake strided columns while keeping the first
+            warp's partials in registers. Requires a built-in ReductionOp or
+            a callable declaring ``commutative = True``.
+        WARP_REDUCTIONS: Reduce each warp, then combine warp totals in thread
+            order. This is the default policy.
+        WARP_REDUCTIONS_NONDETERMINISTIC: Assign shared slots to warp totals
+            with atomic arrival tickets and fold them in ticket order. Requires
+            a commutative operator; floating-point results may vary across runs.
     """
 
     RAKING = "raking"
-    RAKING_COMMUTATIVE_ONLY = "raking_commutative_only"  # planned, not implemented
+    RAKING_COMMUTATIVE_ONLY = "raking_commutative_only"
     WARP_REDUCTIONS = "warp_reductions"
-    WARP_REDUCTIONS_NONDETERMINISTIC = "warp_reductions_nondeterministic"  # planned, not implemented
+    WARP_REDUCTIONS_NONDETERMINISTIC = "warp_reductions_nondeterministic"
 
-
-# ── policy implementations ─────────────────────────────────────────────────
-# One function per BlockReduceAlgorithm, each paired with the shared storage it
-# needs in _SHARED_STORAGE below.
+    Raking = RAKING
+    RakingCommutativeOnly = RAKING_COMMUTATIVE_ONLY
+    WarpReductions = WARP_REDUCTIONS
+    WarpReductionsNondeterministic = WARP_REDUCTIONS_NONDETERMINISTIC
 
 
 @jit
-def _reduce_warp_reductions(partial, tid, slots, op, warp_reduce, warp_threads, num_warps):
-    """Reduce within each warp, then fold the per-warp aggregates through shared memory."""
-    aggregate = warp_reduce(partial, op, width=warp_threads)
+def _reduce_warps(partial, tid, storage, op, warp_reduce, warp_threads, block_threads, nondeterministic, valid_threads):
+    lane = tid % warp_threads
+    warp_id = tid // warp_threads
+    num_warps = (block_threads + warp_threads - 1) // warp_threads
+    active = Int32(warp_threads)
+    if const_expr(valid_threads is not None):
+        remaining = valid_threads - warp_id * warp_threads
+        active = (remaining < warp_threads).select(remaining, active)
+        # Empty warps contribute no slot to the final fold; use an existing
+        # lane as their temporary source without inventing a semigroup identity.
+        active = (active > 0).select(active, Int32(1))
+        aggregate = warp_reduce(partial, op, width=warp_threads, valid_items=active)
+    elif const_expr(block_threads % warp_threads != 0):
+        active = (warp_id == num_warps - 1).select(Int32(block_threads % warp_threads), active)
+        aggregate = warp_reduce(partial, op, width=warp_threads, valid_items=active)
+    else:
+        aggregate = warp_reduce(partial, op, width=warp_threads)
     if const_expr(num_warps == 1):
         total = aggregate
     else:
-        lane = tid % warp_threads
-        warp_id = tid // warp_threads
-        if lane == 0:
-            slots[warp_id] = aggregate
+        if const_expr(nondeterministic):
+            if tid == 0:
+                storage.counter[0] = Int32(0)
+            barrier()
+            eligible = lane == 0
+            if const_expr(valid_threads is not None):
+                eligible = eligible & (warp_id * warp_threads < valid_threads)
+            if eligible:
+                ticket = atomic_add(storage.counter.ptr, Int32(1))
+                _shared_store(storage.slots, ticket, aggregate)
+        else:
+            if lane == 0:
+                _shared_store(storage.slots, warp_id, aggregate)
         barrier()
-        # Every thread folds the same num_warps values, so the result is valid
-        # block-wide and no second barrier is needed to broadcast it.
-
-        # TODO: that fold is linear in num_warps and every thread walks it —
-        # num_warps - 1 combines each, so 15 at a 1024-thread wave64 block.
-        # Reducing *slots* in one warp instead would make it logarithmic, at the
-        # cost of the second barrier this shape is currently free of.
-        total = slots[0]
+        total = _shared_load(storage.slots, 0)
         for i in range_constexpr(1, num_warps):
-            total = combine(op, total, slots[i])
+            if const_expr(valid_threads is not None):
+                # Do not load uninitialized arrival slots for empty warps.
+                if i * warp_threads < valid_threads:
+                    total = _combine(op, total, _shared_load(storage.slots, i))
+            else:
+                total = _combine(op, total, _shared_load(storage.slots, i))
     return total
 
 
 @jit
-def _reduce_raking(partial, tid, slots, result, op, warp_reduce, warp_threads, segment_length):
-    """Stage every thread's partial in shared memory, then rake it with a single warp."""
-    if const_expr(segment_length == 1):
-        # One segment per raking lane means the block is already one warp, so
-        # staging it would only be a round trip out to shared memory and back into the
-        # same cross-lane fold. This is the warp reduction, unchanged.
-        total = warp_reduce(partial, op, width=warp_threads)
-    else:
-        slots[tid] = partial
+def _reduce_raking(partial, tid, storage, op, warp_reduce, warp_threads, block_threads, commutative, valid_threads):
+    if const_expr(valid_threads is None):
+        # Complete logical warps make every raking segment complete. Do not
+        # manufacture a valid_items argument: that would disable the DPP path.
+        if const_expr(block_threads == warp_threads):
+            return warp_reduce(partial, op, width=warp_threads)
+        if const_expr(commutative):
+            if tid >= warp_threads:
+                _shared_store(storage.slots, tid, partial)
+        else:
+            _shared_store(storage.slots, tid, partial)
         barrier()
         if tid < warp_threads:
-            base = tid * segment_length
-            raked = slots[base]
-            for i in range_constexpr(1, segment_length):
-                raked = combine(op, raked, slots[base + i])
+            if const_expr(commutative):
+                raked = partial
+                for offset in range_constexpr(warp_threads, block_threads, warp_threads):
+                    raked = _combine(op, raked, _shared_load(storage.slots, tid + offset))
+            else:
+                segment = block_threads // warp_threads
+                base = tid * segment
+                raked = _shared_load(storage.slots, base)
+                for i in range_constexpr(1, segment):
+                    raked = _combine(op, raked, _shared_load(storage.slots, base + i))
             raked = warp_reduce(raked, op, width=warp_threads)
             if tid == 0:
-                result[0] = raked
+                _shared_store(storage.result, 0, raked)
         barrier()
-        total = result[0]
+        return _shared_load(storage.result, 0)
+    limit = valid_threads
+    if const_expr(block_threads == warp_threads):
+        total = warp_reduce(partial, op, width=warp_threads, valid_items=limit)
+    else:
+        if const_expr(commutative):
+            if tid >= warp_threads:
+                _shared_store(storage.slots, tid, partial)
+        else:
+            _shared_store(storage.slots, tid, partial)
+        barrier()
+        if tid < warp_threads:
+            if const_expr(commutative):
+                raked = partial
+                for offset in range_constexpr(warp_threads, block_threads, warp_threads):
+                    index = tid + offset
+                    safe = (index < block_threads).select(index, Int32(block_threads - 1))
+                    raked = _select_value(index < limit, _combine(op, raked, _shared_load(storage.slots, safe)), raked)
+                active = (limit < warp_threads).select(limit, Int32(warp_threads))
+                raked = warp_reduce(raked, op, width=warp_threads, valid_items=active)
+            else:
+                segment = (block_threads + warp_threads - 1) // warp_threads
+                base = tid * segment
+                safe = (base < block_threads).select(base, Int32(block_threads - 1))
+                raked = _shared_load(storage.slots, safe)
+                for i in range_constexpr(1, segment):
+                    index = base + i
+                    safe = (index < block_threads).select(index, Int32(block_threads - 1))
+                    raked = _select_value(index < limit, _combine(op, raked, _shared_load(storage.slots, safe)), raked)
+                raked = warp_reduce(raked, op, width=warp_threads, valid_items=(limit + segment - 1) // segment)
+            if tid == 0:
+                _shared_store(storage.result, 0, raked)
+        barrier()
+        total = _shared_load(storage.result, 0)
     return total
 
 
-def _storage_warp_reductions(dtype, block_threads, warp_threads):
-    return Struct["slots" : Array[dtype, block_threads // warp_threads]]
+def _storage_warps(dtype, block_threads, warp_threads):
+    return Struct["slots" : _shared_array(dtype, (block_threads + warp_threads - 1) // warp_threads)]
+
+
+def _storage_nondeterministic(dtype, block_threads, warp_threads):
+    return Struct[
+        "slots" : _shared_array(dtype, (block_threads + warp_threads - 1) // warp_threads), "counter" : Array[Int32, 1]
+    ]
 
 
 def _storage_raking(dtype, block_threads, warp_threads):
-    # A single-warp block never reaches the raking grid — see _reduce_raking —
-    # so reserving a slot per thread for it would just be shared memory nothing writes.
     slots = block_threads if block_threads > warp_threads else 1
-    return Struct["slots" : Array[dtype, slots], "result" : Array[dtype, 1]]
-
-
-# Registry of the implemented policies. An unlisted member of the enum names a
-# strategy this library has not implemented yet.
-_SHARED_STORAGE = {
-    BlockReduceAlgorithm.WARP_REDUCTIONS: _storage_warp_reductions,
-    BlockReduceAlgorithm.RAKING: _storage_raking,
-}
+    return Struct["slots" : _shared_array(dtype, slots), "result" : _shared_array(dtype, 1)]
 
 
 class _BlockReduceMeta(BlockAlgorithmMeta):
-    """Gives ``BlockReduce`` its ``[...]`` specialization and call syntax."""
-
+    _supports_subwarp = True
     _algorithms = BlockReduceAlgorithm
-    _shared_storage = _SHARED_STORAGE
+    _shared_storage = {
+        BlockReduceAlgorithm.WARP_REDUCTIONS: _storage_warps,
+        BlockReduceAlgorithm.WARP_REDUCTIONS_NONDETERMINISTIC: _storage_nondeterministic,
+        BlockReduceAlgorithm.RAKING: _storage_raking,
+        BlockReduceAlgorithm.RAKING_COMMUTATIVE_ONLY: _storage_raking,
+    }
 
     def _default_algorithm_for(cls, target):
-        """``WARP_REDUCTIONS`` everywhere so far, and this is where that is decided.
-
-        Measured on both a wave64 and a wave32 target, it comes out ahead of
-        ``RAKING`` at every block width — fewer shared memory accesses, half the
-        barriers, and a gap that widens with the warp count. A target that
-        inverts that gets its branch here.
-        """
         return BlockReduceAlgorithm.WARP_REDUCTIONS
 
-    def __call__(cls, value, op, *, storage):
+    def __call__(
+        cls,
+        value,
+        op,
+        *,
+        storage,
+        valid_items: int | Integer | None = None,
+        identity=None,
+    ):
+        """Reduce a flattened blocked input sequence and broadcast the aggregate.
+
+        All block threads must participate. Ordered policies preserve operand
+        order, while commutative policies may reorder it. Synchronize before
+        reusing the shared allocation.
+
+        Args:
+            value: Per-thread input value with nonempty items converted to the specialized element dtype. Every
+                thread must
+                provide the same item count.
+            op: Associative ReductionOp or binary callable returning the element
+                dtype. Values that need a custom operation require a callable. Commutative policies
+                require ReductionOp or a callable with ``commutative = True``.
+            storage: Shared instance of the specialization's ``SharedStorage``.
+            valid_items: Uniform Python integer or runtime scalar counting leading
+                elements across all threads, not valid threads. Must be in
+                ``[0, block_threads * per_thread_item_count]``; ``None`` includes
+                all inputs. Runtime bounds are the caller's responsibility.
+                With multiple items per thread, the valid prefix may end within
+                a thread's local tile.
+            identity: Optional neutral element or callable ``identity(dtype)`` used
+                for masking a valid prefix. Overrides a built-in identity or
+                ``op.identity``. Without one, nonempty prefixes are still supported
+                and the empty reduction has an unspecified result.
+
+        Returns:
+            One aggregate value of the specialized dtype in every
+            participating thread, regardless of the per-thread input tile length.
+            An empty valid prefix returns the identity when available.
+        """
         if cls.block_threads is None:
             raise TypeError("specialize first, e.g. BlockReduce[fx.Float32, 256]")
-
-        partial = thread_partial(value, op)
-        tid = linear_thread_id(cls.block_size)
-        if cls.algorithm is BlockReduceAlgorithm.WARP_REDUCTIONS:
-            return _reduce_warp_reductions(
+        commutative = cls.algorithm is BlockReduceAlgorithm.RAKING_COMMUTATIVE_ONLY
+        nondeterministic = cls.algorithm is BlockReduceAlgorithm.WARP_REDUCTIONS_NONDETERMINISTIC
+        if commutative or nondeterministic:
+            _require_commutative(op, cls.algorithm.name)
+        # Tensor signatures may carry signless integer storage. Honor the
+        # specialization's signedness before any thread-local min/max fold.
+        value = _convert_value(value, cls.dtype)
+        tid = _linear_thread_id(cls.block_size)
+        items = _as_items(value)
+        count = len(items)
+        _validate_valid_items(valid_items, cls.block_threads * count)
+        valid_threads = None
+        if valid_items is not None:
+            neutral = _optional_identity(op, cls.dtype, identity)
+            if neutral is None:
+                valid_threads = (Int32(valid_items) + count - 1) // count
+                # Without an identity, an empty aggregate is unspecified. Read
+                # a real input lane for that case, never uninitialized scratch.
+                valid_threads = (valid_threads > 0).select(valid_threads, Int32(1))
+                partial = items[0]
+                for i, item in enumerate(items[1:], 1):
+                    partial = _select_value(tid * count + i < valid_items, _combine(op, partial, item), partial)
+            else:
+                value = _from_items(
+                    [_select_value(tid * count + i < valid_items, item, neutral) for i, item in enumerate(items)]
+                )
+                partial = _thread_partial(value, op)
+        else:
+            partial = _thread_partial(value, op)
+        if cls.algorithm in (
+            BlockReduceAlgorithm.WARP_REDUCTIONS,
+            BlockReduceAlgorithm.WARP_REDUCTIONS_NONDETERMINISTIC,
+        ):
+            return _reduce_warps(
                 partial,
                 tid,
-                storage.slots,
+                storage,
                 op,
                 cls.warp_ops.warp_reduce,
                 cls.warp_threads,
-                cls.num_warps,
+                cls.block_threads,
+                nondeterministic,
+                valid_threads,
             )
         return _reduce_raking(
             partial,
             tid,
-            storage.slots,
-            storage.result,
+            storage,
             op,
             cls.warp_ops.warp_reduce,
             cls.warp_threads,
-            cls.num_warps,
+            cls.block_threads,
+            commutative,
+            valid_threads,
         )
 
 
 class BlockReduce(metaclass=_BlockReduceMeta):
-    """Block-wide reduction.
+    """Reduce a block's input values in blocked per-thread order.
 
-    Specialize it, allocate its shared storage, then call it::
+    Specialize as ``BlockReduce[dtype, block_size, algorithm]``. The default
+    policy is ``WARP_REDUCTIONS``. ``block_size`` is a positive thread count or
+    positive ``(x, y, z)`` extents. ``dtype`` specifies the input value type. Values that need a custom operation
+    require a callable operator. Tile lengths are inferred from inputs and must be uniform.
 
-        block_reduce = fx.coop.BlockReduce[fx.Float32, 256]
-        storage = fx.SharedAllocator().allocate(block_reduce.SharedStorage).peek()
-        total = block_reduce(value, fx.ReductionOp.ADD, storage=storage)
+    Every thread receives the aggregate. ``valid_items`` counts leading
+    elements in flattened blocked order, where each thread's items precede
+    those of the next linear thread. RAKING and WARP_REDUCTIONS preserve this
+    order for associative noncommutative operators. The two commutative policies
+    require a built-in ReductionOp or ``op.commutative = True`` and may reorder
+    operands. Floating-point regrouping may affect results even in ordered policies.
 
-    The parameters are ``[dtype, block_size, algorithm]``. *block_size* is either the x extent on
-    its own or the full ``(x, y, z)``, and must be a power of two in total.
+    An empty valid prefix returns the explicit or operator-provided identity
+    when available; without an identity its result is unspecified. Every block
+    thread must enter the collective with uniform options. Use one shared
+    allocation of ``SharedStorage`` and synchronize before reusing it.
 
-    Where the kernel declares its own block size — the usual case, either through
-    ``known_block_size`` or inferred from a static launch — passing
-    :func:`~flydsl.expr.gpu.known_block_size` straight through is the way to keep the two in step
-    without repeating the dimensions::
+    A block smaller than the target's physical warp (64 on CDNA, 32 on RDNA)
+    must have a power-of-two thread count; its logical warp narrows to that
+    count. Larger blocks must contain complete physical warps. valid_items
+    controls a partial input tile; all launched threads still participate.
 
-        block_reduce = fx.coop.BlockReduce[fx.Float32, fx.known_block_size()]
+    Attributes:
+        dtype: Specialized reduction element type.
+        block_size: Specialized ``(x, y, z)`` shape.
+        block_threads: Number of participating threads.
+        algorithm: Selected reduction policy.
+        warp_threads: Logical warp width selected for the target and block.
+        num_warps: Number of logical warps in the block.
+        SharedStorage: Shared-memory Struct type required by the specialization.
 
-    ``value`` is either one scalar per thread or a ``Vector`` of several per-thread items. The
-    result is valid in every thread of the block, not only in one of them.
-
-    Every thread of the block has to reach this call, and reach it together. It synchronizes the
-    block and reads across lanes, so a call made under a condition that is not uniform block-wide
-    hangs on the barrier or folds in lanes with no defined value.
-
-    *op* must be commutative under every algorithm implemented so far, and associative under all of
-    them; :class:`BlockReduceAlgorithm` says where that comes from and why no policy is currently
-    free of it. Nothing depends on the distinction while every
-    :class:`~flydsl.expr.typing.ReductionOp` is commutative.
-
-    Reusing *storage* for a second collective call needs a :func:`~flydsl.expr.gpu.barrier` in
-    between, since this one leaves the block unsynchronized after its last read.
+    Examples:
+        # x in thread t is [2*t+1, 2*t+2], so the block owns integers 1 through 128.
+        P = fx.coop.BlockReduce[fx.Int32, 64, fx.coop.BlockReduceAlgorithm.WARP_REDUCTIONS]
+        storage = fx.SharedAllocator().allocate(P.SharedStorage).peek()
+        y = P(x, fx.ReductionOp.ADD, storage=storage)
+        # Every thread receives y=8256.
+        fx.barrier()
+        partial = P(x, fx.ReductionOp.ADD, storage=storage, valid_items=5, identity=fx.Int32(0))
+        # Every thread receives partial=15. valid_items counts elements, not threads.
     """
 
     dtype = None
@@ -215,9 +347,4 @@ class BlockReduce(metaclass=_BlockReduceMeta):
     warp_threads = None
     num_warps = None
     SharedStorage = None
-
-    # Where the warp-scope fold underneath comes from. The default is the
-    # dispatched namespace, so a block reduction picks up whatever override the
-    # target supplies. :mod:`flydsl.extension.coop.universal` subclasses this and
-    # points it at the portable implementations instead.
     warp_ops = _dispatched_warp

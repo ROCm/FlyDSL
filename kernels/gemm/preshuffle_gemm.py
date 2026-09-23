@@ -13,9 +13,15 @@ from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, 
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
+from kernels.gemm.preshuffle_layout import make_preshuffle_dma_layouts, preshuffle_dma_lane_coord
 
 # (dsrd_preload, dvmem_preload) per (tile_m, tile_n, tile_k).
 _TILE_PRELOAD_TABLE = {
+    # ── 2-wave tile_n = 32 ──
+    (16, 32, 512): (4, 4),
+    (16, 32, 1024): (4, 4),
+    (32, 32, 512): (4, 4),
+    (32, 32, 1024): (4, 4),
     # ── tile_m = 16 ──
     (16, 64, 256): (2, 2),
     (16, 64, 512): (4, 4),
@@ -127,12 +133,20 @@ def compile_preshuffle_gemm(
     """
     if in_dtype not in ("fp8", "int8", "fp16", "bf16"):
         raise ValueError(f"in_dtype must be fp8/int8/fp16/bf16, got {in_dtype!r}")
+    if tile_m <= 0 or tile_m % 16 != 0:
+        raise ValueError(f"tile_m must be a positive multiple of 16, got tile_m={tile_m}")
+    if tile_n <= 0:
+        raise ValueError(f"tile_n must be positive, got tile_n={tile_n}")
     if tile_k <= 0 or K % tile_k != 0:
         raise ValueError(f"tile_k must be a positive divisor of K; got tile_k={tile_k}, K={K}")
+    if N % tile_n != 0:
+        raise ValueError(f"N must be divisible by tile_n; got N={N}, tile_n={tile_n}")
     if epilogue not in ("none", "bias", "bias_relu", "bias_silu", "bias_gelu"):
         raise ValueError(f"epilogue must be none/bias/bias_relu/bias_silu/bias_gelu, got {epilogue!r}")
     if lds_stage not in (1, 2):
         raise ValueError(f"lds_stage must be 1 or 2, got {lds_stage}")
+    if tile_n != 32 and tile_n % 64 != 0:
+        raise ValueError(f"tile_n must be 32 or a multiple of 64, got tile_n={tile_n}")
     _has_epilogue = epilogue != "none"
     _has_bias = epilogue in ("bias", "bias_relu", "bias_silu", "bias_gelu")
     _has_relu = epilogue == "bias_relu"
@@ -150,6 +164,8 @@ def compile_preshuffle_gemm(
     gpu_arch = get_rocm_arch()
     is_gfx942 = str(gpu_arch).startswith("gfx942")
     is_gfx950 = str(gpu_arch).startswith("gfx950")
+    if tile_n == 32 and not is_gfx950:
+        raise ValueError(f"tile_n=32 two-wave path requires gfx950, got {gpu_arch}")
     if use_async_copy and not is_gfx950:
         # buffer_load_lds only lowers on gfx950; without this the failure surfaces much
         # later as an unactionable legalization error.
@@ -168,15 +184,18 @@ def compile_preshuffle_gemm(
 
     # Tile geometry (tile_K_perm = K-elements grouped per MMA k-step)
     tile_K_perm = 128 if use_mfma_scale_128 else (64 if is_8bit else 32)
+    if tile_k % tile_K_perm != 0:
+        raise ValueError(f"tile_k must be divisible by the {tile_K_perm}-element MMA step; " f"got tile_k={tile_k}")
     k_iters = tile_k // tile_K_perm
     num_tiles = K // tile_k
     m_repeat = tile_m // 16
-    num_waves = 4
+    is_two_wave = tile_n == 32
+    num_waves = 2 if is_two_wave else 4
     n_per_wave = tile_n // num_waves
     num_acc_n = n_per_wave // 16
     acc_size = m_repeat * num_acc_n * 4
 
-    total_threads = 256
+    total_threads = num_waves * 64
     a_load_bytes = 16
     bytes_per_thread_a = (tile_m * tile_k * elem_bytes) // total_threads
     num_a_loads = bytes_per_thread_a // a_load_bytes
@@ -193,6 +212,13 @@ def compile_preshuffle_gemm(
             f"elem_bytes={elem_bytes} -> {a_tile_bytes} bytes, leaving "
             f"{a_tile_bytes % a_copy_granularity} bytes of the A tile unloaded"
         )
+    val_per_thr = a_load_bytes // elem_bytes
+    thrs_k = tile_k // val_per_thr
+    if thrs_k <= 0 or total_threads % thrs_k != 0:
+        raise ValueError(f"tile_k={tile_k} gives thrs_k={thrs_k}, which must divide " f"total_threads={total_threads}")
+    thrs_m = total_threads // thrs_k
+    if tile_m % thrs_m != 0:
+        raise ValueError(f"tile_m={tile_m} must be divisible by thrs_m={thrs_m}")
     num_b_loads = (tile_n * tile_k * elem_bytes) // total_threads // 16
     num_ds_load = (tile_m * tile_k * elem_bytes) // 64 // 16  # A LDS reads per wave
     num_gmem_loads = num_a_loads + num_b_loads
@@ -246,9 +272,13 @@ def compile_preshuffle_gemm(
 
         if const_expr(use_mfma_scale_128):
             _scale_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, layout_elem))
+            if const_expr(is_two_wave):
+                wave_layout = fx.make_layout((1, 2, 1), (0, 1, 0))
+            else:
+                wave_layout = fx.make_layout((1, 4, 1), (0, 1, 0))
             tiled_mma = fx.make_tiled_mma(
                 _scale_atom,
-                fx.make_layout((1, 4, 1), (0, 1, 0)),
+                wave_layout,
                 fx.make_tile(None, None, fx.make_layout((32, 4), (1, 32))),
             )
         else:
@@ -353,33 +383,24 @@ def compile_preshuffle_gemm(
                 max_size=False,
                 num_records_bytes=fx.Int64(i32_m) * fx.Int64(K) * fx.Int64(elem_bytes),
             )
-            gA_div = fx.logical_divide(gA_flat, fx.make_layout(1, 1))
             sA_i8_ptr = [fx.recast_iter(Int8, lds.a0.ptr)]
             if const_expr(lds_stage == 2):
                 sA_i8_ptr.append(fx.recast_iter(Int8, lds.a1.ptr))
             bx_m = bid_x * tile_m
-            wave_id = tid // 64
-            step_bytes = total_threads * a_load_bytes
-            wave_stride_bytes = 64 * a_load_bytes
-            k_blocks16_dma = (tile_k * elem_bytes) // 16
-            elems_per_16b = 16 // elem_bytes
+            wave_id = rocdl.readfirstlane(Int32.ir_type, fx.Int32(tid // 64))
+            dma_src_layout, dma_dst_layout = make_preshuffle_dma_layouts(
+                tile_m, tile_k * elem_bytes, K * elem_bytes, total_threads
+            )
+            dma_lane = preshuffle_dma_lane_coord(tid % 64, tile_k * elem_bytes)
+            dma_a_base = fx.add_offset(fx.get_iter(gA_flat), bx_m * K * elem_bytes)
+            dma_destinations = [fx.Tensor(fx.make_view(ptr, dma_dst_layout)) for ptr in sA_i8_ptr]
 
             def dma_a_to_lds(k_tile_val, stage):
-                wave_off = rocdl.readfirstlane(fx.Int32.ir_type, wave_id * wave_stride_bytes)
-                lds_ptr = fx.add_offset(sA_i8_ptr[stage], wave_off)
-                base_k = k_tile_val * tile_k
+                src = fx.Tensor(
+                    fx.make_view(fx.add_offset(dma_a_base, k_tile_val * tile_k * elem_bytes), dma_src_layout)
+                )
                 for i in range_constexpr(num_a_loads):
-                    if const_expr(i > 0):
-                        lds_ptr = fx.add_offset(lds_ptr, step_bytes)
-                    pos_bytes = i * total_threads * a_load_bytes + tid * a_load_bytes
-                    elem_idx = pos_bytes // elem_bytes
-                    m = elem_idx // tile_k
-                    k = elem_idx % tile_k
-                    k_swz = k ^ ((m % k_blocks16_dma) * elems_per_16b)
-                    gmem_byte = ((bx_m + m) * K + base_k + k_swz) * elem_bytes
-                    dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
-                    src = fx.slice(gA_div, (None, fx.Int32(gmem_byte)))
-                    fx.copy(dma_atom, src, dst)
+                    fx.copy(dma_atom, src[None, dma_lane, wave_id, i], dma_destinations[stage][None, wave_id, i])
 
         # ── Scheduling hints (ported from old pipeline) ───────────
         def build_scheduler(numer: int, denom: int):
@@ -596,56 +617,68 @@ def compile_preshuffle_gemm(
                 pipeline_2stage(read_stage=(k_tail0 + j) % 2, next_k_val=fx.Int32(k_tail0 + j + 1))
 
         # ── Epilogue-operand preloads (scale_a / scale_b / bias) ─────────
-        bx_m = bid_x * tile_m
-        by_n = bid_y * tile_n
-        wave_id = gpu.thread_id("x") // 64
-        lane_id = gpu.thread_id("x") % 64
-        lane_div_16 = lane_id // 16
-        lane_mod_16 = lane_id % 16
-
-        # Epilogue scalar/vec4 gathers via buffer_copy atoms over a make_buffer_tensor
-        # (element-index addressing; same OOB-checked descriptor as the legacy buffer_load).
+        # Describe the per-lane row/column operands as small tensor views.  The
+        # MMA partition lowering does not currently accept stride-zero broadcast
+        # modes, so encode the lane-owned coordinates in each view's base pointer.
         epi_copy_32b = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), Float32)
         epi_copy_128b = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), Float32)
         epi_copy_16b = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
+        epi_wave_id = tid // 64
+        epi_lane_id = tid % 64
+        epi_lane_div_16 = epi_lane_id // 16
+        epi_lane_mod_16 = epi_lane_id % 16
+
+        def make_epi_view(arg, base, shape, strides, nbytes):
+            buf = fx.rocdl.make_buffer_tensor(arg, max_size=False, num_records_bytes=nbytes)
+            return fx.Tensor(
+                fx.make_view(
+                    fx.add_offset(fx.get_iter(buf), base),
+                    fx.make_layout(shape, strides),
+                )
+            )
 
         def load_epi_operands():
             s_a = s_b = bias = None
             if const_expr(is_8bit):
                 # Per-row(scale_a) × per-col(scale_b) scaling, applied in the epilogue.
-                sb_buf = fx.logical_divide(
-                    fx.rocdl.make_buffer_tensor(arg_scale_b, max_size=True), fx.make_layout(1, 1)
+                pSb = make_epi_view(
+                    arg_scale_b,
+                    bid_y * tile_n + epi_wave_id * 16 + epi_lane_mod_16,
+                    (1, num_acc_n),
+                    (0, num_waves * 16),
+                    fx.Int64(N * 4),
                 )
                 s_b = []
                 for ni in range_constexpr(num_acc_n):
                     f = fx.make_rmem_tensor(1, Float32)
-                    fx.copy(
-                        epi_copy_32b,
-                        sb_buf[None, fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)],
-                        f,
-                    )
+                    fx.copy(epi_copy_32b, pSb[None, ni], f)
                     s_b.append(fx.Float32(f.load()[0]))
                 # scale_a: vec4 f32 per m-block (BufferCopy128b).
-                sa_buf = fx.logical_divide(
-                    fx.rocdl.make_buffer_tensor(arg_scale_a, max_size=True), fx.make_layout(4, 1)
+                pSa = make_epi_view(
+                    arg_scale_a,
+                    bid_x * tile_m + epi_lane_div_16 * 4,
+                    (4, m_repeat),
+                    (1, 16),
+                    fx.Int64(i32_m) * fx.Int64(4),
                 )
                 s_a = []
                 for mi in range_constexpr(m_repeat):
                     f = fx.make_rmem_tensor(4, Float32)
-                    grp = (bx_m + mi * 16 + lane_div_16 * 4) // 4
-                    fx.copy(epi_copy_128b, sa_buf[None, fx.Int32(grp)], f)
+                    fx.copy(epi_copy_128b, pSa[None, mi], f)
                     s_a.append(Vec(f.load()))
             if const_expr(_has_bias):
                 # Per-column bias (out_dtype), one scalar per N-block, shared across rows.
-                bias_buf = fx.logical_divide(fx.rocdl.make_buffer_tensor(arg_bias, max_size=True), fx.make_layout(1, 1))
+                pBias = make_epi_view(
+                    arg_bias,
+                    bid_y * tile_n + epi_wave_id * 16 + epi_lane_mod_16,
+                    (1, num_acc_n),
+                    (0, num_waves * 16),
+                    fx.Int64(N * 2),
+                )
                 bias = []
                 for ni in range_constexpr(num_acc_n):
                     f = fx.make_rmem_tensor(1, out_elem_cls)
-                    fx.copy(
-                        epi_copy_16b,
-                        bias_buf[None, fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)],
-                        f,
-                    )
+                    fx.copy(epi_copy_16b, pBias[None, ni], f)
                     bias.append(fx.Float32(f.load()[0]))
             return s_a, s_b, bias
 
@@ -742,16 +775,13 @@ def compile_preshuffle_gemm(
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem))
             k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
 
-        tiled_mma = fx.make_tiled_mma(
-            mma_atom,
-            fx.make_layout((1, 4, 1), (0, 1, 0)),
-            fx.make_tile(None, None, k_perm),
-        )
+        if const_expr(is_two_wave):
+            wave_layout = fx.make_layout((1, 2, 1), (0, 1, 0))
+        else:
+            wave_layout = fx.make_layout((1, 4, 1), (0, 1, 0))
+        tiled_mma = fx.make_tiled_mma(mma_atom, wave_layout, fx.make_tile(None, None, k_perm))
 
         # G2S tiled copy
-        val_per_thr = a_load_bytes // elem_bytes
-        thrs_k = tile_k // val_per_thr
-        thrs_m = total_threads // thrs_k
         tiled_copy_g2s = fx.make_tiled_copy(
             fx.make_copy_atom(fx.UniversalCopy128b(), layout_elem),
             fx.make_layout(
@@ -800,7 +830,7 @@ def compile_preshuffle_gemm(
             value_attrs={"rocdl.waves_per_eu": waves_per_eu},
         ).launch(
             grid=(gx, gy, 1),
-            block=(256, 1, 1),
+            block=(total_threads, 1, 1),
             stream=stream,
         )
 

@@ -167,6 +167,10 @@ def run_torch(a, b, scale_a, scale_b, bias=None, dtype=torch.float32):
 
 _A8_DTYPES = ["fp8", "int8", "fp16", "bf16"]
 _A8_SHAPES = [
+    (16, 1024, 1024, 16, 32, 512),
+    (16, 1024, 1024, 16, 32, 1024),
+    (33, 1024, 2048, 32, 32, 512),
+    (33, 1024, 2048, 32, 32, 1024),
     (16, 5120, 8192, 16, 64, 512),
     (33, 1024, 2048, 32, 64, 512),
     (5120, 5120, 8320, 64, 256, 128),
@@ -176,9 +180,9 @@ _A8_SHAPES = [
 ]
 
 # The old dtype x shape x copy-mode x launch-mode Cartesian product ran 96
-# expensive GEMMs.  Dtype x shape alone requires 24 cases, so use that lower
+# expensive GEMMs. Dtype x shape supplies the lower bound, so use that matrix
 # bound and distribute sync/async plus eager/graph to retain every pairwise
-# interaction.  Shapes 2+ keep their original large_shape classification.
+# interaction. Shapes 6+ keep the original large_shape classification.
 _A8_CASE_VALUES = [
     (in_dtype, shape, bool((dtype_index + shape_index) % 2), bool((dtype_index // 2 + shape_index) % 2))
     for dtype_index, in_dtype in enumerate(_A8_DTYPES)
@@ -190,7 +194,7 @@ _A8_CASES = [
         *shape,
         use_async_copy,
         test_graph,
-        marks=pytest.mark.large_shape if shape in _A8_SHAPES[2:] else (),
+        marks=pytest.mark.large_shape if shape in _A8_SHAPES[6:] else (),
         id=(
             f"{in_dtype}-M{shape[0]}-tile{shape[3]}x{shape[4]}x{shape[5]}-"
             f"{'async' if use_async_copy else 'sync'}-{'graph' if test_graph else 'eager'}"
@@ -230,6 +234,8 @@ def test_mfma_a8_flyc_preshuffle(
         # operator's operand!"), while CDNA4 (gfx950) handles it. Restrict async
         # copy to gfx950 until the gfx942 codegen path is supported.
         pytest.skip(f"async copy (buffer_load_lds) is only supported on gfx950, not {get_rocm_arch()}")
+    if tile_n == 32 and get_rocm_arch() != "gfx950":
+        pytest.skip(f"tile_n=32 two-wave path requires gfx950, not {get_rocm_arch()}")
     print("=" * 80)
     print(f"[flyc] MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
     print("=" * 80)
@@ -1097,6 +1103,22 @@ def test_preshuffle_accepts_whole_a_tile(tile_m):
     if get_rocm_arch() not in ("gfx942", "gfx950"):
         pytest.skip(f"v2 preshuffle GEMM requires gfx942/gfx950, got {get_rocm_arch()}")
     compile_preshuffle_gemm(N=1024, K=2048, tile_m=tile_m, tile_n=256, tile_k=64, in_dtype="bf16", out_dtype="bf16")
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"N": 48, "K": 512, "tile_m": 16, "tile_n": 32, "tile_k": 512}, "N must be divisible"),
+        ({"N": 64, "K": 512, "tile_m": 20, "tile_n": 32, "tile_k": 512}, "tile_m must be"),
+        ({"N": 64, "K": 512, "tile_m": 16, "tile_n": 32, "tile_k": 32}, "MMA step"),
+    ],
+)
+def test_preshuffle_rejects_truncated_tile_geometry(kwargs, match):
+    """Reject tile geometries that would silently leave rows, columns, or K work undone."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"tile_n=32 two-wave path requires gfx950, got {get_rocm_arch()}")
+    with pytest.raises(ValueError, match=match):
+        compile_preshuffle_gemm(in_dtype="int8", out_dtype="bf16", **kwargs)
 
 
 @pytest.mark.parametrize("in_dtype", ["fp16", "bf16"])

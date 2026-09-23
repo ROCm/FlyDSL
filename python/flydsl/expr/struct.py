@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import dis
+import hashlib
+import inspect
 from dataclasses import FrozenInstanceError, dataclass
 from enum import Enum
 from itertools import chain
+from types import CodeType, FunctionType
 from typing import Any, List
 
 from .._mlir import ir
@@ -27,6 +31,7 @@ from .typing import Array, Constexpr, Pointer
 __all__ = [
     "struct",
     "Struct",
+    "Empty",
     "union",
     "Union",
     "Array",
@@ -79,6 +84,86 @@ _RESERVED_FIELD_NAMES = frozenset(
 )
 
 
+def _field_type_signature(dtype):
+    """Stable field/specialization keys, without inspecting Python object state."""
+    if is_composite_type(dtype):
+        return dtype.__cache_signature__()
+    if _is_constexpr_type(dtype) and dtype.is_specialized:
+        return ("constexpr", Constexpr.value_signature(dtype.value))
+    if issubclass(dtype, Array._Base):
+        return ("array", _field_type_signature(dtype.dtype), dtype.size, dtype.align)
+    if issubclass(dtype, Align):
+        return ("align", _field_type_signature(dtype.dtype), dtype.align)
+    if issubclass(dtype, Storage):
+        return ("storage", _field_type_signature(dtype._target_type))
+    return (dtype.__module__, dtype.__qualname__)
+
+
+def _has_member_behavior(dtype):
+    if not isinstance(dtype, type):
+        return False
+    if is_composite_type(dtype):
+        return dtype.__dsl_member_behavior__
+    return any(_has_member_behavior(getattr(dtype, name, None)) for name in ("dtype", "_target_type"))
+
+
+def _make_cache_signature(definition, fields, has_members):
+    """Capture a concrete schema's definition once; instances add field metadata."""
+    field_keys = tuple((name, _field_type_signature(dtype)) for name, dtype in fields)
+    signature = ("composite", hashlib.sha256(repr((definition, field_keys)).encode()).hexdigest())
+    runtime_fields = tuple(name for name, dtype in fields if not _is_constexpr_type(dtype))
+
+    def __cache_signature__(self=None):
+        if self is None:
+            return signature
+        parts = [type(self), signature] if has_members else [type(self)]
+        for name in runtime_fields:
+            parts.append((name, cache_signature(getattr(self, name))))
+        return tuple(parts)
+
+    return __cache_signature__
+
+
+def _member_dependencies(function):
+    """Snapshot directly named Structs, preserving each name's type binding."""
+    refs = {
+        ("closure", name): cell.cell_contents
+        for name, cell in zip(function.__code__.co_freevars, function.__closure__ or ())
+    }
+    pending = [function.__code__]
+    while pending:
+        code = pending.pop()
+        for instruction in dis.get_instructions(code):
+            if instruction.opname == "LOAD_GLOBAL":
+                refs[("global", instruction.argval)] = function.__globals__.get(instruction.argval)
+        pending.extend(constant for constant in code.co_consts if isinstance(constant, CodeType))
+    return tuple(
+        (scope, name, value.__cache_signature__())
+        for (scope, name), value in sorted(refs.items())
+        if is_composite_type(value)
+    )
+
+
+def _normalize_members(klass):
+    """Install native descriptors and snapshot source/type dependencies once.
+
+    Definitions and external constants should be immutable by contract. Only directly
+    referenced Struct types are tracked; other globals/closures are ignored.
+    """
+    members, sources = {}, []
+    for name, member in vars(klass).items():
+        function = member.fget if isinstance(member, property) else getattr(member, "__func__", member)
+        original = getattr(function, "_original_func", function)
+        if not isinstance(original, FunctionType):
+            continue
+        sources.append((name, type(member).__name__, inspect.getsource(original), _member_dependencies(original)))
+        members[name] = member
+    if "__eq__" in members and vars(klass).get("__hash__") is None:
+        members["__hash__"] = None
+    digest = hashlib.sha256(repr(sources).encode()).hexdigest() if sources else None
+    return members, digest
+
+
 def _validate_field_name(name: str, context: str):
     if name.startswith("_"):
         raise ValueError(f"{context}: field name '{name}' must not start with underscore")
@@ -113,7 +198,10 @@ def _storage_layout(schema: type) -> tuple[int, int, dict[str, int]]:
 
     def _field_layout(field: FieldDef) -> tuple[int, int]:
         try:
-            return dsl_size_of(field.type_spec), dsl_align_of(field.type_spec)
+            size = dsl_size_of(field.type_spec)
+            align = dsl_align_of(field.type_spec)
+            # Empty fields, including nested containers, add neither bytes nor padding.
+            return size, align if size else 1
         except TypeError as exc:
             raise TypeError(
                 f"Cannot compute layout for type {_display_name(schema)}: field '{field.name}' has type "
@@ -257,10 +345,13 @@ def _specialize_type(base_cls: type, fields: tuple[FieldDef, ...], values: dict[
         if isinstance(eff_type, type) and issubclass(eff_type, Constexpr) and eff_type.is_specialized:
             suffix_parts.append(f"{name}={eff_type.value!r}")
     suffix = f"[{', '.join(suffix_parts)}]" if suffix_parts else ""
+    has_members = base_cls.__dsl_member_behavior__ or any(_has_member_behavior(dtype) for _, dtype in effective)
     namespace: dict[str, Any] = {
         "__dsl_effective_field_defs__": tuple(effective),
         "__dsl_base_type__": base_cls,
         "__dsl_display_name__": _display_name(base_cls) + suffix,
+        "__dsl_member_behavior__": has_members,
+        "__cache_signature__": _make_cache_signature(base_cls.__cache_signature__(), effective, has_members),
     }
     specialized = type(base_cls.__name__ + suffix, (base_cls,), namespace)
     _specialization_cache[cache_key] = specialized
@@ -357,8 +448,17 @@ def _make_composite_class(
     fields: tuple[FieldDef, ...],
     policy: CompositeKind,
     display_name: str,
+    members=None,
+    member_digest=None,
+    qualname=None,
+    doc=None,
 ):
+    members = members or {}
+    conflicts = members.keys() & {field.name for field in fields}
+    if conflicts:
+        raise ValueError(f"{name}: members conflict with fields: {sorted(conflicts)}")
     identity = _make_type_identity(policy, fields)
+    has_members = bool(members) or any(_has_member_behavior(field.type_spec) for field in fields)
 
     def __init__(self, *args, **kwargs):
         if policy == CompositeKind.Sum:
@@ -502,22 +602,15 @@ def _make_composite_class(
                 )
             poke_into_ptr(eff_type, add_offset(ptr, offsets[field.name]), getattr(value, field.name))
 
-    def __cache_signature__(self):
-        parts = [type(self)]
-        for field in fields:
-            if _is_constexpr_type(field.type_spec):
-                # Constexpr fields are already folded into type(self) by _specialize_type,
-                # so only the non-constexpr field values need to be encoded here.
-                continue
-            parts.append((field.name, cache_signature(getattr(self, field.name))))
-        return tuple(parts)
-
     namespace = {
         "__module__": module,
+        "__qualname__": qualname or name,
+        "__doc__": doc,
         "__annotations__": {field.name: field.type_spec for field in fields},
         "__dsl_composite_kind__": policy,
         "__dsl_field_defs__": fields,
         "__dsl_type_identity__": identity,
+        "__dsl_member_behavior__": has_members,
         "__dsl_display_name__": display_name,
         "__init__": __init__,
         "__setattr__": __setattr__,
@@ -527,7 +620,11 @@ def _make_composite_class(
         "__hash__": __hash__,
         "__extract_to_ir_values__": __extract_to_ir_values__,
         "__construct_from_ir_values__": __construct_from_ir_values__,
-        "__cache_signature__": __cache_signature__,
+        "__cache_signature__": _make_cache_signature(
+            (module, qualname, policy.name, member_digest),
+            tuple((field.name, field.type_spec) for field in fields),
+            has_members,
+        ),
         "__get_ir_types__": __get_ir_types__,
         "__c_abi_spec__": __c_abi_spec__,
         "__dsl_size_of__": __dsl_size_of__,
@@ -536,6 +633,7 @@ def _make_composite_class(
         "__poke_into_ptr__": __poke_into_ptr__,
         "replace": replace,
     }
+    namespace.update(members)
     schema = type(name, (), namespace)
     schema.__dsl_base_type__ = schema
     return schema
@@ -549,16 +647,22 @@ class CompositeMeta(type):
         return cls
 
     def __call__(cls, klass=None, /, **kwargs):
+        # Preserve the decorator API's acceptance of ignored keyword options.
         policy = cls._policy
 
         def wrap(wrapped):
             fields = _normalize_decorator_fields(wrapped)
+            members, member_digest = _normalize_members(wrapped)
             return _make_composite_class(
                 name=wrapped.__name__,
                 module=wrapped.__module__,
                 fields=fields,
                 policy=policy,
                 display_name=wrapped.__name__,
+                members=members,
+                member_digest=member_digest,
+                qualname=wrapped.__qualname__,
+                doc=wrapped.__doc__,
             )
 
         if klass is None:
@@ -588,6 +692,65 @@ class union(metaclass=CompositeMeta, policy=CompositeKind.Sum, display="Union"):
 
 Struct = struct
 Union = union
+
+
+class Empty:
+    """Zero-size value with alignment 1 and no runtime IR values.
+
+    Use ``Empty`` for storage that requires no memory. Allocating it returns a
+    pointer-free ``Storage[Empty]``; ``peek()`` returns ``Empty()`` and
+    ``poke(Empty())`` is a no-op, with no allocation or alignment padding.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return f"{type(self).__name__}()"
+
+    def __eq__(self, other):
+        return True if type(self) is type(other) else NotImplemented
+
+    def __hash__(self):
+        return hash(type(self))
+
+    @classmethod
+    def __construct_from_ir_values__(cls, values, exemplar=None):
+        if values:
+            raise ValueError(f"{cls.__name__} expected 0 ir.Values, got {len(values)}")
+        return cls()
+
+    def __extract_to_ir_values__(self):
+        return []
+
+    @classmethod
+    def __get_ir_types__(cls):
+        return []
+
+    @classmethod
+    def __cache_signature__(cls):
+        return (cls.__module__, cls.__qualname__)
+
+    def __c_abi_spec__(self):
+        return []
+
+    @classmethod
+    def __dsl_size_of__(cls):
+        return 0
+
+    @classmethod
+    def __dsl_align_of__(cls):
+        return 1
+
+    @classmethod
+    def __peek_from_ptr__(cls, ptr):
+        return cls()
+
+    @classmethod
+    def __poke_into_ptr__(cls, ptr, value):
+        if not isinstance(value, cls):
+            raise TypeError(
+                f"{cls.__name__}.__poke_into_ptr__ expects {cls.__name__} value, got {type(value).__name__}."
+            )
 
 
 class Align:
@@ -705,6 +868,8 @@ class Storage:
 
             def peek(self):
                 dsl_type = type(self)._target_type
+                if dsl_type is Empty:
+                    return Empty()
                 prebuilt = object.__getattribute__(self, "_prebuilt")
                 if prebuilt and is_struct_type(dsl_type):
                     values = {}
@@ -725,6 +890,8 @@ class Storage:
 
             def poke(self, value):
                 dsl_type = type(self)._target_type
+                if dsl_type is Empty:
+                    return poke_into_ptr(Empty, None, value)
                 prebuilt = object.__getattribute__(self, "_prebuilt")
                 if prebuilt and is_struct_type(dsl_type):
                     for name, eff_type in _effective_field_defs(dsl_type):
@@ -805,7 +972,9 @@ class Arena:
 
     def _bump(self, nbytes: int, align: int) -> int:
         offset = _align_up(self._offset, align)
-        self._offset = offset + nbytes
+        # A zero-size allocation must not consume alignment padding either.
+        if nbytes:
+            self._offset = offset + nbytes
         return offset
 
     @dsl_loc_tracing
@@ -830,5 +999,7 @@ class Arena:
             nbytes = dsl_size_of(storable)
             align = dsl_align_of(storable) if alignment is None else max(dsl_align_of(storable), alignment)
             offset = self._bump(nbytes, align)
+            if storable is Empty:
+                return Storage[Empty](None)
             base = add_offset(self.base_ptr, offset)
             return Storage[storable](base)

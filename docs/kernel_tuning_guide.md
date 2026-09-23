@@ -289,8 +289,8 @@ Three pitfalls (all covered in `/prefetch-data-load`):
 2. **Unwrap init values at hard boundaries only.** Most carried values stay
    `fx.Int32`/`fx.Float32`/`Vector`; unwrap to raw `ir.Value` only where a
    low-level helper demands it.
-3. **Clear `SmemPtr._view_cache = None` before the epilogue** when a shared view
-   was created inside the loop, or the epilogue use hits an SSA dominance error.
+3. **Build shared-memory views at the top of the kernel**, not inside the loop
+   body, or the epilogue use hits an SSA dominance error.
 
 ### Async copy (global → LDS DMA)
 
@@ -445,8 +445,9 @@ WHERE ks.KernelName LIKE '%target_kernel%' LIMIT 5;
 the binding limiter, so you know whether to cut VGPR, shrink LDS per block, or
 reduce SGPR pressure.
 
-**Do not** use `maxnreg` to force `accum_vgpr=0` — it spills MFMA results through
-arch_vgpr via `v_accvgpr_read` (measured ~4.5× regression).
+The `maxnreg` hint has been removed — it never reached LLVM, and forcing
+`accum_vgpr=0` with it spilled MFMA results through arch_vgpr via
+`v_accvgpr_read` (measured ~4.5× regression). Use `waves_per_eu` instead.
 
 ---
 

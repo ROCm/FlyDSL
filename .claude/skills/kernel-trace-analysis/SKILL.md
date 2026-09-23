@@ -22,6 +22,10 @@ Do **not** use GUI tools.
 > LDS?", use `/isa-resource-diff` first — it is compile-only, needs no GPU or
 > profiler run, and answers in seconds. Come here when you need to know *why* a
 > kernel is slow rather than *what resources it uses*.
+>
+> To pick an LLVM knob that changes what the compiler emits — a compile hint, a
+> function attribute, an `-mllvm` flag — and to prove it took effect, use
+> `/llvm`. That is also compile-only.
 
 ## Arguments
 
@@ -333,8 +337,9 @@ Worked example (PA decode, gfx942): arch 144 + accum 136 = 280 combined → `512
 wave/SIMD, VGPR-bound (LDS allows 5, SGPR allows 7). Reaching 2 waves needs
 combined ≤ 256, e.g. freeing ~24 VGPRs.
 
-**Warning**: `maxnreg` forcing `accum_vgpr=0` doubles occupancy but causes MFMA spills through
-arch_vgpr — measured 4.5x GPU slowdown. Do not use `maxnreg` for MFMA-heavy kernels.
+**Note**: `maxnreg` has been removed (it never reached LLVM). Forcing
+`accum_vgpr=0` with it doubled occupancy but caused MFMA spills through
+arch_vgpr — measured 4.5x GPU slowdown. Use `waves_per_eu` instead.
 
 ### L2 / HBM efficiency analysis (PMC, not ATT)
 

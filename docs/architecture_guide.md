@@ -66,8 +66,7 @@ FlyDSL/
 │   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
 │   └── utils/
 │       ├── env.py                    # EnvManager — typed environment config
-│       ├── logger.py                 # Logging utilities
-│       └── smem_allocator.py         # SmemAllocator for LDS management
+│       └── logger.py                 # Logging utilities
 │
 ├── examples/                         # Runnable examples
 │   ├── 01-vectorAdd.py               # Vector addition with layout algebra
@@ -175,6 +174,7 @@ Python Function (@flyc.kernel / @flyc.jit)
    │   convert-fly-to-rocdl                                 │
    │   canonicalize                                         │
    │   gpu.module(convert-scf-to-cf, cse,                   │
+   │              convert-rocdl-fastmath-ops,              │
    │              convert-gpu-to-rocdl{chipset=gfxNNN ...}, │
    │              fly-rocdl-cluster-attr)                   │
    ├────────────────────────────────────────────────────────┤
@@ -209,6 +209,17 @@ external LLVM toolchain only for Stage C (`gpu-module-to-binary`).
 
 **Stage A — `pre_binary_fragments`** (Fly dialect → ROCDL lowering)
 
+The tables explain the stages conceptually. The following excerpt is included
+directly from the backend at documentation build time, so it is the exact pass
+definition for this checkout:
+
+```{literalinclude} ../python/flydsl/compiler/backends/rocm.py
+:language: python
+:start-at:         pre_binary_fragments = [
+:end-before:         return [*pre_binary_fragments
+:dedent: 8
+```
+
 | # | Pass | Description |
 |---|---|---|
 | 1 | `fly-rewrite-func-signature` | Rewrite DSL types at function and SCF control-flow boundaries; lowers `IntTuple` / `Layout` / `ComposedLayout` / `CoordTensor` / `MemRef` to packed LLVM struct types and reconstructs them in the body via constructor ops. |
@@ -220,7 +231,7 @@ external LLVM toolchain only for Stage C (`gpu-module-to-binary`).
 | 7 | `fly-promote-regmem-to-vectorssa` | Promotes `fly.make_ptr(register)` memory semantics to vector SSA values (requires #6). |
 | 8 | `convert-fly-to-rocdl` | Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → `rocdl.buffer_load/store`, or gfx1250 TDM → `rocdl.tensor.load.to.lds` / `store.from.lds`; MMA atoms → `rocdl.mfma.*` on CDNA, `rocdl.wmma.*` on gfx11/gfx1250). |
 | 9 | `canonicalize` | Second canonicalization round after ROCDL lowering. |
-| 10 | `gpu.module(convert-scf-to-cf, cse, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
+| 10 | `gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, ROCDL fast-math ops lowering, GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
 
 **Stage B — `binary_prep_fragments`** (LLVM lowering, host + kernel)
 

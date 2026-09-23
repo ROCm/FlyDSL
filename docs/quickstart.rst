@@ -12,6 +12,13 @@ The following example demonstrates the core FlyDSL workflow: define a kernel
 with ``@flyc.kernel``, use layout algebra to partition data, then launch with
 ``@flyc.jit``.
 
+This teaching example requires a positive length divisible by 64 and contiguous
+one-dimensional float32 tensors of equal length. Its loads and stores are
+unmasked: rounding up the grid does **not** make a partial last block safe.
+Keep the assertion below when changing ``n``. Supporting arbitrary lengths
+requires predicated loads and stores or padding all three tensors to a full
+block before launching.
+
 .. code-block:: python
 
    import torch
@@ -70,6 +77,7 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
 
    # Usage
    n = 128
+   assert n > 0 and n % 64 == 0, "This unmasked example requires full 64-element blocks"
    A = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
    B = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
    C = torch.zeros(n, dtype=torch.float32).cuda()
@@ -77,7 +85,8 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
    torch.cuda.synchronize()
    print("Result correct:", torch.allclose(C, A + B))
 
-See ``examples/01-vectorAdd.py`` for the complete implementation with
+See `examples/01-vectorAdd.py <https://github.com/ROCm/FlyDSL/blob/main/examples/01-vectorAdd.py>`_
+for the complete implementation with
 CUDA Graph capture support.
 
 Key concepts
@@ -117,6 +126,7 @@ and compiles it through the Fly MLIR pipeline. The pass list is built by
       │    fly-promote-regmem-to-vectorssa →                     │
       │    convert-fly-to-rocdl → canonicalize →                 │
       │    gpu.module(convert-scf-to-cf, cse,                    │
+      │       convert-rocdl-fastmath-ops,                       │
       │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
       ├──────────────────────────────────────────────────────────┤
       │ B. binary_prep_fragments  (→ LLVM)                       │

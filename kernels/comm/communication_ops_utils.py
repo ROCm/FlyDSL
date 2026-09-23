@@ -42,12 +42,20 @@ def _to_ptr_global(v, dtype=fx.Int64, alignment=8):
     return fx.inttoptr(ptr_type, fx.Int64(v))
 
 
+def _to_atomic_ptr_global(addr_i64, val):
+    """Typed global pointer matching the atomic operand *val*.
+
+    A bare Python literal keeps the default ``int -> Int32`` mapping the atomic
+    helpers apply to untyped operands.
+    """
+    dtype = getattr(val, "dtype", None) or fx.as_numeric(val).dtype
+    return _to_ptr_global(addr_i64, dtype, dtype.width // 8)
+
+
 def store_i32_system(addr_i64, offset, val):
     """System-scope release i32 store at ``addr_i64 + offset*4``."""
-    off = fx.as_ir_value(offset)
-    off64 = fx.Uint64(fx.Uint32(off)) if off.type == fx.Int32.ir_type else fx.Uint64(off)
-    addr = fx.Uint64(addr_i64) + off64 * fx.Uint64(4)
-    fx.generic_store(_to_ptr_global(addr, fx.Int32, 4), val, memory_order=fx.AtomicOrdering.Release, syncscope="one-as")
+    ptr = _to_ptr_global(addr_i64, fx.Int32, 4) + offset
+    fx.generic_store(ptr, val, memory_order=fx.AtomicOrdering.Release, syncscope="one-as")
 
 
 def store_i64_global_system(addr_i64, val):
@@ -87,15 +95,19 @@ def fence_agent_release():
 
 
 def load_i64_global(addr_i64):
-    """Relaxed global i64 load from ``addr_i64``."""
-    ptr = _to_ptr_global(addr_i64)
-    return fx.generic_load(ptr).ir_value()
+    """Relaxed global i64 load from ``addr_i64``.
+
+    Returns a DSL scalar, so callers need no re-wrapping.
+    """
+    return fx.generic_load(_to_ptr_global(addr_i64))
 
 
 def atomic_add_global_at(addr_i64, val, syncscope="one-as"):
-    """Monotonic global fetch-add with configurable agent/system visibility."""
-    ptr = _to_ptr_global(addr_i64)
-    return fx.atomic_add(ptr.llvm_ptr, fx.as_ir_value(val), syncscope=syncscope).ir_value()
+    """Monotonic global fetch-add with configurable agent/system visibility.
+
+    Returns the pre-update value as a DSL scalar of ``val``'s type.
+    """
+    return fx.atomic_add(_to_atomic_ptr_global(addr_i64, val), val, syncscope=syncscope)
 
 
 def atomic_add_agent(addr_i64, val):
@@ -109,9 +121,11 @@ def atomic_add_system(addr_i64, val):
 
 
 def atomic_xchg_global_at(addr_i64, val, syncscope="agent"):
-    """Monotonic global exchange with configurable agent/system visibility."""
-    ptr = _to_ptr_global(addr_i64)
-    return fx.atomic_xchg(ptr.llvm_ptr, fx.as_ir_value(val), syncscope=syncscope).ir_value()
+    """Monotonic global exchange with configurable agent/system visibility.
+
+    Returns the pre-update value as a DSL scalar of ``val``'s type.
+    """
+    return fx.atomic_xchg(_to_atomic_ptr_global(addr_i64, val), val, syncscope=syncscope)
 
 
 @dataclass
