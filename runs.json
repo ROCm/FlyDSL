@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-23T08:03:48Z",
+ "updated": "2026-09-23T08:16:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35835910530,
+   "pr": 987,
+   "commit": "bd4239d0a1b25699897d7191a3727edf81d356e6",
+   "branch": "jli/fix-lld-issue",
+   "event": "pull_request",
+   "title": "[Feat][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835910530",
+   "created_at": "2026-09-23T08:13:27Z",
+   "updated_at": "2026-09-23T08:13:37Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 35835884222,
+   "pr": 1184,
+   "commit": "c894948d9dec2d61276ef7ee78c33975fdbc108f",
+   "branch": "jli/fix-waves-per-eu",
+   "event": "pull_request",
+   "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835884222",
+   "created_at": "2026-09-23T08:13:11Z",
+   "updated_at": "2026-09-23T08:14:53Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 35834501494,
    "pr": null,
@@ -10,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "Refactor preshuffle GEMM indexing with layout algebra (#1131)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494",
    "created_at": "2026-09-23T07:58:11Z",
-   "updated_at": "2026-09-23T08:01:46Z",
+   "updated_at": "2026-09-23T08:02:58Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,38 +70,38 @@
    "branch": "jli/fix-waves-per-eu",
    "event": "pull_request",
    "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35831319394",
    "created_at": "2026-09-23T07:21:54Z",
-   "updated_at": "2026-09-23T07:51:35Z",
+   "updated_at": "2026-09-23T08:14:38Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-23T07:51:35Z",
-     "completed_at": null,
+     "completed_at": "2026-09-23T08:13:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35831319394/job/107092794067"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-23T07:52:02Z",
-     "completed_at": null,
+     "completed_at": "2026-09-23T08:14:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35831319394/job/107092794113"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-23T07:51:55Z",
-     "completed_at": null,
+     "completed_at": "2026-09-23T08:14:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35831319394/job/107092794189"
     }
    ]
@@ -2108,95 +2138,6 @@
      "started_at": "2026-09-20T01:57:27Z",
      "completed_at": "2026-09-20T01:57:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35482646437/job/106003241637"
-    }
-   ]
-  },
-  {
-   "run_id": 35480673166,
-   "pr": null,
-   "commit": "7ce8ad56cb4bb23ac9b705f9161a45e5257ee6d1",
-   "branch": "main",
-   "event": "push",
-   "title": "Version: bump version to 0.4.0 (#1174)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480673166",
-   "created_at": "2026-09-20T01:09:57Z",
-   "updated_at": "2026-09-20T03:30:34Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-20T01:54:03Z",
-     "completed_at": "2026-09-20T02:15:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480673166/job/105999478347"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-20T01:24:44Z",
-     "completed_at": "2026-09-20T02:34:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480673166/job/105999478359",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-20T02:46:28Z",
-     "completed_at": "2026-09-20T03:30:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480673166/job/105999478378"
-    }
-   ]
-  },
-  {
-   "run_id": 35480648735,
-   "pr": null,
-   "commit": "e011da818d9a3fd9cf1de0c54b82927ed05143e5",
-   "branch": "pr/enh-coop-warp-primitives",
-   "event": "pull_request",
-   "title": "[Ext][Coop] Add more warp-level primitives",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480648735",
-   "created_at": "2026-09-20T01:09:22Z",
-   "updated_at": "2026-09-20T02:25:00Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-20T02:15:23Z",
-     "completed_at": "2026-09-20T02:24:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480648735/job/105999067780"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-20T01:22:43Z",
-     "completed_at": "2026-09-20T02:13:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480648735/job/105999067808"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-20T01:21:17Z",
-     "completed_at": "2026-09-20T02:17:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480648735/job/105999067812"
     }
    ]
   }
