@@ -16,6 +16,7 @@ from .. import warp as _dispatched_warp
 from .._common import (
     _cast_value,
     _combine,
+    _convert_item,
     _convert_value,
     _identity,
     _linear_thread_id,
@@ -23,9 +24,9 @@ from .._common import (
     _seed,
     _select_value,
     _shuffle_value,
-    _validate_valid_items,
+    _validate_scalar_valid_items,
 )
-from .._values import _as_items, _from_items, _is_items, _shared_array, _shared_load, _shared_store
+from .._values import _as_items, _from_items, _is_items, _item_dtype, _shared_array, _shared_load, _shared_store
 from ._spec import BlockAlgorithmMeta
 
 __all__ = ["BlockScanAlgorithm", "BlockScan"]
@@ -64,7 +65,9 @@ def _prefix_warp_scans_full(partial, tid, slots, op, warp_scan_with_aggregate, w
     already read every warp's total out of *slots*, and with a single warp the
     scan's top lane already holds it.
     """
-    inclusive, prefix, aggregate = warp_scan_with_aggregate(partial, op, width=warp_threads)
+    inclusive, prefix, aggregate = warp_scan_with_aggregate(
+        partial, op, width=warp_threads, _dtype=_item_dtype(partial)
+    )
     if const_expr(num_warps > 1):
         lane = tid % warp_threads
         warp_id = tid // warp_threads
@@ -80,7 +83,7 @@ def _prefix_warp_scans_full(partial, tid, slots, op, warp_scan_with_aggregate, w
         # make it logarithmic: warp 0 scans the num_warps totals, and each
         # thread then reads the single entry in front of its own warp.
         for i in range_constexpr(num_warps - 2, -1, -1):
-            prefix = (warp_id > i).select(_combine(op, _shared_load(slots, i), prefix), prefix)
+            prefix = _select_value(warp_id > i, _combine(op, _shared_load(slots, i), prefix), prefix)
         # Same slots, folded unconditionally: that is the whole block.
         aggregate = _shared_load(slots, 0)
         for i in range_constexpr(1, num_warps):
@@ -93,7 +96,7 @@ def _prefix_warp_scans(partial, tid, storage, op, warp_inclusive_scan, warp_thre
     lane = tid % warp_threads
     warp_id = tid // warp_threads
     num_warps = (block_threads + warp_threads - 1) // warp_threads
-    raw = warp_inclusive_scan(partial, op, width=warp_threads)
+    raw = warp_inclusive_scan(partial, op, width=warp_threads, _dtype=_item_dtype(partial))
     prefix = _shuffle_value(raw, 1, warp_threads, mode="up")
     last = Int32(warp_threads - 1)
     if const_expr(block_threads % warp_threads != 0):
@@ -154,7 +157,7 @@ def _prefix_raking(partial, tid, storage, op, warp_inclusive_scan, warp_threads,
                 total = _select_value(
                     index < block_threads, _combine(op, total, _shared_load(storage.slots, safe)), total
                 )
-        scanned = warp_inclusive_scan(total, op, width=warp_threads)
+        scanned = warp_inclusive_scan(total, op, width=warp_threads, _dtype=_item_dtype(total))
         preceding = _shuffle_value(scanned, 1, warp_threads, mode="up")
         aggregate = _shuffle_value(scanned, segments - 1, warp_threads)
         if tid == 0:
@@ -191,7 +194,7 @@ def _callback_prefix(aggregate, tid, storage, callback, warp_threads):
     # return value is used. Pointer-backed state can carry prefixes across tiles.
     barrier()
     if tid < warp_threads:
-        prefix = callback(aggregate)
+        prefix = _convert_item(callback(aggregate), _item_dtype(aggregate))
         if tid == 0:
             _shared_store(storage.callback, 0, prefix)
     barrier()
@@ -251,6 +254,9 @@ class BlockScan(metaclass=_BlockScanMeta):
     Specialize as ``BlockScan[dtype, block_size, algorithm]``; ``algorithm``
     defaults to ``WARP_SCANS``. ``block_size`` is a positive thread count or
     positive ``(x, y, z)`` extents.
+    The declared dtype is one complete element. A bare Vector is one element
+    for a Vector dtype, and a scalar item sequence for a Numeric dtype.
+    Prefixes preserve the input item count; seeds and aggregate are one dtype.
     Tile lengths are inferred from inputs and must be uniform across threads.
     All policies support associative operators and preserve flattened blocked
     order: thread ``t``'s items precede thread ``t + 1``'s items. Regrouping may
@@ -259,8 +265,9 @@ class BlockScan(metaclass=_BlockScanMeta):
     Custom callables may supply ``identity(dtype)`` or a constant ``identity``
     member, overridden by explicit ``identity=``. Inclusive scans need no
     identity. Exclusive scans without an identity or ``init`` leave the first
-    flattened output unspecified. ``valid_items`` counts leading elements
-    across the entire block and requires an identity to mask the remainder.
+    flattened output unspecified. ``valid_items`` is supported only for one
+    item per thread, counts leading contributing threads, and requires an
+    identity to mask the remainder. Item ranges require ``valid_items=None``.
     The aggregate excludes both ``init`` and any callback prefix.
 
     ``prefix_callback(aggregate)`` executes in the first physical warp: all its
@@ -309,56 +316,22 @@ class BlockScan(metaclass=_BlockScanMeta):
         # to every thread. With 128 threads and four ones per thread, the last thread receives
         # [508,509,510,511] from the exclusive scan.
 
-        # Keep the first six ones and seed with 10. Each method keeps its normal return shape.
-        fx.barrier()
-        inclusive = P.inclusive(
-            x, fx.ReductionOp.ADD, storage=storage, init=10, valid_items=6, identity=fx.Int32(0)
-        )
-        fx.barrier()
-        exclusive = P.exclusive(
-            x, fx.ReductionOp.ADD, storage=storage, init=10, valid_items=6, identity=fx.Int32(0)
-        )
+        # Guarded scans accept one item per thread. The first six threads
+        # contribute one each; aggregate=6 and inclusive[T0..T5]=11..16.
         fx.barrier()
         inclusive, aggregate = P.inclusive_with_aggregate(
-            x, fx.ReductionOp.ADD, storage=storage, init=10, valid_items=6, identity=fx.Int32(0)
+            x[0], fx.ReductionOp.ADD, storage=storage, init=10, valid_items=6
         )
-        fx.barrier()
-        exclusive, aggregate = P.exclusive_with_aggregate(
-            x, fx.ReductionOp.ADD, storage=storage, init=10, valid_items=6, identity=fx.Int32(0)
-        )
-        # Data      | T0            | T1            | T2            | T3
-        # ----------+---------------+---------------+---------------+--------------
-        # inclusive | [11,12,13,14] | [15,16,16,16] | [16,16,16,16] | [16,16,16,16]
-        # exclusive | [10,11,12,13] | [14,15,16,16] | [16,16,16,16] | [16,16,16,16]
-        # aggregate | 6             | 6             | 6             | 6
 
-        # T4..T63 receive [16,16,16,16] in both guarded scans.
-
-        # A callback can supply the prefix from an earlier tile; omit init in these calls.
+        # A callback also supplies one prefix for a complete array tile.
         def previous_prefix(aggregate):
             return fx.Int32(10)
 
         fx.barrier()
-        inclusive = P.inclusive(
-            x, fx.ReductionOp.ADD, storage=storage, valid_items=6,
-            identity=fx.Int32(0), prefix_callback=previous_prefix,
-        )
-        fx.barrier()
-        exclusive = P.exclusive(
-            x, fx.ReductionOp.ADD, storage=storage, valid_items=6,
-            identity=fx.Int32(0), prefix_callback=previous_prefix,
-        )
-        fx.barrier()
-        inclusive, aggregate = P.inclusive_with_aggregate(
-            x, fx.ReductionOp.ADD, storage=storage, valid_items=6,
-            identity=fx.Int32(0), prefix_callback=previous_prefix,
-        )
-        fx.barrier()
         exclusive, aggregate = P.exclusive_with_aggregate(
-            x, fx.ReductionOp.ADD, storage=storage, valid_items=6,
-            identity=fx.Int32(0), prefix_callback=previous_prefix,
+            x, fx.ReductionOp.ADD, storage=storage, prefix_callback=previous_prefix
         )
-        # The callback receives 6; all four methods produce the same respective results as above.
+        # aggregate=256; T0 receives [10,11,12,13], T1 receives [14,15,16,17].
     """
 
     dtype = None
@@ -388,23 +361,24 @@ class BlockScan(metaclass=_BlockScanMeta):
         All threads must participate and synchronize before reusing storage.
 
         Args:
-            value: Per-thread input value with nonempty items converted to the specialization's dtype. Tile lengths
-                must
+            value: One element or a nonempty list/tuple/Vector of consecutive
+                elements, converted to the specialized dtype. Tile lengths must
                 match across threads; items are ordered by thread, then item index.
+                A list/tuple of vector elements keeps each vector intact.
             op: Associative ReductionOp or binary callable returning the element
                 dtype. Values that need a custom operation require a callable. Operand order is preserved
                 and commutativity is not required.
             storage: Shared instance of the specialization's ``SharedStorage``.
-            init: Optional prefix seed, applied as the left operand before the
-                input sequence. Mutually exclusive with ``prefix_callback``.
+            init: Optional single value of the element dtype, applied as the
+                left operand before the entire input sequence. Mutually exclusive
+                with ``prefix_callback``.
             identity: Optional neutral element or callable ``identity(dtype)``.
                 Overrides a built-in identity or ``op.identity``. Required from
                 one of these sources when ``valid_items`` is supplied.
-            valid_items: Uniform Python integer or runtime scalar counting valid
-                leading elements in the entire flattened block tile, not threads.
-                Must lie in ``[0, block_threads * per_thread_item_count]``; ``None``
-                includes all inputs. The caller must enforce runtime bounds.
-                Remaining inputs are replaced by the operator identity.
+            valid_items: Uniform number of leading contributing threads in
+                ``[0, block_threads]``, or ``None`` for all inputs. Only the
+                single-item overload accepts this argument; omit it for an
+                item range. Runtime bounds are the caller's responsibility.
             prefix_callback: Optional callable receiving the input aggregate.
                 Runs in the first physical warp's active lanes for WARP_SCANS,
                 or its raking-thread subset for raking policies. Only lane zero's
@@ -445,23 +419,24 @@ class BlockScan(metaclass=_BlockScanMeta):
         All threads must participate and synchronize before reusing storage.
 
         Args:
-            value: Per-thread input value with nonempty items converted to the specialization's dtype. Tile lengths
-                must
+            value: One element or a nonempty list/tuple/Vector of consecutive
+                elements, converted to the specialized dtype. Tile lengths must
                 match across threads; items are ordered by thread, then item index.
+                A list/tuple of vector elements keeps each vector intact.
             op: Associative ReductionOp or binary callable returning the element
                 dtype. Values that need a custom operation require a callable. Operand order is preserved
                 and commutativity is not required.
             storage: Shared instance of the specialization's ``SharedStorage``.
-            init: Optional prefix seed, applied as the left operand before the
-                input sequence. Mutually exclusive with ``prefix_callback``.
+            init: Optional single value of the element dtype, applied as the
+                left operand before the entire input sequence. Mutually exclusive
+                with ``prefix_callback``.
             identity: Optional neutral element or callable ``identity(dtype)``.
                 Overrides a built-in identity or ``op.identity``. Required from
                 one of these sources when ``valid_items`` is supplied.
-            valid_items: Uniform Python integer or runtime scalar counting valid
-                leading elements in the entire flattened block tile, not threads.
-                Must lie in ``[0, block_threads * per_thread_item_count]``; ``None``
-                includes all inputs. The caller must enforce runtime bounds.
-                Remaining inputs are replaced by the operator identity.
+            valid_items: Uniform number of leading contributing threads in
+                ``[0, block_threads]``, or ``None`` for all inputs. Only the
+                single-item overload accepts this argument; omit it for an
+                item range. Runtime bounds are the caller's responsibility.
             prefix_callback: Optional callable receiving the input aggregate.
                 Runs in the first physical warp's active lanes for WARP_SCANS,
                 or its raking-thread subset for raking policies. Only lane zero's
@@ -501,23 +476,24 @@ class BlockScan(metaclass=_BlockScanMeta):
         All threads must participate and synchronize before reusing storage.
 
         Args:
-            value: Per-thread input value with nonempty items converted to the specialization's dtype. Tile lengths
-                must
+            value: One element or a nonempty list/tuple/Vector of consecutive
+                elements, converted to the specialized dtype. Tile lengths must
                 match across threads; items are ordered by thread, then item index.
+                A list/tuple of vector elements keeps each vector intact.
             op: Associative ReductionOp or binary callable returning the element
                 dtype. Values that need a custom operation require a callable. Operand order is preserved
                 and commutativity is not required.
             storage: Shared instance of the specialization's ``SharedStorage``.
-            init: Optional prefix seed, applied as the left operand before the
-                input sequence. Mutually exclusive with ``prefix_callback``.
+            init: Optional single value of the element dtype, applied as the
+                left operand before the entire input sequence. Mutually exclusive
+                with ``prefix_callback``.
             identity: Optional neutral element or callable ``identity(dtype)``.
                 Overrides a built-in identity or ``op.identity``. Required from
                 one of these sources when ``valid_items`` is supplied.
-            valid_items: Uniform Python integer or runtime scalar counting valid
-                leading elements in the entire flattened block tile, not threads.
-                Must lie in ``[0, block_threads * per_thread_item_count]``; ``None``
-                includes all inputs. The caller must enforce runtime bounds.
-                Remaining inputs are replaced by the operator identity.
+            valid_items: Uniform number of leading contributing threads in
+                ``[0, block_threads]``, or ``None`` for all inputs. Only the
+                single-item overload accepts this argument; omit it for an
+                item range. Runtime bounds are the caller's responsibility.
             prefix_callback: Optional callable receiving the input aggregate.
                 Runs in the first physical warp's active lanes for WARP_SCANS,
                 or its raking-thread subset for raking policies. Only lane zero's
@@ -559,23 +535,24 @@ class BlockScan(metaclass=_BlockScanMeta):
         All threads must participate and synchronize before reusing storage.
 
         Args:
-            value: Per-thread input value with nonempty items converted to the specialization's dtype. Tile lengths
-                must
+            value: One element or a nonempty list/tuple/Vector of consecutive
+                elements, converted to the specialized dtype. Tile lengths must
                 match across threads; items are ordered by thread, then item index.
+                A list/tuple of vector elements keeps each vector intact.
             op: Associative ReductionOp or binary callable returning the element
                 dtype. Values that need a custom operation require a callable. Operand order is preserved
                 and commutativity is not required.
             storage: Shared instance of the specialization's ``SharedStorage``.
-            init: Optional prefix seed, applied as the left operand before the
-                input sequence. Mutually exclusive with ``prefix_callback``.
+            init: Optional single value of the element dtype, applied as the
+                left operand before the entire input sequence. Mutually exclusive
+                with ``prefix_callback``.
             identity: Optional neutral element or callable ``identity(dtype)``.
                 Overrides a built-in identity or ``op.identity``. Required from
                 one of these sources when ``valid_items`` is supplied.
-            valid_items: Uniform Python integer or runtime scalar counting valid
-                leading elements in the entire flattened block tile, not threads.
-                Must lie in ``[0, block_threads * per_thread_item_count]``; ``None``
-                includes all inputs. The caller must enforce runtime bounds.
-                Remaining inputs are replaced by the operator identity.
+            valid_items: Uniform number of leading contributing threads in
+                ``[0, block_threads]``, or ``None`` for all inputs. Only the
+                single-item overload accepts this argument; omit it for an
+                item range. Runtime bounds are the caller's responsibility.
             prefix_callback: Optional callable receiving the input aggregate.
                 Runs in the first physical warp's active lanes for WARP_SCANS,
                 or its raking-thread subset for raking policies. Only lane zero's
@@ -604,10 +581,12 @@ class BlockScan(metaclass=_BlockScanMeta):
             raise TypeError("specialize first, e.g. BlockScan[fx.Float32, 256]")
         if prefix_callback is not None and init is not None:
             raise ValueError("init and prefix_callback are mutually exclusive")
+        _validate_scalar_valid_items(value, valid_items, cls.block_threads, cls.dtype)
         value = _convert_value(value, cls.dtype)
+        if init is not None:
+            init = _cast_value(cls.dtype, init)
         tid = _linear_thread_id(cls.block_size)
-        items = _as_items(value)
-        _validate_valid_items(valid_items, cls.block_threads * len(items))
+        items = _as_items(value, cls.dtype)
         if (
             cls.algorithm is BlockScanAlgorithm.WARP_SCANS
             and isinstance(op, ReductionOp)
@@ -634,12 +613,12 @@ class BlockScan(metaclass=_BlockScanMeta):
             output = [_combine(op, prefix, head) for head in heads]
             if not inclusive:
                 output.insert(0, prefix)
-            result = _from_items(output, like=value) if _is_items(value) else output[0]
+            result = _from_items(output, like=value) if _is_items(value, cls.dtype) else output[0]
             return result, aggregate
         neutral = _optional_identity(op, cls.dtype, identity)
         if valid_items is not None:
             neutral = _identity(op, cls.dtype, identity)
-            items = [_select_value(tid * len(items) + i < valid_items, item, neutral) for i, item in enumerate(items)]
+            items = (_select_value(tid < valid_items, value, neutral),)
         scanned = [items[0]]
         for item in items[1:]:
             scanned.append(_combine(op, scanned[-1], item))
@@ -663,7 +642,7 @@ class BlockScan(metaclass=_BlockScanMeta):
             output.append(joined)
         if not inclusive:
             output.insert(0, prefix)
-        result = _from_items(output, like=value) if _is_items(value) else output[0]
+        result = _from_items(output, like=value) if _is_items(value, cls.dtype) else output[0]
         return result, aggregate
 
     @classmethod

@@ -16,15 +16,15 @@ __all__ = [
 ]
 
 
-def _reduce_batched(value, op, width, output_layout, sync_physical_warp=False):
+def _reduce_batched(value, op, width, output_layout, sync_physical_warp=False, dtype=None):
     width = _resolve_warp_width(width, "warp_reduce_batched width")
     if not isinstance(sync_physical_warp, bool):
         raise TypeError("sync_physical_warp must be a Python bool")
     if output_layout not in ("scalar", "blocked", "striped"):
         raise ValueError("output_layout must be scalar, blocked, or striped")
-    if not _is_items(value):
+    if not _is_items(value, dtype):
         raise TypeError("warp_reduce_batched expects a Vector or a fixed-size tuple/list")
-    items = list(_as_items(value)) if len(value) else []
+    items = list(_as_items(value, dtype)) if len(value) else []
     batches = len(items)
     if output_layout == "scalar" and not 1 <= batches <= width:
         raise ValueError("scalar batched reduction requires 1 <= batches <= width; use a distributed layout")
@@ -67,6 +67,7 @@ def warp_reduce_batched(
     *,
     width: int | None = None,
     sync_physical_warp: bool = False,
+    _dtype=None,
 ):
     """Reduce register columns and distribute the batch aggregates across lanes.
 
@@ -109,7 +110,7 @@ def warp_reduce_batched(
         # --------------+------+-------+-----+-----++------+-------+-----+----
         # physical_sync | [10] | [100] | [?] | [?] || [26] | [260] | [?] | [?]
     """
-    return _reduce_batched(value, op, width, "scalar", sync_physical_warp)
+    return _reduce_batched(value, op, width, "scalar", sync_physical_warp, _dtype)
 
 
 def warp_reduce_batched_to_blocked(
@@ -118,6 +119,7 @@ def warp_reduce_batched_to_blocked(
     *,
     width: int | None = None,
     sync_physical_warp: bool = False,
+    _dtype=None,
 ):
     """Reduce register columns into blocked batch ownership.
 
@@ -163,7 +165,7 @@ def warp_reduce_batched_to_blocked(
         )
         # physical_sync has the same lane/slot results as y, including its unspecified slots.
     """
-    return _reduce_batched(value, op, width, "blocked", sync_physical_warp)
+    return _reduce_batched(value, op, width, "blocked", sync_physical_warp, _dtype)
 
 
 def warp_reduce_batched_to_striped(
@@ -172,6 +174,7 @@ def warp_reduce_batched_to_striped(
     *,
     width: int | None = None,
     sync_physical_warp: bool = False,
+    _dtype=None,
 ):
     """Reduce register columns into striped batch ownership.
 
@@ -217,7 +220,7 @@ def warp_reduce_batched_to_striped(
         )
         # physical_sync has the same lane/slot results as y, including its unspecified slots.
     """
-    return _reduce_batched(value, op, width, "striped", sync_physical_warp)
+    return _reduce_batched(value, op, width, "striped", sync_physical_warp, _dtype)
 
 
 class WarpReduceBatched(WarpPrimitive):
@@ -274,7 +277,9 @@ class WarpReduceBatched(WarpPrimitive):
             batch count exceeds width or is zero.
         """
         value = cls._prepare(value)
-        return cls._invoke(warp_reduce_batched, value, op, sync_physical_warp=sync_physical_warp, storage=storage)
+        return cls._invoke(
+            warp_reduce_batched, value, op, sync_physical_warp=sync_physical_warp, storage=storage, _dtype=cls.dtype
+        )
 
     @classmethod
     def reduce_to_blocked(
@@ -310,7 +315,12 @@ class WarpReduceBatched(WarpPrimitive):
         """
         value = cls._prepare(value)
         return cls._invoke(
-            warp_reduce_batched_to_blocked, value, op, sync_physical_warp=sync_physical_warp, storage=storage
+            warp_reduce_batched_to_blocked,
+            value,
+            op,
+            sync_physical_warp=sync_physical_warp,
+            storage=storage,
+            _dtype=cls.dtype,
         )
 
     @classmethod
@@ -347,5 +357,10 @@ class WarpReduceBatched(WarpPrimitive):
         """
         value = cls._prepare(value)
         return cls._invoke(
-            warp_reduce_batched_to_striped, value, op, sync_physical_warp=sync_physical_warp, storage=storage
+            warp_reduce_batched_to_striped,
+            value,
+            op,
+            sync_physical_warp=sync_physical_warp,
+            storage=storage,
+            _dtype=cls.dtype,
         )

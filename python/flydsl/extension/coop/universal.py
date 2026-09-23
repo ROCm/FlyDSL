@@ -71,8 +71,8 @@ class BlockReduce(_block_reduce.BlockReduce):
         y = P(x, fx.ReductionOp.ADD, storage=storage)
         # Every thread receives y=8256.
         fx.barrier()
-        partial = P(x, fx.ReductionOp.ADD, storage=storage, valid_items=5, identity=fx.Int32(0))
-        # Every thread receives partial=15. valid_items counts elements, not threads.
+        partial = P(x[0], fx.ReductionOp.ADD, storage=storage, valid_items=5, identity=fx.Int32(0))
+        # Every thread receives partial=25, the sum of the first five threads' odd values.
     """
 
     warp_ops = _UNIVERSAL_WARP
@@ -105,56 +105,22 @@ class BlockScan(_block_scan.BlockScan):
         # to every thread. With 128 threads and four ones per thread, the last thread receives
         # [508,509,510,511] from the exclusive scan.
 
-        # Keep the first six ones and seed with 10. Each method keeps its normal return shape.
-        fx.barrier()
-        inclusive = P.inclusive(
-            x, fx.ReductionOp.ADD, storage=storage, init=10, valid_items=6, identity=fx.Int32(0)
-        )
-        fx.barrier()
-        exclusive = P.exclusive(
-            x, fx.ReductionOp.ADD, storage=storage, init=10, valid_items=6, identity=fx.Int32(0)
-        )
+        # Guarded scans take one item per thread and count contributing threads.
         fx.barrier()
         inclusive, aggregate = P.inclusive_with_aggregate(
-            x, fx.ReductionOp.ADD, storage=storage, init=10, valid_items=6, identity=fx.Int32(0)
+            x[0], fx.ReductionOp.ADD, storage=storage, init=10, valid_items=6
         )
-        fx.barrier()
-        exclusive, aggregate = P.exclusive_with_aggregate(
-            x, fx.ReductionOp.ADD, storage=storage, init=10, valid_items=6, identity=fx.Int32(0)
-        )
-        # Data      | T0            | T1            | T2            | T3
-        # ----------+---------------+---------------+---------------+--------------
-        # inclusive | [11,12,13,14] | [15,16,16,16] | [16,16,16,16] | [16,16,16,16]
-        # exclusive | [10,11,12,13] | [14,15,16,16] | [16,16,16,16] | [16,16,16,16]
-        # aggregate | 6             | 6             | 6             | 6
+        # T0..T5 receive 11..16; the remaining threads receive 16. aggregate=6.
 
-        # T4..T63 receive [16,16,16,16] in both guarded scans.
-
-        # A callback can supply the prefix from an earlier tile; omit init in these calls.
+        # A callback supplies one prefix for the complete array tile.
         def previous_prefix(aggregate):
             return fx.Int32(10)
 
         fx.barrier()
-        inclusive = P.inclusive(
-            x, fx.ReductionOp.ADD, storage=storage, valid_items=6,
-            identity=fx.Int32(0), prefix_callback=previous_prefix,
-        )
-        fx.barrier()
-        exclusive = P.exclusive(
-            x, fx.ReductionOp.ADD, storage=storage, valid_items=6,
-            identity=fx.Int32(0), prefix_callback=previous_prefix,
-        )
-        fx.barrier()
-        inclusive, aggregate = P.inclusive_with_aggregate(
-            x, fx.ReductionOp.ADD, storage=storage, valid_items=6,
-            identity=fx.Int32(0), prefix_callback=previous_prefix,
-        )
-        fx.barrier()
         exclusive, aggregate = P.exclusive_with_aggregate(
-            x, fx.ReductionOp.ADD, storage=storage, valid_items=6,
-            identity=fx.Int32(0), prefix_callback=previous_prefix,
+            x, fx.ReductionOp.ADD, storage=storage, prefix_callback=previous_prefix
         )
-        # The callback receives 6; all four methods produce the same respective results as above.
+        # aggregate=256; T0 receives [10,11,12,13], T1 receives [14,15,16,17].
     """
 
     warp_ops = _UNIVERSAL_WARP

@@ -29,6 +29,8 @@ def warp_merge_sort(
     width: int | None = None,
     compare_op,
     valid_items: int | Integer | None = None,
+    _dtype=None,
+    _value_dtype=None,
 ):
     """Stably sort a blocked logical-warp tile, optionally carrying payloads.
 
@@ -91,11 +93,11 @@ def warp_merge_sort(
     """
     if not callable(compare_op):
         raise TypeError("compare_op must be a strict ordering callable")
-    if not _is_items(keys):
+    if not _is_items(keys, _dtype):
         raise TypeError("keys must be a nonempty Vector/tuple/list")
     descending = False
     width = _resolve_warp_width(width, "warp_merge_sort width")
-    items, payload, vector = _unpack(keys, values)
+    items, payload, vector = _unpack(keys, values, _value_dtype, _dtype)
     count = len(items)
     _validate_valid_items(valid_items, width * count)
     lane = lane_id() % width
@@ -201,5 +203,12 @@ class WarpMergeSort(WarpPrimitive):
         if values is not None:
             values = cls._prepare(values, dtype=cls.value_dtype)
         return cls._invoke(
-            warp_merge_sort, keys, values, compare_op=compare_op, valid_items=valid_items, storage=storage
+            warp_merge_sort,
+            keys,
+            values,
+            compare_op=compare_op,
+            valid_items=valid_items,
+            storage=storage,
+            _dtype=cls.dtype,
+            _value_dtype=cls.value_dtype,
         )
