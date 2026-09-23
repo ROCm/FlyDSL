@@ -222,6 +222,12 @@ std::pair<ContigResult, ContigSegment> findContigSegment(IntTupleBuilder<IntTupl
     bool isStride1 =
         flatStrideLeaves[i].isStatic() && flatStrideLeaves[i].getLeafAsInt().getValue() == 1;
     if (isStride1) {
+      // Size-one dims are contiguous with everything; they neither define nor
+      // break the contiguous segment. Skip them so layouts like (1, 4):(1, 1)
+      // still resolve to the size-4 stride-1 dim instead of being rejected.
+      if (flatShapeLeaves[i].isStatic() &&
+          flatShapeLeaves[i].getLeafAsInt().getValue() == 1)
+        continue;
       ++count;
       if (count > 1)
         return {ContigResult::Invalid, {}};
