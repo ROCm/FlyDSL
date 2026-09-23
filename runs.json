@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-09-23T06:46:06Z",
+ "updated": "2026-09-23T08:00:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35834501494,
+   "pr": null,
+   "commit": "e70bf796facb79fb30e179fdc852946f776b876d",
+   "branch": "main",
+   "event": "push",
+   "title": "Refactor preshuffle GEMM indexing with layout algebra (#1131)",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494",
+   "created_at": "2026-09-23T07:58:11Z",
+   "updated_at": "2026-09-23T07:58:12Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35834362277,
+   "pr": null,
+   "commit": "82679a9ddae4da1c16bd52c61776ab0e3bb3070e",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel][GEMM] Add gfx950 2-wave preshuffle tiles (#1183)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834362277",
+   "created_at": "2026-09-23T07:56:44Z",
+   "updated_at": "2026-09-23T07:58:12Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 35831319394,
+   "pr": 1184,
+   "commit": "948ea848e2ace47a61194f87388f1e93dafbd7b8",
+   "branch": "jli/fix-waves-per-eu",
+   "event": "pull_request",
+   "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35831319394",
+   "created_at": "2026-09-23T07:21:54Z",
+   "updated_at": "2026-09-23T07:51:35Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-23T07:51:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35831319394/job/107092794067"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-23T07:52:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35831319394/job/107092794113"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-23T07:51:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35831319394/job/107092794189"
+    }
+   ]
+  },
   {
    "run_id": 35815211205,
    "pr": null,
@@ -10,19 +83,19 @@
    "branch": "main",
    "event": "push",
    "title": "[Fix][Coop] Align warp array collective semantics (#1178)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35815211205",
    "created_at": "2026-09-23T03:39:46Z",
-   "updated_at": "2026-09-23T04:03:34Z",
+   "updated_at": "2026-09-23T07:32:16Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-23T04:03:34Z",
+     "started_at": "2026-09-23T07:32:15Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35815211205/job/107039881661"
     },
@@ -2126,79 +2199,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480648735/job/105999067812"
     }
    ]
-  },
-  {
-   "run_id": 35480600803,
-   "pr": 1174,
-   "commit": "e2a92f1974965af531eee12a018042d000187546",
-   "branch": "codex/bump-version-0.4.0",
-   "event": "pull_request",
-   "title": "[Verion] Bump version to 0.4.0",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600803",
-   "created_at": "2026-09-20T01:08:15Z",
-   "updated_at": "2026-09-20T02:01:57Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-20T01:37:41Z",
-     "completed_at": "2026-09-20T01:53:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600803/job/105999270524"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-20T01:22:46Z",
-     "completed_at": "2026-09-20T02:01:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600803/job/105999270530"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-20T01:24:35Z",
-     "completed_at": "2026-09-20T01:40:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600803/job/105999270531"
-    }
-   ]
-  },
-  {
-   "run_id": 35480600260,
-   "pr": null,
-   "commit": "4acdec678e592ab0f9d69c9b58b2f22ff2a28e6f",
-   "branch": "main",
-   "event": "push",
-   "title": "test: align cache IR assertion with serialization (#1171)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480600260",
-   "created_at": "2026-09-20T01:08:14Z",
-   "updated_at": "2026-09-20T01:09:58Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 35480587161,
-   "pr": null,
-   "commit": "6c5e39d4bf1b1fd3c2375c365ad248192295b3ae",
-   "branch": "main",
-   "event": "push",
-   "title": "[llvm] Drop four LLVM tuning knobs that never reached codegen (#1153)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35480587161",
-   "created_at": "2026-09-20T01:07:57Z",
-   "updated_at": "2026-09-20T01:13:16Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
