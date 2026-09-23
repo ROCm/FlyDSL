@@ -58,7 +58,6 @@ Pipeline is built by `RocmBackend._pipeline_parts()` and split into three stages
   (package: cdna3, cdna4, cdna5, rdna3, rdna4, cluster, inline_asm, tdm_ops, universal;
   plus `utils.py` / `enum.py` helpers)
 - `python/flydsl/expr/gpu.py` - `SharedAllocator` for LDS (shared memory), `thread_id`/`block_id`, `barrier`
-- `python/flydsl/utils/smem_allocator.py` - legacy `SmemAllocator` (un-migrated kernels only)
 - `kernels/common/buffer_ops.py` - legacy raw AMD buffer load/store intrinsics
   (moved out of `flydsl.expr` in #880; prefer `fx.rocdl.make_buffer_tensor`)
 - `kernels/` - Pre-built kernels, organized into subpackages: `gemm/` (preshuffle_gemm.py, mxfp4_preshuffle.py, ...), `norm/` (layernorm/softmax/rmsnorm), `attention/`, `moe/`, `mega_moe/`, `common/` (incl. `common/mma/`), `comm/`, `conv/`
@@ -420,11 +419,7 @@ compute(acc_final, tile_final)
 
 2. **Prefer internal types, but unwrap at hard boundaries.** Most `range(..., init=...)` uses accept DSL numeric/vector values. If a lower-level helper explicitly expects raw `ir.Value`, unwrap with `v.ir_value()` / `_raw(v)` at that boundary only.
 
-3. **Clear `SmemPtr._view_cache` before epilogue.** `SmemPtr.get()` caches the view it creates. If called inside the runtime loop body, the cached view is defined in the loop scope. Using it in the epilogue (outside the loop) causes an SSA dominance error. Fix:
-   ```python
-   # After the runtime loop, before epilogue compute:
-   my_smem_ptr._view_cache = None
-   ```
+3. **Build LDS views at the top of the kernel, not inside the runtime loop.** Allocate shared memory with `fx.SharedAllocator().allocate(...).peek()` and build each `.view()` once up front. A view created inside the `scf.for` body is defined in the loop scope; using it in the epilogue (outside the loop) causes an SSA dominance error. Building it once at the top makes it dominate both the loop and the epilogue.
 
 ### Arithmetic Operations
 ```python
@@ -657,11 +652,11 @@ def my_kernel(A: fx.Tensor, ...):
 For the dynamic mode (``static=False``), the launch wrapper auto-infers
 ``smem`` from ``SharedAllocator.allocated_bytes`` when ``smem=None``.
 
-### Legacy SmemAllocator
-
-`flydsl.utils.smem_allocator.SmemAllocator` remains for un-migrated kernels. Its
-surface is ``__init__``/``finalize``/``get_base`` plus ``SmemPtr.get/load/store``;
-prefer `SharedAllocator` for anything new.
+`SharedAllocator` is the allocator for new kernels. The legacy
+`flydsl.utils.smem_allocator` module (`SmemAllocator` / `SmemPtr`, with its
+`finalize()` step) is kept so existing kernels keep working, but it is not
+recommended and warns when used — allocate through `fx.SharedAllocator()` over a
+`@fx.struct` storage layout and build each `.view(...)` at the top of the kernel.
 
 ### LDS Capacity
 | Architecture | GPU | LDS per CU |
@@ -874,22 +869,29 @@ FlyDSL supports source-to-assembly mapping for rocprofv3 ATT traces via the MLIR
 **How it works**:
 1. FlyDSL's `FuncLocationTracker` generates MLIR `loc()` metadata pointing to Python source lines
 2. The `ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}` pass converts MLIR locations into LLVM `DISubprogramAttr` / `DICompileUnitAttr` metadata
-3. The `-g` flag in `gpu-module-to-binary` preserves this metadata as `.debug_line` in the HSACO binary
+3. That metadata is carried through MLIR-to-LLVM-IR translation and emitted as `.debug_line` in the HSACO binary
 4. rocprofv3 ATT reads `.debug_line` to produce `code.json` with `"source_file:line"` entries
 
 **Pipeline position**: After `reconcile-unrealized-casts`, before `gpu-module-to-binary`:
 ```
 ... -> reconcile-unrealized-casts
     -> ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}  (conditional on enable_debug_info)
-    -> gpu-module-to-binary{format=fatbin opts=-g}
+    -> gpu-module-to-binary{format=fatbin opts=""}
 ```
 
 **Verification**: With `FLYDSL_DUMP_IR=1`, check `final_isa.s` for `.file` and `.loc` directives.
 The PA decode kernel achieves 99.9% coverage (1109/1110 ISA instructions mapped to source).
 
 **Key insight**: Without this pass, MLIR `loc()` metadata is silently dropped during MLIR-to-LLVM-IR
-translation. The `-g` flag alone is useless — it preserves debug info, but there's none to preserve
-without the DI scope pass.
+translation. The DI scope pass is what produces the debug info; everything downstream only carries it.
+
+⚠ `opts=` is empty above because nothing routed through it ever reaches AMD codegen —
+FlyDSL used to pass `-g` there, and it did **nothing**.
+`gpu-module-to-binary`'s `opts=` string is consumed only by the XeVM and NVVM targets —
+`TargetOptions::tokenizeCmdOptions()` has no ROCDL caller, and `ROCDL::assembleIsa()` takes no
+flags parameter at all — so the whole string is discarded without a diagnostic. Debug info
+survives purely because the DI scope pass wrote it into the IR earlier. See `/llvm` for the
+other knobs that ride this same dead path.
 
 ### Autotune Module
 
@@ -920,8 +922,16 @@ def myKernel(A, C, n: fx.Int32, const_n: fx.Constexpr[int],
 - Disk cache at `~/.flydsl/autotune/{func_name}.json`
 - `do_bench(fn, warmup=5, rep=25)` benchmarks using CUDA/HIP events, returns median ms
 
-**IMPORTANT**: `waves_per_eu` does NOT work via `gpu-module-to-binary opts=`. It needs to be
-set as an LLVM function attribute or through `rocdl-attach-target`. This is a known limitation.
+**IMPORTANT**: `waves_per_eu` does NOT work via `gpu-module-to-binary opts=`, and this is not a
+limitation that could be lifted: `opts=` is never read on AMD at all (only XeVM and NVVM consume
+it), and `--amdgpu-waves-per-eu` is not a command-line flag in the first place — it is an IR
+function attribute, which `llc` rejects if passed as a flag. The hint works because
+`RocmBackend.lower_compile_hints` *also* sets the `rocdl.waves_per_eu` attribute, which becomes
+LLVM's `"amdgpu-waves-per-eu"="N"`.
+
+⚠ `maxnreg` had no such second path — it reached only the dead `opts=` lane and was therefore
+silently inert, so it has been removed: the hint now raises, as does `Config(maxnreg=...)`.
+See `/llvm` before tuning occupancy, and to verify any knob actually reached codegen.
 
 **DLTensorAdaptor bug**: Do NOT use `flyc.from_dlpack()` with pre-wrapped tensors when calling
 a `@jit` function with varying `Constexpr` values. The `DLTensorAdaptor` caches MLIR types from
@@ -947,17 +957,15 @@ Pass raw `torch.Tensor` objects instead.
 
 6. **Tensor layout marking**: For dynamic shapes or alignment, use `flyc.from_dlpack(tensor).mark_layout_dynamic(leading_dim=0, divisibility=4)`.
 
-7. **Legacy SmemAllocator finalize**: only for the legacy `SmemAllocator` path — call `allocator.finalize()` inside the GPU module body (`CompilationContext.get_current().gpu_module_body`). `SharedAllocator` needs no finalize step.
+7. **AMD wavefront size**: Always 64 on gfx9xx. Use shifts [32, 16, 8, 4, 2, 1] for full-wave reduction.
 
-8. **AMD wavefront size**: Always 64 on gfx9xx. Use shifts [32, 16, 8, 4, 2, 1] for full-wave reduction.
+8. **tile_k alignment for GEMM**: `tile_k * elem_bytes` must be divisible by 64 (K64-byte micro-step).
 
-9. **tile_k alignment for GEMM**: `tile_k * elem_bytes` must be divisible by 64 (K64-byte micro-step).
+9. **INT4 (W4A8)**: A matrix is int8, B matrix is packed int4 (2 values/byte), unpacked to int8 in-kernel.
 
-10. **INT4 (W4A8)**: A matrix is int8, B matrix is packed int4 (2 values/byte), unpacked to int8 in-kernel.
+10. **Absolute value**: the *arith dialect* has no `absf`, but FlyDSL exports one — use `abs(v)` or `fx.absf(v)` rather than a negate/compare/select sequence.
 
-11. **Absolute value**: the *arith dialect* has no `absf`, but FlyDSL exports one — use `abs(v)` or `fx.absf(v)` rather than a negate/compare/select sequence.
-
-12. **Scalar broadcast to vector**: Use `Vec.filled(width, value, fx.Float32)` to create a splat constant vector. Do NOT use raw vector ops for ordinary arithmetic.
+11. **Scalar broadcast to vector**: Use `Vec.filled(width, value, fx.Float32)` to create a splat constant vector. Do NOT use raw vector ops for ordinary arithmetic.
 
 ---
 

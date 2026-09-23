@@ -16,6 +16,7 @@ from kernels.attention.flash_attn_utils import (
     DualwaveFp8SoftmaxHelper,
     DualwaveFp8StoreHelper,
     _make_paged_dualwave_swp_fp8_traits,
+    daz_denormal_attr,
 )
 from kernels.common.tensor_shim import _run_compiled
 
@@ -466,7 +467,6 @@ def build_flash_attn_paged_fp8_module(
 
         passthrough_entries = (
             [
-                ["denormal-fp-math-f32", "preserve-sign,preserve-sign"],
                 ["no-nans-fp-math", "true"],
                 ["unsafe-fp-math", "true"],
             ]
@@ -477,6 +477,7 @@ def build_flash_attn_paged_fp8_module(
             "rocdl.waves_per_eu": waves_per_eu,
             "rocdl.flat_work_group_size": f"{BLOCK_SIZE},{BLOCK_SIZE}",
             "passthrough": passthrough_entries,
+            "llvm.denormal_fpenv": (daz_denormal_attr() if const_expr(daz) else None),
         }
         flash_attn_paged_fp8_bn128_kernel(
             Q,

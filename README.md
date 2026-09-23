@@ -45,7 +45,7 @@ FlyDSL/
 │   │   ├── expr/              # DSL expression API (primitive, arith, vector, gpu, rocdl, buffer_ops, math, mem_ops)
 │   │   ├── compiler/          # JIT compilation pipeline (ast_rewriter, kernel_function, jit_function, backends/)
 │   │   ├── runtime/           # Device runtime (device.py, device_runtime/)
-│   │   ├── utils/             # Utilities (smem_allocator, env, logger)
+│   │   ├── utils/             # Utilities (env, logger)
 │   │   └── autotune.py        # Triton-style autotune module
 │   └── mlir_flydsl/           # MLIR Python bindings (built, not edited)
 ├── examples/                  # Runnable examples

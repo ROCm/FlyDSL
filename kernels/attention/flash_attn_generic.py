@@ -35,6 +35,7 @@ from kernels.attention.flash_attn_utils import (
     GenericStoreHelper,
     _make_flash_attn_generic_traits,
     _waitcnt_vm_n,
+    daz_denormal_attr,
 )
 from kernels.common.kernels_common import dtype_to_elem_type
 
@@ -526,7 +527,6 @@ def build_flash_attn_func_module_primary(
 
         passthrough_entries = (
             [
-                ["denormal-fp-math-f32", "preserve-sign,preserve-sign"],
                 ["no-nans-fp-math", "true"],
                 ["unsafe-fp-math", "true"],
             ]
@@ -553,6 +553,7 @@ def build_flash_attn_func_module_primary(
                     else None
                 ),
                 "passthrough": passthrough_entries,
+                "llvm.denormal_fpenv": (daz_denormal_attr() if const_expr(daz) else None),
             },
         ).launch(
             grid=(grid_x, 1, 1),

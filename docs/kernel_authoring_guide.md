@@ -501,15 +501,7 @@ LDS global that the compiler sizes, so `launch(smem=...)` is left unset. Use
 `>=` that size). See `kernels/gemm/preshuffle_gemm.py` and
 `kernels/norm/rmsnorm_kernel.py` for real usage.
 
-### 6.2 Legacy `SmemAllocator`
-
-The older `SmemAllocator` / `SmemPtr` path
-(`python/flydsl/utils/smem_allocator.py`) remains for un-migrated kernels: it
-tracks byte offsets manually (`_align` / `finalize` / `get_base`) and its
-`finalize()` must be called inside the `gpu.module` body. Prefer
-`fx.SharedAllocator` for new kernels.
-
-### 6.3 LDS capacity
+### 6.2 LDS capacity
 
 | Architecture | LDS per CU |
 |---|---|
@@ -737,7 +729,6 @@ Writing a new kernel?
 | `python/flydsl/expr/rocdl/` | ROCm dialect intrinsics (MFMA/WMMA, buffer, TDM, cluster) |
 | `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, etc.) |
 | `python/flydsl/expr/gpu.py` | `SharedAllocator`, GPU ops (thread_id, barrier, ...) |
-| `python/flydsl/utils/smem_allocator.py` | Legacy `SmemAllocator` / `SmemPtr` LDS management |
 | `kernels/gemm/preshuffle_gemm.py` | Preshuffle GEMM kernel example |
 | `tests/kernels/test_vec_add.py` | Vector add kernel test |
 | `tests/kernels/test_preshuffle_gemm.py` | Preshuffle GEMM test |

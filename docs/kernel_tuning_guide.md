@@ -289,8 +289,8 @@ Three pitfalls (all covered in `/prefetch-data-load`):
 2. **Unwrap init values at hard boundaries only.** Most carried values stay
    `fx.Int32`/`fx.Float32`/`Vector`; unwrap to raw `ir.Value` only where a
    low-level helper demands it.
-3. **Clear `SmemPtr._view_cache = None` before the epilogue** when a shared view
-   was created inside the loop, or the epilogue use hits an SSA dominance error.
+3. **Build shared-memory views at the top of the kernel**, not inside the loop
+   body, or the epilogue use hits an SSA dominance error.
 
 ### Async copy (global → LDS DMA)
 

@@ -3,9 +3,10 @@
 
 """Ordered warp prefix scans and logical-warp broadcast.
 
-Numeric list/tuple inputs normalize to Vector; lists of Struct items normalize
-to tuples. Both function and class APIs scan each item column independently.
-A seed may be one item shared by all columns or a matching item sequence.
+Item ranges form one complete blocked sequence: each lane's items precede
+the next lane's items. A scan accepts one element-valued seed and produces
+one unseeded aggregate. Array inputs require valid_items=None; for scalar
+and plain Struct inputs, valid_items counts contributing leading lanes.
 """
 
 from ....compiler import jit
@@ -22,9 +23,9 @@ from .._common import (
     _seed,
     _select_value,
     _shuffle_value,
-    _validate_valid_items,
+    _validate_scalar_valid_items,
 )
-from .._values import _items_dtype
+from .._values import _as_items, _from_items, _is_items, _items_dtype
 from ._spec import WarpPrimitive
 
 __all__ = [
@@ -73,7 +74,7 @@ def _scan_valid(value, op, width, valid_items):
 
 def _raw(value, op, width, valid_items):
     value = _normalize_columns(value)
-    _validate_valid_items(valid_items, width)
+    _validate_scalar_valid_items(value, valid_items, width)
     if valid_items is not None:
         return _scan_valid(value, op, width, valid_items)
     return _hillis_steele(value, op, width)
@@ -124,6 +125,37 @@ def _exclusive(raw, op, width, init, valid_items):
         return _seed_exclusive(shifted, op, init, width, width if valid_items is None else valid_items)
     # Without a seed, the first exclusive prefix is unspecified.
     return shifted
+
+
+def _validate_scan(value, init, valid_items, width):
+    _validate_scalar_valid_items(value, valid_items, width)
+    if _is_items(value) and _is_items(init):
+        raise TypeError("scan init must be one item, not an item range")
+
+
+@jit
+def _join_array_prefix(local, prefix, op, init, width):
+    result = local
+    if lane_id() % width != 0:
+        result = _combine(op, prefix, local)
+    return _seed(result, op, init)
+
+
+def _array_scan(value, op, width, init):
+    """Scan a complete blocked tile, returning one unseeded aggregate."""
+    items = _as_items(value)
+    local = [items[0]]
+    for item in items[1:]:
+        local.append(_combine(op, local[-1], item))
+    raw = _hillis_steele(local[-1], op, width)
+    prefix, _ = _shuffle_up(raw, 1, width)
+    inclusive = [_join_array_prefix(item, prefix, op, init, width) for item in local]
+    exclusive = [_exclusive(raw, op, width, init, None), *inclusive[:-1]]
+    return (
+        _from_items(inclusive, like=value),
+        _from_items(exclusive, like=value),
+        _broadcast_last(raw, width),
+    )
 
 
 def warp_broadcast(
@@ -188,15 +220,17 @@ def warp_inclusive_scan(
     for other operators the first exclusive output is unspecified.
 
     Args:
-        value: This lane's input value. Its items are scanned independently.
+        value: This lane's input value. An item range forms part of one blocked
+            sequence: all of this lane's items precede the next lane's items.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
-        init: Optional initial value combined on the left of each prefix, converted
-            to the input value type.
+        init: One initial item combined on the left of each prefix, converted
+            to the input element type. Array inputs reject per-item seed ranges.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-            all lanes. Runtime counts must stay in range.
+            all lanes. Only single-item inputs accept this argument; omit it for
+            an item range. Runtime counts must stay in range.
 
     Returns:
         This lane's inclusive prefix, with the input value type and shape.
@@ -236,6 +270,9 @@ def warp_inclusive_scan(
         # carried | 17 | 19 | 22 | ?  || 33 | 39 | 46 | ?
     """
     width = _resolve_warp_width(width, "warp_inclusive_scan width")
+    _validate_scan(value, init, valid_items, width)
+    if _is_items(value):
+        return _array_scan(value, op, width, init)[0]
     raw = _raw(value, op, width, valid_items)
     return _inclusive(raw, op, width, init, valid_items)
 
@@ -257,15 +294,17 @@ def warp_exclusive_scan(
     for other operators the first exclusive output is unspecified.
 
     Args:
-        value: This lane's input value. Its items are scanned independently.
+        value: This lane's input value. An item range forms part of one blocked
+            sequence: all of this lane's items precede the next lane's items.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
-        init: Optional initial value combined on the left of each prefix, converted
-            to the input value type.
+        init: One initial item combined on the left of each prefix, converted
+            to the input element type. Array inputs reject per-item seed ranges.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-            all lanes. Runtime counts must stay in range.
+            all lanes. Only single-item inputs accept this argument; omit it for
+            an item range. Runtime counts must stay in range.
 
     Returns:
         This lane's exclusive prefix, with the input value type and shape.
@@ -305,6 +344,9 @@ def warp_exclusive_scan(
         # carried | 16 | 17 | 19 | ?  || 28 | 33 | 39 | ?
     """
     width = _resolve_warp_width(width, "warp_exclusive_scan width")
+    _validate_scan(value, init, valid_items, width)
+    if _is_items(value):
+        return _array_scan(value, op, width, init)[1]
     raw = _raw(value, op, width, valid_items)
     exclusive = _exclusive(raw, op, width, init, valid_items)
     return exclusive if valid_items is None else _select_value(lane_id() % width < valid_items, exclusive, value)
@@ -327,15 +369,17 @@ def warp_scan(
     for other operators the first exclusive output is unspecified.
 
     Args:
-        value: This lane's input value. Its items are scanned independently.
+        value: This lane's input value. An item range forms part of one blocked
+            sequence: all of this lane's items precede the next lane's items.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
-        init: Optional initial value combined on the left of each prefix, converted
-            to the input value type.
+        init: One initial item combined on the left of each prefix, converted
+            to the input element type. Array inputs reject per-item seed ranges.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-            all lanes. Runtime counts must stay in range.
+            all lanes. Only single-item inputs accept this argument; omit it for
+            an item range. Runtime counts must stay in range.
 
     Returns:
         A tuple (inclusive, exclusive) of this lane's prefixes.
@@ -398,19 +442,21 @@ def warp_scan_with_aggregate(
     for other operators the first exclusive output is unspecified.
 
     Args:
-        value: This lane's input value. Its items are scanned independently.
+        value: This lane's input value. An item range forms part of one blocked
+            sequence: all of this lane's items precede the next lane's items.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
-        init: Optional initial value combined on the left of each prefix, converted
-            to the input value type.
+        init: One initial item combined on the left of each prefix, converted
+            to the input element type. Array inputs reject per-item seed ranges.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-            all lanes. Runtime counts must stay in range.
+            all lanes. Only single-item inputs accept this argument; omit it for
+            an item range. Runtime counts must stay in range.
 
     Returns:
         A tuple (inclusive, exclusive, aggregate). The aggregate is available in every
-        participating lane.
+        participating lane and has the input element type, even for an item range.
 
     Examples:
         # Prefixes restart in each group. An exclusive prefix excludes the current lane.
@@ -454,17 +500,19 @@ def warp_scan_with_aggregate(
         # carried[1] exclusive | 16 | 17 | 19 | ?  || 28 | 33 | 39 | ?
         # carried[2] aggregate | 6  | 6  | 6  | 6  || 18 | 18 | 18 | 18
 
-        # Per-lane arrays scan each item position independently; the two columns do not mix.
-        columns = fx.coop.warp_scan_with_aggregate(items, fx.ReductionOp.ADD, width=4, init=0)
-        # Group                |                  group 0                  ||                  group 1
-        # Data                 | L0       | L1       | L2       | L3       || L4       | L5       | L6       | L7
-        # ---------------------+----------+----------+----------+----------++----------+----------+----------+---------
-        # items in             | [1,10]   | [2,20]   | [3,30]   | [4,40]   || [5,50]   | [6,60]   | [7,70]   | [8,80]
-        # columns[0] inclusive | [1,10]   | [3,30]   | [6,60]   | [10,100] || [5,50]   | [11,110] | [18,180] | [26,260]
-        # columns[1] exclusive | [0,0]    | [1,10]   | [3,30]   | [6,60]   || [0,0]    | [5,50]   | [11,110] | [18,180]
-        # columns[2] aggregate | [10,100] | [10,100] | [10,100] | [10,100] || [26,260] | [26,260] | [26,260] | [26,260]
+        # Per-lane arrays form a single blocked sequence within each group.
+        tile = fx.coop.warp_scan_with_aggregate(items, fx.ReductionOp.ADD, width=4, init=0)
+        # Data              | L0     | L1      | L2      | L3
+        # ------------------+--------+---------+---------+---------
+        # items in          | [1,10] | [2,20]  | [3,30]  | [4,40]
+        # tile[0] inclusive | [1,11] | [13,33] | [36,66] | [70,110]
+        # tile[1] exclusive | [0,1]  | [11,13] | [33,36] | [66,70]
+        # tile[2] aggregate | 110    | 110     | 110     | 110
     """
     width = _resolve_warp_width(width, "warp_scan_with_aggregate width")
+    _validate_scan(value, init, valid_items, width)
+    if _is_items(value):
+        return _array_scan(value, op, width, init)
     if valid_items is None and isinstance(op, ReductionOp):
         # Keep the old construction order, including for callers that combine
         # all three results; otherwise LLVM can schedule the aggregate first.
@@ -488,6 +536,13 @@ class WarpScan(WarpPrimitive):
     SharedStorage is Empty: explicit storage has a zero-byte layout.
     There is no algorithm parameter.
     The corresponding ``warp_*`` functions infer dtype and tile extent.
+
+    List, tuple, Vector and native item-sequence inputs form one complete
+    blocked tile: each lane's items precede the next lane's items. Arrays
+    require ``valid_items=None``, even with one item per lane. One element-valued
+    ``init`` seeds the whole sequence; the aggregate is one unseeded element.
+    Scalar and plain Struct inputs contribute one item per lane and accept
+    ``valid_items`` as the number of contributing leading lanes.
 
     Examples:
         P = fx.coop.WarpScan[fx.Int32, 8]
@@ -518,13 +573,15 @@ class WarpScan(WarpPrimitive):
             storage: Optional instance of this specialization's empty SharedStorage.
                 Allocate Array[SharedStorage, num_warps] with SharedAllocator,
                 peek the array and pass this warp's element. None is also allowed.
-            value: This lane's input value. Its items are scanned independently.
+            value: This lane's input value. An item range forms part of one blocked
+                sequence: all of this lane's items precede the next lane's items.
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
-            init: Optional initial value combined on the left of each prefix, converted
-                to the input value type.
+            init: One initial item combined on the left of each prefix, converted
+                to the input element type. Array inputs reject per-item seed ranges.
             valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-                all lanes. Runtime counts must stay in range.
+                all lanes. Only single-item inputs accept this argument; omit it for
+                an item range. Runtime counts must stay in range.
 
         Returns:
             This lane's inclusive prefix, with the input value type and shape.
@@ -556,13 +613,15 @@ class WarpScan(WarpPrimitive):
             storage: Optional instance of this specialization's empty SharedStorage.
                 Allocate Array[SharedStorage, num_warps] with SharedAllocator,
                 peek the array and pass this warp's element. None is also allowed.
-            value: This lane's input value. Its items are scanned independently.
+            value: This lane's input value. An item range forms part of one blocked
+                sequence: all of this lane's items precede the next lane's items.
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
-            init: Optional initial value combined on the left of each prefix, converted
-                to the input value type.
+            init: One initial item combined on the left of each prefix, converted
+                to the input element type. Array inputs reject per-item seed ranges.
             valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-                all lanes. Runtime counts must stay in range.
+                all lanes. Only single-item inputs accept this argument; omit it for
+                an item range. Runtime counts must stay in range.
 
         Returns:
             This lane's exclusive prefix, with the input value type and shape.
@@ -594,13 +653,15 @@ class WarpScan(WarpPrimitive):
             storage: Optional instance of this specialization's empty SharedStorage.
                 Allocate Array[SharedStorage, num_warps] with SharedAllocator,
                 peek the array and pass this warp's element. None is also allowed.
-            value: This lane's input value. Its items are scanned independently.
+            value: This lane's input value. An item range forms part of one blocked
+                sequence: all of this lane's items precede the next lane's items.
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
-            init: Optional initial value combined on the left of each prefix, converted
-                to the input value type.
+            init: One initial item combined on the left of each prefix, converted
+                to the input element type. Array inputs reject per-item seed ranges.
             valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-                all lanes. Runtime counts must stay in range.
+                all lanes. Only single-item inputs accept this argument; omit it for
+                an item range. Runtime counts must stay in range.
 
         Returns:
             A tuple (inclusive, exclusive) of this lane's prefixes.
@@ -632,17 +693,19 @@ class WarpScan(WarpPrimitive):
             storage: Optional instance of this specialization's empty SharedStorage.
                 Allocate Array[SharedStorage, num_warps] with SharedAllocator,
                 peek the array and pass this warp's element. None is also allowed.
-            value: This lane's input value. Its items are scanned independently.
+            value: This lane's input value. An item range forms part of one blocked
+                sequence: all of this lane's items precede the next lane's items.
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
-            init: Optional initial value combined on the left of each prefix, converted
-                to the input value type.
+            init: One initial item combined on the left of each prefix, converted
+                to the input element type. Array inputs reject per-item seed ranges.
             valid_items: Uniform number of leading contributing lanes in [0, width], or None for
-                all lanes. Runtime counts must stay in range.
+                all lanes. Only single-item inputs accept this argument; omit it for
+                an item range. Runtime counts must stay in range.
 
         Returns:
             A tuple (inclusive, exclusive, aggregate). The aggregate is available in every
-            participating lane.
+            participating lane and has the input element type, even for an item range.
         """
         value = cls._prepare(value)
         return cls._invoke(warp_scan_with_aggregate, value, op, init=init, valid_items=valid_items, storage=storage)

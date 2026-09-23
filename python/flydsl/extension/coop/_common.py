@@ -201,6 +201,13 @@ def _validate_valid_items(valid_items, size):
         raise ValueError(f"valid_items must be between 0 and {size}, got {valid_items}")
 
 
+def _validate_scalar_valid_items(value, valid_items, size):
+    """Reduce/scan guarded overloads accept one element per thread."""
+    if valid_items is not None and _is_items(value):
+        raise TypeError("valid_items is supported only for a single item per thread; omit it for an item range")
+    _validate_valid_items(valid_items, size)
+
+
 def _seed(value, op, init):
     """Fold *init* into a scan result; ``None`` leaves it alone.
 

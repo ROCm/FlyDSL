@@ -66,8 +66,7 @@ FlyDSL/
 │   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
 │   └── utils/
 │       ├── env.py                    # EnvManager — typed environment config
-│       ├── logger.py                 # Logging utilities
-│       └── smem_allocator.py         # SmemAllocator for LDS management
+│       └── logger.py                 # Logging utilities
 │
 ├── examples/                         # Runnable examples
 │   ├── 01-vectorAdd.py               # Vector addition with layout algebra

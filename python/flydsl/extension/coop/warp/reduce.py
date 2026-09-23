@@ -10,7 +10,6 @@ from ....expr.primitive import range_constexpr
 from ....expr.typing import ReductionOp
 from .._common import (
     _combine,
-    _normalize_columns,
     _resolve_warp_width,
     _shuffle_value,
     _thread_partial,
@@ -49,7 +48,7 @@ def _reduce_valid(value, op, width, valid_items):
 @jit
 def _segmented_reduce(value, tail_flag, op, width):
     """Suffix doubling: the aggregate is valid at each segment's head lane."""
-    value = _normalize_columns(value)
+    value = _thread_partial(value, op)
     lane = lane_id() % width
     ended = Int32(tail_flag != 0) | Int32(lane == width - 1)
     for stage in range_constexpr(width.bit_length() - 1):
@@ -57,7 +56,7 @@ def _segmented_reduce(value, tail_flag, op, width):
         other = _shuffle_value(value, offset, width, mode="down")
         other_end = shuffle_down(ended, offset, width)
         take = (ended == 0) & (lane + offset < width)
-        # Shuffles stay converged; the operator only sees this segment's values.
+        # Shuffles stay converged; operators only consume this segment's data.
         if take:
             value = _combine(op, value, other)
         ended = take.select(other_end, ended)
@@ -91,8 +90,7 @@ def warp_reduce(
 
     Returns:
         The aggregate in every lane of the logical warp, including lanes outside
-        valid_items. Empty groups have unspecified results. This preserves FlyDSL
-        all-lane results and extends CUB's lane-zero output guarantee.
+        valid_items. Empty groups have unspecified results.
 
     Examples:
         # Each group of four lanes reduces independently; every lane gets its aggregate.
@@ -159,8 +157,9 @@ def warp_head_segmented_reduce(
     Operand order within each segment follows ascending lanes.
 
     Args:
-        value: This lane's input value. Its items are reduced independently.
-        head_flag: Nonzero when this lane starts a segment.
+        value: This lane's input value. Local items are folded in order before
+            combining lanes into one segment aggregate.
+        head_flag: Nonzero when this lane's first item starts a segment.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
@@ -168,8 +167,7 @@ def warp_head_segmented_reduce(
 
     Returns:
         The segment aggregate at each segment's first lane. Results at other lanes are
-        unspecified. A one-lane segment returns its input at that lane, which is both
-        the segment's head and tail.
+        unspecified. A one-lane segment returns its locally folded items at that lane.
 
     Examples:
         # Split eight lanes into three segments. A nonzero head_flag starts a segment; sum the values in
@@ -203,8 +201,9 @@ def warp_tail_segmented_reduce(
     Operand order within each segment follows ascending lanes.
 
     Args:
-        value: This lane's input value. Its items are reduced independently.
-        tail_flag: Nonzero when this lane ends a segment.
+        value: This lane's input value. Local items are folded in order before
+            combining lanes into one segment aggregate.
+        tail_flag: Nonzero when this lane's last item ends a segment.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
@@ -212,8 +211,7 @@ def warp_tail_segmented_reduce(
 
     Returns:
         The segment aggregate at each segment's first lane. Results at other lanes are
-        unspecified. A one-lane segment returns its input at that lane, which is both
-        the segment's head and tail.
+        unspecified. A one-lane segment returns its locally folded items at that lane.
 
     Examples:
         # Four segments have lengths 2, 3, 2 and 1. L7 is an implicit tail even with tail_flag=0.
@@ -296,8 +294,7 @@ class WarpReduce(WarpPrimitive):
 
         Returns:
             The aggregate in every lane of the logical warp, including lanes outside
-            valid_items. Empty groups have unspecified results. This preserves FlyDSL
-            all-lane results and extends CUB's lane-zero output guarantee.
+            valid_items. Empty groups have unspecified results.
         """
         value = cls._prepare(value)
         return cls._invoke(warp_reduce, value, op, valid_items=valid_items, storage=storage)
@@ -322,15 +319,15 @@ class WarpReduce(WarpPrimitive):
             storage: Optional instance of this specialization's empty SharedStorage.
                 Allocate Array[SharedStorage, num_warps] with SharedAllocator,
                 peek the array and pass this warp's element. None is also allowed.
-            value: This lane's input value. Its items are reduced independently.
-            head_flag: Nonzero when this lane starts a segment.
+            value: This lane's input value. Local items are folded in order before
+                combining lanes into one segment aggregate.
+            head_flag: Nonzero when this lane's first item starts a segment.
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
 
         Returns:
             The segment aggregate at each segment's first lane. Results at other lanes are
-            unspecified. A one-lane segment returns its input at that lane, which is both
-            the segment's head and tail.
+            unspecified. A one-lane segment returns its locally folded items at that lane.
         """
         value = cls._prepare(value)
         return cls._invoke(warp_head_segmented_reduce, value, head_flag, op, storage=storage)
@@ -355,15 +352,15 @@ class WarpReduce(WarpPrimitive):
             storage: Optional instance of this specialization's empty SharedStorage.
                 Allocate Array[SharedStorage, num_warps] with SharedAllocator,
                 peek the array and pass this warp's element. None is also allowed.
-            value: This lane's input value. Its items are reduced independently.
-            tail_flag: Nonzero when this lane ends a segment.
+            value: This lane's input value. Local items are folded in order before
+                combining lanes into one segment aggregate.
+            tail_flag: Nonzero when this lane's last item ends a segment.
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
 
         Returns:
             The segment aggregate at each segment's first lane. Results at other lanes are
-            unspecified. A one-lane segment returns its input at that lane, which is both
-            the segment's head and tail.
+            unspecified. A one-lane segment returns its locally folded items at that lane.
         """
         value = cls._prepare(value)
         return cls._invoke(warp_tail_segmented_reduce, value, tail_flag, op, storage=storage)
