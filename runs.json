@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-23T08:16:05Z",
+ "updated": "2026-09-23T09:33:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[Feat][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835910530",
    "created_at": "2026-09-23T08:13:27Z",
-   "updated_at": "2026-09-23T08:13:37Z",
+   "updated_at": "2026-09-23T08:33:35Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-23T08:33:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835910530/job/107105355788"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-23T08:33:59Z",
+     "completed_at": "2026-09-23T09:23:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835910530/job/107105355824"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-23T09:26:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835910530/job/107105356314"
+    }
+   ]
   },
   {
    "run_id": 35835884222,
@@ -29,9 +57,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835884222",
    "created_at": "2026-09-23T08:13:11Z",
-   "updated_at": "2026-09-23T08:14:53Z",
+   "updated_at": "2026-09-23T08:54:13Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-23T08:54:12Z",
+     "completed_at": "2026-09-23T09:25:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835884222/job/107103952446"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-23T08:29:33Z",
+     "completed_at": "2026-09-23T09:25:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835884222/job/107103952600"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-23T08:33:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835884222/job/107103952647"
+    }
+   ]
   },
   {
    "run_id": 35834501494,
@@ -44,9 +100,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494",
    "created_at": "2026-09-23T07:58:11Z",
-   "updated_at": "2026-09-23T08:02:58Z",
+   "updated_at": "2026-09-23T08:29:42Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-23T08:20:30Z",
+     "completed_at": "2026-09-23T08:53:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494/job/107101144537"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-23T08:29:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494/job/107101144563"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-23T08:20:35Z",
+     "completed_at": "2026-09-23T09:13:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494/job/107101144739"
+    }
+   ]
   },
   {
    "run_id": 35834362277,
