@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-23T03:44:52Z",
+ "updated": "2026-09-23T04:12:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Fix][Coop] Align warp array collective semantics (#1178)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35815211205",
    "created_at": "2026-09-23T03:39:46Z",
-   "updated_at": "2026-09-23T03:43:47Z",
+   "updated_at": "2026-09-23T04:03:34Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-23T04:03:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35815211205/job/107039881661"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-23T04:04:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35815211205/job/107039881704"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-23T04:06:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35815211205/job/107039881745"
+    }
+   ]
   },
   {
    "run_id": 35815081519,
@@ -40,21 +68,24 @@
    "branch": "perf/preshuffle-2wave-tile-n32",
    "event": "pull_request",
    "title": "[Kernel][GEMM] Add gfx950 2-wave preshuffle tiles",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35810783011",
    "created_at": "2026-09-23T02:32:47Z",
-   "updated_at": "2026-09-23T02:46:17Z",
+   "updated_at": "2026-09-23T04:10:00Z",
    "actor": "XiaobingSuper",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-23T02:44:54Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35810783011/job/107023973631"
+     "completed_at": "2026-09-23T04:09:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35810783011/job/107023973631",
+     "machine": "cv350-1e707-c03-2",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -68,10 +99,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-23T02:46:16Z",
-     "completed_at": null,
+     "completed_at": "2026-09-23T03:52:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35810783011/job/107023973708"
     }
    ]
