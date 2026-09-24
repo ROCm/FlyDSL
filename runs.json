@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-24T03:24:41Z",
+ "updated": "2026-09-24T03:34:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950855284",
    "created_at": "2026-09-24T03:17:47Z",
-   "updated_at": "2026-09-24T03:23:01Z",
+   "updated_at": "2026-09-24T03:23:56Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -70,13 +70,41 @@
    "branch": "main",
    "event": "push",
    "title": "Revert error merge \"Refactor preshuffle GEMM indexing with layout alg\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207",
    "created_at": "2026-09-24T03:08:58Z",
-   "updated_at": "2026-09-24T03:11:21Z",
+   "updated_at": "2026-09-24T03:25:06Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T03:25:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107480396960"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-24T03:25:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107480396980"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T03:25:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107480397017"
+    }
+   ]
   },
   {
    "run_id": 35948988500,
@@ -85,11 +113,11 @@
    "branch": "revert-1131-preshuffle-layout",
    "event": "pull_request",
    "title": "Revert \"Refactor preshuffle GEMM indexing with layout algebra (#1131)\"",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948988500",
    "created_at": "2026-09-24T02:51:11Z",
-   "updated_at": "2026-09-24T03:14:14Z",
+   "updated_at": "2026-09-24T03:27:22Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -104,18 +132,18 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T03:14:14Z",
+     "started_at": "2026-09-24T03:27:21Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948988500/job/107478110413"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T03:14:14Z",
+     "started_at": "2026-09-24T03:25:28Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948988500/job/107478110454"
     }
@@ -147,10 +175,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-24T02:56:40Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T03:26:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816/job/107474311681"
     },
     {
