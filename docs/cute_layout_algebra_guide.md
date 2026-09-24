@@ -282,8 +282,10 @@ lds_tile = lds.tile.view(fx.make_layout((128, 64), (64, 1)))
 ```
 
 The compiler sizes the per-leaf static LDS global automatically (default
-``static=True``), so ``launch(smem=...)`` is normally left unset. The legacy
-``flydsl.utils.smem_allocator.SmemAllocator`` remains for un-migrated kernels.
+``static=True``), so ``launch(smem=...)`` is normally left unset.
+``SharedAllocator`` is the allocator for new kernels; the legacy
+``flydsl.utils.smem_allocator`` path is kept for backward compatibility, but it
+is not recommended and warns when used.
 
 ### 5.3 Swizzling (bank conflict avoidance)
 
@@ -361,18 +363,6 @@ fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
 | `mfma_i32_16x16x32_i8` | INT8 | 16×16×32 | GFX942+ |
 | `mfma_f32_32x32x8f16` | FP16 | 32×32×8 | GFX942+ |
 | `mfma_scale_x128` | MXFP4 | 16×16×128 | GFX950 |
-
-**K64-byte micro-step pattern (2× K32 per step):**
-```python
-for ku in range(tile_k_bytes // 64):
-    a_val = lds_load_pack_k32(...)   # Load A from LDS
-    b_val = load_b_pack_k32(...)     # Load B from GMEM
-    c_acc = rocdl.mfma_f32_16x16x32_fp8_fp8(a_val, b_val, c_acc)
-    # second half
-    a_val2 = lds_load_pack_k32(...)
-    b_val2 = load_b_pack_k32(...)
-    c_acc = rocdl.mfma_f32_16x16x32_fp8_fp8(a_val2, b_val2, c_acc)
-```
 
 ---
 
@@ -521,7 +511,6 @@ for a production-quality GEMM implementation.
 - `python/flydsl/expr/rocdl/` — ROCDL-specific operations
 - `python/flydsl/compiler/` — JIT compilation pipeline (`kernel_function.py`, `jit_function.py`)
 - `python/flydsl/expr/gpu.py` — `SharedAllocator` for LDS allocation (`fx.SharedAllocator`)
-- `python/flydsl/utils/smem_allocator.py` — legacy `SmemAllocator`
 - `examples/01-vectorAdd.py` — VecAdd example with layout algebra
 - `examples/02-tiledCopy.py` — Tiled copy example
 - `examples/03-tiledMma.py` — Tiled MFMA GEMM example

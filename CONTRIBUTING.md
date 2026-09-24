@@ -138,27 +138,70 @@ If you don't have access to specific AMD GPU models, mention this in your PR. Ou
 
 ## Code Quality
 
+### Commit Hooks
+
+Install the style tools and enable the commit hook:
+
+```bash
+python3 -m pip install --upgrade "pip>=25.1"
+python3 -m pip install --group style
+pre-commit install
+```
+
+Before each commit, pre-commit formats and checks staged Python and C/C++ files.
+It installs the pinned hook tools in isolated environments, so no system
+`clang-format` installation is required. Third-party and build directories are
+excluded, matching the CI style checks.
+
+If a hook changes files, review the changes, stage them again, and retry the
+commit. Ruff errors that cannot be fixed automatically must be corrected manually.
+
+To run all hooks on selected files or across the repository:
+
+```bash
+pre-commit run --files path/to/file.py path/to/file.cpp
+pre-commit run --all-files
+```
+
 ### Python
 
-FlyDSL uses [Ruff](https://docs.astral.sh/ruff/) for linting and formatting. The project configuration is defined in `pyproject.toml`:
+FlyDSL uses [Black](https://black.readthedocs.io/) for formatting and
+[Ruff](https://docs.astral.sh/ruff/) for linting and import sorting. Their
+versions and configuration are defined in `pyproject.toml`:
 
 * **Line length**: 120 characters
 * **Target version**: Python 3.10+
 * **Linting rules**: pycodestyle (E/W), pyflakes (F), isort (I)
 * **Import sorting**: `flydsl` is treated as first-party
 
-Before submitting, run:
+The hooks run Black 26.5.1, Ruff 0.16.6 with automatic fixes, and a final Black
+pass to normalize Ruff's edits. These versions match the `style` dependency group
+installed by GitHub Actions; keep `.pre-commit-config.yaml` in sync when updating it.
+
+To format and check all branch-local Python changes manually, run:
 
 ```bash
-ruff check python/ kernels/ tests/
-ruff format --check python/ kernels/ tests/
+bash scripts/check_python_style.sh --fix --include-local
 ```
 
 ### C++ (Fly Dialect)
 
 * Tabs should be expanded to spaces. Use 2 spaces indentation (consistent with MLIR/LLVM style).
 * Follow MLIR coding conventions for dialect implementation code.
-* Use `clang-format` where applicable.
+* Use the repository's `.clang-format`: LLVM style with a 100-character line limit.
+* The commit hook pins clang-format 18.1.8, matching the major version of
+  `clang-format-18` installed by GitHub Actions. Keep the hook and CI versions aligned.
+* The hook and CI cover `.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hh`, `.hpp`, `.hxx`,
+  `.cu`, and `.cuh` files. TableGen (`.td`) files are outside this check.
+
+To format all tracked C/C++ files with the pinned tool:
+
+```bash
+pre-commit run clang-format --all-files
+```
+
+CI runs `clang-format-18 --dry-run --Werror` on changed files, reporting format
+violations without modifying them.
 
 ### General Style Guidelines
 

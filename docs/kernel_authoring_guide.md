@@ -138,7 +138,8 @@ launch(data, stream=fx.Stream(stream))
 
 ### 2.5 Custom argument types
 
-Register new Python types for the JIT boundary:
+Register a raw Python type with a `JitArgument` adapter and the `DslType` that
+will appear inside the traced function:
 
 ```python
 from flydsl.compiler import JitArgumentRegistry
@@ -151,9 +152,15 @@ class MyCustomAdaptor:
     def __get_ir_types__(self):
         return [...]  # MLIR types for this argument
 
-    def __get_c_pointers__(self):
-        return [...]  # ctypes pointers for invocation
+    def __cache_signature__(self):
+        return (...)  # every property that can change generated code
+
+    def __c_abi_spec__(self):
+        return [...]  # ordered (ctypes storage type, fill(argument, storage)) slots
 ```
+
+The adapter's C-ABI slots may outnumber its MLIR types (for example, a dynamic
+memref has data and layout slots).
 
 ---
 
@@ -270,7 +277,7 @@ where out-of-range reads return zero and writes are suppressed. The byte count
 may be dynamic. Omitting it keeps the default unchecked descriptor; passing
 `max_size=False` derives the count from the tensor layout and enables checking.
 
-See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma-tdm-atoms-wave32) below for the
+See [gfx1250 WMMA & TDM atoms](#wmma-tdm-atoms) below for the
 gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.
 
 #### MFMA instructions
@@ -322,6 +329,8 @@ val = rocdl.ds_bpermute(idx, src)
 data = rocdl.raw_ptr_buffer_load(rsrc, offset, soffset, aux)
 rocdl.raw_ptr_buffer_store(data, rsrc, offset, soffset, aux)
 ```
+
+(wmma-tdm-atoms)=
 
 #### gfx1250 WMMA & TDM atoms (wave32)
 
@@ -377,6 +386,51 @@ mma = fx.atom_set_value(mma, "scale_a", fx.Int32(scale_a))   # E8M0 scales
 mma = fx.atom_set_value(mma, "scale_b", fx.Int32(scale_b))
 fx.gemm(mma, frag_C, frag_A, frag_B, frag_C)
 ```
+
+For per-tile scales, pass each operand as a list or tuple containing its data
+and scale fragments:
+
+```python
+fx.gemm(tiled_mma, frag_D, [frag_A, scales_A], [frag_B, scales_B], frag_C)
+```
+
+If A has shape `(V, M, K)`, its scale fragment has shape `(1, M, K)`; B uses
+`(1, N, K)`. Rank-2 operands omit the K mode. Scales use i32 for CDNA4 MFMA
+and block-32 WMMA, or i64 for block-16 WMMA. Use zero strides in tile modes
+to broadcast a scale. The compiler slices all tensors in each operand group
+together and fully expands the static M/N/K dimensions. All operands in each
+group must be Tensors.
+
+The first tensor is always the primary operand. Further tensors are defined by the MMA atom; Single
+Tensor operands and scalar atom-state keywords remain supported for both bare atoms and tiled MMA.
+`tiled_mma.set_value("scale_a", scale)` returns a new tiled MMA with the same layout and
+permutation. Explicit scale tensors override the corresponding atom-state fields; omitted scale
+tensors use those fields. The current scaled atoms accept data and an optional scale; they do not
+consume sparsity metadata.
+
+Tiled copies support the same state update API: `tiled_copy.set_value("soffset", offset)`
+returns a new TiledCopy with its original tile and thread/value layout. Passing it to
+`fx.copy` uses the updated atom state. Both tiled types also accept a dictionary of fields.
+
+Use `atom_callback` to select a different atom for each static tile, for example
+to choose a byte from packed CDNA4 scale words explicitly:
+
+```python
+fx.gemm(
+    tiled_mma, frag_D, [frag_A, scales_A], [frag_B, scales_B], frag_C,
+    atom_callback=lambda atom, mnk: fx.make_mma_atom(
+        fx.rocdl.cdna4.MFMA_Scale(
+            16, 16, 128, fx.Float8E4M3FN,
+            opsel_a=mnk[0] % 2, opsel_b=mnk[1] % 4,
+        )
+    ),
+)
+```
+
+When a callback is present, the callback receives the original atom with its runtime state and a
+tuple of integer tile indices `(m, n, k)`, and returns the atom for that tile. Rank-2 operands use
+`k=0`; rank-1 calls use `(0, 0, 0)`.
+
 
 **TDM async copy atom** — the **base pointer comes from the `copy_atom_call` global
 operand** (its pointer); the per-dim extent (HW out-of-bounds handling), per-dim
@@ -492,15 +546,7 @@ LDS global that the compiler sizes, so `launch(smem=...)` is left unset. Use
 `>=` that size). See `kernels/gemm/preshuffle_gemm.py` and
 `kernels/norm/rmsnorm_kernel.py` for real usage.
 
-### 6.2 Legacy `SmemAllocator`
-
-The older `SmemAllocator` / `SmemPtr` path
-(`python/flydsl/utils/smem_allocator.py`) remains for un-migrated kernels: it
-tracks byte offsets manually (`_align` / `finalize` / `get_base`) and its
-`finalize()` must be called inside the `gpu.module` body. Prefer
-`fx.SharedAllocator` for new kernels.
-
-### 6.3 LDS capacity
+### 6.2 LDS capacity
 
 | Architecture | LDS per CU |
 |---|---|
@@ -697,7 +743,7 @@ Writing a new kernel?
 │
 ├── Matrix multiply (GEMM)?
 │   ├── Use @flyc.kernel + fx.SharedAllocator + MFMA
-│   ├── B-preshuffle layout from kernels/mma/mfma_preshuffle_pipeline.py
+│   ├── B-preshuffle layout from kernels/common/mma/mfma_preshuffle_pipeline.py
 │   └── See kernels/gemm/preshuffle_gemm.py
 │
 ├── Need shared memory?
@@ -728,7 +774,6 @@ Writing a new kernel?
 | `python/flydsl/expr/rocdl/` | ROCm dialect intrinsics (MFMA/WMMA, buffer, TDM, cluster) |
 | `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, etc.) |
 | `python/flydsl/expr/gpu.py` | `SharedAllocator`, GPU ops (thread_id, barrier, ...) |
-| `python/flydsl/utils/smem_allocator.py` | Legacy `SmemAllocator` / `SmemPtr` LDS management |
 | `kernels/gemm/preshuffle_gemm.py` | Preshuffle GEMM kernel example |
 | `tests/kernels/test_vec_add.py` | Vector add kernel test |
 | `tests/kernels/test_preshuffle_gemm.py` | Preshuffle GEMM test |

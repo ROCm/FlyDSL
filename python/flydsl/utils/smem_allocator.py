@@ -1,6 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+"""Legacy shared-memory (LDS) allocator, kept so existing kernels keep working.
+
+``SmemAllocator`` / ``SmemPtr`` track byte offsets and alignment by hand and need an explicit
+``finalize()`` in the launch wrapper. New kernels should allocate LDS with ``fx.SharedAllocator``
+over an ``@fx.struct`` storage layout instead: it derives offsets, sizes and alignment from the
+field types and tracks the shared-memory bytes on its own. Constructing either class here warns
+once and points at the replacement.
+
+The LDS capacity helpers (``SMEM_CAPACITY_MAP`` / ``check_smem_capacity``) are not part of this
+module; import them from ``flydsl.runtime.device``.
+"""
+
+import warnings
 from typing import Optional, Tuple
 
 from flydsl.expr.gpu import lds_space
@@ -8,6 +21,24 @@ from flydsl.expr.gpu import lds_space
 from .._mlir import ir
 from .._mlir.dialects import arith, memref
 from .._mlir.extras import types as T
+
+_LEGACY_SMEM_WARNED = False
+
+
+def _warn_legacy_smem(name: str) -> None:
+    """Warn once per process that the legacy LDS allocator is being used."""
+    global _LEGACY_SMEM_WARNED
+    if _LEGACY_SMEM_WARNED:
+        return
+    _LEGACY_SMEM_WARNED = True
+    warnings.warn(
+        f"{name} is the legacy FlyDSL shared-memory API, kept only for backward compatibility. "
+        f"Prefer fx.SharedAllocator with an @fx.struct storage layout: it derives offsets, sizes "
+        f"and alignment from the field types and needs no finalize() in the launch wrapper. "
+        f"See docs/kernel_authoring_guide.md.",
+        stacklevel=3,
+    )
+
 
 # ==============================================================================
 # Type Utilities
@@ -82,14 +113,16 @@ def get_index_value(op_or_val):
 
 
 class SmemPtr:
-    """
-    Represents a typed pointer into Shared Memory.
-    Analogue to a typed pointer wrapper.
+    """Typed pointer into shared memory (legacy).
+
+    Kept for backward compatibility; new kernels should use ``fx.SharedAllocator`` with an
+    ``@fx.struct`` storage layout and read/write through the resulting ``Storage`` handles.
     """
 
     def __init__(
         self, base_memref: ir.Value, byte_offset: int, element_type: ir.Type, shape: Optional[Tuple[int, ...]] = None
     ):
+        _warn_legacy_smem("SmemPtr")
         self.base_memref = base_memref  # The raw i8 buffer
         self.byte_offset = byte_offset  # Static offset
         self.element_type = element_type
@@ -161,7 +194,10 @@ class SmemPtr:
 
 
 class SmemAllocator:
-    """GPU shared memory (LDS) allocator for kernel construction.
+    """GPU shared memory (LDS) allocator for kernel construction (legacy).
+
+    Kept for backward compatibility; new kernels should use ``fx.SharedAllocator`` with an
+    ``@fx.struct`` storage layout, which needs no manual offsets and no ``finalize()``.
 
     Tracks byte offsets and alignment requirements for multiple shared
     memory buffers within a single kernel. Call ``finalize()`` inside the
@@ -182,6 +218,7 @@ class SmemAllocator:
     """
 
     def __init__(self, ctx, arch: Optional[str] = None, global_sym_name: str = "smem_storage"):
+        _warn_legacy_smem("SmemAllocator")
         self.ctx = ctx
         self.ptr = 0
         self.max_size = 0
@@ -230,42 +267,3 @@ class SmemAllocator:
         memref_type = T.memref(total_size, T.i8(), memory_space=lds_space())
         op = memref.get_global(memref_type, self.global_sym_name)
         return get_op_result_or_value(op)
-
-
-# ==============================================================================
-# Shared Memory Capacity Check
-# ==============================================================================
-
-SMEM_CAPACITY_MAP = {
-    # ===================== AMD CDNA Architectures (Data Center Compute Cards) =====================
-    # CDNA 3 (MI300 Series) - 64KB LDS per CU
-    "gfx942": 65536,  # MI300A / MI300X: 64KB LDS per CU
-    # CDNA 4 (MI350 Series) - 160KB LDS per CU (key upgrade for CDNA4)
-    "gfx950": 163840,  # MI300C / MI300X Enhanced Models: 64KB LDS per CU
-    "gfx1100": 65536,  # RDNA3 (Navi 31 / W7900): 64KB max per workgroup
-    "gfx1151": 65536,  # RDNA3.5: 64KB LDS per WGP
-    "gfx1201": 65536,  # RDNA4: 64KB LDS per WGP
-    # GFX1250 - 320KB LDS (WGP$ unified, 5 × 64KB segments)
-    "gfx1250": 327680,  # 320KB configurable as LDS
-}
-
-
-def check_smem_capacity(allocated_bytes: int, arch: str = None):
-    """
-    Checks if the allocated shared memory fits within the device capacity.
-    """
-    if arch is None:
-        # Try to detect arch from environment or FlyDSL context if possible
-        # For now, default to a safe limit or skip check if unknown
-        return
-
-    if arch in SMEM_CAPACITY_MAP:
-        limit = SMEM_CAPACITY_MAP[arch]
-        if allocated_bytes > limit:
-            raise RuntimeError(
-                f"Shared Memory Overflow: Requested {allocated_bytes} bytes, "
-                f"but device {arch} limit is {limit} bytes."
-            )
-    else:
-        # Unknown arch, maybe warn or skip
-        pass

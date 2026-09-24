@@ -174,7 +174,7 @@ class CompilationContext:
 
     _current = threading.local()
 
-    # Thread-local storage for compile hints (waves_per_eu, maxnreg, etc.)
+    # Thread-local storage for compile hints (waves_per_eu, fast_fp_math, etc.)
     _compile_hints = threading.local()
 
     @classmethod
