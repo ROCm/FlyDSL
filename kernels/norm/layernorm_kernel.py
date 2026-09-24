@@ -6,9 +6,10 @@
 LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 
 Two paths:
-  - Fast path (N == BLOCK_THREADS * VEC_WIDTH * 4): vectorised tiled copy,
-    register caching, pipelined gamma/beta loads.
-  - Generic path (arbitrary N): scalar 2-pass implementation.
+  - Vector path (16-bit dtype, N % VEC_WIDTH == 0): buffer-backed tiled copy
+    over N / VEC_WIDTH tiles, input cached in registers across both passes.
+  - Scalar path (fp32, or N not divisible by VEC_WIDTH): 2-pass scalar
+    implementation.
 """
 
 import math
