@@ -53,14 +53,18 @@ class Glm5MlaMoeLayer:
         self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)  # decode-step counter
 
-    def debug(self, name: str, shape, dtype=torch.float32, pairs=True) -> torch.Tensor:
-        """Values of a scratch mailbox (``(value, tag)`` pairs unless ``pairs=False``)."""
+    def debug(self, name: str, shape, dtype=torch.float32, pairs=True, bf2=False) -> torch.Tensor:
+        """Values of a scratch mailbox (``(value, tag)`` pairs unless ``pairs=False``;
+        ``bf2``: each pair's value word packs two bf16 elements)."""
         off = self.scr_layout[name]
         n = 1
         for d in shape:
             n *= d
         if not pairs:
             return self.scratch[off : off + n * 4].view(dtype).view(shape)
+        if bf2:
+            words = self.scratch[off : off + n * 4].view(torch.int32).view(n // 2, 2)[:, 0].contiguous()
+            return words.view(torch.bfloat16).float().view(shape)
         words = self.scratch[off : off + n * 8].view(torch.int32).view(n, 2)[:, 0].contiguous()
         return words.view(dtype).view(shape)
 
@@ -144,11 +148,11 @@ class Glm5MlaMoeLayer:
         return dict(
             q_a=self.debug("q_a", (S, Q_LORA)),
             kv_a=self.debug("kv_a", (S, KV_LORA + PE_DIM)),
-            q_nope=self.debug("q_nope", (S, H, NOPE_DIM)),
-            q_pe=self.debug("q_pe", (S, H, PE_DIM)),
-            q_lat=self.debug("q_lat", (S, H, KV_LORA)),
-            o=self.debug("o", (S, H * V_DIM)),
-            a=self.debug("a", (S, HIDDEN)).to(torch.bfloat16),
+            q_nope=self.debug("q_nope", (S, H, NOPE_DIM), bf2=True),
+            q_pe=self.debug("q_pe", (S, H, PE_DIM), bf2=True),
+            q_lat=self.debug("q_lat", (S, H, KV_LORA), bf2=True),
+            o=self.debug("o", (S, H * V_DIM), bf2=True),
+            a=self.debug("a", (S, HIDDEN), bf2=True).to(torch.bfloat16),
             scores=self.debug("scores", (S, N_EXPERTS)),
             sel=self.debug("sel", (S, MOE_SLOTS), torch.int32),
             prob=self.debug("prob", (S, MOE_SLOTS)),
