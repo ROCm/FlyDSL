@@ -79,8 +79,10 @@ def test_layout_dynamic_types():
         with Location.unknown(ctx):
             module = Module.create()
             i32 = IntegerType.get_signless(32)
+            i64 = IntegerType.get_signless(64)
             with InsertionPoint(module.body):
-                f = func.FuncOp("dynamic_layout", FunctionType.get([i32] * 4, [i32]))
+                # A product of dynamic extents can exceed INT32_MAX, so the size is i64.
+                f = func.FuncOp("dynamic_layout", FunctionType.get([i32] * 4, [i64]))
                 entry = f.add_entry_block()
                 with InsertionPoint(entry):
                     dim0, dim1, stride0, stride1 = entry.arguments
@@ -131,8 +133,10 @@ def test_mixed_static_dynamic():
         with Location.unknown(ctx):
             module = Module.create()
             i32 = IntegerType.get_signless(32)
+            i64 = IntegerType.get_signless(64)
             with InsertionPoint(module.body):
-                f = func.FuncOp("mixed_layout", FunctionType.get([i32, i32], [i32]))
+                # c8 below is an SSA value, i.e. a dynamic extent: the size is an i64 product.
+                f = func.FuncOp("mixed_layout", FunctionType.get([i32, i32], [i64]))
                 entry = f.add_entry_block()
                 with InsertionPoint(entry):
                     runtime_extent, runtime_stride = entry.arguments

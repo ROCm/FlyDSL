@@ -576,7 +576,7 @@ typename LayoutBuilder<Layout>::IntTuple layoutCoshape(LayoutBuilder<Layout> &bu
 
 template <class Layout>
 typename LayoutBuilder<Layout>::IntTuple layoutSize(LayoutBuilder<Layout> &builder, Layout layout) {
-  return intTupleProduct(builder, builder.getShape(layout));
+  return intTupleSize(builder, builder.getShape(layout));
 }
 
 template <class Layout>
@@ -770,7 +770,7 @@ std::pair<IntTuple, IntTuple> compositionImpl(const IntTupleBuilder<IntTuple> &b
       continue;
     }
 
-    IntTuple newShape = builder.min(nextShape, restShape);
+    IntTuple newShape = builder.minExtent(nextShape, restShape);
     IntTuple newStride = builder.mul(restStride, currStride);
 
     if (newShape.isStatic() && restShape.isStatic()) {
