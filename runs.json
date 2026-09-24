@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-24T06:45:46Z",
+ "updated": "2026-09-24T07:32:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35969553491,
+   "pr": 1188,
+   "commit": "8720dca8c79924ebd42ebef00e40a50bf2784d77",
+   "branch": "feat/hack-ut-asm-multi-kernel",
+   "event": "pull_request",
+   "title": "[Compiler][Debug] Add a compile path for hand-edited assembly",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35969553491",
+   "created_at": "2026-09-24T07:25:41Z",
+   "updated_at": "2026-09-24T07:30:58Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 35969455971,
+   "pr": 1190,
+   "commit": "f83c58e2ef8d71332b662e51adeb6f89dd0e97ec",
+   "branch": "phil/llvm-extensions-v1",
+   "event": "pull_request",
+   "title": "[llvm] Extend LLVM for FlyDSL end-to-end performance work",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35969455971",
+   "created_at": "2026-09-24T07:24:39Z",
+   "updated_at": "2026-09-24T07:26:20Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35964375827,
    "pr": 987,
@@ -29,18 +59,18 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-24T06:42:52Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-24T06:45:35Z",
+     "completed_at": "2026-09-24T06:49:48Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35964375827/job/107524065337"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T06:42:52Z",
+     "started_at": "2026-09-24T06:51:47Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35964375827/job/107524065370"
     }
@@ -53,20 +83,20 @@
    "branch": "feat/hack-ut-asm-multi-kernel",
    "event": "pull_request",
    "title": "[Compiler][Debug] Add a compile path for hand-edited assembly",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869",
    "created_at": "2026-09-24T03:58:04Z",
-   "updated_at": "2026-09-24T06:43:41Z",
+   "updated_at": "2026-09-24T07:30:43Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-24T06:21:15Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T06:51:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869/job/107495566230"
     },
     {
@@ -84,10 +114,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-24T06:43:41Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T07:30:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869/job/107495566329"
     }
    ]
@@ -2087,67 +2117,6 @@
      "started_at": "2026-09-21T07:48:07Z",
      "completed_at": "2026-09-21T08:06:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35573341144/job/106253659966"
-    }
-   ]
-  },
-  {
-   "run_id": 35572352299,
-   "pr": 1162,
-   "commit": "2bacd2eb4775dc838b2e8cba0b3d8f1740fd7e7d",
-   "branch": "feature/ktrace-dialect-squashed",
-   "event": "pull_request",
-   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35572352299",
-   "created_at": "2026-09-21T07:18:35Z",
-   "updated_at": "2026-09-21T07:31:15Z",
-   "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 35571210579,
-   "pr": 1175,
-   "commit": "b27a7e9449765340de4332d56cb883fd3dc3c0b0",
-   "branch": "jli/relax-tag-condition",
-   "event": "pull_request",
-   "title": "[CI] Remove ancestor-of-main gate from PyPI publish workflow",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579",
-   "created_at": "2026-09-21T07:04:20Z",
-   "updated_at": "2026-09-21T11:26:15Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T09:10:28Z",
-     "completed_at": "2026-09-21T10:31:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579/job/106275992113",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T09:45:24Z",
-     "completed_at": "2026-09-21T11:26:14Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579/job/106275992207"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T07:21:17Z",
-     "completed_at": "2026-09-21T07:49:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571210579/job/106276032814"
     }
    ]
   }
