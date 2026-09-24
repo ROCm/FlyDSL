@@ -105,7 +105,7 @@ def ug_split(S: int):
     ``nf`` whole tiles plus one of ``seg`` K-segments of a leftover tile.  Returns
     (nf, seg) when the leftover tiles split evenly over the CTAs."""
     nf, r = divmod((S * TOP_K + 1) * N_UG_PER_SLOT, BLOCKS)
-    if S != 2 or r == 0 or BLOCKS % r:
+    if S not in (2, 4) or r == 0 or BLOCKS % r:
         return None
     seg = BLOCKS // r
     if (HIDDEN // 128) % seg or (HIDDEN // 128) // seg > WAVES // 2:
@@ -438,6 +438,18 @@ def build_layer(
             )
             bo.buffer_store(vec, _rsrc(base_addr), i * 2, cache_modifier=cm)
 
+        def put_bf(base_addr, i, vs, cm=CM_DEV):
+            """Elements i .. i + len(vs) (2 or 4, i aligned) as packed bf16 pairs: pair
+            i / 2 + j := (bf16(vs[2j]) | bf16(vs[2j + 1]) << 16, tag), one 8 / 16-byte store."""
+            words = []
+            for j in range_constexpr(len(vs) // 2):
+                words += [bf16_pair(vs[2 * j], vs[2 * j + 1]).bitcast(fx.Int32), tag]
+            bo.buffer_store(fx.Vector.from_elements(words, fx.Int32), _rsrc(base_addr), i, cache_modifier=cm)
+
+        def bf2_f32(w):
+            """Packed bf16 pair word -> (f32 low, f32 high)."""
+            return (w << 16).bitcast(fx.Float32), (w & fx.Int32(-65536)).bitcast(fx.Float32)
+
         def _qptr(addr):
             return fx.inttoptr(fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8), fx.Int64(addr))
 
@@ -495,6 +507,14 @@ def build_layer(
                 stamp(mark[0], mark[1], 1)
             gpu.barrier()
 
+        def pre_poll(n, addr_of):
+            """Wave 0 spins on one small pair per producer (lane j -> producer j < n <= 64)
+            before a large payload poll, so waiting CTAs do not flood memory."""
+            if wave == 0:
+                b, i = addr_of(fx.min(lane, n - 1))
+                poll([(b, i, 1)])
+            gpu.barrier()
+
         def get(base_addr, i):
             return poll([(base_addr, i, 1)])[0][0]
 
@@ -511,6 +531,10 @@ def build_layer(
 
         def get2(base_addr, i):
             return get2_many([(base_addr, i)])[0]
+
+        def get_bf2_many(specs):
+            """[(base, i)] packed bf16 elements i, i + 1 (i even) -> list of (f32, f32)."""
+            return [bf2_f32(v[0]) for v in poll([(b, i // 2, 1) for b, i in specs])]
 
         # ---- wave reductions
         def wave_sum(v):
@@ -677,17 +701,20 @@ def build_layer(
             return rstds
 
         def stage_x_pairs(name, n_total, src_of):
-            """LDS bf16 X[k] = bf16(mailbox ``name`` at src_of(k)) for k < n_total (src_of(k) even)."""
-            nw = n_total // 2
-            full = nw // THREADS
-            vals = get2_many([(mb(name), src_of((tid + i * THREADS) * 2)) for i in range(full)])
+            """LDS bf16 X[k] = packed bf16 mailbox ``name`` element src_of(k) for k < n_total
+            (src_of contiguous over aligned groups of 4): one 16-byte poll per 4 elements."""
+            nq = n_total // 4
+            full = nq // THREADS
+            vals = poll([(mb(name), src_of((tid + i * THREADS) * 4) // 2, 2) for i in range(full)])
             for i in range_constexpr(full):
-                lds_st(xs, tid + i * THREADS, bf16_pair(vals[i][0], vals[i][1]))
-            if const_expr(nw % THREADS):
+                for j in range_constexpr(2):
+                    lds_st(xs, (tid + i * THREADS) * 2 + j, vals[i][j].bitcast(fx.Float32))
+            if const_expr(nq % THREADS):
                 w = tid + full * THREADS
-                if w < nw:
-                    a0, a1 = get2(mb(name), src_of(w * 2))
-                    lds_st(xs, w, bf16_pair(a0, a1))
+                if w < nq:
+                    v = poll([(mb(name), src_of(w * 4) // 2, 2)])[0]
+                    for j in range_constexpr(2):
+                        lds_st(xs, w * 2 + j, v[j].bitcast(fx.Float32))
 
         def quant_scaled(a0, a1):
             """Per-wave FP8 quant of a 128-block held as 2 f32 per lane -> (scaled q0, q1, scale)."""
@@ -779,11 +806,12 @@ def build_layer(
                     put2(peer_addr[p] + fx.Int64(SY[region]), (rank * S + s) * HIDDEN + t * tile + r, v0, v1, CM_SYS)
                 own = sym + fx.Int64(SY[region])
                 specs = [(own, (src * S + s) * HIDDEN + row, 2) for src in range(W)]
+                if const_expr(not callable(residual)):  # packed bf16 pair
+                    specs.append((residual, (s * HIDDEN + row) // 2, 1))
+                got = poll(specs, "one-as")
+                parts = [(v[0].bitcast(fx.Float32), v[1].bitcast(fx.Float32)) for v in got[:W]]
                 if const_expr(not callable(residual)):
-                    specs.append((residual, s * HIDDEN + row, 2))
-                parts = [(v[0].bitcast(fx.Float32), v[1].bitcast(fx.Float32)) for v in poll(specs, "one-as")]
-                if const_expr(not callable(residual)):
-                    r0, r1 = parts[W]
+                    r0, r1 = bf2_f32(got[W][0])
                 t0 = fx.Float32(0.0)
                 t1 = fx.Float32(0.0)
                 for src in range_constexpr(W):
@@ -912,9 +940,14 @@ def build_layer(
             head = t // QB_PER_HEAD
             hoff = (t % QB_PER_HEAD) * Q_B_TILE
             if hoff < NOPE_DIM:
-                if tid < S * Q_B_TILE:
-                    s = tid // Q_B_TILE
-                    put(mb("q_nope"), (s * H + head) * NOPE_DIM + hoff + tid % Q_B_TILE, lds_ld(outs, tid))
+                if tid < S * Q_B_TILE // 4:
+                    s = tid // (Q_B_TILE // 4)
+                    r = (tid % (Q_B_TILE // 4)) * 4
+                    put_bf(
+                        mb("q_nope"),
+                        (s * H + head) * NOPE_DIM + hoff + r,
+                        [lds_ld(outs, s * Q_B_TILE + r + j) for j in range(4)],
+                    )
             else:
                 if tid < S * Q_B_TILE // 2:
                     s = tid // (Q_B_TILE // 2)
@@ -924,7 +957,7 @@ def build_layer(
                     x1 = lds_ld(outs, s * Q_B_TILE + pr * 2 + 1)
                     c = ld_f32(_rsrc(rope_cos), (pos0 + s) * (PE_DIM // 2) + i // 2)
                     sn = ld_f32(_rsrc(rope_sin), (pos0 + s) * (PE_DIM // 2) + i // 2)
-                    put2(mb("q_pe"), (s * H + head) * PE_DIM + i, x0 * c - x1 * sn, x0 * sn + x1 * c)
+                    put_bf(mb("q_pe"), (s * H + head) * PE_DIM + i, [x0 * c - x1 * sn, x0 * sn + x1 * c])
             stamp("q_b", t, 4)
 
         # ==================================== 4. absorbed query: q_lat = W_UK^T q_nope
@@ -954,15 +987,14 @@ def build_layer(
             reduce_rows(WAVES, acc, emit_out(UK_TILE))
             stamp("uk", t, 3)
             gpu.barrier()
-            for i in range_constexpr((S * UK_TILE + THREADS - 1) // THREADS):
-                k = tid + i * THREADS
-                if k < S * UK_TILE:
-                    s = k // UK_TILE
-                    put(
-                        mb("q_lat"),
-                        (s * H + head) * KV_LORA + (t % UK_PER_HEAD) * UK_TILE + k % UK_TILE,
-                        lds_ld(outs, k),
-                    )
+            if tid < S * UK_TILE // 4:
+                k = tid * 4
+                s = k // UK_TILE
+                put_bf(
+                    mb("q_lat"),
+                    (s * H + head) * KV_LORA + (t % UK_PER_HEAD) * UK_TILE + k % UK_TILE,
+                    [lds_ld(outs, k + j) for j in range(4)],
+                )
             stamp("uk", t, 4)
 
         # ================================== 5. sparse MLA split: 64 keys x 8 heads
@@ -1046,21 +1078,20 @@ def build_layer(
             # q of all heads -> bf16 Q[h][576] (words h * 288 + d / 2): latent 512 then pe 64
             NQ = H * KV_LORA // 4 // THREADS
             tpe = fx.min(tid, H * PE_DIM // 4 - 1)
-            qv = get2_many(
-                [(mb("q_lat"), s * H * KV_LORA + (tid + (i // 2) * THREADS) * 4 + (i % 2) * 2) for i in range(2 * NQ)]
-                + [(mb("q_pe"), s * H * PE_DIM + tpe * 4), (mb("q_pe"), s * H * PE_DIM + tpe * 4 + 2)]
+            qv = poll(
+                [(mb("q_lat"), (s * H * KV_LORA + (tid + i * THREADS) * 4) // 2, 2) for i in range(NQ)]
+                + [(mb("q_pe"), (s * H * PE_DIM + tpe * 4) // 2, 2)]
             )
             for i in range_constexpr(NQ):
                 w4 = tid + i * THREADS
                 qw = (w4 // (KV_LORA // 4)) * QS + (w4 % (KV_LORA // 4)) * 2
-                lds_st(xs, qw, bf16_pair(qv[2 * i][0], qv[2 * i][1]))
-                lds_st(xs, qw + 1, bf16_pair(qv[2 * i + 1][0], qv[2 * i + 1][1]))
+                lds_st(xs, qw, qv[i][0].bitcast(fx.Float32))
+                lds_st(xs, qw + 1, qv[i][1].bitcast(fx.Float32))
             if tid < H * PE_DIM // 4:
                 hh = tid // (PE_DIM // 4)
-                (a0, a1), (a2, a3) = qv[2 * NQ], qv[2 * NQ + 1]
                 qw = hh * QS + KV_LORA // 2 + (tid % (PE_DIM // 4)) * 2
-                lds_st(xs, qw, bf16_pair(a0, a1))
-                lds_st(xs, qw + 1, bf16_pair(a2, a3))
+                lds_st(xs, qw, qv[NQ][0].bitcast(fx.Float32))
+                lds_st(xs, qw + 1, qv[NQ][1].bitcast(fx.Float32))
             patch_new_kv()
             if const_expr(True):
                 stamp("split", tt, 2)
@@ -1148,6 +1179,8 @@ def build_layer(
 
             pre = [u_uv(c) for c in range(UV_NKC // UV_WPR)]
             hint_wait(N_SPLIT, lambda k: (mb("sp_l"), (s * N_SPLIT + k) * H + head), mark=("uv", tt))
+            pre_poll(N_SPLIT, lambda k: (mb("sp_l"), (s * N_SPLIT + k) * H + head))
+            stamp("uv", tt, 5)
             # one batched poll: thread = (d pair dp, split half hf) -> its SPH splits' acc
             # pairs, plus lane's split (m, l) so wave 0 can form the merge weights
             SPH = N_SPLIT // 2
@@ -1187,9 +1220,9 @@ def build_layer(
             reduce_rows(UV_R, acc, emit_out(UV_TILE))
             stamp("uv", tt, 3)
             gpu.barrier()
-            if tid < UV_TILE // 2:
-                r = tid * 2
-                put2(mb("o"), s * O_K + t * UV_TILE + r, lds_ld(outs, r), lds_ld(outs, r + 1))
+            if tid < UV_TILE // 4:
+                r = tid * 4
+                put_bf(mb("o"), s * O_K + t * UV_TILE + r, [lds_ld(outs, r + j) for j in range(4)])
             stamp("uv", tt, 4)
 
         # ====================== 7. W_o + attention TP peer reduce + residual -> a
@@ -1231,7 +1264,7 @@ def build_layer(
                 "attn",
                 t,
                 resid_h,
-                lambda s, row, v0, v1: put2(mb("a"), s * HIDDEN + row, bf16_round(v0), bf16_round(v1)),
+                lambda s, row, v0, v1: put_bf(mb("a"), s * HIDDEN + row, [v0, v1]),
             )
             stamp("o", t, 4)
 
@@ -1259,7 +1292,7 @@ def build_layer(
             xa = []
 
             def ld_a(sks):
-                v = get2_many(
+                v = get_bf2_many(
                     [(mb("a"), s * HIDDEN + k) for s, k in sks] + [(mb("a"), s * HIDDEN + xk) for s in range(S)]
                 )
                 xa.extend(v[len(sks) :])
@@ -1373,7 +1406,7 @@ def build_layer(
                 r_gp = _rsrc(g_post)
                 gps = [(ld_bf16(r_gp, k), ld_bf16(r_gp, k + 1)) for k in ks_]  # issued ahead of the wait
                 hint_wait(N_ROW_TILES, lambda k: (mb("a"), s_u * HIDDEN + k * ROW_TILE + ROW_TILE - 1), mark=("ug", u))
-                av = get2_many([(mb("a"), s_u * HIDDEN + k) for k in ks_])
+                av = get_bf2_many([(mb("a"), s_u * HIDDEN + k) for k in ks_])
                 ss = fx.Float32(0.0)
                 for j in range_constexpr(NB):
                     ss = ss + av[j][0] * av[j][0] + av[j][1] * av[j][1]
