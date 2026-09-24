@@ -821,7 +821,7 @@ def build_layer(
 
         def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
             """Push outs[s * tile + r] as tagged pairs to every peer, then sum all
-            ranks' pairs from the own symmetric buffer in rank order.  ``residual`` is
+            ranks' pairs from the own symmetric buffer in rank order (W = 1: no exchange).  ``residual`` is
             either fn(s, row) -> (r0, r1) (plain loads, issued first) or a mailbox base
             (pairs s * HIDDEN + row, polled in the same batch as the peers)."""
             if tid < S * tile // 2:
@@ -832,16 +832,25 @@ def build_layer(
                     r0, r1 = residual(s, row)
                 v0 = lds_ld(outs, s * tile + r)
                 v1 = lds_ld(outs, s * tile + r + 1)
-                for p in range_constexpr(W):
-                    put2(peer_addr[p] + fx.Int64(SY[region]), (rank * S + s) * HIDDEN + t * tile + r, v0, v1, CM_SYS)
-                own = sym + fx.Int64(SY[region])
-                specs = [(own, (src * S + s) * HIDDEN + row, 2) for src in range(W)]
-                if const_expr(not callable(residual)):  # packed bf16 pair
-                    specs.append((residual, (s * HIDDEN + row) // 2, 1))
-                got = poll(specs, "one-as")
-                parts = [(v[0].bitcast(fx.Float32), v[1].bitcast(fx.Float32)) for v in got[:W]]
+                if const_expr(W == 1):  # no TP peers: the sum is the local value
+                    parts = [(v0, v1)]
+                    got = []
+                    if const_expr(not callable(residual)):
+                        got = poll([(residual, (s * HIDDEN + row) // 2, 1)])
+                else:
+                    for p in range_constexpr(W):
+                        put2(
+                            peer_addr[p] + fx.Int64(SY[region]), (rank * S + s) * HIDDEN + t * tile + r, v0, v1, CM_SYS
+                        )
+                    own = sym + fx.Int64(SY[region])
+                    specs = [(own, (src * S + s) * HIDDEN + row, 2) for src in range(W)]
+                    if const_expr(not callable(residual)):  # packed bf16 pair
+                        specs.append((residual, (s * HIDDEN + row) // 2, 1))
+                    got = poll(specs, "one-as")
+                    parts = [(v[0].bitcast(fx.Float32), v[1].bitcast(fx.Float32)) for v in got[:W]]
+                    got = got[W:]
                 if const_expr(not callable(residual)):
-                    r0, r1 = bf2_f32(got[W][0])
+                    r0, r1 = bf2_f32(got[0][0])
                 t0 = fx.Float32(0.0)
                 t1 = fx.Float32(0.0)
                 for src in range_constexpr(W):
@@ -912,6 +921,11 @@ def build_layer(
             stamp("cache", t, 0)
             r_kv = _rsrc(kv_cache)
             r_pe = _rsrc(pe_cache)
+            # gamma and the RoPE factors are issued ahead of the wait
+            g = ld_bf16(_rsrc(g_kv), tid)
+            tpe = tid % (PE_DIM // 2)
+            cs = [ld_f32(_rsrc(rope_cos), (pos0 + s) * (PE_DIM // 2) + tpe) for s in range(S)]
+            sns = [ld_f32(_rsrc(rope_sin), (pos0 + s) * (PE_DIM // 2) + tpe) for s in range(S)]
             hint_wait(
                 (KV_LORA + PE_DIM) // QKV_A_TILE,
                 lambda k: (mb("kv_a"), (S - 1) * (KV_LORA + PE_DIM) + k * QKV_A_TILE + QKV_A_TILE - 1),
@@ -923,7 +937,6 @@ def build_layer(
                 [(mb("kv_a"), s * (KV_LORA + PE_DIM) + KV_LORA + (tid % (PE_DIM // 2)) * 2) for s in range(S)]
             )
             stamp("cache", t, 2)
-            g = ld_bf16(_rsrc(g_kv), tid)
             ssq = block_sums([v * v for v in vs])
             for s in range_constexpr(S):
                 pos = pos0 + s
@@ -932,8 +945,7 @@ def build_layer(
                 put(mb("kvnew"), s * KV_LORA + tid, kvn)
                 if tid < PE_DIM // 2:
                     x0, x1 = pes[s]
-                    c = ld_f32(_rsrc(rope_cos), pos * (PE_DIM // 2) + tid)
-                    sn = ld_f32(_rsrc(rope_sin), pos * (PE_DIM // 2) + tid)
+                    c, sn = cs[s], sns[s]
                     p0 = bf16_round(x0 * c - x1 * sn)
                     p1 = bf16_round(x0 * sn + x1 * c)
                     bo.buffer_store(p0.to(fx.BFloat16), r_pe, pos * PE_DIM + tid * 2)
@@ -1128,6 +1140,7 @@ def build_layer(
             if const_expr(True):
                 stamp("split", tt, 2)
             gpu.barrier()
+            stamp("split", tt, 5)
             # scores = K Q^T on MFMA: keys are M (4 row groups), the 576 dims K
             # (18 steps of 32, split in two halves), heads N.  wave = (row group, half)
             hn = fx.min(lane % 16, H - 1)
@@ -1145,6 +1158,7 @@ def build_layer(
                 c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
             fx.ptr_store(c, red + (wave * 64 + lane) * 4)
             gpu.barrier()
+            stamp("split", tt, 6)
             # split-local softmax: wave h, lane = key j (score = sum of the two K halves)
             kidx = t * SPLIT_KEYS + lane
             valid = kidx < nkeys
@@ -1335,6 +1349,7 @@ def build_layer(
                 specs = [(mb("a"), (s * HIDDEN + k) // 2, 2) for s, k in sks]
                 specs.append((mb("a"), (x_s * HIDDEN + xk) // 2, 1))
                 v = poll(specs, batch=len(specs))
+                stamp("router", t, 5)
                 xa.append(bf2_f32(v[-1][0]))
                 return [list(bf2_f32(w[0])) + list(bf2_f32(w[1])) for w in v[:-1]]
 
@@ -1498,7 +1513,6 @@ def build_layer(
             # routed and its weights are in flight while job k computes.
             NF, SEG = ug_split(S)
             KB = XQ_BLOCKS // SEG  # 128-k blocks per segment and row group
-            NSC = N_EXPERTS // 64
             XW = HIDDEN // 4  # LDS words of one sample's FP8 activation
             gu_row = (wave // (WAVES // 2)) * (INTER // 16)  # waves 0-3: gate rows, 4-7: up rows
             wq = wave % (WAVES // 2)
@@ -1512,21 +1526,8 @@ def build_layer(
                 shared = es == 0
                 s_u = fx.max(es - 1, 0) // TOP_K
                 slot = shared.select(fx.Int32(0), (es - 1) % TOP_K + 1)
-                bs = load_bias()
-                raws = getf_many([(mb("scores"), s_u * N_EXPERTS + lane + i * 64) for i in range(NSC)])
-                if const_expr(k == 0):
-                    stamp("ug", bid, 6)
-                picks, tot = route_top8(s_u, raws, bs)
-                if const_expr(k == 0):
-                    stamp("ug", bid, 7)
-                e_pick = fx.Int32(-1)
-                w_pick = fx.Float32(0.0)
-                for i in range_constexpr(NSC):
-                    hit = picks[i][0] & (picks[i][1] == slot - 1)
-                    e_pick = hit.select(fx.Int32(lane + i * 64), e_pick)
-                    w_pick = hit.select(picks[i][2] / tot * ROUTE_SCALE, w_pick)
-                e_sel = _uniform(shared.select(fx.Int32(SHARED_EXPERT), wave_max(e_pick)))
-                prob = shared.select(fx.Float32(1.0), wave_sum(w_pick))
+                e_sel = _uniform(lds_ld(keys, s_u * MOE_SLOTS + slot))  # routed once by dn_route
+                prob = lds_ld(dnw, s_u * MOE_SLOTS + slot)
                 bsel = shared.select(n_sel(), s_u)  # this lane's activation sample
                 if const_expr(k == 0):  # waves wq < KB each own one 128-k block
                     kbs = [seg * KB + fx.min(wq, KB - 1)]
@@ -1575,6 +1576,9 @@ def build_layer(
                         put(mb("prob"), shared.select(tid, s_u) * MOE_SLOTS + slot, prob)
 
             stamp("ug", bid, 5)
+            dn_route(load_bias())  # every sample's top-8 (waves < S in parallel), for up/gate and down
+            gpu.barrier()
+            stamp("ug", bid, 6)
             cur = ug_job(0)
             stamp("ug", bid, 0)
             stage_xq(list(range(S)))
@@ -1609,7 +1613,6 @@ def build_layer(
                     lds_st(outs, tid, tot_p)
                 gpu.barrier()
                 ug_mid(*job0)
-            dn_route(load_bias())  # expert-down routing while the other CTAs' mids land
         else:
             # S > 1 (the router already quantized every sample's activation): this CTA's
             # tasks are software pipelined -- task k+1 is routed (by every wave on its
@@ -1660,7 +1663,7 @@ def build_layer(
         for t in range(start("down"), N_DN_TILES, G):
             t = fx.Int32(t)
             stamp("down", t, 0)
-            if const_expr(ug_split(S) is None):  # else routed at the end of up/gate
+            if const_expr(ug_split(S) is None):  # else routed before up/gate
                 dn_route(load_bias())
             gpu.barrier()
             gu = wave // DN_WPR
