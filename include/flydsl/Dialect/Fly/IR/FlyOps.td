@@ -512,6 +512,13 @@ def Fly_MemRefStoreOp : Fly_Op<"memref.store", []> {
 // Utility ops
 //===----------------------------------------------------------------------===//
 
+// Static wave tracing is planned after Python IR construction and removed
+// before the normal device pipeline. Keep markers effectful until planning.
+def Fly_TraceEventOp : Fly_Op<"trace_event"> {
+  let summary = "Uniform wave timestamp annotation with a static event schedule";
+  let arguments = (ins StrAttr:$event_name, StrAttr:$kind, Optional<I32>:$payload);
+}
+
 def Fly_PrintOp : Fly_Op<"print"> {
   let arguments = (ins StrAttr:$format, Variadic<AnyType>:$values);
 }

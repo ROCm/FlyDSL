@@ -163,7 +163,7 @@ def _build_dispatch_factory(slot_specs):
         fills.append(fill)
         setup.append(f"    s{i} = storages[{i}]")
         setup.append(f"    f{i} = fills[{fi}]")
-        body.append(f"        f{i}(a[{arg_idx}], s{i})")
+        body.append(f"        f{i}({'None' if arg_idx == -1 else f'a[{arg_idx}]'}, s{i})")
 
     src = "def make(packed, storages, func_exe, fills):\n"
     src += "".join(line + "\n" for line in setup)
@@ -224,7 +224,9 @@ class CompiledArtifact:
         post_load_processors: Optional[List[Callable]] = None,
         link_libs: Optional[List[str]] = None,
         uses_explicit_module: bool = False,
+        trace_spec=None,
     ):
+        self._trace_spec = trace_spec
         self._ir_text = str(compiled_module)
         self._entry = func_name
         self._source_ir = source_ir
@@ -282,6 +284,7 @@ class CompiledArtifact:
             "processor_refs": refs,
             "link_libs": self._link_libs,
             "uses_explicit_module": self._uses_explicit_module,
+            "trace_spec": self._trace_spec,
         }
 
     def __setstate__(self, state):
@@ -292,6 +295,7 @@ class CompiledArtifact:
             self._ir_text = state["ir_text"]
         self._entry = state["entry"]
         self._source_ir = state.get("source_ir")
+        self._trace_spec = state.get("trace_spec")
         self._link_libs = state.get("link_libs", [])
         self._uses_explicit_module = state.get("uses_explicit_module", False)
         self._post_load_processors = []

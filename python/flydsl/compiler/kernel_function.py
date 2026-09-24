@@ -203,6 +203,9 @@ class CompilationContext:
         self.kernel_counter = 0
         self._kernel_names: set[str] = set()
         self.stream_arg = None
+        self.trace_base = None
+        self.trace_spec = None
+        self.trace_block = (0, 0, 0)
         self.link_libs: list = []
         self._link_libs_seen: set = set()
         # Callables invoked on each GPU hipModule_t after ExecutionEngine
@@ -355,6 +358,14 @@ class KernelLauncher:
         self._check_block_vs_known(block_dims, known_block_size)
 
         specialization_key = tuple(known_block_size) if known_block_size is not None else None
+        if self._ctx.trace_spec is not None:
+            from ..extension._flytrace import _selected_block
+
+            specialization_key = (
+                specialization_key,
+                tuple(as_ir_value(v, keep_static=True) for v in grid_dims),
+                _selected_block(self._ctx),
+            )
         emitted_kernel = self._emitted_kernels.get(specialization_key)
         if emitted_kernel is None:
             kernel_name, kernel_args, gpu_func_op, smem_bytes = self._kernel_function._emit_kernel(
@@ -364,6 +375,10 @@ class KernelLauncher:
                 bound_self=self._bound_self,
                 known_block_size=known_block_size,
             )
+            if self._ctx.trace_spec is not None:
+                from ..extension._flytrace import lower_kernel
+
+                lower_kernel(gpu_func_op, self._ctx, grid_dims, known_block_size, stream)
             _attach_attrs(gpu_func_op, self._unit_attrs, self._value_attrs)
             emitted_kernel = (kernel_name, kernel_args, smem_bytes)
             self._emitted_kernels[specialization_key] = emitted_kernel
@@ -554,6 +569,8 @@ class KernelFunction:
         for value in param_values:
             kernel_arg_types.extend(get_ir_types(value))
 
+        if ctx.trace_spec is not None:
+            kernel_arg_types.append(ir.IntegerType.get_signless(64))
         kernel_id = ctx.next_kernel_id()
         if self._name is not None:
             self._kernel_name = ctx.unique_kernel_name(self._name, kernel_id)
@@ -610,6 +627,10 @@ class KernelFunction:
         else:
             smem_bytes = None
 
+        if ctx.trace_spec is not None:
+            from ..expr import Uint64
+
+            param_values.append(Uint64(ctx.trace_base))
         return self._kernel_name, tuple(param_values), gpu_func, smem_bytes
 
     def __call__(

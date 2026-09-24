@@ -28,11 +28,13 @@ _BACKEND_MODULES = {
 _LIBRARY_MODULES = {
     "coop": "..extension.coop",
     "random": "..extension.random",
+    "flytrace": "..extension.flytrace",
 }
 
 if TYPE_CHECKING:
     from ..extension import coop as coop
     from ..extension import random as random
+    from ..extension import flytrace as flytrace
 
 
 # lazy load backend subpackages and extension libraries
