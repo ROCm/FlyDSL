@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-09-23T21:28:21Z",
+ "updated": "2026-09-24T01:03:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35934904182,
+   "pr": 1187,
+   "commit": "5f24cf1858c143b0c60e56961cb81e11645f26c1",
+   "branch": "ci/fix-dumpir-v2",
+   "event": "pull_request",
+   "title": "[CI] Fix dumpir.sh silently succeeding with no command",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35934904182",
+   "created_at": "2026-09-23T23:42:17Z",
+   "updated_at": "2026-09-24T00:15:00Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T00:15:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35934904182/job/107437884448"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-24T00:15:41Z",
+     "completed_at": "2026-09-24T00:44:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35934904182/job/107437884472"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-24T00:15:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35934904182/job/107437884473"
+    }
+   ]
+  },
   {
    "run_id": 35868591474,
    "pr": 1186,
@@ -10,11 +53,11 @@
    "branch": "rchamber/flash_causal_improvements",
    "event": "pull_request",
    "title": "Issue causal flash q-blocks longest-first",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35868591474",
    "created_at": "2026-09-23T13:39:28Z",
-   "updated_at": "2026-09-23T14:16:26Z",
+   "updated_at": "2026-09-24T00:15:56Z",
    "actor": "RichardChamberlain1",
    "jobs": [
     {
@@ -29,9 +72,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-23T14:16:26Z",
+     "started_at": "2026-09-24T00:15:55Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35868591474/job/107221508751"
     },
@@ -2139,52 +2182,6 @@
      "started_at": "2026-09-20T02:55:15Z",
      "completed_at": "2026-09-20T02:55:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484649345/job/106010266590"
-    }
-   ]
-  },
-  {
-   "run_id": 35484415773,
-   "pr": null,
-   "commit": "66e138b1433d7b9b729ca349f0bdc10ac9985496",
-   "branch": "phil/llvm-skill-only",
-   "event": "pull_request",
-   "title": "[llvm][Skill] Add an LLVM kernel-tuning and verification skill",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484415773",
-   "created_at": "2026-09-20T02:36:14Z",
-   "updated_at": "2026-09-20T02:38:28Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-20T02:38:23Z",
-     "completed_at": "2026-09-20T02:38:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484415773/job/106008250757",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-20T02:38:25Z",
-     "completed_at": "2026-09-20T02:38:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484415773/job/106008250765"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-20T02:38:23Z",
-     "completed_at": "2026-09-20T02:38:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35484415773/job/106008250773"
     }
    ]
   }
