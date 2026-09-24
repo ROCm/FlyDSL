@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-24T04:00:55Z",
+ "updated": "2026-09-24T04:12:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869",
    "created_at": "2026-09-24T03:58:04Z",
-   "updated_at": "2026-09-24T03:59:36Z",
+   "updated_at": "2026-09-24T04:00:51Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -108,9 +108,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T03:45:22Z",
+     "started_at": "2026-09-24T04:06:37Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596/job/107484638199"
     },
@@ -184,9 +184,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T03:42:08Z",
+     "started_at": "2026-09-24T04:04:25Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950379705/job/107483970740"
     }
@@ -199,29 +199,29 @@
    "branch": "main",
    "event": "push",
    "title": "Revert error merge \"Refactor preshuffle GEMM indexing with layout alg\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207",
    "created_at": "2026-09-24T03:08:58Z",
-   "updated_at": "2026-09-24T03:25:06Z",
+   "updated_at": "2026-09-24T04:05:33Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T03:25:06Z",
+     "started_at": "2026-09-24T04:05:32Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107480396960"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-24T03:25:22Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T04:04:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107480396980"
     },
     {
@@ -261,10 +261,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-24T03:27:21Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T04:04:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948988500/job/107478110413"
     },
     {
@@ -285,20 +285,20 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[Feat][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816",
    "created_at": "2026-09-24T02:40:51Z",
-   "updated_at": "2026-09-24T03:00:15Z",
+   "updated_at": "2026-09-24T04:11:09Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-24T03:00:14Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T04:11:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816/job/107474311647"
     },
     {
@@ -313,10 +313,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-24T02:57:21Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T04:05:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816/job/107474311717"
     }
    ]
