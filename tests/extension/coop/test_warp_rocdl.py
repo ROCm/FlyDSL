@@ -21,14 +21,16 @@ for that to be a safe swap, and they are what this file checks:
   value that is not a 32-bit ``Numeric`` — has to reach the portable
   implementation instead.
 
-The functional coverage of the collectives themselves lives in
-``test_warp_scan.py``; nothing here duplicates it.
+The primitive contracts live in ``test_warp_reduce.py``,
+``test_warp_reduce_batched.py`` and ``test_warp_scan.py``. This module focuses
+on agreement between backend implementations and their generated instructions.
 """
 
 from __future__ import annotations
 
 import pytest
 from coop_common import WARP_WIDTHS
+from coop_test_utils import warp_default_device as warp_default_device
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -66,15 +68,15 @@ requires_dpp = pytest.mark.skipif(not _is_gfx9(), reason="the DPP sequence is gf
 
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
-def test_rocm_resolves_every_warp_collective_to_the_override():
-    """On the ROCm backend the public names are the target's, not the portable ones."""
+def test_rocm_declares_its_implemented_warp_overrides():
+    """ROCm overrides are public names; newer families may use portable fallbacks."""
     from flydsl.extension.coop import warp
     from flydsl.extension.coop.warp import rocdl
 
     assert fx.coop.warp.rocdl is rocdl
-    # The override covers the whole warp-scope surface, so nothing in it is
-    # left resolving to a shuffle by accident.
-    assert set(rocdl.__all__) == set(warp.__all__)
+    # The target only advertises algorithms it implements. Other public warp
+    # families retain the portable implementation through Dispatcher.
+    assert set(rocdl.__all__) <= set(warp.__all__)
     # The portable implementations are still reachable, which is what lets the
     # override fall back to them and this file compare against them.
     assert portable.warp_reduce is not rocdl.warp_reduce
@@ -116,6 +118,7 @@ def _run_both(values, call, *, block):
     "form",
     ("reduce", "inclusive", "exclusive", "aggregate"),
 )
+@pytest.mark.usefixtures("warp_default_device")
 def test_every_form_agrees_with_the_portable_one(form, width):
     """Integers wrap identically, so every one of these is exact on both sides."""
     warp_threads = fx.num_warp_threads()
@@ -151,6 +154,7 @@ def test_every_form_agrees_with_the_portable_one(form, width):
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 @pytest.mark.parametrize("op", (fx.ReductionOp.ADD, fx.ReductionOp.MUL), ids=lambda o: o.name)
+@pytest.mark.usefixtures("warp_default_device")
 def test_float_folds_agree_with_the_portable_form(op):
     """Floats fold in a different order, so this is a tolerance check, not equality.
 
@@ -181,6 +185,7 @@ def test_float_folds_agree_with_the_portable_form(op):
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 @pytest.mark.parametrize("width", WARP_WIDTHS, ids=width_id)
 @pytest.mark.parametrize("form", ("reduce", "exclusive"))
+@pytest.mark.usefixtures("warp_default_device")
 def test_max_keeps_its_identity_inside_the_group(form, width):
     """MAX is the op whose identity is visible, so it is the one that pins the edges.
 
@@ -203,14 +208,13 @@ def test_max_keeps_its_identity_inside_the_group(form, width):
     values = torch.randint(1, 2**20, (block,), dtype=torch.int32, device="cuda")
     fast, ref = _run_both(values, call, block=block)
 
-    assert torch.equal(fast, ref)
-
     per_group = values.cpu().reshape(-1, group)
     if form == "reduce":
         expected = per_group.amax(1).repeat_interleave(group)
     else:
-        identity = torch.full((per_group.shape[0], 1), -(2**31), dtype=torch.int32)
+        identity = torch.full((per_group.shape[0], 1), -(2**31), dtype=torch.int32, device="cpu")
         expected = torch.cat([identity, per_group.cummax(1).values[:, :-1]], dim=1).reshape(-1)
+    assert torch.equal(fast, ref)
     assert torch.equal(fast, expected)
 
 

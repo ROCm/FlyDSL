@@ -32,7 +32,7 @@ from ..typing import (
     is_target_address_space,
 )
 from . import cdna3, rdna3, rdna4
-from .utils import normalize_s_waitcnt_field
+from .utils import normalize_s_waitcnt_field, require_lds_dma_support
 
 
 @dsl_loc_tracing
@@ -108,11 +108,12 @@ def BufferCopyLDS(bit_size):
     - `soffset` (`i32`), default zero
     - `imm_offset` (`i32`), default zero
     """
+    require_lds_dma_support(f"BufferCopyLDS({bit_size})")
     return CopyOpCDNA3BufferCopyLDSType.get(bit_size)
 
 
-BufferCopyLDS32b = lambda: CopyOpCDNA3BufferCopyLDSType.get(32)
-BufferCopyLDS128b = lambda: CopyOpCDNA3BufferCopyLDSType.get(128)
+BufferCopyLDS32b = lambda: BufferCopyLDS(32)
+BufferCopyLDS128b = lambda: BufferCopyLDS(128)
 
 
 def BufferCopyLDS64b():
@@ -169,14 +170,16 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
         elem_ty_b: optional B operand type for mixed-type instructions; defaults
             to ``elem_ty_ab``. RDNA4 accepts every FP8(E4M3FN)/BF8(E5M2)
             combination.
-        sign_a (bool, default False): treat A operand as signed.
-        sign_b (bool, default False): treat B operand as signed.
-        clamp  (bool, default False): saturate integer accumulator.
+        sign_a  (bool, default False): treat A operand as signed (iu8/iu4 only).
+        sign_b  (bool, default False): treat B operand as signed (iu8/iu4 only).
+        clamp   (bool, default False): saturate integer accumulator (iu8/iu4 only).
+        mod_c   (int,  default 0):     I16 C-operand modifier (gfx1250 only).
     Forwarded to the arch-specific WMMA atom (MmaOpGFX11_WMMAType on gfx11,
     MmaOpGFX120X_WMMAType on gfx120x, MmaOpGFX1250_WMMAType on gfx1250); the
-    atom's verify() rejects them on the float (fp16/bf16/fp8) paths, where the
-    intrinsic has no such operands. Future WMMA ops for new architectures
-    should extend kwargs here rather than growing the positional signature.
+    atom's verify() rejects sign_a/sign_b/clamp on the float (fp16/bf16/fp8)
+    paths, where the intrinsic has no such operands. Future WMMA ops for new
+    architectures should extend kwargs here rather than growing the positional
+    signature.
     """
     ty_a = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
     elem_ty_b = kwargs.pop("elem_ty_b", None)
@@ -208,6 +211,7 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
             sign_a=bool(kwargs.get("sign_a", False)),
             sign_b=bool(kwargs.get("sign_b", False)),
             clamp=bool(kwargs.get("clamp", False)),
+            mod_c=int(kwargs.get("mod_c", 0)),
         )
     if arch.startswith("gfx120"):
         return MmaOpGFX120X_WMMAType.get(

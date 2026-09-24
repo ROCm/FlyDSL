@@ -4,7 +4,9 @@
 # Configuration file for the Sphinx documentation builder.
 
 import os
+import subprocess
 import sys
+from datetime import datetime, timezone
 
 # -- Path setup --------------------------------------------------------------
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -14,6 +16,23 @@ sys.path.insert(0, os.path.join(_project_root, "python"))
 import flydsl  # noqa: E402
 
 version = release = flydsl.__version__
+
+# Identify the source revision without importing GPU-dependent compiler modules.
+try:
+    _revision = (
+        subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=_project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        or "unknown"
+    )
+except OSError:
+    # Source archive builds may not have Git installed.
+    _revision = "unknown"
+_built_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 # -- Project information -----------------------------------------------------
 project = "FlyDSL"
@@ -80,5 +99,5 @@ myst_heading_anchors = 3
 #   ```md              | ```rst
 #   {{ ROCM_VERSION }} | |ROCM_VERSION|
 #   ```                | ```
-myst_substitutions = {"FLYDSL_VERSION": version}
+myst_substitutions = {"FLYDSL_VERSION": version, "SOURCE_COMMIT": _revision, "BUILD_DATE": _built_at}
 rst_prolog = "\n".join(f".. |{key}| replace:: {val}" for key, val in myst_substitutions.items())

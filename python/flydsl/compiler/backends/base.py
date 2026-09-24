@@ -70,7 +70,7 @@ class BaseBackend(metaclass=ABCMeta):
         """Ordered list of MLIR PassManager.parse fragments.
 
         ``compile_hints`` carries per-kernel knobs such as ``waves_per_eu``
-        and ``maxnreg`` (from ``CompilationContext.get_compile_hints()``).
+        (from ``CompilationContext.get_compile_hints()``).
         """
         ...
 

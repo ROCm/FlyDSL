@@ -44,7 +44,7 @@ class FlyROCDL_Attr<string attrName, string attrMnemonic, list<Trait> traits = [
   let mnemonic = attrMnemonic;
 }
 
-class FlyROCDL_MmaOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
+class FlyROCDL_MmaOp<string typeName, string typeMnemonic, list<Trait> traits = []>
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
         DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>, 
         DeclareTypeInterfaceMethods<Fly_MmaOpTypeInterface>
@@ -71,7 +71,7 @@ class FlyROCDL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> 
   }];
 }
 
-class FlyROCDL_StatefulMmaOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
+class FlyROCDL_StatefulMmaOp<string typeName, string typeMnemonic, list<Trait> traits = []>
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
         DeclareTypeInterfaceMethods<Fly_MmaOpTypeInterface>,
         DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface>

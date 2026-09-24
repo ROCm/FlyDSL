@@ -4,6 +4,14 @@ FlyDSL |FLYDSL_VERSION| documentation
 **FlyDSL** is a Python DSL and MLIR compiler stack for authoring high-performance
 GPU kernels with explicit layout algebra, targeting AMD ROCm/HIP GPUs.
 
+.. note::
+
+   This site is built from ``main`` and may describe APIs newer than the
+   published package. See :ref:`documentation-versions`
+   to choose documentation and dependencies for your installed release.
+
+   Source commit: |SOURCE_COMMIT|. Built: |BUILD_DATE|.
+
 FlyDSL is the Python front-end (*Flexible Layout Python DSL*) powered by the
 **Fly dialect**: an MLIR-native compiler stack with first-class layout IR
 (``!fly.int_tuple``, ``!fly.layout``, ``!fly.coord_tensor``, ``!fly.memref``),
@@ -21,13 +29,18 @@ to GPU/ROCDL.
 
       * :doc:`API stability <api_stability>`
 
-   .. grid-item-card:: Guides
+   .. grid-item-card:: Language
 
       * :doc:`Arithmetic types <language/arithmetic_types>`
-
       * :doc:`Composite types <language/composite_types>`
-
       * :doc:`Storage and allocator <language/storage_and_allocator>`
+      * :doc:`DSL protocols <language/dsl_protocols>`
+
+   .. grid-item-card:: Extension
+
+      * :doc:`Random number generation <extension/rand>`
+
+   .. grid-item-card:: Guides
 
       * :doc:`Architecture and compilation pipeline <architecture_guide>`
 
@@ -60,4 +73,3 @@ to GPU/ROCDL.
       * :doc:`Basic usage <tutorials/basic_usage>`
 
       * :doc:`Kernel development <tutorials/kernel_development>`
-

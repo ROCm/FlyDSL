@@ -2,7 +2,30 @@
 # Copyright (c) 2026 FlyDSL Project Contributors
 
 from ..._mlir import ir
+from ...runtime.device import get_rocm_arch
+from ...utils import env
 from ..numeric import Numeric
+
+
+def require_lds_dma_support(what):
+    """Reject global -> LDS direct loads (``buffer_load_* ... lds``) on gfx11.
+
+    RDNA3 / RDNA3.5 dropped the VMEM -> LDS hardware path that gfx9 and gfx10
+    expose. Emitting the intrinsic anyway passes MLIR verification and then
+    aborts the whole process in LLVM instruction selection with "Do not know
+    how to expand this operator's operand!", so reject it while a Python
+    traceback still points at the kernel line that asked for it.
+    """
+    # `ARCH` picks the compile target in RocmBackend.detect_target(), so gate on the arch actually
+    # being compiled for rather than on the installed device.
+    arch = env.compile.arch or get_rocm_arch()
+    if not arch or not arch.startswith("gfx11"):
+        return
+    raise ValueError(
+        f"{what} is not supported on target arch {arch!r}: gfx11 (RDNA3 / RDNA3.5) has no "
+        "global -> LDS direct-load hardware. Use a buffer load into registers followed by "
+        "ds_write instead."
+    )
 
 
 def normalize_s_waitcnt_field(name, value, maximum):
