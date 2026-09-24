@@ -1,8 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-09-24T15:31:10Z",
+ "updated": "2026-09-24T18:35:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36022932909,
+   "pr": 1192,
+   "commit": "902abec357e498d7ec103fe76282bbc499849d62",
+   "branch": "add-security-scanning",
+   "event": "pull_request",
+   "title": "chore: add security scanning workflows",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36022932909",
+   "created_at": "2026-09-24T15:48:57Z",
+   "updated_at": "2026-09-24T16:25:36Z",
+   "actor": "haribabug",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-24T16:29:20Z",
+     "completed_at": "2026-09-24T18:12:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36022932909/job/107726883258",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T16:25:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36022932909/job/107726883296"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T16:25:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36022932909/job/107726883464"
+    }
+   ]
+  },
   {
    "run_id": 35996004114,
    "pr": 1191,
@@ -41,10 +87,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-24T12:11:15Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-24T16:26:34Z",
+     "completed_at": "2026-09-24T17:43:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35996004114/job/107625737575"
     }
    ]
@@ -2141,49 +2187,6 @@
    "updated_at": "2026-09-21T10:21:30Z",
    "actor": "jli-melchior",
    "jobs": []
-  },
-  {
-   "run_id": 35586471548,
-   "pr": 1162,
-   "commit": "ae834afca97b54c41dee3c2a9e5f320a26459c20",
-   "branch": "feature/ktrace-dialect-squashed",
-   "event": "pull_request",
-   "title": "[DSL][Runtime][Kernel] Add in-kernel wave tracing (fx.ktrace) for gfx942/gfx950",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548",
-   "created_at": "2026-09-21T10:01:24Z",
-   "updated_at": "2026-09-21T11:19:41Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-21T10:22:12Z",
-     "completed_at": "2026-09-21T11:19:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548/job/106296753820"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-21T10:21:38Z",
-     "completed_at": "2026-09-21T11:19:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548/job/106296753871"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-21T10:36:21Z",
-     "completed_at": "2026-09-21T11:19:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35586471548/job/106296754469"
-    }
-   ]
   }
  ]
 }
