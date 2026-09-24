@@ -1394,18 +1394,34 @@ Layout layoutZippedDivide(LayoutBuilder<Layout> &builder, Layout layout, Layout 
   return builder.makeLayout(retShape, retStride);
 }
 
+namespace detail {
+
+// zip2_by guide that preserves the tiler's leaf-vs-tuple nesting. A leaf
+// tile (e.g. 32) is a leaf guide so zipped_divide is identity on the
+// logical_divide result. A singleton tuple tile (e.g. (32,)) is a rank-1
+// tuple guide so the corresponding mode is split into (tile, rest).
+inline IntTupleAttr intTupleZipGuideFromTile(MLIRContext *ctx, Attribute mode) {
+  if (auto nestedTile = dyn_cast<TileAttr>(mode)) {
+    if (nestedTile.isLeaf())
+      return intTupleZipGuideFromTile(ctx, nestedTile.getValue());
+    SmallVector<Attribute> elems;
+    elems.reserve(nestedTile.rank());
+    for (int i = 0; i < nestedTile.rank(); ++i)
+      elems.push_back(intTupleZipGuideFromTile(ctx, nestedTile.at(i)));
+    return IntTupleAttr::get(ArrayAttr::get(ctx, elems));
+  }
+  return IntTupleAttr::getLeafNone(ctx);
+}
+
+} // namespace detail
+
 template <class Layout>
 Layout layoutZippedDivide(LayoutBuilder<Layout> &builder, Layout layout, TileAttr divisorTile) {
   using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
 
   Layout logicalDiv = layoutLogicalDivide(builder, layout, divisorTile);
   auto *ctx = builder.getLayoutAttr(layout).getContext();
-
-  SmallVector<Attribute> guideElems;
-  for (int i = 0; i < divisorTile.rank(); ++i) {
-    guideElems.push_back(IntTupleAttr::getLeafNone(ctx));
-  }
-  IntTupleAttr guide = IntTupleAttr::get(ArrayAttr::get(ctx, guideElems));
+  IntTupleAttr guide = detail::intTupleZipGuideFromTile(ctx, divisorTile);
   IntTuple retShape = intTupleZip2By(builder, builder.getShape(logicalDiv), guide);
   IntTuple retStride = intTupleZip2By(builder, builder.getStride(logicalDiv), guide);
   return builder.makeLayout(retShape, retStride);

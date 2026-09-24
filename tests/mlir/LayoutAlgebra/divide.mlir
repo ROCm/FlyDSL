@@ -65,6 +65,18 @@ func.func @test_logical_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
   return %result : !fly.layout<(4, 4) : (1, 4)>
 }
 
+// CHECK-LABEL: @test_zipped_divide_singleton_tuple_tile
+func.func @test_zipped_divide_singleton_tuple_tile() -> !fly.layout<((32), (2, 8)) : ((1), (32, 128))> {
+  // tile<[32]> is a singleton-tuple tiler, not leaf tile<32>.
+  %s = fly.static : !fly.int_tuple<(64, 8)>
+  %d = fly.static : !fly.int_tuple<(1, 128)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(64, 8)>, !fly.int_tuple<(1, 128)>) -> !fly.layout<(64, 8) : (1, 128)>
+  %tiler = fly.static : !fly.tile<[32]>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(64, 8) : (1, 128)>, !fly.tile<[32]>) -> !fly.layout<((32), (2, 8)) : ((1), (32, 128))>
+  return %result : !fly.layout<((32), (2, 8)) : ((1), (32, 128))>
+}
+
 // CHECK-LABEL: @test_zipped_divide_1d
 func.func @test_zipped_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
   %s = fly.static : !fly.int_tuple<(16)>

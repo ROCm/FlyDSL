@@ -303,6 +303,64 @@ def test_zipped_divide(frontend_only_jit):
     build()
 
 
+def test_zipped_divide_leaf_tile(frontend_only_jit):
+    """zipped_divide(64:1, tile<32>) is identity on logical_divide: (32,2):(1,32)."""
+
+    @flyc.jit
+    def build():
+        result = fx.zipped_divide(fx.make_layout((64,), (1,)), (32,))
+        assert str(result.type) == "!fly.layout<(32,2):(1,32)>"
+        _assert_size(result, 64)
+
+    build()
+
+
+def test_zipped_divide_singleton_tuple_tile(frontend_only_jit):
+    """zipped_divide((64,8):(1,128), tile<(32,)>) splits only the first mode.
+
+    CuTe zip2_by on a singleton-tuple tiler regroups as
+    ((32),(2,8)):((1),(32,128)), not the logical_divide grouping
+    ((32,2),8):((1,32),128).
+    """
+
+    @flyc.jit
+    def build():
+        result = fx.zipped_divide(fx.make_layout((64, 8), (1, 128)), ((32,),))
+        assert str(result.type) == "!fly.layout<((32),(2,8)):((1),(32,128))>"
+        _assert_size(result, 512)
+
+        one_d = fx.zipped_divide(fx.make_layout((64,), (1,)), ((32,),))
+        assert str(one_d.type) == "!fly.layout<((32),(2)):((1),(32))>"
+        _assert_size(one_d, 64)
+
+    build()
+
+
+def test_zipped_divide_singleton_differs_from_logical_divide(frontend_only_jit):
+    """zipped_divide with a singleton-tuple tiler must NOT equal logical_divide.
+
+    This is the key invariant repaired by the zip2By guide fix: before the fix,
+    zipped_divide(layout, ((32,),)) degenerated to logical_divide and both
+    returned ((32,2),8):((1,32),128).  After the fix they differ:
+      logical_divide -> ((32,2),8):((1,32),128)
+      zipped_divide  -> ((32),(2,8)):((1),(32,128))
+    """
+
+    @flyc.jit
+    def build():
+        layout = fx.make_layout((64, 8), (1, 128))
+        ld = fx.logical_divide(layout, ((32,),))
+        zd = fx.zipped_divide(layout, ((32,),))
+        assert str(ld.type) != str(
+            zd.type
+        ), "BUG: zipped_divide degenerated to logical_divide for singleton-tuple tiler"
+        # Confirm the exact types so the assertion message is informative.
+        assert str(ld.type) == "!fly.layout<((32,2),8):((1,32),128)>"
+        assert str(zd.type) == "!fly.layout<((32),(2,8)):((1),(32,128))>"
+
+    build()
+
+
 def test_tiled_divide(frontend_only_jit):
     """Cell 21: tiled_divide preserves size = 32"""
 
