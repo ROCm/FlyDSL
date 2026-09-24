@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-24T05:58:57Z",
+ "updated": "2026-09-24T06:10:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -129,11 +129,11 @@
    "branch": "jli/fix-waves-per-eu",
    "event": "pull_request",
    "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596",
    "created_at": "2026-09-24T03:16:51Z",
-   "updated_at": "2026-09-24T05:02:36Z",
+   "updated_at": "2026-09-24T06:07:52Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -151,10 +151,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-24T05:02:35Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T06:07:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596/job/107484638221"
     },
     {
