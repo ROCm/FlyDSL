@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-24T21:28:12Z",
+ "updated": "2026-09-24T23:34:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36073185378,
+   "pr": 848,
+   "commit": "175cf1c5f1b2241a4845f9759e5f3e782bc73849",
+   "branch": "cjl/norm_perf",
+   "event": "pull_request",
+   "title": "[Perf] Optimize rmsnorm/layernorm",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36073185378",
+   "created_at": "2026-09-24T23:31:50Z",
+   "updated_at": "2026-09-24T23:31:56Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 36022932909,
    "pr": 1192,
@@ -191,11 +206,11 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35991148288",
    "created_at": "2026-09-24T11:07:03Z",
-   "updated_at": "2026-09-24T11:21:26Z",
+   "updated_at": "2026-09-24T23:31:51Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
@@ -219,10 +234,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-24T11:21:26Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T23:31:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35991148288/job/107609783353"
     }
    ]
@@ -2170,21 +2185,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588299456",
    "created_at": "2026-09-21T10:21:24Z",
    "updated_at": "2026-09-21T10:29:26Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 35588085232,
-   "pr": 987,
-   "commit": "f3ddda0f5304b7ce46bad3b05356c002a90d0631",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588085232",
-   "created_at": "2026-09-21T10:18:59Z",
-   "updated_at": "2026-09-21T10:21:30Z",
    "actor": "jli-melchior",
    "jobs": []
   }
