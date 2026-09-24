@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 
 from kernels.comm.custom_all_reduce import FlyDSLAllreduce as _Hip
-from kernels.mla_moe_layer.glm5_mla_moe_layer import build_layer, layout, pack_bf16, pack_fp8, stage_tasks
+from kernels.mla_moe_layer.glm5_mla_moe_layer import TL_COLS, build_layer, layout, pack_bf16, pack_fp8, stage_tasks
 from kernels.mla_moe_layer.reference import HIDDEN, INTER, MOE_SLOTS, N_EXPERTS, LayerWeights
 
 __all__ = ["Glm5MlaMoeLayer"]
@@ -50,7 +50,7 @@ class Glm5MlaMoeLayer:
         self.launch = build_layer(samples, W.heads, npes, topk, timeline=timeline)
         self.stages = stage_tasks(samples, W.heads, topk)
         n_tasks = sum(n for _, n in self.stages)
-        self.timeline = torch.zeros(n_tasks, 5, dtype=torch.int64, device=dev) if timeline else None
+        self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)  # decode-step counter
 
     def debug(self, name: str, shape, dtype=torch.float32, pairs=True) -> torch.Tensor:
@@ -121,7 +121,7 @@ class Glm5MlaMoeLayer:
     def timeline_report(self) -> str:
         """Per stage, in us from launch start: [first start, median hint seen, last end]
         and median per-task phases (hint wait, payload staging, compute, epilogue)."""
-        tl = self.timeline.cpu().double() / 100.0  # s_memrealtime ticks at 100 MHz
+        tl = self.timeline[:, :5].cpu().double() / 100.0  # s_memrealtime ticks at 100 MHz
         t0 = tl[:, 0].min()
         rows, i = [], 0
         for name, n in self.stages:
