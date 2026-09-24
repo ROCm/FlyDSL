@@ -406,6 +406,8 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `FLYDSL_DUMP_IR` | `false` | Dump intermediate IR at each pipeline stage. |
 | `FLYDSL_DUMP_DIR` | `~/.flydsl/debug` | Directory for IR dumps. |
 | `FLYDSL_DEBUG_DUMP_ASM` | `false` | Dump final AMD ISA assembly. |
+| `FLYDSL_HACK_UT_ASM` | `""` | Path to a hand-edited `.s` to assemble and run instead of the generated device object. Debug/UT only. |
+| `FLYDSL_HACK_UT_ASM_SAVE` | `false` | Also write the code object assembled from `FLYDSL_HACK_UT_ASM` next to the `.s`, with a `.hsaco` suffix. Debug/UT only. |
 | `FLYDSL_DEBUG_AST_DIFF` | `false` | Print AST diff during rewrite. |
 | `FLYDSL_DEBUG_PRINT_ORIGIN_IR` | `false` | Print origin IR before compilation. |
 | `FLYDSL_DEBUG_PRINT_AFTER_ALL` | `false` | Print IR after each MLIR pass. |
@@ -479,6 +481,43 @@ dumps/my_func_name/
 ```
 
 If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra numbered dump before `gpu_module_to_binary`.
+
+### Running a hand-edited `.s`
+
+`FLYDSL_HACK_UT_ASM` closes the loop on the ISA dump: point it at a `.s` and the JIT
+assembles that file with the ROCm toolchain's `clang` — which drives the same LLVM MC
+assembler and `ld.lld` that `gpu-module-to-binary` reaches internally — and substitutes
+the result for the device code object it would have generated. Everything else is
+unchanged, so an existing test or benchmark runs the hand-tuned assembly without edits:
+
+```bash
+FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python test_my_kernel.py   # writes 21_final_isa.s
+vim dumps/my_kernel/21_final_isa.s                                  # edit the ISA
+FLYDSL_HACK_UT_ASM=dumps/my_kernel/21_final_isa.s python test_my_kernel.py
+```
+
+To keep the assembled code object — for `llvm-objdump`, or to hand to a profiler — add
+`FLYDSL_HACK_UT_ASM_SAVE=1`: it is written next to the `.s` with a `.hsaco` suffix
+(`21_final_isa.hsaco` above). Saving is off by default.
+
+The kernel symbol must stay the same — the host side still resolves the kernel by name
+and takes grid/block/shared-memory from the traced `gpu.launch_func`, so a renamed
+kernel does not get the substitution. The override is scoped by symbol: in a process
+that compiles several kernels, only the ones the `.s` declares are replaced and the
+rest keep the compiler's own codegen, so a benchmark can run a hand-edited kernel
+alongside untouched ones. If the `.s` matched *nothing* by the end of the run, a
+warning says so — those are the compiler's numbers, not the hand-edit's. Substitution
+replaces the whole `gpu.binary`, so the `.s` must declare every kernel in the module it
+applies to; a partial `.s` is refused rather than dropping the kernels it omits. Scoping
+is by symbol only, and constexpr specializations of one kernel share a symbol: a `.s`
+dumped for `block_dim=256` is also substituted into the `block_dim=128` specialization,
+which will run assembly written for the wrong launch geometry. Override one
+specialization at a time. The disk cache is bypassed while the
+variable is set, so edits take effect without a cache clear and the hacked artifact
+never reaches a normal run. A `.s` dumped for a different arch is refused by the
+assembler's target-id check rather than mis-assembled. Debug/UT only: rocm backend, not
+compatible with `FLYDSL_COMPILE_LLVM_DIR` or `FLYDSL_RUNTIME_RUN_ONLY`.
+Implementation: [`python/flydsl/compiler/hack_asm.py`](../python/flydsl/compiler/hack_asm.py).
 
 ---
 

@@ -707,6 +707,27 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
         return None
 
 
+def _hack_asm_cache_stamp():
+    """Identity of the FLYDSL_HACK_UT_ASM override for the in-process cache key.
+
+    ``None`` when the override is unset.  Stat rather than content: this runs on every
+    call, and a hash of a large .s per call would show up in a benchmark taken through
+    this path.  A missing file stamps as unknown so the compile path raises the
+    actionable error instead of this one.
+    """
+    raw = env.debug.hack_ut_asm.strip()
+    if not raw:
+        return None
+    # expanduser to match substitute_hacked_asm: stat'ing the literal "~/..." always
+    # fails, which would stamp every edit identically and defeat the invalidation.
+    path = str(Path(raw).expanduser())
+    try:
+        st = os.stat(path)
+        return (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (path, None, None)
+
+
 def _infer_kernel_names_from_asm(asm: str) -> list:
     """Extract gpu.func kernel names from MLIR assembly."""
     names = []
@@ -818,6 +839,19 @@ class MlirCompiler:
                 "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern link_libs yet; "
                 "use embedded codegen for kernels that require #fly.explicit_module."
             )
+
+        hack_asm = env.debug.hack_ut_asm.strip()
+        if hack_asm:
+            if external_binary:
+                raise RuntimeError(
+                    "FLYDSL_HACK_UT_ASM is not supported with FLYDSL_COMPILE_LLVM_DIR "
+                    "external codegen; unset one of them."
+                )
+            if not hasattr(backend, "isa_assemble_arch"):
+                raise RuntimeError(
+                    f"FLYDSL_HACK_UT_ASM is only supported on the rocm backend, not {type(backend).__name__}."
+                )
+            hack_kernel_names = _infer_kernel_names_from_asm(module.operation.get_asm())
 
         if link_libs:
             link_opt = _format_link_lib_options(link_libs)
@@ -944,6 +978,20 @@ class MlirCompiler:
                         verifier=env.debug.enable_verifier,
                         print_after_all=env.debug.print_after_all,
                     )
+
+            # Both branches above ran the real pipeline; external codegen, the one path
+            # that does not produce a gpu.binary here, is rejected before this point.
+            # A module the .s does not name keeps the compiler's own object, so a
+            # benchmark can compile the hand-edited kernel alongside untouched ones.
+            if hack_asm:
+                from .hack_asm import substitute_hacked_asm
+
+                substitute_hacked_asm(
+                    module,
+                    arch=backend.isa_assemble_arch(),
+                    func_name=func_name,
+                    module_kernel_names=hack_kernel_names,
+                )
 
         return module
 
@@ -1367,6 +1415,13 @@ class JitFunction:
         )
         if bound_self is not None:
             cache_key = (("_self_type_", type(bound_self)),) + cache_key
+        # The override belongs to the key itself, not to one caller: an artifact built
+        # under a different .s (or none) must never be served.  Stamping here keeps
+        # every lookup agreeing -- doing it per-caller once left _compile_impl looking
+        # up a key nothing was stored under.
+        hack_stamp = _hack_asm_cache_stamp()
+        if hack_stamp is not None:
+            cache_key = (("_hack_ut_asm_", hack_stamp),) + cache_key
         return cache_key
 
     @staticmethod
@@ -1415,6 +1470,12 @@ class JitFunction:
 
         ensure_compile_runtime_pairing_from_env(compile_backend_name())
 
+        # _build_full_cache_key already stamped the override into cache_key, so toggling
+        # or editing the .s cannot serve an artifact built under a different one.  The
+        # disk cache is skipped entirely below, so the hacked artifact is never
+        # persisted and editing never needs a cache clear.
+        hack_asm = bool(env.debug.hack_ut_asm.strip())
+
         # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
         call_state = self._call_state_cache.get(cache_key)
         if call_state is not None:
@@ -1426,11 +1487,16 @@ class JitFunction:
         # In run_only mode the disk cache is read regardless of enable_cache, since
         # AOT-only execution treats the on-disk cache as the deployment artifact.
         run_only = env.runtime.run_only
+        if run_only and hack_asm:
+            raise RuntimeError(
+                "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_HACK_UT_ASM: "
+                "run-only serves the disk cache, which the .s override bypasses."
+            )
         use_disk_cache = env.runtime.enable_cache or run_only
         allow_disk_cache = use_disk_cache and cache_key not in self._extern_linkage_keys
         _rejected_link_libs = False
         cached_func = self._mem_cache.get(cache_key)
-        if cached_func is None and allow_disk_cache and not env.debug.dump_ir:
+        if cached_func is None and allow_disk_cache and not env.debug.dump_ir and not hack_asm:
             str_key = self._cache_key_to_str(cache_key)
             cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
             if cached_func is not None and getattr(cached_func, "_link_libs", None):
@@ -1474,7 +1540,7 @@ class JitFunction:
         compiled_func = None  # will be set inside lock or compile path
 
         # Determine whether to use compile_lock for cross-process safety.
-        _use_compile_lock = use_disk_cache and self.cache_manager and not env.debug.dump_ir
+        _use_compile_lock = use_disk_cache and self.cache_manager and not env.debug.dump_ir and not hack_asm
         if _use_compile_lock:
             str_key = self._cache_key_to_str(cache_key)
             _compile_lock_ctx = self.cache_manager.compile_lock(str_key)
