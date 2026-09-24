@@ -20,8 +20,15 @@ call at the current insertion point.
 | Parameter | Purpose |
 |---|---|
 | `symbol` | Mangled C symbol in the external library |
-| `arg_types`, `ret_type` | MLIR-friendly type names (`"int32"`, `"uint64"`, `"void"`, …) |
+| `arg_types`, `ret_type` | MLIR-friendly type names (`"int32"`, `"uint64"`, `"void"`, `"ptr"`, `"ptr<N>"`, …) |
 | `is_pure` | Metadata for future lowering to `llvm.func readnone / willreturn` attributes |
+
+`"ptr"` is `!llvm.ptr`. `"ptr<N>"` is `!llvm.ptr<N>` (LLVM address space `N`).
+A pointer argument accepts that exact pointer type, or an `i64` SSA address,
+which is converted with `llvm.inttoptr`. Other integer widths, Python integer
+literals, and a pointer value passed to a non-pointer parameter are rejected.
+A pointer result is the raw declared pointer value (`!llvm.ptr` or `!llvm.ptr<N>`).
+Declaring the same symbol again with a different function type is an error.
 
 Frameworks can pre-construct `ffi` wrappers for their device ABI and expose
 them as module-level callables.

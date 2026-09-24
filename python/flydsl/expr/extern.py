@@ -7,6 +7,9 @@ This module provides a pure FFI callable for use inside ``@flyc.kernel`` bodies.
 It declares external LLVM symbols and emits ``llvm.call`` operations, but does
 not attach external bitcode or module-load initialization metadata. Use
 ``flydsl.compiler.extern_link`` for those compiler/runtime concerns.
+
+``"ptr"`` and ``"ptr<N>"`` declare ``!llvm.ptr`` and ``!llvm.ptr<N>``. An ``i64``
+SSA address is converted with ``llvm.inttoptr``; a Python int is not.
 """
 
 from __future__ import annotations
@@ -35,15 +38,48 @@ _TYPE_MAP = {
     "float64": lambda: ir.F64Type.get(),
 }
 _VOID_RET = "void"
+_PTR_ADDR_BITS = 64
+
+
+def _pointer_type(name: str) -> Optional[ir.Type]:
+    """``ptr`` is ``!llvm.ptr``. ``ptr<N>`` is ``!llvm.ptr<N>``."""
+    if name == "ptr":
+        return llvm.PointerType.get()
+    if not (name.startswith("ptr<") and name.endswith(">")):
+        return None
+    space = name[len("ptr<") : -1]
+    if not space.isdigit():
+        raise ValueError(f"ffi: pointer address space in {name!r} must be a non-negative integer, as in 'ptr<1>'.")
+    return llvm.PointerType.get(int(space))
+
+
+def _is_llvm_pointer(ty: Optional[ir.Type]) -> bool:
+    return isinstance(ty, llvm.PointerType)
 
 
 def _resolve_type(name: str) -> Optional[ir.Type]:
     if name == _VOID_RET:
         return None
+    pointer = _pointer_type(name)
+    if pointer is not None:
+        return pointer
     factory = _TYPE_MAP.get(name)
     if factory is None:
-        raise ValueError(f"ffi: unknown type {name!r}. Supported: {list(_TYPE_MAP)} or 'void'.")
+        raise ValueError(
+            f"ffi: unknown type {name!r}. Supported: {list(_TYPE_MAP)}, 'void', 'ptr', or 'ptr<address-space>'."
+        )
     return factory()
+
+
+def _address_to_llvm_ptr(value: ir.Value, ptr_type: ir.Type) -> ir.Value:
+    """Interpret an i64 SSA address as ``ptr_type``. Other widths are rejected."""
+    if not isinstance(value.type, IntegerType) or IntegerType(value.type).width != _PTR_ADDR_BITS:
+        raise TypeError(f"ffi pointer argument expects an i{_PTR_ADDR_BITS} address or {ptr_type}, got {value.type}.")
+    return llvm.inttoptr(ptr_type, value)
+
+
+def _declared_func_type(op) -> ir.Type:
+    return op.operation.attributes["function_type"].value
 
 
 def _get_no_bundle() -> DenseI32ArrayAttr:
@@ -79,7 +115,7 @@ class ExternFunction:
         ret_type = _resolve_type(self._ret_type_name)
         return arg_types, ret_type
 
-    def _already_declared(self, gpu_module_body) -> bool:
+    def _find_declaration(self, gpu_module_body):
         for op in gpu_module_body.operations:
             if op.operation.name != "llvm.func":
                 continue
@@ -91,17 +127,25 @@ class ExternFunction:
             if name is None:
                 name = str(name_attr).strip('"')
             if name == self.symbol:
-                return True
-        return False
+                return op
+        return None
 
-    def _ensure_declared(self, gpu_module_body) -> None:
-        if self._already_declared(gpu_module_body):
-            return
-
+    def _function_type(self) -> ir.Type:
         arg_types, ret_type = self._resolve_types()
         arg_strs = ", ".join(str(t) for t in arg_types)
         ret_str = "void" if ret_type is None else str(ret_type)
-        fn_type = ir.Type.parse(f"!llvm.func<{ret_str} ({arg_strs})>")
+        return ir.Type.parse(f"!llvm.func<{ret_str} ({arg_strs})>")
+
+    def _ensure_declared(self, gpu_module_body) -> None:
+        fn_type = self._function_type()
+        existing = self._find_declaration(gpu_module_body)
+        if existing is not None:
+            declared = _declared_func_type(existing)
+            if declared != fn_type:
+                raise TypeError(
+                    f"ffi {self.symbol!r} is already declared as {declared}, cannot redeclare as {fn_type}."
+                )
+            return
 
         with InsertionPoint(gpu_module_body):
             llvm.LLVMFuncOp(
@@ -134,6 +178,11 @@ class ExternFunction:
                 arg = int(arg.value)
 
             if isinstance(arg, int):
+                if _is_llvm_pointer(expected_type):
+                    raise TypeError(
+                        f"ffi {self.symbol!r} argument {self._arg_type_names[arg_pos]!r} is a pointer; "
+                        "pass an SSA address, not a Python int."
+                    )
                 target_type = expected_type or IntegerType.get_signless(64)
                 raw_args.append(llvm.ConstantOp(target_type, IntegerAttr.get(target_type, arg)).result)
                 continue
@@ -149,23 +198,32 @@ class ExternFunction:
                 raise TypeError(f"ffi: cannot use argument of type {type(arg).__name__} as ir.Value")
 
             if expected_type is not None and value.type != expected_type:
-                from .._mlir.dialects import arith as _arith
+                if _is_llvm_pointer(expected_type) or _is_llvm_pointer(value.type):
+                    if _is_llvm_pointer(expected_type) and not _is_llvm_pointer(value.type):
+                        value = _address_to_llvm_ptr(value, expected_type)
+                    else:
+                        raise TypeError(
+                            f"ffi {self.symbol!r} argument {self._arg_type_names[arg_pos]!r} "
+                            f"expects {expected_type}, got {value.type}."
+                        )
+                else:
+                    from .._mlir.dialects import arith as _arith
 
-                value_is_int = isinstance(value.type, IntegerType)
-                expected_is_int = isinstance(expected_type, IntegerType)
-                if value_is_int and expected_is_int:
-                    value_bits = IntegerType(value.type).width
-                    expected_bits = IntegerType(expected_type).width
-                    if value_bits > expected_bits:
-                        value = _arith.TruncIOp(expected_type, value).result
-                    elif value_bits < expected_bits:
-                        # Use sign-extension for signed type names,
-                        # zero-extension for unsigned.
-                        type_name = self._arg_type_names[arg_pos]
-                        if type_name.startswith("int"):
-                            value = _arith.ExtSIOp(expected_type, value).result
-                        else:
-                            value = _arith.ExtUIOp(expected_type, value).result
+                    value_is_int = isinstance(value.type, IntegerType)
+                    expected_is_int = isinstance(expected_type, IntegerType)
+                    if value_is_int and expected_is_int:
+                        value_bits = IntegerType(value.type).width
+                        expected_bits = IntegerType(expected_type).width
+                        if value_bits > expected_bits:
+                            value = _arith.TruncIOp(expected_type, value).result
+                        elif value_bits < expected_bits:
+                            # Use sign-extension for signed type names,
+                            # zero-extension for unsigned.
+                            type_name = self._arg_type_names[arg_pos]
+                            if type_name.startswith("int"):
+                                value = _arith.ExtSIOp(expected_type, value).result
+                            else:
+                                value = _arith.ExtUIOp(expected_type, value).result
 
             raw_args.append(value)
 
