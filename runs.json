@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-24T04:12:51Z",
+ "updated": "2026-09-24T05:02:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -9,14 +9,42 @@
    "commit": "fb8348e4c4de1797f46e77cb351c697263019cd6",
    "branch": "feat/hack-ut-asm-multi-kernel",
    "event": "pull_request",
-   "title": "[Feature][Debug] Add a compile path for hand-edited assembly (debug only)",
-   "status": "in_progress",
+   "title": "[Compiler][Debug] Add a compile path for hand-edited assembly",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869",
    "created_at": "2026-09-24T03:58:04Z",
-   "updated_at": "2026-09-24T04:00:51Z",
+   "updated_at": "2026-09-24T04:37:06Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T04:37:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869/job/107495566230"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T04:37:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869/job/107495566287"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T04:37:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869/job/107495566329"
+    }
+   ]
   },
   {
    "run_id": 35952761075,
@@ -24,7 +52,7 @@
    "commit": "a287b78d690fbfa0f547e2114a83a646b4ca6290",
    "branch": "feat/hack-ut-asm-multi-kernel",
    "event": "pull_request",
-   "title": "[Feature][Debug] Add a compile path for hand-edited assembly (debug only)",
+   "title": "[Compiler][Debug] Add a compile path for hand-edited assembly",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35952761075",
@@ -39,7 +67,7 @@
    "commit": "0de4eaa511bf7183c072ad34687eec0e836cc449",
    "branch": "feat/hack-ut-asm-multi-kernel",
    "event": "pull_request",
-   "title": "[Feature][Debug] Add a compile path for hand-edited assembly (debug only)",
+   "title": "[Compiler][Debug] Add a compile path for hand-edited assembly",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35952171914",
@@ -65,9 +93,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T03:36:30Z",
+     "started_at": "2026-09-24T04:12:44Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950855284/job/107482782844"
     },
@@ -126,9 +154,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T03:45:22Z",
+     "started_at": "2026-09-24T04:37:44Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596/job/107484638248"
     }
@@ -166,9 +194,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T03:42:08Z",
+     "started_at": "2026-09-24T04:37:23Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950379705/job/107483970710"
     },
@@ -209,10 +237,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-24T04:05:32Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T04:37:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107480396960"
     },
     {
@@ -242,21 +270,24 @@
    "branch": "revert-1131-preshuffle-layout",
    "event": "pull_request",
    "title": "Revert \"Refactor preshuffle GEMM indexing with layout algebra (#1131)\"",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948988500",
    "created_at": "2026-09-24T02:51:11Z",
-   "updated_at": "2026-09-24T03:27:22Z",
+   "updated_at": "2026-09-24T05:01:24Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-24T03:15:49Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948988500/job/107478110394"
+     "completed_at": "2026-09-24T05:01:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948988500/job/107478110394",
+     "machine": "gbt350-odcdh1-b04-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -270,10 +301,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-24T03:25:28Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T04:37:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948988500/job/107478110454"
     }
    ]
@@ -285,13 +316,22 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[Feat][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816",
    "created_at": "2026-09-24T02:40:51Z",
-   "updated_at": "2026-09-24T04:11:09Z",
+   "updated_at": "2026-09-24T04:13:29Z",
    "actor": "jli-melchior",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T04:13:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816/job/107490539970"
+    },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
@@ -299,7 +339,7 @@
      "conclusion": "success",
      "started_at": "2026-09-24T03:00:14Z",
      "completed_at": "2026-09-24T04:11:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816/job/107474311647"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816/job/107490540767"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -308,16 +348,7 @@
      "conclusion": "success",
      "started_at": "2026-09-24T02:56:40Z",
      "completed_at": "2026-09-24T03:26:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816/job/107474311681"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-24T02:57:21Z",
-     "completed_at": "2026-09-24T04:05:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816/job/107474311717"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816/job/107490541180"
     }
    ]
   },
@@ -370,7 +401,7 @@
    "commit": "6fef32fca7ffa09b4435d737bc62594caa98d840",
    "branch": "feat/hack-ut-asm-multi-kernel",
    "event": "pull_request",
-   "title": "[Feature][Debug] Add a compile path for hand-edited assembly (debug only)",
+   "title": "[Compiler][Debug] Add a compile path for hand-edited assembly",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35944469909",
