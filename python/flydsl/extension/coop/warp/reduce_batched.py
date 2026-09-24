@@ -23,7 +23,10 @@ def _reduce_batched(value, op, width, output_layout, sync_physical_warp=False, d
     if output_layout not in ("scalar", "blocked", "striped"):
         raise ValueError("output_layout must be scalar, blocked, or striped")
     if not _is_items(value, dtype):
-        raise TypeError("warp_reduce_batched expects a Vector or a fixed-size tuple/list")
+        raise TypeError(
+            "value must be an outer item sequence; wrap one complete element in [value] or (value,). "
+            "A Vector represents an item sequence only for a Numeric element dtype"
+        )
     items = list(_as_items(value, dtype)) if len(value) else []
     batches = len(items)
     if output_layout == "scalar" and not 1 <= batches <= width:
@@ -76,8 +79,11 @@ def warp_reduce_batched(
     have unspecified results. Requires 1 <= batches <= width.
 
     Args:
-        value: Input value whose item i is this lane's contribution
-            to batch i. All lanes provide the same number of batches.
+        value: Outer tuple/list of batch contributions, with item i belonging to
+            batch i. For one batch, wrap the complete element as ``[value]`` or
+            ``(value,)``, including Vector or Struct elements. A Vector can
+            represent a sequence of Numeric scalar contributions. All lanes
+            provide the same number of batches.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
@@ -127,8 +133,11 @@ def warp_reduce_batched_to_blocked(
     order. Slots beyond the batch count are unspecified.
 
     Args:
-        value: Input value whose item i is this lane's contribution
-            to batch i. All lanes provide the same number of batches.
+        value: Outer tuple/list of batch contributions, with item i belonging to
+            batch i. For one batch, wrap the complete element as ``[value]`` or
+            ``(value,)``, including Vector or Struct elements. A Vector can
+            represent a sequence of Numeric scalar contributions. All lanes
+            provide the same number of batches.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
@@ -182,8 +191,11 @@ def warp_reduce_batched_to_striped(
     order. Slots beyond the batch count are unspecified.
 
     Args:
-        value: Input value whose item i is this lane's contribution
-            to batch i. All lanes provide the same number of batches.
+        value: Outer tuple/list of batch contributions, with item i belonging to
+            batch i. For one batch, wrap the complete element as ``[value]`` or
+            ``(value,)``, including Vector or Struct elements. A Vector can
+            represent a sequence of Numeric scalar contributions. All lanes
+            provide the same number of batches.
         op: ReductionOp or associative binary callable. Operand order follows ascending
             lanes; reassociation is allowed.
         width: Compile-time power-of-two logical width, at most the native warp width. None
@@ -226,13 +238,34 @@ def warp_reduce_batched_to_striped(
 class WarpReduceBatched(WarpPrimitive):
     """Reduce independent register columns into distributed lane outputs.
 
-    Specialize with ``[dtype, width, items_per_thread]``. ``None`` selects the target's
-    physical warp width. Every lane in each logical warp must participate.
+    Specialize with ``WarpReduceBatched[dtype, width, items_per_thread]``. The parameters
+    below are compile-time positional arguments to ``WarpReduceBatched[...]``, in bracket
+    order.
+
+    Args:
+        dtype: Required complete input element type, such as a Numeric scalar, concrete
+            Vector, or Struct. Vector components and Struct fields belong to one element;
+            outer per-thread item sequences are not part of dtype.
+        width: Required positional slot: a positive power-of-two Python int no larger than
+            the target physical warp width, or None to use that physical width. This is the
+            number of participating lanes in each logical warp, not the block thread count.
+            Pass None explicitly to use the physical width while specifying
+            items_per_thread.
+        items_per_thread: Required nonnegative Python int giving the number of independent
+            batches. Each lane supplies one complete element for each batch, and each batch
+            reduces that column across lanes. The reduce method requires 1 <=
+            items_per_thread <= width; reduce_to_blocked and reduce_to_striped accept zero
+            or more batches, including counts larger than width.
+
+    Every lane in each logical warp must participate.
     SharedStorage is Empty: explicit storage has a zero-byte layout.
     There is no algorithm parameter.
     The corresponding ``warp_*`` functions infer dtype and tile extent.
-    The tile extent is the number of independent batches. Zero batches are
-    accepted by the distributed methods; scalar reduce requires 1..width batches.
+
+    All three reduction methods take an outer item sequence. For one batch,
+    pass ``[value]`` or ``(value,)``, including when value is a complete
+    Vector or Struct element. A bare Vector is an item sequence only
+    for a Numeric element dtype.
 
     Examples:
         P = fx.coop.WarpReduceBatched[fx.Int32, 8, 2]
@@ -263,8 +296,11 @@ class WarpReduceBatched(WarpPrimitive):
             storage: Optional instance of this specialization's empty SharedStorage.
                 Allocate Array[SharedStorage, num_warps] with SharedAllocator,
                 peek the array and pass this warp's element. None is also allowed.
-            value: Input value whose item i is this lane's contribution
-                to batch i. All lanes provide the same number of batches.
+            value: Outer tuple/list of batch contributions, with item i belonging to
+                batch i. For one batch, wrap the complete element as ``[value]`` or
+                ``(value,)``, including Vector or Struct elements. A Vector can
+                represent a sequence of Numeric scalar contributions. All lanes
+                provide the same number of batches.
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
             sync_physical_warp: Whether the reduction uses physical-warp shuffle width. True
@@ -301,8 +337,11 @@ class WarpReduceBatched(WarpPrimitive):
             storage: Optional instance of this specialization's empty SharedStorage.
                 Allocate Array[SharedStorage, num_warps] with SharedAllocator,
                 peek the array and pass this warp's element. None is also allowed.
-            value: Input value whose item i is this lane's contribution
-                to batch i. All lanes provide the same number of batches.
+            value: Outer tuple/list of batch contributions, with item i belonging to
+                batch i. For one batch, wrap the complete element as ``[value]`` or
+                ``(value,)``, including Vector or Struct elements. A Vector can
+                represent a sequence of Numeric scalar contributions. All lanes
+                provide the same number of batches.
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
             sync_physical_warp: Whether the reduction uses physical-warp shuffle width. True
@@ -343,8 +382,11 @@ class WarpReduceBatched(WarpPrimitive):
             storage: Optional instance of this specialization's empty SharedStorage.
                 Allocate Array[SharedStorage, num_warps] with SharedAllocator,
                 peek the array and pass this warp's element. None is also allowed.
-            value: Input value whose item i is this lane's contribution
-                to batch i. All lanes provide the same number of batches.
+            value: Outer tuple/list of batch contributions, with item i belonging to
+                batch i. For one batch, wrap the complete element as ``[value]`` or
+                ``(value,)``, including Vector or Struct elements. A Vector can
+                represent a sequence of Numeric scalar contributions. All lanes
+                provide the same number of batches.
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
             sync_physical_warp: Whether the reduction uses physical-warp shuffle width. True

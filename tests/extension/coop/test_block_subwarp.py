@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Subwarp block collectives preserve full-tile and partial-tile semantics."""
+"""Subwarp blocks support complete item tiles and single-element guarded calls."""
 
 import math
 
@@ -32,14 +32,17 @@ def test_subwarp_block_collectives(shape, count, universal, family, policy):
     assert primitive.warp_threads == threads
     assert primitive.num_warps == 1
     result_size = threads if family == "reduce" else 2 * size + threads
+    # Guarded calls count contributing threads and require one element per
+    # thread. Multi-item inputs still exercise the complete blocked tile.
+    partial_cases = (False, True) if count == 1 else (False,)
 
     def apply(a, out):
         tid = linear_tid(shape)
         items = [a[tid * count + i] for i in range(count)]
         value = items[0] if count == 1 else fx.Vector.from_elements(items)
         storage = fx.SharedAllocator().allocate(primitive.SharedStorage).peek()
-        for partial in (False, True):
-            limit = size - 1 if partial else None
+        for partial in partial_cases:
+            limit = threads - 1 if partial else None
             offset = result_size if partial else 0
             if family == "reduce":
                 out[offset + tid] = primitive(value, fx.ReductionOp.ADD, storage=storage, valid_items=limit)
@@ -57,8 +60,10 @@ def test_subwarp_block_collectives(shape, count, universal, family, policy):
             fx.barrier()
 
     host = torch.arange(1, size + 1, device="cpu", dtype=torch.int32)
-    actual = run_kernel(apply, host.to(device="cuda"), result_size * 2, shape).reshape(2, result_size)
-    for partial in (False, True):
+    actual = run_kernel(apply, host.to(device="cuda"), result_size * len(partial_cases), shape).reshape(
+        len(partial_cases), result_size
+    )
+    for partial in partial_cases:
         expected_items = host.clone()
         if partial:
             expected_items[-1] = 0
