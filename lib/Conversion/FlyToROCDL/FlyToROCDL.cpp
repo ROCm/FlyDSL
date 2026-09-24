@@ -556,6 +556,28 @@ public:
   }
 };
 
+class GetCopyAtomOpLowering : public OpConversionPattern<GetCopyAtomOp> {
+public:
+  using OpConversionPattern<GetCopyAtomOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(GetCopyAtomOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, adaptor.getTiledCopy());
+    return success();
+  }
+};
+
+class GetMmaAtomOpLowering : public OpConversionPattern<GetMmaAtomOp> {
+public:
+  using OpConversionPattern<GetMmaAtomOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(GetMmaAtomOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, adaptor.getTiledMma());
+    return success();
+  }
+};
+
 class AtomSetValueOpLowering : public OpConversionPattern<AtomSetValueOp> {
 public:
   using OpConversionPattern<AtomSetValueOp>::OpConversionPattern;
@@ -563,6 +585,10 @@ public:
   LogicalResult matchAndRewrite(AtomSetValueOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Type origAtomTy = op.getAtom().getType();
+    if (auto tiledCopyTy = dyn_cast<TiledCopyType>(origAtomTy))
+      origAtomTy = tiledCopyTy.getCopyAtom();
+    else if (auto tiledMmaTy = dyn_cast<TiledMmaType>(origAtomTy))
+      origAtomTy = tiledMmaTy.getMmaAtom();
     StringAttr fieldAttr = op.getFieldAttr();
     Location loc = op.getLoc();
 
@@ -707,25 +733,15 @@ public:
 
     Location loc = op.getLoc();
 
-    Value dPtr = adaptor.getD();
-    Value aPtr = adaptor.getA();
-    Value bPtr = adaptor.getB();
-    Value cPtr = adaptor.getC();
-
-    if (!isa<LLVM::LLVMPointerType>(dPtr.getType()) ||
-        !isa<LLVM::LLVMPointerType>(aPtr.getType()) ||
-        !isa<LLVM::LLVMPointerType>(bPtr.getType()) || !isa<LLVM::LLVMPointerType>(cPtr.getType()))
+    auto isPointer = [](Value value) { return isa<LLVM::LLVMPointerType>(value.getType()); };
+    if (!isPointer(adaptor.getD()) || !llvm::all_of(adaptor.getA(), isPointer) ||
+        !llvm::all_of(adaptor.getB(), isPointer) || !isPointer(adaptor.getC()))
       return rewriter.notifyMatchFailure(op, "expected llvm.ptr operands after type conversion");
 
-    auto dMemTy = dyn_cast<fly::MemRefType>(op.getD().getType());
-    auto aMemTy = dyn_cast<fly::MemRefType>(op.getA().getType());
-    auto bMemTy = dyn_cast<fly::MemRefType>(op.getB().getType());
-    auto cMemTy = dyn_cast<fly::MemRefType>(op.getC().getType());
-    if (!dMemTy || !aMemTy || !bMemTy || !cMemTy)
-      return rewriter.notifyMatchFailure(op, "expected Fly memref types on original op");
-
-    if (failed(mmaAtomTy.emitAtomCall(rewriter, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy,
-                                      adaptor.getMmaAtom(), dPtr, aPtr, bPtr, cPtr)))
+    if (failed(mmaAtomTy.emitAtomCall(rewriter, loc, mmaAtomTy, op.getD().getType(),
+                                      op.getA().getTypes(), op.getB().getTypes(),
+                                      op.getC().getType(), adaptor.getMmaAtom(), adaptor.getD(),
+                                      adaptor.getA(), adaptor.getB(), adaptor.getC())))
       return failure();
 
     rewriter.eraseOp(op);
@@ -751,8 +767,8 @@ public:
     Value dPtr = hasResult ? Value{} : adaptor.getD();
 
     auto result =
-        mmaAtomTy.emitAtomCallSSA(rewriter, loc, resultTy, mmaAtomTy, dTy, op.getA().getType(),
-                                  op.getB().getType(), op.getC().getType(), adaptor.getMmaAtom(),
+        mmaAtomTy.emitAtomCallSSA(rewriter, loc, resultTy, mmaAtomTy, dTy, op.getA().getTypes(),
+                                  op.getB().getTypes(), op.getC().getType(), adaptor.getMmaAtom(),
                                   dPtr, adaptor.getA(), adaptor.getB(), adaptor.getC());
     if (failed(result))
       return failure();
@@ -975,7 +991,8 @@ public:
     patterns.add<PtrLoadOpLowering, PtrStoreOpLowering>(typeConverter, context);
     patterns.add<MakeCopyAtomOpLowering, MakeMmaAtomOpLowering>(typeConverter, context);
     patterns.add<MakeTiledCopyOpLowering, MakeTiledMmaOpLowering>(typeConverter, context);
-    patterns.add<AtomSetValueOpLowering>(typeConverter, context);
+    patterns.add<GetCopyAtomOpLowering, GetMmaAtomOpLowering, AtomSetValueOpLowering>(typeConverter,
+                                                                                      context);
     patterns.add<CopyAtomCallLowering, MmaAtomCallLowering>(typeConverter, context);
     patterns.add<CopyAtomCallSSALowering, MmaAtomCallSSALowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);

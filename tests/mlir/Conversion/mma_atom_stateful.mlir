@@ -77,9 +77,7 @@ func.func @test_mma_scale_atom_call_16x16x128(
   // CHECK-DAG: %[[A_VAL:.*]] = llvm.load %[[A]] : !llvm.ptr<5> -> vector<8xi32>
   // CHECK-DAG: %[[B_VAL:.*]] = llvm.load %[[B]] : !llvm.ptr<5> -> vector<8xi32>
   // CHECK-DAG: %[[C_VAL:.*]] = llvm.load %[[C]] : !llvm.ptr<5> -> vector<4xf32>
-  // CHECK-DAG: %[[SA_VAL:.*]] = llvm.extractvalue %[[A2]][0]
-  // CHECK-DAG: %[[SB_VAL:.*]] = llvm.extractvalue %[[A2]][1]
-  // CHECK: %[[RES:.*]] = rocdl.mfma.scale.f32.16x16x128.f8f6f4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]], fp8_e4m3, fp8_e4m3, 0, %[[SA_VAL]], 0, %[[SB_VAL]]
+  // CHECK: %[[RES:.*]] = rocdl.mfma.scale.f32.16x16x128.f8f6f4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]], fp8_e4m3, fp8_e4m3, 0, %[[SA]], 0, %[[SB]]
   // CHECK: llvm.store %[[RES]], %[[D]] : vector<4xf32>, !llvm.ptr<5>
   fly.mma_atom_call(%atom_ab, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.cdna4.mfma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>, !fly.memref<f32, register, 4:1>, !fly.memref<f8E4M3FN, register, 32:1>, !fly.memref<f8E4M3FN, register, 32:1>, !fly.memref<f32, register, 4:1>) -> ()
   return
