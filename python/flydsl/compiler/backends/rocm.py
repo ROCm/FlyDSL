@@ -126,17 +126,15 @@ class RocmBackend(BaseBackend):
         waves_per_eu = compile_hints.get("waves_per_eu")
         if waves_per_eu is None:
             return
-        if isinstance(waves_per_eu, bool) or not isinstance(waves_per_eu, int):
-            raise TypeError(f"waves_per_eu must be a non-negative int, got {waves_per_eu!r}")
-        if waves_per_eu < 0:
-            raise ValueError(f"waves_per_eu must be >= 0, got {waves_per_eu}")
-        if waves_per_eu == 0:
+
+        wpe_str = _normalize_waves_per_eu(waves_per_eu)
+        if wpe_str is None:
             return
 
         with module.context:
             from ..._mlir import ir as _ir
 
-            wpe_attr = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), waves_per_eu)
+            wpe_attr = _ir.StringAttr.get(wpe_str)
             for func_op in _iter_gpu_kernel_funcs(module):
                 func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
@@ -160,6 +158,40 @@ class RocmBackend(BaseBackend):
             "libfly_jit_runtime.so",
             "libmlir_c_runner_utils.so",
         ]
+
+
+def _normalize_waves_per_eu(waves_per_eu) -> "str | None":
+    """Validate and normalize ``waves_per_eu`` to a ``"min,max"`` string.
+
+    Accepted forms:
+      int            – single minimum value, e.g. ``2`` → ``"2"``
+      (int, int)     – explicit (min, max), e.g. ``(1, 1)`` → ``"1,1"``
+      str            – pre-formatted, e.g. ``"1,1"`` passed through as-is
+
+    Returns *None* when the effective value is zero (no-op).
+    """
+    if isinstance(waves_per_eu, bool):
+        raise TypeError(f"waves_per_eu must be an int, tuple(int, int), or str, got {waves_per_eu!r}")
+
+    if isinstance(waves_per_eu, int):
+        if waves_per_eu < 0:
+            raise ValueError(f"waves_per_eu must be >= 0, got {waves_per_eu}")
+        return None if waves_per_eu == 0 else str(waves_per_eu)
+
+    if isinstance(waves_per_eu, (tuple, list)):
+        if len(waves_per_eu) != 2 or not all(isinstance(v, int) and not isinstance(v, bool) for v in waves_per_eu):
+            raise TypeError(f"waves_per_eu tuple must be (int, int), got {waves_per_eu!r}")
+        lo, hi = waves_per_eu
+        if lo < 0 or hi < 0:
+            raise ValueError(f"waves_per_eu values must be >= 0, got {waves_per_eu!r}")
+        if lo > hi:
+            raise ValueError(f"waves_per_eu min ({lo}) must be <= max ({hi})")
+        return f"{lo},{hi}"
+
+    if isinstance(waves_per_eu, str):
+        return waves_per_eu
+
+    raise TypeError(f"waves_per_eu must be an int, tuple(int, int), or str, got {type(waves_per_eu).__name__}")
 
 
 def _iter_gpu_kernel_funcs(module):

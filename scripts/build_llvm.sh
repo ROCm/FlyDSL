@@ -17,7 +17,13 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
 LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
 LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
-LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+LLVM_PATCH_DIR="${REPO_ROOT}/thirdparty/llvm-patches"
+mapfile -t LLVM_PATCHES < <(python3 -c "
+import json, os
+info = json.load(open('${LLVM_BUILD_INFO}'))
+for p in info.get('upstream', {}).get('patches', []):
+    print(os.path.join('${LLVM_PATCH_DIR}', p))
+")
 LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
 
 case "${LLVM_BUILD_PROFILE}" in
@@ -48,6 +54,7 @@ echo "LLVM Profile:   $LLVM_BUILD_PROFILE"
 echo "LLVM Projects:  $LLVM_ENABLE_PROJECTS"
 echo "LLVM Targets:   $LLVM_TARGETS_TO_BUILD"
 echo "LLVM Runtimes:  ${LLVM_ENABLE_RUNTIMES:-<none>}"
+echo "LLVM Patches:   ${LLVM_PATCHES[*]:-(none)}"
 
 # 1. Clone LLVM
 LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
@@ -93,13 +100,16 @@ else
     git checkout FETCH_HEAD
 fi
 
-if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
-    echo "LLVM patch already applied: ${LLVM_PATCH}"
-else
-    echo "Applying LLVM patch: ${LLVM_PATCH}"
-    git apply --check "${LLVM_PATCH}"
-    git apply "${LLVM_PATCH}"
-fi
+for _patch in "${LLVM_PATCHES[@]}"; do
+    [ -f "$_patch" ] || continue
+    if git apply --reverse --check "$_patch" >/dev/null 2>&1; then
+        echo "LLVM patch already applied: $_patch"
+    else
+        echo "Applying LLVM patch: $_patch"
+        git apply --check "$_patch"
+        git apply "$_patch"
+    fi
+done
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd
