@@ -97,6 +97,22 @@ def dn_tile(S: int) -> int:
 
 N_ROUTER = N_EXPERTS // ROUTER_TILE
 N_UG_PER_SLOT = INTER // UG_TILE
+
+
+def ug_split(S: int):
+    """Balanced S == 2 up/gate schedule (S == 4 measured slower), or None: the shared expert's tiles are computed
+    once for all samples, so there are (S * TOP_K + 1) * 16 tiles; every CTA runs
+    ``nf`` whole tiles plus one of ``seg`` K-segments of a leftover tile.  Returns
+    (nf, seg) when the leftover tiles split evenly over the CTAs."""
+    nf, r = divmod((S * TOP_K + 1) * N_UG_PER_SLOT, BLOCKS)
+    if S != 2 or r == 0 or BLOCKS % r:
+        return None
+    seg = BLOCKS // r
+    if (HIDDEN // 128) % seg or (HIDDEN // 128) // seg > WAVES // 2:
+        return None
+    return nf, seg
+
+
 XQ_BLOCKS = HIDDEN // 128  # MoE activation quant blocks
 XQ_PER_ROUTER = XQ_BLOCKS // N_ROUTER
 
@@ -133,11 +149,12 @@ def layout(S: int, heads: int, npes: int, topk: int):
         ("o", S * heads * V_DIM * pr),
         ("a", S * HIDDEN * pr),  # post-attention hidden (bf16 values)
         ("scores", S * N_EXPERTS * pr),
-        ("xq", S * HIDDEN * pr),  # FP8-quantized MoE activation (fp8 values)
+        ("xq", S * HIDDEN // 4 * pr),  # FP8-quantized MoE activation (4 packed FP8 per pair)
         ("xqs", S * XQ_BLOCKS * pr),  # its per-128 block scales
         ("sel", S * MOE_SLOTS * pr),
         ("prob", S * MOE_SLOTS * pr),
         ("mid", S * MOE_SLOTS * INTER * pr),
+        ("ugp", BLOCKS * S * 2 * UG_TILE * pr),  # up/gate K-segment partial sums
         ("xqd", S * HIDDEN * 4),  # debug: dequantized MoE activation (plain f32)
     ]
     off, scratch = 0, {}
@@ -259,7 +276,7 @@ def stage_tasks(S: int, heads: int, topk: int):
         ("uv", S * (heads * V_DIM // UV_TILE)),
         ("o", N_ROW_TILES),
         ("router", N_ROUTER),
-        ("ug", S * MOE_SLOTS * N_UG_PER_SLOT),
+        ("ug", S * MOE_SLOTS * N_UG_PER_SLOT if ug_split(S) is None else (ug_split(S)[0] + 1) * BLOCKS),
         ("down", HIDDEN // dn_tile(S)),
     ]
 
@@ -313,7 +330,7 @@ def build_layer(
         x: fx.Array[fx.Float32, XN, 16]  # bf16 activations (pairs) / split q + KV tile
         out: fx.Array[fx.Float32, ON, 16]
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-        misc: fx.Array[fx.Float32, 128, 16]
+        misc: fx.Array[fx.Float32, 8 + S * XQ_BLOCKS, 16]
         p: fx.Array[fx.Float32, H * SPLIT_KEYS, 16]
         keys: fx.Array[fx.Int32, SPLIT_KEYS, 16]
 
@@ -686,6 +703,22 @@ def build_layer(
             d0, d1 = _fp8_roundtrip(q0, q1)
             return d0, d1, qs
 
+        def stage_xq(samples):
+            """Poll the router's packed FP8 activation + block scales of ``samples``
+            (sample list, or one runtime sample) into LDS words s * HIDDEN / 4 (``f8_word``
+            order; slot 0 for a single runtime sample) and misc[8 + s * XQ_BLOCKS:]."""
+            nxw = HIDDEN // 4 // THREADS
+            got = poll(
+                [(mb("xq"), sx * (HIDDEN // 4) + tid + i * THREADS, 1) for sx in samples for i in range(nxw)]
+                + [(mb("xqs"), sx * XQ_BLOCKS + fx.min(tid, XQ_BLOCKS - 1), 1) for sx in samples]
+            )
+            for j in range_constexpr(len(samples)):
+                for i in range_constexpr(nxw):
+                    wd = f8_word((tid + i * THREADS) * 4)
+                    lds_st(xs, j * (HIDDEN // 4) + wd, got[j * nxw + i][0].bitcast(fx.Float32))
+                if tid < XQ_BLOCKS:
+                    lds_st(misc, 8 + j * XQ_BLOCKS + tid, got[len(samples) * nxw + j][0].bitcast(fx.Float32))
+
         def st_f8(k, q0, q1):
             """LDS FP8 activation bytes k, k + 1 (k even, held by this lane; lane ^ 1 holds
             k ^ 2) in ``f8_word`` order.  Call from the whole wave."""
@@ -694,7 +727,7 @@ def build_layer(
             if lane % 2 == 0:
                 lds_st(xs, f8_word(k), (w | (nb << 16)).bitcast(fx.Float32))
 
-        def route_top8(s):
+        def route_top8(s, raws=None):
             """Top-8 of sample s (call from one whole wave, after the router scores landed).
 
             Packed-key argmax: key = order-preserving bits of (sigmoid + bias) with the
@@ -703,7 +736,8 @@ def build_layer(
             [(taken, slot 0..7 in score order, raw score)] (candidate i of this lane is
             expert lane + 64 i) and the sum of the 8 raw scores."""
             r_b = _rsrc(bias)
-            raws = getf_many([(mb("scores"), s * N_EXPERTS + lane + i * 64) for i in range(N_EXPERTS // 64)])
+            if const_expr(raws is None):
+                raws = getf_many([(mb("scores"), s * N_EXPERTS + lane + i * 64) for i in range(N_EXPERTS // 64)])
             keys_ = []
             for i in range_constexpr(N_EXPERTS // 64):
                 kb = (raws[i] + ld_f32(r_b, lane + i * 64)).bitcast(fx.Int32)
@@ -802,6 +836,7 @@ def build_layer(
 
             stage_x_rmsnorm(ld_h, HIDDEN, g_in)
             gpu.barrier()
+            stamp("qkv_a", t, 2)
             acc = run_units(u_qa, QA_NKC // WAVES, QA_NKC // WAVES, pre)
             reduce_rows(1, acc, emit_out(QKV_A_TILE))
             stamp("qkv_a", t, 3)
@@ -826,17 +861,21 @@ def build_layer(
                 lambda k: (mb("kv_a"), (S - 1) * (KV_LORA + PE_DIM) + k * QKV_A_TILE + QKV_A_TILE - 1),
                 mark=("cache", t),
             )
+            # every sample's kv latent and k_pe pair in one poll, one block reduction
+            vs = getf_many([(mb("kv_a"), s * (KV_LORA + PE_DIM) + tid) for s in range(S)])
+            pes = get2_many(
+                [(mb("kv_a"), s * (KV_LORA + PE_DIM) + KV_LORA + (tid % (PE_DIM // 2)) * 2) for s in range(S)]
+            )
+            stamp("cache", t, 2)
+            g = ld_bf16(_rsrc(g_kv), tid)
+            ssq = block_sums([v * v for v in vs])
             for s in range_constexpr(S):
                 pos = pos0 + s
-                v = getf(mb("kv_a"), s * (KV_LORA + PE_DIM) + tid)
-                if const_expr(s == 0):
-                    stamp("cache", t, 2)
-                rstd = fmath.rsqrt(block_sum(v * v) / float(KV_LORA) + EPS)
-                kvn = bf16_round(v * rstd * ld_bf16(_rsrc(g_kv), tid))
+                kvn = bf16_round(vs[s] * fmath.rsqrt(ssq[s] / float(KV_LORA) + EPS) * g)
                 bo.buffer_store(kvn.to(fx.BFloat16), r_kv, pos * KV_LORA + tid)
                 put(mb("kvnew"), s * KV_LORA + tid, kvn)
                 if tid < PE_DIM // 2:
-                    x0, x1 = get2(mb("kv_a"), s * (KV_LORA + PE_DIM) + KV_LORA + tid * 2)
+                    x0, x1 = pes[s]
                     c = ld_f32(_rsrc(rope_cos), pos * (PE_DIM // 2) + tid)
                     sn = ld_f32(_rsrc(rope_sin), pos * (PE_DIM // 2) + tid)
                     p0 = bf16_round(x0 * c - x1 * sn)
@@ -1213,7 +1252,20 @@ def build_layer(
             hint_wait(
                 N_ROW_TILES, lambda k: (mb("a"), (S - 1) * HIDDEN + k * ROW_TILE + ROW_TILE - 1), mark=("router", t)
             )
-            rstds = stage_x_rmsnorm(lambda sks: get2_many([(mb("a"), s * HIDDEN + k) for s, k in sks]), HIDDEN, g_post)
+            # this task's FP8 activation block inputs ride along with the staging loads
+            r_gp = _rsrc(g_post)
+            xk = (t * XQ_PER_ROUTER + fx.min(wave, XQ_PER_ROUTER - 1)) * 128 + lane * 2
+            xg = (ld_bf16(r_gp, xk), ld_bf16(r_gp, xk + 1))
+            xa = []
+
+            def ld_a(sks):
+                v = get2_many(
+                    [(mb("a"), s * HIDDEN + k) for s, k in sks] + [(mb("a"), s * HIDDEN + xk) for s in range(S)]
+                )
+                xa.extend(v[len(sks) :])
+                return v[: len(sks)]
+
+            rstds = stage_x_rmsnorm(ld_a, HIDDEN, g_post)
             stamp("router", t, 2)
             gpu.barrier()
             acc = run_units(u_r, R_NKC // WAVES, R_PRE, pre)
@@ -1225,14 +1277,17 @@ def build_layer(
                 logit = lds_ld(outs, tid)
                 put(mb("scores"), s * N_EXPERTS + t * ROUTER_TILE + tid % ROUTER_TILE, 1.0 / (1.0 + fmath.exp(-logit)))
             # scores are out (top-8 can start); now this task's FP8 activation blocks
-            r_gp = _rsrc(g_post)
             for s in range_constexpr(S):
                 blk = t * XQ_PER_ROUTER + wave
                 if wave < XQ_PER_ROUTER:
-                    k = blk * 128 + lane * 2
-                    a0, a1 = get2(mb("a"), s * HIDDEN + k)
-                    d0, d1, qs = quant_block(a0 * rstds[s] * ld_bf16(r_gp, k), a1 * rstds[s] * ld_bf16(r_gp, k + 1))
-                    put2(mb("xq"), s * HIDDEN + k, d0, d1)
+                    k = xk
+                    a0, a1 = xa[s]
+                    q0, q1, qs = quant_scaled(a0 * rstds[s] * xg[0], a1 * rstds[s] * xg[1])
+                    w8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
+                    w8n = _xshfl(w8, 1)
+                    if lane % 2 == 0:  # FP8 bytes k .. k + 3 in one tagged word
+                        put(mb("xq"), (s * HIDDEN + k) // 4, w8 | (w8n << 16))
+                    d0, d1 = _fp8_roundtrip(q0, q1)
                     bo.buffer_store(
                         fx.Vector.from_elements([d0 * qs, d1 * qs], fx.Float32), _rsrc(mb("xqd")), s * HIDDEN + k
                     )
@@ -1244,13 +1299,72 @@ def build_layer(
         # 2 row groups (16 gate + 16 up rows) x 96 chunks: 4 waves per group, 24 chunks each
         UG_NKC = HIDDEN // 64
         UG_CPW = UG_NKC // (WAVES // 2)
-        for u in range(start("ug"), N_UG, G):
-            u = fx.Int32(u)
-            stamp("ug", u, 0)
+        UG_W_BYTES = 2 * INTER * HIDDEN
+        UG_S_BYTES = 2 * INTER // SCALE_BM * (HIDDEN // 128) * 4
+
+        def ug_units(e_sel, c, live=None):
+            """Unit maker of up/gate tile c of expert e_sel; ``live`` False -> empty
+            buffers (loads return 0 without memory traffic)."""
+            if const_expr(live is None):
+                r_wug = _rsrc(w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES))
+                r_sug = _rsrc(s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES))
+            else:
+                r_wug = bo.create_buffer_resource_from_addr(
+                    w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES),
+                    num_records_bytes=live.select(fx.Int32(UG_W_BYTES), fx.Int32(0)),
+                )
+                r_sug = bo.create_buffer_resource_from_addr(
+                    s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES),
+                    num_records_bytes=live.select(fx.Int32(UG_S_BYTES), fx.Int32(0)),
+                )
+            gate_up = wave // (WAVES // 2)  # waves 0-3: gate rows, 4-7: up rows
+
+            def u_ug(cc):  # cc: 128-k chunk of this wave
+                kc = (wave % (WAVES // 2)) * UG_CPW + cc * 2
+                return unit_f8f8(
+                    r_wug,
+                    r_sug,
+                    gate_up * (INTER // 16) + c,
+                    kc,
+                    UG_NKC,
+                    HIDDEN,
+                    kc * 16,
+                    lambda: _uniform_f32(lds_ld(misc, 8 + kc // 2)),
+                )
+
+            return u_ug
+
+        def ug_finish(u, s_u, slot, c, e_sel, prob, u_ug, pre):
+            """MFMA the staged activation (X, scales in misc[8:]) against the tile,
+            SiLU(gate) * up -> mid."""
+            acc = run_units(u_ug, UG_CPW // 2, UG_CPW // 2, pre)
+            reduce_rows(2, acc, emit_out(UG_TILE * 2))
+            stamp("ug", u, 3)
+            gpu.barrier()
+            if tid < UG_TILE // 2:
+                r = tid * 2
+                g0, g1 = lds_ld(outs, r), lds_ld(outs, r + 1)
+                u0, u1 = lds_ld(outs, UG_TILE + r), lds_ld(outs, UG_TILE + r + 1)
+                put2(
+                    mb("mid"),
+                    (s_u * MOE_SLOTS + slot) * INTER + c * UG_TILE + r,
+                    g0 / (1.0 + fmath.exp(-g0)) * u0,
+                    g1 / (1.0 + fmath.exp(-g1)) * u1,
+                )
+            if (c == 0) & (tid == 0):  # routing record (debug / tests)
+                put(mb("sel"), s_u * MOE_SLOTS + slot, e_sel)
+                put(mb("prob"), s_u * MOE_SLOTS + slot, prob())
+            stamp("ug", u, 4)
+
+        def ug_task(u):
             s_u = u // (MOE_SLOTS * N_UG_PER_SLOT)
-            slot = (u // N_UG_PER_SLOT) % MOE_SLOTS
-            c = u % N_UG_PER_SLOT
-            if const_expr(S == 1):
+            return s_u, (u // N_UG_PER_SLOT) % MOE_SLOTS, u % N_UG_PER_SLOT
+
+        if const_expr(S == 1):
+            for u in range(start("ug"), N_UG, G):
+                u = fx.Int32(u)
+                stamp("ug", u, 0)
+                s_u, slot, c = ug_task(u)
                 # the FP8 activation is computed here from the post-attention state (in
                 # parallel with the router): RMSNorm, then per-128 quant with one wave per
                 # block -> X[0] (fp8 values in bf16), block scales -> misc[8:]
@@ -1269,70 +1383,171 @@ def build_layer(
                     st_f8(ks_[j], q0, q1)
                     if lane == 0:
                         lds_st(misc, 8 + wave + j * WAVES, qs)
-            else:
-                # S > 1: the router already quantized every sample's activation
-                hint_wait(
-                    N_ROUTER,
-                    lambda k: (mb("scores"), s_u * N_EXPERTS + k * ROUTER_TILE + ROUTER_TILE - 1),
-                    mark=("ug", u),
-                )
-                NXW = HIDDEN // 2 // THREADS
-                got = poll(
-                    [(mb("xq"), s_u * HIDDEN + (tid + i * THREADS) * 2, 2) for i in range(NXW)]
-                    + [(mb("xqs"), s_u * XQ_BLOCKS + fx.min(tid, XQ_BLOCKS - 1), 1)]
-                )
-                for i in range_constexpr(NXW):
-                    st_f8((tid + i * THREADS) * 2, got[i][0].bitcast(fx.Float32), got[i][1].bitcast(fx.Float32))
-                if tid < XQ_BLOCKS:
-                    lds_st(misc, 8 + tid, got[NXW][0].bitcast(fx.Float32))
-            if tid == 0:  # slot 0: the shared expert, weight 1 (does not wait for routing)
-                lds_st(keys, 0, fx.Int32(SHARED_EXPERT))
-                lds_st(misc, 0, fx.Float32(1.0))
-            if (slot > 0) & (wave == 0):
-                picks, tot = route_top8(s_u)
-                for i in range_constexpr(N_EXPERTS // 64):
-                    if picks[i][0] & (picks[i][1] == slot - 1):
-                        lds_st(keys, 0, lane + i * 64)
-                        lds_st(misc, 0, picks[i][2] / tot * ROUTE_SCALE)
-            stamp("ug", u, 2)
-            gpu.barrier()
-            e_sel = _uniform(lds_ld(keys, 0))
-            wbase = w_ug + fx.Int64(e_sel) * fx.Int64(2 * INTER * HIDDEN)
-            sbase = s_ug + fx.Int64(e_sel) * fx.Int64(2 * INTER // SCALE_BM * (HIDDEN // 128) * 4)
-            r_wug, r_sug = _rsrc(wbase), _rsrc(sbase)
-            gate_up = wave // (WAVES // 2)  # waves 0-3: gate rows, 4-7: up rows
+                if tid == 0:  # slot 0: the shared expert, weight 1 (does not wait for routing)
+                    lds_st(keys, 0, fx.Int32(SHARED_EXPERT))
+                    lds_st(misc, 0, fx.Float32(1.0))
+                if (slot > 0) & (wave == 0):
+                    picks, tot = route_top8(s_u)
+                    for i in range_constexpr(N_EXPERTS // 64):
+                        if picks[i][0] & (picks[i][1] == slot - 1):
+                            lds_st(keys, 0, lane + i * 64)
+                            lds_st(misc, 0, picks[i][2] / tot * ROUTE_SCALE)
+                stamp("ug", u, 2)
+                gpu.barrier()
+                e_sel = _uniform(lds_ld(keys, 0))
+                ug_finish(u, s_u, slot, c, e_sel, lambda: lds_ld(misc, 0), ug_units(e_sel, c), None)
+        elif const_expr(ug_split(S) is not None):
+            # S = 2, 4 (the router already quantized every sample's activation): job 0 is
+            # this CTA's K-segment of a leftover tile (partial sums -> ugp; the segment-0
+            # CTA sums them after its own tiles), jobs 1..NF whole tiles.  Tile x: expert
+            # slot x // 16 (0 = the shared expert with MFMA column n = sample n, then
+            # sample-major routed slots), intermediates (x % 16) * 16.  Job k + 1 is
+            # routed and its weights are in flight while job k computes.
+            NF, SEG = ug_split(S)
+            KB = XQ_BLOCKS // SEG  # 128-k blocks per segment and row group
+            NSC = N_EXPERTS // 64
+            XW = HIDDEN // 4  # LDS words of one sample's FP8 activation
+            UG_S_ROW = UG_S_BYTES // 4
+            gu_row = (wave // (WAVES // 2)) * (INTER // 16)  # waves 0-3: gate rows, 4-7: up rows
+            wq = wave % (WAVES // 2)
+            seg = bid % SEG
+            x_seg = NF * G + bid // SEG
 
-            def u_ug(cc):  # cc: 128-k chunk of this wave
-                kc = (wave % (WAVES // 2)) * UG_CPW + cc * 2
-                return unit_f8f8(
-                    r_wug,
-                    r_sug,
-                    gate_up * (INTER // 16) + c,
-                    kc,
-                    UG_NKC,
-                    HIDDEN,
-                    kc * 16,
-                    lambda: _uniform_f32(lds_ld(misc, 8 + kc // 2)),
+            def ug_job(k):
+                x = fx.Int32(x_seg if k == 0 else bid + (k - 1) * G)
+                es = x // N_UG_PER_SLOT
+                c = x % N_UG_PER_SLOT
+                shared = es == 0
+                s_u = fx.max(es - 1, 0) // TOP_K
+                slot = shared.select(fx.Int32(0), (es - 1) % TOP_K + 1)
+                raws = getf_many([(mb("scores"), s_u * N_EXPERTS + lane + i * 64) for i in range(NSC)])
+                picks, tot = route_top8(s_u, raws)
+                e_pick = fx.Int32(-1)
+                w_pick = fx.Float32(0.0)
+                for i in range_constexpr(NSC):
+                    hit = picks[i][0] & (picks[i][1] == slot - 1)
+                    e_pick = hit.select(fx.Int32(lane + i * 64), e_pick)
+                    w_pick = hit.select(picks[i][2] / tot * ROUTE_SCALE, w_pick)
+                e_sel = _uniform(shared.select(fx.Int32(SHARED_EXPERT), wave_max(e_pick)))
+                prob = shared.select(fx.Float32(1.0), wave_sum(w_pick))
+                bsel = shared.select(n_sel(), s_u)  # this lane's activation sample
+                if const_expr(k == 0):  # waves wq < KB each own one 128-k block
+                    kbs = [seg * KB + fx.min(wq, KB - 1)]
+                    nrec = (wq < KB).select(fx.Int32(UG_W_BYTES), fx.Int32(0))
+                else:
+                    kbs = [wq * (UG_CPW // 2) + cc for cc in range(UG_CPW // 2)]
+                    nrec = fx.Int32(UG_W_BYTES)
+                r_w = bo.create_buffer_resource_from_addr(
+                    w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES), num_records_bytes=nrec
                 )
+                r_s = _rsrc(s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES))
 
-            acc = run_units(u_ug, UG_CPW // 2, UG_CPW // 2)
-            reduce_rows(2, acc, emit_out(UG_TILE * 2))
-            stamp("ug", u, 3)
+                def mk(kb):
+                    return unit_f8f8(
+                        r_w,
+                        r_s,
+                        gu_row + c,
+                        kb * 2,
+                        UG_NKC,
+                        HIDDEN,
+                        bsel * XW + kb * 32,
+                        lambda: lds_ld(misc, 8 + bsel * XQ_BLOCKS + kb),
+                    )
+
+                return (shared, s_u, slot, c, e_sel, prob, [mk(kb) for kb in kbs])
+
+            def ug_mid(shared, s_u, slot, c, e_sel, prob):
+                """outs (per column: 16 gate then 16 up sums) -> SiLU(gate) * up -> mid of
+                sample s_u, or of every sample n (column n) for the shared expert."""
+                if tid < S * UG_TILE // 2:
+                    n = tid // (UG_TILE // 2)
+                    r = (tid % (UG_TILE // 2)) * 2
+                    if shared | (n == 0):
+                        g0, g1 = lds_ld(outs, n * 2 * UG_TILE + r), lds_ld(outs, n * 2 * UG_TILE + r + 1)
+                        v0 = lds_ld(outs, n * 2 * UG_TILE + UG_TILE + r)
+                        v1 = lds_ld(outs, n * 2 * UG_TILE + UG_TILE + r + 1)
+                        put2(
+                            mb("mid"),
+                            (shared.select(n, s_u) * MOE_SLOTS + slot) * INTER + c * UG_TILE + r,
+                            g0 / (1.0 + fmath.exp(-g0)) * v0,
+                            g1 / (1.0 + fmath.exp(-g1)) * v1,
+                        )
+                if (c == 0) & (tid < S):  # routing record (debug / tests)
+                    if shared | (tid == 0):
+                        put(mb("sel"), shared.select(tid, s_u) * MOE_SLOTS + slot, e_sel)
+                        put(mb("prob"), shared.select(tid, s_u) * MOE_SLOTS + slot, prob)
+
+            cur = ug_job(0)
+            stamp("ug", bid, 0)
+            stage_xq(list(range(S)))
+            stamp("ug", bid, 2)
             gpu.barrier()
-            if tid < UG_TILE // 2:
-                r = tid * 2
-                g0, g1 = lds_ld(outs, r), lds_ld(outs, r + 1)
-                u0, u1 = lds_ld(outs, UG_TILE + r), lds_ld(outs, UG_TILE + r + 1)
-                put2(
-                    mb("mid"),
-                    (s_u * MOE_SLOTS + slot) * INTER + c * UG_TILE + r,
-                    g0 / (1.0 + fmath.exp(-g0)) * u0,
-                    g1 / (1.0 + fmath.exp(-g1)) * u1,
-                )
-            if (c == 0) & (tid == 0):  # routing record (debug / tests)
-                put(mb("sel"), s_u * MOE_SLOTS + slot, e_sel)
-                put(mb("prob"), s_u * MOE_SLOTS + slot, lds_ld(misc, 0))
-            stamp("ug", u, 4)
+            job0 = cur[:6]
+            for k in range_constexpr(NF + 1):
+                shared, s_u, slot, c, e_sel, prob, pre = cur
+                if const_expr(k > 0):
+                    stamp("ug", k * G + bid, 0)
+                if const_expr(k < NF):
+                    cur = ug_job(k + 1)
+                acc = mma_units([fx.Float32(0.0) for _ in range(4)], pre)
+                reduce_rows(2, acc, emit_out(UG_TILE * 2))
+                stamp("ug", k * G + bid, 3)
+                gpu.barrier()
+                if const_expr(k == 0):
+                    if tid < S * 2 * UG_TILE:
+                        put(mb("ugp"), ((x_seg - NF * G) * SEG + seg) * S * 2 * UG_TILE + tid, lds_ld(outs, tid))
+                else:
+                    ug_mid(shared, s_u, slot, c, e_sel, prob)
+                stamp("ug", k * G + bid, 4)
+            if seg == 0:  # sum the leftover tile's K-segments
+                gpu.barrier()
+                if tid < S * 2 * UG_TILE:
+                    parts = getf_many(
+                        [((mb("ugp")), ((x_seg - NF * G) * SEG + j) * S * 2 * UG_TILE + tid) for j in range(SEG)]
+                    )
+                    tot_p = parts[0]
+                    for j in range_constexpr(1, SEG):
+                        tot_p = tot_p + parts[j]
+                    lds_st(outs, tid, tot_p)
+                gpu.barrier()
+                ug_mid(*job0)
+        else:
+            # S > 1 (the router already quantized every sample's activation): this CTA's
+            # tasks are software pipelined -- task k+1 is routed (by every wave on its
+            # own) and its weights are in flight while task k computes
+            UG_NT = (N_UG + G - 1) // G
+            NSC = N_EXPERTS // 64
+            u0 = start("ug")
+
+            def ug_prep(k):
+                u = fx.Int32(u0 + k * G)
+                live = u < N_UG
+                s_u, slot, c = ug_task(fx.min(u, N_UG - 1))
+                raws = getf_many([(mb("scores"), s_u * N_EXPERTS + lane + i * 64) for i in range(NSC)])
+                picks, tot = route_top8(s_u, raws)
+                e_pick = fx.Int32(-1)
+                w_pick = fx.Float32(0.0)
+                for i in range_constexpr(NSC):
+                    hit = picks[i][0] & (picks[i][1] == slot - 1)
+                    e_pick = hit.select(fx.Int32(lane + i * 64), e_pick)
+                    w_pick = hit.select(picks[i][2] / tot * ROUTE_SCALE, w_pick)
+                e_sel = _uniform((slot == 0).select(fx.Int32(SHARED_EXPERT), wave_max(e_pick)))
+                prob = (slot == 0).select(fx.Float32(1.0), wave_sum(w_pick))
+                u_ug = ug_units(e_sel, c, live)
+                return (u, live, s_u, slot, c, e_sel, prob, u_ug, [u_ug(cc) for cc in range(UG_CPW // 2)])
+
+            cur = ug_prep(0)
+            for k in range_constexpr(UG_NT):
+                u, live, s_u, slot, c, e_sel, prob, u_ug, pre = cur
+                if live:
+                    stamp("ug", u, 0)
+                    stage_xq([s_u])
+                    stamp("ug", u, 2)
+                gpu.barrier()
+                if const_expr(k + 1 < UG_NT):
+                    cur = ug_prep(k + 1)
+                if live:
+                    ug_finish(u, s_u, slot, c, e_sel, lambda: prob, u_ug, pre)
 
         # ======== 10. mid FP8 quant + expert down + route weighting + MoE TP reduce
         # 2 row groups x (S * 9 slots * 4) chunks: 4 waves per group
