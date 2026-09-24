@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-24T05:02:48Z",
+ "updated": "2026-09-24T05:05:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -126,11 +126,11 @@
    "branch": "jli/fix-waves-per-eu",
    "event": "pull_request",
    "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596",
    "created_at": "2026-09-24T03:16:51Z",
-   "updated_at": "2026-09-24T03:45:22Z",
+   "updated_at": "2026-09-24T05:02:36Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -145,9 +145,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T03:45:22Z",
+     "started_at": "2026-09-24T05:02:35Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596/job/107484638221"
     },
@@ -227,11 +227,11 @@
    "branch": "main",
    "event": "push",
    "title": "Revert error merge \"Refactor preshuffle GEMM indexing with layout alg\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207",
    "created_at": "2026-09-24T03:08:58Z",
-   "updated_at": "2026-09-24T04:05:33Z",
+   "updated_at": "2026-09-24T05:02:04Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -255,10 +255,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-24T03:40:18Z",
-     "completed_at": null,
+     "completed_at": "2026-09-24T05:02:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107480397017"
     }
    ]
@@ -316,19 +316,19 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[Feat][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816",
    "created_at": "2026-09-24T02:40:51Z",
-   "updated_at": "2026-09-24T04:13:29Z",
+   "updated_at": "2026-09-24T05:02:05Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T04:13:29Z",
+     "started_at": "2026-09-24T05:02:04Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948266816/job/107490539970"
     },
