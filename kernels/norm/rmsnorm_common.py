@@ -12,7 +12,7 @@ have to import from each other. Keeping these here follows the topical
 
 import flydsl.expr as fx
 from flydsl.expr import const_expr
-from kernels.common.kernels_common import get_warp_size
+from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "rmsnorm"
 
@@ -52,19 +52,27 @@ def make_single_reduction_storage(red_slots: int):
     return SharedStorage
 
 
-def load_scalar(copy_atom, elem_dtype, divided_tensor, index):
-    view = fx.slice(divided_tensor, (None, index))
-    r = fx.make_rmem_tensor(1, elem_dtype)
-    fx.copy(copy_atom, view, r)
-    return fx.memref_load_vec(r)[0]
+def validate_norm_operand_dtypes(input_tensor, dtype_str: str, **operands) -> None:
+    """Validate quantized-norm operands against the builder specialization.
 
-
-def store_scalar(copy_atom, elem_dtype, divided_tensor, index, val):
-    r = fx.make_rmem_tensor(1, elem_dtype)
-    ts = fx.Vector.filled(1, val, elem_dtype)
-    fx.memref_store_vec(ts, r)
-    view = fx.slice(divided_tensor, (None, index))
-    fx.copy(copy_atom, r, view)
+    Quantized norm kernels specialize every non-quantized operand on ``dtype_str``,
+    so a mismatched tensor is reinterpreted bit-for-bit instead of failing.
+    ``Input`` and each operand are checked against ``dtype_str`` itself rather than
+    against one another.
+    """
+    expected = dtype_to_elem_type(dtype_str)
+    if input_tensor.dtype != expected:
+        raise ValueError(
+            f"quantized norm kernels specialize on dtype_str={dtype_str!r}, so Input must be "
+            f"{expected}, got {input_tensor.dtype}"
+        )
+    mismatched = {name: t.dtype for name, t in operands.items() if t.dtype != input_tensor.dtype}
+    if mismatched:
+        got = ", ".join(f"{name}={dtype}" for name, dtype in mismatched.items())
+        raise ValueError(
+            f"quantized norm kernels require {'/'.join(operands)} to match the input dtype "
+            f"{input_tensor.dtype}, got {got}"
+        )
 
 
 def load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
