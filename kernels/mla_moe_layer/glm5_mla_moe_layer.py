@@ -374,9 +374,15 @@ def build_layer(
 
     base, first, acc = {}, {}, 0
     for name, n in stage_tasks(S, H, topk):
-        base[name] = acc % G
         first[name] = acc
         acc += n
+    # CTA placement: split before uk, so every split tile lands on a CTA freed by
+    # qkv_a (uk shares the q_b CTAs it waits on anyway)
+    tasks = dict(stage_tasks(S, H, topk))
+    acc = 0
+    for name in ("qkv_a", "cache", "q_b", "split", "uk", "uv", "o", "router", "ug", "down"):
+        base[name] = acc % G
+        acc += tasks[name]
 
     @fx.struct
     class Smem:
@@ -1381,15 +1387,20 @@ def build_layer(
             t = fx.Int32(t)
             stamp("router", t, 0)
 
-            r_sub = t * ROUTER_TILE % 16  # this task's rows of the 16-row group; lanes on
-            r_ln = (lane & -16) | (r_sub + lane % ROUTER_TILE)  # other rows load a twin row
+            # K-fold: MFMA rows / B columns 0..7 take this wave's first K half, rows /
+            # columns 8..15 the second, so every loaded weight row is distinct and the
+            # whole K slice is prefetched; logit = C[r][n] + C[8 + r][8 + n]
+            r_sub = t * ROUTER_TILE % 16  # this task's rows of the 16-row group
+            r_ln = (lane & -16) | (r_sub + lane % ROUTER_TILE)
+            R_CPW = R_NKC // WAVES // 2
+            r_fold = (lane % 16) // ROUTER_TILE
+            r_ns = fx.min(lane % ROUTER_TILE, S - 1)
 
             def u_r(c):
-                kc = wave * (R_NKC // WAVES) + c
-                return unit_bf16(r_wr, t * ROUTER_TILE // 16, kc, R_NKC, (n_sel() * HIDDEN + kc * 64) // 2, r_ln)
+                kc = wave * (R_NKC // WAVES) + r_fold * R_CPW + c
+                return unit_bf16(r_wr, t * ROUTER_TILE // 16, kc, R_NKC, (r_ns * HIDDEN + kc * 64) // 2, r_ln)
 
-            R_PRE = R_NKC // WAVES if const_expr(S == 1) else R_NKC // WAVES // 2  # VGPR budget
-            pre = [u_r(c) for c in range(R_PRE)]
+            pre = [u_r(c) for c in range(R_CPW)]
             hint_wait(
                 N_ROW_TILES, lambda k: (mb("a"), (S - 1) * HIDDEN + k * ROW_TILE + ROW_TILE - 1), mark=("router", t)
             )
@@ -1431,19 +1442,19 @@ def build_layer(
                 if lane == 0:
                     put(mb("xqs"), x_s * XQ_BLOCKS + x_blk, qs)
             gpu.barrier()
-            acc = run_units(u_r, R_NKC // WAVES, R_PRE, pre)
-
-            def emit_r(rl, n, v):
-                if (rl >= r_sub) & (rl < r_sub + ROUTER_TILE):
-                    lds_st(outs, n * ROUTER_TILE + rl - r_sub, v)
-
-            reduce_rows(1, acc, emit_r)
-            stamp("router", t, 3)
+            acc = run_units(u_r, R_CPW, R_CPW, pre)
+            fx.ptr_store(fx.Vector.from_elements(acc, fx.Float32), red + (wave * 64 + lane) * 4)
             gpu.barrier()
+            stamp("router", t, 3)
             if tid < S * ROUTER_TILE:
-                s = tid // ROUTER_TILE
-                logit = lds_ld(outs, tid)
-                put(mb("scores"), s * N_EXPERTS + t * ROUTER_TILE + tid % ROUTER_TILE, _rcp(1.0 + _exp(-logit)))
+                r = tid % ROUTER_TILE
+                n = tid // ROUTER_TILE
+                logit = fx.Float32(0.0)
+                for w in range_constexpr(WAVES):
+                    for f in range_constexpr(2):
+                        m = f * ROUTER_TILE + r
+                        logit = logit + lds_ld(red, (w * 64 + f * ROUTER_TILE + n + 16 * (m // 4)) * 4 + m % 4)
+                put(mb("scores"), n * N_EXPERTS + t * ROUTER_TILE + r, _rcp(1.0 + _exp(-logit)))
             stamp("router", t, 4)
 
         def dn_route(bs):
