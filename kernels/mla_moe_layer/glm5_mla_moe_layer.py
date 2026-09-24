@@ -219,6 +219,21 @@ def _xshfl(v, off):
     return y.bitcast(fx.Float32) if is_f else y
 
 
+def _xred(v, off, op):
+    """op(v, value of lane ``lane ^ off``) for a symmetric op.  Offsets 32 / 16 take
+    both halves of one v_permlane*_swap as the operands (no select needed)."""
+    if off < 16:
+        return op(v, _xshfl(v, off))
+    is_f = isinstance(v, fx.Float32)
+    x = as_ir_value(v.bitcast(fx.Int32) if is_f else fx.Int32(v))
+    swap = rocdl.permlane32_swap if off == 32 else rocdl.permlane16_swap
+    pr = swap(llvm.StructType.get_literal([T.i32, T.i32]), x, x, False, False)
+    a, b = (fx.Int32(llvm.extractvalue(T.i32, pr, [j])) for j in range(2))
+    if is_f:
+        return op(a.bitcast(fx.Float32), b.bitcast(fx.Float32))
+    return op(type(v)(a), type(v)(b))
+
+
 def _ballot(pred):
     return fx.Int64(rocdl.ballot(T.i64, fx.Boolean(pred).ir_value()))
 
@@ -333,6 +348,7 @@ def build_layer(
         misc: fx.Array[fx.Float32, 8 + S * XQ_BLOCKS, 16]
         p: fx.Array[fx.Float32, H * SPLIT_KEYS, 16]
         keys: fx.Array[fx.Int32, SPLIT_KEYS, 16]
+        dnw: fx.Array[fx.Float32, S * MOE_SLOTS, 16]  # expert-down route weights
 
     @flyc.kernel(known_block_size=[THREADS, 1, 1])
     def layer_kernel(
@@ -383,6 +399,7 @@ def build_layer(
         misc = lds.misc.ptr
         pl = lds.p.ptr
         keys = lds.keys.ptr
+        dnw = lds.dnw.ptr
         ktile = xs + KT_OFF  # f32-typed views holding raw bf16 pairs
         petile = xs + PT_OFF
         v4f = fx.Vector.make_type(4, fx.Float32)
@@ -539,12 +556,12 @@ def build_layer(
         # ---- wave reductions
         def wave_sum(v):
             for sh in range_constexpr(6):
-                v = v + _xshfl(v, 32 >> sh)
+                v = _xred(v, 32 >> sh, lambda a, b: a + b)
             return v
 
         def wave_max(v):
             for sh in range_constexpr(6):
-                v = fx.max(v, _xshfl(v, 32 >> sh))
+                v = _xred(v, 32 >> sh, fx.max)
             return v
 
         def block_sums(vs):
@@ -674,30 +691,34 @@ def build_layer(
 
             return f
 
-        def stage_x_rmsnorm(ld2s, n, gamma):
+        def stage_x_rmsnorm(ld4s, n, gamma):
             """LDS bf16 X[s][0:n] = bf16(rmsnorm(x_s) * gamma) for every sample s, where
-            ld2s([(s, k)]) -> [(x_s[k], x_s[k+1])] (one batched load); returns the rstds."""
-            per = n // (2 * THREADS)
+            ld4s([(s, k)]) -> [(x_s[k], .., x_s[k+3])] (one batched load); returns the rstds."""
+            per = n // (4 * THREADS)
             rg_ = _rsrc(gamma)
-            ks = [(tid + i * THREADS) * 2 for i in range(per)]
-            gs = [(ld_bf16(rg_, k), ld_bf16(rg_, k + 1)) for k in ks]  # issued ahead of the wait
-            vals = ld2s([(s, k) for s in range(S) for k in ks])
+            ks = [(tid + i * THREADS) * 4 for i in range(per)]
+            gs = []  # issued ahead of the wait
+            for k in ks:
+                g = fx.Vector(bo.buffer_load(rg_, k // 2, vec_width=2, dtype=T.i32)).bitcast(fx.BFloat16).to(fx.Float32)
+                gs.append([g[j] for j in range(4)])
+            vals = ld4s([(s, k) for s in range(S) for k in ks])
             sss = []
             for s in range_constexpr(S):
                 ss = fx.Float32(0.0)
                 for i in range_constexpr(per):
-                    a0, a1 = vals[s * per + i]
-                    ss = ss + a0 * a0 + a1 * a1
+                    for a in vals[s * per + i]:
+                        ss = ss + a * a
                 sss.append(ss)
             rstds = [fmath.rsqrt(tot / float(n) + EPS) for tot in block_sums(sss)]
             for s in range_constexpr(S):
                 for i in range_constexpr(per):
-                    a0, a1 = vals[s * per + i]
-                    lds_st(
-                        xs,
-                        (s * n + ks[i]) // 2,
-                        bf16_pair(a0 * rstds[s] * gs[i][0], a1 * rstds[s] * gs[i][1]),
-                    )
+                    a = vals[s * per + i]
+                    for j in range_constexpr(2):
+                        lds_st(
+                            xs,
+                            (s * n + ks[i]) // 2 + j,
+                            bf16_pair(a[2 * j] * rstds[s] * gs[i][2 * j], a[2 * j + 1] * rstds[s] * gs[i][2 * j + 1]),
+                        )
             return rstds
 
         def stage_x_pairs(name, n_total, src_of):
@@ -754,7 +775,11 @@ def build_layer(
             if lane % 2 == 0:
                 lds_st(xs, f8_word(k), (w | (nb << 16)).bitcast(fx.Float32))
 
-        def route_top8(s, raws=None):
+        def load_bias():
+            """This lane's 4 expert biases (issue before the scores wait)."""
+            return [ld_f32(_rsrc(bias), lane + i * 64) for i in range(N_EXPERTS // 64)]
+
+        def route_top8(s, raws=None, bs=None):
             """Top-8 of sample s (call from one whole wave, after the router scores landed).
 
             Packed-key argmax: key = order-preserving bits of (sigmoid + bias) with the
@@ -762,12 +787,13 @@ def build_layer(
             so each of the 8 rounds is one u32 wave max.  Returns per-candidate
             [(taken, slot 0..7 in score order, raw score)] (candidate i of this lane is
             expert lane + 64 i) and the sum of the 8 raw scores."""
-            r_b = _rsrc(bias)
+            if const_expr(bs is None):
+                bs = load_bias()
             if const_expr(raws is None):
                 raws = getf_many([(mb("scores"), s * N_EXPERTS + lane + i * 64) for i in range(N_EXPERTS // 64)])
             keys_ = []
             for i in range_constexpr(N_EXPERTS // 64):
-                kb = (raws[i] + ld_f32(r_b, lane + i * 64)).bitcast(fx.Int32)
+                kb = (raws[i] + bs[i]).bitcast(fx.Int32)
                 ok = (kb >= 0).select(kb ^ fx.Int32(-(2**31)), ~kb)
                 keys_.append((ok & fx.Int32(-256)) | (255 - (lane + i * 64)))
             slot = [fx.Int32(-1) for _ in range(N_EXPERTS // 64)]
@@ -776,7 +802,7 @@ def build_layer(
                 for i in range_constexpr(1, N_EXPERTS // 64):
                     m = fx.max(m, fx.Uint32(keys_[i]))
                 for sh in range_constexpr(6):
-                    m = fx.max(m, fx.Uint32(_xshfl(fx.Int32(m), 32 >> sh)))
+                    m = _xred(m, 32 >> sh, fx.max)
                 for i in range_constexpr(N_EXPERTS // 64):
                     hit = fx.Uint32(keys_[i]) == m
                     slot[i] = hit.select(fx.Int32(k), slot[i])
@@ -855,11 +881,9 @@ def build_layer(
             def ld_h(sks):
                 res = []
                 for s, k in sks:
-                    w = fx.Vector.from_elements(
-                        [fx.Int32(bo.buffer_load(r_h, (s * HIDDEN + k) // 2, vec_width=1, dtype=T.i32))], fx.Int32
-                    )
+                    w = fx.Vector(bo.buffer_load(r_h, (s * HIDDEN + k) // 2, vec_width=2, dtype=T.i32))
                     v = w.bitcast(fx.BFloat16).to(fx.Float32)
-                    res.append((v[0], v[1]))
+                    res.append([v[j] for j in range(4)])
                 return res
 
             stage_x_rmsnorm(ld_h, HIDDEN, g_in)
@@ -930,7 +954,11 @@ def build_layer(
                 lambda k: (mb("q_a"), (S - 1) * Q_LORA + k * QKV_A_TILE + QKV_A_TILE - 1),
                 mark=("q_b", t),
             )
-            stage_x_rmsnorm(lambda sks: get2_many([(mb("q_a"), s * Q_LORA + k) for s, k in sks]), Q_LORA, g_q)
+            def ld_qa(sks):
+                v = get2_many([(mb("q_a"), s * Q_LORA + k + j) for s, k in sks for j in (0, 2)])
+                return [list(v[2 * i]) + list(v[2 * i + 1]) for i in range(len(sks))]
+
+            stage_x_rmsnorm(ld_qa, Q_LORA, g_q)
             stamp("q_b", t, 2)
             gpu.barrier()
             acc = run_units(u_qb, QB_NKC // WAVES, QB_NKC // WAVES, pre)
@@ -1292,24 +1320,15 @@ def build_layer(
             xa = []
 
             def ld_a(sks):
-                v = get_bf2_many(
-                    [(mb("a"), s * HIDDEN + k) for s, k in sks] + [(mb("a"), s * HIDDEN + xk) for s in range(S)]
-                )
-                xa.extend(v[len(sks) :])
-                return v[: len(sks)]
+                specs = [(mb("a"), (s * HIDDEN + k) // 2, 2) for s, k in sks]
+                specs += [(mb("a"), (s * HIDDEN + xk) // 2, 1) for s in range(S)]
+                v = poll(specs, batch=len(specs))
+                xa.extend(bf2_f32(w[0]) for w in v[len(sks) :])
+                return [list(bf2_f32(w[0])) + list(bf2_f32(w[1])) for w in v[: len(sks)]]
 
             rstds = stage_x_rmsnorm(ld_a, HIDDEN, g_post)
             stamp("router", t, 2)
-            gpu.barrier()
-            acc = run_units(u_r, R_NKC // WAVES, R_PRE, pre)
-            reduce_rows(1, acc, emit_out(ROUTER_TILE))
-            stamp("router", t, 3)
-            gpu.barrier()
-            if tid < S * ROUTER_TILE:
-                s = tid // ROUTER_TILE
-                logit = lds_ld(outs, tid)
-                put(mb("scores"), s * N_EXPERTS + t * ROUTER_TILE + tid % ROUTER_TILE, 1.0 / (1.0 + fmath.exp(-logit)))
-            # scores are out (top-8 can start); now this task's FP8 activation blocks
+            # this task's FP8 activation blocks go out ahead of the gate GEMV
             for s in range_constexpr(S):
                 blk = t * XQ_PER_ROUTER + wave
                 if wave < XQ_PER_ROUTER:
@@ -1326,7 +1345,30 @@ def build_layer(
                     )
                     if lane == 0:
                         put(mb("xqs"), s * XQ_BLOCKS + blk, qs)
+            gpu.barrier()
+            acc = run_units(u_r, R_NKC // WAVES, R_PRE, pre)
+            reduce_rows(1, acc, emit_out(ROUTER_TILE))
+            stamp("router", t, 3)
+            gpu.barrier()
+            if tid < S * ROUTER_TILE:
+                s = tid // ROUTER_TILE
+                logit = lds_ld(outs, tid)
+                put(mb("scores"), s * N_EXPERTS + t * ROUTER_TILE + tid % ROUTER_TILE, 1.0 / (1.0 + fmath.exp(-logit)))
             stamp("router", t, 4)
+
+        def dn_route(bs):
+            """Expert-down routing (wave s -> sample s): expert ids -> keys[s * 9 + slot],
+            route weights -> dnw[]; the scores must have landed."""
+            if wave < S:
+                picks, tot = route_top8(wave, bs=bs)
+                for i in range_constexpr(N_EXPERTS // 64):
+                    if picks[i][0]:
+                        q = wave * MOE_SLOTS + 1 + picks[i][1]
+                        lds_st(keys, q, lane + i * 64)
+                        lds_st(dnw, q, picks[i][2] / tot * ROUTE_SCALE)
+                if lane == 0:
+                    lds_st(keys, wave * MOE_SLOTS, fx.Int32(SHARED_EXPERT))
+                    lds_st(dnw, wave * MOE_SLOTS, fx.Float32(1.0))
 
         # ================================ 9. expert up/gate + SiLU
         # 2 row groups (16 gate + 16 up rows) x 96 chunks: 4 waves per group, 24 chunks each
@@ -1405,6 +1447,7 @@ def build_layer(
                 ks_ = [(wave + j * WAVES) * 128 + lane * 2 for j in range(NB)]
                 r_gp = _rsrc(g_post)
                 gps = [(ld_bf16(r_gp, k), ld_bf16(r_gp, k + 1)) for k in ks_]  # issued ahead of the wait
+                bs = load_bias()
                 hint_wait(N_ROW_TILES, lambda k: (mb("a"), s_u * HIDDEN + k * ROW_TILE + ROW_TILE - 1), mark=("ug", u))
                 av = get_bf2_many([(mb("a"), s_u * HIDDEN + k) for k in ks_])
                 ss = fx.Float32(0.0)
@@ -1420,7 +1463,7 @@ def build_layer(
                     lds_st(keys, 0, fx.Int32(SHARED_EXPERT))
                     lds_st(misc, 0, fx.Float32(1.0))
                 if (slot > 0) & (wave == 0):
-                    picks, tot = route_top8(s_u)
+                    picks, tot = route_top8(s_u, bs=bs)
                     for i in range_constexpr(N_EXPERTS // 64):
                         if picks[i][0] & (picks[i][1] == slot - 1):
                             lds_st(keys, 0, lane + i * 64)
@@ -1452,8 +1495,13 @@ def build_layer(
                 shared = es == 0
                 s_u = fx.max(es - 1, 0) // TOP_K
                 slot = shared.select(fx.Int32(0), (es - 1) % TOP_K + 1)
+                bs = load_bias()
                 raws = getf_many([(mb("scores"), s_u * N_EXPERTS + lane + i * 64) for i in range(NSC)])
-                picks, tot = route_top8(s_u, raws)
+                if const_expr(k == 0):
+                    stamp("ug", bid, 6)
+                picks, tot = route_top8(s_u, raws, bs)
+                if const_expr(k == 0):
+                    stamp("ug", bid, 7)
                 e_pick = fx.Int32(-1)
                 w_pick = fx.Float32(0.0)
                 for i in range_constexpr(NSC):
@@ -1509,6 +1557,7 @@ def build_layer(
                         put(mb("sel"), shared.select(tid, s_u) * MOE_SLOTS + slot, e_sel)
                         put(mb("prob"), shared.select(tid, s_u) * MOE_SLOTS + slot, prob)
 
+            stamp("ug", bid, 5)
             cur = ug_job(0)
             stamp("ug", bid, 0)
             stage_xq(list(range(S)))
@@ -1543,6 +1592,7 @@ def build_layer(
                     lds_st(outs, tid, tot_p)
                 gpu.barrier()
                 ug_mid(*job0)
+            dn_route(load_bias())  # expert-down routing while the other CTAs' mids land
         else:
             # S > 1 (the router already quantized every sample's activation): this CTA's
             # tasks are software pipelined -- task k+1 is routed (by every wave on its
@@ -1555,8 +1605,9 @@ def build_layer(
                 u = fx.Int32(u0 + k * G)
                 live = u < N_UG
                 s_u, slot, c = ug_task(fx.min(u, N_UG - 1))
+                bs = load_bias()
                 raws = getf_many([(mb("scores"), s_u * N_EXPERTS + lane + i * 64) for i in range(NSC)])
-                picks, tot = route_top8(s_u, raws)
+                picks, tot = route_top8(s_u, raws, bs)
                 e_pick = fx.Int32(-1)
                 w_pick = fx.Float32(0.0)
                 for i in range_constexpr(NSC):
@@ -1592,19 +1643,8 @@ def build_layer(
         for t in range(start("down"), N_DN_TILES, G):
             t = fx.Int32(t)
             stamp("down", t, 0)
-            # routing (wave s -> sample s): expert ids -> keys[], route weights -> misc[80:]
-            # (block scales use misc[:72]); no wait on up/gate needed for this
-            hint_wait(N_ROUTER, lambda k: (mb("scores"), (S - 1) * N_EXPERTS + k * ROUTER_TILE + ROUTER_TILE - 1))
-            if wave < S:
-                picks, tot = route_top8(wave)
-                for i in range_constexpr(N_EXPERTS // 64):
-                    if picks[i][0]:
-                        q = wave * MOE_SLOTS + 1 + picks[i][1]
-                        lds_st(keys, q, lane + i * 64)
-                        lds_st(misc, 80 + q, picks[i][2] / tot * ROUTE_SCALE)
-                if lane == 0:
-                    lds_st(keys, wave * MOE_SLOTS, fx.Int32(SHARED_EXPERT))
-                    lds_st(misc, 80 + wave * MOE_SLOTS, fx.Float32(1.0))
+            if const_expr(ug_split(S) is None):  # else routed at the end of up/gate
+                dn_route(load_bias())
             gpu.barrier()
             gu = wave // DN_WPR
 
@@ -1650,7 +1690,7 @@ def build_layer(
                     q0, q1, qs = quant_scaled(mids[b][0], mids[b][1])
                     st_f8(blk * 128 + lane * 2, q0, q1)
                     if lane == 0:
-                        lds_st(misc, blk, qs * lds_ld(misc, 80 + blk // (INTER // 128)))
+                        lds_st(misc, blk, qs * lds_ld(dnw, blk // (INTER // 128)))
             gpu.barrier()
             acc = run_units(u_dn, DN_CPW // 2, DN_BATCH, pre)
             reduce_rows(DN_R, acc, emit_out(DN_TILE))
