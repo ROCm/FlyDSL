@@ -78,7 +78,7 @@ Q_B_TILE = 16
 UK_TILE = 128
 UV_TILE = 64
 ROW_TILE = 32  # hidden rows per W_o / attention peer-reduce tile
-ROUTER_TILE = 16
+ROUTER_TILE = 8  # experts per router task (a part of a 16-row MFMA group)
 UG_TILE = 16  # intermediates per up/gate task (16 gate rows + 16 up rows)
 SPLIT_KEYS = 64
 NEG = -1.0e30
@@ -90,9 +90,9 @@ N_ROW_TILES = HIDDEN // ROW_TILE
 
 def dn_tile(S: int) -> int:
     """Hidden rows per expert-down / FFN peer-reduce task: 64 at S = 1 so up/gate and
-    down tasks fit on distinct CTAs (down prefetches while up/gate runs); 32 above,
-    where each down task already streams S x 9 experts."""
-    return 64 if S == 1 else 32
+    down tasks fit on distinct CTAs (down prefetches while up/gate runs); 24 above
+    (one task per CTA), where each down task already streams S x 9 experts."""
+    return 64 if S == 1 else HIDDEN // BLOCKS
 
 
 N_ROUTER = N_EXPERTS // ROUTER_TILE
@@ -100,7 +100,7 @@ N_UG_PER_SLOT = INTER // UG_TILE
 
 
 def ug_split(S: int):
-    """Balanced S == 2 up/gate schedule (S == 4 measured slower), or None: the shared expert's tiles are computed
+    """Balanced S in (2, 4) up/gate schedule, or None: the shared expert's tiles are computed
     once for all samples, so there are (S * TOP_K + 1) * 16 tiles; every CTA runs
     ``nf`` whole tiles plus one of ``seg`` K-segments of a leftover tile.  Returns
     (nf, seg) when the leftover tiles split evenly over the CTAs."""
@@ -114,7 +114,8 @@ def ug_split(S: int):
 
 
 XQ_BLOCKS = HIDDEN // 128  # MoE activation quant blocks
-XQ_PER_ROUTER = XQ_BLOCKS // N_ROUTER
+XQ_WAVES = (XQ_BLOCKS + N_ROUTER - 1) // N_ROUTER  # router task t quantizes blocks t, t + N_ROUTER, ..
+assert XQ_WAVES * 4 <= WAVES  # one (block, sample) per wave up to S = 4
 
 # gfx94x/95x cache policy bits (LLVM CPol): SC0 = 1, NT = 2, SC1 = 16.  SC1:SC0 is
 # the coherence scope of the access itself: SC1 = device (past the per-XCD
@@ -603,21 +604,24 @@ def build_layer(
                 s = s * coef
             return ("fp8", [wv], s, b_word + (lane // 16) * 4)
 
-        def unit_f8f8(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, coef):
+        def unit_f8f8(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, coef, ln=None):
             """Issue one 128-k chunk (packed 64-k chunks kc, kc + 1; kc even) of row group
             ``rg`` against the FP8 activation of LDS words ``b_word`` + [0, 32) (``f8_word``
-            order); ``coef()`` = activation block scale (times route weight)."""
+            order); ``coef()`` = activation block scale (times route weight).  ``ln``
+            = the lane whose weights are loaded (default: own lane)."""
+            ln = lane if ln is None else ln
             wv = [
-                fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc + h) * 64 + lane) * 4, vec_width=4, dtype=T.i32))
+                fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc + h) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
                 for h in range(2)
             ]
             s = ld_f32(s_rsrc, (rg * 16 // SCALE_BM) * (K // 128) + kc // 2)
             return ("f8f8", wv, lambda: s * coef(), b_word + (lane // 16) * 4)
 
-        def unit_bf16(w_rsrc, rg, kc, NKC, b_word):
+        def unit_bf16(w_rsrc, rg, kc, NKC, b_word, ln=None):
+            ln = lane if ln is None else ln
             wv = [
                 fx.Vector(
-                    bo.buffer_load(w_rsrc, (((rg * NKC + kc) * 2 + sp) * 64 + lane) * 4, vec_width=4, dtype=T.i32)
+                    bo.buffer_load(w_rsrc, (((rg * NKC + kc) * 2 + sp) * 64 + ln) * 4, vec_width=4, dtype=T.i32)
                 )
                 for sp in range(2)
             ]
@@ -1182,7 +1186,7 @@ def build_layer(
                 if lane < 32:  # rows (heads) 4 * (lane // 16) + e < 8
                     for e in range_constexpr(4):
                         hh = (lane // 16) * 4 + e
-                        put2(mb("sp_acc"), ((s * N_SPLIT + t) * H + hh) * KV_LORA + dw * 2, c0[e], c1[e])
+                        put_bf(mb("sp_acc"), ((s * N_SPLIT + t) * H + hh) * KV_LORA + dw * 2, [c0[e], c1[e]])
             if lane == 0:  # written last: the merge's readiness hint
                 put(mb("sp_m"), (s * N_SPLIT + t) * H + h, m)
                 put(mb("sp_l"), (s * N_SPLIT + t) * H + h, lsum)
@@ -1217,7 +1221,7 @@ def build_layer(
             spi = fx.min(lane, N_SPLIT - 1)
             ml = (s * N_SPLIT + spi) * H + head
             got = poll(
-                [(mb("sp_acc"), ((s * N_SPLIT + hf * SPH + j) * H + head) * KV_LORA + dp * 2, 2) for j in range(SPH)]
+                [(mb("sp_acc"), ((s * N_SPLIT + hf * SPH + j) * H + head) * (KV_LORA // 2) + dp, 1) for j in range(SPH)]
                 + [(mb("sp_m"), ml, 1), (mb("sp_l"), ml, 1)],
                 batch=SPH + 2,
             )
@@ -1235,8 +1239,9 @@ def build_layer(
             o1 = fx.Float32(0.0)
             for j in range_constexpr(SPH):
                 wj = lds_ld(misc, hf * SPH + j)
-                o0 = o0 + got[j][0].bitcast(fx.Float32) * wj
-                o1 = o1 + got[j][1].bitcast(fx.Float32) * wj
+                a0, a1 = bf2_f32(got[j][0])
+                o0 = o0 + a0 * wj
+                o1 = o1 + a1 * wj
             if hf == 1:
                 lds_st(red, dp * 2, o0)
                 lds_st(red, dp * 2 + 1, o1)
@@ -1304,50 +1309,62 @@ def build_layer(
             t = fx.Int32(t)
             stamp("router", t, 0)
 
+            r_sub = t * ROUTER_TILE % 16  # this task's rows of the 16-row group; lanes on
+            r_ln = (lane & -16) | (r_sub + lane % ROUTER_TILE)  # other rows load a twin row
+
             def u_r(c):
                 kc = wave * (R_NKC // WAVES) + c
-                return unit_bf16(r_wr, t, kc, R_NKC, (n_sel() * HIDDEN + kc * 64) // 2)
+                return unit_bf16(r_wr, t * ROUTER_TILE // 16, kc, R_NKC, (n_sel() * HIDDEN + kc * 64) // 2, r_ln)
 
-            R_PRE = R_NKC // WAVES if const_expr(S == 1) else R_NKC // WAVES // 4  # VGPR budget
+            R_PRE = R_NKC // WAVES if const_expr(S == 1) else R_NKC // WAVES // 2  # VGPR budget
             pre = [u_r(c) for c in range(R_PRE)]
             hint_wait(
                 N_ROW_TILES, lambda k: (mb("a"), (S - 1) * HIDDEN + k * ROW_TILE + ROW_TILE - 1), mark=("router", t)
             )
-            # this task's FP8 activation block inputs ride along with the staging loads
+            # this task's FP8 activation block inputs ride along with the staging loads:
+            # wave w quantizes block (w // S) * N_ROUTER + t of sample w % S
             r_gp = _rsrc(g_post)
-            xk = (t * XQ_PER_ROUTER + fx.min(wave, XQ_PER_ROUTER - 1)) * 128 + lane * 2
+            x_blk = wave // S * N_ROUTER + t
+            x_s = wave % S
+            x_ok = (wave < XQ_WAVES * S) & (x_blk < XQ_BLOCKS)
+            xk = fx.min(x_blk, XQ_BLOCKS - 1) * 128 + lane * 2
             xg = (ld_bf16(r_gp, xk), ld_bf16(r_gp, xk + 1))
             xa = []
 
             def ld_a(sks):
                 specs = [(mb("a"), (s * HIDDEN + k) // 2, 2) for s, k in sks]
-                specs += [(mb("a"), (s * HIDDEN + xk) // 2, 1) for s in range(S)]
+                specs.append((mb("a"), (x_s * HIDDEN + xk) // 2, 1))
                 v = poll(specs, batch=len(specs))
-                xa.extend(bf2_f32(w[0]) for w in v[len(sks) :])
-                return [list(bf2_f32(w[0])) + list(bf2_f32(w[1])) for w in v[: len(sks)]]
+                xa.append(bf2_f32(v[-1][0]))
+                return [list(bf2_f32(w[0])) + list(bf2_f32(w[1])) for w in v[:-1]]
 
             rstds = stage_x_rmsnorm(ld_a, HIDDEN, g_post)
             stamp("router", t, 2)
             # this task's FP8 activation blocks go out ahead of the gate GEMV
-            for s in range_constexpr(S):
-                blk = t * XQ_PER_ROUTER + wave
-                if wave < XQ_PER_ROUTER:
-                    k = xk
-                    a0, a1 = xa[s]
-                    q0, q1, qs = quant_scaled(a0 * rstds[s] * xg[0], a1 * rstds[s] * xg[1])
-                    w8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
-                    w8n = _xshfl(w8, 1)
-                    if lane % 2 == 0:  # FP8 bytes k .. k + 3 in one tagged word
-                        put(mb("xq"), (s * HIDDEN + k) // 4, w8 | (w8n << 16))
-                    d0, d1 = _fp8_roundtrip(q0, q1)
-                    bo.buffer_store(
-                        fx.Vector.from_elements([d0 * qs, d1 * qs], fx.Float32), _rsrc(mb("xqd")), s * HIDDEN + k
-                    )
-                    if lane == 0:
-                        put(mb("xqs"), s * XQ_BLOCKS + blk, qs)
+            if x_ok:
+                x_rstd = rstds[0]
+                for s in range_constexpr(1, S):
+                    x_rstd = (x_s == s).select(rstds[s], x_rstd)
+                a0, a1 = xa[0]
+                q0, q1, qs = quant_scaled(a0 * x_rstd * xg[0], a1 * x_rstd * xg[1])
+                w8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
+                w8n = _xshfl(w8, 1)
+                if lane % 2 == 0:  # FP8 bytes k .. k + 3 in one tagged word
+                    put(mb("xq"), (x_s * HIDDEN + xk) // 4, w8 | (w8n << 16))
+                d0, d1 = _fp8_roundtrip(q0, q1)
+                bo.buffer_store(
+                    fx.Vector.from_elements([d0 * qs, d1 * qs], fx.Float32), _rsrc(mb("xqd")), x_s * HIDDEN + xk
+                )
+                if lane == 0:
+                    put(mb("xqs"), x_s * XQ_BLOCKS + x_blk, qs)
             gpu.barrier()
             acc = run_units(u_r, R_NKC // WAVES, R_PRE, pre)
-            reduce_rows(1, acc, emit_out(ROUTER_TILE))
+
+            def emit_r(rl, n, v):
+                if (rl >= r_sub) & (rl < r_sub + ROUTER_TILE):
+                    lds_st(outs, n * ROUTER_TILE + rl - r_sub, v)
+
+            reduce_rows(1, acc, emit_r)
             stamp("router", t, 3)
             gpu.barrier()
             if tid < S * ROUTER_TILE:
@@ -1635,7 +1652,7 @@ def build_layer(
         # ======== 10. mid FP8 quant + expert down + route weighting + MoE TP reduce
         # 2 row groups x (S * 9 slots * 4) chunks: 4 waves per group
         DN_NKC = INTER // 64
-        DN_R = DN_TILE // 16
+        DN_R = (DN_TILE + 15) // 16  # 16-row groups touched by a tile (24-row tiles start at row 0 or 8 of one)
         DN_WPR = WAVES // DN_R
         DN_CPW = S * MOE_SLOTS * DN_NKC // DN_WPR
         DN_BLK = S * MOE_SLOTS * INTER // 128
@@ -1647,6 +1664,12 @@ def build_layer(
                 dn_route(load_bias())
             gpu.barrier()
             gu = wave // DN_WPR
+            dn_rg = t * DN_TILE // 16
+            dn_off = t * DN_TILE % 16
+            # this lane's row, as a tile row; rows outside the tile load their lane ^ 8 twin
+            # (same cache lines) and are dropped in the output
+            dn_lr = gu * 16 + lane % 16 - dn_off
+            dn_ln = ((dn_lr >= 0) & (dn_lr < DN_TILE)).select(lane, lane ^ 8)
 
             def u_dn(cc):  # cc: 128-k chunk of this wave
                 q = (wave % DN_WPR) * DN_CPW + cc * 2  # 64-k chunk index over (s, slot, kc)
@@ -1660,7 +1683,7 @@ def build_layer(
                 def coef():  # mid block scale * route weight, only in this sample's column
                     return (lane % 16 == s_q).select(_uniform_f32(lds_ld(misc, q // 2)), fx.Float32(0.0))
 
-                return unit_f8f8(wb, sb, t * DN_R + gu, kc, DN_NKC, INTER, q * 16, coef)
+                return unit_f8f8(wb, sb, dn_rg + gu, kc, DN_NKC, INTER, q * 16, coef, dn_ln)
 
             # the experts are known: stream their down weights while up/gate finishes
             pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_CPW // 2))]
@@ -1693,7 +1716,11 @@ def build_layer(
                         lds_st(misc, blk, qs * lds_ld(dnw, blk // (INTER // 128)))
             gpu.barrier()
             acc = run_units(u_dn, DN_CPW // 2, DN_BATCH, pre)
-            reduce_rows(DN_R, acc, emit_out(DN_TILE))
+            def emit_dn(rl, n, v):
+                if (rl >= dn_off) & (rl < dn_off + DN_TILE):
+                    lds_st(outs, n * DN_TILE + rl - dn_off, v)
+
+            reduce_rows(DN_R, acc, emit_dn)
             stamp("down", t, 3)
             gpu.barrier()
 
