@@ -47,6 +47,10 @@ class RocmBackend(BaseBackend):
         """Format {key: value, ...} as 'key=value key2=value2' for MLIR pass options."""
         return " ".join(f"{k}={v}" for k, v in opts.items())
 
+    def isa_assemble_arch(self) -> str:
+        """``-mcpu`` used to assemble a hand-edited ``.s`` back into a code object."""
+        return self.target.arch
+
     def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         chip = self.target.arch
 
