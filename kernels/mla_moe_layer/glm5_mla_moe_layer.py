@@ -797,9 +797,11 @@ def build_layer(
         def quant_scaled(a0, a1):
             """Per-wave FP8 quant of a 128-block held as 2 f32 per lane -> (scaled q0, q1, scale)."""
             amax = wave_max(fx.max(fmath.absf(a0), fmath.absf(a1)))
-            qs = (amax > 0.0).select(amax / FP8_MAX, fx.Float32(1.0))
-            q0 = fx.min(fx.max(a0 / qs, -FP8_MAX), FP8_MAX)
-            q1 = fx.min(fx.max(a1 / qs, -FP8_MAX), FP8_MAX)
+            nz = amax > 0.0
+            qs = nz.select(amax * (1.0 / FP8_MAX), fx.Float32(1.0))
+            inv = nz.select(_rcp(amax) * FP8_MAX, fx.Float32(1.0))  # hardware rcp, no IEEE divide
+            q0 = fx.min(fx.max(a0 * inv, -FP8_MAX), FP8_MAX)
+            q1 = fx.min(fx.max(a1 * inv, -FP8_MAX), FP8_MAX)
             return q0, q1, qs
 
         def quant_block(a0, a1):
@@ -1546,10 +1548,18 @@ def build_layer(
                 gps = [(ld_bf16(r_gp, k), ld_bf16(r_gp, k + 1)) for k in ks_]  # issued ahead of the wait
                 bs = load_bias()
                 hint_wait(N_ROW_TILES, lambda k: (mb("a"), s_u * HIDDEN + k * ROW_TILE + ROW_TILE - 1), mark=("ug", u))
-                av = get_bf2_many([(mb("a"), s_u * HIDDEN + k) for k in ks_])
+                # the sum of squares takes the router's element partition and order
+                # (stage_x_rmsnorm), so rstd -- and every FP8 rounding -- is bit-identical
+                NQ4 = HIDDEN // (4 * THREADS)
+                got = poll(
+                    [(mb("a"), (s_u * HIDDEN + (tid + i * THREADS) * 4) // 2, 2) for i in range(NQ4)]
+                    + [(mb("a"), (s_u * HIDDEN + k) // 2, 1) for k in ks_]
+                )
+                av = [bf2_f32(w[0]) for w in got[NQ4:]]
                 ss = fx.Float32(0.0)
-                for j in range_constexpr(NB):
-                    ss = ss + av[j][0] * av[j][0] + av[j][1] * av[j][1]
+                for w in got[:NQ4]:
+                    for a in list(bf2_f32(w[0])) + list(bf2_f32(w[1])):
+                        ss = ss + a * a
                 rstd = _rsq(block_sum(ss) * (1.0 / HIDDEN) + EPS)
                 for j in range_constexpr(NB):
                     q0, q1, qs = quant_scaled(av[j][0] * rstd * gps[j][0], av[j][1] * rstd * gps[j][1])
