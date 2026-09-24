@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-24T03:41:41Z",
+ "updated": "2026-09-24T03:48:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35952761075,
+   "pr": 1188,
+   "commit": "a287b78d690fbfa0f547e2114a83a646b4ca6290",
+   "branch": "feat/hack-ut-asm-multi-kernel",
+   "event": "pull_request",
+   "title": "[Feature][Debug] Add a compile path for hand-edited assembly (debug only)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35952761075",
+   "created_at": "2026-09-24T03:45:14Z",
+   "updated_at": "2026-09-24T03:46:37Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35952171914,
    "pr": 1188,
@@ -10,11 +25,11 @@
    "branch": "feat/hack-ut-asm-multi-kernel",
    "event": "pull_request",
    "title": "[Feature][Debug] Add a compile path for hand-edited assembly (debug only)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35952171914",
    "created_at": "2026-09-24T03:36:45Z",
-   "updated_at": "2026-09-24T03:40:01Z",
+   "updated_at": "2026-09-24T03:46:00Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -68,13 +83,41 @@
    "branch": "jli/fix-waves-per-eu",
    "event": "pull_request",
    "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596",
    "created_at": "2026-09-24T03:16:51Z",
-   "updated_at": "2026-09-24T03:19:56Z",
+   "updated_at": "2026-09-24T03:45:22Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T03:45:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596/job/107484638199"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T03:45:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596/job/107484638221"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T03:45:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596/job/107484638248"
+    }
+   ]
   },
   {
    "run_id": 35950575712,
@@ -98,13 +141,41 @@
    "branch": "rchamber/flash_causal_improvements",
    "event": "pull_request",
    "title": "Issue causal flash q-blocks longest-first",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950379705",
    "created_at": "2026-09-24T03:11:04Z",
-   "updated_at": "2026-09-24T03:14:02Z",
+   "updated_at": "2026-09-24T03:42:08Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T03:42:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950379705/job/107483970710"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T03:42:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950379705/job/107483970725"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T03:42:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950379705/job/107483970740"
+    }
+   ]
   },
   {
    "run_id": 35950232207,
@@ -141,9 +212,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T03:25:06Z",
+     "started_at": "2026-09-24T03:40:18Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107480397017"
     }
@@ -2062,52 +2133,6 @@
      "started_at": "2026-09-21T06:23:16Z",
      "completed_at": "2026-09-21T07:59:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986/job/106234148122",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35553659425,
-   "pr": 987,
-   "commit": "b2da2691303e9799a2c30fec4bb60167be907347",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35553659425",
-   "created_at": "2026-09-21T02:16:56Z",
-   "updated_at": "2026-09-21T03:55:25Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T02:49:54Z",
-     "completed_at": "2026-09-21T03:47:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35553659425/job/106195469197"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T02:33:00Z",
-     "completed_at": "2026-09-21T03:02:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35553659425/job/106195469225"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T02:33:16Z",
-     "completed_at": "2026-09-21T03:55:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35553659425/job/106195469257",
      "machine": "gbt350-odcdh1-b13-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
