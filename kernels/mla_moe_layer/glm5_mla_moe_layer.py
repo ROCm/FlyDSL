@@ -882,7 +882,7 @@ def build_layer(
             tot = raw
             for off in (1, 2, 4):
                 tot = _xred(tot, off, lambda a, b: a + b)
-            return e, raw / tot * ROUTE_SCALE
+            return e, raw * (_rcp(tot) * ROUTE_SCALE)
 
         def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
             """Push outs[s * tile + r] as tagged pairs to every peer, then sum all
@@ -1312,7 +1312,7 @@ def build_layer(
                 w_sp = _exp(m_sp - wave_max(m_sp))
                 den = wave_sum(l_sp * w_sp)
                 if ok_sp:
-                    lds_st(misc, lane, w_sp / den)
+                    lds_st(misc, lane, w_sp * _rcp(den))
             stamp("uv", tt, 2)
             gpu.barrier()
             o0 = fx.Float32(0.0)
@@ -1730,7 +1730,7 @@ def build_layer(
         DN_WPR = WAVES // DN_R
         DN_CPW = S * MOE_SLOTS * DN_NKC // DN_WPR
         DN_BLK = S * MOE_SLOTS * INTER // 128
-        DN_BATCH = 9 if const_expr(S == 1) else 3  # 128-k chunks in flight per wave (VGPR budget)
+        DN_BATCH = 9  # 128-k chunks per wave in flight / prefetched before the mid wait
         for t in range(start("down"), N_DN_TILES, G):
             t = fx.Int32(t)
             stamp("down", t, 0)
