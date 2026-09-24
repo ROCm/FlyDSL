@@ -130,12 +130,15 @@ def quant_dequant(x: torch.Tensor, block: int = 128) -> torch.Tensor:
 
 
 def route(scores: torch.Tensor, bias: torch.Tensor):
-    """sigmoid scores [E] -> (indices [8], probs [8]); ties go to the lower expert id.
+    """sigmoid scores [E] -> (indices [8], probs [8]) in score order.
 
-    The selected experts are returned in ascending id (their slot order)."""
-    rank = scores + bias
-    order = sorted(range(N_EXPERTS), key=lambda e: (-float(rank[e]), e))[:TOP_K]
-    idx = torch.tensor(sorted(order), device=scores.device)
+    Selection key (as in the kernel's packed-key argmax): the order-preserving bits
+    of the f32 ``score + bias`` with the low byte replaced by ``255 - expert id``,
+    so keys are unique and near-ties go to the lower expert id."""
+    bits = (scores.float() + bias.float()).view(torch.int32).long()
+    okey = torch.where(bits >= 0, bits ^ (1 << 31), ~bits & 0xFFFFFFFF) & 0xFFFFFFFF
+    key = (okey & 0xFFFFFF00) | (255 - torch.arange(N_EXPERTS, device=scores.device))
+    idx = torch.argsort(key, descending=True)[:TOP_K]
     p = scores[idx]
     return idx, p / p.sum() * ROUTE_SCALE
 
