@@ -1,13 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Ordered warp prefix scans and logical-warp broadcast.
-
-Item ranges form one complete blocked sequence: each lane's items precede
-the next lane's items. A scan accepts one element-valued seed and produces
-one unseeded aggregate. Array inputs require valid_items=None; for scalar
-and plain Struct inputs, valid_items counts contributing leading lanes.
-"""
+"""Ordered warp prefix scans and logical-warp broadcast."""
 
 from ....compiler import jit
 from ....expr.gpu import lane_id
@@ -25,7 +19,7 @@ from .._common import (
     _shuffle_value,
     _validate_scalar_valid_items,
 )
-from .._values import _as_items, _from_items, _is_items, _items_dtype
+from .._values import _as_items, _from_items, _is_items, _item_dtype, _items_dtype
 from ._spec import WarpPrimitive
 
 __all__ = [
@@ -44,7 +38,7 @@ def _shuffle_up(value, offset, width):
 
 def _shift_up(inclusive, op, width):
     shifted, valid = _shuffle_up(inclusive, 1, width)
-    return _select_value(valid, shifted, _identity(op, _items_dtype(inclusive)))
+    return _select_value(valid, shifted, _identity(op, _item_dtype(inclusive)))
 
 
 def _broadcast_last(value, width):
@@ -74,7 +68,8 @@ def _scan_valid(value, op, width, valid_items):
 
 def _raw(value, op, width, valid_items):
     value = _normalize_columns(value)
-    _validate_scalar_valid_items(value, valid_items, width)
+    dtype = _item_dtype(value)
+    _validate_scalar_valid_items(value, valid_items, width, dtype)
     if valid_items is not None:
         return _scan_valid(value, op, width, valid_items)
     return _hillis_steele(value, op, width)
@@ -120,16 +115,17 @@ def _exclusive(raw, op, width, init, valid_items):
         return _seed(_shift_up(raw, op, width), op, init)
     shifted, _ = _shuffle_up(raw, 1, width)
     if init is None and op is ReductionOp.ADD:
-        init = _items_dtype(raw)(0)
+        init = _item_dtype(raw)(0)
     if init is not None:
         return _seed_exclusive(shifted, op, init, width, width if valid_items is None else valid_items)
     # Without a seed, the first exclusive prefix is unspecified.
     return shifted
 
 
-def _validate_scan(value, init, valid_items, width):
-    _validate_scalar_valid_items(value, valid_items, width)
-    if _is_items(value) and _is_items(init):
+def _validate_scan(value, init, valid_items, width, dtype=None):
+    dtype = _items_dtype(value) if dtype is None else dtype
+    _validate_scalar_valid_items(value, valid_items, width, dtype)
+    if _is_items(init, dtype):
         raise TypeError("scan init must be one item, not an item range")
 
 
@@ -141,9 +137,9 @@ def _join_array_prefix(local, prefix, op, init, width):
     return _seed(result, op, init)
 
 
-def _array_scan(value, op, width, init):
+def _array_scan(value, op, width, init, dtype=None):
     """Scan a complete blocked tile, returning one unseeded aggregate."""
-    items = _as_items(value)
+    items = _as_items(value, dtype)
     local = [items[0]]
     for item in items[1:]:
         local.append(_combine(op, local[-1], item))
@@ -163,6 +159,7 @@ def warp_broadcast(
     source_lane: int | Integer,
     *,
     width: int | None = None,
+    _dtype=None,
 ):
     """Read a value from a lane relative to the calling logical warp.
 
@@ -210,6 +207,7 @@ def warp_inclusive_scan(
     width: int | None = None,
     init=None,
     valid_items: int | Integer | None = None,
+    _dtype=None,
 ):
     """Compute the inclusive prefix in ascending lane order.
 
@@ -227,7 +225,7 @@ def warp_inclusive_scan(
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
         init: One initial item combined on the left of each prefix, converted
-            to the input element type. Array inputs reject per-item seed ranges.
+            to the input element type. Per-item seed ranges are rejected.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
             all lanes. Only single-item inputs accept this argument; omit it for
             an item range. Runtime counts must stay in range.
@@ -270,9 +268,9 @@ def warp_inclusive_scan(
         # carried | 17 | 19 | 22 | ?  || 33 | 39 | 46 | ?
     """
     width = _resolve_warp_width(width, "warp_inclusive_scan width")
-    _validate_scan(value, init, valid_items, width)
-    if _is_items(value):
-        return _array_scan(value, op, width, init)[0]
+    _validate_scan(value, init, valid_items, width, _dtype)
+    if _is_items(value, _dtype):
+        return _array_scan(value, op, width, init, _dtype)[0]
     raw = _raw(value, op, width, valid_items)
     return _inclusive(raw, op, width, init, valid_items)
 
@@ -284,6 +282,7 @@ def warp_exclusive_scan(
     width: int | None = None,
     init=None,
     valid_items: int | Integer | None = None,
+    _dtype=None,
 ):
     """Compute the exclusive prefix in ascending lane order.
 
@@ -301,7 +300,7 @@ def warp_exclusive_scan(
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
         init: One initial item combined on the left of each prefix, converted
-            to the input element type. Array inputs reject per-item seed ranges.
+            to the input element type. Per-item seed ranges are rejected.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
             all lanes. Only single-item inputs accept this argument; omit it for
             an item range. Runtime counts must stay in range.
@@ -344,9 +343,9 @@ def warp_exclusive_scan(
         # carried | 16 | 17 | 19 | ?  || 28 | 33 | 39 | ?
     """
     width = _resolve_warp_width(width, "warp_exclusive_scan width")
-    _validate_scan(value, init, valid_items, width)
-    if _is_items(value):
-        return _array_scan(value, op, width, init)[1]
+    _validate_scan(value, init, valid_items, width, _dtype)
+    if _is_items(value, _dtype):
+        return _array_scan(value, op, width, init, _dtype)[1]
     raw = _raw(value, op, width, valid_items)
     exclusive = _exclusive(raw, op, width, init, valid_items)
     return exclusive if valid_items is None else _select_value(lane_id() % width < valid_items, exclusive, value)
@@ -359,6 +358,7 @@ def warp_scan(
     width: int | None = None,
     init=None,
     valid_items: int | Integer | None = None,
+    _dtype=None,
 ):
     """Compute inclusive and exclusive prefixes with one scan.
 
@@ -376,7 +376,7 @@ def warp_scan(
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
         init: One initial item combined on the left of each prefix, converted
-            to the input element type. Array inputs reject per-item seed ranges.
+            to the input element type. Per-item seed ranges are rejected.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
             all lanes. Only single-item inputs accept this argument; omit it for
             an item range. Runtime counts must stay in range.
@@ -421,7 +421,7 @@ def warp_scan(
         # carried[0] inclusive | 17 | 19 | 22 | ?  || 33 | 39 | 46 | ?
         # carried[1] exclusive | 16 | 17 | 19 | ?  || 28 | 33 | 39 | ?
     """
-    result = warp_scan_with_aggregate(value, op, width=width, init=init, valid_items=valid_items)
+    result = warp_scan_with_aggregate(value, op, width=width, init=init, valid_items=valid_items, _dtype=_dtype)
     return result[0], result[1]
 
 
@@ -432,6 +432,7 @@ def warp_scan_with_aggregate(
     width: int | None = None,
     init=None,
     valid_items: int | Integer | None = None,
+    _dtype=None,
 ):
     """Compute both prefixes and the unseeded group aggregate.
 
@@ -449,7 +450,7 @@ def warp_scan_with_aggregate(
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
         init: One initial item combined on the left of each prefix, converted
-            to the input element type. Array inputs reject per-item seed ranges.
+            to the input element type. Per-item seed ranges are rejected.
         valid_items: Uniform number of leading contributing lanes in [0, width], or None for
             all lanes. Only single-item inputs accept this argument; omit it for
             an item range. Runtime counts must stay in range.
@@ -510,9 +511,9 @@ def warp_scan_with_aggregate(
         # tile[2] aggregate | 110    | 110     | 110     | 110
     """
     width = _resolve_warp_width(width, "warp_scan_with_aggregate width")
-    _validate_scan(value, init, valid_items, width)
-    if _is_items(value):
-        return _array_scan(value, op, width, init)
+    _validate_scan(value, init, valid_items, width, _dtype)
+    if _is_items(value, _dtype):
+        return _array_scan(value, op, width, init, _dtype)
     if valid_items is None and isinstance(op, ReductionOp):
         # Keep the old construction order, including for callers that combine
         # all three results; otherwise LLVM can schedule the aggregate first.
@@ -537,11 +538,12 @@ class WarpScan(WarpPrimitive):
     There is no algorithm parameter.
     The corresponding ``warp_*`` functions infer dtype and tile extent.
 
-    List, tuple, Vector and native item-sequence inputs form one complete
-    blocked tile: each lane's items precede the next lane's items. Arrays
+    Outer item sequences (including Vector only for a Numeric dtype) form one
+    complete blocked tile: each lane's items precede the next lane's items. Arrays
     require ``valid_items=None``, even with one item per lane. One element-valued
     ``init`` seeds the whole sequence; the aggregate is one unseeded element.
-    Scalar and plain Struct inputs contribute one item per lane and accept
+    A single complete dtype value, including Vector or Struct, contributes
+    one item per lane and accepts
     ``valid_items`` as the number of contributing leading lanes.
 
     Examples:
@@ -578,7 +580,7 @@ class WarpScan(WarpPrimitive):
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
             init: One initial item combined on the left of each prefix, converted
-                to the input element type. Array inputs reject per-item seed ranges.
+                to the input element type. Per-item seed ranges are rejected.
             valid_items: Uniform number of leading contributing lanes in [0, width], or None for
                 all lanes. Only single-item inputs accept this argument; omit it for
                 an item range. Runtime counts must stay in range.
@@ -587,7 +589,9 @@ class WarpScan(WarpPrimitive):
             This lane's inclusive prefix, with the input value type and shape.
         """
         value = cls._prepare(value)
-        return cls._invoke(warp_inclusive_scan, value, op, init=init, valid_items=valid_items, storage=storage)
+        return cls._invoke(
+            warp_inclusive_scan, value, op, init=init, valid_items=valid_items, storage=storage, _dtype=cls.dtype
+        )
 
     @classmethod
     def exclusive_scan(
@@ -618,7 +622,7 @@ class WarpScan(WarpPrimitive):
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
             init: One initial item combined on the left of each prefix, converted
-                to the input element type. Array inputs reject per-item seed ranges.
+                to the input element type. Per-item seed ranges are rejected.
             valid_items: Uniform number of leading contributing lanes in [0, width], or None for
                 all lanes. Only single-item inputs accept this argument; omit it for
                 an item range. Runtime counts must stay in range.
@@ -627,7 +631,9 @@ class WarpScan(WarpPrimitive):
             This lane's exclusive prefix, with the input value type and shape.
         """
         value = cls._prepare(value)
-        return cls._invoke(warp_exclusive_scan, value, op, init=init, valid_items=valid_items, storage=storage)
+        return cls._invoke(
+            warp_exclusive_scan, value, op, init=init, valid_items=valid_items, storage=storage, _dtype=cls.dtype
+        )
 
     @classmethod
     def scan(
@@ -658,7 +664,7 @@ class WarpScan(WarpPrimitive):
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
             init: One initial item combined on the left of each prefix, converted
-                to the input element type. Array inputs reject per-item seed ranges.
+                to the input element type. Per-item seed ranges are rejected.
             valid_items: Uniform number of leading contributing lanes in [0, width], or None for
                 all lanes. Only single-item inputs accept this argument; omit it for
                 an item range. Runtime counts must stay in range.
@@ -667,7 +673,7 @@ class WarpScan(WarpPrimitive):
             A tuple (inclusive, exclusive) of this lane's prefixes.
         """
         value = cls._prepare(value)
-        return cls._invoke(warp_scan, value, op, init=init, valid_items=valid_items, storage=storage)
+        return cls._invoke(warp_scan, value, op, init=init, valid_items=valid_items, storage=storage, _dtype=cls.dtype)
 
     @classmethod
     def scan_with_aggregate(
@@ -698,7 +704,7 @@ class WarpScan(WarpPrimitive):
             op: ReductionOp or associative binary callable. Operand order follows ascending
                 lanes; reassociation is allowed.
             init: One initial item combined on the left of each prefix, converted
-                to the input element type. Array inputs reject per-item seed ranges.
+                to the input element type. Per-item seed ranges are rejected.
             valid_items: Uniform number of leading contributing lanes in [0, width], or None for
                 all lanes. Only single-item inputs accept this argument; omit it for
                 an item range. Runtime counts must stay in range.
@@ -708,7 +714,9 @@ class WarpScan(WarpPrimitive):
             participating lane and has the input element type, even for an item range.
         """
         value = cls._prepare(value)
-        return cls._invoke(warp_scan_with_aggregate, value, op, init=init, valid_items=valid_items, storage=storage)
+        return cls._invoke(
+            warp_scan_with_aggregate, value, op, init=init, valid_items=valid_items, storage=storage, _dtype=cls.dtype
+        )
 
     @classmethod
     def broadcast(
@@ -737,4 +745,4 @@ class WarpScan(WarpPrimitive):
             The source lane's value, retaining its type and shape.
         """
         value = cls._prepare(value)
-        return cls._invoke(warp_broadcast, value, source_lane, storage=storage)
+        return cls._invoke(warp_broadcast, value, source_lane, storage=storage, _dtype=cls.dtype)

@@ -101,6 +101,8 @@ def _rebuild_record(dtype, leaves, exemplar=None):
 def _record_default(dtype, fill=0):
     """Construct an explicit default in the native item type."""
     dtype = _unalign(dtype)
+    if isinstance(dtype, type) and issubclass(dtype, Vector) and isinstance(fill, Vector):
+        return _record_cast(fill, dtype)
     if isinstance(fill, dtype):
         return fill
     if is_struct_type(type(fill)):
@@ -144,6 +146,13 @@ def _record_cast(value, dtype):
     """Convert corresponding native leaves, validating pointer field types."""
     if _item_dtype(value) is dtype:
         return value
+    if isinstance(value, Vector) or issubclass(dtype, Vector):
+        if not isinstance(value, Vector) or not issubclass(dtype, Vector):
+            raise TypeError("item conversion must preserve Vector element boundaries")
+        target = dtype(0)
+        if value.shape != target.shape:
+            raise TypeError(f"vector item shape must be {target.shape}, got {value.shape}")
+        return dtype(value.to(target.dtype))
     if _constexpr_fields(_item_dtype(value)) != _constexpr_fields(dtype):
         raise TypeError("item conversion must preserve Constexpr fields and their specialization")
     source, target = _flatten_record(value), _leaf_fields(dtype)
@@ -160,7 +169,7 @@ def _record_cast(value, dtype):
                 raise TypeError("pointer conversion requires a Pointer field")
             leaves.append(leaf if target_type is Pointer else target_type.__coerce__(leaf))
         else:
-            leaves.append(target_type.__coerce__(leaf))
+            leaves.append(_record_cast(leaf, target_type))
     return _rebuild_record(dtype, leaves)
 
 
@@ -176,27 +185,35 @@ def _is_struct_items(value):
     )
 
 
-def _is_items(value):
+def _is_items(value, dtype=None):
+    # A specialized operator's complete element takes precedence over the
+    # sequence protocol. Vector.shape belongs to that element's type.
+    if dtype is not None:
+        if isinstance(value, Vector) and issubclass(dtype, Vector):
+            return False
+        if is_struct_type(type(value)) and isinstance(value, dtype):
+            return False
     return isinstance(value, (Vector, tuple, list)) or _is_struct_items(value)
 
 
-def _as_items(value):
+def _as_items(value, dtype=None):
     value = _normalize_value(value)
     # Vector indexing need not raise IndexError, so explicitly bound iteration.
-    items = tuple(value[i] for i in range(len(value))) if _is_items(value) else (value,)
+    sequence = _is_items(value, dtype)
+    items = tuple(value[i] for i in range(len(value))) if sequence else (value,)
     items = tuple(_normalize_value(item) for item in items)
     if not items:
         raise ValueError("a cooperative tile must contain at least one item")
     dtype = _item_dtype(items[0])
     if any(_item_dtype(item) is not dtype for item in items[1:]):
         raise TypeError("all cooperative tile items must have the same dtype")
-    if _is_struct_items(value) and value.dtype is not dtype:
+    if sequence and _is_struct_items(value) and value.dtype is not dtype:
         raise TypeError("native Struct sequence dtype must match its indexed items")
     return items
 
 
-def _items_dtype(value):
-    return _item_dtype(_as_items(value)[0])
+def _items_dtype(value, dtype=None):
+    return _item_dtype(_as_items(value, dtype)[0])
 
 
 def _from_items(items, dtype=None, *, like=None):
@@ -214,14 +231,7 @@ def _from_items(items, dtype=None, *, like=None):
 
 
 def _record_select(condition, lhs, rhs):
-    if (
-        isinstance(lhs, (tuple, list))
-        or isinstance(rhs, (tuple, list))
-        or _is_struct_items(lhs)
-        or _is_struct_items(rhs)
-    ):
-        if _is_struct_items(lhs) and _is_struct_items(rhs) and type(lhs) is not type(rhs):
-            raise TypeError("selection operands must have the same Struct sequence type and Constexpr specialization")
+    if isinstance(lhs, (tuple, list)) or isinstance(rhs, (tuple, list)):
         template = lhs if _is_items(lhs) else rhs
         left = _as_items(lhs) if _is_items(lhs) else (lhs,) * len(template)
         right = _as_items(rhs) if _is_items(rhs) else (rhs,) * len(template)
@@ -313,7 +323,10 @@ def _shared_array(dtype, size):
 def _shared_load(slots, index):
     spec = _SCRATCH_SCHEMAS.get(type(slots))
     if spec is None:
-        return slots[index]
+        value = slots[index]
+        # Signless IR loads lose unsigned Numeric metadata. Restore the array's
+        # declared type before comparisons or widening can interpret its bits.
+        return slots.dtype(value) if issubclass(slots.dtype, Numeric) else value
     dtype = spec[0]
     leaves = []
     for i, (_, leaf_type) in enumerate(_leaf_fields(dtype)):
