@@ -1407,7 +1407,6 @@ def build_layer(
             KB = XQ_BLOCKS // SEG  # 128-k blocks per segment and row group
             NSC = N_EXPERTS // 64
             XW = HIDDEN // 4  # LDS words of one sample's FP8 activation
-            UG_S_ROW = UG_S_BYTES // 4
             gu_row = (wave // (WAVES // 2)) * (INTER // 16)  # waves 0-3: gate rows, 4-7: up rows
             wq = wave % (WAVES // 2)
             seg = bid % SEG
