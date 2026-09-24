@@ -1133,7 +1133,11 @@ def _build_call_state(sig, args_tuple, func_exe):
             )
 
         inst = arg if isinstance(arg, jit_arg_type) else jit_arg_type(arg)
-        for ctype, fill in c_abi_spec(inst):
+        slots = c_abi_spec(inst)
+        plan = getattr(inst, "_layout_plan", None)
+        if plan is not None:
+            plan.param_name = param_name
+        for ctype, fill in slots:
             slot_specs.append((i, ctype, fill))
 
     # Auto-stream: NULL ptr selects HIP default stream when no user stream arg.

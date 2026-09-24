@@ -547,12 +547,18 @@ def _make_composite_class(
         for name, eff_type in _effective_field_defs(type(self)):
             if _is_constexpr_type(eff_type):
                 continue
-            for ctype, subfill in c_abi_spec(getattr(self, name)):
+            sub = getattr(self, name)
+            for ctype, subfill in c_abi_spec(sub):
 
                 def fill(struct_arg, s, _n=name, _f=subfill):
                     _f(getattr(struct_arg, _n), s)
 
                 slots.append((ctype, fill))
+            # Propagate the field name onto any layout plan the sub-arg built,
+            # so overflow diagnostics can name the struct field.
+            subplan = getattr(sub, "_layout_plan", None)
+            if subplan is not None and not subplan.param_name:
+                subplan.param_name = f"{type(self).__name__}.{name}"
         return slots
 
     @classmethod
