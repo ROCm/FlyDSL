@@ -310,9 +310,17 @@ LogicalResult CopyOpUniversalAtomicType::emitAtomCall(OpBuilder &builder, Locati
 
 FailureOr<Value> MmaOpUniversalFMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
                                                         Type resultTy, Type mmaAtomTyArg,
-                                                        Type dTyArg, Type aTyArg, Type bTyArg,
-                                                        Type cTyArg, Value atomVal, Value d,
-                                                        Value a, Value b, Value c) const {
+                                                        Type dTyArg, TypeRange aTyArgs,
+                                                        TypeRange bTyArgs, Type cTyArg,
+                                                        Value atomVal, Value d, ValueRange aValues,
+                                                        ValueRange bValues, Value c) const {
+  if (aValues.size() != 1 || bValues.size() != 1) {
+    emitError(loc, "this MMA atom does not support auxiliary operands");
+    return failure();
+  }
+  Value a = aValues.front();
+  Value b = bValues.front();
+
   Type elemTy = getElemTy();
   Value mul = LLVM::FMulOp::create(builder, loc, elemTy, a, b);
   Value res = LLVM::FAddOp::create(builder, loc, elemTy, mul, c);
@@ -322,9 +330,17 @@ FailureOr<Value> MmaOpUniversalFMAType::emitAtomCallSSA(OpBuilder &builder, Loca
 }
 
 LogicalResult MmaOpUniversalFMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
-                                                  Type dMemTy, Type aMemTy, Type bMemTy,
+                                                  Type dMemTy, TypeRange aMemTys, TypeRange bMemTys,
                                                   Type cMemTy, Value atomVal, Value dPtr,
-                                                  Value aPtr, Value bPtr, Value cPtr) const {
+                                                  ValueRange aPtrs, ValueRange bPtrs,
+                                                  Value cPtr) const {
+  if (aPtrs.size() != 1 || bPtrs.size() != 1) {
+    emitError(loc, "this MMA atom does not support auxiliary operands");
+    return failure();
+  }
+  Value aPtr = aPtrs.front();
+  Value bPtr = bPtrs.front();
+
   Type elemTy = getElemTy();
 
   Value a = LLVM::LoadOp::create(builder, loc, elemTy, aPtr);

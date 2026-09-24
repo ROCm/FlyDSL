@@ -44,6 +44,10 @@ def WMMAScale(
     ``block_size`` selects the MX block size (elements per shared E8M0 scale):
     ``32`` (default) uses V_WMMA_SCALE with i32 scale state; ``16`` uses
     V_WMMA_SCALE16 with i64 scale state.
+
+    An extra scale operand in an atom-call group (``[data, scale]``) overrides
+    the corresponding ``scale_a`` or ``scale_b`` state for that call. If a
+    group omits the scale operand, its scale is read from atom state.
     """
     ty_a = elem_ty_a.ir_type if hasattr(elem_ty_a, "ir_type") else elem_ty_a
     if elem_ty_b is None:
