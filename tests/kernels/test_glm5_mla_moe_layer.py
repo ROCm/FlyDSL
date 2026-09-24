@@ -43,7 +43,7 @@ TOL = {  # name -> (atol, rtol) on the fp32/bf16 intermediates
     "prob": (1e-5, 1e-5),
     "kv": (2e-2, 1e-2),
     "x_out": (1.6e-2, 8e-3),  # 1 bf16 ulp
-    "mid": (1e-4, 1e-4),
+    "mid": (1e-3, 1e-3),  # FP8 x FP8 MFMA accumulation (~1e-4 abs), far below one E4M3 step
 }
 # End to end, single FP8 rounding flips propagate, so judge by relative L2.
 FP8_FLIPS = ("xq",)

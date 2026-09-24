@@ -78,7 +78,6 @@ Q_B_TILE = 16
 UK_TILE = 128
 UV_TILE = 64
 ROW_TILE = 32  # hidden rows per W_o / attention peer-reduce tile
-DN_TILE = 64  # hidden rows per expert-down / FFN peer-reduce tile (up/gate + down tasks <= 256 CTAs)
 ROUTER_TILE = 16
 UG_TILE = 16  # intermediates per up/gate task (16 gate rows + 16 up rows)
 SPLIT_KEYS = 64
@@ -87,7 +86,15 @@ NEG = -1.0e30
 # task counts per stage
 N_QKV_A = QKV_A_ROWS // QKV_A_TILE
 N_ROW_TILES = HIDDEN // ROW_TILE
-N_DN_TILES = HIDDEN // DN_TILE
+
+
+def dn_tile(S: int) -> int:
+    """Hidden rows per expert-down / FFN peer-reduce task: 64 at S = 1 so up/gate and
+    down tasks fit on distinct CTAs (down prefetches while up/gate runs); 32 above,
+    where each down task already streams S x 9 experts."""
+    return 64 if S == 1 else 32
+
+
 N_ROUTER = N_EXPERTS // ROUTER_TILE
 N_UG_PER_SLOT = INTER // UG_TILE
 XQ_BLOCKS = HIDDEN // 128  # MoE activation quant blocks
@@ -99,6 +106,7 @@ XQ_PER_ROUTER = XQ_BLOCKS // N_ROUTER
 CM_DEV = 16
 CM_SYS = 17
 POLL_MAX = 12  # mailbox specs polled per batch
+TL_COLS = 8  # timeline stamps per task: 5 phases + 3 free debug marks
 
 
 def _align(n, a=256):
@@ -218,6 +226,13 @@ def _fp8_roundtrip(a, b):
     return lo[0], lo[1]
 
 
+def f8_word(k):
+    """LDS word of FP8 activation byte k: each 64-k chunk is stored so that the 16 bytes
+    lane group g needs (k = 8 g + [0, 8) and 32 + 8 g + [0, 8), the packed weight order)
+    are contiguous."""
+    return (k // 64) * 16 + ((k % 32) // 8) * 4 + ((k % 64) // 32) * 2 + (k % 8) // 4
+
+
 def _fp8_to_bf16x8(w0, w1):
     """Two dwords of 8 FP8 -> vector<8 x bf16> (exact: E4M3 is a subset of bf16).
 
@@ -245,7 +260,7 @@ def stage_tasks(S: int, heads: int, topk: int):
         ("o", N_ROW_TILES),
         ("router", N_ROUTER),
         ("ug", S * MOE_SLOTS * N_UG_PER_SLOT),
-        ("down", N_DN_TILES),
+        ("down", HIDDEN // dn_tile(S)),
     ]
 
 
@@ -256,9 +271,8 @@ def build_layer(
 
     ``timeline=True`` records ``s_memrealtime`` (100 MHz) at the start and end of
     every task, and once its inputs have arrived, into the ``timeline`` buffer:
-    int64 ``[sum(task counts), 5]`` (start, hint seen, inputs staged, compute done,
-    end) in ``stage_tasks``
-    order.
+    int64 ``[sum(task counts), TL_COLS]`` (start, hint seen, inputs staged, compute
+    done, end, then free debug marks) in ``stage_tasks`` order.
     """
     assert heads == 8, "the split-attention mapping uses one wave per local head"
     assert topk % SPLIT_KEYS == 0 and 1 <= S <= 4
@@ -285,6 +299,8 @@ def build_layer(
     PT_OFF = KT_OFF + SPLIT_KEYS * KS
     XN = max(S * HIDDEN // 2, PT_OFF + SPLIT_KEYS * PS)
     ON = S * UK_TILE
+    DN_TILE = dn_tile(S)
+    N_DN_TILES = HIDDEN // DN_TILE
 
     base, first, acc = {}, {}, 0
     for name, n in stage_tasks(S, H, topk):
@@ -413,7 +429,7 @@ def build_layer(
             coherent at ``scope`` (agent -> sc1, system -> sc0 sc1)."""
             return fx.generic_load(_qptr(addr), memory_order=fx.AtomicOrdering.Monotonic, syncscope=scope)
 
-        def poll(specs, scope="agent"):
+        def poll(specs, scope="agent", batch=POLL_MAX):
             """Batched poll of mailbox pairs: ``specs`` = [(base_addr, pair index, npairs in {1, 2})].
 
             All pairs are loaded together with plain 8 / 16-byte coherent buffer loads
@@ -424,8 +440,8 @@ def build_layer(
             Int32 value bits per spec."""
             if const_expr(len(specs) == 0):
                 return []
-            if const_expr(len(specs) > POLL_MAX):  # bound live registers
-                return poll(specs[:POLL_MAX], scope) + poll(specs[POLL_MAX:], scope)
+            if const_expr(len(specs) > batch):  # bound live registers
+                return poll(specs[:batch], scope, batch) + poll(specs[batch:], scope, batch)
             cm = CM_DEV if const_expr(scope == "agent") else CM_SYS
 
             def load_all():
@@ -456,29 +472,8 @@ def build_layer(
             return outs_
 
         def hint_wait(n, addr_of, mark=None):
-            """Cheap pre-wait: wave 0 polls one pair per producer task -- the last pair
-            that producer writes -- then the CTA barriers.  Payload loads afterwards
-            still verify every tag; this only keeps hundreds of waiting CTAs from
-            flooding memory with full-batch polls.  A lane's (<= 4) producers are
-            polled together each iteration."""
-            if wave == 0:
-                nj = (n + 63) // 64
-                bis = [addr_of(fx.min(lane + j * 64, n - 1)) for j in range(nj)]
-                addrs = [b + fx.Int64(i) * 8 for b, i in bis]
-
-                def load_all():
-                    return fx.Vector.from_elements([_ld_pair(a, "agent") for a in addrs], fx.Int64)
-
-                def pending(v):
-                    bad = fx.Int32(v[0] >> 32) != tag
-                    for e in range_constexpr(1, nj):
-                        bad = bad | (fx.Int32(v[e] >> 32) != tag)
-                    return bad
-
-                v = load_all()
-                while pending(v):
-                    rocdl.s_sleep(1)
-                    v = load_all()
+            """Consumers poll their payload directly (tight per-wave spins); a wave-0
+            pre-poll of each producer's last pair only added a hop of latency."""
             if const_expr(mark is not None):
                 stamp(mark[0], mark[1], 1)
             gpu.barrier()
@@ -550,6 +545,17 @@ def build_layer(
                 s = s * coef
             return ("fp8", [wv], s, b_word + (lane // 16) * 4)
 
+        def unit_f8f8(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, coef):
+            """Issue one 128-k chunk (packed 64-k chunks kc, kc + 1; kc even) of row group
+            ``rg`` against the FP8 activation of LDS words ``b_word`` + [0, 32) (``f8_word``
+            order); ``coef()`` = activation block scale (times route weight)."""
+            wv = [
+                fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc + h) * 64 + lane) * 4, vec_width=4, dtype=T.i32))
+                for h in range(2)
+            ]
+            s = ld_f32(s_rsrc, (rg * 16 // SCALE_BM) * (K // 128) + kc // 2)
+            return ("f8f8", wv, lambda: s * coef(), b_word + (lane // 16) * 4)
+
         def unit_bf16(w_rsrc, rg, kc, NKC, b_word):
             wv = [
                 fx.Vector(
@@ -565,7 +571,17 @@ def build_layer(
                 if const_expr(callable(coef)):
                     coef = coef()
                 c = fx.Vector.filled(4, 0.0, fx.Float32)
-                for sp in range_constexpr(2):
+                if const_expr(fmt == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
+                    a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
+                    bv = [
+                        fx.Vector(fx.ptr_load(xs + (bw + h * 16), result_type=v4f)).bitcast(fx.Int32) for h in range(2)
+                    ]
+                    b = fx.Vector.from_elements([bv[h][e] for h in range(2) for e in range(4)], fx.Int32)
+                    one = fx.Int32(127)
+                    c = fx.Vector(
+                        rocdl.mfma_scale_f32_16x16x128_f8f6f4(T.vec(4, T.f32), [a, b, c, 0, 0, 0, one, 0, one])
+                    )
+                for sp in range_constexpr(2 if fmt != "f8f8" else 0):
                     if const_expr(fmt == "fp8"):
                         a = _fp8_to_bf16x8(wv[0][sp * 2], wv[0][sp * 2 + 1])
                     else:
@@ -623,6 +639,7 @@ def build_layer(
             per = n // (2 * THREADS)
             rg_ = _rsrc(gamma)
             ks = [(tid + i * THREADS) * 2 for i in range(per)]
+            gs = [(ld_bf16(rg_, k), ld_bf16(rg_, k + 1)) for k in ks]  # issued ahead of the wait
             vals = ld2s([(s, k) for s in range(S) for k in ks])
             sss = []
             for s in range_constexpr(S):
@@ -632,7 +649,6 @@ def build_layer(
                     ss = ss + a0 * a0 + a1 * a1
                 sss.append(ss)
             rstds = [fmath.rsqrt(tot / float(n) + EPS) for tot in block_sums(sss)]
-            gs = [(ld_bf16(rg_, k), ld_bf16(rg_, k + 1)) for k in ks]
             for s in range_constexpr(S):
                 for i in range_constexpr(per):
                     a0, a1 = vals[s * per + i]
@@ -656,14 +672,27 @@ def build_layer(
                     a0, a1 = get2(mb(name), src_of(w * 2))
                     lds_st(xs, w, bf16_pair(a0, a1))
 
-        def quant_block(a0, a1):
-            """Per-wave FP8 quant of a 128-block held as 2 f32 per lane -> (q0, q1, scale)."""
+        def quant_scaled(a0, a1):
+            """Per-wave FP8 quant of a 128-block held as 2 f32 per lane -> (scaled q0, q1, scale)."""
             amax = wave_max(fx.max(fmath.absf(a0), fmath.absf(a1)))
             qs = (amax > 0.0).select(amax / FP8_MAX, fx.Float32(1.0))
             q0 = fx.min(fx.max(a0 / qs, -FP8_MAX), FP8_MAX)
             q1 = fx.min(fx.max(a1 / qs, -FP8_MAX), FP8_MAX)
+            return q0, q1, qs
+
+        def quant_block(a0, a1):
+            """quant_scaled, values returned as the FP8-rounded f32s."""
+            q0, q1, qs = quant_scaled(a0, a1)
             d0, d1 = _fp8_roundtrip(q0, q1)
             return d0, d1, qs
+
+        def st_f8(k, q0, q1):
+            """LDS FP8 activation bytes k, k + 1 (k even, held by this lane; lane ^ 1 holds
+            k ^ 2) in ``f8_word`` order.  Call from the whole wave."""
+            w = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
+            nb = _xshfl(w, 1)
+            if lane % 2 == 0:
+                lds_st(xs, f8_word(k), (w | (nb << 16)).bitcast(fx.Float32))
 
         def route_top8(s):
             """Top-8 of sample s (call from one whole wave, after the router scores landed).
@@ -699,28 +728,33 @@ def build_layer(
                 tot = tot + take.select(raws[i], fx.Float32(0.0))
             return picks, wave_sum(tot)
 
-        def peer_reduce(region, t, residual_fn, out_fn, tile=ROW_TILE):
+        def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
             """Push outs[s * tile + r] as tagged pairs to every peer, then sum all
-            ranks' pairs from the own symmetric buffer in rank order."""
+            ranks' pairs from the own symmetric buffer in rank order.  ``residual`` is
+            either fn(s, row) -> (r0, r1) (plain loads, issued first) or a mailbox base
+            (pairs s * HIDDEN + row, polled in the same batch as the peers)."""
             if tid < S * tile // 2:
                 s = tid // (tile // 2)
                 r = (tid % (tile // 2)) * 2
+                row = t * tile + r
+                if const_expr(callable(residual)):
+                    r0, r1 = residual(s, row)
                 v0 = lds_ld(outs, s * tile + r)
                 v1 = lds_ld(outs, s * tile + r + 1)
                 for p in range_constexpr(W):
                     put2(peer_addr[p] + fx.Int64(SY[region]), (rank * S + s) * HIDDEN + t * tile + r, v0, v1, CM_SYS)
                 own = sym + fx.Int64(SY[region])
-                parts = [
-                    (v[0].bitcast(fx.Float32), v[1].bitcast(fx.Float32))
-                    for v in poll([(own, (src * S + s) * HIDDEN + t * tile + r, 2) for src in range(W)], "one-as")
-                ]
+                specs = [(own, (src * S + s) * HIDDEN + row, 2) for src in range(W)]
+                if const_expr(not callable(residual)):
+                    specs.append((residual, s * HIDDEN + row, 2))
+                parts = [(v[0].bitcast(fx.Float32), v[1].bitcast(fx.Float32)) for v in poll(specs, "one-as")]
+                if const_expr(not callable(residual)):
+                    r0, r1 = parts[W]
                 t0 = fx.Float32(0.0)
                 t1 = fx.Float32(0.0)
                 for src in range_constexpr(W):
                     t0 = t0 + parts[src][0]
                     t1 = t1 + parts[src][1]
-                row = t * tile + r
-                r0, r1 = residual_fn(s, row)
                 out_fn(s, row, r0 + t0, r1 + t1)
 
         def start(name):
@@ -733,7 +767,7 @@ def build_layer(
                     fx.generic_store(
                         fx.inttoptr(
                             fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8),
-                            timeline_buf + fx.Int64((first[name] + t) * 5 + which) * 8,
+                            timeline_buf + fx.Int64((first[name] + t) * TL_COLS + which) * 8,
                         ),
                         now,
                     )
@@ -1026,28 +1060,31 @@ def build_layer(
                 lds_st(pl, h * (SPLIT_KEYS // 2) + lane // 2, bf16_pair(p, p_n))
             gpu.barrier()
             stamp("split", tt, 3)
-            # O = P V on MFMA: heads M, keys K (2 steps), 16 latent dims N per group;
-            # each wave owns 4 of the 32 dim groups.  V is read key-strided from the tile.
-            for g in range_constexpr(KV_LORA // 16 // WAVES):
-                dg = wave * (KV_LORA // 16 // WAVES) + g
-                d = dg * 16 + lane % 16
-                sh = (d % 2) * 16
-                c = fx.Vector.filled(4, 0.0, fx.Float32)
+            # O = P V on MFMA: heads M, keys K (2 steps), latent dims N.  Each V word holds
+            # a dim pair (even dim low), so one read feeds two MFMAs (even / odd dims):
+            # each wave owns 2 groups of 32 dims.  V is read key-strided from the tile.
+            for g in range_constexpr(KV_LORA // 32 // WAVES):
+                dw = (wave * (KV_LORA // 32 // WAVES) + g) * 16 + lane % 16  # dim pair word
+                c0 = fx.Vector.filled(4, 0.0, fx.Float32)
+                c1 = fx.Vector.filled(4, 0.0, fx.Float32)
                 for js in range_constexpr(SPLIT_KEYS // 32):
                     a = fx.ptr_load(
                         pl + (hn * (SPLIT_KEYS // 2) + js * 16 + (lane // 16) * 4), result_type=v4f
                     ).bitcast(fx.BFloat16)
-                    vv = []
-                    for i in range_constexpr(8):
-                        j = js * 32 + (lane // 16) * 8 + i
-                        word = fx.ptr_load(ktile + (j * KS + d // 2)).bitcast(fx.Int32)
-                        vv.append(fx.Int32((word >> sh) << 16).bitcast(fx.Float32))
-                    b = fx.Vector.from_elements(vv, fx.Float32).to(fx.BFloat16)
-                    c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
+                    ws = [
+                        fx.ptr_load(ktile + ((js * 32 + (lane // 16) * 8 + i) * KS + dw)).bitcast(fx.Int32)
+                        for i in range(8)
+                    ]
+                    w_lo = [(ws[2 * i] & 0xFFFF) | (ws[2 * i + 1] << 16) for i in range(4)]
+                    w_hi = [fx.Int32(fx.Uint32(ws[2 * i]) >> 16) | (ws[2 * i + 1] & -65536) for i in range(4)]
+                    b0 = fx.Vector.from_elements(w_lo, fx.Int32).bitcast(fx.BFloat16)
+                    b1 = fx.Vector.from_elements(w_hi, fx.Int32).bitcast(fx.BFloat16)
+                    c0 = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b0, c0]))
+                    c1 = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b1, c1]))
                 if lane < 32:  # rows (heads) 4 * (lane // 16) + e < 8
                     for e in range_constexpr(4):
                         hh = (lane // 16) * 4 + e
-                        put(mb("sp_acc"), ((s * N_SPLIT + t) * H + hh) * KV_LORA + d, c[e])
+                        put2(mb("sp_acc"), ((s * N_SPLIT + t) * H + hh) * KV_LORA + dw * 2, c0[e], c1[e])
             if lane == 0:  # written last: the merge's readiness hint
                 put(mb("sp_m"), (s * N_SPLIT + t) * H + h, m)
                 put(mb("sp_l"), (s * N_SPLIT + t) * H + h, lsum)
@@ -1072,30 +1109,40 @@ def build_layer(
 
             pre = [u_uv(c) for c in range(UV_NKC // UV_WPR)]
             hint_wait(N_SPLIT, lambda k: (mb("sp_l"), (s * N_SPLIT + k) * H + head), mark=("uv", tt))
-            # wave 0: per-split weights exp(m - M) / L for this head -> misc[sp]
-            if wave == 0:
+            # one batched poll: thread = (d pair dp, split half hf) -> its SPH splits' acc
+            # pairs, plus lane's split (m, l) so wave 0 can form the merge weights
+            SPH = N_SPLIT // 2
+            dp = tid % (KV_LORA // 2)
+            hf = tid // (KV_LORA // 2)
+            spi = fx.min(lane, N_SPLIT - 1)
+            ml = (s * N_SPLIT + spi) * H + head
+            got = poll(
+                [(mb("sp_acc"), ((s * N_SPLIT + hf * SPH + j) * H + head) * KV_LORA + dp * 2, 2) for j in range(SPH)]
+                + [(mb("sp_m"), ml, 1), (mb("sp_l"), ml, 1)],
+                batch=SPH + 2,
+            )
+            if wave == 0:  # per-split weights exp(m - M) / L for this head -> misc[sp]
                 ok_sp = lane < N_SPLIT
-                spi = ok_sp.select(lane, 0)
-                m_raw, l_raw = getf_many(
-                    [(mb("sp_m"), (s * N_SPLIT + spi) * H + head), (mb("sp_l"), (s * N_SPLIT + spi) * H + head)]
-                )
-                m_sp = ok_sp.select(m_raw, fx.Float32(NEG))
-                l_sp = ok_sp.select(l_raw, fx.Float32(0.0))
+                m_sp = ok_sp.select(got[SPH][0].bitcast(fx.Float32), fx.Float32(NEG))
+                l_sp = ok_sp.select(got[SPH + 1][0].bitcast(fx.Float32), fx.Float32(0.0))
                 w_sp = fmath.exp(m_sp - wave_max(m_sp))
                 den = wave_sum(l_sp * w_sp)
                 if ok_sp:
                     lds_st(misc, lane, w_sp / den)
-            accs_sp = getf_many(
-                [(mb("sp_acc"), ((s * N_SPLIT + sp) * H + head) * KV_LORA + tid) for sp in range(N_SPLIT)]
-            )
             stamp("uv", tt, 2)
             gpu.barrier()
-            o_l = fx.Float32(0.0)
-            for sp in range_constexpr(N_SPLIT):
-                o_l = o_l + accs_sp[sp] * lds_ld(misc, sp)
-            o_n = _xshfl(o_l, 1)
-            if tid % 2 == 0:
-                lds_st(xs, tid // 2, bf16_pair(o_l, o_n))
+            o0 = fx.Float32(0.0)
+            o1 = fx.Float32(0.0)
+            for j in range_constexpr(SPH):
+                wj = lds_ld(misc, hf * SPH + j)
+                o0 = o0 + got[j][0].bitcast(fx.Float32) * wj
+                o1 = o1 + got[j][1].bitcast(fx.Float32) * wj
+            if hf == 1:
+                lds_st(red, dp * 2, o0)
+                lds_st(red, dp * 2 + 1, o1)
+            gpu.barrier()
+            if hf == 0:
+                lds_st(xs, dp, bf16_pair(o0 + lds_ld(red, dp * 2), o1 + lds_ld(red, dp * 2 + 1)))
             gpu.barrier()
             acc = run_units(u_uv, UV_NKC // UV_WPR, UV_NKC // UV_WPR, pre)
             reduce_rows(UV_R, acc, emit_out(UV_TILE))
@@ -1203,24 +1250,41 @@ def build_layer(
             s_u = u // (MOE_SLOTS * N_UG_PER_SLOT)
             slot = (u // N_UG_PER_SLOT) % MOE_SLOTS
             c = u % N_UG_PER_SLOT
-            # the FP8 activation is computed here from the post-attention state (in
-            # parallel with the router): RMSNorm, then per-128 quant with one wave per
-            # block -> X[0] (fp8 values in bf16), block scales -> misc[8:]
-            hint_wait(N_ROW_TILES, lambda k: (mb("a"), s_u * HIDDEN + k * ROW_TILE + ROW_TILE - 1), mark=("ug", u))
-            NB = XQ_BLOCKS // WAVES
-            ks_ = [(wave + j * WAVES) * 128 + lane * 2 for j in range(NB)]
-            av = get2_many([(mb("a"), s_u * HIDDEN + k) for k in ks_])
-            ss = fx.Float32(0.0)
-            for j in range_constexpr(NB):
-                ss = ss + av[j][0] * av[j][0] + av[j][1] * av[j][1]
-            rstd = fmath.rsqrt(block_sum(ss) / float(HIDDEN) + EPS)
-            r_gp = _rsrc(g_post)
-            for j in range_constexpr(NB):
-                k = ks_[j]
-                d0, d1, qs = quant_block(av[j][0] * rstd * ld_bf16(r_gp, k), av[j][1] * rstd * ld_bf16(r_gp, k + 1))
-                lds_st(xs, k // 2, bf16_pair(d0, d1))
-                if lane == 0:
-                    lds_st(misc, 8 + wave + j * WAVES, qs)
+            if const_expr(S == 1):
+                # the FP8 activation is computed here from the post-attention state (in
+                # parallel with the router): RMSNorm, then per-128 quant with one wave per
+                # block -> X[0] (fp8 values in bf16), block scales -> misc[8:]
+                NB = XQ_BLOCKS // WAVES
+                ks_ = [(wave + j * WAVES) * 128 + lane * 2 for j in range(NB)]
+                r_gp = _rsrc(g_post)
+                gps = [(ld_bf16(r_gp, k), ld_bf16(r_gp, k + 1)) for k in ks_]  # issued ahead of the wait
+                hint_wait(N_ROW_TILES, lambda k: (mb("a"), s_u * HIDDEN + k * ROW_TILE + ROW_TILE - 1), mark=("ug", u))
+                av = get2_many([(mb("a"), s_u * HIDDEN + k) for k in ks_])
+                ss = fx.Float32(0.0)
+                for j in range_constexpr(NB):
+                    ss = ss + av[j][0] * av[j][0] + av[j][1] * av[j][1]
+                rstd = fmath.rsqrt(block_sum(ss) / float(HIDDEN) + EPS)
+                for j in range_constexpr(NB):
+                    q0, q1, qs = quant_scaled(av[j][0] * rstd * gps[j][0], av[j][1] * rstd * gps[j][1])
+                    st_f8(ks_[j], q0, q1)
+                    if lane == 0:
+                        lds_st(misc, 8 + wave + j * WAVES, qs)
+            else:
+                # S > 1: the router already quantized every sample's activation
+                hint_wait(
+                    N_ROUTER,
+                    lambda k: (mb("scores"), s_u * N_EXPERTS + k * ROUTER_TILE + ROUTER_TILE - 1),
+                    mark=("ug", u),
+                )
+                NXW = HIDDEN // 2 // THREADS
+                got = poll(
+                    [(mb("xq"), s_u * HIDDEN + (tid + i * THREADS) * 2, 2) for i in range(NXW)]
+                    + [(mb("xqs"), s_u * XQ_BLOCKS + fx.min(tid, XQ_BLOCKS - 1), 1)]
+                )
+                for i in range_constexpr(NXW):
+                    st_f8((tid + i * THREADS) * 2, got[i][0].bitcast(fx.Float32), got[i][1].bitcast(fx.Float32))
+                if tid < XQ_BLOCKS:
+                    lds_st(misc, 8 + tid, got[NXW][0].bitcast(fx.Float32))
             if tid == 0:  # slot 0: the shared expert, weight 1 (does not wait for routing)
                 lds_st(keys, 0, fx.Int32(SHARED_EXPERT))
                 lds_st(misc, 0, fx.Float32(1.0))
@@ -1238,12 +1302,20 @@ def build_layer(
             r_wug, r_sug = _rsrc(wbase), _rsrc(sbase)
             gate_up = wave // (WAVES // 2)  # waves 0-3: gate rows, 4-7: up rows
 
-            def u_ug(cc):
-                kc = (wave % (WAVES // 2)) * UG_CPW + cc
-                xsc = _uniform_f32(lds_ld(misc, 8 + kc // 2))
-                return unit_fp8(r_wug, r_sug, gate_up * (INTER // 16) + c, kc, UG_NKC, HIDDEN, 128, kc * 32, xsc)
+            def u_ug(cc):  # cc: 128-k chunk of this wave
+                kc = (wave % (WAVES // 2)) * UG_CPW + cc * 2
+                return unit_f8f8(
+                    r_wug,
+                    r_sug,
+                    gate_up * (INTER // 16) + c,
+                    kc,
+                    UG_NKC,
+                    HIDDEN,
+                    kc * 16,
+                    lambda: _uniform_f32(lds_ld(misc, 8 + kc // 2)),
+                )
 
-            acc = run_units(u_ug, UG_CPW, 24)
+            acc = run_units(u_ug, UG_CPW // 2, UG_CPW // 2)
             reduce_rows(2, acc, emit_out(UG_TILE * 2))
             stamp("ug", u, 3)
             gpu.barrier()
@@ -1269,7 +1341,7 @@ def build_layer(
         DN_WPR = WAVES // DN_R
         DN_CPW = S * MOE_SLOTS * DN_NKC // DN_WPR
         DN_BLK = S * MOE_SLOTS * INTER // 128
-        DN_BATCH = 18 if const_expr(S == 1) else 6  # chunks in flight per wave (VGPR budget)
+        DN_BATCH = 9 if const_expr(S == 1) else 3  # 128-k chunks in flight per wave (VGPR budget)
         for t in range(start("down"), N_DN_TILES, G):
             t = fx.Int32(t)
             stamp("down", t, 0)
@@ -1289,8 +1361,8 @@ def build_layer(
             gpu.barrier()
             gu = wave // DN_WPR
 
-            def u_dn(cc):
-                q = (wave % DN_WPR) * DN_CPW + cc  # chunk index over (s, slot, kc)
+            def u_dn(cc):  # cc: 128-k chunk of this wave
+                q = (wave % DN_WPR) * DN_CPW + cc * 2  # 64-k chunk index over (s, slot, kc)
                 s_q = q // (MOE_SLOTS * DN_NKC)
                 slot_q = (q // DN_NKC) % MOE_SLOTS
                 kc = q % DN_NKC
@@ -1301,10 +1373,10 @@ def build_layer(
                 def coef():  # mid block scale * route weight, only in this sample's column
                     return (lane % 16 == s_q).select(_uniform_f32(lds_ld(misc, q // 2)), fx.Float32(0.0))
 
-                return unit_fp8(wb, sb, t * DN_R + gu, kc, DN_NKC, INTER, 128, q * 32, coef)
+                return unit_f8f8(wb, sb, t * DN_R + gu, kc, DN_NKC, INTER, q * 16, coef)
 
             # the experts are known: stream their down weights while up/gate finishes
-            pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_CPW))]
+            pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_CPW // 2))]
             hint_wait(
                 N_UG,
                 lambda k: (
@@ -1328,12 +1400,12 @@ def build_layer(
             for b in range_constexpr((DN_BLK + WAVES - 1) // WAVES):
                 blk = wave + b * WAVES
                 if blk < DN_BLK:
-                    d0, d1, qs = quant_block(mids[b][0], mids[b][1])
-                    lds_st(xs, blk * 64 + lane, bf16_pair(d0, d1))
+                    q0, q1, qs = quant_scaled(mids[b][0], mids[b][1])
+                    st_f8(blk * 128 + lane * 2, q0, q1)
                     if lane == 0:
                         lds_st(misc, blk, qs * lds_ld(misc, 80 + blk // (INTER // 128)))
             gpu.barrier()
-            acc = run_units(u_dn, DN_CPW, DN_BATCH, pre)
+            acc = run_units(u_dn, DN_CPW // 2, DN_BATCH, pre)
             reduce_rows(DN_R, acc, emit_out(DN_TILE))
             stamp("down", t, 3)
             gpu.barrier()
@@ -1343,7 +1415,7 @@ def build_layer(
                     fx.Vector.from_elements([v0, v1], fx.Float32).to(fx.BFloat16), _rsrc(x_out), s * HIDDEN + row
                 )
 
-            peer_reduce("ffn", t, lambda s, row: get2(mb("a"), s * HIDDEN + row), store_x, tile=DN_TILE)
+            peer_reduce("ffn", t, mb("a"), store_x, tile=DN_TILE)
             gpu.barrier()
             stamp("down", t, 4)
 
