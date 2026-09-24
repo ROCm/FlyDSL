@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-24T03:48:07Z",
+ "updated": "2026-09-24T04:00:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 35953635869,
+   "pr": 1188,
+   "commit": "fb8348e4c4de1797f46e77cb351c697263019cd6",
+   "branch": "feat/hack-ut-asm-multi-kernel",
+   "event": "pull_request",
+   "title": "[Feature][Debug] Add a compile path for hand-edited assembly (debug only)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869",
+   "created_at": "2026-09-24T03:58:04Z",
+   "updated_at": "2026-09-24T03:59:36Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 35952761075,
    "pr": 1188,
@@ -10,11 +25,11 @@
    "branch": "feat/hack-ut-asm-multi-kernel",
    "event": "pull_request",
    "title": "[Feature][Debug] Add a compile path for hand-edited assembly (debug only)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35952761075",
    "created_at": "2026-09-24T03:45:14Z",
-   "updated_at": "2026-09-24T03:46:37Z",
+   "updated_at": "2026-09-24T03:58:59Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -2090,52 +2105,6 @@
      "started_at": "2026-09-21T07:14:45Z",
      "completed_at": "2026-09-21T07:18:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35571032178/job/106245543866"
-    }
-   ]
-  },
-  {
-   "run_id": 35567101986,
-   "pr": 987,
-   "commit": "c7926fff1d15a3a7da3e97b0b144d65b93853c93",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat][Fix] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986",
-   "created_at": "2026-09-21T06:08:06Z",
-   "updated_at": "2026-09-21T08:36:30Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T06:23:34Z",
-     "completed_at": "2026-09-21T06:58:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986/job/106234148020"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T07:15:14Z",
-     "completed_at": "2026-09-21T08:36:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986/job/106234148031"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T06:23:16Z",
-     "completed_at": "2026-09-21T07:59:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35567101986/job/106234148122",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
