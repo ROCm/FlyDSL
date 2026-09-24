@@ -50,7 +50,7 @@ class Glm5MlaMoeLayer:
         self.launch = build_layer(samples, W.heads, npes, topk, timeline=timeline)
         self.stages = stage_tasks(samples, W.heads, topk)
         n_tasks = sum(n for _, n in self.stages)
-        self.timeline = torch.zeros(n_tasks, 3, dtype=torch.int64, device=dev) if timeline else None
+        self.timeline = torch.zeros(n_tasks, 5, dtype=torch.int64, device=dev) if timeline else None
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)  # decode-step counter
 
     def debug(self, name: str, shape, dtype=torch.float32, pairs=True) -> torch.Tensor:
@@ -119,17 +119,21 @@ class Glm5MlaMoeLayer:
         self.step.add_(1)
 
     def timeline_report(self) -> str:
-        """Per stage: [first start, last end] and mean wait / work per task, in us from launch start."""
+        """Per stage, in us from launch start: [first start, median hint seen, last end]
+        and median per-task phases (hint wait, payload staging, compute, epilogue)."""
         tl = self.timeline.cpu().double() / 100.0  # s_memrealtime ticks at 100 MHz
         t0 = tl[:, 0].min()
         rows, i = [], 0
         for name, n in self.stages:
-            st = tl[i : i + n]
+            st = tl[i : i + n].clone()
             i += n
-            ready = torch.where(st[:, 1] > 0, st[:, 1], st[:, 0])
+            for c in (1, 2, 3):  # missing marks inherit the previous one
+                st[:, c] = torch.where(st[:, c] > 0, st[:, c], st[:, c - 1])
+            d = (st[:, 1:] - st[:, :-1]).median(0).values
             rows.append(
-                f"{name:7s} x{n:4d}  span [{(st[:, 0].min() - t0):7.1f}, {(st[:, 2].max() - t0):7.1f}]"
-                f"  wait {(ready - st[:, 0]).mean():6.1f}  work {(st[:, 2] - ready).mean():6.1f}"
+                f"{name:7s} x{n:4d}  [{(st[:, 0].min() - t0):6.1f} | hint {(st[:, 1].median() - t0):6.1f} | "
+                f"end {(st[:, 4].max() - t0):6.1f}]  hint {d[0]:5.1f}  stage {d[1]:5.1f}  "
+                f"compute {d[2]:5.1f}  epi {d[3]:5.1f}"
             )
         return "\n".join(rows)
 
