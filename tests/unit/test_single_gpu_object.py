@@ -26,6 +26,7 @@ else:
     pytest_skip = False
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -57,12 +58,17 @@ def _vec_launch(A: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
     _vec_kernel(A).launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
 
 
-def _reset_jit_caches(jit_fn):
+def _reset_jit_caches(jit_fn, monkeypatch, tmp_path):
+    """Full isolation: clear in-process caches AND point the disk cache at a
+    fresh temp dir, so a warm developer/CI cache can never satisfy (and thus
+    mask) what these tests compile."""
     jit_fn._call_state_cache.clear()
     jit_fn._mem_cache.clear()
     jit_fn._last_compiled = None
     jit_fn.manager_key = None
     jit_fn.cache_manager = None
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    monkeypatch.setenv("FLYDSL_CACHE_DIR", str(tmp_path / "flydsl-cache"))
 
 
 def _gpu_objects(ir_text: str):
@@ -86,24 +92,24 @@ def _gpu_objects(ir_text: str):
 
 
 class TestSingleCodeObject:
-    def test_exactly_one_gpu_object(self, monkeypatch):
-        monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-        _reset_jit_caches(_vec_launch)
+    def test_exactly_one_gpu_object(self, monkeypatch, tmp_path):
+        _reset_jit_caches(_vec_launch, monkeypatch, tmp_path)
 
         A = torch.arange(64, dtype=torch.float32, device="cuda")
         exe = flyc.compile(_vec_launch)
         exe(A, torch.cuda.current_stream(A.device))
         torch.cuda.synchronize()
 
-        _key, artifact = _vec_launch._last_compiled
+        last = _vec_launch._last_compiled
+        assert last is not None, "flyc.compile() did not leave _last_compiled"
+        _key, artifact = last
         count, targets = _gpu_objects(artifact._ir_text)
         assert count == 1, f"expected exactly one #gpu.object, found {count}"
         assert len(targets) == 1 and "gfx" in targets[0]
 
-    def test_compile_hints_reach_shipped_object(self, monkeypatch):
+    def test_compile_hints_reach_shipped_object(self, monkeypatch, tmp_path):
         """fast_fp_math/unsafe_fp_math must be visible on the (only) object."""
-        monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-        _reset_jit_caches(_vec_launch)
+        _reset_jit_caches(_vec_launch, monkeypatch, tmp_path)
 
         A = torch.arange(64, dtype=torch.float32, device="cuda")
         hints = {"fast_fp_math": True, "unsafe_fp_math": True}
@@ -118,11 +124,10 @@ class TestSingleCodeObject:
         assert "fast" in target_attr, f"fast_fp_math not on shipped target: {target_attr}"
         assert "unsafe_math" in target_attr, f"unsafe_fp_math not on shipped target: {target_attr}"
 
-    def test_hints_change_codegen_and_result_correct(self, monkeypatch):
+    def test_hints_change_codegen_and_result_correct(self, monkeypatch, tmp_path):
         """The shipped object must actually carry the fast-math flags AND the
         kernel must still run correctly with them (end-to-end check)."""
-        monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-        _reset_jit_caches(_vec_launch)
+        _reset_jit_caches(_vec_launch, monkeypatch, tmp_path)
 
         A = torch.arange(64, dtype=torch.float32, device="cuda")
         exe = flyc.compile[{"fast_fp_math": True}](_vec_launch)
