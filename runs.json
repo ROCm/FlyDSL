@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-25T02:09:26Z",
+ "updated": "2026-09-25T02:40:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -265,20 +265,20 @@
    "branch": "main",
    "event": "push",
    "title": "[script] Fix dumpir.sh silently succeeding with no command (#1187)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35992555154",
    "created_at": "2026-09-24T11:21:35Z",
-   "updated_at": "2026-09-24T11:35:22Z",
+   "updated_at": "2026-09-25T02:39:02Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-24T11:35:22Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-25T02:08:21Z",
+     "completed_at": "2026-09-25T02:39:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35992555154/job/107614162726"
     },
     {
@@ -311,11 +311,11 @@
    "branch": "pr/fix-coop-element-types",
    "event": "pull_request",
    "title": "fix(coop): preserve declared operator element types",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35991186029",
    "created_at": "2026-09-24T11:07:27Z",
-   "updated_at": "2026-09-24T11:32:29Z",
+   "updated_at": "2026-09-25T02:39:07Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -330,9 +330,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T11:32:28Z",
+     "started_at": "2026-09-25T02:39:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35991186029/job/107613246637"
     },
