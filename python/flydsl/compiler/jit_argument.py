@@ -31,6 +31,11 @@ from .protocol import DslType, JitArgument
 
 _RESOLVE_SIG_WARNED = set()
 
+# Signed-field ranges used by the dynamic-layout buffer (see _LayoutPlan).
+# struct's "i"/"q" accept the full signed range, minima included.
+_I32_MIN, _I32_MAX = -(2**31), 2**31 - 1
+_I64_MIN, _I64_MAX = -(2**63), 2**63 - 1
+
 
 def resolve_signature(func):
     """``inspect.signature`` with PEP 563 string annotations resolved; warn once on NameError fallback."""
@@ -163,7 +168,11 @@ class _LayoutPlan:
     ``pack_into``.
     """
 
-    __slots__ = ("buf_ctype", "codec", "shape", "stride")
+    __slots__ = (
+        "buf_ctype", "codec", "shape", "stride",
+        "shape_min", "shape_max", "stride_min", "stride_max",
+        "param_name", "path_suffix",
+    )
 
     def __init__(self, shape, stride, use_32bit_stride):
         self.shape = shape
@@ -171,6 +180,65 @@ class _LayoutPlan:
         struct_fmt = "<" + "i" * len(shape) + ("i" if use_32bit_stride else "q") * len(stride)
         self.codec = _struct.Struct(struct_fmt)
         self.buf_ctype = ctypes.c_byte * self.codec.size
+        # Signed-field bounds for the launch-time diagnostic (see
+        # _check_layout_fields): shape fields are always signed i32;
+        # stride fields are signed i32 iff use_32bit_stride, else signed i64.
+        self.shape_min, self.shape_max = _I32_MIN, _I32_MAX
+        if use_32bit_stride:
+            self.stride_min, self.stride_max = _I32_MIN, _I32_MAX
+        else:
+            self.stride_min, self.stride_max = _I64_MIN, _I64_MAX
+        # Set by the dispatch builder (jit_function._build_call_state) so the
+        # overflow diagnostic can name the offending JIT parameter.
+        self.param_name = None
+        # Field path within a struct-typed parameter ("" for plain tensors),
+        # appended by the struct ABI recursion so nested diagnostics read
+        # e.g. "arg.x.inner" instead of a bare, ambiguous "Struct.field".
+        self.path_suffix = ""
+
+    def overflow_report(self, shape_vals, stride_vals):
+        """Return the (kind, dim, value, limit) tuples that exceed their packed
+        field width, or an empty list when every dynamic field fits."""
+        bad = []
+        if shape_vals is not None:
+            for d in self.shape:
+                v = shape_vals[d]
+                if not self.shape_min <= v <= self.shape_max:
+                    bad.append(("shape", d, v, self.shape_max))
+        if stride_vals is not None:
+            for d in self.stride:
+                v = stride_vals[d]
+                if not self.stride_min <= v <= self.stride_max:
+                    bad.append(("stride", d, v, self.stride_max))
+        return bad
+
+
+def _check_layout_fields(plan, shape_vals, stride_vals):
+    """Raise an actionable error when a dynamic layout field overflows its
+    packed ABI width (shapes are signed i32; strides are i32/i64 per plan).
+
+    Called by every generated ``fill`` before ``pack_into``; returns quickly
+    when all fields fit, so the launch fast-path only pays one compare per
+    dynamic field.
+    """
+    bad = plan.overflow_report(shape_vals, stride_vals)
+    if bad:
+        label = plan.param_name or "?"
+        if plan.path_suffix:
+            label = f"{label}.{plan.path_suffix}"
+        parts = []
+        for kind, dim, val, limit in bad:
+            width = "int32" if limit == _I32_MAX else "int64"
+            parts.append(f"argument '{label}': dynamic {kind}[{dim}] = {val} "
+                         f"exceeds the signed {width} ABI field (max {limit})")
+        raise ValueError(
+            "; ".join(parts)
+            + ". The dynamic-layout buffer packs this field at a fixed width. "
+            "To launch this tensor, avoid making that dimension dynamic (use a "
+            "static-layout memref, e.g. flyc.from_dlpack, or do not mark it with "
+            "mark_shape_dynamic/mark_layout_dynamic), reshape or split the tensor "
+            "so each dynamic dim fits, or file an issue for wider dynamic dims."
+        )
 
 
 class MemRefSpec:
@@ -278,6 +346,11 @@ class MemRefJitArg(abc.ABC):
         # (__get_ir_types__) or an explicit mark_* actually needs it.
         self.spec = None
         self.is_layout_dynamic = dynamic_layout
+
+        # The most recent _LayoutPlan built by a subclass __c_abi_spec__; the
+        # dispatch builder stamps the JIT parameter name onto it so launch-time
+        # field-overflow diagnostics can name the offending argument.
+        self._layout_plan = None
 
         # Validate eagerly so a no-unit-stride tensor fails at wrap time (same
         # timing as before) with the same actionable message.
@@ -503,10 +576,12 @@ class DLTensorJitArg(MemRefJitArg):
         if plan.stride:
             body.append("    st = _ad.stride")
             terms += [f"st[{d}]" for d in plan.stride]
+        body.append("    _check(_plan, sh if _plan.shape else None, st if _plan.stride else None)")
         body.append(f"    _codec.pack_into(s, 0, {', '.join(terms)})")
-        src = "def fill(a, s, _codec=_codec, _shared=_shared):\n" + "\n".join(body) + "\n"
-        ns = {"_codec": plan.codec, "_shared": shared}
+        src = "def fill(a, s, _codec=_codec, _shared=_shared, _plan=_plan, _check=_check):\n" + "\n".join(body) + "\n"
+        ns = {"_codec": plan.codec, "_shared": shared, "_plan": plan, "_check": _check_layout_fields}
         exec(compile(src, "<flydsl-cabi-fill>", "exec"), ns)
+        self._layout_plan = plan
         return [(ctypes.c_void_p, ptr_fill), (plan.buf_ctype, ns["fill"])]
 
 
@@ -581,10 +656,12 @@ class TorchTensorJitArg(MemRefJitArg):
             if plan.stride:
                 body.append("    st = t.stride()")
                 terms += [f"st[{d}]" for d in plan.stride]
+            body.append("    _check(_plan, sh if _plan.shape else None, st if _plan.stride else None)")
             body.append(f"    _codec.pack_into(s, 0, {', '.join(terms)})")
-            src = "def fill(a, s, _codec=_codec):\n" + "\n".join(body) + "\n"
-            ns = {"_codec": plan.codec}
+            src = "def fill(a, s, _codec=_codec, _plan=_plan, _check=_check):\n" + "\n".join(body) + "\n"
+            ns = {"_codec": plan.codec, "_plan": plan, "_check": _check_layout_fields}
             exec(compile(src, "<flydsl-cabi-fill>", "exec"), ns)
+            self._layout_plan = plan
             slots.append((plan.buf_ctype, ns["fill"]))
         return slots
 
