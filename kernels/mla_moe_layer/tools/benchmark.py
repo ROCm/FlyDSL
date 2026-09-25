@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Graph latency of the shared/reuse GLM-5 shard with FlyDSL or native TileRT.
+"""Graph latency of the shared/reuse decode kernels.
 
-Both backends use the same generated weights and inputs. TileRT's released
-whole-layer kernel supports one or eight peers. Every rank keeps eight heads
-and intermediate size 256, so two/four-GPU FlyDSL runs are communication-scale
-measurements rather than full-model TP2/TP4 configurations.
+The GLM-5 path can run with FlyDSL or the native TileRT baseline using the same
+generated weights and inputs. Its two/four-GPU runs are communication-scale
+measurements rather than full-model TP2/TP4 configurations. Kimi-K3 measures
+the FlyDSL full-attention MLA shard at its production 12 heads per TP8 rank.
 """
 
 from __future__ import annotations
@@ -24,7 +24,14 @@ import torch.multiprocessing as mp
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from kernels.mla_moe_layer.config import KV_LORA, MAX_LAYERS_PER_STEP, PE_DIM, MoeMode  # noqa: E402
+from kernels.mla_moe_layer.config import (  # noqa: E402
+    GLM5_CONFIG,
+    KIMI_K3_CONFIG,
+    MAX_LAYERS_PER_STEP,
+    MODEL_CONFIGS,
+    MoeMode,
+    as_layer_config,
+)
 from kernels.mla_moe_layer.layer import SharedReuseMlaMoeLayer  # noqa: E402
 from kernels.mla_moe_layer.native_baseline import make_native_glm5_baseline  # noqa: E402
 from kernels.mla_moe_layer.reference import make_weights, rope_table  # noqa: E402
@@ -49,14 +56,24 @@ def _worker(rank, args, port):
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=args.npes)
-    weights = make_weights(rank, heads=8, device=device, seed=args.seed, moe_mode=args.moe_mode)
+    config = as_layer_config(args.model)
+    attention_only = config == KIMI_K3_CONFIG
+    weights = make_weights(
+        rank,
+        heads=config.local_heads,
+        device=device,
+        seed=args.seed,
+        moe_mode=args.moe_mode,
+        model_config=config,
+        attention_only=attention_only,
+    )
     native = make_native_glm5_baseline(weights, device, args.moe_mode) if args.backend == "tilert" else None
-    cos, sin = rope_table(4096, device=device)
+    cos, sin = rope_table(4096, device=device, model_config=config)
 
     for samples in args.samples:
         generator = torch.Generator(device=device).manual_seed(args.seed + 99)
-        kv = torch.randn(4096, KV_LORA, generator=generator, device=device).bfloat16()
-        pe = torch.randn(4096, PE_DIM, generator=generator, device=device).bfloat16()
+        kv = torch.randn(4096, config.kv_lora, generator=generator, device=device).bfloat16()
+        pe = torch.randn(4096, config.pe_dim, generator=generator, device=device).bfloat16()
         indices = torch.stack(
             [
                 torch.randperm(max(args.pos + sample + 1, 2048), generator=generator, device=device)[:2048]
@@ -67,7 +84,7 @@ def _worker(rank, args, port):
         ).int()
         if args.pos >= 2048:
             indices[:, -1] = torch.arange(args.pos, args.pos + samples, device=device)
-        hidden = torch.randn(samples, 6144, generator=generator, device=device).bfloat16()
+        hidden = torch.randn(samples, config.hidden, generator=generator, device=device).bfloat16()
         output = torch.empty_like(hidden)
         pos = torch.tensor([args.pos], dtype=torch.int32, device=device)
 
@@ -79,6 +96,8 @@ def _worker(rank, args, port):
                 npes=args.npes,
                 timeline=args.trace,
                 moe_mode=args.moe_mode,
+                model_config=config,
+                attention_only=attention_only,
             )
 
             def run(epoch):
@@ -159,6 +178,11 @@ def _worker(rank, args, port):
         run(0)
         torch.cuda.synchronize()
         reference = output.clone()
+        # The graph's first layer must not reuse the reference launch's mailbox
+        # epoch.  A repeated tag can let different ranks consume different
+        # generations of peer data and deadlock the following persistent launch.
+        advance()
+        torch.cuda.synchronize()
         if args.dump_outputs:
             target = Path(args.dump_outputs)
             target.mkdir(parents=True, exist_ok=True)
@@ -202,13 +226,15 @@ def _worker(rank, args, port):
             result = dict(
                 benchmark_version=3,
                 backend=args.backend,
+                model=args.model,
+                attention_only=attention_only,
                 moe_mode=args.moe_mode,
                 instrumented=args.trace,
                 npes=args.npes,
                 samples=samples,
                 pos=args.pos,
-                heads_per_rank=8,
-                inter_per_rank=256,
+                heads_per_rank=config.local_heads,
+                inter_per_rank=config.inter,
                 seed=args.seed,
                 layers=args.layers,
                 median_us=statistics.median(critical),
@@ -235,6 +261,7 @@ def _worker(rank, args, port):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("flydsl", "tilert"), required=True)
+    parser.add_argument("--model", choices=tuple(MODEL_CONFIGS), default=GLM5_CONFIG.name)
     parser.add_argument("--moe-mode", choices=tuple(mode.value for mode in MoeMode), default=MoeMode.W8A8.value)
     parser.add_argument("--npes", choices=(1, 2, 4, 8), type=int, required=True)
     parser.add_argument("--samples", type=int, nargs="+", choices=(1, 2, 4, 8), default=[1, 2, 4])
@@ -247,6 +274,8 @@ if __name__ == "__main__":
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--trace-dir", default="/root/glm5-perf-results/traces")
     args = parser.parse_args()
+    if args.backend == "tilert" and args.model != GLM5_CONFIG.name:
+        parser.error("the TileRT comparison adapter supports only the glm5 profile")
     if args.backend == "tilert" and args.npes not in (1, 8):
         parser.error("TileRT's released whole-layer kernel only supports 1 or 8 peers")
     if args.backend == "tilert" and args.moe_mode not in (MoeMode.W8A8.value, MoeMode.W8A16.value):

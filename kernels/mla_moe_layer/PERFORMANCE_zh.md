@@ -2,9 +2,10 @@
 
 [English](PERFORMANCE.md)
 
-本目录包含一个固定 GLM-5 MLA + MoE 分片的 FlyDSL 实现。生产路径通过
-`SharedReuseMlaMoeLayer` 提供，并由 `build_shared_reuse_kernel` 生成。该路径不导入
-TileRT kernel 主体，也不嵌入汇编。原有的汇编捕获、改写和启动桥接代码已全部删除。
+本目录包含固定 GLM-5 MLA + MoE 分片，以及 Kimi-K3 full-attention MLA 分片的
+FlyDSL 实现。生产路径通过 `SharedReuseMlaMoeLayer` 和 `KimiK3MlaLayer` 提供，均由
+`build_shared_reuse_kernel` 生成。这些路径不导入 TileRT kernel 主体，也不嵌入汇编。
+原有的汇编捕获、改写和启动桥接代码已全部删除。
 
 `native_baseline.py` 仍可选择性依赖 TileRT，用于把同一组生成权重转换给已发布的
 TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导入该适配器。
@@ -156,3 +157,57 @@ FlyDSL benchmark 可添加 `--trace --layers 16 --trace-dir <directory>` 记录�
 ```
 
 trace 插桩会等待内存操作完成并改变调度。延迟比较应使用未插桩的 graph 测量。
+
+## Kimi-K3 full-attention MLA
+
+Kimi-K3 profile 实现了 TP8 ROCm 模型路径使用的 full-attention MLA 分片：
+
+- hidden size 7168、Q-LoRA rank 1536、KV-LoRA rank 512；
+- 每卡 12 个 head，non-positional / RoPE / value 维度分别为 128 / 64 / 128；
+- BF16 attention 权重，以及 sigmoid attention output gate；
+- 输入由调用方预先归一化，输出仅包含完成 TP reduce 的 MLA projection，与
+  `KimiMLAAttention` 的接口边界一致。
+
+Kimi-K3 路径有意止于该边界，不宣称是完整 Kimi-K3 decoder layer。模型的 12 层
+attention-residual block 和 latent-MoE 尾部仍在 kernel 外部；具体而言，7168→3584
+routed transform、896 experts/top-16 MXFP4 MoE、shared SiTU MLP、latent
+normalization/up-projection 和最终 residual 均不属于 `KimiK3MlaLayer`。
+
+正确性在 8 x MI355X（gfx950）上完成了 TP1 S=1/4/8 和生产拓扑 TP8 S=1/8 验证。
+每个 attention 中间量均与独立 Torch 计算比较，同时检查新增 KV/PE cache 行，并确认
+TP8 所有 rank 的最终输出逐位一致；64-layer HIP graph 也完成了重复 replay 验证。
+benchmark 现在会在独立 reference launch 与 graph capture 之间推进 mailbox epoch；
+复用该 tag 会使不同 rank 读取不同代的 mailbox 数据并造成死锁。
+
+主要优化是在 S >= 2 时，让两个 local head group 复用同一份 64-key KV tile 和一次
+16-column score MFMA，避免 heads 8-11 的第二个 CTA 重复读取 Q/KV 并重算 score。
+S=1 仍保留两个 CTA，因为并行执行略快。output gate 也下推并融合进各 W_UV producer，
+使每个输出元素只计算一次 sigmoid，不再由全部 224 个 W_o CTA 重复计算。
+
+下表是在 position 3000、每个 HIP graph 64 次 launch、7 次正式 replay 条件下得到的
+每个 MLA 分片中位延迟。“Baseline”是两项调度优化之前、每个 split 使用两个 CTA 的
+正确实现。
+
+| Peer 数 | 版本 | S=1 | S=4 | S=8 |
+|---:|---|---:|---:|---:|
+| 1 | Baseline | 24.17 us | 32.16 us | 42.99 us |
+| 1 | Optimized | 23.60 us | 30.10 us | 35.78 us |
+| 1 | 提升 | 2.3% | 6.4% | 16.8% |
+| 8 | Baseline | 26.44 us | 35.53 us | 49.77 us |
+| 8 | Optimized | 26.29 us | 34.70 us | 43.80 us |
+| 8 | 提升 | 0.6% | 2.3% | 12.0% |
+
+插桩后的 TP1/S8 中，最后一个 split、W_UV、W_o 的完成时刻从
+34.2/39.7/42.2 us 提前到 28.6/33.7/36.1 us。插桩自身会增加开销，因此这些时间用于
+解释关键路径变化，不是上表的最终延迟。
+
+Kimi-K3 的正确性与性能可用以下命令复现：
+
+```bash
+/opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
+  --model kimi_k3 --npes 8 -S 8 --pos 100 --iters 1
+
+/opt/venv/bin/python kernels/mla_moe_layer/tools/benchmark.py \
+  --backend flydsl --model kimi_k3 --npes 8 --samples 1 4 8 \
+  --layers 64 --repeats 7 --pos 3000
+```

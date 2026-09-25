@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""GLM-5 shared/reuse MLA+MoE layer monokernel vs the torch golden.
+"""Shared/reuse GLM-5 MLA+MoE and Kimi-K3 MLA kernels vs Torch goldens.
 
 Single GPU (TP1 view of one shard, the peer reduce is a 1-rank loopback)::
 
@@ -10,6 +10,10 @@ Single GPU (TP1 view of one shard, the peer reduce is a 1-rank loopback)::
 TP8, one process per GPU::
 
     python3 tests/kernels/test_shared_reuse_mla_moe_layer.py --npes 8
+
+Kimi-K3 full-attention MLA shard::
+
+    python3 tests/kernels/test_shared_reuse_mla_moe_layer.py --model kimi_k3 --npes 8
 """
 
 import argparse
@@ -21,7 +25,15 @@ import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from kernels.mla_moe_layer.config import KV_LORA, PE_DIM, ExpertActivation, MoeMode, moe_format  # noqa: E402
+from kernels.mla_moe_layer.config import (  # noqa: E402
+    GLM5_CONFIG,
+    KIMI_K3_CONFIG,
+    MODEL_CONFIGS,
+    ExpertActivation,
+    MoeMode,
+    as_layer_config,
+    moe_format,
+)
 from kernels.mla_moe_layer.reference import (  # noqa: E402
     golden_layer,
     golden_moe,
@@ -38,6 +50,7 @@ TOL = {  # name -> (atol, rtol) on the fp32/bf16 intermediates
     "q_lat": (1e-2, 1e-2),
     "o": (1e-2, 1e-2),
     "a": (3e-2, 2e-2),
+    "gate": (2e-3, 2e-3),
     "scores": (1e-3, 1e-3),
     "prob": (1e-5, 1e-5),
     "xq": (0.0, 0.0),
@@ -73,18 +86,38 @@ def _check(name, got, ref, report, fp8_flips=False):
     return not bool(bad.any())
 
 
-def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeMode.W8A8):
+def run_rank(
+    rank,
+    npes,
+    S,
+    cur_pos,
+    iters,
+    group=None,
+    seed=1234,
+    moe_mode=MoeMode.W8A8,
+    model_config=GLM5_CONFIG,
+):
     from kernels.mla_moe_layer.layer import SharedReuseMlaMoeLayer
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
     topk = 2048
+    config = as_layer_config(model_config)
+    attention_only = config == KIMI_K3_CONFIG
     activation = moe_format(moe_mode).activation
-    W = make_weights(rank, heads=8, device=dev, seed=seed, moe_mode=moe_mode)
-    cos, sin = rope_table(MAX_SEQ, device=dev)
+    W = make_weights(
+        rank,
+        heads=config.local_heads,
+        device=dev,
+        seed=seed,
+        moe_mode=moe_mode,
+        model_config=config,
+        attention_only=attention_only,
+    )
+    cos, sin = rope_table(MAX_SEQ, device=dev, model_config=config)
     gen = torch.Generator(device=dev).manual_seed(seed + 99)  # same inputs on every rank
-    kv0 = (torch.randn(MAX_SEQ, KV_LORA, generator=gen, device=dev)).to(torch.bfloat16)
-    pe0 = (torch.randn(MAX_SEQ, PE_DIM, generator=gen, device=dev)).to(torch.bfloat16)
+    kv0 = (torch.randn(MAX_SEQ, config.kv_lora, generator=gen, device=dev)).to(torch.bfloat16)
+    pe0 = (torch.randn(MAX_SEQ, config.pe_dim, generator=gen, device=dev)).to(torch.bfloat16)
     indices = torch.stack(
         [torch.randperm(max(cur_pos + s + 1, topk), generator=gen, device=dev)[:topk].sort().values for s in range(S)]
     ).to(torch.int32)
@@ -98,6 +131,8 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
         group=group,
         topk=topk,
         moe_mode=moe_mode,
+        model_config=config,
+        attention_only=attention_only,
     )
 
     if npes == 1:
@@ -114,7 +149,7 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
 
     ok = True
     for it in range(iters):
-        h = (torch.randn(S, 6144, generator=gen, device=dev)).to(torch.bfloat16)
+        h = (torch.randn(S, config.hidden, generator=gen, device=dev)).to(torch.bfloat16)
         kv, pe = kv0.clone(), pe0.clone()
         pos_t = torch.tensor([cur_pos], dtype=torch.int32, device=dev)
         out = op.forward(h, pos_t, kv, pe, indices, cos, sin)
@@ -139,11 +174,23 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
             allreduce,
             topk=topk,
             moe_mode=moe_mode,
+            attention_only=attention_only,
         )
         report = []
         # attention half vs the full golden
         for name in ("q_a", "kv_a", "q_nope", "q_pe", "q_lat", "o", "a"):
             ok &= _check(name, got[name], ref[name], report)
+        if config.attention_output_gate:
+            ok &= _check("gate", got["gate"], ref["gate"], report)
+        if attention_only:
+            ok &= _check("x_out", got["x_out"], ref["a"], report)
+            rows = slice(cur_pos, cur_pos + S)
+            ok &= _check("kv", kv[rows], kv_ref[rows], report)
+            if rank == 0 or not ok:
+                lines = [f"[rank {rank} iter {it}] ok={ok}"]
+                lines += [f"   {n:9s} max_err={e:.3e} ref_max={m:.3e} {nb}" for n, e, m, nb in report]
+                print("\n".join(lines), flush=True)
+            continue
         # MoE half vs the golden fed the kernel's own post-attention state, so a
         # 1-ulp difference in ``a`` cannot flip FP8 roundings downstream
         moe = golden_moe(W, got["a"].clone(), allreduce, moe_mode=moe_mode)
@@ -197,19 +244,48 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
     return ok
 
 
-def bench_rank(rank, npes, S, cur_pos, iters=320, group=None, seed=1234, moe_mode=MoeMode.W8A8):
+def bench_rank(
+    rank,
+    npes,
+    S,
+    cur_pos,
+    iters=320,
+    group=None,
+    seed=1234,
+    moe_mode=MoeMode.W8A8,
+    model_config=GLM5_CONFIG,
+):
     """HIP-graph replay of 16 layer launches per step; returns us per layer."""
     from kernels.mla_moe_layer.layer import SharedReuseMlaMoeLayer
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
-    W = make_weights(rank, heads=8, device=dev, seed=seed, moe_mode=moe_mode)
-    cos, sin = rope_table(MAX_SEQ, device=dev)
-    kv = torch.randn(MAX_SEQ, KV_LORA, device=dev).to(torch.bfloat16)
-    pe = torch.randn(MAX_SEQ, PE_DIM, device=dev).to(torch.bfloat16)
+    config = as_layer_config(model_config)
+    attention_only = config == KIMI_K3_CONFIG
+    W = make_weights(
+        rank,
+        heads=config.local_heads,
+        device=dev,
+        seed=seed,
+        moe_mode=moe_mode,
+        model_config=config,
+        attention_only=attention_only,
+    )
+    cos, sin = rope_table(MAX_SEQ, device=dev, model_config=config)
+    kv = torch.randn(MAX_SEQ, config.kv_lora, device=dev).to(torch.bfloat16)
+    pe = torch.randn(MAX_SEQ, config.pe_dim, device=dev).to(torch.bfloat16)
     indices = torch.stack([torch.randperm(max(cur_pos + s + 1, 2048), device=dev)[:2048] for s in range(S)]).int()
-    op = SharedReuseMlaMoeLayer(W, S, rank=rank, npes=npes, group=group, moe_mode=moe_mode)
-    h = torch.randn(S, 6144, device=dev).to(torch.bfloat16)
+    op = SharedReuseMlaMoeLayer(
+        W,
+        S,
+        rank=rank,
+        npes=npes,
+        group=group,
+        moe_mode=moe_mode,
+        model_config=config,
+        attention_only=attention_only,
+    )
+    h = torch.randn(S, config.hidden, device=dev).to(torch.bfloat16)
     x = torch.empty_like(h)
     pos_t = torch.tensor([cur_pos], dtype=torch.int32, device=dev)
     for _ in range(10):
@@ -228,6 +304,8 @@ def bench_rank(rank, npes, S, cur_pos, iters=320, group=None, seed=1234, moe_mod
             group=group,
             timeline=True,
             moe_mode=moe_mode,
+            model_config=config,
+            attention_only=attention_only,
         )
         for _ in range(3):
             top.forward(h, pos_t, kv, pe, indices, cos, sin, x_out=x)
@@ -258,28 +336,37 @@ def bench_rank(rank, npes, S, cur_pos, iters=320, group=None, seed=1234, moe_mod
     return latency
 
 
-def _worker(rank, npes, S, cur_pos, iters, results, moe_mode):
+def _worker(rank, npes, S, cur_pos, iters, results, moe_mode, model_config):
     import torch.distributed as dist
 
     dist.init_process_group("gloo", init_method="tcp://127.0.0.1:29541", rank=rank, world_size=npes)
     if iters < 0:
-        us = bench_rank(rank, npes, S, cur_pos, moe_mode=moe_mode)
+        us = bench_rank(rank, npes, S, cur_pos, moe_mode=moe_mode, model_config=model_config)
         results[rank] = us
         print(f"[rank {rank}] {us:.1f} us/layer", flush=True)
     else:
-        results[rank] = run_rank(rank, npes, S, cur_pos, iters, group=None, moe_mode=moe_mode)
+        results[rank] = run_rank(
+            rank,
+            npes,
+            S,
+            cur_pos,
+            iters,
+            group=None,
+            moe_mode=moe_mode,
+            model_config=model_config,
+        )
     dist.barrier()
     dist.destroy_process_group()
 
 
-def run(npes, S, cur_pos, iters, moe_mode=MoeMode.W8A8):
+def run(npes, S, cur_pos, iters, moe_mode=MoeMode.W8A8, model_config=GLM5_CONFIG):
     if npes == 1:
-        return run_rank(0, 1, S, cur_pos, iters, moe_mode=moe_mode)
+        return run_rank(0, 1, S, cur_pos, iters, moe_mode=moe_mode, model_config=model_config)
     import torch.multiprocessing as mp
 
     mgr = mp.Manager()
     results = mgr.dict()
-    mp.spawn(_worker, args=(npes, S, cur_pos, iters, results, moe_mode), nprocs=npes)
+    mp.spawn(_worker, args=(npes, S, cur_pos, iters, results, moe_mode, model_config), nprocs=npes)
     return all(results[r] for r in range(npes))
 
 
@@ -295,6 +382,17 @@ def test_layer_tp8(moe_mode):
     assert run(8, 1, 3000, 3, moe_mode)
 
 
+@pytest.mark.parametrize("S,cur_pos", [(1, 100), (8, 3000)])
+def test_kimi_k3_mla_single_gpu(S, cur_pos):
+    assert run(1, S, cur_pos, 2, model_config=KIMI_K3_CONFIG)
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
+def test_kimi_k3_mla_tp8():
+    assert run(8, 8, 3000, 1, model_config=KIMI_K3_CONFIG)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--npes", type=int, default=1)
@@ -303,13 +401,15 @@ if __name__ == "__main__":
     ap.add_argument("--iters", type=int, default=2)
     ap.add_argument("--bench", action="store_true", help="time back-to-back launches")
     ap.add_argument("--moe-mode", choices=tuple(mode.value for mode in MoeMode), default=MoeMode.W8A8.value)
+    ap.add_argument("--model", choices=tuple(MODEL_CONFIGS), default=GLM5_CONFIG.name)
     a = ap.parse_args()
+    config = as_layer_config(a.model)
     if a.bench:
         if a.npes == 1:
-            print(f"{bench_rank(0, 1, a.S, a.pos, moe_mode=a.moe_mode):.1f} us/layer")
+            print(f"{bench_rank(0, 1, a.S, a.pos, moe_mode=a.moe_mode, model_config=config):.1f} us/layer")
         else:
-            run(a.npes, a.S, a.pos, -1, a.moe_mode)
+            run(a.npes, a.S, a.pos, -1, a.moe_mode, config)
         sys.exit(0)
-    passed = run(a.npes, a.S, a.pos, a.iters, a.moe_mode)
+    passed = run(a.npes, a.S, a.pos, a.iters, a.moe_mode, config)
     print("PASS" if passed else "FAIL")
     sys.exit(0 if passed else 1)

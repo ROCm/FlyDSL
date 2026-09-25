@@ -8,13 +8,17 @@ from __future__ import annotations
 import torch
 
 from kernels.mla_moe_layer.config import (
+    GLM5_CONFIG,
     HIDDEN,
     INTER,
+    KIMI_K3_CONFIG,
     MAX_LAYERS_PER_STEP,
     MOE_SLOTS,
     N_EXPERTS,
     ExpertActivation,
+    LayerConfig,
     MoeMode,
+    as_layer_config,
     as_moe_mode,
     moe_format,
     validate_shard,
@@ -29,7 +33,7 @@ from kernels.mla_moe_layer.shared_reuse_moe_kernel import (
     stage_tasks,
 )
 
-__all__ = ["MoeMode", "SharedReuseMlaMoeLayer"]
+__all__ = ["KimiK3MlaLayer", "MoeMode", "SharedReuseMlaMoeLayer"]
 
 
 class SharedReuseMlaMoeLayer:
@@ -50,12 +54,28 @@ class SharedReuseMlaMoeLayer:
         topk: int = 2048,
         timeline: bool = False,
         moe_mode: MoeMode | str = MoeMode.W8A8,
+        model_config: LayerConfig | str = GLM5_CONFIG,
+        attention_only: bool = False,
     ):
-        validate_shard(samples, W.heads, rank, npes, topk)
+        self.config = as_layer_config(model_config)
+        if W.config != self.config:
+            raise ValueError(f"weight profile {W.config.name!r} does not match {self.config.name!r}")
+        if self.config != GLM5_CONFIG and not attention_only:
+            raise ValueError(f"{self.config.name} currently supports the attention-only kernel path")
+        validate_shard(samples, W.heads, rank, npes, topk, self.config)
         self.moe_mode = as_moe_mode(moe_mode)
+        self.attention_only = attention_only
         self.W, self.S, self.rank, self.npes, self.topk = W, samples, rank, npes, topk
-        self.packed = pack_layer_weights(W.t, self.moe_mode)
-        self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk, self.moe_mode)
+        self.packed = pack_layer_weights(W.t, self.moe_mode, self.config, attention_only)
+        self.scr_layout, self.sym_layout = layout(
+            samples,
+            W.heads,
+            npes,
+            topk,
+            self.moe_mode,
+            self.config,
+            attention_only,
+        )
         dev = torch.device("cuda", torch.cuda.current_device())
         self.scratch = torch.zeros(self.scr_layout["_bytes"], dtype=torch.uint8, device=dev)
         self.peer_buffer = SymmetricPeerBuffer(self.sym_layout["_bytes"], rank=rank, npes=npes, group=group)
@@ -69,8 +89,10 @@ class SharedReuseMlaMoeLayer:
             topk,
             timeline=timeline,
             moe_mode=self.moe_mode,
+            model_config=self.config,
+            attention_only=attention_only,
         )
-        self.stages = stage_tasks(samples, W.heads, topk)
+        self.stages = stage_tasks(samples, W.heads, topk, self.config, attention_only)
         n_tasks = sum(n for _, n in self.stages)
         self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)  # decode-step counter
@@ -99,8 +121,9 @@ class SharedReuseMlaMoeLayer:
             raise ValueError(f"layer must be in [0, {MAX_LAYERS_PER_STEP}), got {layer}")
         t = dict(self.W.t, **self.packed)
         if x_out is None:
-            x_out = torch.empty(self.S, HIDDEN, dtype=torch.bfloat16, device=h.device)
+            x_out = torch.empty(self.S, self.config.hidden, dtype=torch.bfloat16, device=h.device)
         p = lambda x: x.data_ptr()  # noqa: E731
+        p_or_zero = lambda name: p(t[name]) if name in t else 0  # noqa: E731
         self.launch(
             p(h),
             p(x_out),
@@ -114,22 +137,22 @@ class SharedReuseMlaMoeLayer:
             p(t["g_q"]),
             p(t["g_kv"]),
             p(t["g_post"]),
-            p(t["w_qkv_a"]),
-            p(t["s_qkv_a"]),
-            p(t["w_q_b"]),
-            p(t["s_q_b"]),
-            p(t["w_uk"]),
-            p(t["s_uk"]),
-            p(t["w_uv"]),
-            p(t["s_uv"]),
-            p(t["w_o"]),
-            p(t["s_o"]),
-            p(t["w_r"]),
-            p(t["bias"]),
-            p(t["w_ug"]),
-            p(t["s_ug"]),
-            p(t["w_dn"]),
-            p(t["s_dn"]),
+            p_or_zero("w_qkv_a"),
+            p_or_zero("s_qkv_a"),
+            p_or_zero("w_q_b"),
+            p_or_zero("s_q_b"),
+            p_or_zero("w_uk"),
+            p_or_zero("s_uk"),
+            p_or_zero("w_uv"),
+            p_or_zero("s_uv"),
+            p_or_zero("w_o"),
+            p_or_zero("s_o"),
+            p_or_zero("w_r"),
+            p_or_zero("bias"),
+            p_or_zero("w_ug"),
+            p_or_zero("s_ug"),
+            p_or_zero("w_dn"),
+            p_or_zero("s_dn"),
             p(self.scratch),
             self.sym,
             p(self.peers),
@@ -180,22 +203,45 @@ class SharedReuseMlaMoeLayer:
 
     def intermediates(self):
         S, H = self.S, self.W.heads
-        from kernels.mla_moe_layer.config import KV_LORA, NOPE_DIM, PE_DIM, Q_LORA, V_DIM
+        config = self.config
+
+        attention = dict(
+            q_a=self.debug("q_a", (S, config.q_lora)),
+            kv_a=self.debug("kv_a", (S, config.kv_lora + config.pe_dim)),
+            q_nope=self.debug("q_nope", (S, H, config.nope_dim), bf2=True),
+            q_pe=self.debug("q_pe", (S, H, config.pe_dim), bf2=True),
+            q_lat=self.debug("q_lat", (S, H, config.kv_lora), bf2=True),
+            o=self.debug("o", (S, H * config.v_dim), bf2=True),
+            a=self.debug("a", (S, config.hidden), bf2=True).to(torch.bfloat16),
+        )
+        if config.attention_output_gate:
+            attention["gate"] = self.debug("gate", (S, H, config.v_dim))
+        if self.attention_only:
+            return attention
 
         mid = self.debug("mid", (S, MOE_SLOTS, INTER))
         if moe_format(self.moe_mode).activation is ExpertActivation.BF16:
             mid = mid.to(torch.bfloat16).float()
         return dict(
-            q_a=self.debug("q_a", (S, Q_LORA)),
-            kv_a=self.debug("kv_a", (S, KV_LORA + PE_DIM)),
-            q_nope=self.debug("q_nope", (S, H, NOPE_DIM), bf2=True),
-            q_pe=self.debug("q_pe", (S, H, PE_DIM), bf2=True),
-            q_lat=self.debug("q_lat", (S, H, KV_LORA), bf2=True),
-            o=self.debug("o", (S, H * V_DIM), bf2=True),
-            a=self.debug("a", (S, HIDDEN), bf2=True).to(torch.bfloat16),
+            **attention,
             scores=self.debug("scores", (S, N_EXPERTS)),
             sel=self.debug("sel", (S, MOE_SLOTS), torch.int32),
             prob=self.debug("prob", (S, MOE_SLOTS)),
             mid=mid,
             xq=self.debug("xqd", (S, HIDDEN), pairs=False),
+        )
+
+
+class KimiK3MlaLayer(SharedReuseMlaMoeLayer):
+    """Kimi-K3 TP8 full-attention shard, excluding the latent-MoE tail."""
+
+    def __init__(self, W: LayerWeights, samples: int, **kwargs):
+        kwargs.pop("model_config", None)
+        kwargs.pop("attention_only", None)
+        super().__init__(
+            W,
+            samples,
+            model_config=KIMI_K3_CONFIG,
+            attention_only=True,
+            **kwargs,
         )

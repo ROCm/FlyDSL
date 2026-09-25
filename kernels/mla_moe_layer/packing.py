@@ -1,13 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Host-side weight packing shared by GLM-5 MLA and MoE launch wrappers."""
+"""Host-side weight packing for GLM-5 and Kimi-K3 MLA launch wrappers."""
 
 from __future__ import annotations
 
 import torch
 
-from kernels.mla_moe_layer.config import ExpertWeight, MoeMode, moe_format
+from kernels.mla_moe_layer.config import (
+    GLM5_CONFIG,
+    AttentionWeight,
+    ExpertWeight,
+    LayerConfig,
+    MoeMode,
+    as_layer_config,
+    moe_format,
+)
 
 
 def pack_fp8(q: torch.Tensor) -> torch.Tensor:
@@ -53,16 +61,24 @@ def pack_mxfp4(q: torch.Tensor) -> torch.Tensor:
 
 
 def pack_layer_weights(
-    tensors: dict[str, torch.Tensor], moe_mode: MoeMode | str = MoeMode.W8A8
+    tensors: dict[str, torch.Tensor],
+    moe_mode: MoeMode | str = MoeMode.W8A8,
+    model_config: LayerConfig | str = GLM5_CONFIG,
+    attention_only: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Pack every matrix consumed by the fused layer kernel."""
 
+    config = as_layer_config(model_config)
     attention_names = ("w_qkv_a", "w_q_b", "w_uk", "w_uv", "w_o")
     expert_names = ("w_ug", "w_dn")
-    missing = [name for name in (*attention_names, *expert_names, "w_r") if name not in tensors]
+    required = attention_names if attention_only else (*attention_names, *expert_names, "w_r")
+    missing = [name for name in required if name not in tensors]
     if missing:
         raise ValueError(f"missing layer weights: {', '.join(missing)}")
-    packed = {name: pack_fp8(tensors[name]) for name in attention_names}
+    pack_attention = pack_bf16 if config.attention_weight is AttentionWeight.BF16 else pack_fp8
+    packed = {name: pack_attention(tensors[name]) for name in attention_names}
+    if attention_only:
+        return packed
     weight = moe_format(moe_mode).weight
     pack_expert = pack_mxfp4 if weight is ExpertWeight.MXFP4_BLOCK32 else pack_fp8
     packed.update({name: pack_expert(tensors[name]) for name in expert_names})
