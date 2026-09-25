@@ -12,7 +12,8 @@ The imported assembly, the hybrid with the final MoE reduction written in
 FlyDSL, and the tuned regular `Glm5MlaMoeLayer` now reach approximately TileRT
 latency for the measured shards. Select the regular kernel with `--backend flydsl`
 or the hybrid with `--backend tilert_inline --replace ffn`. The regular kernel
-does not import the TileRT assembly body.
+does not import the TileRT assembly body and contains no `InlineAsmOp`; its
+remaining wave reduction and poll-loop scheduling operations use FlyDSL APIs.
 
 ## Measured scope and results
 
@@ -31,20 +32,20 @@ between implementations. Graph output must match eager output exactly.
 |---:|---|---:|---:|---:|
 | 2 | Adapted TileRT ASM in FlyDSL | 34.59 | 41.10 | 52.95 |
 | 2 | Hybrid: FlyDSL final reduction/output | 34.54 | 40.82 | 52.54 |
-| 2 | Regular FlyDSL kernel | 33.69 | 40.01 | 53.48 |
+| 2 | Regular FlyDSL kernel | 33.98 | 39.80 | 53.55 |
 | 4 | Adapted TileRT ASM in FlyDSL | 35.39 | 42.08 | 53.60 |
 | 4 | Hybrid: FlyDSL final reduction/output | 35.33 | 42.06 | 54.52 |
-| 4 | Regular FlyDSL kernel | 34.55 | 41.52 | 54.57 |
+| 4 | Regular FlyDSL kernel | 34.30 | 41.51 | 54.42 |
 | 8 | Native TileRT | 35.85 | 42.90 | 55.93 |
 | 8 | TileRT ASM in FlyDSL | 36.10 | 42.83 | 55.69 |
 | 8 | Hybrid: FlyDSL final reduction/output | 36.54 | 43.11 | 55.63 |
-| 8 | Regular FlyDSL kernel | 35.65 | 43.03 | 56.32 |
+| 8 | Regular FlyDSL kernel | 35.55 | 42.72 | 56.32 |
 
 Sources: `corrected-inline{2,4,8}.jsonl`, `corrected-tilert8.jsonl`,
-`final-ffn{2,4,8}.jsonl`, `verified-flydsl{2,4,8}.jsonl`, and
+`final-ffn{2,4,8}.jsonl`, `fx-api-candidate{2,4,8}.jsonl`, and
 `verified-tilert8.jsonl` in the results directory. Both the hybrid and regular
-FlyDSL kernel are within about 2% of their corresponding assembly/native
-reference on the slowest measured case; several regular-kernel cases are faster.
+FlyDSL kernels remain close to their corresponding assembly/native references;
+no regular-kernel case is slower by more than 1.6%, and several are faster.
 The previous regular eight-GPU S=4 result was 61.91 µs (`final-flydsl8.jsonl`).
 
 **Superseded measurements:** earlier `matched-*`, `inline*`, `dispatch*`, and
@@ -92,9 +93,20 @@ The regular FlyDSL kernel uses one wave per peer destination, one peer pointer
 per wave, mask-based CTA mapping, and eight-intermediate up/gate tiles pipelined
 over samples. Two changes guided by the assembly comparison closed the remaining
 gap: packed BF16 peer payloads and one sample per router CTA. The S=4 compiler
-dump uses **224 VGPRs, 94 SGPRs and zero private/scratch bytes**, versus 256 VGPRs
-and spills in the recovered version. Obsolete up/gate schedules were removed;
-the reserved scratch layout remains compatible.
+dump now uses **216 VGPRs, 94 SGPRs and zero private/scratch bytes**, versus
+224 VGPRs before the API conversion and 256 VGPRs with spills in the recovered
+version. Obsolete up/gate schedules were removed; the reserved scratch layout
+remains compatible.
+
+The last two inline-assembly sites in the regular kernel were replaced with
+FlyDSL APIs: unsigned top-k reduction now calls
+`fx.coop.warp_reduce(..., fx.ReductionOp.MAX, width=64)`, and the mailbox retry
+loop uses `rocdl.s_nop(0)`. The generated gfx950 ISA still contains 48
+fused `v_max_u32_dpp` instructions for S=4, while the source and emitted LLVM IR
+contain no inline assembly. A fresh eight-GPU before/after run measured
+35.44/42.99/56.02 µs and 35.55/42.72/56.32 µs for S=1/2/4 respectively, changes
+of +0.31%, -0.65%, and +0.55%. Artifacts are `fx-api-baseline8.jsonl`,
+`fx-api-candidate8.jsonl`, and `fx-api-isa8-s4/`.
 
 The peer format changes numerical behavior: each rank rounds its attention and
 FFN partial to BF16 before the ordered FP32 reduction, matching TileRT's peer
@@ -193,8 +205,9 @@ changing inputs for every 2/4/8-GPU × S=1/2/4 combination, with exact agreement
 across ranks and segment goldens. The independent end-to-end comparison passed
 41 of 45 inputs at relative L2 1.49–2.85%; the existing near-tied-routing check
 skipped four inputs (NP2/S2 once, NP8/S2 once, NP8/S4 twice). Those inputs still
-passed the segment checks and rank equality. Its test
-CLI returns nonzero on failure:
+passed the segment checks and rank equality. The API-only follow-up reran the
+same matrix with the same result; logs are `fx-api-check-np{2,4,8}-s{1,2,4}.log`.
+Its test CLI returns nonzero on failure:
 
 ```bash
 /opt/venv/bin/python tests/kernels/test_glm5_mla_moe_layer.py \

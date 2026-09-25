@@ -9,7 +9,8 @@
 导入汇编版、用 FlyDSL 实现最终 MoE 归约的混合版，以及调优后的常规
 `Glm5MlaMoeLayer`，在已测分片上均已接近 TileRT 延迟。使用 `--backend flydsl`
 选择常规 kernel，使用 `--backend tilert_inline --replace ffn` 选择混合版。
-常规 kernel 不导入 TileRT 汇编主体。
+常规 kernel 不导入 TileRT 汇编主体，也不含 `InlineAsmOp`；剩余的 wave 归约和轮询循环
+调度操作均使用 FlyDSL API。
 
 ## 测量范围与结果
 
@@ -26,19 +27,20 @@
 |---:|---|---:|---:|---:|
 | 2 | FlyDSL 中的适配版 TileRT 汇编 | 34.59 | 41.10 | 52.95 |
 | 2 | 混合版：FlyDSL 最终归约与输出 | 34.54 | 40.82 | 52.54 |
-| 2 | 常规 FlyDSL kernel | 33.69 | 40.01 | 53.48 |
+| 2 | 常规 FlyDSL kernel | 33.98 | 39.80 | 53.55 |
 | 4 | FlyDSL 中的适配版 TileRT 汇编 | 35.39 | 42.08 | 53.60 |
 | 4 | 混合版：FlyDSL 最终归约与输出 | 35.33 | 42.06 | 54.52 |
-| 4 | 常规 FlyDSL kernel | 34.55 | 41.52 | 54.57 |
+| 4 | 常规 FlyDSL kernel | 34.30 | 41.51 | 54.42 |
 | 8 | 原生 TileRT | 35.85 | 42.90 | 55.93 |
 | 8 | FlyDSL 中的 TileRT 汇编 | 36.10 | 42.83 | 55.69 |
 | 8 | 混合版：FlyDSL 最终归约与输出 | 36.54 | 43.11 | 55.63 |
-| 8 | 常规 FlyDSL kernel | 35.65 | 43.03 | 56.32 |
+| 8 | 常规 FlyDSL kernel | 35.55 | 42.72 | 56.32 |
 
 数据来源为结果目录中的 `corrected-inline{2,4,8}.jsonl`、`corrected-tilert8.jsonl`、
-`final-ffn{2,4,8}.jsonl`、`verified-flydsl{2,4,8}.jsonl` 和 `verified-tilert8.jsonl`。
-混合版和常规 FlyDSL kernel 最慢的测量项与对应汇编或原生基线的差距均约在 2% 以内，
-部分常规 kernel 项更快。此前常规八卡 S=4 为 61.91 µs（`final-flydsl8.jsonl`）。
+`final-ffn{2,4,8}.jsonl`、`fx-api-candidate{2,4,8}.jsonl` 和
+`verified-tilert8.jsonl`。混合版和常规 FlyDSL kernel 仍接近对应汇编或原生基线；
+常规 kernel 没有任何一项慢超过 1.6%，部分项目更快。此前常规八卡 S=4 为
+61.91 µs（`final-flydsl8.jsonl`）。
 
 **已作废的测量：** 未带 `corrected-`/`final-` 前缀的早期 `matched-*`、`inline*`、
 `dispatch*`、`ffn*` 运行使用了错误的 Q-B 转换。TileRT 要求先排列全部非位置编码行，
@@ -74,9 +76,17 @@ S=1 完整导入版做过逐条检查：FlyDSL code object 的两条参数指针
 常规 FlyDSL kernel 使用每个 wave 对应一个 peer 的发送方式、每个 wave 一个 peer
 指针、按位与计算 CTA 映射，以及按 sample 流水执行的八个 intermediate 的 up/gate
 tile。汇编对比指导了最后两项优化：BF16 打包通信，以及每个 router CTA 只处理一个
-sample。S=4 编译结果使用 **224 个 VGPR、94 个 SGPR，private/scratch 为零**；
-恢复版本使用 256 个 VGPR 且有 spill。已删除不再使用的 up/gate 调度，保留预留的
-scratch 布局以维持兼容。
+sample。API 替换后的 S=4 编译结果使用 **216 个 VGPR、94 个 SGPR，
+private/scratch 为零**，此前为 224 个 VGPR，恢复版本则使用 256 个 VGPR 且有
+spill。已删除不再使用的 up/gate 调度，保留预留的 scratch 布局以维持兼容。
+
+常规 kernel 中最后两处内联汇编已改用 FlyDSL API：无符号 top-k 归约调用
+`fx.coop.warp_reduce(..., fx.ReductionOp.MAX, width=64)`，mailbox 重试循环使用
+`rocdl.s_nop(0)`。生成的 gfx950 ISA 在 S=4 下仍包含 48 条融合
+`v_max_u32_dpp`，源代码和生成的 LLVM IR 中均无内联汇编。八卡前后紧邻测量的
+S=1/2/4 分别为 35.44/42.99/56.02 µs 与 35.55/42.72/56.32 µs，变化为
++0.31%、-0.65%、+0.55%。产物位于 `fx-api-baseline8.jsonl`、
+`fx-api-candidate8.jsonl` 和 `fx-api-isa8-s4/`。
 
 通信格式改变了数值行为：每个 rank 的 attention 和 FFN partial 先舍入为 BF16，
 再按 rank 顺序以 FP32 累加，与 TileRT 的通信精度一致。独立端到端 golden 仍使用
@@ -161,8 +171,9 @@ trace 也支持 2/4 peers；NP2/S4 已在 `verified-trace-flydsl2-s4` 实测。�
 `corrected-dispatch8.jsonl`。常规 kernel 在 2/4/8 GPU × S=1/2/4 的每种组合下
 检查五组变化输入、跨 rank 逐位一致和分段 golden。独立端到端比较在 45 个输入中
 通过了 41 个，相对 L2 为 1.49–2.85%；原有的近似并列 routing 检查跳过四个输入
-（NP2/S2 一次、NP8/S2 一次、NP8/S4 两次），这些输入仍通过分段和跨 rank 检查。测试 CLI
-会在失败时返回非零退出码：
+（NP2/S2 一次、NP8/S2 一次、NP8/S4 两次），这些输入仍通过分段和跨 rank 检查。
+API-only 后续修改重新运行了相同矩阵，结果不变；日志位于
+`fx-api-check-np{2,4,8}-s{1,2,4}.log`。测试 CLI 会在失败时返回非零退出码：
 
 ```bash
 /opt/venv/bin/python tests/kernels/test_glm5_mla_moe_layer.py \

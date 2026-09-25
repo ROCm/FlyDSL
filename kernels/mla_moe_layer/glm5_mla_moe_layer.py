@@ -224,26 +224,9 @@ def _xshfl(v, off):
     return y.bitcast(fx.Float32) if is_f else y
 
 
-_UMAX_ASM = "\n".join(
-    [
-        "s_nop 1\nv_max_u32_dpp $0, $0, $0 " + c
-        for c in (
-            "row_shr:1 bound_ctrl:0",
-            "row_shr:2 bound_ctrl:0",
-            "row_shr:4 bound_ctrl:0",
-            "row_shr:8 bound_ctrl:0",
-            "row_bcast:15 row_mask:0xa",
-            "row_bcast:31 row_mask:0xc",
-        )
-    ]
-)
-
-
 def _wave_umax(v):
-    """Unsigned max over the (fully active) wave as a wave-uniform Int32: fused DPP
-    max steps (out-of-row sources read 0) leave it in lane 63, read into an SGPR."""
-    x = llvm.InlineAsmOp(T.i32, [fx.Int32(v).ir_value()], _UMAX_ASM, "=v,0").result
-    return fx.Int32(rocdl.readlane(T.i32, x, fx.Int32(63).ir_value()))
+    """Unsigned max over the fully active wave as a wave-uniform Int32."""
+    return fx.Int32(fx.coop.warp_reduce(fx.Uint32(v), fx.ReductionOp.MAX, width=64))
 
 
 def _xred(v, off, op):
@@ -513,9 +496,9 @@ def build_layer(
             All pairs are loaded together with plain 8 / 16-byte coherent buffer loads
             (sc1 locally, sc0 sc1 for peer memory); while any tag is not this launch's
             the whole batch is re-loaded, so a batch costs one round trip after its
-            last producer lands.  A side-effecting (compiler-opaque) asm statement in
-            the retry loop keeps the loads from being hoisted.  Returns one list of
-            Int32 value bits per spec."""
+            last producer lands.  A side-effecting scheduling op in the retry loop
+            keeps the loads from being hoisted.  Returns one list of Int32 value bits
+            per spec."""
             if const_expr(len(specs) == 0):
                 return []
             if const_expr(len(specs) > batch):  # bound live registers
@@ -541,7 +524,7 @@ def build_layer(
 
             v = load_all()
             while pending(v):
-                llvm.InlineAsmOp(None, [], "s_nop 0", "", has_side_effects=True)
+                rocdl.s_nop(0)
                 v = load_all()
             outs_, e = [], 0
             for _, _, n in specs:
