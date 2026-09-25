@@ -22,6 +22,7 @@ import pytest
 import torch
 
 import flydsl.compiler as flyc
+import flydsl.expr as fx
 from flydsl.compiler.jit_argument import TorchTensorJitArg
 
 # ---------------------------------------------------------------------------
@@ -163,7 +164,6 @@ def test_repeated_launch_still_packs():
 
 @pytest.mark.l2_device
 def test_launch_big_view_neg1_diagnostic():
-    import flydsl.expr as fx
 
     @flyc.kernel(known_block_size=[64, 1, 1])
     def kern(OUT: fx.Tensor):
