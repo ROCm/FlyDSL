@@ -141,8 +141,15 @@ class RocmBackend(BaseBackend):
                 func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
     def gpu_module_targets(self) -> List[str]:
-        chip = self.target.arch
-        return [f'#rocdl.target<chip = "{chip}">']
+        # Intentionally empty: the ROCm pipeline attaches the authoritative
+        # #rocdl.target via `rocdl-attach-target` (binary_prep_fragments),
+        # which carries the compile options (O, abi, fast/unsafe-math,
+        # wave64, link_libs). Attaching a bare target here as well made
+        # gpu-module-to-binary serialize one object per target and select the
+        # *bare* one (first object, no offloading handler) — doubling backend
+        # work and silently discarding compile options and link_libs
+        # (ROCm/FlyDSL#1054).
+        return []
 
     # -- cache / fingerprint ---------------------------------------------
 
