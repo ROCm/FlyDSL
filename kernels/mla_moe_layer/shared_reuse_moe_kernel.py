@@ -66,8 +66,10 @@ from kernels.mla_moe_layer.config import (
     SOFTMAX_SCALE,
     TOP_K,
     V_DIM,
+    ExpertActivation,
+    ExpertWeight,
     MoeMode,
-    as_moe_mode,
+    moe_format,
 )
 
 BLOCKS = 256
@@ -101,10 +103,6 @@ N_ROUTER = N_EXPERTS // ROUTER_TILE
 N_UG_PER_SLOT = INTER // UG_TILE
 
 
-XQ_BLOCKS = HIDDEN // 128  # MoE activation quant blocks
-XQ_WAVES = (XQ_BLOCKS + N_ROUTER - 1) // N_ROUTER  # router task t quantizes blocks t, t + N_ROUTER, ..
-assert XQ_WAVES <= WAVES  # one sample per router CTA
-
 # gfx94x/95x cache policy bits (LLVM CPol): SC0 = 1, NT = 2, SC1 = 16.  SC1:SC0 is
 # the coherence scope of the access itself: SC1 = device (past the per-XCD
 # non-coherent caches), SC0|SC1 = system (peer GPUs over XGMI).
@@ -122,7 +120,9 @@ def layout(S: int, heads: int, npes: int, topk: int, moe_mode: MoeMode | str = M
     """Byte offsets of the per-rank scratch and of the symmetric buffer.
 
     Every mailbox holds ``(value, tag)`` int32 pairs (8 bytes per element)."""
-    mode = as_moe_mode(moe_mode)
+    fmt = moe_format(moe_mode)
+    quant_group = fmt.activation_group
+    xq_blocks = 0 if quant_group is None else HIDDEN // quant_group
     n_split = topk // SPLIT_KEYS
     pr = 8
     items = [
@@ -139,8 +139,8 @@ def layout(S: int, heads: int, npes: int, topk: int, moe_mode: MoeMode | str = M
         ("o", S * heads * V_DIM * pr),
         ("a", S * HIDDEN * pr),  # post-attention hidden (bf16 values)
         ("scores", S * N_EXPERTS * pr),
-        ("xq", S * HIDDEN // (4 if mode is MoeMode.W8A8 else 2) * pr),
-        ("xqs", S * XQ_BLOCKS * pr if mode is MoeMode.W8A8 else 0),
+        ("xq", S * HIDDEN // (4 if quant_group is not None else 2) * pr),
+        ("xqs", S * xq_blocks * pr),
         ("sel", S * MOE_SLOTS * pr),
         ("prob", S * MOE_SLOTS * pr),
         ("mid", S * MOE_SLOTS * INTER * pr),
@@ -272,6 +272,18 @@ def _fp8_to_bf16x8(w0, w1):
     return fx.Vector.from_elements(parts, fx.BFloat16)
 
 
+def _mxfp4_to_bf16x8(word, scale):
+    """One packed dword of eight E2M1 values -> scaled BF16 MFMA operand."""
+
+    parts = []
+    for select in range_constexpr(4):
+        pair = fx.Vector(
+            rocdl.cvt_scalef32_pk_bf16_fp4(T.vec(2, T.bf16), as_ir_value(word), as_ir_value(scale), select)
+        )
+        parts += [pair[0], pair[1]]
+    return fx.Vector.from_elements(parts, fx.BFloat16)
+
+
 def stage_tasks(S: int, heads: int, topk: int):
     """[(stage name, task count)] in execution order."""
     return [
@@ -309,12 +321,24 @@ def build_shared_reuse_kernel(
     """
     assert heads == 8, "the split-attention mapping uses one wave per local head"
     assert topk % SPLIT_KEYS == 0 and 1 <= S <= 8
-    mode = as_moe_mode(moe_mode)
-    use_w8a8 = mode is MoeMode.W8A8
+    fmt = moe_format(moe_mode)
+    use_fp8_block128 = fmt.activation is ExpertActivation.FP8_BLOCK128
+    use_mxfp8_block32 = fmt.activation is ExpertActivation.MXFP8_BLOCK32
+    use_mxfp4_weight = fmt.weight is ExpertWeight.MXFP4_BLOCK32
+    XQ_BLOCKS = 0 if fmt.activation_group is None else HIDDEN // fmt.activation_group
+    PUBLISH_BLOCKS = HIDDEN // (32 if use_mxfp8_block32 else 128)
+    XQ_WAVES = (
+        (PUBLISH_BLOCKS + N_ROUTER * 4 - 1) // (N_ROUTER * 4)
+        if use_mxfp8_block32
+        else (PUBLISH_BLOCKS + N_ROUTER - 1) // N_ROUTER
+    )
+    assert XQ_WAVES <= WAVES
+    down_scale_words = 0 if fmt.activation_group is None else S * MOE_SLOTS * INTER // fmt.activation_group
+    misc_words = 8 + max(S * XQ_BLOCKS, down_scale_words)
     H = heads
     W = npes
     G = BLOCKS
-    SC, SY = layout(S, H, W, topk, mode)
+    SC, SY = layout(S, H, W, topk, moe_mode)
     N_SPLIT = topk // SPLIT_KEYS
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
@@ -354,7 +378,7 @@ def build_shared_reuse_kernel(
         x: fx.Array[fx.Float32, XN, 16]  # bf16 activations (pairs) / split q + KV tile
         out: fx.Array[fx.Float32, ON, 16]
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-        misc: fx.Array[fx.Float32, 8 + S * XQ_BLOCKS, 16]
+        misc: fx.Array[fx.Float32, misc_words, 16]
         p: fx.Array[fx.Float32, H * SPLIT_KEYS, 16]
         keys: fx.Array[fx.Int32, SPLIT_KEYS, 16]
         dnw: fx.Array[fx.Float32, S * MOE_SLOTS, 16]  # expert-down route weights
@@ -569,6 +593,11 @@ def build_shared_reuse_kernel(
                 v = _xred(v, 32 >> sh, fx.max)
             return v
 
+        def subgroup16_max(v):
+            for off in (8, 4, 2, 1):
+                v = _xred(v, off, fx.max)
+            return v
+
         def block_sums(vs):
             """Block-wide sums of several per-thread values with one LDS exchange."""
             ws = [wave_sum(v) for v in vs]
@@ -622,6 +651,19 @@ def build_shared_reuse_kernel(
             s = ld_f32(s_rsrc, (rg * 16 // SCALE_BM) * (K // 128) + kc // 2)
             return ("f8f8", wv, lambda: s * coef(), b_word + (lane // 16) * 4)
 
+        def unit_mxfp4(w_rsrc, s_rsrc, rg, kc, K, b_word, coef=None, ln=None):
+            """Issue one packed 128-K MXFP4 tile and its four per-row E8M0 scales."""
+
+            ln = lane if ln is None else ln
+            raw = fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 128) + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
+            row = rg * 16 + ln % 16
+            packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
+            scales = [
+                ((packed_scale.shrui(fx.Int32(sp * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
+                for sp in range_constexpr(4)
+            ]
+            return ("mxfp4", (raw, scales), coef, b_word + (lane // 16) * 4)
+
         def unit_bf16(w_rsrc, rg, kc, NKC, b_word, ln=None):
             ln = lane if ln is None else ln
             wv = [
@@ -632,11 +674,26 @@ def build_shared_reuse_kernel(
 
         def mma_units(acc, units):
             """acc[4] += coef * (W_chunk @ X_chunk) for every issued unit."""
-            for fmt, wv, coef, bw in units:
-                if const_expr(callable(coef)):
+            for unit_format, wv, coef, bw in units:
+                if const_expr(callable(coef) and unit_format != "mxfp4"):
                     coef = coef()
+                if const_expr(unit_format == "mxfp4"):
+                    raw, scales = wv
+                    for sp in range_constexpr(4):
+                        a = _mxfp4_to_bf16x8(raw[sp], scales[sp])
+                        b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
+                        c = fx.Vector.filled(4, 0.0, fx.Float32)
+                        c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
+                        part_coef = coef[sp] if const_expr(isinstance(coef, list)) else coef
+                        if const_expr(callable(part_coef)):
+                            part_coef = part_coef()
+                        if const_expr(part_coef is None):
+                            acc = [acc[e] + c[e] for e in range(4)]
+                        else:
+                            acc = [acc[e] + c[e] * part_coef for e in range(4)]
+                    continue
                 c = fx.Vector.filled(4, 0.0, fx.Float32)
-                if const_expr(fmt == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
+                if const_expr(unit_format == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
                     a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
                     bv = [
                         fx.Vector(fx.ptr_load(xs + (bw + h * 16), result_type=v4f)).bitcast(fx.Int32) for h in range(2)
@@ -646,8 +703,8 @@ def build_shared_reuse_kernel(
                     c = fx.Vector(
                         rocdl.mfma_scale_f32_16x16x128_f8f6f4(T.vec(4, T.f32), [a, b, c, 0, 0, 0, one, 0, one])
                     )
-                for sp in range_constexpr(2 if fmt != "f8f8" else 0):
-                    if const_expr(fmt == "fp8"):
+                for sp in range_constexpr(2 if unit_format != "f8f8" else 0):
+                    if const_expr(unit_format == "fp8"):
                         a = _fp8_to_bf16x8(wv[0][sp * 2], wv[0][sp * 2 + 1])
                     else:
                         a = wv[sp].bitcast(fx.BFloat16)
@@ -770,9 +827,28 @@ def build_shared_reuse_kernel(
             d0, d1 = _fp8_roundtrip(q0, q1)
             return d0, d1, qs
 
+        def quant_mxfp8(a0, a1):
+            """Per-16-lane/32-value MXFP8 quantization with an E8M0 scale."""
+
+            amax = subgroup16_max(fx.max(fmath.absf(a0), fmath.absf(a1)))
+            nz = amax > 0.0
+            raw_scale = amax * (1.0 / FP8_MAX)
+            bits = raw_scale.bitcast(fx.Int32)
+            exponent = (bits.shrui(fx.Int32(23))) & fx.Int32(0xFF)
+            round_up = ((bits & fx.Int32(0x400000)) != 0) & (
+                ((bits & fx.Int32(0x200000)) != 0) | ((bits & fx.Int32(0x1FFFFF)) != 0) | (exponent > 0)
+            )
+            exponent = exponent + round_up.select(fx.Int32(1), fx.Int32(0))
+            scale = nz.select((exponent << fx.Int32(23)).bitcast(fx.Float32), fx.Float32(1.0))
+            inv = nz.select(_rcp(scale), fx.Float32(1.0))
+            q0 = fx.min(fx.max(a0 * inv, -FP8_MAX), FP8_MAX)
+            q1 = fx.min(fx.max(a1 * inv, -FP8_MAX), FP8_MAX)
+            d0, d1 = _fp8_roundtrip(q0, q1)
+            return d0, d1, scale
+
         def stage_moe_input(samples):
             """Stage normalized expert inputs published by the router into LDS."""
-            if const_expr(use_w8a8):
+            if const_expr(use_fp8_block128):
                 nxw = HIDDEN // 4 // THREADS
                 got = poll(
                     [(mb("xq"), sx * (HIDDEN // 4) + tid + i * THREADS, 1) for sx in samples for i in range(nxw)]
@@ -787,6 +863,36 @@ def build_shared_reuse_kernel(
                             misc,
                             8 + j * XQ_BLOCKS + tid,
                             got[len(samples) * nxw + j][0].bitcast(fx.Float32),
+                        )
+            elif const_expr(use_mxfp8_block32):
+                chunks = HIDDEN // 8
+                per_thread = (chunks + THREADS - 1) // THREADS
+                data_specs = []
+                for sx in samples:
+                    for i in range_constexpr(per_thread):
+                        chunk = fx.min(tid + i * THREADS, chunks - 1)
+                        data_specs.append((mb("xq"), sx * (HIDDEN // 4) + chunk * 2, 2))
+                scale_specs = [(mb("xqs"), sx * XQ_BLOCKS + fx.min(tid, XQ_BLOCKS - 1), 1) for sx in samples]
+                got = poll(data_specs + scale_specs)
+                for j in range_constexpr(len(samples)):
+                    for i in range_constexpr(per_thread):
+                        chunk = tid + i * THREADS
+                        if chunk < chunks:
+                            words = got[j * per_thread + i]
+                            values = _fp8_to_bf16x8(words[0], words[1])
+                            for pair in range_constexpr(4):
+                                lds_st(
+                                    xs,
+                                    j * (HIDDEN // 2) + chunk * 4 + pair,
+                                    fx.Vector.from_elements(
+                                        [values[2 * pair], values[2 * pair + 1]], fx.BFloat16
+                                    ).bitcast(fx.Float32)[0],
+                                )
+                    if tid < XQ_BLOCKS:
+                        lds_st(
+                            misc,
+                            8 + j * XQ_BLOCKS + tid,
+                            got[len(samples) * per_thread + j][0].bitcast(fx.Float32),
                         )
             else:
                 nxw = HIDDEN // 2 // THREADS
@@ -1404,13 +1510,17 @@ def build_shared_reuse_kernel(
                 lambda k: (mb("a"), router_sample * HIDDEN + k * ROW_TILE + ROW_TILE - 1),
                 mark=("router", tt),
             )
-            # this task's FP8 activation block inputs ride along with the staging loads:
-            # wave w quantizes block w * N_ROUTER + t of this CTA's sample
+            # This task's expert-activation block inputs ride along with the staging
+            # loads. MXFP8 uses four independent 16-lane groups per wave.
             r_gp = _rsrc(g_post)
-            x_blk = wave * N_ROUTER + t
+            if const_expr(use_mxfp8_block32):
+                x_blk = (wave * N_ROUTER + t) * 4 + lane // 16
+                xk = fx.min(x_blk, PUBLISH_BLOCKS - 1) * 32 + lane % 16 * 2
+            else:
+                x_blk = wave * N_ROUTER + t
+                xk = fx.min(x_blk, PUBLISH_BLOCKS - 1) * 128 + lane * 2
             x_s = router_sample
-            x_ok = (wave < XQ_WAVES) & (x_blk < XQ_BLOCKS)
-            xk = fx.min(x_blk, XQ_BLOCKS - 1) * 128 + lane * 2
+            x_ok = (wave < XQ_WAVES) & (x_blk < PUBLISH_BLOCKS)
             xg = (ld_bf16(r_gp, xk), ld_bf16(r_gp, xk + 1))
             xa = []
 
@@ -1429,7 +1539,7 @@ def build_shared_reuse_kernel(
                 x_rstd = rstds[0]
                 a0, a1 = xa[0]
                 v0, v1 = a0 * x_rstd * xg[0], a1 * x_rstd * xg[1]
-                if const_expr(use_w8a8):
+                if const_expr(use_fp8_block128):
                     q0, q1, qs = quant_scaled(v0, v1)
                     w8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
                     w8n = _xshfl(w8, 1)
@@ -1439,6 +1549,15 @@ def build_shared_reuse_kernel(
                     d0, d1 = d0 * qs, d1 * qs
                     if lane == 0:
                         put(mb("xqs"), x_s * XQ_BLOCKS + x_blk, qs)
+                elif const_expr(use_mxfp8_block32):
+                    d0, d1, qs = quant_mxfp8(v0, v1)
+                    w8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, d0, d1, fx.Int32(0), False)) & 0xFFFF
+                    w8n = _xshfl(w8, 1)
+                    if lane % 2 == 0:
+                        put(mb("xq"), (x_s * HIDDEN + xk) // 4, w8 | (w8n << 16))
+                    if lane % 16 == 0:
+                        put(mb("xqs"), x_s * XQ_BLOCKS + x_blk, qs)
+                    d0, d1 = d0 * qs, d1 * qs
                 else:
                     d0, d1 = bf16_round(v0), bf16_round(v1)
                     put(mb("xq"), (x_s * HIDDEN + xk) // 2, bf16_pair(d0, d1))
@@ -1472,27 +1591,30 @@ def build_shared_reuse_kernel(
         # ================================ 9. expert up/gate + SiLU
         # One 16-row group (8 gate + 8 up rows), with all eight waves splitting K.
         UG_NKC = HIDDEN // 64
-        UG_W_BYTES = 2 * INTER * HIDDEN
-        UG_S_BYTES = 2 * INTER // SCALE_BM * (HIDDEN // 128) * 4
+        UG_UNIT_K = 128 if (use_fp8_block128 or use_mxfp4_weight) else 64
+        UG_W_BYTES = 2 * INTER * HIDDEN // (2 if use_mxfp4_weight else 1)
+        UG_S_BYTES = 2 * INTER * (HIDDEN // 32) if use_mxfp4_weight else 2 * INTER // SCALE_BM * (HIDDEN // 128) * 4
 
         if const_expr(S == 1):
             # one task per CTA: task u takes intermediates (u % 32) * 8 of routed slot
             # u // 32 (slot 8 for u < 32, which also take the shared expert's); the 8 gate
             # + 8 up rows are one MFMA row group and all waves split K
             UG8 = 8
-            UG8_CPW = UG_NKC // WAVES
-            UG8_UNITS = UG8_CPW // 2 if use_w8a8 else UG8_CPW
+            UG8_UNITS = (HIDDEN // UG_UNIT_K) // WAVES
             for u in range(start("ug"), G, G):
                 u = fx.Int32(u)
                 stamp("ug", u, 0)
                 s_u, c = fx.Int32(0), u % (INTER // UG8)
                 has_sh = u < INTER // UG8
                 slot = has_sh.select(fx.Int32(MOE_SLOTS - 1), u // (INTER // UG8))
-                # the FP8 activation is computed here from the post-attention state (in
-                # parallel with the router): RMSNorm, then per-128 quant with one wave per
-                # block -> X[0] (fp8 values in bf16), block scales -> misc[8:]
-                NB = XQ_BLOCKS // WAVES
-                ks_ = [(wave + j * WAVES) * 128 + lane * 2 for j in range(NB)]
+                # The expert activation is recomputed here in parallel with the router.
+                # MXFP8 uses the four independent 16-lane groups in each wave.
+                if const_expr(use_mxfp8_block32):
+                    NB = XQ_BLOCKS // (WAVES * 4)
+                    ks_ = [((wave + j * WAVES) * 4 + lane // 16) * 32 + lane % 16 * 2 for j in range(NB)]
+                else:
+                    NB = PUBLISH_BLOCKS // WAVES
+                    ks_ = [(wave + j * WAVES) * 128 + lane * 2 for j in range(NB)]
                 r_gp = _rsrc(g_post)
                 gps = [(ld_bf16(r_gp, k), ld_bf16(r_gp, k + 1)) for k in ks_]  # issued ahead of the wait
                 bs = load_bias()
@@ -1509,8 +1631,29 @@ def build_shared_reuse_kernel(
                     r_sug = bo.create_buffer_resource_from_addr(
                         s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), num_records_bytes=ns
                     )
-                    kc = wave * UG8_CPW + cc * (2 if use_w8a8 else 1)
-                    nwc = 2 if use_w8a8 else 1
+                    unit = wave * UG8_UNITS + cc
+                    if const_expr(use_mxfp4_weight):
+                        coefficients = None
+                        if const_expr(use_mxfp8_block32):
+                            coefficients = []
+                            for sp in range_constexpr(4):
+
+                                def coefficient(sp=sp, unit=unit):
+                                    return _uniform_f32(lds_ld(misc, 8 + unit * 4 + sp))
+
+                                coefficients.append(coefficient)
+                        return unit_mxfp4(
+                            r_wug,
+                            r_sug,
+                            w_rg,
+                            unit,
+                            HIDDEN,
+                            unit * 64,
+                            coefficients,
+                            w_ln,
+                        )
+                    kc = unit * (2 if use_fp8_block128 else 1)
+                    nwc = 2 if use_fp8_block128 else 1
                     wv = [
                         fx.Vector(
                             bo.buffer_load(r_wug, ((w_rg * UG_NKC + kc + h) * 64 + w_ln) * 4, vec_width=4, dtype=T.i32)
@@ -1518,7 +1661,7 @@ def build_shared_reuse_kernel(
                         for h in range(nwc)
                     ]
                     sc = ld_f32(r_sug, (s_rg * 16 // SCALE_BM) * (HIDDEN // 128) + kc // 2)
-                    if const_expr(use_w8a8):
+                    if const_expr(use_fp8_block128):
                         return (
                             "f8f8",
                             wv,
@@ -1546,11 +1689,17 @@ def build_shared_reuse_kernel(
                 rstd = _rsq(block_sum(ss) * (1.0 / HIDDEN) + EPS)
                 for j in range_constexpr(NB):
                     v0, v1 = av[j][0] * rstd * gps[j][0], av[j][1] * rstd * gps[j][1]
-                    if const_expr(use_w8a8):
+                    if const_expr(use_fp8_block128):
                         q0, q1, qs = quant_scaled(v0, v1)
                         st_f8(ks_[j], q0, q1)
                         if lane == 0:
                             lds_st(misc, 8 + wave + j * WAVES, qs)
+                    elif const_expr(use_mxfp8_block32):
+                        d0, d1, qs = quant_mxfp8(v0, v1)
+                        lds_st(xs, ks_[j] // 2, bf16_pair(d0, d1))
+                        if lane % 16 == 0:
+                            block = (wave + j * WAVES) * 4 + lane // 16
+                            lds_st(misc, 8 + block, qs)
                     else:
                         lds_st(xs, ks_[j] // 2, bf16_pair(v0, v1))
                 if wave == 0:
@@ -1592,9 +1741,8 @@ def build_shared_reuse_kernel(
             # One eight-intermediate tile per CTA and sample. Shared weights use
             # the sample columns of one MFMA; routed tiles pipeline over samples.
             UG8 = 8
-            UG8_CPW = UG_NKC // WAVES
-            UG8_UNITS = UG8_CPW // 2 if use_w8a8 else UG8_CPW
-            XW = HIDDEN // (4 if use_w8a8 else 2)
+            UG8_UNITS = (HIDDEN // UG_UNIT_K) // WAVES
+            XW = HIDDEN // (4 if use_fp8_block128 else 2)
             u = fx.Int32(start("ug"))
             c = u % (INTER // UG8)
             has_sh = u < INTER // UG8
@@ -1615,8 +1763,32 @@ def build_shared_reuse_kernel(
                 sn = n_sel() if sample is None else fx.Int32(sample)
                 units = []
                 for cc in range_constexpr(UG8_UNITS):
-                    kc = wave * UG8_CPW + cc * (2 if use_w8a8 else 1)
-                    nwc = 2 if use_w8a8 else 1
+                    unit = wave * UG8_UNITS + cc
+                    if const_expr(use_mxfp4_weight):
+                        coefficients = None
+                        if const_expr(use_mxfp8_block32):
+                            coefficients = []
+                            for sp in range_constexpr(4):
+
+                                def coefficient(sp=sp, unit=unit, sn=sn):
+                                    return lds_ld(misc, 8 + sn * XQ_BLOCKS + unit * 4 + sp)
+
+                                coefficients.append(coefficient)
+                        units.append(
+                            unit_mxfp4(
+                                rw,
+                                rs,
+                                w_rg,
+                                unit,
+                                HIDDEN,
+                                sn * XW + unit * 64,
+                                coefficients,
+                                w_ln,
+                            )
+                        )
+                        continue
+                    kc = unit * (2 if use_fp8_block128 else 1)
+                    nwc = 2 if use_fp8_block128 else 1
                     wv = [
                         fx.Vector(
                             bo.buffer_load(rw, ((w_rg * UG_NKC + kc + j) * 64 + w_ln) * 4, vec_width=4, dtype=T.i32)
@@ -1626,7 +1798,7 @@ def build_shared_reuse_kernel(
                     sc = ld_f32(rs, (s_rg * 16 // SCALE_BM) * (HIDDEN // 128) + kc // 2)
 
                     # Bind each chunk's operands; the deferred scale follows staging.
-                    if const_expr(use_w8a8):
+                    if const_expr(use_fp8_block128):
 
                         def coefficient(sc=sc, kb=kc // 2, sn=sn):
                             return sc * lds_ld(misc, 8 + sn * XQ_BLOCKS + kb)
@@ -1680,10 +1852,13 @@ def build_shared_reuse_kernel(
         DN_NKC = INTER // 64
         DN_R = (DN_TILE + 15) // 16  # 16-row groups touched by a tile (24-row tiles start at row 0 or 8 of one)
         DN_WPR = WAVES // DN_R
-        DN_K_PER_UNIT = 2 if use_w8a8 else 1
-        DN_NU = S * MOE_SLOTS * DN_NKC // DN_K_PER_UNIT
+        DN_UNIT_K = 128 if (use_fp8_block128 or use_mxfp4_weight) else 64
+        DN_UNITS_PER_SLOT = INTER // DN_UNIT_K
+        DN_NU = S * MOE_SLOTS * DN_UNITS_PER_SLOT
         DN_UPW = (DN_NU + DN_WPR - 1) // DN_WPR
         DN_BLK = S * MOE_SLOTS * INTER // 128
+        DN_W_BYTES = HIDDEN * INTER // (2 if use_mxfp4_weight else 1)
+        DN_S_BYTES = HIDDEN * (INTER // 32) if use_mxfp4_weight else HIDDEN // SCALE_BM * (INTER // 128) * 4
         DN_BATCH = 9  # 128-k chunks per wave in flight / prefetched before the mid wait
         for t in range(start("down"), N_DN_TILES, G):
             t = fx.Int32(t)
@@ -1702,30 +1877,62 @@ def build_shared_reuse_kernel(
             def u_dn(cc):  # cc: 128-k chunk of this wave
                 qu = (wave % DN_WPR) * DN_UPW + cc
                 live = qu < DN_NU
-                q = fx.min(qu, DN_NU - 1) * DN_K_PER_UNIT  # 64-k chunk index over (s, slot, kc)
-                s_q = q // (MOE_SLOTS * DN_NKC)
-                slot_q = (q // DN_NKC) % MOE_SLOTS
-                kc = q % DN_NKC
+                q = fx.min(qu, DN_NU - 1)  # unit index over (sample, slot, K chunk)
+                s_q = q // (MOE_SLOTS * DN_UNITS_PER_SLOT)
+                slot_q = (q // DN_UNITS_PER_SLOT) % MOE_SLOTS
+                kc = q % DN_UNITS_PER_SLOT
                 e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
                 wb = bo.create_buffer_resource_from_addr(
-                    w_dn + fx.Int64(e) * fx.Int64(HIDDEN * INTER),
-                    num_records_bytes=(
-                        None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(HIDDEN * INTER), fx.Int32(0))
-                    ),
+                    w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
+                    num_records_bytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
                 )
-                sb = _rsrc(s_dn + fx.Int64(e) * fx.Int64(HIDDEN // SCALE_BM * (INTER // 128) * 4))
+                sb = bo.create_buffer_resource_from_addr(
+                    s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
+                    num_records_bytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
+                )
 
-                if const_expr(use_w8a8):
+                if const_expr(use_mxfp4_weight):
+                    coefficients = []
+                    if const_expr(use_mxfp8_block32):
+                        for sp in range_constexpr(4):
+
+                            def coefficient(sp=sp, q=q, s_q=s_q):
+                                return (lane % 16 == s_q).select(
+                                    _uniform_f32(lds_ld(misc, q * 4 + sp)), fx.Float32(0.0)
+                                )
+
+                            coefficients.append(coefficient)
+                    else:
+
+                        def coefficient():
+                            return (lane % 16 == s_q).select(
+                                _uniform_f32(lds_ld(dnw, s_q * MOE_SLOTS + slot_q)), fx.Float32(0.0)
+                            )
+
+                        coefficients = coefficient
+                    return unit_mxfp4(
+                        wb,
+                        sb,
+                        dn_rg + gu,
+                        kc,
+                        INTER,
+                        q * 64,
+                        coefficients,
+                        dn_ln,
+                    )
+
+                kc64 = kc * (2 if use_fp8_block128 else 1)
+                if const_expr(use_fp8_block128):
 
                     def coef():  # mid block scale * route weight, only in this sample's column
-                        return (lane % 16 == s_q).select(_uniform_f32(lds_ld(misc, q // 2)), fx.Float32(0.0))
+                        return (lane % 16 == s_q).select(_uniform_f32(lds_ld(misc, q)), fx.Float32(0.0))
 
-                    return unit_f8f8(wb, sb, dn_rg + gu, kc, DN_NKC, INTER, q * 16, coef, dn_ln)
+                    return unit_f8f8(wb, sb, dn_rg + gu, kc64, DN_NKC, INTER, q * 32, coef, dn_ln)
 
                 def coef():
                     return (lane % 16 == s_q).select(_uniform_f32(lds_ld(dnw, s_q * MOE_SLOTS + slot_q)), 0.0)
 
-                return unit_fp8(wb, sb, dn_rg + gu, kc, DN_NKC, INTER, 128, q * 32, coef, dn_ln)
+                return unit_fp8(wb, sb, dn_rg + gu, kc64, DN_NKC, INTER, 128, q * 32, coef, dn_ln)
 
             # the experts are known: stream their down weights while up/gate finishes
             pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]
@@ -1751,11 +1958,17 @@ def build_shared_reuse_kernel(
             for b in range_constexpr((DN_BLK + WAVES - 1) // WAVES):
                 blk = wave + b * WAVES
                 if blk < DN_BLK:
-                    if const_expr(use_w8a8):
+                    if const_expr(use_fp8_block128):
                         q0, q1, qs = quant_scaled(mids[b][0], mids[b][1])
                         st_f8(blk * 128 + lane * 2, q0, q1)
                         if lane == 0:
                             lds_st(misc, blk, qs * lds_ld(dnw, blk // (INTER // 128)))
+                    elif const_expr(use_mxfp8_block32):
+                        d0, d1, qs = quant_mxfp8(mids[b][0], mids[b][1])
+                        lds_st(xs, blk * 64 + lane, bf16_pair(d0, d1))
+                        if lane % 16 == 0:
+                            scale_group = blk * 4 + lane // 16
+                            lds_st(misc, scale_group, qs * lds_ld(dnw, blk // (INTER // 128)))
                     else:
                         lds_st(xs, blk * 64 + lane, bf16_pair(mids[b][0], mids[b][1]))
             gpu.barrier()

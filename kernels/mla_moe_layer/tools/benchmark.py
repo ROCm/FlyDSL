@@ -33,8 +33,14 @@ from kernels.mla_moe_layer.runtime import SymmetricPeerBuffer  # noqa: E402
 
 def _source_hash() -> str:
     digest = hashlib.sha256()
-    for name in ("config.py", "packing.py", "runtime.py", "shared_reuse_moe_kernel.py", "layer.py"):
-        digest.update((ROOT / "kernels/mla_moe_layer" / name).read_bytes())
+    sources = [
+        ROOT / "kernels/common/mx_formats.py",
+        *(ROOT / "kernels/mla_moe_layer" / name for name in ("config.py", "packing.py", "runtime.py")),
+        ROOT / "kernels/mla_moe_layer/shared_reuse_moe_kernel.py",
+        ROOT / "kernels/mla_moe_layer/layer.py",
+    ]
+    for source in sources:
+        digest.update(source.read_bytes())
     return digest.hexdigest()
 
 
@@ -43,7 +49,7 @@ def _worker(rank, args, port):
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=args.npes)
-    weights = make_weights(rank, heads=8, device=device, seed=args.seed)
+    weights = make_weights(rank, heads=8, device=device, seed=args.seed, moe_mode=args.moe_mode)
     native = make_native_glm5_baseline(weights, device, args.moe_mode) if args.backend == "tilert" else None
     cos, sin = rope_table(4096, device=device)
 
@@ -243,6 +249,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.backend == "tilert" and args.npes not in (1, 8):
         parser.error("TileRT's released whole-layer kernel only supports 1 or 8 peers")
+    if args.backend == "tilert" and args.moe_mode not in (MoeMode.W8A8.value, MoeMode.W8A16.value):
+        parser.error("the TileRT comparison adapter supports only w8a8 and w8a16 expert weights")
     if args.backend == "tilert" and any(samples == 8 for samples in args.samples):
         parser.error("TileRT's released whole-layer kernel only supports sample counts 1, 2, and 4")
     if args.trace and args.backend != "flydsl":

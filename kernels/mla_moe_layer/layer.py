@@ -13,8 +13,10 @@ from kernels.mla_moe_layer.config import (
     MAX_LAYERS_PER_STEP,
     MOE_SLOTS,
     N_EXPERTS,
+    ExpertActivation,
     MoeMode,
     as_moe_mode,
+    moe_format,
     validate_shard,
 )
 from kernels.mla_moe_layer.packing import pack_layer_weights
@@ -52,7 +54,7 @@ class SharedReuseMlaMoeLayer:
         validate_shard(samples, W.heads, rank, npes, topk)
         self.moe_mode = as_moe_mode(moe_mode)
         self.W, self.S, self.rank, self.npes, self.topk = W, samples, rank, npes, topk
-        self.packed = pack_layer_weights(W.t)
+        self.packed = pack_layer_weights(W.t, self.moe_mode)
         self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk, self.moe_mode)
         dev = torch.device("cuda", torch.cuda.current_device())
         self.scratch = torch.zeros(self.scr_layout["_bytes"], dtype=torch.uint8, device=dev)
@@ -181,7 +183,7 @@ class SharedReuseMlaMoeLayer:
         from kernels.mla_moe_layer.config import KV_LORA, NOPE_DIM, PE_DIM, Q_LORA, V_DIM
 
         mid = self.debug("mid", (S, MOE_SLOTS, INTER))
-        if self.moe_mode is MoeMode.W8A16:
+        if moe_format(self.moe_mode).activation is ExpertActivation.BF16:
             mid = mid.to(torch.bfloat16).float()
         return dict(
             q_a=self.debug("q_a", (S, Q_LORA)),

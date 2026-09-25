@@ -21,7 +21,7 @@ import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from kernels.mla_moe_layer.config import KV_LORA, PE_DIM, MoeMode  # noqa: E402
+from kernels.mla_moe_layer.config import KV_LORA, PE_DIM, ExpertActivation, MoeMode, moe_format  # noqa: E402
 from kernels.mla_moe_layer.reference import (  # noqa: E402
     golden_layer,
     golden_moe,
@@ -41,11 +41,11 @@ TOL = {  # name -> (atol, rtol) on the fp32/bf16 intermediates
     "scores": (1e-3, 1e-3),
     "prob": (1e-5, 1e-5),
     "xq": (0.0, 0.0),
-    "xq_w8a16": (1.6e-2, 8e-3),  # one bf16 ulp after RMSNorm reduction-order differences
+    "xq_bf16": (1.6e-2, 8e-3),  # one bf16 ulp after RMSNorm reduction-order differences
     "kv": (2e-2, 1e-2),
     "x_out": (1.6e-2, 8e-3),  # 1 bf16 ulp
-    "mid": (1e-3, 1e-3),  # FP8 x FP8 MFMA accumulation (~1e-4 abs), far below one E4M3 step
-    "mid_w8a16": (1.6e-2, 8e-3),  # one bf16 ulp after the V4 expert handoff
+    "mid": (1e-3, 1e-3),  # quantized-activation MFMA accumulation, below one activation step
+    "mid_bf16": (1.6e-2, 8e-3),  # one bf16 ulp after the V4 expert handoff
 }
 # End to end, single FP8 rounding flips propagate, so judge by relative L2.
 REL_L2 = {
@@ -79,7 +79,8 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
     topk = 2048
-    W = make_weights(rank, heads=8, device=dev, seed=seed)
+    activation = moe_format(moe_mode).activation
+    W = make_weights(rank, heads=8, device=dev, seed=seed, moe_mode=moe_mode)
     cos, sin = rope_table(MAX_SEQ, device=dev)
     gen = torch.Generator(device=dev).manual_seed(seed + 99)  # same inputs on every rank
     kv0 = (torch.randn(MAX_SEQ, KV_LORA, generator=gen, device=dev)).to(torch.bfloat16)
@@ -148,9 +149,15 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
         moe = golden_moe(W, got["a"].clone(), allreduce, moe_mode=moe_mode)
         for name in ("scores", "prob"):
             ok &= _check(name, got[name], moe[name], report)
-        xq_check = "xq" if moe_mode == MoeMode.W8A8 else "xq_w8a16"
-        ok &= _check(xq_check, got["xq"], moe["xq"], report, fp8_flips=moe_mode == MoeMode.W8A8)
-        # up/gate + SiLU from the kernel's own FP8 activation
+        xq_check = "xq_bf16" if activation is ExpertActivation.BF16 else "xq"
+        ok &= _check(
+            xq_check,
+            got["xq"],
+            moe["xq"],
+            report,
+            fp8_flips=activation is not ExpertActivation.BF16,
+        )
+        # up/gate + SiLU from the kernel's own staged expert activation
         ug = golden_moe(
             W,
             got["a"].clone(),
@@ -158,7 +165,7 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
             xq=got["xq"].clone(),
             moe_mode=moe_mode,
         )
-        mid_check = "mid" if moe_mode == MoeMode.W8A8 else "mid_w8a16"
+        mid_check = "mid_bf16" if activation is ExpertActivation.BF16 else "mid"
         ok &= _check(mid_check, got["mid"], ug["mid"], report)
         # The peer payload rounds each rank's down partial to BF16 before the
         # ordered FP32 sum (TileRT's communication precision). Model that here;
@@ -196,7 +203,7 @@ def bench_rank(rank, npes, S, cur_pos, iters=320, group=None, seed=1234, moe_mod
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
-    W = make_weights(rank, heads=8, device=dev, seed=seed)
+    W = make_weights(rank, heads=8, device=dev, seed=seed, moe_mode=moe_mode)
     cos, sin = rope_table(MAX_SEQ, device=dev)
     kv = torch.randn(MAX_SEQ, KV_LORA, device=dev).to(torch.bfloat16)
     pe = torch.randn(MAX_SEQ, PE_DIM, device=dev).to(torch.bfloat16)

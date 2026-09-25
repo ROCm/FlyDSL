@@ -3,10 +3,10 @@
 
 """Weights, layouts and the torch golden for the GLM-5 shared/reuse MLA+MoE layer.
 
-One rank's TP shard of one layer. All matrices are row-major ``[N, K]`` FP8
-E4M3FN with fp32 block scales ``[ceil(N / 128), K / BK]`` (``y = W @ x``).
-The golden reduces across ranks through a caller-supplied ``allreduce`` so a
-TP8 run checks each rank against its own shard.
+One rank's TP shard of one layer. Attention matrices use row-major FP8 E4M3FN
+with FP32 block scales. Expert matrices use either that format or packed MXFP4
+with per-1x32 E8M0 scales. The golden reduces through a caller-supplied
+``allreduce`` so a multi-rank run checks every rank against its own shard.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import torch
 
+from kernels.common.mx_formats import dequantize_mxfp4, quant_dequant_mxfp8, quantize_mxfp4
 from kernels.mla_moe_layer.config import (
     EPS,
     FP8_MAX,
@@ -32,8 +33,11 @@ from kernels.mla_moe_layer.config import (
     SOFTMAX_SCALE,
     TOP_K,
     V_DIM,
+    ExpertActivation,
+    ExpertWeight,
     MoeMode,
     as_moe_mode,
+    moe_format,
 )
 
 
@@ -72,8 +76,15 @@ class LayerWeights:
     t: dict  # name -> tensor
 
 
-def make_weights(rank: int, heads: int = 8, device="cuda", seed: int = 1234) -> LayerWeights:
+def make_weights(
+    rank: int,
+    heads: int = 8,
+    device="cuda",
+    seed: int = 1234,
+    moe_mode: MoeMode | str = MoeMode.W8A8,
+) -> LayerWeights:
     """Replicated tensors share ``seed``; TP shards add ``rank`` to it."""
+    expert_weight = moe_format(moe_mode).weight
     rep = torch.Generator(device=device).manual_seed(seed)
     shd = torch.Generator(device=device).manual_seed(seed + 1 + rank)
     t = {}
@@ -87,15 +98,34 @@ def make_weights(rank: int, heads: int = 8, device="cuda", seed: int = 1234) -> 
         t[f"w_{name}"], t[f"s_{name}"] = _rand_fp8(rows, k, bk, gen, device)
     t["w_r"] = (torch.randn(N_EXPERTS, HIDDEN, generator=rep, device=device) / HIDDEN**0.5 * 4).to(bf)
     t["bias"] = torch.randn(N_EXPERTS, generator=rep, device=device) * 0.1
-    ug_q = torch.empty(N_EXPERTS + 1, 2 * INTER, HIDDEN, dtype=torch.float8_e4m3fn, device=device)
-    ug_s = torch.empty(N_EXPERTS + 1, *scale_shape(2 * INTER, HIDDEN, 128), device=device)
-    dn_q = torch.empty(N_EXPERTS + 1, HIDDEN, INTER, dtype=torch.float8_e4m3fn, device=device)
-    dn_s = torch.empty(N_EXPERTS + 1, *scale_shape(HIDDEN, INTER, 128), device=device)
-    for e in range(N_EXPERTS + 1):
-        ug_q[e], ug_s[e] = _rand_fp8(2 * INTER, HIDDEN, 128, shd, device)
-        dn_q[e], dn_s[e] = _rand_fp8(HIDDEN, INTER, 128, shd, device)
+    if expert_weight is ExpertWeight.FP8_BLOCK128:
+        ug_q = torch.empty(N_EXPERTS + 1, 2 * INTER, HIDDEN, dtype=torch.float8_e4m3fn, device=device)
+        ug_s = torch.empty(N_EXPERTS + 1, *scale_shape(2 * INTER, HIDDEN, 128), device=device)
+        dn_q = torch.empty(N_EXPERTS + 1, HIDDEN, INTER, dtype=torch.float8_e4m3fn, device=device)
+        dn_s = torch.empty(N_EXPERTS + 1, *scale_shape(HIDDEN, INTER, 128), device=device)
+        for e in range(N_EXPERTS + 1):
+            ug_q[e], ug_s[e] = _rand_fp8(2 * INTER, HIDDEN, 128, shd, device)
+            dn_q[e], dn_s[e] = _rand_fp8(HIDDEN, INTER, 128, shd, device)
+    else:
+        ug_q = torch.empty(N_EXPERTS + 1, 2 * INTER, HIDDEN // 2, dtype=torch.uint8, device=device)
+        ug_s = torch.empty(N_EXPERTS + 1, 2 * INTER, HIDDEN // 32, dtype=torch.uint8, device=device)
+        dn_q = torch.empty(N_EXPERTS + 1, HIDDEN, INTER // 2, dtype=torch.uint8, device=device)
+        dn_s = torch.empty(N_EXPERTS + 1, HIDDEN, INTER // 32, dtype=torch.uint8, device=device)
+        for e in range(N_EXPERTS + 1):
+            ug = torch.randn(2 * INTER, HIDDEN, generator=shd, device=device) / HIDDEN**0.5
+            dn = torch.randn(HIDDEN, INTER, generator=shd, device=device) / INTER**0.5
+            ug_q[e], ug_s[e] = quantize_mxfp4(ug)
+            dn_q[e], dn_s[e] = quantize_mxfp4(dn)
     t["w_ug"], t["s_ug"], t["w_dn"], t["s_dn"] = ug_q, ug_s, dn_q, dn_s
     return LayerWeights(heads, t)
+
+
+def dequant_expert(q: torch.Tensor, scale: torch.Tensor, weight: ExpertWeight) -> torch.Tensor:
+    """Decode one logical expert matrix for the torch reference."""
+
+    if weight is ExpertWeight.MXFP4_BLOCK32:
+        return dequantize_mxfp4(q, scale)
+    return dequant(q, scale, 128)
 
 
 def rope_table(max_seq: int, theta: float = 8.0e6, device="cuda"):
@@ -221,12 +251,18 @@ def golden_moe(
     inputs, so each stage can be checked from the kernel's own inputs.
     """
     mode = as_moe_mode(moe_mode)
+    fmt = moe_format(mode)
     t = W.t
     S = a.shape[0]
     out = {k: [] for k in ("sel", "prob", "mid")}
     x2 = rmsnorm(a, t["g_post"])
     scores = torch.sigmoid(bf(x2) @ t["w_r"].float().T)
-    xq_ref = quant_dequant(x2) if mode is MoeMode.W8A8 else bf(x2)
+    if fmt.activation is ExpertActivation.FP8_BLOCK128:
+        xq_ref = quant_dequant(x2)
+    elif fmt.activation is ExpertActivation.MXFP8_BLOCK32:
+        xq_ref = quant_dequant_mxfp8(x2)
+    else:
+        xq_ref = bf(x2)
     xq = xq_ref if xq is None else xq.float()
     y = torch.zeros(S, HIDDEN, device=a.device)
     for s in range(S):
@@ -235,9 +271,9 @@ def golden_moe(
         weights = [1.0] + p.tolist()
         mids = []
         for e, wgt in zip(experts, weights):
-            ug = dequant(t["w_ug"][e], t["s_ug"][e], 128) @ xq[s]
+            ug = dequant_expert(t["w_ug"][e], t["s_ug"][e], fmt.weight) @ xq[s]
             value = torch.nn.functional.silu(ug[:INTER]) * ug[INTER:]
-            mids.append(bf(value) if mode is MoeMode.W8A16 else value)
+            mids.append(bf(value) if fmt.activation is ExpertActivation.BF16 else value)
         out["sel"].append(torch.tensor(experts, device=a.device, dtype=torch.int32))
         out["prob"].append(torch.tensor(weights, device=a.device))
         out["mid"].append(torch.stack(mids))
@@ -246,8 +282,13 @@ def golden_moe(
         weights = out["prob"][s].tolist() if prob is None else prob[s].tolist()
         for j, (e, wgt) in enumerate(zip(experts, weights)):
             m = out["mid"][s][j] if mid is None else mid[s, j].float()
-            activation = quant_dequant(m) if mode is MoeMode.W8A8 else bf(m)
-            y[s] += wgt * (dequant(t["w_dn"][e], t["s_dn"][e], 128) @ activation)
+            if fmt.activation is ExpertActivation.FP8_BLOCK128:
+                activation = quant_dequant(m)
+            elif fmt.activation is ExpertActivation.MXFP8_BLOCK32:
+                activation = quant_dequant_mxfp8(m)
+            else:
+                activation = bf(m)
+            y[s] += wgt * (dequant_expert(t["w_dn"][e], t["s_dn"][e], fmt.weight) @ activation)
     x_out = (a.float() + allreduce(y)).to(torch.bfloat16)
     return dict(
         scores=scores,

@@ -5,14 +5,54 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 
 
 class MoeMode(str, Enum):
-    """Activation arithmetic used by the expert up/gate and down projections."""
+    """Public arithmetic modes for the expert up/gate and down projections."""
 
     W8A8 = "w8a8"
     W8A16 = "w8a16"
+    A16W4 = "a16w4"
+    A8W4 = "a8w4"
+
+
+class ExpertActivation(str, Enum):
+    """Activation representation consumed by both expert projections."""
+
+    FP8_BLOCK128 = "fp8_block128"
+    MXFP8_BLOCK32 = "mxfp8_block32"
+    BF16 = "bf16"
+
+
+class ExpertWeight(str, Enum):
+    """Packed expert-weight representation."""
+
+    FP8_BLOCK128 = "fp8_block128"
+    MXFP4_BLOCK32 = "mxfp4_block32"
+
+
+@dataclass(frozen=True)
+class MoeFormat:
+    activation: ExpertActivation
+    weight: ExpertWeight
+
+    @property
+    def activation_group(self) -> int | None:
+        if self.activation is ExpertActivation.FP8_BLOCK128:
+            return 128
+        if self.activation is ExpertActivation.MXFP8_BLOCK32:
+            return 32
+        return None
+
+
+MOE_FORMATS = {
+    MoeMode.W8A8: MoeFormat(ExpertActivation.FP8_BLOCK128, ExpertWeight.FP8_BLOCK128),
+    MoeMode.W8A16: MoeFormat(ExpertActivation.BF16, ExpertWeight.FP8_BLOCK128),
+    MoeMode.A16W4: MoeFormat(ExpertActivation.BF16, ExpertWeight.MXFP4_BLOCK32),
+    MoeMode.A8W4: MoeFormat(ExpertActivation.MXFP8_BLOCK32, ExpertWeight.MXFP4_BLOCK32),
+}
 
 
 def as_moe_mode(value: MoeMode | str) -> MoeMode:
@@ -25,6 +65,12 @@ def as_moe_mode(value: MoeMode | str) -> MoeMode:
     except ValueError as error:
         choices = ", ".join(mode.value for mode in MoeMode)
         raise ValueError(f"unsupported MoE mode {value!r}; expected one of: {choices}") from error
+
+
+def moe_format(value: MoeMode | str) -> MoeFormat:
+    """Return the independent activation and weight formats for a public mode."""
+
+    return MOE_FORMATS[as_moe_mode(value)]
 
 
 HIDDEN = 6144

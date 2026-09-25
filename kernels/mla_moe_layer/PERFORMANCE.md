@@ -24,10 +24,12 @@ The public `MoeMode` values are:
 
 | Mode | Expert activation | Expert weight | Up/gate to down handoff |
 |---|---|---|---|
-| `w8a8` | dynamic FP8 E4M3 | block-scaled FP8 E4M3 | FP8 |
+| `w8a8` | dynamic FP8 E4M3, per 128 | block-scaled FP8 E4M3 | FP8 |
 | `w8a16` | BF16 | block-scaled FP8 E4M3 | BF16 |
+| `a16w4` | BF16 | MXFP4, per-1x32 E8M0 | BF16 |
+| `a8w4` | MXFP8 E4M3, per-1x32 E8M0 | MXFP4, per-1x32 E8M0 | MXFP8 |
 
-Attention weights stay block-scaled FP8 in both modes. Supported sample counts
+Attention weights stay block-scaled FP8 in all modes. Supported sample counts
 are 1, 2, 4, and 8; supported peer counts are 1, 2, 4, and 8. The host wrapper
 validates the complete fixed-shard contract before allocating GPU buffers.
 
@@ -36,7 +38,8 @@ validates the complete fixed-shard contract before allocating GPU buffers.
 | File | Responsibility |
 |---|---|
 | `config.py` | Fixed dimensions, public arithmetic modes, and host validation. |
-| `packing.py` | Shared MFMA weight packing for FP8 and BF16 matrices. |
+| `../common/mx_formats.py` | Reusable Torch MXFP4/MXFP8 quantization and dequantization. |
+| `packing.py` | MFMA weight packing for FP8, BF16, and MXFP4 matrices. |
 | `runtime.py` | Owned symmetric HIP IPC buffers and deterministic remote-handle cleanup. |
 | `shared_reuse_moe_kernel.py` | FlyDSL kernel scheduling, communication, MLA, routing, and expert computation. |
 | `layer.py` | Public host wrapper, scratch allocation, launch arguments, tracing, and lifecycle. |
@@ -74,6 +77,13 @@ two 64-lane send batches; exact output agreement across ranks was retained.
 The NP4 `w8a16` normalized expert input differed from the independent reduction
 by one BF16 ulp on one element, within the existing BF16 handoff bound.
 
+The new `a16w4` and `a8w4` modes passed the complete stage suite at S=1 and
+S=8 on one GPU, and at S=8 on two and eight GPUs. The checks covered the
+packed MXFP4 weight path, per-1x32 E8M0 scales, A8W4 activation quantization,
+the final BF16 peer reduction, and exact final-output agreement across ranks.
+At TP8/S8, independent end-to-end relative L2 was 0.430% for `a16w4` and
+2.87% for `a8w4`. Existing tolerances were retained.
+
 A direct TP1/S1 output comparison against the same-weight TileRT wrapper gave:
 
 | Mode | Maximum absolute error | Relative L2 |
@@ -105,6 +115,23 @@ quality latency results.
 A separate 16-layer, three-replay TP1 run measured W8A8 at 52.03 us for S=4
 and 84.20 us for S=8. TileRT has no S=8 whole-layer baseline.
 
+After adding the MXFP4 paths, a same-process 16-layer, three-replay TP1 run
+measured the following medians. These are short development measurements, not
+publication-quality results:
+
+| Mode | S=1 | S=8 |
+|---|---:|---:|
+| `w8a8` | 33.38 us | 83.46 us |
+| `w8a16` | 34.63 us | 90.13 us |
+| `a16w4` | 33.22 us | 78.80 us |
+| `a8w4` | 35.21 us | 87.00 us |
+
+The `a16w4` path was fastest in this short TP1 comparison. `a8w4` still pays
+for per-1x32 activation quantization and BF16 MFMA staging, so it did not beat
+`w8a8` in both sample counts. The released TileRT comparison adapter accepts
+only `w8a8` and `w8a16`; there is no valid same-weight TileRT baseline for the
+two MXFP4 modes in this harness.
+
 Segment traces guided two retained scheduling changes: BF16-packed peer
 exchange and one sample per router CTA. For the earlier S=4 schedule, the last
 instrumented CTA reached attention publication, router publication, routed
@@ -122,21 +149,20 @@ export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-perf:
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib
 
 /opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
-  --npes 8 -S 4 --pos 3000 --iters 5 --moe-mode w8a8
+  --npes 8 -S 8 --pos 3000 --iters 1 --moe-mode a8w4
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/benchmark.py \
-  --backend flydsl --moe-mode w8a8 --npes 8 --samples 1 2 4 \
-  --layers 128 --repeats 9 \
-  --output /root/glm5-perf-results/flydsl-w8a8-tp8.jsonl
+  --backend flydsl --moe-mode a16w4 --npes 1 --samples 1 8 \
+  --layers 16 --repeats 3
 ```
 
-Repeat the correctness command for `--moe-mode w8a16`, peer counts 2/4/8,
-and sample counts 1/2/4. Run GPU jobs sequentially.
+Repeat the correctness command for the other modes and peer counts. Run GPU
+jobs sequentially.
 
 For a direct released-implementation comparison, keep `/root/tilert_pkg` on
 `PYTHONPATH` and replace `--backend flydsl` with `--backend tilert`. The native
-wrapper supports only one or eight peers and sample counts 1/2/4. S=8 is a
-FlyDSL-only extension.
+wrapper supports only `w8a8`/`w8a16`, one or eight peers, and sample counts
+1/2/4. S=8 and the MXFP4 modes are FlyDSL-only extensions in this harness.
 
 Add `--trace --layers 16 --trace-dir <directory>` to a FlyDSL benchmark for
 stage timestamps, then inspect a rank with:

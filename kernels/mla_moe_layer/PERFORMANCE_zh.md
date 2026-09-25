@@ -19,10 +19,12 @@ TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导�
 
 | 模式 | 专家 activation | 专家 weight | Up/gate 到 down 的交接格式 |
 |---|---|---|---|
-| `w8a8` | 动态 FP8 E4M3 | block-scaled FP8 E4M3 | FP8 |
+| `w8a8` | 每 128 个元素动态量化 FP8 E4M3 | block-scaled FP8 E4M3 | FP8 |
 | `w8a16` | BF16 | block-scaled FP8 E4M3 | BF16 |
+| `a16w4` | BF16 | 每 1x32 使用 E8M0 scale 的 MXFP4 | BF16 |
+| `a8w4` | 每 1x32 使用 E8M0 scale 的 MXFP8 E4M3 | 每 1x32 使用 E8M0 scale 的 MXFP4 | MXFP8 |
 
-两种模式的 attention weights 都保持 block-scaled FP8。当前支持 sample count 1、2、4、8
+所有模式的 attention weights 都保持 block-scaled FP8。当前支持 sample count 1、2、4、8
 以及 peer count 1、2、4、8。host wrapper 会在分配 GPU buffer 前验证完整固定分片约束。
 
 ## 代码结构
@@ -30,7 +32,8 @@ TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导�
 | 文件 | 职责 |
 |---|---|
 | `config.py` | 固定维度、公开计算模式和 host 参数验证。 |
-| `packing.py` | FP8 和 BF16 matrix 共用的 MFMA weight packing。 |
+| `../common/mx_formats.py` | 可供其他 MoE wrapper 复用的 Torch MXFP4/MXFP8 量化与反量化。 |
+| `packing.py` | FP8、BF16 和 MXFP4 matrix 的 MFMA weight packing。 |
 | `runtime.py` | 自有 symmetric HIP IPC buffer，以及远端 handle 的确定性清理。 |
 | `shared_reuse_moe_kernel.py` | FlyDSL kernel 调度、通信、MLA、routing 和专家计算。 |
 | `layer.py` | 公开 host wrapper、scratch 分配、启动参数、trace 和生命周期。 |
@@ -64,6 +67,11 @@ S=8 也在 1、2、4、8 GPU 上分别以一组新输入通过 `w8a8` 和 `w8a16
 NP4 `w8a16` 的 normalized expert input 有一个元素与独立 reduction 相差一个 BF16 ulp，
 处于已有 BF16 handoff 上限内。
 
+新增的 `a16w4` 和 `a8w4` 在单卡 S=1、S=8，以及双卡和八卡 S=8 上通过完整分段
+检查。检查覆盖 packed MXFP4 weight、每 1x32 E8M0 scale、A8W4 activation 量化、
+最终 BF16 peer reduction，以及所有 rank 最终输出逐位一致。TP8/S8 的独立端到端
+相对 L2 分别为 `a16w4` 0.430%、`a8w4` 2.87%。没有放宽现有容差。
+
 TP1/S1 下使用相同权重直接对比 TileRT wrapper，结果为：
 
 | 模式 | 最大绝对误差 | 相对 L2 |
@@ -94,6 +102,21 @@ benchmark 路径，不属于可发布的性能数据。
 另一组使用 16 层和 3 次正式 replay 的 TP1 测量中，W8A8 的 S=4 为 52.03 us，S=8
 为 84.20 us。TileRT 没有 S=8 整层基线。
 
+加入 MXFP4 路径后，在同一进程内使用 16 层、3 次正式 replay 进行 TP1 短测，得到
+以下中位数。这些是开发阶段短测，不属于可发布性能数据：
+
+| 模式 | S=1 | S=8 |
+|---|---:|---:|
+| `w8a8` | 33.38 us | 83.46 us |
+| `w8a16` | 34.63 us | 90.13 us |
+| `a16w4` | 33.22 us | 78.80 us |
+| `a8w4` | 35.21 us | 87.00 us |
+
+`a16w4` 在这组 TP1 短测中最快。`a8w4` 仍需承担每 1x32 activation 量化和 BF16
+MFMA staging 的开销，因此没有在两个 sample count 上都超过 `w8a8`。当前已发布
+TileRT 对比适配器只接受 `w8a8` 和 `w8a16`，本 harness 中没有两种 MXFP4 模式的
+有效同权重 TileRT 基线。
+
 分段 trace 指导了两项保留的调度修改：BF16 packed peer exchange，以及每个 router
 CTA 只处理一个 sample。此前 S=4 调度中，最后一个插桩 CTA 到达 attention 发布、
 router 发布、routed up/gate 发布和 down 完成的时间分别为 30.23、35.12、50.12、
@@ -110,20 +133,19 @@ export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-perf:
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib
 
 /opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
-  --npes 8 -S 4 --pos 3000 --iters 5 --moe-mode w8a8
+  --npes 8 -S 8 --pos 3000 --iters 1 --moe-mode a8w4
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/benchmark.py \
-  --backend flydsl --moe-mode w8a8 --npes 8 --samples 1 2 4 \
-  --layers 128 --repeats 9 \
-  --output /root/glm5-perf-results/flydsl-w8a8-tp8.jsonl
+  --backend flydsl --moe-mode a16w4 --npes 1 --samples 1 8 \
+  --layers 16 --repeats 3
 ```
 
-正确性命令应分别使用 `--moe-mode w8a16`、peer count 2/4/8 和 sample count 1/2/4
-重复运行。GPU 任务应串行执行。
+正确性命令应替换其他模式和 peer count 重复运行。GPU 任务应串行执行。
 
 如需与已发布实现直接比较，保留 `/root/tilert_pkg` 在 `PYTHONPATH` 中，并把
-`--backend flydsl` 改为 `--backend tilert`。原生 wrapper 只支持 1 或 8 peers，以及
-sample count 1/2/4。S=8 是 FlyDSL 独有扩展。
+`--backend flydsl` 改为 `--backend tilert`。原生 wrapper 只支持 `w8a8`/`w8a16`、
+1 或 8 peers，以及 sample count 1/2/4。S=8 和 MXFP4 模式是本 harness 中的
+FlyDSL 独有扩展。
 
 FlyDSL benchmark 可添加 `--trace --layers 16 --trace-dir <directory>` 记录分段时间戳，
 然后查看某个 rank：

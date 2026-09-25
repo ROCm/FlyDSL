@@ -23,6 +23,8 @@ def make_native_glm5_baseline(
     """
 
     mode = as_moe_mode(moe_mode)
+    if mode not in (MoeMode.W8A8, MoeMode.W8A16):
+        raise ValueError(f"the TileRT comparison adapter does not support {mode.value} expert weights")
     import tilert
 
     tilert.load_backend("glm5_2_rocm")

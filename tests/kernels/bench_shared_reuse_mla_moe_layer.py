@@ -26,7 +26,7 @@ if __name__ == "__main__":
     ap.add_argument("--moe-mode", choices=tuple(mode.value for mode in MoeMode), default=MoeMode.W8A8.value)
     a = ap.parse_args()
     dev = torch.device("cuda", 0)
-    W = make_weights(0, heads=8, device=dev)
+    W = make_weights(0, heads=8, device=dev, moe_mode=a.moe_mode)
     cos, sin = rope_table(4096, device=dev)
     kv = torch.randn(4096, KV_LORA, device=dev).to(torch.bfloat16)
     pe = torch.randn(4096, PE_DIM, device=dev).to(torch.bfloat16)
