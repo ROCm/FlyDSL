@@ -10,9 +10,9 @@ whole layer body for this rank's TP shard::
       -> KV RMSNorm / k_pe RoPE -> KV/PE cache publish
       -> absorbed q (W_UK) -> sparse MLA split softmax -> merge -> W_UV -> W_o
       -> attention TP8 peer reduce + residual                      (sym_attn)
-      -> post-attention RMSNorm -> router sigmoid + activation FP8 quant
+      -> post-attention RMSNorm -> router sigmoid + expert activation staging
       -> top-8 -> 1 shared + 8 routed expert up/gate/SiLU
-      -> mid FP8 quant -> expert down + route weighting
+      -> expert down + route weighting
       -> MoE TP8 peer reduce + residual -> x_out                   (sym_ffn)
 
 Scheduling: every stage is a list of tasks; task ``t`` of a stage runs on CTA
@@ -26,8 +26,8 @@ device- (``sc1``) or system-coherent (``sc0 sc1``) 8 / 16-byte stores.  A
 consumer polls the payload itself until the tags match, so a hand-off costs
 one memory round trip: no store drain, no separate flag, no second load.
 
-GEMVs run on the matrix cores: weights are host-packed (``pack_fp8`` /
-``pack_bf16``) so one wave loads 16 rows x 64 k as one contiguous 1 KB, FP8 is
+GEMVs run on the matrix cores: ``packing.py`` arranges weights so one wave
+loads 16 rows x 64 k as one contiguous 1 KB. FP8 is
 widened exactly to bf16 and fed to ``mfma_f32_16x16x32_bf16`` with the samples
 as the N dimension.  Each 64-k chunk's partial is scaled by its f32 block
 scale (times any activation scale / route weight) into the accumulator, so the
@@ -39,8 +39,6 @@ an epoch tag into every peer's symmetric buffer and polls its own; every rank su
 order, so all ranks produce bit-identical hidden states (and routing).
 """
 
-import torch
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
@@ -49,12 +47,13 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T, as_ir_value
 from kernels.common import buffer_ops as bo
 from kernels.common.dpp_utils import update_dpp_i32
-from kernels.mla_moe_layer.reference import (
+from kernels.mla_moe_layer.config import (
     EPS,
     FP8_MAX,
     HIDDEN,
     INTER,
     KV_LORA,
+    MAX_LAYERS_PER_STEP,
     MOE_SLOTS,
     N_EXPERTS,
     NOPE_DIM,
@@ -67,10 +66,12 @@ from kernels.mla_moe_layer.reference import (
     SOFTMAX_SCALE,
     TOP_K,
     V_DIM,
+    MoeMode,
+    as_moe_mode,
 )
 
 BLOCKS = 256
-LAYER_SLOTS = 128  # max layers per step sharing one scratch / symmetric buffer
+LAYER_SLOTS = MAX_LAYERS_PER_STEP
 THREADS = 512
 WAVES = THREADS // 64
 QKV_A_TILE = 16
@@ -117,10 +118,11 @@ def _align(n, a=256):
     return (n + a - 1) // a * a
 
 
-def layout(S: int, heads: int, npes: int, topk: int):
+def layout(S: int, heads: int, npes: int, topk: int, moe_mode: MoeMode | str = MoeMode.W8A8):
     """Byte offsets of the per-rank scratch and of the symmetric buffer.
 
     Every mailbox holds ``(value, tag)`` int32 pairs (8 bytes per element)."""
+    mode = as_moe_mode(moe_mode)
     n_split = topk // SPLIT_KEYS
     pr = 8
     items = [
@@ -137,8 +139,8 @@ def layout(S: int, heads: int, npes: int, topk: int):
         ("o", S * heads * V_DIM * pr),
         ("a", S * HIDDEN * pr),  # post-attention hidden (bf16 values)
         ("scores", S * N_EXPERTS * pr),
-        ("xq", S * HIDDEN // 4 * pr),  # FP8-quantized MoE activation (4 packed FP8 per pair)
-        ("xqs", S * XQ_BLOCKS * pr),  # its per-128 block scales
+        ("xq", S * HIDDEN // (4 if mode is MoeMode.W8A8 else 2) * pr),
+        ("xqs", S * XQ_BLOCKS * pr if mode is MoeMode.W8A8 else 0),
         ("sel", S * MOE_SLOTS * pr),
         ("prob", S * MOE_SLOTS * pr),
         ("mid", S * MOE_SLOTS * INTER * pr),
@@ -153,26 +155,6 @@ def layout(S: int, heads: int, npes: int, topk: int):
     part = npes * S * HIDDEN * pr
     sym = {"attn": 0, "ffn": part, "_bytes": 2 * part}
     return scratch, sym
-
-
-def pack_fp8(q: torch.Tensor) -> torch.Tensor:
-    """FP8 ``[..., N, K]`` -> MFMA-native ``[..., N/16, K/64, 64 lanes, 16 B]``.
-
-    Lane ``l`` of a 64-k chunk holds row ``l % 16``, k ``sp*32 + (l//16)*8 + i``
-    for sp in (0, 1), i < 8: the A operands of two ``mfma_f32_16x16x32_bf16``.
-    """
-    *lead, N, K = q.shape
-    w8 = q.view(torch.uint8).reshape(*lead, N // 16, 16, K // 64, 2, 4, 8)  # rg r kc sp lg i
-    nl = len(lead)
-    perm = list(range(nl)) + [nl + p for p in (0, 2, 4, 1, 3, 5)]  # rg kc lg r sp i
-    return w8.permute(*perm).contiguous().view(-1)
-
-
-def pack_bf16(w: torch.Tensor) -> torch.Tensor:
-    """bf16 ``[N, K]`` -> ``[N/16, K/64, 2 (sp), 64 lanes, 8 bf16]``."""
-    N, K = w.shape
-    w16 = w.view(torch.int16).reshape(N // 16, 16, K // 64, 2, 4, 8)  # rg r kc sp lg i
-    return w16.permute(0, 2, 3, 4, 1, 5).contiguous().view(-1)
 
 
 def _rsrc(addr):
@@ -309,8 +291,14 @@ def stage_tasks(S: int, heads: int, topk: int):
     ]
 
 
-def build_layer(
-    S: int = 1, heads: int = 8, npes: int = 8, topk: int = 2048, scale: float = SOFTMAX_SCALE, timeline: bool = False
+def build_shared_reuse_kernel(
+    S: int = 1,
+    heads: int = 8,
+    npes: int = 8,
+    topk: int = 2048,
+    scale: float = SOFTMAX_SCALE,
+    timeline: bool = False,
+    moe_mode: MoeMode | str = MoeMode.W8A8,
 ):
     """Return the ``@flyc.jit`` launcher for one rank's whole layer.
 
@@ -321,10 +309,12 @@ def build_layer(
     """
     assert heads == 8, "the split-attention mapping uses one wave per local head"
     assert topk % SPLIT_KEYS == 0 and 1 <= S <= 4
+    mode = as_moe_mode(moe_mode)
+    use_w8a8 = mode is MoeMode.W8A8
     H = heads
     W = npes
     G = BLOCKS
-    SC, SY = layout(S, H, W, topk)
+    SC, SY = layout(S, H, W, topk, mode)
     N_SPLIT = topk // SPLIT_KEYS
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
@@ -370,7 +360,7 @@ def build_layer(
         dnw: fx.Array[fx.Float32, S * MOE_SLOTS, 16]  # expert-down route weights
 
     @flyc.kernel(known_block_size=[THREADS, 1, 1])
-    def layer_kernel(
+    def shared_reuse_kernel(
         h_in: Int64,
         x_out: Int64,
         cur_pos: Int64,
@@ -607,10 +597,11 @@ def build_layer(
             return t
 
         # ------------------------------------------------ MFMA GEMV machinery
-        def unit_fp8(w_rsrc, s_rsrc, rg, kc, NKC, K, BK, b_word, coef=None):
+        def unit_fp8(w_rsrc, s_rsrc, rg, kc, NKC, K, BK, b_word, coef=None, ln=None):
             """Issue one 64-k chunk of row group ``rg`` of a packed FP8 matrix; the
             bf16 activation chunk starts at LDS word ``b_word``."""
-            wv = fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc) * 64 + lane) * 4, vec_width=4, dtype=T.i32))
+            ln = lane if ln is None else ln
+            wv = fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
             s = ld_f32(s_rsrc, (rg * 16 // SCALE_BM) * (K // BK) + kc * 64 // BK)
             if const_expr(callable(coef)):  # factor known only after a later wait
                 return ("fp8", [wv], lambda: s * coef(), b_word + (lane // 16) * 4)
@@ -779,21 +770,36 @@ def build_layer(
             d0, d1 = _fp8_roundtrip(q0, q1)
             return d0, d1, qs
 
-        def stage_xq(samples):
-            """Poll the router's packed FP8 activation + block scales of ``samples``
-            (sample list, or one runtime sample) into LDS words s * HIDDEN / 4 (``f8_word``
-            order; slot 0 for a single runtime sample) and misc[8 + s * XQ_BLOCKS:]."""
-            nxw = HIDDEN // 4 // THREADS
-            got = poll(
-                [(mb("xq"), sx * (HIDDEN // 4) + tid + i * THREADS, 1) for sx in samples for i in range(nxw)]
-                + [(mb("xqs"), sx * XQ_BLOCKS + fx.min(tid, XQ_BLOCKS - 1), 1) for sx in samples]
-            )
-            for j in range_constexpr(len(samples)):
-                for i in range_constexpr(nxw):
-                    wd = f8_word((tid + i * THREADS) * 4)
-                    lds_st(xs, j * (HIDDEN // 4) + wd, got[j * nxw + i][0].bitcast(fx.Float32))
-                if tid < XQ_BLOCKS:
-                    lds_st(misc, 8 + j * XQ_BLOCKS + tid, got[len(samples) * nxw + j][0].bitcast(fx.Float32))
+        def stage_moe_input(samples):
+            """Stage normalized expert inputs published by the router into LDS."""
+            if const_expr(use_w8a8):
+                nxw = HIDDEN // 4 // THREADS
+                got = poll(
+                    [(mb("xq"), sx * (HIDDEN // 4) + tid + i * THREADS, 1) for sx in samples for i in range(nxw)]
+                    + [(mb("xqs"), sx * XQ_BLOCKS + fx.min(tid, XQ_BLOCKS - 1), 1) for sx in samples]
+                )
+                for j in range_constexpr(len(samples)):
+                    for i in range_constexpr(nxw):
+                        wd = f8_word((tid + i * THREADS) * 4)
+                        lds_st(xs, j * (HIDDEN // 4) + wd, got[j * nxw + i][0].bitcast(fx.Float32))
+                    if tid < XQ_BLOCKS:
+                        lds_st(
+                            misc,
+                            8 + j * XQ_BLOCKS + tid,
+                            got[len(samples) * nxw + j][0].bitcast(fx.Float32),
+                        )
+            else:
+                nxw = HIDDEN // 2 // THREADS
+                got = poll(
+                    [(mb("xq"), sx * (HIDDEN // 2) + tid + i * THREADS, 1) for sx in samples for i in range(nxw)]
+                )
+                for j in range_constexpr(len(samples)):
+                    for i in range_constexpr(nxw):
+                        lds_st(
+                            xs,
+                            j * (HIDDEN // 2) + tid + i * THREADS,
+                            got[j * nxw + i][0].bitcast(fx.Float32),
+                        )
 
         def st_f8(k, q0, q1):
             """LDS FP8 activation bytes k, k + 1 (k even, held by this lane; lane ^ 1 holds
@@ -1415,21 +1421,25 @@ def build_layer(
 
             rstds = stage_x_rmsnorm(ld_a, HIDDEN, g_post, mark=("router", tt), count=1)
             stamp("router", tt, 2)
-            # this task's FP8 activation blocks go out ahead of the gate GEMV
+            # This task's normalized expert input goes out ahead of the gate GEMV.
             if x_ok:
                 x_rstd = rstds[0]
                 a0, a1 = xa[0]
-                q0, q1, qs = quant_scaled(a0 * x_rstd * xg[0], a1 * x_rstd * xg[1])
-                w8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
-                w8n = _xshfl(w8, 1)
-                if lane % 2 == 0:  # FP8 bytes k .. k + 3 in one tagged word
-                    put(mb("xq"), (x_s * HIDDEN + xk) // 4, w8 | (w8n << 16))
-                d0, d1 = _fp8_roundtrip(q0, q1)
-                bo.buffer_store(
-                    fx.Vector.from_elements([d0 * qs, d1 * qs], fx.Float32), _rsrc(mb("xqd")), x_s * HIDDEN + xk
-                )
-                if lane == 0:
-                    put(mb("xqs"), x_s * XQ_BLOCKS + x_blk, qs)
+                v0, v1 = a0 * x_rstd * xg[0], a1 * x_rstd * xg[1]
+                if const_expr(use_w8a8):
+                    q0, q1, qs = quant_scaled(v0, v1)
+                    w8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
+                    w8n = _xshfl(w8, 1)
+                    if lane % 2 == 0:  # FP8 bytes k .. k + 3 in one tagged word
+                        put(mb("xq"), (x_s * HIDDEN + xk) // 4, w8 | (w8n << 16))
+                    d0, d1 = _fp8_roundtrip(q0, q1)
+                    d0, d1 = d0 * qs, d1 * qs
+                    if lane == 0:
+                        put(mb("xqs"), x_s * XQ_BLOCKS + x_blk, qs)
+                else:
+                    d0, d1 = bf16_round(v0), bf16_round(v1)
+                    put(mb("xq"), (x_s * HIDDEN + xk) // 2, bf16_pair(d0, d1))
+                bo.buffer_store(fx.Vector.from_elements([d0, d1], fx.Float32), _rsrc(mb("xqd")), x_s * HIDDEN + xk)
             gpu.barrier()
             acc = run_units(u_r, R_CPW, R_CPW, pre)
             fx.ptr_store(fx.Vector.from_elements(acc, fx.Float32), red + (wave * 64 + lane) * 4)
@@ -1468,6 +1478,7 @@ def build_layer(
             # + 8 up rows are one MFMA row group and all waves split K
             UG8 = 8
             UG8_CPW = UG_NKC // WAVES
+            UG8_UNITS = UG8_CPW // 2 if use_w8a8 else UG8_CPW
             for u in range(start("ug"), G, G):
                 u = fx.Int32(u)
                 stamp("ug", u, 0)
@@ -1495,24 +1506,27 @@ def build_layer(
                     r_sug = bo.create_buffer_resource_from_addr(
                         s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), num_records_bytes=ns
                     )
-                    kc = wave * UG8_CPW + cc * 2
+                    kc = wave * UG8_CPW + cc * (2 if use_w8a8 else 1)
+                    nwc = 2 if use_w8a8 else 1
                     wv = [
                         fx.Vector(
                             bo.buffer_load(r_wug, ((w_rg * UG_NKC + kc + h) * 64 + w_ln) * 4, vec_width=4, dtype=T.i32)
                         )
-                        for h in range(2)
+                        for h in range(nwc)
                     ]
                     sc = ld_f32(r_sug, (s_rg * 16 // SCALE_BM) * (HIDDEN // 128) + kc // 2)
-                    return (
-                        "f8f8",
-                        wv,
-                        lambda: sc * _uniform_f32(lds_ld(misc, 8 + kc // 2)),
-                        kc * 16 + (lane // 16) * 4,
-                    )
+                    if const_expr(use_w8a8):
+                        return (
+                            "f8f8",
+                            wv,
+                            lambda: sc * _uniform_f32(lds_ld(misc, 8 + kc // 2)),
+                            kc * 16 + (lane // 16) * 4,
+                        )
+                    return ("fp8", wv, sc, kc * 32 + (lane // 16) * 4)
 
                 # the shared expert's weights do not depend on routing: prefetch them (the
                 # later zero-weight MMAs of the other tasks are cheaper than a branch)
-                pre = [u_ug8(cc, fx.Int32(SHARED_EXPERT), has_sh) for cc in range(UG8_CPW // 2)]
+                pre = [u_ug8(cc, fx.Int32(SHARED_EXPERT), has_sh) for cc in range(UG8_UNITS)]
                 hint_wait(N_ROW_TILES, lambda k: (mb("a"), s_u * HIDDEN + k * ROW_TILE + ROW_TILE - 1), mark=("ug", u))
                 # the sum of squares takes the router's element partition and order
                 # (stage_x_rmsnorm), so rstd -- and every FP8 rounding -- is bit-identical
@@ -1528,10 +1542,14 @@ def build_layer(
                         ss = ss + a * a
                 rstd = _rsq(block_sum(ss) * (1.0 / HIDDEN) + EPS)
                 for j in range_constexpr(NB):
-                    q0, q1, qs = quant_scaled(av[j][0] * rstd * gps[j][0], av[j][1] * rstd * gps[j][1])
-                    st_f8(ks_[j], q0, q1)
-                    if lane == 0:
-                        lds_st(misc, 8 + wave + j * WAVES, qs)
+                    v0, v1 = av[j][0] * rstd * gps[j][0], av[j][1] * rstd * gps[j][1]
+                    if const_expr(use_w8a8):
+                        q0, q1, qs = quant_scaled(v0, v1)
+                        st_f8(ks_[j], q0, q1)
+                        if lane == 0:
+                            lds_st(misc, 8 + wave + j * WAVES, qs)
+                    else:
+                        lds_st(xs, ks_[j] // 2, bf16_pair(v0, v1))
                 if wave == 0:
                     e, w = route_top8(s_u, bs=bs)
                     if lane == slot - 1:
@@ -1540,7 +1558,7 @@ def build_layer(
                 stamp("ug", u, 2)
                 gpu.barrier()
                 e_sel = _uniform(lds_ld(keys, 0))
-                post = [u_ug8(cc, e_sel) for cc in range(UG8_CPW // 2)]
+                post = [u_ug8(cc, e_sel) for cc in range(UG8_UNITS)]
                 reduce_rows(1, mma_units([fx.Float32(0.0) for _ in range(4)], pre), emit_out(16))
                 gpu.barrier()
                 reduce_rows(
@@ -1572,7 +1590,8 @@ def build_layer(
             # the sample columns of one MFMA; routed tiles pipeline over samples.
             UG8 = 8
             UG8_CPW = UG_NKC // WAVES
-            XW = HIDDEN // 4
+            UG8_UNITS = UG8_CPW // 2 if use_w8a8 else UG8_CPW
+            XW = HIDDEN // (4 if use_w8a8 else 2)
             u = fx.Int32(start("ug"))
             c = u % (INTER // UG8)
             has_sh = u < INTER // UG8
@@ -1592,21 +1611,26 @@ def build_layer(
                 )
                 sn = n_sel() if sample is None else fx.Int32(sample)
                 units = []
-                for cc in range_constexpr(UG8_CPW // 2):
-                    kc = wave * UG8_CPW + cc * 2
+                for cc in range_constexpr(UG8_UNITS):
+                    kc = wave * UG8_CPW + cc * (2 if use_w8a8 else 1)
+                    nwc = 2 if use_w8a8 else 1
                     wv = [
                         fx.Vector(
                             bo.buffer_load(rw, ((w_rg * UG_NKC + kc + j) * 64 + w_ln) * 4, vec_width=4, dtype=T.i32)
                         )
-                        for j in range(2)
+                        for j in range(nwc)
                     ]
                     sc = ld_f32(rs, (s_rg * 16 // SCALE_BM) * (HIDDEN // 128) + kc // 2)
 
                     # Bind each chunk's operands; the deferred scale follows staging.
-                    def coefficient(sc=sc, kb=kc // 2, sn=sn):
-                        return sc * lds_ld(misc, 8 + sn * XQ_BLOCKS + kb)
+                    if const_expr(use_w8a8):
 
-                    units.append(("f8f8", wv, coefficient, sn * XW + kc * 16 + (lane // 16) * 4))
+                        def coefficient(sc=sc, kb=kc // 2, sn=sn):
+                            return sc * lds_ld(misc, 8 + sn * XQ_BLOCKS + kb)
+
+                        units.append(("f8f8", wv, coefficient, sn * XW + kc * 16 + (lane // 16) * 4))
+                    else:
+                        units.append(("fp8", wv, sc, sn * XW + kc * 32 + (lane // 16) * 4))
                 return units
 
             def ug8_emit(sample, shared):
@@ -1633,7 +1657,7 @@ def build_layer(
             dn_route(load_bias())
             gpu.barrier()
             cur = ug8_units(_uniform(lds_ld(keys, slot)), 0)
-            stage_xq(list(range(S)))
+            stage_moe_input(list(range(S)))
             gpu.barrier()
             if has_sh:
                 reduce_rows(1, mma_units([fx.Float32(0.0) for _ in range(4)], shared_pre), emit_out(16))
@@ -1649,13 +1673,13 @@ def build_layer(
                 ug8_emit(sample, False)
                 stamp("ug", sample * G + u, 4)
 
-        # ======== 10. mid FP8 quant + expert down + route weighting + MoE TP reduce
-        # 2 row groups x (S * 9 slots * 4) chunks: 4 waves per group
+        # =============== 10. expert down + route weighting + MoE TP reduce
         DN_NKC = INTER // 64
         DN_R = (DN_TILE + 15) // 16  # 16-row groups touched by a tile (24-row tiles start at row 0 or 8 of one)
         DN_WPR = WAVES // DN_R
-        DN_NU = S * MOE_SLOTS * DN_NKC // 2  # 128-k units of a row group
-        DN_UPW = (DN_NU + DN_WPR - 1) // DN_WPR  # per wave (S = 1, 32 rows: 5, 5, 4 + dead, 4 + dead)
+        DN_K_PER_UNIT = 2 if use_w8a8 else 1
+        DN_NU = S * MOE_SLOTS * DN_NKC // DN_K_PER_UNIT
+        DN_UPW = (DN_NU + DN_WPR - 1) // DN_WPR
         DN_BLK = S * MOE_SLOTS * INTER // 128
         DN_BATCH = 9  # 128-k chunks per wave in flight / prefetched before the mid wait
         for t in range(start("down"), N_DN_TILES, G):
@@ -1675,7 +1699,7 @@ def build_layer(
             def u_dn(cc):  # cc: 128-k chunk of this wave
                 qu = (wave % DN_WPR) * DN_UPW + cc
                 live = qu < DN_NU
-                q = fx.min(qu, DN_NU - 1) * 2  # 64-k chunk index over (s, slot, kc)
+                q = fx.min(qu, DN_NU - 1) * DN_K_PER_UNIT  # 64-k chunk index over (s, slot, kc)
                 s_q = q // (MOE_SLOTS * DN_NKC)
                 slot_q = (q // DN_NKC) % MOE_SLOTS
                 kc = q % DN_NKC
@@ -1688,10 +1712,17 @@ def build_layer(
                 )
                 sb = _rsrc(s_dn + fx.Int64(e) * fx.Int64(HIDDEN // SCALE_BM * (INTER // 128) * 4))
 
-                def coef():  # mid block scale * route weight, only in this sample's column
-                    return (lane % 16 == s_q).select(_uniform_f32(lds_ld(misc, q // 2)), fx.Float32(0.0))
+                if const_expr(use_w8a8):
 
-                return unit_f8f8(wb, sb, dn_rg + gu, kc, DN_NKC, INTER, q * 16, coef, dn_ln)
+                    def coef():  # mid block scale * route weight, only in this sample's column
+                        return (lane % 16 == s_q).select(_uniform_f32(lds_ld(misc, q // 2)), fx.Float32(0.0))
+
+                    return unit_f8f8(wb, sb, dn_rg + gu, kc, DN_NKC, INTER, q * 16, coef, dn_ln)
+
+                def coef():
+                    return (lane % 16 == s_q).select(_uniform_f32(lds_ld(dnw, s_q * MOE_SLOTS + slot_q)), 0.0)
+
+                return unit_fp8(wb, sb, dn_rg + gu, kc, DN_NKC, INTER, 128, q * 32, coef, dn_ln)
 
             # the experts are known: stream their down weights while up/gate finishes
             pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]
@@ -1713,15 +1744,17 @@ def build_layer(
                 ]
             )
             stamp("down", t, 2)
-            # mids -> per-128 FP8 (values in bf16) in X[(s * 9 + slot) * 256 + k];
-            # block scale * route weight in misc[block]
+            # Stage expert intermediates in the activation format selected for this mode.
             for b in range_constexpr((DN_BLK + WAVES - 1) // WAVES):
                 blk = wave + b * WAVES
                 if blk < DN_BLK:
-                    q0, q1, qs = quant_scaled(mids[b][0], mids[b][1])
-                    st_f8(blk * 128 + lane * 2, q0, q1)
-                    if lane == 0:
-                        lds_st(misc, blk, qs * lds_ld(dnw, blk // (INTER // 128)))
+                    if const_expr(use_w8a8):
+                        q0, q1, qs = quant_scaled(mids[b][0], mids[b][1])
+                        st_f8(blk * 128 + lane * 2, q0, q1)
+                        if lane == 0:
+                            lds_st(misc, blk, qs * lds_ld(dnw, blk // (INTER // 128)))
+                    else:
+                        lds_st(xs, blk * 64 + lane, bf16_pair(mids[b][0], mids[b][1]))
             gpu.barrier()
             acc = run_units(u_dn, DN_UPW, DN_BATCH, pre)
 
@@ -1743,7 +1776,7 @@ def build_layer(
             stamp("down", t, 4)
 
     @flyc.jit
-    def launch(
+    def launch_shared_reuse(
         h_in: Int64,
         x_out: Int64,
         cur_pos: Int64,
@@ -1781,7 +1814,7 @@ def build_layer(
         layer: Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        layer_kernel(
+        shared_reuse_kernel(
             h_in,
             x_out,
             cur_pos,
@@ -1819,4 +1852,4 @@ def build_layer(
             layer,
         ).launch(grid=(G,), block=(THREADS,), stream=stream)
 
-    return launch
+    return launch_shared_reuse

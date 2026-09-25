@@ -7,14 +7,30 @@ from __future__ import annotations
 
 import torch
 
-from kernels.comm.custom_all_reduce import FlyDSLAllreduce as _Hip
-from kernels.mla_moe_layer.glm5_mla_moe_layer import TL_COLS, build_layer, layout, pack_bf16, pack_fp8, stage_tasks
-from kernels.mla_moe_layer.reference import HIDDEN, INTER, MOE_SLOTS, N_EXPERTS, LayerWeights
+from kernels.mla_moe_layer.config import (
+    HIDDEN,
+    INTER,
+    MAX_LAYERS_PER_STEP,
+    MOE_SLOTS,
+    N_EXPERTS,
+    MoeMode,
+    as_moe_mode,
+    validate_shard,
+)
+from kernels.mla_moe_layer.packing import pack_layer_weights
+from kernels.mla_moe_layer.reference import LayerWeights
+from kernels.mla_moe_layer.runtime import SymmetricPeerBuffer
+from kernels.mla_moe_layer.shared_reuse_moe_kernel import (
+    TL_COLS,
+    build_shared_reuse_kernel,
+    layout,
+    stage_tasks,
+)
 
-__all__ = ["Glm5MlaMoeLayer"]
+__all__ = ["MoeMode", "SharedReuseMlaMoeLayer"]
 
 
-class Glm5MlaMoeLayer:
+class SharedReuseMlaMoeLayer:
     """One rank of the TP layer. ``group`` is a torch.distributed group (None for npes=1).
 
     The symmetric buffer is a torch allocation exported to every peer through
@@ -23,32 +39,35 @@ class Glm5MlaMoeLayer:
     """
 
     def __init__(
-        self, W: LayerWeights, samples: int, rank: int = 0, npes: int = 1, group=None, topk: int = 2048, timeline=False
+        self,
+        W: LayerWeights,
+        samples: int,
+        rank: int = 0,
+        npes: int = 1,
+        group=None,
+        topk: int = 2048,
+        timeline: bool = False,
+        moe_mode: MoeMode | str = MoeMode.W8A8,
     ):
+        validate_shard(samples, W.heads, rank, npes, topk)
+        self.moe_mode = as_moe_mode(moe_mode)
         self.W, self.S, self.rank, self.npes, self.topk = W, samples, rank, npes, topk
-        # MFMA-native weight packings (see pack_fp8 / pack_bf16)
-        t = W.t
-        self.packed = {n: pack_fp8(t[n]) for n in ("w_qkv_a", "w_q_b", "w_uk", "w_uv", "w_o", "w_ug", "w_dn")}
-        self.packed["w_r"] = pack_bf16(t["w_r"])
-        self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk)
+        self.packed = pack_layer_weights(W.t)
+        self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk, self.moe_mode)
         dev = torch.device("cuda", torch.cuda.current_device())
         self.scratch = torch.zeros(self.scr_layout["_bytes"], dtype=torch.uint8, device=dev)
-        self.sym_storage = torch.zeros(self.sym_layout["_bytes"], dtype=torch.uint8, device=dev)
-        self.sym = self.sym_storage.data_ptr()
-        if npes == 1:
-            addrs = [self.sym]
-        else:
-            import torch.distributed as dist
-
-            # IPC handles name the whole allocation; the buffer may sit at an offset in it
-            base = _Hip._get_alloc_base_ptr(self.sym)
-            mine = (_Hip._get_mem_handle_bytes(base), self.sym - base)
-            peers = [None] * npes
-            dist.all_gather_object(peers, mine, group=group)
-            addrs = [self.sym if i == rank else _Hip._open_mem_handle(peers[i][0]) + peers[i][1] for i in range(npes)]
-            dist.barrier(group=group)
-        self.peers = torch.tensor(addrs, dtype=torch.int64, device=dev)
-        self.launch = build_layer(samples, W.heads, npes, topk, timeline=timeline)
+        self.peer_buffer = SymmetricPeerBuffer(self.sym_layout["_bytes"], rank=rank, npes=npes, group=group)
+        self.sym_storage = self.peer_buffer.storage
+        self.sym = self.peer_buffer.local_address
+        self.peers = self.peer_buffer.addresses
+        self.launch = build_shared_reuse_kernel(
+            samples,
+            W.heads,
+            npes,
+            topk,
+            timeline=timeline,
+            moe_mode=self.moe_mode,
+        )
         self.stages = stage_tasks(samples, W.heads, topk)
         n_tasks = sum(n for _, n in self.stages)
         self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
@@ -74,6 +93,8 @@ class Glm5MlaMoeLayer:
         this scratch within a decode step need distinct ``layer``; call
         ``advance_step`` (or pass ``advance=True``) once per step.  Both are
         stream-ordered device ops, so the sequence can be captured in a HIP graph."""
+        if not 0 <= layer < MAX_LAYERS_PER_STEP:
+            raise ValueError(f"layer must be in [0, {MAX_LAYERS_PER_STEP}), got {layer}")
         t = dict(self.W.t, **self.packed)
         if x_out is None:
             x_out = torch.empty(self.S, HIDDEN, dtype=torch.bfloat16, device=h.device)
@@ -123,9 +144,22 @@ class Glm5MlaMoeLayer:
     def advance_step(self):
         self.step.add_(1)
 
+    def close(self):
+        """Release this rank's remote HIP IPC mappings."""
+
+        self.peer_buffer.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
     def timeline_report(self) -> str:
         """Per stage, in us from launch start: [first start, median hint seen, last end]
         and median per-task phases (hint wait, payload staging, compute, epilogue)."""
+        if self.timeline is None:
+            raise RuntimeError("timeline collection was not enabled")
         tl = self.timeline[:, :5].cpu().double() / 100.0  # s_memrealtime ticks at 100 MHz
         t0 = tl[:, 0].min()
         rows, i = [], 0
@@ -144,8 +178,11 @@ class Glm5MlaMoeLayer:
 
     def intermediates(self):
         S, H = self.S, self.W.heads
-        from kernels.mla_moe_layer.reference import KV_LORA, NOPE_DIM, PE_DIM, Q_LORA, V_DIM
+        from kernels.mla_moe_layer.config import KV_LORA, NOPE_DIM, PE_DIM, Q_LORA, V_DIM
 
+        mid = self.debug("mid", (S, MOE_SLOTS, INTER))
+        if self.moe_mode is MoeMode.W8A16:
+            mid = mid.to(torch.bfloat16).float()
         return dict(
             q_a=self.debug("q_a", (S, Q_LORA)),
             kv_a=self.debug("kv_a", (S, KV_LORA + PE_DIM)),
@@ -157,6 +194,6 @@ class Glm5MlaMoeLayer:
             scores=self.debug("scores", (S, N_EXPERTS)),
             sel=self.debug("sel", (S, MOE_SLOTS), torch.int32),
             prob=self.debug("prob", (S, MOE_SLOTS)),
-            mid=self.debug("mid", (S, MOE_SLOTS, INTER)),
+            mid=mid,
             xq=self.debug("xqd", (S, HIDDEN), pairs=False),
         )

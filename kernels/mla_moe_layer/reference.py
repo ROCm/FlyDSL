@@ -15,23 +15,26 @@ from dataclasses import dataclass
 
 import torch
 
-HIDDEN = 6144
-Q_LORA = 2048
-KV_LORA = 512
-PE_DIM = 64
-NOPE_DIM = 192
-V_DIM = 256
-QKV_A_ROWS = Q_LORA + KV_LORA + PE_DIM  # 2624
-N_EXPERTS = 256
-TOP_K = 8
-MOE_SLOTS = 1 + TOP_K  # slot 0 = shared expert
-SHARED_EXPERT = N_EXPERTS  # bank index of the shared expert
-INTER = 256  # per-rank intermediate shard (2048 / TP8)
-ROUTE_SCALE = 2.5
-EPS = 1e-5
-SCALE_BM = 128
-FP8_MAX = 448.0
-SOFTMAX_SCALE = (NOPE_DIM + PE_DIM) ** -0.5
+from kernels.mla_moe_layer.config import (
+    EPS,
+    FP8_MAX,
+    HIDDEN,
+    INTER,
+    KV_LORA,
+    N_EXPERTS,
+    NOPE_DIM,
+    PE_DIM,
+    Q_LORA,
+    QKV_A_ROWS,
+    ROUTE_SCALE,
+    SCALE_BM,
+    SHARED_EXPERT,
+    SOFTMAX_SCALE,
+    TOP_K,
+    V_DIM,
+    MoeMode,
+    as_moe_mode,
+)
 
 
 # (name, rows, K, BK) of every FP8 matrix, rows given per local head count H.
@@ -143,7 +146,19 @@ def route(scores: torch.Tensor, bias: torch.Tensor):
     return idx, p / p.sum() * ROUTE_SCALE
 
 
-def golden_layer(W: LayerWeights, h, cur_pos: int, kv_cache, pe_cache, indices, cos, sin, allreduce, topk=2048):
+def golden_layer(
+    W: LayerWeights,
+    h,
+    cur_pos: int,
+    kv_cache,
+    pe_cache,
+    indices,
+    cos,
+    sin,
+    allreduce,
+    topk=2048,
+    moe_mode: MoeMode | str = MoeMode.W8A8,
+):
     """One rank's view of the layer. Mutates ``kv_cache``/``pe_cache`` like the kernel.
 
     Returns a dict of intermediates keyed like the kernel's debug scratch.
@@ -183,25 +198,35 @@ def golden_layer(W: LayerWeights, h, cur_pos: int, kv_cache, pe_cache, indices, 
         o_lat[s] = sum(a * wi for a, wi in zip(accs, w)) / sum(li * wi for li, wi in zip(ls, w))
     o = torch.einsum("hvk,shk->shv", dq["uv"].view(H, V_DIM, KV_LORA), bf(o_lat)).reshape(S, H * V_DIM)
     a = (h.float() + allreduce(bf(o) @ dq["o"].T)).to(torch.bfloat16)
-    moe = golden_moe(W, a, allreduce)
+    moe = golden_moe(W, a, allreduce, moe_mode=moe_mode)
     res = dict(q_a=q_a, kv_a=kv_a, q_nope=q_nope, q_pe=q_pe, q_lat=q_lat, o=o, a=a)
     res.update(moe)
     return res
 
 
-def golden_moe(W: LayerWeights, a, allreduce, mid=None, sel=None, prob=None, xq=None):
+def golden_moe(
+    W: LayerWeights,
+    a,
+    allreduce,
+    mid=None,
+    sel=None,
+    prob=None,
+    xq=None,
+    moe_mode: MoeMode | str = MoeMode.W8A8,
+):
     """MoE half of the layer from the post-attention hidden state ``a`` [S, HIDDEN] (bf16).
 
     ``xq`` [S, HIDDEN] overrides the quant-dequantized activation and
     ``mid``/``sel``/``prob`` ([S, 9, INTER] / [S, 9] / [S, 9]) the down-projection
     inputs, so each stage can be checked from the kernel's own inputs.
     """
+    mode = as_moe_mode(moe_mode)
     t = W.t
     S = a.shape[0]
     out = {k: [] for k in ("sel", "prob", "mid")}
     x2 = rmsnorm(a, t["g_post"])
     scores = torch.sigmoid(bf(x2) @ t["w_r"].float().T)
-    xq_ref = quant_dequant(x2)
+    xq_ref = quant_dequant(x2) if mode is MoeMode.W8A8 else bf(x2)
     xq = xq_ref if xq is None else xq.float()
     y = torch.zeros(S, HIDDEN, device=a.device)
     for s in range(S):
@@ -211,7 +236,8 @@ def golden_moe(W: LayerWeights, a, allreduce, mid=None, sel=None, prob=None, xq=
         mids = []
         for e, wgt in zip(experts, weights):
             ug = dequant(t["w_ug"][e], t["s_ug"][e], 128) @ xq[s]
-            mids.append(torch.nn.functional.silu(ug[:INTER]) * ug[INTER:])
+            value = torch.nn.functional.silu(ug[:INTER]) * ug[INTER:]
+            mids.append(bf(value) if mode is MoeMode.W8A16 else value)
         out["sel"].append(torch.tensor(experts, device=a.device, dtype=torch.int32))
         out["prob"].append(torch.tensor(weights, device=a.device))
         out["mid"].append(torch.stack(mids))
@@ -220,7 +246,8 @@ def golden_moe(W: LayerWeights, a, allreduce, mid=None, sel=None, prob=None, xq=
         weights = out["prob"][s].tolist() if prob is None else prob[s].tolist()
         for j, (e, wgt) in enumerate(zip(experts, weights)):
             m = out["mid"][s][j] if mid is None else mid[s, j].float()
-            y[s] += wgt * (dequant(t["w_dn"][e], t["s_dn"][e], 128) @ quant_dequant(m))
+            activation = quant_dequant(m) if mode is MoeMode.W8A8 else bf(m)
+            y[s] += wgt * (dequant(t["w_dn"][e], t["s_dn"][e], 128) @ activation)
     x_out = (a.float() + allreduce(y)).to(torch.bfloat16)
     return dict(
         scores=scores,

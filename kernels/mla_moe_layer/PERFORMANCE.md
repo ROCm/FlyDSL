@@ -1,215 +1,140 @@
-# GLM-5 MLA + MoE: TileRT assembly inside FlyDSL
+# Shared/reuse MLA + MoE kernel
 
-[简体中文](PERFORMANCE_zh.md)
+[中文](PERFORMANCE_zh.md)
 
-Worktree: `/root/FlyDSL-glm5-perf`, branch `codex/glm5-perf`, based on
-`2fc0cefb`. Claude's nine local tuning commits were recovered from
-`/root/FlyDSL-glm5mono`; its staged changes are preserved there. Local
-measurements, candidate snapshots, disassembly and logs are in
-`/root/glm5-perf-results`.
+This directory contains a FlyDSL implementation of one fixed GLM-5 MLA + MoE
+shard. The production path is exposed as `SharedReuseMlaMoeLayer` and generated
+by `build_shared_reuse_kernel`. It contains no imported TileRT kernel body or
+embedded assembly. The former assembly capture, rewriting, and launch bridge
+has been deleted.
 
-The imported assembly, the hybrid with the final MoE reduction written in
-FlyDSL, and the tuned regular `Glm5MlaMoeLayer` now reach approximately TileRT
-latency for the measured shards. Select the regular kernel with `--backend flydsl`
-or the hybrid with `--backend tilert_inline --replace ffn`. The regular kernel
-does not import the TileRT assembly body and contains no `InlineAsmOp`; its
-remaining wave reduction and poll-loop scheduling operations use FlyDSL APIs.
+TileRT remains an optional benchmark dependency in `native_baseline.py`. That
+adapter converts the same generated tensors to the released TileRT wrapper so
+the two implementations can be compared directly. It is not imported by the
+FlyDSL execution path.
 
-## Measured scope and results
+## Fixed shard and arithmetic modes
 
-Hardware: 8 × MI355X, gfx950. Torch: `2.12.0+rocm7.14.0`.
-TileRT: `0.1.6.post2`. Position 3000, sparse top-2048, hidden size 6144.
-Each rank has **8 heads and expert intermediate size 256** at every GPU count.
-Consequently, 2/4-GPU results measure smaller collectives on the same shard;
-they are **not full-model TP2/TP4 shapes**.
+Every rank uses eight attention heads, expert intermediate size 256, hidden
+size 6144, 256 routed experts, one shared expert, and top-8 routing. The 2- and
+4-GPU measurements therefore exercise the same fixed shards with smaller peer
+groups; they are not full-model TP2 or TP4 shapes.
 
-Latency is microseconds per layer: a 128-launch HIP graph, two warmup replays,
-nine measured replays, median of the slowest rank per replay. Tags and peer
-buffers are cleared outside the timed interval. Weights and inputs are shared
-between implementations. Graph output must match eager output exactly.
+The public `MoeMode` values are:
 
-| GPUs | Implementation | S=1 | S=2 | S=4 |
-|---:|---|---:|---:|---:|
-| 2 | Adapted TileRT ASM in FlyDSL | 34.59 | 41.10 | 52.95 |
-| 2 | Hybrid: FlyDSL final reduction/output | 34.54 | 40.82 | 52.54 |
-| 2 | Regular FlyDSL kernel | 33.98 | 39.80 | 53.55 |
-| 4 | Adapted TileRT ASM in FlyDSL | 35.39 | 42.08 | 53.60 |
-| 4 | Hybrid: FlyDSL final reduction/output | 35.33 | 42.06 | 54.52 |
-| 4 | Regular FlyDSL kernel | 34.30 | 41.51 | 54.42 |
-| 8 | Native TileRT | 35.85 | 42.90 | 55.93 |
-| 8 | TileRT ASM in FlyDSL | 36.10 | 42.83 | 55.69 |
-| 8 | Hybrid: FlyDSL final reduction/output | 36.54 | 43.11 | 55.63 |
-| 8 | Regular FlyDSL kernel | 35.55 | 42.72 | 56.32 |
+| Mode | Expert activation | Expert weight | Up/gate to down handoff |
+|---|---|---|---|
+| `w8a8` | dynamic FP8 E4M3 | block-scaled FP8 E4M3 | FP8 |
+| `w8a16` | BF16 | block-scaled FP8 E4M3 | BF16 |
 
-Sources: `corrected-inline{2,4,8}.jsonl`, `corrected-tilert8.jsonl`,
-`final-ffn{2,4,8}.jsonl`, `fx-api-candidate{2,4,8}.jsonl`, and
-`verified-tilert8.jsonl` in the results directory. Both the hybrid and regular
-FlyDSL kernels remain close to their corresponding assembly/native references;
-no regular-kernel case is slower by more than 1.6%, and several are faster.
-The previous regular eight-GPU S=4 result was 61.91 µs (`final-flydsl8.jsonl`).
+Attention weights stay block-scaled FP8 in both modes. Supported sample counts
+are 1, 2, and 4; supported peer counts are 1, 2, 4, and 8. The host wrapper
+validates the complete fixed-shard contract before allocating GPU buffers.
 
-**Superseded measurements:** earlier `matched-*`, `inline*`, `dispatch*`, and
-`ffn*` runs without the `corrected-`/`final-` prefix used an incorrect Q-B
-conversion. TileRT requires all non-positional rows followed by all RoPE rows,
-with 64-row scale blocks. The corrected adapter reorders rows and expands the
-original 128-row scales. Independent golden checks caught this error; those
-older runs must not be used as matched-workload performance evidence.
-
-## Implemented segments
+## Code layout
 
 | File | Responsibility |
 |---|---|
-| `tools/asm_bridge/capture.cpp` | Capture the 560-byte native argument structure and exact specialization name at an armed launch. A skip mode discovers the 8-peer ABI without executing it on a smaller group. |
-| `tools/asm_bridge/inline.py` | Disassemble one specialization, relocate branches to labels, and execute it in a real `llvm.InlineAsmOp`. Check the code-object hash and ABI before use. |
-| `tools/asm_bridge/replacements.py` | Replace CTA-role dispatch and thread coordinates with FlyDSL expressions. Keep argument prefetches and the live block-ID sign register. |
-| `tools/asm_bridge/peer_count.py` | Adapt the collective for 2/4 peers. Preserve the seven-remote-slot stride, zero absent slots, and mask their sends and receives. |
-| `tools/asm_bridge/epilogue.py` | Return from the assembly after expert-down computation; perform peer reduction, residual addition and BF16 output in FlyDSL. |
-| `tools/asm_bridge/trace.py` | Timestamp producer/consumer boundaries for S=1/2/4. |
+| `config.py` | Fixed dimensions, public arithmetic modes, and host validation. |
+| `packing.py` | Shared MFMA weight packing for FP8 and BF16 matrices. |
+| `runtime.py` | Owned symmetric HIP IPC buffers and deterministic remote-handle cleanup. |
+| `shared_reuse_moe_kernel.py` | FlyDSL kernel scheduling, communication, MLA, routing, and expert computation. |
+| `layer.py` | Public host wrapper, scratch allocation, launch arguments, tracing, and lifecycle. |
+| `reference.py` | Independent Torch stage and end-to-end calculations. |
+| `native_baseline.py` | Optional same-weight TileRT comparison adapter. |
 
-The S=1 intact import was checked instruction by instruction: all **6,254**
-native instruction encodings matched the generated FlyDSL code object after
-its two-instruction argument-pointer prologue. Native LDS size and launch shape
-remain 256 CTAs × 512 threads. The bridge does not use runtime ASM substitution.
+The kernel uses FlyDSL operations for wave reductions, hardware math,
+mailbox polling, buffer access, and MFMA issue. Peer payloads are rounded to
+BF16 and accumulated in rank order so every rank produces exactly the same
+hidden state and routing decisions.
 
-The final-reduction replacement preserves the native down stage's out-of-line
-basic blocks. Its ASM inputs are declared read/write so LLVM preserves live
-argument and thread/block values when control returns to FlyDSL. Local down
-outputs begin at LDS byte 7168 / 6144 / 4096 for S=1 / 2 / 4; the residual is
-at byte 27152. The replacement batches all peer polls and sums in rank order.
-A separately tested 64-byte packet translation was slightly slower and is
-archived as `ffn-packets-epilogue.py` with `packets8.jsonl`.
+`SharedReuseMlaMoeLayer` owns its remote HIP IPC mappings. Call `close()` after
+the last rank barrier, or use it as a context manager.
 
-Native argument offsets established by differential capture:
+## Correctness status
 
-- Epoch fields: 120, 392, 496, 536.
-- Attention rank/count: 176, 180.
-- FFN rank/count: 488, 492.
+Both `w8a8` and `w8a16` passed the full 2/4/8-GPU by S=1/2/4 matrix. Each of
+the nine configurations ran five changing inputs and checked:
 
-The released native wrapper supports only 1/8 peers. Its 2/4-peer adaptation is
-validated against the independent golden; there is no released native TP2/TP4
-whole-layer benchmark to quote.
+- stage outputs against the independent Torch calculations;
+- exact final-output agreement across ranks;
+- the final down projection and BF16 peer reduction;
+- finite outputs and stable HIP graph replay.
 
-The regular FlyDSL kernel uses one wave per peer destination, one peer pointer
-per wave, mask-based CTA mapping, and eight-intermediate up/gate tiles pipelined
-over samples. Two changes guided by the assembly comparison closed the remaining
-gap: packed BF16 peer payloads and one sample per router CTA. The S=4 compiler
-dump now uses **216 VGPRs, 94 SGPRs and zero private/scratch bytes**, versus
-224 VGPRs before the API conversion and 256 VGPRs with spills in the recovered
-version. Obsolete up/gate schedules were removed; the reserved scratch layout
-remains compatible.
+The independent FP32 end-to-end check passed 41 inputs at 1.49-2.85% relative
+L2. Four inputs used the existing near-tied-routing skip rule because a one-BF16-
+ulp attention difference changed the selected expert set; those inputs still
+passed the stage checks and exact rank agreement. Existing tolerances were not
+relaxed. One NP2/S4 `w8a16` intermediate used the existing one-BF16-ulp bound,
+while its final down/output check matched exactly.
 
-The last two inline-assembly sites in the regular kernel were replaced with
-FlyDSL APIs: unsigned top-k reduction now calls
-`fx.coop.warp_reduce(..., fx.ReductionOp.MAX, width=64)`, and the mailbox retry
-loop uses `rocdl.s_nop(0)`. The generated gfx950 ISA still contains 48
-fused `v_max_u32_dpp` instructions for S=4, while the source and emitted LLVM IR
-contain no inline assembly. A fresh eight-GPU before/after run measured
-35.44/42.99/56.02 µs and 35.55/42.72/56.32 µs for S=1/2/4 respectively, changes
-of +0.31%, -0.65%, and +0.55%. Artifacts are `fx-api-baseline8.jsonl`,
-`fx-api-candidate8.jsonl`, and `fx-api-isa8-s4/`.
+A direct TP1/S1 output comparison against the same-weight TileRT wrapper gave:
 
-The peer format changes numerical behavior: each rank rounds its attention and
-FFN partial to BF16 before the ordered FP32 reduction, matching TileRT's peer
-precision. The independent end-to-end golden still uses FP32 peer partials and
-the original 5% relative-L2 limit. The down-segment golden models the BF16 payload
-rounding and retains its original tight output tolerance. The extended check
-first exposed this reference mismatch on two eight-GPU S=1 inputs; the payload
-precision is now explicit, without relaxing either tolerance.
+| Mode | Maximum absolute error | Relative L2 |
+|---|---:|---:|
+| `w8a8` | 0.1171875 | 2.263% |
+| `w8a16` | 0.03125 | 0.357% |
 
-## Segment-guided tuning
+## Performance status
 
-The S=4 rank-0 traces exposed later attention publication, router completion,
-and down computation in the earlier regular kernel. The uninstrumented
-eight-GPU ablation was:
+The established W8A8 graph measurements below use 128 layer launches per HIP
+graph, two warmups, nine measured replays, and the median critical-rank time.
+Hardware was 8 x MI355X (gfx950), with position 3000 and sparse top-2048.
 
-| Candidate | S=1 | S=2 | S=4 |
-|---|---:|---:|---:|
-| Before peer-format/router changes | 36.22 | 45.21 | 61.91 |
-| Packed BF16 peer payload | 35.61 | 43.27 | 57.93 |
-| Plus one sample per router CTA | — | 42.94 | 56.09 |
+| GPUs | Backend | S=1 | S=2 | S=4 |
+|---:|---|---:|---:|---:|
+| 2 | FlyDSL | 33.98 us | 39.80 us | 53.55 us |
+| 4 | FlyDSL | 34.30 us | 41.51 us | 54.42 us |
+| 8 | FlyDSL | 35.55 us | 42.72 us | 56.32 us |
+| 8 | TileRT | 35.85 us | 42.90 us | 55.93 us |
 
-These come from `final-flydsl8.jsonl`, `packed-peer8.jsonl`, and
-`router-split8.jsonl`. Earlier shared-expert execution improved S=2 slightly but
-regressed S=4; a larger activation poll batch did not improve S=4. Both experiments
-are archived rather than selected. The final matrix above remeasures the cleaned
-candidate. Native and regular traces are in `final-trace-inline-s4` and
-`verified-trace-flydsl-s4`; the prior regular trace is `final-trace-flydsl-s4`.
-Last-CTA milestones in these diagnostic traces are:
+FlyDSL is faster in the measured eight-GPU S=1 and S=2 cases and 0.7% slower
+at S=4. It has therefore not beaten TileRT in every configuration.
 
-| S=4 milestone | Earlier FlyDSL | TileRT ASM | Tuned FlyDSL |
-|---|---:|---:|---:|
-| Attention state published | 30.23 | 27.59 | 27.66 |
-| Router scores published | 35.12 | 31.83 | 30.65 |
-| Routed up/gate published | 50.12 | 44.96 | 45.73 |
-| Down computation complete | 57.52 | 53.18 | 52.97 |
+A short TP1/S1 smoke measurement using eight layers and one measured replay
+gave 33.840 us versus 33.520 us for `w8a8`, and 34.735 us versus 32.895 us for
+`w8a16`. These short runs verify the benchmark path and are not publication-
+quality latency results.
 
-Units are microseconds from launch entry, with instrumentation enabled. The
-plot and CSV are `s4-segment-milestones.png` and `s4-segment-milestones.csv` in
-the results directory.
+Segment traces guided two retained scheduling changes: BF16-packed peer
+exchange and one sample per router CTA. For the earlier S=4 schedule, the last
+instrumented CTA reached attention publication, router publication, routed
+up/gate publication, and down completion at 30.23, 35.12, 50.12, and 57.52 us.
+After the changes, those marks were 27.66, 30.65, 45.73, and 52.97 us. The
+comparison plot is `/root/glm5-perf-results/s4-segment-milestones.png`.
 
 ## Reproduce
 
-Use the existing compiler build, this worktree, and the installed TileRT package:
+Use the existing FlyDSL compiler build and this worktree:
 
 ```bash
 cd /root/FlyDSL-glm5-perf
 export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-perf:/root/tilert_pkg
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib
-mkdir -p /root/glm5-perf-results/repro
-g++ -shared -fPIC -O2 kernels/mla_moe_layer/tools/asm_bridge/capture.cpp \
-  -ldl -o /root/glm5-perf-results/repro/capture.so
-export LD_PRELOAD=/root/glm5-perf-results/repro/capture.so
+
+/opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
+  --npes 8 -S 4 --pos 3000 --iters 5 --moe-mode w8a8
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/benchmark.py \
-  --backend tilert_inline --replace ffn --npes 8 --samples 1 2 4 \
-  --verify-golden --changing-inputs 5 \
-  --output /root/glm5-perf-results/repro/hybrid8.jsonl \
-  --asm-artifacts /root/glm5-perf-results/repro/asm
+  --backend flydsl --moe-mode w8a8 --npes 8 --samples 1 2 4 \
+  --layers 128 --repeats 9 \
+  --output /root/glm5-perf-results/flydsl-w8a8-tp8.jsonl
 ```
 
-Repeat with `--npes 2` and `--npes 4`. Use `--replace none` for the imported
-assembly, `--replace dispatch` on 1/8 peers for dispatch replacement,
-`--backend tilert` on eight GPUs for native TileRT, and `--backend flydsl`
-without `--replace`, `--verify-golden`, or `--changing-inputs` for the regular
-kernel. Run GPU benchmarks sequentially.
+Repeat the correctness command for `--moe-mode w8a16`, peer counts 2/4/8,
+and sample counts 1/2/4. Run GPU jobs sequentially.
 
-The imported binary is `/root/tilert_isa/b14.co`, SHA256
-`6e0517e924f042d63a8b5a4e13f86696ae5bc4c1eee32765b28456d65bd2eb65`.
-Generated assembly and code objects are local artifacts, not checked-in source.
-Another TileRT build needs a new ABI/segment audit before changing this guard.
+For a direct released-implementation comparison, keep `/root/tilert_pkg` on
+`PYTHONPATH` and replace `--backend flydsl` with `--backend tilert`. The native
+wrapper supports only one or eight peers and sample counts 1/2/4.
 
-For diagnostics, add `--trace --layers 16` to the intact inline or regular
-FlyDSL benchmark. Inspect a rank's trace with:
+Add `--trace --layers 16 --trace-dir <directory>` to a FlyDSL benchmark for
+stage timestamps, then inspect a rank with:
 
 ```bash
 /opt/venv/bin/python kernels/mla_moe_layer/tools/profile_summary.py \
-  /root/glm5-perf-results/repro/asm/s4/rank0/trace.pt
+  <directory>/w8a8-s4/rank0/trace.pt
 ```
 
-Inline traces for S=1/2/4 were run on eight GPUs and preserved exact native
-output. Regular FlyDSL tracing also runs on 2/4 peers; NP2/S4 was exercised in
-`verified-trace-flydsl2-s4`. Inline tracing of the 2/4-peer adapter remains
-unsupported because it shares instrumentation registers.
-
-Trace timestamps use the 100 MHz realtime counter. Instrumentation drains
-memory operations and changes scheduling; use uninstrumented graph measurements
-for performance claims. Some publication marks cover a subset of CTAs or the
-last iteration of a repeated stage.
-
-The hybrid checks five changing inputs per S/GPU combination against native
-TileRT on eight GPUs and the adapted intact assembly on two/four GPUs, requiring
-bitwise equality and rank agreement. Independent golden checks also cover the
-initial input. Corrected-input dispatch replacement also passes all three sample
-sizes on eight GPUs (`corrected-dispatch8.jsonl`). The regular kernel checks five
-changing inputs for every 2/4/8-GPU × S=1/2/4 combination, with exact agreement
-across ranks and segment goldens. The independent end-to-end comparison passed
-41 of 45 inputs at relative L2 1.49–2.85%; the existing near-tied-routing check
-skipped four inputs (NP2/S2 once, NP8/S2 once, NP8/S4 twice). Those inputs still
-passed the segment checks and rank equality. The API-only follow-up reran the
-same matrix with the same result; logs are `fx-api-check-np{2,4,8}-s{1,2,4}.log`.
-Its test CLI returns nonzero on failure:
-
-```bash
-/opt/venv/bin/python tests/kernels/test_glm5_mla_moe_layer.py \
-  --npes 8 -S 4 --pos 3000 --iters 5
-```
+Trace instrumentation drains memory operations and changes scheduling. Use
+uninstrumented graph measurements for latency comparisons.
