@@ -3,8 +3,17 @@
 #
 # FlyJitRuntime — thin ROCm runtime with GPU module caching.
 
-file(GLOB _rocm_paths LIST_DIRECTORIES true "/opt/rocm*")
-list(SORT _rocm_paths ORDER DESCENDING)
+# ROCM_PATH, else the SDK's own answer, else whatever is in /opt.
+if(DEFINED ENV{ROCM_PATH})
+  set(_rocm_paths "$ENV{ROCM_PATH}")
+else()
+  execute_process(COMMAND rocm-sdk path --root
+                  OUTPUT_VARIABLE _rocm_paths OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
+if(NOT _rocm_paths)
+  file(GLOB _rocm_paths LIST_DIRECTORIES true "/opt/rocm*")
+  list(SORT _rocm_paths ORDER DESCENDING)
+endif()
 find_package(hip REQUIRED CONFIG PATHS ${_rocm_paths})
 
 add_library(FlyJitRuntime SHARED FlyRocmRuntimeWrappers.cpp)
