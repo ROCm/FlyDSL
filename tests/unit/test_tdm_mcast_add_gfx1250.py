@@ -185,7 +185,8 @@ def _compile_tdm_mcast_add(grid_m, grid_n, cluster_m, cluster_n):
 def _run_tdm_mcast_add(grid_m, grid_n, cluster_x, cluster_y, n_warmup=0, n_iters=1):
     """Launch the TDM multicast add kernel and verify correctness.
 
-    Returns (max_err, avg_us) where avg_us is 0 if n_warmup == 0.
+    Returns (max_err, avg_us) where avg_us is the profiled device time per launch, or 0 if
+    n_warmup == 0.
     """
     assert grid_m % cluster_x == 0 and grid_n % cluster_y == 0
 
@@ -204,24 +205,19 @@ def _run_tdm_mcast_add(grid_m, grid_n, cluster_x, cluster_y, n_warmup=0, n_iters
     launch_fn = _compile_tdm_mcast_add(grid_m, grid_n, cluster_x, cluster_y)
     stream = torch.cuda.Stream()
 
-    # Warmup
-    for _ in range(n_warmup):
+    def launch():
         launch_fn(a_dev, b_dev, c_dev, stream=stream)
-    torch.cuda.synchronize()
 
     avg_us = 0.0
     if n_iters > 1 and n_warmup > 0:
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record(stream)
-        for _ in range(n_iters):
-            launch_fn(a_dev, b_dev, c_dev, stream=stream)
-        end_event.record(stream)
-        torch.cuda.synchronize()
-        avg_us = start_event.elapsed_time(end_event) * 1000.0 / n_iters
+        from tests.test_common import run_perftest
+
+        # An event pair around a loop of these launches times the ~40 us host launch
+        # path rather than the few-microsecond kernel, so read the device time instead.
+        _, avg_us = run_perftest(launch, num_iters=n_iters, num_warmup=n_warmup)
     else:
-        launch_fn(a_dev, b_dev, c_dev, stream=stream)
-        torch.cuda.synchronize()
+        launch()
+    torch.cuda.synchronize()
 
     # Reference: flat tile bid = bx * grid_n + by, each tile = flatten(A_tile + B_tile)
     c_ref = torch.zeros_like(c_dev)
