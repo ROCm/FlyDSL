@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-25T03:33:43Z",
+ "updated": "2026-09-25T03:48:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -158,10 +158,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-25T02:47:07Z",
-     "completed_at": null,
+     "completed_at": "2026-09-25T03:33:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36073185378/job/107882072625"
     }
    ]
@@ -173,11 +173,11 @@
    "branch": "add-security-scanning",
    "event": "pull_request",
    "title": "chore: add security scanning workflows",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36022932909",
    "created_at": "2026-09-24T15:48:57Z",
-   "updated_at": "2026-09-24T16:25:36Z",
+   "updated_at": "2026-09-25T03:46:49Z",
    "actor": "haribabug",
    "jobs": [
     {
@@ -204,9 +204,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T16:25:36Z",
+     "started_at": "2026-09-25T03:46:48Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36022932909/job/107726883464"
     }
@@ -219,11 +219,11 @@
    "branch": "fix/shared-allocator-explicit-alignment",
    "event": "pull_request",
    "title": "[Fix][Expr] Honor allocate(..., alignment=) for static shared allocat\u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35996004114",
    "created_at": "2026-09-24T11:56:48Z",
-   "updated_at": "2026-09-25T03:18:47Z",
+   "updated_at": "2026-09-25T03:46:31Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -241,10 +241,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-25T03:18:46Z",
-     "completed_at": null,
+     "completed_at": "2026-09-25T03:46:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35996004114/job/107625737573"
     },
     {
