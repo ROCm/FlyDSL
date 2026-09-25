@@ -141,6 +141,7 @@ def _gemm(
     tile_k,
     stage1_act,
     cluster_n=1,
+    swiglu_limit=7.0,
 ):
     nb = min(3, max(1, K // tile_k))
     launch_moe_gemm_a8w4(
@@ -166,7 +167,7 @@ def _gemm(
         stage1_act,
         0,  # has_bias
         _ptr(a_payload),  # bias ptr (unused)
-        7.0,  # swiglu_limit (unused for silu)
+        swiglu_limit,
         1,  # cluster_m
         cluster_n,
     )
@@ -187,6 +188,8 @@ def _grouped_moe(
     tile_n=256,
     tile_k=256,
     cluster_n=1,
+    stage1_act=1,
+    swiglu_limit=7.0,
 ):
     device = hidden.device
     tokens, model_dim = hidden.shape
@@ -216,8 +219,9 @@ def _grouped_moe(
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
-        stage1_act=1,
+        stage1_act=stage1_act,
         cluster_n=cluster_n,
+        swiglu_limit=swiglu_limit,
     )
     a2_p, a2_s = _quant_a(a2_bf16, wmma_rep)
 
@@ -263,11 +267,11 @@ def _reference_moe(hidden, w1_deq, w2_deq, topk_ids, topk_weight, inter_dim):
     return out
 
 
-def _build_case(E, model_dim, inter_dim, token_num, topk, seed=0):
+def _build_case(E, model_dim, inter_dim, token_num, topk, seed=0, hidden_scale=0.5):
     _require_gpu()
     torch.manual_seed(seed)
     dev = torch.device("cuda")
-    hidden = (torch.randn(token_num, model_dim, dtype=torch.float32, device=dev) * 0.5).bfloat16()
+    hidden = (torch.randn(token_num, model_dim, dtype=torch.float32, device=dev) * hidden_scale).bfloat16()
     w1 = (torch.randn(E, 2 * inter_dim, model_dim, device=dev) * 0.2).bfloat16()
     w2 = (torch.randn(E, model_dim, inter_dim, device=dev) * 0.2).bfloat16()
     w1_p, w1_s, w1_deq = _quant_mxfp4_weight(w1)
@@ -335,6 +339,18 @@ def test_grouped_moe_stability():
         again = _grouped_moe(**args)
         torch.cuda.synchronize()
         assert torch.equal(first, again), "MoE output is non-deterministic across launches"
+
+
+@pytest.mark.parametrize("stage1_act, clamps", [(1, False), (2, True)], ids=["silu", "swiglu"])
+def test_grouped_moe_swiglu_limit_scope(stage1_act, clamps):
+    """swiglu_limit clamps the gpt-oss SwiGLU epilogue and must not change SiLU."""
+    # Stage-1 pre-activations have a std of ~18, so a limit of 7 would clamp many of them.
+    args, _ = _build_case(8, 512, 256, 64, 2, seed=4, hidden_scale=4.0)
+    limited = _grouped_moe(**args, stage1_act=stage1_act, swiglu_limit=7.0).clone()
+    torch.cuda.synchronize()
+    unlimited = _grouped_moe(**args, stage1_act=stage1_act, swiglu_limit=float("inf"))
+    torch.cuda.synchronize()
+    assert torch.equal(limited, unlimited) is not clamps
 
 
 @pytest.mark.parametrize("cluster_n", [2, 4])
