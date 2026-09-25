@@ -337,6 +337,13 @@ def test_grouped_moe_stability():
         assert torch.equal(first, again), "MoE output is non-deterministic across launches"
 
 
+def test_grouped_moe_rejects_k_not_multiple_of_tile_k():
+    # model_dim is stage 1's K; with tile_k=256, K=640 used to drop its last 128 columns.
+    args, _ = _build_case(8, 640, 256, 64, 2)
+    with pytest.raises(ValueError, match="multiple of tile_k"):
+        _grouped_moe(**args)
+
+
 @pytest.mark.parametrize("cluster_n", [2, 4])
 def test_grouped_moe_cluster(cluster_n):
     args, _ = _build_case(8, 1024, 512, 128, 2, seed=3)
