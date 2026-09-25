@@ -3,11 +3,15 @@
 
 """CPU checks for indexed MLA + MoE configuration and weight packing."""
 
+from dataclasses import replace
+
 import pytest
 import torch
 
 from kernels.common.mx_formats import dequantize_mxfp4, quant_dequant_mxfp8, quantize_mxfp4
 from kernels.mla_moe_layer.config import (
+    GLM5_CONFIG,
+    KIMI_K3_CONFIG,
     ExpertActivation,
     ExpertWeight,
     MoeMode,
@@ -20,6 +24,7 @@ from kernels.mla_moe_layer.packing import (
     pack_fp8,
     pack_mxfp4,
 )
+from kernels.mla_moe_layer.reference import golden_layer, make_weights, rope_table
 
 
 def test_pack_fp8_uses_mfma_lane_order():
@@ -92,3 +97,53 @@ def test_validate_shard_rejects_unsupported_contract(args):
 
 def test_validate_shard_accepts_eight_samples():
     validate_shard(8, 8, 0, 1, 2048)
+
+
+def test_validate_kimi_k3_attention_shard_accepts_tp8_geometry():
+    validate_shard(8, 12, 7, 8, 2048, KIMI_K3_CONFIG)
+
+
+def test_kimi_k3_mla_golden_uses_pre_normalized_input_and_defers_residual():
+    config = replace(
+        KIMI_K3_CONFIG,
+        name="tiny_kimi_k3",
+        hidden=64,
+        q_lora=64,
+        kv_lora=64,
+        pe_dim=64,
+        nope_dim=64,
+        v_dim=64,
+        n_experts=8,
+        top_k=2,
+        inter=16,
+        local_heads=1,
+        attention_output_gate=False,
+    )
+    weights = make_weights(0, heads=1, device="cpu", model_config=config, attention_only=True)
+    weights.t["g_in"].fill_(float("nan"))
+    weights.t["w_o"].zero_()
+    hidden = torch.arange(64, dtype=torch.bfloat16).reshape(1, 64)
+    kv_cache = torch.zeros(64, 64, dtype=torch.bfloat16)
+    pe_cache = torch.zeros(64, 64, dtype=torch.bfloat16)
+    cos, sin = rope_table(64, device="cpu", model_config=config)
+
+    got = golden_layer(
+        weights,
+        hidden,
+        0,
+        kv_cache,
+        pe_cache,
+        torch.arange(64, dtype=torch.int32).reshape(1, 64),
+        cos,
+        sin,
+        lambda value: value,
+        sparse_attention_topk=64,
+        attention_only=True,
+    )
+
+    torch.testing.assert_close(got["a"], torch.zeros_like(hidden), atol=0, rtol=0)
+
+
+def test_validate_kimi_k3_attention_shard_rejects_glm_head_count():
+    with pytest.raises(ValueError, match="kimi_k3 requires 12 local heads"):
+        validate_shard(1, GLM5_CONFIG.local_heads, 0, 8, 2048, KIMI_K3_CONFIG)

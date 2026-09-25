@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""GLM-5 indexed sparse MLA + MoE block in ONE persistent launch per rank (TP8 decode).
+"""Shared/reuse decode kernels in one persistent launch per rank.
 
-One launch of ``grid = 256 CTAs x 512 threads`` (one CTA per MI355X CU) runs the
-whole layer body for this rank's TP shard::
+For GLM-5, one launch of ``grid = 256 CTAs x 512 threads`` (one CTA per MI355X
+CU) runs the whole layer body for this rank's TP shard::
 
     input RMSNorm -> q_a / kv_a projection -> q_a RMSNorm -> q_b (+RoPE)
       -> KV RMSNorm / k_pe RoPE -> KV/PE cache publish
@@ -14,6 +14,10 @@ whole layer body for this rank's TP shard::
       -> top-8 -> 1 shared + 8 routed expert up/gate/SiLU
       -> expert down + route weighting
       -> MoE TP8 peer reduce + residual -> x_out                   (sym_ffn)
+
+The Kimi-K3 profile runs the full-attention MLA portion through the attention
+TP reduce and returns there. Its input is already normalized by the caller and
+its residual/attention-residual handling remains outside this kernel.
 
 Scheduling: every stage is a list of tasks; task ``t`` of a stage runs on CTA
 ``(stage_base + t) % 256`` and every CTA walks the stages in order.  There is
@@ -52,26 +56,16 @@ from kernels.common import buffer_ops as bo
 from kernels.common.dpp_utils import update_dpp_i32
 from kernels.mla_moe_layer.config import (
     EPS,
-    EXPERT_TOP_K,
     FP8_MAX,
-    HIDDEN,
-    INTER,
-    KV_LORA,
+    GLM5_CONFIG,
     MAX_LAYERS_PER_STEP,
-    MOE_SLOTS,
-    N_EXPERTS,
-    NOPE_DIM,
-    PE_DIM,
-    Q_LORA,
-    QKV_A_ROWS,
-    ROUTE_SCALE,
     SCALE_BM,
-    SHARED_EXPERT,
-    SOFTMAX_SCALE,
-    V_DIM,
+    AttentionWeight,
     ExpertActivation,
     ExpertWeight,
+    LayerConfig,
     MoeMode,
+    as_layer_config,
     moe_format,
 )
 
@@ -89,21 +83,13 @@ UG_TILE = 16  # intermediates per up/gate task (16 gate rows + 16 up rows)
 SPLIT_KEYS = 64
 NEG = -1.0e30
 
-# task counts per stage
-N_QKV_A = QKV_A_ROWS // QKV_A_TILE
-N_ROW_TILES = HIDDEN // ROW_TILE
 
-
-def dn_tile(S: int) -> int:
+def dn_tile(S: int, hidden: int = GLM5_CONFIG.hidden) -> int:
     """Hidden rows per expert-down / FFN peer-reduce task: 32 at S = 1 (192 tasks,
     placed off the router CTAs, whose up/gate task finishes last, so every down task
     streams its weights during the mid wait); 24 above (one task per CTA), where
     each down task already streams S x 9 experts."""
-    return 32 if S == 1 else HIDDEN // BLOCKS
-
-
-N_ROUTER = N_EXPERTS // ROUTER_TILE
-N_UG_PER_SLOT = INTER // UG_TILE
+    return 32 if S == 1 else hidden // BLOCKS
 
 
 # gfx94x/95x cache policy bits (LLVM CPol): SC0 = 1, NT = 2, SC1 = 16.  SC1:SC0 is
@@ -119,47 +105,74 @@ def _align(n, a=256):
     return (n + a - 1) // a * a
 
 
-def layout(S: int, heads: int, npes: int, sparse_attention_topk: int, moe_mode: MoeMode | str = MoeMode.W8A8):
+def layout(
+    S: int,
+    heads: int,
+    npes: int,
+    sparse_attention_topk: int,
+    moe_mode: MoeMode | str = MoeMode.W8A8,
+    model_config: LayerConfig | str = GLM5_CONFIG,
+    attention_only: bool = False,
+):
     """Byte offsets of the per-rank scratch and of the symmetric buffer.
 
     Every mailbox holds ``(value, tag)`` int32 pairs (8 bytes per element).
     Each cross-GPU reduction region has two ``part`` slots selected by epoch
     parity so consecutive layers cannot overwrite one another in flight."""
+    config = as_layer_config(model_config)
+    hidden = config.hidden
+    q_lora = config.q_lora
+    kv_lora = config.kv_lora
+    pe_dim = config.pe_dim
+    nope_dim = config.nope_dim
+    v_dim = config.v_dim
+    n_experts = config.n_experts
+    moe_slots = config.moe_slots
+    inter = config.inter
     fmt = moe_format(moe_mode)
     quant_group = fmt.activation_group
-    xq_blocks = 0 if quant_group is None else HIDDEN // quant_group
+    xq_blocks = 0 if quant_group is None else hidden // quant_group
     n_split = sparse_attention_topk // SPLIT_KEYS
     pr = 8
     items = [
-        ("q_a", S * Q_LORA * pr),
-        ("kv_a", S * (KV_LORA + PE_DIM) * pr),
-        ("kvnew", S * KV_LORA * pr),  # this launch's KV cache rows (bf16 values)
-        ("penew", S * PE_DIM * pr),
-        ("q_nope", S * heads * NOPE_DIM * pr),
-        ("q_pe", S * heads * PE_DIM * pr),
-        ("q_lat", S * heads * KV_LORA * pr),
-        ("sp_acc", S * n_split * heads * KV_LORA * pr),
+        ("q_a", S * q_lora * pr),
+        ("kv_a", S * (kv_lora + pe_dim) * pr),
+        ("gate", S * heads * v_dim * pr if config.attention_output_gate else 0),
+        ("kvnew", S * kv_lora * pr),  # this launch's KV cache rows (bf16 values)
+        ("penew", S * pe_dim * pr),
+        ("q_nope", S * heads * nope_dim * pr),
+        ("q_pe", S * heads * pe_dim * pr),
+        ("q_lat", S * heads * kv_lora * pr),
+        ("sp_acc", S * n_split * heads * kv_lora * pr),
         ("sp_m", S * n_split * heads * pr),
         ("sp_l", S * n_split * heads * pr),
-        ("o", S * heads * V_DIM * pr),
-        ("a", S * HIDDEN * pr),  # post-attention hidden (bf16 values)
-        ("scores", S * N_EXPERTS * pr),
-        ("xq", S * HIDDEN // (4 if quant_group is not None else 2) * pr),
-        ("xqs", S * xq_blocks * pr),
-        ("sel", S * MOE_SLOTS * pr),
-        ("prob", S * MOE_SLOTS * pr),
-        ("mid", S * MOE_SLOTS * INTER * pr),
-        ("ugp", BLOCKS * S * 2 * UG_TILE * pr),  # up/gate K-segment partial sums
-        ("xqd", S * HIDDEN * 4),  # debug: dequantized MoE activation (plain f32)
+        ("o", S * heads * v_dim * pr),
+        ("a", S * hidden * pr),  # post-attention hidden (bf16 values)
     ]
+    if not attention_only:
+        items += [
+            ("scores", S * n_experts * pr),
+            ("xq", S * hidden // (4 if quant_group is not None else 2) * pr),
+            ("xqs", S * xq_blocks * pr),
+            ("sel", S * moe_slots * pr),
+            ("prob", S * moe_slots * pr),
+            ("mid", S * moe_slots * inter * pr),
+            ("ugp", BLOCKS * S * 2 * UG_TILE * pr),  # up/gate K-segment partial sums
+            ("xqd", S * hidden * 4),  # debug: dequantized MoE activation (plain f32)
+        ]
     off, scratch = 0, {}
     for name, size in items:
         scratch[name] = off
         off += _align(size)
     scratch["_bytes"] = off
-    part = npes * S * HIDDEN * pr
+    part = npes * S * hidden * pr
     region = 2 * part
-    sym = {"attn": 0, "ffn": region, "_part_stride": part, "_bytes": 2 * region}
+    sym = {
+        "attn": 0,
+        "ffn": region,
+        "_part_stride": part,
+        "_bytes": region if attention_only else 2 * region,
+    }
     return scratch, sym
 
 
@@ -290,23 +303,37 @@ def _mxfp4_to_bf16x8(word, scale):
     return fx.Vector.from_elements(parts, fx.BFloat16)
 
 
-def stage_tasks(S: int, heads: int, sparse_attention_topk: int):
+def stage_tasks(
+    S: int,
+    heads: int,
+    sparse_attention_topk: int,
+    model_config: LayerConfig | str = GLM5_CONFIG,
+    attention_only: bool = False,
+):
     """[(stage name, task count)] in execution order."""
-    return [
-        ("qkv_a", N_QKV_A),
+    config = as_layer_config(model_config)
+    head_groups = (heads + WAVES - 1) // WAVES
+    split_ctas_per_tile = head_groups if S == 1 else 1
+    tasks = [
+        ("qkv_a", config.qkv_a_rows // QKV_A_TILE),
         ("cache", 1),
-        ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE),
-        ("uk", heads * KV_LORA // UK_TILE),
-        ("split", S * (sparse_attention_topk // SPLIT_KEYS)),
-        ("uv", S * (heads * V_DIM // UV_TILE)),
-        ("o", N_ROW_TILES),
-        ("router", S * N_ROUTER),
+        ("q_b", heads * (config.nope_dim + config.pe_dim) // Q_B_TILE),
+        ("uk", heads * config.kv_lora // UK_TILE),
+        ("split", S * (sparse_attention_topk // SPLIT_KEYS) * split_ctas_per_tile),
+        ("uv", S * (heads * config.v_dim // UV_TILE)),
+        ("o", config.hidden // ROW_TILE),
+    ]
+    if attention_only:
+        return tasks
+    tasks += [
+        ("router", S * (config.n_experts // ROUTER_TILE)),
         (
             "ug",
             (BLOCKS if S == 1 else S * BLOCKS),
         ),
-        ("down", HIDDEN // dn_tile(S)),
+        ("down", config.hidden // dn_tile(S, config.hidden)),
     ]
+    return tasks
 
 
 def build_indexed_mla_moe_kernel(
@@ -315,9 +342,11 @@ def build_indexed_mla_moe_kernel(
     npes: int = 8,
     sparse_attention_topk: int = 2048,
     launches_per_step: int = 1,
-    scale: float = SOFTMAX_SCALE,
+    scale: float | None = None,
     timeline: bool = False,
     moe_mode: MoeMode | str = MoeMode.W8A8,
+    model_config: LayerConfig | str = GLM5_CONFIG,
+    attention_only: bool = False,
 ):
     """Return the ``@flyc.jit`` launcher for one rank's whole layer.
 
@@ -326,7 +355,38 @@ def build_indexed_mla_moe_kernel(
     int64 ``[sum(task counts), TL_COLS]`` (start, hint seen, inputs staged, compute
     done, end, then free debug marks) in ``stage_tasks`` order.
     """
-    assert heads == 8, "the split-attention mapping uses one wave per local head"
+    config = as_layer_config(model_config)
+    HIDDEN = config.hidden
+    Q_LORA = config.q_lora
+    KV_LORA = config.kv_lora
+    PE_DIM = config.pe_dim
+    NOPE_DIM = config.nope_dim
+    V_DIM = config.v_dim
+    QKV_A_ROWS = config.qkv_a_rows
+    N_EXPERTS = config.n_experts
+    TOP_K = config.top_k
+    MOE_SLOTS = config.moe_slots
+    SHARED_EXPERT = config.shared_expert
+    INTER = config.inter
+    ROUTE_SCALE = config.route_scale
+    SOFTMAX_SCALE = config.softmax_scale
+    if scale is None:
+        scale = SOFTMAX_SCALE
+    N_QKV_A = QKV_A_ROWS // QKV_A_TILE
+    N_ROW_TILES = HIDDEN // ROW_TILE
+    N_ROUTER = N_EXPERTS // ROUTER_TILE
+    N_UG_PER_SLOT = INTER // UG_TILE
+    HEAD_GROUPS = (heads + WAVES - 1) // WAVES
+    SPLIT_CTAS_PER_TILE = HEAD_GROUPS if S == 1 else 1
+    HEAD_GROUPS_PER_CTA = 1 if S == 1 else HEAD_GROUPS
+    PAD_HEADS = HEAD_GROUPS * WAVES
+    attention_bf16 = config.attention_weight is AttentionWeight.BF16
+    attention_k_chunks_per_unit = 1 if attention_bf16 else 2
+    attention_output_gate = config.attention_output_gate
+    attention_input_norm = config.attention_input_norm
+    attention_residual = config.attention_residual
+
+    assert heads == config.local_heads, f"{config.name} requires {config.local_heads} local heads"
     assert sparse_attention_topk % SPLIT_KEYS == 0 and 1 <= S <= 8
     assert 1 <= launches_per_step <= MAX_LAYERS_PER_STEP
     fmt = moe_format(moe_mode)
@@ -342,11 +402,11 @@ def build_indexed_mla_moe_kernel(
     )
     assert XQ_WAVES <= WAVES
     down_scale_words = 0 if fmt.activation_group is None else S * MOE_SLOTS * INTER // fmt.activation_group
-    misc_words = 8 + max(S * XQ_BLOCKS, down_scale_words)
+    misc_words = max(sparse_attention_topk // SPLIT_KEYS, 8 + max(S * XQ_BLOCKS, down_scale_words))
     H = heads
     W = npes
     G = BLOCKS
-    SC, SY = layout(S, H, W, sparse_attention_topk, moe_mode)
+    SC, SY = layout(S, H, W, sparse_attention_topk, moe_mode, config, attention_only)
     N_SPLIT = sparse_attention_topk // SPLIT_KEYS
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
@@ -366,18 +426,21 @@ def build_indexed_mla_moe_kernel(
     PT_OFF = KT_OFF + SPLIT_KEYS * KS
     XN = max(S * HIDDEN // 2, PT_OFF + SPLIT_KEYS * PS)
     ON = S * UK_TILE
-    DN_TILE = dn_tile(S)
+    DN_TILE = dn_tile(S, HIDDEN)
     N_DN_TILES = HIDDEN // DN_TILE
 
     base, first, acc = {}, {}, 0
-    for name, n in stage_tasks(S, H, sparse_attention_topk):
+    for name, n in stage_tasks(S, H, sparse_attention_topk, config, attention_only):
         first[name] = acc
         acc += n
     # CTA placement: split before uk, so every split tile lands on a CTA freed by
     # qkv_a (uk shares the q_b CTAs it waits on anyway)
-    tasks = dict(stage_tasks(S, H, sparse_attention_topk))
+    tasks = dict(stage_tasks(S, H, sparse_attention_topk, config, attention_only))
     acc = 0
-    for name in ("qkv_a", "cache", "q_b", "split", "uk", "uv", "o", "router", "ug", "down"):
+    stage_order = ["qkv_a", "cache", "q_b", "split", "uk", "uv", "o"]
+    if not attention_only:
+        stage_order += ["router", "ug", "down"]
+    for name in stage_order:
         base[name] = acc % G
         acc += tasks[name]
 
@@ -387,7 +450,7 @@ def build_indexed_mla_moe_kernel(
         out: fx.Array[fx.Float32, ON, 16]
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
         misc: fx.Array[fx.Float32, misc_words, 16]
-        p: fx.Array[fx.Float32, H * SPLIT_KEYS, 16]
+        p: fx.Array[fx.Float32, PAD_HEADS * SPLIT_KEYS, 16]
         keys: fx.Array[fx.Int32, SPLIT_KEYS, 16]
         dnw: fx.Array[fx.Float32, S * MOE_SLOTS, 16]  # expert-down route weights
 
@@ -697,6 +760,13 @@ def build_indexed_mla_moe_kernel(
             ]
             return ("bf16", wv, None, b_word + (lane // 16) * 4)
 
+        def unit_attention(w_rsrc, s_rsrc, rg, kc, NKC, K, BK, b_word, ln=None):
+            """Issue one configured attention-weight chunk."""
+
+            if const_expr(attention_bf16):
+                return unit_bf16(w_rsrc, rg, kc, NKC, b_word, ln)
+            return unit_fp8x2(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, ln=ln)
+
         def mma_units(acc, units):
             """acc[4] += coef * (W_chunk @ X_chunk) for every issued unit."""
             for unit_format, wv, coef, bw in units:
@@ -787,15 +857,16 @@ def build_indexed_mla_moe_kernel(
             """LDS bf16 X[s][0:n] = bf16(rmsnorm(x_s) * gamma) for every sample s, where
             ld4s([(s, k)]) -> [(x_s[k], .., x_s[k+3])] (one batched load); returns the rstds.
             ``loaded``: the (gamma, x) loads already issued by load_x_rmsnorm."""
-            per = n // (4 * THREADS)
+            per = (n + 4 * THREADS - 1) // (4 * THREADS)
             ks = [(tid + i * THREADS) * 4 for i in range(per)]
             gs, vals = loaded if loaded is not None else load_x_rmsnorm(ld4s, n, gamma, count)
             sss = []
             for s in range_constexpr(count):
                 ss = fx.Float32(0.0)
                 for i in range_constexpr(per):
+                    valid = ks[i] < n
                     for a in vals[s * per + i]:
-                        ss = ss + a * a
+                        ss = ss + valid.select(a * a, fx.Float32(0.0))
                 sss.append(ss)
             if const_expr(mark is not None):
                 stamp(mark[0], mark[1], 6)
@@ -805,23 +876,50 @@ def build_indexed_mla_moe_kernel(
             for s in range_constexpr(count):
                 for i in range_constexpr(per):
                     a = vals[s * per + i]
-                    for j in range_constexpr(2):
-                        lds_st(
-                            xs,
-                            (s * n + ks[i]) // 2 + j,
-                            bf16_pair(a[2 * j] * rstds[s] * gs[i][2 * j], a[2 * j + 1] * rstds[s] * gs[i][2 * j + 1]),
-                        )
+                    if ks[i] < n:
+                        for j in range_constexpr(2):
+                            lds_st(
+                                xs,
+                                (s * n + ks[i]) // 2 + j,
+                                bf16_pair(
+                                    a[2 * j] * rstds[s] * gs[i][2 * j],
+                                    a[2 * j + 1] * rstds[s] * gs[i][2 * j + 1],
+                                ),
+                            )
             return rstds
 
         def load_x_rmsnorm(ld4s, n, gamma, count=S):
             """The gamma loads (issued ahead of the wait), then ld4s -> (gammas, x values)."""
             rg_ = _rsrc(gamma)
-            ks = [(tid + i * THREADS) * 4 for i in range(n // (4 * THREADS))]
+            per = (n + 4 * THREADS - 1) // (4 * THREADS)
+            ks = [(tid + i * THREADS) * 4 for i in range(per)]
+            safe_ks = [fx.min(k, n - 4) for k in ks]
             gs = []
-            for k in ks:
+            for k in safe_ks:
                 g = fx.Vector(bo.buffer_load(rg_, k // 2, vec_width=2, dtype=T.i32)).bitcast(fx.BFloat16).to(fx.Float32)
                 gs.append([g[j] for j in range(4)])
-            return gs, ld4s([(s, k) for s in range(count) for k in ks])
+            return gs, ld4s([(s, k) for s in range(count) for k in safe_ks])
+
+        def load_x_bf16(ld4s, n, count=S):
+            """Issue direct BF16 loads for an activation normalized by the caller."""
+
+            per = (n + 4 * THREADS - 1) // (4 * THREADS)
+            ks = [(tid + i * THREADS) * 4 for i in range(per)]
+            safe_ks = [fx.min(k, n - 4) for k in ks]
+            return ld4s([(s, k) for s in range(count) for k in safe_ks])
+
+        def stage_x_bf16(ld4s, n, loaded=None, count=S):
+            """Stage a pre-normalized BF16 activation without applying another norm."""
+
+            per = (n + 4 * THREADS - 1) // (4 * THREADS)
+            ks = [(tid + i * THREADS) * 4 for i in range(per)]
+            vals = loaded if loaded is not None else load_x_bf16(ld4s, n, count)
+            for s in range_constexpr(count):
+                for i in range_constexpr(per):
+                    a = vals[s * per + i]
+                    if ks[i] < n:
+                        for j in range_constexpr(2):
+                            lds_st(xs, (s * n + ks[i]) // 2 + j, bf16_pair(a[2 * j], a[2 * j + 1]))
 
         def stage_x_pairs(name, n_total, src_of):
             """LDS bf16 X[k] = packed bf16 mailbox ``name`` element src_of(k) for k < n_total
@@ -838,6 +936,11 @@ def build_indexed_mla_moe_kernel(
                     v = poll([(mb(name), src_of(w * 4) // 2, 2)])[0]
                     for j in range_constexpr(2):
                         lds_st(xs, w * 2 + j, v[j].bitcast(fx.Float32))
+
+        def stage_attention_output():
+            """Stage the BF16 attention output; Kimi-K3 gating is fused at W_UV."""
+
+            stage_x_pairs("o", S * O_K, lambda k: k)
 
         def quant_scaled(a0, a1):
             """Per-wave FP8 quant of a 128-block held as 2 f32 per lane -> (scaled q0, q1, scale)."""
@@ -948,14 +1051,14 @@ def build_indexed_mla_moe_kernel(
             return [ld_f32(_rsrc(bias), lane + i * 64) for i in range(N_EXPERTS // 64)]
 
         def route_top8(s, raws=None, bs=None):
-            """Top-8 of sample s (call from one whole wave, after the router scores landed).
+            """Top-k of sample s (call from one whole wave, after the router scores landed).
 
             Packed-key argmax: key = order-preserving bits of (sigmoid + bias) with the
             low byte replaced by 255 - expert id (unique; near-ties go to the lower id),
             so each of the 8 rounds is one u32 wave max (candidate i of this lane is
             expert lane + 64 i).  Returns (expert id, route weight = raw score / sum of
             the 8 raw scores * ROUTE_SCALE) of pick ``lane`` in score order, valid in
-            lanes < EXPERT_TOP_K."""
+            lanes < TOP_K."""
             if const_expr(bs is None):
                 bs = load_bias()
             if const_expr(raws is None):
@@ -972,7 +1075,7 @@ def build_indexed_mla_moe_kernel(
                 ks[a], ks[b] = fx.max(ks[a], ks[b]), fx.min(ks[a], ks[b])
             ks = [fx.Int32(k) for k in ks] + [fx.Int32(0)]
             mv = fx.Int32(0)  # lane k: the key of pick k
-            for k in range_constexpr(EXPERT_TOP_K):
+            for k in range_constexpr(TOP_K):
                 m = _wave_umax(ks[0])
                 hit = ks[0] == m
                 ks = [hit.select(ks[i + 1], ks[i]) for i in range(4)] + [ks[4]]
@@ -991,7 +1094,7 @@ def build_indexed_mla_moe_kernel(
             raw = got[0]
             for i in range_constexpr(1, N_EXPERTS // 64):
                 raw = (e // 64 == i).select(got[i], raw)
-            raw = (lane < EXPERT_TOP_K).select(raw.bitcast(fx.Float32), fx.Float32(0.0))
+            raw = (lane < TOP_K).select(raw.bitcast(fx.Float32), fx.Float32(0.0))
             tot = raw
             for off in (1, 2, 4):
                 tot = _xred(tot, off, lambda a, b: a + b)
@@ -1078,14 +1181,23 @@ def build_indexed_mla_moe_kernel(
         # 1 row group x 96 chunks: 8 waves split K, 12 chunks each (all prefetched)
         r_wqa, r_sqa = _rsrc(w_qkv_a), _rsrc(s_qkv_a)
         QA_NKC = HIDDEN // 64
-        QA_UNITS = QA_NKC // (2 * WAVES)
+        QA_UNITS = QA_NKC // (attention_k_chunks_per_unit * WAVES)
         for t in range(start("qkv_a"), N_QKV_A, G):
             t = fx.Int32(t)
             stamp("qkv_a", t, 0)
 
             def u_qa(c):
-                kc = (wave * QA_UNITS + c) * 2
-                return unit_fp8x2(r_wqa, r_sqa, t, kc, QA_NKC, HIDDEN, (n_sel() * HIDDEN + kc * 64) // 2)
+                kc = (wave * QA_UNITS + c) * attention_k_chunks_per_unit
+                return unit_attention(
+                    r_wqa,
+                    r_sqa,
+                    t,
+                    kc,
+                    QA_NKC,
+                    HIDDEN,
+                    128,
+                    (n_sel() * HIDDEN + kc * 64) // 2,
+                )
 
             def ld_h(sks):
                 res = []
@@ -1096,9 +1208,12 @@ def build_indexed_mla_moe_kernel(
                 return res
 
             # the (small) input loads go out before the weight stream: loads complete in order
-            h_ld = load_x_rmsnorm(ld_h, HIDDEN, g_in)
+            h_ld = load_x_rmsnorm(ld_h, HIDDEN, g_in) if const_expr(attention_input_norm) else load_x_bf16(ld_h, HIDDEN)
             pre = [u_qa(c) for c in range(QA_UNITS)]
-            stage_x_rmsnorm(ld_h, HIDDEN, g_in, loaded=h_ld)
+            if const_expr(attention_input_norm):
+                stage_x_rmsnorm(ld_h, HIDDEN, g_in, loaded=h_ld)
+            else:
+                stage_x_bf16(ld_h, HIDDEN, loaded=h_ld)
             gpu.barrier()
             stamp("qkv_a", t, 2)
             acc = run_units(u_qa, QA_UNITS, QA_UNITS, pre)
@@ -1111,8 +1226,10 @@ def build_indexed_mla_moe_kernel(
                 v = lds_ld(outs, tid)
                 if row < Q_LORA:
                     put(mb("q_a"), s * Q_LORA + row, v)
-                else:
+                elif row < Q_LORA + KV_LORA + PE_DIM:
                     put(mb("kv_a"), s * (KV_LORA + PE_DIM) + row - Q_LORA, v)
+                else:
+                    put(mb("gate"), s * O_K + row - (Q_LORA + KV_LORA + PE_DIM), v)
             stamp("qkv_a", t, 4)
 
         # ================ 2. KV RMSNorm + k_pe RoPE -> cache (+ this launch's rows)
@@ -1155,14 +1272,23 @@ def build_indexed_mla_moe_kernel(
         # ============================================ 3. q_a RMSNorm -> q_b (+RoPE)
         r_wqb, r_sqb = _rsrc(w_q_b), _rsrc(s_q_b)
         QB_NKC = Q_LORA // 64
-        QB_UNITS = QB_NKC // (2 * WAVES)
+        QB_UNITS = QB_NKC // (attention_k_chunks_per_unit * WAVES)
         for t in range(start("q_b"), N_QB, G):
             t = fx.Int32(t)
             stamp("q_b", t, 0)
 
             def u_qb(c):
-                kc = (wave * QB_UNITS + c) * 2
-                return unit_fp8x2(r_wqb, r_sqb, t, kc, QB_NKC, Q_LORA, (n_sel() * Q_LORA + kc * 64) // 2)
+                kc = (wave * QB_UNITS + c) * attention_k_chunks_per_unit
+                return unit_attention(
+                    r_wqb,
+                    r_sqb,
+                    t,
+                    kc,
+                    QB_NKC,
+                    Q_LORA,
+                    128,
+                    (n_sel() * Q_LORA + kc * 64) // 2,
+                )
 
             pre = [u_qb(c) for c in range(QB_UNITS)]
             hint_wait(
@@ -1215,7 +1341,7 @@ def build_indexed_mla_moe_kernel(
             head = t // UK_PER_HEAD
 
             def u_uk(c):
-                return unit_fp8(
+                return unit_attention(
                     r_wuk, r_suk, t * WAVES + wave, c, UK_NKC, NOPE_DIM, 64, (n_sel() * NOPE_DIM + c * 64) // 2
                 )
 
@@ -1291,12 +1417,13 @@ def build_indexed_mla_moe_kernel(
                         a0, a1 = get2(mb("penew"), sn * PE_DIM + lane * 2)
                         lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
 
-        for tt in range(start("split"), S * N_SPLIT, G):
+        for tt in range(start("split"), S * N_SPLIT * SPLIT_CTAS_PER_TILE, G):
             tt = fx.Int32(tt)
             stamp("split", tt, 0)
-            s = tt // N_SPLIT  # sample
-            t = tt % N_SPLIT  # 64-key chunk
-            h = wave
+            s = tt // (N_SPLIT * SPLIT_CTAS_PER_TILE)  # sample
+            split_group = tt % (N_SPLIT * SPLIT_CTAS_PER_TILE)
+            t = split_group // SPLIT_CTAS_PER_TILE  # 64-key chunk
+            task_head_group = split_group % SPLIT_CTAS_PER_TILE
             nkeys, sparse = split_keys(t, s)
             gpu.barrier()
             gather_old_kv()  # before waiting for q: these rows are from earlier launches
@@ -1347,7 +1474,8 @@ def build_indexed_mla_moe_kernel(
             stamp("split", tt, 5)
             # scores = K Q^T on MFMA: keys are M (4 row groups), the 576 dims K
             # (18 steps of 32, split in two halves), heads N.  wave = (row group, half)
-            hn = fx.min(lane % 16, H - 1)
+            score_head_base = task_head_group * WAVES
+            hn = fx.min(score_head_base + lane % 16, H - 1)
             rgk = wave % 4
             c = fx.Vector.filled(4, 0.0, fx.Float32)
             for st in range_constexpr(QK_DIM // 32 // 2):
@@ -1363,51 +1491,65 @@ def build_indexed_mla_moe_kernel(
             fx.ptr_store(c, red + (wave * 64 + lane) * 4)
             gpu.barrier()
             stamp("split", tt, 6)
-            # split-local softmax: wave h, lane = key j (score = sum of the two K halves)
-            kidx = t * SPLIT_KEYS + lane
-            valid = kidx < nkeys
-            r16 = lane % 16
-            cl = h + 16 * (r16 // 4)
-            raw = lds_ld(red, ((lane // 16) * 64 + cl) * 4 + r16 % 4) + lds_ld(
-                red, ((lane // 16 + 4) * 64 + cl) * 4 + r16 % 4
-            )
-            sc_v = valid.select(raw * scale, fx.Float32(NEG))
-            m = wave_max(sc_v)
-            p = valid.select(_exp(sc_v - m), fx.Float32(0.0))
-            lsum = wave_sum(p)
-            p_n = _xshfl(p, 1)
-            if lane % 2 == 0:  # P^T bf16 [h][64 keys] (words h * 32 + j / 2)
-                lds_st(pl, h * (SPLIT_KEYS // 2) + lane // 2, bf16_pair(p, p_n))
-            gpu.barrier()
-            stamp("split", tt, 3)
-            # O = P V on MFMA: heads M, keys K (2 steps), latent dims N.  Each V word holds
-            # a dim pair (even dim low), so one read feeds two MFMAs (even / odd dims):
-            # each wave owns 2 groups of 32 dims.  V is read key-strided from the tile.
-            for g in range_constexpr(KV_LORA // 32 // WAVES):
-                dw = (wave * (KV_LORA // 32 // WAVES) + g) * 16 + lane % 16  # dim pair word
-                c0 = fx.Vector.filled(4, 0.0, fx.Float32)
-                c1 = fx.Vector.filled(4, 0.0, fx.Float32)
-                for js in range_constexpr(SPLIT_KEYS // 32):
-                    a = fx.ptr_load(
-                        pl + (hn * (SPLIT_KEYS // 2) + js * 16 + (lane // 16) * 4), result_type=v4f
-                    ).bitcast(fx.BFloat16)
-                    ws = [
-                        fx.ptr_load(ktile + ((js * 32 + (lane // 16) * 8 + i) * KS + dw)).bitcast(fx.Int32)
-                        for i in range(8)
-                    ]
-                    w_lo = [(ws[2 * i] & 0xFFFF) | (ws[2 * i + 1] << 16) for i in range(4)]
-                    w_hi = [fx.Int32(fx.Uint32(ws[2 * i]) >> 16) | (ws[2 * i + 1] & -65536) for i in range(4)]
-                    b0 = fx.Vector.from_elements(w_lo, fx.Int32).bitcast(fx.BFloat16)
-                    b1 = fx.Vector.from_elements(w_hi, fx.Int32).bitcast(fx.BFloat16)
-                    c0 = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b0, c0]))
-                    c1 = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b1, c1]))
-                if lane < 32:  # rows (heads) 4 * (lane // 16) + e < 8
-                    for e in range_constexpr(4):
-                        hh = (lane // 16) * 4 + e
-                        put_bf(mb("sp_acc"), ((s * N_SPLIT + t) * H + hh) * KV_LORA + dw * 2, [c0[e], c1[e]])
-            if lane == 0:  # written last: the merge's readiness hint
-                put(mb("sp_m"), (s * N_SPLIT + t) * H + h, m)
-                put(mb("sp_l"), (s * N_SPLIT + t) * H + h, lsum)
+            # The score MFMA above produces 16 head columns in one pass.  Process
+            # those columns in 8-wave groups so Kimi-K3's heads 8..11 reuse the
+            # already-staged Q/KV and scores instead of launching a second CTA.
+            for local_head_group in range_constexpr(HEAD_GROUPS_PER_CTA):
+                head_base = (task_head_group + local_head_group) * WAVES
+                h = head_base + wave
+                # split-local softmax: wave h, lane = key j (score = sum of the two K halves)
+                kidx = t * SPLIT_KEYS + lane
+                valid = kidx < nkeys
+                r16 = lane % 16
+                score_head = local_head_group * WAVES + wave
+                cl = score_head + 16 * (r16 // 4)
+                raw = lds_ld(red, ((lane // 16) * 64 + cl) * 4 + r16 % 4) + lds_ld(
+                    red, ((lane // 16 + 4) * 64 + cl) * 4 + r16 % 4
+                )
+                sc_v = valid.select(raw * scale, fx.Float32(NEG))
+                m = wave_max(sc_v)
+                p = valid.select(_exp(sc_v - m), fx.Float32(0.0))
+                lsum = wave_sum(p)
+                p_n = _xshfl(p, 1)
+                if lane % 2 == 0:  # P^T bf16 [h][64 keys] (words h * 32 + j / 2)
+                    lds_st(pl, h * (SPLIT_KEYS // 2) + lane // 2, bf16_pair(p, p_n))
+                gpu.barrier()
+                stamp("split", tt, 3)
+                # O = P V on MFMA: heads M, keys K (2 steps), latent dims N.  Each V word holds
+                # a dim pair (even dim low), so one read feeds two MFMAs (even / odd dims):
+                # each wave owns 2 groups of 32 dims.  V is read key-strided from the tile.
+                hn = fx.min(head_base + lane % 16, H - 1)
+                for g in range_constexpr(KV_LORA // 32 // WAVES):
+                    dw = (wave * (KV_LORA // 32 // WAVES) + g) * 16 + lane % 16  # dim pair word
+                    c0 = fx.Vector.filled(4, 0.0, fx.Float32)
+                    c1 = fx.Vector.filled(4, 0.0, fx.Float32)
+                    for js in range_constexpr(SPLIT_KEYS // 32):
+                        a = fx.ptr_load(
+                            pl + (hn * (SPLIT_KEYS // 2) + js * 16 + (lane // 16) * 4), result_type=v4f
+                        ).bitcast(fx.BFloat16)
+                        ws = [
+                            fx.ptr_load(ktile + ((js * 32 + (lane // 16) * 8 + i) * KS + dw)).bitcast(fx.Int32)
+                            for i in range(8)
+                        ]
+                        w_lo = [(ws[2 * i] & 0xFFFF) | (ws[2 * i + 1] << 16) for i in range(4)]
+                        w_hi = [fx.Int32(fx.Uint32(ws[2 * i]) >> 16) | (ws[2 * i + 1] & -65536) for i in range(4)]
+                        b0 = fx.Vector.from_elements(w_lo, fx.Int32).bitcast(fx.BFloat16)
+                        b1 = fx.Vector.from_elements(w_hi, fx.Int32).bitcast(fx.BFloat16)
+                        c0 = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b0, c0]))
+                        c1 = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b1, c1]))
+                    if lane < 32:  # rows (heads) 4 * (lane // 16) + e < 8
+                        for e in range_constexpr(4):
+                            hh = head_base + (lane // 16) * 4 + e
+                            if hh < H:
+                                put_bf(
+                                    mb("sp_acc"),
+                                    ((s * N_SPLIT + t) * H + hh) * KV_LORA + dw * 2,
+                                    [c0[e], c1[e]],
+                                )
+                if (lane == 0) & (h < H):  # written last: the merge's readiness hint
+                    put(mb("sp_m"), (s * N_SPLIT + t) * H + h, m)
+                    put(mb("sp_l"), (s * N_SPLIT + t) * H + h, lsum)
+                gpu.barrier()
             stamp("split", tt, 4)
 
         # ========================== 6. split merge + W_UV: o = W_UV (softmax . KV)
@@ -1416,7 +1558,7 @@ def build_indexed_mla_moe_kernel(
         UV_NKC = KV_LORA // 64
         UV_R = UV_TILE // 16
         UV_WPR = WAVES // UV_R
-        UV_UNITS = UV_NKC // (2 * UV_WPR)
+        UV_UNITS = UV_NKC // (attention_k_chunks_per_unit * UV_WPR)
         for tt in range(start("uv"), S * N_UV, G):
             tt = fx.Int32(tt)
             stamp("uv", tt, 0)
@@ -1425,8 +1567,17 @@ def build_indexed_mla_moe_kernel(
             head = t // (V_DIM // UV_TILE)
 
             def u_uv(c):
-                kc = ((wave % UV_WPR) * UV_UNITS + c) * 2
-                return unit_fp8x2(r_wuv, r_suv, t * UV_R + wave // UV_WPR, kc, UV_NKC, KV_LORA, (kc * 64) // 2)
+                kc = ((wave % UV_WPR) * UV_UNITS + c) * attention_k_chunks_per_unit
+                return unit_attention(
+                    r_wuv,
+                    r_suv,
+                    t * UV_R + wave // UV_WPR,
+                    kc,
+                    UV_NKC,
+                    KV_LORA,
+                    128,
+                    (kc * 64) // 2,
+                )
 
             pre = [u_uv(c) for c in range(UV_UNITS)]
             hint_wait(N_SPLIT, lambda k: (mb("sp_l"), (s * N_SPLIT + k) * H + head), mark=("uv", tt))
@@ -1474,7 +1625,11 @@ def build_indexed_mla_moe_kernel(
             gpu.barrier()
             if tid < UV_TILE // 4:
                 r = tid * 4
-                put_bf(mb("o"), s * O_K + t * UV_TILE + r, [lds_ld(outs, r + j) for j in range(4)])
+                values = [lds_ld(outs, r + j) for j in range(4)]
+                if const_expr(attention_output_gate):
+                    gate = getf_many([(mb("gate"), s * O_K + t * UV_TILE + r + j) for j in range(4)])
+                    values = [bf16_round(values[j]) * _rcp(fx.Float32(1.0) + _exp(-gate[j])) for j in range(4)]
+                put_bf(mb("o"), s * O_K + t * UV_TILE + r, values)
             stamp("uv", tt, 4)
 
         # ====================== 7. W_o + attention TP peer reduce + residual -> a
@@ -1483,20 +1638,22 @@ def build_indexed_mla_moe_kernel(
         O_NKC = O_K // 64
         O_R = ROW_TILE // 16
         O_WPR = WAVES // O_R
-        O_UNITS = O_NKC // (2 * O_WPR)
+        O_UNITS = O_NKC // (attention_k_chunks_per_unit * O_WPR)
         for t in range(start("o"), N_ROW_TILES, G):
             t = fx.Int32(t)
             stamp("o", t, 0)
 
             def u_o(c):
-                kc = ((wave % O_WPR) * O_UNITS + c) * 2
-                return unit_fp8x2(r_wo, r_so, t * O_R + wave // O_WPR, kc, O_NKC, O_K, (n_sel() * O_K + kc * 64) // 2)
+                kc = ((wave % O_WPR) * O_UNITS + c) * attention_k_chunks_per_unit
+                return unit_attention(
+                    r_wo, r_so, t * O_R + wave // O_WPR, kc, O_NKC, O_K, 128, (n_sel() * O_K + kc * 64) // 2
+                )
 
             pre = [u_o(c) for c in range(O_UNITS)]
             hint_wait(
                 S * N_UV, lambda k: (mb("o"), (k // N_UV) * O_K + (k % N_UV) * UV_TILE + UV_TILE - 1), mark=("o", t)
             )
-            stage_x_pairs("o", S * O_K, lambda k: k)
+            stage_attention_output()
             stamp("o", t, 2)
             gpu.barrier()
             acc = run_units(u_o, O_UNITS, O_UNITS, pre)
@@ -1505,19 +1662,33 @@ def build_indexed_mla_moe_kernel(
             gpu.barrier()
 
             def resid_h(s, row):
+                if const_expr(not attention_residual):
+                    return fx.Float32(0.0), fx.Float32(0.0)
                 w = fx.Vector.from_elements(
                     [fx.Int32(bo.buffer_load(r_h, (s * HIDDEN + row) // 2, vec_width=1, dtype=T.i32))], fx.Int32
                 )
                 v = w.bitcast(fx.BFloat16).to(fx.Float32)
                 return v[0], v[1]
 
+            def store_attention(s, row, v0, v1):
+                put_bf(mb("a"), s * HIDDEN + row, [v0, v1])
+                if const_expr(attention_only):
+                    bo.buffer_store(
+                        fx.Vector.from_elements([v0, v1], fx.Float32).to(fx.BFloat16),
+                        _rsrc(x_out),
+                        s * HIDDEN + row,
+                    )
+
             peer_reduce(
                 "attn",
                 t,
                 resid_h,
-                lambda s, row, v0, v1: put_bf(mb("a"), s * HIDDEN + row, [v0, v1]),
+                store_attention,
             )
             stamp("o", t, 4)
+
+        if const_expr(attention_only):
+            return
 
         # ====== 8. post-attn RMSNorm -> router scores + this task's FP8 activation blocks
         # One sample per CTA: 1 row group x 96 chunks (bf16), 8 waves split K
@@ -1623,8 +1794,8 @@ def build_indexed_mla_moe_kernel(
                 e, w = route_top8(wave, bs=bs)
                 if lane < MOE_SLOTS:  # slot 0: the shared expert, then pick lane (slot lane + 1)
                     q = wave * MOE_SLOTS + (lane + 1) % MOE_SLOTS
-                    lds_st(keys, q, (lane == EXPERT_TOP_K).select(fx.Int32(SHARED_EXPERT), e))
-                    lds_st(dnw, q, (lane == EXPERT_TOP_K).select(fx.Float32(1.0), w))
+                    lds_st(keys, q, (lane == TOP_K).select(fx.Int32(SHARED_EXPERT), e))
+                    lds_st(dnw, q, (lane == TOP_K).select(fx.Float32(1.0), w))
 
         # ================================ 9. expert up/gate + SiLU
         # One 16-row group (8 gate + 8 up rows), with all eight waves splitting K.
