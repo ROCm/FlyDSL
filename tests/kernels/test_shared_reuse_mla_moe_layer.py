@@ -41,6 +41,7 @@ TOL = {  # name -> (atol, rtol) on the fp32/bf16 intermediates
     "scores": (1e-3, 1e-3),
     "prob": (1e-5, 1e-5),
     "xq": (0.0, 0.0),
+    "xq_w8a16": (1.6e-2, 8e-3),  # one bf16 ulp after RMSNorm reduction-order differences
     "kv": (2e-2, 1e-2),
     "x_out": (1.6e-2, 8e-3),  # 1 bf16 ulp
     "mid": (1e-3, 1e-3),  # FP8 x FP8 MFMA accumulation (~1e-4 abs), far below one E4M3 step
@@ -147,7 +148,8 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
         moe = golden_moe(W, got["a"].clone(), allreduce, moe_mode=moe_mode)
         for name in ("scores", "prob"):
             ok &= _check(name, got[name], moe[name], report)
-        ok &= _check("xq", got["xq"], moe["xq"], report, fp8_flips=moe_mode == MoeMode.W8A8)
+        xq_check = "xq" if moe_mode == MoeMode.W8A8 else "xq_w8a16"
+        ok &= _check(xq_check, got["xq"], moe["xq"], report, fp8_flips=moe_mode == MoeMode.W8A8)
         # up/gate + SiLU from the kernel's own FP8 activation
         ug = golden_moe(
             W,
@@ -275,7 +277,7 @@ def run(npes, S, cur_pos, iters, moe_mode=MoeMode.W8A8):
 
 
 @pytest.mark.parametrize("moe_mode", tuple(MoeMode))
-@pytest.mark.parametrize("S,cur_pos", [(1, 100), (1, 3000), (2, 3000), (4, 3000)])
+@pytest.mark.parametrize("S,cur_pos", [(1, 100), (1, 3000), (2, 3000), (4, 3000), (8, 3000)])
 def test_layer_single_gpu(S, cur_pos, moe_mode):
     assert run(1, S, cur_pos, 2, moe_mode)
 

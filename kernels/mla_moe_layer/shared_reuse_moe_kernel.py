@@ -103,7 +103,7 @@ N_UG_PER_SLOT = INTER // UG_TILE
 
 XQ_BLOCKS = HIDDEN // 128  # MoE activation quant blocks
 XQ_WAVES = (XQ_BLOCKS + N_ROUTER - 1) // N_ROUTER  # router task t quantizes blocks t, t + N_ROUTER, ..
-assert XQ_WAVES * 4 <= WAVES  # one (block, sample) per wave up to S = 4
+assert XQ_WAVES <= WAVES  # one sample per router CTA
 
 # gfx94x/95x cache policy bits (LLVM CPol): SC0 = 1, NT = 2, SC1 = 16.  SC1:SC0 is
 # the coherence scope of the access itself: SC1 = device (past the per-XCD
@@ -308,7 +308,7 @@ def build_shared_reuse_kernel(
     done, end, then free debug marks) in ``stage_tasks`` order.
     """
     assert heads == 8, "the split-attention mapping uses one wave per local head"
-    assert topk % SPLIT_KEYS == 0 and 1 <= S <= 4
+    assert topk % SPLIT_KEYS == 0 and 1 <= S <= 8
     mode = as_moe_mode(moe_mode)
     use_w8a8 = mode is MoeMode.W8A8
     H = heads
@@ -873,15 +873,18 @@ def build_shared_reuse_kernel(
                 # destinations progress concurrently instead of eight serial stores
                 # from the output wave. All waves consume outs before it is reused.
                 if wave < W:
-                    if lane < S * tile // 2:
-                        si = lane // (tile // 2)
-                        ri = (lane % (tile // 2)) * 2
-                        put_bf(
-                            peer_dst + fx.Int64(SY[region]),
-                            (rank * S + si) * HIDDEN + t * tile + ri,
-                            [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
-                            CM_SYS,
-                        )
+                    pair_count = S * tile // 2
+                    for batch in range_constexpr((pair_count + 63) // 64):
+                        pair = lane + batch * 64
+                        if pair < pair_count:
+                            si = pair // (tile // 2)
+                            ri = (pair % (tile // 2)) * 2
+                            put_bf(
+                                peer_dst + fx.Int64(SY[region]),
+                                (rank * S + si) * HIDDEN + t * tile + ri,
+                                [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
+                                CM_SYS,
+                            )
                 gpu.barrier()
             if tid < S * tile // 2:
                 s = tid // (tile // 2)

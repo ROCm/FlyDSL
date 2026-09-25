@@ -36,6 +36,7 @@ def test_moe_mode_accepts_public_values(value):
     "args",
     [
         (3, 8, 0, 1, 2048),
+        (16, 8, 0, 1, 2048),
         (1, 10, 0, 1, 2048),
         (1, 8, 1, 1, 2048),
         (1, 8, 0, 3, 2048),
@@ -45,3 +46,7 @@ def test_moe_mode_accepts_public_values(value):
 def test_validate_shard_rejects_unsupported_contract(args):
     with pytest.raises(ValueError):
         validate_shard(*args)
+
+
+def test_validate_shard_accepts_eight_samples():
+    validate_shard(8, 8, 0, 1, 2048)

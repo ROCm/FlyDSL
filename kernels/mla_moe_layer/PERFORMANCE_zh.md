@@ -22,7 +22,7 @@ TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导�
 | `w8a8` | 动态 FP8 E4M3 | block-scaled FP8 E4M3 | FP8 |
 | `w8a16` | BF16 | block-scaled FP8 E4M3 | BF16 |
 
-两种模式的 attention weights 都保持 block-scaled FP8。当前支持 sample count 1、2、4
+两种模式的 attention weights 都保持 block-scaled FP8。当前支持 sample count 1、2、4、8
 以及 peer count 1、2、4、8。host wrapper 会在分配 GPU buffer 前验证完整固定分片约束。
 
 ## 代码结构
@@ -59,6 +59,11 @@ rank 得到逐位一致的 hidden state 和 routing 结果。
 输入仍通过分段检查和跨 rank 逐位一致检查。现有容差没有放宽。一个 NP2/S4 `w8a16`
 intermediate 使用已有的一个 BF16 ulp 上限，而其最终 down/output 仍精确匹配。
 
+S=8 也在 1、2、4、8 GPU 上分别以一组新输入通过 `w8a8` 和 `w8a16` 的完整分段检查。
+更大的 peer payload 使用两个 64-lane send batches，仍保持所有 rank 输出逐位一致。
+NP4 `w8a16` 的 normalized expert input 有一个元素与独立 reduction 相差一个 BF16 ulp，
+处于已有 BF16 handoff 上限内。
+
 TP1/S1 下使用相同权重直接对比 TileRT wrapper，结果为：
 
 | 模式 | 最大绝对误差 | 相对 L2 |
@@ -85,6 +90,9 @@ TileRT。
 一次使用 8 层、1 次正式 replay 的 TP1/S1 短 smoke 测量中，`w8a8` 为 33.840 us，
 TileRT 为 33.520 us；`w8a16` 为 34.735 us，TileRT 为 32.895 us。这些短运行用于验证
 benchmark 路径，不属于可发布的性能数据。
+
+另一组使用 16 层和 3 次正式 replay 的 TP1 测量中，W8A8 的 S=4 为 52.03 us，S=8
+为 84.20 us。TileRT 没有 S=8 整层基线。
 
 分段 trace 指导了两项保留的调度修改：BF16 packed peer exchange，以及每个 router
 CTA 只处理一个 sample。此前 S=4 调度中，最后一个插桩 CTA 到达 attention 发布、
@@ -115,7 +123,7 @@ export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib
 
 如需与已发布实现直接比较，保留 `/root/tilert_pkg` 在 `PYTHONPATH` 中，并把
 `--backend flydsl` 改为 `--backend tilert`。原生 wrapper 只支持 1 或 8 peers，以及
-sample count 1/2/4。
+sample count 1/2/4。S=8 是 FlyDSL 独有扩展。
 
 FlyDSL benchmark 可添加 `--trace --layers 16 --trace-dir <directory>` 记录分段时间戳，
 然后查看某个 rank：

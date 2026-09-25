@@ -231,7 +231,7 @@ if __name__ == "__main__":
     parser.add_argument("--backend", choices=("flydsl", "tilert"), required=True)
     parser.add_argument("--moe-mode", choices=tuple(mode.value for mode in MoeMode), default=MoeMode.W8A8.value)
     parser.add_argument("--npes", choices=(1, 2, 4, 8), type=int, required=True)
-    parser.add_argument("--samples", type=int, nargs="+", choices=(1, 2, 4), default=[1, 2, 4])
+    parser.add_argument("--samples", type=int, nargs="+", choices=(1, 2, 4, 8), default=[1, 2, 4])
     parser.add_argument("--pos", type=int, default=3000)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--layers", type=int, default=MAX_LAYERS_PER_STEP)
@@ -243,6 +243,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.backend == "tilert" and args.npes not in (1, 8):
         parser.error("TileRT's released whole-layer kernel only supports 1 or 8 peers")
+    if args.backend == "tilert" and any(samples == 8 for samples in args.samples):
+        parser.error("TileRT's released whole-layer kernel only supports sample counts 1, 2, and 4")
     if args.trace and args.backend != "flydsl":
         parser.error("--trace is available for the FlyDSL backend")
     if not 1 <= args.layers <= MAX_LAYERS_PER_STEP:

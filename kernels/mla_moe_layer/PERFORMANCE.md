@@ -28,7 +28,7 @@ The public `MoeMode` values are:
 | `w8a16` | BF16 | block-scaled FP8 E4M3 | BF16 |
 
 Attention weights stay block-scaled FP8 in both modes. Supported sample counts
-are 1, 2, and 4; supported peer counts are 1, 2, 4, and 8. The host wrapper
+are 1, 2, 4, and 8; supported peer counts are 1, 2, 4, and 8. The host wrapper
 validates the complete fixed-shard contract before allocating GPU buffers.
 
 ## Code layout
@@ -68,6 +68,12 @@ passed the stage checks and exact rank agreement. Existing tolerances were not
 relaxed. One NP2/S4 `w8a16` intermediate used the existing one-BF16-ulp bound,
 while its final down/output check matched exactly.
 
+S=8 also passed the complete stage suite for `w8a8` and `w8a16` on 1, 2, 4,
+and 8 GPUs with one fresh input per configuration. The larger peer payload uses
+two 64-lane send batches; exact output agreement across ranks was retained.
+The NP4 `w8a16` normalized expert input differed from the independent reduction
+by one BF16 ulp on one element, within the existing BF16 handoff bound.
+
 A direct TP1/S1 output comparison against the same-weight TileRT wrapper gave:
 
 | Mode | Maximum absolute error | Relative L2 |
@@ -95,6 +101,9 @@ A short TP1/S1 smoke measurement using eight layers and one measured replay
 gave 33.840 us versus 33.520 us for `w8a8`, and 34.735 us versus 32.895 us for
 `w8a16`. These short runs verify the benchmark path and are not publication-
 quality latency results.
+
+A separate 16-layer, three-replay TP1 run measured W8A8 at 52.03 us for S=4
+and 84.20 us for S=8. TileRT has no S=8 whole-layer baseline.
 
 Segment traces guided two retained scheduling changes: BF16-packed peer
 exchange and one sample per router CTA. For the earlier S=4 schedule, the last
@@ -126,7 +135,8 @@ and sample counts 1/2/4. Run GPU jobs sequentially.
 
 For a direct released-implementation comparison, keep `/root/tilert_pkg` on
 `PYTHONPATH` and replace `--backend flydsl` with `--backend tilert`. The native
-wrapper supports only one or eight peers and sample counts 1/2/4.
+wrapper supports only one or eight peers and sample counts 1/2/4. S=8 is a
+FlyDSL-only extension.
 
 Add `--trace --layers 16 --trace-dir <directory>` to a FlyDSL benchmark for
 stage timestamps, then inspect a rank with:
