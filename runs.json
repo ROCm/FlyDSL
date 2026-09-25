@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-25T01:40:02Z",
+ "updated": "2026-09-25T02:09:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -458,11 +458,11 @@
    "branch": "phil/llvm-extensions-v1",
    "event": "pull_request",
    "title": "[llvm] Extend LLVM for FlyDSL end-to-end performance work",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35969455971",
    "created_at": "2026-09-24T07:24:39Z",
-   "updated_at": "2026-09-24T07:58:28Z",
+   "updated_at": "2026-09-25T02:07:56Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -477,10 +477,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-25T01:38:29Z",
-     "completed_at": null,
+     "completed_at": "2026-09-25T02:07:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35969455971/job/107545383551"
     },
     {
