@@ -115,7 +115,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-tools-${{ steps.llvm-ref.outputs.safe_ref }}-${{ hashFiles('flydsl/scripts/build_llvm.sh') }}
+          # The patches are part of the build, so they are part of the key.
+          key: mlir-tools-${{ steps.llvm-ref.outputs.safe_ref }}-${{ hashFiles('flydsl/scripts/build_llvm.sh', 'flydsl/thirdparty/llvm-extensions/**') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'

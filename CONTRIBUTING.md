@@ -100,6 +100,115 @@ Contributions should align with FlyDSL's goal of providing a Python DSL and MLIR
 * For Fly dialect (C++/MLIR) changes, update headers in `include/flydsl/` and implementation in `lib/`.
 * Add MLIR lit tests and/or Python-level pytest tests covering the new functionality.
 
+### Add an LLVM Extension
+
+FlyDSL's codegen quality is bounded by what LLVM does with the IR it emits, so
+some end-to-end performance work lands in LLVM rather than in the DSL. This is
+where those changes live: FlyDSL builds a stock upstream LLVM at the commit
+pinned in `thirdparty/llvm-build-info.json` and applies a small series of local
+extensions on top. The LLVM source tree is never forked or vendored.
+
+**What belongs here.** Only two kinds of change:
+
+1. A change already submitted upstream, carried locally while it is in review.
+2. A change genuinely specific to FlyDSL that upstream would not accept.
+
+Anything else belongs upstream first. A local extension is a maintenance cost paid
+on every pin bump, by whoever bumps it — usually not its author — so the series
+is kept small on purpose. Record which of the two cases an extension is, and
+its upstream link, in its `LLVM_EXTENSIONS` comment; that is what tells the next
+person whether it can be dropped.
+
+Extensions live in `thirdparty/llvm-extensions/` as `.patch` files. The **apply
+order is the `LLVM_EXTENSIONS` array in `scripts/build_llvm.sh`** — a file that
+is not listed there is not applied, and the build fails rather than ignoring it.
+Each entry carries a comment saying what the extension does and its upstream
+status.
+
+**Every extension must be switchable at run time.** An extension changes a
+compiler FlyDSL does not own, and when one turns out to regress a kernel,
+finding that out costs a full LLVM rebuild unless the behavior can be turned off
+in place. So introduce an `llvm::cl::opt` (default off) or a `getenv` guard, and
+branch on it — do not change behavior unconditionally:
+
+```cpp
+static cl::opt<bool> EnableFlyThing(
+    "fly-thing", cl::Hidden, cl::init(false),
+    cl::desc("FlyDSL: enable the thing"));
+
+if (EnableFlyThing) { /* new behavior */ }
+```
+
+`scripts/check_llvm_extensions.py` enforces this and runs in CI through
+`scripts/check_repo.py`. It checks that the diff adds a switch and branches on
+it; it cannot tell a real switch from one wired to a constant, so that part is
+on review. Only `REQUIRED_PATCHES` are exempt (see below) — a new extension
+needs a switch, not a place in that array.
+
+To add one:
+
+```bash
+# 1. Prepare llvm-project: reset to the pin, replay the existing patches
+bash scripts/llvm_extension.sh my-fix-slug
+
+# 2. Edit or add files under ../llvm-project/
+
+# 3. Capture the edits as thirdparty/llvm-extensions/my-fix-slug.patch
+bash scripts/llvm_extension.sh --finish
+
+# 4. Add it to the LLVM_EXTENSIONS array in scripts/build_llvm.sh, with a comment
+```
+
+Do not generate it with a bare `git diff`. Because the preceding extensions
+are left as uncommitted work-tree edits, a plain `git diff` produces a
+*cumulative* diff that re-applies their hunks; replaying such a series fails
+with `patch does not apply`, which looks like staleness but is not.
+`scripts/llvm_extension.sh` makes a throwaway commit first so the diff is
+incremental, and `--finish` captures new files as well as edits.
+
+Order matters: each extension is a diff against the tree with its predecessors
+applied. Append to the array rather than inserting, unless the new one genuinely
+has to precede an existing one.
+
+**Two arrays.** `REQUIRED_PATCHES` are not extensions — they make LLVM work at
+all for FlyDSL rather than making it faster, so every build carries them and
+the run-time switch rule does not apply. Keep that list closed: a new patch
+belongs in `LLVM_EXTENSIONS` unless the build is broken without it.
+
+**Building without the extensions.** To answer "is this regression ours?",
+build the same pin with the required patches only, so the extensions are the
+only variable:
+
+```bash
+FLYDSL_LLVM_NO_EXT=1 bash scripts/build_llvm.sh -j64
+
+# Build any commit, optionally from another remote, without editing the pin.
+FLYDSL_LLVM_REF=<sha> \
+FLYDSL_LLVM_REMOTE=https://github.com/ROCm/llvm-project.git \
+  bash scripts/build_llvm.sh -j64
+```
+
+`FLYDSL_LLVM_NO_EXT` drops the extensions but keeps `REQUIRED_PATCHES` — a
+build without those cannot find lld, which would make the control arm broken
+rather than clean. It is all-or-nothing by design; there is no per-extension
+skip. A stale extension is meant to be rebased rather than routed around, and
+two possible answers to "which extensions were in this build?" are easier to
+reason about than many. The knob feeds the CI cache key, so a control build
+never restores an install that has the extensions applied, and it does not
+suppress the checks on the tree itself: a `.patch` file listed in neither array
+still fails the build.
+
+**When a pin bump breaks a patch**, CI names the one that failed. Either rebase
+it with `bash scripts/llvm_extension.sh --rebase <name>` (required patches
+included), or, if the change landed upstream, delete the file and drop it from
+its array.
+
+> **Note**: `scripts/build_llvm.sh` resets the tracked files in `../llvm-project`
+> on every run (`git checkout --force`) so the extensions always replay from a
+> pristine tree. Uncommitted edits you made there by hand are discarded without
+> a prompt, but it refuses to run while `llvm_extension.sh` has a patch in
+> progress. Build outputs (`build-flydsl/`, `mlir_install/`) are left untouched.
+
 ---
 
 ## Testing
