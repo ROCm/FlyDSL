@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-09-25T06:47:08Z",
+ "updated": "2026-09-25T09:33:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36112129460,
+   "pr": 1196,
+   "commit": "1e28fd8a1703a475dbf992acde59559842944467",
+   "branch": "glm5-mla-moe-layer-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add GLM-5 FlyDSL decode kernels / \u6dfb\u52a0 GLM-5 FlyDSL \u89e3\u7801\u7b97\u5b50",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36112129460",
+   "created_at": "2026-09-25T08:17:35Z",
+   "updated_at": "2026-09-25T08:31:59Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-25T08:31:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36112129460/job/108001867804"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-25T08:33:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36112129460/job/108001867879"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-25T08:35:45Z",
+     "completed_at": "2026-09-25T09:03:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36112129460/job/108001867957"
+    }
+   ]
+  },
   {
    "run_id": 36082271869,
    "pr": 1194,
@@ -1986,21 +2029,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35672215969/job/106573417129"
     }
    ]
-  },
-  {
-   "run_id": 35671761257,
-   "pr": null,
-   "commit": "ddd34db9d3b314024f65bdb6e75f1ebf8320e352",
-   "branch": "phil/fix-daz-attributes",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Fix the DAZ flag never reaching the hardware",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35671761257",
-   "created_at": "2026-09-22T00:23:36Z",
-   "updated_at": "2026-09-22T00:30:41Z",
-   "actor": "Phil-amd",
-   "jobs": []
   }
  ]
 }
