@@ -87,30 +87,30 @@ def test_fitting_fields_still_pack_cleanly():
 
 
 def test_signed_min_values_are_accepted():
-    # The full signed range must be accepted (Copilot review): -2**31 fits an
-    # 'i' field exactly; only values below it may be rejected.
-    t = torch.empty(2_147_483_648, dtype=torch.float32, device="meta")
-    fill, plan = _make_fill(t)
-    plan.param_name = "MIN"
-    # shape 2**31 overflows; but the check itself must use the exact signed
-    # bound. Use a stride field to probe the i32 minimum: build a 2-D tensor
-    # whose dynamic stride is -2**31 (negative strides are accepted by the
-    # packer; only the range check guards the ABI).
-    t2 = torch.empty(4, 8, dtype=torch.float32, device="meta").as_strided((4, 8), (-2**31, 1))
-    fill2, plan2 = _make_fill(t2, use_32bit_stride=True)
-    plan2.param_name = "NEG"
-    with pytest.raises(ValueError) as ei:
-        fill2(t2, _storage(plan2))
-    msg = str(ei.value)
-    # -2**31 is IN range for 'i', so this must NOT be reported as overflow.
-    assert "-2147483648" not in msg, f"signed minimum wrongly rejected: {msg}"
+    # The full signed range must be accepted (Copilot review): -2**31 packs
+    # fine as 'i' and must not be reported; only values beyond the signed
+    # minimum may be. Probe overflow_report directly with synthetic fields.
+    from flydsl.compiler.jit_argument import _LayoutPlan
+
+    plan32 = _LayoutPlan((), (0,), use_32bit_stride=True)
+    plan32.param_name = "STR"
+    assert plan32.overflow_report(None, (-2**31,)) == [], "signed i32 minimum must be accepted"
+    bad = plan32.overflow_report(None, (-2**31 - 1,))
+    assert bad and bad[0][2] == -(2**31) - 1, bad
+
+    plan64 = _LayoutPlan((), (0,), use_32bit_stride=False)
+    assert plan64.overflow_report(None, (-2**63,)) == [], "signed i64 minimum must be accepted"
+    bad64 = plan64.overflow_report(None, (-2**63 - 1,))
+    assert bad64 and bad64[0][2] == -(2**63) - 1, bad64
 
 
 def test_nested_struct_path_in_diagnostic():
-    # A struct-typed JIT parameter must produce a full field path in the
-    # overflow diagnostic (Copilot review): 'outer.inner', not 'Struct.field'.
+    # A struct-typed JIT parameter must compose a full field path in the
+    # diagnostic (Copilot review): "payload.inner.t", not "Struct.field".
     import flydsl.expr as fx
+    from flydsl.compiler.jit_function import _stamp_plan_param_names
     from flydsl.compiler.jit_argument import TorchTensorJitArg
+    from flydsl.expr.struct import _effective_field_defs, _is_constexpr_type
 
     @fx.struct
     class Inner:
@@ -121,33 +121,29 @@ def test_nested_struct_path_in_diagnostic():
         inner: Inner
 
     big = torch.empty(2_147_483_648, dtype=torch.float32, device="meta")
-    outer = Outer(inner=Inner(t=TorchTensorJitArg(big)))
-    slots = outer.__c_abi_spec__()
-    # find the fill built for the nested tensor plan
-    from flydsl.compiler.jit_function import _stamp_plan_param_names
+    jit_arg = TorchTensorJitArg(big)
+
+    # Construct with a real tensor (field coercion requires one), then swap
+    # in the JIT arg the dispatch layer actually sees — the ABI recursion
+    # must still find and path-stamp its layout plan.
+    outer = Outer(inner=Inner(t=big))
+    object.__setattr__(outer.inner, "t", jit_arg)
+
+    # Build the ABI spec — this must stamp the nested plan's path_suffix.
+    outer.__c_abi_spec__()
     _stamp_plan_param_names(outer, "payload")
-    # locate the plan through the struct walk and check the composed label
-    from flydsl.expr.struct import _effective_field_defs, _is_constexpr_type
 
-    def find_plans(obj, prefix):
-        plans = []
-        plan = getattr(obj, "_layout_plan", None)
-        if plan is not None:
-            plans.append((prefix, plan))
-        if hasattr(obj, "__dsl_composite_kind__"):
-            for name, eff in _effective_field_defs(type(obj)):
-                if _is_constexpr_type(eff):
-                    continue
-                plans += find_plans(getattr(obj, name, None), f"{prefix}.{name}" if prefix else name)
-        return plans
-
-    plans = find_plans(outer, "")
-    assert plans, "no layout plan discovered in struct"
-    label = None
-    for _path, plan in plans:
-        if plan.path_suffix:
-            label = f"{plan.param_name}.{plan.path_suffix}"
+    plan = jit_arg._layout_plan
+    assert plan is not None, "nested tensor plan was not built/stamped"
+    label = plan.param_name + (f".{plan.path_suffix}" if plan.path_suffix else "")
     assert label == "payload.inner.t", f"unexpected diagnostic label: {label!r}"
+
+    # And the actual message composed by _check_layout_fields uses that label.
+    from flydsl.compiler.jit_argument import _check_layout_fields
+
+    storage = plan.buf_ctype.from_buffer(bytearray(plan.codec.size))
+    with pytest.raises(ValueError, match=r"argument 'payload\.inner\.t'"):
+        _check_layout_fields(plan, (2_147_483_648,), None)
 
 
 def test_repeated_launch_still_packs():
