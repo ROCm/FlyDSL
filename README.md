@@ -377,7 +377,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **AllReduce** | `test_allreduce.py` | Multi-GPU all-reduce |
 | **RDNA GEMM** | `test_rdna_gemm.py` | RDNA FP16/FP8 GEMM |
 | **GFX1250 GEMM** | `test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| **WMMA GEMM** | `test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| **GFX1250 BF16 GEMM** | `test_gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | **VecAdd** | `test_vec_add.py` | Basic vector addition |
 | **Quantization** | `test_quant.py` | Quantization utilities |
 

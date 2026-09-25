@@ -84,8 +84,9 @@ FlyDSL/
 │   │   ├── rdna_f16_gemm.py          # RDNA FP16 GEMM
 │   │   ├── rdna_fp8_preshuffle_gemm.py # RDNA FP8 GEMM
 │   │   ├── gemm_common_gfx1250.py    # GFX1250 GEMM common
-│   │   ├── gemm_fp8fp4_gfx1250.py    # GFX1250 FP8/FP4 GEMM
-│   │   ├── wmma_gemm_gfx1250.py      # GFX1250 WMMA GEMM
+│   │   ├── gemm_bf16_gfx1250.py      # GFX1250 BF16/FP16 GEMM
+│   │   ├── gemm_a8w8_gfx1250.py      # GFX1250 FP8 GEMM (per-token/channel, blockscale)
+│   │   ├── gemm_a8w4_mxscale_gfx1250.py # GFX1250 FP8 x MXFP4 GEMM
 │   │   └── fp8_gemm_utils.py         # FP8 GEMM helpers
 │   ├── norm/                         # Normalization kernels
 │   │   ├── layernorm_kernel.py       # LayerNorm (layout API)
