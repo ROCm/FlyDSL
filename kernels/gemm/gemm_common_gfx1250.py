@@ -102,11 +102,12 @@ def fmax_f32(a, b):
 
 
 def fused_silu_swiglu_elem(g, u, *, swiglu, limit_f32, neg_limit_f32):
-    """One (gate, up) pair -> fused silu or swiglu scalar (gpt-oss clamp)."""
+    """One (gate, up) pair -> silu(g) * u, or gpt-oss swiglu with its +-limit clamp."""
     _one = fx.Float32(1.0)
-    g = fmin_f32(g, limit_f32)
-    u = fmin_f32(fmax_f32(u, neg_limit_f32), limit_f32)
     if swiglu:
+        # The clamp is part of the gpt-oss SwiGLU definition; plain SiLU is unclamped.
+        g = fmin_f32(g, limit_f32)
+        u = fmin_f32(fmax_f32(u, neg_limit_f32), limit_f32)
         nlog2e = fx.Float32(-1.702 * LOG2E)
         sig = fx.Float32(rocdl.rcp(T.f32, _one + (g * nlog2e).exp2()))
         return g * sig * (u + _one)
