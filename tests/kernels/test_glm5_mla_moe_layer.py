@@ -91,11 +91,13 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234):
     op = Glm5MlaMoeLayer(W, S, rank=rank, npes=npes, group=group, topk=topk)
 
     if npes == 1:
-        allreduce = lambda x: x  # noqa: E731
+        allreduce = lambda x, bf16_partials=False: x  # noqa: E731
     else:
         import torch.distributed as dist
 
-        def allreduce(x):
+        def allreduce(x, bf16_partials=False):
+            if bf16_partials:
+                x = x.to(torch.bfloat16).float()
             parts = [torch.empty_like(x.cpu()) for _ in range(npes)]
             dist.all_gather(parts, x.cpu().contiguous(), group=group)
             return sum(parts[1:], parts[0]).to(x.device)
@@ -109,6 +111,11 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234):
         torch.cuda.synchronize()
         got = op.intermediates()
         got["x_out"] = out
+        if npes > 1:
+            ranks = [torch.empty_like(out.cpu()) for _ in range(npes)]
+            dist.all_gather(ranks, out.cpu().contiguous(), group=group)
+            for other in ranks[1:]:
+                torch.testing.assert_close(other, ranks[0], atol=0, rtol=0)
         kv_ref, pe_ref = kv0.clone(), pe0.clone()
         ref = golden_layer(W, h, cur_pos, kv_ref, pe_ref, indices, cos, sin, allreduce, topk=topk)
         report = []
@@ -123,8 +130,17 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234):
         # up/gate + SiLU from the kernel's own FP8 activation
         ug = golden_moe(W, got["a"].clone(), allreduce, xq=got["xq"].clone())
         ok &= _check("mid", got["mid"], ug["mid"], report)
-        # down + route weighting + TP reduce + residual from the kernel's own mid
-        down = golden_moe(W, got["a"].clone(), allreduce, got["mid"].clone(), got["sel"].clone(), got["prob"].clone())
+        # The peer payload rounds each rank's down partial to BF16 before the
+        # ordered FP32 sum (TileRT's communication precision). Model that here;
+        # the fully independent end-to-end golden above keeps FP32 partials.
+        down = golden_moe(
+            W,
+            got["a"].clone(),
+            lambda x: allreduce(x, bf16_partials=True),
+            got["mid"].clone(),
+            got["sel"].clone(),
+            got["prob"].clone(),
+        )
         ok &= _check("x_out", got["x_out"], down["x_out"], report)
         ok &= torch.equal(got["sel"], moe["sel"])
         # fully independent golden: only comparable when a 1-ulp difference in ``a``
@@ -241,4 +257,6 @@ if __name__ == "__main__":
         else:
             run(a.npes, a.S, a.pos, -1)
         sys.exit(0)
-    print("PASS" if run(a.npes, a.S, a.pos, a.iters) else "FAIL")
+    passed = run(a.npes, a.S, a.pos, a.iters)
+    print("PASS" if passed else "FAIL")
+    sys.exit(0 if passed else 1)

@@ -17,8 +17,8 @@ __all__ = ["Glm5MlaMoeLayer"]
 class Glm5MlaMoeLayer:
     """One rank of the TP layer. ``group`` is a torch.distributed group (None for npes=1).
 
-    The symmetric buffer is hipDeviceMallocUncached memory exported to every
-    peer through HIP IPC; scratch and symmetric buffers may be shared by all
+    The symmetric buffer is a torch allocation exported to every peer through
+    HIP IPC; scratch and symmetric buffers may be shared by all
     layers because every launch uses a fresh ``tag``.
     """
 
@@ -33,7 +33,8 @@ class Glm5MlaMoeLayer:
         self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk)
         dev = torch.device("cuda", torch.cuda.current_device())
         self.scratch = torch.zeros(self.scr_layout["_bytes"], dtype=torch.uint8, device=dev)
-        self.sym = _Hip._alloc_uncached(self.sym_layout["_bytes"])
+        self.sym_storage = torch.zeros(self.sym_layout["_bytes"], dtype=torch.uint8, device=dev)
+        self.sym = self.sym_storage.data_ptr()
         if npes == 1:
             addrs = [self.sym]
         else:
