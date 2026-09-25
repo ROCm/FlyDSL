@@ -26,7 +26,6 @@ else:
     pytest_skip = False
 
 import re
-from pathlib import Path
 
 import pytest
 
