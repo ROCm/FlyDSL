@@ -86,6 +86,70 @@ def test_fitting_fields_still_pack_cleanly():
     assert (sh0, sh1, st1) == (4, 8, 8)
 
 
+def test_signed_min_values_are_accepted():
+    # The full signed range must be accepted (Copilot review): -2**31 fits an
+    # 'i' field exactly; only values below it may be rejected.
+    t = torch.empty(2_147_483_648, dtype=torch.float32, device="meta")
+    fill, plan = _make_fill(t)
+    plan.param_name = "MIN"
+    # shape 2**31 overflows; but the check itself must use the exact signed
+    # bound. Use a stride field to probe the i32 minimum: build a 2-D tensor
+    # whose dynamic stride is -2**31 (negative strides are accepted by the
+    # packer; only the range check guards the ABI).
+    t2 = torch.empty(4, 8, dtype=torch.float32, device="meta").as_strided((4, 8), (-2**31, 1))
+    fill2, plan2 = _make_fill(t2, use_32bit_stride=True)
+    plan2.param_name = "NEG"
+    with pytest.raises(ValueError) as ei:
+        fill2(t2, _storage(plan2))
+    msg = str(ei.value)
+    # -2**31 is IN range for 'i', so this must NOT be reported as overflow.
+    assert "-2147483648" not in msg, f"signed minimum wrongly rejected: {msg}"
+
+
+def test_nested_struct_path_in_diagnostic():
+    # A struct-typed JIT parameter must produce a full field path in the
+    # overflow diagnostic (Copilot review): 'outer.inner', not 'Struct.field'.
+    import flydsl.expr as fx
+    from flydsl.compiler.jit_argument import TorchTensorJitArg
+
+    @fx.struct
+    class Inner:
+        t: fx.Tensor
+
+    @fx.struct
+    class Outer:
+        inner: Inner
+
+    big = torch.empty(2_147_483_648, dtype=torch.float32, device="meta")
+    outer = Outer(inner=Inner(t=TorchTensorJitArg(big)))
+    slots = outer.__c_abi_spec__()
+    # find the fill built for the nested tensor plan
+    from flydsl.compiler.jit_function import _stamp_plan_param_names
+    _stamp_plan_param_names(outer, "payload")
+    # locate the plan through the struct walk and check the composed label
+    from flydsl.expr.struct import _effective_field_defs, _is_constexpr_type
+
+    def find_plans(obj, prefix):
+        plans = []
+        plan = getattr(obj, "_layout_plan", None)
+        if plan is not None:
+            plans.append((prefix, plan))
+        if hasattr(obj, "__dsl_composite_kind__"):
+            for name, eff in _effective_field_defs(type(obj)):
+                if _is_constexpr_type(eff):
+                    continue
+                plans += find_plans(getattr(obj, name, None), f"{prefix}.{name}" if prefix else name)
+        return plans
+
+    plans = find_plans(outer, "")
+    assert plans, "no layout plan discovered in struct"
+    label = None
+    for _path, plan in plans:
+        if plan.path_suffix:
+            label = f"{plan.param_name}.{plan.path_suffix}"
+    assert label == "payload.inner.t", f"unexpected diagnostic label: {label!r}"
+
+
 def test_repeated_launch_still_packs():
     # The check must not break the fast dispatch path: same fill, run twice.
     t = torch.empty(64, dtype=torch.float32)

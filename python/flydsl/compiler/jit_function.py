@@ -1100,6 +1100,26 @@ def _resolve_jit_arg_type(arg, annotation):
     return constructor
 
 
+def _stamp_plan_param_names(inst, param_name):
+    """Set ``param_name`` on the layout plan(s) reachable from a JIT argument.
+
+    A plain MemRefJitArg exposes its plan as ``_layout_plan``. A struct-typed
+    argument is frozen (no attribute assignment), so its fields' plans are
+    discovered by walking the composite fields; each already carries a
+    ``path_suffix`` with its field path (set during ``__c_abi_spec__``).
+    """
+    plan = getattr(inst, "_layout_plan", None)
+    if plan is not None and not plan.param_name:
+        plan.param_name = param_name
+    if hasattr(inst, "__dsl_composite_kind__"):
+        from ..expr.struct import _effective_field_defs, _is_constexpr_type
+
+        for name, _eff_type in _effective_field_defs(type(inst)):
+            if _is_constexpr_type(_eff_type):
+                continue
+            _stamp_plan_param_names(getattr(inst, name, None), param_name)
+
+
 def _build_call_state(sig, args_tuple, func_exe):
     """Build a CallState for fast repeated dispatch.
 
@@ -1134,9 +1154,11 @@ def _build_call_state(sig, args_tuple, func_exe):
 
         inst = arg if isinstance(arg, jit_arg_type) else jit_arg_type(arg)
         slots = c_abi_spec(inst)
-        plan = getattr(inst, "_layout_plan", None)
-        if plan is not None:
-            plan.param_name = param_name
+        # Stamp the JIT parameter name on every layout plan this argument's
+        # ABI spec built (direct tensor plan, or plans nested in struct
+        # fields — those carry a path_suffix like "x.inner" composed during
+        # the struct's __c_abi_spec__ recursion).
+        _stamp_plan_param_names(inst, param_name)
         for ctype, fill in slots:
             slot_specs.append((i, ctype, fill))
 

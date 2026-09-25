@@ -540,25 +540,40 @@ def _make_composite_class(
             )
         )
 
-    def __c_abi_spec__(self):
+    def __c_abi_spec__(self, _path_prefix=""):
         # Recurse each non-constexpr field through the shared ABI dispatcher and
         # wrap every sub-slot fill so it reads the field off the struct instance.
+        #
+        # ``_path_prefix`` accumulates the field path within a (possibly
+        # nested) struct-typed JIT parameter. Layout plans built by sub-args
+        # get that path as their ``path_suffix``; the dispatch builder
+        # (jit_function._build_call_state) later prefixes the real parameter
+        # name, so a nested overflow diagnostic reads
+        # ``argument 'outer.inner'`` instead of an ambiguous type name.
         slots = []
         for name, eff_type in _effective_field_defs(type(self)):
             if _is_constexpr_type(eff_type):
                 continue
             sub = getattr(self, name)
-            for ctype, subfill in c_abi_spec(sub):
+            field_path = f"{_path_prefix}.{name}" if _path_prefix else name
+            is_composite = hasattr(sub, "__dsl_composite_kind__")
+            if is_composite:
+                # Nested struct: recurse with the extended path so its own
+                # sub-plans carry the full field path (c_abi_spec() would call
+                # __c_abi_spec__() without the prefix).
+                sub_slots = sub.__c_abi_spec__(_path_prefix=field_path)
+            else:
+                sub_slots = c_abi_spec(sub)
+            for ctype, subfill in sub_slots:
 
                 def fill(struct_arg, s, _n=name, _f=subfill):
                     _f(getattr(struct_arg, _n), s)
 
                 slots.append((ctype, fill))
-            # Propagate the field name onto any layout plan the sub-arg built,
-            # so overflow diagnostics can name the struct field.
+            # Propagate the field path onto any layout plan the sub-arg built.
             subplan = getattr(sub, "_layout_plan", None)
-            if subplan is not None and not subplan.param_name:
-                subplan.param_name = f"{type(self).__name__}.{name}"
+            if subplan is not None:
+                subplan.path_suffix = field_path
         return slots
 
     @classmethod
