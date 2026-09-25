@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-25T03:18:09Z",
+ "updated": "2026-09-25T03:33:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -219,11 +219,11 @@
    "branch": "fix/shared-allocator-explicit-alignment",
    "event": "pull_request",
    "title": "[Fix][Expr] Honor allocate(..., alignment=) for static shared allocat\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35996004114",
    "created_at": "2026-09-24T11:56:48Z",
-   "updated_at": "2026-09-24T12:11:15Z",
+   "updated_at": "2026-09-25T03:18:47Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -241,9 +241,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T12:11:15Z",
+     "started_at": "2026-09-25T03:18:46Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35996004114/job/107625737573"
     },
