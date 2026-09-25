@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-24T23:34:50Z",
+ "updated": "2026-09-25T01:03:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36077361118,
+   "pr": 1194,
+   "commit": "1d83b7413ef333f030d7a351e32308899d77fc5e",
+   "branch": "fix/1176-layout-field-overflow-diagnostic",
+   "event": "pull_request",
+   "title": "[JIT] Actionable diagnostic for dynamic layout field overflow",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36077361118",
+   "created_at": "2026-09-25T00:24:07Z",
+   "updated_at": "2026-09-25T00:24:07Z",
+   "actor": "mustafayildirim",
+   "jobs": []
+  },
+  {
+   "run_id": 36076554979,
+   "pr": 1193,
+   "commit": "015b23f44674279ff450a6108846b4aa174d17c1",
+   "branch": "fix/1165-singleton-contig-segment",
+   "event": "pull_request",
+   "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36076554979",
+   "created_at": "2026-09-25T00:13:42Z",
+   "updated_at": "2026-09-25T00:13:42Z",
+   "actor": "mustafayildirim",
+   "jobs": []
+  },
   {
    "run_id": 36073185378,
    "pr": 848,
@@ -10,13 +40,41 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36073185378",
    "created_at": "2026-09-24T23:31:50Z",
-   "updated_at": "2026-09-24T23:31:56Z",
+   "updated_at": "2026-09-24T23:45:50Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-24T23:46:26Z",
+     "completed_at": "2026-09-25T00:32:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36073185378/job/107882072537"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T23:45:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36073185378/job/107882072599"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-24T23:45:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36073185378/job/107882072625"
+    }
+   ]
   },
   {
    "run_id": 36022932909,
@@ -47,9 +105,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-24T16:25:36Z",
+     "started_at": "2026-09-24T23:47:28Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36022932909/job/107726883296"
     },
@@ -2126,67 +2184,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588987712/job/106302812855"
     }
    ]
-  },
-  {
-   "run_id": 35588596933,
-   "pr": null,
-   "commit": "effd112d5dfce9451c875d69c693acd6b8827d93",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Remove ancestor-of-main gate from PyPI publish workflow (#1175)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588596933",
-   "created_at": "2026-09-21T10:24:44Z",
-   "updated_at": "2026-09-21T13:11:42Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T10:36:01Z",
-     "completed_at": "2026-09-21T11:58:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588596933/job/106300644462",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T10:51:15Z",
-     "completed_at": "2026-09-21T11:20:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588596933/job/106300644463"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-21T11:21:02Z",
-     "completed_at": "2026-09-21T13:11:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588596933/job/106300644540"
-    }
-   ]
-  },
-  {
-   "run_id": 35588299456,
-   "pr": 987,
-   "commit": "ec211a3b5ab69aa4e5e6d650b5071180ea084de9",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35588299456",
-   "created_at": "2026-09-21T10:21:24Z",
-   "updated_at": "2026-09-21T10:29:26Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
