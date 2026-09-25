@@ -106,42 +106,40 @@ def test_signed_min_values_are_accepted():
 
 def test_nested_struct_path_in_diagnostic():
     # A struct-typed JIT parameter must compose a full field path in the
-    # diagnostic (Copilot review): "payload.inner.t", not "Struct.field".
-    import flydsl.expr as fx
+    # diagnostic (Copilot review): "payload.inner.t", not an ambiguous
+    # "Struct.field" shared by every field of the same struct type.
+    #
+    # Struct fields coerce to DSL wrappers at construction (host tensors are
+    # rejected — see test_raw_framework_tensor_is_not_an_fx_tensor_field), so
+    # the JIT arg is swapped in post-construction; the ABI recursion only
+    # reads field *values*, not annotations. object.__setattr__ is the same
+    # escape hatch the specializer itself uses for frozen fields.
+    from flydsl.compiler.jit_argument import _check_layout_fields
     from flydsl.compiler.jit_function import _stamp_plan_param_names
-    from flydsl.compiler.jit_argument import TorchTensorJitArg
-    from flydsl.expr.struct import _effective_field_defs, _is_constexpr_type
 
     @fx.struct
-    class Inner:
-        t: fx.Tensor
+    class InnerS:
+        t: fx.Int32
 
     @fx.struct
-    class Outer:
-        inner: Inner
+    class OuterS:
+        inner: InnerS
 
     big = torch.empty(2_147_483_648, dtype=torch.float32, device="meta")
-    jit_arg = TorchTensorJitArg(big)
+    arg = TorchTensorJitArg(big)
+    arg.__c_abi_spec__()  # build the plan so the struct recursion can stamp it
 
-    # Construct with a real tensor (field coercion requires one), then swap
-    # in the JIT arg the dispatch layer actually sees — the ABI recursion
-    # must still find and path-stamp its layout plan.
-    outer = Outer(inner=Inner(t=big))
-    object.__setattr__(outer.inner, "t", jit_arg)
+    holder = OuterS(inner=InnerS(t=1))
+    object.__setattr__(holder.inner, "t", arg)
 
-    # Build the ABI spec — this must stamp the nested plan's path_suffix.
-    outer.__c_abi_spec__()
-    _stamp_plan_param_names(outer, "payload")
+    holder.__c_abi_spec__()
+    _stamp_plan_param_names(holder, "payload")
 
-    plan = jit_arg._layout_plan
+    plan = getattr(arg, "_layout_plan", None)
     assert plan is not None, "nested tensor plan was not built/stamped"
     label = plan.param_name + (f".{plan.path_suffix}" if plan.path_suffix else "")
     assert label == "payload.inner.t", f"unexpected diagnostic label: {label!r}"
 
-    # And the actual message composed by _check_layout_fields uses that label.
-    from flydsl.compiler.jit_argument import _check_layout_fields
-
-    storage = plan.buf_ctype.from_buffer(bytearray(plan.codec.size))
     with pytest.raises(ValueError, match=r"argument 'payload\.inner\.t'"):
         _check_layout_fields(plan, (2_147_483_648,), None)
 
