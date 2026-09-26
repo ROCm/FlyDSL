@@ -153,7 +153,13 @@ class KimiK3MlaMoeLayer:
         self.topk_ids = torch.empty(samples, config.top_k, dtype=torch.int32, device=device)
         self.topk_weights = torch.empty(samples, config.top_k, dtype=torch.float32, device=device)
         self.router_select = SigmoidTopkRouter(config.n_experts, config.top_k, samples)
-        self.router_projection = FusedRouterProjection(config.hidden, config.n_experts, config.top_k, samples)
+        self.router_projection = FusedRouterProjection(
+            config.hidden,
+            config.n_experts,
+            config.top_k,
+            samples,
+            samples * self.routed_hidden,
+        )
         self.router_score_mailbox = torch.zeros(
             samples * config.n_experts * 2,
             dtype=torch.int32,
@@ -178,6 +184,8 @@ class KimiK3MlaMoeLayer:
                 rank=rank,
                 npes=npes,
                 group=group,
+                final_hidden=config.hidden,
+                final_shard_width=self.hidden_shard,
             )
             if reduce_backend == "symmetric"
             else None
@@ -279,6 +287,11 @@ class KimiK3MlaMoeLayer:
                 self.router_scores,
                 self.topk_ids,
                 self.topk_weights,
+                self.sorted_token_ids,
+                self.sorted_weights,
+                self.sorted_expert_ids,
+                self.num_valid_ids,
+                self.moe_buf,
                 self.attention.step,
                 epoch_layer,
             )
@@ -296,18 +309,19 @@ class KimiK3MlaMoeLayer:
             self.topk_ids.copy_(self.topk_ids_i64)
             torch.gather(self.router_scores, 1, self.topk_ids_i64, out=self.topk_weights)
             self.topk_weights.div_(self.topk_weights.sum(-1, keepdim=True))
-        moe_sorting_flydsl(
-            self.topk_ids,
-            self.topk_weights,
-            self.sorted_token_ids,
-            self.sorted_weights,
-            self.sorted_expert_ids,
-            self.num_valid_ids,
-            self.moe_buf,
-            self.config.n_experts,
-            unit_size=_ROUTING_TILE_M,
-            num_local_tokens=self.S,
-        )
+        if not self.fuse_router:
+            moe_sorting_flydsl(
+                self.topk_ids,
+                self.topk_weights,
+                self.sorted_token_ids,
+                self.sorted_weights,
+                self.sorted_expert_ids,
+                self.num_valid_ids,
+                self.moe_buf,
+                self.config.n_experts,
+                unit_size=_ROUTING_TILE_M,
+                num_local_tokens=self.S,
+            )
 
     def _reduce(
         self,
@@ -332,7 +346,13 @@ class KimiK3MlaMoeLayer:
         dist.all_reduce(output, group=self.reduce_group)
         return output
 
-    def _moe(self, hidden_states: torch.Tensor, epoch_layer: int) -> torch.Tensor:
+    def _moe(
+        self,
+        hidden_states: torch.Tensor,
+        epoch_layer: int,
+        residual: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
         with self._profile_stage("router_sort"):
             self._route_and_sort(hidden_states, epoch_layer)
         with self._profile_stage("latent_down"):
@@ -397,16 +417,30 @@ class KimiK3MlaMoeLayer:
             torch.mm(self.latent_norm, self.t["w_latent_up"].t(), out=self.tail)
 
         with self._profile_stage("final_reduce"):
+            if self.symmetric_allreduce is not None:
+                return self.symmetric_allreduce.reduce_final(
+                    self.shared_partial,
+                    self.tail,
+                    residual,
+                    self.final_partial,
+                    self.moe_delta,
+                    output,
+                    self.attention.step,
+                    epoch_layer,
+                )
             self.final_partial.copy_(self.shared_partial)
             lo = self.rank * self.hidden_shard
             hi = lo + self.hidden_shard
             self.final_partial[:, lo:hi].add_(self.tail)
-            return self._reduce(
+            self._reduce(
                 self.final_partial,
                 self.moe_delta,
                 region=1,
                 epoch_layer=epoch_layer,
             )
+            with self._profile_stage("output_add"):
+                torch.add(residual, self.moe_delta, out=output)
+            return output
 
     def _shared_experts(self, hidden_states: torch.Tensor) -> None:
         with self._profile_stage("shared_experts"):
@@ -490,10 +524,8 @@ class KimiK3MlaMoeLayer:
                 self.t["g_post"],
                 self.previous_valid_blocks + int(self.is_block_write_layer),
             )
-        moe_delta = self._moe(self.moe_input, epoch_layer)
         target = self.output if x_out is None else x_out
-        with self._profile_stage("output_add"):
-            torch.add(self.updated_prefix, moe_delta, out=target)
+        self._moe(self.moe_input, epoch_layer, self.updated_prefix, target)
         if advance:
             self.advance_step()
         return target
