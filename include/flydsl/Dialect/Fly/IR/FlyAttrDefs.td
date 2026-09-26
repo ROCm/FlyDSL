@@ -288,4 +288,17 @@ def Fly_ExplicitModuleAttr : Fly_Attr<"ExplicitModule", "explicit_module", [
   let assemblyFormat = "``";
 }
 
+def Fly_AotModuleAttr : Fly_Attr<"AotModule", "aot_module", [
+    OffloadingTranslationAttrTrait
+]> {
+  let summary = "ROCm GPU binary offloading handler for exported (AOT) host objects";
+  let description = [{
+    Embeds a GPU binary with internal linkage and emits prefixed module init,
+    load, and unload functions. Kernel launches use runtime-managed per-device
+    state.
+  }];
+  let parameters = (ins StringRefParameter<"exported symbol prefix">:$symbolPrefix);
+  let assemblyFormat = "`<` $symbolPrefix `>`";
+}
+
 #endif // FLY_ATTRDEFS
