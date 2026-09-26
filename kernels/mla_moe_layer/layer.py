@@ -8,6 +8,7 @@ from __future__ import annotations
 import torch
 
 from kernels.mla_moe_layer.config import (
+    GLM5_CONFIG,
     HIDDEN,
     INTER,
     KV_LORA,
@@ -43,6 +44,9 @@ __all__ = [
     "Mxfp4WeightLayout",
     "RouterWeightLayout",
     "SharedReuseMlaMoeLayer",
+    "Glm5IndexedMlaMoeBlock",
+    "IndexedMlaMoeBlock",
+    "KimiK3MlaLayer",
 ]
 
 
@@ -69,7 +73,9 @@ class SharedReuseMlaMoeLayer:
         router_weight_layout: RouterWeightLayout | str | None = None,
         kv_cache_layout: KvCacheLayout | str | None = None,
     ):
-        validate_shard(samples, W.heads, rank, npes, topk)
+        if W.config != GLM5_CONFIG:
+            raise ValueError(f"SharedReuseMlaMoeLayer requires GLM-5 weights, got {W.config.name!r}")
+        validate_shard(samples, W.heads, rank, npes, topk, GLM5_CONFIG)
         self.moe_mode = as_moe_mode(moe_mode)
         (
             self.mxfp4_weight_layout,
@@ -87,9 +93,9 @@ class SharedReuseMlaMoeLayer:
         self.packed = pack_layer_weights(
             W.t,
             self.moe_mode,
-            self.mxfp4_weight_layout,
-            self.mxfp4_scale_layout,
-            self.router_weight_layout,
+            mxfp4_weight_layout=self.mxfp4_weight_layout,
+            mxfp4_scale_layout=self.mxfp4_scale_layout,
+            router_weight_layout=self.router_weight_layout,
         )
         self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk, self.moe_mode)
         dev = torch.device("cuda", torch.cuda.current_device())
@@ -245,3 +251,12 @@ class SharedReuseMlaMoeLayer:
             mid=mid,
             xq=self.debug("xqd", (S, HIDDEN), pairs=False),
         )
+
+
+# The model-configured indexed path lives separately from the tuned GLM-5
+# monokernel so new model profiles do not perturb its launch or storage ABI.
+from kernels.mla_moe_layer.indexed_layer import (  # noqa: E402
+    Glm5IndexedMlaMoeBlock,
+    IndexedMlaMoeBlock,
+    KimiK3MlaLayer,
+)

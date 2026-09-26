@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Static GLM-5 shard dimensions and supported MoE arithmetic modes."""
+"""Model geometry, arithmetic formats, and storage-layout contracts."""
 
 from __future__ import annotations
 
@@ -31,6 +31,13 @@ class ExpertWeight(str, Enum):
 
     FP8_BLOCK128 = "fp8_block128"
     MXFP4_BLOCK32 = "mxfp4_block32"
+
+
+class AttentionWeight(str, Enum):
+    """Packed attention-weight representation."""
+
+    FP8_BLOCK128 = "fp8_block128"
+    BF16 = "bf16"
 
 
 class Mxfp4WeightLayout(str, Enum):
@@ -134,14 +141,13 @@ def resolve_storage_layouts(
     router_weight_layout: RouterWeightLayout | str | None = None,
     kv_cache_layout: KvCacheLayout | str | None = None,
 ) -> tuple[Mxfp4WeightLayout, Mxfp4ScaleLayout, RouterWeightLayout, KvCacheLayout]:
-    """Resolve storage defaults for each MoE arithmetic mode."""
+    """Resolve storage defaults independently from model geometry."""
 
     is_mxfp4 = moe_format(moe_mode).weight is ExpertWeight.MXFP4_BLOCK32
     weight_default = Mxfp4WeightLayout.ATOM if is_mxfp4 else Mxfp4WeightLayout.NATIVE
     scale_default = Mxfp4ScaleLayout.ATOM if is_mxfp4 else Mxfp4ScaleLayout.NATIVE
     # ATOM keeps the unquantized router row-major, but direct row-major loads
-    # regress the A16W4 S=8 mono-kernel. Keep the MFMA-native router packing by
-    # default while allowing zero-copy ATOM router experiments explicitly.
+    # regress the A16W4 S=8 mono-kernel. Preserve the MFMA-native default.
     router_default = RouterWeightLayout.NATIVE
     cache_default = KvCacheLayout.ATOM if is_mxfp4 else KvCacheLayout.SPLIT
     return (
@@ -152,40 +158,156 @@ def resolve_storage_layouts(
     )
 
 
-HIDDEN = 6144
-Q_LORA = 2048
-KV_LORA = 512
-PE_DIM = 64
-NOPE_DIM = 192
-V_DIM = 256
-QKV_A_ROWS = Q_LORA + KV_LORA + PE_DIM
-N_EXPERTS = 256
-TOP_K = 8
-MOE_SLOTS = 1 + TOP_K
-SHARED_EXPERT = N_EXPERTS
-INTER = 256
-ROUTE_SCALE = 2.5
+@dataclass(frozen=True)
+class LayerConfig:
+    """Compile-time geometry and attention semantics for one TP decode shard."""
+
+    name: str
+    hidden: int
+    q_lora: int
+    kv_lora: int
+    pe_dim: int
+    nope_dim: int
+    v_dim: int
+    n_experts: int
+    top_k: int
+    inter: int
+    route_scale: float
+    local_heads: int
+    attention_weight: AttentionWeight = AttentionWeight.FP8_BLOCK128
+    attention_output_gate: bool = False
+    attention_input_norm: bool = True
+    attention_residual: bool = True
+    routed_hidden: int | None = None
+    shared_inter: int | None = None
+    num_shared_experts: int = 1
+    situ_beta: float = 1.0
+    situ_linear_beta: float = 1.0
+    attn_res_block_size: int | None = None
+
+    @property
+    def qkv_a_rows(self) -> int:
+        rows = self.q_lora + self.kv_lora + self.pe_dim
+        if self.attention_output_gate:
+            rows += self.local_heads * self.v_dim
+        return rows
+
+    @property
+    def moe_slots(self) -> int:
+        return 1 + self.top_k
+
+    @property
+    def shared_expert(self) -> int:
+        return self.n_experts
+
+    @property
+    def softmax_scale(self) -> float:
+        return (self.nope_dim + self.pe_dim) ** -0.5
+
+    @property
+    def uses_latent_moe(self) -> bool:
+        return self.routed_hidden is not None
+
+
+GLM5_CONFIG = LayerConfig(
+    name="glm5",
+    hidden=6144,
+    q_lora=2048,
+    kv_lora=512,
+    pe_dim=64,
+    nope_dim=192,
+    v_dim=256,
+    n_experts=256,
+    top_k=8,
+    inter=256,
+    route_scale=2.5,
+    local_heads=8,
+)
+
+KIMI_K3_CONFIG = LayerConfig(
+    name="kimi_k3",
+    hidden=7168,
+    q_lora=1536,
+    kv_lora=512,
+    pe_dim=64,
+    nope_dim=128,
+    v_dim=128,
+    n_experts=896,
+    top_k=16,
+    inter=384,
+    route_scale=1.0,
+    local_heads=12,
+    attention_weight=AttentionWeight.BF16,
+    attention_output_gate=True,
+    attention_input_norm=False,
+    attention_residual=False,
+    routed_hidden=3584,
+    shared_inter=768,
+    num_shared_experts=2,
+    situ_beta=4.0,
+    situ_linear_beta=25.0,
+    attn_res_block_size=12,
+)
+
+MODEL_CONFIGS = {config.name: config for config in (GLM5_CONFIG, KIMI_K3_CONFIG)}
+
+
+def as_layer_config(value: LayerConfig | str) -> LayerConfig:
+    """Normalize a public model-profile argument."""
+
+    if isinstance(value, LayerConfig):
+        return value
+    try:
+        return MODEL_CONFIGS[value]
+    except KeyError as error:
+        choices = ", ".join(MODEL_CONFIGS)
+        raise ValueError(f"unsupported model profile {value!r}; expected one of: {choices}") from error
+
+
+# Backward-compatible GLM-5 aliases used by the performance-specialized kernel.
+HIDDEN = GLM5_CONFIG.hidden
+Q_LORA = GLM5_CONFIG.q_lora
+KV_LORA = GLM5_CONFIG.kv_lora
+PE_DIM = GLM5_CONFIG.pe_dim
+NOPE_DIM = GLM5_CONFIG.nope_dim
+V_DIM = GLM5_CONFIG.v_dim
+QKV_A_ROWS = GLM5_CONFIG.qkv_a_rows
+N_EXPERTS = GLM5_CONFIG.n_experts
+EXPERT_TOP_K = GLM5_CONFIG.top_k
+TOP_K = EXPERT_TOP_K
+MOE_SLOTS = GLM5_CONFIG.moe_slots
+SHARED_EXPERT = GLM5_CONFIG.shared_expert
+INTER = GLM5_CONFIG.inter
+ROUTE_SCALE = GLM5_CONFIG.route_scale
 EPS = 1e-5
 SCALE_BM = 128
 FP8_MAX = 448.0
-SOFTMAX_SCALE = (NOPE_DIM + PE_DIM) ** -0.5
+SOFTMAX_SCALE = GLM5_CONFIG.softmax_scale
 
 SUPPORTED_SAMPLES = (1, 2, 4, 8)
 SUPPORTED_PEERS = (1, 2, 4, 8)
-LOCAL_HEADS = 8
+LOCAL_HEADS = GLM5_CONFIG.local_heads
 MAX_LAYERS_PER_STEP = 128
 
 
-def validate_shard(samples: int, heads: int, rank: int, npes: int, topk: int) -> None:
-    """Validate the fixed GLM-5 shard contract before allocating GPU buffers."""
+def validate_shard(
+    samples: int,
+    heads: int,
+    rank: int,
+    npes: int,
+    sparse_attention_topk: int,
+    model_config: LayerConfig | str = GLM5_CONFIG,
+) -> None:
+    """Validate one model profile before allocating GPU buffers."""
 
+    config = as_layer_config(model_config)
     if samples not in SUPPORTED_SAMPLES:
         raise ValueError(f"samples must be one of {SUPPORTED_SAMPLES}, got {samples}")
-    if heads != LOCAL_HEADS:
-        raise ValueError(f"this kernel requires {LOCAL_HEADS} local heads, got {heads}")
+    if heads != config.local_heads:
+        raise ValueError(f"{config.name} requires {config.local_heads} local heads, got {heads}")
     if npes not in SUPPORTED_PEERS:
         raise ValueError(f"npes must be one of {SUPPORTED_PEERS}, got {npes}")
     if not 0 <= rank < npes:
         raise ValueError(f"rank must be in [0, {npes}), got {rank}")
-    if topk <= 0 or topk % 64:
-        raise ValueError(f"topk must be a positive multiple of 64, got {topk}")
+    if sparse_attention_topk <= 0 or sparse_attention_topk % 64:
+        raise ValueError("sparse_attention_topk must be a positive multiple of 64, " f"got {sparse_attention_topk}")

@@ -9,11 +9,14 @@
 set -e
 cd "$(dirname "$0")/.."
 
+if [ $# -eq 0 ]; then
+    echo "usage: bash scripts/dumpir.sh <command> [args...]" >&2
+    echo "  e.g. bash scripts/dumpir.sh python my_kernel.py" >&2
+    exit 2
+fi
+
 export FLYDSL_DUMP_IR=1
 export FLYDSL_DUMP_DIR="${FLYDSL_DUMP_DIR:-/tmp/flydsl_dump_ir}"
 
-echo "[dumpir] IR dumps -> ${FLYDSL_DUMP_DIR} (cache disabled)"
+echo "[dumpir] IR dumps -> ${FLYDSL_DUMP_DIR}"
 "$@"
-rc=$?
-
-exit $rc
