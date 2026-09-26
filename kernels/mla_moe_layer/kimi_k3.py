@@ -11,9 +11,10 @@ import torch
 
 from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG
 from kernels.mla_moe_layer.layer import KimiK3MlaLayer
-from kernels.mla_moe_layer.packing import pack_a16w4_scale, pack_a16w4_weight
+from kernels.mla_moe_layer.packing import pack_a16w4_scale, pack_a16w4_weight, pack_bf16
 from kernels.mla_moe_layer.reference import LayerWeights
 from kernels.mla_moe_layer.router import SigmoidTopkRouter
+from kernels.mla_moe_layer.router_projection import FusedRouterProjection
 from kernels.mla_moe_layer.symmetric_allreduce import SymmetricBf16Allreduce
 from kernels.mla_moe_layer.torch_fusions import (
     CudaStageProfiler,
@@ -134,6 +135,7 @@ class KimiK3MlaMoeLayer:
         self.s_ug = pack_a16w4_scale(self.t["s_ug"])
         self.w_dn = pack_a16w4_weight(self.t["w_dn"])
         self.s_dn = pack_a16w4_scale(self.t["s_dn"])
+        self.w_router = pack_bf16(self.t["w_r"])
 
         max_sorted = samples * config.top_k + config.n_experts * (_ROUTING_TILE_M - 1)
         max_blocks = (max_sorted + _ROUTING_TILE_M - 1) // _ROUTING_TILE_M
@@ -151,6 +153,12 @@ class KimiK3MlaMoeLayer:
         self.topk_ids = torch.empty(samples, config.top_k, dtype=torch.int32, device=device)
         self.topk_weights = torch.empty(samples, config.top_k, dtype=torch.float32, device=device)
         self.router_select = SigmoidTopkRouter(config.n_experts, config.top_k, samples)
+        self.router_projection = FusedRouterProjection(config.hidden, config.n_experts, config.top_k, samples)
+        self.router_score_mailbox = torch.zeros(
+            samples * config.n_experts * 2,
+            dtype=torch.int32,
+            device=device,
+        )
         self.latent = torch.empty(samples, self.routed_hidden, dtype=torch.bfloat16, device=device)
         self.routed_partial = torch.empty_like(self.latent)
         self.routed_reduced = torch.empty_like(self.latent)
@@ -261,15 +269,18 @@ class KimiK3MlaMoeLayer:
             mixed = rmsnorm(mixed, output_norm_weight)
         return mixed, updated
 
-    def _route_and_sort(self, hidden_states: torch.Tensor) -> None:
+    def _route_and_sort(self, hidden_states: torch.Tensor, epoch_layer: int) -> None:
         if self.fuse_router:
-            torch.mm(hidden_states, self.t["w_r"].t(), out=self.router_logits)
-            self.router_select(
-                self.router_logits,
+            self.router_projection(
+                hidden_states,
+                self.w_router,
                 self.t["bias"],
+                self.router_score_mailbox,
                 self.router_scores,
                 self.topk_ids,
                 self.topk_weights,
+                self.attention.step,
+                epoch_layer,
             )
         else:
             torch.mm(hidden_states, self.t["w_r"].t(), out=self.router_logits)
@@ -323,7 +334,7 @@ class KimiK3MlaMoeLayer:
 
     def _moe(self, hidden_states: torch.Tensor, epoch_layer: int) -> torch.Tensor:
         with self._profile_stage("router_sort"):
-            self._route_and_sort(hidden_states)
+            self._route_and_sort(hidden_states, epoch_layer)
         with self._profile_stage("latent_down"):
             torch.mm(hidden_states, self.t["w_latent_down"].t(), out=self.latent)
 

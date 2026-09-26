@@ -69,6 +69,7 @@ validates the complete fixed-shard contract before allocating GPU buffers.
 | `kernel_common.py` | Shared production AMD wave/DPP, hardware-math, FP8, and MXFP4 kernel primitives. |
 | `torch_fusions.py` | Shared graph-capturable RMSNorm, SiTU, AttnRes, and shared-expert production fusions. |
 | `router.py` | Reusable native low-token BF16-logit sigmoid/correction-bias top-k router. |
+| `router_projection.py` | K3 fused BF16 router projection, FP32 sigmoid, and normalized top-16 selection. |
 | `symmetric_allreduce.py` | Reusable graph-safe BF16 TP all-reduce over tagged symmetric peer mailboxes. |
 | `indexed_mla_moe_kernel.py` | FlyDSL kernel scheduling, communication, MLA, routing, and expert computation using the shared kernel modules. |
 | `layer.py` | Public host wrapper, scratch allocation, launch arguments, tracing, and lifecycle. |
@@ -260,15 +261,16 @@ improvements remain 0.6%, 2.3%, and 12.0% for S=1, S=4, and S=8 respectively.
 The complete Kimi-K3 layer was measured with TP8, position 3000, 16 layer
 launches per HIP graph, two eager warmup forwards, two graph warmup replays,
 seven measured replays, and the median critical-rank time. The final results
-use the native router, `bm16` routed-MoE tiles, compiled latent RMSNorm output,
-and the graph-safe symmetric TP reduce backend.
+use the fused BF16 router projection/top-16 kernel, `bm16` routed-MoE tiles,
+compiled latent RMSNorm output, and the graph-safe symmetric TP reduce backend.
 
 | Version | S=4 | S=8 |
 |---|---:|---:|
 | Initial correct sequential full layer | 383.85 us | 404.81 us |
 | Common-module source before the deep tuning pass | 258.7604 us | 282.4305 us |
-| Final optimized source | 204.4796 us | 228.6948 us |
-| Improvement from the common-module source | 20.98% | 19.03% |
+| Before fused router projection | 204.4796 us | 228.6948 us |
+| Current fused-router source | 194.9370 us | 221.5046 us |
+| Improvement from the common-module source | 24.66% | 21.57% |
 
 The slowdown in the pre-tuning K3 path was not primarily a TP communication
 problem. A controlled NCCL-versus-symmetric-reduce comparison changed S=4
@@ -279,6 +281,11 @@ problems:
 - The Torch top-k route used a roughly 27.96-us `gatherTopK` kernel plus a
   roughly 4.40-us sort. `router.py` now runs one wave per sample, evaluates 14
   experts per lane, and performs normalized top-16 selection in about 15.2 us.
+- `router_projection.py` now fuses the preceding BF16 7168-by-896 projection
+  with FP32 sigmoid/top-16 selection. At S=4 the fused kernel takes about
+  22.91 us, versus about 15.52 us for the prior router GEMM plus 15.24 us for
+  selection. Tagged score mailboxes preserve graph-safe multi-layer replay and
+  the BF16 logit handoff preserves zero isolated top-16 mismatches at S=1/4/8.
 - The routed expert GEMM used `bm32`, although ATOM selects `bm16` for these
   low-token batches. Switching to `bm16` reduced the S=4/S=8 layer latency
   from 235.29/255.39 us to 226.59/247.25 us at that point in the tuning pass.
@@ -300,8 +307,8 @@ graph replay.
 
 | Batch | FlyDSL full layer | ATOM full layer | FlyDSL delta vs ATOM |
 |---:|---:|---:|---:|
-| 4 | 204.4796 us | 225.6496 us | -9.38% |
-| 8 | 228.6948 us | 256.5222 us | -10.85% |
+| 4 | 194.9370 us | 225.6496 us | -13.61% |
+| 8 | 221.5046 us | 256.5222 us | -13.65% |
 
 These are observed end-to-end decoder-layer timings, but the attention work is
 not identical. ATOM's `KimiFullAttention` scans a dense 3001-token KV context,
@@ -313,7 +320,7 @@ same-attention-work kernel comparison.
 
 ### Why K3 is still much slower than the GLM kernel in absolute time
 
-The GLM-5 W8A8 S=4 result above is 56.217 us, versus 204.4796 us for the K3
+The GLM-5 W8A8 S=4 result above is 56.217 us, versus 194.9370 us for the K3
 A16W4 full layer. These numbers should not be treated as the same-workload
 optimization target. K3 has hidden size 7168 instead of 6144, 896 routed
 experts/top-16/intermediate 384 instead of 256/top-8/intermediate 256, and 12
@@ -331,14 +338,14 @@ fusion, and symmetric peer communication--but cannot make the unnormalized
 model workloads have the same absolute latency.
 
 On a one-layer S=4 profile, the largest remaining K3 kernels were persistent
-MLA (34.20 us), routed GEMM1 (23.32 us), the two symmetric reductions together
-(18.60 us), latent projection (15.52 us), native router selection (15.24 us),
-and the shared-expert GEMMs. The next material step is deeper persistent
-integration: fuse the router projection with selection, emit sorter-ready
-metadata directly from routing, and combine latent normalization/tail work
-where the ownership and mailbox protocol can be proven safe. A trial that
-combined shared/tail accumulation with the final peer reduce was not retained
-because it produced an illegal-address failure under TP8.
+MLA (34.94 us), fused router projection/top-16 (22.91 us), routed GEMM1
+(21.43 us), the two symmetric reductions together (18.48 us), latent projection
+(15.49 us), and the shared-expert GEMMs. The next material step is deeper
+persistent integration: emit sorter-ready metadata directly from routing, and
+combine latent normalization/tail work where the ownership and mailbox protocol
+can be proven safe. A trial that combined shared/tail accumulation with the
+final peer reduce was not retained because it produced an illegal-address
+failure under TP8.
 
 Overlapping shared and routed branches on separate HIP streams was also
 tested and rejected: at S=1 it regressed from 336.68 us to 384.66 us because

@@ -61,6 +61,7 @@ TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导�
 | `kernel_common.py` | 生产 kernel 共用的 AMD wave/DPP、硬件数学、FP8 和 MXFP4 primitive。 |
 | `torch_fusions.py` | 可复用、可 graph capture 的生产 RMSNorm、SiTU、AttnRes 和 shared-expert fusion。 |
 | `router.py` | 可复用的原生低 token BF16-logit sigmoid/correction-bias top-k router。 |
+| `router_projection.py` | K3 融合 BF16 router projection、FP32 sigmoid 与归一化 top-16。 |
 | `symmetric_allreduce.py` | 基于 tagged symmetric peer mailbox、可 graph capture 的通用 BF16 TP all-reduce。 |
 | `indexed_mla_moe_kernel.py` | 使用公共 kernel 模块的 FlyDSL 调度、通信、MLA、routing 和专家计算。 |
 | `layer.py` | 公开 host wrapper、scratch 分配、启动参数、trace 和生命周期。 |
@@ -227,15 +228,16 @@ attention-only TP8 在 S=1、S=4、S=8 的提升仍分别为 0.6%、2.3%、12.0%
 
 完整 Kimi-K3 层使用 TP8、position 3000、每个 HIP graph 16 次 layer launch、2 次
 eager forward 预热、2 次 graph replay 预热、7 次正式 replay，并取最慢 rank 的中位
-延迟。最终结果使用原生 router、`bm16` routed-MoE tile、编译后的 latent RMSNorm
-直接输出，以及可 graph capture 的 symmetric TP reduce backend。
+延迟。最终结果使用融合 BF16 router projection/top-16 kernel、`bm16` routed-MoE tile、
+编译后的 latent RMSNorm 直接输出，以及可 graph capture 的 symmetric TP reduce backend。
 
 | 版本 | S=4 | S=8 |
 |---|---:|---:|
 | 第一版正确的串行完整层 | 383.85 us | 404.81 us |
 | 深度优化前的公共模块源码 | 258.7604 us | 282.4305 us |
-| 最终优化源码 | 204.4796 us | 228.6948 us |
-| 相对公共模块源码的提升 | 20.98% | 19.03% |
+| 融合 router projection 前 | 204.4796 us | 228.6948 us |
+| 当前 fused-router 源码 | 194.9370 us | 221.5046 us |
+| 相对公共模块源码的提升 | 24.66% | 21.57% |
 
 优化前 K3 的主要问题并不是 TP 通信。受控 NCCL 与 symmetric reduce A/B 中，S=4
 仅从 258.9820 us 变为 256.3328 us，S=8 仅从 281.1871 us 变为 279.5571 us，
@@ -244,6 +246,10 @@ eager forward 预热、2 次 graph replay 预热、7 次正式 replay，并取�
 - Torch top-k 路径包含约 27.96 us 的 `gatherTopK` kernel 和约 4.40 us 的排序。
   `router.py` 现在每个 sample 使用一个 wave，每个 lane 处理 14 个 expert，并在约
   15.2 us 内完成归一化 top-16 选择。
+- `router_projection.py` 进一步把前置 BF16 7168×896 projection 与 FP32 sigmoid/top-16
+  融合。S=4 下融合 kernel 约 22.91 us，而旧路径的 router GEMM 与 selection 分别约
+  15.52 us 和 15.24 us。tagged score mailbox 保证多层 HIP graph replay 安全，BF16
+  logit 交接则让 S=1/4/8 的 isolated top-16 mismatch 都保持为 0。
 - routed expert GEMM 原来使用 `bm32`，而 ATOM 在这种低 token batch 下使用 `bm16`。
   切换到 `bm16` 后，该轮调优中的 S=4/S=8 整层延迟从 235.29/255.39 us 降到
   226.59/247.25 us。
@@ -261,8 +267,8 @@ MoE、latent transforms、TP reductions、dual streams 和 HIP graph replay。
 
 | Batch | FlyDSL 完整层 | ATOM 完整层 | FlyDSL 相对 ATOM |
 |---:|---:|---:|---:|
-| 4 | 204.4796 us | 225.6496 us | -9.38% |
-| 8 | 228.6948 us | 256.5222 us | -10.85% |
+| 4 | 194.9370 us | 225.6496 us | -13.61% |
+| 8 | 221.5046 us | 256.5222 us | -13.65% |
 
 这些数据都是实测的 decoder 整层端到端时间，但 attention 工作量并不完全相同：ATOM
 的 `KimiFullAttention` 扫描 dense 3001-token KV context，而 FlyDSL 在 position 3000
@@ -272,7 +278,7 @@ MoE、latent transforms、TP reductions、dual streams 和 HIP graph replay。
 
 ### 为什么 K3 的绝对耗时仍明显高于 GLM kernel
 
-上文 GLM-5 W8A8 S=4 为 56.217 us，而 K3 A16W4 完整层为 204.4796 us，但不能把
+上文 GLM-5 W8A8 S=4 为 56.217 us，而 K3 A16W4 完整层为 194.9370 us，但不能把
 两者当成同工作量的直接优化目标。K3 hidden size 为 7168 而不是 6144，routed expert
 为 896/top-16/intermediate 384 而不是 256/top-8/intermediate 256，每卡 attention
 head 为 12 而不是 8。仅 router projection 的规模就约大 4.08 倍：
@@ -286,13 +292,13 @@ collectives 组合。因此本次修改对齐的是 GLM 的优化原则——原
 低 token tile、graph-stable 输出融合和 symmetric peer 通信——不能让未归一化的两个
 模型工作量得到相同绝对延迟。
 
-S=4 单层 profile 中，当前 K3 最大的 kernel 依次包括 persistent MLA（34.20 us）、
-routed GEMM1（23.32 us）、两次 symmetric reduction 合计（18.60 us）、latent
-projection（15.52 us）、原生 router selection（15.24 us）和 shared-expert GEMM。
-下一步有实质收益的方向是更深的 persistent 集成：融合 router projection 与 selection、
-让 routing 直接产出 sorter-ready metadata，并在 ownership 与 mailbox 协议可验证时
-合并 latent normalization/tail。曾尝试把 shared/tail accumulation 与 final peer
-reduce 合并，但 TP8 下出现 illegal-address，故未保留该实验代码。
+S=4 单层 profile 中，当前 K3 最大的 kernel 依次包括 persistent MLA（34.94 us）、
+融合 router projection/top-16（22.91 us）、routed GEMM1（21.43 us）、两次 symmetric
+reduction 合计（18.48 us）、latent projection（15.49 us）和 shared-expert GEMM。下一步
+有实质收益的方向是更深的 persistent 集成：让 routing 直接产出 sorter-ready metadata，
+并在 ownership 与 mailbox 协议可验证时合并 latent normalization/tail。曾尝试把
+shared/tail accumulation 与 final peer reduce 合并，但 TP8 下出现 illegal-address，
+故未保留该实验代码。
 
 还测试了在两个 HIP stream 上重叠 shared 与 routed 分支，但该方案被否决：S=1 从
 336.68 us 回退到 384.66 us，原因是小 GEMM 争抢计算资源并引入跨 stream 同步。生产
