@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-26T12:37:45Z",
+ "updated": "2026-09-26T14:30:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36248558456,
+   "pr": 1202,
+   "commit": "ce9baf759aa986325b736ac744b66251e5f0dcd7",
+   "branch": "dev/export_c",
+   "event": "pull_request",
+   "title": "[AOT] Export linkable C objects and support CPU-only builds",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36248558456",
+   "created_at": "2026-09-26T14:27:20Z",
+   "updated_at": "2026-09-26T14:28:16Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36247721776,
+   "pr": 1202,
+   "commit": "8c74e766e0dea5a255c709464bf9848af7e17492",
+   "branch": "dev/export_c",
+   "event": "pull_request",
+   "title": "[AOT] Export linkable C objects and support CPU-only builds",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36247721776",
+   "created_at": "2026-09-26T14:12:34Z",
+   "updated_at": "2026-09-26T14:28:16Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36205037906,
    "pr": 1201,
@@ -2005,36 +2035,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 35711225833,
-   "pr": null,
-   "commit": "3a12d5dd81af73095b35285a47e5feb18bc3e10f",
-   "branch": "fujun.han/fix-singleton-zip2by",
-   "event": "pull_request",
-   "title": "Bugfix: Unwrap zip2By singleton guides only on rank-2 pairs",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35711225833",
-   "created_at": "2026-09-22T09:35:13Z",
-   "updated_at": "2026-09-22T09:35:13Z",
-   "actor": "Peter9606",
-   "jobs": []
-  },
-  {
-   "run_id": 35708273637,
-   "pr": 1179,
-   "commit": "122b20aad39adfcd5a25626201b23ea559698537",
-   "branch": "ffi-llvm-pointer-types",
-   "event": "pull_request",
-   "title": "[Enh] Accept LLVM pointer types in ffi declarations",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35708273637",
-   "created_at": "2026-09-22T09:04:08Z",
-   "updated_at": "2026-09-22T09:04:08Z",
-   "actor": "LWenH",
-   "jobs": []
   }
  ]
 }
