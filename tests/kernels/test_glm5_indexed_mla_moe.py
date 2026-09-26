@@ -21,6 +21,14 @@ import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
+_ARCH = str(get_rocm_arch() or "")
+if _ARCH != "gfx950":
+    pytest.skip(f"GLM-5 indexed MLA + MoE requires gfx950, got {_ARCH}", allow_module_level=True)
+
 from kernels.mla_moe_layer.config import KV_LORA, PE_DIM, ExpertActivation, MoeMode, moe_format  # noqa: E402
 from kernels.mla_moe_layer.reference import (  # noqa: E402
     golden_layer,
