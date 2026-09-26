@@ -57,12 +57,20 @@ TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导�
 | `../common/mx_formats.py` | 可供其他 MoE wrapper 复用的 Torch MXFP4/MXFP8 量化与反量化。 |
 | `packing.py` | FP8、BF16 和 MXFP4 matrix 的 MFMA weight packing。 |
 | `runtime.py` | 自有 symmetric HIP IPC buffer，以及远端 handle 的确定性清理。 |
-| `indexed_mla_moe_kernel.py` | FlyDSL kernel 调度、通信、MLA、routing 和专家计算。 |
+| `kernel_layout.py` | 生产 kernel 共用的 scratch/symmetric layout、双 epoch slot、launch 常量和 CTA stage 调度。 |
+| `kernel_common.py` | 生产 kernel 共用的 AMD wave/DPP、硬件数学、FP8 和 MXFP4 primitive。 |
+| `torch_fusions.py` | 可复用、可 graph capture 的生产 RMSNorm、SiTU、AttnRes、router 和 shared-expert fusion。 |
+| `indexed_mla_moe_kernel.py` | 使用公共 kernel 模块的 FlyDSL 调度、通信、MLA、routing 和专家计算。 |
 | `layer.py` | 公开 host wrapper、scratch 分配、启动参数、trace 和生命周期。 |
-| `kimi_k3.py` | 完整 Kimi-K3 TP8 AttnRes + MLA + latent-MoE 层及融合的 Torch 尾部算子。 |
-| `reference.py` | 独立 Torch 分段与端到端计算。 |
+| `kimi_k3.py` | 使用公共生产 fusion 的完整 Kimi-K3 TP8 AttnRes + MLA + latent-MoE 层。 |
+| `reference.py` | 仅作为验证 oracle 的独立 Torch 分段与端到端计算。 |
 | `native_baseline.py` | 可选的同权重 TileRT 对比适配器。 |
 | `tools/kimi_k3_full.py` | TP8 正确性、分段 profile 和 HIP graph benchmark harness。 |
+| `tools/atom_kimi_k3_full.py` | 原始 ATOM `KimiDecoderLayer` 的 TP8 HIP graph benchmark harness。 |
+
+上述公共代码抽自真实算子执行路径：`indexed_mla_moe_kernel.py` 导入公共 kernel layout
+与 AMD primitive，`kimi_k3.py` 导入可 graph capture 的 Torch fusion。`reference.py`
+继续保持独立，不是生产公共抽象的来源。
 
 kernel 使用 FlyDSL 操作实现 wave reduction、硬件数学指令、mailbox polling、buffer
 访问和 MFMA。每个 rank 的 peer payload 先舍入为 BF16，再按 rank 顺序累加，因此所有
@@ -216,8 +224,9 @@ attention-only TP8 在 S=1、S=4、S=8 的提升仍分别为 0.6%、2.3%、12.0%
 ### 完整层性能
 
 完整 Kimi-K3 层使用 TP8、position 3000、每个 HIP graph 16 次 layer launch、2 次
-预热、7 次正式 replay，并取最慢 rank 的中位延迟。baseline 是第一版正确的串行组合；
-优化版本在 graph capture 前融合了三段 Torch 路径：
+eager forward 预热、2 次 graph replay 预热、7 次正式 replay，并取最慢 rank 的中位
+延迟。baseline 是第一版正确的串行组合；优化版本在 graph capture 前融合了三段 Torch
+路径：
 
 - AttnRes RMSNorm/source weighting/output RMSNorm；
 - sigmoid + correction-bias top-k + gather + route renormalization；
@@ -226,8 +235,24 @@ attention-only TP8 在 S=1、S=4、S=8 的提升仍分别为 0.6%、2.3%、12.0%
 | 版本 | S=1 | S=4 | S=8 |
 |---|---:|---:|---:|
 | 初版完整层 | 334.23 us | 383.85 us | 404.81 us |
-| 优化后完整层 | 205.11 us | 258.13 us | 281.50 us |
-| 提升 | 38.6% | 32.8% | 30.5% |
+| 公共模块抽取前的优化后完整层 | 205.11 us | 258.13 us | 281.50 us |
+| 当前公共模块源码 | 未重跑 | 258.7604 us | 282.4305 us |
+| 初版到当前源码的提升 | 未重跑 | 32.6% | 30.2% |
+
+按要求与 ATOM 原始实现进行对比时，使用 ATOM commit `3cea04f45`，直接实例化其生产
+`atom.models.kimi_k3.KimiDecoderLayer`，覆盖 AttnRes、MLA、routing、routed/shared
+MoE、latent transforms、TP reductions、dual streams 和 HIP graph replay。
+
+| Batch | FlyDSL 完整层 | ATOM 完整层 | FlyDSL 相对 ATOM |
+|---:|---:|---:|---:|
+| 4 | 258.7604 us | 225.6496 us | +14.67% |
+| 8 | 282.4305 us | 256.5222 us | +10.10% |
+
+这些数据都是实测的 decoder 整层端到端时间，但 attention 工作量并不完全相同：ATOM
+的 `KimiFullAttention` 扫描 dense 3001-token KV context，而 FlyDSL 在 position 3000
+消费调用方给出的 top-2048 KV indices。MoE 与 hidden/model shapes、TP8 拓扑、graph
+长度、预热次数、正式重复次数和 critical-rank 取值规则一致。因此该表可作为直接的整层
+实现基线，但 delta 不能解释为同 attention 工作量下的归一化 kernel 性能差异。
 
 还测试了在两个 HIP stream 上重叠 shared 与 routed 分支，但该方案被否决：S=1 从
 336.68 us 回退到 384.66 us，原因是小 GEMM 争抢计算资源并引入跨 stream 同步。生产
@@ -235,15 +260,10 @@ attention-only TP8 在 S=1、S=4、S=8 的提升仍分别为 0.6%、2.3%、12.0%
 
 剩余主要开销是 persistent MLA kernel、两次 RCCL TP reduce、latent dense transforms
 和 A16W4 routed expert kernels。下一步优化机会是原生融合的
-sigmoid/correction-bias top-k sorter，以及更低延迟的小消息 TP reduce。仓库现有的
-symmetric-peer all-reduce 在本环境中 HIP IPC 初始化不稳定，因此本实现没有启用它。
-
-attention-only 检查可用以下命令复现：
-
-```bash
-/opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
-  --model kimi_k3 --npes 8 -S 8 --pos 100 --iters 1
-```
+sigmoid/correction-bias top-k sorter，以及更低延迟的小消息 TP reduce。合入后的 HIP
+IPC runtime 已通过自有 `SymmetricPeerBuffer` mapping、确定性清理和双 epoch slot 支撑
+persistent MLA peer exchange；Kimi-K3 组合层的两次 latent/final reduction 目前仍使用
+RCCL `torch.distributed.all_reduce`。
 
 完整 MLA + MoE 正确性与性能可用以下命令复现：
 
@@ -252,12 +272,32 @@ cd /root/FlyDSL-kimi-k3
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
 export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:.
 
-python kernels/mla_moe_layer/tools/kimi_k3_full.py \
+/opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
+  --npes 8 --samples 4 --layer-idx 0 --check \
+  --bench --layers 16 --repeats 7 \
+  --output /root/kimi-k3-perf-results/full-moe/final-indexed-s4.json
+
+/opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
   --npes 8 --samples 8 --layer-idx 0 --check \
   --bench --layers 16 --repeats 7 \
-  --output /root/kimi-k3-perf-results/full-moe/final-s8.json
+  --output /root/kimi-k3-perf-results/full-moe/final-indexed-s8.json
 ```
 
 可使用 `--eager-attn-res`、`--eager-router` 或 `--eager-shared-experts` 做受控的优化
 A/B；`--profile` 可报告 eager GPU event 中位分段时间。最终延迟应以未插桩的 HIP
 graph replay 为准。
+
+ATOM baseline 从独立 checkout 复现，直接使用其原始层实现。本地 AITER JIT build 需要
+composable-kernel submodule，以及与这里的 AITER core ABI 匹配的 `pybind11==3.0.1`：
+
+```bash
+git -C /root/ATOM-k3-baseline checkout 3cea04f45
+git -C /root/aiter submodule update --init --recursive -- 3rdparty/composable_kernel
+/opt/venv/bin/python -m pip install --upgrade --target /tmp/atom-k3-deps pybind11==3.0.1
+
+cd /root/FlyDSL-kimi-k3
+/opt/venv/bin/python kernels/mla_moe_layer/tools/atom_kimi_k3_full.py \
+  --samples 4 --output /root/kimi-k3-perf-results/full-moe/atom-s4.json
+/opt/venv/bin/python kernels/mla_moe_layer/tools/atom_kimi_k3_full.py \
+  --samples 8 --output /root/kimi-k3-perf-results/full-moe/atom-s8.json
+```

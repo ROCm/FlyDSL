@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import statistics
 from contextlib import contextmanager
 
 import torch
@@ -14,102 +13,21 @@ from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG
 from kernels.mla_moe_layer.layer import KimiK3MlaLayer
 from kernels.mla_moe_layer.packing import pack_a16w4_scale, pack_a16w4_weight
 from kernels.mla_moe_layer.reference import LayerWeights
+from kernels.mla_moe_layer.torch_fusions import (
+    CudaStageProfiler,
+    compiled_attn_res_no_delta,
+    compiled_attn_res_with_delta,
+    compiled_rmsnorm,
+    compiled_shared_experts,
+    compiled_sigmoid_topk_router,
+    rmsnorm,
+    situ,
+)
 from kernels.moe.moe_2stage_a16wmix import flydsl_a16w4_gemm1, flydsl_a16w4_gemm2
 from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
 
 _TP_SIZE = 8
 _ROUTING_TILE_M = 32
-
-
-def _rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    xf = x.float()
-    return (xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + EPS) * weight.float()).to(torch.bfloat16)
-
-
-def _situ(x: torch.Tensor, beta: float, linear_beta: float) -> torch.Tensor:
-    gate, up = x.float().chunk(2, dim=-1)
-    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
-    up = linear_beta * torch.tanh(up / linear_beta)
-    return (gate * up).to(torch.bfloat16)
-
-
-@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
-def _compiled_rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    xf = x.float()
-    return (xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + EPS) * weight.float()).to(torch.bfloat16)
-
-
-@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
-def _compiled_attn_res_no_delta(
-    prefix: torch.Tensor,
-    blocks: torch.Tensor,
-    norm_weight: torch.Tensor,
-    qk_weight: torch.Tensor,
-    output_norm_weight: torch.Tensor,
-) -> torch.Tensor:
-    sources = torch.cat((blocks, prefix[:, None]), dim=1)
-    sf = sources.float()
-    normalized = sf * torch.rsqrt(sf.square().mean(-1, keepdim=True) + EPS)
-    logits = (normalized * norm_weight.float() * qk_weight.float()).sum(-1)
-    mixed = (torch.softmax(logits, dim=-1)[..., None] * sf).sum(1)
-    return _compiled_rmsnorm(mixed, output_norm_weight)
-
-
-@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
-def _compiled_attn_res_with_delta(
-    prefix: torch.Tensor,
-    delta: torch.Tensor,
-    blocks: torch.Tensor,
-    norm_weight: torch.Tensor,
-    qk_weight: torch.Tensor,
-    output_norm_weight: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    updated = (prefix.float() + delta.float()).to(torch.bfloat16)
-    mixed = _compiled_attn_res_no_delta(updated, blocks, norm_weight, qk_weight, output_norm_weight)
-    return mixed, updated
-
-
-@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
-def _compiled_kimi_router(
-    hidden_states: torch.Tensor,
-    router_weight: torch.Tensor,
-    correction_bias: torch.Tensor,
-    scores_out: torch.Tensor,
-    ids_out: torch.Tensor,
-    weights_out: torch.Tensor,
-) -> None:
-    scores = torch.sigmoid(hidden_states.float() @ router_weight.t())
-    _, ids = torch.topk(
-        scores + correction_bias,
-        KIMI_K3_CONFIG.top_k,
-        dim=-1,
-        sorted=True,
-    )
-    weights = torch.gather(scores, 1, ids)
-    weights = weights / weights.sum(-1, keepdim=True)
-    scores_out.copy_(scores)
-    ids_out.copy_(ids)
-    weights_out.copy_(weights)
-
-
-@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
-def _compiled_shared_experts(
-    hidden_states: torch.Tensor,
-    up_gate_weight: torch.Tensor,
-    down_weight: torch.Tensor,
-    up_gate_out: torch.Tensor,
-    mid_out: torch.Tensor,
-    partial_out: torch.Tensor,
-) -> None:
-    up_gate = hidden_states @ up_gate_weight.t()
-    gate, up = up_gate.float().chunk(2, dim=-1)
-    gate = KIMI_K3_CONFIG.situ_beta * torch.tanh(gate / KIMI_K3_CONFIG.situ_beta) * torch.sigmoid(gate)
-    up = KIMI_K3_CONFIG.situ_linear_beta * torch.tanh(up / KIMI_K3_CONFIG.situ_linear_beta)
-    mid = (gate * up).to(torch.bfloat16)
-    partial = mid @ down_weight.t()
-    up_gate_out.copy_(up_gate)
-    mid_out.copy_(mid)
-    partial_out.copy_(partial)
 
 
 class KimiK3MlaMoeLayer:
@@ -238,7 +156,7 @@ class KimiK3MlaMoeLayer:
         self.moe_delta = torch.empty_like(self.shared_partial)
         self.output = torch.empty_like(self.shared_partial)
         self.attention_delta = torch.empty_like(self.shared_partial)
-        self._stage_events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] | None = None
+        self._profiler = CudaStageProfiler()
 
         # The sorter also clears this output buffer before atomic stage2.
         self.moe_buf = self.routed_partial
@@ -247,35 +165,18 @@ class KimiK3MlaMoeLayer:
 
     @contextmanager
     def _profile_stage(self, name: str):
-        if self._stage_events is None:
+        with self._profiler.stage(name):
             yield
-            return
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        yield
-        end.record()
-        self._stage_events.setdefault(name, []).append((start, end))
 
     def start_stage_profile(self) -> None:
         """Collect one eager forward's per-stage GPU event timings."""
 
-        if self._stage_events is not None:
-            raise RuntimeError("stage profiling is already active")
-        self._stage_events = {}
+        self._profiler.start()
 
     def finish_stage_profile(self) -> dict[str, float]:
         """Synchronize and return the active stage profile in microseconds."""
 
-        if self._stage_events is None:
-            raise RuntimeError("stage profiling is not active")
-        torch.cuda.synchronize()
-        result = {
-            name: statistics.median(start.elapsed_time(end) * 1000.0 for start, end in events)
-            for name, events in self._stage_events.items()
-        }
-        self._stage_events = None
-        return result
+        return self._profiler.finish()
 
     @property
     def is_block_write_layer(self) -> bool:
@@ -305,10 +206,10 @@ class KimiK3MlaMoeLayer:
             source_blocks = blocks[:, :num_blocks]
             if num_blocks == 0:
                 updated = prefix if delta is None else (prefix.float() + delta.float()).to(torch.bfloat16)
-                mixed = _compiled_rmsnorm(updated, output_norm_weight)
+                mixed = compiled_rmsnorm(updated, output_norm_weight)
             elif delta is None:
                 updated = prefix
-                mixed = _compiled_attn_res_no_delta(
+                mixed = compiled_attn_res_no_delta(
                     prefix,
                     source_blocks,
                     norm_weight,
@@ -316,7 +217,7 @@ class KimiK3MlaMoeLayer:
                     output_norm_weight,
                 )
             else:
-                mixed, updated = _compiled_attn_res_with_delta(
+                mixed, updated = compiled_attn_res_with_delta(
                     prefix,
                     delta,
                     source_blocks,
@@ -340,18 +241,19 @@ class KimiK3MlaMoeLayer:
             logits = (normalized * norm_weight.float() * qk_weight.float()).sum(-1)
             mixed = (torch.softmax(logits, dim=-1)[..., None] * sf).sum(1).to(torch.bfloat16)
         if output_norm_weight is not None:
-            mixed = _rmsnorm(mixed, output_norm_weight)
+            mixed = rmsnorm(mixed, output_norm_weight)
         return mixed, updated
 
     def _route_and_sort(self, hidden_states: torch.Tensor) -> None:
         if self.fuse_router:
-            _compiled_kimi_router(
+            compiled_sigmoid_topk_router(
                 hidden_states,
                 self.t["w_r"],
                 self.t["bias"],
                 self.router_scores,
                 self.topk_ids,
                 self.topk_weights,
+                self.config.top_k,
             )
         else:
             torch.mm(hidden_states.float(), self.t["w_r"].t(), out=self.router_logits)
@@ -443,7 +345,7 @@ class KimiK3MlaMoeLayer:
         with self._profile_stage("routed_reduce"):
             self._reduce(self.routed_partial, self.routed_reduced)
         with self._profile_stage("latent_tail"):
-            self.latent_norm.copy_(_rmsnorm(self.routed_reduced, self.t["g_latent"]))
+            self.latent_norm.copy_(rmsnorm(self.routed_reduced, self.t["g_latent"]))
             torch.mm(self.latent_norm, self.t["w_latent_up"].t(), out=self.tail)
 
         with self._profile_stage("final_reduce"):
@@ -456,17 +358,19 @@ class KimiK3MlaMoeLayer:
     def _shared_experts(self, hidden_states: torch.Tensor) -> None:
         with self._profile_stage("shared_experts"):
             if self.fuse_shared_experts:
-                _compiled_shared_experts(
+                compiled_shared_experts(
                     hidden_states,
                     self.t["w_shared_ug"],
                     self.t["w_shared_dn"],
                     self.shared_gu,
                     self.shared_mid,
                     self.shared_partial,
+                    self.config.situ_beta,
+                    self.config.situ_linear_beta,
                 )
             else:
                 torch.mm(hidden_states, self.t["w_shared_ug"].t(), out=self.shared_gu)
-                self.shared_mid.copy_(_situ(self.shared_gu, self.config.situ_beta, self.config.situ_linear_beta))
+                self.shared_mid.copy_(situ(self.shared_gu, self.config.situ_beta, self.config.situ_linear_beta))
                 torch.mm(self.shared_mid, self.t["w_shared_dn"].t(), out=self.shared_partial)
 
     def forward(

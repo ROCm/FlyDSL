@@ -51,14 +51,12 @@ import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import Int32, Int64, T, as_ir_value
+from flydsl.expr.typing import Int32, Int64, T
 from kernels.common import buffer_ops as bo
-from kernels.common.dpp_utils import update_dpp_i32
 from kernels.mla_moe_layer.config import (
     EPS,
     FP8_MAX,
     GLM5_CONFIG,
-    MAX_LAYERS_PER_STEP,
     SCALE_BM,
     AttentionWeight,
     ExpertActivation,
@@ -68,272 +66,67 @@ from kernels.mla_moe_layer.config import (
     as_layer_config,
     moe_format,
 )
-
-BLOCKS = 256
-LAYER_SLOTS = MAX_LAYERS_PER_STEP
-THREADS = 512
-WAVES = THREADS // 64
-QKV_A_TILE = 16
-Q_B_TILE = 16
-UK_TILE = 128
-UV_TILE = 64
-ROW_TILE = 32  # hidden rows per W_o / attention peer-reduce tile
-ROUTER_TILE = 8  # experts per router task (a part of a 16-row MFMA group)
-UG_TILE = 16  # intermediates per up/gate task (16 gate rows + 16 up rows)
-SPLIT_KEYS = 64
-NEG = -1.0e30
-
-
-def dn_tile(S: int, hidden: int = GLM5_CONFIG.hidden) -> int:
-    """Hidden rows per expert-down / FFN peer-reduce task: 32 at S = 1 (192 tasks,
-    placed off the router CTAs, whose up/gate task finishes last, so every down task
-    streams its weights during the mid wait); 24 above (one task per CTA), where
-    each down task already streams S x 9 experts."""
-    return 32 if S == 1 else hidden // BLOCKS
-
-
-# gfx94x/95x cache policy bits (LLVM CPol): SC0 = 1, NT = 2, SC1 = 16.  SC1:SC0 is
-# the coherence scope of the access itself: SC1 = device (past the per-XCD
-# non-coherent caches), SC0|SC1 = system (peer GPUs over XGMI).
-CM_DEV = 16
-CM_SYS = 17
-POLL_MAX = 12  # mailbox specs polled per batch
-TL_COLS = 8  # timeline stamps per task: 5 phases + 3 free debug marks
-
-
-def _align(n, a=256):
-    return (n + a - 1) // a * a
-
-
-def layout(
-    S: int,
-    heads: int,
-    npes: int,
-    sparse_attention_topk: int,
-    moe_mode: MoeMode | str = MoeMode.W8A8,
-    model_config: LayerConfig | str = GLM5_CONFIG,
-    attention_only: bool = False,
-):
-    """Byte offsets of the per-rank scratch and of the symmetric buffer.
-
-    Every mailbox holds ``(value, tag)`` int32 pairs (8 bytes per element).
-    Each cross-GPU reduction region has two ``part`` slots selected by epoch
-    parity so consecutive layers cannot overwrite one another in flight."""
-    config = as_layer_config(model_config)
-    hidden = config.hidden
-    q_lora = config.q_lora
-    kv_lora = config.kv_lora
-    pe_dim = config.pe_dim
-    nope_dim = config.nope_dim
-    v_dim = config.v_dim
-    n_experts = config.n_experts
-    moe_slots = config.moe_slots
-    inter = config.inter
-    fmt = moe_format(moe_mode)
-    quant_group = fmt.activation_group
-    xq_blocks = 0 if quant_group is None else hidden // quant_group
-    n_split = sparse_attention_topk // SPLIT_KEYS
-    pr = 8
-    items = [
-        ("q_a", S * q_lora * pr),
-        ("kv_a", S * (kv_lora + pe_dim) * pr),
-        ("gate", S * heads * v_dim * pr if config.attention_output_gate else 0),
-        ("kvnew", S * kv_lora * pr),  # this launch's KV cache rows (bf16 values)
-        ("penew", S * pe_dim * pr),
-        ("q_nope", S * heads * nope_dim * pr),
-        ("q_pe", S * heads * pe_dim * pr),
-        ("q_lat", S * heads * kv_lora * pr),
-        ("sp_acc", S * n_split * heads * kv_lora * pr),
-        ("sp_m", S * n_split * heads * pr),
-        ("sp_l", S * n_split * heads * pr),
-        ("o", S * heads * v_dim * pr),
-        ("a", S * hidden * pr),  # post-attention hidden (bf16 values)
-    ]
-    if not attention_only:
-        items += [
-            ("scores", S * n_experts * pr),
-            ("xq", S * hidden // (4 if quant_group is not None else 2) * pr),
-            ("xqs", S * xq_blocks * pr),
-            ("sel", S * moe_slots * pr),
-            ("prob", S * moe_slots * pr),
-            ("mid", S * moe_slots * inter * pr),
-            ("ugp", BLOCKS * S * 2 * UG_TILE * pr),  # up/gate K-segment partial sums
-            ("xqd", S * hidden * 4),  # debug: dequantized MoE activation (plain f32)
-        ]
-    off, scratch = 0, {}
-    for name, size in items:
-        scratch[name] = off
-        off += _align(size)
-    scratch["_bytes"] = off
-    part = npes * S * hidden * pr
-    region = 2 * part
-    sym = {
-        "attn": 0,
-        "ffn": region,
-        "_part_stride": part,
-        "_bytes": region if attention_only else 2 * region,
-    }
-    return scratch, sym
-
-
-def _rsrc(addr):
-    return bo.create_buffer_resource_from_addr(addr)
-
-
-def _uniform(v):
-    return fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(v).ir_value()))
-
-
-def _uniform_f32(v):
-    return _uniform(fx.Float32(v).bitcast(fx.Int32)).bitcast(fx.Float32)
-
-
-def _hw_f32(name, x):
-    """One hardware transcendental (v_rsq / v_rcp / v_exp): ~1 ulp, no libm range fixups."""
-    return fx.Float32(llvm.call_intrinsic(T.f32, name, [fx.Float32(x).ir_value()], [], []))
-
-
-def _rsq(x):
-    return _hw_f32("llvm.amdgcn.rsq.f32", x)
-
-
-def _rcp(x):
-    return _hw_f32("llvm.amdgcn.rcp.f32", x)
-
-
-def _exp(x):
-    return _hw_f32("llvm.amdgcn.exp2.f32", fx.Float32(x) * 1.4426950408889634)
-
-
-def _xshfl(v, off):
-    """Value of lane ``lane ^ off``.  Offsets 32 / 16 lower to v_permlane*_swap; the
-    in-row offsets use DPP (VALU latency) instead of ds_swizzle (LDS latency)."""
-    if off >= 16:
-        return v.shuffle_xor(off, 64)
-    is_f = isinstance(v, fx.Float32)
-    x = v.bitcast(fx.Int32) if is_f else fx.Int32(v)
-    if off == 8:  # row_shr:8 into banks 2-3, row_shl:8 into banks 0-1
-        y = fx.Int32(update_dpp_i32(x, x, 0x118, 0xF, 0xC, False))
-        y = fx.Int32(update_dpp_i32(y, x, 0x108, 0xF, 0x3, False))
-    elif off == 4:
-        y = fx.Int32(update_dpp_i32(x, x, 0x114, 0xF, 0xA, False))
-        y = fx.Int32(update_dpp_i32(y, x, 0x104, 0xF, 0x5, False))
-    elif off == 2:  # quad_perm [2, 3, 0, 1]
-        y = fx.Int32(update_dpp_i32(x, x, 0x4E, 0xF, 0xF, False))
-    else:  # quad_perm [1, 0, 3, 2]
-        y = fx.Int32(update_dpp_i32(x, x, 0xB1, 0xF, 0xF, False))
-    return y.bitcast(fx.Float32) if is_f else y
-
-
-def _wave_umax(v):
-    """Unsigned max over the fully active wave as a wave-uniform Int32."""
-    return fx.Int32(fx.coop.warp_reduce(fx.Uint32(v), fx.ReductionOp.MAX, width=64))
-
-
-def _xred(v, off, op):
-    """op(v, value of lane ``lane ^ off``) for a symmetric op.  Offsets 32 / 16 take
-    both halves of one v_permlane*_swap as the operands (no select needed)."""
-    if off < 16:
-        return op(v, _xshfl(v, off))
-    is_f = isinstance(v, fx.Float32)
-    x = as_ir_value(v.bitcast(fx.Int32) if is_f else fx.Int32(v))
-    swap = rocdl.permlane32_swap if off == 32 else rocdl.permlane16_swap
-    pr = swap(llvm.StructType.get_literal([T.i32, T.i32]), x, x, False, False)
-    a, b = (fx.Int32(llvm.extractvalue(T.i32, pr, [j])) for j in range(2))
-    if is_f:
-        return op(a.bitcast(fx.Float32), b.bitcast(fx.Float32))
-    return op(type(v)(a), type(v)(b))
-
-
-def _ballot(pred):
-    return fx.Int64(rocdl.ballot(T.i64, fx.Boolean(pred).ir_value()))
-
-
-def _popc(mask):
-    return fx.Int32(fx.Int64(fmath.ctpop(mask)))
-
-
-def _mbcnt(mask):
-    """Number of set bits of the 64-bit lane mask below this lane."""
-    lo = llvm.call_intrinsic(
-        T.i32, "llvm.amdgcn.mbcnt.lo", [fx.Int32(mask & 0xFFFFFFFF).ir_value(), fx.Int32(0).ir_value()], [], []
-    )
-    return fx.Int32(llvm.call_intrinsic(T.i32, "llvm.amdgcn.mbcnt.hi", [fx.Int32(mask >> 32).ir_value(), lo], [], []))
-
-
-def _fp8_roundtrip(a, b):
-    """f32 pair -> E4M3FN -> f32 pair (inputs already scaled into range)."""
-    word = rocdl.cvt_pk_fp8_f32(T.i32, a, b, fx.Int32(0), False)
-    v2 = fx.Vector.make_type(2, fx.Float32)
-    lo = fx.Vector(rocdl.cvt_pk_f32_fp8(res=v2, src=word, word_sel=False))
-    return lo[0], lo[1]
-
-
-def f8_word(k):
-    """LDS word of FP8 activation byte k: each 64-k chunk is stored so that the 16 bytes
-    lane group g needs (k = 8 g + [0, 8) and 32 + 8 g + [0, 8), the packed weight order)
-    are contiguous."""
-    return (k // 64) * 16 + ((k % 32) // 8) * 4 + ((k % 64) // 32) * 2 + (k % 8) // 4
-
-
-def _fp8_to_bf16x8(w0, w1):
-    """Two dwords of 8 FP8 -> vector<8 x bf16> (exact: E4M3 is a subset of bf16).
-
-    ``cvt_scalef32_pk_bf16_fp8`` only honours the scale's exponent, so the scale
-    is 1 here and the f32 block scale is applied to the MFMA partials instead.
-    """
-    one = as_ir_value(fx.Float32(1.0))
-    parts = []
-    for w in (w0, w1):
-        for half in range_constexpr(2):
-            pr = fx.Vector(rocdl.cvt_scalef32_pk_bf16_fp8(T.vec(2, T.bf16), as_ir_value(w), one, bool(half)))
-            parts += [pr[0], pr[1]]
-    return fx.Vector.from_elements(parts, fx.BFloat16)
-
-
-def _mxfp4_to_bf16x8(word, scale):
-    """One packed dword of eight E2M1 values -> scaled BF16 MFMA operand."""
-
-    parts = []
-    for select in range_constexpr(4):
-        pair = fx.Vector(
-            rocdl.cvt_scalef32_pk_bf16_fp4(T.vec(2, T.bf16), as_ir_value(word), as_ir_value(scale), select)
-        )
-        parts += [pair[0], pair[1]]
-    return fx.Vector.from_elements(parts, fx.BFloat16)
-
-
-def stage_tasks(
-    S: int,
-    heads: int,
-    sparse_attention_topk: int,
-    model_config: LayerConfig | str = GLM5_CONFIG,
-    attention_only: bool = False,
-):
-    """[(stage name, task count)] in execution order."""
-    config = as_layer_config(model_config)
-    head_groups = (heads + WAVES - 1) // WAVES
-    split_ctas_per_tile = head_groups if S == 1 else 1
-    tasks = [
-        ("qkv_a", config.qkv_a_rows // QKV_A_TILE),
-        ("cache", 1),
-        ("q_b", heads * (config.nope_dim + config.pe_dim) // Q_B_TILE),
-        ("uk", heads * config.kv_lora // UK_TILE),
-        ("split", S * (sparse_attention_topk // SPLIT_KEYS) * split_ctas_per_tile),
-        ("uv", S * (heads * config.v_dim // UV_TILE)),
-        ("o", config.hidden // ROW_TILE),
-    ]
-    if attention_only:
-        return tasks
-    tasks += [
-        ("router", S * (config.n_experts // ROUTER_TILE)),
-        (
-            "ug",
-            (BLOCKS if S == 1 else S * BLOCKS),
-        ),
-        ("down", config.hidden // dn_tile(S, config.hidden)),
-    ]
-    return tasks
+from kernels.mla_moe_layer.kernel_common import (
+    exp as _exp,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    f8_word as _f8_word,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    fp8_roundtrip as _fp8_roundtrip,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    fp8_to_bf16x8 as _fp8_to_bf16x8,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    rcp as _rcp,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    rsq as _rsq,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    rsrc as _rsrc,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    uniform as _uniform,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    uniform_f32 as _uniform_f32,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    wave_umax as _wave_umax,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    xred as _xred,
+)
+from kernels.mla_moe_layer.kernel_common import (
+    xshfl as _xshfl,
+)
+from kernels.mla_moe_layer.kernel_layout import (
+    BLOCKS,
+    CM_DEV,
+    CM_SYS,
+    LAYER_SLOTS,
+    NEG,
+    POLL_MAX,
+    Q_B_TILE,
+    QKV_A_TILE,
+    ROUTER_TILE,
+    ROW_TILE,
+    SPLIT_KEYS,
+    THREADS,
+    TL_COLS,
+    UG_TILE,
+    UK_TILE,
+    UV_TILE,
+    WAVES,
+    dn_tile,
+    layout,
+    stage_tasks,
+)
 
 
 def build_indexed_mla_moe_kernel(
@@ -388,7 +181,7 @@ def build_indexed_mla_moe_kernel(
 
     assert heads == config.local_heads, f"{config.name} requires {config.local_heads} local heads"
     assert sparse_attention_topk % SPLIT_KEYS == 0 and 1 <= S <= 8
-    assert 1 <= launches_per_step <= MAX_LAYERS_PER_STEP
+    assert 1 <= launches_per_step <= LAYER_SLOTS
     fmt = moe_format(moe_mode)
     use_fp8_block128 = fmt.activation is ExpertActivation.FP8_BLOCK128
     use_mxfp8_block32 = fmt.activation is ExpertActivation.MXFP8_BLOCK32
@@ -765,6 +558,8 @@ def build_indexed_mla_moe_kernel(
 
             if const_expr(attention_bf16):
                 return unit_bf16(w_rsrc, rg, kc, NKC, b_word, ln)
+            if const_expr(BK == 64):
+                return unit_fp8(w_rsrc, s_rsrc, rg, kc, NKC, K, BK, b_word, ln=ln)
             return unit_fp8x2(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, ln=ln)
 
         def mma_units(acc, units):
@@ -987,7 +782,7 @@ def build_indexed_mla_moe_kernel(
                 )
                 for j in range_constexpr(len(samples)):
                     for i in range_constexpr(nxw):
-                        wd = f8_word((tid + i * THREADS) * 4)
+                        wd = _f8_word((tid + i * THREADS) * 4)
                         lds_st(xs, j * (HIDDEN // 4) + wd, got[j * nxw + i][0].bitcast(fx.Float32))
                     if tid < XQ_BLOCKS:
                         lds_st(
@@ -1044,7 +839,7 @@ def build_indexed_mla_moe_kernel(
             w = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
             nb = _xshfl(w, 1)
             if lane % 2 == 0:
-                lds_st(xs, f8_word(k), (w | (nb << 16)).bitcast(fx.Float32))
+                lds_st(xs, _f8_word(k), (w | (nb << 16)).bitcast(fx.Float32))
 
         def load_bias():
             """This lane's 4 expert biases (issue before the scores wait)."""

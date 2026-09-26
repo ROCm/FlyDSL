@@ -65,12 +65,22 @@ validates the complete fixed-shard contract before allocating GPU buffers.
 | `../common/mx_formats.py` | Reusable Torch MXFP4/MXFP8 quantization and dequantization. |
 | `packing.py` | MFMA weight packing for FP8, BF16, and MXFP4 matrices. |
 | `runtime.py` | Owned symmetric HIP IPC buffers and deterministic remote-handle cleanup. |
-| `indexed_mla_moe_kernel.py` | FlyDSL kernel scheduling, communication, MLA, routing, and expert computation. |
+| `kernel_layout.py` | Shared production scratch/symmetric layouts, double-epoch slots, launch constants, and CTA stage schedules. |
+| `kernel_common.py` | Shared production AMD wave/DPP, hardware-math, FP8, and MXFP4 kernel primitives. |
+| `torch_fusions.py` | Shared graph-capturable RMSNorm, SiTU, AttnRes, router, and shared-expert production fusions. |
+| `indexed_mla_moe_kernel.py` | FlyDSL kernel scheduling, communication, MLA, routing, and expert computation using the shared kernel modules. |
 | `layer.py` | Public host wrapper, scratch allocation, launch arguments, tracing, and lifecycle. |
-| `kimi_k3.py` | Complete Kimi-K3 TP8 AttnRes + MLA + latent-MoE layer and fused Torch tail operations. |
-| `reference.py` | Independent Torch stage and end-to-end calculations. |
+| `kimi_k3.py` | Complete Kimi-K3 TP8 AttnRes + MLA + latent-MoE layer using the shared production fusions. |
+| `reference.py` | Independent Torch stage and end-to-end calculations used only as a validation oracle. |
 | `native_baseline.py` | Optional same-weight TileRT comparison adapter. |
 | `tools/kimi_k3_full.py` | TP8 correctness, stage-profile, and HIP-graph benchmark harness. |
+| `tools/atom_kimi_k3_full.py` | Original ATOM `KimiDecoderLayer` TP8 HIP-graph benchmark harness. |
+
+The reusable code above is extracted from the actual operator execution path:
+`indexed_mla_moe_kernel.py` imports the common kernel layout and AMD
+primitives, while `kimi_k3.py` imports the graph-capturable Torch fusions.
+`reference.py` remains independent and is not the source of the production
+abstractions.
 
 The kernel uses FlyDSL operations for wave reductions, hardware math,
 mailbox polling, buffer access, and MFMA issue. Peer payloads are rounded to
@@ -244,9 +254,10 @@ improvements remain 0.6%, 2.3%, and 12.0% for S=1, S=4, and S=8 respectively.
 ### Complete-layer performance
 
 The complete Kimi-K3 layer was measured with TP8, position 3000, 16 layer
-launches per HIP graph, two warmups, seven measured replays, and the median
-critical-rank time. The baseline is the first correct sequential composition;
-the optimized path fuses three Torch-side regions before graph capture:
+launches per HIP graph, two eager warmup forwards, two graph warmup replays,
+seven measured replays, and the median critical-rank time. The baseline is the
+first correct sequential composition; the optimized path fuses three
+Torch-side regions before graph capture:
 
 - AttnRes RMSNorm/source weighting/output RMSNorm;
 - sigmoid + correction-bias top-k + gather + route renormalization;
@@ -255,8 +266,28 @@ the optimized path fuses three Torch-side regions before graph capture:
 | Version | S=1 | S=4 | S=8 |
 |---|---:|---:|---:|
 | Initial full layer | 334.23 us | 383.85 us | 404.81 us |
-| Optimized full layer | 205.11 us | 258.13 us | 281.50 us |
-| Improvement | 38.6% | 32.8% | 30.5% |
+| Optimized full layer before common-module extraction | 205.11 us | 258.13 us | 281.50 us |
+| Current common-module source | not rerun | 258.7604 us | 282.4305 us |
+| Initial-to-current improvement | not rerun | 32.6% | 30.2% |
+
+The requested comparison against the original ATOM implementation uses ATOM
+commit `3cea04f45` and directly instantiates its production
+`atom.models.kimi_k3.KimiDecoderLayer`, including AttnRes, MLA, routing,
+routed/shared MoE, latent transforms, TP reductions, dual streams, and HIP
+graph replay.
+
+| Batch | FlyDSL full layer | ATOM full layer | FlyDSL delta vs ATOM |
+|---:|---:|---:|---:|
+| 4 | 258.7604 us | 225.6496 us | +14.67% |
+| 8 | 282.4305 us | 256.5222 us | +10.10% |
+
+These are observed end-to-end decoder-layer timings, but the attention work is
+not identical. ATOM's `KimiFullAttention` scans a dense 3001-token KV context,
+whereas FlyDSL consumes caller-supplied top-2048 KV indices at position 3000.
+The MoE and hidden/model shapes, TP8 topology, graph length, warmups, repeats,
+and critical-rank timing rule match. Therefore the table is useful as a direct
+implementation-level full-layer baseline, but its delta is not a normalized
+same-attention-work kernel comparison.
 
 Overlapping the shared and routed branches on separate HIP streams was also
 tested and rejected: at S=1 it regressed from 336.68 us to 384.66 us because
@@ -266,16 +297,11 @@ synchronization. The production path remains single-stream.
 The remaining dominant work is the persistent MLA kernel, two RCCL TP
 reductions, the latent dense transforms, and the A16W4 routed expert kernels.
 The next optimization opportunity is a native fused sigmoid/correction-bias
-top-k sorter and a lower-latency small-message TP reduction. The repository's
-symmetric-peer all-reduce was not used because HIP IPC initialization was not
-reliable in this environment.
-
-Reproduce the attention-only check with:
-
-```bash
-/opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
-  --model kimi_k3 --npes 8 -S 8 --pos 100 --iters 1
-```
+top-k sorter and a lower-latency small-message TP reduction. The merged HIP IPC
+runtime now backs the persistent MLA peer exchange with owned
+`SymmetricPeerBuffer` mappings, deterministic cleanup, and double epoch slots.
+The two composed Kimi-K3 latent/final reductions still use RCCL
+`torch.distributed.all_reduce`.
 
 Reproduce the complete MLA + MoE checks and measurements with:
 
@@ -284,12 +310,33 @@ cd /root/FlyDSL-kimi-k3
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
 export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:.
 
-python kernels/mla_moe_layer/tools/kimi_k3_full.py \
+/opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
+  --npes 8 --samples 4 --layer-idx 0 --check \
+  --bench --layers 16 --repeats 7 \
+  --output /root/kimi-k3-perf-results/full-moe/final-indexed-s4.json
+
+/opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
   --npes 8 --samples 8 --layer-idx 0 --check \
   --bench --layers 16 --repeats 7 \
-  --output /root/kimi-k3-perf-results/full-moe/final-s8.json
+  --output /root/kimi-k3-perf-results/full-moe/final-indexed-s8.json
 ```
 
 Use `--eager-attn-res`, `--eager-router`, or `--eager-shared-experts` for
 controlled optimization A/B runs. Use `--profile` for median eager GPU event
 timings; uninstrumented HIP-graph replay remains the latency source of truth.
+
+Reproduce the ATOM baseline from the separate checkout with its original layer
+implementation. The local AITER JIT build requires its composable-kernel
+submodule and `pybind11==3.0.1`, matching the AITER core ABI used here:
+
+```bash
+git -C /root/ATOM-k3-baseline checkout 3cea04f45
+git -C /root/aiter submodule update --init --recursive -- 3rdparty/composable_kernel
+/opt/venv/bin/python -m pip install --upgrade --target /tmp/atom-k3-deps pybind11==3.0.1
+
+cd /root/FlyDSL-kimi-k3
+/opt/venv/bin/python kernels/mla_moe_layer/tools/atom_kimi_k3_full.py \
+  --samples 4 --output /root/kimi-k3-perf-results/full-moe/atom-s4.json
+/opt/venv/bin/python kernels/mla_moe_layer/tools/atom_kimi_k3_full.py \
+  --samples 8 --output /root/kimi-k3-perf-results/full-moe/atom-s8.json
+```

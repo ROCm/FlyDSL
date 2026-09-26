@@ -19,6 +19,7 @@ from kernels.mla_moe_layer.config import (
     moe_format,
     validate_shard,
 )
+from kernels.mla_moe_layer.kernel_layout import layout, stage_tasks
 from kernels.mla_moe_layer.packing import (
     pack_a16w4_scale,
     pack_a16w4_weight,
@@ -166,6 +167,29 @@ def test_kimi_k3_mla_golden_uses_pre_normalized_input_and_defers_residual():
 def test_validate_kimi_k3_attention_shard_rejects_glm_head_count():
     with pytest.raises(ValueError, match="kimi_k3 requires 12 local heads"):
         validate_shard(1, GLM5_CONFIG.local_heads, 0, 8, 2048, KIMI_K3_CONFIG)
+
+
+def test_common_layout_reserves_two_epoch_slots_for_attention_only():
+    config = replace(KIMI_K3_CONFIG, name="tiny_layout", hidden=64, local_heads=12)
+    scratch, symmetric = layout(4, 12, 2, 128, model_config=config, attention_only=True)
+    part = 2 * 4 * 64 * 8
+
+    assert scratch["gate"] > 0
+    assert "scores" not in scratch
+    assert symmetric == {
+        "attn": 0,
+        "ffn": 2 * part,
+        "_part_stride": part,
+        "_bytes": 2 * part,
+    }
+
+
+def test_common_schedule_splits_twelve_heads_across_two_ctas_at_s1():
+    s1 = dict(stage_tasks(1, 12, 128, KIMI_K3_CONFIG, attention_only=True))
+    s4 = dict(stage_tasks(4, 12, 128, KIMI_K3_CONFIG, attention_only=True))
+
+    assert s1["split"] == 4
+    assert s4["split"] == 8
 
 
 def test_kimi_k3_situ_applies_bounded_gate_and_up_branches():
