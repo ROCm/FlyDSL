@@ -167,6 +167,12 @@ The on-disk cache stores only the compressed compiled IR required to recreate
 the runtime module. Pre-lowering source IR remains available in the compiling
 process for inspection, but is intentionally omitted from AOT cache files.
 
+Pre-warming the cache still requires Python and FlyDSL at run time. To call a
+launcher from C/C++ without Python, export it as a linkable object with
+``flyc.compile_aot(launcher, *args).export_to_c(file_path="build",
+file_name="k")``; see
+:doc:`aot_export_guide`.
+
 Next steps
 ----------
 

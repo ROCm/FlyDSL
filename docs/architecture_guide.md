@@ -274,6 +274,33 @@ When a `@flyc.jit` function is called:
 8. **Execution**: `JITCFunction` wraps MLIR ExecutionEngine to invoke the compiled code.
 9. **Cache store**: Serialize the compiled function to disk for future runs.
 
+### 3.4 AOT export flow
+
+`flyc.compile_aot(launcher, *args)` runs steps 2-7 through the same
+`JitFunction._trace_and_compile` helper as the JIT and stops there: no cache,
+no ExecutionEngine, no launch. It records the ABI of the lowered entry
+(`AbiSlot` per packed argument). The callable returned by `flyc.compile` builds
+the same export view from its already-lowered artifact, without a second
+compile. `export_to_c(file_path, file_name, function_prefix)` then works on a
+fresh copy of the lowered module:
+
+1. **Namespace**: every defined symbol becomes `<name>__<symbol>` with internal
+   linkage (references follow through the symbol table; external declarations
+   keep their names).
+2. **Offloading handler**: the `gpu.binary` switches to `#fly.aot_module<"name">`,
+   whose LLVM translation embeds the binary and emits `<name>__module_init/load/unload`
+   backed by the per-device module table in `libfly_jit_runtime.so`.
+3. **Entry wrapper**: `int32_t <name>(void **args)` unpacks the slots, calls the
+   launcher and returns the first runtime error recorded during the call.
+4. **Metadata**: the JSON result is embedded as `<name>__metadata`.
+5. **Emission**: `emit_host_object` (C API `flydslEmitHostObject`,
+   `lib/CAPI/HostObject/`) translates the module to LLVM IR and emits a PIC
+   object for the generic CPU of the host triple, in process. The exported
+   global symbols must be exactly the entry, lifecycle and metadata symbols
+   before the object is published atomically.
+
+See [`aot_export_guide.md`](aot_export_guide.md) for the user-facing contract.
+
 ---
 
 ## 4. Key abstractions
@@ -423,10 +450,17 @@ Transforms Python control flow to MLIR ops at the AST level:
 ### 5.4 Architecture detection priority
 
 `get_rocm_arch()` in `runtime/device.py` checks in the following order:
-1. `FLYDSL_GPU_ARCH` env var
-2. `HSA_OVERRIDE_GFX_VERSION` env var (supports `9.4.2` → `gfx942` format)
-3. `rocm_agent_enumerator` system tool
-4. Default: `gfx942`
+1. `ARCH` compile-target override
+2. `FLYDSL_GPU_ARCH` env var
+3. `HSA_OVERRIDE_GFX_VERSION` env var (supports `9.4.2` → `gfx942` format)
+4. `rocm_agent_enumerator` system tool
+5. Default: `gfx942`
+
+Setting `ARCH` makes compilation independent of GPU discovery. In particular,
+`flyc.compile_aot(...).export_to_c(...)` can complete device code generation,
+host object emission and CPU linking when the build host has no visible GPU.
+The normal `flyc.compile(...)` path still performs its initial launch and is
+therefore not the CPU-only AOT entry point.
 
 ---
 
@@ -489,6 +523,9 @@ If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra numbere
 | `python/flydsl/compiler/jit_function.py` | `@jit` decorator, `MlirCompiler`, `JitCacheManager` |
 | `python/flydsl/compiler/kernel_function.py` | `@kernel` decorator, `KernelFunction`, `KernelLauncher`, `CompilationContext` |
 | `python/flydsl/compiler/jit_executor.py` | `JITCFunction` — ExecutionEngine wrapper |
+| `python/flydsl/compiler/aot.py` | `compile_aot`, `AOTCompiledFunction.export_to_c`, ABI model |
+| `python/flydsl/compiler/aot_config.py` | Linker-flags CLI for exported objects |
+| `python/flydsl/runtime/libraries.py` | `find_runtime_libraries()` |
 | `python/flydsl/compiler/jit_argument.py` | `JitArgumentRegistry`, `TensorAdaptor`, `from_dlpack` |
 | `python/flydsl/compiler/ast_rewriter.py` | `ASTRewriter` — Python AST → MLIR control flow |
 | `python/flydsl/compiler/protocol.py` | `get_ir_types`, `extract_to_ir_values`, `construct_from_ir_values` protocols |

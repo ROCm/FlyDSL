@@ -1143,6 +1143,36 @@ def _build_call_state(sig, args_tuple, func_exe):
     return CallState(slot_specs, func_exe)
 
 
+class _BoundJitMethod(partial):
+    """A ``@flyc.jit`` method bound to an instance (``obj.launch``).
+
+    Behaves exactly like ``partial(jit.__call__, obj)``; the distinct type lets
+    ``compile_aot`` recover the launcher and the instance.
+    """
+
+    @property
+    def jit_function(self) -> "JitFunction":
+        return self.func.__self__
+
+    @property
+    def instance(self):
+        return self.args[0]
+
+
+@dataclass
+class _TraceResult:
+    """Result of :meth:`JitFunction._trace_and_compile` (internal)."""
+
+    compiled_module: ir.Module
+    original_ir: str
+    link_libs: Optional[list]
+    post_load_processors: list
+    extern_linked: bool
+    param_names: List[str]
+    jit_args: list
+    has_user_stream: bool
+
+
 class JitFunction:
     def __init__(self, func: Callable, compile_hints: Optional[dict] = None):
         install_excepthook()
@@ -1197,7 +1227,7 @@ class JitFunction:
         # first positional argument.
         if obj is None:
             return self
-        return partial(self.__call__, obj)
+        return _BoundJitMethod(self.__call__, obj)
 
     def _effective_compile_hints(self):
         """Resolve persistent defaults and the current thread-local overlay."""
@@ -1209,6 +1239,22 @@ class JitFunction:
         if owner_cls not in cache:
             cache[owner_cls] = _discover_global_refs(self.func, owner_cls)
         return cache[owner_cls]
+
+    def _split_self(self, args):
+        """Ensure the signature is resolved and split a leading ``self`` off ``args``."""
+        self._ensure_sig()
+        if not self._has_self_param:
+            return None, args
+        if not args:
+            raise TypeError(f"{self.func.__name__}() missing 'self' argument")
+        return args[0], args[1:]
+
+    def _snapshot_or_check_globals(self, owner_cls=None) -> None:
+        """Snapshot the used globals on first compile (per owner_cls); raise on any later drift."""
+        if owner_cls not in self._used_global_vals:
+            self._used_global_vals[owner_cls] = _snapshot_refs(self._get_global_refs(owner_cls), stable=False)
+        else:
+            self._check_globals_drift(owner_cls)
 
     def _check_globals_drift(self, owner_cls=None) -> None:
         """Raise if any captured global value has changed since first compile."""
@@ -1374,26 +1420,112 @@ class JitFunction:
         """Convert tuple cache key to string for disk cache."""
         return str(cache_key)
 
+    def _trace_and_compile(self, ctx, sig, bound, bound_self) -> "_TraceResult":
+        """Trace the launcher for ``bound`` and run the FlyDSL lowering pipeline.
+
+        Shared by the JIT path (``__call__``) and ``compile_aot``.  Must run
+        inside ``ctx`` and the effective compile-hints scope.  Nothing is
+        executed: the result holds the lowered module plus the JIT arguments
+        used to build its signature.
+        """
+        param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
+        # Per-call value/annotation consistency check.
+        for pname, dsl_type in zip(param_names, dsl_types):
+            ann = sig.parameters[pname].annotation
+            if ann is not inspect.Parameter.empty and isinstance(ann, type) and not issubclass(dsl_type, ann):
+                warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
+        has_user_stream = _ensure_stream_arg(jit_args)
+        ir_types = get_ir_types(jit_args)
+        loc = func_def_location(self.func, ctx)
+
+        log().info(f"jit_args={jit_args}")
+        log().info(f"dsl_types={dsl_types}")
+
+        module = ir.Module.create(loc=loc)
+        module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
+
+        with ir.InsertionPoint(module.body), loc:
+            backend = get_backend()
+            gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
+
+            func_op = func.FuncOp(self.func.__name__, (ir_types, []))
+            func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+            entry_block = func_op.add_entry_block()
+
+            with CompilationContext.create() as comp_ctx:
+                comp_ctx.gpu_module_op = gpu_module
+                comp_ctx.gpu_module_body = get_gpu_module_body(gpu_module)
+
+                with ir.InsertionPoint(entry_block):
+                    ir_args = list(func_op.regions[0].blocks[0].arguments)
+                    if not has_user_stream:
+                        comp_ctx.stream_arg = ir_args[-1]
+                    user_jit_args = jit_args[: len(param_names)]
+                    dsl_args = construct_from_ir_values(dsl_types, user_jit_args, ir_args)
+                    log().info(f"dsl_args={dsl_args}")
+                    named_args = dict(zip(param_names, dsl_args))
+                    named_args.update(constexpr_values)
+                    # Bound the call-site boundary at the jit body.
+                    with tracing_context(
+                        self.func,
+                        fastmath=effective_fastmath_hint(CompilationContext.get_compile_hints()),
+                    ):
+                        if bound_self is not None:
+                            self.func(bound_self, **named_args)
+                        else:
+                            self.func(**named_args)
+                    func.ReturnOp([])
+
+        original_ir = module.operation.get_asm(enable_debug_info=True)
+
+        # Extern-symbol integration is carried entirely via
+        # CompilationContext: each ExternFunction populates
+        # link_libs and post_load_processors at declaration time,
+        # so the JIT path depends on no framework-specific import.
+        link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
+        post_load_processors = list(comp_ctx.post_load_processors)
+        extern_linked = bool(link_libs or post_load_processors)
+        if extern_linked and _use_external_binary_codegen():
+            raise RuntimeError(
+                "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern-linked kernels yet; "
+                "use embedded codegen for kernels that require #fly.explicit_module."
+            )
+        if extern_linked:
+            # Switch to explicit Python-side module loading so
+            # post_load_processors can receive hipModule_t handles.
+            # Also clear targets set at construction: the backend attach-target
+            # pass is the sole source when link_libs is used; duplicating
+            # targets can make the runtime pick an object without extern libs.
+            gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
+            if "targets" in gpu_module.operation.attributes:
+                del gpu_module.operation.attributes["targets"]
+
+        compiled_module = MlirCompiler.compile(
+            module,
+            arch=backend.target.arch,
+            func_name=self.func.__name__,
+            link_libs=link_libs,
+        )
+        return _TraceResult(
+            compiled_module=compiled_module,
+            original_ir=original_ir,
+            link_libs=link_libs,
+            post_load_processors=post_load_processors,
+            extern_linked=extern_linked,
+            param_names=param_names,
+            jit_args=jit_args,
+            has_user_stream=has_user_stream,
+        )
+
     def __call__(self, *args, **kwargs):
         if ir.Context.current is not None:
             return self.func(*args, **kwargs)
 
-        self._ensure_sig()
-
-        bound_self = None
-        if self._has_self_param:
-            if not args:
-                raise TypeError(f"{self.func.__name__}() missing 'self' argument")
-            bound_self, args = args[0], args[1:]
+        bound_self, args = self._split_self(args)
         owner_cls = type(bound_self) if bound_self is not None else None
         self._ensure_cache_manager(owner_cls)
 
-        # snapshot the used globals on first compile (per owner_cls) and RAISE on
-        # any later change.
-        if owner_cls not in self._used_global_vals:
-            self._used_global_vals[owner_cls] = _snapshot_refs(self._get_global_refs(owner_cls), stable=False)
-        else:
-            self._check_globals_drift(owner_cls)
+        self._snapshot_or_check_globals(owner_cls)
 
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
@@ -1489,97 +1621,17 @@ class JitFunction:
                 self._last_compiled = (cache_key, compiled_func)
             else:
                 with _create_mlir_context() as ctx, _hints_ctx:
-                    param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
-                    # Per-call value/annotation consistency check.
-                    for pname, dsl_type in zip(param_names, dsl_types):
-                        ann = sig.parameters[pname].annotation
-                        if (
-                            ann is not inspect.Parameter.empty
-                            and isinstance(ann, type)
-                            and not issubclass(dsl_type, ann)
-                        ):
-                            warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
-                    has_user_stream = _ensure_stream_arg(jit_args)
-                    ir_types = get_ir_types(jit_args)
-                    loc = func_def_location(self.func, ctx)
-
-                    log().info(f"jit_args={jit_args}")
-                    log().info(f"dsl_types={dsl_types}")
-
-                    module = ir.Module.create(loc=loc)
-                    module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
-
-                    with ir.InsertionPoint(module.body), loc:
-                        backend = get_backend()
-                        gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
-
-                        func_op = func.FuncOp(self.func.__name__, (ir_types, []))
-                        func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
-                        entry_block = func_op.add_entry_block()
-
-                        with CompilationContext.create() as comp_ctx:
-                            comp_ctx.gpu_module_op = gpu_module
-                            comp_ctx.gpu_module_body = get_gpu_module_body(gpu_module)
-
-                            with ir.InsertionPoint(entry_block):
-                                ir_args = list(func_op.regions[0].blocks[0].arguments)
-                                if not has_user_stream:
-                                    comp_ctx.stream_arg = ir_args[-1]
-                                user_jit_args = jit_args[: len(param_names)]
-                                dsl_args = construct_from_ir_values(dsl_types, user_jit_args, ir_args)
-                                log().info(f"dsl_args={dsl_args}")
-                                named_args = dict(zip(param_names, dsl_args))
-                                named_args.update(constexpr_values)
-                                # Bound the call-site boundary at the jit body.
-                                with tracing_context(
-                                    self.func,
-                                    fastmath=effective_fastmath_hint(CompilationContext.get_compile_hints()),
-                                ):
-                                    if bound_self is not None:
-                                        self.func(bound_self, **named_args)
-                                    else:
-                                        self.func(**named_args)
-                                func.ReturnOp([])
-
-                    original_ir = module.operation.get_asm(enable_debug_info=True)
-
-                    # Extern-symbol integration is carried entirely via
-                    # CompilationContext: each ExternFunction populates
-                    # link_libs and post_load_processors at declaration time,
-                    # so the JIT path depends on no framework-specific import.
-                    link_libs = list(comp_ctx.link_libs) if comp_ctx.link_libs else None
-                    post_load_processors = list(comp_ctx.post_load_processors)
-                    extern_linked = bool(link_libs or post_load_processors)
-                    if extern_linked and _use_external_binary_codegen():
-                        raise RuntimeError(
-                            "FLYDSL_COMPILE_LLVM_DIR external codegen does not support extern-linked kernels yet; "
-                            "use embedded codegen for kernels that require #fly.explicit_module."
-                        )
-                    if extern_linked:
+                    traced = self._trace_and_compile(ctx, sig, bound, bound_self)
+                    if traced.extern_linked:
                         self._extern_linkage_keys.add(cache_key)
-                        # Switch to explicit Python-side module loading so
-                        # post_load_processors can receive hipModule_t handles.
-                        # Also clear targets set at construction: the backend attach-target
-                        # pass is the sole source when link_libs is used; duplicating
-                        # targets can make the runtime pick an object without extern libs.
-                        gpu_module.offloadingHandler = ir.Attribute.parse("#fly.explicit_module")
-                        if "targets" in gpu_module.operation.attributes:
-                            del gpu_module.operation.attributes["targets"]
-
-                    compiled_module = MlirCompiler.compile(
-                        module,
-                        arch=backend.target.arch,
-                        func_name=self.func.__name__,
-                        link_libs=link_libs,
-                    )
 
                     compiled_func = CompiledArtifact(
-                        compiled_module,
+                        traced.compiled_module,
                         self.func.__name__,
-                        original_ir,
-                        post_load_processors=post_load_processors,
-                        link_libs=link_libs,
-                        uses_explicit_module=extern_linked,
+                        traced.original_ir,
+                        post_load_processors=traced.post_load_processors,
+                        link_libs=traced.link_libs,
+                        uses_explicit_module=traced.extern_linked,
                     )
 
                     # Always keep a reference to the latest compilation result so
@@ -1590,7 +1642,7 @@ class JitFunction:
                     # cache is disabled. This preserves code object lifetime for
                     # profiler/roctracer teardown and enables fast same-process reuse.
                     self._mem_cache[cache_key] = compiled_func
-                    if _cache_writer and not extern_linked:
+                    if _cache_writer and not traced.extern_linked:
                         try:
                             _cache_writer(compiled_func)
                         except Exception as e:
@@ -1641,19 +1693,65 @@ class CompiledFunction:
     No ``inspect.Signature.bind``, no ``_resolve_and_make_cache_key``, no cache lookup.
     Accepts **positional arguments only** (same count and order as the
     original ``@flyc.jit`` function).
+
+    The compiled specialization can also be exported with
+    :meth:`export_to_c`; exporting reuses the lowered JIT artifact and does not
+    trace or compile the launcher again.
     """
 
-    __slots__ = ("_call_state", "_keepalive")
+    __slots__ = ("_call_state", "_keepalive", "_aot_compiled", "_aot_error")
 
-    def __init__(self, call_state, keepalive):
+    def __init__(self, call_state, keepalive, aot_compiled=None, aot_error=None):
         self._call_state = call_state
         self._keepalive = keepalive  # prevent GC of CompiledArtifact / ExecutionEngine
+        self._aot_compiled = aot_compiled
+        self._aot_error = aot_error
 
     def __call__(self, *args):
         return self._call_state(args)
 
+    def export_to_c(self, *args, **kwargs):
+        """Export this compiled specialization to C-compatible files.
 
-def _compile_impl(func, *args) -> Optional[CompiledFunction]:
+        Accepts the same directory-style and object-path forms as
+        :meth:`flydsl.compiler.aot.AOTCompiledFunction.export_to_c`.
+        """
+        if self._aot_error is not None:
+            error_type, message = self._aot_error
+            raise error_type(message)
+        if self._aot_compiled is None:
+            raise RuntimeError("flyc.compile(): no AOT export artifact is available")
+        return self._aot_compiled.export_to_c(*args, **kwargs)
+
+
+def _prepare_aot_export(jf, sig, bound, artifact):
+    """Build export metadata without changing normal ``flyc.compile`` errors."""
+    try:
+        param_names, jit_args, _dsl_types, _constexpr_values = convert_to_jit_arguments(sig, bound)
+        has_user_stream = _ensure_stream_arg(jit_args)
+        from .aot import _aot_from_jit_artifact
+
+        target = jf._backend_target
+        compiled = _aot_from_jit_artifact(
+            artifact,
+            sig=sig,
+            param_names=param_names,
+            jit_args=jit_args,
+            has_user_stream=has_user_stream,
+            backend=target.backend,
+            arch=target.arch,
+        )
+        return compiled, None
+    except Exception as exc:
+        # Export support is additive: a launcher that can be JIT-compiled must
+        # keep working even when one of its argument types is not exportable.
+        error_type = (
+            type(exc) if isinstance(exc, (TypeError, ValueError, NotImplementedError, RuntimeError)) else RuntimeError
+        )
+        return None, (error_type, str(exc))
+
+
+def _compile_impl(func, *args, **kwargs) -> Optional[CompiledFunction]:
     """Pre-compile a ``@flyc.jit`` function, returning a fast callable.
 
     Usage::
@@ -1664,8 +1762,8 @@ def _compile_impl(func, *args) -> Optional[CompiledFunction]:
         for ...:
             compiled_fn(c, a, b, sa, sb, M, N, stream)
 
-    All arguments (including ``stream``) must be **positional**.
-    The returned :class:`CompiledFunction` also accepts only positional args.
+    Compilation arguments may be positional or keyword arguments. The returned
+    :class:`CompiledFunction` keeps its existing positional-only fast path.
 
     Constexpr values are baked in at compile time and ignored on subsequent
     calls; only runtime values (data pointers, scalars, stream) may change.
@@ -1678,13 +1776,13 @@ def _compile_impl(func, *args) -> Optional[CompiledFunction]:
 
     jf = func
 
-    jf(*args)
+    jf(*args, **kwargs)
     if env.compile.compile_only:
         return None
 
     # Retrieve the CallState (already built by __call__ above).
     sig = jf._sig  # guaranteed initialized after __call__
-    bound = sig.bind(*args)
+    bound = sig.bind(*args, **kwargs)
     bound.apply_defaults()
     cache_key = jf._build_full_cache_key(bound.arguments)
     args_tuple = tuple(bound.arguments.values())
@@ -1706,7 +1804,8 @@ def _compile_impl(func, *args) -> Optional[CompiledFunction]:
     if call_state is None:
         call_state = _build_call_state(sig, args_tuple, artifact._get_func_exe())
 
-    return CompiledFunction(call_state, artifact)
+    aot_compiled, aot_error = _prepare_aot_export(jf, sig, bound, artifact)
+    return CompiledFunction(call_state, artifact, aot_compiled, aot_error)
 
 
 class CompileCallable:
@@ -1728,13 +1827,13 @@ class CompileCallable:
             raise TypeError(f"flyc.compile[...] expects a dict of compile hints, got {type(hints).__name__}")
         return CompileCallable(compile_hints=hints)
 
-    def __call__(self, func, *args):
+    def __call__(self, func, *args, **kwargs):
         if self._compile_hints and isinstance(func, JitFunction):
             func.compile_hints = {**func.compile_hints, **self._compile_hints}
-        if not args:
+        if not args and not kwargs:
             # No args → just return the (hinted) function for deferred compilation
             return func
-        return _compile_impl(func, *args)
+        return _compile_impl(func, *args, **kwargs)
 
 
 compile = CompileCallable()
