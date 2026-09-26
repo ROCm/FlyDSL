@@ -45,7 +45,7 @@ from ATOM without repacking the expert tensors:
 | `s_ug`, `s_dn` | One E8M0 byte per 1x32 block | AITER non-interleaved `shuffle_scale` | Exact |
 | `w_r` | 256 BF16 router rows | Mono-kernel MFMA packing by default; optional ATOM row-major | Logical match; default is not zero-copy |
 | MLA projection weights | `qkv_a=[q_a; kv_a]`; each `q_b` head is `[nope; rope]` | Existing block-128 FP8 MFMA packing | Not compatible with the BF16 attention weights in `amd/GLM-5.1-MXFP4` |
-| KV cache | Per-token `[k_c(512), k_pe(64)]` | One contiguous BF16 `[tokens, 576]` tensor | Shape/stride match; ATOM benchmark dtype is FP8, not BF16 |
+| KV cache | Per-token `[k_c(512), k_pe(64)]` | One contiguous BF16 `[tokens, 576]` tensor | Exact shape, stride, and dtype in the matched benchmark; ATOM serving can select FP8 by configuration |
 
 The expert value and scale packers were compared byte-for-byte against the
 current AITER `shuffle_weight` and `shuffle_scale` implementations for both
@@ -53,17 +53,23 @@ GLM-5 up/gate and down shapes. Norm vectors and routing bias are already plain
 contiguous tensors. ATOM's default `ATOM_MOE_GU_ITLV=0` also matches this
 kernel's gate-then-up row order.
 
+The matched ATOM layer exposes logical expert tensors with shapes
+`w13=[257,512,3072]`, `w13_scale=[257,512,192]`, `w2=[257,6144,128]`, and
+`w2_scale=[257,6144,8]`. After AITER postprocessing, the value shapes are
+unchanged and the scale buffers become `[131584,192]` and `[1579008,8]`.
+These shapes and the bytes in each buffer match the FlyDSL default MXFP4 path.
+
 `--router-weight-layout atom` is retained for zero-copy experiments. It is not
 the default: with otherwise ATOM-compatible A16W4 storage, TP1 S=1 improved
 slightly from 31.19 to 31.08 us/layer, but S=8 regressed from 70.80 to 72.47
 us/layer (2.4%). The standalone ATOM GEMM can tile a row-major router internally;
 the mono-kernel's direct MFMA loads instead cross the 6144-element row stride.
 
-The attention and cache-dtype differences are format changes rather than a
-permutation-only issue, so this change does not claim complete zero-copy loading
-of an `amd/GLM-5.1-MXFP4` checkpoint. It aligns every MXFP4 expert value/scale
-and the 576-wide cache allocation while preserving the faster existing
-attention and router paths.
+The attention-format difference, and any configured serving cache-dtype
+difference, are not permutation-only issues. This change therefore does not
+claim complete zero-copy loading of an `amd/GLM-5.1-MXFP4` checkpoint. It
+aligns every MXFP4 expert value/scale and the 576-wide cache allocation while
+preserving the faster existing attention and router paths.
 
 ## Code layout
 
@@ -77,6 +83,7 @@ attention and router paths.
 | `layer.py` | Public host wrapper, scratch allocation, launch arguments, tracing, and lifecycle. |
 | `reference.py` | Independent Torch stage and end-to-end calculations. |
 | `native_baseline.py` | Optional same-weight TileRT comparison adapter. |
+| `tools/benchmark_atom.py` | Native ATOM GLM-5.1 decoder-layer benchmark with preselected sparse indices. |
 
 The kernel uses FlyDSL operations for wave reductions, hardware math,
 mailbox polling, buffer access, and MFMA issue. Peer payloads are rounded to
@@ -132,6 +139,37 @@ A direct TP1/S1 output comparison against the same-weight TileRT wrapper gave:
 
 ## Performance status
 
+### MXFP4: FlyDSL mono-kernel versus native ATOM layer
+
+The primary MXFP4 comparison runs on 8 x MI355X (gfx950), TP8, at position
+3000 with sparse top-2048 and a BF16 `[tokens,576]` KV cache. Each HIP graph
+contains one decoder-layer invocation. After two warmup replays, the benchmark
+records 30 replays, takes the slowest rank for every replay, removes the five
+fastest and five slowest samples, and reports the mean of the remaining 20.
+
+ATOM uses its native multi-operator `DeepseekV2DecoderLayer` chain: RMSNorm,
+BF16 MLA projections and sparse attention, router, MXFP4 FusedMoE, and TP
+collectives. Only the indexer that produces sparse top-2048 indices is bypassed,
+because the FlyDSL API also receives those indices as input. The revisions are
+ATOM `b104cf915aeced8c0c319fe1e0fcf6cf70b323ba` and AITER
+`d4e9afc85857e30e03b417606e6f25071ffaaa9a`.
+
+| Batch | FlyDSL mono-kernel | ATOM native layer | Speedup | Latency reduction |
+|---:|---:|---:|---:|---:|
+| 1 | 74.77 us | 136.84 us | 1.83x | 45.4% |
+| 2 | 73.69 us | 145.43 us | 1.97x | 49.3% |
+| 4 | 94.77 us | 144.12 us | 1.52x | 34.2% |
+| 8 | 124.66 us | 158.99 us | 1.28x | 21.6% |
+
+There is no measured regression against ATOM at any tested batch, so no
+attention/router-MoE/collective regression split was required. This is an
+equivalent-layer latency comparison, not a pure fusion-only comparison:
+experts and KV storage use the matched MXFP4/BF16 formats, but the released
+`amd/GLM-5.1-MXFP4` ATOM attention weights are BF16 while the FlyDSL
+mono-kernel keeps its block-128 FP8 attention path.
+
+### Historical and layout A/B measurements
+
 The established W8A8 graph measurements below use 128 layer launches per HIP
 graph, two warmups, nine measured replays, and the median critical-rank time.
 Hardware was 8 x MI355X (gfx950), with position 3000 and sparse top-2048.
@@ -171,10 +209,10 @@ for per-1x32 activation quantization and BF16 MFMA staging, so it did not beat
 only `w8a8` and `w8a16`; there is no valid same-weight TileRT baseline for the
 two MXFP4 modes in this harness.
 
-For the ATOM-layout work, TP1 used 128 layer launches per graph, two warmups,
-15 measured replays, and median latency. Native measurements bracketed the
-ATOM expert/cache run to expose drift; the percentage uses the mean of the two
-native medians.
+As secondary evidence for the storage-layout change, TP1 used 128 layer
+launches per graph, two warmups, 15 measured replays, and median latency.
+Native measurements bracketed the ATOM expert/cache run to expose drift; the
+percentage uses the mean of the two native medians.
 
 | Mode | Samples | Native expert/scale + split cache | ATOM expert/scale + fused cache | Change |
 |---|---:|---:|---:|---:|
@@ -214,24 +252,25 @@ Use the existing FlyDSL compiler build and this worktree:
 
 ```bash
 cd /root/FlyDSL-glm5-mxfp4-atom-layout
-export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-mxfp4-atom-layout:/root/tilert_pkg
+export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-mxfp4-atom-layout
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib
 
 /opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
   --npes 8 -S 8 --pos 3000 --iters 1 --moe-mode a8w4
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/benchmark.py \
-  --backend flydsl --moe-mode a16w4 --npes 1 --samples 1 8 \
-  --layers 128 --repeats 15
+  --backend flydsl --moe-mode a16w4 --npes 8 --samples 1 2 4 8 \
+  --layers 1 --repeats 30 --trim 5
+
+/opt/venv/bin/python kernels/mla_moe_layer/tools/benchmark_atom.py \
+  --npes 8 --samples 1 2 4 8 --layers 1 --repeats 30 --trim 5
 ```
 
-Repeat the correctness command for the other modes and peer counts. Run GPU
-jobs sequentially.
+Repeat the correctness command for the other modes and peer counts.
 
-For a direct released-implementation comparison, keep `/root/tilert_pkg` on
-`PYTHONPATH` and replace `--backend flydsl` with `--backend tilert`. The native
-wrapper supports only `w8a8`/`w8a16`, one or eight peers, and sample counts
-1/2/4. S=8 and the MXFP4 modes are FlyDSL-only extensions in this harness.
+The ATOM benchmark defaults to `/root/ATOM` and `/root/aiter`; override those
+paths with `--atom-root` and `--aiter-root` when needed. Run GPU jobs
+sequentially.
 
 Add `--trace --layers 16 --trace-dir <directory>` to a FlyDSL benchmark for
 stage timestamps, then inspect a rank with:

@@ -54,6 +54,13 @@ def _source_hash() -> str:
     return digest.hexdigest()
 
 
+def _trimmed_mean(values: list[float], trim_each_tail: int) -> float:
+    ordered = sorted(values)
+    if trim_each_tail:
+        ordered = ordered[trim_each_tail:-trim_each_tail]
+    return statistics.mean(ordered)
+
+
 def _worker(rank, args, port):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
@@ -239,6 +246,9 @@ def _worker(rank, args, port):
                 inter_per_rank=256,
                 seed=args.seed,
                 layers=args.layers,
+                measured_repeats=args.repeats,
+                trim_each_tail=args.trim,
+                trimmed_mean_us=_trimmed_mean(critical, args.trim),
                 median_us=statistics.median(critical),
                 min_us=min(critical),
                 max_us=max(critical),
@@ -290,6 +300,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--layers", type=int, default=MAX_LAYERS_PER_STEP)
     parser.add_argument("--repeats", type=int, default=9)
+    parser.add_argument("--trim", type=int, default=0)
     parser.add_argument("--output")
     parser.add_argument("--dump-outputs")
     parser.add_argument("--trace", action="store_true")
@@ -305,6 +316,8 @@ if __name__ == "__main__":
         parser.error("--trace is available for the FlyDSL backend")
     if not 1 <= args.layers <= MAX_LAYERS_PER_STEP:
         parser.error(f"layers must be in [1, {MAX_LAYERS_PER_STEP}]")
+    if args.repeats <= 2 * args.trim:
+        parser.error("repeats must be greater than twice trim")
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
