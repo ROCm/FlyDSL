@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-09-26T14:30:24Z",
+ "updated": "2026-09-26T15:27:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36249442959,
+   "pr": 1201,
+   "commit": "e1ee412e2a832c9eabfc62574d2d813e3604dc53",
+   "branch": "glm5-mla-moe-layer-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add GLM-5 indexed reuse MLA + MoE block",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36249442959",
+   "created_at": "2026-09-26T14:42:54Z",
+   "updated_at": "2026-09-26T14:57:49Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-26T15:06:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36249442959/job/108426897675"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-26T14:58:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36249442959/job/108426897684"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-26T14:57:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36249442959/job/108426897712"
+    }
+   ]
+  },
   {
    "run_id": 36248558456,
    "pr": 1202,
@@ -10,13 +53,41 @@
    "branch": "dev/export_c",
    "event": "pull_request",
    "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36248558456",
    "created_at": "2026-09-26T14:27:20Z",
-   "updated_at": "2026-09-26T14:28:16Z",
+   "updated_at": "2026-09-26T14:59:12Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-26T14:59:12Z",
+     "completed_at": "2026-09-26T15:07:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36248558456/job/108423957292"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-26T14:39:02Z",
+     "completed_at": "2026-09-26T15:06:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36248558456/job/108423957295"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-26T14:39:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36248558456/job/108423957412"
+    }
+   ]
   },
   {
    "run_id": 36247721776,
@@ -39,7 +110,7 @@
    "commit": "86bf048492cb5b04d23b2ec093f1c4306386a4f6",
    "branch": "glm5-mla-moe-layer-monokernel",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 indexed reuse MLA + MoE block / \u6dfb\u52a0 GLM-5 \u7d22\u5f15\u590d\u7528 MLA + MoE \u878d\u5408\u5757",
+   "title": "[Kernel][Perf] Add GLM-5 indexed reuse MLA + MoE block",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36205037906",
@@ -1989,52 +2060,6 @@
    "updated_at": "2026-09-22T11:05:10Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 35715457290,
-   "pr": 1181,
-   "commit": "92619bc0d5be7f1d625a3b2a0039d93263cd9b9e",
-   "branch": "pr/enh-release-api-check",
-   "event": "pull_request",
-   "title": "[API] Add extension as stable, exclude experimental module paths",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290",
-   "created_at": "2026-09-22T10:20:42Z",
-   "updated_at": "2026-09-22T13:55:39Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T13:22:38Z",
-     "completed_at": "2026-09-22T13:55:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290/job/106759081427"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T10:47:23Z",
-     "completed_at": "2026-09-22T12:44:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290/job/106759083555"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T10:46:10Z",
-     "completed_at": "2026-09-22T12:19:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35715457290/job/106759083623",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
