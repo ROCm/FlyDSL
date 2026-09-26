@@ -338,6 +338,31 @@ def _worker(rank: int, args, port: int, results) -> None:
     dist.all_gather_object(gathered, times)
     critical = [max(values) for values in zip(*gathered)]
 
+    kernel_profile = None
+    if args.kernel_profile:
+        dist.barrier()
+        if rank == 0:
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+            ) as profiler:
+                graph.replay()
+                torch.cuda.synchronize()
+            events = [event for event in profiler.key_averages() if event.self_device_time_total > 0]
+            events.sort(key=lambda event: event.self_device_time_total, reverse=True)
+            kernel_profile = [
+                {
+                    "name": event.key,
+                    "calls": event.count,
+                    "total_us": event.self_device_time_total,
+                    "mean_us": event.self_device_time_total / event.count,
+                }
+                for event in events
+            ]
+        else:
+            graph.replay()
+            torch.cuda.synchronize()
+        dist.barrier()
+
     prefix_out, routed, shared, block_out = outputs
     finite = all(
         value is None or bool(torch.isfinite(value).all()) for value in (prefix_out, routed, shared, block_out)
@@ -355,6 +380,8 @@ def _worker(rank: int, args, port: int, results) -> None:
         "layers": args.layers,
         "repeats": args.repeats,
     }
+    if kernel_profile is not None:
+        result["kernel_profile"] = kernel_profile
     if rank == 0:
         print(json.dumps(result), flush=True)
         if args.output:
@@ -382,6 +409,7 @@ def main() -> int:
     parser.add_argument("--context-len", type=int, default=3001)
     parser.add_argument("--layers", type=int, default=16)
     parser.add_argument("--repeats", type=int, default=7)
+    parser.add_argument("--kernel-profile", action="store_true", help="record one rank-0 HIP-graph kernel profile")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--output")
     args = parser.parse_args()

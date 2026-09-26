@@ -67,7 +67,9 @@ validates the complete fixed-shard contract before allocating GPU buffers.
 | `runtime.py` | Owned symmetric HIP IPC buffers and deterministic remote-handle cleanup. |
 | `kernel_layout.py` | Shared production scratch/symmetric layouts, double-epoch slots, launch constants, and CTA stage schedules. |
 | `kernel_common.py` | Shared production AMD wave/DPP, hardware-math, FP8, and MXFP4 kernel primitives. |
-| `torch_fusions.py` | Shared graph-capturable RMSNorm, SiTU, AttnRes, router, and shared-expert production fusions. |
+| `torch_fusions.py` | Shared graph-capturable RMSNorm, SiTU, AttnRes, and shared-expert production fusions. |
+| `router.py` | Reusable native low-token BF16-logit sigmoid/correction-bias top-k router. |
+| `symmetric_allreduce.py` | Reusable graph-safe BF16 TP all-reduce over tagged symmetric peer mailboxes. |
 | `indexed_mla_moe_kernel.py` | FlyDSL kernel scheduling, communication, MLA, routing, and expert computation using the shared kernel modules. |
 | `layer.py` | Public host wrapper, scratch allocation, launch arguments, tracing, and lifecycle. |
 | `kimi_k3.py` | Complete Kimi-K3 TP8 AttnRes + MLA + latent-MoE layer using the shared production fusions. |
@@ -221,7 +223,8 @@ path used by Kimi-K3:
 - 12 local heads with 128 non-positional, 64 RoPE, and 128 value dimensions;
 - BF16 attention weights and the sigmoid attention-output gate;
 - 12-layer AttnRes source mixing before attention and before MoE;
-- FP32 sigmoid router with correction bias, 896 experts, and normalized top-16;
+- BF16 router projection with FP32 sigmoid/correction-bias selection, 896 experts,
+  and normalized top-16;
 - replicated BF16 7168-to-3584 latent projection;
 - FlyDSL device-side sorting and two-stage A16W4/MXFP4 routed experts with SiTU;
 - TP8-local BF16 shared experts, latent RMSNorm, and rank-local 3584-to-896 tail;
@@ -235,10 +238,11 @@ instead of owning the host implementation.
 Correctness was checked on 8 x MI355X (gfx950) for S=1/4/8 at layer 0, plus
 S=4 at layer 1 and layer 12 to cover both non-write and new-block AttnRes
 branches. All outputs were finite and bit-identical across the eight ranks.
-Using the implementation's own post-attention state, top-16 selection matched
-the independent reference exactly, routed-MoE relative L2 was 0.525-0.538%,
-and full-output relative L2 was 0.538-0.671%. KV-cache relative L2 stayed at or
-below 0.046%. Layer 0/1/12 HIP-graph capture and replay also completed.
+In the final optimized S=4/S=8 runs, using the implementation's own
+post-attention state, top-16 selection had zero mismatches, routed-MoE relative
+L2 was 0.524%/0.526%, full-output relative L2 was 0.424%/0.425%, and KV-cache
+relative L2 was approximately 1e-8. Layer 0/1/12 HIP-graph capture and replay
+also completed.
 
 As in the existing GLM-5 tests, the independent end-to-end comparison records
 but does not fail on a near-tied synthetic route changed by a legal upstream
@@ -255,20 +259,38 @@ improvements remain 0.6%, 2.3%, and 12.0% for S=1, S=4, and S=8 respectively.
 
 The complete Kimi-K3 layer was measured with TP8, position 3000, 16 layer
 launches per HIP graph, two eager warmup forwards, two graph warmup replays,
-seven measured replays, and the median critical-rank time. The baseline is the
-first correct sequential composition; the optimized path fuses three
-Torch-side regions before graph capture:
+seven measured replays, and the median critical-rank time. The final results
+use the native router, `bm16` routed-MoE tiles, compiled latent RMSNorm output,
+and the graph-safe symmetric TP reduce backend.
 
-- AttnRes RMSNorm/source weighting/output RMSNorm;
-- sigmoid + correction-bias top-k + gather + route renormalization;
-- shared-expert up/gate GEMM, SiTU, and down GEMM handoff.
+| Version | S=4 | S=8 |
+|---|---:|---:|
+| Initial correct sequential full layer | 383.85 us | 404.81 us |
+| Common-module source before the deep tuning pass | 258.7604 us | 282.4305 us |
+| Final optimized source | 204.4796 us | 228.6948 us |
+| Improvement from the common-module source | 20.98% | 19.03% |
 
-| Version | S=1 | S=4 | S=8 |
-|---|---:|---:|---:|
-| Initial full layer | 334.23 us | 383.85 us | 404.81 us |
-| Optimized full layer before common-module extraction | 205.11 us | 258.13 us | 281.50 us |
-| Current common-module source | not rerun | 258.7604 us | 282.4305 us |
-| Initial-to-current improvement | not rerun | 32.6% | 30.2% |
+The slowdown in the pre-tuning K3 path was not primarily a TP communication
+problem. A controlled NCCL-versus-symmetric-reduce comparison changed S=4
+from 258.9820 us to 256.3328 us and S=8 from 281.1871 us to 279.5571 us, only
+about 0.6-1.0%. Kernel profiling instead identified three local scheduling
+problems:
+
+- The Torch top-k route used a roughly 27.96-us `gatherTopK` kernel plus a
+  roughly 4.40-us sort. `router.py` now runs one wave per sample, evaluates 14
+  experts per lane, and performs normalized top-16 selection in about 15.2 us.
+- The routed expert GEMM used `bm32`, although ATOM selects `bm16` for these
+  low-token batches. Switching to `bm16` reduced the S=4/S=8 layer latency
+  from 235.29/255.39 us to 226.59/247.25 us at that point in the tuning pass.
+- Latent RMSNorm was expressed as `copy_(rmsnorm(...))`, which graph capture
+  expanded into approximately 25-30 us of elementwise/reduction work.
+  `compiled_rmsnorm_out` now writes directly to the graph-stable destination,
+  bringing the final layer to about 204/229 us.
+
+The router projection and correction bias now also use BF16, matching ATOM's
+production gate contract; FP32 remains confined to sigmoid, comparison, and
+route normalization. This dtype correction did not materially change latency,
+but removes an implementation mismatch from the comparison.
 
 The requested comparison against the original ATOM implementation uses ATOM
 commit `3cea04f45` and directly instantiates its production
@@ -278,8 +300,8 @@ graph replay.
 
 | Batch | FlyDSL full layer | ATOM full layer | FlyDSL delta vs ATOM |
 |---:|---:|---:|---:|
-| 4 | 258.7604 us | 225.6496 us | +14.67% |
-| 8 | 282.4305 us | 256.5222 us | +10.10% |
+| 4 | 204.4796 us | 225.6496 us | -9.38% |
+| 8 | 228.6948 us | 256.5222 us | -10.85% |
 
 These are observed end-to-end decoder-layer timings, but the attention work is
 not identical. ATOM's `KimiFullAttention` scans a dense 3001-token KV context,
@@ -289,19 +311,39 @@ and critical-rank timing rule match. Therefore the table is useful as a direct
 implementation-level full-layer baseline, but its delta is not a normalized
 same-attention-work kernel comparison.
 
-Overlapping the shared and routed branches on separate HIP streams was also
+### Why K3 is still much slower than the GLM kernel in absolute time
+
+The GLM-5 W8A8 S=4 result above is 56.217 us, versus 204.4796 us for the K3
+A16W4 full layer. These numbers should not be treated as the same-workload
+optimization target. K3 has hidden size 7168 instead of 6144, 896 routed
+experts/top-16/intermediate 384 instead of 256/top-8/intermediate 256, and 12
+local attention heads instead of 8. Its router projection alone is about 4.08
+times larger: `(7168 * 896) / (6144 * 256)`.
+
+K3 also performs AttnRes mixing, a replicated 7168-to-3584 latent projection,
+shared experts, latent RMSNorm, a rank-local 3584-to-896 tail, and two MoE TP
+reductions. The GLM fast path places most of its work inside one persistent
+monokernel; K3 still composes the persistent MLA kernel with dense GEMMs, the
+native router, sorting, two-stage routed experts, shared experts, and
+collectives. The retained changes therefore align K3 with GLM's optimization
+principles--native wave-level routing, low-token tiles, graph-stable output
+fusion, and symmetric peer communication--but cannot make the unnormalized
+model workloads have the same absolute latency.
+
+On a one-layer S=4 profile, the largest remaining K3 kernels were persistent
+MLA (34.20 us), routed GEMM1 (23.32 us), the two symmetric reductions together
+(18.60 us), latent projection (15.52 us), native router selection (15.24 us),
+and the shared-expert GEMMs. The next material step is deeper persistent
+integration: fuse the router projection with selection, emit sorter-ready
+metadata directly from routing, and combine latent normalization/tail work
+where the ownership and mailbox protocol can be proven safe. A trial that
+combined shared/tail accumulation with the final peer reduce was not retained
+because it produced an illegal-address failure under TP8.
+
+Overlapping shared and routed branches on separate HIP streams was also
 tested and rejected: at S=1 it regressed from 336.68 us to 384.66 us because
 the small GEMMs contend for compute resources and add cross-stream
 synchronization. The production path remains single-stream.
-
-The remaining dominant work is the persistent MLA kernel, two RCCL TP
-reductions, the latent dense transforms, and the A16W4 routed expert kernels.
-The next optimization opportunity is a native fused sigmoid/correction-bias
-top-k sorter and a lower-latency small-message TP reduction. The merged HIP IPC
-runtime now backs the persistent MLA peer exchange with owned
-`SymmetricPeerBuffer` mappings, deterministic cleanup, and double epoch slots.
-The two composed Kimi-K3 latent/final reductions still use RCCL
-`torch.distributed.all_reduce`.
 
 Reproduce the complete MLA + MoE checks and measurements with:
 
@@ -313,17 +355,20 @@ export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:.
 /opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
   --npes 8 --samples 4 --layer-idx 0 --check \
   --bench --layers 16 --repeats 7 \
-  --output /root/kimi-k3-perf-results/full-moe/final-indexed-s4.json
+  --output /root/kimi-k3-perf-results/full-moe/final-optimized-s4.json
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
   --npes 8 --samples 8 --layer-idx 0 --check \
   --bench --layers 16 --repeats 7 \
-  --output /root/kimi-k3-perf-results/full-moe/final-indexed-s8.json
+  --output /root/kimi-k3-perf-results/full-moe/final-optimized-s8.json
 ```
 
 Use `--eager-attn-res`, `--eager-router`, or `--eager-shared-experts` for
 controlled optimization A/B runs. Use `--profile` for median eager GPU event
-timings; uninstrumented HIP-graph replay remains the latency source of truth.
+timings. The default `--reduce-backend symmetric` can be changed to `nccl` for
+a communication A/B. Add `--kernel-profile` to either full-layer harness to
+record one rank-0 graph replay broken down by GPU kernel. Uninstrumented
+HIP-graph replay remains the latency source of truth.
 
 Reproduce the ATOM baseline from the separate checkout with its original layer
 implementation. The local AITER JIT build requires its composable-kernel

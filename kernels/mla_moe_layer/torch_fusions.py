@@ -37,6 +37,13 @@ def compiled_rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 
 
 @torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
+def compiled_rmsnorm_out(x: torch.Tensor, weight: torch.Tensor, output: torch.Tensor) -> None:
+    """Write RMSNorm directly to a caller-owned graph-stable buffer."""
+
+    output.copy_(rmsnorm(x, weight))
+
+
+@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
 def compiled_attn_res_no_delta(
     prefix: torch.Tensor,
     blocks: torch.Tensor,
@@ -68,27 +75,6 @@ def compiled_attn_res_with_delta(
     updated = (prefix.float() + delta.float()).to(torch.bfloat16)
     mixed = compiled_attn_res_no_delta(updated, blocks, norm_weight, qk_weight, output_norm_weight)
     return mixed, updated
-
-
-@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
-def compiled_sigmoid_topk_router(
-    hidden_states: torch.Tensor,
-    router_weight: torch.Tensor,
-    correction_bias: torch.Tensor,
-    scores_out: torch.Tensor,
-    ids_out: torch.Tensor,
-    weights_out: torch.Tensor,
-    top_k: int,
-) -> None:
-    """Fuse FP32 sigmoid routing, correction-bias selection, and normalization."""
-
-    scores = torch.sigmoid(hidden_states.float() @ router_weight.t())
-    _, ids = torch.topk(scores + correction_bias, top_k, dim=-1, sorted=True)
-    weights = torch.gather(scores, 1, ids)
-    weights = weights / weights.sum(-1, keepdim=True)
-    scores_out.copy_(scores)
-    ids_out.copy_(ids)
-    weights_out.copy_(weights)
 
 
 @torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")

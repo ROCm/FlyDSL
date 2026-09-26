@@ -139,8 +139,8 @@ def make_weights(
         t["w_mlp_res"] = (torch.randn(config.hidden, generator=rep, device=device) / config.hidden**0.5).to(bf)
         t["w_r"] = (
             torch.randn(config.n_experts, config.hidden, generator=rep, device=device) / config.hidden**0.5 * 4
-        ).float()
-        t["bias"] = torch.randn(config.n_experts, generator=rep, device=device).float() * 0.1
+        ).to(bf)
+        t["bias"] = (torch.randn(config.n_experts, generator=rep, device=device) * 0.1).to(bf)
         t["w_latent_down"] = (
             torch.randn(routed_hidden, config.hidden, generator=rep, device=device) / config.hidden**0.5
         ).to(bf)
@@ -177,9 +177,9 @@ def make_weights(
             device=device,
         )
         return LayerWeights(heads, t, config, rank, npes)
-    t["w_r"] = (torch.randn(config.n_experts, config.hidden, generator=rep, device=device) / config.hidden**0.5 * 4).to(
-        bf
-    )
+    t["w_r"] = (
+        torch.randn(config.n_experts, config.hidden, generator=rep, device=device) / config.hidden**0.5 * 4
+    ).to(bf)
     t["bias"] = torch.randn(config.n_experts, generator=rep, device=device) * 0.1
     if expert_weight is ExpertWeight.FP8_BLOCK128:
         ug_q = torch.empty(
@@ -515,7 +515,7 @@ def golden_kimi_k3_moe(W: LayerWeights, hidden_states: torch.Tensor, allreduce):
     if routed_hidden is None or shared_inter is None:
         raise ValueError("Kimi-K3 latent-MoE dimensions are missing")
 
-    scores = torch.sigmoid(hidden_states.float() @ t["w_r"].T)
+    scores = torch.sigmoid((hidden_states @ t["w_r"].T).float())
     latent = bf(hidden_states.float() @ t["w_latent_down"].float().T)
     selected, probabilities, mids = [], [], []
     routed_partial = torch.zeros(hidden_states.shape[0], routed_hidden, device=hidden_states.device)

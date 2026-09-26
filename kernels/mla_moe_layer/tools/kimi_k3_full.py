@@ -72,6 +72,7 @@ def _worker(rank: int, args, port: int, results) -> None:
         fuse_attn_res=not args.eager_attn_res,
         fuse_router=not args.eager_router,
         fuse_shared_experts=not args.eager_shared_experts,
+        reduce_backend=args.reduce_backend,
     )
 
     generator = torch.Generator(device=device).manual_seed(args.seed + 99)
@@ -135,6 +136,7 @@ def _worker(rank: int, args, port: int, results) -> None:
         for name, value in stage_tensors.items()
     }
     result = {
+        "reduce_backend": args.reduce_backend,
         "rank_equal": rank_equal,
         "finite": bool(torch.isfinite(output).all()),
         "stage_health": stage_health,
@@ -246,6 +248,29 @@ def _worker(rank: int, args, port: int, results) -> None:
             layers=args.layers,
             repeats=args.repeats,
         )
+        if args.kernel_profile:
+            dist.barrier()
+            if rank == 0:
+                with torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+                ) as profiler:
+                    graph.replay()
+                    torch.cuda.synchronize()
+                events = [event for event in profiler.key_averages() if event.self_device_time_total > 0]
+                events.sort(key=lambda event: event.self_device_time_total, reverse=True)
+                result["kernel_profile"] = [
+                    {
+                        "name": event.key,
+                        "calls": event.count,
+                        "total_us": event.self_device_time_total,
+                        "mean_us": event.self_device_time_total / event.count,
+                    }
+                    for event in events
+                ]
+            else:
+                graph.replay()
+                torch.cuda.synchronize()
+            dist.barrier()
 
     results[rank] = result
     if rank == 0:
@@ -281,8 +306,10 @@ def main() -> int:
         action="store_true",
         help="use the unfused Torch shared-expert path",
     )
+    parser.add_argument("--reduce-backend", choices=("symmetric", "nccl"), default="symmetric")
     parser.add_argument("--layers", type=int, default=16)
     parser.add_argument("--repeats", type=int, default=7)
+    parser.add_argument("--kernel-profile", action="store_true", help="record one rank-0 HIP-graph kernel profile")
     parser.add_argument("--output", help="write rank-0 JSON results to this path")
     args = parser.parse_args()
     if not args.check and not args.bench and not args.profile:

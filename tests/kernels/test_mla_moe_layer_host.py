@@ -19,7 +19,7 @@ from kernels.mla_moe_layer.config import (
     moe_format,
     validate_shard,
 )
-from kernels.mla_moe_layer.kernel_layout import layout, stage_tasks
+from kernels.mla_moe_layer.kernel_layout import layout, stage_tasks, symmetric_allreduce_nbytes
 from kernels.mla_moe_layer.packing import (
     pack_a16w4_scale,
     pack_a16w4_weight,
@@ -28,6 +28,7 @@ from kernels.mla_moe_layer.packing import (
     pack_mxfp4,
 )
 from kernels.mla_moe_layer.reference import golden_layer, kimi_attn_res, make_weights, rope_table, situ
+from kernels.mla_moe_layer.router import build_sigmoid_topk_router
 
 
 def test_pack_fp8_uses_mfma_lane_order():
@@ -190,6 +191,16 @@ def test_common_schedule_splits_twelve_heads_across_two_ctas_at_s1():
 
     assert s1["split"] == 4
     assert s4["split"] == 8
+
+
+def test_symmetric_allreduce_layout_reserves_two_slots_per_region():
+    assert symmetric_allreduce_nbytes((4 * 3584, 4 * 7168), 8) == 4 * 8 * (4 * 7168 // 2) * 8
+
+
+@pytest.mark.parametrize("args", [(900, 16, 4), (896, 0, 4), (896, 16, 3)])
+def test_sigmoid_topk_router_rejects_unsupported_shapes(args):
+    with pytest.raises(ValueError):
+        build_sigmoid_topk_router(*args)
 
 
 def test_kimi_k3_situ_applies_bounded_gate_and_up_branches():

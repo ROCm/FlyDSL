@@ -34,6 +34,18 @@ POLL_MAX = 12
 TL_COLS = 8
 
 
+def symmetric_allreduce_nbytes(sizes: tuple[int, ...], npes: int) -> int:
+    """Return bytes for two tagged-mailbox epoch slots per reduce region."""
+
+    if not sizes or any(size <= 0 or size % 2 for size in sizes):
+        raise ValueError("all BF16 reduce sizes must be positive and even")
+    if npes not in {2, 4, 8}:
+        raise ValueError(f"npes must be one of {{2, 4, 8}}, got {npes}")
+    max_pairs = max(sizes) // 2
+    slot_bytes = npes * max_pairs * 8
+    return len(sizes) * 2 * slot_bytes
+
+
 def dn_tile(samples: int, hidden: int = GLM5_CONFIG.hidden) -> int:
     """Return hidden rows per expert-down / FFN peer-reduce task."""
 
