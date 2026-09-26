@@ -288,4 +288,26 @@ def Fly_ExplicitModuleAttr : Fly_Attr<"ExplicitModule", "explicit_module", [
   let assemblyFormat = "``";
 }
 
+def Fly_AotModuleAttr : Fly_Attr<"AotModule", "aot_module", [
+    OffloadingTranslationAttrTrait
+]> {
+  let summary = "ROCm GPU binary offloading handler for exported (AOT) host objects";
+  let description = [{
+    Offloading handler used by `flyc.compile(...).export_to_c(...)`.
+    During LLVM translation it embeds the selected GPU binary with internal
+    linkage and emits the externally visible lifecycle functions
+
+      int32_t <prefix>__module_init(void)
+      int32_t <prefix>__module_load(int32_t device)
+      int32_t <prefix>__module_unload(void)
+
+    backed by the per-device module table in the FlyDSL runtime.  Kernel
+    launches resolve and submit through the AOT runtime while holding the
+    module state alive, so concurrent unload cannot invalidate a function
+    handle between lookup and launch.
+  }];
+  let parameters = (ins StringRefParameter<"exported symbol prefix">:$symbolPrefix);
+  let assemblyFormat = "`<` $symbolPrefix `>`";
+}
+
 #endif // FLY_ATTRDEFS

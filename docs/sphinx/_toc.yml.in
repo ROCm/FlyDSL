@@ -51,6 +51,8 @@ subtrees:
         title: CuTe layout algebra
       - file: extern_integration_guide
         title: External bitcode integration
+      - file: aot_export_guide
+        title: AOT export to C objects
   - caption: API reference
     entries:
       - file: api/dsl

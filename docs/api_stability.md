@@ -156,6 +156,8 @@ table is the only exception list; a new commitment must add an explicit row.
 | ------------------------------------- | ---------------------------------- |
 | `flydsl.runtime.device.get_rocm_arch` | Query the target ROCm architecture |
 | `flydsl.runtime.device.is_rdna_arch`  | Choose between CDNA and RDNA paths |
+| `flydsl.runtime.find_runtime_libraries` | Runtime libraries needed by objects exported with `flyc.compile(...).export_to_c(...)` |
+| `flydsl.compiler.aot_config`          | `python -m flydsl.compiler.aot_config --libdir / --ldflags / --libs` command line |
 
 ### 2.5 All other APIs
 

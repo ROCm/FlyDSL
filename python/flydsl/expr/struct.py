@@ -366,6 +366,15 @@ def _effective_field_defs(schema: type) -> tuple[tuple[str, Any], ...]:
     return tuple(getattr(base_cls, "__annotations__", {}).items())
 
 
+def runtime_fields(obj: Any) -> list[tuple[str, Any]]:
+    """``(name, value)`` of a struct instance's non-constexpr fields, in C ABI packing order."""
+    return [
+        (name, getattr(obj, name))
+        for name, eff_type in _effective_field_defs(type(obj))
+        if not _is_constexpr_type(eff_type)
+    ]
+
+
 def _carrier_for_field(eff_type: Any, value: Any) -> Any:
     if isinstance(eff_type, type) and issubclass(eff_type, Constexpr):
         return eff_type
@@ -544,10 +553,8 @@ def _make_composite_class(
         # Recurse each non-constexpr field through the shared ABI dispatcher and
         # wrap every sub-slot fill so it reads the field off the struct instance.
         slots = []
-        for name, eff_type in _effective_field_defs(type(self)):
-            if _is_constexpr_type(eff_type):
-                continue
-            for ctype, subfill in c_abi_spec(getattr(self, name)):
+        for name, value in runtime_fields(self):
+            for ctype, subfill in c_abi_spec(value):
 
                 def fill(struct_arg, s, _n=name, _f=subfill):
                     _f(getattr(struct_arg, _n), s)

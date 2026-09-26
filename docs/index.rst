@@ -60,6 +60,8 @@ to GPU/ROCDL.
 
       * :doc:`External bitcode integration <extern_integration_guide>`
 
+      * :doc:`AOT export to C objects <aot_export_guide>`
+
    .. grid-item-card:: API reference
 
       * :doc:`FlyDSL Python DSL <api/dsl>`

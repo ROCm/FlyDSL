@@ -13,13 +13,16 @@ from .device_runtime import (
     register_compile_runtime_mapping,
     register_device_runtime,
 )
+from .libraries import RuntimeLibrary, find_runtime_libraries
 
 __all__ = [
     "COMPILE_BACKEND_TO_RUNTIME_KIND",
     "DeviceRuntime",
     "RocmDeviceRuntime",
+    "RuntimeLibrary",
     "ensure_compile_runtime_compatible",
     "ensure_compile_runtime_pairing_from_env",
+    "find_runtime_libraries",
     "get_device_runtime",
     "register_compile_runtime_mapping",
     "register_device_runtime",

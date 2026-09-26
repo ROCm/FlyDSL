@@ -170,6 +170,20 @@ class TestCompileCallable:
         result = flyc.compile(_fresh)
         assert result.compile_hints == {}
 
+    def test_deferred_compilation_sets_hints_on_bound_method(self):
+        """Compile hints apply to the JitFunction behind a bound method."""
+
+        class Launcher:
+            @flyc.jit
+            def launch(self, stream: fx.Stream = fx.Stream(None)):
+                _noop_kernel().launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
+
+        bound = Launcher().launch
+        result = flyc.compile[{"fast_fp_math": True}](bound)
+
+        assert result is bound
+        assert Launcher.launch.compile_hints == {"fast_fp_math": True}
+
 
 # ──────────────────────────────────────────────────────────────
 # Tests: compile_hints pipeline propagation
