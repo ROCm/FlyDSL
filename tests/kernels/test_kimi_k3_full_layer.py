@@ -13,7 +13,15 @@ from pathlib import Path
 import pytest
 import torch
 
+from flydsl.runtime.device import get_rocm_arch
+
 ROOT = Path(__file__).resolve().parents[2]
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
+_ARCH = str(get_rocm_arch() or "")
+if _ARCH != "gfx950":
+    pytest.skip(f"Kimi-K3 full layer requires gfx950, got {_ARCH}", allow_module_level=True)
 
 
 @pytest.mark.multi_gpu
