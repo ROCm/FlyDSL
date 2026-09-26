@@ -48,7 +48,7 @@ Three things follow from `allocate` returning an address rather than a value:
   exactly what a `T` value could not do.
 
 `peek` and `poke` compose recursively, so a nested struct reads and writes each leaf at `base +
-outer_offset + inner_offset`. 
+outer_offset + inner_offset`.
 
 `peek` and `poke` are real members of this class, and attribute lookup finds a member before it
 reaches the type's fields — which is why they, along with `replace` and any `_`-prefixed name, are
@@ -199,7 +199,6 @@ static_assert(sizeof(double) == 8 && alignof(double) == 8);
 static_assert(alignof(Item) == 16);
 static_assert(sizeof(Item) == 16);
 ```
-
 
 ## Byte layout
 

@@ -42,7 +42,6 @@ function.
 The adapter defines the host contract; `dsl_type` defines the value visible while tracing. A value
 implementing both `JitArgument` and `DslType` can be used directly without an adapter.
 
-
 ## `DslType`
 
 | Hook | Meaning |
@@ -69,7 +68,6 @@ A zero-length result is valid and is used by `Constexpr` values with no run-time
 The free functions `dsl_size_of`, `dsl_align_of`, `peek_from_ptr`, and `poke_into_ptr` dispatch to
 these hooks. `Storage[T]` and the allocators use the same protocol; see [Storage and
 Allocator](storage_and_allocator.md).
-
 
 ## Python-to-MLIR boundary
 
@@ -119,7 +117,6 @@ affect specialization, but contribute no run-time MLIR parameters or C-ABI slots
 
 `JitArgument` is used only at the Python-to-MLIR boundary. The jit-to-kernel boundary is already
 inside MLIR construction and therefore uses `DslType`, not the host C ABI.
-
 
 ## Protocol support
 

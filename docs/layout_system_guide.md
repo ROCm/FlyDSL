@@ -127,6 +127,7 @@ coord = fx.idx2crd(idx, layout)
 ### Example
 
 For layout `((8, 16), (1, 8))` (8x16, column-major):
+
 - `crd2idx((3, 5), layout)` = `3*1 + 5*8` = `43`
 - `idx2crd(43, layout)` = `(43 % 8, 43 / 8)` = `(3, 5)`
 
@@ -185,6 +186,7 @@ rest = fx.complement(tiler, target_size)
 Simplifies a layout by flattening nested modes and combining adjacent modes when possible.
 
 **Post-conditions**:
+
 - `size(result) == size(layout)` (preserves total size)
 - For all valid indices: `layout(i) == result(i)` (preserves mapping)
 
@@ -456,6 +458,7 @@ fx.printf("tid={} bid={} val={}", tid, bid, value)
 ```
 
 Supports:
+
 - `ir.Value` — dynamic values
 - `int`, `float`, `bool` — auto-converted to constants
 - `str`, `type` — embedded as static text
@@ -465,7 +468,7 @@ Supports:
 
 ## 13. Decision tree
 
-```
+```text
 Which layout operation do I need?
 
 ├── Creating a layout?

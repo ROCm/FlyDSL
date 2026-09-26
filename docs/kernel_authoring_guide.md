@@ -277,7 +277,7 @@ where out-of-range reads return zero and writes are suppressed. The byte count
 may be dynamic. Omitting it keeps the default unchecked descriptor; passing
 `max_size=False` derives the count from the tensor layout and enables checking.
 
-See [gfx1250 WMMA & TDM atoms](#wmma-tdm-atoms) below for the
+See {ref}`gfx1250 WMMA & TDM atoms <wmma-tdm-atoms>` below for the
 gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.
 
 #### MFMA instructions
@@ -319,16 +319,10 @@ result = rocdl.exp2(T.f32, x)
 result = rocdl.rcp(T.f32, x)
 ```
 
-#### Low-level ops
-
-```python
-# Warp shuffle
-val = rocdl.ds_bpermute(idx, src)
-
-# Buffer load/store (raw)
-data = rocdl.raw_ptr_buffer_load(rsrc, offset, soffset, aux)
-rocdl.raw_ptr_buffer_store(data, rsrc, offset, soffset, aux)
-```
+Generated upstream ROCDL builders and repository-only compatibility helpers are
+not part of the stable expression API and are intentionally omitted here. New
+kernels should prefer `rocdl.make_buffer_tensor()` plus `fx.copy()` or typed
+`Tensor`/`Pointer` access.
 
 (wmma-tdm-atoms)=
 
@@ -364,7 +358,7 @@ accumulating to f32. Pass a different B type with the keyword-only `elem_ty_b`;
 it defaults to the A type. The 16x16x32 BF16 and fp8 K=64/128 forms above are
 gfx1250-only and are rejected by the atom's verifier. See
 `kernels/gemm/rdna_f16_gemm.py` for a full pipelined f16 example and
-`kernels/gemm/rdna4_fp8_blockscale.py` for raw FP8 operands.
+`kernels/gemm/rdna_fp8_preshuffle_gemm.py` for an RDNA4 FP8 implementation.
 
 ```python
 mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.BFloat16, fx.Float32))  # RDNA4
@@ -430,7 +424,6 @@ fx.gemm(
 When a callback is present, the callback receives the original atom with its runtime state and a
 tuple of integer tile indices `(m, n, k)`, and returns the atom for that tile. Rank-2 operands use
 `k=0`; rank-1 calls use `(0, 0, 0)`.
-
 
 **TDM async copy atom** — the **base pointer comes from the `copy_atom_call` global
 operand** (its pointer); the per-dim extent (HW out-of-bounds handling), per-dim
@@ -573,6 +566,7 @@ def launch(data: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
 ```
 
 Grid and block dimensions accept:
+
 - `int` — static value
 - `ir.Value` — dynamic MLIR value
 - Tuple of 1–3 values — missing dimensions default to 1
@@ -616,6 +610,7 @@ JIT-compiled functions are cached automatically:
 ### 9.2 Cache invalidation
 
 The cache is invalidated when:
+
 - Source code of the function or its dependencies changes
 - Argument types change (different tensor shapes/dtypes)
 - `Constexpr` values change
@@ -729,7 +724,7 @@ one compiled kernel serves any `M`. Select output post-processing with
 
 ## 12. Decision tree
 
-```
+```text
 Writing a new kernel?
 │
 ├── Simple element-wise?
