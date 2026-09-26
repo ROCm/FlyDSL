@@ -3,8 +3,6 @@
 
 """Small graph-safe BF16 all-reduce using tagged symmetric peer mailboxes."""
 
-from __future__ import annotations
-
 import torch
 
 import flydsl.compiler as flyc
@@ -12,7 +10,8 @@ import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.mla_moe_layer.kernel_common import rsrc, uniform
+from kernels.mla_moe_layer.config import EPS
+from kernels.mla_moe_layer.kernel_common import rsq, rsrc, uniform, xred
 from kernels.mla_moe_layer.kernel_layout import (
     CM_DEV,
     CM_SYS,
@@ -23,6 +22,7 @@ from kernels.mla_moe_layer.runtime import SymmetricPeerBuffer
 
 THREADS = 512
 WAVE_SIZE = 64
+WAVES = THREADS // WAVE_SIZE
 
 
 def build_symmetric_bf16_allreduce(
@@ -147,6 +147,216 @@ def build_symmetric_bf16_allreduce(
 
     launch.func.__name__ = f"symmetric_bf16_allreduce_n{numel}_w{npes}_r{region}"
     return launch
+
+
+def build_symmetric_bf16_allreduce_rmsnorm(
+    numel: int,
+    row_width: int,
+    npes: int,
+    max_pairs: int,
+    region: int,
+):
+    """Build a BF16 all-reduce that also RMS-normalizes each reduced row."""
+
+    if numel <= 0 or numel % row_width or row_width % 2:
+        raise ValueError(f"numel={numel} must be a positive multiple of even row_width={row_width}")
+    if npes not in {2, 4, 8}:
+        raise ValueError(f"npes must be one of {{2, 4, 8}}, got {npes}")
+    pairs = numel // 2
+    if pairs > max_pairs:
+        raise ValueError(f"pairs={pairs} exceeds max_pairs={max_pairs}")
+    rows = numel // row_width
+    pairs_per_row = row_width // 2
+    blocks_per_row = (pairs_per_row + THREADS - 1) // THREADS
+    blocks = rows * blocks_per_row
+    if blocks > 256:
+        raise ValueError(f"RMSNorm all-reduce requires a co-resident grid, got {blocks} blocks")
+    slot_bytes = npes * max_pairs * 8
+    region_base = region * 2 * slot_bytes
+
+    @fx.struct
+    class SharedStorage:
+        reduction: fx.Array[fx.Float32, 8, 16]
+
+    @flyc.kernel(known_block_size=[THREADS, 1, 1])
+    def symmetric_bf16_allreduce_rmsnorm(
+        source: Int64,
+        reduced: Int64,
+        gain: Int64,
+        normalized: Int64,
+        norm_scratch: Int64,
+        symmetric: Int64,
+        peers: Int64,
+        step: Int64,
+        rank: Int32,
+        layer: Int32,
+    ):
+        tid = fx.thread_idx.x
+        bid = fx.block_idx.x
+        lane = tid % WAVE_SIZE
+        wave = tid // WAVE_SIZE
+        sample = bid // blocks_per_row
+        block_in_row = bid % blocks_per_row
+        pair_in_row = block_in_row * THREADS + tid
+        valid = pair_in_row < pairs_per_row
+        pair = sample * pairs_per_row + pair_in_row
+
+        step_value = uniform(bo.buffer_load(rsrc(step), 0, vec_width=1, dtype=T.i32))
+        tag = step_value * LAYER_SLOTS + layer + 1
+        slot = (step_value * LAYER_SLOTS + layer) & 1
+        base = fx.Int64(region_base) + fx.Int64(slot) * fx.Int64(slot_bytes)
+
+        peer_words = fx.Vector(bo.buffer_load(rsrc(peers), wave * 2, vec_width=2, dtype=T.i32))
+        peer_base = (fx.Int64(uniform(peer_words[1])) << 32) | fx.Int64(fx.Uint32(uniform(peer_words[0])))
+        source_rsrc = rsrc(source)
+
+        if wave < npes:
+            peer_rsrc = rsrc(peer_base + base)
+            for batch in range_constexpr(THREADS // WAVE_SIZE):
+                send_pair_in_row = block_in_row * THREADS + lane + batch * WAVE_SIZE
+                if send_pair_in_row < pairs_per_row:
+                    send_pair = sample * pairs_per_row + send_pair_in_row
+                    value = fx.Int32(bo.buffer_load(source_rsrc, send_pair, vec_width=1, dtype=T.i32))
+                    mailbox = rank * max_pairs + send_pair
+                    bo.buffer_store(
+                        fx.Vector.from_elements([value, tag], fx.Int32),
+                        peer_rsrc,
+                        mailbox * 2,
+                        cache_modifier=CM_SYS,
+                    )
+        gpu.barrier()
+
+        reduced_lo = fx.Float32(0.0)
+        reduced_hi = fx.Float32(0.0)
+        if valid:
+            local_rsrc = rsrc(symmetric + base)
+
+            def load_all():
+                words = []
+                for source_rank in range_constexpr(npes):
+                    mailbox = source_rank * max_pairs + pair
+                    value_tag = fx.Vector(
+                        bo.buffer_load(
+                            local_rsrc,
+                            mailbox * 2,
+                            vec_width=2,
+                            dtype=T.i32,
+                            cache_modifier=CM_DEV,
+                        )
+                    )
+                    words += [value_tag[0], value_tag[1]]
+                return fx.Vector.from_elements(words, fx.Int32)
+
+            values = load_all()
+            pending = values[1] != tag
+            for source_rank in range_constexpr(1, npes):
+                pending = pending | (values[source_rank * 2 + 1] != tag)
+            while pending:
+                rocdl.s_nop(0)
+                values = load_all()
+                pending = values[1] != tag
+                for source_rank in range_constexpr(1, npes):
+                    pending = pending | (values[source_rank * 2 + 1] != tag)
+
+            sum_lo = fx.Float32(0.0)
+            sum_hi = fx.Float32(0.0)
+            for source_rank in range_constexpr(npes):
+                word = values[source_rank * 2]
+                sum_lo = sum_lo + (word << 16).bitcast(fx.Float32)
+                sum_hi = sum_hi + (word & fx.Int32(-65536)).bitcast(fx.Float32)
+            packed = fx.Vector.from_elements([sum_lo, sum_hi], fx.Float32).to(fx.BFloat16).bitcast(fx.Int32)[0]
+            bo.buffer_store(packed, rsrc(reduced), pair, cache_modifier=CM_DEV)
+            reduced_lo = (packed << 16).bitcast(fx.Float32)
+            reduced_hi = (packed & fx.Int32(-65536)).bitcast(fx.Float32)
+
+        square_sum = reduced_lo * reduced_lo + reduced_hi * reduced_hi
+        for offset in (32, 16, 8, 4, 2, 1):
+            square_sum = xred(square_sum, offset, lambda lhs, rhs: lhs + rhs)
+        reduction = fx.SharedAllocator().allocate(SharedStorage).peek().reduction.ptr
+        if lane == 0:
+            fx.ptr_store(square_sum, reduction + wave)
+        gpu.barrier()
+        block_square_sum = fx.ptr_load(reduction)
+        for source_wave in range_constexpr(1, WAVES):
+            block_square_sum = block_square_sum + fx.ptr_load(reduction + source_wave)
+        if tid == 0:
+            bo.buffer_store(
+                fx.Vector.from_elements([block_square_sum.bitcast(fx.Int32), tag], fx.Int32),
+                rsrc(norm_scratch),
+                bid * 2,
+                cache_modifier=CM_DEV,
+            )
+        gpu.barrier()
+
+        if tid < blocks_per_row:
+            partial_index = sample * blocks_per_row + tid
+
+            def load_partial():
+                return fx.Vector(
+                    bo.buffer_load(
+                        rsrc(norm_scratch),
+                        partial_index * 2,
+                        vec_width=2,
+                        dtype=T.i32,
+                        cache_modifier=CM_DEV,
+                    )
+                )
+
+            partial = load_partial()
+            while partial[1] != tag:
+                rocdl.s_nop(0)
+                partial = load_partial()
+            fx.ptr_store(partial[0].bitcast(fx.Float32), reduction + tid)
+        gpu.barrier()
+
+        total_square = fx.ptr_load(reduction)
+        for source_block in range_constexpr(1, blocks_per_row):
+            total_square = total_square + fx.ptr_load(reduction + source_block)
+        inverse_rms = rsq(total_square * (1.0 / row_width) + EPS)
+        if valid:
+            gain_word = fx.Int32(bo.buffer_load(rsrc(gain), pair_in_row, vec_width=1, dtype=T.i32))
+            gain_lo = (gain_word << 16).bitcast(fx.Float32)
+            gain_hi = (gain_word & fx.Int32(-65536)).bitcast(fx.Float32)
+            normalized_word = (
+                fx.Vector.from_elements(
+                    [reduced_lo * inverse_rms * gain_lo, reduced_hi * inverse_rms * gain_hi],
+                    fx.Float32,
+                )
+                .to(fx.BFloat16)
+                .bitcast(fx.Int32)[0]
+            )
+            bo.buffer_store(normalized_word, rsrc(normalized), pair, cache_modifier=CM_DEV)
+
+    @flyc.jit
+    def launch(
+        source: Int64,
+        reduced: Int64,
+        gain: Int64,
+        normalized: Int64,
+        norm_scratch: Int64,
+        symmetric: Int64,
+        peers: Int64,
+        step: Int64,
+        rank: Int32,
+        layer: Int32,
+        stream: Stream = Stream(None),
+    ):
+        symmetric_bf16_allreduce_rmsnorm(
+            source,
+            reduced,
+            gain,
+            normalized,
+            norm_scratch,
+            symmetric,
+            peers,
+            step,
+            rank,
+            layer,
+            value_attrs={"rocdl.flat_work_group_size": f"{THREADS},{THREADS}"},
+        ).launch(grid=(blocks, 1, 1), block=(THREADS, 1, 1), stream=stream)
+
+    launch.func.__name__ = f"symmetric_bf16_allreduce_rmsnorm_n{numel}_h{row_width}_w{npes}_r{region}"
+    return launch, blocks
 
 
 def build_symmetric_bf16_final_reduce(
@@ -322,8 +532,6 @@ def build_symmetric_bf16_final_reduce(
     return launch
 
 
-
-
 class SymmetricBf16Allreduce:
     """Own symmetric storage and fixed-shape launchers for small BF16 reductions."""
 
@@ -336,6 +544,7 @@ class SymmetricBf16Allreduce:
         *,
         final_hidden: int | None = None,
         final_shard_width: int | None = None,
+        rmsnorm_width: int | None = None,
     ) -> None:
         nbytes = symmetric_allreduce_nbytes(sizes, npes)
         self.max_pairs = max(sizes) // 2
@@ -344,6 +553,15 @@ class SymmetricBf16Allreduce:
             build_symmetric_bf16_allreduce(size, npes, self.max_pairs, region) for region, size in enumerate(sizes)
         )
         self.final_launch = None
+        self.rmsnorm_launch = None
+        self.rmsnorm_scratch = None
+        if rmsnorm_width is not None:
+            self.rmsnorm_launch, rmsnorm_blocks = build_symmetric_bf16_allreduce_rmsnorm(
+                sizes[0], rmsnorm_width, npes, self.max_pairs, 0
+            )
+            # The fused Kimi tail reuses the first 2*blocks words for tagged
+            # row sums and the final blocks words for completion tags.
+            self.rmsnorm_scratch = torch.zeros(rmsnorm_blocks * 3, dtype=torch.int32, device="cuda")
         if final_hidden is not None and final_shard_width is not None:
             self.final_launch = build_symmetric_bf16_final_reduce(
                 sizes[-1],
@@ -354,6 +572,41 @@ class SymmetricBf16Allreduce:
                 len(sizes) - 1,
             )
         self.rank = rank
+
+    def reduce_rmsnorm(
+        self,
+        source: torch.Tensor,
+        reduced: torch.Tensor,
+        gain: torch.Tensor,
+        normalized: torch.Tensor,
+        step: torch.Tensor,
+        layer: int,
+    ) -> torch.Tensor:
+        """Reduce one BF16 matrix and RMS-normalize every row in the same launch."""
+
+        if self.rmsnorm_launch is None or self.rmsnorm_scratch is None:
+            raise ValueError("fused RMSNorm reduction was not configured")
+        tensors = (source, reduced, gain, normalized)
+        if any(tensor.dtype != torch.bfloat16 or not tensor.is_contiguous() for tensor in tensors):
+            raise ValueError("fused RMSNorm reduction requires contiguous BF16 tensors")
+        if source.shape != reduced.shape or source.shape != normalized.shape:
+            raise ValueError("source, reduced, and normalized shapes must match")
+        if gain.numel() != source.shape[-1]:
+            raise ValueError("RMSNorm gain must match the row width")
+        self.rmsnorm_launch(
+            source.data_ptr(),
+            reduced.data_ptr(),
+            gain.data_ptr(),
+            normalized.data_ptr(),
+            self.rmsnorm_scratch.data_ptr(),
+            self.peer_buffer.local_address,
+            self.peer_buffer.addresses.data_ptr(),
+            step.data_ptr(),
+            self.rank,
+            layer,
+            stream=torch.cuda.current_stream(),
+        )
+        return normalized
 
     def reduce(
         self,

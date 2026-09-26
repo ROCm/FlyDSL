@@ -177,9 +177,9 @@ def make_weights(
             device=device,
         )
         return LayerWeights(heads, t, config, rank, npes)
-    t["w_r"] = (
-        torch.randn(config.n_experts, config.hidden, generator=rep, device=device) / config.hidden**0.5 * 4
-    ).to(bf)
+    t["w_r"] = (torch.randn(config.n_experts, config.hidden, generator=rep, device=device) / config.hidden**0.5 * 4).to(
+        bf
+    )
     t["bias"] = torch.randn(config.n_experts, generator=rep, device=device) * 0.1
     if expert_weight is ExpertWeight.FP8_BLOCK128:
         ug_q = torch.empty(
@@ -508,7 +508,13 @@ def kimi_attn_res(
     return bf(mixed).to(prefix.dtype), updated.to(prefix.dtype)
 
 
-def golden_kimi_k3_moe(W: LayerWeights, hidden_states: torch.Tensor, allreduce):
+def golden_kimi_k3_moe(
+    W: LayerWeights,
+    hidden_states: torch.Tensor,
+    allreduce,
+    *,
+    projection_states: torch.Tensor | None = None,
+):
     """Kimi-K3 TP8 latent-MoE golden, including shared experts and tail."""
 
     if W.config != KIMI_K3_CONFIG:
@@ -520,7 +526,9 @@ def golden_kimi_k3_moe(W: LayerWeights, hidden_states: torch.Tensor, allreduce):
         raise ValueError("Kimi-K3 latent-MoE dimensions are missing")
 
     scores = torch.sigmoid((hidden_states @ t["w_r"].T).float())
-    latent = bf(hidden_states.float() @ t["w_latent_down"].float().T)
+    if projection_states is None:
+        projection_states = hidden_states
+    latent = bf(projection_states.float() @ t["w_latent_down"].float().T)
     selected, probabilities, mids = [], [], []
     routed_partial = torch.zeros(hidden_states.shape[0], routed_hidden, device=hidden_states.device)
     fmt = moe_format(MoeMode.A16W4)
@@ -540,7 +548,7 @@ def golden_kimi_k3_moe(W: LayerWeights, hidden_states: torch.Tensor, allreduce):
     routed_reduced = allreduce(bf(routed_partial))
     latent_norm = bf(rmsnorm(routed_reduced, t["g_latent"]))
 
-    shared_gu = bf(hidden_states.float() @ t["w_shared_ug"].float().T)
+    shared_gu = bf(projection_states.float() @ t["w_shared_ug"].float().T)
     shared_mid = bf(situ(shared_gu, beta=config.situ_beta, linear_beta=config.situ_linear_beta))
     shared_partial = bf(shared_mid.float() @ t["w_shared_dn"].float().T)
     tail = bf(latent_norm.float() @ t["w_latent_up"].float().T)

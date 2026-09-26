@@ -19,14 +19,17 @@ import torch.multiprocessing as mp
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from kernels.mla_moe_layer.config import KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP, MoeMode  # noqa: E402
+from kernels.common.mx_formats import dequantize_mxfp8, quant_dequant_mxfp8, quantize_mxfp8  # noqa: E402
+from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP, MoeMode  # noqa: E402
 from kernels.mla_moe_layer.kimi_k3 import KimiK3MlaMoeLayer  # noqa: E402
 from kernels.mla_moe_layer.reference import (  # noqa: E402
+    LayerWeights,
     golden_kimi_k3_layer,
     golden_kimi_k3_moe,
     make_weights,
     rope_table,
 )
+from kernels.mla_moe_layer.torch_fusions import situ  # noqa: E402
 
 
 def _allreduce_reference(value: torch.Tensor, world_size: int) -> torch.Tensor:
@@ -113,7 +116,6 @@ def _worker(rank: int, args, port: int, results) -> None:
     rank_equal = all(torch.equal(peers[0], peer) for peer in peers[1:])
 
     stage_tensors = {
-        "pre_attn": layer.pre_attn,
         "attention_delta": layer.attention_delta,
         "moe_input": layer.moe_input,
         "router_scores": layer.router_scores,
@@ -121,6 +123,7 @@ def _worker(rank: int, args, port: int, results) -> None:
         "routed_partial": layer.routed_partial,
         "routed_reduced": layer.routed_reduced,
         "latent_norm": layer.latent_norm,
+        "shared_gu": layer.shared_gu,
         "shared_mid": layer.shared_mid,
         "shared_partial": layer.shared_partial,
         "tail": layer.tail,
@@ -128,6 +131,8 @@ def _worker(rank: int, args, port: int, results) -> None:
         "moe_delta": layer.moe_delta,
         "output": output,
     }
+    if not layer.inline_pre_attn:
+        stage_tensors["pre_attn"] = layer.pre_attn
     stage_health = {
         name: {
             "finite": bool(torch.isfinite(value).all()),
@@ -142,10 +147,24 @@ def _worker(rank: int, args, port: int, results) -> None:
         "stage_health": stage_health,
     }
     if args.check:
+        reference_tensors = weights.t.copy()
+        quantized_names = ["w_latent_down", "w_shared_ug"]
+        if layer.fused_tail is not None:
+            quantized_names += ["w_shared_dn", "w_latent_up"]
+        for name in quantized_names:
+            quantized, scale = quantize_mxfp8(reference_tensors[name])
+            reference_tensors[name] = dequantize_mxfp8(quantized, scale).to(torch.bfloat16)
+        reference_weights = LayerWeights(
+            weights.heads,
+            reference_tensors,
+            weights.config,
+            weights.rank,
+            weights.npes,
+        )
         ref_blocks = blocks0.clone()
         ref_kv, ref_pe = kv0.clone(), pe0.clone()
         reference = golden_kimi_k3_layer(
-            weights,
+            reference_weights,
             prefix,
             ref_blocks,
             args.pos,
@@ -162,20 +181,51 @@ def _worker(rank: int, args, port: int, results) -> None:
         # small legal MLA accumulation difference can otherwise flip a near-tied
         # synthetic router decision and obscure whether the MoE path is correct.
         moe_reference = golden_kimi_k3_moe(
-            weights,
+            reference_weights,
             layer.moe_input.clone(),
             lambda value: _allreduce_reference(value, args.npes),
+            projection_states=quant_dequant_mxfp8(layer.moe_input).to(torch.bfloat16),
         )
         output_reference = (layer.updated_prefix.float() + moe_reference["moe_delta"].float()).to(torch.bfloat16)
+        routed_reduced_reference = _allreduce_reference(layer.routed_partial, args.npes)
+        routed_norm_reference = (
+            routed_reduced_reference.float()
+            * torch.rsqrt(routed_reduced_reference.float().square().mean(-1, keepdim=True) + EPS)
+            * layer.t["g_latent"].float()
+        ).to(torch.bfloat16)
+        shared_mid_reference = situ(layer.shared_gu, config.situ_beta, config.situ_linear_beta)
+        num_valid = int(layer.num_valid_ids[0])
+        packed_routes = layer.sorted_token_ids[:num_valid]
+        route_tokens = packed_routes & 0x00FFFFFF
+        route_slots = packed_routes >> 24
+        route_experts = layer.sorted_expert_ids[torch.arange(num_valid, device=device, dtype=torch.int64) // 16]
+        route_valid = (route_tokens < args.samples) & (route_slots < config.top_k)
+        reconstructed_ids = torch.full_like(layer.topk_ids, -1)
+        reconstructed_weights = torch.zeros_like(layer.topk_weights)
+        reconstructed_ids[route_tokens[route_valid].long(), route_slots[route_valid].long()] = route_experts[
+            route_valid
+        ]
+        reconstructed_weights[route_tokens[route_valid].long(), route_slots[route_valid].long()] = layer.sorted_weights[
+            :num_valid
+        ][route_valid]
         result.update(
-            pre_attn_rel_l2=_relative_l2(layer.pre_attn, reference["pre_attn"]),
+            pre_attn_rel_l2=(None if layer.inline_pre_attn else _relative_l2(layer.pre_attn, reference["pre_attn"])),
             attention_rel_l2=_relative_l2(layer.attention_delta, reference["attention_delta"]),
             moe_input_rel_l2=_relative_l2(layer.moe_input, reference["moe_input"]),
             router_rel_l2=_relative_l2(layer.router_scores, reference["scores"]),
+            latent_mxfp8_rel_l2=_relative_l2(layer.latent, moe_reference["latent"]),
             output_rel_l2=_relative_l2(output, output_reference),
             routed_rel_l2=_relative_l2(layer.routed_partial, moe_reference["routed_partial"]),
+            routed_reduce_rel_l2=_relative_l2(layer.routed_reduced, routed_reduced_reference),
+            routed_norm_rel_l2=_relative_l2(layer.latent_norm, routed_norm_reference),
+            shared_mid_rel_l2=_relative_l2(layer.shared_mid, shared_mid_reference),
             selection_equal=bool(torch.equal(layer.topk_ids, moe_reference["sel"])),
             selection_mismatches=int((layer.topk_ids != moe_reference["sel"]).sum()),
+            topk_weight_rel_l2=_relative_l2(layer.topk_weights, moe_reference["prob"]),
+            route_layout_equal=bool(torch.equal(reconstructed_ids, layer.topk_ids)),
+            route_layout_mismatches=int((reconstructed_ids != layer.topk_ids).sum()),
+            route_weight_rel_l2=_relative_l2(reconstructed_weights, layer.topk_weights),
+            num_valid_ids=num_valid,
             e2e_output_rel_l2=_relative_l2(output, reference["x_out"]),
             e2e_selection_equal=bool(torch.equal(layer.topk_ids, reference["sel"])),
             e2e_selection_mismatches=int((layer.topk_ids != reference["sel"]).sum()),
@@ -327,7 +377,10 @@ def main() -> int:
     if args.check:
         ok = ok and all(
             result["selection_equal"]
+            and result["latent_mxfp8_rel_l2"] < 0.01
             and result["routed_rel_l2"] < 0.02
+            and result["routed_reduce_rel_l2"] < 0.001
+            and result["routed_norm_rel_l2"] < 0.001
             and result["output_rel_l2"] < 0.08
             and result["kv_rel_l2"] < 0.03
             for result in results.values()

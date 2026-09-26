@@ -64,6 +64,7 @@ def layout(
     moe_mode: MoeMode | str = MoeMode.W8A8,
     model_config: LayerConfig | str = GLM5_CONFIG,
     attention_only: bool = False,
+    dedicated_input_norm: bool = False,
 ):
     """Return scratch and double-buffered symmetric-region byte offsets."""
 
@@ -74,6 +75,7 @@ def layout(
     n_split = sparse_attention_topk // SPLIT_KEYS
     pair_bytes = 8
     items = [
+        ("input_norm", samples * config.hidden * pair_bytes if dedicated_input_norm else 0),
         ("q_a", samples * config.q_lora * pair_bytes),
         ("kv_a", samples * (config.kv_lora + config.pe_dim) * pair_bytes),
         ("gate", samples * heads * config.v_dim * pair_bytes if config.attention_output_gate else 0),
@@ -122,13 +124,17 @@ def stage_tasks(
     sparse_attention_topk: int,
     model_config: LayerConfig | str = GLM5_CONFIG,
     attention_only: bool = False,
+    dedicated_input_norm: bool = False,
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
     config = as_layer_config(model_config)
     head_groups = (heads + WAVES - 1) // WAVES
     split_ctas_per_tile = head_groups if samples == 1 else 1
-    tasks = [
+    tasks = []
+    if dedicated_input_norm:
+        tasks.append(("input_norm", samples))
+    tasks += [
         ("qkv_a", config.qkv_a_rows // QKV_A_TILE),
         ("cache", 1),
         ("q_b", heads * (config.nope_dim + config.pe_dim) // Q_B_TILE),

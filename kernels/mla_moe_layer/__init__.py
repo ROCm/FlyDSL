@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     )
     from kernels.mla_moe_layer.kimi_k3 import KimiK3MlaMoeLayer
     from kernels.mla_moe_layer.layer import SharedReuseMlaMoeLayer
+    from kernels.mla_moe_layer.mxfp8_linear import Mxfp8Linear
 
 __all__ = [
     "GLM5_CONFIG",
@@ -24,6 +25,7 @@ __all__ = [
     "KimiK3MlaLayer",
     "KimiK3MlaMoeLayer",
     "MoeMode",
+    "Mxfp8Linear",
     "SharedReuseMlaMoeLayer",
 ]
 
@@ -51,4 +53,8 @@ def __getattr__(name: str):
         from kernels.mla_moe_layer.kimi_k3 import KimiK3MlaMoeLayer
 
         return KimiK3MlaMoeLayer
+    if name == "Mxfp8Linear":
+        from kernels.mla_moe_layer.mxfp8_linear import Mxfp8Linear
+
+        return Mxfp8Linear
     raise AttributeError(name)

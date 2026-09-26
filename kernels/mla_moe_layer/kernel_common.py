@@ -107,6 +107,18 @@ def fp8_to_bf16x8(word0, word1):
     return fx.Vector.from_elements(parts, fx.BFloat16)
 
 
+def mxfp8_to_bf16x8(word0, word1, scale):
+    """Convert two dwords of eight FP8 values with one E8M0 block scale to BF16."""
+
+    scale = as_ir_value(scale)
+    parts = []
+    for word in (word0, word1):
+        for half in range_constexpr(2):
+            pair = fx.Vector(rocdl.cvt_scalef32_pk_bf16_fp8(T.vec(2, T.bf16), as_ir_value(word), scale, bool(half)))
+            parts += [pair[0], pair[1]]
+    return fx.Vector.from_elements(parts, fx.BFloat16)
+
+
 def mxfp4_to_bf16x8(word, scale):
     """Convert one packed dword of eight scaled E2M1 values to BF16."""
 

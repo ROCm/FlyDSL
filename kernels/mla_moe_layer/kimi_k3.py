@@ -9,9 +9,18 @@ from contextlib import contextmanager
 
 import torch
 
+from kernels.common.mx_formats import quantize_mxfp8
 from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG
 from kernels.mla_moe_layer.indexed_layer import KimiK3MlaLayer
-from kernels.mla_moe_layer.packing import pack_a16w4_scale, pack_a16w4_weight, pack_bf16
+from kernels.mla_moe_layer.kimi_k3_attn_res import KimiK3AttnRes
+from kernels.mla_moe_layer.kimi_k3_tail import FusedKimiK3Tail
+from kernels.mla_moe_layer.mxfp8_linear import Mxfp8Linear
+from kernels.mla_moe_layer.packing import (
+    pack_a16w4_scale,
+    pack_a16w4_weight,
+    pack_bf16,
+    pack_fp8,
+)
 from kernels.mla_moe_layer.reference import LayerWeights
 from kernels.mla_moe_layer.router import SigmoidTopkRouter
 from kernels.mla_moe_layer.router_projection import FusedRouterProjection
@@ -22,7 +31,6 @@ from kernels.mla_moe_layer.torch_fusions import (
     compiled_attn_res_with_delta,
     compiled_rmsnorm,
     compiled_rmsnorm_out,
-    compiled_shared_experts,
     rmsnorm,
     situ,
 )
@@ -86,6 +94,7 @@ class KimiK3MlaMoeLayer:
         self.layer_idx = layer_idx
         self.topk = topk
         self.fuse_attn_res = fuse_attn_res
+        self.inline_pre_attn = fuse_attn_res and layer_idx == 0
         self.fuse_router = fuse_router
         self.fuse_shared_experts = fuse_shared_experts
         self.routed_hidden = config.routed_hidden
@@ -126,8 +135,29 @@ class KimiK3MlaMoeLayer:
             topk=topk,
             timeline=timeline,
             moe_mode="a16w4",
+            attention_input_norm_override=self.inline_pre_attn,
         )
         device = torch.device("cuda", torch.cuda.current_device())
+        self.pre_attn = torch.empty(samples, config.hidden, dtype=torch.bfloat16, device=device)
+        self.pre_updated = torch.empty_like(self.pre_attn)
+        self.moe_input = torch.empty_like(self.pre_attn)
+        self.updated_prefix = torch.empty_like(self.pre_attn)
+        self.pre_attn_res = KimiK3AttnRes(
+            samples,
+            config.hidden,
+            self.previous_valid_blocks,
+            False,
+            self.block_write_idx if self.is_block_write_layer else -1,
+        )
+        self.post_attn_res = KimiK3AttnRes(
+            samples,
+            config.hidden,
+            self.previous_valid_blocks + int(self.is_block_write_layer),
+            not self.is_block_write_layer,
+            -1,
+            quantize_output=True,
+            source_override_idx=0 if self.inline_pre_attn else -1,
+        )
 
         # A16W4 production layouts.  Raw checkpoint-format tensors remain in W
         # for reference checks; these packed copies are launch-ready.
@@ -136,8 +166,24 @@ class KimiK3MlaMoeLayer:
         self.w_dn = pack_a16w4_weight(self.t["w_dn"])
         self.s_dn = pack_a16w4_scale(self.t["s_dn"])
         self.w_router = pack_bf16(self.t["w_r"])
+        latent_weight, self.s_latent_down = quantize_mxfp8(self.t["w_latent_down"])
+        shared_weight, self.s_shared_ug = quantize_mxfp8(self.t["w_shared_ug"])
+        shared_down_weight, self.s_shared_dn = quantize_mxfp8(self.t["w_shared_dn"])
+        latent_up_weight, self.s_latent_up = quantize_mxfp8(self.t["w_latent_up"])
+        self.latent_projection = Mxfp8Linear(latent_weight, self.s_latent_down, samples)
+        self.shared_projection = Mxfp8Linear(shared_weight, self.s_shared_ug, samples)
+        self.w_latent_down = self.latent_projection.weight
+        self.s_latent_down = self.latent_projection.scale
+        self.w_shared_ug = self.shared_projection.weight
+        self.s_shared_ug = self.shared_projection.scale
+        self.w_shared_dn = pack_fp8(shared_down_weight)
+        self.w_latent_up = pack_fp8(latent_up_weight)
 
-        max_sorted = samples * config.top_k + config.n_experts * (_ROUTING_TILE_M - 1)
+        # At most one padded BM tile is needed per selected route: there can be
+        # no more active experts than routes.  The old ``routes + E*(BM-1)``
+        # bound made the expert GEMMs launch tens of thousands of empty CTAs at
+        # low token counts.
+        max_sorted = samples * config.top_k * _ROUTING_TILE_M
         max_blocks = (max_sorted + _ROUTING_TILE_M - 1) // _ROUTING_TILE_M
         self.max_sorted = max_sorted
         self.sorted_token_ids = torch.empty(max_sorted, dtype=torch.int32, device=device)
@@ -159,6 +205,10 @@ class KimiK3MlaMoeLayer:
             config.top_k,
             samples,
             samples * self.routed_hidden,
+            self.routed_hidden,
+            2 * self.shared_inter,
+            config.situ_beta,
+            config.situ_linear_beta,
         )
         self.router_score_mailbox = torch.zeros(
             samples * config.n_experts * 2,
@@ -186,8 +236,22 @@ class KimiK3MlaMoeLayer:
                 group=group,
                 final_hidden=config.hidden,
                 final_shard_width=self.hidden_shard,
+                rmsnorm_width=self.routed_hidden,
             )
             if reduce_backend == "symmetric"
+            else None
+        )
+        self.fused_tail = (
+            FusedKimiK3Tail(
+                samples,
+                config.hidden,
+                self.routed_hidden,
+                self.shared_inter,
+                rank,
+                npes,
+                self.symmetric_allreduce.max_pairs,
+            )
+            if self.symmetric_allreduce is not None and self.fuse_shared_experts
             else None
         )
 
@@ -277,24 +341,41 @@ class KimiK3MlaMoeLayer:
             mixed = rmsnorm(mixed, output_norm_weight)
         return mixed, updated
 
+    def _launch_projection(
+        self,
+        projection: FusedRouterProjection,
+        hidden_states: torch.Tensor,
+        epoch_layer: int,
+    ) -> None:
+        projection(
+            hidden_states,
+            self.latent_projection.activation,
+            self.latent_projection.activation_scale,
+            self.w_router,
+            self.w_latent_down,
+            self.s_latent_down,
+            self.w_shared_ug,
+            self.s_shared_ug,
+            self.t["bias"],
+            self.router_score_mailbox,
+            self.router_scores,
+            self.topk_ids,
+            self.topk_weights,
+            self.sorted_token_ids,
+            self.sorted_weights,
+            self.sorted_expert_ids,
+            self.num_valid_ids,
+            self.moe_buf,
+            self.latent,
+            self.shared_gu,
+            self.shared_mid,
+            self.attention.step,
+            epoch_layer,
+        )
+
     def _route_and_sort(self, hidden_states: torch.Tensor, epoch_layer: int) -> None:
         if self.fuse_router:
-            self.router_projection(
-                hidden_states,
-                self.w_router,
-                self.t["bias"],
-                self.router_score_mailbox,
-                self.router_scores,
-                self.topk_ids,
-                self.topk_weights,
-                self.sorted_token_ids,
-                self.sorted_weights,
-                self.sorted_expert_ids,
-                self.num_valid_ids,
-                self.moe_buf,
-                self.attention.step,
-                epoch_layer,
-            )
+            self._launch_projection(self.router_projection, hidden_states, epoch_layer)
         else:
             torch.mm(hidden_states, self.t["w_r"].t(), out=self.router_logits)
             torch.sigmoid(self.router_logits.float(), out=self.router_scores)
@@ -355,14 +436,9 @@ class KimiK3MlaMoeLayer:
     ) -> torch.Tensor:
         with self._profile_stage("router_sort"):
             self._route_and_sort(hidden_states, epoch_layer)
-        with self._profile_stage("latent_down"):
-            torch.mm(hidden_states, self.t["w_latent_down"].t(), out=self.latent)
-
-        # Shared experts are tensor-parallel over their combined 6144-wide
-        # intermediate; each rank computes its own 768-wide shard.
-        self._shared_experts(hidden_states)
 
         with self._profile_stage("routed_gemm1"):
+            gemm1_kwargs = {"use_csv_config": True}
             flydsl_a16w4_gemm1(
                 a_bf16=self.latent,
                 w1_u8=self.w_ug,
@@ -381,7 +457,7 @@ class KimiK3MlaMoeLayer:
                 situ_beta=self.config.situ_beta,
                 situ_linear_beta=self.config.situ_linear_beta,
                 w_dtype="mxfp4",
-                use_csv_config=True,
+                **gemm1_kwargs,
             )
         with self._profile_stage("routed_gemm2"):
             flydsl_a16w4_gemm2(
@@ -405,18 +481,60 @@ class KimiK3MlaMoeLayer:
                 use_csv_config=True,
             )
 
+        if self.fused_tail is None:
+            # Shared experts are tensor-parallel over their combined 6144-wide
+            # intermediate; each rank computes its own 768-wide shard.
+            self._shared_experts(hidden_states)
+
         with self._profile_stage("routed_reduce"):
-            self._reduce(
-                self.routed_partial,
-                self.routed_reduced,
-                region=0,
-                epoch_layer=epoch_layer,
-            )
+            if self.fused_tail is not None:
+                pass
+            elif self.symmetric_allreduce is not None:
+                self.symmetric_allreduce.reduce_rmsnorm(
+                    self.routed_partial,
+                    self.routed_reduced,
+                    self.t["g_latent"],
+                    self.latent_norm,
+                    self.attention.step,
+                    epoch_layer,
+                )
+            else:
+                self._reduce(
+                    self.routed_partial,
+                    self.routed_reduced,
+                    region=0,
+                    epoch_layer=epoch_layer,
+                )
         with self._profile_stage("latent_tail"):
-            compiled_rmsnorm_out(self.routed_reduced, self.t["g_latent"], self.latent_norm)
-            torch.mm(self.latent_norm, self.t["w_latent_up"].t(), out=self.tail)
+            if self.symmetric_allreduce is None:
+                compiled_rmsnorm_out(self.routed_reduced, self.t["g_latent"], self.latent_norm)
+            if self.fused_tail is None:
+                torch.mm(self.latent_norm, self.t["w_latent_up"].t(), out=self.tail)
 
         with self._profile_stage("final_reduce"):
+            if self.fused_tail is not None:
+                return self.fused_tail(
+                    self.routed_partial,
+                    self.routed_reduced,
+                    self.t["g_latent"],
+                    self.symmetric_allreduce.rmsnorm_scratch,
+                    self.shared_mid,
+                    self.latent_norm,
+                    self.w_shared_dn,
+                    self.s_shared_dn,
+                    self.w_latent_up,
+                    self.s_latent_up,
+                    residual,
+                    self.shared_partial,
+                    self.tail,
+                    self.final_partial,
+                    self.moe_delta,
+                    output,
+                    self.symmetric_allreduce.peer_buffer.local_address,
+                    self.symmetric_allreduce.peer_buffer.addresses,
+                    self.attention.step,
+                    epoch_layer,
+                )
             if self.symmetric_allreduce is not None:
                 return self.symmetric_allreduce.reduce_final(
                     self.shared_partial,
@@ -445,16 +563,7 @@ class KimiK3MlaMoeLayer:
     def _shared_experts(self, hidden_states: torch.Tensor) -> None:
         with self._profile_stage("shared_experts"):
             if self.fuse_shared_experts:
-                compiled_shared_experts(
-                    hidden_states,
-                    self.t["w_shared_ug"],
-                    self.t["w_shared_dn"],
-                    self.shared_gu,
-                    self.shared_mid,
-                    self.shared_partial,
-                    self.config.situ_beta,
-                    self.config.situ_linear_beta,
-                )
+                torch.mm(self.shared_mid, self.t["w_shared_dn"].t(), out=self.shared_partial)
             else:
                 torch.mm(hidden_states, self.t["w_shared_ug"].t(), out=self.shared_gu)
                 self.shared_mid.copy_(situ(self.shared_gu, self.config.situ_beta, self.config.situ_linear_beta))
@@ -488,19 +597,35 @@ class KimiK3MlaMoeLayer:
             raise ValueError(f"block_residual needs index {self.block_write_idx}, got {block_residual.shape[1]} blocks")
 
         with self._profile_stage("pre_attn_res"):
-            self.pre_attn, _ = self._attn_res(
-                prefix_sum,
-                None,
-                block_residual,
-                self.t["g_self_res"],
-                self.t["w_self_res"],
-                self.t["g_in"],
-                self.previous_valid_blocks,
-                self.block_write_idx if self.is_block_write_layer else -1,
-            )
+            if self.inline_pre_attn:
+                attention_input = prefix_sum
+            elif self.fuse_attn_res:
+                self.pre_attn_res(
+                    prefix_sum,
+                    prefix_sum,
+                    block_residual,
+                    self.t["g_self_res"],
+                    self.t["w_self_res"],
+                    self.t["g_in"],
+                    self.pre_updated,
+                    self.pre_attn,
+                )
+                attention_input = self.pre_attn
+            else:
+                self.pre_attn, _ = self._attn_res(
+                    prefix_sum,
+                    None,
+                    block_residual,
+                    self.t["g_self_res"],
+                    self.t["w_self_res"],
+                    self.t["g_in"],
+                    self.previous_valid_blocks,
+                    self.block_write_idx if self.is_block_write_layer else -1,
+                )
+                attention_input = self.pre_attn
         with self._profile_stage("attention"):
             self.attention.forward(
-                self.pre_attn,
+                attention_input,
                 cur_pos,
                 kv_cache,
                 pe_cache,
@@ -515,15 +640,30 @@ class KimiK3MlaMoeLayer:
         post_prefix = self.attention_delta if self.is_block_write_layer else prefix_sum
         post_delta = None if self.is_block_write_layer else self.attention_delta
         with self._profile_stage("post_attn_res"):
-            self.moe_input, self.updated_prefix = self._attn_res(
-                post_prefix,
-                post_delta,
-                block_residual,
-                self.t["g_mlp_res"],
-                self.t["w_mlp_res"],
-                self.t["g_post"],
-                self.previous_valid_blocks + int(self.is_block_write_layer),
-            )
+            if self.fuse_attn_res:
+                self.post_attn_res(
+                    post_prefix,
+                    prefix_sum if self.inline_pre_attn else (post_prefix if post_delta is None else post_delta),
+                    block_residual,
+                    self.t["g_mlp_res"],
+                    self.t["w_mlp_res"],
+                    self.t["g_post"],
+                    self.updated_prefix,
+                    self.moe_input,
+                    self.latent_projection.activation,
+                    self.latent_projection.activation_scale,
+                )
+            else:
+                self.moe_input, self.updated_prefix = self._attn_res(
+                    post_prefix,
+                    post_delta,
+                    block_residual,
+                    self.t["g_mlp_res"],
+                    self.t["w_mlp_res"],
+                    self.t["g_post"],
+                    self.previous_valid_blocks + int(self.is_block_write_layer),
+                )
+                self.latent_projection.quantize_input(self.moe_input)
         target = self.output if x_out is None else x_out
         self._moe(self.moe_input, epoch_layer, self.updated_prefix, target)
         if advance:

@@ -8,7 +8,13 @@ from dataclasses import replace
 import pytest
 import torch
 
-from kernels.common.mx_formats import dequantize_mxfp4, quant_dequant_mxfp8, quantize_mxfp4
+from kernels.common.mx_formats import (
+    dequantize_mxfp4,
+    dequantize_mxfp8,
+    quant_dequant_mxfp8,
+    quantize_mxfp4,
+    quantize_mxfp8,
+)
 from kernels.mla_moe_layer.config import (
     GLM5_CONFIG,
     KIMI_K3_CONFIG,
@@ -32,6 +38,8 @@ from kernels.mla_moe_layer.packing import (
     pack_bf16_atom,
     pack_fp8,
     pack_mxfp4,
+    pack_mxfp8_scale,
+    pack_mxfp8_weight,
 )
 from kernels.mla_moe_layer.reference import golden_layer, kimi_attn_res, make_weights, rope_table, situ
 from kernels.mla_moe_layer.router import build_sigmoid_topk_router
@@ -44,6 +52,23 @@ def test_pack_fp8_uses_mfma_lane_order():
         [*range(0, 8), *range(32, 40), *range(64, 72), *range(96, 104)],
         dtype=torch.uint8,
     )
+    torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
+
+
+def test_pack_mxfp8_weight_uses_scaled_mfma_lane_order():
+    raw = torch.arange(16 * 64, dtype=torch.int64).remainder(256).to(torch.uint8).reshape(16, 64)
+    packed = pack_mxfp8_weight(raw.view(torch.float8_e4m3fn)).view(torch.uint8)
+    expected = torch.tensor(
+        [*range(0, 16), *range(64, 80), *range(128, 144), *range(192, 208)],
+        dtype=torch.uint8,
+    )
+    torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
+
+
+def test_pack_mxfp8_scale_interleaves_32_row_pairs():
+    raw = torch.arange(32 * 8, dtype=torch.int64).remainder(256).to(torch.uint8).reshape(32, 8)
+    packed = pack_mxfp8_scale(raw)
+    expected = torch.tensor([0, 128, 4, 132, 8, 136, 12, 140], dtype=torch.uint8)
     torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
 
 
@@ -98,6 +123,13 @@ def test_mxfp8_quantization_uses_independent_32_value_groups():
     got = quant_dequant_mxfp8(values)
     expected = torch.cat([torch.full((32,), 0.4375), torch.full((32,), 56.0)]).reshape(1, 64)
     torch.testing.assert_close(got, expected, atol=0, rtol=0)
+
+
+def test_mxfp8_quantize_and_dequantize_match_combined_conversion():
+    values = torch.cat([torch.linspace(-1.0, 1.0, 32), torch.linspace(-128.0, 128.0, 32)]).reshape(1, 64)
+    quantized, scale = quantize_mxfp8(values)
+    got = dequantize_mxfp8(quantized, scale)
+    torch.testing.assert_close(got, quant_dequant_mxfp8(values), atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("value", tuple(mode.value for mode in MoeMode))

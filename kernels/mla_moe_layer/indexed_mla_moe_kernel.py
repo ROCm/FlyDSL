@@ -140,6 +140,7 @@ def build_indexed_mla_moe_kernel(
     moe_mode: MoeMode | str = MoeMode.W8A8,
     model_config: LayerConfig | str = GLM5_CONFIG,
     attention_only: bool = False,
+    attention_input_norm_override: bool | None = None,
 ):
     """Return the ``@flyc.jit`` launcher for one rank's whole layer.
 
@@ -176,7 +177,10 @@ def build_indexed_mla_moe_kernel(
     attention_bf16 = config.attention_weight is AttentionWeight.BF16
     attention_k_chunks_per_unit = 1 if attention_bf16 else 2
     attention_output_gate = config.attention_output_gate
-    attention_input_norm = config.attention_input_norm
+    attention_input_norm = (
+        config.attention_input_norm if attention_input_norm_override is None else attention_input_norm_override
+    )
+    dedicated_input_norm = attention_input_norm and not config.attention_input_norm and S > 4
     attention_residual = config.attention_residual
 
     assert heads == config.local_heads, f"{config.name} requires {config.local_heads} local heads"
@@ -199,7 +203,16 @@ def build_indexed_mla_moe_kernel(
     H = heads
     W = npes
     G = BLOCKS
-    SC, SY = layout(S, H, W, sparse_attention_topk, moe_mode, config, attention_only)
+    SC, SY = layout(
+        S,
+        H,
+        W,
+        sparse_attention_topk,
+        moe_mode,
+        config,
+        attention_only,
+        dedicated_input_norm,
+    )
     N_SPLIT = sparse_attention_topk // SPLIT_KEYS
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
@@ -223,14 +236,33 @@ def build_indexed_mla_moe_kernel(
     N_DN_TILES = HIDDEN // DN_TILE
 
     base, first, acc = {}, {}, 0
-    for name, n in stage_tasks(S, H, sparse_attention_topk, config, attention_only):
+    for name, n in stage_tasks(
+        S,
+        H,
+        sparse_attention_topk,
+        config,
+        attention_only,
+        dedicated_input_norm,
+    ):
         first[name] = acc
         acc += n
     # CTA placement: split before uk, so every split tile lands on a CTA freed by
     # qkv_a (uk shares the q_b CTAs it waits on anyway)
-    tasks = dict(stage_tasks(S, H, sparse_attention_topk, config, attention_only))
+    tasks = dict(
+        stage_tasks(
+            S,
+            H,
+            sparse_attention_topk,
+            config,
+            attention_only,
+            dedicated_input_norm,
+        )
+    )
     acc = 0
-    stage_order = ["qkv_a", "cache", "q_b", "split", "uk", "uv", "o"]
+    stage_order = []
+    if dedicated_input_norm:
+        stage_order.append("input_norm")
+    stage_order += ["qkv_a", "cache", "q_b", "split", "uk", "uv", "o"]
     if not attention_only:
         stage_order += ["router", "ug", "down"]
     for name in stage_order:
@@ -350,12 +382,13 @@ def build_indexed_mla_moe_kernel(
             )
             bo.buffer_store(vec, _rsrc(base_addr), i * 2, cache_modifier=cm)
 
-        def put_bf(base_addr, i, vs, cm=CM_DEV):
+        def put_bf(base_addr, i, vs, cm=CM_DEV, store_tag=None):
             """Elements i .. i + len(vs) (2 or 4, i aligned) as packed bf16 pairs: pair
             i / 2 + j := (bf16(vs[2j]) | bf16(vs[2j + 1]) << 16, tag), one 8 / 16-byte store."""
+            write_tag = tag if store_tag is None else store_tag
             words = []
             for j in range_constexpr(len(vs) // 2):
-                words += [bf16_pair(vs[2 * j], vs[2 * j + 1]).bitcast(fx.Int32), tag]
+                words += [bf16_pair(vs[2 * j], vs[2 * j + 1]).bitcast(fx.Int32), write_tag]
             bo.buffer_store(fx.Vector.from_elements(words, fx.Int32), _rsrc(base_addr), i, cache_modifier=cm)
 
         def bf2_f32(w):
@@ -370,7 +403,7 @@ def build_indexed_mla_moe_kernel(
             coherent at ``scope`` (agent -> sc1, system -> sc0 sc1)."""
             return fx.generic_load(_qptr(addr), memory_order=fx.AtomicOrdering.Monotonic, syncscope=scope)
 
-        def poll(specs, scope="agent", batch=POLL_MAX):
+        def poll(specs, scope="agent", batch=POLL_MAX, expected_tag=None):
             """Batched poll of mailbox pairs: ``specs`` = [(base_addr, pair index, npairs in {1, 2})].
 
             All pairs are loaded together with plain 8 / 16-byte coherent buffer loads
@@ -382,8 +415,9 @@ def build_indexed_mla_moe_kernel(
             if const_expr(len(specs) == 0):
                 return []
             if const_expr(len(specs) > batch):  # bound live registers
-                return poll(specs[:batch], scope, batch) + poll(specs[batch:], scope, batch)
+                return poll(specs[:batch], scope, batch, expected_tag) + poll(specs[batch:], scope, batch, expected_tag)
             cm = CM_DEV if const_expr(scope == "agent") else CM_SYS
+            wanted_tag = tag if expected_tag is None else expected_tag
 
             def load_all():
                 words = []
@@ -397,9 +431,9 @@ def build_indexed_mla_moe_kernel(
             nw = sum(2 * n for _, _, n in specs)
 
             def pending(v):
-                bad = v[1] != tag
+                bad = v[1] != wanted_tag
                 for e in range_constexpr(3, nw, 2):
-                    bad = bad | (v[e] != tag)
+                    bad = bad | (v[e] != wanted_tag)
                 return bad
 
             v = load_all()
@@ -905,6 +939,74 @@ def build_indexed_mla_moe_kernel(
             r1) (plain loads, issued first) or a mailbox base (pairs s * HIDDEN
             + row, polled in the same batch as the peers)."""
             region_base = fx.Int64(SY[region]) + fx.Int64(peer_slot) * fx.Int64(SY["_part_stride"])
+            if const_expr(attention_only and W > 1):
+                pair_count = S * tile // 2
+                owner_rank = (t * tile) // (HIDDEN // W)
+                owner_words = fx.Vector(bo.buffer_load(r_peers, owner_rank * 2, vec_width=2, dtype=T.i32))
+                owner_dst = (fx.Int64(_uniform(owner_words[1])) << 32) | fx.Int64(fx.Uint32(_uniform(owner_words[0])))
+                if wave == 0:
+                    for batch in range_constexpr((pair_count + 63) // 64):
+                        pair = lane + batch * 64
+                        if pair < pair_count:
+                            si = pair // (tile // 2)
+                            ri = (pair % (tile // 2)) * 2
+                            put_bf(
+                                owner_dst + region_base,
+                                (rank * S + si) * HIDDEN + t * tile + ri,
+                                [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
+                                CM_SYS,
+                            )
+                gpu.barrier()
+
+                if (rank == owner_rank) & (tid < pair_count):
+                    s = tid // (tile // 2)
+                    r = (tid % (tile // 2)) * 2
+                    row = t * tile + r
+                    r0, r1 = residual(s, row)
+                    own = sym + region_base
+                    got = poll(
+                        [(own, ((src * S + s) * HIDDEN + row) // 2, 1) for src in range(W)],
+                        "one-as",
+                    )
+                    t0 = fx.Float32(0.0)
+                    t1 = fx.Float32(0.0)
+                    for src in range_constexpr(W):
+                        p0, p1 = bf2_f32(got[src][0])
+                        t0 = t0 + p0
+                        t1 = t1 + p1
+                    lds_st(outs, tid, bf16_pair(r0 + t0, r1 + t1))
+                gpu.barrier()
+
+                result_tag = tag + fx.Int32(1 << 30)
+                if (rank == owner_rank) & (wave < W):
+                    for batch in range_constexpr((pair_count + 63) // 64):
+                        pair = lane + batch * 64
+                        if pair < pair_count:
+                            s = pair // (tile // 2)
+                            r = (pair % (tile // 2)) * 2
+                            packed = lds_ld(outs, pair).bitcast(fx.Int32)
+                            mailbox = ((owner_rank * S + s) * HIDDEN + t * tile + r) // 2
+                            bo.buffer_store(
+                                fx.Vector.from_elements([packed, result_tag], fx.Int32),
+                                _rsrc(peer_dst + region_base),
+                                mailbox * 2,
+                                cache_modifier=CM_SYS,
+                            )
+                gpu.barrier()
+
+                if tid < pair_count:
+                    s = tid // (tile // 2)
+                    r = (tid % (tile // 2)) * 2
+                    row = t * tile + r
+                    own = sym + region_base
+                    got = poll(
+                        [(own, ((owner_rank * S + s) * HIDDEN + row) // 2, 1)],
+                        "one-as",
+                        expected_tag=result_tag,
+                    )
+                    v0, v1 = bf2_f32(got[0][0])
+                    out_fn(s, row, v0, v1)
+                return
             if const_expr(W > 1):
                 # One wave per destination: peer pointers are wave-uniform, and the
                 # destinations progress concurrently instead of eight serial stores
@@ -972,6 +1074,48 @@ def build_indexed_mla_moe_kernel(
             """This lane's MFMA B column (sample); columns >= S duplicate the last one."""
             return fx.min(lane % 16, S - 1)
 
+        if const_expr(dedicated_input_norm):
+            norm_rounds = (HIDDEN + 4 * THREADS - 1) // (4 * THREADS)
+            r_gin = _rsrc(g_in)
+            for s in range(start("input_norm"), S, G):
+                s = fx.Int32(s)
+                values = []
+                square_sum = fx.Float32(0.0)
+                for norm_round in range_constexpr(norm_rounds):
+                    element = (tid + norm_round * THREADS) * 4
+                    safe_element = fx.min(element, HIDDEN - 4)
+                    words = fx.Vector(
+                        bo.buffer_load(
+                            r_h,
+                            (s * HIDDEN + safe_element) // 2,
+                            vec_width=2,
+                            dtype=T.i32,
+                        )
+                    )
+                    chunk = words.bitcast(fx.BFloat16).to(fx.Float32)
+                    values.append(chunk)
+                    for item in range_constexpr(4):
+                        square_sum = square_sum + (element < HIDDEN).select(
+                            chunk[item] * chunk[item],
+                            fx.Float32(0.0),
+                        )
+                inverse_rms = _rsq(block_sum(square_sum) * (1.0 / HIDDEN) + EPS)
+                for norm_round in range_constexpr(norm_rounds):
+                    element = (tid + norm_round * THREADS) * 4
+                    safe_element = fx.min(element, HIDDEN - 4)
+                    gain = (
+                        fx.Vector(bo.buffer_load(r_gin, safe_element // 2, vec_width=2, dtype=T.i32))
+                        .bitcast(fx.BFloat16)
+                        .to(fx.Float32)
+                    )
+                    chunk = values[norm_round]
+                    if element < HIDDEN:
+                        put_bf(
+                            mb("input_norm"),
+                            s * HIDDEN + element,
+                            [chunk[j] * inverse_rms * gain[j] for j in range_constexpr(4)],
+                        )
+
         # ================================================= 1. q_a / kv_a GEMV
         # 1 row group x 96 chunks: 8 waves split K, 12 chunks each (all prefetched)
         r_wqa, r_sqa = _rsrc(w_qkv_a), _rsrc(s_qkv_a)
@@ -1002,12 +1146,26 @@ def build_indexed_mla_moe_kernel(
                     res.append([v[j] for j in range(4)])
                 return res
 
-            # the (small) input loads go out before the weight stream: loads complete in order
-            h_ld = load_x_rmsnorm(ld_h, HIDDEN, g_in) if const_expr(attention_input_norm) else load_x_bf16(ld_h, HIDDEN)
-            pre = [u_qa(c) for c in range(QA_UNITS)]
-            if const_expr(attention_input_norm):
-                stage_x_rmsnorm(ld_h, HIDDEN, g_in, loaded=h_ld)
+            if const_expr(dedicated_input_norm):
+                pre = [u_qa(c) for c in range(QA_UNITS)]
+
+                def ld_h_normalized(sks):
+                    pairs = get_bf2_many([(mb("input_norm"), s * HIDDEN + k + j) for s, k in sks for j in (0, 2)])
+                    return [list(pairs[2 * i]) + list(pairs[2 * i + 1]) for i in range(len(sks))]
+
+                stage_x_bf16(ld_h_normalized, HIDDEN)
             else:
+                # The small input loads go out before the weight stream; loads
+                # complete in order while the independent weights are fetched.
+                h_ld = (
+                    load_x_rmsnorm(ld_h, HIDDEN, g_in)
+                    if const_expr(attention_input_norm)
+                    else load_x_bf16(ld_h, HIDDEN)
+                )
+                pre = [u_qa(c) for c in range(QA_UNITS)]
+            if const_expr(attention_input_norm and not dedicated_input_norm):
+                stage_x_rmsnorm(ld_h, HIDDEN, g_in, loaded=h_ld)
+            elif const_expr(not dedicated_input_norm):
                 stage_x_bf16(ld_h, HIDDEN, loaded=h_ld)
             gpu.barrier()
             stamp("qkv_a", t, 2)

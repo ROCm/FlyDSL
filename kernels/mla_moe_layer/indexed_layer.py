@@ -61,6 +61,7 @@ class IndexedMlaMoeBlock:
         moe_mode: MoeMode | str = MoeMode.W8A8,
         model_config: LayerConfig | str = GLM5_CONFIG,
         attention_only: bool = False,
+        attention_input_norm_override: bool | None = None,
     ):
         self.config = as_layer_config(model_config)
         if W.config != self.config:
@@ -79,6 +80,9 @@ class IndexedMlaMoeBlock:
         self.sparse_attention_topk = sparse_attention_topk
         self.launches_per_step = launches_per_step
         self.packed = pack_layer_weights(W.t, self.moe_mode, self.config, attention_only)
+        dedicated_input_norm = (
+            attention_input_norm_override is True and not self.config.attention_input_norm and samples > 4
+        )
         self.scr_layout, self.sym_layout = layout(
             samples,
             W.heads,
@@ -87,6 +91,7 @@ class IndexedMlaMoeBlock:
             self.moe_mode,
             self.config,
             attention_only,
+            dedicated_input_norm,
         )
         dev = torch.device("cuda", torch.cuda.current_device())
         self.scratch = torch.zeros(self.scr_layout["_bytes"], dtype=torch.uint8, device=dev)
@@ -104,8 +109,16 @@ class IndexedMlaMoeBlock:
             moe_mode=self.moe_mode,
             model_config=self.config,
             attention_only=attention_only,
+            attention_input_norm_override=attention_input_norm_override,
         )
-        self.stages = stage_tasks(samples, W.heads, sparse_attention_topk, self.config, attention_only)
+        self.stages = stage_tasks(
+            samples,
+            W.heads,
+            sparse_attention_topk,
+            self.config,
+            attention_only,
+            dedicated_input_norm,
+        )
         n_tasks = sum(n for _, n in self.stages)
         self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)

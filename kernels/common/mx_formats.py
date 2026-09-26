@@ -98,3 +98,28 @@ def quant_dequant_mxfp8(x: torch.Tensor) -> torch.Tensor:
     scale_f32 = e8m0_to_float(scale).clamp_min(torch.finfo(torch.float32).tiny)
     q = (blocks / scale_f32.unsqueeze(-1)).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).float()
     return (q * scale_f32.unsqueeze(-1)).reshape(shape)
+
+
+def quantize_mxfp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize ``[..., K]`` to FP8 values plus row-major per-1x32 E8M0 scales."""
+
+    if x.shape[-1] % 32:
+        raise ValueError(f"MXFP8 K dimension must be divisible by 32, got {x.shape[-1]}")
+    shape = x.shape
+    blocks = x.float().reshape(*shape[:-1], shape[-1] // 32, 32)
+    amax = blocks.abs().amax(dim=-1)
+    scale = float_to_e8m0(amax / 448.0)
+    scale_f32 = e8m0_to_float(scale).clamp_min(torch.finfo(torch.float32).tiny)
+    quantized = (blocks / scale_f32.unsqueeze(-1)).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    return quantized.reshape(shape).contiguous(), scale.contiguous()
+
+
+def dequantize_mxfp8(q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Decode row-major MXFP8 values and per-1x32 E8M0 scales."""
+
+    if q.shape[-1] % 32:
+        raise ValueError(f"MXFP8 K dimension must be divisible by 32, got {q.shape[-1]}")
+    expected_scale_shape = (*q.shape[:-1], q.shape[-1] // 32)
+    if scale.shape != expected_scale_shape:
+        raise ValueError(f"MXFP8 scale shape must be {expected_scale_shape}, got {tuple(scale.shape)}")
+    return q.float() * e8m0_to_float(scale).repeat_interleave(32, dim=-1)

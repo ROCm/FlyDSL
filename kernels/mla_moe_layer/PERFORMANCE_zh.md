@@ -76,6 +76,9 @@ attention 格式差异以及 serving 配置可能带来的 cache dtype 差异，
 | `indexed_mla_moe_kernel.py` | 由 `LayerConfig` 参数化、便于扩展的 indexed MLA + MoE kernel。 |
 | `indexed_layer.py` | 通用 indexed wrapper，以及 GLM-5 compatibility 和 Kimi-K3 MLA adapter。 |
 | `kimi_k3.py` | 组合 indexed MLA、latent MoE 与 reduction 的 Kimi-K3 完整层 adapter。 |
+| `kimi_k3_attn_res.py` | 融合 Kimi-K3 AttnRes mixing、RMSNorm 与 MXFP8 输入量化。 |
+| `router_projection.py`、`mxfp8_linear.py` | 融合 router/top-k，以及可复用的 gfx950 MXFP8 projection 支持。 |
+| `kimi_k3_tail.py` | 重叠 routed reduce/RMSNorm、MXFP8 shared/latent projection 与最终 TP reduce。 |
 | `router.py`、`router_projection.py` | 可复用的原生 routing 与融合 projection/top-k kernel。 |
 | `runtime.py`、`../common/hip_ipc.py` | 共用 symmetric HIP IPC 生命周期和远端 handle 的确定性清理。 |
 | `symmetric_allreduce.py`、`torch_fusions.py` | 可 graph capture 的 reduction 与编译后 Torch output helper。 |
@@ -276,9 +279,9 @@ trace 插桩会等待内存操作完成并改变调度。延迟比较应使用�
 - BF16 attention 权重，以及 sigmoid attention output gate；
 - attention 前和 MoE 前的 12-layer AttnRes source mixing；
 - BF16 router 投影、FP32 sigmoid/correction-bias 选路、896 experts 和归一化 top-16；
-- replicated BF16 7168→3584 latent projection；
+- replicated MXFP8 7168→3584 latent projection；
 - FlyDSL device-side sorting，以及带 SiTU 的两阶段 A16W4/MXFP4 routed experts；
-- TP8-local BF16 shared experts、latent RMSNorm 和 rank-local 3584→896 tail；
+- TP8-local MXFP8 shared experts、latent RMSNorm 和 rank-local MXFP8 3584→896 tail；
 - latent 空间的一次 TP reduce，以及 residual 更新前的最终 TP reduce。
 
 A16W4 launcher 和 Kimi-K3 tuned 配置现在位于
@@ -288,9 +291,10 @@ host 实现。
 正确性在 8 x MI355X（gfx950）上验证了 layer 0 的 S=1/4/8，并以 S=4 验证了
 layer 1 和 layer 12，覆盖非 block-write 与新 block-write 两类 AttnRes 分支。所有输出
 均为有限值，且八个 rank 的结果逐位一致。最终优化版 S=4/S=8 使用实现自身的
-post-attention 状态时，top-16 mismatch 均为 0，routed-MoE relative L2 分别为
-0.524%/0.526%，完整输出 relative L2 分别为 0.424%/0.425%，KV-cache relative L2
-约为 1e-8。layer 0/1/12 的 HIP graph capture 与 replay 也均成功。
+post-attention 状态时，top-16 mismatch 均为 0，routed-MoE relative L2 为
+0.549%/0.538-0.551%，完整输出 relative L2 约为 0.469%/0.466-0.474%，KV-cache
+relative L2 约为 1e-8。额外 5 次全新进程的 S=8 检查都保持 rank 间逐位一致，且未再
+复现此前单次较高误差样本。layer 0/1/12 的 HIP graph capture 与 replay 也均成功。
 
 与现有 GLM-5 测试相同，独立端到端比较会记录、但不会因合法 MLA rounding 差异导致的
 近似并列 synthetic route 翻转而失败。隔离的 MoE 检查把实现的 post-attention tensor
@@ -304,35 +308,47 @@ attention-only TP8 在 S=1、S=4、S=8 的提升仍分别为 0.6%、2.3%、12.0%
 ### 完整层性能
 
 完整 Kimi-K3 层使用 TP8、position 3000、每个 HIP graph 16 次 layer launch、2 次
-eager forward 预热、2 次 graph replay 预热、7 次正式 replay，并取最慢 rank 的中位
-延迟。最终结果使用融合 BF16 router projection/top-16 kernel、`bm16` routed-MoE tile、
-编译后的 latent RMSNorm 直接输出，以及可 graph capture 的 symmetric TP reduce backend。
+eager forward 预热、2 次 graph replay 预热、100 次正式 replay，并取最慢 rank 的中位
+延迟。测试前已确认 8 张 GPU 没有其他进程。最终路径使用融合 BF16 router/top-16 与
+MXFP8 latent/shared projection、`bm16` MXFP4 routed-MoE tile、融合通信/RMSNorm/tail，
+以及可 graph capture 的 symmetric peer mailbox。
 
 | 版本 | S=4 | S=8 |
 |---|---:|---:|
 | 第一版正确的串行完整层 | 383.85 us | 404.81 us |
 | 深度优化前的公共模块源码 | 258.7604 us | 282.4305 us |
 | 融合 router projection 前 | 204.4796 us | 228.6948 us |
-| 当前 fused-router 源码 | 194.9370 us | 221.5046 us |
-| 相对公共模块源码的提升 | 24.66% | 21.57% |
+| MXFP8/tail 集成前的 fused-router 源码 | 194.9370 us | 221.5046 us |
+| 最终 MXFP8/overlap 源码 | **111.7374 us** | **126.4800 us** |
+| 相对公共模块源码的加速 | **2.32x** | **2.23x** |
 
-优化前 K3 的主要问题并不是 TP 通信。受控 NCCL 与 symmetric reduce A/B 中，S=4
-仅从 258.9820 us 变为 256.3328 us，S=8 仅从 281.1871 us 变为 279.5571 us，
-差异约 0.6-1.0%。kernel profile 指向的是三个本地调度问题：
+早期受控 NCCL 与 symmetric reduce A/B 中，S=4 仅从 258.9820 us 变为
+256.3328 us，S=8 仅从 281.1871 us 变为 279.5571 us，差异约 0.6-1.0%。因此只替换
+通信并不足够。最终一轮同时处理了 launch 开销、occupancy 不足、重复访存与 overlap：
 
-- Torch top-k 路径包含约 27.96 us 的 `gatherTopK` kernel 和约 4.40 us 的排序。
-  `router.py` 现在每个 sample 使用一个 wave，每个 lane 处理 14 个 expert，并在约
-  15.2 us 内完成归一化 top-16 选择。
-- `router_projection.py` 进一步把前置 BF16 7168×896 projection 与 FP32 sigmoid/top-16
-  融合。S=4 下融合 kernel 约 22.91 us，而旧路径的 router GEMM 与 selection 分别约
-  15.52 us 和 15.24 us。tagged score mailbox 保证多层 HIP graph replay 安全，BF16
-  logit 交接则让 S=1/4/8 的 isolated top-16 mismatch 都保持为 0。
-- routed expert GEMM 原来使用 `bm32`，而 ATOM 在这种低 token batch 下使用 `bm16`。
-  切换到 `bm16` 后，该轮调优中的 S=4/S=8 整层延迟从 235.29/255.39 us 降到
-  226.59/247.25 us。
-- latent RMSNorm 原来写成 `copy_(rmsnorm(...))`，graph capture 后展开为约
-  25-30 us 的 elementwise/reduction 工作。`compiled_rmsnorm_out` 现在直接写入
-  graph-stable 目标 buffer，使最终整层降到约 204/229 us。
+- routed experts 使用现有调优后的 `bm16` MXFP4 GEMM 路径，与 ATOM 的低 token 选择
+  对齐。该阶段把 S=4/S=8 从 235.29/255.39 us 降到 226.59/247.25 us。
+- `mxfp8_linear.py` 沿用仓库已有的 gfx950 scaled-MFMA preshuffle 布局，并针对
+  M=1/2/4/8 特化调度。post-AttnRes 只量化一次 activation，latent-down 与 shared
+  up/gate 共同消费这份 packed 输入。
+- `router_projection.py` 把 BF16 router projection/top-16 与两路 MXFP8 projection 放在
+  同一个 kernel。每个 512-thread CTA 使用 4 个 projection wave，增加可独立调度的 CTA
+  数；隔离的 latent/shared 阶段从约 24.9 us 降到 16.2 us。完整融合 kernel 在 S=4/S=8
+  分别为 22.59/24.26 us。
+- K3 的 `S <= 8`、top-16 约束意味着每个 active expert 只需要一个 padded 16-row tile。
+  LDS atomic histogram 与每条 route 的 atomic ticket 取代重复扫描，使 S=8 整层减少约
+  8 us。
+- `kimi_k3_tail.py` 把 routed TP reduce/RMSNorm 与独立的 shared-down 计算重叠。shared
+  partial 提前发给对应 output owner；owner 随后叠加本 rank 的 latent-up shard，再广播
+  最终值。两路 projection、两段通信、RMSNorm、累加与 residual update 合并后，该 kernel
+  在 S=4/S=8 分别为 16.66/18.68 us。
+- 独立 AttnRes kernel 在一次 launch 内完成混合，并直接量化 post-attention 输出供 MXFP8
+  消费。post-AttnRes 在 S=4/S=8 分别为 8.47/8.64 us。
+
+隔离的 7168→3584 projection 使用含 16 次 launch 的 HIP graph 测量，MXFP8 kernel
+在 M=4/M=8 分别为 7.05/7.75 us；对应 BF16 `torch.mm` 为 11.86/12.09 us，因此特化
+MXFP8 GEMM 分别快 1.68x/1.56x，同时相对反量化 MXFP8 matmul 的 relative L2 约为
+`2e-4`。
 
 router projection 和 correction bias 也已改成 BF16，与 ATOM 的生产 gate 契约一致；
 FP32 只用于 sigmoid、比较和 route normalization。该 dtype 修正没有明显改变延迟，
@@ -342,10 +358,10 @@ FP32 只用于 sigmoid、比较和 route normalization。该 dtype 修正没有�
 `atom.models.kimi_k3.KimiDecoderLayer`，覆盖 AttnRes、MLA、routing、routed/shared
 MoE、latent transforms、TP reductions、dual streams 和 HIP graph replay。
 
-| Batch | FlyDSL 完整层 | ATOM 完整层 | FlyDSL 相对 ATOM |
-|---:|---:|---:|---:|
-| 4 | 194.9370 us | 225.6496 us | -13.61% |
-| 8 | 221.5046 us | 256.5222 us | -13.65% |
+| Batch | FlyDSL 完整层 | ATOM 完整层 | 加速比 | 延迟降低 |
+|---:|---:|---:|---:|---:|
+| 4 | **111.7374 us** | 225.6496 us | **2.019x** | **50.48%** |
+| 8 | **126.4800 us** | 256.5222 us | **2.028x** | **50.69%** |
 
 这些数据都是实测的 decoder 整层端到端时间，但 attention 工作量并不完全相同：ATOM
 的 `KimiFullAttention` 扫描 dense 3001-token KV context，而 FlyDSL 在 position 3000
@@ -355,48 +371,53 @@ MoE、latent transforms、TP reductions、dual streams 和 HIP graph replay。
 
 ### 为什么 K3 的绝对耗时仍明显高于 GLM kernel
 
-上文 GLM-5 W8A8 S=4 为 56.217 us，而 K3 A16W4 完整层为 194.9370 us，但不能把
+上文 GLM-5 W8A8 S=4 为 56.217 us，而 K3 A16W4 完整层为 111.7374 us，但不能把
 两者当成同工作量的直接优化目标。K3 hidden size 为 7168 而不是 6144，routed expert
 为 896/top-16/intermediate 384 而不是 256/top-8/intermediate 256，每卡 attention
 head 为 12 而不是 8。仅 router projection 的规模就约大 4.08 倍：
 `(7168 * 896) / (6144 * 256)`。
 
 K3 还额外执行 AttnRes mixing、replicated 7168→3584 latent projection、shared
-experts、latent RMSNorm、rank-local 3584→896 tail，以及两次 MoE TP reduction。
-GLM 快路径把主要工作放进一个 persistent monokernel；K3 目前仍由 persistent MLA、
-dense GEMM、原生 router、sorting、两阶段 routed experts、shared experts 和
-collectives 组合。因此本次修改对齐的是 GLM 的优化原则——原生 wave-level routing、
-低 token tile、graph-stable 输出融合和 symmetric peer 通信——不能让未归一化的两个
-模型工作量得到相同绝对延迟。
+experts、latent RMSNorm、rank-local 3584→896 tail，以及两次 MoE TP reduction。最终
+K3 路径仍包含 6 个应用 kernel，而 GLM 快路径把大部分工作放在一个 persistent
+monokernel 内。本次保留了 GLM 中有效的机制：persistent attention、owner-reduce/
+broadcast 通信、低 token MXFP4 tile、直接生成 routing metadata，以及显式计算/通信
+overlap。
 
-S=4 单层 profile 中，当前 K3 最大的 kernel 依次包括 persistent MLA（34.94 us）、
-融合 router projection/top-16（22.91 us）、routed GEMM1（21.43 us）、两次 symmetric
-reduction 合计（18.48 us）、latent projection（15.49 us）和 shared-expert GEMM。下一步
-有实质收益的方向是更深的 persistent 集成：让 routing 直接产出 sorter-ready metadata，
-并在 ownership 与 mailbox 协议可验证时合并 latent normalization/tail。曾尝试把
-shared/tail accumulation 与 final peer reduce 合并，但 TP8 下出现 illegal-address，
-故未保留该实验代码。
+最终单层 kernel breakdown 如下：
 
-还测试了在两个 HIP stream 上重叠 shared 与 routed 分支，但该方案被否决：S=1 从
-336.68 us 回退到 384.66 us，原因是小 GEMM 争抢计算资源并引入跨 stream 同步。生产
-路径继续使用单 stream。
+| 阶段 | S=4 | S=8 |
+|---|---:|---:|
+| Persistent MLA | 34.10 us | 42.98 us |
+| Router + latent/shared projection | 22.59 us | 24.26 us |
+| MXFP4 routed GEMM1 | 21.08 us | 22.27 us |
+| 融合 shared/latent tail + TP communication | 16.66 us | 18.68 us |
+| MXFP4 routed GEMM2 | 9.17 us | 10.21 us |
+| Post-attention AttnRes | 8.47 us | 8.64 us |
+
+各阶段相加已接近无插桩端到端延迟，因此剩余时间主要受计算量限制，而不是隐藏的 framework
+或 collective 空泡。曾测试用独立 HIP stream 重叠 shared 与 routed 分支，但小 kernel
+争抢计算资源并增加跨 stream 同步，因此未保留。最终保留的 overlap 位于 fused tail
+内部：shared 访存和远端发送在 routed reduce/RMSNorm 与 latent-up 依赖完成期间推进。
+也测试过把 selector CTA 放到 projection CTA 前面；修正区间条件后结果正确，但 S=8
+回退到 127.12 us，因此保留 selector-last 调度。
 
 完整 MLA + MoE 正确性与性能可用以下命令复现：
 
 ```bash
-cd /root/FlyDSL-glm5-mxfp4-atom-layout
+cd /root/FlyDSL-kimi-k3
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
-export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:.
+export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-kimi-k3:/root/tilert_pkg
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
   --npes 8 --samples 4 --layer-idx 0 --check \
-  --bench --layers 16 --repeats 7 \
-  --output /root/kimi-k3-perf-results/full-moe/final-optimized-s4.json
+  --bench --kernel-profile --layers 16 --repeats 100 \
+  --output /root/kimi-k3-perf-results/full-moe/final-s4.json
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
   --npes 8 --samples 8 --layer-idx 0 --check \
-  --bench --layers 16 --repeats 7 \
-  --output /root/kimi-k3-perf-results/full-moe/final-optimized-s8.json
+  --bench --kernel-profile --layers 16 --repeats 100 \
+  --output /root/kimi-k3-perf-results/full-moe/final-s8.json
 ```
 
 可使用 `--eager-attn-res`、`--eager-router` 或 `--eager-shared-experts` 做受控的优化

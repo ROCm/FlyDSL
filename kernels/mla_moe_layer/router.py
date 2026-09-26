@@ -94,9 +94,9 @@ def build_sigmoid_topk_router(num_experts: int, topk: int, samples: int):
                 best_raw = take.select(peer_raw, best_raw)
                 best_id = take.select(peer_id, best_id)
 
+            selected_sum = selected_sum + best_raw
             selected_scores.append(best_raw)
             selected_ids.append(best_id)
-            selected_sum = selected_sum + best_raw
             for i in range_constexpr(values_per_lane):
                 is_winner = expert_ids[i] == best_id
                 corrected_scores[i] = is_winner.select(neg_inf, corrected_scores[i])
