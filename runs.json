@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-25T23:53:27Z",
+ "updated": "2026-09-26T00:46:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36205037906,
+   "pr": 1201,
+   "commit": "86bf048492cb5b04d23b2ec093f1c4306386a4f6",
+   "branch": "glm5-mla-moe-layer-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add GLM-5 indexed reuse MLA + MoE block / \u6dfb\u52a0 GLM-5 \u7d22\u5f15\u590d\u7528 MLA + MoE \u878d\u5408\u5757",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36205037906",
+   "created_at": "2026-09-26T00:29:27Z",
+   "updated_at": "2026-09-26T00:31:20Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36199412182,
    "pr": 1200,
@@ -10,20 +25,20 @@
    "branch": "fix/gfx1250-tdm-mcast-bench-device-time",
    "event": "pull_request",
    "title": "[Fix][gfx1250] Time the TDM multicast-add benchmark on the device",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199412182",
    "created_at": "2026-09-25T23:02:46Z",
-   "updated_at": "2026-09-25T23:20:09Z",
+   "updated_at": "2026-09-26T00:10:51Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-25T23:20:08Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-26T00:10:50Z",
+     "completed_at": "2026-09-26T00:37:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199412182/job/108286211613"
     },
     {
@@ -63,19 +78,19 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-25T23:43:08Z",
-     "completed_at": null,
+     "completed_at": "2026-09-26T00:10:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199396682/job/108285430966"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-25T23:20:58Z",
-     "completed_at": null,
+     "completed_at": "2026-09-26T00:43:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199396682/job/108285430992"
     },
     {
@@ -106,9 +121,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-25T23:22:54Z",
+     "started_at": "2026-09-26T00:37:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199381043/job/108286765625"
     },
@@ -139,29 +154,32 @@
    "branch": "chore/gfx1250-drop-pre-885-leftovers",
    "event": "pull_request",
    "title": "[Chore][gfx1250] Drop leftovers of the GEMM modules removed in #885",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199364400",
    "created_at": "2026-09-25T23:02:05Z",
-   "updated_at": "2026-09-25T23:17:01Z",
+   "updated_at": "2026-09-26T00:44:03Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-25T23:15:03Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199364400/job/108285032323"
+     "completed_at": "2026-09-26T00:41:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199364400/job/108285032323",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-25T23:17:00Z",
-     "completed_at": null,
+     "completed_at": "2026-09-26T00:44:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199364400/job/108285032349"
     },
     {
@@ -177,11 +195,11 @@
   },
   {
    "run_id": 36112129460,
-   "pr": 1196,
+   "pr": 1201,
    "commit": "1e28fd8a1703a475dbf992acde59559842944467",
    "branch": "glm5-mla-moe-layer-monokernel",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 FlyDSL decode kernels / \u6dfb\u52a0 GLM-5 FlyDSL \u89e3\u7801\u7b97\u5b50",
+   "title": "[Superseded] GLM-5 indexed reuse MLA + MoE block / [\u5df2\u66ff\u4ee3] GLM-5 \u7d22\u5f15\u590d\u7528 MLA + MoE \u878d\u5408\u5757",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36112129460",
@@ -1977,52 +1995,6 @@
    "updated_at": "2026-09-22T09:04:08Z",
    "actor": "LWenH",
    "jobs": []
-  },
-  {
-   "run_id": 35700013488,
-   "pr": 1062,
-   "commit": "bebff0d3b73f2ed36cd7de6c1070debd93ff1f5e",
-   "branch": "smem-capacity-decouple",
-   "event": "pull_request",
-   "title": "smem cleanup: move capacity helpers off legacy allocator, migrate tes\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35700013488",
-   "created_at": "2026-09-22T07:31:17Z",
-   "updated_at": "2026-09-22T09:40:47Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T07:48:11Z",
-     "completed_at": "2026-09-22T09:05:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35700013488/job/106659985745",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T08:10:00Z",
-     "completed_at": "2026-09-22T08:40:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35700013488/job/106659985770"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T07:50:59Z",
-     "completed_at": "2026-09-22T09:40:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35700013488/job/106659985824"
-    }
-   ]
   }
  ]
 }
