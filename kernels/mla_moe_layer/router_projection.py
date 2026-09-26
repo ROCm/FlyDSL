@@ -13,7 +13,7 @@ from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.mla_moe_layer.kernel_common import exp, rcp, rsrc, uniform
+from kernels.mla_moe_layer.kernel_common import exp, rcp, rsrc, uniform, xshfl
 from kernels.mla_moe_layer.kernel_layout import CM_DEV, LAYER_SLOTS
 
 _THREADS = 512
@@ -262,9 +262,9 @@ def build_router_projection(hidden: int, num_experts: int, topk: int, samples: i
                         best_id = take.select(candidate_id, best_id)
 
                     for shuffle_offset in (32, 16, 8, 4, 2, 1):
-                        peer_score = best_score.shuffle_xor(fx.Int32(shuffle_offset), _WAVE_SIZE)
-                        peer_raw = best_raw.shuffle_xor(fx.Int32(shuffle_offset), _WAVE_SIZE)
-                        peer_id = best_id.shuffle_xor(fx.Int32(shuffle_offset), _WAVE_SIZE)
+                        peer_score = xshfl(best_score, shuffle_offset)
+                        peer_raw = xshfl(best_raw, shuffle_offset)
+                        peer_id = xshfl(best_id, shuffle_offset)
                         take = (peer_score > best_score) | (
                             (ArithValue(peer_score) == ArithValue(best_score)) & (peer_id < best_id)
                         )
