@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
@@ -160,6 +160,28 @@ class RocmBackend(BaseBackend):
             "libfly_jit_runtime.so",
             "libmlir_c_runner_utils.so",
         ]
+
+    # -- AOT export ------------------------------------------------------
+
+    @classmethod
+    def aot_runtime_lib_basenames(cls) -> List[str]:
+        return ["libfly_jit_runtime.so"]
+
+    @classmethod
+    def aot_offloading_handler(cls, symbol_prefix: str) -> str:
+        return f'#fly.aot_module<"{symbol_prefix}">'
+
+    @classmethod
+    def aot_module_symbols(cls, symbol_prefix: str) -> Dict[str, str]:
+        return {
+            "init": f"{symbol_prefix}__module_init",
+            "load": f"{symbol_prefix}__module_load",
+            "unload": f"{symbol_prefix}__module_unload",
+        }
+
+    @classmethod
+    def aot_take_error_symbol(cls) -> str:
+        return "flydslRuntimeTakeError"
 
 
 def _iter_gpu_kernel_funcs(module):

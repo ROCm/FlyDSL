@@ -107,6 +107,35 @@ The ``flydsl.expr.rocdl`` module provides AMD-specific operations:
 - **fx.rocdl.WMMA** / **fx.rocdl.WMMAScale** -- wave32 WMMA MMA atoms; ``WMMA`` is arch-dispatched (gfx11 / gfx120x RDNA4 / gfx1250), ``WMMAScale`` is the gfx1250 E8M0 MX-scaled form
 - **fx.rocdl.make_tdm_atom** / **fx.rocdl.TDM** -- gfx1250 TDM async Global↔LDS whole-tile copy atom (1–5D; base from the copy operand, per-dim extent/stride/imm_offset/mask as atom state)
 
+AOT export
+-----------
+
+``flyc.compile(launcher, *args)`` returns an exportable specialization. Null
+pointer wrappers and non-device tensors select a runtime-free compile path;
+the engine is initialized lazily if that result is called. Live device
+arguments retain the established initial launch behavior.
+``export_to_c(file_path, file_name, function_prefix)`` writes a PIC host object
+and C header, with the entry ``int32_t function_prefix(void **args)`` plus
+module lifecycle functions, and returns the C ABI description:
+
+.. code-block:: python
+
+   compiled = flyc.compile(launch, *example_args)
+   result = compiled.export_to_c(
+       file_path="build",
+       file_name="kernel",
+       function_prefix="my_kernel",
+   )
+   result.abi            # one AbiSlot per args[i]
+   result.to_json()
+
+The export reuses the compiled specialization. The legacy
+``export_to_c(object_file_path, function_name, header_file_path=...)`` form is
+also supported.
+
+Link flags come from ``python -m flydsl.compiler.aot_config --ldflags --libs``.
+See :doc:`../aot_export_guide`.
+
 fly-opt CLI
 ------------
 

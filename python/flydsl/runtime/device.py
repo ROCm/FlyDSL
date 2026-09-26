@@ -42,8 +42,12 @@ def get_rocm_arch() -> str:
     Lower-casing happens here so every caller can compare against lower-case
     literals without normalising first; ROCm itself only ever emits lower-case
     names, so this only affects hand-set environment overrides.
+
+    ``ARCH`` is checked first because it selects the compile target. This also
+    makes architecture-sensitive DSL construction deterministic on CPU-only
+    hosts, where no device exists to auto-detect.
     """
-    env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
+    env = os.environ.get("ARCH") or os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
     if env:
         env = env.lower()
         if env.startswith("gfx"):

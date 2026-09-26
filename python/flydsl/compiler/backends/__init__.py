@@ -45,6 +45,21 @@ def compile_backend_name() -> str:
     return (env.compile.backend or "rocm").lower()
 
 
+def get_backend_class(name: Optional[str] = None) -> Type[BaseBackend]:
+    """Resolve a registered backend class without detecting a GPU target.
+
+    *name* defaults to ``FLYDSL_COMPILE_BACKEND`` (or ``'rocm'``).
+    """
+    name = (name or compile_backend_name()).lower()
+    backend_cls = _registry.get(name)
+    if backend_cls is None:
+        if name in _import_errors:
+            raise ImportError(f"Compile backend '{name}' failed to import") from _import_errors[name]
+        available = ", ".join(sorted(_registry)) or "(none)"
+        raise ValueError(f"Unknown compile backend '{name}'. Registered backends: {available}")
+    return backend_cls
+
+
 def resolve_llvm_address_space(address_space) -> int:
     """Map a Fly pointer address space using the active compile backend."""
     name = compile_backend_name()

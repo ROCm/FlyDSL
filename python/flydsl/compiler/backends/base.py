@@ -3,7 +3,7 @@
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 
 @dataclass(frozen=True)
@@ -27,7 +27,8 @@ class BaseBackend(metaclass=ABCMeta):
     * MLIR pass-pipeline fragments for lowering Fly IR to device binary,
     * gpu.module target attributes,
     * native-library patterns for toolchain fingerprinting (cache key),
-    * runtime shared-library basenames for the JIT ExecutionEngine.
+    * runtime shared-library basenames for the JIT ExecutionEngine,
+    * optionally, the hooks used by ``flyc.compile(...).export_to_c(...)``.
     """
 
     def __init__(self, target: GPUTarget) -> None:
@@ -113,3 +114,30 @@ class BaseBackend(metaclass=ABCMeta):
     def jit_runtime_lib_basenames(self) -> List[str]:
         """Basenames of shared libraries passed to ``ExecutionEngine``."""
         ...
+
+    # -- AOT export ------------------------------------------------------
+
+    @classmethod
+    def aot_runtime_lib_basenames(cls) -> List[str]:
+        """Basenames (in ``_mlir/_mlir_libs/``) of the shared libraries an
+        exported host object links against."""
+        raise NotImplementedError(f"{cls.__name__} does not support AOT export")
+
+    @classmethod
+    def aot_offloading_handler(cls, symbol_prefix: str) -> str:
+        """Offloading-handler attribute (MLIR assembly) that embeds the GPU
+        binary of an exported object and emits the lifecycle functions named
+        by :meth:`aot_module_symbols`."""
+        raise NotImplementedError(f"{cls.__name__} does not support AOT export")
+
+    @classmethod
+    def aot_module_symbols(cls, symbol_prefix: str) -> Dict[str, str]:
+        """``{"init": ..., "load": ..., "unload": ...}`` lifecycle symbols
+        emitted by :meth:`aot_offloading_handler` for *symbol_prefix*."""
+        raise NotImplementedError(f"{cls.__name__} does not support AOT export")
+
+    @classmethod
+    def aot_take_error_symbol(cls) -> str:
+        """Runtime function ``int32_t f(void)`` returning and clearing the
+        calling thread's first recorded runtime error (0 when none)."""
+        raise NotImplementedError(f"{cls.__name__} does not support AOT export")

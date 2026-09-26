@@ -84,6 +84,7 @@ declare_mlir_python_extension(FlyPythonSources.RegisterEverything
     MLIRCAPIIR
     MLIRCPIFly
     ${_backend_embed_capi_libs}
+    MLIRCPIHostObject
     MLIRCPILLVMOption
     MLIRCAPIArith
     MLIRCAPIGPU

@@ -34,6 +34,10 @@ static llvm::Twine getModuleIdentifier(llvm::StringRef moduleName) {
   return moduleName + "_module";
 }
 
+static std::string getAotStateIdentifier(llvm::StringRef moduleName) {
+  return (moduleName + "_aot_state").str();
+}
+
 namespace {
 
 gpu::ObjectAttr getFirstObject(gpu::BinaryOp op) {
@@ -122,6 +126,67 @@ LogicalResult embedExplicitModule(StringRef moduleName, gpu::ObjectAttr object,
   return success();
 }
 
+// Embed `object` for an exported host object.  The binary and the module state
+// slot stay internal; only the prefixed lifecycle functions are external.
+LogicalResult embedAotModule(gpu::BinaryOp op, gpu::ObjectAttr object, StringRef symbolPrefix,
+                             llvm::Module &module) {
+  if (object.getFormat() == gpu::CompilationTarget::Assembly)
+    return op.emitError("fly.aot_module requires a binary GPU object, not assembly");
+  if (symbolPrefix.empty())
+    return op.emitError("fly.aot_module requires a non-empty symbol prefix");
+  StringRef moduleName = op.getName();
+
+  StringRef serializedStr = object.getObject().getValue();
+  llvm::Constant *serializedCst =
+      llvm::ConstantDataArray::getString(module.getContext(), serializedStr, /*AddNull=*/false);
+  auto *serializedObj = new llvm::GlobalVariable(module, serializedCst->getType(), true,
+                                                 llvm::GlobalValue::InternalLinkage, serializedCst,
+                                                 moduleName + "_binary");
+  serializedObj->setAlignment(llvm::MaybeAlign(8));
+  if (DictionaryAttr objectProps = object.getProperties()) {
+    if (auto section = dyn_cast_or_null<StringAttr>(objectProps.get(gpu::elfSectionName)))
+      serializedObj->setSection(section.getValue());
+  }
+
+  llvm::IRBuilder<> builder(module.getContext());
+  auto *i32Ty = builder.getInt32Ty();
+  auto *ptrTy = builder.getPtrTy(0);
+
+  auto *statePtr = new llvm::GlobalVariable(
+      module, ptrTy, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
+      llvm::ConstantPointerNull::get(ptrTy), getAotStateIdentifier(moduleName));
+
+  // Emit `int32_t <prefix>__<suffix>(params...)` forwarding to
+  // `runtimeName(leadingArgs..., params...)`.
+  auto createLifecycleFn = [&](StringRef suffix, ArrayRef<llvm::Type *> params,
+                               StringRef runtimeName,
+                               ArrayRef<llvm::Value *> leadingArgs) -> llvm::Function * {
+    std::string name = (symbolPrefix + "__" + suffix).str();
+    if (module.getFunction(name))
+      return nullptr;
+    auto *fn = llvm::Function::Create(llvm::FunctionType::get(i32Ty, params, false),
+                                      llvm::GlobalValue::ExternalLinkage, name, module);
+    builder.SetInsertPoint(llvm::BasicBlock::Create(module.getContext(), "entry", fn));
+    SmallVector<llvm::Value *> args(leadingArgs);
+    for (llvm::Argument &arg : fn->args())
+      args.push_back(&arg);
+    SmallVector<llvm::Type *> argTypes;
+    for (llvm::Value *arg : args)
+      argTypes.push_back(arg->getType());
+    llvm::FunctionCallee runtimeFn =
+        module.getOrInsertFunction(runtimeName, llvm::FunctionType::get(i32Ty, argTypes, false));
+    builder.CreateRet(builder.CreateCall(runtimeFn, args));
+    return fn;
+  };
+
+  if (!createLifecycleFn("module_init", {}, "flydslAotModuleInit", {statePtr, serializedObj}) ||
+      !createLifecycleFn("module_load", {i32Ty}, "flydslAotModuleLoad", {statePtr}) ||
+      !createLifecycleFn("module_unload", {}, "flydslAotModuleUnload", {statePtr}))
+    return op.emitError("fly.aot_module supports one GPU binary per symbol prefix; '")
+           << symbolPrefix << "' is already used";
+  return success();
+}
+
 } // namespace
 
 namespace llvm {
@@ -160,6 +225,25 @@ public:
   FunctionCallee getModuleFunctionFn() {
     return module.getOrInsertFunction(
         "mgpuModuleGetFunction", FunctionType::get(ptrTy, ArrayRef<Type *>({ptrTy, ptrTy}), false));
+  }
+
+  FunctionCallee getAotKernelLaunchFn() {
+    return module.getOrInsertFunction(
+        "flydslAotModuleLaunchKernel",
+        FunctionType::get(voidTy,
+                          ArrayRef<Type *>({ptrTy, ptrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
+                                            intPtrTy, intPtrTy, i32Ty, ptrTy, ptrTy, ptrTy, i64Ty}),
+                          false));
+  }
+
+  FunctionCallee getAotClusterKernelLaunchFn() {
+    return module.getOrInsertFunction(
+        "flydslAotModuleLaunchClusterKernel",
+        FunctionType::get(voidTy,
+                          ArrayRef<Type *>({ptrTy, ptrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
+                                            intPtrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy, i32Ty,
+                                            ptrTy, ptrTy, ptrTy, i64Ty}),
+                          false));
   }
 
   FunctionCallee getStreamCreateFn() {
@@ -203,7 +287,7 @@ public:
     return argArray;
   }
 
-  llvm::LogicalResult createKernelLaunch(mlir::gpu::LaunchFuncOp op) {
+  llvm::LogicalResult createKernelLaunch(mlir::gpu::LaunchFuncOp op, bool aotModule = false) {
     auto llvmValue = [&](mlir::Value value) -> Value * {
       Value *v = moduleTranslation.lookupValue(value);
       assert(v && "Value has not been translated.");
@@ -225,13 +309,17 @@ public:
     Value *argArray = createKernelArgArray(op);
 
     StringRef moduleName = op.getKernelModuleName().getValue();
-    Twine moduleIdentifier = getModuleIdentifier(moduleName);
-    Value *modulePtr = module.getGlobalVariable(moduleIdentifier.str(), true);
+    std::string moduleIdentifier =
+        aotModule ? getAotStateIdentifier(moduleName) : getModuleIdentifier(moduleName).str();
+    Value *modulePtr = module.getGlobalVariable(moduleIdentifier, true);
     if (!modulePtr)
       return op.emitError() << "Couldn't find the binary: " << moduleIdentifier;
-    Value *moduleObj = builder.CreateLoad(ptrTy, modulePtr);
     Value *functionName = getOrCreateFunctionName(moduleName, op.getKernelName());
-    Value *moduleFunction = builder.CreateCall(getModuleFunctionFn(), {moduleObj, functionName});
+    Value *moduleFunction = nullptr;
+    if (!aotModule) {
+      Value *moduleObj = builder.CreateLoad(ptrTy, modulePtr);
+      moduleFunction = builder.CreateCall(getModuleFunctionFn(), {moduleObj, functionName});
+    }
 
     Value *stream = nullptr;
     if (mlir::Value asyncObject = op.getAsyncObject()) {
@@ -251,14 +339,29 @@ public:
     if (op.hasClusterSize()) {
       mlir::gpu::KernelDim3 cluster = op.getClusterSizeOperandValues();
       Value *cx = llvmValue(cluster.x), *cy = llvmValue(cluster.y), *cz = llvmValue(cluster.z);
-      builder.CreateCall(
-          getClusterKernelLaunchFn(),
-          ArrayRef<Value *>({moduleFunction, cx, cy, cz, gx, gy, gz, bx, by, bz, dynamicMemorySize,
-                             stream, argArray, nullPtr, paramsCount}));
+      if (aotModule) {
+        builder.CreateCall(
+            getAotClusterKernelLaunchFn(),
+            ArrayRef<Value *>({modulePtr, functionName, cx, cy, cz, gx, gy, gz, bx, by, bz,
+                               dynamicMemorySize, stream, argArray, nullPtr, paramsCount}));
+      } else {
+        builder.CreateCall(
+            getClusterKernelLaunchFn(),
+            ArrayRef<Value *>({moduleFunction, cx, cy, cz, gx, gy, gz, bx, by, bz,
+                               dynamicMemorySize, stream, argArray, nullPtr, paramsCount}));
+      }
     } else {
-      builder.CreateCall(getKernelLaunchFn(), ArrayRef<Value *>({moduleFunction, gx, gy, gz, bx, by,
-                                                                 bz, dynamicMemorySize, stream,
-                                                                 argArray, nullPtr, paramsCount}));
+      if (aotModule) {
+        builder.CreateCall(
+            getAotKernelLaunchFn(),
+            ArrayRef<Value *>({modulePtr, functionName, gx, gy, gz, bx, by, bz, dynamicMemorySize,
+                               stream, argArray, nullPtr, paramsCount}));
+      } else {
+        builder.CreateCall(
+            getKernelLaunchFn(),
+            ArrayRef<Value *>({moduleFunction, gx, gy, gz, bx, by, bz, dynamicMemorySize, stream,
+                               argArray, nullPtr, paramsCount}));
+      }
     }
 
     return success();
@@ -306,8 +409,37 @@ public:
   }
 };
 
+class AotModuleAttrImpl
+    : public gpu::OffloadingLLVMTranslationAttrInterface::FallbackModel<AotModuleAttrImpl> {
+public:
+  LogicalResult embedBinary(Attribute attribute, Operation *operation, llvm::IRBuilderBase &builder,
+                            LLVM::ModuleTranslation &moduleTranslation) const {
+    auto op = dyn_cast_or_null<gpu::BinaryOp>(operation);
+    if (!op)
+      return operation->emitError("operation must be a GPU binary"), failure();
+    gpu::ObjectAttr object = getFirstObject(op);
+    if (!object)
+      return failure();
+    return embedAotModule(op, object, cast<fly::AotModuleAttr>(attribute).getSymbolPrefix(),
+                          *moduleTranslation.getLLVMModule());
+  }
+
+  LogicalResult launchKernel(Attribute attribute, Operation *launchFuncOp, Operation *binaryOp,
+                             llvm::IRBuilderBase &builder,
+                             LLVM::ModuleTranslation &moduleTranslation) const {
+    auto op = dyn_cast_or_null<gpu::LaunchFuncOp>(launchFuncOp);
+    if (!op)
+      return launchFuncOp->emitError("operation must be a GPU launch func Op."), failure();
+    if (!isa_and_nonnull<gpu::BinaryOp>(binaryOp))
+      return binaryOp->emitError("operation must be a GPU binary."), failure();
+    return llvm::LaunchKernel(*moduleTranslation.getLLVMModule(), builder, moduleTranslation)
+        .createKernelLaunch(op, /*aotModule=*/true);
+  }
+};
+
 } // namespace
 
 void mlir::fly::registerExplicitModuleOffloadingLLVMTranslation(MLIRContext &context) {
   ExplicitModuleAttr::attachInterface<ExplicitModuleAttrImpl>(context);
+  AotModuleAttr::attachInterface<AotModuleAttrImpl>(context);
 }
