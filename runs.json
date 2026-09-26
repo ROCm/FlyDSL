@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-26T00:46:05Z",
+ "updated": "2026-09-26T00:49:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "glm5-mla-moe-layer-monokernel",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add GLM-5 indexed reuse MLA + MoE block / \u6dfb\u52a0 GLM-5 \u7d22\u5f15\u590d\u7528 MLA + MoE \u878d\u5408\u5757",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36205037906",
    "created_at": "2026-09-26T00:29:27Z",
-   "updated_at": "2026-09-26T00:31:20Z",
+   "updated_at": "2026-09-26T00:45:12Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-26T00:45:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36205037906/job/108302532387"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-26T00:47:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36205037906/job/108302532525"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-26T00:45:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36205037906/job/108302532877"
+    }
+   ]
   },
   {
    "run_id": 36199412182,
@@ -68,11 +96,11 @@
    "branch": "fix/gfx1250-moe-reject-partial-k",
    "event": "pull_request",
    "title": "[Fix][gfx1250] Reject a K that tile_k does not divide in the A8W4 MoE GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199396682",
    "created_at": "2026-09-25T23:02:33Z",
-   "updated_at": "2026-09-25T23:43:09Z",
+   "updated_at": "2026-09-26T00:47:31Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -96,11 +124,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-25T23:17:37Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199396682/job/108285430997"
+     "completed_at": "2026-09-26T00:47:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199396682/job/108285430997",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -111,11 +142,11 @@
    "branch": "fix/gfx1250-moe-silu-clamp",
    "event": "pull_request",
    "title": "[Fix][gfx1250] Stop clamping SiLU with swiglu_limit in the A8W4 MoE epilogue",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199381043",
    "created_at": "2026-09-25T23:02:19Z",
-   "updated_at": "2026-09-25T23:22:55Z",
+   "updated_at": "2026-09-26T00:45:50Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -139,9 +170,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-25T23:22:54Z",
+     "started_at": "2026-09-26T00:45:49Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199381043/job/108286765682"
     }
