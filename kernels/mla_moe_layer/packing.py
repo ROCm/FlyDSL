@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Host-side weight packing for GLM-5 and Kimi-K3 MLA launch wrappers."""
+"""Host-side weight packing for model-specific MLA + MoE launch wrappers."""
 
 from __future__ import annotations
 
@@ -13,7 +13,13 @@ from kernels.mla_moe_layer.config import (
     ExpertWeight,
     LayerConfig,
     MoeMode,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    RouterWeightLayout,
     as_layer_config,
+    as_mxfp4_scale_layout,
+    as_mxfp4_weight_layout,
+    as_router_weight_layout,
     moe_format,
 )
 
@@ -42,12 +48,16 @@ def pack_bf16(w: torch.Tensor) -> torch.Tensor:
     return w16.permute(0, 2, 3, 4, 1, 5).contiguous().view(-1)
 
 
-def pack_mxfp4(q: torch.Tensor) -> torch.Tensor:
-    """Pack MXFP4 for four BF16 MFMA K32 steps in each 128-K tile.
+def pack_bf16_atom(w: torch.Tensor) -> torch.Tensor:
+    """Keep the row-major BF16 layout used by ATOM's unquantized router."""
 
-    A lane loads four dwords. Dword ``s`` holds its eight FP4 values for K32
-    step ``s``, matching :func:`pack_bf16` after in-kernel FP4 conversion.
-    """
+    if w.ndim != 2:
+        raise ValueError(f"BF16 packing expects a matrix, got shape {tuple(w.shape)}")
+    return w.contiguous().view(-1)
+
+
+def pack_mxfp4(q: torch.Tensor) -> torch.Tensor:
+    """Pack MXFP4 for four BF16 MFMA K32 steps in each 128-K tile."""
 
     q = q.view(torch.uint8)
     *lead, rows, packed_k = q.shape
@@ -61,12 +71,7 @@ def pack_mxfp4(q: torch.Tensor) -> torch.Tensor:
 
 
 def pack_a16w4_weight(q: torch.Tensor) -> torch.Tensor:
-    """Pack row-major MXFP4 weights for the two-stage A16W4 MoE kernels.
-
-    ``q`` stores two FP4 values per byte and may have arbitrary leading expert
-    dimensions.  The kernel consumes 16 output rows by 64 logical K values per
-    tile, with the two packed-K halves preceding the row/lane dimensions.
-    """
+    """Pack MXFP4 values in the ATOM/AITER 16-row by 16-byte tile order."""
 
     q = q.view(torch.uint8)
     *lead, rows, packed_k = q.shape
@@ -82,11 +87,7 @@ def pack_a16w4_weight(q: torch.Tensor) -> torch.Tensor:
 
 
 def pack_a16w4_scale(scale: torch.Tensor) -> torch.Tensor:
-    """Pack row-major per-1x32 E8M0 scales for the A16W4 kernels.
-
-    The layout matches the production kernel's 256-row by 8-group scale tile.
-    Padding is deterministic because padded rows/groups are never addressed.
-    """
+    """Pack E8M0 scales in the ATOM/AITER 256-row by 8-group tile order."""
 
     scale = scale.view(torch.uint8)
     if scale.ndim < 2:
@@ -102,13 +103,27 @@ def pack_a16w4_scale(scale: torch.Tensor) -> torch.Tensor:
     return packed.permute(0, 3, 5, 2, 4, 1).contiguous().view(-1)
 
 
+# Compatibility names used by the GLM-5 ATOM-layout experiments.
+pack_mxfp4_atom = pack_a16w4_weight
+pack_mxfp4_scale_atom = pack_a16w4_scale
+
+
 def pack_layer_weights(
     tensors: dict[str, torch.Tensor],
     moe_mode: MoeMode | str = MoeMode.W8A8,
     model_config: LayerConfig | str = GLM5_CONFIG,
     attention_only: bool = False,
+    *,
+    mxfp4_weight_layout: Mxfp4WeightLayout | str | None = None,
+    mxfp4_scale_layout: Mxfp4ScaleLayout | str | None = None,
+    router_weight_layout: RouterWeightLayout | str | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Pack every matrix consumed by the fused layer kernel."""
+    """Pack weights for a model profile and the selected kernel storage contract.
+
+    The generic indexed kernel retains its native packing by default. The
+    optimized GLM-5 wrapper resolves and passes its ATOM-compatible MXFP4
+    layouts explicitly, so model geometry and physical storage stay separate.
+    """
 
     config = as_layer_config(model_config)
     attention_names = ("w_qkv_a", "w_q_b", "w_uk", "w_uv", "w_o")
@@ -117,12 +132,31 @@ def pack_layer_weights(
     missing = [name for name in required if name not in tensors]
     if missing:
         raise ValueError(f"missing layer weights: {', '.join(missing)}")
+
     pack_attention = pack_bf16 if config.attention_weight is AttentionWeight.BF16 else pack_fp8
     packed = {name: pack_attention(tensors[name]) for name in attention_names}
     if attention_only:
         return packed
+
     weight = moe_format(moe_mode).weight
-    pack_expert = pack_mxfp4 if weight is ExpertWeight.MXFP4_BLOCK32 else pack_fp8
+    weight_layout = (
+        Mxfp4WeightLayout.NATIVE if mxfp4_weight_layout is None else as_mxfp4_weight_layout(mxfp4_weight_layout)
+    )
+    scale_layout = Mxfp4ScaleLayout.NATIVE if mxfp4_scale_layout is None else as_mxfp4_scale_layout(mxfp4_scale_layout)
+    router_layout = (
+        RouterWeightLayout.NATIVE if router_weight_layout is None else as_router_weight_layout(router_weight_layout)
+    )
+
+    if weight is ExpertWeight.MXFP4_BLOCK32:
+        pack_expert = pack_a16w4_weight if weight_layout is Mxfp4WeightLayout.ATOM else pack_mxfp4
+    else:
+        if weight_layout is not Mxfp4WeightLayout.NATIVE or scale_layout is not Mxfp4ScaleLayout.NATIVE:
+            raise ValueError("ATOM MXFP4 layouts require an MXFP4 expert mode")
+        pack_expert = pack_fp8
     packed.update({name: pack_expert(tensors[name]) for name in expert_names})
-    packed["w_r"] = pack_bf16(tensors["w_r"])
+    if scale_layout is Mxfp4ScaleLayout.ATOM:
+        packed.update({name: pack_a16w4_scale(tensors[name]) for name in ("s_ug", "s_dn")})
+    packed["w_r"] = (
+        pack_bf16_atom(tensors["w_r"]) if router_layout is RouterWeightLayout.ATOM else pack_bf16(tensors["w_r"])
+    )
     return packed

@@ -1,34 +1,13 @@
-# Indexed sparse MLA + MoE block
+# Shared/reuse MLA + MoE kernel
 
 [English](PERFORMANCE.md)
 
-本目录包含一套共享、按模型配置的 FlyDSL 实现，覆盖固定的 GLM-5 MLA + MoE
-分片和生产 TP8 Kimi-K3 MLA + latent-MoE 完整层。persistent 路径由
-`IndexedMlaMoeBlock` 提供，`Glm5IndexedMlaMoeBlock` 与 `KimiK3MlaLayer`
-只是轻量模型封装，kernel 统一由 `build_indexed_mla_moe_kernel` 通过 FlyDSL 与
-ROCDL API 生成。
-
-该 block 接收调用方准备好的 sparse-attention indices。GLM-5 的 78 层生产调度中，
-57 个 MoE 层使用本实现覆盖的对称 8-head/rank reuse 拓扑。另外 18 个 MoE 层使用非对称
-refresh 拓扑：rank 1-7 运行 padded 10-head whole-layer 路径，rank 0 参加 attention
-reduction 后再调用 standalone MoE。该 refresh 拓扑和 standalone 入口尚不在此 block
-内。生成新索引的 selector/indexer/top-2048/broadcast 独立链路也不在本 block 内，且
-不属于 MoE 计算。
-
-在已支持的拓扑中，本 block 完整包含 MoE router、expert top-8、shared/routed experts、
-up/gate activation、down projection、expert weighting 和 TP peer reduction。refresh
-路径使用相同的 MoE 数学阶段，但其生产装载方式和 rank 布局仍需单独集成。
-
-`KimiK3MlaMoeLayer` 在 K3 MLA 分片外串接 AttnRes、routing、A16W4 routed
-experts、shared experts、latent transforms 和 TP reductions。这些路径不导入
-TileRT kernel 主体，也不嵌入汇编。
+本目录包含一个固定 GLM-5 MLA + MoE 分片的 FlyDSL 实现。生产路径通过
+`SharedReuseMlaMoeLayer` 提供，并由 `build_shared_reuse_kernel` 生成。该路径不导入
+TileRT kernel 主体，也不嵌入汇编。原有的汇编捕获、改写和启动桥接代码已全部删除。
 
 `native_baseline.py` 仍可选择性依赖 TileRT，用于把同一组生成权重转换给已发布的
 TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导入该适配器。
-
-外部集成与测量基线参考
-[InferenceX commit 8ac98344](https://github.com/SemiAnalysisAI/InferenceX/commit/8ac98344b038a3f2da20a565fe9b974772a67ef9)，
-该提交固定了对比所用的 GLM-5.3 MI355X TileRT 环境。
 
 ## 固定分片与计算模式
 
@@ -48,57 +27,79 @@ TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导�
 所有模式的 attention weights 都保持 block-scaled FP8。当前支持 sample count 1、2、4、8
 以及 peer count 1、2、4、8。host wrapper 会在分配 GPU buffer 前验证完整固定分片约束。
 
+## ATOM 存储布局审计
+
+MXFP4 模式现在默认采用可以直接消费 ATOM tensor、无需重新打包 expert tensor 的布局：
+
+| Tensor | 逻辑顺序 | MXFP4 默认路径的物理存储 | 与 ATOM 的兼容性 |
+|---|---|---|---|
+| `w_ug` | 256 个 routed experts，随后是 shared expert 256；gate rows 在前、up rows 在后 | AITER `shuffle_weight(..., layout=(16, 16), is_guinterleave=False)` | 完全一致 |
+| `w_dn` | 相同 expert 编号；output rows x input-intermediate columns | 相同 AITER 16x16 shuffle | 完全一致 |
+| `s_ug`、`s_dn` | 每个 1x32 block 一个 E8M0 byte | AITER non-interleaved `shuffle_scale` | 完全一致 |
+| `w_r` | 256 行 BF16 router | 默认仍用 mono-kernel MFMA packing；可选 ATOM row-major | 逻辑一致，默认不能零拷贝 |
+| MLA projection weights | `qkv_a=[q_a; kv_a]`；每个 `q_b` head 为 `[nope; rope]` | 现有 block-128 FP8 MFMA packing | 与 `amd/GLM-5.1-MXFP4` 的 BF16 attention weights 不兼容 |
+| KV cache | 每个 token 为 `[k_c(512), k_pe(64)]` | 单个连续 BF16 `[tokens, 576]` tensor | 对齐 benchmark 中 shape、stride、dtype 完全一致；ATOM serving 可通过配置选择 FP8 |
+
+expert value 和 scale packer 已针对 GLM-5 up/gate、down 两种形状，与当前 AITER 的
+`shuffle_weight`、`shuffle_scale` 做过逐字节比较，结果完全一致。norm vectors 和
+routing bias 原本就是普通连续 tensor。ATOM 默认的 `ATOM_MOE_GU_ITLV=0` 也与本
+kernel 的 gate-then-up 行顺序一致。
+
+对齐后的 ATOM layer 逻辑 expert tensor shape 为
+`w13=[257,512,3072]`、`w13_scale=[257,512,192]`、`w2=[257,6144,128]`、
+`w2_scale=[257,6144,8]`。经过 AITER 后处理后，value shape 不变，scale buffer
+变为 `[131584,192]` 和 `[1579008,8]`。这些 shape 以及每个 buffer 的字节内容都与
+FlyDSL 默认 MXFP4 路径一致。
+
+保留 `--router-weight-layout atom` 用于零拷贝实验，但不设为默认：在其他存储均采用
+ATOM-compatible 的 A16W4 下，TP1 S=1 从 31.19 降到 31.08 us/layer，略有提升；但
+S=8 从 70.80 上升到 72.47 us/layer，回退 2.4%。ATOM 的独立 GEMM 可以在内部对
+row-major router 做 tiling，而 mono-kernel 的直接 MFMA load 会跨越 6144-element
+row stride。
+
+attention 格式差异以及 serving 配置可能带来的 cache dtype 差异，都不只是 permutation
+问题。因此本改动不宣称可以把 `amd/GLM-5.1-MXFP4` checkpoint 的所有 weight 完整
+零拷贝加载；当前对齐了全部 MXFP4 expert value/scale 和 576-wide cache allocation，
+同时保留性能更好的既有 attention 与 router 路径。
+
 ## 代码结构
 
 | 文件 | 职责 |
 |---|---|
-| `config.py` | 固定维度、公开计算模式和 host 参数验证。 |
-| `../common/hip_ipc.py` | 可复用的 HIP IPC handle 与 allocation host wrapper。 |
+| `config.py` | 模型 profile、公开计算/存储模式和 host 参数验证。 |
 | `../common/mx_formats.py` | 可供其他 MoE wrapper 复用的 Torch MXFP4/MXFP8 量化与反量化。 |
-| `packing.py` | FP8、BF16 和 MXFP4 matrix 的 MFMA weight packing。 |
-| `runtime.py` | 自有 symmetric HIP IPC buffer，以及远端 handle 的确定性清理。 |
-| `kernel_layout.py` | 生产 kernel 共用的 scratch/symmetric layout、双 epoch slot、launch 常量和 CTA stage 调度。 |
-| `kernel_common.py` | 生产 kernel 共用的 AMD wave/DPP、硬件数学、FP8 和 MXFP4 primitive。 |
-| `torch_fusions.py` | 可复用、可 graph capture 的生产 RMSNorm、SiTU、AttnRes 和 shared-expert fusion。 |
-| `router.py` | 可复用的原生低 token BF16-logit sigmoid/correction-bias top-k router。 |
-| `router_projection.py` | K3 融合 BF16 router projection、FP32 sigmoid 与归一化 top-16。 |
-| `symmetric_allreduce.py` | 基于 tagged symmetric peer mailbox、可 graph capture 的通用 BF16 TP all-reduce。 |
-| `indexed_mla_moe_kernel.py` | 使用公共 kernel 模块的 FlyDSL 调度、通信、MLA、routing 和专家计算。 |
-| `layer.py` | 公开 host wrapper、scratch 分配、启动参数、trace 和生命周期。 |
-| `kimi_k3.py` | 使用公共生产 fusion 的完整 Kimi-K3 TP8 AttnRes + MLA + latent-MoE 层。 |
-| `reference.py` | 仅作为验证 oracle 的独立 Torch 分段与端到端计算。 |
+| `packing.py` | 按模型处理 attention packing，并提供 native 与 ATOM/AITER-compatible expert packing。 |
+| `kernel_common.py` | model-configured kernel 共用的底层 helper。 |
+| `kernel_layout.py` | 按模型计算 scratch、peer buffer 和 stage layout。 |
+| `shared_reuse_moe_kernel.py` | 针对 GLM-5 性能特化的调度、通信、MLA、routing 和专家计算。 |
+| `layer.py` | 调优后 GLM-5 mono-kernel 的稳定 host wrapper。 |
+| `indexed_mla_moe_kernel.py` | 由 `LayerConfig` 参数化、便于扩展的 indexed MLA + MoE kernel。 |
+| `indexed_layer.py` | 通用 indexed wrapper，以及 GLM-5 compatibility 和 Kimi-K3 MLA adapter。 |
+| `kimi_k3.py` | 组合 indexed MLA、latent MoE 与 reduction 的 Kimi-K3 完整层 adapter。 |
+| `router.py`、`router_projection.py` | 可复用的原生 routing 与融合 projection/top-k kernel。 |
+| `runtime.py`、`../common/hip_ipc.py` | 共用 symmetric HIP IPC 生命周期和远端 handle 的确定性清理。 |
+| `symmetric_allreduce.py`、`torch_fusions.py` | 可 graph capture 的 reduction 与编译后 Torch output helper。 |
+| `reference.py` | 独立 Torch 分段与端到端计算。 |
 | `native_baseline.py` | 可选的同权重 TileRT 对比适配器。 |
-| `tools/kimi_k3_full.py` | TP8 正确性、分段 profile 和 HIP graph benchmark harness。 |
-| `tools/atom_kimi_k3_full.py` | 原始 ATOM `KimiDecoderLayer` 的 TP8 HIP graph benchmark harness。 |
-
-上述公共代码抽自真实算子执行路径：`indexed_mla_moe_kernel.py` 导入公共 kernel layout
-与 AMD primitive，`kimi_k3.py` 导入可 graph capture 的 Torch fusion。`reference.py`
-继续保持独立，不是生产公共抽象的来源。
+| `tools/benchmark_atom.py` | 使用预选 sparse indices 的 ATOM 原生 GLM-5.1 decoder-layer benchmark。 |
+| `tools/kimi_k3_full.py` | Kimi-K3 正确性、profiling 和完整层 benchmark driver。 |
 
 kernel 使用 FlyDSL 操作实现 wave reduction、硬件数学指令、mailbox polling、buffer
 访问和 MFMA。每个 rank 的 peer payload 先舍入为 BF16，再按 rank 顺序累加，因此所有
 rank 得到逐位一致的 hidden state 和 routing 结果。
 
-attention 与 FFN reduction 各自使用两个按 epoch 奇偶选择的 symmetric-buffer slot。
-这样在一个 graph 连续捕获多层时，较快 rank 不会覆盖仍由较慢 peer 读取的 epoch `k` 数据。
-
-`Glm5IndexedMlaMoeBlock` 持有远端 HIP IPC mappings。应在最后一次 rank barrier 后调用
+`SharedReuseMlaMoeLayer` 持有远端 HIP IPC mappings。应在最后一次 rank barrier 后调用
 `close()`，也可以把该对象作为 context manager 使用。
 
 ## 正确性状态
 
-最终 peer slot 修复没有改动算术路径；固定 8-head reuse 算术路径的 `w8a8` 和
-`w8a16` 均已通过 2/4/8 GPU x S=1/2/4 的完整矩阵。九种配置各运行五组变化输入，
-并检查：
+`w8a8` 和 `w8a16` 均通过 2/4/8 GPU x S=1/2/4 的完整矩阵。九种配置各运行五组变化
+输入，并检查：
 
 - 分段输出与独立 Torch 计算一致；
 - 所有 rank 的最终输出逐位一致；
 - 最终 down projection 和 BF16 peer reduction；
 - 输出有限，且 HIP graph replay 稳定。
-
-最终源码随后又通过 TP8 下每 step 1、75 和 128 次 launch 的 eager-versus-replay 精确
-检查，验证了常规单层实例和 75-launch 压力序列中的 slot 轮换；该检查不能代替尚未实现
-的非对称 refresh 拓扑。
 
 独立 FP32 端到端检查通过 41 个输入，相对 L2 为 1.49-2.85%。另有四个输入沿用已有的
 近似并列 routing 跳过规则，因为 attention 的一个 BF16 ulp 差异改变了专家选择；这些
@@ -115,6 +116,12 @@ NP4 `w8a16` 的 normalized expert input 有一个元素与独立 reduction 相�
 最终 BF16 peer reduction，以及所有 rank 最终输出逐位一致。TP8/S8 的独立端到端
 相对 L2 分别为 `a16w4` 0.430%、`a8w4` 2.87%。没有放宽现有容差。
 
+ATOM layout 路径还通过了两种 MXFP4 模式的默认布局 TP1/S1、TP1/S8 和 TP8/S8
+检查。A8W4 S>1 最初暴露了一个只影响 shared expert 的 scale
+关联问题：8 个 routed slots 都正确，只有 shared slot 0 错误。最终实现让 routed
+experts 继续使用高性能 lane-group ATOM 直读，仅在一个 MFMA 的不同列代表不同 sample
+的 shared expert 上使用 canonical K32 gather。
+
 TP1/S1 下使用相同权重直接对比 TileRT wrapper，结果为：
 
 | 模式 | 最大绝对误差 | 相对 L2 |
@@ -124,29 +131,99 @@ TP1/S1 下使用相同权重直接对比 TileRT wrapper，结果为：
 
 ## 性能状态
 
-下列配对结果比较的是对称 reuse-selection 拓扑。每个 HIP graph 包含 128 次 layer
-launch，并使用 5 个 eager warmup step、2 次舍弃的 graph 计时和 9 次正式 graph
-replay，结果取每轮最慢 rank 的中位数。硬件为 8 x MI355X（gfx950），位置 3000，
-seed 1234，sparse top-2048。Delta 越低表示 FlyDSL 越快。
+### MXFP4：FlyDSL mono-kernel 与 ATOM 原生层
 
-| 模式 | S | FlyDSL | TileRT | Delta |
+MXFP4 主对比运行于 8 x MI355X（gfx950）、TP8，位置 3000、sparse top-2048，
+KV cache 为 BF16 `[tokens,576]`。每个 HIP graph 只包含一次 decoder-layer 调用。
+预热两次后记录 30 次 replay；每轮取最慢 rank，去掉最快 5 次和最慢 5 次，再对剩余
+20 次求平均。
+
+ATOM 把 GLM-5.1 注册为 `GlmMoeDsaForCausalLM`。该生产模型复用
+`atom.models.deepseek_v2` 并构造 `DeepseekV2DecoderLayer`，因此 baseline 直接使用
+GLM-5.1 config 实例化这一个 GLM 实际选择的 layer class；继承而来的 class 名称不代表
+使用了 DeepSeek 模型配置。其原生多算子链路包括 RMSNorm、BF16 MLA projections 与
+sparse attention、router、MXFP4 FusedMoE 和 TP collectives。仅跳过生成 sparse top-2048
+indices 的 indexer，因为 FlyDSL API 同样把这些 indices 作为输入。版本为 ATOM
+`b104cf915aeced8c0c319fe1e0fcf6cf70b323ba`、AITER
+`d4e9afc85857e30e03b417606e6f25071ffaaa9a`。
+
+| Batch | FlyDSL mono-kernel | ATOM 原生层 | 加速比 | 延迟降低 |
+|---:|---:|---:|---:|---:|
+| 1 | 74.77 us | 136.84 us | 1.83x | 45.4% |
+| 2 | 73.69 us | 145.43 us | 1.97x | 49.3% |
+| 4 | 94.77 us | 144.12 us | 1.52x | 34.2% |
+| 8 | 124.66 us | 158.99 us | 1.28x | 21.6% |
+
+所有已测 batch 均未出现相对 ATOM 的性能回退，因此不需要继续拆分
+attention、router/MoE 和 collective 排查。这是等价单层工作量的延迟对比，不是纯粹的
+fusion-only 对比：expert 与 KV storage 使用对齐的 MXFP4/BF16 格式，但已发布的
+`amd/GLM-5.1-MXFP4` ATOM attention weights 为 BF16，而 FlyDSL mono-kernel 保留
+block-128 FP8 attention 路径。
+
+### 历史数据与 layout A/B 测量
+
+下表为既有 W8A8 HIP graph 测量：每个 graph 含 128 次 layer launch，预热两次，正式
+测量九次，并取各轮最慢 rank 的中位数。硬件为 8 x MI355X（gfx950），位置 3000，
+sparse top-2048。
+
+| GPU 数量 | 后端 | S=1 | S=2 | S=4 |
+|---:|---|---:|---:|---:|
+| 2 | FlyDSL | 33.98 us | 39.80 us | 53.55 us |
+| 4 | FlyDSL | 34.30 us | 41.51 us | 54.42 us |
+| 8 | FlyDSL | 35.55 us | 42.72 us | 56.32 us |
+| 8 | TileRT | 35.85 us | 42.90 us | 55.93 us |
+
+FlyDSL 在已测八卡 S=1、S=2 中更快，在 S=4 中慢 0.7%，所以尚未在所有配置上超过
+TileRT。
+
+一次使用 8 层、1 次正式 replay 的 TP1/S1 短 smoke 测量中，`w8a8` 为 33.840 us，
+TileRT 为 33.520 us；`w8a16` 为 34.735 us，TileRT 为 32.895 us。这些短运行用于验证
+benchmark 路径，不属于可发布的性能数据。
+
+另一组使用 16 层和 3 次正式 replay 的 TP1 测量中，W8A8 的 S=4 为 52.03 us，S=8
+为 84.20 us。TileRT 没有 S=8 整层基线。
+
+加入 MXFP4 路径后，在同一进程内使用 16 层、3 次正式 replay 进行 TP1 短测，得到
+以下中位数。这些是开发阶段短测，不属于可发布性能数据：
+
+| 模式 | S=1 | S=8 |
+|---|---:|---:|
+| `w8a8` | 33.38 us | 83.46 us |
+| `w8a16` | 34.63 us | 90.13 us |
+| `a16w4` | 33.22 us | 78.80 us |
+| `a8w4` | 35.21 us | 87.00 us |
+
+`a16w4` 在这组 TP1 短测中最快。`a8w4` 仍需承担每 1x32 activation 量化和 BF16
+MFMA staging 的开销，因此没有在两个 sample count 上都超过 `w8a8`。当前已发布
+TileRT 对比适配器只接受 `w8a8` 和 `w8a16`，本 harness 中没有两种 MXFP4 模式的
+有效同权重 TileRT 基线。
+
+作为 storage-layout 改动的补充证据，ATOM layout 测试在 TP1 下每个 graph 包含
+128 次 layer launch，预热两次、正式测量 15 次并取中位数。ATOM expert/cache 测量
+前后各测一次 native，以暴露机器漂移；百分比使用两次 native 中位数的均值计算。
+
+| 模式 | Samples | Native expert/scale + split cache | ATOM expert/scale + fused cache | 变化 |
 |---|---:|---:|---:|---:|
-| `w8a8` | 1 | 35.179 us | 35.995 us | -2.27% |
-| `w8a8` | 2 | 42.461 us | 42.712 us | -0.59% |
-| `w8a8` | 4 | 56.217 us | 55.361 us | +1.55% |
-| `w8a16` | 1 | 35.747 us | 36.305 us | -1.54% |
-| `w8a16` | 2 | 43.414 us | 43.448 us | -0.08% |
-| `w8a16` | 4 | 57.246 us | 55.563 us | +3.03% |
+| `a16w4` | 1 | 31.80-32.33 us | 31.14 us | 快 2.9% |
+| `a16w4` | 8 | 74.65-75.04 us | 71.37 us | 快 4.6% |
+| `a8w4` | 1 | 32.98-33.02 us | 32.08 us | 快 2.8% |
+| `a8w4` | 8 | 81.64-81.80 us | 77.21 us | 快 5.5% |
 
-FlyDSL 在六项已测配置中的四项更快。两个 S=4 配置与 TileRT 的差距均不超过 3.03%，
-因此 W8A8 和 W8A16 在已测范围内接近性能持平，但不能表述为所有配置都更快。同一源码
-还通过了每 step 1 次和 75 次 launch 的 TP8 重复 graph，直接覆盖单层使用方式和
-75-launch 压力序列，未再发生 peer slot 覆盖。
+轻量 TP8 graph benchmark 每个 graph 包含 16 次 launch，并取最慢 rank，也没有出现
+回退：
 
-当前已发布的 TileRT 对比适配器只接受 `w8a8`、`w8a16`、1 或 8 peers，以及
-S=1/2/4。它没有 `a16w4`、`a8w4` 或 S=8 的有效同权重整层基线，因此这些 FlyDSL
-扩展已有正确性覆盖，但这里不作 TileRT 性能结论。TP2 和 TP4 结果使用固定的每-rank
-分片，只表示 scaling 检查，不是完整模型 TP2/TP4 对比。
+| 模式 | Samples | Native | ATOM expert/cache 默认布局 |
+|---|---:|---:|---:|
+| `a16w4` | 1 | 35.2 us | 34.8 us |
+| `a16w4` | 8 | 87.2 us | 82.1 us |
+| `a8w4` | 1 | 36.9 us | 35.4 us |
+| `a8w4` | 8 | 92.9 us | 87.5 us |
+
+第一版 ATOM expert layout 使用分散 dword load 和寄存器内转置，A16W4 S=8 曾上升到
+约 115 us。把四个 lane groups 直接映射到 ATOM 的四个 K32 tiles 后消除了这项回退，
+并保留 ATOM scale storage 与 fused cache。A8W4 多 sample 的 shared-expert 路径使用
+上文所述的小范围 canonical-load fallback 保证正确性；最终 TP1/S=8 仍比 native
+layout 快 5.5%。
 
 分段 trace 指导了两项保留的调度修改：BF16 packed peer exchange，以及每个 router
 CTA 只处理一个 sample。此前 S=4 调度中，最后一个插桩 CTA 到达 attention 发布、
@@ -159,25 +236,25 @@ router 发布、routed up/gate 发布和 down 完成的时间分别为 30.23、3
 使用现有 FlyDSL compiler build 和本 worktree：
 
 ```bash
-cd /root/FlyDSL-glm5-perf
-export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-perf:/root/tilert_pkg
+cd /root/FlyDSL-glm5-mxfp4-atom-layout
+export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-mxfp4-atom-layout
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib
 
-/opt/venv/bin/python tests/kernels/test_glm5_indexed_mla_moe.py \
+/opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
   --npes 8 -S 8 --pos 3000 --iters 1 --moe-mode a8w4
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/benchmark.py \
-  --backend flydsl --moe-mode w8a8 --npes 8 --samples 1 2 4 \
-  --layers 128 --repeats 9 --seed 1234 --pos 3000
+  --backend flydsl --moe-mode a16w4 --npes 8 --samples 1 2 4 8 \
+  --layers 1 --repeats 30 --trim 5
+
+/opt/venv/bin/python kernels/mla_moe_layer/tools/benchmark_atom.py \
+  --npes 8 --samples 1 2 4 8 --layers 1 --repeats 30 --trim 5
 ```
 
-正确性命令应替换其他模式和 peer count 重复运行。性能命令还应使用
-`--moe-mode w8a16` 重复，再用 `--backend tilert` 得到配对基线。GPU 任务应串行执行。
+正确性命令应替换其他模式和 peer count 重复运行。
 
-如需与已发布实现直接比较，保留 `/root/tilert_pkg` 在 `PYTHONPATH` 中，并把
-`--backend flydsl` 改为 `--backend tilert`。原生 wrapper 只支持 `w8a8`/`w8a16`、
-1 或 8 peers，以及 sample count 1/2/4。S=8 和 MXFP4 模式是本 harness 中的
-FlyDSL 独有扩展。
+ATOM benchmark 默认使用 `/root/ATOM` 和 `/root/aiter`；如路径不同，可通过
+`--atom-root` 和 `--aiter-root` 覆盖。GPU 任务应串行执行。
 
 FlyDSL benchmark 可添加 `--trace --layers 16 --trace-dir <directory>` 记录分段时间戳，
 然后查看某个 rank：
@@ -307,7 +384,7 @@ shared/tail accumulation 与 final peer reduce 合并，但 TP8 下出现 illega
 完整 MLA + MoE 正确性与性能可用以下命令复现：
 
 ```bash
-cd /root/FlyDSL-kimi-k3
+cd /root/FlyDSL-glm5-mxfp4-atom-layout
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
 export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:.
 
@@ -336,7 +413,7 @@ git -C /root/ATOM-k3-baseline checkout 3cea04f45
 git -C /root/aiter submodule update --init --recursive -- 3rdparty/composable_kernel
 /opt/venv/bin/python -m pip install --upgrade --target /tmp/atom-k3-deps pybind11==3.0.1
 
-cd /root/FlyDSL-kimi-k3
+cd /root/FlyDSL-glm5-mxfp4-atom-layout
 /opt/venv/bin/python kernels/mla_moe_layer/tools/atom_kimi_k3_full.py \
   --samples 4 --output /root/kimi-k3-perf-results/full-moe/atom-s4.json
 /opt/venv/bin/python kernels/mla_moe_layer/tools/atom_kimi_k3_full.py \

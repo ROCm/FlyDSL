@@ -327,11 +327,15 @@ def golden_layer(
     sparse_attention_topk=2048,
     moe_mode: MoeMode | str = MoeMode.W8A8,
     attention_only: bool = False,
+    *,
+    topk: int | None = None,
 ):
     """One rank's view of the layer. Mutates ``kv_cache``/``pe_cache`` like the kernel.
 
     Returns a dict of intermediates keyed like the kernel's debug scratch.
     """
+    if topk is not None:
+        sparse_attention_topk = topk
     t, H, config = W.t, W.heads, W.config
     S = h.shape[0]
     if config.attention_weight is AttentionWeight.BF16:

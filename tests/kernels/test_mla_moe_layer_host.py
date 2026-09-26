@@ -14,9 +14,14 @@ from kernels.mla_moe_layer.config import (
     KIMI_K3_CONFIG,
     ExpertActivation,
     ExpertWeight,
+    KvCacheLayout,
     MoeMode,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    RouterWeightLayout,
     as_moe_mode,
     moe_format,
+    resolve_storage_layouts,
     validate_shard,
 )
 from kernels.mla_moe_layer.kernel_layout import layout, stage_tasks, symmetric_allreduce_nbytes
@@ -24,6 +29,7 @@ from kernels.mla_moe_layer.packing import (
     pack_a16w4_scale,
     pack_a16w4_weight,
     pack_bf16,
+    pack_bf16_atom,
     pack_fp8,
     pack_mxfp4,
 )
@@ -46,6 +52,12 @@ def test_pack_bf16_uses_mfma_lane_order():
     packed = pack_bf16(raw.view(torch.bfloat16)).view(torch.int16)
     expected = torch.tensor([*range(8), *range(64, 72)], dtype=torch.int16)
     torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
+
+
+def test_pack_bf16_atom_keeps_row_major_order():
+    raw = torch.arange(16 * 64, dtype=torch.int16).reshape(16, 64)
+    packed = pack_bf16_atom(raw.view(torch.bfloat16)).view(torch.int16)
+    torch.testing.assert_close(packed, raw.view(-1), atol=0, rtol=0)
 
 
 def test_pack_mxfp4_matches_bf16_mfma_k32_steps():
@@ -98,6 +110,21 @@ def test_moe_modes_map_to_independent_activation_and_weight_formats():
     assert moe_format(MoeMode.W8A16).activation is ExpertActivation.BF16
     assert moe_format(MoeMode.A16W4).weight is ExpertWeight.MXFP4_BLOCK32
     assert moe_format(MoeMode.A8W4).activation is ExpertActivation.MXFP8_BLOCK32
+
+
+def test_mxfp4_modes_default_to_atom_storage_layouts():
+    assert resolve_storage_layouts(MoeMode.A16W4) == (
+        Mxfp4WeightLayout.ATOM,
+        Mxfp4ScaleLayout.ATOM,
+        RouterWeightLayout.NATIVE,
+        KvCacheLayout.ATOM,
+    )
+    assert resolve_storage_layouts(MoeMode.W8A8) == (
+        Mxfp4WeightLayout.NATIVE,
+        Mxfp4ScaleLayout.NATIVE,
+        RouterWeightLayout.NATIVE,
+        KvCacheLayout.SPLIT,
+    )
 
 
 @pytest.mark.parametrize(

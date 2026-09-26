@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Graph latency of the indexed GLM-5 MLA + MoE shard with FlyDSL or TileRT.
+"""Graph latency of the shared/reuse GLM-5 shard with FlyDSL or native TileRT.
 
 Both backends use the same generated weights and inputs. TileRT's released
 whole-layer kernel supports one or eight peers. Every rank keeps eight heads
@@ -24,38 +24,41 @@ import torch.multiprocessing as mp
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from kernels.mla_moe_layer.config import KV_LORA, MAX_LAYERS_PER_STEP, PE_DIM, MoeMode  # noqa: E402
-from kernels.mla_moe_layer.layer import Glm5IndexedMlaMoeBlock  # noqa: E402
+from kernels.mla_moe_layer.config import (  # noqa: E402
+    KV_LORA,
+    MAX_LAYERS_PER_STEP,
+    PE_DIM,
+    KvCacheLayout,
+    MoeMode,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    RouterWeightLayout,
+    resolve_storage_layouts,
+)
+from kernels.mla_moe_layer.layer import SharedReuseMlaMoeLayer  # noqa: E402
 from kernels.mla_moe_layer.native_baseline import make_native_glm5_baseline  # noqa: E402
 from kernels.mla_moe_layer.reference import make_weights, rope_table  # noqa: E402
 from kernels.mla_moe_layer.runtime import SymmetricPeerBuffer  # noqa: E402
 
 
-def _implementation_hash(backend: str) -> str:
+def _source_hash() -> str:
     digest = hashlib.sha256()
-    if backend == "flydsl":
-        sources = [
-            *(
-                ROOT / "kernels/common" / name
-                for name in ("buffer_ops.py", "dpp_utils.py", "hip_ipc.py", "mx_formats.py")
-            ),
-            *(ROOT / "kernels/mla_moe_layer" / name for name in ("config.py", "packing.py", "runtime.py")),
-            ROOT / "kernels/mla_moe_layer/indexed_mla_moe_kernel.py",
-            ROOT / "kernels/mla_moe_layer/layer.py",
-        ]
-    else:
-        import tilert
-
-        sources = [
-            ROOT / "kernels/mla_moe_layer/config.py",
-            ROOT / "kernels/mla_moe_layer/native_baseline.py",
-            ROOT / "kernels/mla_moe_layer/reference.py",
-            Path(tilert.__file__).resolve().parent / "libtilert_glm52_rocm.so",
-        ]
+    sources = [
+        ROOT / "kernels/common/mx_formats.py",
+        *(ROOT / "kernels/mla_moe_layer" / name for name in ("config.py", "packing.py", "runtime.py")),
+        ROOT / "kernels/mla_moe_layer/shared_reuse_moe_kernel.py",
+        ROOT / "kernels/mla_moe_layer/layer.py",
+    ]
     for source in sources:
-        digest.update(str(source).encode())
         digest.update(source.read_bytes())
     return digest.hexdigest()
+
+
+def _trimmed_mean(values: list[float], trim_each_tail: int) -> float:
+    ordered = sorted(values)
+    if trim_each_tail:
+        ordered = ordered[trim_each_tail:-trim_each_tail]
+    return statistics.mean(ordered)
 
 
 def _worker(rank, args, port):
@@ -64,6 +67,13 @@ def _worker(rank, args, port):
     device = torch.device("cuda", rank)
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=args.npes)
     weights = make_weights(rank, heads=8, device=device, seed=args.seed, moe_mode=args.moe_mode)
+    weight_layout, scale_layout, router_layout, cache_layout = resolve_storage_layouts(
+        args.moe_mode,
+        args.mxfp4_weight_layout,
+        args.mxfp4_scale_layout,
+        args.router_weight_layout,
+        args.kv_cache_layout,
+    )
     native = make_native_glm5_baseline(weights, device, args.moe_mode) if args.backend == "tilert" else None
     cos, sin = rope_table(4096, device=device)
 
@@ -71,7 +81,10 @@ def _worker(rank, args, port):
         generator = torch.Generator(device=device).manual_seed(args.seed + 99)
         kv = torch.randn(4096, KV_LORA, generator=generator, device=device).bfloat16()
         pe = torch.randn(4096, PE_DIM, generator=generator, device=device).bfloat16()
-        sparse_indices = torch.stack(
+        if cache_layout is KvCacheLayout.ATOM:
+            kv = torch.cat((kv, pe), dim=1)
+            pe = kv
+        indices = torch.stack(
             [
                 torch.randperm(max(args.pos + sample + 1, 2048), generator=generator, device=device)[:2048]
                 .sort()
@@ -80,24 +93,27 @@ def _worker(rank, args, port):
             ]
         ).int()
         if args.pos >= 2048:
-            sparse_indices[:, -1] = torch.arange(args.pos, args.pos + samples, device=device)
+            indices[:, -1] = torch.arange(args.pos, args.pos + samples, device=device)
         hidden = torch.randn(samples, 6144, generator=generator, device=device).bfloat16()
         output = torch.empty_like(hidden)
         pos = torch.tensor([args.pos], dtype=torch.int32, device=device)
 
         if native is None:
-            layer = Glm5IndexedMlaMoeBlock(
+            layer = SharedReuseMlaMoeLayer(
                 weights,
                 samples,
                 rank=rank,
                 npes=args.npes,
-                launches_per_step=args.layers,
                 timeline=args.trace,
                 moe_mode=args.moe_mode,
+                mxfp4_weight_layout=weight_layout,
+                mxfp4_scale_layout=scale_layout,
+                router_weight_layout=router_layout,
+                kv_cache_layout=cache_layout,
             )
 
             def run(epoch):
-                layer.forward(hidden, pos, kv, pe, sparse_indices, cos, sin, x_out=output, layer=epoch, advance=False)
+                layer.forward(hidden, pos, kv, pe, indices, cos, sin, x_out=output, layer=epoch, advance=False)
 
             def advance():
                 layer.advance_step()
@@ -140,7 +156,7 @@ def _worker(rank, args, port):
                     freqs,
                     pe[None],
                     kv[None],
-                    sparse_indices,
+                    indices,
                     partials,
                     weights.t["bias"],
                     residual=hidden,
@@ -165,20 +181,15 @@ def _worker(rank, args, port):
                 attn_peers.storage.zero_()
                 ffn_peers.storage.zero_()
 
-        for warmup in range(5):
-            for layer_ordinal in range(args.layers):
-                run(layer_ordinal if native is None else warmup * args.layers + layer_ordinal)
+        for epoch in range(5):
+            run(epoch)
             advance()
         reset()
         torch.cuda.synchronize()
         dist.barrier()
         run(0)
-        advance()
         torch.cuda.synchronize()
         reference = output.clone()
-        reset()
-        torch.cuda.synchronize()
-        dist.barrier()
         if args.dump_outputs:
             target = Path(args.dump_outputs)
             target.mkdir(parents=True, exist_ok=True)
@@ -220,9 +231,13 @@ def _worker(rank, args, port):
         if rank == 0:
             critical = [max(batch) for batch in zip(*per_rank)]
             result = dict(
-                benchmark_version=4,
+                benchmark_version=3,
                 backend=args.backend,
                 moe_mode=args.moe_mode,
+                mxfp4_weight_layout=weight_layout.value,
+                mxfp4_scale_layout=scale_layout.value,
+                router_weight_layout=router_layout.value,
+                kv_cache_layout=cache_layout.value,
                 instrumented=args.trace,
                 npes=args.npes,
                 samples=samples,
@@ -231,11 +246,14 @@ def _worker(rank, args, port):
                 inter_per_rank=256,
                 seed=args.seed,
                 layers=args.layers,
+                measured_repeats=args.repeats,
+                trim_each_tail=args.trim,
+                trimmed_mean_us=_trimmed_mean(critical, args.trim),
                 median_us=statistics.median(critical),
                 min_us=min(critical),
                 max_us=max(critical),
                 rank_times_us=per_rank,
-                implementation_sha256=_implementation_hash(args.backend),
+                kernel_sha256=_source_hash(),
                 torch=torch.__version__,
                 benchmark_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             )
@@ -256,12 +274,33 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("flydsl", "tilert"), required=True)
     parser.add_argument("--moe-mode", choices=tuple(mode.value for mode in MoeMode), default=MoeMode.W8A8.value)
+    parser.add_argument(
+        "--mxfp4-weight-layout",
+        choices=tuple(layout.value for layout in Mxfp4WeightLayout),
+        default=None,
+    )
+    parser.add_argument(
+        "--mxfp4-scale-layout",
+        choices=tuple(layout.value for layout in Mxfp4ScaleLayout),
+        default=None,
+    )
+    parser.add_argument(
+        "--router-weight-layout",
+        choices=tuple(layout.value for layout in RouterWeightLayout),
+        default=None,
+    )
+    parser.add_argument(
+        "--kv-cache-layout",
+        choices=tuple(layout.value for layout in KvCacheLayout),
+        default=None,
+    )
     parser.add_argument("--npes", choices=(1, 2, 4, 8), type=int, required=True)
     parser.add_argument("--samples", type=int, nargs="+", choices=(1, 2, 4, 8), default=[1, 2, 4])
     parser.add_argument("--pos", type=int, default=3000)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--layers", type=int, default=MAX_LAYERS_PER_STEP)
     parser.add_argument("--repeats", type=int, default=9)
+    parser.add_argument("--trim", type=int, default=0)
     parser.add_argument("--output")
     parser.add_argument("--dump-outputs")
     parser.add_argument("--trace", action="store_true")
@@ -277,6 +316,8 @@ if __name__ == "__main__":
         parser.error("--trace is available for the FlyDSL backend")
     if not 1 <= args.layers <= MAX_LAYERS_PER_STEP:
         parser.error(f"layers must be in [1, {MAX_LAYERS_PER_STEP}]")
+    if args.repeats <= 2 * args.trim:
+        parser.error("repeats must be greater than twice trim")
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]

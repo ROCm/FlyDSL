@@ -11,38 +11,47 @@ from kernels.mla_moe_layer.config import (
     GLM5_CONFIG,
     HIDDEN,
     INTER,
-    KIMI_K3_CONFIG,
+    KV_LORA,
     MAX_LAYERS_PER_STEP,
     MOE_SLOTS,
     N_EXPERTS,
+    PE_DIM,
     ExpertActivation,
-    LayerConfig,
+    KvCacheLayout,
     MoeMode,
-    as_layer_config,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    RouterWeightLayout,
     as_moe_mode,
     moe_format,
+    resolve_storage_layouts,
     validate_shard,
-)
-from kernels.mla_moe_layer.indexed_mla_moe_kernel import (
-    TL_COLS,
-    build_indexed_mla_moe_kernel,
-    layout,
-    stage_tasks,
 )
 from kernels.mla_moe_layer.packing import pack_layer_weights
 from kernels.mla_moe_layer.reference import LayerWeights
 from kernels.mla_moe_layer.runtime import SymmetricPeerBuffer
+from kernels.mla_moe_layer.shared_reuse_moe_kernel import (
+    TL_COLS,
+    build_shared_reuse_kernel,
+    layout,
+    stage_tasks,
+)
 
-__all__ = ["Glm5IndexedMlaMoeBlock", "IndexedMlaMoeBlock", "KimiK3MlaLayer", "MoeMode"]
+__all__ = [
+    "KvCacheLayout",
+    "MoeMode",
+    "Mxfp4ScaleLayout",
+    "Mxfp4WeightLayout",
+    "RouterWeightLayout",
+    "SharedReuseMlaMoeLayer",
+    "Glm5IndexedMlaMoeBlock",
+    "IndexedMlaMoeBlock",
+    "KimiK3MlaLayer",
+]
 
 
-class IndexedMlaMoeBlock:
-    """One rank of a model-configured indexed sparse MLA block.
-
-    The caller supplies sparse-attention indices. This wrapper implements the
-    symmetric eight-head-per-rank reuse topology; the asymmetric refresh
-    topology uses the same MoE math but needs separate rank-specific wrappers.
-    ``group`` is a torch.distributed group (None for npes=1).
+class SharedReuseMlaMoeLayer:
+    """One rank of the TP layer. ``group`` is a torch.distributed group (None for npes=1).
 
     The symmetric buffer is a torch allocation exported to every peer through
     HIP IPC; scratch and symmetric buffers may be shared by all
@@ -56,57 +65,58 @@ class IndexedMlaMoeBlock:
         rank: int = 0,
         npes: int = 1,
         group=None,
-        sparse_attention_topk: int = 2048,
-        launches_per_step: int = 1,
+        topk: int = 2048,
         timeline: bool = False,
         moe_mode: MoeMode | str = MoeMode.W8A8,
-        model_config: LayerConfig | str = GLM5_CONFIG,
-        attention_only: bool = False,
+        mxfp4_weight_layout: Mxfp4WeightLayout | str | None = None,
+        mxfp4_scale_layout: Mxfp4ScaleLayout | str | None = None,
+        router_weight_layout: RouterWeightLayout | str | None = None,
+        kv_cache_layout: KvCacheLayout | str | None = None,
     ):
-        self.config = as_layer_config(model_config)
-        if W.config != self.config:
-            raise ValueError(f"weight profile {W.config.name!r} does not match {self.config.name!r}")
-        if self.config != GLM5_CONFIG and not attention_only:
-            raise ValueError(f"{self.config.name} currently supports the attention-only kernel path")
-        validate_shard(samples, W.heads, rank, npes, sparse_attention_topk, self.config)
-        if not 1 <= launches_per_step <= MAX_LAYERS_PER_STEP:
-            raise ValueError(f"launches_per_step must be in [1, {MAX_LAYERS_PER_STEP}], got {launches_per_step}")
+        if W.config != GLM5_CONFIG:
+            raise ValueError(f"SharedReuseMlaMoeLayer requires GLM-5 weights, got {W.config.name!r}")
+        validate_shard(samples, W.heads, rank, npes, topk, GLM5_CONFIG)
         self.moe_mode = as_moe_mode(moe_mode)
-        self.attention_only = attention_only
-        self.W = W
-        self.S = samples
-        self.rank = rank
-        self.npes = npes
-        self.sparse_attention_topk = sparse_attention_topk
-        self.launches_per_step = launches_per_step
-        self.packed = pack_layer_weights(W.t, self.moe_mode, self.config, attention_only)
-        self.scr_layout, self.sym_layout = layout(
-            samples,
-            W.heads,
-            npes,
-            sparse_attention_topk,
+        (
+            self.mxfp4_weight_layout,
+            self.mxfp4_scale_layout,
+            self.router_weight_layout,
+            self.kv_cache_layout,
+        ) = resolve_storage_layouts(
             self.moe_mode,
-            self.config,
-            attention_only,
+            mxfp4_weight_layout,
+            mxfp4_scale_layout,
+            router_weight_layout,
+            kv_cache_layout,
         )
+        self.W, self.S, self.rank, self.npes, self.topk = W, samples, rank, npes, topk
+        self.packed = pack_layer_weights(
+            W.t,
+            self.moe_mode,
+            mxfp4_weight_layout=self.mxfp4_weight_layout,
+            mxfp4_scale_layout=self.mxfp4_scale_layout,
+            router_weight_layout=self.router_weight_layout,
+        )
+        self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk, self.moe_mode)
         dev = torch.device("cuda", torch.cuda.current_device())
         self.scratch = torch.zeros(self.scr_layout["_bytes"], dtype=torch.uint8, device=dev)
         self.peer_buffer = SymmetricPeerBuffer(self.sym_layout["_bytes"], rank=rank, npes=npes, group=group)
         self.sym_storage = self.peer_buffer.storage
         self.sym = self.peer_buffer.local_address
         self.peers = self.peer_buffer.addresses
-        self.launch = build_indexed_mla_moe_kernel(
+        self.launch = build_shared_reuse_kernel(
             samples,
             W.heads,
             npes,
-            sparse_attention_topk,
-            launches_per_step=launches_per_step,
+            topk,
             timeline=timeline,
             moe_mode=self.moe_mode,
-            model_config=self.config,
-            attention_only=attention_only,
+            mxfp4_weight_layout=self.mxfp4_weight_layout,
+            mxfp4_scale_layout=self.mxfp4_scale_layout,
+            router_weight_layout=self.router_weight_layout,
+            kv_cache_layout=self.kv_cache_layout,
         )
-        self.stages = stage_tasks(samples, W.heads, sparse_attention_topk, self.config, attention_only)
+        self.stages = stage_tasks(samples, W.heads, topk)
         n_tasks = sum(n for _, n in self.stages)
         self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)  # decode-step counter
@@ -126,62 +136,52 @@ class IndexedMlaMoeBlock:
         words = self.scratch[off : off + n * 8].view(torch.int32).view(n, 2)[:, 0].contiguous()
         return words.view(dtype).view(shape)
 
-    def forward(
-        self,
-        h,
-        cur_pos,
-        kv_cache,
-        pe_cache,
-        sparse_indices,
-        cos,
-        sin,
-        x_out=None,
-        layer=0,
-        advance=True,
-    ):
-        """Launch one block invocation.
-
-        For the normal one-invocation-per-step path, keep ``launches_per_step=1``
-        and ``layer=0``. A benchmark that reuses this object multiple times in
-        one graph must set ``launches_per_step`` to that count, pass consecutive
-        ``layer`` ordinals, and advance the step once after the final launch.
-        """
-        if not 0 <= layer < self.launches_per_step:
-            raise ValueError(f"layer must be in [0, {self.launches_per_step}), got {layer}")
+    def forward(self, h, cur_pos, kv_cache, pe_cache, indices, cos, sin, x_out=None, layer=0, advance=True):
+        """One layer.  Mailbox epochs are ``step * 128 + layer + 1``: layers sharing
+        this scratch within a decode step need distinct ``layer``; call
+        ``advance_step`` (or pass ``advance=True``) once per step.  Both are
+        stream-ordered device ops, so the sequence can be captured in a HIP graph."""
+        if not 0 <= layer < MAX_LAYERS_PER_STEP:
+            raise ValueError(f"layer must be in [0, {MAX_LAYERS_PER_STEP}), got {layer}")
         t = dict(self.W.t, **self.packed)
         if x_out is None:
-            x_out = torch.empty(self.S, self.config.hidden, dtype=torch.bfloat16, device=h.device)
+            x_out = torch.empty(self.S, HIDDEN, dtype=torch.bfloat16, device=h.device)
         p = lambda x: x.data_ptr()  # noqa: E731
-        p_or_zero = lambda name: p(t[name]) if name in t else 0  # noqa: E731
+        if self.kv_cache_layout is KvCacheLayout.ATOM:
+            cache_width = KV_LORA + PE_DIM
+            if kv_cache.ndim != 2 or kv_cache.shape[1] != cache_width:
+                raise ValueError(f"ATOM KV cache must have shape [tokens, {cache_width}], got {tuple(kv_cache.shape)}")
+            if kv_cache.data_ptr() != pe_cache.data_ptr():
+                raise ValueError("ATOM KV cache layout requires the same fused tensor for kv_cache and pe_cache")
         self.launch(
             p(h),
             p(x_out),
             p(cur_pos),
             p(kv_cache),
             p(pe_cache),
-            p(sparse_indices),
+            p(indices),
             p(cos),
             p(sin),
             p(t["g_in"]),
             p(t["g_q"]),
             p(t["g_kv"]),
             p(t["g_post"]),
-            p_or_zero("w_qkv_a"),
-            p_or_zero("s_qkv_a"),
-            p_or_zero("w_q_b"),
-            p_or_zero("s_q_b"),
-            p_or_zero("w_uk"),
-            p_or_zero("s_uk"),
-            p_or_zero("w_uv"),
-            p_or_zero("s_uv"),
-            p_or_zero("w_o"),
-            p_or_zero("s_o"),
-            p_or_zero("w_r"),
-            p_or_zero("bias"),
-            p_or_zero("w_ug"),
-            p_or_zero("s_ug"),
-            p_or_zero("w_dn"),
-            p_or_zero("s_dn"),
+            p(t["w_qkv_a"]),
+            p(t["s_qkv_a"]),
+            p(t["w_q_b"]),
+            p(t["s_q_b"]),
+            p(t["w_uk"]),
+            p(t["s_uk"]),
+            p(t["w_uv"]),
+            p(t["s_uv"]),
+            p(t["w_o"]),
+            p(t["s_o"]),
+            p(t["w_r"]),
+            p(t["bias"]),
+            p(t["w_ug"]),
+            p(t["s_ug"]),
+            p(t["w_dn"]),
+            p(t["s_dn"]),
             p(self.scratch),
             self.sym,
             p(self.peers),
@@ -232,27 +232,19 @@ class IndexedMlaMoeBlock:
 
     def intermediates(self):
         S, H = self.S, self.W.heads
-        config = self.config
-
-        attention = dict(
-            q_a=self.debug("q_a", (S, config.q_lora)),
-            kv_a=self.debug("kv_a", (S, config.kv_lora + config.pe_dim)),
-            q_nope=self.debug("q_nope", (S, H, config.nope_dim), bf2=True),
-            q_pe=self.debug("q_pe", (S, H, config.pe_dim), bf2=True),
-            q_lat=self.debug("q_lat", (S, H, config.kv_lora), bf2=True),
-            o=self.debug("o", (S, H * config.v_dim), bf2=True),
-            a=self.debug("a", (S, config.hidden), bf2=True).to(torch.bfloat16),
-        )
-        if config.attention_output_gate:
-            attention["gate"] = self.debug("gate", (S, H, config.v_dim))
-        if self.attention_only:
-            return attention
+        from kernels.mla_moe_layer.config import KV_LORA, NOPE_DIM, PE_DIM, Q_LORA, V_DIM
 
         mid = self.debug("mid", (S, MOE_SLOTS, INTER))
         if moe_format(self.moe_mode).activation is ExpertActivation.BF16:
             mid = mid.to(torch.bfloat16).float()
         return dict(
-            **attention,
+            q_a=self.debug("q_a", (S, Q_LORA)),
+            kv_a=self.debug("kv_a", (S, KV_LORA + PE_DIM)),
+            q_nope=self.debug("q_nope", (S, H, NOPE_DIM), bf2=True),
+            q_pe=self.debug("q_pe", (S, H, PE_DIM), bf2=True),
+            q_lat=self.debug("q_lat", (S, H, KV_LORA), bf2=True),
+            o=self.debug("o", (S, H * V_DIM), bf2=True),
+            a=self.debug("a", (S, HIDDEN), bf2=True).to(torch.bfloat16),
             scores=self.debug("scores", (S, N_EXPERTS)),
             sel=self.debug("sel", (S, MOE_SLOTS), torch.int32),
             prob=self.debug("prob", (S, MOE_SLOTS)),
@@ -261,28 +253,10 @@ class IndexedMlaMoeBlock:
         )
 
 
-class Glm5IndexedMlaMoeBlock(IndexedMlaMoeBlock):
-    """GLM-5 indexed sparse MLA + MoE block."""
-
-    def __init__(self, W: LayerWeights, samples: int, **kwargs):
-        kwargs.pop("model_config", None)
-        kwargs.pop("attention_only", None)
-        super().__init__(W, samples, model_config=GLM5_CONFIG, attention_only=False, **kwargs)
-
-
-class KimiK3MlaLayer(IndexedMlaMoeBlock):
-    """Kimi-K3 TP8 full-attention shard, excluding the latent-MoE tail."""
-
-    def __init__(self, W: LayerWeights, samples: int, **kwargs):
-        kwargs.pop("model_config", None)
-        kwargs.pop("attention_only", None)
-        if "topk" in kwargs:
-            kwargs["sparse_attention_topk"] = kwargs.pop("topk")
-        kwargs.setdefault("launches_per_step", MAX_LAYERS_PER_STEP)
-        super().__init__(
-            W,
-            samples,
-            model_config=KIMI_K3_CONFIG,
-            attention_only=True,
-            **kwargs,
-        )
+# The model-configured indexed path lives separately from the tuned GLM-5
+# monokernel so new model profiles do not perturb its launch or storage ABI.
+from kernels.mla_moe_layer.indexed_layer import (  # noqa: E402
+    Glm5IndexedMlaMoeBlock,
+    IndexedMlaMoeBlock,
+    KimiK3MlaLayer,
+)

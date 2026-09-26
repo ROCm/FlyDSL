@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import torch
 
 from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG
-from kernels.mla_moe_layer.layer import KimiK3MlaLayer
+from kernels.mla_moe_layer.indexed_layer import KimiK3MlaLayer
 from kernels.mla_moe_layer.packing import pack_a16w4_scale, pack_a16w4_weight, pack_bf16
 from kernels.mla_moe_layer.reference import LayerWeights
 from kernels.mla_moe_layer.router import SigmoidTopkRouter
