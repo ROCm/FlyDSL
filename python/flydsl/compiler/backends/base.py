@@ -16,7 +16,7 @@ class GPUTarget:
 
     backend: str  # e.g. "rocm"
     arch: str  # e.g. "gfx942", "gfx950"
-    warp_size: int  # 64 for CDNA, 32 for RDNA
+    warp_size: int  # Target wave size (gfx9 CDNA: 64; gfx10/11/12, including CDNA5: 32)
 
 
 class BaseBackend(metaclass=ABCMeta):

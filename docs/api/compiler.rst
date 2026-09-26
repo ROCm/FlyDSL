@@ -1,148 +1,233 @@
-Compiler and pipeline
-=====================
+Compiler API
+============
 
-FlyDSL includes a JIT compiler that traces Python kernel functions into MLIR
-and lowers them through the Fly dialect pipeline to GPU binaries.
-
-``@flyc.kernel`` and ``@flyc.jit``
-------------------------------------
-
-The primary API for defining and compiling kernels:
+``flydsl.compiler`` is conventionally imported as ``flyc``. It turns traced
+Python launchers and kernels into target binaries, manages specialization and
+caching, and provides the supported host-boundary adapters.
 
 .. code-block:: python
 
    import flydsl.compiler as flyc
    import flydsl.expr as fx
 
-   @flyc.kernel
-   def my_kernel(A: fx.Tensor, B: fx.Tensor, n: fx.Constexpr[int]):
-       tid = fx.thread_idx.x
-       bid = fx.block_idx.x
-       # ... kernel body using layout ops ...
+Top-level API
+-------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 30 40
+
+   * - API
+     - Returns
+     - Purpose
+   * - ``kernel(func=None, *, name=None, known_block_size=None)``
+     - ``KernelFunction``
+     - Decorate a GPU kernel. Calling it inside a JIT launcher produces a
+       pending ``KernelLauncher``; ``.launch(...)`` emits the kernel and launch.
+   * - ``jit(func=None)``
+     - ``JitFunction``
+     - Decorate a host launcher that is traced, specialized, compiled, cached,
+       and executed on demand.
+   * - ``compile(launcher, *example_args, **example_kwargs)``
+     - ``CompiledFunction`` or ``None`` in compile-only mode
+     - Compile one specialization eagerly and return a low-overhead
+       positional-only callable for repeated launches.
+   * - ``compile_aot(launcher, *example_args, **example_kwargs)``
+     - ``AOTCompiledFunction``
+     - Trace and lower without loading or launching the GPU module; the result
+       can be exported as a linkable host object and C header.
+   * - ``from_dlpack(tensor, *, assumed_align=None, use_32bit_stride=False)``
+     - DLPack tensor adapter
+     - Preserve shape/stride metadata for any DLPack-compatible tensor.
+   * - ``from_torch_tensor(tensor, *, assumed_align=None, use_32bit_stride=False)``
+     - PyTorch tensor adapter
+     - Explicit form of the built-in PyTorch argument conversion.
+   * - ``from_c_void_p(element_type, pointer, *, address_space=..., assumed_align=None)``
+     - Typed pointer adapter
+     - Pass an integer or ``ctypes.c_void_p`` as ``fx.Pointer``.
+   * - ``JitArgumentRegistry``
+     - Registry class
+     - Register host Python types and already-adapted argument classes.
+   * - ``GPUTarget`` / ``BaseBackend``
+     - Target description / backend base class
+     - Extension interfaces for compile backends.
+   * - ``get_backend``, ``register_backend``, ``compile_backend_name``
+     - Backend registry helpers
+     - Resolve or extend the selected compiler backend.
+
+Kernel and launch definitions
+-----------------------------
+
+.. code-block:: python
+
+   @flyc.kernel(name="copy_f32", known_block_size=(256, 1, 1))
+   def copy_kernel(src: fx.Tensor, dst: fx.Tensor, n: fx.Int32):
+       i = fx.block_idx.x * fx.block_dim.x + fx.thread_idx.x
+       if i < n:
+           dst[i] = src[i]
 
    @flyc.jit
-   def launch(A: fx.Tensor, B: fx.Tensor, n: fx.Constexpr[int],
-              stream: fx.Stream = fx.Stream(None)):
-       my_kernel(A, B, n).launch(
-           grid=(grid_x, 1, 1),
+   def copy(src: fx.Tensor, dst: fx.Tensor, n: fx.Int32,
+            stream: fx.Stream = fx.Stream(None)):
+       copy_kernel(src, dst, n).launch(
+           grid=((n + 255) // 256, 1, 1),
            block=(256, 1, 1),
            stream=stream,
        )
 
-- ``@flyc.kernel`` compiles the function body into a ``gpu.func`` inside a
-  ``gpu.module``. It uses AST rewriting to trace Python code into MLIR IR.
-- ``@flyc.jit`` wraps a host-side function that constructs and launches kernels.
-  On first call it triggers JIT compilation; subsequent calls with the same type
-  signature use a cached compiled artifact.
+``name`` controls the profiler-visible kernel name. ``known_block_size`` is a
+contract for dynamic launch dimensions; static integer block dimensions are
+normally inferred automatically.
 
-Compilation flow
------------------
+``KernelLauncher.launch`` accepts ``grid``, ``block``, and ``stream`` plus
+backend compile/launch controls such as dynamic shared memory and unit/value
+attributes. The exact accepted keywords are validated by the launcher; use the
+ordinary ``grid=(x, y, z)`` and ``block=(x, y, z)`` form unless an architecture
+feature requires more.
 
-On first call, ``@flyc.jit`` runs the following pipeline:
+Specialization and ``compile``
+------------------------------
 
-1. **AST rewriting**: The Python source is parsed and rewritten to emit MLIR ops.
-2. **MLIR module construction**: The kernel body is traced into ``fly``, ``gpu``,
-   ``arith``, ``scf``, ``memref``, and ``vector`` dialect ops.
-3. **Fly pass pipeline**: The module is lowered through three pass stages,
-   defined in ``RocmBackend._pipeline_parts()``
-   (``python/flydsl/compiler/backends/rocm.py``). See
-   :doc:`../architecture_guide` §3 for the per-pass table.
+A JIT specialization is determined by the launcher source/dependencies,
+backend/toolchain, compile-affecting environment, argument DSL types/layout
+metadata, and ``Constexpr`` values. Runtime scalar values such as ``fx.Int32``
+do not create a new specialization merely because their value changes.
 
-   A. ``pre_binary_fragments`` (Fly → ROCDL):
-
-      - ``fly-rewrite-func-signature``
-      - ``fly-canonicalize``
-      - ``fly-layout-lowering``
-      - ``fly-int-swizzle-simplify``
-      - ``canonicalize``
-      - ``fly-convert-atom-call-to-ssa-form``
-      - ``fly-promote-regmem-to-vectorssa``
-      - ``convert-fly-to-rocdl``
-      - ``canonicalize``
-      - ``gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)``
-
-   B. ``binary_prep_fragments`` (→ LLVM):
-
-      - ``rocdl-attach-target{chip=gfxNNN ...}``
-      - ``convert-scf-to-cf``
-      - ``convert-cf-to-llvm``
-      - ``gpu-to-llvm{use-bare-pointers-...=true}``
-      - ``convert-vector-to-llvm``
-      - ``convert-arith-to-llvm``
-      - ``convert-func-to-llvm``
-      - ``reconcile-unrealized-casts``
-      - ``ensure-debug-info-scope-on-llvm-func`` (optional, gated by ``FLYDSL_DEBUG_ENABLE_DEBUG_INFO``)
-
-   C. ``binary_fragment``:
-
-      - ``gpu-module-to-binary{format=fatbin opts="..."}``
-
-4. **Cached artifact**: The compiled binary is cached to disk
-   (``~/.flydsl/cache/``) keyed by the compiler toolchain hash and kernel
-   type signature.
-
-Tensor arguments
------------------
-
-Use ``flyc.from_dlpack`` to convert PyTorch tensors into FlyDSL tensor
-descriptors with layout metadata:
+``flyc.compile`` performs the first compile up front:
 
 .. code-block:: python
 
-   import flydsl.compiler as flyc
+   fast_copy = flyc.compile(copy, x, y, x.numel(), stream)
 
-   tA = flyc.from_dlpack(torch_tensor).mark_layout_dynamic(
-       leading_dim=0, divisibility=4
+   # The returned callable is positional-only and must keep the same runtime
+   # argument count/order. Constexpr values remain baked into the specialization.
+   fast_copy(x2, y2, x2.numel(), stream)
+
+Compile hints can be attached with subscription syntax:
+
+.. code-block:: python
+
+   compiled = flyc.compile[{"fastmath": "contract", "waves_per_eu": 2}](
+       copy, x, y, x.numel(), stream
    )
-   launch(tA, B, n, stream=torch.cuda.Stream())
 
-ROCDL operations
------------------
+``flyc.compile[hints](launcher)`` returns the hinted launcher without compiling
+yet, which is useful when another layer owns the example arguments.
 
-The ``flydsl.expr.rocdl`` module provides AMD-specific operations:
+Argument conversion
+-------------------
 
-- **fx.rocdl.make_buffer_tensor** -- create buffer resource descriptor from tensor (CDNA buffer copy)
-- **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy atoms
-- **fx.rocdl.MFMA** -- MFMA instruction atoms (CDNA3/CDNA4; for example, ``MFMA(16, 16, 4, fx.Float32)``)
-- **fx.rocdl.WMMA** / **fx.rocdl.WMMAScale** -- wave32 WMMA MMA atoms; ``WMMA`` is arch-dispatched (gfx11 / gfx120x RDNA4 / gfx1250), ``WMMAScale`` is the gfx1250 E8M0 MX-scaled form
-- **fx.rocdl.make_tdm_atom** / **fx.rocdl.TDM** -- gfx1250 TDM async Global↔LDS whole-tile copy atom (1–5D; base from the copy operand, per-dim extent/stride/imm_offset/mask as atom state)
+Plain Python/PyTorch arguments are converted through ``JitArgumentRegistry``:
 
-AOT export
------------
+.. list-table::
+   :header-rows: 1
+   :widths: 30 30 40
 
-``flyc.compile_aot(launcher, *args)`` traces and lowers a ``@flyc.jit``
-launcher without running it. ``export_to_c(file_path, file_name,
-function_prefix)`` on the result writes a PIC host object and C header, with
-the entry ``int32_t function_prefix(void **args)`` plus module lifecycle
-functions, and returns the C ABI description:
+   * - Host value
+     - DSL annotation
+     - Notes
+   * - ``bool`` / ``int`` / ``float``
+     - ``Boolean`` / ``Int32`` / ``Float32``
+     - Default scalar mappings; use explicit DSL annotations/adapters when a
+       different width is required.
+   * - ``torch.Tensor``
+     - ``Tensor``
+     - Uses data pointer, shape, stride, dtype, and alignment metadata.
+   * - ``torch.cuda.Stream``
+     - ``Stream``
+     - PyTorch uses its CUDA-named API for both CUDA and ROCm builds.
+   * - ``from_dlpack(...)``
+     - ``Tensor``
+     - Works with other DLPack producers and supports dynamic-layout marking.
+   * - ``from_c_void_p(...)``
+     - ``Pointer``
+     - Carries element type, address space, and optional alignment.
+   * - ``Constexpr[T]``
+     - Compile-time Python value
+     - Included in the specialization/cache key and not passed at runtime.
+
+Custom host types can register either a DSL type conversion or a complete
+``JitArgument`` adapter. The public protocol helpers live in
+``flydsl.compiler.protocol``; see :doc:`../language/dsl_protocols` for
+``DslType``, ``JitArgument``, and ``Storable`` contracts.
+
+Backends and targets
+--------------------
+
+``GPUTarget`` contains ``backend``, ``arch``, and ``warp_size``. The built-in
+backend id is ``rocm``. ``get_backend(name=None, arch="")`` resolves a backend
+using explicit arguments, then ``FLYDSL_COMPILE_BACKEND`` and ``ARCH``/device
+detection.
+
+Third-party backends can either call ``register_backend(name, backend_cls)`` or
+publish an entry point in the ``flydsl.backends`` group. A backend supplies
+target detection, MLIR pipeline fragments, target attributes, runtime library
+names, cache fingerprint inputs, and optional AOT hooks. If it uses a custom
+device runtime, register the matching runtime mapping described in
+:doc:`runtime`.
+
+AOT and C export
+----------------
+
+``compile_aot`` compiles without creating an execution engine or launching a
+kernel:
 
 .. code-block:: python
 
-   compiled = flyc.compile_aot(launch, *example_args)
+   compiled = flyc.compile_aot(copy, x, y, x.numel(), stream)
    result = compiled.export_to_c(
        file_path="build",
-       file_name="kernel",
-       function_prefix="my_kernel",
+       file_name="copy",
+       function_prefix="my_copy",
    )
-   result.abi            # one AbiSlot per args[i]
-   result.to_json()
 
-The callable returned by ``flyc.compile(launch, *example_args)`` provides the
-same ``export_to_c`` method and reuses its compiled specialization. The legacy
-``export_to_c(object_file_path, function_name, header_file_path=...)`` form is
-also supported.
+``CompiledFunction.export_to_c`` exports the same already-compiled
+specialization. The result describes the C ABI and generated object/header;
+runtime libraries and link flags are available through
+``flydsl.runtime.find_runtime_libraries`` and:
 
-Link flags come from ``python -m flydsl.compiler.aot_config --ldflags --libs``.
-See :doc:`../aot_export_guide`.
+.. code-block:: bash
 
-fly-opt CLI
-------------
+   python -m flydsl.compiler.aot_config --ldflags --libs
 
-The ``fly-opt`` tool is a command-line interface for running MLIR passes on
-``.mlir`` files:
+See :doc:`../aot_export_guide` for object naming, ABI slots, lifecycle,
+status codes, CPU-only cross-compilation, and limitations.
+
+Compilation flow
+----------------
+
+On a cache miss, a JIT call performs:
+
+1. signature binding and host-argument conversion;
+2. Python AST rewriting for dynamic control flow;
+3. tracing into Fly and upstream MLIR dialects;
+4. Fly-to-ROCDL and LLVM lowering through the selected backend;
+5. GPU binary generation and cache persistence;
+6. execution-engine/module initialization and launch.
+
+The exact pass fragments are defined in
+``python/flydsl/compiler/backends/rocm.py`` and included directly in
+:doc:`../architecture_guide`, which is the source for pipeline details.
+
+Command-line tools
+------------------
+
+``fly-opt`` runs Fly/MLIR passes on textual modules:
 
 .. code-block:: bash
 
    fly-opt --fly-canonicalize input.mlir
    fly-opt --fly-layout-lowering input.mlir
    fly-opt --help
+
+``flydsl-lsp-server`` is an MLIR language server with the Fly and selected
+backend dialects registered. It supports ``.mlir`` files; it is not a Python
+language server for the DSL.
+
+Environment and diagnostics
+---------------------------
+
+Compilation, cache, debug, target, and runtime environment variables are
+listed in :doc:`runtime`. DSL compile failures preserve user source locations
+and show a filtered Python-style diagnostic by default; set
+``FLYDSL_DEBUG_SHOW_STACKTRACE=1`` when the internal traceback is needed.

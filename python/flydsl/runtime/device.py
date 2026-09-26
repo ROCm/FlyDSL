@@ -84,10 +84,11 @@ def get_rocm_device_count() -> int:
 
 
 def is_rdna_arch(arch: Optional[str] = None) -> bool:
-    """Check if architecture is RDNA-based (gfx10/11/12, wave32).
+    """Check if architecture is RDNA-based (gfx10, gfx11, or gfx120).
 
     This is the single source of truth for CDNA vs RDNA classification.
     RDNA architectures use wave32 and have different buffer descriptor flags.
+    CDNA5 gfx1250 is also wave32, but is intentionally not classified as RDNA.
 
     If arch is None, the current GPU arch is auto-detected.
     """

@@ -46,6 +46,12 @@ current source tree; consult the tests and CI results for the revision you use.
      - RDNA WMMA paths, with separate dtype/shape restrictions
      - Architecture-gated RDNA GEMM tests exist; source CI includes a Navi
        runner. The wheel CI matrix is narrower than the source target set.
+   * - ``gfx1250``
+     - CDNA5 wave32 WMMA, TDM, cluster/multicast, and 320-KB LDS paths
+     - Dedicated GEMM, MoE, and atom tests exist in the source tree, but the
+       checked-in GitHub Actions matrices do not currently provide a gfx1250
+       hardware validation job. Treat those paths as target-specific and
+       verify them on the intended system.
 
 For other target-specific APIs, see :doc:`api/compiler` and the corresponding
 kernel tests. This table is not a blanket support guarantee. The authoritative
@@ -165,17 +171,11 @@ After a successful build, you have:
 Step 3: Install FlyDSL
 ~~~~~~~~~~~~~~~~~~~~~~
 
-For development (editable install):
+For development, use an editable install:
 
 .. code-block:: bash
 
-   pip install -e .
-
-Or use setup.py directly:
-
-.. code-block:: bash
-
-   python setup.py develop
+   python -m pip install -e .
 
 This creates an editable install — changes to ``python/flydsl/`` are immediately reflected.
 
@@ -186,11 +186,12 @@ This creates an editable install — changes to ``python/flydsl/`` are immediate
    export PYTHONPATH=$(pwd)/build-fly/python_packages:$(pwd):$PYTHONPATH
    export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
 
-To build a distributable wheel:
+To build a distributable wheel after the native build is available:
 
 .. code-block:: bash
 
-   python setup.py bdist_wheel
+   python -m pip install build
+   python -m build --wheel --no-isolation
    ls dist/
 
 Verify installation
@@ -204,10 +205,13 @@ Run the test suite to verify that everything works:
 
 This runs the following:
 
-- **MLIR lit tests**: ``tests/mlir/{LayoutAlgebra,Conversion,Transforms}/*.mlir``
-  through ``fly-opt``
-- **Python tests**: ``tests/python/examples/`` (AOT examples)
-- **Kernel/GPU execution tests** (only if ROCm is detected): ``tests/kernels/test_*.py``
+- **Pytest suites**: ``tests/kernels/``, ``tests/language/``, ``tests/unit/``,
+  ``tests/system/``, ``tests/extension/``, and ``tests/python/examples/``
+- **Standalone examples**: architecture-compatible scripts under ``examples/``
+- **MLIR/FileCheck tests**: all ``.mlir`` files under ``tests/mlir/``
+
+The broad runner requires a GPU for its device-tier tests. For test tiers,
+focused commands, and compile-only coverage, see :doc:`testing_benchmarking_guide`.
 
 Troubleshooting
 ---------------
@@ -224,6 +228,10 @@ Troubleshooting
       pip install -e .
 
 **MLIR .so load errors**
-   Add the MLIR build lib dir to the loader path::
+   For a source build, add the embedded package library directory to the loader
+   path::
 
-      export LD_LIBRARY_PATH=$MLIR_PATH/lib:$LD_LIBRARY_PATH
+      export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
+
+   If an external MLIR install is also required by a development tool, append
+   ``$MLIR_PATH/lib`` rather than replacing the embedded directory.

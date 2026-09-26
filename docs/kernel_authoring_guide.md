@@ -325,10 +325,18 @@ result = rocdl.rcp(T.f32, x)
 # Warp shuffle
 val = rocdl.ds_bpermute(idx, src)
 
-# Buffer load/store (raw)
-data = rocdl.raw_ptr_buffer_load(rsrc, offset, soffset, aux)
-rocdl.raw_ptr_buffer_store(data, rsrc, offset, soffset, aux)
+# Repository kernels that still need raw resource operations use the legacy
+# compatibility helpers outside the stable expression API.
+from kernels.common import buffer_ops
+
+data = buffer_ops.buffer_load(rsrc, offsets, vec_width=4)
+buffer_ops.buffer_store(rsrc, offsets, data, vec_width=4)
 ```
+
+New kernels should prefer `rocdl.make_buffer_tensor()` plus `fx.copy()` or
+typed `Tensor`/`Pointer` access. `kernels.common.buffer_ops` is source-tree
+implementation support, is not installed by the `flydsl` wheel, and is not a
+stable package API.
 
 (wmma-tdm-atoms)=
 
@@ -364,7 +372,7 @@ accumulating to f32. Pass a different B type with the keyword-only `elem_ty_b`;
 it defaults to the A type. The 16x16x32 BF16 and fp8 K=64/128 forms above are
 gfx1250-only and are rejected by the atom's verifier. See
 `kernels/gemm/rdna_f16_gemm.py` for a full pipelined f16 example and
-`kernels/gemm/rdna4_fp8_blockscale.py` for raw FP8 operands.
+`kernels/gemm/rdna_fp8_preshuffle_gemm.py` for an RDNA4 FP8 implementation.
 
 ```python
 mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.BFloat16, fx.Float32))  # RDNA4
