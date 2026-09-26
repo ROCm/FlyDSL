@@ -33,6 +33,34 @@ class ExpertWeight(str, Enum):
     MXFP4_BLOCK32 = "mxfp4_block32"
 
 
+class Mxfp4WeightLayout(str, Enum):
+    """Physical layout of packed MXFP4 expert values."""
+
+    NATIVE = "native"
+    ATOM = "atom"
+
+
+class Mxfp4ScaleLayout(str, Enum):
+    """Physical layout of per-row MXFP4 E8M0 scales."""
+
+    NATIVE = "native"
+    ATOM = "atom"
+
+
+class RouterWeightLayout(str, Enum):
+    """Physical layout of the BF16 router matrix."""
+
+    NATIVE = "native"
+    ATOM = "atom"
+
+
+class KvCacheLayout(str, Enum):
+    """Physical layout of the BF16 MLA KV cache."""
+
+    SPLIT = "split"
+    ATOM = "atom"
+
+
 @dataclass(frozen=True)
 class MoeFormat:
     activation: ExpertActivation
@@ -71,6 +99,57 @@ def moe_format(value: MoeMode | str) -> MoeFormat:
     """Return the independent activation and weight formats for a public mode."""
 
     return MOE_FORMATS[as_moe_mode(value)]
+
+
+def _as_layout(value, enum_type, name):
+    if isinstance(value, enum_type):
+        return value
+    try:
+        return enum_type(value)
+    except ValueError as error:
+        choices = ", ".join(layout.value for layout in enum_type)
+        raise ValueError(f"unsupported {name} {value!r}; expected one of: {choices}") from error
+
+
+def as_mxfp4_weight_layout(value: Mxfp4WeightLayout | str) -> Mxfp4WeightLayout:
+    return _as_layout(value, Mxfp4WeightLayout, "MXFP4 weight layout")
+
+
+def as_mxfp4_scale_layout(value: Mxfp4ScaleLayout | str) -> Mxfp4ScaleLayout:
+    return _as_layout(value, Mxfp4ScaleLayout, "MXFP4 scale layout")
+
+
+def as_router_weight_layout(value: RouterWeightLayout | str) -> RouterWeightLayout:
+    return _as_layout(value, RouterWeightLayout, "router weight layout")
+
+
+def as_kv_cache_layout(value: KvCacheLayout | str) -> KvCacheLayout:
+    return _as_layout(value, KvCacheLayout, "KV-cache layout")
+
+
+def resolve_storage_layouts(
+    moe_mode: MoeMode | str,
+    mxfp4_weight_layout: Mxfp4WeightLayout | str | None = None,
+    mxfp4_scale_layout: Mxfp4ScaleLayout | str | None = None,
+    router_weight_layout: RouterWeightLayout | str | None = None,
+    kv_cache_layout: KvCacheLayout | str | None = None,
+) -> tuple[Mxfp4WeightLayout, Mxfp4ScaleLayout, RouterWeightLayout, KvCacheLayout]:
+    """Resolve storage defaults for each MoE arithmetic mode."""
+
+    is_mxfp4 = moe_format(moe_mode).weight is ExpertWeight.MXFP4_BLOCK32
+    weight_default = Mxfp4WeightLayout.ATOM if is_mxfp4 else Mxfp4WeightLayout.NATIVE
+    scale_default = Mxfp4ScaleLayout.ATOM if is_mxfp4 else Mxfp4ScaleLayout.NATIVE
+    # ATOM keeps the unquantized router row-major, but direct row-major loads
+    # regress the A16W4 S=8 mono-kernel. Keep the MFMA-native router packing by
+    # default while allowing zero-copy ATOM router experiments explicitly.
+    router_default = RouterWeightLayout.NATIVE
+    cache_default = KvCacheLayout.ATOM if is_mxfp4 else KvCacheLayout.SPLIT
+    return (
+        weight_default if mxfp4_weight_layout is None else as_mxfp4_weight_layout(mxfp4_weight_layout),
+        scale_default if mxfp4_scale_layout is None else as_mxfp4_scale_layout(mxfp4_scale_layout),
+        router_default if router_weight_layout is None else as_router_weight_layout(router_weight_layout),
+        cache_default if kv_cache_layout is None else as_kv_cache_layout(kv_cache_layout),
+    )
 
 
 HIDDEN = 6144

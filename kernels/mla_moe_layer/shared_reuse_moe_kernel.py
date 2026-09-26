@@ -68,8 +68,13 @@ from kernels.mla_moe_layer.config import (
     V_DIM,
     ExpertActivation,
     ExpertWeight,
+    KvCacheLayout,
     MoeMode,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    RouterWeightLayout,
     moe_format,
+    resolve_storage_layouts,
 )
 
 BLOCKS = 256
@@ -311,6 +316,10 @@ def build_shared_reuse_kernel(
     scale: float = SOFTMAX_SCALE,
     timeline: bool = False,
     moe_mode: MoeMode | str = MoeMode.W8A8,
+    mxfp4_weight_layout: Mxfp4WeightLayout | str | None = None,
+    mxfp4_scale_layout: Mxfp4ScaleLayout | str | None = None,
+    router_weight_layout: RouterWeightLayout | str | None = None,
+    kv_cache_layout: KvCacheLayout | str | None = None,
 ):
     """Return the ``@flyc.jit`` launcher for one rank's whole layer.
 
@@ -325,6 +334,17 @@ def build_shared_reuse_kernel(
     use_fp8_block128 = fmt.activation is ExpertActivation.FP8_BLOCK128
     use_mxfp8_block32 = fmt.activation is ExpertActivation.MXFP8_BLOCK32
     use_mxfp4_weight = fmt.weight is ExpertWeight.MXFP4_BLOCK32
+    weight_layout, scale_layout, router_layout, cache_layout = resolve_storage_layouts(
+        moe_mode,
+        mxfp4_weight_layout,
+        mxfp4_scale_layout,
+        router_weight_layout,
+        kv_cache_layout,
+    )
+    use_atom_mxfp4_weight = weight_layout is Mxfp4WeightLayout.ATOM
+    use_atom_mxfp4_scale = scale_layout is Mxfp4ScaleLayout.ATOM
+    use_atom_router_weight = router_layout is RouterWeightLayout.ATOM
+    use_atom_kv_cache = cache_layout is KvCacheLayout.ATOM
     XQ_BLOCKS = 0 if fmt.activation_group is None else HIDDEN // fmt.activation_group
     PUBLISH_BLOCKS = HIDDEN // (32 if use_mxfp8_block32 else 128)
     XQ_WAVES = (
@@ -651,25 +671,122 @@ def build_shared_reuse_kernel(
             s = ld_f32(s_rsrc, (rg * 16 // SCALE_BM) * (K // 128) + kc // 2)
             return ("f8f8", wv, lambda: s * coef(), b_word + (lane // 16) * 4)
 
-        def unit_mxfp4(w_rsrc, s_rsrc, rg, kc, K, b_word, coef=None, ln=None):
+        def unit_mxfp4(w_rsrc, s_rsrc, rg, kc, K, b_word, coef=None, ln=None, canonical=False):
             """Issue one packed 128-K MXFP4 tile and its four per-row E8M0 scales."""
 
             ln = lane if ln is None else ln
-            raw = fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 128) + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-            row = rg * 16 + ln % 16
-            packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
-            scales = [
-                ((packed_scale.shrui(fx.Int32(sp * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
-                for sp in range_constexpr(4)
-            ]
+            if const_expr(use_atom_mxfp4_weight and not canonical):
+                # AITER shuffle_weight(layout=(16, 16)): [row-group, K32, row, 16B].
+                # Consume that layout directly by matching activation lane groups
+                # to K32 steps. Per-K32 MXFP8 activation scales are folded into the
+                # FP4 conversion scale in ``mma_units``.
+                loaded = fx.Vector(
+                    bo.buffer_load(
+                        w_rsrc,
+                        ((rg * (K // 32) + kc * 4 + ln // 16) * 16 + ln % 16) * 4,
+                        vec_width=4,
+                        dtype=T.i32,
+                    )
+                )
+                raw = loaded
+            elif const_expr(use_atom_mxfp4_weight):
+                # A batched MFMA has a different MXFP8 scale for each output
+                # column. Preserve the canonical four-K32 issue order for that
+                # case; only the shared expert uses this slower gather path.
+                raw = [
+                    fx.Int32(
+                        bo.buffer_load(
+                            w_rsrc,
+                            (((rg * (K // 32) + kc * 4 + sp) * 16 + ln % 16) * 4 + ln // 16),
+                            vec_width=1,
+                            dtype=T.i32,
+                        )
+                    )
+                    for sp in range_constexpr(4)
+                ]
+            else:
+                raw = fx.Vector(
+                    bo.buffer_load(
+                        w_rsrc,
+                        ((rg * (K // 128) + kc) * 64 + ln) * 4,
+                        vec_width=4,
+                        dtype=T.i32,
+                    )
+                )
+            if const_expr(use_atom_mxfp4_scale):
+                # AITER shuffle_scale: dword bytes are [K128 parity, row-group parity].
+                byte = (kc % 2) * 2 + rg % 2
+                if const_expr(use_atom_mxfp4_weight and not canonical):
+                    scale_word = fx.Int32(
+                        bo.buffer_load(
+                            s_rsrc,
+                            (((rg // 2) * (K // 256) + kc // 2) * 4 + ln // 16) * 16 + ln % 16,
+                            vec_width=1,
+                            dtype=T.i32,
+                        )
+                    )
+                    lane_scale = ((scale_word.shrui(fx.Int32(byte * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(
+                        fx.Float32
+                    )
+                else:
+                    scales = []
+                    for sp in range_constexpr(4):
+                        scale_word = fx.Int32(
+                            bo.buffer_load(
+                                s_rsrc,
+                                (((rg // 2) * (K // 256) + kc // 2) * 4 + sp) * 16 + ln % 16,
+                                vec_width=1,
+                                dtype=T.i32,
+                            )
+                        )
+                        scales.append(
+                            ((scale_word.shrui(fx.Int32(byte * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(
+                                fx.Float32
+                            )
+                        )
+            else:
+                row = rg * 16 + ln % 16
+                packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
+                if const_expr(use_atom_mxfp4_weight and not canonical):
+                    lane_scale = (
+                        (packed_scale.shrui(fx.Int32((ln // 16) * 8)) & fx.Int32(0xFF)) << fx.Int32(23)
+                    ).bitcast(fx.Float32)
+                else:
+                    scales = [
+                        ((packed_scale.shrui(fx.Int32(sp * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
+                        for sp in range_constexpr(4)
+                    ]
+            if const_expr(use_atom_mxfp4_weight and not canonical):
+                return ("mxfp4_atom", (raw, lane_scale), coef, b_word)
             return ("mxfp4", (raw, scales), coef, b_word + (lane // 16) * 4)
 
         def unit_bf16(w_rsrc, rg, kc, NKC, b_word, ln=None):
             ln = lane if ln is None else ln
-            wv = [
-                fx.Vector(bo.buffer_load(w_rsrc, (((rg * NKC + kc) * 2 + sp) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-                for sp in range(2)
-            ]
+            if const_expr(use_atom_router_weight):
+                row = rg * 16 + ln % 16
+                wv = [
+                    fx.Vector(
+                        bo.buffer_load(
+                            w_rsrc,
+                            (row * NKC * 64 + kc * 64 + sp * 32 + (ln // 16) * 8) // 2,
+                            vec_width=4,
+                            dtype=T.i32,
+                        )
+                    )
+                    for sp in range(2)
+                ]
+            else:
+                wv = [
+                    fx.Vector(
+                        bo.buffer_load(
+                            w_rsrc,
+                            (((rg * NKC + kc) * 2 + sp) * 64 + ln) * 4,
+                            vec_width=4,
+                            dtype=T.i32,
+                        )
+                    )
+                    for sp in range(2)
+                ]
             return ("bf16", wv, None, b_word + (lane // 16) * 4)
 
         def mma_units(acc, units):
@@ -677,6 +794,37 @@ def build_shared_reuse_kernel(
             for unit_format, wv, coef, bw in units:
                 if const_expr(callable(coef) and unit_format != "mxfp4"):
                     coef = coef()
+                if const_expr(unit_format == "mxfp4_atom"):
+                    raw, lane_scale = wv
+                    activation_scale = None
+                    post_coef = coef
+                    if const_expr(isinstance(coef, tuple)):
+                        activation_scale = coef[0]()
+                        post_coef = coef[1]() if const_expr(coef[1] is not None) else None
+                    elif const_expr(isinstance(coef, list)):
+                        scale_functions = coef
+                        scale_values = [scale_function() for scale_function in scale_functions]
+                        lane_group = lane // 16
+                        activation_scale = (lane_group == 0).select(
+                            scale_values[0],
+                            (lane_group == 1).select(
+                                scale_values[1],
+                                (lane_group == 2).select(scale_values[2], scale_values[3]),
+                            ),
+                        )
+                        post_coef = None
+                    if const_expr(activation_scale is not None):
+                        lane_scale = lane_scale * activation_scale
+                    for chunk in range_constexpr(4):
+                        a = _mxfp4_to_bf16x8(raw[chunk], lane_scale)
+                        b = fx.ptr_load(xs + (bw + (lane // 16) * 16 + chunk * 4), result_type=v4f).bitcast(fx.BFloat16)
+                        c = fx.Vector.filled(4, 0.0, fx.Float32)
+                        c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
+                        if const_expr(post_coef is None):
+                            acc = [acc[e] + c[e] for e in range(4)]
+                        else:
+                            acc = [acc[e] + c[e] * post_coef for e in range(4)]
+                    continue
                 if const_expr(unit_format == "mxfp4"):
                     raw, scales = wv
                     for sp in range_constexpr(4):
@@ -1106,15 +1254,21 @@ def build_shared_reuse_kernel(
             for s in range_constexpr(S):
                 pos = pos0 + s
                 kvn = bf16_round(vs[s] * _rsq(ssq[s] * (1.0 / KV_LORA) + EPS) * g)
-                bo.buffer_store(kvn.to(fx.BFloat16), r_kv, pos * KV_LORA + tid)
+                kv_offset = pos * (KV_LORA + PE_DIM) + tid if const_expr(use_atom_kv_cache) else pos * KV_LORA + tid
+                bo.buffer_store(kvn.to(fx.BFloat16), r_kv, kv_offset)
                 put(mb("kvnew"), s * KV_LORA + tid, kvn)
                 if tid < PE_DIM // 2:
                     x0, x1 = pes[s]
                     c, sn = cs[s], sns[s]
                     p0 = bf16_round(x0 * c - x1 * sn)
                     p1 = bf16_round(x0 * sn + x1 * c)
-                    bo.buffer_store(p0.to(fx.BFloat16), r_pe, pos * PE_DIM + tid * 2)
-                    bo.buffer_store(p1.to(fx.BFloat16), r_pe, pos * PE_DIM + tid * 2 + 1)
+                    pe_offset = (
+                        pos * (KV_LORA + PE_DIM) + KV_LORA + tid * 2
+                        if const_expr(use_atom_kv_cache)
+                        else pos * PE_DIM + tid * 2
+                    )
+                    bo.buffer_store(p0.to(fx.BFloat16), r_pe, pe_offset)
+                    bo.buffer_store(p1.to(fx.BFloat16), r_pe, pe_offset + 1)
                     put2(mb("penew"), s * PE_DIM + tid * 2, p0, p1)
             stamp("cache", t, 4)
 
@@ -1234,10 +1388,20 @@ def build_shared_reuse_kernel(
             krows = [lds_ld(keys, wave * KPW + jj) for jj in range(KPW)]
             for jj in range_constexpr(KPW):
                 j = wave * KPW + jj
-                kv8 = fx.Vector(bo.buffer_load(r_kv, krows[jj] * (KV_LORA // 2) + lane * 4, vec_width=4, dtype=T.i32))
+                kv_row = (
+                    krows[jj] * ((KV_LORA + PE_DIM) // 2)
+                    if const_expr(use_atom_kv_cache)
+                    else krows[jj] * (KV_LORA // 2)
+                )
+                kv8 = fx.Vector(bo.buffer_load(r_kv, kv_row + lane * 4, vec_width=4, dtype=T.i32))
                 fx.ptr_store(kv8.bitcast(fx.Float32), ktile + (j * KS + lane * 4))
                 if lane < PE_DIM // 2:
-                    lds_st(petile, j * PS + lane, ld_f32(r_pe, krows[jj] * (PE_DIM // 2) + lane))
+                    pe_row = (
+                        krows[jj] * ((KV_LORA + PE_DIM) // 2) + KV_LORA // 2
+                        if const_expr(use_atom_kv_cache)
+                        else krows[jj] * (PE_DIM // 2)
+                    )
+                    lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row + lane))
 
         def patch_new_kv():
             """Rows appended by this launch come from the cache task's kvnew / penew pairs."""
@@ -1635,13 +1799,20 @@ def build_shared_reuse_kernel(
                     if const_expr(use_mxfp4_weight):
                         coefficients = None
                         if const_expr(use_mxfp8_block32):
-                            coefficients = []
-                            for sp in range_constexpr(4):
+                            if const_expr(use_atom_mxfp4_weight):
 
-                                def coefficient(sp=sp, unit=unit):
-                                    return _uniform_f32(lds_ld(misc, 8 + unit * 4 + sp))
+                                def activation_scale(unit=unit):
+                                    return lds_ld(misc, 8 + unit * 4 + lane // 16)
 
-                                coefficients.append(coefficient)
+                                coefficients = (activation_scale, None)
+                            else:
+                                coefficients = []
+                                for sp in range_constexpr(4):
+
+                                    def coefficient(sp=sp, unit=unit):
+                                        return _uniform_f32(lds_ld(misc, 8 + unit * 4 + sp))
+
+                                    coefficients.append(coefficient)
                         return unit_mxfp4(
                             r_wug,
                             r_sug,
@@ -1766,14 +1937,23 @@ def build_shared_reuse_kernel(
                     unit = wave * UG8_UNITS + cc
                     if const_expr(use_mxfp4_weight):
                         coefficients = None
+                        canonical = False
                         if const_expr(use_mxfp8_block32):
-                            coefficients = []
-                            for sp in range_constexpr(4):
+                            canonical = use_atom_mxfp4_weight and sample is None
+                            if const_expr(use_atom_mxfp4_weight and not canonical):
 
-                                def coefficient(sp=sp, unit=unit, sn=sn):
-                                    return lds_ld(misc, 8 + sn * XQ_BLOCKS + unit * 4 + sp)
+                                def activation_scale(unit=unit, sn=sn):
+                                    return lds_ld(misc, 8 + sn * XQ_BLOCKS + unit * 4 + lane // 16)
 
-                                coefficients.append(coefficient)
+                                coefficients = (activation_scale, None)
+                            else:
+                                coefficients = []
+                                for sp in range_constexpr(4):
+
+                                    def coefficient(sp=sp, unit=unit, sn=sn):
+                                        return lds_ld(misc, 8 + sn * XQ_BLOCKS + unit * 4 + sp)
+
+                                    coefficients.append(coefficient)
                         units.append(
                             unit_mxfp4(
                                 rw,
@@ -1784,6 +1964,7 @@ def build_shared_reuse_kernel(
                                 sn * XW + unit * 64,
                                 coefficients,
                                 w_ln,
+                                canonical,
                             )
                         )
                         continue
@@ -1894,14 +2075,25 @@ def build_shared_reuse_kernel(
                 if const_expr(use_mxfp4_weight):
                     coefficients = []
                     if const_expr(use_mxfp8_block32):
-                        for sp in range_constexpr(4):
+                        if const_expr(use_atom_mxfp4_weight):
 
-                            def coefficient(sp=sp, q=q, s_q=s_q):
+                            def activation_scale(q=q):
+                                return lds_ld(misc, q * 4 + lane // 16)
+
+                            def route_coefficient():
                                 return (lane % 16 == s_q).select(
-                                    _uniform_f32(lds_ld(misc, q * 4 + sp)), fx.Float32(0.0)
+                                    _uniform_f32(lds_ld(dnw, s_q * MOE_SLOTS + slot_q)), fx.Float32(0.0)
                                 )
 
-                            coefficients.append(coefficient)
+                            coefficients = (activation_scale, route_coefficient)
+                        else:
+                            for sp in range_constexpr(4):
+
+                                def coefficient(sp=sp, q=q, s_q=s_q):
+                                    scale_value = _uniform_f32(lds_ld(misc, q * 4 + sp))
+                                    return (lane % 16 == s_q).select(scale_value, fx.Float32(0.0))
+
+                                coefficients.append(coefficient)
                     else:
 
                         def coefficient():
@@ -1968,7 +2160,10 @@ def build_shared_reuse_kernel(
                         lds_st(xs, blk * 64 + lane, bf16_pair(d0, d1))
                         if lane % 16 == 0:
                             scale_group = blk * 4 + lane // 16
-                            lds_st(misc, scale_group, qs * lds_ld(dnw, blk // (INTER // 128)))
+                            if const_expr(use_atom_mxfp4_weight):
+                                lds_st(misc, scale_group, qs)
+                            else:
+                                lds_st(misc, scale_group, qs * lds_ld(dnw, blk // (INTER // 128)))
                     else:
                         lds_st(xs, blk * 64 + lane, bf16_pair(mids[b][0], mids[b][1]))
             gpu.barrier()

@@ -27,6 +27,35 @@ TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导�
 所有模式的 attention weights 都保持 block-scaled FP8。当前支持 sample count 1、2、4、8
 以及 peer count 1、2、4、8。host wrapper 会在分配 GPU buffer 前验证完整固定分片约束。
 
+## ATOM 存储布局审计
+
+MXFP4 模式现在默认采用可以直接消费 ATOM tensor、无需重新打包 expert tensor 的布局：
+
+| Tensor | 逻辑顺序 | MXFP4 默认路径的物理存储 | 与 ATOM 的兼容性 |
+|---|---|---|---|
+| `w_ug` | 256 个 routed experts，随后是 shared expert 256；gate rows 在前、up rows 在后 | AITER `shuffle_weight(..., layout=(16, 16), is_guinterleave=False)` | 完全一致 |
+| `w_dn` | 相同 expert 编号；output rows x input-intermediate columns | 相同 AITER 16x16 shuffle | 完全一致 |
+| `s_ug`、`s_dn` | 每个 1x32 block 一个 E8M0 byte | AITER non-interleaved `shuffle_scale` | 完全一致 |
+| `w_r` | 256 行 BF16 router | 默认仍用 mono-kernel MFMA packing；可选 ATOM row-major | 逻辑一致，默认不能零拷贝 |
+| MLA projection weights | `qkv_a=[q_a; kv_a]`；每个 `q_b` head 为 `[nope; rope]` | 现有 block-128 FP8 MFMA packing | 与 `amd/GLM-5.1-MXFP4` 的 BF16 attention weights 不兼容 |
+| KV cache | 每个 token 为 `[k_c(512), k_pe(64)]` | 单个连续 BF16 `[tokens, 576]` tensor | shape/stride 一致；ATOM benchmark 使用 FP8 而非 BF16 |
+
+expert value 和 scale packer 已针对 GLM-5 up/gate、down 两种形状，与当前 AITER 的
+`shuffle_weight`、`shuffle_scale` 做过逐字节比较，结果完全一致。norm vectors 和
+routing bias 原本就是普通连续 tensor。ATOM 默认的 `ATOM_MOE_GU_ITLV=0` 也与本
+kernel 的 gate-then-up 行顺序一致。
+
+保留 `--router-weight-layout atom` 用于零拷贝实验，但不设为默认：在其他存储均采用
+ATOM-compatible 的 A16W4 下，TP1 S=1 从 31.19 降到 31.08 us/layer，略有提升；但
+S=8 从 70.80 上升到 72.47 us/layer，回退 2.4%。ATOM 的独立 GEMM 可以在内部对
+row-major router 做 tiling，而 mono-kernel 的直接 MFMA load 会跨越 6144-element
+row stride。
+
+attention 与 cache dtype 的差异属于格式变化，不只是 permutation 问题。因此本改动
+不宣称可以把 `amd/GLM-5.1-MXFP4` checkpoint 的所有 weight 完整零拷贝加载；当前
+对齐了全部 MXFP4 expert value/scale 和 576-wide cache allocation，同时保留性能更好
+的既有 attention 与 router 路径。
+
 ## 代码结构
 
 | 文件 | 职责 |
@@ -71,6 +100,12 @@ NP4 `w8a16` 的 normalized expert input 有一个元素与独立 reduction 相�
 检查。检查覆盖 packed MXFP4 weight、每 1x32 E8M0 scale、A8W4 activation 量化、
 最终 BF16 peer reduction，以及所有 rank 最终输出逐位一致。TP8/S8 的独立端到端
 相对 L2 分别为 `a16w4` 0.430%、`a8w4` 2.87%。没有放宽现有容差。
+
+ATOM layout 路径还通过了两种 MXFP4 模式的默认布局 TP1/S1、TP1/S8 和 TP8/S8
+检查。A8W4 S>1 最初暴露了一个只影响 shared expert 的 scale
+关联问题：8 个 routed slots 都正确，只有 shared slot 0 错误。最终实现让 routed
+experts 继续使用高性能 lane-group ATOM 直读，仅在一个 MFMA 的不同列代表不同 sample
+的 shared expert 上使用 canonical K32 gather。
 
 TP1/S1 下使用相同权重直接对比 TileRT wrapper，结果为：
 
@@ -117,6 +152,33 @@ MFMA staging 的开销，因此没有在两个 sample count 上都超过 `w8a8`�
 TileRT 对比适配器只接受 `w8a8` 和 `w8a16`，本 harness 中没有两种 MXFP4 模式的
 有效同权重 TileRT 基线。
 
+ATOM layout 测试在 TP1 下每个 graph 包含 128 次 layer launch，预热两次、正式测量
+15 次并取中位数。ATOM expert/cache 测量前后各测一次 native，以暴露机器漂移；百分比
+使用两次 native 中位数的均值计算。
+
+| 模式 | Samples | Native expert/scale + split cache | ATOM expert/scale + fused cache | 变化 |
+|---|---:|---:|---:|---:|
+| `a16w4` | 1 | 31.80-32.33 us | 31.14 us | 快 2.9% |
+| `a16w4` | 8 | 74.65-75.04 us | 71.37 us | 快 4.6% |
+| `a8w4` | 1 | 32.98-33.02 us | 32.08 us | 快 2.8% |
+| `a8w4` | 8 | 81.64-81.80 us | 77.21 us | 快 5.5% |
+
+轻量 TP8 graph benchmark 每个 graph 包含 16 次 launch，并取最慢 rank，也没有出现
+回退：
+
+| 模式 | Samples | Native | ATOM expert/cache 默认布局 |
+|---|---:|---:|---:|
+| `a16w4` | 1 | 35.2 us | 34.8 us |
+| `a16w4` | 8 | 87.2 us | 82.1 us |
+| `a8w4` | 1 | 36.9 us | 35.4 us |
+| `a8w4` | 8 | 92.9 us | 87.5 us |
+
+第一版 ATOM expert layout 使用分散 dword load 和寄存器内转置，A16W4 S=8 曾上升到
+约 115 us。把四个 lane groups 直接映射到 ATOM 的四个 K32 tiles 后消除了这项回退，
+并保留 ATOM scale storage 与 fused cache。A8W4 多 sample 的 shared-expert 路径使用
+上文所述的小范围 canonical-load fallback 保证正确性；最终 TP1/S=8 仍比 native
+layout 快 5.5%。
+
 分段 trace 指导了两项保留的调度修改：BF16 packed peer exchange，以及每个 router
 CTA 只处理一个 sample。此前 S=4 调度中，最后一个插桩 CTA 到达 attention 发布、
 router 发布、routed up/gate 发布和 down 完成的时间分别为 30.23、35.12、50.12、
@@ -128,8 +190,8 @@ router 发布、routed up/gate 发布和 down 完成的时间分别为 30.23、3
 使用现有 FlyDSL compiler build 和本 worktree：
 
 ```bash
-cd /root/FlyDSL-glm5-perf
-export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-perf:/root/tilert_pkg
+cd /root/FlyDSL-glm5-mxfp4-atom-layout
+export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-mxfp4-atom-layout:/root/tilert_pkg
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib
 
 /opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
@@ -137,7 +199,7 @@ export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/benchmark.py \
   --backend flydsl --moe-mode a16w4 --npes 1 --samples 1 8 \
-  --layers 16 --repeats 3
+  --layers 128 --repeats 15
 ```
 
 正确性命令应替换其他模式和 peer count 重复运行。GPU 任务应串行执行。

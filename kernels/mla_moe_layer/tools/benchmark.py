@@ -24,7 +24,17 @@ import torch.multiprocessing as mp
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from kernels.mla_moe_layer.config import KV_LORA, MAX_LAYERS_PER_STEP, PE_DIM, MoeMode  # noqa: E402
+from kernels.mla_moe_layer.config import (  # noqa: E402
+    KV_LORA,
+    MAX_LAYERS_PER_STEP,
+    PE_DIM,
+    KvCacheLayout,
+    MoeMode,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    RouterWeightLayout,
+    resolve_storage_layouts,
+)
 from kernels.mla_moe_layer.layer import SharedReuseMlaMoeLayer  # noqa: E402
 from kernels.mla_moe_layer.native_baseline import make_native_glm5_baseline  # noqa: E402
 from kernels.mla_moe_layer.reference import make_weights, rope_table  # noqa: E402
@@ -50,6 +60,13 @@ def _worker(rank, args, port):
     device = torch.device("cuda", rank)
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=args.npes)
     weights = make_weights(rank, heads=8, device=device, seed=args.seed, moe_mode=args.moe_mode)
+    weight_layout, scale_layout, router_layout, cache_layout = resolve_storage_layouts(
+        args.moe_mode,
+        args.mxfp4_weight_layout,
+        args.mxfp4_scale_layout,
+        args.router_weight_layout,
+        args.kv_cache_layout,
+    )
     native = make_native_glm5_baseline(weights, device, args.moe_mode) if args.backend == "tilert" else None
     cos, sin = rope_table(4096, device=device)
 
@@ -57,6 +74,9 @@ def _worker(rank, args, port):
         generator = torch.Generator(device=device).manual_seed(args.seed + 99)
         kv = torch.randn(4096, KV_LORA, generator=generator, device=device).bfloat16()
         pe = torch.randn(4096, PE_DIM, generator=generator, device=device).bfloat16()
+        if cache_layout is KvCacheLayout.ATOM:
+            kv = torch.cat((kv, pe), dim=1)
+            pe = kv
         indices = torch.stack(
             [
                 torch.randperm(max(args.pos + sample + 1, 2048), generator=generator, device=device)[:2048]
@@ -79,6 +99,10 @@ def _worker(rank, args, port):
                 npes=args.npes,
                 timeline=args.trace,
                 moe_mode=args.moe_mode,
+                mxfp4_weight_layout=weight_layout,
+                mxfp4_scale_layout=scale_layout,
+                router_weight_layout=router_layout,
+                kv_cache_layout=cache_layout,
             )
 
             def run(epoch):
@@ -203,6 +227,10 @@ def _worker(rank, args, port):
                 benchmark_version=3,
                 backend=args.backend,
                 moe_mode=args.moe_mode,
+                mxfp4_weight_layout=weight_layout.value,
+                mxfp4_scale_layout=scale_layout.value,
+                router_weight_layout=router_layout.value,
+                kv_cache_layout=cache_layout.value,
                 instrumented=args.trace,
                 npes=args.npes,
                 samples=samples,
@@ -236,6 +264,26 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("flydsl", "tilert"), required=True)
     parser.add_argument("--moe-mode", choices=tuple(mode.value for mode in MoeMode), default=MoeMode.W8A8.value)
+    parser.add_argument(
+        "--mxfp4-weight-layout",
+        choices=tuple(layout.value for layout in Mxfp4WeightLayout),
+        default=None,
+    )
+    parser.add_argument(
+        "--mxfp4-scale-layout",
+        choices=tuple(layout.value for layout in Mxfp4ScaleLayout),
+        default=None,
+    )
+    parser.add_argument(
+        "--router-weight-layout",
+        choices=tuple(layout.value for layout in RouterWeightLayout),
+        default=None,
+    )
+    parser.add_argument(
+        "--kv-cache-layout",
+        choices=tuple(layout.value for layout in KvCacheLayout),
+        default=None,
+    )
     parser.add_argument("--npes", choices=(1, 2, 4, 8), type=int, required=True)
     parser.add_argument("--samples", type=int, nargs="+", choices=(1, 2, 4, 8), default=[1, 2, 4])
     parser.add_argument("--pos", type=int, default=3000)

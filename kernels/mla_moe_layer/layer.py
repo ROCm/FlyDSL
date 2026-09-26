@@ -10,13 +10,20 @@ import torch
 from kernels.mla_moe_layer.config import (
     HIDDEN,
     INTER,
+    KV_LORA,
     MAX_LAYERS_PER_STEP,
     MOE_SLOTS,
     N_EXPERTS,
+    PE_DIM,
     ExpertActivation,
+    KvCacheLayout,
     MoeMode,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    RouterWeightLayout,
     as_moe_mode,
     moe_format,
+    resolve_storage_layouts,
     validate_shard,
 )
 from kernels.mla_moe_layer.packing import pack_layer_weights
@@ -29,7 +36,14 @@ from kernels.mla_moe_layer.shared_reuse_moe_kernel import (
     stage_tasks,
 )
 
-__all__ = ["MoeMode", "SharedReuseMlaMoeLayer"]
+__all__ = [
+    "KvCacheLayout",
+    "MoeMode",
+    "Mxfp4ScaleLayout",
+    "Mxfp4WeightLayout",
+    "RouterWeightLayout",
+    "SharedReuseMlaMoeLayer",
+]
 
 
 class SharedReuseMlaMoeLayer:
@@ -50,11 +64,33 @@ class SharedReuseMlaMoeLayer:
         topk: int = 2048,
         timeline: bool = False,
         moe_mode: MoeMode | str = MoeMode.W8A8,
+        mxfp4_weight_layout: Mxfp4WeightLayout | str | None = None,
+        mxfp4_scale_layout: Mxfp4ScaleLayout | str | None = None,
+        router_weight_layout: RouterWeightLayout | str | None = None,
+        kv_cache_layout: KvCacheLayout | str | None = None,
     ):
         validate_shard(samples, W.heads, rank, npes, topk)
         self.moe_mode = as_moe_mode(moe_mode)
+        (
+            self.mxfp4_weight_layout,
+            self.mxfp4_scale_layout,
+            self.router_weight_layout,
+            self.kv_cache_layout,
+        ) = resolve_storage_layouts(
+            self.moe_mode,
+            mxfp4_weight_layout,
+            mxfp4_scale_layout,
+            router_weight_layout,
+            kv_cache_layout,
+        )
         self.W, self.S, self.rank, self.npes, self.topk = W, samples, rank, npes, topk
-        self.packed = pack_layer_weights(W.t, self.moe_mode)
+        self.packed = pack_layer_weights(
+            W.t,
+            self.moe_mode,
+            self.mxfp4_weight_layout,
+            self.mxfp4_scale_layout,
+            self.router_weight_layout,
+        )
         self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk, self.moe_mode)
         dev = torch.device("cuda", torch.cuda.current_device())
         self.scratch = torch.zeros(self.scr_layout["_bytes"], dtype=torch.uint8, device=dev)
@@ -69,6 +105,10 @@ class SharedReuseMlaMoeLayer:
             topk,
             timeline=timeline,
             moe_mode=self.moe_mode,
+            mxfp4_weight_layout=self.mxfp4_weight_layout,
+            mxfp4_scale_layout=self.mxfp4_scale_layout,
+            router_weight_layout=self.router_weight_layout,
+            kv_cache_layout=self.kv_cache_layout,
         )
         self.stages = stage_tasks(samples, W.heads, topk)
         n_tasks = sum(n for _, n in self.stages)
@@ -101,6 +141,12 @@ class SharedReuseMlaMoeLayer:
         if x_out is None:
             x_out = torch.empty(self.S, HIDDEN, dtype=torch.bfloat16, device=h.device)
         p = lambda x: x.data_ptr()  # noqa: E731
+        if self.kv_cache_layout is KvCacheLayout.ATOM:
+            cache_width = KV_LORA + PE_DIM
+            if kv_cache.ndim != 2 or kv_cache.shape[1] != cache_width:
+                raise ValueError(f"ATOM KV cache must have shape [tokens, {cache_width}], got {tuple(kv_cache.shape)}")
+            if kv_cache.data_ptr() != pe_cache.data_ptr():
+                raise ValueError("ATOM KV cache layout requires the same fused tensor for kv_cache and pe_cache")
         self.launch(
             p(h),
             p(x_out),

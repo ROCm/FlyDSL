@@ -14,7 +14,13 @@ import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from kernels.mla_moe_layer.config import KV_LORA, PE_DIM, MoeMode  # noqa: E402
+from kernels.mla_moe_layer.config import (  # noqa: E402
+    KV_LORA,
+    PE_DIM,
+    KvCacheLayout,
+    MoeMode,
+    resolve_storage_layouts,
+)
 from kernels.mla_moe_layer.layer import SharedReuseMlaMoeLayer  # noqa: E402
 from kernels.mla_moe_layer.reference import make_weights, rope_table  # noqa: E402
 
@@ -30,6 +36,10 @@ if __name__ == "__main__":
     cos, sin = rope_table(4096, device=dev)
     kv = torch.randn(4096, KV_LORA, device=dev).to(torch.bfloat16)
     pe = torch.randn(4096, PE_DIM, device=dev).to(torch.bfloat16)
+    _, _, _, cache_layout = resolve_storage_layouts(a.moe_mode)
+    if cache_layout is KvCacheLayout.ATOM:
+        kv = torch.cat((kv, pe), dim=1)
+        pe = kv
     idx = torch.stack([torch.randperm(max(a.pos + s + 1, 2048), device=dev)[:2048] for s in range(a.S)]).int()
     op = SharedReuseMlaMoeLayer(W, a.S, moe_mode=a.moe_mode)
     h = torch.randn(a.S, 6144, device=dev).to(torch.bfloat16)

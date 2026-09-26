@@ -21,7 +21,18 @@ import torch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from kernels.mla_moe_layer.config import KV_LORA, PE_DIM, ExpertActivation, MoeMode, moe_format  # noqa: E402
+from kernels.mla_moe_layer.config import (  # noqa: E402
+    KV_LORA,
+    PE_DIM,
+    ExpertActivation,
+    KvCacheLayout,
+    MoeMode,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    RouterWeightLayout,
+    moe_format,
+    resolve_storage_layouts,
+)
 from kernels.mla_moe_layer.reference import (  # noqa: E402
     golden_layer,
     golden_moe,
@@ -43,6 +54,7 @@ TOL = {  # name -> (atol, rtol) on the fp32/bf16 intermediates
     "xq": (0.0, 0.0),
     "xq_bf16": (1.6e-2, 8e-3),  # one bf16 ulp after RMSNorm reduction-order differences
     "kv": (2e-2, 1e-2),
+    "pe": (2e-2, 1e-2),
     "x_out": (1.6e-2, 8e-3),  # 1 bf16 ulp
     "mid": (1e-3, 1e-3),  # quantized-activation MFMA accumulation, below one activation step
     "mid_bf16": (1.6e-2, 8e-3),  # one bf16 ulp after the V4 expert handoff
@@ -73,13 +85,33 @@ def _check(name, got, ref, report, fp8_flips=False):
     return not bool(bad.any())
 
 
-def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeMode.W8A8):
+def run_rank(
+    rank,
+    npes,
+    S,
+    cur_pos,
+    iters,
+    group=None,
+    seed=1234,
+    moe_mode=MoeMode.W8A8,
+    mxfp4_weight_layout=None,
+    mxfp4_scale_layout=None,
+    router_weight_layout=None,
+    kv_cache_layout=None,
+):
     from kernels.mla_moe_layer.layer import SharedReuseMlaMoeLayer
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
     topk = 2048
     activation = moe_format(moe_mode).activation
+    weight_layout, scale_layout, router_layout, cache_layout = resolve_storage_layouts(
+        moe_mode,
+        mxfp4_weight_layout,
+        mxfp4_scale_layout,
+        router_weight_layout,
+        kv_cache_layout,
+    )
     W = make_weights(rank, heads=8, device=dev, seed=seed, moe_mode=moe_mode)
     cos, sin = rope_table(MAX_SEQ, device=dev)
     gen = torch.Generator(device=dev).manual_seed(seed + 99)  # same inputs on every rank
@@ -98,6 +130,10 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
         group=group,
         topk=topk,
         moe_mode=moe_mode,
+        mxfp4_weight_layout=weight_layout,
+        mxfp4_scale_layout=scale_layout,
+        router_weight_layout=router_layout,
+        kv_cache_layout=cache_layout,
     )
 
     if npes == 1:
@@ -115,7 +151,11 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
     ok = True
     for it in range(iters):
         h = (torch.randn(S, 6144, generator=gen, device=dev)).to(torch.bfloat16)
-        kv, pe = kv0.clone(), pe0.clone()
+        if cache_layout is KvCacheLayout.ATOM:
+            cache = torch.cat((kv0, pe0), dim=1)
+            kv, pe = cache, cache
+        else:
+            kv, pe = kv0.clone(), pe0.clone()
         pos_t = torch.tensor([cur_pos], dtype=torch.int32, device=dev)
         out = op.forward(h, pos_t, kv, pe, indices, cos, sin)
         torch.cuda.synchronize()
@@ -188,7 +228,12 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
         else:
             report.append(("x_out_e2e", 0.0, 0.0, "skipped: golden routing flipped on a 1-ulp difference in a"))
         rows = slice(cur_pos, cur_pos + S)
-        ok &= _check("kv", kv[rows], kv_ref[rows], report)
+        if cache_layout is KvCacheLayout.ATOM:
+            ok &= _check("kv", kv[rows, :KV_LORA], kv_ref[rows], report)
+            ok &= _check("pe", kv[rows, KV_LORA:], pe_ref[rows], report)
+        else:
+            ok &= _check("kv", kv[rows], kv_ref[rows], report)
+            ok &= _check("pe", pe[rows], pe_ref[rows], report)
         if rank == 0 or not ok:
             lines = [f"[rank {rank} iter {it}] ok={ok} sel_ok={torch.equal(got['sel'], moe['sel'])}"]
             lines += [f"   {n:9s} max_err={e:.3e} ref_max={m:.3e} {nb}" for n, e, m, nb in report]
@@ -197,7 +242,20 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, moe_mode=MoeM
     return ok
 
 
-def bench_rank(rank, npes, S, cur_pos, iters=320, group=None, seed=1234, moe_mode=MoeMode.W8A8):
+def bench_rank(
+    rank,
+    npes,
+    S,
+    cur_pos,
+    iters=320,
+    group=None,
+    seed=1234,
+    moe_mode=MoeMode.W8A8,
+    mxfp4_weight_layout=None,
+    mxfp4_scale_layout=None,
+    router_weight_layout=None,
+    kv_cache_layout=None,
+):
     """HIP-graph replay of 16 layer launches per step; returns us per layer."""
     from kernels.mla_moe_layer.layer import SharedReuseMlaMoeLayer
 
@@ -205,10 +263,31 @@ def bench_rank(rank, npes, S, cur_pos, iters=320, group=None, seed=1234, moe_mod
     torch.cuda.set_device(dev)
     W = make_weights(rank, heads=8, device=dev, seed=seed, moe_mode=moe_mode)
     cos, sin = rope_table(MAX_SEQ, device=dev)
+    weight_layout, scale_layout, router_layout, cache_layout = resolve_storage_layouts(
+        moe_mode,
+        mxfp4_weight_layout,
+        mxfp4_scale_layout,
+        router_weight_layout,
+        kv_cache_layout,
+    )
     kv = torch.randn(MAX_SEQ, KV_LORA, device=dev).to(torch.bfloat16)
     pe = torch.randn(MAX_SEQ, PE_DIM, device=dev).to(torch.bfloat16)
+    if cache_layout is KvCacheLayout.ATOM:
+        kv = torch.cat((kv, pe), dim=1)
+        pe = kv
     indices = torch.stack([torch.randperm(max(cur_pos + s + 1, 2048), device=dev)[:2048] for s in range(S)]).int()
-    op = SharedReuseMlaMoeLayer(W, S, rank=rank, npes=npes, group=group, moe_mode=moe_mode)
+    op = SharedReuseMlaMoeLayer(
+        W,
+        S,
+        rank=rank,
+        npes=npes,
+        group=group,
+        moe_mode=moe_mode,
+        mxfp4_weight_layout=weight_layout,
+        mxfp4_scale_layout=scale_layout,
+        router_weight_layout=router_layout,
+        kv_cache_layout=cache_layout,
+    )
     h = torch.randn(S, 6144, device=dev).to(torch.bfloat16)
     x = torch.empty_like(h)
     pos_t = torch.tensor([cur_pos], dtype=torch.int32, device=dev)
@@ -228,6 +307,10 @@ def bench_rank(rank, npes, S, cur_pos, iters=320, group=None, seed=1234, moe_mod
             group=group,
             timeline=True,
             moe_mode=moe_mode,
+            mxfp4_weight_layout=weight_layout,
+            mxfp4_scale_layout=scale_layout,
+            router_weight_layout=router_layout,
+            kv_cache_layout=cache_layout,
         )
         for _ in range(3):
             top.forward(h, pos_t, kv, pe, indices, cos, sin, x_out=x)
@@ -258,28 +341,98 @@ def bench_rank(rank, npes, S, cur_pos, iters=320, group=None, seed=1234, moe_mod
     return latency
 
 
-def _worker(rank, npes, S, cur_pos, iters, results, moe_mode):
+def _worker(
+    rank,
+    npes,
+    S,
+    cur_pos,
+    iters,
+    results,
+    moe_mode,
+    mxfp4_weight_layout,
+    mxfp4_scale_layout,
+    router_weight_layout,
+    kv_cache_layout,
+):
     import torch.distributed as dist
 
     dist.init_process_group("gloo", init_method="tcp://127.0.0.1:29541", rank=rank, world_size=npes)
     if iters < 0:
-        us = bench_rank(rank, npes, S, cur_pos, moe_mode=moe_mode)
+        us = bench_rank(
+            rank,
+            npes,
+            S,
+            cur_pos,
+            moe_mode=moe_mode,
+            mxfp4_weight_layout=mxfp4_weight_layout,
+            mxfp4_scale_layout=mxfp4_scale_layout,
+            router_weight_layout=router_weight_layout,
+            kv_cache_layout=kv_cache_layout,
+        )
         results[rank] = us
         print(f"[rank {rank}] {us:.1f} us/layer", flush=True)
     else:
-        results[rank] = run_rank(rank, npes, S, cur_pos, iters, group=None, moe_mode=moe_mode)
+        results[rank] = run_rank(
+            rank,
+            npes,
+            S,
+            cur_pos,
+            iters,
+            group=None,
+            moe_mode=moe_mode,
+            mxfp4_weight_layout=mxfp4_weight_layout,
+            mxfp4_scale_layout=mxfp4_scale_layout,
+            router_weight_layout=router_weight_layout,
+            kv_cache_layout=kv_cache_layout,
+        )
     dist.barrier()
     dist.destroy_process_group()
 
 
-def run(npes, S, cur_pos, iters, moe_mode=MoeMode.W8A8):
+def run(
+    npes,
+    S,
+    cur_pos,
+    iters,
+    moe_mode=MoeMode.W8A8,
+    mxfp4_weight_layout=None,
+    mxfp4_scale_layout=None,
+    router_weight_layout=None,
+    kv_cache_layout=None,
+):
     if npes == 1:
-        return run_rank(0, 1, S, cur_pos, iters, moe_mode=moe_mode)
+        return run_rank(
+            0,
+            1,
+            S,
+            cur_pos,
+            iters,
+            moe_mode=moe_mode,
+            mxfp4_weight_layout=mxfp4_weight_layout,
+            mxfp4_scale_layout=mxfp4_scale_layout,
+            router_weight_layout=router_weight_layout,
+            kv_cache_layout=kv_cache_layout,
+        )
     import torch.multiprocessing as mp
 
     mgr = mp.Manager()
     results = mgr.dict()
-    mp.spawn(_worker, args=(npes, S, cur_pos, iters, results, moe_mode), nprocs=npes)
+    mp.spawn(
+        _worker,
+        args=(
+            npes,
+            S,
+            cur_pos,
+            iters,
+            results,
+            moe_mode,
+            mxfp4_weight_layout,
+            mxfp4_scale_layout,
+            router_weight_layout,
+            kv_cache_layout,
+        ),
+        nprocs=npes,
+    )
     return all(results[r] for r in range(npes))
 
 
@@ -303,13 +456,55 @@ if __name__ == "__main__":
     ap.add_argument("--iters", type=int, default=2)
     ap.add_argument("--bench", action="store_true", help="time back-to-back launches")
     ap.add_argument("--moe-mode", choices=tuple(mode.value for mode in MoeMode), default=MoeMode.W8A8.value)
+    ap.add_argument(
+        "--mxfp4-weight-layout",
+        choices=tuple(layout.value for layout in Mxfp4WeightLayout),
+        default=None,
+    )
+    ap.add_argument(
+        "--mxfp4-scale-layout",
+        choices=tuple(layout.value for layout in Mxfp4ScaleLayout),
+        default=None,
+    )
+    ap.add_argument(
+        "--router-weight-layout",
+        choices=tuple(layout.value for layout in RouterWeightLayout),
+        default=None,
+    )
+    ap.add_argument(
+        "--kv-cache-layout",
+        choices=tuple(layout.value for layout in KvCacheLayout),
+        default=None,
+    )
     a = ap.parse_args()
     if a.bench:
         if a.npes == 1:
-            print(f"{bench_rank(0, 1, a.S, a.pos, moe_mode=a.moe_mode):.1f} us/layer")
+            print(
+                f"{bench_rank(0, 1, a.S, a.pos, moe_mode=a.moe_mode, mxfp4_weight_layout=a.mxfp4_weight_layout, mxfp4_scale_layout=a.mxfp4_scale_layout, router_weight_layout=a.router_weight_layout, kv_cache_layout=a.kv_cache_layout):.1f} us/layer"
+            )
         else:
-            run(a.npes, a.S, a.pos, -1, a.moe_mode)
+            run(
+                a.npes,
+                a.S,
+                a.pos,
+                -1,
+                a.moe_mode,
+                a.mxfp4_weight_layout,
+                a.mxfp4_scale_layout,
+                a.router_weight_layout,
+                a.kv_cache_layout,
+            )
         sys.exit(0)
-    passed = run(a.npes, a.S, a.pos, a.iters, a.moe_mode)
+    passed = run(
+        a.npes,
+        a.S,
+        a.pos,
+        a.iters,
+        a.moe_mode,
+        a.mxfp4_weight_layout,
+        a.mxfp4_scale_layout,
+        a.router_weight_layout,
+        a.kv_cache_layout,
+    )
     print("PASS" if passed else "FAIL")
     sys.exit(0 if passed else 1)

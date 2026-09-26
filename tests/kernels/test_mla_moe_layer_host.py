@@ -10,15 +10,23 @@ from kernels.common.mx_formats import dequantize_mxfp4, quant_dequant_mxfp8, qua
 from kernels.mla_moe_layer.config import (
     ExpertActivation,
     ExpertWeight,
+    KvCacheLayout,
     MoeMode,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    RouterWeightLayout,
     as_moe_mode,
     moe_format,
+    resolve_storage_layouts,
     validate_shard,
 )
 from kernels.mla_moe_layer.packing import (
     pack_bf16,
+    pack_bf16_atom,
     pack_fp8,
     pack_mxfp4,
+    pack_mxfp4_atom,
+    pack_mxfp4_scale_atom,
 )
 
 
@@ -39,6 +47,12 @@ def test_pack_bf16_uses_mfma_lane_order():
     torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
 
 
+def test_pack_bf16_atom_keeps_row_major_order():
+    raw = torch.arange(16 * 64, dtype=torch.int16).reshape(16, 64)
+    packed = pack_bf16_atom(raw.view(torch.bfloat16)).view(torch.int16)
+    torch.testing.assert_close(packed, raw.view(-1), atol=0, rtol=0)
+
+
 def test_pack_mxfp4_matches_bf16_mfma_k32_steps():
     raw = torch.arange(16 * 64, dtype=torch.int64).remainder(256).to(torch.uint8).reshape(16, 64)
     packed = pack_mxfp4(raw)
@@ -46,6 +60,25 @@ def test_pack_mxfp4_matches_bf16_mfma_k32_steps():
         [*range(0, 4), *range(16, 20), *range(32, 36), *range(48, 52)],
         dtype=torch.uint8,
     )
+    torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
+
+
+def test_pack_mxfp4_atom_uses_aiter_16_by_16_tiles():
+    raw = torch.arange(16 * 64, dtype=torch.int64).remainder(256).to(torch.uint8).reshape(16, 64)
+    packed = pack_mxfp4_atom(raw)
+    expected = torch.tensor(
+        [*range(0, 16), *range(64, 80)],
+        dtype=torch.uint8,
+    )
+    torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
+
+
+def test_pack_mxfp4_scale_atom_uses_aiter_scale_tiles():
+    rows = torch.arange(256, dtype=torch.int64)[:, None]
+    cols = torch.arange(8, dtype=torch.int64)[None, :]
+    raw = (rows * 8 + cols).remainder(256).to(torch.uint8)
+    packed = pack_mxfp4_scale_atom(raw)
+    expected = torch.tensor([0, 128, 4, 132, 8, 136, 12, 140], dtype=torch.uint8)
     torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
 
 
@@ -72,6 +105,21 @@ def test_moe_modes_map_to_independent_activation_and_weight_formats():
     assert moe_format(MoeMode.W8A16).activation is ExpertActivation.BF16
     assert moe_format(MoeMode.A16W4).weight is ExpertWeight.MXFP4_BLOCK32
     assert moe_format(MoeMode.A8W4).activation is ExpertActivation.MXFP8_BLOCK32
+
+
+def test_mxfp4_modes_default_to_atom_storage_layouts():
+    assert resolve_storage_layouts(MoeMode.A16W4) == (
+        Mxfp4WeightLayout.ATOM,
+        Mxfp4ScaleLayout.ATOM,
+        RouterWeightLayout.NATIVE,
+        KvCacheLayout.ATOM,
+    )
+    assert resolve_storage_layouts(MoeMode.W8A8) == (
+        Mxfp4WeightLayout.NATIVE,
+        Mxfp4ScaleLayout.NATIVE,
+        RouterWeightLayout.NATIVE,
+        KvCacheLayout.SPLIT,
+    )
 
 
 @pytest.mark.parametrize(

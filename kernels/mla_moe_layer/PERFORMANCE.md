@@ -33,6 +33,38 @@ Attention weights stay block-scaled FP8 in all modes. Supported sample counts
 are 1, 2, 4, and 8; supported peer counts are 1, 2, 4, and 8. The host wrapper
 validates the complete fixed-shard contract before allocating GPU buffers.
 
+## ATOM storage-layout audit
+
+The MXFP4 modes now default to the storage layouts that can be consumed directly
+from ATOM without repacking the expert tensors:
+
+| Tensor | Logical order | Physical storage in the default MXFP4 path | ATOM compatibility |
+|---|---|---|---|
+| `w_ug` | 256 routed experts followed by shared expert 256; gate rows then up rows | AITER `shuffle_weight(..., layout=(16, 16), is_guinterleave=False)` | Exact |
+| `w_dn` | Same expert numbering; output rows by input-intermediate columns | Same AITER 16x16 shuffle | Exact |
+| `s_ug`, `s_dn` | One E8M0 byte per 1x32 block | AITER non-interleaved `shuffle_scale` | Exact |
+| `w_r` | 256 BF16 router rows | Mono-kernel MFMA packing by default; optional ATOM row-major | Logical match; default is not zero-copy |
+| MLA projection weights | `qkv_a=[q_a; kv_a]`; each `q_b` head is `[nope; rope]` | Existing block-128 FP8 MFMA packing | Not compatible with the BF16 attention weights in `amd/GLM-5.1-MXFP4` |
+| KV cache | Per-token `[k_c(512), k_pe(64)]` | One contiguous BF16 `[tokens, 576]` tensor | Shape/stride match; ATOM benchmark dtype is FP8, not BF16 |
+
+The expert value and scale packers were compared byte-for-byte against the
+current AITER `shuffle_weight` and `shuffle_scale` implementations for both
+GLM-5 up/gate and down shapes. Norm vectors and routing bias are already plain
+contiguous tensors. ATOM's default `ATOM_MOE_GU_ITLV=0` also matches this
+kernel's gate-then-up row order.
+
+`--router-weight-layout atom` is retained for zero-copy experiments. It is not
+the default: with otherwise ATOM-compatible A16W4 storage, TP1 S=1 improved
+slightly from 31.19 to 31.08 us/layer, but S=8 regressed from 70.80 to 72.47
+us/layer (2.4%). The standalone ATOM GEMM can tile a row-major router internally;
+the mono-kernel's direct MFMA loads instead cross the 6144-element row stride.
+
+The attention and cache-dtype differences are format changes rather than a
+permutation-only issue, so this change does not claim complete zero-copy loading
+of an `amd/GLM-5.1-MXFP4` checkpoint. It aligns every MXFP4 expert value/scale
+and the 576-wide cache allocation while preserving the faster existing
+attention and router paths.
+
 ## Code layout
 
 | File | Responsibility |
@@ -84,6 +116,13 @@ the final BF16 peer reduction, and exact final-output agreement across ranks.
 At TP8/S8, independent end-to-end relative L2 was 0.430% for `a16w4` and
 2.87% for `a8w4`. Existing tolerances were retained.
 
+The ATOM-layout path additionally passed default-layout TP1/S1, TP1/S8, and
+TP8/S8 checks for both MXFP4 modes. A8W4 S>1 initially exposed
+a shared-expert-only scale-association bug: all eight routed slots were correct,
+while shared slot 0 was not. The final implementation keeps the direct
+lane-group ATOM load for routed experts and uses canonical K32 gathers only for
+the shared expert whose MFMA columns represent different samples.
+
 A direct TP1/S1 output comparison against the same-weight TileRT wrapper gave:
 
 | Mode | Maximum absolute error | Relative L2 |
@@ -132,6 +171,36 @@ for per-1x32 activation quantization and BF16 MFMA staging, so it did not beat
 only `w8a8` and `w8a16`; there is no valid same-weight TileRT baseline for the
 two MXFP4 modes in this harness.
 
+For the ATOM-layout work, TP1 used 128 layer launches per graph, two warmups,
+15 measured replays, and median latency. Native measurements bracketed the
+ATOM expert/cache run to expose drift; the percentage uses the mean of the two
+native medians.
+
+| Mode | Samples | Native expert/scale + split cache | ATOM expert/scale + fused cache | Change |
+|---|---:|---:|---:|---:|
+| `a16w4` | 1 | 31.80-32.33 us | 31.14 us | 2.9% faster |
+| `a16w4` | 8 | 74.65-75.04 us | 71.37 us | 4.6% faster |
+| `a8w4` | 1 | 32.98-33.02 us | 32.08 us | 2.8% faster |
+| `a8w4` | 8 | 81.64-81.80 us | 77.21 us | 5.5% faster |
+
+The lightweight TP8 graph benchmark uses 16 launches per graph and reports the
+slowest rank. It also showed no regression:
+
+| Mode | Samples | Native | ATOM expert/cache default |
+|---|---:|---:|---:|
+| `a16w4` | 1 | 35.2 us | 34.8 us |
+| `a16w4` | 8 | 87.2 us | 82.1 us |
+| `a8w4` | 1 | 36.9 us | 35.4 us |
+| `a8w4` | 8 | 92.9 us | 87.5 us |
+
+The first direct implementation of the ATOM expert layout used scattered
+dword loads and register-side transposition; A16W4 S=8 rose to roughly 115 us.
+Mapping the four lane groups directly to ATOM's four K32 tiles removed that
+regression. ATOM scale storage and the fused cache were then kept with the
+optimized value path. For A8W4 multi-sample shared-expert computation, the
+small canonical-load fallback described above preserves correctness while the
+final end-to-end result remains 5.5% faster than the native layout at TP1/S=8.
+
 Segment traces guided two retained scheduling changes: BF16-packed peer
 exchange and one sample per router CTA. For the earlier S=4 schedule, the last
 instrumented CTA reached attention publication, router publication, routed
@@ -144,8 +213,8 @@ comparison plot is `/root/glm5-perf-results/s4-segment-milestones.png`.
 Use the existing FlyDSL compiler build and this worktree:
 
 ```bash
-cd /root/FlyDSL-glm5-perf
-export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-perf:/root/tilert_pkg
+cd /root/FlyDSL-glm5-mxfp4-atom-layout
+export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-glm5-mxfp4-atom-layout:/root/tilert_pkg
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib
 
 /opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
@@ -153,7 +222,7 @@ export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/benchmark.py \
   --backend flydsl --moe-mode a16w4 --npes 1 --samples 1 8 \
-  --layers 16 --repeats 3
+  --layers 128 --repeats 15
 ```
 
 Repeat the correctness command for the other modes and peer counts. Run GPU
