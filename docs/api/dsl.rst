@@ -1,217 +1,280 @@
-FlyDSL Python DSL
-=================
+Expression language
+===================
 
-The ``flydsl`` package provides the Python front-end for authoring GPU kernels
-with explicit layout algebra.
-
-Core module
------------
-
-.. automodule:: flydsl
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-Expression API (``flydsl.expr``)
----------------------------------
-
-The ``flydsl.expr`` module (imported as ``fx``) provides the high-level Python
-API for constructing Fly IR, including layout construction, tiled copies, tensor
-operations, and kernel definitions.
+``flydsl.expr`` is the kernel-authoring surface and is conventionally imported
+as ``fx``:
 
 .. code-block:: python
 
    import flydsl.expr as fx
 
-Layout construction
-~~~~~~~~~~~~~~~~~~~~
+Its direct-child modules export names into the ``fx`` namespace. For example,
+``fx.make_layout``, ``fx.gpu.barrier``, and
+``flydsl.expr.primitive.make_layout`` refer to the same public operation.
+Backend and extension packages are loaded lazily as ``fx.rocdl``, ``fx.coop``,
+and ``fx.random``.
 
-- **fx.make_layout(shape, stride)** -- create a layout from shape and stride tuples
-- **fx.make_shape(\*dims)** -- create a shape tuple
-- **fx.make_stride(\*strides)** -- create a stride tuple
-- **fx.make_coord(\*coords)** -- create a coordinate tuple
-- **fx.make_ordered_layout(shape, order)** -- layout with explicit mode ordering
-- **fx.make_identity_layout(shape)** -- identity layout (strides = prefix products)
+Execution model
+---------------
 
-Layout inspection
-~~~~~~~~~~~~~~~~~~
+Most ``fx`` calls build MLIR and must execute while FlyDSL traces a
+``@flyc.jit`` or ``@flyc.kernel`` function. A Python value wrapped in a DSL
+numeric type can remain compile-time when all of its inputs are known; once an
+operand is dynamic, the same expression emits IR. See
+:doc:`../language/arithmetic_types` for the exact folding and promotion rules.
 
-- **fx.size(layout)** -- total number of elements
-- **fx.cosize(layout)** -- codomain size
-- **fx.rank(layout)** -- number of modes
-- **fx.depth(layout)** -- nesting depth
-- **fx.get_shape(layout)** -- extract shape tuple
-- **fx.get_stride(layout)** -- extract stride tuple
-- **fx.get_scalar(int_tuple)** -- extract the scalar from a single-leaf int tuple (per-mode access is ``fx.get``)
+Values and annotations
+----------------------
+
+.. list-table:: Core value families
+   :header-rows: 1
+   :widths: 24 34 42
+
+   * - Family
+     - Important names
+     - Purpose
+   * - Scalar values
+     - ``Boolean``, ``Int4/8/16/32/64/128``, ``Uint8/16/32/64/128``,
+       ``Float16``, ``BFloat16``, ``Float32/64``, FP8/FP6/FP4 types
+     - Typed constants, casts, and dynamic scalar results. ``Index`` remains
+       compatible but is deprecated; prefer ``Int64`` for offsets and bounds.
+   * - Function annotations
+     - ``Tensor``, ``Pointer``, ``Stream``, ``Constexpr[T]``
+     - Describe host arguments at the JIT boundary and kernel operands.
+   * - Layout values
+     - ``IntTuple``, ``Layout``, ``ComposedLayout``, ``Swizzle``, ``Tile``,
+       ``Basis``, ``E``
+     - Represent shapes, strides, coordinates, swizzles, and mappings.
+   * - Tiled operations
+     - ``CopyAtom``, ``TiledCopy``, ``TiledMma``, ``ThrCopy``, ``ThrMma``
+     - Describe an instruction and how its work is partitioned across threads.
+   * - Vectors
+     - ``Vector``, aliases such as ``Int32x4`` and ``Float16x8``
+     - SSA vectors with element access, conversion, bitcast, load, and store.
+   * - Composite/storage types
+     - ``struct``, ``union``, ``Struct``, ``Union``, ``Array``, ``Storage``,
+       ``Arena``, ``Align``, ``Empty``
+     - Define aggregate DSL values and their typed memory representations.
+
+``fx.T`` exposes MLIR type constructors such as ``T.f32()``, ``T.i32()``, and
+``T.index()``. Prefer the DSL numeric classes for arithmetic values; use
+``fx.T`` when an API explicitly asks for an MLIR type.
+
+Layout construction and inspection
+----------------------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 66
+
+   * - API
+     - Meaning
+   * - ``make_int_tuple``, ``make_shape``, ``make_stride``, ``make_coord``
+     - Construct scalar or nested integer tuples with the requested semantic
+       role.
+   * - ``make_layout(shape, stride)``
+     - Construct a layout from shape and stride tuples.
+   * - ``make_ordered_layout(shape, order)``
+     - Construct a compact layout with an explicit slow-to-fast mode order.
+   * - ``make_identity_layout(shape)``
+     - Construct the identity coordinate layout for a shape.
+   * - ``make_composed_layout(swizzle, offset, layout)``
+     - Combine a base layout with an offset and coordinate swizzle.
+   * - ``make_layout_like``, ``make_fragment_layout_like``
+     - Derive layouts matching an existing tensor or layout.
+   * - ``rank``, ``depth``, ``size``, ``cosize``, ``coshape``
+     - Query logical rank/nesting and domain/codomain size.
+   * - ``get_shape``, ``get_stride``, ``get_scalar``, ``get_leaves``
+     - Inspect a layout or integer tuple. Use ``get_``/``unpack`` for element
+       access; the old ``get`` spelling is deprecated.
+   * - ``crd2idx``, ``idx2crd``
+     - Map coordinates to indices or indices back to coordinates.
 
 Layout algebra
-~~~~~~~~~~~~~~~
+--------------
 
-- **fx.composition(a, b)** -- compose two layouts
-- **fx.complement(layout, codomain_size)** -- complementary layout
-- **fx.right_inverse(layout)** -- right inverse
-- **fx.coalesce(layout)** -- coalesce contiguous modes
-- **fx.recast_layout(layout, old_type, new_type)** -- recast layout for type change
+The core transforms are ``composition``, ``complement``, ``coalesce``,
+``right_inverse``, ``left_inverse``, ``recast_layout``, ``apply_swizzle``, and
+``tile_to_shape``. Product and divide operations provide several result
+organizations:
 
-Layout products and divides
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. list-table::
+   :header-rows: 1
+   :widths: 22 34 44
 
-- **fx.logical_divide(tensor, tiler)** -- partition tensor by tiler layout
-- **fx.zipped_divide**, **fx.tiled_divide**, **fx.flat_divide** -- divide variants
-- **fx.logical_product(a, b)** -- layout product
-- **fx.zipped_product**, **fx.tiled_product**, **fx.flat_product** -- product variants
-- **fx.raked_product(thr_layout, val_layout)** -- interleaved (raked) product
-- **fx.blocked_product(a, b)** -- blocked product
+   * - Operation
+     - Variants
+     - Typical use
+   * - Product
+     - ``logical_product``, ``zipped_product``, ``tiled_product``,
+       ``flat_product``, ``raked_product``, ``blocked_product``
+     - Combine thread/value or tile/remainder mappings.
+   * - Divide
+     - ``logical_divide``, ``zipped_divide``, ``tiled_divide``,
+       ``flat_divide``
+     - Partition a tensor or layout by a tiler.
+   * - Structural editing
+     - ``append``, ``prepend``, ``group``, ``take``, ``dice``, ``slice``
+     - Reshape or select modes without reverting to manual byte arithmetic.
 
-Coordinate mapping
-~~~~~~~~~~~~~~~~~~~
+See :doc:`../layout_system_guide` for semantics and worked examples, and
+:doc:`../cute_layout_algebra_guide` for the mathematical vocabulary shared
+with CuTe-style layout algebra.
 
-- **fx.crd2idx(coord, layout)** -- coordinate to linear index
-- **fx.idx2crd(idx, layout)** -- linear index to coordinate
-- **fx.slice(tensor, slices)** -- slice a tensor by coordinates or ``None``
-- **fx.get(layout, idx)** -- access element at index
+Tensors, pointers, and memory
+-----------------------------
 
-Memory operations
-~~~~~~~~~~~~~~~~~~
+``Tensor`` combines an iterator/pointer with a layout. ``Pointer`` is a typed
+pointer value. Both expose convenience indexing, but the underlying operations
+are also available explicitly:
 
-- **fx.make_rmem_tensor(shape_or_layout, dtype)** -- allocate register-file memory
-- **fx.memref_load(memref, indices)** -- scalar load from memref
-- **fx.memref_store(value, memref, indices)** -- scalar store to memref
-- **fx.memref_load_vec(memref)** -- load entire register as a vector
-- **fx.memref_store_vec(vec, memref)** -- store vector to register memref
-- **fx.make_fragment_layout_like(tensor)** -- compute the corresponding fragment layout
-- **fx.make_fragment_like(tensor)** -- allocate register fragment with same layout
+.. list-table::
+   :header-rows: 1
+   :widths: 34 66
 
-Copy and GEMM
-~~~~~~~~~~~~~
+   * - API
+     - Purpose
+   * - ``make_ptr``, ``make_view``, ``add_offset``, ``recast_iter``
+     - Construct or transform typed pointers and tensor views.
+   * - ``ptr_load``, ``ptr_store``
+     - Typed pointer access, including vector types and masking supported by the
+       pointer API.
+   * - ``memref_alloca``, ``memref_load``, ``memref_store``
+     - Allocate and access register/shared memrefs.
+   * - ``memref_load_vec``, ``memref_store_vec``
+     - Move an entire register memref as a vector SSA value.
+   * - ``make_rmem_tensor``
+     - Allocate a register-memory tensor from a shape or layout.
+   * - ``make_fragment_like``
+     - Allocate a register fragment with the derived layout and element type.
+   * - ``inttoptr``, ``ptrtoint``, ``to_llvm_ptr``
+     - Low-level pointer conversions for integration code.
+   * - ``printf``
+     - Emit device-side formatted debug output.
 
-- **fx.make_copy_atom(instr, dtype)** -- create a CopyAtom from instruction descriptor
-- **fx.make_mma_atom(instr)** -- create an MmaAtom from an MMA op type (the op type carries the dtype, for example ``fx.rocdl.MFMA(16, 16, 4, fx.Float32)``)
-- **fx.make_tile(\*layouts)** -- build a tile from layouts (variadic)
-- **fx.make_tiled_copy(copy_atom, layout_tv, tile_mn)** -- build a TiledCopy
-- **fx.make_tiled_mma(mma_atom, ...)** -- build a TiledMma
-- **fx.copy(copy_atom, src, dst, pred=None)** -- execute a copy (with optional predicate mask)
-- **fx.gemm(mma_atom, d, a, b, c)** -- execute matrix multiply-accumulate (accumulator passed as both ``d`` and ``c``)
-- **fx.copy_atom_call(atom, src, dst)** -- invoke a single copy atom
-- **fx.mma_atom_call(atom, d, a, b, c)** -- invoke a single MMA atom
+For composite storage, typed address views, static/dynamic shared memory, and
+alignment rules, see :doc:`../language/composite_types` and
+:doc:`../language/storage_and_allocator`.
 
-Derived tiled operations (``flydsl.expr.derived``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Copy and matrix operations
+--------------------------
 
-High-level classes for tiled copy and MMA partitioning:
+.. list-table::
+   :header-rows: 1
+   :widths: 34 66
 
-- **CopyAtom** (``flydsl.expr.typing``) -- single hardware copy instruction descriptor
-- **MmaAtom** (``flydsl.expr.typing``) -- single MMA instruction descriptor (MFMA)
-- **CopyAtomType**, **MmaAtomType** -- atom type wrappers exposed by ``flydsl.expr.derived``
-- **TiledCopy** -- multi-thread tiled copy; use ``get_slice(tid)`` → ``ThrCopy``
-- **TiledMma** -- multi-thread tiled MMA; use ``get_slice(tid)`` → ``ThrMma``
-- **ThrCopy** -- per-thread copy view: ``partition_S(src)``, ``partition_D(dst)``, ``retile(t)``
-- **ThrMma** -- per-thread MMA view: ``partition_A(a)``, ``partition_B(b)``, ``partition_C(c)``
-- **make_layout_tv(thr, val)** -- build thread-value layout
-- **make_tiled_copy_A/B/C(copy_atom, tiled_mma)** -- create TiledCopy matched to MMA operands
-- **fx.gather(copy_atom, base_iter, offset_tensor, dst_tensor, \*, pred=None)** -- indexed load ``dst = base[offset]`` via a copy atom (offset tensor is ``(TV, Rest...)``)
-- **fx.scatter(copy_atom, src_tensor, base_iter, offset_tensor, \*, pred=None)** -- indexed store ``base[offset] = src`` (see ``examples/05-gather_scatter.py``)
+   * - API
+     - Purpose
+   * - ``make_copy_atom(op, dtype)``
+     - Wrap a universal or backend-specific copy instruction.
+   * - ``make_mma_atom(op)``
+     - Wrap an FMA/MFMA/WMMA instruction descriptor.
+   * - ``make_tile``
+     - Construct an operand tile from one or more layouts.
+   * - ``make_layout_tv``, ``make_tiled_copy_tv``
+     - Build thread-value layouts and tiled-copy descriptors.
+   * - ``make_tiled_copy``, ``make_tiled_copy_A/B/C``
+     - Build an independent copy or one matched to a tiled MMA operand.
+   * - ``make_tiled_mma``
+     - Partition an MMA atom across threads and values.
+   * - ``TiledCopy.get_slice(tid)``
+     - Return ``ThrCopy`` with ``partition_S``, ``partition_D``, and ``retile``.
+   * - ``TiledMma.get_slice(tid)``
+     - Return ``ThrMma`` with ``partition_A/B/C``.
+   * - ``copy(atom, src, dst, pred=None)``
+     - Execute a tiled or single-atom copy with an optional predicate tensor.
+   * - ``gemm(atom, d, a, b, c)``
+     - Execute tiled or atomic matrix multiply-accumulate.
+   * - ``gather`` / ``scatter``
+     - Indexed copy-atom loads and stores using an offset tensor.
 
-Type annotations
-~~~~~~~~~~~~~~~~~
+``copy_atom_call`` and ``mma_atom_call`` remain available for direct atom calls,
+but new code should normally use ``copy`` and ``gemm`` so the same spelling
+works for both atomic and tiled operations.
 
-- **fx.Tensor** -- GPU tensor argument
-- **fx.Constexpr[int]** -- compile-time constant
-- **fx.Int32** -- dynamic int32 argument
-- **fx.Float32**, **fx.Float16**, **fx.BFloat16** -- scalar types
-- **fx.Float8E4M3FN**, **fx.Float8E4M3FNUZ**, **fx.Float8E5M2** -- FP8 scalar types
-- **fx.Stream** -- GPU stream argument
-- **fx.T** -- type namespace (``T.f32``, ``T.f16``, ``T.bf16``, ``T.i8``, ``T.index``, etc.)
-- **fx.Basis(value, modes)** / **fx.E(\*modes)** -- basis-stride leaves for by-mode layout construction (``E(0)`` → ``1E0``)
-- **fx.SyncScope** -- target-neutral LLVM sync scopes (``SyncScope.System``, ``SyncScope.SingleThread``); AMDGPU scopes live in ``flydsl.expr.rocdl.enum.SyncScope``
+Control flow and compile-time helpers
+-------------------------------------
 
-GPU intrinsics (``flydsl.expr.gpu``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Python ``if``, ``for``, ``while``, boolean expressions, and chained comparisons
+inside traced functions are rewritten to the corresponding MLIR control flow
+when their conditions are dynamic. These helpers make intent explicit:
 
-- **fx.thread_idx** -- thread index (``Tuple3D`` with ``.x``, ``.y``, ``.z``)
-- **fx.block_idx** -- block index
-- **fx.block_dim** -- block dimensions
-- **fx.grid_dim** -- grid dimensions
-- **fx.gpu.barrier()** -- workgroup barrier synchronization
-- **fx.gpu.smem_space()** -- shared memory (LDS) address space attribute
+- ``const_expr(value)`` requires a trace-time value.
+- ``range_constexpr(...)`` unrolls a compile-time range.
+- ``static(value)`` materializes a static Fly value.
+- ``assume(condition)`` records an optimization assumption.
+- ``select(condition, true_value, false_value)`` is the function form of a
+  typed select; an arithmetic condition also exposes ``condition.select(...)``.
 
-Arithmetic and numeric types
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Arithmetic and math
+-------------------
 
-Prefer typed DSL values and operator-overloaded arithmetic:
+DSL numeric and vector values overload ordinary arithmetic, comparisons,
+bitwise operators, and casts. Additional exported helpers include:
 
-.. code-block:: python
+- ``ceildiv``/``ceil_div``, ``min``, ``max``, ``cmpi``, ``cmpf``, and
+  ``shrui``;
+- IEEE/NaN-sensitive ``minimumf``, ``maximumf``, ``minnumf``, and ``maxnumf``;
+- ``fastmath(flags)`` and ``FastMathFlags`` for ambient or per-operation
+  floating-point flags;
+- elementary/transcendental functions including ``absf``, ``exp``, ``exp2``,
+  ``log``, ``sqrt``, ``rsqrt``, trigonometric/hyperbolic functions, ``erf``,
+  ``powf``, ``fma``, ``clampf``, and floating-point classification;
+- integer helpers ``absi``, ``ctlz``, ``cttz``, ``ctpop``, and ``ipowi``.
 
-   import flydsl.expr as fx
-   from flydsl.expr.typing import Vector as Vec
+The complete type, folding, overflow, conversion, vector, and fast-math
+contract is in :doc:`../language/arithmetic_types`.
 
-   c = fx.Int64(42)
-   v = fx.Int32(idx)
-   f = fx.Float32(1.0)
-   r = cond.select(a, b)
-   y = (x + 1) * scale
+GPU and LLVM operations
+-----------------------
 
-Preferred APIs:
+``fx.thread_idx``, ``fx.block_idx``, ``fx.block_dim``, and ``fx.grid_dim`` are
+``Tuple3D`` values with ``.x``, ``.y``, and ``.z`` members. Other public GPU
+helpers include ``lane_id``, ``known_block_size``, ``num_warp_threads``,
+``barrier``, the ``shuffle_xor/up/down/idx`` family, and ``SharedAllocator``.
 
-- **fx.Int32(value)**, **fx.Int64(value)**, **fx.Float32(value)** -- typed constants and casts (use **fx.Int64** for index/offset values and loop bounds; **fx.Index** is deprecated)
-- **ArithValue / Numeric operators** -- ``+``, ``-``, ``*``, ``/``, ``%``, ``<<``, ``>>``
-- **cond.select(true_val, false_val)** -- ternary select when ``cond`` is an ``ArithValue``
-- **arith.cmpi(predicate, lhs, rhs)** -- integer comparison
-- **arith.cmpf(predicate, lhs, rhs)** -- float comparison
-- **fx.maxnumf(a, b)** -- float maximum returning the non-NaN operand (libm ``fmax``); preserves the DSL type of ``a``
-- **fx.minnumf(a, b)** -- float minimum returning the non-NaN operand (libm ``fmin``); preserves the DSL type of ``a``
-- **Chained comparisons** (``lo <= x < hi``) are supported inside traced kernels and lower to combined ``cmp`` + ``and``.
+``flydsl.expr.llvm`` provides target-neutral atomics and generic pointer access:
+``atomic_add/sub/and/or/xor/xchg/min/max/fmin/fmax/cas``, ``generic_load``,
+``generic_store``, and ``memory_fence``. Use ``AtomicOrdering`` and
+``SyncScope`` to make ordering and scope explicit.
 
-You can apply fastmath flags ambiently to a block or per-op:
+ROCm-specific operations
+------------------------
 
-.. code-block:: python
+``fx.rocdl`` is the AMD backend package. Prefer its higher-level descriptors
+and helpers over direct calls to generated upstream MLIR builders:
 
-   with fx.fastmath(fx.FastMathFlags.fast):
-       y = a * b + c          # float operators/math funcs inherit the flags
-       z = fx.exp(a, fastmath="contract")   # explicit arg overrides the ambient scope
+- buffer access: ``make_buffer_tensor``, ``make_buffer_ptr``,
+  ``BufferCopy8b/16b/32b/64b/128b``, ``BufferCopyLDS*``, and ``BufferAtomic*``;
+- matrix instructions: ``MFMA``, architecture-dispatched ``WMMA``, and
+  gfx1250 ``WMMAScale``;
+- async and scheduling control: ``asyncmark``, ``wait_asyncmark``,
+  ``s_waitcnt``, ``sched_mfma``, ``sched_vmem``, ``sched_dsrd``, and
+  ``sched_dswr``;
+- gfx1250 TDM and cluster operations under ``fx.rocdl.tdm_ops`` and
+  ``fx.rocdl.cluster``.
 
-- **fx.fastmath(flags)** -- context manager applying ``fastmath`` to float ops built in the block; nests and restores on exit
-- **fx.FastMathFlags** -- flag enum (``fast``, ``contract``, ``reassoc``, …; combine with ``|``)
-- **Direct ``arith.addf(..., fastmath=...)`` / ``arith.AddFOp(..., fastmath=...)``** -- per-op flags where an ambient scope is not desired
+Architecture-specific child modules (for example ``cdna4`` and ``rdna4``)
+expose operations that are not portable to every target. Direct upstream ROCDL
+operation builders may change with the bundled MLIR revision; consult
+:doc:`../api_stability` before treating one as a compatibility contract.
 
-Vector values (``flydsl.expr.typing.Vector``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Complete export catalog
+-----------------------
 
-- **Vec.from_elements(elements, dtype)** -- construct vector from scalars
-- **Vec.filled(shape, value, dtype)** -- splat vector
-- **Vec(value)[i]** -- extract element
-- **Vec(value).bitcast(dtype)** -- bitcast vector element type
-- **Vec(value).to(dtype)** -- convert vector element type
-- **Vec(value).store(memref, indices)** -- store vector to memref
+This page groups the usable surface rather than repeating hundreds of vector
+aliases and generated instruction names. The authoritative, mechanically
+derived list of stable paths for this checkout is:
 
-ROCDL operations (``flydsl.expr.rocdl``)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. code-block:: bash
 
-AMD-specific operations for ROCm:
+   python3 scripts/list_stable_apis.py
 
-- **fx.rocdl.make_buffer_tensor(tensor)** -- create buffer resource from tensor (CDNA buffer copy)
-- **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy instruction atoms
-- **fx.rocdl.MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None)** -- MFMA instruction atom constructor (CDNA3/CDNA4; 4th arg is the A/B element type; accumulator defaults to f32)
-- **fx.rocdl.WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, \*\*kwargs)** -- WMMA MMA atom constructor (arch-dispatched: gfx11 / gfx120x / gfx1250). ``elem_ty_b`` optionally selects a different B operand type. gfx1250 supports f32(K4), f16/bf16(K32), fp8/bf8(K64/128), i8(K64), i4(K32); integer paths take ``sign_a`` / ``sign_b`` / ``clamp``. gfx120x (RDNA4) supports 16x16x16 f16/bf16 and every fp8(E4M3FN)/bf8(E5M2) A/B combination to f32, on the v8 operand ABI
-- **fx.rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, \*, opsel_a=0, opsel_b=0, mod_c=0, reuse_a=False, reuse_b=False, block_size=32)** -- gfx1250 MX-scaled WMMA (E8M0 block scale, f8/f6/f4; ``16x16x128`` or ``32x16x128`` fp4-only). Per-operand scales are atom state (``scale_a`` / ``scale_b``)
-- **fx.rocdl.make_tdm_atom(tensor, tensor_extents, strides=None, \*, num_warps, ...)** -- build a gfx1250 TDM (Tensor Data Mover) async Global↔LDS whole-tile copy atom (rank 1-5); the global base comes from the ``copy_atom_call`` operand pointer, while the per-dim extent (OOB), stride, ``imm_offset``, and MCAST ``workgroup_mask`` are atom state. ``fx.rocdl.TDM(rank, num_warps, ...)`` builds the atom type only. Advance the K-loop tile with ``fx.copy(atom, gt, dst, imm_offset=...)``
-- **fx.rocdl.sched_mfma(cnt)** -- insert MFMA scheduling barrier
-- **fx.rocdl.sched_vmem(cnt)** -- insert VMEM scheduling barrier
-- **fx.rocdl.sched_dsrd(cnt)** -- insert DS read scheduling barrier
-- **fx.rocdl.sched_dswr(cnt)** -- insert DS write scheduling barrier
-- **mfma_f32_16x16x16f16**, **mfma_f32_16x16x16bf16_1k**, etc. -- direct MFMA intrinsics
+Use ``--format json`` for tooling and ``--include-deprecated`` during release
+review.
 
-Compiler API (``flydsl.compiler``)
------------------------------------
+.. seealso::
 
-.. code-block:: python
-
-   import flydsl.compiler as flyc
-
-- **@flyc.kernel** -- decorator for GPU kernel functions
-- **@flyc.jit** -- decorator for host-side JIT launch functions
-- **flyc.from_dlpack(tensor)** -- convert DLPack-compatible tensors (PyTorch, etc.) to FlyDSL
-- **JitArgumentRegistry** -- registry for custom argument type adapters
-- **flydsl.compiler.kernel_function.CompilationContext** -- context object available during kernel compilation (not a top-level ``flydsl.compiler`` symbol)
-
-.. seealso:: :doc:`compiler` for the full compilation pipeline and pass details.
+   - :doc:`compiler` for decorators, specialization, and argument adapters
+   - :doc:`extensions` for cooperative algorithms and random generation
+   - :doc:`../kernel_authoring_guide` for end-to-end kernel patterns

@@ -45,7 +45,14 @@ extensions = [
     "sphinx_autodoc_typehints",
 ]
 external_toc_path = "./sphinx/_toc.yml"
-external_projects_current_project = "flydsl"
+# This repository does not use intersphinx references to other ROCm projects.
+# Use the rocm-docs-core bundled project metadata and avoid network access so
+# local and pull-request builds remain deterministic and do not depend on the
+# GitHub API rate limit. FlyDSL is not present in every supported bundled
+# registry version, so use its parent documentation family for version context.
+external_projects_current_project = "ai-ecosystem"
+external_projects_remote_repository = ""
+external_projects = []
 # Generate llms.txt
 rocm_docs_generate_llms = True
 

@@ -38,19 +38,23 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          # Match docs/.readthedocs.yaml and the Python version used to
+          # generate docs/sphinx/requirements.txt.
+          python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: docs/requirements.txt
+          cache-dependency-path: |
+            docs/requirements.txt
+            docs/sphinx/requirements.txt
 
       - name: Install documentation dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r docs/requirements.txt
+          python -m pip install -r docs/requirements.txt
 
       - name: Build Sphinx documentation
         run: |
           cd docs
-          make clean html
+          make clean html SPHINXOPTS="-W --keep-going"
 
       - name: Verify documentation root
         run: |

@@ -266,6 +266,8 @@ load as loop-invariant). Use FlyDSL's **runtime** loop with loop-carried values
 to create genuine SSA phi nodes:
 
 ```python
+from flydsl.expr.typing import T
+
 # Prologue: load iteration 0 before the loop
 next_a = buffer_ops.buffer_load(rsrc_a, offsets_0, vec_width=4)
 init_state = [_unwrap(v) for v in [next_a, acc]]
@@ -274,12 +276,12 @@ init_state = [_unwrap(v) for v in [next_a, acc]]
 for iv, state in range(fx.Int64(0), fx.Int64(N - 1), fx.Int64(1), init=init_state):
     a, acc = state[0], state[1]
     next_a = buffer_ops.buffer_load(rsrc_a, compute_offsets(iv + 1), vec_width=4)  # async
-    acc = rocdl.mfma_f32_16x16x16_f16(transform(a), b, acc)   # overlaps next load
+    acc = rocdl.mfma_f32_16x16x16f16(T.f32, [transform(a), b, acc])  # overlaps next load
     results = yield [_unwrap(v) for v in [next_a, acc]]
 
 # Epilogue: process the last iteration from `results`
 a, acc = results[0], results[1]
-acc = rocdl.mfma_f32_16x16x16_f16(transform(a), b, acc)
+acc = rocdl.mfma_f32_16x16x16f16(T.f32, [transform(a), b, acc])
 ```
 
 Three pitfalls (all covered in `/prefetch-data-load`):
