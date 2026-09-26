@@ -19,17 +19,12 @@ import torch
 from kernels.common.mx_formats import dequantize_mxfp4, quant_dequant_mxfp8, quantize_mxfp4
 from kernels.mla_moe_layer.config import (
     EPS,
-    EXPERT_TOP_K,
     FP8_MAX,
     GLM5_CONFIG,
     HIDDEN,
     INTER,
-    N_EXPERTS,
-    ROUTE_SCALE,
+    KIMI_K3_CONFIG,
     SCALE_BM,
-    SHARED_EXPERT,
-    SOFTMAX_SCALE,
-    V_DIM,
     AttentionWeight,
     ExpertActivation,
     ExpertWeight,
@@ -82,6 +77,8 @@ class LayerWeights:
     heads: int
     t: dict  # name -> tensor
     config: LayerConfig = GLM5_CONFIG
+    rank: int = 0
+    npes: int = 1
 
 
 def make_weights(
@@ -92,11 +89,14 @@ def make_weights(
     moe_mode: MoeMode | str = MoeMode.W8A8,
     model_config: LayerConfig | str = GLM5_CONFIG,
     attention_only: bool = False,
+    npes: int = 1,
 ) -> LayerWeights:
     """Replicated tensors share ``seed``; TP shards add ``rank`` to it."""
     config = as_layer_config(model_config)
-    if config != GLM5_CONFIG and not attention_only:
-        raise ValueError(f"{config.name} currently supports the attention-only kernel path")
+    if config == KIMI_K3_CONFIG and not attention_only and npes != 8:
+        raise ValueError("Kimi-K3 full MLA+MoE weights require the production TP8 shard")
+    if not attention_only and config not in (GLM5_CONFIG, KIMI_K3_CONFIG):
+        raise ValueError(f"unsupported full-layer weight profile {config.name!r}")
     expert_weight = moe_format(moe_mode).weight
     rep = torch.Generator(device=device).manual_seed(seed)
     shd = torch.Generator(device=device).manual_seed(seed + 1 + rank)
@@ -123,10 +123,63 @@ def make_weights(
         for name in attention_mats(heads, config):
             t[f"s_{name}"] = dummy_scale
     if attention_only:
-        return LayerWeights(heads, t, config)
-    t["w_r"] = (
-        torch.randn(config.n_experts, config.hidden, generator=rep, device=device) / config.hidden**0.5 * 4
-    ).to(bf)
+        return LayerWeights(heads, t, config, rank, npes)
+    if config == KIMI_K3_CONFIG:
+        routed_hidden = config.routed_hidden
+        shared_inter = config.shared_inter
+        if routed_hidden is None or shared_inter is None:
+            raise ValueError("Kimi-K3 latent-MoE dimensions are missing")
+
+        # AttnRes and router/dense latent transforms are replicated.  The final
+        # latent up projection is row-sharded so each rank computes only its
+        # 896-wide output slice before the final TP reduction.
+        t["g_self_res"] = (1 + 0.1 * torch.randn(config.hidden, generator=rep, device=device)).to(bf)
+        t["w_self_res"] = (torch.randn(config.hidden, generator=rep, device=device) / config.hidden**0.5).to(bf)
+        t["g_mlp_res"] = (1 + 0.1 * torch.randn(config.hidden, generator=rep, device=device)).to(bf)
+        t["w_mlp_res"] = (torch.randn(config.hidden, generator=rep, device=device) / config.hidden**0.5).to(bf)
+        t["w_r"] = (
+            torch.randn(config.n_experts, config.hidden, generator=rep, device=device) / config.hidden**0.5 * 4
+        ).float()
+        t["bias"] = torch.randn(config.n_experts, generator=rep, device=device).float() * 0.1
+        t["w_latent_down"] = (
+            torch.randn(routed_hidden, config.hidden, generator=rep, device=device) / config.hidden**0.5
+        ).to(bf)
+        t["g_latent"] = (1 + 0.1 * torch.randn(routed_hidden, generator=rep, device=device)).to(bf)
+        full_up = (torch.randn(config.hidden, routed_hidden, generator=rep, device=device) / routed_hidden**0.5).to(bf)
+        shard_rows = config.hidden // npes
+        t["w_latent_up"] = full_up[rank * shard_rows : (rank + 1) * shard_rows].contiguous()
+        del full_up
+
+        t["w_shared_ug"] = (
+            torch.randn(2 * shared_inter, config.hidden, generator=shd, device=device) / config.hidden**0.5
+        ).to(bf)
+        t["w_shared_dn"] = (
+            torch.randn(config.hidden, shared_inter, generator=shd, device=device) / shared_inter**0.5
+        ).to(bf)
+
+        # The generated test weights use valid MXFP4 codes and a fixed per-1x32
+        # E8M0 scale.  This avoids materialising multi-gigabyte FP32 temporaries;
+        # checkpoint-loaded weights follow the same packed tensor contract.
+        w1_shape = (config.n_experts, 2 * config.inter, routed_hidden // 2)
+        w2_shape = (config.n_experts, routed_hidden, config.inter // 2)
+        t["w_ug"] = torch.randint(0, 256, w1_shape, generator=shd, dtype=torch.uint8, device=device)
+        t["w_dn"] = torch.randint(0, 256, w2_shape, generator=shd, dtype=torch.uint8, device=device)
+        t["s_ug"] = torch.full(
+            (config.n_experts, 2 * config.inter, routed_hidden // 32),
+            118,
+            dtype=torch.uint8,
+            device=device,
+        )
+        t["s_dn"] = torch.full(
+            (config.n_experts, routed_hidden, config.inter // 32),
+            119,
+            dtype=torch.uint8,
+            device=device,
+        )
+        return LayerWeights(heads, t, config, rank, npes)
+    t["w_r"] = (torch.randn(config.n_experts, config.hidden, generator=rep, device=device) / config.hidden**0.5 * 4).to(
+        bf
+    )
     t["bias"] = torch.randn(config.n_experts, generator=rep, device=device) * 0.1
     if expert_weight is ExpertWeight.FP8_BLOCK128:
         ug_q = torch.empty(
@@ -191,7 +244,7 @@ def make_weights(
             ug_q[e], ug_s[e] = quantize_mxfp4(ug)
             dn_q[e], dn_s[e] = quantize_mxfp4(dn)
     t["w_ug"], t["s_ug"], t["w_dn"], t["s_dn"] = ug_q, ug_s, dn_q, dn_s
-    return LayerWeights(heads, t, config)
+    return LayerWeights(heads, t, config, rank, npes)
 
 
 def dequant_expert(q: torch.Tensor, scale: torch.Tensor, weight: ExpertWeight) -> torch.Tensor:
@@ -250,6 +303,8 @@ def route(scores: torch.Tensor, bias: torch.Tensor, config: LayerConfig = GLM5_C
     so keys are unique and near-ties go to the lower expert id."""
     bits = (scores.float() + bias.float()).view(torch.int32).long()
     okey = torch.where(bits >= 0, bits ^ (1 << 31), ~bits & 0xFFFFFFFF) & 0xFFFFFFFF
+    # GLM's packed-key implementation has an 8-bit expert-id tie break.  The
+    # generic path uses the full index so Kimi-K3's 896 experts are not aliased.
     if config.n_experts <= 256:
         key = (okey & 0xFFFFFF00) | (255 - torch.arange(config.n_experts, device=scores.device))
         idx = torch.argsort(key, descending=True)[: config.top_k]
@@ -373,8 +428,8 @@ def golden_moe(
     xq = xq_ref if xq is None else xq.float()
     y = torch.zeros(S, HIDDEN, device=a.device)
     for s in range(S):
-        idx, p = route(scores[s], t["bias"])
-        experts = [SHARED_EXPERT] + idx.tolist()
+        idx, p = route(scores[s], t["bias"], W.config)
+        experts = [W.config.shared_expert] + idx.tolist()
         weights = [1.0] + p.tolist()
         mids = []
         for e, wgt in zip(experts, weights):
@@ -405,3 +460,177 @@ def golden_moe(
         prob=torch.stack(out["prob"]),
         mid=torch.stack(out["mid"]),
     )
+
+
+def situ(x: torch.Tensor, *, beta: float, linear_beta: float) -> torch.Tensor:
+    """Kimi-K3 SiTU activation over concatenated gate/up projections."""
+
+    gate, up = x.float().chunk(2, dim=-1)
+    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
+    up = linear_beta * torch.tanh(up / linear_beta)
+    return gate * up
+
+
+def kimi_attn_res(
+    prefix: torch.Tensor,
+    delta: torch.Tensor | None,
+    blocks: torch.Tensor,
+    norm_weight: torch.Tensor,
+    qk_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor | None,
+    num_blocks: int,
+    block_write_idx: int = -1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Torch reference for Kimi-K3's attention-residual source mixer.
+
+    Returns ``(mixed_output, updated_prefix)`` and updates ``blocks`` when this
+    layer starts a new 12-layer attention-residual block.
+    """
+
+    updated = prefix.float()
+    if delta is not None:
+        updated = bf(updated + delta.float())
+    if block_write_idx >= 0:
+        blocks[:, block_write_idx].copy_(updated.to(blocks.dtype))
+    if num_blocks == 0:
+        mixed = updated
+    else:
+        sources = torch.cat((blocks[:, :num_blocks].float(), updated[:, None]), dim=1)
+        normalized = sources * torch.rsqrt(sources.square().mean(-1, keepdim=True) + EPS)
+        logits = (normalized * norm_weight.float() * qk_weight.float()).sum(-1)
+        mixed = (torch.softmax(logits, dim=-1)[..., None] * sources).sum(1)
+    if output_norm_weight is not None:
+        mixed = rmsnorm(mixed, output_norm_weight)
+    return bf(mixed).to(prefix.dtype), updated.to(prefix.dtype)
+
+
+def golden_kimi_k3_moe(W: LayerWeights, hidden_states: torch.Tensor, allreduce):
+    """Kimi-K3 TP8 latent-MoE golden, including shared experts and tail."""
+
+    if W.config != KIMI_K3_CONFIG:
+        raise ValueError("golden_kimi_k3_moe requires Kimi-K3 weights")
+    config, t = W.config, W.t
+    routed_hidden = config.routed_hidden
+    shared_inter = config.shared_inter
+    if routed_hidden is None or shared_inter is None:
+        raise ValueError("Kimi-K3 latent-MoE dimensions are missing")
+
+    scores = torch.sigmoid(hidden_states.float() @ t["w_r"].T)
+    latent = bf(hidden_states.float() @ t["w_latent_down"].float().T)
+    selected, probabilities, mids = [], [], []
+    routed_partial = torch.zeros(hidden_states.shape[0], routed_hidden, device=hidden_states.device)
+    fmt = moe_format(MoeMode.A16W4)
+    for sample in range(hidden_states.shape[0]):
+        ids, weights = route(scores[sample], t["bias"], config)
+        selected.append(ids.to(torch.int32))
+        probabilities.append(weights)
+        sample_mids = []
+        for expert, weight in zip(ids.tolist(), weights.tolist()):
+            ug = dequant_expert(t["w_ug"][expert], t["s_ug"][expert], fmt.weight) @ latent[sample].float()
+            mid = bf(situ(ug, beta=config.situ_beta, linear_beta=config.situ_linear_beta))
+            sample_mids.append(mid)
+            down = dequant_expert(t["w_dn"][expert], t["s_dn"][expert], fmt.weight) @ mid
+            routed_partial[sample] += weight * down
+        mids.append(torch.stack(sample_mids))
+
+    routed_reduced = allreduce(bf(routed_partial))
+    latent_norm = bf(rmsnorm(routed_reduced, t["g_latent"]))
+
+    shared_gu = bf(hidden_states.float() @ t["w_shared_ug"].float().T)
+    shared_mid = bf(situ(shared_gu, beta=config.situ_beta, linear_beta=config.situ_linear_beta))
+    shared_partial = bf(shared_mid.float() @ t["w_shared_dn"].float().T)
+    tail = bf(latent_norm.float() @ t["w_latent_up"].float().T)
+    shard = t["w_latent_up"].shape[0]
+    # The rank-local tail is folded into the matching hidden slice of the
+    # shared-expert partial before the final TP reduction.
+    rank = W.rank
+    final_partial = shared_partial.clone()
+    final_partial[:, rank * shard : (rank + 1) * shard] = bf(
+        final_partial[:, rank * shard : (rank + 1) * shard].float() + tail.float()
+    )
+    moe_delta = allreduce(final_partial)
+    return {
+        "scores": scores,
+        "latent": latent,
+        "sel": torch.stack(selected),
+        "prob": torch.stack(probabilities),
+        "mid": torch.stack(mids),
+        "routed_partial": routed_partial,
+        "routed_reduced": routed_reduced,
+        "shared_partial": shared_partial,
+        "moe_delta": moe_delta,
+    }
+
+
+def golden_kimi_k3_layer(
+    W: LayerWeights,
+    prefix_sum: torch.Tensor,
+    block_residual: torch.Tensor,
+    cur_pos: int,
+    kv_cache: torch.Tensor,
+    pe_cache: torch.Tensor,
+    indices: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    allreduce,
+    *,
+    layer_idx: int,
+    topk: int = 2048,
+):
+    """Full Kimi-K3 MLA + attention-residual + latent-MoE layer golden."""
+
+    config, t = W.config, W.t
+    if config != KIMI_K3_CONFIG or config.attn_res_block_size is None:
+        raise ValueError("golden_kimi_k3_layer requires the Kimi-K3 profile")
+    block_size = config.attn_res_block_size
+    write_block = layer_idx % block_size == 0
+    block_index = layer_idx // block_size
+    previous_blocks = (layer_idx + block_size - 1) // block_size
+
+    pre_attn, _ = kimi_attn_res(
+        prefix_sum,
+        None,
+        block_residual,
+        t["g_self_res"],
+        t["w_self_res"],
+        t["g_in"],
+        previous_blocks,
+        block_index if write_block else -1,
+    )
+    attention = golden_layer(
+        W,
+        pre_attn,
+        cur_pos,
+        kv_cache,
+        pe_cache,
+        indices,
+        cos,
+        sin,
+        allreduce,
+        sparse_attention_topk=topk,
+        moe_mode=MoeMode.A16W4,
+        attention_only=True,
+    )
+    attention_delta = attention["a"]
+    post_prefix = attention_delta if write_block else prefix_sum
+    post_delta = None if write_block else attention_delta
+    moe_input, updated_prefix = kimi_attn_res(
+        post_prefix,
+        post_delta,
+        block_residual,
+        t["g_mlp_res"],
+        t["w_mlp_res"],
+        t["g_post"],
+        previous_blocks + int(write_block),
+    )
+    moe = golden_kimi_k3_moe(W, moe_input, allreduce)
+    output = bf(updated_prefix.float() + moe["moe_delta"].float()).to(torch.bfloat16)
+    return {
+        **attention,
+        **moe,
+        "pre_attn": pre_attn,
+        "attention_delta": attention_delta,
+        "moe_input": moe_input,
+        "updated_prefix": updated_prefix,
+        "x_out": output,
+    }

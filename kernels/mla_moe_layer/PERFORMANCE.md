@@ -2,8 +2,10 @@
 
 [中文](PERFORMANCE_zh.md)
 
-This directory contains a FlyDSL implementation of one fixed GLM-5 MLA + MoE
-shard. The production path is exposed as `Glm5IndexedMlaMoeBlock` and generated
+This directory contains a shared, model-configured FlyDSL implementation of the
+fixed GLM-5 MLA + MoE shard and a production-TP8 Kimi-K3 MLA + latent-MoE
+layer. The persistent path is exposed through `IndexedMlaMoeBlock`, with thin
+`Glm5IndexedMlaMoeBlock` and `KimiK3MlaLayer` model wrappers, and is generated
 by `build_indexed_mla_moe_kernel` with FlyDSL and ROCDL APIs.
 
 The block consumes caller-supplied sparse-attention indices. In the 78-layer
@@ -20,6 +22,10 @@ expert top-8, shared and routed experts, up/gate activation, down projection,
 expert weighting, and TP peer reduction. Its MoE math is shared with the
 refresh path, but the production refresh loading and rank layout still need a
 separate integration.
+
+`KimiK3MlaMoeLayer` composes the K3 MLA shard with AttnRes, routing, A16W4
+routed experts, shared experts, latent transforms, and TP reductions. These
+paths contain no imported TileRT kernel body or embedded assembly.
 
 TileRT remains an optional benchmark dependency in `native_baseline.py`. That
 adapter converts the same generated tensors to the released TileRT wrapper so
@@ -61,8 +67,10 @@ validates the complete fixed-shard contract before allocating GPU buffers.
 | `runtime.py` | Owned symmetric HIP IPC buffers and deterministic remote-handle cleanup. |
 | `indexed_mla_moe_kernel.py` | FlyDSL kernel scheduling, communication, MLA, routing, and expert computation. |
 | `layer.py` | Public host wrapper, scratch allocation, launch arguments, tracing, and lifecycle. |
+| `kimi_k3.py` | Complete Kimi-K3 TP8 AttnRes + MLA + latent-MoE layer and fused Torch tail operations. |
 | `reference.py` | Independent Torch stage and end-to-end calculations. |
 | `native_baseline.py` | Optional same-weight TileRT comparison adapter. |
+| `tools/kimi_k3_full.py` | TP8 correctness, stage-profile, and HIP-graph benchmark harness. |
 
 The kernel uses FlyDSL operations for wave reductions, hardware math,
 mailbox polling, buffer access, and MFMA issue. Peer payloads are rounded to
@@ -192,3 +200,96 @@ stage timestamps, then inspect a rank with:
 
 Trace instrumentation drains memory operations and changes scheduling. Use
 uninstrumented graph measurements for latency comparisons.
+
+## Kimi-K3 full MLA + latent-MoE layer
+
+`KimiK3MlaLayer` remains the reusable full-attention component. The new
+`KimiK3MlaMoeLayer` implements the complete production-TP8 decoder-layer data
+path used by Kimi-K3:
+
+- hidden size 7168, 1536 Q-LoRA rank, and 512 KV-LoRA rank;
+- 12 local heads with 128 non-positional, 64 RoPE, and 128 value dimensions;
+- BF16 attention weights and the sigmoid attention-output gate;
+- 12-layer AttnRes source mixing before attention and before MoE;
+- FP32 sigmoid router with correction bias, 896 experts, and normalized top-16;
+- replicated BF16 7168-to-3584 latent projection;
+- FlyDSL device-side sorting and two-stage A16W4/MXFP4 routed experts with SiTU;
+- TP8-local BF16 shared experts, latent RMSNorm, and rank-local 3584-to-896 tail;
+- one TP reduction in latent space and one final TP reduction before the
+  residual update.
+
+The A16W4 launcher and tuned Kimi-K3 configuration now live under
+`kernels/moe/moe_2stage_a16wmix/host.py`; tests import that production module
+instead of owning the host implementation.
+
+Correctness was checked on 8 x MI355X (gfx950) for S=1/4/8 at layer 0, plus
+S=4 at layer 1 and layer 12 to cover both non-write and new-block AttnRes
+branches. All outputs were finite and bit-identical across the eight ranks.
+Using the implementation's own post-attention state, top-16 selection matched
+the independent reference exactly, routed-MoE relative L2 was 0.525-0.538%,
+and full-output relative L2 was 0.538-0.671%. KV-cache relative L2 stayed at or
+below 0.046%. Layer 0/1/12 HIP-graph capture and replay also completed.
+
+As in the existing GLM-5 tests, the independent end-to-end comparison records
+but does not fail on a near-tied synthetic route changed by a legal upstream
+MLA rounding difference. The isolated MoE check feeds the implementation's
+post-attention tensor to the independent MoE reference, so it distinguishes a
+real router/expert regression from this synthetic boundary effect.
+
+The MLA component retains its two scheduling optimizations: S >= 2 reuses one
+staged 64-key KV tile and one 16-column score MFMA for both local head groups,
+and the output gate is fused into each W_UV producer. The attention-only TP8
+improvements remain 0.6%, 2.3%, and 12.0% for S=1, S=4, and S=8 respectively.
+
+### Complete-layer performance
+
+The complete Kimi-K3 layer was measured with TP8, position 3000, 16 layer
+launches per HIP graph, two warmups, seven measured replays, and the median
+critical-rank time. The baseline is the first correct sequential composition;
+the optimized path fuses three Torch-side regions before graph capture:
+
+- AttnRes RMSNorm/source weighting/output RMSNorm;
+- sigmoid + correction-bias top-k + gather + route renormalization;
+- shared-expert up/gate GEMM, SiTU, and down GEMM handoff.
+
+| Version | S=1 | S=4 | S=8 |
+|---|---:|---:|---:|
+| Initial full layer | 334.23 us | 383.85 us | 404.81 us |
+| Optimized full layer | 205.11 us | 258.13 us | 281.50 us |
+| Improvement | 38.6% | 32.8% | 30.5% |
+
+Overlapping the shared and routed branches on separate HIP streams was also
+tested and rejected: at S=1 it regressed from 336.68 us to 384.66 us because
+the small GEMMs contend for compute resources and add cross-stream
+synchronization. The production path remains single-stream.
+
+The remaining dominant work is the persistent MLA kernel, two RCCL TP
+reductions, the latent dense transforms, and the A16W4 routed expert kernels.
+The next optimization opportunity is a native fused sigmoid/correction-bias
+top-k sorter and a lower-latency small-message TP reduction. The repository's
+symmetric-peer all-reduce was not used because HIP IPC initialization was not
+reliable in this environment.
+
+Reproduce the attention-only check with:
+
+```bash
+/opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
+  --model kimi_k3 --npes 8 -S 8 --pos 100 --iters 1
+```
+
+Reproduce the complete MLA + MoE checks and measurements with:
+
+```bash
+cd /root/FlyDSL-kimi-k3
+export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
+export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:.
+
+python kernels/mla_moe_layer/tools/kimi_k3_full.py \
+  --npes 8 --samples 8 --layer-idx 0 --check \
+  --bench --layers 16 --repeats 7 \
+  --output /root/kimi-k3-perf-results/full-moe/final-s8.json
+```
+
+Use `--eager-attn-res`, `--eager-router`, or `--eager-shared-experts` for
+controlled optimization A/B runs. Use `--profile` for median eager GPU event
+timings; uninstrumented HIP-graph replay remains the latency source of truth.

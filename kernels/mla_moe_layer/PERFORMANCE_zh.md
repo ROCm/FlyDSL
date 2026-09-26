@@ -2,8 +2,11 @@
 
 [English](PERFORMANCE.md)
 
-本目录包含一个固定 GLM-5 MLA + MoE 分片的 FlyDSL 实现。生产路径通过
-`Glm5IndexedMlaMoeBlock` 提供，并通过 FlyDSL 与 ROCDL API 生成。
+本目录包含一套共享、按模型配置的 FlyDSL 实现，覆盖固定的 GLM-5 MLA + MoE
+分片和生产 TP8 Kimi-K3 MLA + latent-MoE 完整层。persistent 路径由
+`IndexedMlaMoeBlock` 提供，`Glm5IndexedMlaMoeBlock` 与 `KimiK3MlaLayer`
+只是轻量模型封装，kernel 统一由 `build_indexed_mla_moe_kernel` 通过 FlyDSL 与
+ROCDL API 生成。
 
 该 block 接收调用方准备好的 sparse-attention indices。GLM-5 的 78 层生产调度中，
 57 个 MoE 层使用本实现覆盖的对称 8-head/rank reuse 拓扑。另外 18 个 MoE 层使用非对称
@@ -15,6 +18,10 @@ reduction 后再调用 standalone MoE。该 refresh 拓扑和 standalone 入口�
 在已支持的拓扑中，本 block 完整包含 MoE router、expert top-8、shared/routed experts、
 up/gate activation、down projection、expert weighting 和 TP peer reduction。refresh
 路径使用相同的 MoE 数学阶段，但其生产装载方式和 rank 布局仍需单独集成。
+
+`KimiK3MlaMoeLayer` 在 K3 MLA 分片外串接 AttnRes、routing、A16W4 routed
+experts、shared experts、latent transforms 和 TP reductions。这些路径不导入
+TileRT kernel 主体，也不嵌入汇编。
 
 `native_baseline.py` 仍可选择性依赖 TileRT，用于把同一组生成权重转换给已发布的
 TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导入该适配器。
@@ -52,8 +59,10 @@ TileRT wrapper，从而直接比较两个实现。FlyDSL 执行路径不会导�
 | `runtime.py` | 自有 symmetric HIP IPC buffer，以及远端 handle 的确定性清理。 |
 | `indexed_mla_moe_kernel.py` | FlyDSL kernel 调度、通信、MLA、routing 和专家计算。 |
 | `layer.py` | 公开 host wrapper、scratch 分配、启动参数、trace 和生命周期。 |
+| `kimi_k3.py` | 完整 Kimi-K3 TP8 AttnRes + MLA + latent-MoE 层及融合的 Torch 尾部算子。 |
 | `reference.py` | 独立 Torch 分段与端到端计算。 |
 | `native_baseline.py` | 可选的同权重 TileRT 对比适配器。 |
+| `tools/kimi_k3_full.py` | TP8 正确性、分段 profile 和 HIP graph benchmark harness。 |
 
 kernel 使用 FlyDSL 操作实现 wave reduction、硬件数学指令、mailbox polling、buffer
 访问和 MFMA。每个 rank 的 peer payload 先舍入为 BF16，再按 rank 顺序累加，因此所有
@@ -168,3 +177,87 @@ FlyDSL benchmark 可添加 `--trace --layers 16 --trace-dir <directory>` 记录�
 ```
 
 trace 插桩会等待内存操作完成并改变调度。延迟比较应使用未插桩的 graph 测量。
+
+## Kimi-K3 完整 MLA + latent-MoE 层
+
+`KimiK3MlaLayer` 继续作为可复用的 full-attention 组件。新增的
+`KimiK3MlaMoeLayer` 实现了 Kimi-K3 生产 TP8 decoder layer 的完整数据路径：
+
+- hidden size 7168、Q-LoRA rank 1536、KV-LoRA rank 512；
+- 每卡 12 个 head，non-positional / RoPE / value 维度分别为 128 / 64 / 128；
+- BF16 attention 权重，以及 sigmoid attention output gate；
+- attention 前和 MoE 前的 12-layer AttnRes source mixing；
+- FP32 sigmoid router、correction bias、896 experts 和归一化 top-16；
+- replicated BF16 7168→3584 latent projection；
+- FlyDSL device-side sorting，以及带 SiTU 的两阶段 A16W4/MXFP4 routed experts；
+- TP8-local BF16 shared experts、latent RMSNorm 和 rank-local 3584→896 tail；
+- latent 空间的一次 TP reduce，以及 residual 更新前的最终 TP reduce。
+
+A16W4 launcher 和 Kimi-K3 tuned 配置现在位于
+`kernels/moe/moe_2stage_a16wmix/host.py`；测试改为导入该生产模块，不再自行持有
+host 实现。
+
+正确性在 8 x MI355X（gfx950）上验证了 layer 0 的 S=1/4/8，并以 S=4 验证了
+layer 1 和 layer 12，覆盖非 block-write 与新 block-write 两类 AttnRes 分支。所有输出
+均为有限值，且八个 rank 的结果逐位一致。使用实现自身的 post-attention 状态时，
+top-16 与独立 reference 完全一致，routed-MoE relative L2 为 0.525-0.538%，完整输出
+relative L2 为 0.538-0.671%，KV-cache relative L2 不高于 0.046%。layer 0/1/12 的
+HIP graph capture 与 replay 也均成功。
+
+与现有 GLM-5 测试相同，独立端到端比较会记录、但不会因合法 MLA rounding 差异导致的
+近似并列 synthetic route 翻转而失败。隔离的 MoE 检查把实现的 post-attention tensor
+传给独立 MoE reference，因此可以把真实 router/expert 回归与该 synthetic 边界效应
+区分开。
+
+MLA 组件保留原有两项调度优化：S >= 2 时，两个 local head group 复用同一份 64-key
+KV tile 和一次 16-column score MFMA；output gate 则融合到每个 W_UV producer。
+attention-only TP8 在 S=1、S=4、S=8 的提升仍分别为 0.6%、2.3%、12.0%。
+
+### 完整层性能
+
+完整 Kimi-K3 层使用 TP8、position 3000、每个 HIP graph 16 次 layer launch、2 次
+预热、7 次正式 replay，并取最慢 rank 的中位延迟。baseline 是第一版正确的串行组合；
+优化版本在 graph capture 前融合了三段 Torch 路径：
+
+- AttnRes RMSNorm/source weighting/output RMSNorm；
+- sigmoid + correction-bias top-k + gather + route renormalization；
+- shared-expert up/gate GEMM、SiTU 和 down GEMM 的交接。
+
+| 版本 | S=1 | S=4 | S=8 |
+|---|---:|---:|---:|
+| 初版完整层 | 334.23 us | 383.85 us | 404.81 us |
+| 优化后完整层 | 205.11 us | 258.13 us | 281.50 us |
+| 提升 | 38.6% | 32.8% | 30.5% |
+
+还测试了在两个 HIP stream 上重叠 shared 与 routed 分支，但该方案被否决：S=1 从
+336.68 us 回退到 384.66 us，原因是小 GEMM 争抢计算资源并引入跨 stream 同步。生产
+路径继续使用单 stream。
+
+剩余主要开销是 persistent MLA kernel、两次 RCCL TP reduce、latent dense transforms
+和 A16W4 routed expert kernels。下一步优化机会是原生融合的
+sigmoid/correction-bias top-k sorter，以及更低延迟的小消息 TP reduce。仓库现有的
+symmetric-peer all-reduce 在本环境中 HIP IPC 初始化不稳定，因此本实现没有启用它。
+
+attention-only 检查可用以下命令复现：
+
+```bash
+/opt/venv/bin/python tests/kernels/test_shared_reuse_mla_moe_layer.py \
+  --model kimi_k3 --npes 8 -S 8 --pos 100 --iters 1
+```
+
+完整 MLA + MoE 正确性与性能可用以下命令复现：
+
+```bash
+cd /root/FlyDSL-kimi-k3
+export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
+export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:.
+
+python kernels/mla_moe_layer/tools/kimi_k3_full.py \
+  --npes 8 --samples 8 --layer-idx 0 --check \
+  --bench --layers 16 --repeats 7 \
+  --output /root/kimi-k3-perf-results/full-moe/final-s8.json
+```
+
+可使用 `--eager-attn-res`、`--eager-router` 或 `--eager-shared-experts` 做受控的优化
+A/B；`--profile` 可报告 eager GPU event 中位分段时间。最终延迟应以未插桩的 HIP
+graph replay 为准。

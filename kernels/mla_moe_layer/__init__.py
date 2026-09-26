@@ -5,12 +5,12 @@ from typing import TYPE_CHECKING
 from kernels.mla_moe_layer.config import KIMI_K3_CONFIG, MoeMode
 
 if TYPE_CHECKING:
-    from kernels.mla_moe_layer.layer import Glm5IndexedMlaMoeBlock
     from kernels.mla_moe_layer.kimi_k3 import KimiK3MlaMoeLayer
-    from kernels.mla_moe_layer.layer import KimiK3MlaLayer
+    from kernels.mla_moe_layer.layer import Glm5IndexedMlaMoeBlock, IndexedMlaMoeBlock, KimiK3MlaLayer
 
 __all__ = [
     "Glm5IndexedMlaMoeBlock",
+    "IndexedMlaMoeBlock",
     "KIMI_K3_CONFIG",
     "KimiK3MlaLayer",
     "KimiK3MlaMoeLayer",
@@ -25,6 +25,10 @@ def __getattr__(name: str):
         from kernels.mla_moe_layer.layer import Glm5IndexedMlaMoeBlock
 
         return Glm5IndexedMlaMoeBlock
+    if name == "IndexedMlaMoeBlock":
+        from kernels.mla_moe_layer.layer import IndexedMlaMoeBlock
+
+        return IndexedMlaMoeBlock
     if name == "KimiK3MlaLayer":
         from kernels.mla_moe_layer.layer import KimiK3MlaLayer
 

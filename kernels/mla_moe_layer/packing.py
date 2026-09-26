@@ -60,6 +60,48 @@ def pack_mxfp4(q: torch.Tensor) -> torch.Tensor:
     return w4.permute(*order).contiguous().view(torch.uint8).view(-1)
 
 
+def pack_a16w4_weight(q: torch.Tensor) -> torch.Tensor:
+    """Pack row-major MXFP4 weights for the two-stage A16W4 MoE kernels.
+
+    ``q`` stores two FP4 values per byte and may have arbitrary leading expert
+    dimensions.  The kernel consumes 16 output rows by 64 logical K values per
+    tile, with the two packed-K halves preceding the row/lane dimensions.
+    """
+
+    q = q.view(torch.uint8)
+    *lead, rows, packed_k = q.shape
+    if rows % 16 or packed_k % 32:
+        raise ValueError(
+            "A16W4 weights require rows divisible by 16 and logical K divisible "
+            f"by 64, got rows={rows}, K={packed_k * 2}"
+        )
+    tiled = q.reshape(*lead, rows // 16, 16, packed_k // 32, 2, 16)
+    nlead = len(lead)
+    order = list(range(nlead)) + [nlead + position for position in (0, 2, 3, 1, 4)]
+    return tiled.permute(*order).contiguous().view(torch.uint8).view(-1)
+
+
+def pack_a16w4_scale(scale: torch.Tensor) -> torch.Tensor:
+    """Pack row-major per-1x32 E8M0 scales for the A16W4 kernels.
+
+    The layout matches the production kernel's 256-row by 8-group scale tile.
+    Padding is deterministic because padded rows/groups are never addressed.
+    """
+
+    scale = scale.view(torch.uint8)
+    if scale.ndim < 2:
+        raise ValueError(f"A16W4 scales must have at least two dimensions, got {scale.ndim}")
+    groups = scale.shape[-1]
+    rows = scale.numel() // groups
+    flat = scale.reshape(rows, groups)
+    padded_rows = (rows + 255) // 256 * 256
+    padded_groups = (groups + 7) // 8 * 8
+    padded = torch.zeros(padded_rows, padded_groups, dtype=torch.uint8, device=scale.device)
+    padded[:rows, :groups] = flat
+    packed = padded.view(padded_rows // 32, 2, 16, padded_groups // 8, 2, 4)
+    return packed.permute(0, 3, 5, 2, 4, 1).contiguous().view(-1)
+
+
 def pack_layer_weights(
     tensors: dict[str, torch.Tensor],
     moe_mode: MoeMode | str = MoeMode.W8A8,

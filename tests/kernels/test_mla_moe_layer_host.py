@@ -20,11 +20,13 @@ from kernels.mla_moe_layer.config import (
     validate_shard,
 )
 from kernels.mla_moe_layer.packing import (
+    pack_a16w4_scale,
+    pack_a16w4_weight,
     pack_bf16,
     pack_fp8,
     pack_mxfp4,
 )
-from kernels.mla_moe_layer.reference import golden_layer, make_weights, rope_table
+from kernels.mla_moe_layer.reference import golden_layer, kimi_attn_res, make_weights, rope_table, situ
 
 
 def test_pack_fp8_uses_mfma_lane_order():
@@ -51,6 +53,23 @@ def test_pack_mxfp4_matches_bf16_mfma_k32_steps():
         [*range(0, 4), *range(16, 20), *range(32, 36), *range(48, 52)],
         dtype=torch.uint8,
     )
+    torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
+
+
+def test_pack_a16w4_uses_standard_16x64_weight_tile_order():
+    raw = torch.arange(16 * 32, dtype=torch.int64).remainder(256).to(torch.uint8).reshape(16, 32)
+    packed = pack_a16w4_weight(raw)
+    expected = torch.tensor(
+        [*range(0, 16), *range(32, 48), *range(64, 80), *range(96, 112)],
+        dtype=torch.uint8,
+    )
+    torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
+
+
+def test_pack_a16w4_scale_interleaves_32_row_pairs():
+    raw = torch.arange(256 * 8, dtype=torch.int64).remainder(256).to(torch.uint8).reshape(256, 8)
+    packed = pack_a16w4_scale(raw)
+    expected = torch.tensor([0, 128, 4, 132, 8, 136, 12, 140], dtype=torch.uint8)
     torch.testing.assert_close(packed[: expected.numel()], expected, atol=0, rtol=0)
 
 
@@ -147,3 +166,22 @@ def test_kimi_k3_mla_golden_uses_pre_normalized_input_and_defers_residual():
 def test_validate_kimi_k3_attention_shard_rejects_glm_head_count():
     with pytest.raises(ValueError, match="kimi_k3 requires 12 local heads"):
         validate_shard(1, GLM5_CONFIG.local_heads, 0, 8, 2048, KIMI_K3_CONFIG)
+
+
+def test_kimi_k3_situ_applies_bounded_gate_and_up_branches():
+    values = torch.tensor([[0.0, 4.0, 25.0, -25.0]])
+    got = situ(values, beta=4.0, linear_beta=25.0)
+    expected = torch.tensor([[0.0, -56.9593]])
+    torch.testing.assert_close(got, expected, atol=0.25, rtol=0)
+
+
+def test_kimi_attn_res_updates_prefix_and_block_bank_before_mixing():
+    prefix = torch.tensor([[1.0, 3.0]], dtype=torch.bfloat16)
+    delta = torch.tensor([[1.0, -1.0]], dtype=torch.bfloat16)
+    blocks = torch.zeros(1, 1, 2, dtype=torch.bfloat16)
+    one = torch.ones(2, dtype=torch.bfloat16)
+    output, updated = kimi_attn_res(prefix, delta, blocks, one, one, None, 0, 0)
+    expected = torch.tensor([[2.0, 2.0]], dtype=torch.bfloat16)
+    torch.testing.assert_close(updated, expected, atol=0, rtol=0)
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)
+    torch.testing.assert_close(blocks[:, 0], expected, atol=0, rtol=0)
