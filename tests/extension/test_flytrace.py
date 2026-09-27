@@ -10,7 +10,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.extension import flytrace
 from flydsl.extension._flytrace_backend import get_trace_backend
-from flydsl.extension._flytrace_export import perfetto_events
+from flydsl.extension._flytrace_export import export_perfetto_per_kernel, perfetto_events
 from flydsl.runtime.device import get_rocm_arch
 
 
@@ -56,6 +56,17 @@ def _two_dimensional_trace_launch(stream: fx.Stream):
     _two_dimensional_trace_kernel().launch(grid=(1, 1, 1), block=(32, 2, 1), stream=stream)
 
 
+@flyc.kernel(known_block_size=[64, 1, 1])
+def _second_static_trace_kernel():
+    flytrace.mark("second_event")
+
+
+@flyc.jit
+def _multi_kernel_trace_launch(stream: fx.Stream):
+    _static_trace_kernel().launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
+    _second_static_trace_kernel().launch(grid=(1, 1, 1), block=(64, 1, 1), stream=stream)
+
+
 def test_capture_option_validation():
     assert flytrace.capture(block=(1, 2, 3)).options.version == "flytrace-v4"
     assert flytrace.capture(block=(1, 2, 3)).options.blocks == ((1, 2, 3),)
@@ -70,6 +81,8 @@ def test_capture_option_validation():
         flytrace.capture(exclude="event")
     with pytest.raises(TypeError, match="bool"):
         flytrace.capture(hardware=1)
+    with pytest.raises(TypeError, match="per_kernel"):
+        flytrace.capture(per_kernel=1)
 
 
 def test_backend_errors_are_reported_at_the_trace_boundary():
@@ -226,6 +239,41 @@ def test_generic_export_pairs_crossing_same_name_ranges_by_token():
     ]
 
 
+def test_per_kernel_export_uses_one_capture_wide_origin(tmp_path):
+    def wave(kernel, epoch, tick, end_tick):
+        return {
+            "kernel": kernel,
+            "block": (0, 0, 0),
+            "wave": 0,
+            "epoch": epoch,
+            "end_tick": end_tick,
+            "events": [{"name": "event", "kind": "mark", "payload": None, "tick": tick}],
+            "attempted_events": 1,
+            "overflow": False,
+        }
+
+    manifest = export_perfetto_per_kernel(
+        [
+            {"recording": 0, "kernel": "first/kernel", "waves": [wave("first/kernel", 90, 100, 110)]},
+            {"recording": 0, "kernel": "second kernel", "waves": [wave("second kernel", 190, 200, 210)]},
+        ],
+        tmp_path,
+        100_000_000,
+    )
+    assert manifest["kernels"] == 2
+    assert manifest["waves"] == 2
+    assert [entry["file"] for entry in manifest["files"]] == [
+        "000-first_kernel.json",
+        "001-second_kernel.json",
+    ]
+    timestamps = []
+    for entry in manifest["files"]:
+        trace = json.loads((tmp_path / entry["file"]).read_text())
+        timestamps.append(next(event["ts"] for event in trace["traceEvents"] if event.get("ph") == "i"))
+    assert timestamps == [0.1, 1.1]
+    assert json.loads((tmp_path / "manifest.json").read_text()) == manifest
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
 def test_static_all_grid_rejects_runtime_launch_dimensions():
     if get_rocm_arch().split(":")[0] not in ("gfx942", "gfx950"):
@@ -266,6 +314,31 @@ def test_trace_supports_multidimensional_blocks():
     assert len(waves) == 1
     assert waves[0]["block"] == (0, 0, 0)
     assert [event["name"] for event in waves[0]["events"]] == ["two_dimensional"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
+def test_capture_exports_multiple_kernels_combined_or_separately(tmp_path):
+    if get_rocm_arch().split(":")[0] not in ("gfx942", "gfx950"):
+        pytest.skip("flytrace recorder currently targets gfx942/gfx950")
+    directory = tmp_path / "per-kernel"
+    with flytrace.capture(directory, mode="static", per_kernel=True) as cap:
+        flyc.compile(_multi_kernel_trace_launch, torch.cuda.current_stream())
+
+    manifest = json.loads((directory / "manifest.json").read_text())
+    assert manifest["kernels"] == 2
+    assert manifest["waves"] == 2
+    assert manifest["records"] == 2
+    assert {entry["records"] for entry in manifest["files"]} == {1}
+    assert all((directory / entry["file"]).is_file() for entry in manifest["files"])
+
+    combined = tmp_path / "combined.json"
+    assert cap.export(combined, per_kernel=False) == {"waves": 2, "records": 2, "dropped": 0}
+    names = {
+        event["args"]["name"].split(" Block ", 1)[0]
+        for event in json.loads(combined.read_text())["traceEvents"]
+        if event.get("name") == "thread_name"
+    }
+    assert len(names) == 2
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")

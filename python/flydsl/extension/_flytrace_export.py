@@ -4,6 +4,7 @@
 """Target-neutral trace validation and Perfetto JSON export."""
 
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -23,12 +24,15 @@ def _event_args(event):
     return args
 
 
-def perfetto_events(waves, clock_hz):
+def perfetto_events(waves, clock_hz, *, origin=None):
     """Convert decoded wave records to the Perfetto Trace Event schema."""
 
     if not isinstance(clock_hz, int) or clock_hz <= 0:
         raise ValueError("flytrace clock frequency must be a positive integer")
-    origin = min((wave["epoch"] for wave in waves), default=0)
+    if origin is None:
+        origin = min((wave["epoch"] for wave in waves), default=0)
+    elif not isinstance(origin, int):
+        raise TypeError("flytrace origin tick must be an integer or None")
     scale = 1_000_000 / clock_hz
     output = []
     for tid, wave in enumerate(waves, 1):
@@ -117,10 +121,55 @@ def perfetto_events(waves, clock_hz):
     return output
 
 
-def export_perfetto_json(waves, path, clock_hz):
-    events = perfetto_events(waves, clock_hz)
+def export_perfetto_json(waves, path, clock_hz, *, origin=None):
+    events = perfetto_events(waves, clock_hz, origin=origin)
     Path(path).write_text(json.dumps({"traceEvents": events, "displayTimeUnit": "ns"}) + "\n")
     return trace_stats(waves)
+
+
+def _safe_filename(name):
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._-")
+    return filename or "kernel"
+
+
+def export_perfetto_per_kernel(groups, directory, clock_hz):
+    """Write one aligned Perfetto JSON file per compiled kernel.
+
+    ``groups`` contains ``recording``, ``kernel``, and ``waves`` fields. Files
+    share the capture-wide clock origin, so their timestamps remain comparable.
+    A manifest identifies files unambiguously when different compiled modules
+    use the same kernel symbol.
+    """
+
+    if not isinstance(clock_hz, int) or clock_hz <= 0:
+        raise ValueError("flytrace clock frequency must be a positive integer")
+    groups = list(groups)
+    waves = [wave for group in groups for wave in group["waves"]]
+    origin = min((wave["epoch"] for wave in waves), default=0)
+    target = Path(directory)
+    target.mkdir(parents=True, exist_ok=True)
+    files = []
+    for index, group in enumerate(groups):
+        filename = f"{index:03d}-{_safe_filename(group['kernel'])}.json"
+        stats = export_perfetto_json(group["waves"], target / filename, clock_hz, origin=origin)
+        files.append(
+            {
+                "recording": group["recording"],
+                "kernel": group["kernel"],
+                "file": filename,
+                **stats,
+            }
+        )
+    manifest = {
+        "format": "flytrace.per_kernel.v1",
+        "clock_hz": clock_hz,
+        "origin_tick": origin,
+        "kernels": len(files),
+        **trace_stats(waves),
+        "files": files,
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest
 
 
 def save_raw_trace(waves, path, metadata):

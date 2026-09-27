@@ -195,29 +195,31 @@ def _worker(rank, args, port):
             trace_dir.mkdir(parents=True, exist_ok=True)
             trace_path = trace_dir / "flytrace.json"
             stats = capture.export(trace_path)
+            kernel_trace_dir = trace_dir / "kernels"
+            kernel_stats = capture.export_per_kernel(kernel_trace_dir) if args.flytrace_per_kernel else None
             pftrace_path = trace_dir / "flytrace.pftrace.gz"
             pftrace_stats = export_hierarchical_pftrace(trace_path, pftrace_path, rank)
+            summary = {
+                **stats,
+                **pftrace_stats,
+                "mode": args.moe_mode,
+                "npes": args.npes,
+                "pftrace": str(pftrace_path),
+                "rank": rank,
+                "samples": samples,
+                "trace": str(trace_path),
+            }
+            if kernel_stats is not None:
+                summary["per_kernel"] = kernel_stats
+                summary["per_kernel_manifest"] = str(kernel_trace_dir / "manifest.json")
             (trace_dir / "flytrace_summary.json").write_text(
-                json.dumps(
-                    {
-                        **stats,
-                        **pftrace_stats,
-                        "mode": args.moe_mode,
-                        "npes": args.npes,
-                        "pftrace": str(pftrace_path),
-                        "rank": rank,
-                        "samples": samples,
-                        "trace": str(trace_path),
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
+                json.dumps(summary, indent=2, sort_keys=True) + "\n"
             )
             torch.cuda.synchronize()
             dist.barrier()
             if rank == 0:
-                print(f"flytrace: {trace_path} {stats}; Perfetto: {pftrace_path}", flush=True)
+                kernel_output = f"; kernels: {kernel_trace_dir / 'manifest.json'}" if kernel_stats is not None else ""
+                print(f"flytrace: {trace_path} {stats}; Perfetto: {pftrace_path}{kernel_output}", flush=True)
         if args.dump_outputs:
             target = Path(args.dump_outputs)
             target.mkdir(parents=True, exist_ok=True)
@@ -310,6 +312,11 @@ if __name__ == "__main__":
         action="store_true",
         help="capture one eager launch as full-wave JSON and hierarchical Perfetto protobuf traces",
     )
+    parser.add_argument(
+        "--flytrace-per-kernel",
+        action="store_true",
+        help="also export one aligned JSON trace per compiled kernel",
+    )
     parser.add_argument("--flytrace-max-blocks", type=int, default=256)
     parser.add_argument("--flytrace-max-events", type=int, default=128)
     args = parser.parse_args()
@@ -323,6 +330,8 @@ if __name__ == "__main__":
         parser.error("--trace is available for the FlyDSL backend")
     if args.flytrace and args.backend != "flydsl":
         parser.error("--flytrace is available for the FlyDSL backend")
+    if args.flytrace_per_kernel and not args.flytrace:
+        parser.error("--flytrace-per-kernel requires --flytrace")
     if args.flytrace_max_blocks <= 0 or args.flytrace_max_events <= 0:
         parser.error("--flytrace-max-blocks and --flytrace-max-events must be positive")
     if not 1 <= args.layers <= MAX_LAYERS_PER_STEP:

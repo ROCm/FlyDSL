@@ -251,11 +251,18 @@ def _flytrace_body(body, op_tag, args, rank, dev, out_dir, meta):
     os.makedirs(out_dir, exist_ok=True)
     trace_path = os.path.join(out_dir, f"{op_tag}_rank{rank}_flytrace.json")
     stats = cap.export(trace_path)
+    kernel_trace_dir = os.path.join(out_dir, f"{op_tag}_rank{rank}_flytrace_kernels")
+    kernel_stats = cap.export_per_kernel(kernel_trace_dir) if getattr(args, "flytrace_per_kernel", False) else None
     summary_path = os.path.join(out_dir, f"{op_tag}_rank{rank}_flytrace_summary.json")
     with open(summary_path, "w") as f:
-        json.dump({**meta, **stats, "trace": trace_path}, f, indent=2, sort_keys=True)
+        summary = {**meta, **stats, "trace": trace_path}
+        if kernel_stats is not None:
+            summary["per_kernel"] = kernel_stats
+            summary["per_kernel_manifest"] = os.path.join(kernel_trace_dir, "manifest.json")
+        json.dump(summary, f, indent=2, sort_keys=True)
         f.write("\n")
-    _info(rank, f"[flytrace] {trace_path}: {stats}")
+    kernel_output = f"; kernels: {os.path.join(kernel_trace_dir, 'manifest.json')}" if kernel_stats is not None else ""
+    _info(rank, f"[flytrace] {trace_path}: {stats}{kernel_output}")
     ms.shmem_barrier_all()
     return stats
 
@@ -1560,6 +1567,11 @@ def main():
         help="capture one eager MegaMoE launch as a wave-level Perfetto trace; works alongside --profile",
     )
     p.add_argument(
+        "--flytrace-per-kernel",
+        action="store_true",
+        help="also export one aligned JSON trace per compiled kernel",
+    )
+    p.add_argument(
         "--flytrace-max-blocks",
         type=int,
         default=128,
@@ -1634,6 +1646,8 @@ def main():
     args = p.parse_args()
     if args.stage1_only and not args.mega_only:
         p.error("--stage1-only requires --mega-only")
+    if args.flytrace_per_kernel and not args.flytrace:
+        p.error("--flytrace-per-kernel requires --flytrace")
     if args.flytrace_max_blocks <= 0 or args.flytrace_max_events <= 0:
         p.error("--flytrace-max-blocks and --flytrace-max-events must be positive")
 

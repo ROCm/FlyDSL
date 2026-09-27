@@ -21,7 +21,7 @@ from .._mlir import ir
 from ..compiler.kernel_function import CompilationContext
 from ..expr.meta import dsl_loc_tracing
 from ._flytrace_backend import get_trace_backend
-from ._flytrace_export import export_perfetto_json, save_raw_trace
+from ._flytrace_export import export_perfetto_json, export_perfetto_per_kernel, save_raw_trace
 from ._flytrace_schema import MAX_EVENTS
 from ._flytrace_schema import option as _option
 
@@ -215,7 +215,8 @@ class capture:
     default block selection is ``(0, 0, 0)``; use ``block=None`` with a finite
     ``max_blocks`` to capture a runtime-sized grid. ``mode='auto'`` chooses the
     compact static schedule when possible and otherwise records dynamic control
-    flow and payloads into a bounded per-wave buffer.
+    flow and payloads into a bounded per-wave buffer. ``per_kernel=True`` makes
+    an automatic path export write a directory of aligned kernel traces.
     """
 
     def __init__(
@@ -225,6 +226,7 @@ class capture:
         block=_DEFAULT_BLOCK,
         exclude=(),
         hardware=False,
+        per_kernel=False,
         mode="auto",
         max_events=65536,
         max_blocks=None,
@@ -237,8 +239,11 @@ class capture:
             raise ValueError("flytrace max_blocks must be a positive integer or None")
         if type(hardware) is not bool:
             raise TypeError("flytrace hardware must be a bool")
+        if type(per_kernel) is not bool:
+            raise TypeError("flytrace per_kernel must be a bool")
         blocks = "jit" if block is _DEFAULT_BLOCK else _normalize_blocks(block)
         self.path = path
+        self.per_kernel = per_kernel
         self.options = TraceOptions(
             "flytrace-v4",
             mode,
@@ -319,14 +324,17 @@ class capture:
         self._records[key] = (spec, buffer)
         return self.backend.buffer_pointer(buffer)
 
-    def decode(self):
+    def _decode_recordings(self):
         backend = self.backend
         backend.synchronize(self.device)
-        waves = []
-        for spec, buffer in self._records.values():
+        recordings = []
+        for recording, (spec, buffer) in enumerate(self._records.values()):
             words = backend.buffer_words(buffer)
-            waves.extend(backend.decode(spec, words))
-        return waves
+            recordings.append((recording, backend.decode(spec, words)))
+        return recordings
+
+    def decode(self):
+        return [wave for _, waves in self._decode_recordings() for wave in waves]
 
     def save(self, path):
         """Save absolute ticks and hardware identities for offline analysis."""
@@ -335,7 +343,27 @@ class capture:
         specs = [spec for spec, _ in self._records.values()]
         return save_raw_trace(waves, path, self.backend.raw_metadata(specs))
 
-    def export(self, path):
-        """Export a generic Perfetto-compatible JSON trace."""
+    def export_per_kernel(self, directory):
+        """Export one aligned Perfetto JSON file per compiled kernel."""
 
+        groups = []
+        for recording, waves in self._decode_recordings():
+            by_kernel = {}
+            for wave in waves:
+                by_kernel.setdefault(wave["kernel"], []).append(wave)
+            groups.extend(
+                {"recording": recording, "kernel": kernel, "waves": kernel_waves}
+                for kernel, kernel_waves in by_kernel.items()
+            )
+        return export_perfetto_per_kernel(groups, directory, self.backend.clock_hz)
+
+    def export(self, path, *, per_kernel=None):
+        """Export one combined trace, or one file per compiled kernel."""
+
+        if per_kernel is None:
+            per_kernel = self.per_kernel
+        if type(per_kernel) is not bool:
+            raise TypeError("flytrace export per_kernel must be a bool or None")
+        if per_kernel:
+            return self.export_per_kernel(path)
         return export_perfetto_json(self.decode(), path, self.backend.clock_hz)

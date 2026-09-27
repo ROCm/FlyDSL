@@ -15,9 +15,11 @@ runtime launch dimensions, selected block lists, and all-grid capture bounded by
 ``max_blocks``. The public layers are backend-independent; the current ROCm
 recorder supports gfx942/gfx950 and user-provided streams.
 
-Export with ``cap.export("trace.json")`` for Perfetto. Dynamic recorder overflow
-is non-fatal: export reports dropped records and adds a warning event. Tune the
-per-wave capacity with ``max_events``.
+Export with ``cap.export("trace.json")`` for one combined Perfetto timeline, or
+``cap.export_per_kernel("trace-directory")`` for aligned per-kernel files plus
+a manifest. ``capture(path, per_kernel=True)`` selects the latter on context
+exit. Dynamic recorder overflow is non-fatal: export reports dropped records
+and adds a warning event. Tune the per-wave capacity with ``max_events``.
 
 For simultaneous rocprofv3 ATT, capture(hardware=True).save(path) preserves
 absolute clocks and hardware identities; merge_att() produces a combined

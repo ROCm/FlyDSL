@@ -41,6 +41,25 @@ of waves and records plus any records dropped because `max_events` was reached.
 Overflow does not abort the workload and is also shown as a warning in the
 trace.
 
+One capture can contain several kernel launches. Export them into one shared
+timeline, or write one aligned trace per compiled kernel:
+
+```python
+with flytrace.capture() as cap:
+    launch_pipeline(...)  # May launch GEMM, attention, collectives, and more.
+
+cap.export("pipeline.json")
+cap.export_per_kernel("pipeline-kernels")
+```
+
+The per-kernel directory contains numbered JSON traces and `manifest.json`.
+Every file uses the same capture-wide clock origin, so timestamps can be
+compared across files. Different compiled modules that reuse a kernel symbol
+remain separate manifest entries. The equivalent automatic form is
+`flytrace.capture("pipeline-kernels", per_kernel=True)`; pass
+`per_kernel=False` to `export()` when a combined file is wanted from that same
+capture.
+
 Explicitly paired ranges can cross source-level scopes when the token remains
 available. Start and end payload forms must match:
 
@@ -91,10 +110,13 @@ forward per rank:
 ```bash
 torchrun --nproc_per_node=8 tests/kernels/test_mega_moe_v2.py \
   --mega-only --tokens 64 --skip-acc --flytrace \
+  --flytrace-per-kernel \
   --flytrace-max-blocks 128 --flytrace-max-events 8192 \
   --profile-dir /tmp/mega_flytrace
 ```
 
 Each rank writes `*_rankN_flytrace.json` and a matching
-`*_rankN_flytrace_summary.json`. Lower `max_blocks` or `max_events` when a full
-capture would use too much device memory; one capture is limited to 512 MiB.
+`*_rankN_flytrace_summary.json`. With `--flytrace-per-kernel`, it also writes a
+kernel trace directory and manifest. Lower `max_blocks` or `max_events` when a
+full capture would use too much device memory; one capture is limited to
+512 MiB.
