@@ -48,6 +48,7 @@ from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T, as_ir_value
+from flydsl.extension import flytrace
 from kernels.common import buffer_ops as bo
 from kernels.common.dpp_utils import update_dpp_i32
 from kernels.mla_moe_layer.config import (
@@ -113,6 +114,7 @@ CM_DEV = 16
 CM_SYS = 17
 POLL_MAX = 12  # mailbox specs polled per batch
 TL_COLS = 8  # timeline stamps per task: 5 phases + 3 free debug marks
+TRACE_PHASES = ("start", "hint", "ready", "computed", "publish", "debug5", "debug6", "debug7")
 
 
 def _align(n, a=256):
@@ -429,6 +431,7 @@ def build_indexed_mla_moe_kernel(
         rank: Int32,
         layer: Int32,
     ):
+        flytrace.push("glm5_mla_moe", layer)
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
         lane = tid % 64
@@ -1059,6 +1062,7 @@ def build_indexed_mla_moe_kernel(
             return (bid + (G - base[name])) & (G - 1)
 
         def stamp(name, t, which, lead=0):
+            flytrace.mark(f"{name}/{TRACE_PHASES[which]}", t)
             if const_expr(timeline):
                 if tid == lead:
                     now = fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
@@ -2026,6 +2030,8 @@ def build_indexed_mla_moe_kernel(
             peer_reduce("ffn", t, mb("a"), store_x, tile=DN_TILE)
             gpu.barrier()
             stamp("down", t, 4)
+
+        flytrace.pop()
 
     @flyc.jit
     def launch_indexed_mla_moe(

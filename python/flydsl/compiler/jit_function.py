@@ -1100,7 +1100,7 @@ def _resolve_jit_arg_type(arg, annotation):
     return constructor
 
 
-def _build_call_state(sig, args_tuple, func_exe):
+def _build_call_state(sig, args_tuple, func_exe, trace_spec=None):
     """Build a CallState for fast repeated dispatch.
 
     Resolves each parameter's JitArgument type using the same registry as
@@ -1140,6 +1140,14 @@ def _build_call_state(sig, args_tuple, func_exe):
     if not has_user_stream:
         slot_specs.append((-1, ctypes.c_void_p, None))
 
+    if trace_spec is not None:
+        from functools import partial
+
+        from ..extension._flytrace import TraceCallState, fill_buffer
+
+        slot_specs.append((-1, ctypes.c_uint64, partial(fill_buffer, trace_spec)))
+        streams = [i for i, p in enumerate(sig.parameters.values()) if getattr(p.annotation, "_is_stream_param", False)]
+        return TraceCallState(CallState(slot_specs, func_exe), trace_spec, streams)
     return CallState(slot_specs, func_exe)
 
 
@@ -1447,6 +1455,7 @@ class JitFunction:
                 sig,
                 args_tuple,
                 cached_func._get_func_exe(),
+                trace_spec=cached_func._trace_spec,
             )
             self._call_state_cache[cache_key] = state
             return state(args_tuple)
@@ -1501,6 +1510,9 @@ class JitFunction:
                             warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
                     has_user_stream = _ensure_stream_arg(jit_args)
                     ir_types = get_ir_types(jit_args)
+                    trace_options = effective_hints.get("flytrace")
+                    if trace_options is not None:
+                        ir_types.append(ir.IntegerType.get_signless(64))
                     loc = func_def_location(self.func, ctx)
 
                     log().info(f"jit_args={jit_args}")
@@ -1523,6 +1535,9 @@ class JitFunction:
 
                             with ir.InsertionPoint(entry_block):
                                 ir_args = list(func_op.regions[0].blocks[0].arguments)
+                                if trace_options is not None:
+                                    comp_ctx.trace_base = ir_args.pop()
+                                    comp_ctx.trace_spec = dict(options=trace_options, kernels=[], words=0)
                                 if not has_user_stream:
                                     comp_ctx.stream_arg = ir_args[-1]
                                 user_jit_args = jit_args[: len(param_names)]
@@ -1580,6 +1595,7 @@ class JitFunction:
                         post_load_processors=post_load_processors,
                         link_libs=link_libs,
                         uses_explicit_module=extern_linked,
+                        trace_spec=comp_ctx.trace_spec,
                     )
 
                     # Always keep a reference to the latest compilation result so
@@ -1607,6 +1623,7 @@ class JitFunction:
             sig,
             args_tuple,
             compiled_func._get_func_exe(),
+            trace_spec=compiled_func._trace_spec,
         )
         self._call_state_cache[cache_key] = state
         return state(args_tuple)
@@ -1704,7 +1721,7 @@ def _compile_impl(func, *args) -> Optional[CompiledFunction]:
 
     call_state = jf._call_state_cache.get(cache_key)
     if call_state is None:
-        call_state = _build_call_state(sig, args_tuple, artifact._get_func_exe())
+        call_state = _build_call_state(sig, args_tuple, artifact._get_func_exe(), trace_spec=artifact._trace_spec)
 
     return CompiledFunction(call_state, artifact)
 

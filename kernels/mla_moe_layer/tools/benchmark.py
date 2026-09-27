@@ -179,6 +179,40 @@ def _worker(rank, args, port):
         reset()
         torch.cuda.synchronize()
         dist.barrier()
+        if args.flytrace:
+            from flydsl.extension import flytrace
+
+            with flytrace.capture(
+                block=None,
+                mode="dynamic",
+                max_blocks=args.flytrace_max_blocks,
+                max_events=args.flytrace_max_events,
+            ) as capture:
+                run(0)
+            advance()
+            trace_dir = Path(args.trace_dir) / f"{args.moe_mode}-s{samples}" / f"rank{rank}"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = trace_dir / "flytrace.json"
+            stats = capture.export(trace_path)
+            (trace_dir / "flytrace_summary.json").write_text(
+                json.dumps(
+                    {
+                        **stats,
+                        "mode": args.moe_mode,
+                        "npes": args.npes,
+                        "rank": rank,
+                        "samples": samples,
+                        "trace": str(trace_path),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            torch.cuda.synchronize()
+            dist.barrier()
+            if rank == 0:
+                print(f"flytrace: {trace_path} {stats}", flush=True)
         if args.dump_outputs:
             target = Path(args.dump_outputs)
             target.mkdir(parents=True, exist_ok=True)
@@ -266,6 +300,9 @@ if __name__ == "__main__":
     parser.add_argument("--dump-outputs")
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--trace-dir", default="/root/glm5-perf-results/traces")
+    parser.add_argument("--flytrace", action="store_true", help="capture one eager launch as a Perfetto JSON trace")
+    parser.add_argument("--flytrace-max-blocks", type=int, default=256)
+    parser.add_argument("--flytrace-max-events", type=int, default=128)
     args = parser.parse_args()
     if args.backend == "tilert" and args.npes not in (1, 8):
         parser.error("TileRT's released whole-layer kernel only supports 1 or 8 peers")
@@ -275,6 +312,10 @@ if __name__ == "__main__":
         parser.error("TileRT's released whole-layer kernel only supports sample counts 1, 2, and 4")
     if args.trace and args.backend != "flydsl":
         parser.error("--trace is available for the FlyDSL backend")
+    if args.flytrace and args.backend != "flydsl":
+        parser.error("--flytrace is available for the FlyDSL backend")
+    if args.flytrace_max_blocks <= 0 or args.flytrace_max_events <= 0:
+        parser.error("--flytrace-max-blocks and --flytrace-max-events must be positive")
     if not 1 <= args.layers <= MAX_LAYERS_PER_STEP:
         parser.error(f"layers must be in [1, {MAX_LAYERS_PER_STEP}]")
     with socket.socket() as sock:

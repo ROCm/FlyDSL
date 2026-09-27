@@ -11,6 +11,7 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
+from flydsl.extension import flytrace
 from flydsl.runtime.device import get_rocm_arch
 from kernels.comm import communication_ops_utils as comm_ops
 from kernels.common.tensor_shim import _run_compiled
@@ -177,6 +178,8 @@ def compile_mega_moe_stage1(
         addr_in_idx: fx.Int64, addr_in_wts: fx.Int64, addr_in_sc: fx.Int64, addr_parity: fx.Int64,
         addr_expected: fx.Int64,
     ):
+        flytrace.push("mega_stage1")
+        flytrace.boundary("entry")
         tid = fx.thread_idx.x
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         a_buf = lds.pool
@@ -215,6 +218,8 @@ def compile_mega_moe_stage1(
         compact_owner = ticket == fx.Int32(0)
         compact_producer = (ticket > fx.Int32(0)) & (ticket <= fx.Int32(dispatch_blocks))
         producer_slot = ticket - fx.Int32(1)
+        flytrace.mark("ticket", fx.Int32(ticket))
+        flytrace.boundary("launch_sync")
 
         if compact_owner:
             next_parity_lane = fx.Int32(0)
@@ -273,6 +278,7 @@ def compile_mega_moe_stage1(
         payload_parity = _buffer_load(parity_rsrc, fx.Int32(0), fx.Int32, cache_modifier=_SC0_CACHE)
         payload_expected = _buffer_load(expected_rsrc, payload_parity, fx.Int32, cache_modifier=_SC0_CACHE)
 
+        flytrace.boundary("dispatch")
         if compact_owner:  # noqa: SIM102 - keep the device and compile-time branches separate.
             if const_expr(not direct_fixed_slot):
                 emit_dispatch_plan(
@@ -376,6 +382,7 @@ def compile_mega_moe_stage1(
             )
         os_rsrc = _make_buffer(out_scale, fx.Int8, max_size=False, num_records_bytes=os_nbytes)
 
+        flytrace.boundary("gemm1_setup")
         expert_of_flat, _do_scheduled_tile = build_fused_gemm1(
             x_tensor=x, w_rsrc=w_rsrc,
             sw_rsrc=sw_rsrc, sx_rsrc=sx_rsrc, out_rsrc=out_rsrc, os_rsrc=os_rsrc,
@@ -392,6 +399,7 @@ def compile_mega_moe_stage1(
             swiglu_limit=swiglu_limit,
         )
 
+        flytrace.boundary("wait_plan")
         if tid == fx.Int32(0):
             local_plan_ready = _buffer_load(disp_rsrc, fx.Int32(int(DispatchSlot.PLAN_READY)), fx.Int64)
             ready_index = payload_parity * fx.Int32(fz_npes) + fx.Int32(fz_rank)
@@ -425,6 +433,7 @@ def compile_mega_moe_stage1(
         work_scratch = fx.recast_iter(fx.Int32, a_buf.ptr)
         work_scratch_view = fx.make_view(work_scratch, fx.make_layout(1, 1))
         work_shard = ticket & fx.Int32(WORK_SHARDS - 1)
+        flytrace.boundary("work_loop")
         while consumer_active:
             if tid == fx.Int32(0):
                 local_work = comm_ops.atomic_add_agent(
@@ -445,8 +454,12 @@ def compile_mega_moe_stage1(
             if has_work != fx.Int32(0):
                 if const_expr(not direct_fixed_slot):
                     comm_ops.fence_system_acquire()
+                flytrace.push("gemm1_tile", work)
                 _do_scheduled_tile(work)
+                flytrace.pop()
             consumer_active = has_work != fx.Int32(0)
+        flytrace.end()
+        flytrace.pop()
 
     @flyc.jit
     def launch(
