@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Reusable Torch-side fusions for model-composed MLA + MoE layers."""
+"""Torch-side fusions used by Kimi-K3 layers."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from contextlib import contextmanager
 
 import torch
 
-from kernels.mla_moe_layer.config import EPS
+from kernels.common.fused_layer_config import EPS
 
 
 def rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:

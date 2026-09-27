@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Common AMD expression primitives for fused MLA + MoE kernels."""
+"""Common AMD expression primitives for fused model-layer kernels."""
 
 from __future__ import annotations
 

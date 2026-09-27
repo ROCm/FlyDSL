@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Model geometry, arithmetic formats, and storage-layout contracts."""
+"""Shared model geometry, arithmetic formats, and storage-layout contracts."""
 
 from __future__ import annotations
 

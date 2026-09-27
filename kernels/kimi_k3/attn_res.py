@@ -12,8 +12,8 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.mla_moe_layer.config import EPS, FP8_MAX
-from kernels.mla_moe_layer.kernel_common import exp, rcp, rsq, rsrc, xred, xshfl
+from kernels.common.fused_layer_config import EPS, FP8_MAX
+from kernels.common.fused_layer_ops import exp, rcp, rsq, rsrc, xred, xshfl
 
 _THREADS = 896
 _WAVE_SIZE = 64

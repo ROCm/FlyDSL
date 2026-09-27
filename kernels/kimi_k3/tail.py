@@ -12,9 +12,9 @@ import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.mla_moe_layer.config import EPS
-from kernels.mla_moe_layer.kernel_common import mxfp8_to_bf16x8, rsq, rsrc, uniform, xred
-from kernels.mla_moe_layer.kernel_layout import CM_DEV, CM_SYS, LAYER_SLOTS
+from kernels.common.fused_layer_config import EPS
+from kernels.common.fused_layer_layout import CM_DEV, CM_SYS, LAYER_SLOTS
+from kernels.common.fused_layer_ops import mxfp8_to_bf16x8, rsq, rsrc, uniform, xred
 
 _THREADS = 512
 _WAVE_SIZE = 64

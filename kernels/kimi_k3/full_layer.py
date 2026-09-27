@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import torch
 
-from kernels.mla_moe_layer.kimi_k3 import KimiK3KdaMoeLayer
+from kernels.kimi_k3.layer import KimiK3KdaMoeLayer
 
 
 class KimiK3KdaFullLayer(KimiK3KdaMoeLayer):

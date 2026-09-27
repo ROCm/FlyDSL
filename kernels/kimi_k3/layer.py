@@ -9,25 +9,26 @@ from contextlib import contextmanager
 
 import torch
 
-from kernels.common.mx_formats import quantize_mxfp8
-from kernels.kimi_k3.kda import KimiK3KdaAttention
-from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG, KvCacheLayout
-from kernels.mla_moe_layer.indexed_layer import KimiK3MlaLayer
-from kernels.mla_moe_layer.kimi_k3_attn_res import KimiK3AttnRes
-from kernels.mla_moe_layer.kimi_k3_tail import FusedKimiK3Tail
-from kernels.mla_moe_layer.mxfp8_linear import Mxfp8Linear
-from kernels.mla_moe_layer.packing import (
+from kernels.common.fused_layer_config import EPS, KIMI_K3_CONFIG, KvCacheLayout
+from kernels.common.fused_layer_packing import (
     pack_a16w4_scale,
     pack_a16w4_weight,
     pack_bf16,
     pack_mxfp8_scale,
     pack_mxfp8_weight,
 )
-from kernels.mla_moe_layer.reference import LayerWeights
-from kernels.mla_moe_layer.router import SigmoidTopkRouter
-from kernels.mla_moe_layer.router_projection import FusedRouterProjection
-from kernels.mla_moe_layer.symmetric_allreduce import SymmetricBf16Allreduce
-from kernels.mla_moe_layer.torch_fusions import (
+from kernels.common.fused_layer_reference import LayerWeights
+from kernels.common.mx_formats import quantize_mxfp8
+from kernels.kimi_k3.attn_res import KimiK3AttnRes
+from kernels.kimi_k3.kda import KimiK3KdaAttention
+from kernels.kimi_k3.mla import KimiK3MlaLayer
+from kernels.kimi_k3.moe import kimi_k3_mxfp4_gemm1, kimi_k3_mxfp4_gemm2
+from kernels.kimi_k3.mxfp8_linear import Mxfp8Linear
+from kernels.kimi_k3.router import SigmoidTopkRouter
+from kernels.kimi_k3.router_projection import FusedRouterProjection
+from kernels.kimi_k3.symmetric_allreduce import SymmetricBf16Allreduce
+from kernels.kimi_k3.tail import FusedKimiK3Tail
+from kernels.kimi_k3.torch_fusions import (
     CudaStageProfiler,
     compiled_attn_res_no_delta,
     compiled_attn_res_with_delta,
@@ -36,7 +37,6 @@ from kernels.mla_moe_layer.torch_fusions import (
     rmsnorm,
     situ,
 )
-from kernels.moe.moe_2stage_a16wmix import flydsl_a16w4_gemm1, flydsl_a16w4_gemm2
 from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
 
 _TP_SIZE = 8
@@ -472,47 +472,30 @@ class KimiK3MlaMoeLayer:
             self._route_and_sort(hidden_states, epoch_layer)
 
         with self._profile_stage("routed_gemm1"):
-            gemm1_kwargs = {"use_csv_config": True}
-            flydsl_a16w4_gemm1(
-                a_bf16=self.latent,
-                w1_u8=self.w_ug,
-                w1_scale_u8=self.s_ug,
+            kimi_k3_mxfp4_gemm1(
+                self.latent,
+                self.w_ug,
+                self.s_ug,
                 sorted_expert_ids=self.sorted_expert_ids,
-                cumsum_tensor=self.num_valid_ids,
-                m_indices=self.sorted_token_ids,
-                inter_sorted_bf16=self.inter_sorted,
-                n_tokens=self.S,
-                NE=self.config.n_experts,
-                D_HIDDEN=self.routed_hidden,
-                D_INTER=self.config.inter,
-                topk=self.config.top_k,
-                tile_m=_ROUTING_TILE_M,
-                act="situv2",
+                num_valid_ids=self.num_valid_ids,
+                sorted_token_ids=self.sorted_token_ids,
+                output=self.inter_sorted,
+                samples=self.S,
                 situ_beta=self.config.situ_beta,
                 situ_linear_beta=self.config.situ_linear_beta,
-                w_dtype="mxfp4",
-                **gemm1_kwargs,
             )
         with self._profile_stage("routed_gemm2"):
-            flydsl_a16w4_gemm2(
-                inter_sorted_bf16=self.inter_sorted,
-                w2_u8=self.w_dn,
-                w2_scale_u8=self.s_dn,
+            kimi_k3_mxfp4_gemm2(
+                self.inter_sorted,
+                self.w_dn,
+                self.s_dn,
                 sorted_expert_ids=self.sorted_expert_ids,
-                cumsum_tensor=self.num_valid_ids,
+                num_valid_ids=self.num_valid_ids,
                 sorted_token_ids=self.sorted_token_ids,
                 sorted_weights=self.sorted_weights,
-                flat_out=self.routed_partial,
-                M_logical=self.S,
+                output=self.routed_partial,
+                samples=self.S,
                 max_sorted=self.max_sorted,
-                NE=self.config.n_experts,
-                D_HIDDEN=self.routed_hidden,
-                D_INTER=self.config.inter,
-                topk=self.config.top_k,
-                tile_m=_ROUTING_TILE_M,
-                tile_k=128,
-                w_dtype="mxfp4",
-                use_csv_config=True,
             )
 
         if self.fused_tail is None:

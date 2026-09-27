@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Model-configured wrapper for the extensible indexed MLA + MoE kernel."""
+"""Kimi-K3 wrapper for the indexed MLA kernel."""
 
 from __future__ import annotations
 
 import torch
 
-from kernels.mla_moe_layer.config import (
+from kernels.common.fused_layer_config import (
     GLM5_CONFIG,
     HIDDEN,
     INTER,
@@ -25,15 +25,15 @@ from kernels.mla_moe_layer.config import (
     moe_format,
     validate_shard,
 )
-from kernels.mla_moe_layer.indexed_mla_moe_kernel import (
+from kernels.common.fused_layer_packing import pack_layer_weights
+from kernels.common.fused_layer_reference import LayerWeights
+from kernels.common.fused_layer_runtime import SymmetricPeerBuffer
+from kernels.kimi_k3.mla_kernel import (
     TL_COLS,
     build_indexed_mla_moe_kernel,
     layout,
     stage_tasks,
 )
-from kernels.mla_moe_layer.packing import pack_layer_weights
-from kernels.mla_moe_layer.reference import LayerWeights
-from kernels.mla_moe_layer.runtime import SymmetricPeerBuffer
 
 __all__ = ["Glm5IndexedMlaMoeBlock", "IndexedMlaMoeBlock", "KimiK3MlaLayer", "MoeMode"]
 

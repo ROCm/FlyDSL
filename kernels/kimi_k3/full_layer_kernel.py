@@ -19,8 +19,9 @@ from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
 from kernels.common.act import sigmoid_batch
-from kernels.mla_moe_layer.config import EPS, FP8_MAX, MAX_LAYERS_PER_STEP
-from kernels.mla_moe_layer.kernel_common import (
+from kernels.common.fused_layer_config import EPS, FP8_MAX, MAX_LAYERS_PER_STEP
+from kernels.common.fused_layer_layout import CM_DEV, CM_SYS
+from kernels.common.fused_layer_ops import (
     exp,
     mxfp4_to_bf16x8,
     mxfp8_to_bf16x8,
@@ -32,7 +33,6 @@ from kernels.mla_moe_layer.kernel_common import (
     xred,
     xshfl,
 )
-from kernels.mla_moe_layer.kernel_layout import CM_DEV, CM_SYS
 
 _BLOCKS = 256
 _THREADS = 512

@@ -20,6 +20,19 @@ import torch.multiprocessing as mp
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from kernels.common.fused_layer_config import (  # noqa: E402
+    EPS,
+    KIMI_K3_CONFIG,
+    MAX_LAYERS_PER_STEP,
+    MoeMode,
+)
+from kernels.common.fused_layer_reference import (  # noqa: E402
+    LayerWeights,
+    golden_kimi_k3_kda_attention,
+    golden_kimi_k3_kda_layer,
+    golden_kimi_k3_moe,
+    make_weights,
+)
 from kernels.common.mx_formats import (  # noqa: E402
     dequantize_mxfp8,
     quant_dequant_mxfp8,
@@ -28,21 +41,8 @@ from kernels.common.mx_formats import (  # noqa: E402
 from kernels.kimi_k3.full_layer import KimiK3KdaFullLayer  # noqa: E402
 from kernels.kimi_k3.full_layer_kernel import kda_full_layer_layout  # noqa: E402
 from kernels.kimi_k3.kda import KimiK3KdaAttention  # noqa: E402
-from kernels.mla_moe_layer.config import (  # noqa: E402
-    EPS,
-    KIMI_K3_CONFIG,
-    MAX_LAYERS_PER_STEP,
-    MoeMode,
-)
-from kernels.mla_moe_layer.kimi_k3 import KimiK3KdaMoeLayer  # noqa: E402
-from kernels.mla_moe_layer.reference import (  # noqa: E402
-    LayerWeights,
-    golden_kimi_k3_kda_attention,
-    golden_kimi_k3_kda_layer,
-    golden_kimi_k3_moe,
-    make_weights,
-)
-from kernels.mla_moe_layer.torch_fusions import situ  # noqa: E402
+from kernels.kimi_k3.layer import KimiK3KdaMoeLayer  # noqa: E402
+from kernels.kimi_k3.torch_fusions import situ  # noqa: E402
 
 
 def _allreduce_reference(value: torch.Tensor, world_size: int) -> torch.Tensor:

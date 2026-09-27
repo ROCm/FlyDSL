@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Fused low-token BF16 router projection and sigmoid top-k selection."""
+"""Kimi-K3 fused BF16 router projection and sigmoid top-k selection."""
 
 import functools
 
@@ -13,8 +13,8 @@ from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.mla_moe_layer.kernel_common import exp, rcp, rsrc, uniform, xshfl
-from kernels.mla_moe_layer.kernel_layout import CM_DEV, LAYER_SLOTS
+from kernels.common.fused_layer_layout import CM_DEV, LAYER_SLOTS
+from kernels.common.fused_layer_ops import exp, rcp, rsrc, uniform, xshfl
 
 _THREADS = 512
 _WAVE_SIZE = 64

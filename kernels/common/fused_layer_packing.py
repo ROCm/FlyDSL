@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Host-side weight packing for model-specific MLA + MoE launch wrappers."""
+"""Host-side weight packing for fused model-layer launch wrappers."""
 
 from __future__ import annotations
 
 import torch
 
-from kernels.mla_moe_layer.config import (
+from kernels.common.fused_layer_config import (
     GLM5_CONFIG,
     AttentionWeight,
     ExpertWeight,

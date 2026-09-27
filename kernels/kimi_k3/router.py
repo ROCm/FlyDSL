@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Reusable low-token sigmoid router selection kernels."""
+"""Kimi-K3 low-token sigmoid router selection kernels."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from flydsl.expr import range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int64, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.mla_moe_layer.kernel_common import exp, rcp, rsrc
+from kernels.common.fused_layer_ops import exp, rcp, rsrc
 
 WAVE_SIZE = 64
 

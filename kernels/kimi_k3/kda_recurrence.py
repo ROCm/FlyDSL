@@ -18,8 +18,8 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
 from kernels.common.act import sigmoid_batch
-from kernels.mla_moe_layer.config import EPS
-from kernels.mla_moe_layer.kernel_common import exp, rsq, rsrc, xshfl
+from kernels.common.fused_layer_config import EPS
+from kernels.common.fused_layer_ops import exp, rsq, rsrc, xshfl
 
 _HEADS = 12
 _HEAD_DIM = 128

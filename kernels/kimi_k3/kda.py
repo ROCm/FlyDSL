@@ -7,22 +7,22 @@ from __future__ import annotations
 
 import torch
 
-from kernels.common.mx_formats import quantize_mxfp8
-from kernels.gemm.gemm_a16w16_gfx950 import gemm_a16w16
-from kernels.kimi_k3.full_layer_kernel import (
-    build_kimi_k3_kda_full_layer_kernel,
-    kda_full_layer_scratch_nbytes,
-)
-from kernels.mla_moe_layer.config import KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP
-from kernels.mla_moe_layer.kda_recurrence import KimiK3KdaConvRecurrence
-from kernels.mla_moe_layer.packing import (
+from kernels.common.fused_layer_config import KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP
+from kernels.common.fused_layer_packing import (
     pack_bf16,
     pack_mxfp4,
     pack_mxfp8_scale,
     pack_mxfp8_weight,
 )
-from kernels.mla_moe_layer.reference import LayerWeights
-from kernels.mla_moe_layer.symmetric_allreduce import SymmetricBf16Allreduce
+from kernels.common.fused_layer_reference import LayerWeights
+from kernels.common.mx_formats import quantize_mxfp8
+from kernels.kimi_k3.full_layer_kernel import (
+    build_kimi_k3_kda_full_layer_kernel,
+    kda_full_layer_scratch_nbytes,
+)
+from kernels.kimi_k3.gemm_a16w16 import gemm_a16w16
+from kernels.kimi_k3.kda_recurrence import KimiK3KdaConvRecurrence
+from kernels.kimi_k3.symmetric_allreduce import SymmetricBf16Allreduce
 
 _TP_SIZE = 8
 _HEAD_DIM = 128

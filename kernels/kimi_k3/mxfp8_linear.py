@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Small-batch MXFP8 linear projection backed by the gfx950 preshuffle GEMM."""
+"""Kimi-K3 small-batch MXFP8 linear projection."""
 
 import functools
 
@@ -13,8 +13,8 @@ from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int64, ReductionOp, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.mla_moe_layer.kernel_common import rsrc
-from kernels.mla_moe_layer.packing import pack_mxfp8_scale, pack_mxfp8_weight
+from kernels.common.fused_layer_ops import rsrc
+from kernels.common.fused_layer_packing import pack_mxfp8_scale, pack_mxfp8_weight
 
 _GROUP = 32
 _QUANT_THREADS = 64

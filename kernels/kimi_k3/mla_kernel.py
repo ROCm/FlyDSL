@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Shared/reuse decode kernels in one persistent launch per rank.
+"""Kimi-K3 indexed MLA decode kernel in one persistent launch per rank.
 
 For GLM-5, one launch of ``grid = 256 CTAs x 512 threads`` (one CTA per MI355X
 CU) runs the whole layer body for this rank's TP shard::
@@ -53,7 +53,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
 from kernels.common import buffer_ops as bo
-from kernels.mla_moe_layer.config import (
+from kernels.common.fused_layer_config import (
     EPS,
     FP8_MAX,
     GLM5_CONFIG,
@@ -68,46 +68,7 @@ from kernels.mla_moe_layer.config import (
     as_layer_config,
     moe_format,
 )
-from kernels.mla_moe_layer.kernel_common import (
-    exp as _exp,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    f8_word as _f8_word,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    fp8_roundtrip as _fp8_roundtrip,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    fp8_to_bf16x8 as _fp8_to_bf16x8,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    rcp as _rcp,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    rsq as _rsq,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    rsrc as _rsrc,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    uniform as _uniform,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    uniform_f32 as _uniform_f32,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    wave_umax as _wave_umax,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    xred as _xred,
-)
-from kernels.mla_moe_layer.kernel_common import (
-    xshfl as _xshfl,
-)
-from kernels.mla_moe_layer.kernel_layout import (
+from kernels.common.fused_layer_layout import (
     BLOCKS,
     CM_DEV,
     CM_SYS,
@@ -128,6 +89,45 @@ from kernels.mla_moe_layer.kernel_layout import (
     dn_tile,
     layout,
     stage_tasks,
+)
+from kernels.common.fused_layer_ops import (
+    exp as _exp,
+)
+from kernels.common.fused_layer_ops import (
+    f8_word as _f8_word,
+)
+from kernels.common.fused_layer_ops import (
+    fp8_roundtrip as _fp8_roundtrip,
+)
+from kernels.common.fused_layer_ops import (
+    fp8_to_bf16x8 as _fp8_to_bf16x8,
+)
+from kernels.common.fused_layer_ops import (
+    mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
+)
+from kernels.common.fused_layer_ops import (
+    rcp as _rcp,
+)
+from kernels.common.fused_layer_ops import (
+    rsq as _rsq,
+)
+from kernels.common.fused_layer_ops import (
+    rsrc as _rsrc,
+)
+from kernels.common.fused_layer_ops import (
+    uniform as _uniform,
+)
+from kernels.common.fused_layer_ops import (
+    uniform_f32 as _uniform_f32,
+)
+from kernels.common.fused_layer_ops import (
+    wave_umax as _wave_umax,
+)
+from kernels.common.fused_layer_ops import (
+    xred as _xred,
+)
+from kernels.common.fused_layer_ops import (
+    xshfl as _xshfl,
 )
 
 

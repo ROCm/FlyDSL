@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Shared compile-time layouts and schedules for fused MLA + MoE kernels."""
+"""Shared compile-time layouts and schedules for fused model-layer kernels."""
 
 from __future__ import annotations
 
-from kernels.mla_moe_layer.config import (
+from kernels.common.fused_layer_config import (
     GLM5_CONFIG,
     MAX_LAYERS_PER_STEP,
     LayerConfig,

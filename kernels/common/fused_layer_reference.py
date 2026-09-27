@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Weights, layouts and Torch goldens for fused decode shards.
+"""Weights, layouts and Torch goldens for fused model-layer decode shards.
 
 One rank's TP shard of one layer. Attention matrices use either row-major FP8
 E4M3FN with FP32 block scales or BF16. Expert matrices use either block-scaled
@@ -16,8 +16,7 @@ from dataclasses import dataclass
 
 import torch
 
-from kernels.common.mx_formats import dequantize_mxfp4, quant_dequant_mxfp8, quantize_mxfp4
-from kernels.mla_moe_layer.config import (
+from kernels.common.fused_layer_config import (
     EPS,
     FP8_MAX,
     GLM5_CONFIG,
@@ -34,6 +33,7 @@ from kernels.mla_moe_layer.config import (
     as_moe_mode,
     moe_format,
 )
+from kernels.common.mx_formats import dequantize_mxfp4, quant_dequant_mxfp8, quantize_mxfp4
 
 
 # (name, rows, K, BK) of every attention matrix, rows given per local head count H.

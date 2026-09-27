@@ -29,10 +29,10 @@ _ARCH = str(get_rocm_arch() or "")
 if _ARCH != "gfx950":
     pytest.skip(f"GLM-5 MonoKernel requires gfx950, got {_ARCH}", allow_module_level=True)
 
+from kernels.common.fused_layer_config import KV_LORA, PE_DIM  # noqa: E402
+from kernels.common.fused_layer_reference import rope, rope_table  # noqa: E402
 from kernels.glm5_monokernel.layout import INDEX_DIM  # noqa: E402
 from kernels.glm5_monokernel.reference import golden_layer, golden_moe, indexer_golden, make_weights  # noqa: E402
-from kernels.mla_moe_layer.config import KV_LORA, PE_DIM  # noqa: E402
-from kernels.mla_moe_layer.reference import rope, rope_table  # noqa: E402
 
 MAX_SEQ = 4096
 TOL = {  # name -> (atol, rtol) on the fp32/bf16 intermediates

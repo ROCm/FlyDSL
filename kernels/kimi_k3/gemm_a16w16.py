@@ -10,9 +10,10 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr.typing import T
 from flydsl.runtime.device import SMEM_CAPACITY_MAP, get_rocm_arch
-
-from .gemm_a16w16_gfx950_utils import (
+from kernels.common import buffer_ops as bo
+from kernels.gemm.gemm_a16w16_gfx950_utils import (
     GFX950_DMA_BYTES,
     GFX950_WAVE_SIZE,
     SPLIT_K_SEMAPHORE_MAX_LEN,
@@ -30,6 +31,8 @@ from .gemm_a16w16_gfx950_utils import (
 GEMM_A16W16_DTYPE_FP32 = 1
 GEMM_A16W16_DTYPE_BF16 = 2
 GEMM_A16W16_DTYPE_FP16 = 3
+_CM_DEV = 16
+_CM_SYS = 17
 
 
 @fx.struct
@@ -60,6 +63,10 @@ class GemmA16W16Gfx950Param:
     block_threads: fx.Constexpr[int]
     ldg_a_iters: fx.Constexpr[int]
     ldg_b_iters: fx.Constexpr[int]
+    fuse_symmetric_allreduce: fx.Constexpr[bool]
+    allreduce_npes: fx.Constexpr[int]
+    allreduce_max_pairs: fx.Constexpr[int]
+    allreduce_layer_slots: fx.Constexpr[int]
 
 
 @dataclass(slots=True, kw_only=True, eq=False)
@@ -103,6 +110,10 @@ def make_gemm_a16w16_gfx950_param(
     a_is_transposed: bool = False,
     b_is_transposed: bool = True,
     has_bias: bool = False,
+    fuse_symmetric_allreduce: bool = False,
+    allreduce_npes: int = 0,
+    allreduce_max_pairs: int = 0,
+    allreduce_layer_slots: int = 0,
     mma_m: int = 16,
     mma_n: int = 16,
     mma_k: int = 32,
@@ -123,6 +134,20 @@ def make_gemm_a16w16_gfx950_param(
         raise ValueError("the workgroup cannot contain more than 16 waves")
     if group_m < 0:
         raise ValueError("group_m must be non-negative")
+    if fuse_symmetric_allreduce:
+        if in_dtype_id != GEMM_A16W16_DTYPE_BF16 or out_dtype_id != GEMM_A16W16_DTYPE_BF16:
+            raise ValueError("the fused symmetric all-reduce requires BF16 input and output")
+        if split_k != 1 or k_waves != 1 or has_bias or use_half_tile_interleaved:
+            raise ValueError(
+                "the fused symmetric all-reduce requires split_k=1, k_waves=1, " "no bias, and the full-tile kernel"
+            )
+        if allreduce_npes not in {2, 4, 8}:
+            raise ValueError("allreduce_npes must be one of {2, 4, 8}")
+        if allreduce_max_pairs <= 0 or allreduce_layer_slots <= 0:
+            raise ValueError("allreduce_max_pairs and allreduce_layer_slots must be positive")
+        waves = m_waves * n_waves
+        if waves > allreduce_npes or allreduce_npes % waves:
+            raise ValueError("the fused symmetric all-reduce requires npes divisible by workgroup waves")
     in_dbytes = 2  # Shared C remains in the 16-bit input dtype.
     out_dbytes = 4 if out_dtype_id == GEMM_A16W16_DTYPE_FP32 else 2
     block_threads = m_waves * n_waves * k_waves * GFX950_WAVE_SIZE
@@ -264,6 +289,10 @@ def make_gemm_a16w16_gfx950_param(
         mma_m=mma_m,
         mma_n=mma_n,
         mma_k=mma_k,
+        fuse_symmetric_allreduce=fuse_symmetric_allreduce,
+        allreduce_npes=allreduce_npes,
+        allreduce_max_pairs=allreduce_max_pairs,
+        allreduce_layer_slots=allreduce_layer_slots,
     )
 
 
@@ -279,6 +308,8 @@ def make_gemm_a16w16_gfx950_kernel_name(param: GemmA16W16Gfx950Param):
     b_layout = "t" if param.b_is_transposed else "n"
     name += f"_l{a_layout}{b_layout}"
     name += "_phti" if param.use_half_tile_interleaved else "_pft"
+    if param.fuse_symmetric_allreduce:
+        name += f"_sar{param.allreduce_npes}"
     return name
 
 
@@ -454,6 +485,11 @@ def gemm_a16w16_gfx950_kernel(
     working_k: fx.Int32,
     a_leading_stride: fx.Int32,
     b_leading_stride: fx.Int32,
+    symmetric: fx.Int64,
+    peers: fx.Int64,
+    step: fx.Int64,
+    rank: fx.Int32,
+    layer: fx.Int32,
     tiled_mma: fx.TiledMma,
     param: GemmA16W16Gfx950Param,
 ):
@@ -703,36 +739,132 @@ def gemm_a16w16_gfx950_kernel(
     else:
         gpu.barrier()
 
-    cshuffle_r2g_x_threads = block_n // cshuffle_r2g_vec_size
-    cshuffle_vectors = block_m * block_n // cshuffle_r2g_vec_size
-    cshuffle_iters = (cshuffle_vectors + block_threads - 1) // block_threads
-    for i in range_constexpr(cshuffle_iters):
-        vector_idx = block_threads * i + tid
-        if vector_idx < cshuffle_vectors:
-            local_row = vector_idx // cshuffle_r2g_x_threads
-            local_col = vector_idx % cshuffle_r2g_x_threads * cshuffle_r2g_vec_size
-            global_row = block_m_offset + local_row
-            global_col = block_n_offset + local_col
-            if (global_row < m) and (global_col < n):
-                c_vec = fx.ptr_load(
-                    smem_c + local_row * block_n + local_col,
-                    result_type=fx.Vector.make_type(cshuffle_r2g_vec_size, elem_dtype),
-                )
-                for k_slice in range_constexpr(1, k_waves):
-                    peer_c_vec = fx.ptr_load(
-                        smem_c + k_slice * block_m * block_n + local_row * block_n + local_col,
+    if const_expr(param.fuse_symmetric_allreduce):
+        wave = tid // GFX950_WAVE_SIZE
+        lane = tid % GFX950_WAVE_SIZE
+        pairs_per_row = n // 2
+        tile_pairs_per_row = block_n // 2
+        tile_pairs = block_m * tile_pairs_per_row
+        pair_rounds = (tile_pairs + block_threads - 1) // block_threads
+        send_rounds = (tile_pairs + GFX950_WAVE_SIZE - 1) // GFX950_WAVE_SIZE
+        peer_rounds = param.allreduce_npes // (block_threads // GFX950_WAVE_SIZE)
+        slot_bytes = param.allreduce_npes * param.allreduce_max_pairs * 8
+
+        step_rsrc = bo.create_buffer_resource_from_addr(step)
+        peers_rsrc = bo.create_buffer_resource_from_addr(peers)
+        step_word = bo.buffer_load(step_rsrc, 0, vec_width=1, dtype=T.i32)
+        step_value = fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(step_word).ir_value()))
+        tag = step_value * param.allreduce_layer_slots + layer + 1
+        slot = (step_value * param.allreduce_layer_slots + layer) & 1
+        base = fx.Int64(slot) * fx.Int64(slot_bytes)
+
+        for peer_round in range_constexpr(peer_rounds):
+            peer = wave + peer_round * (block_threads // GFX950_WAVE_SIZE)
+            peer_words = fx.Vector(bo.buffer_load(peers_rsrc, peer * 2, vec_width=2, dtype=T.i32))
+            peer_lo = fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(peer_words[0]).ir_value()))
+            peer_hi = fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(peer_words[1]).ir_value()))
+            peer_base = (fx.Int64(peer_hi) << 32) | fx.Int64(fx.Uint32(peer_lo))
+            peer_rsrc = bo.create_buffer_resource_from_addr(peer_base + base)
+            for send_round in range_constexpr(send_rounds):
+                local_pair = lane + send_round * GFX950_WAVE_SIZE
+                if local_pair < tile_pairs:
+                    local_row = local_pair // tile_pairs_per_row
+                    local_col_pair = local_pair % tile_pairs_per_row
+                    global_row = block_m_offset + local_row
+                    global_col_pair = block_n_offset // 2 + local_col_pair
+                    if (global_row < m) and (global_col_pair < pairs_per_row):
+                        value = fx.ptr_load(
+                            smem_c + local_row * block_n + local_col_pair * 2,
+                            result_type=fx.Vector.make_type(2, elem_dtype),
+                        ).bitcast(fx.Int32)[0]
+                        global_pair = global_row * pairs_per_row + global_col_pair
+                        mailbox = rank * param.allreduce_max_pairs + global_pair
+                        bo.buffer_store(
+                            fx.Vector.from_elements([value, tag], fx.Int32),
+                            peer_rsrc,
+                            mailbox * 2,
+                            cache_modifier=_CM_SYS,
+                        )
+        gpu.barrier()
+
+        local_rsrc = bo.create_buffer_resource_from_addr(symmetric + base)
+        output_rsrc = bo.create_buffer_resource(out, max_size=True)
+        for pair_round in range_constexpr(pair_rounds):
+            local_pair = tid + pair_round * block_threads
+            if local_pair < tile_pairs:
+                local_row = local_pair // tile_pairs_per_row
+                local_col_pair = local_pair % tile_pairs_per_row
+                global_row = block_m_offset + local_row
+                global_col_pair = block_n_offset // 2 + local_col_pair
+                if (global_row < m) and (global_col_pair < pairs_per_row):
+                    global_pair = global_row * pairs_per_row + global_col_pair
+
+                    def load_all():
+                        words = []
+                        for source_rank in range_constexpr(param.allreduce_npes):
+                            mailbox = source_rank * param.allreduce_max_pairs + global_pair
+                            value_tag = fx.Vector(
+                                bo.buffer_load(
+                                    local_rsrc,
+                                    mailbox * 2,
+                                    vec_width=2,
+                                    dtype=T.i32,
+                                    cache_modifier=_CM_DEV,
+                                )
+                            )
+                            words += [value_tag[0], value_tag[1]]
+                        return fx.Vector.from_elements(words, fx.Int32)
+
+                    values = load_all()
+                    pending = values[1] != tag
+                    for source_rank in range_constexpr(1, param.allreduce_npes):
+                        pending = pending | (values[source_rank * 2 + 1] != tag)
+                    while pending:
+                        rocdl.s_nop(0)
+                        values = load_all()
+                        pending = values[1] != tag
+                        for source_rank in range_constexpr(1, param.allreduce_npes):
+                            pending = pending | (values[source_rank * 2 + 1] != tag)
+
+                    sum_lo = fx.Float32(0.0)
+                    sum_hi = fx.Float32(0.0)
+                    for source_rank in range_constexpr(param.allreduce_npes):
+                        word = values[source_rank * 2]
+                        sum_lo = sum_lo + (word << 16).bitcast(fx.Float32)
+                        sum_hi = sum_hi + (word & fx.Int32(-65536)).bitcast(fx.Float32)
+                    packed = fx.Vector.from_elements([sum_lo, sum_hi], fx.Float32).to(fx.BFloat16).bitcast(fx.Int32)
+                    bo.buffer_store(packed[0], output_rsrc, global_pair, cache_modifier=_CM_DEV)
+    else:
+        cshuffle_r2g_x_threads = block_n // cshuffle_r2g_vec_size
+        cshuffle_vectors = block_m * block_n // cshuffle_r2g_vec_size
+        cshuffle_iters = (cshuffle_vectors + block_threads - 1) // block_threads
+        for i in range_constexpr(cshuffle_iters):
+            vector_idx = block_threads * i + tid
+            if vector_idx < cshuffle_vectors:
+                local_row = vector_idx // cshuffle_r2g_x_threads
+                local_col = vector_idx % cshuffle_r2g_x_threads * cshuffle_r2g_vec_size
+                global_row = block_m_offset + local_row
+                global_col = block_n_offset + local_col
+                if (global_row < m) and (global_col < n):
+                    c_vec = fx.ptr_load(
+                        smem_c + local_row * block_n + local_col,
                         result_type=fx.Vector.make_type(cshuffle_r2g_vec_size, elem_dtype),
                     )
-                    c_vec = c_vec + peer_c_vec
-                global_offset = global_row * n + global_col
-                write_cshuffle_vec_to_global(
-                    out,
-                    out_buf,
-                    global_offset,
-                    c_vec,
-                    is_split_k,
-                    param.out_dtype_id == GEMM_A16W16_DTYPE_FP32,
-                )
+                    for k_slice in range_constexpr(1, k_waves):
+                        peer_c_vec = fx.ptr_load(
+                            smem_c + k_slice * block_m * block_n + local_row * block_n + local_col,
+                            result_type=fx.Vector.make_type(cshuffle_r2g_vec_size, elem_dtype),
+                        )
+                        c_vec = c_vec + peer_c_vec
+                    global_offset = global_row * n + global_col
+                    write_cshuffle_vec_to_global(
+                        out,
+                        out_buf,
+                        global_offset,
+                        c_vec,
+                        is_split_k,
+                        param.out_dtype_id == GEMM_A16W16_DTYPE_FP32,
+                    )
     if const_expr(is_split_k):
         splitk_protocol.finish_split(split_k)
 
@@ -752,6 +884,11 @@ def gemm_a16w16_hti_gfx950_kernel(
     working_k: fx.Int32,
     a_leading_stride: fx.Int32,
     b_leading_stride: fx.Int32,
+    symmetric: fx.Int64,
+    peers: fx.Int64,
+    step: fx.Int64,
+    rank: fx.Int32,
+    layer: fx.Int32,
     tiled_mma: fx.TiledMma,
     param: GemmA16W16Gfx950Param,
 ):
@@ -1157,6 +1294,11 @@ def gemm_a16w16_gfx950(
     semaphore: fx.Tensor,
     signal: fx.Tensor,
     split_k: fx.Int32,
+    symmetric: fx.Int64,
+    peers: fx.Int64,
+    step: fx.Int64,
+    rank: fx.Int32,
+    layer: fx.Int32,
     param: GemmA16W16Gfx950Param,
     stream: fx.Stream = fx.Stream(None),
 ):
@@ -1207,6 +1349,11 @@ def gemm_a16w16_gfx950(
         working_k,
         a_leading_stride,
         b_leading_stride,
+        symmetric,
+        peers,
+        step,
+        rank,
+        layer,
         tiled_mma,
         param,
     ).launch(
@@ -1246,6 +1393,8 @@ def make_gemm_a16w16_param_and_validate(m, n, k, kwargs):
             or result.block_m * result.block_n % c_elements_per_iteration != 0
         ):
             return None
+    if result.fuse_symmetric_allreduce and (n % 2 or m * n // 2 > result.allreduce_max_pairs):
+        return None
     return result
 
 
@@ -1305,6 +1454,7 @@ def gemm_a16w16(
     stream: Optional[torch.cuda.Stream] = None,
     layout: str = "nt",
     out_dtype: Optional[torch.dtype] = None,
+    symmetric_allreduce: Optional[dict[str, int]] = None,
 ) -> torch.Tensor:
     """Compute C[M, N] = A[M, K] @ B[K, N].
 
@@ -1314,6 +1464,8 @@ def gemm_a16w16(
     Set ``user_kwargs["split_k"]`` above 1 to atomically reduce K partitions.
     Set ``user_kwargs["k_waves"]`` above 1 for full-tile workgroup-local slice-K.
     ``out_dtype`` may be the input dtype or ``torch.float32``.
+    ``symmetric_allreduce`` enables the internal tagged-mailbox epilogue used by
+    low-token TP projections; its pointers must remain graph-stable.
     """
     if stream is None:
         stream = torch.cuda.current_stream()
@@ -1412,6 +1564,27 @@ def gemm_a16w16(
     }
 
     kwargs.update(user_kwargs)
+    kwargs["fuse_symmetric_allreduce"] = symmetric_allreduce is not None
+    if symmetric_allreduce is None:
+        kwargs["allreduce_npes"] = 0
+        kwargs["allreduce_max_pairs"] = 0
+        kwargs["allreduce_layer_slots"] = 0
+        symmetric = peers = step = rank = layer = 0
+    else:
+        kwargs["allreduce_npes"] = int(symmetric_allreduce["npes"])
+        kwargs["allreduce_max_pairs"] = int(symmetric_allreduce["max_pairs"])
+        kwargs["allreduce_layer_slots"] = int(symmetric_allreduce["layer_slots"])
+        symmetric = int(symmetric_allreduce["symmetric"])
+        peers = int(symmetric_allreduce["peers"])
+        step = int(symmetric_allreduce["step"])
+        rank = int(symmetric_allreduce["rank"])
+        layer = int(symmetric_allreduce["layer"])
+        if symmetric <= 0 or peers <= 0 or step <= 0:
+            raise ValueError("symmetric all-reduce pointers must be positive")
+        if not 0 <= rank < kwargs["allreduce_npes"]:
+            raise ValueError("symmetric all-reduce rank is out of range")
+        if not 0 <= layer < kwargs["allreduce_layer_slots"]:
+            raise ValueError("symmetric all-reduce layer is out of range")
     kwargs["a_is_transposed"] = a_is_transposed
     kwargs["b_is_transposed"] = b_is_transposed
     kwargs["in_dtype_id"] = GEMM_A16W16_DTYPE_FP16 if a.dtype is torch.float16 else GEMM_A16W16_DTYPE_BF16
@@ -1439,6 +1612,11 @@ def gemm_a16w16(
         semaphore,
         signal,
         split_k,
+        symmetric,
+        peers,
+        step,
+        rank,
+        layer,
         param,
         stream,
     )

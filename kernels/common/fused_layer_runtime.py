@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Owned HIP IPC peer memory used by persistent multi-GPU kernels."""
+"""Owned HIP IPC peer memory used by fused multi-GPU kernels."""
 
 from __future__ import annotations
 

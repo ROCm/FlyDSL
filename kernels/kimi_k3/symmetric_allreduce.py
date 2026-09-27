@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Small graph-safe BF16 all-reduce using tagged symmetric peer mailboxes."""
+"""Kimi-K3 graph-safe BF16 all-reduce using tagged symmetric peer mailboxes."""
 
 import torch
 
@@ -10,15 +10,15 @@ import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.mla_moe_layer.config import EPS
-from kernels.mla_moe_layer.kernel_common import rsq, rsrc, uniform, xred
-from kernels.mla_moe_layer.kernel_layout import (
+from kernels.common.fused_layer_config import EPS
+from kernels.common.fused_layer_layout import (
     CM_DEV,
     CM_SYS,
     LAYER_SLOTS,
     symmetric_allreduce_nbytes,
 )
-from kernels.mla_moe_layer.runtime import SymmetricPeerBuffer
+from kernels.common.fused_layer_ops import rsq, rsrc, uniform, xred
+from kernels.common.fused_layer_runtime import SymmetricPeerBuffer
 
 THREADS = 512
 WAVE_SIZE = 64
