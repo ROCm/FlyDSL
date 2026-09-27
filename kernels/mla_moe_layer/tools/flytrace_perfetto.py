@@ -8,7 +8,8 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-_STAGE_ORDER = ("qkv_a", "cache", "q_b", "uk", "split", "uv", "o", "router", "ug", "down")
+_STAGE_ORDER = ("qkv_a", "cache", "q_b", "uk", "split", "uv", "o", "router", "gating", "ug", "down")
+_SLICE_PREFIX = "FlyDSL · "
 
 # Stable Perfetto proto fields used below. Keeping this writer dependency-free
 # avoids requiring the full Perfetto protobuf package in benchmark environments.
@@ -29,6 +30,12 @@ _TYPE_SLICE_END = 2
 _TYPE_INSTANT = 3
 _CHILD_ORDER_LEXICOGRAPHIC = 1
 _CHILD_ORDER_EXPLICIT = 3
+
+
+def _slice_name(name: str) -> str:
+    # Perfetto derives slice colors from display names. This namespace gives
+    # FlyDSL traces a stable project-specific palette.
+    return f"{_SLICE_PREFIX}{name}"
 
 
 def _varint(value: int) -> bytes:
@@ -95,7 +102,7 @@ def _track_event(
     event = (
         _uint(_EVENT_TYPE, kind)
         + _uint(_EVENT_TRACK_UUID, track_uuid)
-        + _text(_EVENT_CATEGORY, "flytrace")
+        + _text(_EVENT_CATEGORY, "flydsl.glm5")
         + _text(_EVENT_NAME, name)
     )
     for key, value in (annotations or {}).items():
@@ -110,6 +117,14 @@ def _track_event(
 
 def _timestamp_ns(event: dict) -> int:
     return round(event["ts"] * 1000)
+
+
+def _range_ns(event: dict) -> tuple[int, int]:
+    start_ns = _timestamp_ns(event)
+    end_ns = round((event["ts"] + event["dur"]) * 1000)
+    if end_ns < start_ns:
+        raise ValueError(f"negative flytrace range: {event.get('name', '<unnamed>')}")
+    return start_ns, end_ns
 
 
 class _TraceBuilder:
@@ -257,8 +272,10 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
         raise ValueError("flytrace traceEvents must be a list")
     thread_names: dict[int, str] = {}
     wave_events: dict[int, list[dict]] = defaultdict(list)
+    wave_ranges: dict[int, list[dict]] = defaultdict(list)
     outer_ranges: dict[int, dict] = {}
     stage_events: dict[str, list[dict]] = defaultdict(list)
+    stage_ranges: dict[str, list[dict]] = defaultdict(list)
     for event in source_events:
         if event.get("ph") == "M" and event.get("name") == "thread_name":
             thread_names[event["tid"]] = event["args"]["name"]
@@ -267,12 +284,17 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
             stage, separator, _ = event.get("name", "").partition("/")
             if separator:
                 stage_events[stage].append(event)
-        elif event.get("ph") == "X" and event.get("name") == "glm5_mla_moe":
-            outer_ranges[event["tid"]] = event
+        elif event.get("ph") == "X":
+            if event.get("name") == "glm5_mla_moe":
+                outer_ranges[event["tid"]] = event
+            else:
+                wave_ranges[event["tid"]].append(event)
+                stage_ranges[event.get("name", "range")].append(event)
 
-    if not wave_events:
+    trace_tids = set(wave_events) | set(wave_ranges)
+    if not trace_tids:
         raise ValueError("flytrace contains no wave events")
-    missing_outer = sorted(set(wave_events) - set(outer_ranges))
+    missing_outer = sorted(trace_tids - set(outer_ranges))
     if missing_outer:
         raise ValueError(f"flytrace waves are missing glm5_mla_moe ranges: {missing_outer[:8]}")
 
@@ -295,27 +317,30 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
         "Stage Breakdown", parent=layer, child_ordering=_CHILD_ORDER_EXPLICIT, sibling_order=0
     )
 
-    ordered_stages = [stage for stage in _STAGE_ORDER if stage in stage_events]
-    ordered_stages.extend(sorted(set(stage_events) - set(ordered_stages)))
+    present_stages = set(stage_events) | set(stage_ranges)
+    ordered_stages = [stage for stage in _STAGE_ORDER if stage in present_stages]
+    ordered_stages.extend(sorted(present_stages - set(ordered_stages)))
     for stage_index, stage in enumerate(ordered_stages):
         events = stage_events[stage]
+        ranges = stage_ranges[stage]
         starts = [event for event in events if event["name"].endswith("/start")] or events
         ends = [event for event in events if event["name"].endswith("/publish")] or events
-        start_ns = min(_timestamp_ns(event) for event in starts)
-        end_ns = max(_timestamp_ns(event) for event in ends)
-        payloads = [event.get("args", {}).get("payload") for event in events]
+        range_bounds = [_range_ns(event) for event in ranges]
+        start_ns = min([_timestamp_ns(event) for event in starts] + [start for start, _ in range_bounds])
+        end_ns = max([_timestamp_ns(event) for event in ends] + [end for _, end in range_bounds])
+        payloads = [event.get("args", {}).get("payload") for event in events + ranges]
         payloads = [payload for payload in payloads if payload is not None]
-        annotations: dict[str, int | str] = {"events": len(events)}
+        annotations: dict[str, int | str] = {"events": len(events) + len(ranges)}
         if payloads:
             annotations.update(payload_min=min(payloads), payload_max=max(payloads))
         track = builder.track(stage, parent=stage_parent, sibling_order=stage_index)
-        builder.slice(track, stage, start_ns, end_ns, depth=1, annotations=annotations)
+        builder.slice(track, _slice_name(stage), start_ns, end_ns, depth=1, annotations=annotations)
 
     grid_tracks: dict[str, int] = {}
     block_tracks: dict[tuple[str, str], int] = {}
     block_order: dict[str, int] = defaultdict(int)
     grid_outer: dict[str, tuple[int, int, int]] = {}
-    for tid in sorted(wave_events):
+    for tid in sorted(trace_tids):
         kernel, block_name, wave_name, wave_number = _wave_identity(thread_names.get(tid, ""), tid)
         if kernel not in grid_tracks:
             grid_tracks[kernel] = builder.track(
@@ -344,11 +369,10 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
             "StackedRanges", parent=wave, child_ordering=_CHILD_ORDER_LEXICOGRAPHIC, sibling_order=100
         )
         outer = outer_ranges[tid]
-        outer_start = _timestamp_ns(outer)
-        outer_end = round((outer["ts"] + outer["dur"]) * 1000)
+        outer_start, outer_end = _range_ns(outer)
         builder.slice(
             stacked,
-            "kernel_e2e",
+            _slice_name("kernel_e2e"),
             outer_start,
             outer_end,
             depth=1,
@@ -369,16 +393,22 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
             payload = first.get("args", {}).get("payload")
             annotations = {} if payload is None else {"task": payload}
             if not separator or len(group) == 1:
-                builder.instant(stacked, first.get("name", "mark"), first_ns, depth=2, annotations=annotations)
+                builder.instant(
+                    stacked,
+                    _slice_name(first.get("name", "mark")),
+                    first_ns,
+                    depth=2,
+                    annotations=annotations,
+                )
                 continue
             task_name = f"{stage}[{payload}]" if payload is not None else stage
-            builder.slice(stacked, task_name, first_ns, last_ns, depth=2, annotations=annotations)
+            builder.slice(stacked, _slice_name(task_name), first_ns, last_ns, depth=2, annotations=annotations)
             previous_phase = first_phase
             for left, right in zip(group, group[1:]):
                 _, _, right_phase = right["name"].partition("/")
                 builder.slice(
                     stacked,
-                    f"{previous_phase} -> {right_phase}",
+                    _slice_name(f"{previous_phase} → {right_phase}"),
                     _timestamp_ns(left),
                     _timestamp_ns(right),
                     depth=3,
@@ -386,14 +416,29 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
                 )
                 previous_phase = right_phase
 
+        for event in sorted(wave_ranges[tid], key=_timestamp_ns):
+            start_ns, end_ns = _range_ns(event)
+            name = event.get("name", "range")
+            payload = event.get("args", {}).get("payload")
+            display_name = f"{name}[sample={payload}]" if payload is not None else name
+            annotations = {} if payload is None else {"sample": payload}
+            builder.slice(
+                stacked,
+                _slice_name(display_name),
+                start_ns,
+                end_ns,
+                depth=4,
+                annotations=annotations,
+            )
+
     for kernel, (start_ns, end_ns, track) in grid_outer.items():
         builder.slice(
             track,
-            f"glm5_mla_moe layer={layer_number}",
+            _slice_name(f"glm5_mla_moe layer={layer_number}"),
             start_ns,
             end_ns,
             depth=1,
-            annotations={"rank": rank, "waves": len(wave_events), "kernel": kernel},
+            annotations={"rank": rank, "waves": len(trace_tids), "kernel": kernel},
         )
 
     builder.write(target)

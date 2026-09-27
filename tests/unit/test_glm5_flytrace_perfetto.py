@@ -58,6 +58,7 @@ def _synthetic_trace():
                 args=dict(name="indexed_mla_moe_kernel_0 Block (0, 0, 0) / wave 0"),
             ),
             *marks,
+            dict(ph="X", name="gating", pid=1, tid=1, ts=1.25, dur=0.25, args=dict(payload=0)),
             dict(ph="X", name="glm5_mla_moe", pid=1, tid=1, ts=0.5, dur=5.0, args=dict(payload=3)),
         ]
     )
@@ -69,7 +70,7 @@ def test_hierarchical_pftrace_has_balanced_nested_slices(tmp_path):
     source.write_text(json.dumps(_synthetic_trace()))
 
     stats = export_hierarchical_pftrace(source, target, rank=2)
-    assert stats == {"pftrace_tracks": 9, "pftrace_slices": 7, "pftrace_instants": 0}
+    assert stats == {"pftrace_tracks": 10, "pftrace_slices": 9, "pftrace_instants": 0}
 
     packets = [value for field, value in _fields(gzip.open(target, "rb").read()) if field == 1]
     descriptors = []
@@ -96,12 +97,15 @@ def test_hierarchical_pftrace_has_balanced_nested_slices(tmp_path):
     assert descriptor_by_name["GLM5 Layer 3"][1] == descriptor_by_name["Rank 2"][0]
     assert descriptor_by_name["Stage Breakdown"][1] == descriptor_by_name["GLM5 Layer 3"][0]
     assert descriptor_by_name["qkv_a"][1] == descriptor_by_name["Stage Breakdown"][0]
+    assert descriptor_by_name["gating"][1] == descriptor_by_name["Stage Breakdown"][0]
     assert descriptor_by_name["Block (0, 0, 0)"][1] == descriptor_by_name["indexed_mla_moe_kernel_0"][0]
     assert descriptor_by_name["StackedRanges"][1] == descriptor_by_name["Wave00"][0]
-    assert event_types == {1: 7, 2: 7}
-    assert event_names["qkv_a[7]"] == 4  # Two distinct tasks reuse the same payload.
-    assert event_names["start -> publish"] == 4
-    assert event_names["kernel_e2e"] == 2
+    assert event_types == {1: 9, 2: 9}
+    assert event_names["FlyDSL · qkv_a[7]"] == 4  # Two distinct tasks reuse the same payload.
+    assert event_names["FlyDSL · start → publish"] == 4
+    assert event_names["FlyDSL · gating"] == 2
+    assert event_names["FlyDSL · gating[sample=0]"] == 2
+    assert event_names["FlyDSL · kernel_e2e"] == 2
 
 
 def test_hierarchical_pftrace_rejects_incomplete_input(tmp_path):

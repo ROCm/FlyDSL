@@ -959,11 +959,14 @@ def build_indexed_mla_moe_kernel(
             expert lane + 64 i).  Returns (expert id, route weight = raw score / sum of
             the 8 raw scores * ROUTE_SCALE) of pick ``lane`` in score order, valid in
             lanes < EXPERT_TOP_K."""
+            flytrace.push("gating", s)
             if const_expr(bs is None):
                 bs = load_bias()
             if const_expr(raws is None):
                 raws = getf_many([(mb("scores"), s * N_EXPERTS + lane + i * 64) for i in range(N_EXPERTS // 64)])
-                stamp("ug", bid, 7)
+                # The explicit gating range below supersedes this internal
+                # milestone in flytrace; retain it only in the legacy timeline.
+                stamp("ug", bid, 7, trace=False)
             ks = []
             for i in range_constexpr(N_EXPERTS // 64):
                 kb = (raws[i] + bs[i]).bitcast(fx.Int32)
@@ -998,7 +1001,9 @@ def build_indexed_mla_moe_kernel(
             tot = raw
             for off in (1, 2, 4):
                 tot = _xred(tot, off, lambda a, b: a + b)
-            return e, raw * (_rcp(tot) * ROUTE_SCALE)
+            weight = raw * (_rcp(tot) * ROUTE_SCALE)
+            flytrace.pop()
+            return e, weight
 
         def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
             """Push BF16 partials in tagged pairs to every peer, then sum all
@@ -1061,8 +1066,9 @@ def build_indexed_mla_moe_kernel(
         def start(name):
             return (bid + (G - base[name])) & (G - 1)
 
-        def stamp(name, t, which, lead=0):
-            flytrace.mark(f"{name}/{TRACE_PHASES[which]}", t)
+        def stamp(name, t, which, lead=0, trace=True):
+            if const_expr(trace):
+                flytrace.mark(f"{name}/{TRACE_PHASES[which]}", t)
             if const_expr(timeline):
                 if tid == lead:
                     now = fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
