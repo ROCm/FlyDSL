@@ -129,7 +129,7 @@ S=1/2/4。它没有 `a16w4`、`a8w4` 或 S=8 的有效同权重整层基线，�
 分片，只表示 scaling 检查，不是完整模型 TP2/TP4 对比。
 
 分段 trace 指导了两项保留的调度修改：BF16 packed peer exchange，以及每个 router
-CTA 只处理一个 sample。此前 S=4 调度中，最后一个插桩 CTA 到达 attention 发布、
+block 只处理一个 sample。此前 S=4 调度中，最后一个插桩 block 到达 attention 发布、
 router 发布、routed up/gate 发布和 down 完成的时间分别为 30.23、35.12、50.12、
 57.52 us；修改后为 27.66、30.65、45.73、52.97 us。对比图位于
 `/root/glm5-perf-results/s4-segment-milestones.png`。

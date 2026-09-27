@@ -56,10 +56,10 @@ def _option(options, name):
 
 @contextmanager
 def configure(*, block):
-    """Scope CTA selection to kernel launches inside a with block in @jit.
+    """Scope block selection to kernel launches inside a with block in @jit.
 
     Pass a compile-time (x, y, z) tuple, a sequence of tuples, or None for all
-    CTAs. Each selected CTA records all its waves. An explicit capture(block=...)
+    blocks. Each selected block records all its waves. An explicit capture(block=...)
     overrides this choice.
     Nested contexts restore the outer selection on exit, including exceptions.
     Without an active capture, this emits no instrumentation or extra arguments.
@@ -580,7 +580,7 @@ def lower_kernel(func, ctx, grid, block, stream):
     arch = get_rocm_arch().split(":")[0]
     if arch not in _SUPPORTED_ARCHES:
         raise ValueError(f"flytrace requires one of {_SUPPORTED_ARCHES}, got {arch}")
-    if block is None or block[1:] != [1, 1] or block[0] % 64:
+    if block is None or tuple(block[1:]) != (1, 1) or block[0] % 64:
         raise ValueError("flytrace requires a one-dimensional block of complete wave64 waves")
     entry = func.regions[0].blocks[0]
     sites = _dynamic_sites(entry)
@@ -601,13 +601,14 @@ def lower_kernel(func, ctx, grid, block, stream):
     if selected_blocks is not None and grid_static is not None:
         for selected in selected_blocks:
             if any(not 0 <= b < n for b, n in zip(selected, grid_static)):
-                raise ValueError(f"flytrace sampled CTA {selected} is outside launch grid {grid_static}")
+                raise ValueError(f"flytrace sampled block {selected} is outside launch grid {grid_static}")
 
     static_error = None
     try:
         items, count = _layout(entry)
         schema = _schema(items)
-        assert len(schema) == count
+        if len(schema) != count:
+            raise RuntimeError("flytrace internal schema/layout mismatch")
     except ValueError as exc:
         static_error = exc
         items = schema = None
@@ -622,7 +623,7 @@ def lower_kernel(func, ctx, grid, block, stream):
     if mode == "static" and selected_blocks is None and grid_static is None:
         raise ValueError(
             "flytrace mode='static' with block=None requires static launch dimensions; "
-            "use mode='auto'/'dynamic' or select explicit CTA(s)"
+            "use mode='auto'/'dynamic' or select explicit blocks"
         )
 
     if selected_blocks is not None:
@@ -690,8 +691,8 @@ def lower_kernel(func, ctx, grid, block, stream):
 
 
 class TraceCallState:
-    def __init__(self, state, spec, streams):
-        self.state, self.spec, self.streams = state, spec, streams
+    def __init__(self, state, spec):
+        self.state, self.spec = state, spec
 
     def __call__(self, args):
         cap = _active.get()
@@ -714,9 +715,9 @@ class capture:
 
     Allocations and the extra ABI argument are managed internally. Repeated
     launches overwrite the same fixed schedule; call export after completion.
-    A configure() context in the JIT selects CTAs; its default is (0, 0, 0).
+    A configure() context in the JIT selects blocks; its default is (0, 0, 0).
     Supplying block explicitly here overrides JIT selection, including None for
-    all CTAs or a sequence of CTA tuples. ``mode="auto"`` uses the compact static
+    all blocks or a sequence of block-coordinate tuples. ``mode="auto"`` uses the compact static
     format when possible and falls back to a bounded dynamic recorder for runtime
     loops/branches. ``max_blocks`` bounds all-grid capture for a dynamic grid.
     """
@@ -784,7 +785,7 @@ class capture:
             raise ValueError("cannot change device inside flytrace capture")
         key = id(spec)
         if spec["words"] * 4 > 512 * 1024**2:
-            raise ValueError("flytrace capture exceeds the 512 MiB allocation limit; select fewer CTAs/events")
+            raise ValueError("flytrace capture exceeds the 512 MiB allocation limit; select fewer blocks/events")
         # A fresh buffer makes repeated launches deterministic even when a
         # dynamic grid shrinks. Synchronizing here establishes initialization
         # before a kernel launched on an arbitrary user stream consumes it.
@@ -920,7 +921,7 @@ class capture:
                     name="thread_name",
                     pid=1,
                     tid=tid,
-                    args=dict(name=f"{wave['kernel']} CTA {wave['block']} / wave {wave['wave']}"),
+                    args=dict(name=f"{wave['kernel']} Block {wave['block']} / wave {wave['wave']}"),
                 )
             )
             stack = []

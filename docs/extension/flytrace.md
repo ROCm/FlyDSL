@@ -39,19 +39,19 @@ of waves and records plus any records dropped because `max_events` was reached.
 Overflow does not abort the workload and is also shown as a warning in the
 trace.
 
-## Recorder modes and CTA selection
+## Recorder modes and block selection
 
 - `mode="auto"` selects the compact static format when control flow and payloads
   can be reconstructed at compile time; otherwise it uses the dynamic recorder.
 - `mode="static"` requires compile-time event structure. A runtime grid can only
-  be used with explicitly selected CTA coordinates.
+  be used with explicitly selected block coordinates.
 - `mode="dynamic"` records the executed site and payload, so it supports runtime
   `for`/`while`, conditions, payloads, and launch dimensions.
-- `block=(x, y, z)` captures one CTA. A sequence such as
+- `block=(x, y, z)` captures one block. A sequence such as
   `block=[(0, 0, 0), (1, 0, 0)]` captures several. `block=None` captures the
   grid, capped by `max_blocks`.
 
-All waves in each selected CTA are recorded. gfx942 and gfx950 are supported,
+All waves in each selected block are recorded. gfx942 and gfx950 are supported,
 including launches on non-default streams. The optional `hardware=True` ATT
 identity/merge path currently requires gfx942.
 

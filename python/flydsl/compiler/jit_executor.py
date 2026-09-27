@@ -163,7 +163,8 @@ def _build_dispatch_factory(slot_specs):
         fills.append(fill)
         setup.append(f"    s{i} = storages[{i}]")
         setup.append(f"    f{i} = fills[{fi}]")
-        body.append(f"        f{i}({'None' if arg_idx == -1 else f'a[{arg_idx}]'}, s{i})")
+        argument = "None" if arg_idx == -1 else f"a[{arg_idx}]"
+        body.append(f"        f{i}({argument}, s{i})")
 
     src = "def make(packed, storages, func_exe, fills):\n"
     src += "".join(line + "\n" for line in setup)

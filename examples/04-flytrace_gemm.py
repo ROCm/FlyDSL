@@ -73,9 +73,6 @@ def gemm_kernel(
     gA_k_stride = fx.get_scalar(gA_k.stride[2])
     gB_k_stride = fx.get_scalar(gB_k.stride[2])
 
-    gA_k_stride = fx.get_scalar(gA_k.stride[2])
-    gB_k_stride = fx.get_scalar(gB_k.stride[2])
-
     def run_pipeline_stage(read_stage, next_k, read_next=True):
         write_stage = read_stage ^ 1
 

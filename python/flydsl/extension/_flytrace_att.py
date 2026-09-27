@@ -2,7 +2,7 @@
 # Copyright (c) 2026 FlyDSL Project Contributors
 """Offline gfx942 ATT / flytrace correlation and Perfetto Trace Event export.
 
-ATT wave IDs are hardware slots, not CTA-local wave numbers. Correlation uses
+ATT wave IDs are hardware slots, not block-local wave numbers. Correlation uses
 HW_ID, an absolute realtime window, and the complete s_memrealtime fingerprint.
 The exported ISA clock is interpolated between recorded timer reads per wave.
 Raw shader cycles and cross-validation errors remain available in the output.
@@ -214,7 +214,7 @@ def merge_att(flytrace_path, att_directory, output_path, *, max_blocks=0):
     events, mapping, instruction_count = [], [], 0
     for pid, key in enumerate(selected, 1):
         kernel, block = key
-        events.append(dict(ph="M", name="process_name", pid=pid, args=dict(name=f"{kernel} · CTA {block}")))
+        events.append(dict(ph="M", name="process_name", pid=pid, args=dict(name=f"{kernel} · Block {block}")))
         events.append(dict(ph="M", name="process_sort_index", pid=pid, args=dict(sort_index=pid)))
         for rank, match in enumerate(sorted(groups[key], key=lambda m: m["fly"]["wave"])):
             w, att = match["fly"], match["att"]

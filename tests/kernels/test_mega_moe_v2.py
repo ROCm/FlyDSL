@@ -1563,7 +1563,7 @@ def main():
         "--flytrace-max-blocks",
         type=int,
         default=128,
-        help="maximum CTAs captured per annotated kernel when --flytrace is enabled (default 128)",
+        help="maximum blocks captured per annotated kernel when --flytrace is enabled (default 128)",
     )
     p.add_argument(
         "--flytrace-max-events",

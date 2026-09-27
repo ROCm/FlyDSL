@@ -202,7 +202,7 @@ def publish(root, work, data):
                 for mode, r in full["results"].items()
             ]
             all_text = (
-                "\n全 grid 采集，1024 CTA / 4096 waves，全部数值、事件数和 tile 编号校验通过：\n\n"
+                "\n全 grid 采集，1024 blocks / 4096 waves，全部数值、事件数和 tile 编号校验通过：\n\n"
                 "| 版本 | GPU 耗时 µs | 相对 off | 记录数 | VGPR | SGPR |\n"
                 "|---|---:|---:|---:|---:|---:|\n" + "\n".join(all_rows) + "\n"
             )
@@ -211,8 +211,8 @@ def publish(root, work, data):
 
 只看本文件；[timeline.json](timeline.json) 可直接用 Perfetto 打开。三份 `.s` 是本轮实际编译的 final ISA。
 
-设备：{data['gpu']}；PyTorch：{data['torch']}。4096³ FP16，256 threads/CTA，32 KiB LDS。
-以下采样 CTA (0,0,0) 的全部四个 wave；GPU event 计时始终覆盖整个 32×32 grid。
+设备：{data['gpu']}；PyTorch：{data['torch']}。4096³ FP16，256 threads/block，32 KiB LDS。
+以下采样 block (0,0,0) 的全部四个 wave；GPU event 计时始终覆盖整个 32×32 grid。
 
 | 版本 / final ISA | GPU 耗时 µs | 相对 off | 数值校验 | 记录数 |
 |---|---:|---:|---|---:|
@@ -221,7 +221,7 @@ def publish(root, work, data):
         + "\n"
         + all_text
         + """
-| 单 CTA 采样版本 | VGPR | AGPR | SGPR | scratch B | atomic | waterfall | MFMA |
+| 单 block 采样版本 | VGPR | AGPR | SGPR | scratch B | atomic | waterfall | MFMA |
 |---|---:|---:|---:|---:|---:|---:|---:|
 """
         + "\n".join(resources)
@@ -237,11 +237,11 @@ def publish(root, work, data):
 - 旧格式每记录三个 dword：时间戳低 32 位、event ID、int32 payload。现在槽位本身标识事件，循环索引由 host 重建，只保留一个时间 dword；记录写出量减少 2/3。每 wave 使用独立且按 64 B 对齐的区域。入口/出口各写一次完整 64-bit 时间，用于对齐和检测回绕窗口。
 - 没有逐事件 atomic、动态游标、容量检查或 ID 打包。GEMM 计算循环直接写静态槽位，不修改 M0/EXEC，不维护寄存器页。全 grid 采集使用 LLVM 原生 `s_memrealtime` intrinsic，后端负责依赖等待；标量 `s_store_dword` 用一条 inline asm 表达。静态标记的核心为读时钟、等待、写出三条指令，循环地址计算可复用。
 - 对只含标记和简单整数运算、每轮最多两个标记的顶层静态循环，编译器自动切换为 VGPR 缓存：每个标记位置用一个 VGPR 的 64 个 lane 保存 64 个时间戳，每满页合并写出。M0 在循环边界保存/恢复；普通长循环标记为 clock/wait/and/writelane/compare/branch 六条核心指令，页边界额外付出写出和等待成本。剩余页只写有效 lane；短循环在退出时写出。检测不满足条件时保留直写路径。
-- 单 CTA 采样把 uniform guard 放在短 asm 中，避免它进入计算循环 CFG 并增加 VGPR 活跃范围。关闭 capture 时，标记消除，没有隐藏 trace 参数或采样指令。
+- 单 block 采样把 uniform guard 放在短 asm 中，避免它进入计算循环 CFG 并增加 VGPR 活跃范围。关闭 capture 时，标记消除，没有隐藏 trace 参数或采样指令。
 - 仍有计时等待和 scalar-store 成本；它们会扰动流水。延迟写出实验让计时与 LDS 请求混在 LGKM 上，部分等待变成全等待，在该 GEMM 中更慢，因此没有采用。
 - 相邻 tile 使用 boundary：一个时间戳同时结束上一 tile、开始下一 tile。零 gap 不表示插桩耗时为零；成本仍进入后续区间和外部 GPU 计时。
 
-采用两个 lowering 路径是实测后的取舍。相同 70 条记录的 GEMM 中，强制寄存器缓存的单 CTA 开销为 +1.78%，直写为 +0.96%；全 grid 为 +3.57% 与 +3.68%，差异很小。因此 GEMM 保留直写。
+采用两个 lowering 路径是实测后的取舍。相同 70 条记录的 GEMM 中，强制寄存器缓存的单 block 开销为 +1.78%，直写为 +0.96%；全 grid 为 +3.57% 与 +3.68%，差异很小。因此 GEMM 保留直写。
 简单密集循环的直写则会在下一次 `lgkmcnt(0)` 等待前次 scalar store，4096 次标记的间隔中位数约 280 ns；自动缓存避开了逐次显存等待。密集实验的普通点与满页点分开统计，见 `build-fly/flytrace/optimization/dense/`。
 同一 4096 点微基准、四个 wave、五次采集共 81900 对间隔：缓存普通点中位数 80 ns，满页点 280 ns；包含满页点的平均间隔约 69.3 ns（全采集）/72.6 ns（带采样 guard）。这里是相邻读钟的实测间隔，包含循环指令，不是单条指令的独立延迟。
 尝试用每个 lane 重复写一份时间戳、把写出量增加 64 倍，未优于静态标量写；增加内存不能解决计时等待和计算指令调度受到的扰动。
@@ -259,7 +259,7 @@ for k in range(K_TILES):
     # ... 原计算 ...
 flytrace.end()
 
-# @flyc.jit 内，在 kernel launch 前设置采样 CTA；None 表示全部 CTA。
+# @flyc.jit 内，在 kernel launch 前设置采样 block；None 表示全部 block。
 with flytrace.configure(block=(0, 0, 0)):
     gemm_kernel(...).launch(...)
 
@@ -270,7 +270,7 @@ with flytrace.capture("timeline.json"):
 
 支持 `mark`、`boundary/end` 和 `push/pop`；无需预先声明事件名。
 `with flytrace.configure(block=...):` 只影响上下文内的 launch；支持嵌套，正常或异常退出时均恢复外层配置。不同配置分别生成 kernel specialization。配置为编译期常量，既不增加用户参数，也不生成运行时配置指令。
-host 默认使用 JIT 的选择；没有 configure 时仍采样 CTA (0,0,0)。显式 `capture(block=...)` 优先，`capture(block=None)` 可临时覆盖为全 grid。
+host 默认使用 JIT 的选择；没有 configure 时仍采样 block (0,0,0)。显式 `capture(block=...)` 优先，`capture(block=None)` 可临时覆盖为全 grid。
 示例的 phases 版本排除 `k_tile`，tiles 版本排除 `mainloop/drain`，确保 64 个 tile 连续相接。
 编译后的函数可在相同配置的新 capture 中复用；每个 capture 独立持有 buffer。
 同一 capture 重复 launch 同一 specialization 时，保留最后一次记录。

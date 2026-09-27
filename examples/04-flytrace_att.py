@@ -33,7 +33,7 @@ def workload(run):
     ta = flyc.from_dlpack(a).mark_layout_dynamic(leading_dim=1, divisibility=16)
     tc = flyc.from_dlpack(c).mark_layout_dynamic(leading_dim=1, divisibility=16)
     args = (ta, shuffled, tc, torch.cuda.current_stream())
-    # Capture the full grid: the scheduler decides which CTA reaches the ATT CU.
+    # Capture the full grid: the scheduler decides which block reaches the ATT CU.
     with flytrace.capture(block=None, hardware=True, exclude=("mainloop", "drain")) as cap:
         fn = flyc.compile(demo.preshuffle_gemm, *args)  # compiles AND launches the warmup
         fn(*args)  # ATT selects matching invocation 2; flytrace keeps this launch

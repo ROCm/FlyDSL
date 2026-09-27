@@ -1146,8 +1146,7 @@ def _build_call_state(sig, args_tuple, func_exe, trace_spec=None):
         from ..extension._flytrace import TraceCallState, fill_buffer
 
         slot_specs.append((-1, ctypes.c_uint64, partial(fill_buffer, trace_spec)))
-        streams = [i for i, p in enumerate(sig.parameters.values()) if getattr(p.annotation, "_is_stream_param", False)]
-        return TraceCallState(CallState(slot_specs, func_exe), trace_spec, streams)
+        return TraceCallState(CallState(slot_specs, func_exe), trace_spec)
     return CallState(slot_specs, func_exe)
 
 

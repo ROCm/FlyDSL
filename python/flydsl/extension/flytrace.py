@@ -4,13 +4,13 @@
 
 Annotate uniform kernel code with mark(), boundary()/end(), or push()/pop().
 Wrap the unchanged host launch in capture() to allocate and collect a trace.
-In @jit, with configure(block=(x, y, z)) scopes CTA selection to enclosed launches.
+In @jit, with configure(block=(x, y, z)) scopes block selection to enclosed launches.
 Without capture, annotations disappear and kernel signatures remain unchanged.
 
 ``capture(mode="auto")`` keeps a compact one-word-per-event fast path for
 statically reconstructible control flow, and otherwise selects a bounded
 dynamic recorder. The dynamic path supports runtime loops, branches, payloads,
-runtime launch dimensions, selected CTA lists, and all-grid capture bounded by
+runtime launch dimensions, selected block lists, and all-grid capture bounded by
 ``max_blocks``. Both paths support gfx942/gfx950 and user-provided streams.
 
 Export with ``cap.export("trace.json")`` for Perfetto. Dynamic recorder overflow

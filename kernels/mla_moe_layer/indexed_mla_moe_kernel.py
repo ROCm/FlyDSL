@@ -3,7 +3,7 @@
 
 """GLM-5 indexed sparse MLA + MoE block in ONE persistent launch per rank (TP8 decode).
 
-One launch of ``grid = 256 CTAs x 512 threads`` (one CTA per MI355X CU) runs the
+One launch of ``grid = 256 blocks x 512 threads`` (one block per MI355X CU) runs the
 whole layer body for this rank's TP shard::
 
     input RMSNorm -> q_a / kv_a projection -> q_a RMSNorm -> q_b (+RoPE)
@@ -15,12 +15,12 @@ whole layer body for this rank's TP shard::
       -> expert down + route weighting
       -> MoE TP8 peer reduce + residual -> x_out                   (sym_ffn)
 
-Scheduling: every stage is a list of tasks; task ``t`` of a stage runs on CTA
-``(stage_base + t) % 256`` and every CTA walks the stages in order.  There is
-no grid-wide barrier: dependencies only point to earlier stages and all CTAs
+Scheduling: every stage is a list of tasks; task ``t`` of a stage runs on block
+``(stage_base + t) % 256`` and every block walks the stages in order.  There is
+no grid-wide barrier: dependencies only point to earlier stages and all blocks
 are co-resident, so every spin wait makes progress.
 
-Mailboxes are *tagged pairs*: every 32-bit value a task hands to another CTA
+Mailboxes are *tagged pairs*: every 32-bit value a task hands to another block
 (or GPU) is stored next to this launch's epoch tag, ``(value, tag)``, with
 device- (``sc1``) or system-coherent (``sc0 sc1``) 8 / 16-byte stores.  A
 consumer polls the payload itself until the tags match, so a hand-off costs
@@ -97,8 +97,8 @@ N_ROW_TILES = HIDDEN // ROW_TILE
 
 def dn_tile(S: int) -> int:
     """Hidden rows per expert-down / FFN peer-reduce task: 32 at S = 1 (192 tasks,
-    placed off the router CTAs, whose up/gate task finishes last, so every down task
-    streams its weights during the mid wait); 24 above (one task per CTA), where
+    placed off the router blocks, whose up/gate task finishes last, so every down task
+    streams its weights during the mid wait); 24 above (one task per block), where
     each down task already streams S x 9 experts."""
     return 32 if S == 1 else HIDDEN // BLOCKS
 
@@ -375,8 +375,8 @@ def build_indexed_mla_moe_kernel(
     for name, n in stage_tasks(S, H, sparse_attention_topk):
         first[name] = acc
         acc += n
-    # CTA placement: split before uk, so every split tile lands on a CTA freed by
-    # qkv_a (uk shares the q_b CTAs it waits on anyway)
+    # Block placement: split before uk, so every split tile lands on a block freed by
+    # qkv_a (uk shares the q_b blocks it waits on anyway)
     tasks = dict(stage_tasks(S, H, sparse_attention_topk))
     acc = 0
     for name in ("qkv_a", "cache", "q_b", "split", "uk", "uv", "o", "router", "ug", "down"):
@@ -568,7 +568,7 @@ def build_indexed_mla_moe_kernel(
 
         def pre_poll(n, addr_of):
             """Wave 0 spins on one small pair per producer (lane j -> producer j < n <= 64)
-            before a large payload poll, so waiting CTAs do not flood memory."""
+            before a large payload poll, so waiting blocks do not flood memory."""
             if wave == 0:
                 b, i = addr_of(fx.min(lane, n - 1))
                 poll([(b, i, 1)])
@@ -1524,7 +1524,7 @@ def build_indexed_mla_moe_kernel(
             stamp("o", t, 4)
 
         # ====== 8. post-attn RMSNorm -> router scores + this task's FP8 activation blocks
-        # One sample per CTA: 1 row group x 96 chunks (bf16), 8 waves split K
+        # One sample per block: 1 row group x 96 chunks (bf16), 8 waves split K
         r_wr = _rsrc(w_r)
         R_NKC = HIDDEN // 64
         for tt in range(start("router"), S * N_ROUTER, G):
@@ -1638,7 +1638,7 @@ def build_indexed_mla_moe_kernel(
         UG_S_BYTES = 2 * INTER * (HIDDEN // 32) if use_mxfp4_weight else 2 * INTER // SCALE_BM * (HIDDEN // 128) * 4
 
         if const_expr(S == 1):
-            # one task per CTA: task u takes intermediates (u % 32) * 8 of routed slot
+            # one task per block: task u takes intermediates (u % 32) * 8 of routed slot
             # u // 32 (slot 8 for u < 32, which also take the shared expert's); the 8 gate
             # + 8 up rows are one MFMA row group and all waves split K
             UG8 = 8
@@ -1779,7 +1779,7 @@ def build_indexed_mla_moe_kernel(
                         put(mb("prob"), 0, fx.Float32(1.0))
                 stamp("ug", u, 4)
         elif const_expr(S > 1):
-            # One eight-intermediate tile per CTA and sample. Shared weights use
+            # One eight-intermediate tile per block and sample. Shared weights use
             # the sample columns of one MFMA; routed tiles pipeline over samples.
             UG8 = 8
             UG8_UNITS = (HIDDEN // UG_UNIT_K) // WAVES
