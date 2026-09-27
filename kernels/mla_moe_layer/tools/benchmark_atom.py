@@ -180,9 +180,7 @@ def _make_forward_context(config, layer, samples: int, pos: int, generator, incl
 
         aligned_index_dim = ((config.hf_config.index_head_dim + 4 + 15) // 16) * 16
         index_cache = torch.zeros(cache_tokens, 1, aligned_index_dim, dtype=dtypes.fp8, device="cuda")
-        index_cache.view(torch.uint8)[
-            ..., config.hf_config.index_head_dim : config.hf_config.index_head_dim + 4
-        ] = 127
+        index_cache.view(torch.uint8)[..., config.hf_config.index_head_dim : config.hf_config.index_head_dim + 4] = 127
         sparse_index_buffer = sparse_indices.flatten()
         layer.self_attn.indexer.k_cache.kv_cache[0] = index_cache
         layer.self_attn.indexer.sparse_kv_indices_buffer = sparse_index_buffer
