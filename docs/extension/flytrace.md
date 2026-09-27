@@ -94,18 +94,22 @@ their implementation with `flytrace.register_backend(target_name, factory)`;
 operator annotations and host capture code do not change.
 
 Annotations are operator-independent: any `@flyc.kernel` reached by the
-captured `@flyc.jit` launch can emit trace events. A capture may therefore
-contain several different kernels and exports all of their recorded waves in
-one timeline. For repeated calls to the same compiled launcher, the capture
-retains the latest recording for that specialization. Kernels without
-annotations remain valid and contribute no events.
+captured `@flyc.jit` launch can emit trace events. A capture also records an
+automatic entry/exit envelope for kernels without annotations, so production
+operator sources do not need Flytrace imports or phase markers for kernel-level
+profiling. A capture may contain several different kernels and exports all of
+their recorded waves in one timeline. For repeated calls to the same compiled
+launcher, the capture retains the latest recording for that specialization.
 
-## Production GEMM and MegaMoE
+## Operator and tool integration
 
-The production preshuffle GEMM emits `gemm`, `prologue`, `mainloop`, `k_tile`,
-and `epilogue` ranges. MegaMoE stage 1 and stage 2 emit dispatch, synchronization,
-work-loop, GEMM, and combine ranges. The MegaMoE test tool can capture one eager
-forward per rank:
+`capture()` is the instrumentation switch. Without that context, the compiler
+does not add the hidden trace ABI or recorder instructions. Phase annotations
+are optional and belong in dedicated examples or explicitly opted-in operator
+code; [the GEMM example](../../examples/04-flytrace_gemm.py) demonstrates them
+without changing the production GEMM implementation.
+
+The MegaMoE test tool can capture one eager forward per rank at kernel level:
 
 ```bash
 torchrun --nproc_per_node=8 tests/kernels/test_mega_moe_v2.py \

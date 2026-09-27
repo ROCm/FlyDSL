@@ -150,8 +150,8 @@ results exercise fixed per-rank shards and are scaling checks rather than
 full-model TP2/TP4 comparisons.
 
 Segment traces guided two retained scheduling changes: BF16-packed peer
-exchange and one sample per router block. For the earlier S=4 schedule, the last
-instrumented block reached attention publication, router publication, routed
+exchange and one sample per router CTA. For the earlier S=4 schedule, the last
+instrumented CTA reached attention publication, router publication, routed
 up/gate publication, and down completion at 30.23, 35.12, 50.12, and 57.52 us.
 After the changes, those marks were 27.66, 30.65, 45.73, and 52.97 us. The
 comparison plot is `/root/glm5-perf-results/s4-segment-milestones.png`.

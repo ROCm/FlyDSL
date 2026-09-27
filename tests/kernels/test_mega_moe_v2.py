@@ -234,7 +234,7 @@ def _profile_body(body, op_tag, args, rank, world, dev, out_dir, meta):
 
 
 def _flytrace_body(body, op_tag, args, rank, dev, out_dir, meta):
-    """Capture one eager MegaMoE launch with wave-level phase annotations."""
+    """Capture kernel-level envelopes for one eager MegaMoE launch."""
     from flydsl.extension import flytrace
 
     ms.shmem_barrier_all()
@@ -1564,7 +1564,7 @@ def main():
     p.add_argument(
         "--flytrace",
         action="store_true",
-        help="capture one eager MegaMoE launch as a wave-level Perfetto trace; works alongside --profile",
+        help="capture one eager MegaMoE launch as a kernel-level Perfetto trace; works alongside --profile",
     )
     p.add_argument(
         "--flytrace-per-kernel",
@@ -1575,7 +1575,7 @@ def main():
         "--flytrace-max-blocks",
         type=int,
         default=128,
-        help="maximum blocks captured per annotated kernel when --flytrace is enabled (default 128)",
+        help="maximum blocks captured per kernel when --flytrace is enabled (default 128)",
     )
     p.add_argument(
         "--flytrace-max-events",

@@ -56,6 +56,16 @@ def _two_dimensional_trace_launch(stream: fx.Stream):
     _two_dimensional_trace_kernel().launch(grid=(1, 1, 1), block=(32, 2, 1), stream=stream)
 
 
+@flyc.kernel(known_block_size=[32, 1, 1])
+def _partial_wave_trace_kernel():
+    flytrace.mark("partial_wave")
+
+
+@flyc.jit
+def _partial_wave_trace_launch(stream: fx.Stream):
+    _partial_wave_trace_kernel().launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
+
+
 @flyc.kernel(known_block_size=[64, 1, 1])
 def _second_static_trace_kernel():
     flytrace.mark("second_event")
@@ -284,12 +294,19 @@ def test_static_all_grid_rejects_runtime_launch_dimensions():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
-def test_capture_allows_kernels_with_every_event_excluded():
+def test_capture_profiles_kernels_with_every_event_excluded(tmp_path):
     if get_rocm_arch().split(":")[0] not in ("gfx942", "gfx950"):
         pytest.skip("flytrace recorder currently targets gfx942/gfx950")
     with flytrace.capture(mode="static", exclude=("event",)) as cap:
         flyc.compile(_runtime_grid_static_trace_launch, fx.Int32(1), torch.cuda.current_stream())
-    assert cap.decode() == []
+    waves = cap.decode()
+    assert len(waves) == 1
+    assert waves[0]["events"] == []
+    path = tmp_path / "kernel-envelope.json"
+    assert cap.export(path) == {"waves": 1, "records": 0, "dropped": 0}
+    slices = [event for event in json.loads(path.read_text())["traceEvents"] if event.get("ph") == "X"]
+    assert len(slices) == 1
+    assert slices[0]["cat"] == "flytrace.kernel"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
@@ -314,6 +331,17 @@ def test_trace_supports_multidimensional_blocks():
     assert len(waves) == 1
     assert waves[0]["block"] == (0, 0, 0)
     assert [event["name"] for event in waves[0]["events"]] == ["two_dimensional"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
+def test_trace_supports_partial_waves():
+    if get_rocm_arch().split(":")[0] not in ("gfx942", "gfx950"):
+        pytest.skip("flytrace recorder currently targets gfx942/gfx950")
+    with flytrace.capture(mode="static") as cap:
+        flyc.compile(_partial_wave_trace_launch, torch.cuda.current_stream())
+    waves = cap.decode()
+    assert len(waves) == 1
+    assert [event["name"] for event in waves[0]["events"]] == ["partial_wave"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")

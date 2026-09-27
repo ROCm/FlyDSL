@@ -7,6 +7,8 @@ range_push()/range_pop(), or boundary()/end(). Wrap the unchanged host launch
 in capture() to allocate and collect a trace. In @jit,
 with configure(block=(x, y, z)) scopes block selection to enclosed launches.
 Without capture, annotations disappear and kernel signatures remain unchanged.
+With capture, kernels that have no annotations still receive a whole-kernel
+entry/exit envelope, so production operator sources need no tracing changes.
 
 ``capture(mode="auto")`` keeps a compact one-word-per-event fast path for
 statically reconstructible control flow, and otherwise selects a bounded

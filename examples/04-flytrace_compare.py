@@ -285,7 +285,7 @@ host 默认使用 JIT 的选择；没有 configure 时仍采样 block (0,0,0)。
 ## 当前限制与验证
 
 当前 ROCm backend 支持 gfx942/gfx950 wave64；ATT 硬件身份合并限于 gfx942。
-block 维度需为正的编译期常量并包含完整 wave，支持一至三维；runtime grid 在 dynamic 模式下直接记录，
+block 维度需为正的编译期常量，支持一至三维及末尾不完整 wave；runtime grid 在 dynamic 模式下直接记录，
 static 模式则需要显式选择 block。常量结构化循环走静态紧凑路径，runtime loop/branch 和动态 payload 自动走有界 dynamic recorder。
 支持默认及用户 stream；capture 不支持并发或嵌套，重复 launch 保留每个 specialization 的最后一次记录。
 单 wave 采集跨度必须短于约 42.95 秒；每个 capture 的当前 buffer 集合上限为 512 MiB。

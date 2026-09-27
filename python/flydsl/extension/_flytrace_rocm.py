@@ -30,6 +30,10 @@ _DYNAMIC_RECORD_WORDS = 3
 _SUPPORTED_ARCHES = ("gfx942", "gfx950")
 
 
+def _waves_per_block(block, wave_size):
+    return (math.prod(block) + wave_size - 1) // wave_size
+
+
 def _asm(code, operands=(), constraints=""):
     llvm.inline_asm(
         None,
@@ -357,8 +361,6 @@ def _lower_kernel(func, ctx, grid, block, stream):
 
     entry = func.regions[0].blocks[0]
     sites = dynamic_sites(entry)
-    if not sites:
-        return
     target = current_target()
     arch = target.arch.split(":")[0]
     if arch not in _SUPPORTED_ARCHES:
@@ -367,9 +369,6 @@ def _lower_kernel(func, ctx, grid, block, stream):
         raise ValueError(f"flytrace ROCm backend requires wave64, got wave{target.warp_size} on {arch}")
     if block is None or any(type(extent) is not int or extent <= 0 for extent in block):
         raise ValueError("flytrace requires positive static block dimensions")
-    threads_per_block = math.prod(block)
-    if threads_per_block % target.warp_size:
-        raise ValueError("flytrace requires a whole number of complete waves per block")
     options = ctx.trace_spec["options"]
     requested_mode = option(options, "mode")
     selected = selected_blocks(ctx)
@@ -423,13 +422,14 @@ def _lower_kernel(func, ctx, grid, block, stream):
         capacity_blocks = max_blocks
         guard_capacity = capacity_blocks
 
-    waves_per_block = threads_per_block // target.warp_size
+    waves_per_block = _waves_per_block(block, target.warp_size)
     waves = waves_per_block * capacity_blocks
     if mode == "static":
         stride = ((4 + count + (2 if hardware else 0) + 15) // 16) * 16
     else:
         schema = dynamic_schema(sites)
-        stride = ((_DYNAMIC_HEADER_WORDS + max_events * _DYNAMIC_RECORD_WORDS + 15) // 16) * 16
+        record_capacity = max_events if sites else 0
+        stride = ((_DYNAMIC_HEADER_WORDS + record_capacity * _DYNAMIC_RECORD_WORDS + 15) // 16) * 16
     offset = ctx.trace_spec["words"]
     ctx.trace_spec["words"] += waves * stride
     existing_backend = ctx.trace_spec.setdefault("backend", "rocm")
@@ -453,7 +453,7 @@ def _lower_kernel(func, ctx, grid, block, stream):
             offset=offset,
             events=schema,
             hardware=hardware,
-            max_events=max_events if mode == "dynamic" else None,
+            max_events=record_capacity if mode == "dynamic" else None,
         )
     )
     with ir.InsertionPoint.at_block_begin(entry), func.location:
@@ -566,7 +566,7 @@ class RocmTraceBackend(TraceBackend):
                             raise ValueError(f"invalid timestamp at wave {index}, event {ordinal}")
                         previous = tick
                         records.append({**event, "tick": tick, "ordinal": ordinal})
-                    block_number, wave = divmod(index, math.prod(kernel["block"]) // kernel["wave_size"])
+                    block_number, wave = divmod(index, _waves_per_block(kernel["block"], kernel["wave_size"]))
                     if kernel["selected"] is not None:
                         block = kernel["selected"][block_number]
                     else:

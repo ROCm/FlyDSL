@@ -3,7 +3,7 @@
 
 """GLM-5 indexed sparse MLA + MoE block in ONE persistent launch per rank (TP8 decode).
 
-One launch of ``grid = 256 blocks x 512 threads`` (one block per MI355X CU) runs the
+One launch of ``grid = 256 CTAs x 512 threads`` (one CTA per MI355X CU) runs the
 whole layer body for this rank's TP shard::
 
     input RMSNorm -> q_a / kv_a projection -> q_a RMSNorm -> q_b (+RoPE)
@@ -15,12 +15,12 @@ whole layer body for this rank's TP shard::
       -> expert down + route weighting
       -> MoE TP8 peer reduce + residual -> x_out                   (sym_ffn)
 
-Scheduling: every stage is a list of tasks; task ``t`` of a stage runs on block
-``(stage_base + t) % 256`` and every block walks the stages in order.  There is
-no grid-wide barrier: dependencies only point to earlier stages and all blocks
+Scheduling: every stage is a list of tasks; task ``t`` of a stage runs on CTA
+``(stage_base + t) % 256`` and every CTA walks the stages in order.  There is
+no grid-wide barrier: dependencies only point to earlier stages and all CTAs
 are co-resident, so every spin wait makes progress.
 
-Mailboxes are *tagged pairs*: every 32-bit value a task hands to another block
+Mailboxes are *tagged pairs*: every 32-bit value a task hands to another CTA
 (or GPU) is stored next to this launch's epoch tag, ``(value, tag)``, with
 device- (``sc1``) or system-coherent (``sc0 sc1``) 8 / 16-byte stores.  A
 consumer polls the payload itself until the tags match, so a hand-off costs
@@ -48,7 +48,6 @@ from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T, as_ir_value
-from flydsl.extension import flytrace
 from kernels.common import buffer_ops as bo
 from kernels.common.dpp_utils import update_dpp_i32
 from kernels.mla_moe_layer.config import (
@@ -97,8 +96,8 @@ N_ROW_TILES = HIDDEN // ROW_TILE
 
 def dn_tile(S: int) -> int:
     """Hidden rows per expert-down / FFN peer-reduce task: 32 at S = 1 (192 tasks,
-    placed off the router blocks, whose up/gate task finishes last, so every down task
-    streams its weights during the mid wait); 24 above (one task per block), where
+    placed off the router CTAs, whose up/gate task finishes last, so every down task
+    streams its weights during the mid wait); 24 above (one task per CTA), where
     each down task already streams S x 9 experts."""
     return 32 if S == 1 else HIDDEN // BLOCKS
 
@@ -114,7 +113,6 @@ CM_DEV = 16
 CM_SYS = 17
 POLL_MAX = 12  # mailbox specs polled per batch
 TL_COLS = 8  # timeline stamps per task: 5 phases + 3 free debug marks
-TRACE_PHASES = ("start", "hint", "ready", "computed", "publish", "debug5", "debug6", "debug7")
 
 
 def _align(n, a=256):
@@ -375,8 +373,8 @@ def build_indexed_mla_moe_kernel(
     for name, n in stage_tasks(S, H, sparse_attention_topk):
         first[name] = acc
         acc += n
-    # Block placement: split before uk, so every split tile lands on a block freed by
-    # qkv_a (uk shares the q_b blocks it waits on anyway)
+    # CTA placement: split before uk, so every split tile lands on a CTA freed by
+    # qkv_a (uk shares the q_b CTAs it waits on anyway)
     tasks = dict(stage_tasks(S, H, sparse_attention_topk))
     acc = 0
     for name in ("qkv_a", "cache", "q_b", "split", "uk", "uv", "o", "router", "ug", "down"):
@@ -431,7 +429,6 @@ def build_indexed_mla_moe_kernel(
         rank: Int32,
         layer: Int32,
     ):
-        flytrace.range_push("glm5_mla_moe", layer)
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
         lane = tid % 64
@@ -568,7 +565,7 @@ def build_indexed_mla_moe_kernel(
 
         def pre_poll(n, addr_of):
             """Wave 0 spins on one small pair per producer (lane j -> producer j < n <= 64)
-            before a large payload poll, so waiting blocks do not flood memory."""
+            before a large payload poll, so waiting CTAs do not flood memory."""
             if wave == 0:
                 b, i = addr_of(fx.min(lane, n - 1))
                 poll([(b, i, 1)])
@@ -959,16 +956,11 @@ def build_indexed_mla_moe_kernel(
             expert lane + 64 i).  Returns (expert id, route weight = raw score / sum of
             the 8 raw scores * ROUTE_SCALE) of pick ``lane`` in score order, valid in
             lanes < EXPERT_TOP_K."""
-            flytrace.range_push("gating", s)
-            flytrace.boundary("gating/wait_scores", s)
             if const_expr(bs is None):
                 bs = load_bias()
             if const_expr(raws is None):
                 raws = getf_many([(mb("scores"), s * N_EXPERTS + lane + i * 64) for i in range(N_EXPERTS // 64)])
-                # The explicit gating range below supersedes this internal
-                # milestone in flytrace; retain it only in the legacy timeline.
-                stamp("ug", bid, 7, trace=False)
-            flytrace.boundary("gating/select_top8", s)
+                stamp("ug", bid, 7)
             ks = []
             for i in range_constexpr(N_EXPERTS // 64):
                 kb = (raws[i] + bs[i]).bitcast(fx.Int32)
@@ -1000,14 +992,10 @@ def build_indexed_mla_moe_kernel(
             for i in range_constexpr(1, N_EXPERTS // 64):
                 raw = (e // 64 == i).select(got[i], raw)
             raw = (lane < EXPERT_TOP_K).select(raw.bitcast(fx.Float32), fx.Float32(0.0))
-            flytrace.boundary("gating/normalize", s)
             tot = raw
             for off in (1, 2, 4):
                 tot = _xred(tot, off, lambda a, b: a + b)
-            weight = raw * (_rcp(tot) * ROUTE_SCALE)
-            flytrace.end()
-            flytrace.range_pop()
-            return e, weight
+            return e, raw * (_rcp(tot) * ROUTE_SCALE)
 
         def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
             """Push BF16 partials in tagged pairs to every peer, then sum all
@@ -1070,9 +1058,7 @@ def build_indexed_mla_moe_kernel(
         def start(name):
             return (bid + (G - base[name])) & (G - 1)
 
-        def stamp(name, t, which, lead=0, trace=True):
-            if const_expr(trace):
-                flytrace.mark(f"{name}/{TRACE_PHASES[which]}", t)
+        def stamp(name, t, which, lead=0):
             if const_expr(timeline):
                 if tid == lead:
                     now = fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
@@ -1534,7 +1520,7 @@ def build_indexed_mla_moe_kernel(
             stamp("o", t, 4)
 
         # ====== 8. post-attn RMSNorm -> router scores + this task's FP8 activation blocks
-        # One sample per block: 1 row group x 96 chunks (bf16), 8 waves split K
+        # One sample per CTA: 1 row group x 96 chunks (bf16), 8 waves split K
         r_wr = _rsrc(w_r)
         R_NKC = HIDDEN // 64
         for tt in range(start("router"), S * N_ROUTER, G):
@@ -1648,7 +1634,7 @@ def build_indexed_mla_moe_kernel(
         UG_S_BYTES = 2 * INTER * (HIDDEN // 32) if use_mxfp4_weight else 2 * INTER // SCALE_BM * (HIDDEN // 128) * 4
 
         if const_expr(S == 1):
-            # one task per block: task u takes intermediates (u % 32) * 8 of routed slot
+            # one task per CTA: task u takes intermediates (u % 32) * 8 of routed slot
             # u // 32 (slot 8 for u < 32, which also take the shared expert's); the 8 gate
             # + 8 up rows are one MFMA row group and all waves split K
             UG8 = 8
@@ -1789,7 +1775,7 @@ def build_indexed_mla_moe_kernel(
                         put(mb("prob"), 0, fx.Float32(1.0))
                 stamp("ug", u, 4)
         elif const_expr(S > 1):
-            # One eight-intermediate tile per block and sample. Shared weights use
+            # One eight-intermediate tile per CTA and sample. Shared weights use
             # the sample columns of one MFMA; routed tiles pipeline over samples.
             UG8 = 8
             UG8_UNITS = (HIDDEN // UG_UNIT_K) // WAVES
@@ -1878,22 +1864,16 @@ def build_indexed_mla_moe_kernel(
                     put(mb("sel"), sn * MOE_SLOTS + sl, lds_ld(keys, sn * MOE_SLOTS + sl))
                     put(mb("prob"), sn * MOE_SLOTS + sl, lds_ld(dnw, sn * MOE_SLOTS + sl))
 
-            flytrace.range_push("shared_prefetch")
             shared_pre = ug8_units(fx.Int32(SHARED_EXPERT), None, has_sh)
-            flytrace.range_pop()
             dn_route(load_bias())
-            flytrace.range_push("expert_prepare")
             gpu.barrier()
             cur = ug8_units(_uniform(lds_ld(keys, slot)), 0)
             stage_moe_input(list(range(S)))
             gpu.barrier()
-            flytrace.range_pop()
             if has_sh:
-                flytrace.range_push("shared_expert")
                 reduce_rows(1, mma_units([fx.Float32(0.0) for _ in range(4)], shared_pre), emit_out(16))
                 gpu.barrier()
                 ug8_emit(0, True)
-                flytrace.range_pop()
             for sample in range_constexpr(S):
                 stamp("ug", sample * G + u, 0)
                 pre = cur
@@ -2046,8 +2026,6 @@ def build_indexed_mla_moe_kernel(
             peer_reduce("ffn", t, mb("a"), store_x, tile=DN_TILE)
             gpu.barrier()
             stamp("down", t, 4)
-
-        flytrace.range_pop()
 
     @flyc.jit
     def launch_indexed_mla_moe(

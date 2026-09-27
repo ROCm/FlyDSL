@@ -29,7 +29,6 @@ from kernels.mla_moe_layer.layer import Glm5IndexedMlaMoeBlock  # noqa: E402
 from kernels.mla_moe_layer.native_baseline import make_native_glm5_baseline  # noqa: E402
 from kernels.mla_moe_layer.reference import make_weights, rope_table  # noqa: E402
 from kernels.mla_moe_layer.runtime import SymmetricPeerBuffer  # noqa: E402
-from kernels.mla_moe_layer.tools.flytrace_perfetto import export_hierarchical_pftrace  # noqa: E402
 
 
 def _implementation_hash(backend: str) -> str:
@@ -197,14 +196,10 @@ def _worker(rank, args, port):
             stats = capture.export(trace_path)
             kernel_trace_dir = trace_dir / "kernels"
             kernel_stats = capture.export_per_kernel(kernel_trace_dir) if args.flytrace_per_kernel else None
-            pftrace_path = trace_dir / "flytrace.pftrace.gz"
-            pftrace_stats = export_hierarchical_pftrace(trace_path, pftrace_path, rank)
             summary = {
                 **stats,
-                **pftrace_stats,
                 "mode": args.moe_mode,
                 "npes": args.npes,
-                "pftrace": str(pftrace_path),
                 "rank": rank,
                 "samples": samples,
                 "trace": str(trace_path),
@@ -219,7 +214,7 @@ def _worker(rank, args, port):
             dist.barrier()
             if rank == 0:
                 kernel_output = f"; kernels: {kernel_trace_dir / 'manifest.json'}" if kernel_stats is not None else ""
-                print(f"flytrace: {trace_path} {stats}; Perfetto: {pftrace_path}{kernel_output}", flush=True)
+                print(f"flytrace: {trace_path} {stats}{kernel_output}", flush=True)
         if args.dump_outputs:
             target = Path(args.dump_outputs)
             target.mkdir(parents=True, exist_ok=True)
@@ -310,7 +305,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--flytrace",
         action="store_true",
-        help="capture one eager launch as full-wave JSON and hierarchical Perfetto protobuf traces",
+        help="capture one eager launch as a kernel-level Perfetto JSON trace",
     )
     parser.add_argument(
         "--flytrace-per-kernel",

@@ -45,6 +45,19 @@ def perfetto_events(waves, clock_hz, *, origin=None):
                 "args": {"name": f"{wave['kernel']} Block {wave['block']} / wave {wave['wave']}"},
             }
         )
+        if not wave["events"]:
+            output.append(
+                {
+                    "ph": "X",
+                    "cat": "flytrace.kernel",
+                    "name": wave["kernel"],
+                    "pid": 1,
+                    "tid": tid,
+                    "ts": (wave["epoch"] - origin) * scale,
+                    "dur": (wave["end_tick"] - wave["epoch"]) * scale,
+                    "args": {"block": wave["block"], "wave": wave["wave"]},
+                }
+            )
         stack = []
         token_ranges = defaultdict(list)
         current = None
