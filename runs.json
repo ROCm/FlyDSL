@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-09-27T11:45:30Z",
+ "updated": "2026-09-27T12:07:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36316946141,
+   "pr": 1202,
+   "commit": "f06113ce18759c5fde2b5d17d911680ba22b7e39",
+   "branch": "dev/export_c",
+   "event": "pull_request",
+   "title": "[AOT] Export linkable C objects and support CPU-only builds",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141",
+   "created_at": "2026-09-27T11:48:54Z",
+   "updated_at": "2026-09-27T12:00:05Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T12:00:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141/job/108614956163"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T12:04:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141/job/108614956195"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T12:00:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141/job/108614956204"
+    }
+   ]
+  },
   {
    "run_id": 36316616265,
    "pr": 1205,
@@ -14,9 +57,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316616265",
    "created_at": "2026-09-27T11:42:42Z",
-   "updated_at": "2026-09-27T11:43:34Z",
+   "updated_at": "2026-09-27T11:59:18Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T11:59:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316616265/job/108614843174"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T11:59:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316616265/job/108614843186"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T11:59:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316616265/job/108614843203"
+    }
+   ]
   },
   {
    "run_id": 36316437403,
@@ -40,13 +111,41 @@
    "branch": "docs/full-doc-audit-20260926",
    "event": "pull_request",
    "title": "[Docs] Audit and refresh repository documentation",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794",
    "created_at": "2026-09-27T11:39:06Z",
-   "updated_at": "2026-09-27T11:41:21Z",
+   "updated_at": "2026-09-27T11:56:45Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T11:59:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794/job/108614477160"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T11:57:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794/job/108614477169"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T11:56:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794/job/108614477186"
+    }
+   ]
   },
   {
    "run_id": 36316342942,
@@ -59,9 +158,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942",
    "created_at": "2026-09-27T11:37:43Z",
-   "updated_at": "2026-09-27T11:39:29Z",
+   "updated_at": "2026-09-27T11:57:10Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T11:54:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942/job/108614125047"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-27T11:57:09Z",
+     "completed_at": "2026-09-27T12:04:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942/job/108614125091"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T11:54:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942/job/108614125092"
+    }
+   ]
   },
   {
    "run_id": 36316221387,
@@ -100,11 +227,11 @@
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36308335661",
    "created_at": "2026-09-27T09:06:53Z",
-   "updated_at": "2026-09-27T10:55:31Z",
+   "updated_at": "2026-09-27T12:05:32Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -119,10 +246,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-27T10:55:31Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T12:05:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36308335661/job/108591475733"
     },
     {
@@ -1981,49 +2108,6 @@
      "machine": "gbt350-odcdh2-b02-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35934904182,
-   "pr": null,
-   "commit": "5f24cf1858c143b0c60e56961cb81e11645f26c1",
-   "branch": "ci/fix-dumpir-v2",
-   "event": "pull_request",
-   "title": "[CI] Fix dumpir.sh silently succeeding with no command",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35934904182",
-   "created_at": "2026-09-23T23:42:17Z",
-   "updated_at": "2026-09-24T03:22:48Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-24T02:02:53Z",
-     "completed_at": "2026-09-24T03:22:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35934904182/job/107437884448"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T00:15:41Z",
-     "completed_at": "2026-09-24T00:44:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35934904182/job/107437884472"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-24T00:15:50Z",
-     "completed_at": "2026-09-24T01:11:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35934904182/job/107437884473"
     }
    ]
   }
