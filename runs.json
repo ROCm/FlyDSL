@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-27T12:39:18Z",
+ "updated": "2026-09-27T13:08:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "codex/glm5-monokernel",
    "event": "pull_request",
    "title": "[Kernel][Perf] GLM-5 MonoKernel: indexer + mla + moe fused kernel for a full decode layer",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318947964",
    "created_at": "2026-09-27T12:25:42Z",
-   "updated_at": "2026-09-27T12:28:07Z",
+   "updated_at": "2026-09-27T12:45:50Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T13:06:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318947964/job/108622072127"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T12:49:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318947964/job/108622072148"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T12:45:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318947964/job/108622072164"
+    }
+   ]
   },
   {
    "run_id": 36318304733,
@@ -25,11 +53,11 @@
    "branch": "dev/export_c",
    "event": "pull_request",
    "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318304733",
    "created_at": "2026-09-27T12:14:05Z",
-   "updated_at": "2026-09-27T12:35:49Z",
+   "updated_at": "2026-09-27T12:46:15Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -44,19 +72,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-27T12:35:49Z",
+     "started_at": "2026-09-27T12:46:14Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318304733/job/108620506522"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-27T12:36:31Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T13:05:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318304733/job/108620506531"
     }
    ]
@@ -227,21 +255,24 @@
    "branch": "glm5-mla-moe-layer-monokernel",
    "event": "pull_request",
    "title": "[Superseded by #1205] GLM-5 indexed decode MonoKernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942",
    "created_at": "2026-09-27T11:37:43Z",
-   "updated_at": "2026-09-27T11:57:10Z",
+   "updated_at": "2026-09-27T13:06:42Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-27T11:54:41Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942/job/108614125047"
+     "completed_at": "2026-09-27T13:06:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942/job/108614125047",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
