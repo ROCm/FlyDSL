@@ -76,6 +76,8 @@ attention 格式差异以及 serving 配置可能带来的 cache dtype 差异，
 | `indexed_mla_moe_kernel.py` | 由 `LayerConfig` 参数化、便于扩展的 indexed MLA + MoE kernel。 |
 | `indexed_layer.py` | 通用 indexed wrapper，以及 GLM-5 compatibility 和 Kimi-K3 MLA adapter。 |
 | `kimi_k3.py` | 组合 indexed MLA、latent MoE 与 reduction 的 Kimi-K3 完整层 adapter。 |
+| `kda.py` | 生产 shape 的 TP8 KDA attention，以及显式 state-pool API。 |
+| `kda_conv.py`、`kda_recurrence.py` | slot-indexed KDA convolution 与融合 recurrence/gated-RMSNorm kernel。 |
 | `kimi_k3_attn_res.py` | 融合 Kimi-K3 AttnRes mixing、RMSNorm 与 MXFP8 输入量化。 |
 | `router_projection.py`、`mxfp8_linear.py` | 融合 router/top-k，以及可复用的 gfx950 MXFP8 projection 支持。 |
 | `kimi_k3_tail.py` | 重叠 routed reduce/RMSNorm、MXFP8 shared/latent projection 与最终 TP reduce。 |
@@ -86,6 +88,7 @@ attention 格式差异以及 serving 配置可能带来的 cache dtype 差异，
 | `native_baseline.py` | 可选的同权重 TileRT 对比适配器。 |
 | `tools/benchmark_atom.py` | 使用预选 sparse indices 的 ATOM 原生 GLM-5.1 decoder-layer benchmark。 |
 | `tools/kimi_k3_full.py` | Kimi-K3 正确性、profiling 和完整层 benchmark driver。 |
+| `tools/kimi_k3_kda_full.py` | KDA attention 及 KDA + latent-MoE 的 TP8 正确性/性能 driver。 |
 
 kernel 使用 FlyDSL 操作实现 wave reduction、硬件数学指令、mailbox polling、buffer
 访问和 MFMA。每个 rank 的 peer payload 先舍入为 BF16，再按 rank 顺序累加，因此所有
@@ -305,9 +308,9 @@ MLA 组件保留原有两项调度优化：S >= 2 时，两个 local head group 
 KV tile 和一次 16-column score MFMA；output gate 则融合到每个 W_UV producer。
 attention-only TP8 在 S=1、S=4、S=8 的提升仍分别为 0.6%、2.3%、12.0%。
 
-### 完整层性能
+### Synthetic MLA 调优性能
 
-完整 Kimi-K3 层使用 TP8、position 3000、每个 HIP graph 16 次 layer launch、2 次
+原始 synthetic `layer_idx=0` MLA harness 使用 TP8、position 3000、每个 HIP graph 16 次 layer launch、2 次
 eager forward 预热、2 次 graph replay 预热、100 次正式 replay，并取最慢 rank 的中位
 延迟。测试前已确认 8 张 GPU 没有其他进程。最终路径使用融合 BF16 router/top-16 与
 MXFP8 latent/shared projection、`bm16` MXFP4 routed-MoE tile、融合通信/RMSNorm/tail，
@@ -370,11 +373,41 @@ MoE、latent transforms、TP reductions、dual streams 和 HIP graph replay。
 | 4 | **109.4035 us** | 225.6496 us | **2.063x** | **51.52%** |
 | 8 | **124.0237 us** | 256.5222 us | **2.068x** | **51.65%** |
 
-这些数据都是实测的 decoder 整层端到端时间，但 attention 工作量并不完全相同：ATOM
+这些数据是 synthetic MLA geometry 的实测端到端时间，不是生产 layer 0 的结果；
+attention 工作量也并不完全相同：ATOM
 的 `KimiFullAttention` 扫描 dense 3001-token KV context，而 FlyDSL 在 position 3000
 消费调用方给出的 top-2048 KV indices。MoE 与 hidden/model shapes、TP8 拓扑、graph
 长度、预热次数、正式重复次数和 critical-rank 取值规则一致。因此该表可作为直接的整层
 实现基线，但 delta 不能解释为同 attention 工作量下的归一化 kernel 性能差异。
+
+### 生产 MLA 与 KDA 层族
+
+生产 Kimi-K3 在 zero-based layer 3 及之后每隔 4 层使用 MLA，其余大多数层使用 KDA。
+Layer 0 是 KDA + dense FFN，本轮按要求不处理。当前 KDA 路径已经覆盖 BF16 fused input
+projection、低秩 `f_a -> f_b` gate、slot-indexed causal convolution、FP32 recurrent
+delta-rule state update、gated per-head RMSNorm、BF16 output projection、TP8 reduction、
+前后两段 AttnRes，以及已有的 latent MXFP4 MoE。
+
+`f_b` projection 已融合进 convolution/recurrence kernel：每个 per-head CTA 从共享的
+128-wide `f_a` 输入计算自己的 128 个 gate channel，并立刻消费，去掉一个独立的低
+token GEMM，同时保持显式、graph-safe 的 state-pool API。
+
+下表使用相同生产层索引、TP8 拓扑、16 层 HIP graph、预热、30 次重复和 critical-rank
+中位数进行配对。ATOM harness 现在会初始化生产 AttnRes block state，不再对未初始化
+storage 计时。
+
+| 层族 / 代表层 | Batch | FlyDSL | ATOM | 加速比 | 延迟降低 |
+|---|---:|---:|---:|---:|---:|
+| MLA + latent MoE，layer 3 | 4 | **116.1023 us** | 222.5597 us | **1.917x** | **47.83%** |
+| MLA + latent MoE，layer 3 | 8 | **127.9274 us** | 253.9299 us | **1.985x** | **49.62%** |
+| KDA + latent MoE，layer 1 | 4 | **126.7786 us** | 197.2968 us | **1.556x** | **35.74%** |
+| KDA + latent MoE，layer 1 | 8 | **138.2513 us** | 227.3771 us | **1.645x** | **39.20%** |
+
+生产 MLA 的 S=8 已约为 2x，KDA 完整层仍未达到 2x。保留的融合 KDA
+convolution/recurrence/RMSNorm core 在 S=4/8 相对 ATOM 三 kernel 链约为
+1.95-1.98x；完整层剩余差距主要来自两个 BF16 attention projection、TP reduction 和
+AttnRes 边界。更快但会放大 recurrent-state 误差的 split-K input projection，以及让
+post-AttnRes 直接消费 peer mailbox 但造成延迟回退的方案，均未保留。
 
 ### 为什么 K3 的绝对耗时仍明显高于 GLM kernel
 
@@ -417,14 +450,19 @@ export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
 export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-kimi-k3:/root/tilert_pkg
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
-  --npes 8 --samples 4 --layer-idx 0 --check \
+  --npes 8 --samples 4 --layer-idx 3 --check \
   --bench --kernel-profile --layers 16 --repeats 100 \
   --output /root/kimi-k3-perf-results/full-moe/final-s4.json
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
-  --npes 8 --samples 8 --layer-idx 0 --check \
+  --npes 8 --samples 8 --layer-idx 3 --check \
   --bench --kernel-profile --layers 16 --repeats 100 \
   --output /root/kimi-k3-perf-results/full-moe/final-s8.json
+
+/opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_kda_full.py \
+  --npes 8 --samples 4 --layer-idx 1 --check --bench \
+  --layers 16 --repeats 30 \
+  --output /root/kimi-k3-perf-results/full-moe/flydsl-kda-production-layer1-s4.json
 ```
 
 可使用 `--eager-attn-res`、`--eager-router` 或 `--eager-shared-experts` 做受控的优化

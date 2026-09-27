@@ -90,9 +90,14 @@ def make_weights(
     model_config: LayerConfig | str = GLM5_CONFIG,
     attention_only: bool = False,
     npes: int = 1,
+    attention_family: str = "mla",
 ) -> LayerWeights:
     """Replicated tensors share ``seed``; TP shards add ``rank`` to it."""
     config = as_layer_config(model_config)
+    if attention_family not in {"mla", "kda"}:
+        raise ValueError(f"unsupported attention family {attention_family!r}; expected 'mla' or 'kda'")
+    if attention_family == "kda" and config != KIMI_K3_CONFIG:
+        raise ValueError("KDA weights are only available for the Kimi-K3 profile")
     if config == KIMI_K3_CONFIG and not attention_only and npes != 8:
         raise ValueError("Kimi-K3 full MLA+MoE weights require the production TP8 shard")
     if not attention_only and config not in (GLM5_CONFIG, KIMI_K3_CONFIG):
@@ -103,25 +108,43 @@ def make_weights(
     t = {}
     bf = torch.bfloat16
     t["g_in"] = (1 + 0.1 * torch.randn(config.hidden, generator=rep, device=device)).to(bf)
-    t["g_q"] = (1 + 0.1 * torch.randn(config.q_lora, generator=rep, device=device)).to(bf)
-    t["g_kv"] = (1 + 0.1 * torch.randn(config.kv_lora, generator=rep, device=device)).to(bf)
     t["g_post"] = (1 + 0.1 * torch.randn(config.hidden, generator=rep, device=device)).to(bf)
-    for name, (rows, k, bk) in attention_mats(heads, config).items():
-        if name == "qkv_a" and config.attention_output_gate:
-            core_rows = config.q_lora + config.kv_lora + config.pe_dim
-            core = (torch.randn(core_rows, k, generator=rep, device=device) / k**0.5).to(bf)
-            gate = (torch.randn(rows - core_rows, k, generator=shd, device=device) / k**0.5).to(bf)
-            t[f"w_{name}"] = torch.cat((core, gate))
-        elif config.attention_weight is AttentionWeight.BF16:
-            gen = rep if name == "qkv_a" else shd
-            t[f"w_{name}"] = (torch.randn(rows, k, generator=gen, device=device) / k**0.5).to(bf)
-        else:
-            gen = rep if name == "qkv_a" else shd
-            t[f"w_{name}"], t[f"s_{name}"] = _rand_fp8(rows, k, bk, gen, device)
-    if config.attention_weight is AttentionWeight.BF16:
-        dummy_scale = torch.ones(1, dtype=torch.float32, device=device)
-        for name in attention_mats(heads, config):
-            t[f"s_{name}"] = dummy_scale
+    if attention_family == "kda":
+        local_projection = heads * config.v_dim
+        qkvg_rows = 4 * local_projection
+        qkvg = (torch.randn(qkvg_rows, config.hidden, generator=shd, device=device) / config.hidden**0.5).to(bf)
+        beta = (torch.randn(heads, config.hidden, generator=shd, device=device) / config.hidden**0.5).to(bf)
+        f_a = (torch.randn(config.v_dim, config.hidden, generator=rep, device=device) / config.hidden**0.5).to(bf)
+        t["w_kda_in"] = torch.cat((qkvg, beta, f_a)).contiguous()
+        t["w_kda_fb"] = (
+            torch.randn(local_projection, config.v_dim, generator=shd, device=device) / config.v_dim**0.5
+        ).to(bf)
+        t["w_kda_conv"] = (torch.randn(3 * local_projection, 4, generator=shd, device=device) / 4**0.5).to(bf)
+        t["kda_a_log"] = torch.randn(heads, generator=shd, device=device)
+        t["kda_dt_bias"] = torch.randn(heads, config.v_dim, generator=shd, device=device).to(bf)
+        t["g_kda_out"] = (1 + 0.1 * torch.randn(config.v_dim, generator=rep, device=device)).to(bf)
+        t["w_kda_o"] = (
+            torch.randn(config.hidden, local_projection, generator=shd, device=device) / local_projection**0.5
+        ).to(bf)
+    else:
+        t["g_q"] = (1 + 0.1 * torch.randn(config.q_lora, generator=rep, device=device)).to(bf)
+        t["g_kv"] = (1 + 0.1 * torch.randn(config.kv_lora, generator=rep, device=device)).to(bf)
+        for name, (rows, k, bk) in attention_mats(heads, config).items():
+            if name == "qkv_a" and config.attention_output_gate:
+                core_rows = config.q_lora + config.kv_lora + config.pe_dim
+                core = (torch.randn(core_rows, k, generator=rep, device=device) / k**0.5).to(bf)
+                gate = (torch.randn(rows - core_rows, k, generator=shd, device=device) / k**0.5).to(bf)
+                t[f"w_{name}"] = torch.cat((core, gate))
+            elif config.attention_weight is AttentionWeight.BF16:
+                gen = rep if name == "qkv_a" else shd
+                t[f"w_{name}"] = (torch.randn(rows, k, generator=gen, device=device) / k**0.5).to(bf)
+            else:
+                gen = rep if name == "qkv_a" else shd
+                t[f"w_{name}"], t[f"s_{name}"] = _rand_fp8(rows, k, bk, gen, device)
+        if config.attention_weight is AttentionWeight.BF16:
+            dummy_scale = torch.ones(1, dtype=torch.float32, device=device)
+            for name in attention_mats(heads, config):
+                t[f"s_{name}"] = dummy_scale
     if attention_only:
         return LayerWeights(heads, t, config, rank, npes)
     if config == KIMI_K3_CONFIG:
@@ -506,6 +529,142 @@ def kimi_attn_res(
     if output_norm_weight is not None:
         mixed = rmsnorm(mixed, output_norm_weight)
     return bf(mixed).to(prefix.dtype), updated.to(prefix.dtype)
+
+
+def golden_kimi_k3_kda_attention(
+    W: LayerWeights,
+    hidden_states: torch.Tensor,
+    state_indices: torch.Tensor,
+    conv_state: torch.Tensor,
+    recurrent_state: torch.Tensor,
+    allreduce,
+):
+    """Torch golden for one Kimi-K3 KDA decode token per request slot."""
+
+    config, t = W.config, W.t
+    if config != KIMI_K3_CONFIG:
+        raise ValueError("golden_kimi_k3_kda_attention requires Kimi-K3 weights")
+    heads = config.local_heads
+    head_dim = config.v_dim
+    projection = heads * head_dim
+    fused = bf(hidden_states.float() @ t["w_kda_in"].float().T)
+    mixed_qkv = fused[:, : 3 * projection]
+    output_gate = fused[:, 3 * projection : 4 * projection].view(-1, heads, head_dim)
+    beta = fused[:, 4 * projection : 4 * projection + heads]
+    f_a = fused[:, 4 * projection + heads :]
+    gate = bf(f_a.float() @ t["w_kda_fb"].float().T).view(-1, heads, head_dim)
+    recurrence_output = torch.zeros_like(gate)
+
+    for sample, slot_tensor in enumerate(state_indices):
+        slot = int(slot_tensor)
+        if slot < 0:
+            continue
+        previous_conv = conv_state[slot].float()
+        current = mixed_qkv[sample].float()
+        conv_inputs = torch.cat((previous_conv, current[:, None]), dim=1)
+        convolved = torch.nn.functional.silu((conv_inputs * t["w_kda_conv"].float()).sum(dim=1))
+        convolved = bf(convolved)
+        conv_state[slot, :, 0].copy_(conv_state[slot, :, 1])
+        conv_state[slot, :, 1].copy_(conv_state[slot, :, 2])
+        conv_state[slot, :, 2].copy_(mixed_qkv[sample])
+
+        query, key, value = convolved.view(3, heads, head_dim)
+        query = query.float()
+        key = key.float()
+        value = value.float()
+        query = query * torch.rsqrt(query.square().sum(-1, keepdim=True) + 1.0e-6)
+        query = query * head_dim**-0.5
+        key = key * torch.rsqrt(key.square().sum(-1, keepdim=True) + 1.0e-6)
+        decay = torch.exp(
+            -5.0
+            * torch.sigmoid(
+                torch.exp(t["kda_a_log"].float())[:, None] * (gate[sample].float() + t["kda_dt_bias"].float())
+            )
+        )
+        state = recurrent_state[slot]
+        state.mul_(decay[:, None, :])
+        state_key = torch.einsum("hvk,hk->hv", state, key)
+        value_update = (value - state_key) * torch.sigmoid(beta[sample].float())[:, None]
+        state.add_(torch.einsum("hv,hk->hvk", value_update, key))
+        recurrence_output[sample].copy_(torch.einsum("hvk,hk->hv", state, query))
+
+    output_float = recurrence_output.float()
+    output_float = output_float * torch.rsqrt(output_float.square().mean(-1, keepdim=True) + EPS)
+    normed = bf(output_float * t["g_kda_out"].float() * torch.sigmoid(output_gate.float()))
+    partial = bf(normed.flatten(1).float() @ t["w_kda_o"].float().T)
+    output = allreduce(partial)
+    return {
+        "fused_input": fused,
+        "gate": gate,
+        "recurrence_output": recurrence_output,
+        "normed": normed,
+        "partial": partial,
+        "output": output,
+    }
+
+
+def golden_kimi_k3_kda_layer(
+    W: LayerWeights,
+    prefix_sum: torch.Tensor,
+    block_residual: torch.Tensor,
+    state_indices: torch.Tensor,
+    conv_state: torch.Tensor,
+    recurrent_state: torch.Tensor,
+    allreduce,
+    *,
+    layer_idx: int,
+):
+    """Full Kimi-K3 KDA + attention-residual + latent-MoE decode golden."""
+
+    config, t = W.config, W.t
+    if config != KIMI_K3_CONFIG or config.attn_res_block_size is None:
+        raise ValueError("golden_kimi_k3_kda_layer requires the Kimi-K3 profile")
+    block_size = config.attn_res_block_size
+    write_block = layer_idx % block_size == 0
+    block_index = layer_idx // block_size
+    previous_blocks = (layer_idx + block_size - 1) // block_size
+
+    pre_attn, _ = kimi_attn_res(
+        prefix_sum,
+        None,
+        block_residual,
+        t["g_self_res"],
+        t["w_self_res"],
+        t["g_in"],
+        previous_blocks,
+        block_index if write_block else -1,
+    )
+    attention = golden_kimi_k3_kda_attention(
+        W,
+        pre_attn,
+        state_indices,
+        conv_state,
+        recurrent_state,
+        allreduce,
+    )
+    attention_delta = attention["output"]
+    post_prefix = attention_delta if write_block else prefix_sum
+    post_delta = None if write_block else attention_delta
+    moe_input, updated_prefix = kimi_attn_res(
+        post_prefix,
+        post_delta,
+        block_residual,
+        t["g_mlp_res"],
+        t["w_mlp_res"],
+        t["g_post"],
+        previous_blocks + int(write_block),
+    )
+    moe = golden_kimi_k3_moe(W, moe_input, allreduce)
+    output = bf(updated_prefix.float() + moe["moe_delta"].float()).to(torch.bfloat16)
+    return {
+        **attention,
+        **moe,
+        "pre_attn": pre_attn,
+        "attention_delta": attention_delta,
+        "moe_input": moe_input,
+        "updated_prefix": updated_prefix,
+        "x_out": output,
+    }
 
 
 def golden_kimi_k3_moe(

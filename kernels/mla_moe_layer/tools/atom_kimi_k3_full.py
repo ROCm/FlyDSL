@@ -37,7 +37,14 @@ def _configure_imports(args) -> None:
             sys.path.insert(0, path)
 
 
-def _build_atom_config(samples: int, context_len: int):
+def _build_atom_config(
+    samples: int,
+    context_len: int,
+    *,
+    attention_family: str,
+    layer_idx: int,
+    dense_ffn: bool,
+):
     from aiter import QuantType, dtypes
     from atom.config import CompilationConfig, CUDAGraphMode, ParallelConfig, QuantizationConfig
     from atom.models.kimi_k3 import _normalize_kimi_config
@@ -72,15 +79,23 @@ def _build_atom_config(samples: int, context_len: int):
         moe_layer_freq=1,
         rms_norm_eps=1.0e-5,
         attn_res_block_size=12,
+        num_hidden_layers=93,
         max_position_embeddings=max(4096, context_len + 1),
         rope_theta=50000.0,
         rope_parameters={"rope_theta": 50000.0, "rope_type": "default"},
+        linear_attn_config={
+            "num_heads": 96,
+            "head_dim": 128,
+            "short_conv_kernel_size": 4,
+            "gate_lower_bound": -5.0,
+            "kda_layers": [layer_idx + 1] if attention_family == "kda" else [],
+            "full_attn_layers": [layer_idx + 1] if attention_family == "mla" else [],
+        },
         model_type="kimi_linear",
     )
     hf_config.torch_dtype = torch.bfloat16
     hf_config.dtype = torch.bfloat16
-    hf_config.kimi_kda_layers = []
-    hf_config.kimi_full_attn_layers = [0]
+    hf_config.first_k_dense_replace = 1 if dense_ffn else 0
     hf_config.quantization_config = {
         "quant_method": "quark",
         "global_quant_config": {},
@@ -157,7 +172,44 @@ def _post_load(layer) -> None:
             quant_method.init_prepare_finalize(module)
 
 
-def _build_metadata(samples: int, context_len: int, device: torch.device):
+def _prewarm_fused_moe(layer, samples: int, rank: int, npes: int, device: torch.device) -> None:
+    """Compile the large FlyDSL MoE kernels one rank at a time.
+
+    First-use compilation on all eight ranks at once can exhaust lld resources.
+    The production launch itself is unchanged; this only serializes benchmark
+    setup so each worker has its process-local executable before TP collectives
+    begin.
+    """
+
+    moe = getattr(layer, "block_sparse_moe", None)
+    if moe is None:
+        return
+    for compile_rank in range(npes):
+        if rank == compile_rank:
+            routed_input = torch.zeros(
+                samples,
+                moe.moe_hidden_size,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            router_logits = torch.zeros(
+                samples,
+                moe.num_experts,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            moe.experts(routed_input, router_logits)
+            torch.cuda.synchronize()
+        dist.barrier()
+
+
+def _build_metadata(
+    samples: int,
+    context_len: int,
+    device: torch.device,
+    *,
+    attention_family: str,
+):
     from aiter import dtypes, get_mla_metadata_info_v1, get_mla_metadata_v1
     from atom.utils.forward_context import AttentionMetaData, AttnState
 
@@ -180,7 +232,14 @@ def _build_metadata(samples: int, context_len: int, device: torch.device):
         max_split_per_batch=-1,
     )
     buffers = [torch.empty(shape, dtype=dtype, device=device) for shape, dtype in metadata_info]
-    work_meta_data, work_indptr, work_info_set, reduce_indptr, reduce_final_map, reduce_partial_map = buffers
+    (
+        work_meta_data,
+        work_indptr,
+        work_info_set,
+        reduce_indptr,
+        reduce_final_map,
+        reduce_partial_map,
+    ) = buffers
     get_mla_metadata_v1(
         cu_seqlens_q,
         kv_indptr,
@@ -220,6 +279,25 @@ def _build_metadata(samples: int, context_len: int, device: torch.device):
         reduce_partial_map=reduce_partial_map,
     )
     metadata.dtype_q = dtypes.bf16
+    if attention_family == "kda":
+        from atom.model_ops.attentions.gdn_attn import GDNAttentionMetadata
+
+        state_indices = torch.arange(samples, dtype=torch.int32, device=device)
+        query_start_loc = torch.arange(samples + 1, dtype=torch.int32, device=device)
+        kda_metadata = GDNAttentionMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decodes=samples,
+            num_decode_tokens=samples,
+            num_spec_decodes=0,
+            num_spec_decode_tokens=0,
+            num_actual_tokens=samples,
+            non_spec_query_start_loc=query_start_loc,
+            non_spec_state_indices_tensor=state_indices,
+            non_spec_state_indices_in_tensor=state_indices,
+        )
+        metadata.kda_metadata = kda_metadata
+        metadata.gdn_metadata = kda_metadata
     return metadata
 
 
@@ -239,8 +317,13 @@ def _worker(rank: int, args, port: int, results) -> None:
     )
     from atom.config import CUDAGraphMode, KVCacheTensor, set_current_atom_config
     from atom.model_loader.loader import initialize_dummy_weights
-    from atom.models.kimi_k3 import KimiDecoderLayer
-    from atom.utils.forward_context import Context, get_forward_context, set_forward_context, set_kv_cache_data
+    from atom.models.kimi_k3 import KimiDecoderLayer, KimiKDAAttention
+    from atom.utils.forward_context import (
+        Context,
+        get_forward_context,
+        set_forward_context,
+        set_kv_cache_data,
+    )
 
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
@@ -254,21 +337,38 @@ def _worker(rank: int, args, port: int, results) -> None:
     )
     initialize_model_parallel(tensor_model_parallel_size=args.npes)
 
-    atom_config = _build_atom_config(args.samples, args.context_len)
+    atom_config = _build_atom_config(
+        args.samples,
+        args.context_len,
+        attention_family=args.attention_family,
+        layer_idx=args.layer_idx,
+        dense_ffn=args.dense_ffn,
+    )
     set_current_atom_config(atom_config)
     # ATOM's ModelRunner constructs parameters under the configured default
     # dtype.  Mirror that here so RMSNorm weights and BF16 activations satisfy
     # the fused Q/K norm kernel's same-dtype contract.
     torch.set_default_dtype(atom_config.torch_dtype)
+    layer = None
     with torch.device(device):
-        layer = KimiDecoderLayer(
-            atom_config,
-            prefix="model.layers.0",
-            layer_num=0,
-            alt_stream=torch.cuda.Stream(device=device),
-        )
+        if args.attention_only:
+            layer = KimiKDAAttention(
+                atom_config,
+                quant_config=atom_config.quant_config,
+                prefix=f"model.layers.{args.layer_idx}.self_attn",
+            )
+        else:
+            layer = KimiDecoderLayer(
+                atom_config,
+                prefix=f"model.layers.{args.layer_idx}",
+                layer_num=args.layer_idx,
+                alt_stream=torch.cuda.Stream(device=device),
+            )
+    assert layer is not None
     initialize_dummy_weights(layer, "xavier")
     _post_load(layer)
+    if not args.attention_only:
+        _prewarm_fused_moe(layer, args.samples, rank, args.npes, device)
 
     generator = torch.Generator(device=device).manual_seed(args.seed + rank)
     prefix_sum = torch.randn(
@@ -278,10 +378,11 @@ def _worker(rank: int, args, port: int, results) -> None:
         device=device,
         dtype=torch.bfloat16,
     )
-    block_residual = torch.empty(
+    block_residual = torch.randn(
         args.samples,
-        0,
+        (args.layer_idx + atom_config.hf_config.attn_res_block_size - 1) // atom_config.hf_config.attn_res_block_size,
         atom_config.hf_config.hidden_size,
+        generator=generator,
         device=device,
         dtype=torch.bfloat16,
     )
@@ -291,15 +392,49 @@ def _worker(rank: int, args, port: int, results) -> None:
         dtype=torch.int64,
         device=device,
     )
-    metadata = _build_metadata(args.samples, args.context_len, device)
-    kv_cache = torch.zeros(
-        args.samples * args.context_len,
-        1,
-        atom_config.hf_config.kv_lora_rank + atom_config.hf_config.qk_rope_head_dim,
-        dtype=torch.bfloat16,
-        device=device,
+    metadata = _build_metadata(
+        args.samples,
+        args.context_len,
+        device,
+        attention_family=args.attention_family,
     )
-    set_kv_cache_data({"layer_0": KVCacheTensor(layer_num=0, k_cache=kv_cache)}, config=atom_config)
+    if args.attention_family == "kda":
+        local_heads = atom_config.hf_config.linear_num_key_heads // args.npes
+        head_dim = atom_config.hf_config.linear_key_head_dim
+        local_proj = local_heads * head_dim
+        conv_state = torch.randn(
+            args.samples,
+            atom_config.hf_config.linear_conv_kernel_dim - 1,
+            3 * local_proj,
+            generator=generator,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        recurrent_state = torch.randn(
+            args.samples,
+            local_heads,
+            head_dim,
+            head_dim,
+            generator=generator,
+            dtype=torch.float32,
+            device=device,
+        )
+        layer_cache = KVCacheTensor(
+            layer_num=args.layer_idx,
+            k_cache=conv_state,
+            v_cache=recurrent_state,
+            per_request_state=True,
+        )
+    else:
+        kv_cache = torch.zeros(
+            args.samples * args.context_len,
+            1,
+            atom_config.hf_config.kv_lora_rank + atom_config.hf_config.qk_rope_head_dim,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        layer_cache = KVCacheTensor(layer_num=args.layer_idx, k_cache=kv_cache)
+    set_kv_cache_data({f"layer_{args.layer_idx}": layer_cache}, config=atom_config)
     set_forward_context(
         metadata,
         atom_config,
@@ -309,8 +444,13 @@ def _worker(rank: int, args, port: int, results) -> None:
     )
     get_forward_context().cudagraph_runtime_mode = CUDAGraphMode.FULL
 
+    def run_layer():
+        if args.attention_only:
+            return layer(prefix_sum)
+        return layer(positions, prefix_sum, block_residual)
+
     for _ in range(2):
-        outputs = layer(positions, prefix_sum, block_residual)
+        outputs = run_layer()
     torch.cuda.synchronize()
     dist.barrier()
 
@@ -318,7 +458,7 @@ def _worker(rank: int, args, port: int, results) -> None:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=capture_context.stream):
             for _ in range(args.layers):
-                outputs = layer(positions, prefix_sum, block_residual)
+                outputs = run_layer()
 
     for _ in range(2):
         graph.replay()
@@ -343,7 +483,10 @@ def _worker(rank: int, args, port: int, results) -> None:
         dist.barrier()
         if rank == 0:
             with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ]
             ) as profiler:
                 graph.replay()
                 torch.cuda.synchronize()
@@ -363,13 +506,20 @@ def _worker(rank: int, args, port: int, results) -> None:
             torch.cuda.synchronize()
         dist.barrier()
 
-    prefix_out, routed, shared, block_out = outputs
-    finite = all(
-        value is None or bool(torch.isfinite(value).all()) for value in (prefix_out, routed, shared, block_out)
-    )
+    if args.attention_only:
+        finite = bool(torch.isfinite(outputs).all())
+    else:
+        prefix_out, routed, shared, block_out = outputs
+        finite = all(
+            value is None or bool(torch.isfinite(value).all()) for value in (prefix_out, routed, shared, block_out)
+        )
     result = {
         "implementation": "ATOM KimiDecoderLayer",
+        "attention_only": args.attention_only,
         "atom_commit": args.atom_commit,
+        "attention_family": args.attention_family,
+        "layer_idx": args.layer_idx,
+        "ffn": "dense" if args.dense_ffn else "latent_moe",
         "npes": args.npes,
         "samples": args.samples,
         "context_len": args.context_len,
@@ -390,7 +540,7 @@ def _worker(rank: int, args, port: int, results) -> None:
             output_path.write_text(json.dumps(result, indent=2) + "\n")
     results[rank] = result
 
-    del graph, layer, kv_cache
+    del graph, layer_cache
     torch.cuda.synchronize()
     dist.barrier()
     destroy_model_parallel()
@@ -405,7 +555,11 @@ def main() -> int:
     parser.add_argument("--deps-root", default="/tmp/atom-k3-deps")
     parser.add_argument("--atom-commit", default="3cea04f45")
     parser.add_argument("--npes", type=int, choices=(8,), default=8)
-    parser.add_argument("--samples", type=int, choices=(4, 8), required=True)
+    parser.add_argument("--samples", type=int, choices=(1, 4, 8), required=True)
+    parser.add_argument("--attention-family", choices=("mla", "kda"), default="mla")
+    parser.add_argument("--layer-idx", type=int, default=0)
+    parser.add_argument("--dense-ffn", action="store_true")
+    parser.add_argument("--attention-only", action="store_true")
     parser.add_argument("--context-len", type=int, default=3001)
     parser.add_argument("--layers", type=int, default=16)
     parser.add_argument("--repeats", type=int, default=7)
@@ -413,6 +567,10 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--output")
     args = parser.parse_args()
+    if args.dense_ffn and args.layer_idx != 0:
+        parser.error("--dense-ffn is only valid for --layer-idx 0")
+    if args.attention_only and args.attention_family != "kda":
+        parser.error("--attention-only currently supports only --attention-family kda")
 
     manager = mp.Manager()
     results = manager.dict()

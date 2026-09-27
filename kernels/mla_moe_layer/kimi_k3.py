@@ -12,6 +12,7 @@ import torch
 from kernels.common.mx_formats import quantize_mxfp8
 from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG, KvCacheLayout
 from kernels.mla_moe_layer.indexed_layer import KimiK3MlaLayer
+from kernels.mla_moe_layer.kda import KimiK3KdaAttention
 from kernels.mla_moe_layer.kimi_k3_attn_res import KimiK3AttnRes
 from kernels.mla_moe_layer.kimi_k3_tail import FusedKimiK3Tail
 from kernels.mla_moe_layer.mxfp8_linear import Mxfp8Linear
@@ -128,16 +129,16 @@ class KimiK3MlaMoeLayer:
                 f"w_latent_up must be the rank-local output-row shard [{self.hidden_shard}, {self.routed_hidden}]"
             )
 
-        self.attention = KimiK3MlaLayer(
+        self.attention = self._build_attention(
             weights,
             samples,
             rank=rank,
             npes=npes,
             group=group,
+            reduce_group=reduce_group,
             topk=topk,
             timeline=timeline,
-            moe_mode="a16w4",
-            attention_input_norm_override=self.inline_pre_attn,
+            reduce_backend=reduce_backend,
             kv_cache_layout=kv_cache_layout,
         )
         device = torch.device("cuda", torch.cuda.current_device())
@@ -264,6 +265,34 @@ class KimiK3MlaMoeLayer:
         self.moe_buf = self.routed_partial
         if reduce_group is None:
             raise ValueError("Kimi-K3 full MLA+MoE requires a GPU-capable TP reduce_group")
+
+    def _build_attention(
+        self,
+        weights: LayerWeights,
+        samples: int,
+        *,
+        rank: int,
+        npes: int,
+        group,
+        reduce_group,
+        topk: int,
+        timeline: bool,
+        reduce_backend: str,
+        kv_cache_layout: KvCacheLayout | str,
+    ):
+        del reduce_group, reduce_backend
+        return KimiK3MlaLayer(
+            weights,
+            samples,
+            rank=rank,
+            npes=npes,
+            group=group,
+            topk=topk,
+            timeline=timeline,
+            moe_mode="a16w4",
+            attention_input_norm_override=self.inline_pre_attn,
+            kv_cache_layout=kv_cache_layout,
+        )
 
     @contextmanager
     def _profile_stage(self, name: str):
@@ -648,7 +677,7 @@ class KimiK3MlaMoeLayer:
             if self.fuse_attn_res:
                 self.post_attn_res(
                     post_prefix,
-                    prefix_sum if self.inline_pre_attn else (post_prefix if post_delta is None else post_delta),
+                    (prefix_sum if self.inline_pre_attn else (post_prefix if post_delta is None else post_delta)),
                     block_residual,
                     self.t["g_mlp_res"],
                     self.t["w_mlp_res"],
@@ -694,3 +723,131 @@ class KimiK3MlaMoeLayer:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
+
+
+class KimiK3KdaMoeLayer(KimiK3MlaMoeLayer):
+    """One production TP8 Kimi-K3 decode KDA + latent-MoE layer."""
+
+    def _build_attention(
+        self,
+        weights: LayerWeights,
+        samples: int,
+        *,
+        rank: int,
+        npes: int,
+        group,
+        reduce_group,
+        topk: int,
+        timeline: bool,
+        reduce_backend: str,
+        kv_cache_layout: KvCacheLayout | str,
+    ):
+        del topk, timeline, kv_cache_layout
+        return KimiK3KdaAttention(
+            weights,
+            samples,
+            rank=rank,
+            npes=npes,
+            group=group,
+            reduce_group=reduce_group,
+            reduce_backend=reduce_backend,
+        )
+
+    def forward(
+        self,
+        prefix_sum: torch.Tensor,
+        block_residual: torch.Tensor,
+        state_indices: torch.Tensor,
+        conv_state: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        *,
+        x_out: torch.Tensor | None = None,
+        epoch_layer: int = 0,
+        advance: bool = True,
+    ) -> torch.Tensor:
+        """Run KDA decode with explicit slot-indexed state pools."""
+
+        if (
+            block_residual.ndim != 3
+            or block_residual.shape[0] != self.S
+            or block_residual.shape[2] != self.config.hidden
+        ):
+            raise ValueError(
+                "block_residual must have shape "
+                f"[{self.S}, blocks, {self.config.hidden}], got {tuple(block_residual.shape)}"
+            )
+        if block_residual.shape[1] <= self.block_write_idx:
+            raise ValueError(
+                f"block_residual needs index {self.block_write_idx}, " f"got {block_residual.shape[1]} blocks"
+            )
+
+        with self._profile_stage("pre_attn_res"):
+            if self.inline_pre_attn:
+                attention_input = prefix_sum
+            elif self.fuse_attn_res:
+                self.pre_attn_res(
+                    prefix_sum,
+                    prefix_sum,
+                    block_residual,
+                    self.t["g_self_res"],
+                    self.t["w_self_res"],
+                    self.t["g_in"],
+                    self.pre_updated,
+                    self.pre_attn,
+                )
+                attention_input = self.pre_attn
+            else:
+                self.pre_attn, _ = self._attn_res(
+                    prefix_sum,
+                    None,
+                    block_residual,
+                    self.t["g_self_res"],
+                    self.t["w_self_res"],
+                    self.t["g_in"],
+                    self.previous_valid_blocks,
+                    self.block_write_idx if self.is_block_write_layer else -1,
+                )
+                attention_input = self.pre_attn
+        with self._profile_stage("attention"):
+            self.attention.forward(
+                attention_input,
+                state_indices,
+                conv_state,
+                recurrent_state,
+                x_out=self.attention_delta,
+                layer=epoch_layer,
+                advance=False,
+            )
+
+        post_prefix = self.attention_delta if self.is_block_write_layer else prefix_sum
+        post_delta = None if self.is_block_write_layer else self.attention_delta
+        with self._profile_stage("post_attn_res"):
+            if self.fuse_attn_res:
+                self.post_attn_res(
+                    post_prefix,
+                    (prefix_sum if self.inline_pre_attn else (post_prefix if post_delta is None else post_delta)),
+                    block_residual,
+                    self.t["g_mlp_res"],
+                    self.t["w_mlp_res"],
+                    self.t["g_post"],
+                    self.updated_prefix,
+                    self.moe_input,
+                    self.latent_projection.activation,
+                    self.latent_projection.activation_scale,
+                )
+            else:
+                self.moe_input, self.updated_prefix = self._attn_res(
+                    post_prefix,
+                    post_delta,
+                    block_residual,
+                    self.t["g_mlp_res"],
+                    self.t["w_mlp_res"],
+                    self.t["g_post"],
+                    self.previous_valid_blocks + int(self.is_block_write_layer),
+                )
+                self.latent_projection.quantize_input(self.moe_input)
+        target = self.output if x_out is None else x_out
+        self._moe(self.moe_input, epoch_layer, self.updated_prefix, target)
+        if advance:
+            self.advance_step()
+        return target
