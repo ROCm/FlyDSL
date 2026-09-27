@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-27T13:08:31Z",
+ "updated": "2026-09-27T13:30:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,10 +20,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-27T13:06:13Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T13:21:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318947964/job/108622072127"
     },
     {
@@ -212,30 +212,33 @@
    "branch": "docs/full-doc-audit-20260926",
    "event": "pull_request",
    "title": "[Docs] Audit and refresh repository documentation",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794",
    "created_at": "2026-09-27T11:39:06Z",
-   "updated_at": "2026-09-27T12:06:22Z",
+   "updated_at": "2026-09-27T13:29:00Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-27T11:59:49Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T13:28:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794/job/108614477160"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-27T11:57:05Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794/job/108614477169"
+     "completed_at": "2026-09-27T13:11:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794/job/108614477169",
+     "machine": "cv350-1e707-c03-2",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
