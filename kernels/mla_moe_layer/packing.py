@@ -49,15 +49,18 @@ def pack_mxfp8_weight(q: torch.Tensor) -> torch.Tensor:
 
 
 def pack_mxfp8_scale(scale: torch.Tensor) -> torch.Tensor:
-    """Preshuffle row-major per-1x32 E8M0 scales for gfx950 scaled MFMA."""
+    """Preshuffle per-1x32 E8M0 scales in the ATOM/AITER layout."""
 
     scale = scale.view(torch.uint8)
     if scale.ndim != 2:
         raise ValueError(f"MXFP8 scale packing expects a matrix, got shape {tuple(scale.shape)}")
     rows, groups = scale.shape
-    if rows % 32 or groups % 8:
-        raise ValueError(f"MXFP8 scale dimensions must be divisible by (32, 8), got {(rows, groups)}")
-    values = scale.reshape(rows // 32, 2, 16, groups // 8, 2, 4)
+    if groups % 8:
+        raise ValueError(f"MXFP8 scale groups must be divisible by 8, got {groups}")
+    padded_rows = (rows + 255) // 256 * 256
+    padded = torch.zeros(padded_rows, groups, dtype=torch.uint8, device=scale.device)
+    padded[:rows] = scale
+    values = padded.reshape(padded_rows // 32, 2, 16, groups // 8, 2, 4)
     return values.permute(0, 3, 5, 2, 4, 1).contiguous().view(-1)
 
 

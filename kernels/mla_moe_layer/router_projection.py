@@ -63,7 +63,6 @@ def build_router_projection(
         raise ValueError(f"latent_rows must be a positive multiple of {_EXPERT_TILE}, got {latent_rows}")
     if shared_rows <= 0 or shared_rows % _EXPERT_TILE:
         raise ValueError(f"shared_rows must be a positive multiple of {_EXPERT_TILE}, got {shared_rows}")
-
     sample_group = 2 if samples == 4 else min(samples, _SAMPLES_PER_CTA)
     sample_groups = (samples + sample_group - 1) // sample_group
     expert_tiles = num_experts // _EXPERT_TILE
@@ -72,6 +71,8 @@ def build_router_projection(
     shared_half_tiles = shared_tiles // 2
     if not (include_router or include_latent or include_shared):
         raise ValueError("at least one projection stage must be enabled")
+    threads = 896 if samples == 4 else (1024 if samples == 8 else _THREADS)
+    waves = threads // _WAVE_SIZE
     router_tasks = sample_groups * expert_tiles if include_router else 0
     latent_blocks = (latent_tiles + _PROJECTION_WAVES - 1) // _PROJECTION_WAVES if include_latent else 0
     shared_blocks = (shared_half_tiles + _PROJECTION_WAVES - 1) // _PROJECTION_WAVES if include_shared else 0
@@ -82,15 +83,15 @@ def build_router_projection(
 
     k_chunks = hidden // 64
     k_scale_chunks = hidden // 256
-    if include_router and k_chunks % _WAVES:
-        raise ValueError(f"hidden/64 must be divisible by {_WAVES}, got {k_chunks}")
-    router_chunks_per_wave = k_chunks // _WAVES
+    if include_router and k_chunks % waves:
+        raise ValueError(f"hidden/64 must be divisible by {waves}, got {k_chunks}")
+    router_chunks_per_wave = k_chunks // waves
     values_per_lane = num_experts // _WAVE_SIZE
 
     x_words = max(sample_group * hidden // 2, samples * hidden // 4)
-    reduction_words = _WAVES * _WAVE_SIZE * 4
+    reduction_words = waves * _WAVE_SIZE * 4
     route_count = samples * topk
-    block_scan = fx.coop.BlockScan[fx.Int32, _THREADS]
+    block_scan = fx.coop.BlockScan[fx.Int32, threads]
 
     @fx.struct
     class SharedStorage:
@@ -101,7 +102,7 @@ def build_router_projection(
         route_positions: fx.Array[fx.Int32, route_count, 16]
         cumsum: fx.Array[fx.Int32, num_experts + 1, 16]
 
-    @flyc.kernel(known_block_size=[_THREADS, 1, 1])
+    @flyc.kernel(known_block_size=[threads, 1, 1])
     def router_projection_kernel(
         hidden_states: Int64,
         quantized_hidden: Int64,
@@ -172,9 +173,9 @@ def build_router_projection(
                 sample_base = (router_task // expert_tiles) * sample_group
                 expert_tile = router_task % expert_tiles
                 group_elements = sample_group * hidden
-                loads_per_group = (group_elements + 4 * _THREADS - 1) // (4 * _THREADS)
+                loads_per_group = (group_elements + 4 * threads - 1) // (4 * threads)
                 for load_index in range_constexpr(loads_per_group):
-                    element = (tid + load_index * _THREADS) * 4
+                    element = (tid + load_index * threads) * 4
                     if element < group_elements:
                         words = fx.Vector(
                             bo.buffer_load(
@@ -221,7 +222,7 @@ def build_router_projection(
                     row = tid % _EXPERT_TILE
                     sample = sample_base + local_sample
                     logit = fx.Float32(0.0)
-                    for source_wave in range_constexpr(_WAVES):
+                    for source_wave in range_constexpr(waves):
                         source_lane = local_sample + 16 * (row // 4)
                         source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
                         logit = logit + fx.ptr_load(reduction + source_index)
@@ -241,9 +242,9 @@ def build_router_projection(
                 lane_div16 = lane // 16
                 lane_mod16 = lane % 16
                 quantized_words = samples * hidden // 4
-                quantized_loads = (quantized_words + 4 * _THREADS - 1) // (4 * _THREADS)
+                quantized_loads = (quantized_words + 4 * threads - 1) // (4 * threads)
                 for load_index in range_constexpr(quantized_loads):
-                    word = (tid + load_index * _THREADS) * 4
+                    word = (tid + load_index * threads) * 4
                     if word < quantized_words:
                         values = fx.Vector(
                             bo.buffer_load(
@@ -406,8 +407,8 @@ def build_router_projection(
         if include_router and bid == fx.Int32(selector_bid):
             zero4 = fx.Vector.filled(4, 0, fx.Int32)
             moe_vectors = moe_elements // 8
-            for zero_index in range_constexpr((moe_vectors + _THREADS - 1) // _THREADS):
-                vector_index = tid + zero_index * _THREADS
+            for zero_index in range_constexpr((moe_vectors + threads - 1) // threads):
+                vector_index = tid + zero_index * threads
                 if vector_index < moe_vectors:
                     bo.buffer_store(zero4, moe_buf_rsrc, vector_index * 4)
 
@@ -492,8 +493,8 @@ def build_router_projection(
 
             gpu.barrier()
 
-            for expert_iteration in range_constexpr((num_experts + _THREADS - 1) // _THREADS):
-                expert = tid + expert_iteration * _THREADS
+            for expert_iteration in range_constexpr((num_experts + threads - 1) // threads):
+                expert = tid + expert_iteration * threads
                 if expert < num_experts:
                     fx.ptr_store(fx.Int32(0), cumsum + expert + 1)
             if tid == 0:
@@ -510,8 +511,8 @@ def build_router_projection(
                 fx.ptr_store(position, route_positions + tid)
             gpu.barrier()
 
-            for expert_iteration in range_constexpr((num_experts + _THREADS - 1) // _THREADS):
-                expert = tid + expert_iteration * _THREADS
+            for expert_iteration in range_constexpr((num_experts + threads - 1) // threads):
+                expert = tid + expert_iteration * threads
                 if expert < num_experts:
                     active = fx.ptr_load(cumsum + expert + 1) != 0
                     fx.ptr_store(
@@ -520,12 +521,12 @@ def build_router_projection(
                     )
             gpu.barrier()
 
-            for chunk in range_constexpr((num_experts + _THREADS - 1) // _THREADS):
-                expert = chunk * _THREADS + tid
+            for chunk in range_constexpr((num_experts + threads - 1) // threads):
+                expert = chunk * threads + tid
                 valid = expert < num_experts
                 value = valid.select(fx.ptr_load(cumsum + expert + 1), fx.Int32(0))
                 inclusive = block_scan.inclusive(value, fx.ReductionOp.ADD, storage=scan_storage)
-                base = fx.Int32(0) if chunk == 0 else fx.ptr_load(cumsum + chunk * _THREADS)
+                base = fx.Int32(0) if chunk == 0 else fx.ptr_load(cumsum + chunk * threads)
                 if valid:
                     fx.ptr_store(base + inclusive, cumsum + expert + 1)
                 gpu.barrier()
@@ -536,8 +537,8 @@ def build_router_projection(
                 bo.buffer_store(fx.Int32(samples), num_valid_rsrc, 1)
 
             sentinel = fx.Int32((topk << 24) | samples)
-            for expert_iteration in range_constexpr((num_experts + _THREADS - 1) // _THREADS):
-                expert = tid + expert_iteration * _THREADS
+            for expert_iteration in range_constexpr((num_experts + threads - 1) // threads):
+                expert = tid + expert_iteration * threads
                 if expert < num_experts:
                     start = fx.ptr_load(cumsum + expert)
                     end = fx.ptr_load(cumsum + expert + 1)
@@ -612,8 +613,8 @@ def build_router_projection(
             shared_mid_out,
             step,
             layer,
-            value_attrs={"rocdl.flat_work_group_size": f"{_THREADS},{_THREADS}"},
-        ).launch(grid=(grid, 1, 1), block=(_THREADS, 1, 1), stream=stream)
+            value_attrs={"rocdl.flat_work_group_size": f"{threads},{threads}"},
+        ).launch(grid=(grid, 1, 1), block=(threads, 1, 1), stream=stream)
 
     launch.func.__name__ = (
         f"router_projection_h{hidden}_e{num_experts}_k{topk}_s{samples}"

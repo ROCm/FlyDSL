@@ -319,8 +319,8 @@ MXFP8 latent/shared projection、`bm16` MXFP4 routed-MoE tile、融合通信/RMS
 | 深度优化前的公共模块源码 | 258.7604 us | 282.4305 us |
 | 融合 router projection 前 | 204.4796 us | 228.6948 us |
 | MXFP8/tail 集成前的 fused-router 源码 | 194.9370 us | 221.5046 us |
-| 最终 MXFP8/overlap 源码 | **111.7374 us** | **126.4800 us** |
-| 相对公共模块源码的加速 | **2.32x** | **2.23x** |
+| 最终 MXFP8/overlap 源码 | **109.4035 us** | **124.0237 us** |
+| 相对公共模块源码的加速 | **2.37x** | **2.28x** |
 
 早期受控 NCCL 与 symmetric reduce A/B 中，S=4 仅从 258.9820 us 变为
 256.3328 us，S=8 仅从 281.1871 us 变为 279.5571 us，差异约 0.6-1.0%。因此只替换
@@ -333,17 +333,24 @@ MXFP8 latent/shared projection、`bm16` MXFP4 routed-MoE tile、融合通信/RMS
   up/gate 共同消费这份 packed 输入。
 - `router_projection.py` 把 BF16 router projection/top-16 与两路 MXFP8 projection 放在
   同一个 kernel。每个 512-thread CTA 使用 4 个 projection wave，增加可独立调度的 CTA
-  数；隔离的 latent/shared 阶段从约 24.9 us 降到 16.2 us。完整融合 kernel 在 S=4/S=8
-  分别为 22.59/24.26 us。
+  数；隔离的 latent/shared 阶段从约 24.9 us 降到 16.2 us。按 sample 数调整 CTA
+  规模后，完整融合 kernel 在 S=4/S=8 分别为 22.44/23.36 us。
 - K3 的 `S <= 8`、top-16 约束意味着每个 active expert 只需要一个 padded 16-row tile。
   LDS atomic histogram 与每条 route 的 atomic ticket 取代重复扫描，使 S=8 整层减少约
   8 us。
 - `kimi_k3_tail.py` 把 routed TP reduce/RMSNorm 与独立的 shared-down 计算重叠。shared
   partial 提前发给对应 output owner；owner 随后叠加本 rank 的 latent-up shard，再广播
   最终值。两路 projection、两段通信、RMSNorm、累加与 residual update 合并后，该 kernel
-  在 S=4/S=8 分别为 16.66/18.68 us。
+  在 S=4/S=8 分别为 14.97/16.83 us。shared-down 与 latent-up 的 MXFP8 weight/scale
+  现在也使用与其他 MXFP8 projection 相同的 ATOM/AITER preshuffle，其中 scale 按 256 行
+  padding。相对紧邻的上一版，完整层 S=4/S=8 从 111.3647/126.0886 us 降到
+  109.4035/124.0237 us。
 - 独立 AttnRes kernel 在一次 launch 内完成混合，并直接量化 post-attention 输出供 MXFP8
-  消费。post-AttnRes 在 S=4/S=8 分别为 8.47/8.64 us。
+  消费。post-AttnRes 在 S=4/S=8 分别为 8.22/8.51 us。
+
+indexed attention 路径也支持通过 `--kv-cache-layout atom` 使用 ATOM-compatible 的融合
+BF16 `[tokens,576]` KV/PE cache。该路径与 split cache 数值一致，实测差异约 0.1 us，
+因此目前仍保留 split layout 为默认值。
 
 隔离的 7168→3584 projection 使用含 16 次 launch 的 HIP graph 测量，MXFP8 kernel
 在 M=4/M=8 分别为 7.05/7.75 us；对应 BF16 `torch.mm` 为 11.86/12.09 us，因此特化
@@ -360,8 +367,8 @@ MoE、latent transforms、TP reductions、dual streams 和 HIP graph replay。
 
 | Batch | FlyDSL 完整层 | ATOM 完整层 | 加速比 | 延迟降低 |
 |---:|---:|---:|---:|---:|
-| 4 | **111.7374 us** | 225.6496 us | **2.019x** | **50.48%** |
-| 8 | **126.4800 us** | 256.5222 us | **2.028x** | **50.69%** |
+| 4 | **109.4035 us** | 225.6496 us | **2.063x** | **51.52%** |
+| 8 | **124.0237 us** | 256.5222 us | **2.068x** | **51.65%** |
 
 这些数据都是实测的 decoder 整层端到端时间，但 attention 工作量并不完全相同：ATOM
 的 `KimiFullAttention` 扫描 dense 3001-token KV context，而 FlyDSL 在 position 3000
@@ -371,7 +378,7 @@ MoE、latent transforms、TP reductions、dual streams 和 HIP graph replay。
 
 ### 为什么 K3 的绝对耗时仍明显高于 GLM kernel
 
-上文 GLM-5 W8A8 S=4 为 56.217 us，而 K3 A16W4 完整层为 111.7374 us，但不能把
+上文 GLM-5 W8A8 S=4 为 56.217 us，而 K3 A16W4 完整层为 109.4035 us，但不能把
 两者当成同工作量的直接优化目标。K3 hidden size 为 7168 而不是 6144，routed expert
 为 896/top-16/intermediate 384 而不是 256/top-8/intermediate 256，每卡 attention
 head 为 12 而不是 8。仅 router projection 的规模就约大 4.08 倍：
@@ -388,12 +395,12 @@ overlap。
 
 | 阶段 | S=4 | S=8 |
 |---|---:|---:|
-| Persistent MLA | 34.10 us | 42.98 us |
-| Router + latent/shared projection | 22.59 us | 24.26 us |
-| MXFP4 routed GEMM1 | 21.08 us | 22.27 us |
-| 融合 shared/latent tail + TP communication | 16.66 us | 18.68 us |
-| MXFP4 routed GEMM2 | 9.17 us | 10.21 us |
-| Post-attention AttnRes | 8.47 us | 8.64 us |
+| Persistent MLA | 34.07 us | 43.00 us |
+| Router + latent/shared projection | 22.44 us | 23.36 us |
+| MXFP4 routed GEMM1 | 21.07 us | 22.41 us |
+| 融合 shared/latent tail + TP communication | 14.97 us | 16.83 us |
+| MXFP4 routed GEMM2 | 9.03 us | 10.15 us |
+| Post-attention AttnRes | 8.22 us | 8.51 us |
 
 各阶段相加已接近无插桩端到端延迟，因此剩余时间主要受计算量限制，而不是隐藏的 framework
 或 collective 空泡。曾测试用独立 HIP stream 重叠 shared 与 routed 分支，但小 kernel

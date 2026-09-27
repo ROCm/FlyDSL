@@ -328,30 +328,38 @@ def build_kimi_k3_tail(
             tile_in_task = wave // _WAVES_PER_TILE
             wave_in_tile = wave % _WAVES_PER_TILE
             row_tile = row_tile_base + tile_in_task
-            row = row_tile * _ROW_TILE + lane % _ROW_TILE
             accumulator = fx.Vector.filled(4, 0.0, fx.Float32)
             for chunk_index in range_constexpr(chunks_per_wave):
                 chunk = wave_in_tile * chunks_per_wave + chunk_index
                 if chunk < k_chunks:
-                    weight = fx.Vector(
-                        bo.buffer_load(
-                            weight_rsrc,
-                            ((row_tile * k_chunks + chunk) * _WAVE_SIZE + lane) * 4,
-                            vec_width=4,
-                            dtype=T.i32,
-                        )
-                    )
                     for step_index in range_constexpr(2):
-                        scale_byte = fx.Int32(
+                        atom_group = step_index * 2 + (lane // 16) // 2
+                        weight = fx.Vector(
                             bo.buffer_load(
-                                scale_rsrc,
-                                row * (k_dim // 32) + chunk * 2 + step_index,
-                                vec_width=1,
-                                dtype=T.i8,
+                                weight_rsrc,
+                                (((row_tile * k_chunks + chunk) * 4 + atom_group) * 16 + lane % 16) * 4
+                                + ((lane // 16) % 2) * 2,
+                                vec_width=2,
+                                dtype=T.i32,
                             )
                         )
+                        scale_group = chunk * 2 + step_index
+                        scale_word = fx.Int32(
+                            bo.buffer_load(
+                                scale_rsrc,
+                                (
+                                    ((row_tile // 2) * (k_dim // 256) + scale_group // 8) * 64
+                                    + (scale_group % 4) * 16
+                                    + lane % 16
+                                ),
+                                vec_width=1,
+                                dtype=T.i32,
+                            )
+                        )
+                        scale_byte_index = ((scale_group % 8) // 4) * 2 + row_tile % 2
+                        scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & fx.Int32(0xFF)
                         scale = ((scale_byte & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
-                        lhs = mxfp8_to_bf16x8(weight[step_index * 2], weight[step_index * 2 + 1], scale)
+                        lhs = mxfp8_to_bf16x8(weight[0], weight[1], scale)
                         rhs = fx.ptr_load(
                             activation + (sample * k_dim + chunk * 64) // 2 + (lane // 16) * 4 + step_index * 16,
                             result_type=fx.Vector.make_type(4, fx.Float32),
@@ -754,9 +762,11 @@ class FusedKimiK3Tail:
         for name, (tensor, shape, dtype) in expected.items():
             if tensor.shape != shape or tensor.dtype != dtype or not tensor.is_contiguous():
                 raise ValueError(f"{name} must be contiguous {dtype} {list(shape)}")
-        if shared_down_scale.shape != (self.hidden, self.shared_inter // 32):
+        shared_scale_rows = (self.hidden + 255) // 256 * 256
+        latent_scale_rows = (self.hidden // self.npes + 255) // 256 * 256
+        if shared_down_scale.numel() != shared_scale_rows * (self.shared_inter // 32):
             raise ValueError("shared_down_scale has the wrong shape")
-        if latent_up_scale.shape != (self.hidden // self.npes, self.routed_hidden // 32):
+        if latent_up_scale.numel() != latent_scale_rows * (self.routed_hidden // 32):
             raise ValueError("latent_up_scale has the wrong shape")
         if shared_down_scale.dtype != torch.uint8 or latent_up_scale.dtype != torch.uint8:
             raise ValueError("MXFP8 scales must use uint8 E8M0 storage")

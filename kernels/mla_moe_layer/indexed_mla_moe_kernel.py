@@ -61,8 +61,10 @@ from kernels.mla_moe_layer.config import (
     AttentionWeight,
     ExpertActivation,
     ExpertWeight,
+    KvCacheLayout,
     LayerConfig,
     MoeMode,
+    as_kv_cache_layout,
     as_layer_config,
     moe_format,
 )
@@ -141,6 +143,7 @@ def build_indexed_mla_moe_kernel(
     model_config: LayerConfig | str = GLM5_CONFIG,
     attention_only: bool = False,
     attention_input_norm_override: bool | None = None,
+    kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
 ):
     """Return the ``@flyc.jit`` launcher for one rank's whole layer.
 
@@ -150,6 +153,8 @@ def build_indexed_mla_moe_kernel(
     done, end, then free debug marks) in ``stage_tasks`` order.
     """
     config = as_layer_config(model_config)
+    cache_layout = as_kv_cache_layout(kv_cache_layout)
+    use_atom_kv_cache = cache_layout is KvCacheLayout.ATOM
     HIDDEN = config.hidden
     Q_LORA = config.q_lora
     KV_LORA = config.kv_lora
@@ -582,7 +587,14 @@ def build_indexed_mla_moe_kernel(
         def unit_bf16(w_rsrc, rg, kc, NKC, b_word, ln=None):
             ln = lane if ln is None else ln
             wv = [
-                fx.Vector(bo.buffer_load(w_rsrc, (((rg * NKC + kc) * 2 + sp) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
+                fx.Vector(
+                    bo.buffer_load(
+                        w_rsrc,
+                        (((rg * NKC + kc) * 2 + sp) * 64 + ln) * 4,
+                        vec_width=4,
+                        dtype=T.i32,
+                    )
+                )
                 for sp in range(2)
             ]
             return ("bf16", wv, None, b_word + (lane // 16) * 4)
@@ -1210,15 +1222,19 @@ def build_indexed_mla_moe_kernel(
             for s in range_constexpr(S):
                 pos = pos0 + s
                 kvn = bf16_round(vs[s] * _rsq(ssq[s] * (1.0 / KV_LORA) + EPS) * g)
-                bo.buffer_store(kvn.to(fx.BFloat16), r_kv, pos * KV_LORA + tid)
+                kv_offset = pos * QK_DIM + tid if const_expr(use_atom_kv_cache) else pos * KV_LORA + tid
+                bo.buffer_store(kvn.to(fx.BFloat16), r_kv, kv_offset)
                 put(mb("kvnew"), s * KV_LORA + tid, kvn)
                 if tid < PE_DIM // 2:
                     x0, x1 = pes[s]
                     c, sn = cs[s], sns[s]
                     p0 = bf16_round(x0 * c - x1 * sn)
                     p1 = bf16_round(x0 * sn + x1 * c)
-                    bo.buffer_store(p0.to(fx.BFloat16), r_pe, pos * PE_DIM + tid * 2)
-                    bo.buffer_store(p1.to(fx.BFloat16), r_pe, pos * PE_DIM + tid * 2 + 1)
+                    pe_offset = (
+                        pos * QK_DIM + KV_LORA + tid * 2 if const_expr(use_atom_kv_cache) else pos * PE_DIM + tid * 2
+                    )
+                    bo.buffer_store(p0.to(fx.BFloat16), r_pe, pe_offset)
+                    bo.buffer_store(p1.to(fx.BFloat16), r_pe, pe_offset + 1)
                     put2(mb("penew"), s * PE_DIM + tid * 2, p0, p1)
             stamp("cache", t, 4)
 
@@ -1351,10 +1367,16 @@ def build_indexed_mla_moe_kernel(
             krows = [lds_ld(keys, wave * KPW + jj) for jj in range(KPW)]
             for jj in range_constexpr(KPW):
                 j = wave * KPW + jj
-                kv8 = fx.Vector(bo.buffer_load(r_kv, krows[jj] * (KV_LORA // 2) + lane * 4, vec_width=4, dtype=T.i32))
+                kv_row_words = QK_DIM // 2 if const_expr(use_atom_kv_cache) else KV_LORA // 2
+                kv8 = fx.Vector(bo.buffer_load(r_kv, krows[jj] * kv_row_words + lane * 4, vec_width=4, dtype=T.i32))
                 fx.ptr_store(kv8.bitcast(fx.Float32), ktile + (j * KS + lane * 4))
                 if lane < PE_DIM // 2:
-                    lds_st(petile, j * PS + lane, ld_f32(r_pe, krows[jj] * (PE_DIM // 2) + lane))
+                    pe_row = (
+                        krows[jj] * (QK_DIM // 2) + KV_LORA // 2 + lane
+                        if const_expr(use_atom_kv_cache)
+                        else krows[jj] * (PE_DIM // 2) + lane
+                    )
+                    lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row))
 
         def patch_new_kv():
             """Rows appended by this launch come from the cache task's kvnew / penew pairs."""

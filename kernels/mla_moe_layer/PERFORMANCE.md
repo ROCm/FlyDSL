@@ -359,8 +359,8 @@ symmetric peer mailboxes.
 | Common-module source before the deep tuning pass | 258.7604 us | 282.4305 us |
 | Before fused router projection | 204.4796 us | 228.6948 us |
 | Fused-router source before MXFP8/tail integration | 194.9370 us | 221.5046 us |
-| Final MXFP8/overlapped source | **111.7374 us** | **126.4800 us** |
-| Speedup from the common-module source | **2.32x** | **2.23x** |
+| Final MXFP8/overlapped source | **109.4035 us** | **124.0237 us** |
+| Speedup from the common-module source | **2.37x** | **2.28x** |
 
 The earlier controlled NCCL-versus-symmetric-reduce comparison changed S=4
 from 258.9820 us to 256.3328 us and S=8 from 281.1871 us to 279.5571 us, only
@@ -378,8 +378,8 @@ traffic, and overlap together:
 - `router_projection.py` co-locates BF16 router projection/top-16 with both
   MXFP8 projections. Four active projection waves per 512-thread CTA increase
   the number of independent projection CTAs; the isolated latent/shared pass
-  improved from about 24.9 us to 16.2 us. The complete fused kernel measures
-  22.59 us at S=4 and 24.26 us at S=8.
+  improved from about 24.9 us to 16.2 us. Sample-specific CTA sizing reduces
+  the complete fused kernel to 22.44 us at S=4 and 23.36 us at S=8.
 - K3's `S <= 8`, top-16 contract means every active expert needs exactly one
   padded 16-row tile. An LDS atomic histogram and per-route atomic tickets
   replace repeated route scans, removing roughly 8 us from the S=8 full layer.
@@ -387,10 +387,20 @@ traffic, and overlap together:
   shared-down compute. Shared partials are sent to their output owner early;
   each owner then adds its rank-local latent-up shard and broadcasts the final
   value. This collapses two projections, two communication phases, RMSNorm,
-  accumulation, and the residual update into a 16.66-us/18.68-us kernel.
+  accumulation, and the residual update into a 14.97-us/16.83-us kernel. The
+  shared-down and latent-up MXFP8 weights and scales now use the same
+  ATOM/AITER preshuffle as the other MXFP8 projections, including 256-row scale
+  padding. Against the immediately preceding build, this layout change reduced
+  full-layer S=4/S=8 latency from 111.3647/126.0886 us to
+  109.4035/124.0237 us.
 - Dedicated AttnRes kernels keep the mixed state in one launch and quantize the
   post-attention output directly for MXFP8 consumers. The post-AttnRes kernel
-  measures 8.47 us at S=4 and 8.64 us at S=8.
+  measures 8.22 us at S=4 and 8.51 us at S=8.
+
+The indexed attention path also accepts an ATOM-compatible fused BF16
+`[tokens,576]` KV/PE cache through `--kv-cache-layout atom`. It is numerically
+identical to the split-cache path; its measured difference was about 0.1 us,
+so the split layout remains the default.
 
 For the isolated 7168-to-3584 projection, a 16-launch HIP graph measured the
 MXFP8 kernel at 7.05 us for M=4 and 7.75 us for M=8. The corresponding BF16
@@ -411,8 +421,8 @@ graph replay.
 
 | Batch | FlyDSL full layer | ATOM full layer | Speedup | Latency reduction |
 |---:|---:|---:|---:|---:|
-| 4 | **111.7374 us** | 225.6496 us | **2.019x** | **50.48%** |
-| 8 | **126.4800 us** | 256.5222 us | **2.028x** | **50.69%** |
+| 4 | **109.4035 us** | 225.6496 us | **2.063x** | **51.52%** |
+| 8 | **124.0237 us** | 256.5222 us | **2.068x** | **51.65%** |
 
 These are observed end-to-end decoder-layer timings, but the attention work is
 not identical. ATOM's `KimiFullAttention` scans a dense 3001-token KV context,
@@ -424,7 +434,7 @@ same-attention-work kernel comparison.
 
 ### Why K3 is still much slower than the GLM kernel in absolute time
 
-The GLM-5 W8A8 S=4 result above is 56.217 us, versus 111.7374 us for the K3
+The GLM-5 W8A8 S=4 result above is 56.217 us, versus 109.4035 us for the K3
 A16W4 full layer. These numbers should not be treated as the same-workload
 optimization target. K3 has hidden size 7168 instead of 6144, 896 routed
 experts/top-16/intermediate 384 instead of 256/top-8/intermediate 256, and 12
@@ -443,12 +453,12 @@ The final one-layer kernel breakdown is:
 
 | Stage | S=4 | S=8 |
 |---|---:|---:|
-| Persistent MLA | 34.10 us | 42.98 us |
-| Router + latent/shared projection | 22.59 us | 24.26 us |
-| MXFP4 routed GEMM1 | 21.08 us | 22.27 us |
-| Fused shared/latent tail + TP communication | 16.66 us | 18.68 us |
-| MXFP4 routed GEMM2 | 9.17 us | 10.21 us |
-| Post-attention AttnRes | 8.47 us | 8.64 us |
+| Persistent MLA | 34.07 us | 43.00 us |
+| Router + latent/shared projection | 22.44 us | 23.36 us |
+| MXFP4 routed GEMM1 | 21.07 us | 22.41 us |
+| Fused shared/latent tail + TP communication | 14.97 us | 16.83 us |
+| MXFP4 routed GEMM2 | 9.03 us | 10.15 us |
+| Post-attention AttnRes | 8.22 us | 8.51 us |
 
 The stage sum is close to the uninstrumented latency, so the remaining gap is
 now compute-dominated rather than a hidden framework or collective bubble.

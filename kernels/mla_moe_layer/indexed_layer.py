@@ -16,8 +16,10 @@ from kernels.mla_moe_layer.config import (
     MOE_SLOTS,
     N_EXPERTS,
     ExpertActivation,
+    KvCacheLayout,
     LayerConfig,
     MoeMode,
+    as_kv_cache_layout,
     as_layer_config,
     as_moe_mode,
     moe_format,
@@ -62,6 +64,7 @@ class IndexedMlaMoeBlock:
         model_config: LayerConfig | str = GLM5_CONFIG,
         attention_only: bool = False,
         attention_input_norm_override: bool | None = None,
+        kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
     ):
         self.config = as_layer_config(model_config)
         if W.config != self.config:
@@ -72,6 +75,7 @@ class IndexedMlaMoeBlock:
         if not 1 <= launches_per_step <= MAX_LAYERS_PER_STEP:
             raise ValueError(f"launches_per_step must be in [1, {MAX_LAYERS_PER_STEP}], got {launches_per_step}")
         self.moe_mode = as_moe_mode(moe_mode)
+        self.kv_cache_layout = as_kv_cache_layout(kv_cache_layout)
         self.attention_only = attention_only
         self.W = W
         self.S = samples
@@ -110,6 +114,7 @@ class IndexedMlaMoeBlock:
             model_config=self.config,
             attention_only=attention_only,
             attention_input_norm_override=attention_input_norm_override,
+            kv_cache_layout=self.kv_cache_layout,
         )
         self.stages = stage_tasks(
             samples,
@@ -160,6 +165,12 @@ class IndexedMlaMoeBlock:
 
         if not 0 <= layer < self.launches_per_step:
             raise ValueError(f"layer must be in [0, {self.launches_per_step}), got {layer}")
+        if self.kv_cache_layout is KvCacheLayout.ATOM:
+            cache_width = self.config.kv_lora + self.config.pe_dim
+            if kv_cache.ndim != 2 or kv_cache.shape[1] != cache_width:
+                raise ValueError(f"ATOM KV cache must have shape [tokens, {cache_width}], got {tuple(kv_cache.shape)}")
+            if kv_cache.data_ptr() != pe_cache.data_ptr():
+                raise ValueError("ATOM KV cache layout requires the same fused tensor for kv_cache and pe_cache")
         tensors = dict(self.W.t, **self.packed)
         if x_out is None:
             x_out = torch.empty(self.S, self.config.hidden, dtype=torch.bfloat16, device=h.device)

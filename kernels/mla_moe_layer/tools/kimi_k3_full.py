@@ -20,7 +20,13 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from kernels.common.mx_formats import dequantize_mxfp8, quant_dequant_mxfp8, quantize_mxfp8  # noqa: E402
-from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP, MoeMode  # noqa: E402
+from kernels.mla_moe_layer.config import (  # noqa: E402
+    EPS,
+    KIMI_K3_CONFIG,
+    MAX_LAYERS_PER_STEP,
+    KvCacheLayout,
+    MoeMode,
+)
 from kernels.mla_moe_layer.kimi_k3 import KimiK3MlaMoeLayer  # noqa: E402
 from kernels.mla_moe_layer.reference import (  # noqa: E402
     LayerWeights,
@@ -76,6 +82,7 @@ def _worker(rank: int, args, port: int, results) -> None:
         fuse_router=not args.eager_router,
         fuse_shared_experts=not args.eager_shared_experts,
         reduce_backend=args.reduce_backend,
+        kv_cache_layout=args.kv_cache_layout,
     )
 
     generator = torch.Generator(device=device).manual_seed(args.seed + 99)
@@ -88,8 +95,24 @@ def _worker(rank: int, args, port: int, results) -> None:
         generator=generator,
         device=device,
     ).bfloat16()
-    kv0 = torch.randn(args.max_seq, config.kv_lora, generator=generator, device=device).bfloat16()
-    pe0 = torch.randn(args.max_seq, config.pe_dim, generator=generator, device=device).bfloat16()
+    if args.kv_cache_layout == KvCacheLayout.ATOM.value:
+        cache0 = torch.randn(
+            args.max_seq,
+            config.kv_lora + config.pe_dim,
+            generator=generator,
+            device=device,
+        ).bfloat16()
+        reference_kv0 = cache0[:, : config.kv_lora].clone()
+        reference_pe0 = cache0[:, config.kv_lora :].clone()
+        kv = cache0.clone()
+        pe = kv
+    else:
+        kv0 = torch.randn(args.max_seq, config.kv_lora, generator=generator, device=device).bfloat16()
+        pe0 = torch.randn(args.max_seq, config.pe_dim, generator=generator, device=device).bfloat16()
+        reference_kv0 = kv0
+        reference_pe0 = pe0
+        kv = kv0.clone()
+        pe = pe0.clone()
     indices = torch.stack(
         [
             torch.randperm(max(args.pos + sample + 1, args.cache_topk), generator=generator, device=device)[
@@ -107,7 +130,6 @@ def _worker(rank: int, args, port: int, results) -> None:
     output = torch.empty_like(prefix)
 
     blocks = blocks0.clone()
-    kv, pe = kv0.clone(), pe0.clone()
     layer.forward(prefix, blocks, pos, kv, pe, indices, cos, sin, x_out=output)
     torch.cuda.synchronize()
 
@@ -162,7 +184,7 @@ def _worker(rank: int, args, port: int, results) -> None:
             weights.npes,
         )
         ref_blocks = blocks0.clone()
-        ref_kv, ref_pe = kv0.clone(), pe0.clone()
+        ref_kv, ref_pe = reference_kv0.clone(), reference_pe0.clone()
         reference = golden_kimi_k3_layer(
             reference_weights,
             prefix,
@@ -230,15 +252,22 @@ def _worker(rank: int, args, port: int, results) -> None:
             e2e_selection_equal=bool(torch.equal(layer.topk_ids, reference["sel"])),
             e2e_selection_mismatches=int((layer.topk_ids != reference["sel"]).sum()),
             kv_rel_l2=_relative_l2(
-                kv[args.pos : args.pos + args.samples],
+                (
+                    kv[args.pos : args.pos + args.samples, : config.kv_lora]
+                    if args.kv_cache_layout == KvCacheLayout.ATOM.value
+                    else kv[args.pos : args.pos + args.samples]
+                ),
                 ref_kv[args.pos : args.pos + args.samples],
             ),
         )
 
     if args.profile:
         blocks.copy_(blocks0)
-        kv.copy_(kv0)
-        pe.copy_(pe0)
+        if args.kv_cache_layout == KvCacheLayout.ATOM.value:
+            kv.copy_(cache0)
+        else:
+            kv.copy_(kv0)
+            pe.copy_(pe0)
         torch.cuda.synchronize()
         dist.barrier()
         layer.start_stage_profile()
@@ -357,6 +386,11 @@ def main() -> int:
         help="use the unfused Torch shared-expert path",
     )
     parser.add_argument("--reduce-backend", choices=("symmetric", "nccl"), default="symmetric")
+    parser.add_argument(
+        "--kv-cache-layout",
+        choices=tuple(layout.value for layout in KvCacheLayout),
+        default=KvCacheLayout.SPLIT.value,
+    )
     parser.add_argument("--layers", type=int, default=16)
     parser.add_argument("--repeats", type=int, default=7)
     parser.add_argument("--kernel-profile", action="store_true", help="record one rank-0 HIP-graph kernel profile")

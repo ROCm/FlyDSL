@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import torch
 
 from kernels.common.mx_formats import quantize_mxfp8
-from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG
+from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG, KvCacheLayout
 from kernels.mla_moe_layer.indexed_layer import KimiK3MlaLayer
 from kernels.mla_moe_layer.kimi_k3_attn_res import KimiK3AttnRes
 from kernels.mla_moe_layer.kimi_k3_tail import FusedKimiK3Tail
@@ -19,7 +19,8 @@ from kernels.mla_moe_layer.packing import (
     pack_a16w4_scale,
     pack_a16w4_weight,
     pack_bf16,
-    pack_fp8,
+    pack_mxfp8_scale,
+    pack_mxfp8_weight,
 )
 from kernels.mla_moe_layer.reference import LayerWeights
 from kernels.mla_moe_layer.router import SigmoidTopkRouter
@@ -66,6 +67,7 @@ class KimiK3MlaMoeLayer:
         fuse_router: bool = True,
         fuse_shared_experts: bool = True,
         reduce_backend: str = "symmetric",
+        kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
     ) -> None:
         config = weights.config
         if config != KIMI_K3_CONFIG:
@@ -136,6 +138,7 @@ class KimiK3MlaMoeLayer:
             timeline=timeline,
             moe_mode="a16w4",
             attention_input_norm_override=self.inline_pre_attn,
+            kv_cache_layout=kv_cache_layout,
         )
         device = torch.device("cuda", torch.cuda.current_device())
         self.pre_attn = torch.empty(samples, config.hidden, dtype=torch.bfloat16, device=device)
@@ -176,8 +179,10 @@ class KimiK3MlaMoeLayer:
         self.s_latent_down = self.latent_projection.scale
         self.w_shared_ug = self.shared_projection.weight
         self.s_shared_ug = self.shared_projection.scale
-        self.w_shared_dn = pack_fp8(shared_down_weight)
-        self.w_latent_up = pack_fp8(latent_up_weight)
+        self.w_shared_dn = pack_mxfp8_weight(shared_down_weight)
+        self.s_shared_dn = pack_mxfp8_scale(self.s_shared_dn)
+        self.w_latent_up = pack_mxfp8_weight(latent_up_weight)
+        self.s_latent_up = pack_mxfp8_scale(self.s_latent_up)
 
         # At most one padded BM tile is needed per selected route: there can be
         # no more active experts than routes.  The old ``routes + E*(BM-1)``
