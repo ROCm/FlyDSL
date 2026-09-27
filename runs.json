@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-27T01:12:29Z",
+ "updated": "2026-09-27T01:28:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36285338037,
+   "pr": 1203,
+   "commit": "013fde4e0cfe19ea1d4ba064fbe42dad1f337f26",
+   "branch": "docs/full-doc-audit-20260926",
+   "event": "pull_request",
+   "title": "[Docs] Audit and refresh repository documentation",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36285338037",
+   "created_at": "2026-09-27T01:22:30Z",
+   "updated_at": "2026-09-27T01:27:55Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36284912910,
+   "pr": 1204,
+   "commit": "12f8f93a6a6e4a0a9e83cfcc98afd45d932bbcf1",
+   "branch": "codex/kimi-k3-mxfp4-fused",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA MoE",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284912910",
+   "created_at": "2026-09-27T01:14:10Z",
+   "updated_at": "2026-09-27T01:16:03Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36284586536,
    "pr": 1204,
@@ -25,13 +55,41 @@
    "branch": "dev/export_c",
    "event": "pull_request",
    "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284172781",
    "created_at": "2026-09-27T00:59:51Z",
-   "updated_at": "2026-09-27T01:05:49Z",
+   "updated_at": "2026-09-27T01:15:15Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T01:15:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284172781/job/108523864127"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T01:18:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284172781/job/108523864170"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T01:15:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284172781/job/108523864200"
+    }
+   ]
   },
   {
    "run_id": 36282379496,
@@ -40,20 +98,20 @@
    "branch": "docs/full-doc-audit-20260926",
    "event": "pull_request",
    "title": "[Docs] Audit and refresh repository documentation",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36282379496",
    "created_at": "2026-09-27T00:24:05Z",
-   "updated_at": "2026-09-27T00:35:27Z",
+   "updated_at": "2026-09-27T01:27:31Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-27T00:35:27Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-27T01:15:42Z",
+     "completed_at": "2026-09-27T01:27:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36282379496/job/108518194964"
     },
     {
@@ -68,10 +126,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-27T00:37:22Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T01:23:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36282379496/job/108518195036"
     }
    ]
@@ -2027,36 +2085,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 35733143095,
-   "pr": null,
-   "commit": "49e787e5efdecc597b6e5be9cbcbe5773360361a",
-   "branch": "main",
-   "event": "push",
-   "title": "[Enh] Compare stable APIs across release revisions (#1181)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35733143095",
-   "created_at": "2026-09-22T13:23:25Z",
-   "updated_at": "2026-09-22T13:40:01Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 35732845361,
-   "pr": null,
-   "commit": "7f2bed9a25a70e1978dd55595f412909b3dc4b21",
-   "branch": "main",
-   "event": "push",
-   "title": "[Chore] simplify comm atomic helpers (#1116)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35732845361",
-   "created_at": "2026-09-22T13:20:38Z",
-   "updated_at": "2026-09-22T13:23:27Z",
-   "actor": "sjfeng1999",
-   "jobs": []
   }
  ]
 }
