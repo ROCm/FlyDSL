@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-27T01:06:58Z",
+ "updated": "2026-09-27T01:10:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36284586536,
+   "pr": 1204,
+   "commit": "51c7081a5c0ddb3c8775aa3ed3c727eeb7e03853",
+   "branch": "codex/kimi-k3-mxfp4-fused",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA MoE",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284586536",
+   "created_at": "2026-09-27T01:07:46Z",
+   "updated_at": "2026-09-27T01:09:13Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36284172781,
    "pr": 1202,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284172781",
    "created_at": "2026-09-27T00:59:51Z",
-   "updated_at": "2026-09-27T01:05:17Z",
+   "updated_at": "2026-09-27T01:05:49Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2042,52 +2057,6 @@
    "updated_at": "2026-09-22T13:23:27Z",
    "actor": "sjfeng1999",
    "jobs": []
-  },
-  {
-   "run_id": 35728249041,
-   "pr": 1182,
-   "commit": "cfa576cfe9df1172a17be94b68505e361c70a37c",
-   "branch": "gfx942-a16w4-fp4-software-decode",
-   "event": "pull_request",
-   "title": "[a16w4] Sync moe_2stage_a16wmix from aiter (gfx942 MXFP4 + 7 earlier \u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35728249041",
-   "created_at": "2026-09-22T12:36:55Z",
-   "updated_at": "2026-09-22T15:32:28Z",
-   "actor": "MHYangAMD",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T12:51:37Z",
-     "completed_at": "2026-09-22T13:22:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35728249041/job/106751920075"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T12:51:46Z",
-     "completed_at": "2026-09-22T14:12:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35728249041/job/106751920088",
-     "machine": "smci350-rck-g03-f19-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T13:57:45Z",
-     "completed_at": "2026-09-22T15:32:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35728249041/job/106751920120"
-    }
-   ]
   }
  ]
 }
