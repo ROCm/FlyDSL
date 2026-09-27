@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-27T15:21:26Z",
+ "updated": "2026-09-27T15:27:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36329459246,
+   "pr": 1204,
+   "commit": "1adea50fe6a84920f2a6cc41bee75b726e6d3e13",
+   "branch": "codex/kimi-k3-mxfp4-fused",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36329459246",
+   "created_at": "2026-09-27T15:24:55Z",
+   "updated_at": "2026-09-27T15:26:18Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36327300104,
    "pr": 1204,
@@ -10,38 +25,38 @@
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36327300104",
    "created_at": "2026-09-27T14:49:18Z",
-   "updated_at": "2026-09-27T15:12:21Z",
+   "updated_at": "2026-09-27T15:26:18Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-27T15:12:21Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T15:24:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36327300104/job/108646326070"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-27T15:12:41Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T15:26:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36327300104/job/108646326123"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-27T15:12:27Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T15:26:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36327300104/job/108646326153"
     }
    ]
@@ -2043,49 +2058,6 @@
      "machine": "smci350-rck-g03-b20-03",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35950232207,
-   "pr": null,
-   "commit": "a90d90654c76a9ca5c184b14269990b7f314078f",
-   "branch": "main",
-   "event": "push",
-   "title": "Revert error merge \"Refactor preshuffle GEMM indexing with layout alg\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207",
-   "created_at": "2026-09-24T03:08:58Z",
-   "updated_at": "2026-09-24T11:22:04Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-24T11:09:46Z",
-     "completed_at": "2026-09-24T11:22:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107606001305"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T03:40:18Z",
-     "completed_at": "2026-09-24T05:02:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107606002571"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T04:05:32Z",
-     "completed_at": "2026-09-24T04:37:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950232207/job/107606002779"
     }
    ]
   }
