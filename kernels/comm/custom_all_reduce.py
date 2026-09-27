@@ -7,10 +7,11 @@ Provides FlyDSL-generated allreduce kernels with cross-GPU signal
 protocol for multi-GPU communication on ROCm.
 """
 
-import os
 from contextlib import contextmanager
 
 import torch
+
+from kernels.common import hip_ipc
 
 _KMAXBLOCKS = 80
 _DEFAULT_MAX_SIZE = 8192 * 1024 * 8 * 2  # 128 MB
@@ -107,11 +108,10 @@ def init_custom_ar(
 class FlyDSLAllreduce:
     """FlyDSL allreduce kernels with cross-GPU signal protocol on ROCm."""
 
-    _HIP_IPC_HANDLE_BYTES = 64
-    _HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS = 0x1
-    _HIP_DEVICE_MALLOC_UNCACHED = 0x3
+    _HIP_IPC_HANDLE_BYTES = hip_ipc.HIP_IPC_HANDLE_BYTES
+    _HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS = hip_ipc.HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS
+    _HIP_DEVICE_MALLOC_UNCACHED = hip_ipc.HIP_DEVICE_MALLOC_UNCACHED
     _hip = None
-    _hipIpcMemHandle_t = None
     _gpu_arch = None
 
     # Signal struct layout (each field alignas(128)):
@@ -151,94 +151,24 @@ class FlyDSLAllreduce:
 
     @classmethod
     def _load_hip(cls):
-        if cls._hip is not None:
-            return cls._hip
-        import ctypes
-
-        sonames = ("libamdhip64.so", "libamdhip64.so.7", "libamdhip64.so.6", "libamdhip64.so.5")
-        candidates = []
-        rocm_path = os.environ.get("ROCM_PATH")
-        if rocm_path:
-            candidates.extend(
-                os.path.join(rocm_path, lib_dir, name) for lib_dir in ("lib", "lib64") for name in sonames
-            )
-        candidates.extend(sonames)
-
-        for name in candidates:
-            try:
-                cls._hip = ctypes.CDLL(name)
-                break
-            except OSError:
-                continue
-        if cls._hip is None:
-            raise RuntimeError("Failed to load HIP runtime library")
-
-        class hipIpcMemHandle_t(ctypes.Structure):
-            _fields_ = [("reserved", ctypes.c_byte * cls._HIP_IPC_HANDLE_BYTES)]
-
-        cls._hipIpcMemHandle_t = hipIpcMemHandle_t
-
-        cls._hip.hipIpcGetMemHandle.restype = ctypes.c_int
-        cls._hip.hipIpcGetMemHandle.argtypes = [ctypes.POINTER(hipIpcMemHandle_t), ctypes.c_void_p]
-        cls._hip.hipIpcOpenMemHandle.restype = ctypes.c_int
-        cls._hip.hipIpcOpenMemHandle.argtypes = [ctypes.POINTER(ctypes.c_void_p), hipIpcMemHandle_t, ctypes.c_uint]
-        cls._hip.hipIpcCloseMemHandle.restype = ctypes.c_int
-        cls._hip.hipIpcCloseMemHandle.argtypes = [ctypes.c_void_p]
-        cls._hip.hipGetErrorString.restype = ctypes.c_char_p
-        cls._hip.hipGetErrorString.argtypes = [ctypes.c_int]
-        cls._hip.hipExtMallocWithFlags.restype = ctypes.c_int
-        cls._hip.hipExtMallocWithFlags.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_uint]
-        cls._hip.hipFree.restype = ctypes.c_int
-        cls._hip.hipFree.argtypes = [ctypes.c_void_p]
-        cls._hip.hipMemset.restype = ctypes.c_int
-        cls._hip.hipMemset.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]
+        cls._hip = hip_ipc.load_runtime()
         return cls._hip
 
     @classmethod
     def _hip_check(cls, err: int, *, what: str):
-        if int(err) == 0:
-            return
-        hip = cls._load_hip()
-        try:
-            s = hip.hipGetErrorString(int(err))
-            msg = s.decode("utf-8", errors="replace") if s else f"hipError({err})"
-        except Exception:
-            msg = f"hipError({err})"
-        raise RuntimeError(f"{what} failed: {msg}")
+        hip_ipc.check_hip_error(err, operation=what)
 
     @classmethod
     def _get_mem_handle_bytes(cls, base_ptr: int) -> bytes:
-        import ctypes
-
-        hip = cls._load_hip()
-        h = cls._hipIpcMemHandle_t()
-        err = hip.hipIpcGetMemHandle(ctypes.byref(h), ctypes.c_void_p(int(base_ptr)))
-        cls._hip_check(err, what="hipIpcGetMemHandle")
-        return bytes(ctypes.string_at(ctypes.byref(h), cls._HIP_IPC_HANDLE_BYTES))
+        return hip_ipc.get_ipc_handle(base_ptr)
 
     @classmethod
     def _open_mem_handle(cls, handle_bytes: bytes) -> int:
-        import ctypes
-
-        if len(handle_bytes) != cls._HIP_IPC_HANDLE_BYTES:
-            raise ValueError(f"Expected {cls._HIP_IPC_HANDLE_BYTES}B handle")
-        hip = cls._load_hip()
-        h = cls._hipIpcMemHandle_t()
-        ctypes.memmove(ctypes.byref(h), bytes(handle_bytes), cls._HIP_IPC_HANDLE_BYTES)
-        out_ptr = ctypes.c_void_p()
-        err = hip.hipIpcOpenMemHandle(
-            ctypes.byref(out_ptr), h, ctypes.c_uint(int(cls._HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS))
-        )
-        cls._hip_check(err, what="hipIpcOpenMemHandle")
-        return int(out_ptr.value)
+        return hip_ipc.open_ipc_handle(handle_bytes)
 
     @classmethod
     def _close_mem_handle(cls, base_ptr: int) -> None:
-        import ctypes
-
-        hip = cls._load_hip()
-        err = hip.hipIpcCloseMemHandle(ctypes.c_void_p(int(base_ptr)))
-        cls._hip_check(err, what="hipIpcCloseMemHandle")
+        hip_ipc.close_ipc_handle(base_ptr)
 
     @classmethod
     def _alloc_uncached(cls, size: int) -> int:
@@ -246,25 +176,11 @@ class FlyDSLAllreduce:
 
         Returns the raw device pointer as int.
         """
-        import ctypes
-
-        hip = cls._load_hip()
-        buf = ctypes.c_void_p()
-        err = hip.hipExtMallocWithFlags(
-            ctypes.byref(buf), ctypes.c_size_t(size), ctypes.c_uint(cls._HIP_DEVICE_MALLOC_UNCACHED)
-        )
-        cls._hip_check(err, what="hipExtMallocWithFlags")
-        err = hip.hipMemset(buf, 0, ctypes.c_size_t(size))
-        cls._hip_check(err, what="hipMemset")
-        return int(buf.value)
+        return hip_ipc.allocate_uncached(size)
 
     @classmethod
     def _free_device_mem(cls, ptr: int) -> None:
-        import ctypes
-
-        hip = cls._load_hip()
-        err = hip.hipFree(ctypes.c_void_p(ptr))
-        cls._hip_check(err, what="hipFree")
+        hip_ipc.free_device_memory(ptr)
 
     @staticmethod
     def _gather_object_list_via_broadcast(group, shard_data):
@@ -473,22 +389,7 @@ class FlyDSLAllreduce:
     @classmethod
     def _get_alloc_base_ptr(cls, dev_ptr: int) -> int:
         """Get the hipMalloc allocation base for a device pointer."""
-        import ctypes
-
-        hip = cls._load_hip()
-        base = ctypes.c_void_p()
-        _RANGE_START_ADDR = 11
-        if not hasattr(hip, "_pga_setup"):
-            hip.hipPointerGetAttribute.restype = ctypes.c_int
-            hip.hipPointerGetAttribute.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
-            hip._pga_setup = True
-        err = hip.hipPointerGetAttribute(
-            ctypes.byref(base),
-            ctypes.c_int(_RANGE_START_ADDR),
-            ctypes.c_void_p(int(dev_ptr)),
-        )
-        cls._hip_check(err, what="hipPointerGetAttribute(RANGE_START_ADDR)")
-        return int(base.value)
+        return hip_ipc.get_allocation_base(dev_ptr)
 
     def _exchange_out_ptrs(self, out: "torch.Tensor") -> "torch.Tensor":
         """Register user output tensor via IPC and return gpu_out_ptrs_array.

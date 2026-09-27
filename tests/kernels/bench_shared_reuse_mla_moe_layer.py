@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
+"""Lean driver for profiling the shared/reuse MLA+MoE kernel (no torch golden).
+
+python3 tests/kernels/bench_shared_reuse_mla_moe_layer.py [-S 1] [--pos 3000] [--iters 3]
+"""
+
+import argparse
+import os
+import sys
+
+import torch
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from kernels.mla_moe_layer.config import (  # noqa: E402
+    KV_LORA,
+    PE_DIM,
+    KvCacheLayout,
+    MoeMode,
+    resolve_storage_layouts,
+)
+from kernels.mla_moe_layer.layer import SharedReuseMlaMoeLayer  # noqa: E402
+from kernels.mla_moe_layer.reference import make_weights, rope_table  # noqa: E402
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-S", type=int, default=1)
+    ap.add_argument("--pos", type=int, default=3000)
+    ap.add_argument("--iters", type=int, default=3)
+    ap.add_argument("--moe-mode", choices=tuple(mode.value for mode in MoeMode), default=MoeMode.W8A8.value)
+    a = ap.parse_args()
+    dev = torch.device("cuda", 0)
+    W = make_weights(0, heads=8, device=dev, moe_mode=a.moe_mode)
+    cos, sin = rope_table(4096, device=dev)
+    kv = torch.randn(4096, KV_LORA, device=dev).to(torch.bfloat16)
+    pe = torch.randn(4096, PE_DIM, device=dev).to(torch.bfloat16)
+    _, _, _, cache_layout = resolve_storage_layouts(a.moe_mode)
+    if cache_layout is KvCacheLayout.ATOM:
+        kv = torch.cat((kv, pe), dim=1)
+        pe = kv
+    idx = torch.stack([torch.randperm(max(a.pos + s + 1, 2048), device=dev)[:2048] for s in range(a.S)]).int()
+    op = SharedReuseMlaMoeLayer(W, a.S, moe_mode=a.moe_mode)
+    h = torch.randn(a.S, 6144, device=dev).to(torch.bfloat16)
+    pos = torch.tensor([a.pos], dtype=torch.int32, device=dev)
+    for _ in range(a.iters):
+        op.forward(h, pos, kv, pe, idx, cos, sin)
+    torch.cuda.synchronize()
+    op.close()
+    print("done")
