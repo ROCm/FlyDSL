@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-27T04:14:32Z",
+ "updated": "2026-09-27T04:46:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36294943885,
+   "pr": 1204,
+   "commit": "54d92659032d019f167b8a5c43ba96820ea70d37",
+   "branch": "codex/kimi-k3-mxfp4-fused",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36294943885",
+   "created_at": "2026-09-27T04:39:32Z",
+   "updated_at": "2026-09-27T04:44:47Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36293586491,
    "pr": 1202,
@@ -10,13 +25,41 @@
    "branch": "dev/export_c",
    "event": "pull_request",
    "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36293586491",
    "created_at": "2026-09-27T04:11:29Z",
-   "updated_at": "2026-09-27T04:13:37Z",
+   "updated_at": "2026-09-27T04:28:07Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T04:28:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36293586491/job/108550422288"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T04:29:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36293586491/job/108550422314"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T04:28:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36293586491/job/108550422385"
+    }
+   ]
   },
   {
    "run_id": 36293431755,
@@ -82,12 +125,12 @@
    "commit": "654fab4f8e16495a040b202e3a294b325e1046be",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA MoE",
-   "status": "in_progress",
-   "conclusion": null,
+   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36289979325",
    "created_at": "2026-09-27T02:56:53Z",
-   "updated_at": "2026-09-27T03:36:05Z",
+   "updated_at": "2026-09-27T04:44:34Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -102,19 +145,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-27T03:36:05Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T04:44:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36289979325/job/108540014334"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-27T03:15:21Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T04:40:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36289979325/job/108540014357"
     }
    ]
@@ -125,7 +168,7 @@
    "commit": "e12f5bb6031b2fa1a2e5ddcfc2f2ab180fd4e972",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA MoE",
+   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36289277309",
@@ -183,7 +226,7 @@
    "commit": "12f8f93a6a6e4a0a9e83cfcc98afd45d932bbcf1",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA MoE",
+   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284912910",
@@ -226,7 +269,7 @@
    "commit": "51c7081a5c0ddb3c8775aa3ed3c727eeb7e03853",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA MoE",
+   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284586536",
@@ -2061,21 +2104,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494/job/107101144739"
     }
    ]
-  },
-  {
-   "run_id": 35834362277,
-   "pr": null,
-   "commit": "82679a9ddae4da1c16bd52c61776ab0e3bb3070e",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel][GEMM] Add gfx950 2-wave preshuffle tiles (#1183)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834362277",
-   "created_at": "2026-09-23T07:56:44Z",
-   "updated_at": "2026-09-23T07:58:12Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
