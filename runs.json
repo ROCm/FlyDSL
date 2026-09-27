@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-27T12:28:27Z",
+ "updated": "2026-09-27T12:39:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "codex/glm5-monokernel",
    "event": "pull_request",
    "title": "[Kernel][Perf] GLM-5 MonoKernel: indexer + mla + moe fused kernel for a full decode layer",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318947964",
    "created_at": "2026-09-27T12:25:42Z",
-   "updated_at": "2026-09-27T12:27:34Z",
+   "updated_at": "2026-09-27T12:28:07Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,13 +25,41 @@
    "branch": "dev/export_c",
    "event": "pull_request",
    "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318304733",
    "created_at": "2026-09-27T12:14:05Z",
-   "updated_at": "2026-09-27T12:16:12Z",
+   "updated_at": "2026-09-27T12:35:49Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T12:36:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318304733/job/108620506494"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T12:35:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318304733/job/108620506522"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T12:36:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318304733/job/108620506531"
+    }
+   ]
   },
   {
    "run_id": 36318208520,
@@ -184,10 +212,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-27T12:06:22Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T12:36:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794/job/108614477186"
     }
    ]
