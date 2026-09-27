@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-27T06:13:15Z",
+ "updated": "2026-09-27T06:44:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "dev/export_c",
    "event": "pull_request",
    "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36298592651",
    "created_at": "2026-09-27T05:55:23Z",
-   "updated_at": "2026-09-27T05:58:23Z",
+   "updated_at": "2026-09-27T06:14:09Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-27T06:14:17Z",
+     "completed_at": "2026-09-27T06:41:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36298592651/job/108564385603"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T06:14:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36298592651/job/108564385619"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T06:14:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36298592651/job/108564385674"
+    }
+   ]
   },
   {
    "run_id": 36294943885,
@@ -25,30 +53,33 @@
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36294943885",
    "created_at": "2026-09-27T04:39:32Z",
-   "updated_at": "2026-09-27T04:54:47Z",
+   "updated_at": "2026-09-27T06:15:02Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-27T04:54:47Z",
+     "started_at": "2026-09-27T06:15:01Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36294943885/job/108553955366"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-27T04:55:26Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36294943885/job/108553955368"
+     "completed_at": "2026-09-27T06:27:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36294943885/job/108553955368",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
