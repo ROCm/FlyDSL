@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-27T12:07:16Z",
+ "updated": "2026-09-27T12:14:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36318208520,
+   "pr": 1202,
+   "commit": "2e7ac03709fd9aa7bb7460f1a27a9c4c13b5c576",
+   "branch": "dev/export_c",
+   "event": "pull_request",
+   "title": "[AOT] Export linkable C objects and support CPU-only builds",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318208520",
+   "created_at": "2026-09-27T12:12:15Z",
+   "updated_at": "2026-09-27T12:13:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36316946141,
    "pr": 1202,
@@ -10,38 +25,38 @@
    "branch": "dev/export_c",
    "event": "pull_request",
    "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141",
    "created_at": "2026-09-27T11:48:54Z",
-   "updated_at": "2026-09-27T12:00:05Z",
+   "updated_at": "2026-09-27T12:13:14Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-27T12:00:04Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T12:12:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141/job/108614956163"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-27T12:04:45Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T12:13:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141/job/108614956195"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-27T12:00:20Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T12:12:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141/job/108614956204"
     }
    ]
@@ -111,11 +126,11 @@
    "branch": "docs/full-doc-audit-20260926",
    "event": "pull_request",
    "title": "[Docs] Audit and refresh repository documentation",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794",
    "created_at": "2026-09-27T11:39:06Z",
-   "updated_at": "2026-09-27T11:56:45Z",
+   "updated_at": "2026-09-27T12:06:22Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -139,9 +154,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-27T11:56:44Z",
+     "started_at": "2026-09-27T12:06:22Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794/job/108614477186"
     }
@@ -182,10 +197,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-27T11:54:26Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T12:06:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942/job/108614125092"
     }
    ]
@@ -2062,52 +2077,6 @@
      "started_at": "2026-09-24T02:59:26Z",
      "completed_at": "2026-09-24T03:16:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35948250381/job/107474909890"
-    }
-   ]
-  },
-  {
-   "run_id": 35944469909,
-   "pr": 1188,
-   "commit": "6fef32fca7ffa09b4435d737bc62594caa98d840",
-   "branch": "feat/hack-ut-asm-multi-kernel",
-   "event": "pull_request",
-   "title": "[Compiler][Debug] Add a compile path for hand-edited assembly",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35944469909",
-   "created_at": "2026-09-24T01:47:35Z",
-   "updated_at": "2026-09-24T03:39:20Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-24T02:56:55Z",
-     "completed_at": "2026-09-24T03:39:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35944469909/job/107462363721"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-24T02:02:27Z",
-     "completed_at": "2026-09-24T02:23:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35944469909/job/107462363725"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T02:02:46Z",
-     "completed_at": "2026-09-24T03:14:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35944469909/job/107462363756",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
