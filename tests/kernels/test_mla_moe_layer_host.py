@@ -202,9 +202,9 @@ def test_kimi_k3_mla_golden_uses_pre_normalized_input_and_defers_residual():
     weights = make_weights(0, heads=1, device="cpu", model_config=config, attention_only=True)
     weights.t["g_in"].fill_(float("nan"))
     weights.t["w_o"].zero_()
-    hidden = torch.arange(64, dtype=torch.bfloat16).reshape(1, 64)
-    kv_cache = torch.zeros(64, 64, dtype=torch.bfloat16)
-    pe_cache = torch.zeros(64, 64, dtype=torch.bfloat16)
+    hidden = torch.arange(64, dtype=torch.bfloat16, device="cpu").reshape(1, 64)
+    kv_cache = torch.zeros(64, 64, dtype=torch.bfloat16, device="cpu")
+    pe_cache = torch.zeros(64, 64, dtype=torch.bfloat16, device="cpu")
     cos, sin = rope_table(64, device="cpu", model_config=config)
 
     got = golden_layer(
@@ -213,7 +213,7 @@ def test_kimi_k3_mla_golden_uses_pre_normalized_input_and_defers_residual():
         0,
         kv_cache,
         pe_cache,
-        torch.arange(64, dtype=torch.int32).reshape(1, 64),
+        torch.arange(64, dtype=torch.int32, device="cpu").reshape(1, 64),
         cos,
         sin,
         lambda value: value,

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Benchmark ATOM's native GLM-5.1 MXFP4 decoder-layer operator chain.
 
-The FlyDSL mono-kernel consumes preselected sparse-KV indices, so this driver
-does the same: it keeps ATOM's native RMSNorm, MLA projections/attention,
-router, MXFP4 fused-MoE, and TP collectives, while bypassing only the GLM
-indexer that produces those indices.  No ATOM source is modified.
+By default this matches the FlyDSL body-only contract and consumes preselected
+sparse-KV indices. Pass ``--include-indexer`` to retain ATOM's complete sparse
+indexer, including its projections, FP8 cache update, score scan, and top-k.
+No ATOM source is modified.
 """
 
 from __future__ import annotations
@@ -94,8 +94,9 @@ def _allocate_mla_work(samples: int):
     return [torch.empty(size, dtype=dtype, device="cuda") for size, dtype in metadata_info]
 
 
-def _make_forward_context(config, layer, samples: int, pos: int, generator):
+def _make_forward_context(config, layer, samples: int, pos: int, generator, include_indexer: bool):
     import aiter
+    from aiter import dtypes
     from atom.config import KVCacheTensor
     from atom.utils.forward_context import (
         AttentionMetaData,
@@ -158,14 +159,44 @@ def _make_forward_context(config, layer, samples: int, pos: int, generator):
         dtype_q=torch.bfloat16,
         dtype_kv=torch.bfloat16,
     )
+    metadata_kwargs = {}
+    index_cache = None
+    if include_indexer:
+        # The indexer scans the dense request-local page table and writes its
+        # selected physical slots into the sparse MLA buffer below. Page size
+        # is one in this benchmark, and all synthetic requests intentionally
+        # share the same physical history while appending at distinct slots.
+        block_tables = torch.arange(cache_tokens, dtype=torch.int32, device="cuda").expand(samples, -1).contiguous()
+        dense_kv_indptr = torch.zeros(samples + 1, dtype=torch.int32, device="cuda")
+        dense_kv_indptr[1:] = torch.cumsum(context_lens, dim=0)
+        dense_kv_indices = torch.cat(
+            [torch.arange(length, dtype=torch.int32, device="cuda") for length in context_lens.tolist()]
+        )
+        metadata_kwargs = {
+            "block_tables": block_tables,
+            "kv_indptr": dense_kv_indptr,
+            "kv_indices": dense_kv_indices,
+        }
+
+        aligned_index_dim = ((config.hf_config.index_head_dim + 4 + 15) // 16) * 16
+        index_cache = torch.zeros(cache_tokens, 1, aligned_index_dim, dtype=dtypes.fp8, device="cuda")
+        index_cache.view(torch.uint8)[
+            ..., config.hf_config.index_head_dim : config.hf_config.index_head_dim + 4
+        ] = 127
+        sparse_index_buffer = sparse_indices.flatten()
+        layer.self_attn.indexer.k_cache.kv_cache[0] = index_cache
+        layer.self_attn.indexer.sparse_kv_indices_buffer = sparse_index_buffer
+        layer.self_attn.mla_attn.impl.sparse_kv_indices_buffer = sparse_index_buffer
+
     metadata = AttentionMetaData(
         cu_seqlens_q=cu_seqlens_q,
         max_seqlen_q=1,
         max_seqlen_k=int(context_lens.max().item()),
         slot_mapping=positions,
         context_lens=context_lens,
-        kv_indptr=sparse_kv_indptr,
-        kv_indices=sparse_indices.flatten(),
+        kv_indptr=metadata_kwargs.get("kv_indptr", sparse_kv_indptr),
+        kv_indices=metadata_kwargs.get("kv_indices", sparse_indices.flatten()),
+        block_tables=metadata_kwargs.get("block_tables"),
         kv_last_page_lens=kv_last_page_lens,
         sparse_kv_indptr=sparse_kv_indptr,
         work_meta_data=work[0],
@@ -201,7 +232,7 @@ def _make_forward_context(config, layer, samples: int, pos: int, generator):
         num_tokens=samples,
         in_hipgraph=True,
     )
-    return positions, kv_cache, sparse_indices, work
+    return positions, kv_cache, sparse_indices, index_cache, work
 
 
 def _worker(rank: int, args, port: int) -> None:
@@ -260,10 +291,11 @@ def _worker(rank: int, args, port: int) -> None:
     finally:
         torch.set_default_dtype(previous_dtype)
 
-    # The FlyDSL kernel receives top-2048 indices, so remove only ATOM's
-    # producer for those indices while retaining its sparse MLA consumer.
-    layer.self_attn.indexer = None
-    layer.self_attn.mla_attn.indexer = None
+    if not args.include_indexer:
+        # The FlyDSL kernel receives top-2048 indices, so remove only ATOM's
+        # producer for those indices while retaining its sparse MLA consumer.
+        layer.self_attn.indexer = None
+        layer.self_attn.mla_attn.indexer = None
     gc.collect()
     torch.cuda.empty_cache()
     _init_weights(layer, rank)
@@ -295,7 +327,9 @@ def _worker(rank: int, args, port: int) -> None:
         generator = torch.Generator(device=device).manual_seed(args.seed + rank * 17 + samples)
         hidden = torch.randn(samples, 6144, dtype=torch.bfloat16, device=device, generator=generator)
         residual = torch.randn(samples, 6144, dtype=torch.bfloat16, device=device, generator=generator)
-        positions, kv_cache, sparse_indices, work = _make_forward_context(config, layer, samples, args.pos, generator)
+        positions, kv_cache, sparse_indices, index_cache, work = _make_forward_context(
+            config, layer, samples, args.pos, generator, args.include_indexer
+        )
 
         for _ in range(3):
             output, residual_output = layer(positions, hidden, residual)
@@ -324,6 +358,31 @@ def _worker(rank: int, args, port: int) -> None:
             if repetition >= 2:
                 times.append(start.elapsed_time(end) * 1000 / args.layers)
 
+        kernel_profile = None
+        if args.kernel_profile:
+            dist.barrier()
+            if rank == 0:
+                with torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+                ) as profiler:
+                    graph.replay()
+                    torch.cuda.synchronize()
+                events = [event for event in profiler.key_averages() if event.self_device_time_total > 0]
+                events.sort(key=lambda event: event.self_device_time_total, reverse=True)
+                kernel_profile = [
+                    {
+                        "name": event.key,
+                        "calls": event.count,
+                        "total_us": event.self_device_time_total,
+                        "mean_us": event.self_device_time_total / event.count,
+                    }
+                    for event in events
+                ]
+            else:
+                graph.replay()
+                torch.cuda.synchronize()
+            dist.barrier()
+
         per_rank = [None] * args.npes
         dist.all_gather_object(per_rank, times)
         if rank == 0:
@@ -331,7 +390,11 @@ def _worker(rank: int, args, port: int) -> None:
             result = {
                 "benchmark_version": 2,
                 "backend": "atom-native",
-                "scope": "decoder-layer-with-preselected-sparse-indices",
+                "scope": (
+                    "decoder-layer-with-indexer"
+                    if args.include_indexer
+                    else "decoder-layer-with-preselected-sparse-indices"
+                ),
                 "atom_commit": args.atom_commit,
                 "aiter_commit": args.aiter_commit,
                 "npes": args.npes,
@@ -355,13 +418,15 @@ def _worker(rank: int, args, port: int) -> None:
                 "benchmark_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "torch": torch.__version__,
             }
+            if kernel_profile is not None:
+                result["kernel_profile"] = kernel_profile
             encoded = json.dumps(result)
             print(encoded, flush=True)
             if args.output:
                 with args.output.open("a") as output_file:
                     output_file.write(encoded + "\n")
         dist.barrier()
-        del graph, output, residual_output, hidden, residual, positions, kv_cache, sparse_indices, work
+        del graph, output, residual_output, hidden, residual, positions, kv_cache, sparse_indices, index_cache, work
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -387,6 +452,12 @@ if __name__ == "__main__":
     parser.add_argument("--layers", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=30)
     parser.add_argument("--trim", type=int, default=5)
+    parser.add_argument(
+        "--include-indexer",
+        action="store_true",
+        help="measure the full GLM layer including indexer projection, cache update, score scan, and top-k",
+    )
+    parser.add_argument("--kernel-profile", action="store_true", help="record one rank-0 graph replay")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     args.atom_root = args.atom_root.resolve()
