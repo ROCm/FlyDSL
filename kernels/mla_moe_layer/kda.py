@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import torch
 
+from kernels.gemm.gemm_a16w16_gfx950 import gemm_a16w16
 from kernels.mla_moe_layer.config import KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP
 from kernels.mla_moe_layer.kda_recurrence import KimiK3KdaConvRecurrence
 from kernels.mla_moe_layer.reference import LayerWeights
@@ -15,6 +16,43 @@ from kernels.mla_moe_layer.symmetric_allreduce import SymmetricBf16Allreduce
 _TP_SIZE = 8
 _HEAD_DIM = 128
 _CONV_WIDTH = 4
+_INPUT_GEMM_ALIGNMENT = 32
+_INPUT_GEMM_CONFIG = {
+    "block_m": 16,
+    "block_n": 32,
+    "block_k": 128,
+    "stages": 6,
+    "split_k": 1,
+    "m_waves": 1,
+    "n_waves": 2,
+    "k_waves": 1,
+    "group_m": 0,
+    "use_half_tile_interleaved": False,
+}
+_OUTPUT_GEMM_CONFIG = {
+    "block_m": 16,
+    "block_n": 64,
+    "block_k": 128,
+    "stages": 4,
+    "split_k": 1,
+    "m_waves": 1,
+    "n_waves": 4,
+    "k_waves": 1,
+    "group_m": 0,
+    "use_half_tile_interleaved": False,
+}
+_OUTPUT_GEMM_CONFIG_S8 = {
+    "block_m": 32,
+    "block_n": 64,
+    "block_k": 128,
+    "stages": 4,
+    "split_k": 1,
+    "m_waves": 2,
+    "n_waves": 4,
+    "k_waves": 1,
+    "group_m": 0,
+    "use_half_tile_interleaved": False,
+}
 
 
 class KimiK3KdaAttention:
@@ -94,7 +132,22 @@ class KimiK3KdaAttention:
             raise ValueError("KDA weights must be contiguous")
 
         device = self.t["w_kda_in"].device
-        self.fused_input = torch.empty(samples, fused_width, dtype=torch.bfloat16, device=device)
+        padded_fused_width = (fused_width + _INPUT_GEMM_ALIGNMENT - 1) // _INPUT_GEMM_ALIGNMENT
+        padded_fused_width *= _INPUT_GEMM_ALIGNMENT
+        self.fused_input_storage = torch.empty(
+            samples,
+            padded_fused_width,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        self.fused_input = self.fused_input_storage[:, :fused_width]
+        self.w_kda_in_padded = torch.zeros(
+            padded_fused_width,
+            config.hidden,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        self.w_kda_in_padded[:fused_width].copy_(self.t["w_kda_in"])
         self.partial = torch.empty(samples, config.hidden, dtype=torch.bfloat16, device=device)
         self.output = torch.empty_like(self.partial)
         self.step = torch.zeros(1, dtype=torch.int32, device=device)
@@ -136,7 +189,13 @@ class KimiK3KdaAttention:
         ):
             raise ValueError(f"hidden_states must be contiguous BF16 {list(expected_hidden)}")
 
-        torch.mm(hidden_states, self.t["w_kda_in"].T, out=self.fused_input)
+        gemm_a16w16(
+            hidden_states,
+            self.w_kda_in_padded.T,
+            out=self.fused_input_storage,
+            user_kwargs=_INPUT_GEMM_CONFIG,
+            layout="nt",
+        )
         projection = self.local_projection
         heads = self.config.local_heads
         mixed_qkv = self.fused_input[:, : 3 * projection]
@@ -159,20 +218,37 @@ class KimiK3KdaAttention:
             f_a=f_a,
             f_b_weight=self.t["w_kda_fb"],
         )
-        torch.mm(
-            self.normed.view(self.S, projection),
-            self.t["w_kda_o"].T,
-            out=self.partial,
-        )
-
         target = self.output if x_out is None else x_out
         if target.shape != expected_hidden or target.dtype != torch.bfloat16 or not target.is_contiguous():
             raise ValueError(f"x_out must be contiguous BF16 {list(expected_hidden)}")
         if self.symmetric_allreduce is not None:
-            self.symmetric_allreduce.reduce(0, self.partial, target, self.step, layer)
+            gemm_a16w16(
+                self.normed.view(self.S, projection),
+                self.t["w_kda_o"].T,
+                out=target,
+                user_kwargs=_OUTPUT_GEMM_CONFIG_S8 if self.S == 8 else _OUTPUT_GEMM_CONFIG,
+                layout="nt",
+                symmetric_allreduce={
+                    "symmetric": self.symmetric_allreduce.peer_buffer.local_address,
+                    "peers": self.symmetric_allreduce.peer_buffer.addresses.data_ptr(),
+                    "step": self.step.data_ptr(),
+                    "rank": self.rank,
+                    "layer": layer,
+                    "npes": self.npes,
+                    "max_pairs": self.symmetric_allreduce.max_pairs,
+                    "layer_slots": MAX_LAYERS_PER_STEP,
+                },
+            )
         else:
             import torch.distributed as dist
 
+            gemm_a16w16(
+                self.normed.view(self.S, projection),
+                self.t["w_kda_o"].T,
+                out=self.partial,
+                user_kwargs=_OUTPUT_GEMM_CONFIG,
+                layout="nt",
+            )
             target.copy_(self.partial)
             dist.all_reduce(target, group=self.reduce_group)
         if advance:
