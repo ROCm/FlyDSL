@@ -221,6 +221,17 @@ class KimiK3KdaAttention:
         self.fuse_attn_res = True
         self.full_moe = full_moe
         device = self.t["w_kda_in"].device
+        if self.w_kda_in_packed is None:
+            fused_width = 4 * self.local_projection + self.config.local_heads + _HEAD_DIM
+            full_layer_input = torch.zeros(
+                _FULL_LAYER_INPUT_ROWS,
+                self.config.hidden,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            full_layer_input[:fused_width].copy_(self.t["w_kda_in"])
+            self.w_kda_in_packed = pack_bf16(full_layer_input)
+            self.w_kda_o_packed = pack_bf16(self.t["w_kda_o"])
         if full_moe:
             latent_down, latent_down_scale = quantize_mxfp8(self.t["w_latent_down"])
             shared_up, shared_up_scale = quantize_mxfp8(self.t["w_shared_ug"])
@@ -248,6 +259,8 @@ class KimiK3KdaAttention:
             dtype=torch.uint8,
             device=device,
         )
+        if self.full_layer_timeline is None:
+            self.full_layer_timeline = torch.empty(10, dtype=torch.int64, device=device)
         self.full_layer_launch = build_kimi_k3_kda_full_layer_kernel(
             self.S,
             self.npes,

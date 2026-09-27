@@ -54,8 +54,7 @@ class KimiK3KdaFullLayer(KimiK3KdaMoeLayer):
             )
         if block_residual.shape[1] <= self.block_write_idx:
             raise ValueError(
-                f"block_residual needs index {self.block_write_idx}, "
-                f"got {block_residual.shape[1]} blocks"
+                f"block_residual needs index {self.block_write_idx}, " f"got {block_residual.shape[1]} blocks"
             )
 
         target = self.output if x_out is None else x_out

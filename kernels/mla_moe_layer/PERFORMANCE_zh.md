@@ -88,6 +88,7 @@ attention 格式差异以及 serving 配置可能带来的 cache dtype 差异，
 | `native_baseline.py` | 可选的同权重 TileRT 对比适配器。 |
 | `tools/benchmark_atom.py` | 使用预选 sparse indices 的 ATOM 原生 GLM-5.1 decoder-layer benchmark。 |
 | `tools/kimi_k3_full.py` | Kimi-K3 正确性、profiling 和完整层 benchmark driver。 |
+| `../glm5_monokernel/` | 完整的单次 launch GLM-5 Indexer + MLA + MoE 实现及 wrapper。 |
 | `../kimi_k3/tools/full_layer.py` | 单次 launch 的 KDA + AttnRes + latent-MoE TP8 正确性/性能工具。 |
 
 kernel 使用 FlyDSL 操作实现 wave reduction、硬件数学指令、mailbox polling、buffer
@@ -137,7 +138,24 @@ TP1/S1 下使用相同权重直接对比 TileRT wrapper，结果为：
 
 ## 性能状态
 
-### MXFP4：FlyDSL mono-kernel 与 ATOM 原生层
+### 完整 indexed GLM-5 monokernel
+
+本分支已经包含 PR #1205 的 GLM-5 实现，代码位于 `kernels/glm5_monokernel`。
+启用 `with_indexer=True` 后，每层只需一次 GPU launch，即覆盖 index projection、cache
+更新、score 计算、精确 top-2048 selection、sparse MLA、router、MXFP4 experts、两次
+TP reduction 和最终 residual update。
+
+合并后在 8 x MI355X、TP8、position 3000、BF16 cache、MXFP4 experts、每个 HIP graph
+包含 16 次 layer 调用的条件下重新验证：
+
+| Batch | FlyDSL 完整 indexed layer | ATOM 完整层 + Indexer | 加速比 |
+|---:|---:|---:|---:|
+| 4 | **78.4 us** | 205.8-213.7 us | **2.63-2.73x** |
+| 8 | **117.3 us** | 223.4 us | **1.90x** |
+
+结果与 PR #1205 基线一致，模块化代码合入后没有出现 GLM-5 性能回退。
+
+### 预选 index 的 MXFP4 body 与 ATOM 原生层
 
 MXFP4 主对比运行于 8 x MI355X（gfx950）、TP8，位置 3000、sparse top-2048，
 KV cache 为 BF16 `[tokens,576]`。每个 HIP graph 只包含一次 decoder-layer 调用。
@@ -398,16 +416,17 @@ BF16 output tile 发布到已有的 tagged symmetric peer mailbox，等待对应
 `partial` 的写回/重读。S=1-4 使用 16x64、4-wave tile；S=8 使用 32x64、8-wave tile，
 使每个 wave 正好负责一个 TP peer。
 
-下表使用相同生产层索引、TP8 拓扑、16 层 HIP graph、预热、30 次重复和 critical-rank
-中位数进行配对。ATOM harness 现在会初始化生产 AttnRes block state，不再对未初始化
-storage 计时。
+下表使用相同生产层索引、TP8 拓扑、16 层 HIP graph、预热和 critical-rank 中位数进行
+配对；最终 FlyDSL 数据使用 100 次正式 replay。ATOM harness 会初始化生产 AttnRes
+block state，不再对未初始化 storage 计时。这里列出保留的最快路径：生产 MLA 每层
+7 次应用 kernel launch；KDA 在 S=4 使用 7 次 launch，在 S=8 使用更快的 9 次 launch。
 
 | 层族 / 代表层 | Batch | FlyDSL | ATOM | 加速比 | 延迟降低 |
 |---|---:|---:|---:|---:|---:|
-| MLA + latent MoE，layer 3 | 4 | **116.1023 us** | 222.5597 us | **1.917x** | **47.83%** |
-| MLA + latent MoE，layer 3 | 8 | **127.9274 us** | 253.9299 us | **1.985x** | **49.62%** |
-| KDA + latent MoE，layer 1 | 4 | **115.3998 us** | 197.2968 us | **1.710x** | **41.51%** |
-| KDA + latent MoE，layer 1 | 8 | **128.8000 us** | 227.3771 us | **1.765x** | **43.35%** |
+| MLA + latent MoE，layer 3 | 4 | **115.8336 us** | 222.5597 us | **1.921x** | **47.95%** |
+| MLA + latent MoE，layer 3 | 8 | **128.0662 us** | 253.9299 us | **1.983x** | **49.57%** |
+| KDA + latent MoE，layer 1 | 4 | **115.0098 us** | 197.2968 us | **1.715x** | **41.71%** |
+| KDA + latent MoE，layer 1 | 8 | **128.7700 us** | 227.3771 us | **1.766x** | **43.37%** |
 
 生产 MLA 的 S=8 已约为 2x，KDA 完整层仍未达到 2x。保留的融合 KDA
 convolution/recurrence/RMSNorm core 在 S=4/8 相对 ATOM 三 kernel 链约为
@@ -418,9 +437,14 @@ projection、前后两段 AttnRes、router projection 和 routed expert kernels�
 微调一个小 kernel 补齐。更快但会放大 recurrent-state 误差的 split-K input projection，
 以及让 post-AttnRes 直接消费 peer mailbox 但造成延迟回退的方案，均未保留。
 
+单次 launch 的 KDA 实现继续保留用于深入优化，但目前不作为最佳性能路径。其最终
+100 次 replay 数据为：S=4 147.0677 us（相对 ATOM 1.342x），S=8 228.5397 us
+（相对 ATOM 0.995x）。回退主要集中在资源占用较高的 persistent kernel 内部 expert
+和 tail 阶段，而不是 KDA recurrence 本身。
+
 按要求不计 layer 0 dense FFN 后，生产层组合为 24 个 MLA + latent-MoE 层和 68 个
-KDA + latent-MoE 层。用上表配对的代表层延迟加权，92 层 decoder core 估算为：S=4
-约 **1.764x**，S=8 约 **1.822x**。这不是完整 93 层端到端模型数据；layer 0、
+KDA + latent-MoE 层。用上表最快的配对代表层延迟加权，92 层 decoder core 估算为：S=4
+约 **1.769x**，S=8 约 **1.822x**。这不是完整 93 层端到端模型数据；layer 0、
 embedding、sampling、framework scheduling 以及其他非层开销尚未计入，因此完整模型
 实测会略低。
 
@@ -434,8 +458,8 @@ head 为 12 而不是 8。仅 router projection 的规模就约大 4.08 倍：
 
 K3 还额外执行 AttnRes mixing、replicated 7168→3584 latent projection、shared
 experts、latent RMSNorm、rank-local 3584→896 tail，以及两次 MoE TP reduction。最终
-K3 路径仍包含 6 个应用 kernel，而 GLM 快路径把大部分工作放在一个 persistent
-monokernel 内。本次保留了 GLM 中有效的机制：persistent attention、owner-reduce/
+synthetic layer-0 MLA 路径包含 6 个应用 kernel，生产 MLA 路径包含 7 个；GLM 快路径
+则把完整层放在一个 persistent monokernel 内。本次保留了 GLM 中有效的机制：persistent attention、owner-reduce/
 broadcast 通信、低 token MXFP4 tile、直接生成 routing metadata，以及显式计算/通信
 overlap。
 
@@ -475,9 +499,15 @@ export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-kimi-k3
   --output /root/kimi-k3-perf-results/full-moe/final-s8.json
 
 python -m kernels.kimi_k3.tools.full_layer \
+  --staged \
   --npes 8 --samples 4 --layer-idx 1 --check --bench \
-  --layers 16 --repeats 30 \
+  --layers 16 --repeats 100 \
   --output /root/kimi-k3-perf-results/full-moe/flydsl-kda-production-layer1-s4.json
+
+# 实验性的单次 launch KDA + AttnRes + latent-MoE 路径：
+python -m kernels.kimi_k3.tools.full_layer \
+  --npes 8 --samples 4 --layer-idx 1 --check --bench \
+  --layers 16 --repeats 100
 ```
 
 可使用 `--eager-attn-res`、`--eager-router` 或 `--eager-shared-experts` 做受控的优化

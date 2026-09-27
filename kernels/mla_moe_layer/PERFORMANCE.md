@@ -97,6 +97,7 @@ preserving the faster existing attention and router paths.
 | `native_baseline.py` | Optional same-weight TileRT comparison adapter. |
 | `tools/benchmark_atom.py` | Native ATOM GLM-5.1 decoder-layer benchmark with preselected sparse indices. |
 | `tools/kimi_k3_full.py` | Kimi-K3 correctness, profiling, and full-layer benchmark driver. |
+| `../glm5_monokernel/` | Complete one-launch GLM-5 Indexer + MLA + MoE implementation and wrapper. |
 | `../kimi_k3/tools/full_layer.py` | Single-launch KDA + AttnRes + latent-MoE TP8 correctness/performance driver. |
 
 The kernel uses FlyDSL operations for wave reductions, hardware math,
@@ -153,7 +154,26 @@ A direct TP1/S1 output comparison against the same-weight TileRT wrapper gave:
 
 ## Performance status
 
-### MXFP4: FlyDSL mono-kernel versus native ATOM layer
+### Complete indexed GLM-5 monokernel
+
+The GLM-5 implementation from PR #1205 is included in this branch under
+`kernels/glm5_monokernel`. With `with_indexer=True`, one GPU launch per layer
+covers the index projections, cache update, score computation, exact top-2048
+selection, sparse MLA, router, MXFP4 experts, both TP reductions, and the final
+residual update.
+
+The merged source was revalidated on 8 x MI355X with TP8, position 3000,
+BF16 cache, MXFP4 experts, and 16 layer invocations per HIP graph:
+
+| Batch | FlyDSL full indexed layer | ATOM full layer + Indexer | Speedup |
+|---:|---:|---:|---:|
+| 4 | **78.4 us** | 205.8-213.7 us | **2.63-2.73x** |
+| 8 | **117.3 us** | 223.4 us | **1.90x** |
+
+These measurements match the PR #1205 baseline; merging its modularized source
+did not regress GLM-5 performance.
+
+### MXFP4 preselected-index body versus native ATOM layer
 
 The primary MXFP4 comparison runs on 8 x MI355X (gfx950), TP8, at position
 3000 with sparse top-2048 and a BF16 `[tokens,576]` KV cache. Each HIP graph
@@ -460,16 +480,18 @@ uses a 16x64 tile with four waves; S=8 uses a 32x64 tile with eight waves so
 each wave publishes to one peer.
 
 The following results pair the same production layer index, TP8 topology, HIP
-graph depth (16), warmups, repeats (30), and critical-rank median. The ATOM
-harness initializes the production AttnRes block state rather than timing
-uninitialized storage.
+graph depth (16), warmups, and critical-rank median. The final FlyDSL runs use
+100 measured replays. The ATOM harness initializes the production AttnRes block
+state rather than timing uninitialized storage. These are the fastest retained
+paths: production MLA uses seven application launches; KDA uses seven launches
+at S=4 and the faster nine-launch schedule at S=8.
 
 | Family / representative layer | Batch | FlyDSL | ATOM | Speedup | Latency reduction |
 |---|---:|---:|---:|---:|---:|
-| MLA + latent MoE, layer 3 | 4 | **116.1023 us** | 222.5597 us | **1.917x** | **47.83%** |
-| MLA + latent MoE, layer 3 | 8 | **127.9274 us** | 253.9299 us | **1.985x** | **49.62%** |
-| KDA + latent MoE, layer 1 | 4 | **115.3998 us** | 197.2968 us | **1.710x** | **41.51%** |
-| KDA + latent MoE, layer 1 | 8 | **128.8000 us** | 227.3771 us | **1.765x** | **43.35%** |
+| MLA + latent MoE, layer 3 | 4 | **115.8336 us** | 222.5597 us | **1.921x** | **47.95%** |
+| MLA + latent MoE, layer 3 | 8 | **128.0662 us** | 253.9299 us | **1.983x** | **49.57%** |
+| KDA + latent MoE, layer 1 | 4 | **115.0098 us** | 197.2968 us | **1.715x** | **41.71%** |
+| KDA + latent MoE, layer 1 | 8 | **128.7700 us** | 227.3771 us | **1.766x** | **43.37%** |
 
 The production MLA S=8 case is approximately 2x, while KDA remains below the
 2x target. The retained fused KDA convolution/recurrence/RMSNorm core itself is
@@ -483,10 +505,16 @@ longer sufficient. A faster split-K input projection was rejected because it
 enlarged recurrent-state error, and direct mailbox consumption in post-AttnRes
 was rejected because it regressed latency.
 
+The one-launch KDA implementation is retained for continued tuning, but it is
+not selected as the performance path yet. Its final 100-replay measurements are
+147.0677 us at S=4 (1.342x ATOM) and 228.5397 us at S=8 (0.995x ATOM). The
+regression is concentrated in the expert and tail phases of the resource-heavy
+persistent kernel, not in the KDA recurrence itself.
+
 Ignoring the intentionally out-of-scope layer-0 dense FFN, the production mix
 contains 24 MLA + latent-MoE layers and 68 KDA + latent-MoE layers. Weighting the
-paired representative-layer timings above gives a 92-layer decoder-core
-estimate of **1.764x at S=4** and **1.822x at S=8**. This is not an end-to-end
+fastest paired representative-layer timings above gives a 92-layer decoder-core
+estimate of **1.769x at S=4** and **1.822x at S=8**. This is not an end-to-end
 93-layer model number: layer 0, embeddings, sampling, framework scheduling, and
 other non-layer overheads are not included, so a full-model measurement will be
 slightly lower.
@@ -502,8 +530,9 @@ times larger: `(7168 * 896) / (6144 * 256)`.
 
 K3 also performs AttnRes mixing, replicated 7168-to-3584 latent projection,
 shared experts, latent RMSNorm, a rank-local 3584-to-896 tail, and two MoE TP
-reductions. The final K3 path still uses six application kernels, while the GLM
-fast path places most work inside one persistent monokernel. The retained
+reductions. The synthetic layer-0 MLA path uses six application kernels and the
+production MLA path uses seven, while the GLM fast path places the full layer
+inside one persistent monokernel. The retained
 changes nevertheless adopt the useful GLM mechanisms: persistent attention,
 owner-reduce/broadcast communication, low-token MXFP4 tiles, direct routing
 metadata, and explicit compute/communication overlap.
@@ -547,9 +576,15 @@ export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-kimi-k3
   --output /root/kimi-k3-perf-results/full-moe/final-s8.json
 
 python -m kernels.kimi_k3.tools.full_layer \
+  --staged \
   --npes 8 --samples 4 --layer-idx 1 --check --bench \
-  --layers 16 --repeats 30 \
+  --layers 16 --repeats 100 \
   --output /root/kimi-k3-perf-results/full-moe/flydsl-kda-production-layer1-s4.json
+
+# Experimental one-launch KDA + AttnRes + latent-MoE path:
+python -m kernels.kimi_k3.tools.full_layer \
+  --npes 8 --samples 4 --layer-idx 1 --check --bench \
+  --layers 16 --repeats 100
 ```
 
 Use `--eager-attn-res`, `--eager-router`, or `--eager-shared-experts` for

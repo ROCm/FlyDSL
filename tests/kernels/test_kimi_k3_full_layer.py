@@ -116,12 +116,12 @@ def test_kimi_k3_kda_attention_tp8(samples: int, negative_slot: bool) -> None:
 
 @pytest.mark.multi_gpu
 @pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
-@pytest.mark.parametrize("layer_idx", (1, 12))
-def test_kimi_k3_kda_moe_layer_tp8(layer_idx: int) -> None:
+@pytest.mark.parametrize(("samples", "layer_idx"), ((1, 1), (1, 12), (8, 1)))
+def test_kimi_k3_kda_moe_layer_tp8(samples: int, layer_idx: int) -> None:
     result = _run_tp8_tool(
         "kernels/kimi_k3/tools/full_layer.py",
         "--samples",
-        "1",
+        str(samples),
         "--layer-idx",
         str(layer_idx),
         "--check",
@@ -142,7 +142,7 @@ def test_kimi_k3_kda_staged_layer_tp8() -> None:
         "kernels/kimi_k3/tools/full_layer.py",
         "--staged",
         "--samples",
-        "1",
+        "8",
         "--layer-idx",
         "1",
         "--check",
