@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-09-27T11:42:11Z",
+ "updated": "2026-09-27T11:45:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36316616265,
+   "pr": 1205,
+   "commit": "6b0019d829778a4434b68e4edebb9f0cc1b4fcb3",
+   "branch": "codex/glm5-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] GLM-5 MonoKernel: indexer + mla + moe fused kernel for a full decode layer",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316616265",
+   "created_at": "2026-09-27T11:42:42Z",
+   "updated_at": "2026-09-27T11:43:34Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36316437403,
    "pr": 1205,
    "commit": "e138458d46fd54a63854b53f612483c0452d4340",
    "branch": "codex/glm5-monokernel",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Fuse GLM-5 indexed decode into a MonoKernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "title": "[Kernel][Perf] GLM-5 MonoKernel: indexer + mla + moe fused kernel for a full decode layer",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316437403",
    "created_at": "2026-09-27T11:39:27Z",
-   "updated_at": "2026-09-27T11:39:39Z",
+   "updated_at": "2026-09-27T11:43:34Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,11 +40,11 @@
    "branch": "docs/full-doc-audit-20260926",
    "event": "pull_request",
    "title": "[Docs] Audit and refresh repository documentation",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794",
    "created_at": "2026-09-27T11:39:06Z",
-   "updated_at": "2026-09-27T11:40:44Z",
+   "updated_at": "2026-09-27T11:41:21Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2009,49 +2024,6 @@
      "started_at": "2026-09-24T00:15:50Z",
      "completed_at": "2026-09-24T01:11:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35934904182/job/107437884473"
-    }
-   ]
-  },
-  {
-   "run_id": 35868591474,
-   "pr": null,
-   "commit": "46523199afda8a7620949c1638982ef7b0b0c515",
-   "branch": "rchamber/flash_causal_improvements",
-   "event": "pull_request",
-   "title": "Issue causal flash q-blocks longest-first",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35868591474",
-   "created_at": "2026-09-23T13:39:28Z",
-   "updated_at": "2026-09-24T01:29:54Z",
-   "actor": "RichardChamberlain1",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-23T14:16:48Z",
-     "completed_at": "2026-09-23T14:47:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35868591474/job/107221508739"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T00:15:55Z",
-     "completed_at": "2026-09-24T01:29:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35868591474/job/107221508751"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-23T14:16:58Z",
-     "completed_at": "2026-09-23T14:19:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35868591474/job/107221508911"
     }
    ]
   }
