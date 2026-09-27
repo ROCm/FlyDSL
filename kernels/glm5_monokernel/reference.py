@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Weights, layouts and the torch golden for the GLM-5 shared/reuse MLA+MoE layer.
+"""Weights, layouts and torch goldens for the GLM-5 indexed decode MonoKernel.
 
-One rank's TP shard of one layer. All matrices are row-major ``[N, K]`` FP8
-E4M3FN with fp32 block scales ``[ceil(N / 128), K / BK]`` (``y = W @ x``).
-The golden reduces across ranks through a caller-supplied ``allreduce`` so a
-TP8 run checks each rank against its own shard.
+The indexed variant covers selection refresh plus MLA and MoE for one rank's
+TP shard. All matrices are row-major ``[N, K]`` FP8 E4M3FN with fp32 block
+scales ``[ceil(N / 128), K / BK]`` (``y = W @ x``). The golden reduces across
+ranks through a caller-supplied ``allreduce`` so a TP8 run checks each rank
+against its own shard.
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ PE_DIM = 64
 NOPE_DIM = 192
 V_DIM = 256
 QKV_A_ROWS = Q_LORA + KV_LORA + PE_DIM  # 2624
+INDEX_HEADS = 32
+INDEX_DIM = 128
+INDEX_Q_ROWS = INDEX_HEADS * INDEX_DIM
 N_EXPERTS = 256
 TOP_K = 8
 MOE_SLOTS = 1 + TOP_K  # slot 0 = shared expert
@@ -69,7 +73,14 @@ class LayerWeights:
     t: dict  # name -> tensor
 
 
-def make_weights(rank: int, heads: int = 8, device="cuda", seed: int = 1234) -> LayerWeights:
+def make_weights(
+    rank: int,
+    heads: int = 8,
+    device="cuda",
+    seed: int = 1234,
+    with_indexer: bool = False,
+    expert_mxfp4: bool = False,
+) -> LayerWeights:
     """Replicated tensors share ``seed``; TP shards add ``rank`` to it."""
     rep = torch.Generator(device=device).manual_seed(seed)
     shd = torch.Generator(device=device).manual_seed(seed + 1 + rank)
@@ -82,17 +93,72 @@ def make_weights(rank: int, heads: int = 8, device="cuda", seed: int = 1234) -> 
     for name, (rows, k, bk) in fp8_mats(heads).items():
         gen = rep if name == "qkv_a" else shd
         t[f"w_{name}"], t[f"s_{name}"] = _rand_fp8(rows, k, bk, gen, device)
+    if with_indexer:
+        t["w_index_k"], t["s_index_k"] = _rand_fp8(INDEX_DIM, HIDDEN, 128, rep, device)
+        t["w_index_q"], t["s_index_q"] = _rand_fp8(INDEX_Q_ROWS, Q_LORA, 128, rep, device)
+        t["w_index_w"] = (torch.randn(INDEX_HEADS, HIDDEN, generator=rep, device=device) / HIDDEN**0.5).to(bf)
+        t["g_index_k"] = (1 + 0.1 * torch.randn(INDEX_DIM, generator=rep, device=device)).float()
+        t["b_index_k"] = (0.1 * torch.randn(INDEX_DIM, generator=rep, device=device)).float()
     t["w_r"] = (torch.randn(N_EXPERTS, HIDDEN, generator=rep, device=device) / HIDDEN**0.5 * 4).to(bf)
     t["bias"] = torch.randn(N_EXPERTS, generator=rep, device=device) * 0.1
-    ug_q = torch.empty(N_EXPERTS + 1, 2 * INTER, HIDDEN, dtype=torch.float8_e4m3fn, device=device)
-    ug_s = torch.empty(N_EXPERTS + 1, *scale_shape(2 * INTER, HIDDEN, 128), device=device)
-    dn_q = torch.empty(N_EXPERTS + 1, HIDDEN, INTER, dtype=torch.float8_e4m3fn, device=device)
-    dn_s = torch.empty(N_EXPERTS + 1, *scale_shape(HIDDEN, INTER, 128), device=device)
-    for e in range(N_EXPERTS + 1):
-        ug_q[e], ug_s[e] = _rand_fp8(2 * INTER, HIDDEN, 128, shd, device)
-        dn_q[e], dn_s[e] = _rand_fp8(HIDDEN, INTER, 128, shd, device)
+    if expert_mxfp4:
+        # Native MXFP4 storage: two E2M1 values per byte and one E8M0 scale
+        # byte per 32 values.  Fixed representative scales keep test-weight
+        # construction cheap while exercising the production storage contract.
+        ug_q = torch.randint(
+            0,
+            256,
+            (N_EXPERTS + 1, 2 * INTER, HIDDEN // 2),
+            generator=shd,
+            dtype=torch.uint8,
+            device=device,
+        )
+        ug_s = torch.full(
+            (N_EXPERTS + 1, 2 * INTER, HIDDEN // 32),
+            118,
+            dtype=torch.uint8,
+            device=device,
+        )
+        dn_q = torch.randint(
+            0,
+            256,
+            (N_EXPERTS + 1, HIDDEN, INTER // 2),
+            generator=shd,
+            dtype=torch.uint8,
+            device=device,
+        )
+        dn_s = torch.full(
+            (N_EXPERTS + 1, HIDDEN, INTER // 32),
+            121,
+            dtype=torch.uint8,
+            device=device,
+        )
+    else:
+        ug_q = torch.empty(N_EXPERTS + 1, 2 * INTER, HIDDEN, dtype=torch.float8_e4m3fn, device=device)
+        ug_s = torch.empty(N_EXPERTS + 1, *scale_shape(2 * INTER, HIDDEN, 128), device=device)
+        dn_q = torch.empty(N_EXPERTS + 1, HIDDEN, INTER, dtype=torch.float8_e4m3fn, device=device)
+        dn_s = torch.empty(N_EXPERTS + 1, *scale_shape(HIDDEN, INTER, 128), device=device)
+        for e in range(N_EXPERTS + 1):
+            ug_q[e], ug_s[e] = _rand_fp8(2 * INTER, HIDDEN, 128, shd, device)
+            dn_q[e], dn_s[e] = _rand_fp8(HIDDEN, INTER, 128, shd, device)
     t["w_ug"], t["s_ug"], t["w_dn"], t["s_dn"] = ug_q, ug_s, dn_q, dn_s
     return LayerWeights(heads, t)
+
+
+def dequant_expert(q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Decode either FP8/block-128 or native MXFP4/block-32 expert weights."""
+    if q.dtype is not torch.uint8:
+        return dequant(q, scale, 128)
+    codes = q.view(torch.uint8).repeat_interleave(2, dim=-1)
+    codes[..., 0::2] &= 0xF
+    codes[..., 1::2] >>= 4
+    values = torch.tensor(
+        (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0),
+        dtype=torch.float32,
+        device=q.device,
+    )
+    scale_f32 = (scale.to(torch.int32) << 23).contiguous().view(torch.float32)
+    return values[codes.long()] * scale_f32.repeat_interleave(32, dim=-1)
 
 
 def rope_table(max_seq: int, theta: float = 8.0e6, device="cuda"):
@@ -118,6 +184,45 @@ def rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     out[..., 0::2] = x0 * cos - x1 * sin
     out[..., 1::2] = x0 * sin + x1 * cos
     return out
+
+
+def indexer_golden(W: LayerWeights, h, q_a, cur_pos: int, index_cache, cos, sin, topk: int = 2048):
+    """Reference for the fused BF16 indexer path; mutates ``index_cache``."""
+    t = W.t
+    S = h.shape[0]
+    x = bf(rmsnorm(h, t["g_in"]))
+    qn = bf(rmsnorm(q_a, t["g_q"]))
+    wk = dequant(t["w_index_k"], t["s_index_k"], 128)
+    wq = dequant(t["w_index_q"], t["s_index_q"], 128)
+    raw_k = x @ wk.T
+    mean = raw_k.mean(-1, keepdim=True)
+    var = (raw_k - mean).square().mean(-1, keepdim=True)
+    index_k = (raw_k - mean) * torch.rsqrt(var + 1e-6)
+    index_k = index_k * t["g_index_k"] + t["b_index_k"]
+    # The fused path stores the projection in a packed-BF16 mailbox before
+    # applying RoPE in the score CTAs.
+    index_q = bf(qn @ wq.T).view(S, INDEX_HEADS, INDEX_DIM)
+    score_weights = x @ t["w_index_w"].float().T
+    positions = torch.arange(cur_pos, cur_pos + S, device=h.device)
+    for s in range(S):
+        index_k[s, :PE_DIM] = rope(index_k[s, :PE_DIM], cos[positions[s]], sin[positions[s]])
+        index_q[s, :, :PE_DIM] = rope(index_q[s, :, :PE_DIM], cos[positions[s]], sin[positions[s]])
+        index_cache[positions[s]] = index_k[s].to(torch.bfloat16)
+    index_q = index_q.to(torch.bfloat16).float()
+    indices = []
+    logits = []
+    for s in range(S):
+        bound = cur_pos + s + 1
+        per_head = torch.relu(index_q[s] @ index_cache[:bound].float().T)
+        score = (per_head * score_weights[s, :, None]).sum(0)
+        # Stable descending order gives the same tie break as the kernel:
+        # equal scores keep the smaller token index first.
+        selected = torch.argsort(score, descending=True, stable=True)[: min(topk, bound)].to(torch.int32)
+        if bound < topk:
+            selected = torch.nn.functional.pad(selected, (0, topk - bound))
+        indices.append(selected)
+        logits.append(score)
+    return torch.stack(indices), index_q, score_weights, index_k, logits
 
 
 def quant_dequant(x: torch.Tensor, block: int = 128) -> torch.Tensor:
@@ -210,7 +315,7 @@ def golden_moe(W: LayerWeights, a, allreduce, mid=None, sel=None, prob=None, xq=
         weights = [1.0] + p.tolist()
         mids = []
         for e, wgt in zip(experts, weights):
-            ug = dequant(t["w_ug"][e], t["s_ug"][e], 128) @ xq[s]
+            ug = dequant_expert(t["w_ug"][e], t["s_ug"][e]) @ xq[s]
             mids.append(torch.nn.functional.silu(ug[:INTER]) * ug[INTER:])
         out["sel"].append(torch.tensor(experts, device=a.device, dtype=torch.int32))
         out["prob"].append(torch.tensor(weights, device=a.device))
@@ -220,7 +325,8 @@ def golden_moe(W: LayerWeights, a, allreduce, mid=None, sel=None, prob=None, xq=
         weights = out["prob"][s].tolist() if prob is None else prob[s].tolist()
         for j, (e, wgt) in enumerate(zip(experts, weights)):
             m = out["mid"][s][j] if mid is None else mid[s, j].float()
-            y[s] += wgt * (dequant(t["w_dn"][e], t["s_dn"][e], 128) @ quant_dequant(m))
+            activation = m.to(torch.bfloat16).float() if t["w_dn"].dtype is torch.uint8 else quant_dequant(m)
+            y[s] += wgt * (dequant_expert(t["w_dn"][e], t["s_dn"][e]) @ activation)
     x_out = (a.float() + allreduce(y)).to(torch.bfloat16)
     return dict(
         scores=scores,
