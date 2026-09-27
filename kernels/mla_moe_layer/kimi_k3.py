@@ -10,9 +10,9 @@ from contextlib import contextmanager
 import torch
 
 from kernels.common.mx_formats import quantize_mxfp8
+from kernels.kimi_k3.kda import KimiK3KdaAttention
 from kernels.mla_moe_layer.config import EPS, KIMI_K3_CONFIG, KvCacheLayout
 from kernels.mla_moe_layer.indexed_layer import KimiK3MlaLayer
-from kernels.mla_moe_layer.kda import KimiK3KdaAttention
 from kernels.mla_moe_layer.kimi_k3_attn_res import KimiK3AttnRes
 from kernels.mla_moe_layer.kimi_k3_tail import FusedKimiK3Tail
 from kernels.mla_moe_layer.mxfp8_linear import Mxfp8Linear
@@ -751,6 +751,9 @@ class KimiK3KdaMoeLayer(KimiK3MlaMoeLayer):
             group=group,
             reduce_group=reduce_group,
             reduce_backend=reduce_backend,
+            # The persistent attention kernel wins at S<=4.  At S=8 the
+            # staged GEMMs retain better occupancy and remain the faster path.
+            single_launch_attention=samples <= 4,
         )
 
     def forward(

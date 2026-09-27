@@ -88,7 +88,7 @@ attention 格式差异以及 serving 配置可能带来的 cache dtype 差异，
 | `native_baseline.py` | 可选的同权重 TileRT 对比适配器。 |
 | `tools/benchmark_atom.py` | 使用预选 sparse indices 的 ATOM 原生 GLM-5.1 decoder-layer benchmark。 |
 | `tools/kimi_k3_full.py` | Kimi-K3 正确性、profiling 和完整层 benchmark driver。 |
-| `tools/kimi_k3_kda_full.py` | KDA attention 及 KDA + latent-MoE 的 TP8 正确性/性能 driver。 |
+| `../kimi_k3/tools/full_layer.py` | 单次 launch 的 KDA + AttnRes + latent-MoE TP8 正确性/性能工具。 |
 
 kernel 使用 FlyDSL 操作实现 wave reduction、硬件数学指令、mailbox polling、buffer
 访问和 MFMA。每个 rank 的 peer payload 先舍入为 BF16，再按 rank 顺序累加，因此所有
@@ -462,7 +462,7 @@ overlap。
 ```bash
 cd /root/FlyDSL-kimi-k3
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
-export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-kimi-k3:/root/tilert_pkg
+export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-kimi-k3
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
   --npes 8 --samples 4 --layer-idx 3 --check \
@@ -474,7 +474,7 @@ export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-kimi-k3:/r
   --bench --kernel-profile --layers 16 --repeats 100 \
   --output /root/kimi-k3-perf-results/full-moe/final-s8.json
 
-/opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_kda_full.py \
+python -m kernels.kimi_k3.tools.full_layer \
   --npes 8 --samples 4 --layer-idx 1 --check --bench \
   --layers 16 --repeats 30 \
   --output /root/kimi-k3-perf-results/full-moe/flydsl-kda-production-layer1-s4.json

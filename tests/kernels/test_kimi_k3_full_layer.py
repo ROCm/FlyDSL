@@ -90,7 +90,7 @@ def test_kimi_k3_full_layer_tp8() -> None:
 def test_kimi_k3_kda_attention_tp8(samples: int, negative_slot: bool) -> None:
     extra_args = ("--negative-slot",) if negative_slot else ()
     result = _run_tp8_tool(
-        "kernels/mla_moe_layer/tools/kimi_k3_kda_full.py",
+        "kernels/kimi_k3/tools/full_layer.py",
         "--samples",
         str(samples),
         "--layer-idx",
@@ -119,7 +119,7 @@ def test_kimi_k3_kda_attention_tp8(samples: int, negative_slot: bool) -> None:
 @pytest.mark.parametrize("layer_idx", (1, 12))
 def test_kimi_k3_kda_moe_layer_tp8(layer_idx: int) -> None:
     result = _run_tp8_tool(
-        "kernels/mla_moe_layer/tools/kimi_k3_kda_full.py",
+        "kernels/kimi_k3/tools/full_layer.py",
         "--samples",
         "1",
         "--layer-idx",
@@ -131,5 +131,24 @@ def test_kimi_k3_kda_moe_layer_tp8(layer_idx: int) -> None:
     assert result["attention_rel_l2"] < 2e-3
     assert result["conv_state_rel_l2"] < 5e-4
     assert result["recurrent_state_rel_l2"] < 5e-4
+    assert result["selection_equal"] is True
+    assert result["output_rel_l2"] < 1e-2
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
+def test_kimi_k3_kda_staged_layer_tp8() -> None:
+    result = _run_tp8_tool(
+        "kernels/kimi_k3/tools/full_layer.py",
+        "--staged",
+        "--samples",
+        "1",
+        "--layer-idx",
+        "1",
+        "--check",
+    )
+    assert result["launch_mode"] == "staged"
+    assert result["rank_equal"] is True
+    assert result["finite"] is True
     assert result["selection_equal"] is True
     assert result["output_rel_l2"] < 1e-2

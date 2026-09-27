@@ -97,7 +97,7 @@ preserving the faster existing attention and router paths.
 | `native_baseline.py` | Optional same-weight TileRT comparison adapter. |
 | `tools/benchmark_atom.py` | Native ATOM GLM-5.1 decoder-layer benchmark with preselected sparse indices. |
 | `tools/kimi_k3_full.py` | Kimi-K3 correctness, profiling, and full-layer benchmark driver. |
-| `tools/kimi_k3_kda_full.py` | KDA attention and KDA + latent-MoE TP8 correctness/performance driver. |
+| `../kimi_k3/tools/full_layer.py` | Single-launch KDA + AttnRes + latent-MoE TP8 correctness/performance driver. |
 
 The kernel uses FlyDSL operations for wave reductions, hardware math,
 mailbox polling, buffer access, and MFMA issue. Peer payloads are rounded to
@@ -534,7 +534,7 @@ Reproduce the complete MLA + MoE checks and measurements with:
 ```bash
 cd /root/FlyDSL-kimi-k3
 export ROCM_PATH=/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel
-export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-kimi-k3:/root/tilert_pkg
+export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-kimi-k3
 
 /opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_full.py \
   --npes 8 --samples 4 --layer-idx 3 --check \
@@ -546,7 +546,7 @@ export PYTHONPATH=/root/FlyDSL/build-fly/python_packages:/root/FlyDSL-kimi-k3:/r
   --bench --kernel-profile --layers 16 --repeats 100 \
   --output /root/kimi-k3-perf-results/full-moe/final-s8.json
 
-/opt/venv/bin/python kernels/mla_moe_layer/tools/kimi_k3_kda_full.py \
+python -m kernels.kimi_k3.tools.full_layer \
   --npes 8 --samples 4 --layer-idx 1 --check --bench \
   --layers 16 --repeats 30 \
   --output /root/kimi-k3-perf-results/full-moe/flydsl-kda-production-layer1-s4.json
