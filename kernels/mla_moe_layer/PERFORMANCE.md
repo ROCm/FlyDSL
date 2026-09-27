@@ -451,6 +451,14 @@ per-head CTA computes its 128 gate channels from the shared 128-wide `f_a`
 input immediately before consuming them, removing a separate low-token GEMM
 without changing the explicit graph-safe state-pool API.
 
+The KDA output projection now also has a dedicated TP8 epilogue. Each GEMM CTA
+publishes its BF16 output tile directly from LDS into the existing tagged
+symmetric peer mailboxes, waits for the matching epoch tags, and writes the
+reduced result directly to the attention output. This removes both the
+standalone all-reduce launch and the intermediate `partial` write/read. S=1-4
+uses a 16x64 tile with four waves; S=8 uses a 32x64 tile with eight waves so
+each wave publishes to one peer.
+
 The following results pair the same production layer index, TP8 topology, HIP
 graph depth (16), warmups, repeats (30), and critical-rank median. The ATOM
 harness initializes the production AttnRes block state rather than timing
@@ -460,16 +468,28 @@ uninitialized storage.
 |---|---:|---:|---:|---:|---:|
 | MLA + latent MoE, layer 3 | 4 | **116.1023 us** | 222.5597 us | **1.917x** | **47.83%** |
 | MLA + latent MoE, layer 3 | 8 | **127.9274 us** | 253.9299 us | **1.985x** | **49.62%** |
-| KDA + latent MoE, layer 1 | 4 | **126.7786 us** | 197.2968 us | **1.556x** | **35.74%** |
-| KDA + latent MoE, layer 1 | 8 | **138.2513 us** | 227.3771 us | **1.645x** | **39.20%** |
+| KDA + latent MoE, layer 1 | 4 | **115.3998 us** | 197.2968 us | **1.710x** | **41.51%** |
+| KDA + latent MoE, layer 1 | 8 | **128.8000 us** | 227.3771 us | **1.765x** | **43.35%** |
 
 The production MLA S=8 case is approximately 2x, while KDA remains below the
 2x target. The retained fused KDA convolution/recurrence/RMSNorm core itself is
-about 1.95-1.98x faster than ATOM's three-kernel sequence at S=4/8. The
-remaining full-layer gap is dominated by the two BF16 attention projections,
-TP reduction, and AttnRes boundaries. A faster split-K input projection was
-rejected because it enlarged recurrent-state error, and direct mailbox
-consumption in post-AttnRes was rejected because it regressed latency.
+about 1.95-1.98x faster than ATOM's three-kernel sequence at S=4/8. The fused
+output projection and TP reduction measure about 9.7 us at S=4 and 12.7 us at
+S=8, versus about 14.1/14.5 us for the prior two-launch path. Reaching 2x would
+require 98.65 us at S=4 and 113.69 us at S=8, so another 16.75/15.11 us must be
+removed. The remaining gap spans the input projection, both AttnRes boundaries,
+router projection, and routed expert kernels; tuning one small kernel is no
+longer sufficient. A faster split-K input projection was rejected because it
+enlarged recurrent-state error, and direct mailbox consumption in post-AttnRes
+was rejected because it regressed latency.
+
+Ignoring the intentionally out-of-scope layer-0 dense FFN, the production mix
+contains 24 MLA + latent-MoE layers and 68 KDA + latent-MoE layers. Weighting the
+paired representative-layer timings above gives a 92-layer decoder-core
+estimate of **1.764x at S=4** and **1.822x at S=8**. This is not an end-to-end
+93-layer model number: layer 0, embeddings, sampling, framework scheduling, and
+other non-layer overheads are not included, so a full-model measurement will be
+slightly lower.
 
 ### Why K3 is still much slower than the GLM kernel in absolute time
 

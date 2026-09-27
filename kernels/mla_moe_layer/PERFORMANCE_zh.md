@@ -392,6 +392,12 @@ delta-rule state update、gated per-head RMSNorm、BF16 output projection、TP8 
 128-wide `f_a` 输入计算自己的 128 个 gate channel，并立刻消费，去掉一个独立的低
 token GEMM，同时保持显式、graph-safe 的 state-pool API。
 
+KDA output projection 现在也带有专用 TP8 epilogue。每个 GEMM CTA 直接从 LDS 把
+BF16 output tile 发布到已有的 tagged symmetric peer mailbox，等待对应 epoch tag 后，
+把归约结果直接写入 attention output。这样同时去掉了独立 all-reduce launch 和中间
+`partial` 的写回/重读。S=1-4 使用 16x64、4-wave tile；S=8 使用 32x64、8-wave tile，
+使每个 wave 正好负责一个 TP peer。
+
 下表使用相同生产层索引、TP8 拓扑、16 层 HIP graph、预热、30 次重复和 critical-rank
 中位数进行配对。ATOM harness 现在会初始化生产 AttnRes block state，不再对未初始化
 storage 计时。
@@ -400,14 +406,23 @@ storage 计时。
 |---|---:|---:|---:|---:|---:|
 | MLA + latent MoE，layer 3 | 4 | **116.1023 us** | 222.5597 us | **1.917x** | **47.83%** |
 | MLA + latent MoE，layer 3 | 8 | **127.9274 us** | 253.9299 us | **1.985x** | **49.62%** |
-| KDA + latent MoE，layer 1 | 4 | **126.7786 us** | 197.2968 us | **1.556x** | **35.74%** |
-| KDA + latent MoE，layer 1 | 8 | **138.2513 us** | 227.3771 us | **1.645x** | **39.20%** |
+| KDA + latent MoE，layer 1 | 4 | **115.3998 us** | 197.2968 us | **1.710x** | **41.51%** |
+| KDA + latent MoE，layer 1 | 8 | **128.8000 us** | 227.3771 us | **1.765x** | **43.35%** |
 
 生产 MLA 的 S=8 已约为 2x，KDA 完整层仍未达到 2x。保留的融合 KDA
 convolution/recurrence/RMSNorm core 在 S=4/8 相对 ATOM 三 kernel 链约为
-1.95-1.98x；完整层剩余差距主要来自两个 BF16 attention projection、TP reduction 和
-AttnRes 边界。更快但会放大 recurrent-state 误差的 split-K input projection，以及让
-post-AttnRes 直接消费 peer mailbox 但造成延迟回退的方案，均未保留。
+1.95-1.98x。融合后的 output projection + TP reduction 在 S=4/S=8 分别约为
+9.7/12.7 us，而之前的双 launch 路径约为 14.1/14.5 us。完整 KDA 达到 2x 需要降至
+S=4 98.65 us、S=8 113.69 us，因此仍需再减少 16.75/15.11 us。剩余差距横跨 input
+projection、前后两段 AttnRes、router projection 和 routed expert kernels，已经无法靠
+微调一个小 kernel 补齐。更快但会放大 recurrent-state 误差的 split-K input projection，
+以及让 post-AttnRes 直接消费 peer mailbox 但造成延迟回退的方案，均未保留。
+
+按要求不计 layer 0 dense FFN 后，生产层组合为 24 个 MLA + latent-MoE 层和 68 个
+KDA + latent-MoE 层。用上表配对的代表层延迟加权，92 层 decoder core 估算为：S=4
+约 **1.764x**，S=8 约 **1.822x**。这不是完整 93 层端到端模型数据；layer 0、
+embedding、sampling、framework scheduling 以及其他非层开销尚未计入，因此完整模型
+实测会略低。
 
 ### 为什么 K3 的绝对耗时仍明显高于 GLM kernel
 
