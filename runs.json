@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-26T21:27:27Z",
+ "updated": "2026-09-27T01:06:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36284172781,
+   "pr": 1202,
+   "commit": "f88d2b67a6b0beca18d9576a7c05b0cdae972dbd",
+   "branch": "dev/export_c",
+   "event": "pull_request",
+   "title": "[AOT] Export linkable C objects and support CPU-only builds",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284172781",
+   "created_at": "2026-09-27T00:59:51Z",
+   "updated_at": "2026-09-27T01:05:17Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36282379496,
+   "pr": 1203,
+   "commit": "d0581a28b6b76236ecf495ab83784854f7549497",
+   "branch": "docs/full-doc-audit-20260926",
+   "event": "pull_request",
+   "title": "[Docs] Audit and refresh repository documentation",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36282379496",
+   "created_at": "2026-09-27T00:24:05Z",
+   "updated_at": "2026-09-27T00:35:27Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T00:35:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36282379496/job/108518194964"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-27T00:35:36Z",
+     "completed_at": "2026-09-27T01:03:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36282379496/job/108518195011"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T00:37:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36282379496/job/108518195036"
+    }
+   ]
+  },
   {
    "run_id": 36252417137,
    "pr": 1202,
@@ -10,11 +68,11 @@
    "branch": "dev/export_c",
    "event": "pull_request",
    "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36252417137",
    "created_at": "2026-09-26T15:34:36Z",
-   "updated_at": "2026-09-26T15:46:14Z",
+   "updated_at": "2026-09-27T01:04:53Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -38,10 +96,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-26T15:46:13Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-27T00:36:10Z",
+     "completed_at": "2026-09-27T01:04:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36252417137/job/108434673915"
     }
    ]
@@ -2030,67 +2088,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35728249041/job/106751920120"
     }
    ]
-  },
-  {
-   "run_id": 35719721262,
-   "pr": null,
-   "commit": "a3cb59788cb11f334dc48645c52659fc21e37c53",
-   "branch": "main",
-   "event": "push",
-   "title": "[llvm][Skill] Add an LLVM kernel-tuning and verification skill (#1154)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35719721262",
-   "created_at": "2026-09-22T11:07:38Z",
-   "updated_at": "2026-09-22T11:10:41Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T11:10:36Z",
-     "completed_at": "2026-09-22T11:10:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35719721262/job/106720155474"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T11:10:36Z",
-     "completed_at": "2026-09-22T11:10:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35719721262/job/106720155554"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-22T11:10:36Z",
-     "completed_at": "2026-09-22T11:10:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35719721262/job/106720155614",
-     "machine": null,
-     "host_model": null,
-     "bench_skipped": "host unidentified != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35719378633,
-   "pr": null,
-   "commit": "e1e1d3489e25e528da304380656320b01c9f934e",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel][FA] Fix the DAZ flag never reaching the hardware (#1177)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35719378633",
-   "created_at": "2026-09-22T11:03:57Z",
-   "updated_at": "2026-09-22T11:08:40Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
