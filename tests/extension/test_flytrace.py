@@ -9,12 +9,14 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.extension import flytrace
+from flydsl.extension._flytrace_backend import get_trace_backend
+from flydsl.extension._flytrace_export import perfetto_events
 from flydsl.runtime.device import get_rocm_arch
 
 
 @flyc.kernel(known_block_size=[64, 1, 1])
 def _dynamic_trace_kernel(iterations: fx.Int32):
-    flytrace.push("kernel")
+    flytrace.range_push("kernel")
     flytrace.boundary("loop")
     i = fx.Int32(0)
     while i < iterations:
@@ -24,7 +26,9 @@ def _dynamic_trace_kernel(iterations: fx.Int32):
         i = i + fx.Int32(1)
     flytrace.boundary("done")
     flytrace.end()
-    flytrace.pop()
+    token = flytrace.range_start("finalize", iterations)
+    flytrace.range_end(token, iterations)
+    flytrace.range_pop()
 
 
 @flyc.jit
@@ -42,8 +46,19 @@ def _runtime_grid_static_trace_launch(grid: fx.Int32, stream: fx.Stream):
     _static_trace_kernel().launch(grid=(grid, 1, 1), block=(64, 1, 1), stream=stream)
 
 
+@flyc.kernel(known_block_size=[32, 2, 1])
+def _two_dimensional_trace_kernel():
+    flytrace.mark("two_dimensional")
+
+
+@flyc.jit
+def _two_dimensional_trace_launch(stream: fx.Stream):
+    _two_dimensional_trace_kernel().launch(grid=(1, 1, 1), block=(32, 2, 1), stream=stream)
+
+
 def test_capture_option_validation():
-    assert flytrace.capture(block=(1, 2, 3)).options[2] == ((1, 2, 3),)
+    assert flytrace.capture(block=(1, 2, 3)).options.version == "flytrace-v4"
+    assert flytrace.capture(block=(1, 2, 3)).options.blocks == ((1, 2, 3),)
     assert flytrace.capture(block=[(1, 0, 0), (2, 0, 0)]).options[2] == ((1, 0, 0), (2, 0, 0))
     with pytest.raises(ValueError, match="duplicates"):
         flytrace.capture(block=[(1, 0, 0), (1, 0, 0)])
@@ -51,6 +66,164 @@ def test_capture_option_validation():
         flytrace.capture(mode="unknown")
     with pytest.raises(ValueError, match="max_events"):
         flytrace.capture(max_events=0)
+    with pytest.raises(TypeError, match="iterable"):
+        flytrace.capture(exclude="event")
+    with pytest.raises(TypeError, match="bool"):
+        flytrace.capture(hardware=1)
+
+
+def test_backend_errors_are_reported_at_the_trace_boundary():
+    with pytest.raises(ValueError, match="no flytrace backend"):
+        get_trace_backend("unregistered-test-target")
+    with pytest.raises(TypeError, match="name must be a string"):
+        get_trace_backend(1)
+
+    class DummyBackend(flytrace.TraceBackend):
+        name = "unit-test-target"
+        clock_hz = 1
+
+        def lower_kernel(self, func, ctx, grid, block, stream):
+            pass
+
+        def current_device(self):
+            return 0
+
+        def synchronize(self, device):
+            pass
+
+        def allocate_buffer(self, words, device):
+            return [0] * words
+
+        def buffer_pointer(self, buffer):
+            return 0
+
+        def buffer_words(self, buffer):
+            return buffer
+
+        def decode(self, spec, words):
+            return []
+
+        def raw_metadata(self, specs):
+            return {"backend": self.name, "clock_hz": self.clock_hz}
+
+    flytrace.register_backend("unit-test-target", DummyBackend)
+    assert isinstance(get_trace_backend("unit-test-target"), DummyBackend)
+
+
+def test_capture_replaces_repeated_launches_and_enforces_total_allocation(monkeypatch):
+    import flydsl.extension._flytrace as implementation
+
+    class RecordingBackend(flytrace.TraceBackend):
+        name = "recording-test-target"
+        clock_hz = 1
+
+        def __init__(self):
+            self.allocations = 0
+
+        def lower_kernel(self, func, ctx, grid, block, stream):
+            pass
+
+        def current_device(self):
+            return 0
+
+        def synchronize(self, device):
+            pass
+
+        def allocate_buffer(self, words, device):
+            self.allocations += 1
+            return {"words": words, "launch": None, "pointer": self.allocations}
+
+        def buffer_pointer(self, buffer):
+            return buffer["pointer"]
+
+        def buffer_words(self, buffer):
+            return [buffer["launch"]]
+
+        def decode(self, spec, words):
+            return [(spec["name"], words[0])]
+
+        def raw_metadata(self, specs):
+            return {"backend": self.name, "clock_hz": self.clock_hz}
+
+    backend = RecordingBackend()
+    monkeypatch.setattr(implementation, "get_trace_backend", lambda: backend)
+    spec = {"backend": backend.name, "name": "same-compiled-launch", "words": 1}
+    cap = implementation.capture()
+    with cap:
+        assert cap._buffer({"words": 0}) == 0
+        empty_call = implementation.TraceCallState(lambda args: args, {"options": cap.options, "words": 0})
+        assert empty_call(("unannotated",)) == ("unannotated",)
+        first = cap._buffer(spec)
+        cap._records[id(spec)][1]["launch"] = 1
+        second = cap._buffer(spec)
+        cap._records[id(spec)][1]["launch"] = 2
+    assert first != second
+    assert cap.decode() == [("same-compiled-launch", 2)]
+    with cap:
+        third = cap._buffer(spec)
+        cap._records[id(spec)][1]["launch"] = 3
+    assert third != second
+    assert cap.decode() == [("same-compiled-launch", 3)]
+
+    oversized = implementation.capture()
+    with oversized:
+        limit = {"backend": backend.name, "name": "limit", "words": 128 * 1024**2}
+        oversized._buffer(limit)
+        oversized._buffer(limit)
+        with pytest.raises(ValueError, match="512 MiB"):
+            oversized._buffer(spec)
+
+
+def test_generic_export_supports_both_range_models():
+    events = [
+        {"name": "outer", "kind": "push", "payload": None, "tick": 100, "ordinal": 0},
+        {"name": "load", "kind": "range_start", "range_id": 7, "payload": 3, "tick": 110, "ordinal": 1},
+        {"name": "ready", "kind": "mark", "payload": None, "tick": 120, "ordinal": 2},
+        {"name": "load", "kind": "range_end", "range_id": 7, "payload": 4, "tick": 130, "ordinal": 3},
+        {"name": "__pop", "kind": "pop", "payload": None, "tick": 140, "ordinal": 4},
+    ]
+    waves = [
+        {
+            "kernel": "generic_operator",
+            "block": (0, 0, 0),
+            "wave": 0,
+            "epoch": 90,
+            "end_tick": 150,
+            "events": events,
+            "attempted_events": len(events),
+            "overflow": False,
+        }
+    ]
+    trace = perfetto_events(waves, 100_000_000)
+    slices = {event["name"]: event for event in trace if event.get("ph") == "X"}
+    assert set(slices) == {"load", "outer"}
+    assert slices["load"]["args"] == {"payload": 3, "end_payload": 4}
+
+
+def test_generic_export_pairs_crossing_same_name_ranges_by_token():
+    events = [
+        {"name": "tile", "kind": "range_start", "range_id": 10, "payload": 0, "tick": 100},
+        {"name": "tile", "kind": "range_start", "range_id": 11, "payload": 1, "tick": 110},
+        {"name": "tile", "kind": "range_end", "range_id": 10, "payload": 2, "tick": 130},
+        {"name": "tile", "kind": "range_end", "range_id": 11, "payload": 3, "tick": 150},
+    ]
+    waves = [
+        {
+            "kernel": "token_ranges",
+            "block": (0, 0, 0),
+            "wave": 0,
+            "epoch": 90,
+            "end_tick": 160,
+            "events": events,
+            "attempted_events": len(events),
+            "overflow": False,
+        }
+    ]
+    slices = [event for event in perfetto_events(waves, 100_000_000) if event.get("ph") == "X"]
+    assert [(event["args"]["payload"], event["args"]["end_payload"], event["dur"]) for event in slices] == [
+        (0, 2, 0.3),
+        (1, 3, 0.4),
+    ]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
@@ -63,7 +236,16 @@ def test_static_all_grid_rejects_runtime_launch_dimensions():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
-def test_static_runtime_grid_accepts_selected_ctas():
+def test_capture_allows_kernels_with_every_event_excluded():
+    if get_rocm_arch().split(":")[0] not in ("gfx942", "gfx950"):
+        pytest.skip("flytrace recorder currently targets gfx942/gfx950")
+    with flytrace.capture(mode="static", exclude=("event",)) as cap:
+        flyc.compile(_runtime_grid_static_trace_launch, fx.Int32(1), torch.cuda.current_stream())
+    assert cap.decode() == []
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
+def test_static_runtime_grid_accepts_selected_blocks():
     if get_rocm_arch().split(":")[0] not in ("gfx942", "gfx950"):
         pytest.skip("flytrace recorder currently targets gfx942/gfx950")
     selected = [(0, 0, 0), (1, 0, 0)]
@@ -72,6 +254,18 @@ def test_static_runtime_grid_accepts_selected_ctas():
     waves = cap.decode()
     assert {tuple(wave["block"]) for wave in waves} == set(selected)
     assert [[event["name"] for event in wave["events"]] for wave in waves] == [["event"], ["event"]]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
+def test_trace_supports_multidimensional_blocks():
+    if get_rocm_arch().split(":")[0] not in ("gfx942", "gfx950"):
+        pytest.skip("flytrace recorder currently targets gfx942/gfx950")
+    with flytrace.capture(mode="static") as cap:
+        flyc.compile(_two_dimensional_trace_launch, torch.cuda.current_stream())
+    waves = cap.decode()
+    assert len(waves) == 1
+    assert waves[0]["block"] == (0, 0, 0)
+    assert [event["name"] for event in waves[0]["events"]] == ["two_dimensional"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
@@ -98,13 +292,15 @@ def test_dynamic_loop_runtime_grid_and_nondefault_stream(tmp_path):
             "iteration",
             "done",
             "__end",
+            "finalize",
+            "finalize",
             "__pop",
         ]
         assert [event["payload"] for event in wave["events"] if event["name"] == "iteration"] == [0, 1, 2, 3]
 
     path = tmp_path / "dynamic.json"
     stats = cap.export(path)
-    assert stats == {"waves": 2, "records": 22, "dropped": 0}
+    assert stats == {"waves": 2, "records": 26, "dropped": 0}
     assert json.loads(path.read_text())["traceEvents"]
 
 
@@ -116,6 +312,6 @@ def test_dynamic_overflow_is_reported(tmp_path):
         flyc.compile(_dynamic_trace_launch, fx.Int32(4), fx.Int32(1), torch.cuda.current_stream())
     wave = cap.decode()[0]
     assert wave["overflow"] is True
-    assert wave["attempted_events"] == 11
+    assert wave["attempted_events"] == 13
     stats = cap.export(tmp_path / "overflow.json")
-    assert stats == {"waves": 1, "records": 4, "dropped": 7}
+    assert stats == {"waves": 1, "records": 4, "dropped": 9}

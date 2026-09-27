@@ -255,7 +255,7 @@ def compile_preshuffle_gemm(
         tiled_mma_arg: fx.TiledMma,
         tiled_copy_g2s: fx.TiledCopy,
     ):
-        flytrace.push("gemm")
+        flytrace.range_push("gemm")
         flytrace.boundary("prologue")
         tid = fx.thread_idx.x
         bid_x, bid_y, _ = fx.block_idx
@@ -751,7 +751,7 @@ def compile_preshuffle_gemm(
             frag_C_out.store(out_vec)
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
         flytrace.end()
-        flytrace.pop()
+        flytrace.range_pop()
 
     # ── Host launcher ─────────────────────────────────────────────
     @flyc.jit

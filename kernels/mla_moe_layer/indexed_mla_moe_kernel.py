@@ -431,7 +431,7 @@ def build_indexed_mla_moe_kernel(
         rank: Int32,
         layer: Int32,
     ):
-        flytrace.push("glm5_mla_moe", layer)
+        flytrace.range_push("glm5_mla_moe", layer)
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
         lane = tid % 64
@@ -959,7 +959,7 @@ def build_indexed_mla_moe_kernel(
             expert lane + 64 i).  Returns (expert id, route weight = raw score / sum of
             the 8 raw scores * ROUTE_SCALE) of pick ``lane`` in score order, valid in
             lanes < EXPERT_TOP_K."""
-            flytrace.push("gating", s)
+            flytrace.range_push("gating", s)
             flytrace.boundary("gating/wait_scores", s)
             if const_expr(bs is None):
                 bs = load_bias()
@@ -1006,7 +1006,7 @@ def build_indexed_mla_moe_kernel(
                 tot = _xred(tot, off, lambda a, b: a + b)
             weight = raw * (_rcp(tot) * ROUTE_SCALE)
             flytrace.end()
-            flytrace.pop()
+            flytrace.range_pop()
             return e, weight
 
         def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
@@ -1878,22 +1878,22 @@ def build_indexed_mla_moe_kernel(
                     put(mb("sel"), sn * MOE_SLOTS + sl, lds_ld(keys, sn * MOE_SLOTS + sl))
                     put(mb("prob"), sn * MOE_SLOTS + sl, lds_ld(dnw, sn * MOE_SLOTS + sl))
 
-            flytrace.push("shared_prefetch")
+            flytrace.range_push("shared_prefetch")
             shared_pre = ug8_units(fx.Int32(SHARED_EXPERT), None, has_sh)
-            flytrace.pop()
+            flytrace.range_pop()
             dn_route(load_bias())
-            flytrace.push("expert_prepare")
+            flytrace.range_push("expert_prepare")
             gpu.barrier()
             cur = ug8_units(_uniform(lds_ld(keys, slot)), 0)
             stage_moe_input(list(range(S)))
             gpu.barrier()
-            flytrace.pop()
+            flytrace.range_pop()
             if has_sh:
-                flytrace.push("shared_expert")
+                flytrace.range_push("shared_expert")
                 reduce_rows(1, mma_units([fx.Float32(0.0) for _ in range(4)], shared_pre), emit_out(16))
                 gpu.barrier()
                 ug8_emit(0, True)
-                flytrace.pop()
+                flytrace.range_pop()
             for sample in range_constexpr(S):
                 stamp("ug", sample * G + u, 0)
                 pre = cur
@@ -2047,7 +2047,7 @@ def build_indexed_mla_moe_kernel(
             gpu.barrier()
             stamp("down", t, 4)
 
-        flytrace.pop()
+        flytrace.range_pop()
 
     @flyc.jit
     def launch_indexed_mla_moe(

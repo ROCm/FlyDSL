@@ -18,6 +18,10 @@ def fingerprint(root):
     files = [
         "examples/04-flytrace_gemm.py",
         "python/flydsl/extension/_flytrace.py",
+        "python/flydsl/extension/_flytrace_backend.py",
+        "python/flydsl/extension/_flytrace_export.py",
+        "python/flydsl/extension/_flytrace_rocm.py",
+        "python/flydsl/extension/_flytrace_schema.py",
         "python/flydsl/extension/flytrace.py",
         "python/flydsl/compiler/kernel_function.py",
         "python/flydsl/compiler/jit_function.py",
@@ -252,12 +256,14 @@ def publish(root, work, data):
 from flydsl.extension import flytrace
 
 # @flyc.kernel 内：不需要 Plan、buffer 参数、begin/finish 或循环携带状态。
+flytrace.range_push("gemm")
 flytrace.boundary("load")
 # ...
 for k in range(K_TILES):
     flytrace.boundary("tile", k)
     # ... 原计算 ...
 flytrace.end()
+flytrace.range_pop()
 
 # @flyc.jit 内，在 kernel launch 前设置采样 block；None 表示全部 block。
 with flytrace.configure(block=(0, 0, 0)):
@@ -268,7 +274,8 @@ with flytrace.capture("timeline.json"):
     launch_gemm(a, b, c)
 ```
 
-支持 `mark`、`boundary/end` 和 `push/pop`；无需预先声明事件名。
+支持 `mark`、`range_start/range_end`、`range_push/range_pop` 和
+`boundary/end`；无需预先声明事件名。
 `with flytrace.configure(block=...):` 只影响上下文内的 launch；支持嵌套，正常或异常退出时均恢复外层配置。不同配置分别生成 kernel specialization。配置为编译期常量，既不增加用户参数，也不生成运行时配置指令。
 host 默认使用 JIT 的选择；没有 configure 时仍采样 block (0,0,0)。显式 `capture(block=...)` 优先，`capture(block=None)` 可临时覆盖为全 grid。
 示例的 phases 版本排除 `k_tile`，tiles 版本排除 `mainloop/drain`，确保 64 个 tile 连续相接。
@@ -277,15 +284,15 @@ host 默认使用 JIT 的选择；没有 configure 时仍采样 block (0,0,0)。
 
 ## 当前限制与验证
 
-仅 gfx942、完整收敛 wave64、静态 grid、1D block、常量边界且正步长的 `scf.for`。
-包含 trace 的 runtime if/while 拒绝编译；payload 目前要求可由常量及循环索引重建且适合 int32。
-仅默认 stream；capture 可跨多次顺序 launch，但不支持并发/嵌套 capture，也不累计每次 launch 的历史。
-单 wave 采集跨度必须短于约 42.95 秒；保持全部 10 ns tick 精度，未用降低精度来压缩。
+当前 ROCm backend 支持 gfx942/gfx950 wave64；ATT 硬件身份合并限于 gfx942。
+block 维度需为正的编译期常量并包含完整 wave，支持一至三维；runtime grid 在 dynamic 模式下直接记录，
+static 模式则需要显式选择 block。常量结构化循环走静态紧凑路径，runtime loop/branch 和动态 payload 自动走有界 dynamic recorder。
+支持默认及用户 stream；capture 不支持并发或嵌套，重复 launch 保留每个 specialization 的最后一次记录。
+单 wave 采集跨度必须短于约 42.95 秒；每个 capture 的当前 buffer 集合上限为 512 MiB。
 
-定向测试覆盖 CPU/CUDA 两种默认设备、4096 次记录、31/32/33/63/64/65 等页边界、
-双标记交错写入与 M0 保存恢复、非单位步长嵌套循环、分配与行尾哨兵、
-trace on/off 缓存分离、新 capture 的隐藏指针更新、artifact 序列化与不支持路径的拒绝。
-trace、callstate 与 ATT 的 109 个相关用例在全局默认 CPU/CUDA 下分别通过。关闭 capture 的 final ISA 与原始 Example04 逐字节相同。
+定向测试覆盖 static/dynamic recorder、runtime loop/branch/grid、二维 block、非默认 stream、
+显式 token range、同名交叉 range、overflow、无埋点 kernel、backend 注册边界、trace cache 隔离和 GLM 分层导出。
+关闭 capture 时不会增加隐藏参数或采样指令；GEMM smoke 同时校验数值、trace 记录、MFMA 数量及 scratch/atomic/waterfall。
 真实 Perfetto trace processor 导入验证：4 条 wave track，272 个 slice/instant，未结束区间 0；252 对相邻 tile 的 gap 全部为 0。
 未运行全量测试或远端 CI。
 

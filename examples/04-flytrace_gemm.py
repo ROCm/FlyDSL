@@ -24,7 +24,7 @@ def gemm_kernel(
     tiled_mma: fx.TiledMma,
     tiled_copy_g2s_A: fx.TiledCopy,
 ):
-    flytrace.push("gemm")
+    flytrace.range_push("gemm")
     flytrace.boundary("prologue")
     tid = fx.thread_idx.x
     bid_x, bid_y, _ = fx.block_idx
@@ -164,7 +164,7 @@ def gemm_kernel(
     mma_frag_C_f16.store(mma_frag_C.load().to(fx.Float16))
     fx.copy(buffer_copy_16b, mma_frag_C_retile, thr_gC)
     flytrace.end()
-    flytrace.pop()
+    flytrace.range_pop()
 
 
 @flyc.jit

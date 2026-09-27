@@ -430,7 +430,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         arg_sweights: fx.Int64, arg_trb: fx.Int64, arg_p2p_comb_inp: fx.Int64, i32_max_m_blocks: fx.Int32,
         i32_inter: fx.Int32, i32_hidden: fx.Int32, i32_kpad: fx.Int32, i32_npad: fx.Int32):
     # fmt: on
-        flytrace.push("mega_stage2")
+        flytrace.range_push("mega_stage2")
         flytrace.boundary("setup")
         tx_i32 = fx.thread_idx.x
         bx_i32 = fx.block_idx.x
@@ -467,7 +467,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                     is_f8, KH_TILE_A, k_bytes, BM=BM)
 
         def run_unit(unit_bx, m_block_idx):
-            flytrace.push("stage2_tile", unit_bx)
+            flytrace.range_push("stage2_tile", unit_bx)
             flytrace.boundary("gemm2", unit_bx)
             # Map each Stage2 BM sub-tile to its Stage1 SBM metadata row.
             m_row = m_block_idx * fx.Int32(BM)
@@ -516,7 +516,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 p2p_quant_type=p2p_quant_type)
             # fmt: on
             flytrace.end()
-            flytrace.pop()
+            flytrace.range_pop()
 
         cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
         total_m_blocks = (cumsum0 + fx.Int32(BM - 1)) // fx.Int32(BM)
@@ -598,7 +598,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                     run_unit(unit_bx, m_block)
 
         flytrace.end()
-        flytrace.pop()
+        flytrace.range_pop()
 
     # fmt: off
     @flyc.jit

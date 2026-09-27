@@ -30,7 +30,7 @@ def test_run_compiled_keeps_ambient_hint_variants_separate(monkeypatch):
     normal = launcher._cf
     tensor_shim._run_compiled(launcher, "normal-hot")
 
-    trace_options = ("flytrace-v3", "dynamic", None, (), 32, 4, False)
+    trace_options = ("flytrace-v4", "dynamic", None, (), 32, 4, False)
     with CompilationContext.compile_hints({"flytrace": trace_options}):
         tensor_shim._run_compiled(launcher, "trace-cold")
         traced = next(iter(launcher._cf_hint_variants.values()))

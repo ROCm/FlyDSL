@@ -547,10 +547,10 @@ def Fly_MemRefStoreOp : Fly_Op<"memref.store", []> {
 // Utility ops
 //===----------------------------------------------------------------------===//
 
-// Static wave tracing is planned after Python IR construction and removed
-// before the normal device pipeline. Keep markers effectful until planning.
+// In-kernel tracing is planned after Python IR construction and removed before
+// the normal device pipeline. Keep annotations effectful until planning.
 def Fly_TraceEventOp : Fly_Op<"trace_event"> {
-  let summary = "Uniform wave timestamp annotation with a static event schedule";
+  let summary = "Target-neutral in-kernel trace annotation";
   let arguments = (ins StrAttr:$event_name, StrAttr:$kind, Optional<I32>:$payload);
 }
 

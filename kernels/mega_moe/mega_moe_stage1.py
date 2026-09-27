@@ -178,7 +178,7 @@ def compile_mega_moe_stage1(
         addr_in_idx: fx.Int64, addr_in_wts: fx.Int64, addr_in_sc: fx.Int64, addr_parity: fx.Int64,
         addr_expected: fx.Int64,
     ):
-        flytrace.push("mega_stage1")
+        flytrace.range_push("mega_stage1")
         flytrace.boundary("entry")
         tid = fx.thread_idx.x
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
@@ -454,12 +454,12 @@ def compile_mega_moe_stage1(
             if has_work != fx.Int32(0):
                 if const_expr(not direct_fixed_slot):
                     comm_ops.fence_system_acquire()
-                flytrace.push("gemm1_tile", work)
+                flytrace.range_push("gemm1_tile", work)
                 _do_scheduled_tile(work)
-                flytrace.pop()
+                flytrace.range_pop()
             consumer_active = has_work != fx.Int32(0)
         flytrace.end()
-        flytrace.pop()
+        flytrace.range_pop()
 
     @flyc.jit
     def launch(

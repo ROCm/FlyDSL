@@ -145,7 +145,7 @@ def _match(raw, directory):
 
 
 def _phase_events(wave, pid, tid, origin, frequency):
-    events, stack, current = [], [], None
+    events, stack, token_ranges, current = [], [], defaultdict(list), None
 
     def emit(a, b=None):
         name = a["name"] if a["payload"] is None else f"{a['name']}[{a['payload']}]"
@@ -176,13 +176,20 @@ def _phase_events(wave, pid, tid, origin, frequency):
             if not stack:
                 raise ValueError("Unmatched flytrace.pop()")
             emit(stack.pop(), event)
+        elif kind == "range_start":
+            token_ranges[event.get("range_id", event["name"])].append(event)
+        elif kind == "range_end":
+            starts = token_ranges[event.get("range_id", event["name"])]
+            if not starts:
+                raise ValueError(f"Unmatched flytrace.range_end() for {event['name']!r}")
+            emit(starts.pop(), event)
         elif kind in ("boundary", "end"):
             if current is not None:
                 emit(current, event)
             current = event if kind == "boundary" else None
         else:
             raise ValueError(f"Unknown flytrace event kind: {kind}")
-    if stack or current:
+    if stack or current or any(token_ranges.values()):
         raise ValueError("Unfinished flytrace phase")
     return events
 
