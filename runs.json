@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-27T04:46:27Z",
+ "updated": "2026-09-27T05:59:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36298592651,
+   "pr": 1202,
+   "commit": "96e40f9a8ee857dd7a2e245d63d1020d312c642f",
+   "branch": "dev/export_c",
+   "event": "pull_request",
+   "title": "[AOT] Export linkable C objects and support CPU-only builds",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36298592651",
+   "created_at": "2026-09-27T05:55:23Z",
+   "updated_at": "2026-09-27T05:57:46Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36294943885,
    "pr": 1204,
@@ -10,13 +25,41 @@
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36294943885",
    "created_at": "2026-09-27T04:39:32Z",
-   "updated_at": "2026-09-27T04:44:47Z",
+   "updated_at": "2026-09-27T04:54:47Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-27T04:54:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36294943885/job/108553955366"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-27T04:55:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36294943885/job/108553955368"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-27T04:57:23Z",
+     "completed_at": "2026-09-27T05:24:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36294943885/job/108553955369"
+    }
+   ]
   },
   {
    "run_id": 36293586491,
@@ -25,38 +68,38 @@
    "branch": "dev/export_c",
    "event": "pull_request",
    "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36293586491",
    "created_at": "2026-09-27T04:11:29Z",
-   "updated_at": "2026-09-27T04:28:07Z",
+   "updated_at": "2026-09-27T05:57:31Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-27T04:28:28Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T04:57:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36293586491/job/108550422288"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-27T04:29:29Z",
-     "completed_at": null,
+     "completed_at": "2026-09-27T05:50:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36293586491/job/108550422314"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-27T04:28:06Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-27T04:55:19Z",
+     "completed_at": "2026-09-27T05:57:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36293586491/job/108550422385"
     }
    ]
@@ -2059,49 +2102,6 @@
      "started_at": "2026-09-23T08:33:55Z",
      "completed_at": "2026-09-23T09:43:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35835884222/job/107103952647"
-    }
-   ]
-  },
-  {
-   "run_id": 35834501494,
-   "pr": null,
-   "commit": "e70bf796facb79fb30e179fdc852946f776b876d",
-   "branch": "main",
-   "event": "push",
-   "title": "Refactor preshuffle GEMM indexing with layout algebra (#1131)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494",
-   "created_at": "2026-09-23T07:58:11Z",
-   "updated_at": "2026-09-23T09:47:52Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-23T08:20:30Z",
-     "completed_at": "2026-09-23T08:53:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494/job/107101144537"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-23T08:29:42Z",
-     "completed_at": "2026-09-23T09:47:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494/job/107101144563"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-23T08:20:35Z",
-     "completed_at": "2026-09-23T09:13:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35834501494/job/107101144739"
     }
    ]
   }
