@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-27T11:33:03Z",
+ "updated": "2026-09-27T11:40:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36316342942,
+   "pr": 1201,
+   "commit": "e138458d46fd54a63854b53f612483c0452d4340",
+   "branch": "glm5-mla-moe-layer-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Fuse GLM-5 indexed decode into a MonoKernel",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942",
+   "created_at": "2026-09-27T11:37:43Z",
+   "updated_at": "2026-09-27T11:38:35Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36316221387,
+   "pr": null,
+   "commit": "aeadf0538d84bd362684ab0d8bac29e291a0def2",
+   "branch": "glm5-mla-moe-layer-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Fuse GLM-5 indexed decode into a MonoKernel",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316221387",
+   "created_at": "2026-09-27T11:35:25Z",
+   "updated_at": "2026-09-27T11:38:35Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36315923044,
    "pr": 1203,
@@ -10,11 +40,11 @@
    "branch": "docs/full-doc-audit-20260926",
    "event": "pull_request",
    "title": "[Docs] Audit and refresh repository documentation",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36315923044",
    "created_at": "2026-09-27T11:30:01Z",
-   "updated_at": "2026-09-27T11:31:36Z",
+   "updated_at": "2026-09-27T11:32:14Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -544,11 +574,11 @@
   },
   {
    "run_id": 36249442959,
-   "pr": 1201,
+   "pr": null,
    "commit": "e1ee412e2a832c9eabfc62574d2d813e3604dc53",
    "branch": "glm5-mla-moe-layer-monokernel",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 indexed reuse MLA + MoE block",
+   "title": "[Kernel][Perf] Fuse GLM-5 indexed decode into a MonoKernel",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36249442959",
@@ -648,11 +678,11 @@
   },
   {
    "run_id": 36205037906,
-   "pr": 1201,
+   "pr": null,
    "commit": "86bf048492cb5b04d23b2ec093f1c4306386a4f6",
    "branch": "glm5-mla-moe-layer-monokernel",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 indexed reuse MLA + MoE block",
+   "title": "[Kernel][Perf] Fuse GLM-5 indexed decode into a MonoKernel",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36205037906",
@@ -878,7 +908,7 @@
   },
   {
    "run_id": 36112129460,
-   "pr": 1201,
+   "pr": 1196,
    "commit": "1e28fd8a1703a475dbf992acde59559842944467",
    "branch": "glm5-mla-moe-layer-monokernel",
    "event": "pull_request",
@@ -2050,64 +2080,6 @@
      "started_at": "2026-09-23T12:43:40Z",
      "completed_at": "2026-09-23T13:22:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35856569021/job/107185156029"
-    }
-   ]
-  },
-  {
-   "run_id": 35856287754,
-   "pr": 1185,
-   "commit": "d5be700282d36af440c9cc1aea35ffe40388f11f",
-   "branch": "pr/fix-coop-element-types",
-   "event": "pull_request",
-   "title": "fix(coop): preserve declared operator element types",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35856287754",
-   "created_at": "2026-09-23T11:44:25Z",
-   "updated_at": "2026-09-23T11:47:51Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 35844549876,
-   "pr": null,
-   "commit": "5bf9b2d90b75ceb42617c032886e89e8b8f7cdf5",
-   "branch": "main",
-   "event": "push",
-   "title": "Support variadic operands in fully expanded tiled GEMM (#1128)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35844549876",
-   "created_at": "2026-09-23T09:42:50Z",
-   "updated_at": "2026-09-23T14:00:39Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-23T12:44:34Z",
-     "completed_at": "2026-09-23T14:00:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35844549876/job/107133987720"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-23T10:03:28Z",
-     "completed_at": "2026-09-23T10:33:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35844549876/job/107133987825"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-23T10:03:34Z",
-     "completed_at": "2026-09-23T11:01:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35844549876/job/107133987910"
     }
    ]
   }
