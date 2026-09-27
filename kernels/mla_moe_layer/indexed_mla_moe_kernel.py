@@ -960,6 +960,7 @@ def build_indexed_mla_moe_kernel(
             the 8 raw scores * ROUTE_SCALE) of pick ``lane`` in score order, valid in
             lanes < EXPERT_TOP_K."""
             flytrace.push("gating", s)
+            flytrace.boundary("gating/wait_scores", s)
             if const_expr(bs is None):
                 bs = load_bias()
             if const_expr(raws is None):
@@ -967,6 +968,7 @@ def build_indexed_mla_moe_kernel(
                 # The explicit gating range below supersedes this internal
                 # milestone in flytrace; retain it only in the legacy timeline.
                 stamp("ug", bid, 7, trace=False)
+            flytrace.boundary("gating/select_top8", s)
             ks = []
             for i in range_constexpr(N_EXPERTS // 64):
                 kb = (raws[i] + bs[i]).bitcast(fx.Int32)
@@ -998,10 +1000,12 @@ def build_indexed_mla_moe_kernel(
             for i in range_constexpr(1, N_EXPERTS // 64):
                 raw = (e // 64 == i).select(got[i], raw)
             raw = (lane < EXPERT_TOP_K).select(raw.bitcast(fx.Float32), fx.Float32(0.0))
+            flytrace.boundary("gating/normalize", s)
             tot = raw
             for off in (1, 2, 4):
                 tot = _xred(tot, off, lambda a, b: a + b)
             weight = raw * (_rcp(tot) * ROUTE_SCALE)
+            flytrace.end()
             flytrace.pop()
             return e, weight
 
@@ -1874,16 +1878,22 @@ def build_indexed_mla_moe_kernel(
                     put(mb("sel"), sn * MOE_SLOTS + sl, lds_ld(keys, sn * MOE_SLOTS + sl))
                     put(mb("prob"), sn * MOE_SLOTS + sl, lds_ld(dnw, sn * MOE_SLOTS + sl))
 
+            flytrace.push("shared_prefetch")
             shared_pre = ug8_units(fx.Int32(SHARED_EXPERT), None, has_sh)
+            flytrace.pop()
             dn_route(load_bias())
+            flytrace.push("expert_prepare")
             gpu.barrier()
             cur = ug8_units(_uniform(lds_ld(keys, slot)), 0)
             stage_moe_input(list(range(S)))
             gpu.barrier()
+            flytrace.pop()
             if has_sh:
+                flytrace.push("shared_expert")
                 reduce_rows(1, mma_units([fx.Float32(0.0) for _ in range(4)], shared_pre), emit_out(16))
                 gpu.barrier()
                 ug8_emit(0, True)
+                flytrace.pop()
             for sample in range_constexpr(S):
                 stamp("ug", sample * G + u, 0)
                 pre = cur

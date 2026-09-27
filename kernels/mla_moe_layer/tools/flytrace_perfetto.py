@@ -8,7 +8,22 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-_STAGE_ORDER = ("qkv_a", "cache", "q_b", "uk", "split", "uv", "o", "router", "gating", "ug", "down")
+_STAGE_ORDER = (
+    "qkv_a",
+    "cache",
+    "q_b",
+    "uk",
+    "split",
+    "uv",
+    "o",
+    "router",
+    "shared_prefetch",
+    "gating",
+    "expert_prepare",
+    "shared_expert",
+    "ug",
+    "down",
+)
 _SLICE_PREFIX = "FlyDSL · "
 
 # Stable Perfetto proto fields used below. Keeping this writer dependency-free
@@ -276,6 +291,7 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
     outer_ranges: dict[int, dict] = {}
     stage_events: dict[str, list[dict]] = defaultdict(list)
     stage_ranges: dict[str, list[dict]] = defaultdict(list)
+    stage_phase_ranges: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for event in source_events:
         if event.get("ph") == "M" and event.get("name") == "thread_name":
             thread_names[event["tid"]] = event["args"]["name"]
@@ -289,7 +305,10 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
                 outer_ranges[event["tid"]] = event
             else:
                 wave_ranges[event["tid"]].append(event)
-                stage_ranges[event.get("name", "range")].append(event)
+                stage, separator, phase = event.get("name", "range").partition("/")
+                stage_ranges[stage].append(event)
+                if separator:
+                    stage_phase_ranges[stage, phase].append(event)
 
     trace_tids = set(wave_events) | set(wave_ranges)
     if not trace_tids:
@@ -333,8 +352,26 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
         annotations: dict[str, int | str] = {"events": len(events) + len(ranges)}
         if payloads:
             annotations.update(payload_min=min(payloads), payload_max=max(payloads))
-        track = builder.track(stage, parent=stage_parent, sibling_order=stage_index)
+        phases = [phase for parent, phase in stage_phase_ranges if parent == stage]
+        track = builder.track(
+            stage,
+            parent=stage_parent,
+            child_ordering=_CHILD_ORDER_EXPLICIT if phases else None,
+            sibling_order=stage_index,
+        )
         builder.slice(track, _slice_name(stage), start_ns, end_ns, depth=1, annotations=annotations)
+        for phase_index, phase in enumerate(phases):
+            phase_ranges = stage_phase_ranges[stage, phase]
+            phase_bounds = [_range_ns(event) for event in phase_ranges]
+            phase_track = builder.track(phase, parent=track, sibling_order=phase_index)
+            builder.slice(
+                phase_track,
+                _slice_name(f"{stage}/{phase}"),
+                min(start for start, _ in phase_bounds),
+                max(end for _, end in phase_bounds),
+                depth=1,
+                annotations={"ranges": len(phase_ranges)},
+            )
 
     grid_tracks: dict[str, int] = {}
     block_tracks: dict[tuple[str, str], int] = {}
@@ -372,7 +409,7 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
         outer_start, outer_end = _range_ns(outer)
         builder.slice(
             stacked,
-            _slice_name("kernel_e2e"),
+            _slice_name("timeline envelope"),
             outer_start,
             outer_end,
             depth=1,
@@ -434,11 +471,11 @@ def export_hierarchical_pftrace(source: Path, target: Path, rank: int) -> dict[s
     for kernel, (start_ns, end_ns, track) in grid_outer.items():
         builder.slice(
             track,
-            _slice_name(f"glm5_mla_moe layer={layer_number}"),
+            _slice_name("layer envelope"),
             start_ns,
             end_ns,
             depth=1,
-            annotations={"rank": rank, "waves": len(trace_tids), "kernel": kernel},
+            annotations={"rank": rank, "layer": layer_number, "waves": len(trace_tids), "kernel": kernel},
         )
 
     builder.write(target)
