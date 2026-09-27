@@ -205,7 +205,7 @@ class CompilationContext:
         self.stream_arg = None
         self.trace_base = None
         self.trace_spec = None
-        self.trace_block = (0, 0, 0)
+        self.trace_blocks = ((0, 0, 0),)
         self.link_libs: list = []
         self._link_libs_seen: set = set()
         # Callables invoked on each GPU hipModule_t after ExecutionEngine
@@ -359,12 +359,12 @@ class KernelLauncher:
 
         specialization_key = tuple(known_block_size) if known_block_size is not None else None
         if self._ctx.trace_spec is not None:
-            from ..extension._flytrace import _selected_block
+            from ..extension._flytrace import _grid_metadata, _selected_blocks
 
             specialization_key = (
                 specialization_key,
-                tuple(as_ir_value(v, keep_static=True) for v in grid_dims),
-                _selected_block(self._ctx),
+                _grid_metadata(grid_dims),
+                _selected_blocks(self._ctx),
             )
         emitted_kernel = self._emitted_kernels.get(specialization_key)
         if emitted_kernel is None:

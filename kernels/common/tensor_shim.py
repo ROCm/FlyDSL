@@ -21,15 +21,36 @@ def _run_compiled(exe, *args):
     """First call: ``flyc.compile(exe, *args)`` compiles **and** executes the kernel.
     Subsequent calls: fast dispatch via the cached ``CompiledFunction``.
 
+    Ambient compile hints (including flytrace) use a separate compiled variant,
+    so profiling a warmed production kernel neither bypasses instrumentation nor
+    replaces the normal fast-path artifact.
+
     A failed cold compile can leave an MLIR ``Context`` open on the stack; unwind
     it before re-raising so the next attempt starts clean.
     """
-    cf = getattr(exe, "_cf", None)
+    from flydsl.compiler.kernel_function import CompilationContext
+
+    hints = CompilationContext.get_compile_hints()
+    hint_key = tuple(
+        sorted((key, type(value).__module__, type(value).__qualname__, repr(value)) for key, value in hints.items())
+    )
+    variants = None
+    if hint_key:
+        variants = getattr(exe, "_cf_hint_variants", None)
+        if variants is None:
+            variants = exe._cf_hint_variants = {}
+        cf = variants.get(hint_key)
+    else:
+        cf = getattr(exe, "_cf", None)
     if cf is not None:
         cf(*args)
         return
     try:
-        exe._cf = flyc.compile(exe, *args)
+        cf = flyc.compile(exe, *args)
+        if hint_key:
+            variants[hint_key] = cf
+        else:
+            exe._cf = cf
     except Exception:
         try:
             while ir.Context.current is not None:

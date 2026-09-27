@@ -7,6 +7,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Int8, T
+from flydsl.extension import flytrace
 from flydsl.runtime.device import get_rocm_arch
 
 from kernels.common import buffer_ops
@@ -429,6 +430,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
         arg_sweights: fx.Int64, arg_trb: fx.Int64, arg_p2p_comb_inp: fx.Int64, i32_max_m_blocks: fx.Int32,
         i32_inter: fx.Int32, i32_hidden: fx.Int32, i32_kpad: fx.Int32, i32_npad: fx.Int32):
     # fmt: on
+        flytrace.push("mega_stage2")
+        flytrace.boundary("setup")
         tx_i32 = fx.thread_idx.x
         bx_i32 = fx.block_idx.x
         lane = tx_i32 % fx.Int32(64)
@@ -464,6 +467,8 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                     is_f8, KH_TILE_A, k_bytes, BM=BM)
 
         def run_unit(unit_bx, m_block_idx):
+            flytrace.push("stage2_tile", unit_bx)
+            flytrace.boundary("gemm2", unit_bx)
             # Map each Stage2 BM sub-tile to its Stage1 SBM metadata row.
             m_row = m_block_idx * fx.Int32(BM)
             sort_block_idx = m_row // fx.Int32(SBM)
@@ -502,6 +507,7 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 i32_kpad, i32_npad, BM=BM, BN=BN, BK=BK, use_nt=use_nt, INTER_MAX=INTER_MAX, aStages=aStages,
                 a_dtype=a_dtype, has_pad=has_pad, SBM=SBM, g2_bhoist=g2_bhoist, g2_ascale_pf=g2_ascale_pf,
                 g2_b2stage=g2_b2stage, g2_deep_a_pipeline=g2_deep_a_pipeline, expert_offset=_expert_offset)
+            flytrace.boundary("combine", unit_bx)
             p2p_scatter_epilog(lds_base_i32, accm_vecs, n_block_idx, wave, lane, N_OUT=N_OUT,
                 BM=BM, BN=BN, npes=npes, topk=topk,
                 log2_max_tok=log2_max_tok, mask_max_tok=mask_max_tok, recv_cap=_recv_cap,
@@ -509,9 +515,12 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 lds_weight_off=lds_weight_off, lds_peer_off=lds_peer_off, g2_bf16_lds=g2_bf16_lds,
                 p2p_quant_type=p2p_quant_type)
             # fmt: on
+            flytrace.end()
+            flytrace.pop()
 
         cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
         total_m_blocks = (cumsum0 + fx.Int32(BM - 1)) // fx.Int32(BM)
+        flytrace.boundary("work_loop")
 
         if const_expr(not persist and g2_spart <= 0):
             bound = total_m_blocks * fx.Int32(num_n_blocks)
@@ -587,6 +596,9 @@ def compile_mega_moe_stage2(*, model_dim: int, inter_dim: int, experts: int, top
                 rocdl.sched_barrier(0)
                 if fx.Int32(m_block) < total_m_blocks:
                     run_unit(unit_bx, m_block)
+
+        flytrace.end()
+        flytrace.pop()
 
     # fmt: off
     @flyc.jit

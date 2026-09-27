@@ -31,6 +31,8 @@ subtrees:
     entries:
       - file: extension/rand
         title: Random number generation
+      - file: extension/flytrace
+        title: Flytrace wave profiler
   - caption: Guides
     entries:
       - file: architecture_guide

@@ -39,6 +39,7 @@ to GPU/ROCDL.
    .. grid-item-card:: Extension
 
       * :doc:`Random number generation <extension/rand>`
+      * :doc:`Flytrace wave profiler <extension/flytrace>`
 
    .. grid-item-card:: Guides
 

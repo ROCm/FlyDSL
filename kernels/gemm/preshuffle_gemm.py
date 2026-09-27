@@ -11,6 +11,7 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, Float32, Int8, Int32
 from flydsl.expr.typing import Vector as Vec
+from flydsl.extension import flytrace
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
 
@@ -229,6 +230,8 @@ def compile_preshuffle_gemm(
         tiled_mma_arg: fx.TiledMma,
         tiled_copy_g2s: fx.TiledCopy,
     ):
+        flytrace.push("gemm")
+        flytrace.boundary("prologue")
         tid = fx.thread_idx.x
         bid_x, bid_y, _ = fx.block_idx
 
@@ -550,10 +553,12 @@ def compile_preshuffle_gemm(
         rocdl.sched_barrier(0)
 
         # ── Main tile loop ────────────────────────────────────────────
+        flytrace.boundary("mainloop")
         if const_expr(lds_stage == 1 and num_tiles > 1):
             frag_Bc = frag_B_stages[0]
             frag_Bc_retile = frag_B_retile_stages[0]
             for iv, state in range(0, num_tiles - 1, 1, init=[frag_C.load()]):
+                flytrace.boundary("k_tile", iv)
                 frag_C.store(state[0])
                 k_next = fx.Int32(iv + 1)
                 mma_kloop(0, frag_Bc)
@@ -579,7 +584,9 @@ def compile_preshuffle_gemm(
             loop_end = (num_tiles - tail) // 2
 
             def two_tiles(k_base):
+                flytrace.boundary("k_tile", k_base)
                 pipeline_2stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
+                flytrace.boundary("k_tile", k_base + fx.Int32(1))
                 pipeline_2stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
 
             if const_expr(loop_end > 0 and use_async_copy):
@@ -593,6 +600,7 @@ def compile_preshuffle_gemm(
                 frag_C.store(results)
             k_tail0 = num_tiles - tail  # first tile handled by the peeled tail
             for j in range_constexpr(tail - 1):
+                flytrace.boundary("k_tile", k_tail0 + j)
                 pipeline_2stage(read_stage=(k_tail0 + j) % 2, next_k_val=fx.Int32(k_tail0 + j + 1))
 
         # ── Epilogue-operand preloads (scale_a / scale_b / bias) ─────────
@@ -655,12 +663,14 @@ def compile_preshuffle_gemm(
             s_a_vals, s_b_vals, bias_vals = load_epi_operands()
 
         # Final MMA stage — overlaps the epilogue-operand loads when issued above.
+        flytrace.boundary("k_tile", num_tiles - 1)
         if const_expr(lds_stage == 1):
             mma_kloop(0, frag_B_stages[0])
         else:
             pipeline_2stage(read_stage=(num_tiles - 1) % 2, read_next=False)
 
         # ── Epilogue ─────────────────────────────────────────────
+        flytrace.boundary("epilogue")
         if const_expr(not is_8bit and not _has_epilogue):
             frag_C_out.store(Vec(frag_C.load()).to(out_elem_cls))
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
@@ -711,6 +721,8 @@ def compile_preshuffle_gemm(
             out_vec = fx.Vector.from_elements(out_elems, out_elem_cls)
             frag_C_out.store(out_vec)
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
+        flytrace.end()
+        flytrace.pop()
 
     # ── Host launcher ─────────────────────────────────────────────
     @flyc.jit

@@ -233,6 +233,33 @@ def _profile_body(body, op_tag, args, rank, world, dev, out_dir, meta):
     return {"e2e_us_avg": s.item() / world}
 
 
+def _flytrace_body(body, op_tag, args, rank, dev, out_dir, meta):
+    """Capture one eager MegaMoE launch with wave-level phase annotations."""
+    from flydsl.extension import flytrace
+
+    ms.shmem_barrier_all()
+    body()  # Warm the normal, uninstrumented compiled-function cache.
+    torch.cuda.synchronize(dev)
+    ms.shmem_barrier_all()
+    with flytrace.capture(
+        block=None,
+        mode="dynamic",
+        max_blocks=int(args.flytrace_max_blocks),
+        max_events=int(args.flytrace_max_events),
+    ) as cap:
+        body()
+    os.makedirs(out_dir, exist_ok=True)
+    trace_path = os.path.join(out_dir, f"{op_tag}_rank{rank}_flytrace.json")
+    stats = cap.export(trace_path)
+    summary_path = os.path.join(out_dir, f"{op_tag}_rank{rank}_flytrace_summary.json")
+    with open(summary_path, "w") as f:
+        json.dump({**meta, **stats, "trace": trace_path}, f, indent=2, sort_keys=True)
+        f.write("\n")
+    _info(rank, f"[flytrace] {trace_path}: {stats}")
+    ms.shmem_barrier_all()
+    return stats
+
+
 def _chunked_fp4_quant(x):
     """Row-chunked MX-FP4 quant (identical result; bounds the f32 temp)."""
     n = int(x.shape[1])
@@ -827,6 +854,17 @@ def _run_full_e2e(
     _rma_max = _all_max(dev, _rma)
     _all_ok = _all_max(dev, 0.0 if ok else 1.0) < 0.5  # any failing rank -> all_ok False
 
+    if getattr(args, "flytrace", False):
+        _flytrace_body(
+            _mega_body,
+            f"mega_{args.network}_{args.quant}_bs{run_tokens}",
+            args,
+            rank,
+            dev,
+            args.profile_dir,
+            dict(tokens=run_tokens, network=args.network, quant=args.quant),
+        )
+
     # Use either profiler traces or lightweight event timing.
     if getattr(args, "profile", False):
         _pmeta = dict(tokens=run_tokens, network=args.network, quant=args.quant)
@@ -1216,6 +1254,17 @@ def _run_mega_only(
         torch.cuda.empty_cache()
     relL2 = _acc_metric  # kept name for the return dict / downstream reporting
 
+    if getattr(args, "flytrace", False):
+        _flytrace_body(
+            _body,
+            f"mega_only_{args.network}_{quant}_bs{run_tokens}",
+            args,
+            rank,
+            dev,
+            args.profile_dir,
+            dict(tokens=run_tokens, network=args.network, quant=quant),
+        )
+
     # ---- perf: CUDAGraph device time (mean across ranks) ----
     mega_ms = -1.0
     mega_max_ms = -1.0
@@ -1503,7 +1552,24 @@ def main():
         "--profile-dir",
         type=str,
         default="/tmp/mega_prof",
-        help="output dir for --profile chrome traces (default /tmp/mega_prof).",
+        help="output dir for --profile and --flytrace traces (default /tmp/mega_prof).",
+    )
+    p.add_argument(
+        "--flytrace",
+        action="store_true",
+        help="capture one eager MegaMoE launch as a wave-level Perfetto trace; works alongside --profile",
+    )
+    p.add_argument(
+        "--flytrace-max-blocks",
+        type=int,
+        default=128,
+        help="maximum CTAs captured per annotated kernel when --flytrace is enabled (default 128)",
+    )
+    p.add_argument(
+        "--flytrace-max-events",
+        type=int,
+        default=8192,
+        help="dynamic records reserved per wave when --flytrace is enabled (default 8192)",
     )
     p.add_argument(
         "--strict",
@@ -1568,6 +1634,8 @@ def main():
     args = p.parse_args()
     if args.stage1_only and not args.mega_only:
         p.error("--stage1-only requires --mega-only")
+    if args.flytrace_max_blocks <= 0 or args.flytrace_max_events <= 0:
+        p.error("--flytrace-max-blocks and --flytrace-max-events must be positive")
 
     rank = int(os.environ.get("RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
