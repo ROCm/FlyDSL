@@ -46,6 +46,11 @@ extensions = [
 ]
 external_toc_path = "./sphinx/_toc.yml"
 external_projects_current_project = "flydsl"
+# FlyDSL does not use cross-project references. Avoid fetching the remote
+# project map and inventories during builds, which can hit GitHub's
+# unauthenticated API rate limit on Read the Docs.
+external_projects_remote_repository = ""
+external_projects = []
 # Generate llms.txt
 rocm_docs_generate_llms = True
 
