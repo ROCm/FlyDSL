@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-28T15:58:41Z",
+ "updated": "2026-09-28T18:38:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36452604265,
+   "pr": 1194,
+   "commit": "f6589a52751284a3a2e8b845697d8fb08b2d2068",
+   "branch": "fix/1176-layout-field-overflow-diagnostic",
+   "event": "pull_request",
+   "title": "[JIT] Actionable diagnostic for dynamic layout field overflow",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36452604265",
+   "created_at": "2026-09-28T16:39:22Z",
+   "updated_at": "2026-09-28T16:39:22Z",
+   "actor": "mustafayildirim",
+   "jobs": []
+  },
   {
    "run_id": 36435015445,
    "pr": 1209,
@@ -2223,49 +2238,6 @@
      "started_at": "2026-09-27T01:42:36Z",
      "completed_at": "2026-09-27T02:11:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36285338037/job/108605293255"
-    }
-   ]
-  },
-  {
-   "run_id": 36284912910,
-   "pr": null,
-   "commit": "12f8f93a6a6e4a0a9e83cfcc98afd45d932bbcf1",
-   "branch": "codex/kimi-k3-mxfp4-fused",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284912910",
-   "created_at": "2026-09-27T01:14:10Z",
-   "updated_at": "2026-09-27T02:38:19Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-27T02:11:48Z",
-     "completed_at": "2026-09-27T02:38:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284912910/job/108525731414"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-27T01:41:56Z",
-     "completed_at": "2026-09-27T02:27:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284912910/job/108525731419"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-27T01:30:12Z",
-     "completed_at": "2026-09-27T01:32:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284912910/job/108525731448"
     }
    ]
   }
