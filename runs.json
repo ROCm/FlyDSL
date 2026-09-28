@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-28T03:06:13Z",
+ "updated": "2026-09-28T03:42:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36374562613,
+   "pr": null,
+   "commit": "eff199afffc15d697e04fa16dbf92c1ad16f0eca",
+   "branch": "main",
+   "event": "push",
+   "title": "[AOT] Export C objects and support CPU-only builds (#1202)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36374562613",
+   "created_at": "2026-09-28T03:39:20Z",
+   "updated_at": "2026-09-28T03:40:51Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36371915077,
    "pr": 1204,
@@ -10,13 +25,41 @@
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371915077",
    "created_at": "2026-09-28T02:59:24Z",
-   "updated_at": "2026-09-28T03:04:34Z",
+   "updated_at": "2026-09-28T03:17:30Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-28T03:19:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371915077/job/108773458532"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T03:17:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371915077/job/108773458554"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T03:17:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371915077/job/108773458564"
+    }
+   ]
   },
   {
    "run_id": 36371162955,
@@ -25,37 +68,37 @@
    "branch": "docs/full-doc-audit-20260926",
    "event": "pull_request",
    "title": "[Docs] Audit and refresh repository documentation",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371162955",
    "created_at": "2026-09-28T02:47:22Z",
-   "updated_at": "2026-09-28T03:03:50Z",
+   "updated_at": "2026-09-28T03:22:14Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T03:03:50Z",
+     "started_at": "2026-09-28T03:06:00Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371162955/job/108770715914"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T03:03:50Z",
+     "started_at": "2026-09-28T03:06:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371162955/job/108770715950"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T03:03:50Z",
+     "started_at": "2026-09-28T03:22:13Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371162955/job/108770715967"
     }
@@ -96,10 +139,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T02:48:51Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T03:21:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36369967985/job/108767878581"
     }
    ]
@@ -330,7 +373,7 @@
   },
   {
    "run_id": 36318208520,
-   "pr": 1202,
+   "pr": null,
    "commit": "2e7ac03709fd9aa7bb7460f1a27a9c4c13b5c576",
    "branch": "dev/export_c",
    "event": "pull_request",
@@ -345,7 +388,7 @@
   },
   {
    "run_id": 36316946141,
-   "pr": 1202,
+   "pr": null,
    "commit": "f06113ce18759c5fde2b5d17d911680ba22b7e39",
    "branch": "dev/export_c",
    "event": "pull_request",
@@ -614,7 +657,7 @@
   },
   {
    "run_id": 36298592651,
-   "pr": 1202,
+   "pr": null,
    "commit": "96e40f9a8ee857dd7a2e245d63d1020d312c642f",
    "branch": "dev/export_c",
    "event": "pull_request",
@@ -703,7 +746,7 @@
   },
   {
    "run_id": 36293586491,
-   "pr": 1202,
+   "pr": null,
    "commit": "8180940cacea0495ca251ba21477e8ed74f84348",
    "branch": "dev/export_c",
    "event": "pull_request",
@@ -746,7 +789,7 @@
   },
   {
    "run_id": 36293431755,
-   "pr": 1202,
+   "pr": null,
    "commit": "26b7b988475f68b89374a77b83c2418d72715ddf",
    "branch": "dev/export_c",
    "event": "pull_request",
@@ -761,7 +804,7 @@
   },
   {
    "run_id": 36291109910,
-   "pr": 1202,
+   "pr": null,
    "commit": "e6849b38612d581764c33f86f89d11dff30fc0f3",
    "branch": "dev/export_c",
    "event": "pull_request",
@@ -963,7 +1006,7 @@
   },
   {
    "run_id": 36284172781,
-   "pr": 1202,
+   "pr": null,
    "commit": "f88d2b67a6b0beca18d9576a7c05b0cdae972dbd",
    "branch": "dev/export_c",
    "event": "pull_request",
@@ -1049,7 +1092,7 @@
   },
   {
    "run_id": 36252417137,
-   "pr": 1202,
+   "pr": null,
    "commit": "cb3b9b1d126496fcb48f6a7c92aff49ef8b47b3b",
    "branch": "dev/export_c",
    "event": "pull_request",
@@ -1138,7 +1181,7 @@
   },
   {
    "run_id": 36248558456,
-   "pr": 1202,
+   "pr": null,
    "commit": "ce9baf759aa986325b736ac744b66251e5f0dcd7",
    "branch": "dev/export_c",
    "event": "pull_request",
@@ -1181,7 +1224,7 @@
   },
   {
    "run_id": 36247721776,
-   "pr": 1202,
+   "pr": null,
    "commit": "8c74e766e0dea5a255c709464bf9848af7e17492",
    "branch": "dev/export_c",
    "event": "pull_request",
@@ -2065,21 +2108,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/35952761075",
    "created_at": "2026-09-24T03:45:14Z",
    "updated_at": "2026-09-24T03:58:59Z",
-   "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 35952171914,
-   "pr": 1188,
-   "commit": "0de4eaa511bf7183c072ad34687eec0e836cc449",
-   "branch": "feat/hack-ut-asm-multi-kernel",
-   "event": "pull_request",
-   "title": "[Compiler][Debug] Add a compile path for hand-edited assembly",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35952171914",
-   "created_at": "2026-09-24T03:36:45Z",
-   "updated_at": "2026-09-24T03:46:00Z",
    "actor": "Phil-amd",
    "jobs": []
   }
