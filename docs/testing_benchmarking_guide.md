@@ -383,7 +383,7 @@ Produces numbered `.mlir` files per pipeline stage plus `final_isa.s`.
 ### Dedicated IR dump script
 
 ```bash
-bash scripts/dumpir.sh
+bash scripts/dumpir.sh python my_kernel.py
 ```
 
 ---
