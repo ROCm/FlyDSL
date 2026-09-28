@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-28T08:07:26Z",
+ "updated": "2026-09-28T08:27:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36397000018,
+   "pr": null,
+   "commit": "d993f0cfbac01ecfcb1ee1faf0f274f1ee48f4c7",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Reduce cooperative test matrix (#1207)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397000018",
+   "created_at": "2026-09-28T08:22:44Z",
+   "updated_at": "2026-09-28T08:25:16Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36394537727,
    "pr": 1204,
@@ -10,13 +25,41 @@
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394537727",
    "created_at": "2026-09-28T07:57:39Z",
-   "updated_at": "2026-09-28T07:59:38Z",
+   "updated_at": "2026-09-28T08:13:18Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T08:13:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394537727/job/108842624986"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-28T08:16:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394537727/job/108842624989"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T08:13:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394537727/job/108842625048"
+    }
+   ]
   },
   {
    "run_id": 36394315958,
@@ -25,13 +68,41 @@
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
    "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394315958",
    "created_at": "2026-09-28T07:55:19Z",
-   "updated_at": "2026-09-28T07:57:22Z",
+   "updated_at": "2026-09-28T08:15:09Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-28T08:21:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394315958/job/108843222673"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T08:15:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394315958/job/108843222679"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T08:15:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394315958/job/108843222816"
+    }
+   ]
   },
   {
    "run_id": 36393395910,
@@ -65,9 +136,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T07:38:13Z",
+     "started_at": "2026-09-28T08:09:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36391294393/job/108831970196"
     },
@@ -83,10 +154,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-28T07:38:31Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T08:20:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36391294393/job/108831970233"
     }
    ]
@@ -98,29 +169,29 @@
    "branch": "pr/fix-coop-element-types",
    "event": "pull_request",
    "title": "fix(coop): preserve declared operator element types",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36389620239",
    "created_at": "2026-09-28T07:03:51Z",
-   "updated_at": "2026-09-28T07:17:08Z",
+   "updated_at": "2026-09-28T08:06:49Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T07:17:08Z",
+     "started_at": "2026-09-28T08:06:48Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36389620239/job/108826046042"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T07:37:32Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T08:09:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36389620239/job/108826046083"
     },
     {
@@ -160,11 +231,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T07:11:21Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36388757397/job/108824278748"
+     "completed_at": "2026-09-28T08:26:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36388757397/job/108824278748",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -179,7 +253,7 @@
   },
   {
    "run_id": 36386744572,
-   "pr": 1207,
+   "pr": null,
    "commit": "2d5dd6a399baba85673fed52890f057dd3bca55d",
    "branch": "codex/reduce-coop-test-matrix",
    "event": "pull_request",
@@ -273,11 +347,11 @@
    "branch": "docs/full-doc-audit-20260926",
    "event": "pull_request",
    "title": "[Docs] Audit and refresh repository documentation",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062",
    "created_at": "2026-09-28T06:00:51Z",
-   "updated_at": "2026-09-28T06:42:53Z",
+   "updated_at": "2026-09-28T08:26:05Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -301,10 +375,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T06:42:53Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T08:26:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108809981917"
     }
    ]
@@ -1999,11 +2073,11 @@
    "branch": "fix/1054-single-rocdl-target",
    "event": "pull_request",
    "title": "[JIT] Attach exactly one #rocdl.target per gpu.module",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36081073180",
    "created_at": "2026-09-25T01:13:29Z",
-   "updated_at": "2026-09-25T01:13:29Z",
+   "updated_at": "2026-09-28T08:24:43Z",
    "actor": "mustafayildirim",
    "jobs": []
   },
@@ -2034,21 +2108,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36077361118",
    "created_at": "2026-09-25T00:24:07Z",
    "updated_at": "2026-09-25T00:24:07Z",
-   "actor": "mustafayildirim",
-   "jobs": []
-  },
-  {
-   "run_id": 36076554979,
-   "pr": 1193,
-   "commit": "015b23f44674279ff450a6108846b4aa174d17c1",
-   "branch": "fix/1165-singleton-contig-segment",
-   "event": "pull_request",
-   "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36076554979",
-   "created_at": "2026-09-25T00:13:42Z",
-   "updated_at": "2026-09-28T06:55:37Z",
    "actor": "mustafayildirim",
    "jobs": []
   }
