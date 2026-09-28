@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-28T05:07:34Z",
+ "updated": "2026-09-28T05:09:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36380551624,
+   "pr": null,
+   "commit": "c4169a7878b515d4de074b3535a19bab311eb075",
+   "branch": "main",
+   "event": "push",
+   "title": "[Fix][gfx1250] Time the TDM multicast-add benchmark on the device (#1\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36380551624",
+   "created_at": "2026-09-28T05:07:48Z",
+   "updated_at": "2026-09-28T05:07:50Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36380506765,
+   "pr": null,
+   "commit": "65532b71bb20ac767cfdbb185c7e7d68764c0fb4",
+   "branch": "main",
+   "event": "push",
+   "title": "[Fix][gfx1250] Reject a K that tile_k does not divide in the A8W4 MoE\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36380506765",
+   "created_at": "2026-09-28T05:07:10Z",
+   "updated_at": "2026-09-28T05:07:50Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36380299383,
    "pr": null,
@@ -10,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Chore][gfx1250] Drop leftovers of the GEMM modules removed in #885 (\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36380299383",
    "created_at": "2026-09-28T05:04:10Z",
-   "updated_at": "2026-09-28T05:05:58Z",
+   "updated_at": "2026-09-28T05:07:43Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2050,95 +2080,6 @@
      "machine": "gbt350-odcdh2-b13-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 35964375827,
-   "pr": 987,
-   "commit": "cdd3985a149c8531d10e7d395b9e960b09a0b71f",
-   "branch": "jli/fix-lld-issue",
-   "event": "pull_request",
-   "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35964375827",
-   "created_at": "2026-09-24T06:25:00Z",
-   "updated_at": "2026-09-24T08:57:34Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T07:42:14Z",
-     "completed_at": "2026-09-24T08:57:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35964375827/job/107524065254"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-24T06:45:35Z",
-     "completed_at": "2026-09-24T06:49:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35964375827/job/107524065337"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T06:51:47Z",
-     "completed_at": "2026-09-24T07:37:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35964375827/job/107524065370"
-    }
-   ]
-  },
-  {
-   "run_id": 35953635869,
-   "pr": 1188,
-   "commit": "fb8348e4c4de1797f46e77cb351c697263019cd6",
-   "branch": "feat/hack-ut-asm-multi-kernel",
-   "event": "pull_request",
-   "title": "[Compiler][Debug] Add a compile path for hand-edited assembly",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869",
-   "created_at": "2026-09-24T03:58:04Z",
-   "updated_at": "2026-09-24T07:30:43Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-24T06:21:15Z",
-     "completed_at": "2026-09-24T06:51:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869/job/107495566230"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T05:15:18Z",
-     "completed_at": "2026-09-24T06:43:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869/job/107495566287",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-24T06:43:41Z",
-     "completed_at": "2026-09-24T07:30:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869/job/107495566329"
     }
    ]
   }
