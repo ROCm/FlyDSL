@@ -45,9 +45,26 @@ class WarpStoreAlgorithm(enum.Enum):
 class WarpStore(WarpPrimitive):
     """Store a logical-warp tile with a fixed memory-access policy.
 
-    Specialize with ``[dtype, width, items_per_thread, algorithm]``. The final
-    policy is optional and defaults to ``WarpStoreAlgorithm.DIRECT``.
-    ``None`` selects the target's physical warp width. All participating lanes
+    Specialize with ``WarpStore[dtype, width, items_per_thread, algorithm]``. The parameters
+    below are compile-time positional arguments to ``WarpStore[...]``, in bracket order.
+
+    Args:
+        dtype: Required complete input element type, such as a Numeric scalar, concrete
+            Vector, or Struct. Vector components and Struct fields belong to one element;
+            outer per-thread item sequences are not part of dtype.
+        width: Required positional slot: a positive power-of-two Python int no larger than
+            the target physical warp width, or None to use that physical width. This is the
+            number of participating lanes in each logical warp, not the block thread count.
+            Pass None explicitly to use the physical width while specifying
+            items_per_thread.
+        items_per_thread: Required positive Python int giving the number of complete items
+            owned by each lane; the logical-warp tile has width * items_per_thread items.
+            Element components/fields do not increase this count.
+        algorithm: Optional member of WarpStoreAlgorithm selecting the implementation
+            policy. Defaults to ``WarpStoreAlgorithm.DIRECT`` when omitted; member calls use
+            this fixed policy.
+
+    All participating lanes
     use the same specialization and per-call options. Algorithm selection is
     part of the operator type; member functions do not accept an algorithm.
     STRIPED retains striped ownership; other policies use blocked ownership.

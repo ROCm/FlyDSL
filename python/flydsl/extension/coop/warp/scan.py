@@ -532,8 +532,18 @@ def warp_scan_with_aggregate(
 class WarpScan(WarpPrimitive):
     """Compute logical-warp prefixes and broadcast lane values.
 
-    Specialize with ``[dtype, width=None]``. ``None`` selects the target's
-    physical warp width. Every lane in each logical warp must participate.
+    Specialize with ``WarpScan[dtype, width]``. The parameters below are compile-time
+    positional arguments to ``WarpScan[...]``, in bracket order.
+
+    Args:
+        dtype: Required complete input element type, such as a Numeric scalar, concrete
+            Vector, or Struct. Vector components and Struct fields belong to one element;
+            outer per-thread item sequences are not part of dtype.
+        width: Optional; defaults to None. A positive power-of-two Python int no larger than
+            the target physical warp width, or None to use that physical width. This is the
+            number of participating lanes in each logical warp, not the block thread count.
+
+    Every lane in each logical warp must participate.
     SharedStorage is Empty: explicit storage has a zero-byte layout.
     There is no algorithm parameter.
     The corresponding ``warp_*`` functions infer dtype and tile extent.
