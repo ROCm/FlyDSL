@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-28T10:34:42Z",
+ "updated": "2026-09-28T10:47:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36411612778,
+   "pr": 1209,
+   "commit": "2f7b7a3198a3e55b805985484c692d3af294704e",
+   "branch": "codex/aot-direct-hip",
+   "event": "pull_request",
+   "title": "[AOT] Embed backend runtime into exported objects",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36411612778",
+   "created_at": "2026-09-28T10:45:43Z",
+   "updated_at": "2026-09-28T10:45:44Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36411503720,
+   "pr": 1142,
+   "commit": "7d76692f97b50dd6ff0b0f57e88bd41f1713f073",
+   "branch": "xinyazhang/theRock-support",
+   "event": "pull_request",
+   "title": "[Build] Find ROCm through rocm-sdk before falling back to /opt/rocm*",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36411503720",
+   "created_at": "2026-09-28T10:44:38Z",
+   "updated_at": "2026-09-28T10:45:07Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36407567617,
    "pr": 1109,
@@ -68,19 +98,19 @@
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
    "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36403970616",
    "created_at": "2026-09-28T09:30:43Z",
-   "updated_at": "2026-09-28T09:47:24Z",
+   "updated_at": "2026-09-28T10:32:58Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T09:47:24Z",
+     "started_at": "2026-09-28T10:32:57Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36403970616/job/108873833398"
     },
@@ -188,10 +218,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-28T10:25:52Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T10:36:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657/job/108876463364"
     },
     {
@@ -242,20 +272,20 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] Reduce cooperative test matrix (#1207)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397000018",
    "created_at": "2026-09-28T08:22:44Z",
-   "updated_at": "2026-09-28T09:52:33Z",
+   "updated_at": "2026-09-28T10:45:52Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T09:52:32Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T10:45:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397000018/job/108851245897"
     },
     {
@@ -2134,98 +2164,6 @@
      "machine": "cv350-odcdh2-a06-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 36199381043,
-   "pr": 1198,
-   "commit": "6a8b1d97b247604f21a4ee9ff5db4f390b1ba773",
-   "branch": "fix/gfx1250-moe-silu-clamp",
-   "event": "pull_request",
-   "title": "[Fix][gfx1250] Stop clamping SiLU with swiglu_limit in the A8W4 MoE epilogue",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199381043",
-   "created_at": "2026-09-25T23:02:19Z",
-   "updated_at": "2026-09-26T02:11:34Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-26T00:37:39Z",
-     "completed_at": "2026-09-26T01:05:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199381043/job/108286765625"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-25T23:25:59Z",
-     "completed_at": "2026-09-26T00:53:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199381043/job/108286765680",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-26T00:45:49Z",
-     "completed_at": "2026-09-26T02:11:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199381043/job/108286765682"
-    }
-   ]
-  },
-  {
-   "run_id": 36199364400,
-   "pr": 1197,
-   "commit": "60df6a1204e6dd5b127dd1351c6f8abb904b9cc0",
-   "branch": "chore/gfx1250-drop-pre-885-leftovers",
-   "event": "pull_request",
-   "title": "[Chore][gfx1250] Drop leftovers of the GEMM modules removed in #885",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199364400",
-   "created_at": "2026-09-25T23:02:05Z",
-   "updated_at": "2026-09-26T00:44:03Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-25T23:15:03Z",
-     "completed_at": "2026-09-26T00:41:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199364400/job/108285032323",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-25T23:17:00Z",
-     "completed_at": "2026-09-26T00:44:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199364400/job/108285032349"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-25T23:14:36Z",
-     "completed_at": "2026-09-25T23:42:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36199364400/job/108285032394"
     }
    ]
   }
