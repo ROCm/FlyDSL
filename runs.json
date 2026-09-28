@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-28T12:37:50Z",
+ "updated": "2026-09-28T12:46:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -38,9 +38,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T12:04:40Z",
+     "started_at": "2026-09-28T12:36:21Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36417401095/job/108918570396"
     }
@@ -53,19 +53,19 @@
    "branch": "cjl/norm_perf",
    "event": "pull_request",
    "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413622989",
    "created_at": "2026-09-28T11:06:11Z",
-   "updated_at": "2026-09-28T11:24:45Z",
+   "updated_at": "2026-09-28T12:37:48Z",
    "actor": "cschenjunlin",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T11:24:44Z",
+     "started_at": "2026-09-28T12:36:31Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413622989/job/108905515128"
     },
@@ -81,9 +81,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T11:24:45Z",
+     "started_at": "2026-09-28T12:37:47Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413622989/job/108905516320"
     }
@@ -115,19 +115,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T11:50:20Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T12:38:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413538494/job/108904799943"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T12:13:56Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T12:37:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413538494/job/108904800107"
     }
    ]
