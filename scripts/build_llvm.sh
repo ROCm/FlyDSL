@@ -36,6 +36,8 @@ case "${LLVM_SOURCE}" in
     _custom_json=$(python3 -c "import json; c=json.load(open('${LLVM_BUILD_INFO}'))['custom']; print(c['repository']); print(c['branch'])")
     LLVM_REMOTE="${LLVM_REMOTE:-$(echo "$_custom_json" | sed -n '1p')}"
     LLVM_REF="${LLVM_REF:-$(echo "$_custom_json" | sed -n '2p')}"
+    # Derive a short suffix from the branch: last segment, _ → -
+    _branch_suffix=$(echo "${LLVM_REF}" | sed 's|.*/||; s/_/-/g')
     ;;
   *)
     echo "Unknown --source value: ${LLVM_SOURCE}. Use 'upstream' or 'custom'." >&2
@@ -43,9 +45,15 @@ case "${LLVM_SOURCE}" in
     ;;
 esac
 
-LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-flydsl"
-LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
-LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
+if [[ "${LLVM_SOURCE}" == "upstream" ]]; then
+  LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-$LLVM_SRC_DIR/build-flydsl}"
+  LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
+  LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
+else
+  LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-$LLVM_SRC_DIR/build-flydsl-${_branch_suffix}}"
+  LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install-${_branch_suffix}}"
+  LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install-${_branch_suffix}.tgz}"
+fi
 
 case "${LLVM_BUILD_PROFILE}" in
   full)

@@ -6,11 +6,32 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
+LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
+
+# ---------------------------------------------------------------------------
+# Source selection: --source upstream (default) | --source custom
+# ---------------------------------------------------------------------------
+LLVM_SOURCE="${LLVM_SOURCE:-upstream}"
+for arg in "$@"; do
+  if [[ "$arg" == "--source" ]]; then
+    _next_is_source=1
+  elif [[ "${_next_is_source:-}" == "1" ]]; then
+    LLVM_SOURCE="$arg"
+    unset _next_is_source
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # Build directory (default: build-fly/, overridable via FLY_BUILD_DIR)
+# For custom source, default includes the branch suffix: build-fly-<suffix>
 # ---------------------------------------------------------------------------
-BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly}"
+if [[ "${LLVM_SOURCE}" == "custom" && -z "${FLY_BUILD_DIR:-}" ]]; then
+  _branch=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['custom']['branch'])")
+  _branch_suffix=$(echo "${_branch}" | sed 's|.*/||; s/_/-/g')
+  BUILD_DIR="${REPO_ROOT}/build-fly-${_branch_suffix}"
+else
+  BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly}"
+fi
 if [[ "${BUILD_DIR}" != /* ]]; then
   BUILD_DIR="${REPO_ROOT}/${BUILD_DIR}"
 fi
@@ -29,11 +50,19 @@ done
 # Discover MLIR_PATH
 # ---------------------------------------------------------------------------
 if [ -z "${MLIR_PATH:-}" ]; then
-  candidates=(
-    "${BASE_DIR}/llvm-project-flydsl/build-flydsl/mlir_install"
-    "${BASE_DIR}/llvm-project/build-flydsl/mlir_install"
-    "${BASE_DIR}/llvm-project/mlir_install"
-  )
+  if [[ "${LLVM_SOURCE}" == "custom" ]]; then
+    # Custom: look for mlir_install-<suffix> in llvm-project-custom
+    candidates=(
+      "${BASE_DIR}/llvm-project-custom/mlir_install-${_branch_suffix}"
+      "${BASE_DIR}/llvm-project-custom/mlir_install"
+    )
+  else
+    candidates=(
+      "${BASE_DIR}/llvm-project-flydsl/build-flydsl/mlir_install"
+      "${BASE_DIR}/llvm-project/build-flydsl/mlir_install"
+      "${BASE_DIR}/llvm-project/mlir_install"
+    )
+  fi
   for p in "${candidates[@]}"; do
     if [ -d "${p}/lib/cmake/mlir" ]; then
       echo "Auto-detected MLIR_PATH: ${p}"
@@ -69,9 +98,10 @@ fi
 
 echo "=============================================="
 echo "FlyDSL Build"
-echo "  REPO_ROOT:  ${REPO_ROOT}"
-echo "  BUILD_DIR:  ${BUILD_DIR}"
-echo "  MLIR_PATH:  ${MLIR_PATH}"
+echo "  LLVM_SOURCE: ${LLVM_SOURCE}"
+echo "  REPO_ROOT:   ${REPO_ROOT}"
+echo "  BUILD_DIR:   ${BUILD_DIR}"
+echo "  MLIR_PATH:   ${MLIR_PATH}"
 echo "  PARALLEL:   -j${PARALLEL_JOBS}"
 echo "  GENERATOR:  ${GENERATOR}"
 echo "  HIP_PLATFORM: ${HIP_PLATFORM:-amd (default)}"

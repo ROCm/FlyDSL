@@ -357,30 +357,49 @@ jobs:
           docker exec flydsl_mlir_cache test -d "${sdk_root}"
           printf 'ROCM_PATH=%s\n' "${sdk_root}" >>"${GITHUB_ENV}"
 
+      - name: Compute LLVM container paths
+        id: llvm-paths
+        run: |
+          if [ "${LLVM_SOURCE}" = "custom" ]; then
+            branch=$(python3 -c "import json; print(json.load(open('flydsl-test/thirdparty/llvm-build-info.json'))['custom']['branch'])")
+            suffix=$(echo "${branch}" | sed 's|.*/||; s/_/-/g')
+            echo "llvm_dir=/llvm-project-custom"               >>"${GITHUB_OUTPUT}"
+            echo "install_dir=/llvm-project-custom/mlir_install-${suffix}" >>"${GITHUB_OUTPUT}"
+            echo "tgz_path=/llvm-project-custom/mlir_install-${suffix}.tgz" >>"${GITHUB_OUTPUT}"
+          else
+            echo "llvm_dir=/llvm-project"                      >>"${GITHUB_OUTPUT}"
+            echo "install_dir=/llvm-project/mlir_install"      >>"${GITHUB_OUTPUT}"
+            echo "tgz_path=/llvm-project/mlir_install.tgz"     >>"${GITHUB_OUTPUT}"
+          fi
+
       - name: Use cached MLIR install
         if: steps.mlir-cache.outputs.cache-hit == 'true'
+        env:
+          LLVM_DIR: ${{ steps.llvm-paths.outputs.llvm_dir }}
+          INSTALL_DIR: ${{ steps.llvm-paths.outputs.install_dir }}
         run: |
-          llvm_dir="/llvm-project$( [ "${LLVM_SOURCE}" = "custom" ] && echo "-custom" || true )"
           test -s ./mlir_install.tgz
           docker cp ./mlir_install.tgz flydsl_mlir_cache:/tmp/mlir_install.tgz
-          docker exec flydsl_mlir_cache bash -c "mkdir -p ${llvm_dir} && tar -xzf /tmp/mlir_install.tgz -C ${llvm_dir}"
-          docker exec flydsl_mlir_cache bash -c "test -d ${llvm_dir}/mlir_install/lib/cmake/mlir"
+          docker exec flydsl_mlir_cache bash -c "mkdir -p ${LLVM_DIR} && tar -xzf /tmp/mlir_install.tgz -C ${LLVM_DIR}"
+          docker exec flydsl_mlir_cache bash -c "test -d ${INSTALL_DIR}/lib/cmake/mlir"
 
       - name: Build LLVM once
         if: steps.mlir-cache.outputs.cache-hit != 'true'
+        env:
+          INSTALL_DIR: ${{ steps.llvm-paths.outputs.install_dir }}
+          TGZ_PATH: ${{ steps.llvm-paths.outputs.tgz_path }}
         # A cold LLVM build measures ~10 min on these runners. Fail fast instead
         # of letting a stalled fetch or build hold the GPU runner until the
         # job-level timeout.
         timeout-minutes: 45
         run: |
           set -ex
-          llvm_dir="/llvm-project$( [ "${LLVM_SOURCE}" = "custom" ] && echo "-custom" || true )"
           docker exec -e LLVM_BUILD_PROFILE -e LLVM_SOURCE -e ROCM_PATH flydsl_mlir_cache bash -c '
             cd /flydsl-test
             bash scripts/build_llvm.sh --source '"${LLVM_SOURCE}"'
           '
-          docker exec flydsl_mlir_cache bash -c "ls -la ${llvm_dir}/mlir_install/lib/cmake/mlir"
-          docker cp "flydsl_mlir_cache:${llvm_dir}/mlir_install.tgz" ./mlir_install.tgz
+          docker exec flydsl_mlir_cache bash -c "ls -la ${INSTALL_DIR}/lib/cmake/mlir"
+          docker cp "flydsl_mlir_cache:${TGZ_PATH}" ./mlir_install.tgz
           test -s ./mlir_install.tgz
 
       # Checked against the VCSRevision.h the install ships: a wrong-pin baseline
@@ -427,14 +446,14 @@ jobs:
         env:
           BASE_MLIR_PATH: ${{ steps.base-mlir.outputs.ready == 'true' && '/llvm-project/mlir_install_base' || '' }}
           BASELINE_LLVM_HASH: ${{ steps.base-pin.outputs.base_llvm_hash }}
+          INSTALL_DIR: ${{ steps.llvm-paths.outputs.install_dir }}
         run: |
-          llvm_dir="/llvm-project$( [ "${LLVM_SOURCE}" = "custom" ] && echo "-custom" || true )"
           docker exec \
             -e BASE_REPO_NAME \
             -e BASE_COMMIT_SHA \
             -e ROCM_PATH \
             -e BASE_MLIR_PATH \
-            -e "MLIR_PATH=${llvm_dir}/mlir_install" \
+            -e "MLIR_PATH=${INSTALL_DIR}" \
             flydsl_mlir_cache bash -c '
               if command -v rocm-sdk >/dev/null 2>&1; then
                 rocm_bin="$(rocm-sdk path --bin)"
