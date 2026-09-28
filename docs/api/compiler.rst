@@ -81,6 +81,29 @@ On first call, ``@flyc.jit`` runs the following pipeline:
    (``~/.flydsl/cache/``) keyed by the compiler toolchain hash and kernel
    type signature.
 
+Ahead-of-time C export
+-----------------------
+
+``CompiledFunction.export_to_c(directory, name, symbol)`` writes a target-
+specific object file and a C/C++ header. The object contains the GPU binary
+and a small backend adapter, so the deployed executable or shared library does
+not need FlyDSL or Python. The generated header records the backend and system
+link flags; for ROCm these are ``-lamdhip64 -pthread -ldl``.
+
+The header exposes two calling styles:
+
+* ``<symbol>__module_init``, ``<symbol>__module_load`` and
+  ``<symbol>__module_unload`` provide explicit lifecycle and device control.
+  After loading, ``<symbol>_call`` provides a typed wrapper around the packed
+  entry point.
+* ``<symbol>_call_auto`` is the simple path. It idempotently initializes the
+  module and loads it on the current device before each call. It intentionally
+  does not unload automatically, so asynchronous launches remain safe.
+
+Exported objects are tied to the host ABI and GPU target used during
+compilation. They can be moved and linked independently, but must run on a
+compatible backend and GPU architecture.
+
 Tensor arguments
 -----------------
 

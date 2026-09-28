@@ -3,7 +3,7 @@
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,21 @@ class GPUTarget:
     warp_size: int  # 64 for CDNA, 32 for RDNA
 
 
+@dataclass(frozen=True)
+class AOTRuntimeConfig:
+    """Deployment contract between the generic exporter and a backend.
+
+    The archive implements FlyDSL's target-neutral AOT module ABI. It is
+    embedded into every exported object; only ``runtime_libraries`` and the
+    system libraries represented by ``linker_flags`` remain deployment-time
+    dependencies.
+    """
+
+    archive_basename: str
+    runtime_libraries: Tuple[str, ...]
+    linker_flags: Tuple[str, ...]
+
+
 class BaseBackend(metaclass=ABCMeta):
     """Abstract compile-backend interface.
 
@@ -27,7 +42,7 @@ class BaseBackend(metaclass=ABCMeta):
     * MLIR pass-pipeline fragments for lowering Fly IR to device binary,
     * gpu.module target attributes,
     * native-library patterns for toolchain fingerprinting (cache key),
-    * runtime shared-library basenames for JIT and C export.
+    * runtime artifacts for JIT and AOT export.
     """
 
     def __init__(self, target: GPUTarget) -> None:
@@ -115,21 +130,15 @@ class BaseBackend(metaclass=ABCMeta):
         ...
 
     @classmethod
-    def _aot_runtime_lib_basenames(cls) -> List[str]:
-        """Runtime library basenames needed by exported host objects."""
+    def aot_runtime_config(cls) -> AOTRuntimeConfig:
+        """Backend runtime contract for self-contained AOT host objects."""
         raise NotImplementedError(f"{cls.__name__} does not support AOT export")
 
     @classmethod
-    def _aot_offloading_handler(cls, symbol_prefix: str) -> str:
-        """MLIR offloading-handler attribute for an exported object."""
-        raise NotImplementedError(f"{cls.__name__} does not support AOT export")
+    def aot_object_index(cls, arch: str) -> int:
+        """Index of the compiled object selected for ``arch``.
 
-    @classmethod
-    def _aot_module_symbols(cls, symbol_prefix: str) -> Dict[str, str]:
-        """Lifecycle symbols emitted for ``symbol_prefix``."""
-        raise NotImplementedError(f"{cls.__name__} does not support AOT export")
-
-    @classmethod
-    def _aot_take_error_symbol(cls) -> str:
-        """Runtime symbol that returns and clears the current launch error."""
-        raise NotImplementedError(f"{cls.__name__} does not support AOT export")
+        Backends that emit a fat ``gpu.binary`` can override this method to
+        map the requested architecture to their target-list ordering.
+        """
+        return 0
