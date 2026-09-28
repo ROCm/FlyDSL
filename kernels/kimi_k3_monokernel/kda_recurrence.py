@@ -18,8 +18,8 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
 from kernels.common.act import sigmoid_batch
-from kernels.common.fused_layer_config import EPS
-from kernels.common.fused_layer_ops import exp, rsq, rsrc, xshfl
+from kernels.monokernel.config import EPS
+from kernels.monokernel.ops import exp, rsq, rsrc, xshfl
 
 _HEADS = 12
 _HEAD_DIM = 128
@@ -62,14 +62,14 @@ def _subgroup_sum(value):
 @functools.cache
 def build_kimi_k3_kda_recurrence(
     samples: int,
-    fuse_output_norm: bool = False,
-    fuse_conv: bool = False,
-    fuse_gate_projection: bool = False,
 ):
-    """Build the fixed Kimi-K3 decode kernel for ``samples`` requests."""
+    """Build the fused Kimi-K3 convolution, recurrence, and norm kernel."""
 
     if samples not in {1, 2, 4, 8}:
         raise ValueError(f"samples must be one of {{1, 2, 4, 8}}, got {samples}")
+    fuse_output_norm = True
+    fuse_conv = True
+    fuse_gate_projection = True
 
     @fx.struct
     class SharedStorage:
@@ -509,142 +509,17 @@ def build_kimi_k3_kda_recurrence(
 
 
 class KimiK3KdaRecurrence:
-    """Graph-safe tensor adapter for the Kimi-K3 KDA decode recurrence."""
-
-    def __init__(
-        self,
-        samples: int,
-        heads: int = _HEADS,
-        head_dim: int = _HEAD_DIM,
-        *,
-        fuse_output_norm: bool = False,
-    ) -> None:
-        if heads != _HEADS or head_dim != _HEAD_DIM:
-            raise ValueError("Kimi-K3 KDA recurrence requires 12 local 128-wide heads")
-        self.samples = samples
-        self.heads = heads
-        self.head_dim = head_dim
-        self.fuse_output_norm = fuse_output_norm
-        self.launch = build_kimi_k3_kda_recurrence(samples, fuse_output_norm, False, False)
-
-    def __call__(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        gate: torch.Tensor,
-        beta: torch.Tensor,
-        dt_bias: torch.Tensor,
-        a_log: torch.Tensor,
-        state_indices: torch.Tensor,
-        state: torch.Tensor,
-        output: torch.Tensor,
-        *,
-        output_gate: torch.Tensor | None = None,
-        norm_weight: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        expected_vector = (self.samples, 1, self.heads, self.head_dim)
-        vector_inputs = (query, key, value, gate)
-        if any(
-            tensor.shape != expected_vector or tensor.dtype != torch.bfloat16 or not tensor.is_contiguous()
-            for tensor in vector_inputs
-        ):
-            raise ValueError(f"query, key, value, and gate must be contiguous BF16 {list(expected_vector)}")
-        if beta.shape != (self.samples, 1, self.heads) or beta.dtype != torch.bfloat16:
-            raise ValueError(f"beta must be BF16 [{self.samples}, 1, {self.heads}]")
-        if dt_bias.shape != (self.heads, self.head_dim) or dt_bias.dtype != torch.bfloat16:
-            raise ValueError(f"dt_bias must be BF16 [{self.heads}, {self.head_dim}]")
-        if a_log.shape != (self.heads,) or a_log.dtype != torch.float32:
-            raise ValueError(f"a_log must be FP32 [{self.heads}]")
-        if state_indices.shape != (self.samples,) or state_indices.dtype != torch.int32:
-            raise ValueError(f"state_indices must be int32 [{self.samples}]")
-        if state.ndim != 4 or state.shape[1:] != (
-            self.heads,
-            self.head_dim,
-            self.head_dim,
-        ):
-            raise ValueError(f"state must have shape [slots, {self.heads}, {self.head_dim}, {self.head_dim}]")
-        if state.dtype != torch.float32 or not state.is_contiguous():
-            raise ValueError("state must be contiguous FP32")
-        if output.shape != expected_vector or output.dtype != torch.bfloat16 or not output.is_contiguous():
-            raise ValueError(f"output must be contiguous BF16 {list(expected_vector)}")
-
-        output_gate_stride = self.heads * self.head_dim
-        if self.fuse_output_norm:
-            if output_gate is None or norm_weight is None:
-                raise ValueError("output_gate and norm_weight are required for fused output normalization")
-            if (
-                output_gate.shape
-                not in {
-                    expected_vector,
-                    (self.samples, self.heads, self.head_dim),
-                }
-                or output_gate.dtype != torch.bfloat16
-            ):
-                raise ValueError("output_gate must be a BF16 [samples, (1,) heads, head_dim] tensor")
-            if output_gate.stride(-1) != 1 or output_gate.stride(-2) != self.head_dim:
-                raise ValueError("output_gate heads must be contiguous")
-            if norm_weight.shape != (self.head_dim,) or norm_weight.dtype != torch.bfloat16:
-                raise ValueError(f"norm_weight must be BF16 [{self.head_dim}]")
-            output_gate_stride = output_gate.stride(0)
-        else:
-            output_gate = output
-            norm_weight = output
-
-        tensors = (
-            *vector_inputs,
-            beta,
-            dt_bias,
-            a_log,
-            state_indices,
-            state,
-            output_gate,
-            norm_weight,
-            output,
-        )
-        if any(tensor.device != query.device for tensor in tensors):
-            raise ValueError("all KDA recurrence tensors must be on the same device")
-
-        self.launch(
-            query.data_ptr(),
-            key.data_ptr(),
-            value.data_ptr(),
-            gate.data_ptr(),
-            gate.data_ptr(),
-            gate.data_ptr(),
-            beta.data_ptr(),
-            dt_bias.data_ptr(),
-            a_log.data_ptr(),
-            query.data_ptr(),
-            query.data_ptr(),
-            query.data_ptr(),
-            state_indices.data_ptr(),
-            state.data_ptr(),
-            output_gate.data_ptr(),
-            norm_weight.data_ptr(),
-            output.data_ptr(),
-            beta.stride(0),
-            query.stride(0),
-            output_gate_stride,
-            stream=torch.cuda.current_stream(),
-        )
-        return output
-
-
-class KimiK3KdaConvRecurrence:
     """Fused q/k/v causal convolution, recurrence, and gated RMSNorm."""
 
-    def __init__(self, samples: int, *, fuse_gate_projection: bool = False) -> None:
+    def __init__(self, samples: int) -> None:
         if samples not in {1, 2, 4, 8}:
             raise ValueError(f"samples must be one of {{1, 2, 4, 8}}, got {samples}")
         self.samples = samples
-        self.fuse_gate_projection = fuse_gate_projection
-        self.launch = build_kimi_k3_kda_recurrence(samples, True, True, fuse_gate_projection)
+        self.launch = build_kimi_k3_kda_recurrence(samples)
 
     def __call__(
         self,
         mixed_qkv: torch.Tensor,
-        gate: torch.Tensor | None,
         beta: torch.Tensor,
         conv_weight: torch.Tensor,
         conv_state: torch.Tensor,
@@ -656,8 +531,8 @@ class KimiK3KdaConvRecurrence:
         norm_weight: torch.Tensor,
         output: torch.Tensor,
         *,
-        f_a: torch.Tensor | None = None,
-        f_b_weight: torch.Tensor | None = None,
+        f_a: torch.Tensor,
+        f_b_weight: torch.Tensor,
     ) -> torch.Tensor:
         expected_vector = (self.samples, 1, _HEADS, _HEAD_DIM)
         if (
@@ -666,31 +541,14 @@ class KimiK3KdaConvRecurrence:
             or mixed_qkv.stride(1) != 1
         ):
             raise ValueError(f"mixed_qkv must be a feature-contiguous BF16 [{self.samples}, {_CONV_CHANNELS}] view")
-        if self.fuse_gate_projection:
-            if (
-                f_a is None
-                or f_a.shape != (self.samples, _HEAD_DIM)
-                or f_a.dtype != torch.bfloat16
-                or f_a.stride(1) != 1
-            ):
-                raise ValueError(f"f_a must be a feature-contiguous BF16 [{self.samples}, {_HEAD_DIM}] view")
-            if (
-                f_b_weight is None
-                or f_b_weight.shape != (_HEADS * _HEAD_DIM, _HEAD_DIM)
-                or f_b_weight.dtype != torch.bfloat16
-                or not f_b_weight.is_contiguous()
-            ):
-                raise ValueError("f_b_weight must be contiguous BF16 " f"[{_HEADS * _HEAD_DIM}, {_HEAD_DIM}]")
-        else:
-            if (
-                gate is None
-                or gate.shape != expected_vector
-                or gate.dtype != torch.bfloat16
-                or not gate.is_contiguous()
-            ):
-                raise ValueError(f"gate must be contiguous BF16 {list(expected_vector)}")
-            f_a = gate
-            f_b_weight = gate
+        if f_a.shape != (self.samples, _HEAD_DIM) or f_a.dtype != torch.bfloat16 or f_a.stride(1) != 1:
+            raise ValueError(f"f_a must be a feature-contiguous BF16 [{self.samples}, {_HEAD_DIM}] view")
+        if (
+            f_b_weight.shape != (_HEADS * _HEAD_DIM, _HEAD_DIM)
+            or f_b_weight.dtype != torch.bfloat16
+            or not f_b_weight.is_contiguous()
+        ):
+            raise ValueError("f_b_weight must be contiguous BF16 " f"[{_HEADS * _HEAD_DIM}, {_HEAD_DIM}]")
         if beta.shape != (self.samples, 1, _HEADS) or beta.dtype != torch.bfloat16:
             raise ValueError(f"beta must be BF16 [{self.samples}, 1, {_HEADS}]")
         if (
@@ -757,7 +615,7 @@ class KimiK3KdaConvRecurrence:
             output.data_ptr(),
             output.data_ptr(),
             output.data_ptr(),
-            0 if gate is None else gate.data_ptr(),
+            output.data_ptr(),
             f_a.data_ptr(),
             f_b_weight.data_ptr(),
             beta.data_ptr(),

@@ -15,7 +15,7 @@ from flydsl.expr import range_constexpr
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int64, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.common.fused_layer_ops import exp, rcp, rsrc
+from kernels.monokernel.ops import exp, rcp, rsrc
 
 WAVE_SIZE = 64
 

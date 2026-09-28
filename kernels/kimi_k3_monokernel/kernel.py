@@ -19,9 +19,9 @@ from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
 from kernels.common.act import sigmoid_batch
-from kernels.common.fused_layer_config import EPS, FP8_MAX, MAX_LAYERS_PER_STEP
-from kernels.common.fused_layer_layout import CM_DEV, CM_SYS
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.config import EPS, FP8_MAX, MAX_LAYERS_PER_STEP
+from kernels.monokernel.layout import CM_DEV, CM_SYS
+from kernels.monokernel.ops import (
     exp,
     mxfp4_to_bf16x8,
     mxfp8_to_bf16x8,
@@ -78,13 +78,13 @@ _SHARED_INTER = 768
 _HIDDEN_SHARD = _HIDDEN // 8
 
 
-def kda_full_layer_layout(
+def monokernel_layout(
     samples: int,
     *,
     fuse_attn_res: bool = False,
-    full_moe: bool = False,
+    fuse_moe: bool = False,
 ) -> dict[str, int]:
-    """Return byte offsets for the full-layer kernel's tagged mailboxes."""
+    """Return byte offsets for the MonoKernel's tagged mailboxes."""
 
     if samples not in {1, 2, 4, 8}:
         raise ValueError(f"samples must be one of {{1, 2, 4, 8}}, got {samples}")
@@ -109,7 +109,7 @@ def kda_full_layer_layout(
         offset += samples * _HIDDEN * 2
         offsets["moe_ready"] = offset
         offset += samples * _ATTN_RES_CTAS * 8
-        if full_moe:
+        if fuse_moe:
             offsets["mxfp8"] = offset
             offsets["mxfp8_scale"] = offset
     offsets["input"] = offset
@@ -125,7 +125,7 @@ def kda_full_layer_layout(
         offset += samples * _ATTN_RES_CTAS * _ATTN_RES_STATS * 8
         offsets["post_stats"] = offset
         offset += samples * _ATTN_RES_CTAS * _ATTN_RES_STATS * 8
-    if full_moe:
+    if fuse_moe:
         routed_tiles = _ROUTED_HIDDEN // 16
         for name, size in (
             ("router", samples * _N_EXPERTS * 4),
@@ -149,41 +149,41 @@ def kda_full_layer_layout(
     return offsets
 
 
-def kda_full_layer_scratch_nbytes(
+def monokernel_scratch_nbytes(
     samples: int,
     *,
     fuse_attn_res: bool = False,
-    full_moe: bool = False,
+    fuse_moe: bool = False,
 ) -> int:
     """Bytes required by tagged BF16-pair projection mailboxes."""
 
-    return kda_full_layer_layout(
+    return monokernel_layout(
         samples,
         fuse_attn_res=fuse_attn_res,
-        full_moe=full_moe,
+        fuse_moe=fuse_moe,
     )["_bytes"]
 
 
 @functools.cache
-def build_kimi_k3_kda_full_layer_kernel(
+def build_kimi_k3_monokernel(
     samples: int,
     npes: int = 8,
     launches_per_step: int = MAX_LAYERS_PER_STEP,
     attn_res_blocks: int = -1,
     block_write_idx: int = -1,
-    full_moe: bool = False,
+    fuse_moe: bool = False,
 ):
-    """Build the fixed-shape single-launch KDA + latent-MoE layer."""
+    """Build the fixed-shape single-launch Kimi-K3 decode MonoKernel."""
 
     if samples not in {1, 2, 4, 8}:
         raise ValueError(f"samples must be one of {{1, 2, 4, 8}}, got {samples}")
     if npes != 8:
-        raise ValueError(f"Kimi-K3 KDA full-layer kernel requires TP8, got TP{npes}")
+        raise ValueError(f"Kimi-K3 MonoKernel requires TP8, got TP{npes}")
     if not 1 <= launches_per_step <= MAX_LAYERS_PER_STEP:
         raise ValueError(f"launches_per_step must be in [1, {MAX_LAYERS_PER_STEP}], got {launches_per_step}")
     fuse_attn_res = attn_res_blocks >= 0
-    if full_moe and not fuse_attn_res:
-        raise ValueError("the full KDA MoE kernel requires fused AttnRes")
+    if fuse_moe and not fuse_attn_res:
+        raise ValueError("the KDA + MoE MonoKernel requires fused AttnRes")
     if attn_res_blocks < -1:
         raise ValueError(f"attn_res_blocks must be >= -1, got {attn_res_blocks}")
     if block_write_idx >= 0 and block_write_idx != attn_res_blocks:
@@ -241,7 +241,7 @@ def build_kimi_k3_kda_full_layer_kernel(
         attn_values: fx.Array[fx.Float32, 16, 16]
 
     @flyc.kernel(known_block_size=[_THREADS, 1, 1])
-    def kimi_k3_kda_full_layer_kernel(
+    def kimi_k3_monokernel(
         hidden_states: Int64,
         output: Int64,
         block_residual: Int64,
@@ -1500,7 +1500,7 @@ def build_kimi_k3_kda_full_layer_kernel(
                     )
             gpu.barrier()
 
-        # Stage 0: the full-layer specialization folds pre-attention AttnRes
+        # Stage 0: the MonoKernel specialization folds pre-attention AttnRes
         # into the same launch and publishes its normalized BF16 output.
         if const_expr(fuse_attn_res):
             if bid < samples * _ATTN_RES_CTAS:
@@ -1991,7 +1991,7 @@ def build_kimi_k3_kda_full_layer_kernel(
                 )
         stamp(4)
 
-        if const_expr(full_moe):
+        if const_expr(fuse_moe):
             # Stage 5: the BF16 router and the two production MXFP8 dense
             # projections.  All consume the post-AttnRes result; the dense
             # branches directly reuse the quantized activation emitted there.
@@ -2651,7 +2651,7 @@ def build_kimi_k3_kda_full_layer_kernel(
         layer: Int32,
         stream: Stream = Stream(None),
     ):
-        kimi_k3_kda_full_layer_kernel(
+        kimi_k3_monokernel(
             hidden_states,
             output,
             block_residual,

@@ -7,28 +7,28 @@ from __future__ import annotations
 
 import torch
 
-from kernels.common.fused_layer_config import KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP
-from kernels.common.fused_layer_packing import (
+from kernels.kimi_k3_monokernel.gemm_a16w16 import gemm_a16w16
+from kernels.kimi_k3_monokernel.kda_recurrence import KimiK3KdaRecurrence
+from kernels.kimi_k3_monokernel.kernel import (
+    build_kimi_k3_monokernel,
+    monokernel_scratch_nbytes,
+)
+from kernels.kimi_k3_monokernel.symmetric_allreduce import SymmetricBf16Allreduce
+from kernels.monokernel.config import KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP
+from kernels.monokernel.formats import quantize_mxfp8
+from kernels.monokernel.packing import (
     pack_bf16,
     pack_mxfp4,
     pack_mxfp8_scale,
     pack_mxfp8_weight,
 )
-from kernels.common.fused_layer_reference import LayerWeights
-from kernels.common.mx_formats import quantize_mxfp8
-from kernels.kimi_k3.full_layer_kernel import (
-    build_kimi_k3_kda_full_layer_kernel,
-    kda_full_layer_scratch_nbytes,
-)
-from kernels.kimi_k3.gemm_a16w16 import gemm_a16w16
-from kernels.kimi_k3.kda_recurrence import KimiK3KdaConvRecurrence
-from kernels.kimi_k3.symmetric_allreduce import SymmetricBf16Allreduce
+from kernels.monokernel.weights import LayerWeights
 
 _TP_SIZE = 8
 _HEAD_DIM = 128
 _CONV_WIDTH = 4
 _INPUT_GEMM_ALIGNMENT = 32
-_FULL_LAYER_INPUT_ROWS = 6400
+_MONOKERNEL_INPUT_ROWS = 6400
 _INPUT_GEMM_CONFIG = {
     "block_m": 16,
     "block_n": 32,
@@ -165,7 +165,7 @@ class KimiK3KdaAttention:
         self.output = torch.empty_like(self.partial)
         self.step = torch.zeros(1, dtype=torch.int32, device=device)
         self.normed = torch.empty(samples, config.local_heads, _HEAD_DIM, dtype=torch.bfloat16, device=device)
-        self.core = KimiK3KdaConvRecurrence(samples, fuse_gate_projection=True)
+        self.core = KimiK3KdaRecurrence(samples)
         self.symmetric_allreduce = (
             SymmetricBf16Allreduce(
                 (self.partial.numel(),),
@@ -176,33 +176,33 @@ class KimiK3KdaAttention:
             if reduce_backend == "symmetric"
             else None
         )
-        self.full_layer_launch = None
-        self.full_layer_scratch = None
-        self.full_layer_timeline = None
+        self.monokernel_launch = None
+        self.monokernel_scratch = None
+        self.monokernel_timeline = None
         self.fuse_attn_res = False
         self.attn_res_blocks = -1
         self.block_write_idx = -1
-        self.full_moe = False
+        self.fuse_moe = False
         self.moe_packed: dict[str, torch.Tensor] = {}
         self.w_kda_in_packed = None
         self.w_kda_o_packed = None
         if self.symmetric_allreduce is not None and single_launch_attention:
-            full_layer_input = torch.zeros(
-                _FULL_LAYER_INPUT_ROWS,
+            monokernel_input = torch.zeros(
+                _MONOKERNEL_INPUT_ROWS,
                 config.hidden,
                 dtype=torch.bfloat16,
                 device=device,
             )
-            full_layer_input[:fused_width].copy_(self.t["w_kda_in"])
-            self.w_kda_in_packed = pack_bf16(full_layer_input)
+            monokernel_input[:fused_width].copy_(self.t["w_kda_in"])
+            self.w_kda_in_packed = pack_bf16(monokernel_input)
             self.w_kda_o_packed = pack_bf16(self.t["w_kda_o"])
-            self.full_layer_scratch = torch.zeros(
-                kda_full_layer_scratch_nbytes(samples),
+            self.monokernel_scratch = torch.zeros(
+                monokernel_scratch_nbytes(samples),
                 dtype=torch.uint8,
                 device=device,
             )
-            self.full_layer_timeline = torch.empty(10, dtype=torch.int64, device=device)
-            self.full_layer_launch = build_kimi_k3_kda_full_layer_kernel(
+            self.monokernel_timeline = torch.empty(10, dtype=torch.int64, device=device)
+            self.monokernel_launch = build_kimi_k3_monokernel(
                 samples,
                 npes,
                 launches_per_step,
@@ -210,7 +210,7 @@ class KimiK3KdaAttention:
         if reduce_group is None:
             raise ValueError("Kimi-K3 KDA attention requires a GPU-capable TP reduce_group")
 
-    def configure_full_layer(self, layer_idx: int, *, full_moe: bool = False) -> None:
+    def configure_monokernel(self, layer_idx: int, *, fuse_moe: bool = False) -> None:
         """Specialize the single launch for both AttnRes mixers and latent-MoE."""
 
         block = self.config.attn_res_block_size
@@ -219,20 +219,20 @@ class KimiK3KdaAttention:
         self.attn_res_blocks = (layer_idx + block - 1) // block
         self.block_write_idx = layer_idx // block if layer_idx % block == 0 else -1
         self.fuse_attn_res = True
-        self.full_moe = full_moe
+        self.fuse_moe = fuse_moe
         device = self.t["w_kda_in"].device
         if self.w_kda_in_packed is None:
             fused_width = 4 * self.local_projection + self.config.local_heads + _HEAD_DIM
-            full_layer_input = torch.zeros(
-                _FULL_LAYER_INPUT_ROWS,
+            monokernel_input = torch.zeros(
+                _MONOKERNEL_INPUT_ROWS,
                 self.config.hidden,
                 dtype=torch.bfloat16,
                 device=device,
             )
-            full_layer_input[:fused_width].copy_(self.t["w_kda_in"])
-            self.w_kda_in_packed = pack_bf16(full_layer_input)
+            monokernel_input[:fused_width].copy_(self.t["w_kda_in"])
+            self.w_kda_in_packed = pack_bf16(monokernel_input)
             self.w_kda_o_packed = pack_bf16(self.t["w_kda_o"])
-        if full_moe:
+        if fuse_moe:
             latent_down, latent_down_scale = quantize_mxfp8(self.t["w_latent_down"])
             shared_up, shared_up_scale = quantize_mxfp8(self.t["w_shared_ug"])
             shared_down, shared_down_scale = quantize_mxfp8(self.t["w_shared_dn"])
@@ -250,24 +250,24 @@ class KimiK3KdaAttention:
                 "w_latent_up": pack_mxfp8_weight(latent_up),
                 "s_latent_up": pack_mxfp8_scale(latent_up_scale),
             }
-        self.full_layer_scratch = torch.zeros(
-            kda_full_layer_scratch_nbytes(
+        self.monokernel_scratch = torch.zeros(
+            monokernel_scratch_nbytes(
                 self.S,
                 fuse_attn_res=True,
-                full_moe=full_moe,
+                fuse_moe=fuse_moe,
             ),
             dtype=torch.uint8,
             device=device,
         )
-        if self.full_layer_timeline is None:
-            self.full_layer_timeline = torch.empty(10, dtype=torch.int64, device=device)
-        self.full_layer_launch = build_kimi_k3_kda_full_layer_kernel(
+        if self.monokernel_timeline is None:
+            self.monokernel_timeline = torch.empty(10, dtype=torch.int64, device=device)
+        self.monokernel_launch = build_kimi_k3_monokernel(
             self.S,
             self.npes,
             self.launches_per_step,
             self.attn_res_blocks,
             self.block_write_idx,
-            full_moe,
+            fuse_moe,
         )
 
     def forward(
@@ -285,7 +285,7 @@ class KimiK3KdaAttention:
         moe_input: torch.Tensor | None = None,
         quantized_moe_input: torch.Tensor | None = None,
         quantized_moe_scale: torch.Tensor | None = None,
-        full_output: torch.Tensor | None = None,
+        monokernel_output: torch.Tensor | None = None,
         moe_symmetric: int = 0,
         moe_peers: torch.Tensor | None = None,
         layer: int = 0,
@@ -307,9 +307,9 @@ class KimiK3KdaAttention:
         if target.shape != expected_hidden or target.dtype != torch.bfloat16 or not target.is_contiguous():
             raise ValueError(f"x_out must be contiguous BF16 {list(expected_hidden)}")
 
-        if self.full_layer_launch is not None:
+        if self.monokernel_launch is not None:
             if self.fuse_attn_res:
-                full_layer_tensors = (
+                monokernel_tensors = (
                     block_residual,
                     pre_updated,
                     pre_output,
@@ -318,8 +318,8 @@ class KimiK3KdaAttention:
                     quantized_moe_input,
                     quantized_moe_scale,
                 )
-                if any(tensor is None for tensor in full_layer_tensors):
-                    raise ValueError("fused AttnRes requires all full-layer output buffers")
+                if any(tensor is None for tensor in monokernel_tensors):
+                    raise ValueError("fused AttnRes requires all MonoKernel output buffers")
                 block_stride = block_residual.shape[1]
             else:
                 block_residual = hidden_states
@@ -329,18 +329,18 @@ class KimiK3KdaAttention:
                 moe_input = hidden_states
                 quantized_moe_input = hidden_states
                 quantized_moe_scale = hidden_states
-                full_output = hidden_states
+                monokernel_output = hidden_states
                 moe_peers = hidden_states
                 block_stride = 1
-            if self.full_moe and (full_output is None or moe_symmetric == 0 or moe_peers is None):
-                raise ValueError("the full MoE kernel requires output and symmetric peer buffers")
-            if full_output is None:
-                full_output = target
+            if self.fuse_moe and (monokernel_output is None or moe_symmetric == 0 or moe_peers is None):
+                raise ValueError("the fused MoE path requires output and symmetric peer buffers")
+            if monokernel_output is None:
+                monokernel_output = target
             if moe_peers is None:
                 moe_peers = hidden_states
             packed = self.moe_packed
             pointer_or_hidden = lambda name: packed[name].data_ptr() if name in packed else hidden_states.data_ptr()
-            self.full_layer_launch(
+            self.monokernel_launch(
                 hidden_states.data_ptr(),
                 target.data_ptr(),
                 block_residual.data_ptr(),
@@ -358,23 +358,23 @@ class KimiK3KdaAttention:
                 quantized_moe_scale.data_ptr(),
                 block_stride,
                 pointer_or_hidden("w_r"),
-                self.t["bias"].data_ptr() if self.full_moe else hidden_states.data_ptr(),
+                self.t["bias"].data_ptr() if self.fuse_moe else hidden_states.data_ptr(),
                 pointer_or_hidden("w_latent_down"),
                 pointer_or_hidden("s_latent_down"),
                 pointer_or_hidden("w_shared_ug"),
                 pointer_or_hidden("s_shared_ug"),
                 pointer_or_hidden("w_ug"),
-                self.t["s_ug"].data_ptr() if self.full_moe else hidden_states.data_ptr(),
+                self.t["s_ug"].data_ptr() if self.fuse_moe else hidden_states.data_ptr(),
                 pointer_or_hidden("w_dn"),
-                self.t["s_dn"].data_ptr() if self.full_moe else hidden_states.data_ptr(),
-                self.t["g_latent"].data_ptr() if self.full_moe else hidden_states.data_ptr(),
+                self.t["s_dn"].data_ptr() if self.fuse_moe else hidden_states.data_ptr(),
+                self.t["g_latent"].data_ptr() if self.fuse_moe else hidden_states.data_ptr(),
                 pointer_or_hidden("w_shared_dn"),
                 pointer_or_hidden("s_shared_dn"),
                 pointer_or_hidden("w_latent_up"),
                 pointer_or_hidden("s_latent_up"),
                 moe_symmetric,
                 moe_peers.data_ptr(),
-                full_output.data_ptr(),
+                monokernel_output.data_ptr(),
                 self.w_kda_in_packed.data_ptr(),
                 self.t["w_kda_fb"].data_ptr(),
                 self.t["w_kda_conv"].data_ptr(),
@@ -385,11 +385,11 @@ class KimiK3KdaAttention:
                 state_indices.data_ptr(),
                 conv_state.data_ptr(),
                 recurrent_state.data_ptr(),
-                self.full_layer_scratch.data_ptr(),
+                self.monokernel_scratch.data_ptr(),
                 self.symmetric_allreduce.peer_buffer.local_address,
                 self.symmetric_allreduce.peer_buffer.addresses.data_ptr(),
                 self.step.data_ptr(),
-                self.full_layer_timeline.data_ptr(),
+                self.monokernel_timeline.data_ptr(),
                 self.rank,
                 layer,
                 stream=torch.cuda.current_stream(),
@@ -413,7 +413,6 @@ class KimiK3KdaAttention:
         f_a = self.fused_input[:, 4 * projection + heads :]
         self.core(
             mixed_qkv,
-            None,
             beta,
             self.t["w_kda_conv"],
             conv_state,

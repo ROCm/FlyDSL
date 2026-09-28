@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Kimi-K3 TP8 full-attention MLA + AttnRes + latent-MoE layer."""
+"""Staged MLA/KDA baselines retained beside the Kimi-K3 MonoKernel."""
 
 from __future__ import annotations
 
@@ -9,26 +9,16 @@ from contextlib import contextmanager
 
 import torch
 
-from kernels.common.fused_layer_config import EPS, KIMI_K3_CONFIG, KvCacheLayout
-from kernels.common.fused_layer_packing import (
-    pack_a16w4_scale,
-    pack_a16w4_weight,
-    pack_bf16,
-    pack_mxfp8_scale,
-    pack_mxfp8_weight,
-)
-from kernels.common.fused_layer_reference import LayerWeights
-from kernels.common.mx_formats import quantize_mxfp8
-from kernels.kimi_k3.attn_res import KimiK3AttnRes
-from kernels.kimi_k3.kda import KimiK3KdaAttention
-from kernels.kimi_k3.mla import KimiK3MlaLayer
-from kernels.kimi_k3.moe import kimi_k3_mxfp4_gemm1, kimi_k3_mxfp4_gemm2
-from kernels.kimi_k3.mxfp8_linear import Mxfp8Linear
-from kernels.kimi_k3.router import SigmoidTopkRouter
-from kernels.kimi_k3.router_projection import FusedRouterProjection
-from kernels.kimi_k3.symmetric_allreduce import SymmetricBf16Allreduce
-from kernels.kimi_k3.tail import FusedKimiK3Tail
-from kernels.kimi_k3.torch_fusions import (
+from kernels.kimi_k3_monokernel.attn_res import KimiK3AttnRes
+from kernels.kimi_k3_monokernel.kda import KimiK3KdaAttention
+from kernels.kimi_k3_monokernel.mla import KimiK3MlaAttention
+from kernels.kimi_k3_monokernel.moe import kimi_k3_mxfp4_gemm1, kimi_k3_mxfp4_gemm2
+from kernels.kimi_k3_monokernel.mxfp8_linear import Mxfp8Linear
+from kernels.kimi_k3_monokernel.router import SigmoidTopkRouter
+from kernels.kimi_k3_monokernel.router_projection import FusedRouterProjection
+from kernels.kimi_k3_monokernel.symmetric_allreduce import SymmetricBf16Allreduce
+from kernels.kimi_k3_monokernel.tail import FusedKimiK3Tail
+from kernels.kimi_k3_monokernel.torch_fusions import (
     CudaStageProfiler,
     compiled_attn_res_no_delta,
     compiled_attn_res_with_delta,
@@ -38,13 +28,23 @@ from kernels.kimi_k3.torch_fusions import (
     situ,
 )
 from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
+from kernels.monokernel.config import EPS, KIMI_K3_CONFIG, KvCacheLayout
+from kernels.monokernel.formats import quantize_mxfp8
+from kernels.monokernel.packing import (
+    pack_a16w4_scale,
+    pack_a16w4_weight,
+    pack_bf16,
+    pack_mxfp8_scale,
+    pack_mxfp8_weight,
+)
+from kernels.monokernel.weights import LayerWeights
 
 _TP_SIZE = 8
 _ROUTING_TILE_M = 16
 
 
-class KimiK3MlaMoeLayer:
-    """One production TP8 Kimi-K3 decode layer.
+class _KimiK3MlaPath:
+    """Internal staged Kimi-K3 MLA reference/performance path.
 
     The MLA core remains the persistent shared/reuse kernel.  The K3-specific
     tail composes the model's attention-residual mixer, 896-way top-16 router,
@@ -63,7 +63,6 @@ class KimiK3MlaMoeLayer:
         group=None,
         reduce_group=None,
         topk: int = 2048,
-        timeline: bool = False,
         fuse_attn_res: bool = True,
         fuse_router: bool = True,
         fuse_shared_experts: bool = True,
@@ -72,9 +71,9 @@ class KimiK3MlaMoeLayer:
     ) -> None:
         config = weights.config
         if config != KIMI_K3_CONFIG:
-            raise ValueError("KimiK3MlaMoeLayer requires Kimi-K3 weights")
+            raise ValueError("the Kimi-K3 staged path requires Kimi-K3 weights")
         if npes != _TP_SIZE:
-            raise ValueError(f"Kimi-K3 full MLA+MoE currently requires TP8, got TP{npes}")
+            raise ValueError(f"the Kimi-K3 staged path requires TP8, got TP{npes}")
         if weights.rank != rank or weights.npes != npes:
             raise ValueError(f"weight shard is rank {weights.rank}/TP{weights.npes}, requested rank {rank}/TP{npes}")
         if not 0 <= rank < npes:
@@ -123,7 +122,7 @@ class KimiK3MlaMoeLayer:
         }
         missing = sorted(expected.difference(self.t))
         if missing:
-            raise ValueError(f"missing Kimi-K3 full-layer weights: {', '.join(missing)}")
+            raise ValueError(f"missing Kimi-K3 MonoKernel weights: {', '.join(missing)}")
         if self.t["w_latent_up"].shape != (self.hidden_shard, self.routed_hidden):
             raise ValueError(
                 f"w_latent_up must be the rank-local output-row shard [{self.hidden_shard}, {self.routed_hidden}]"
@@ -137,7 +136,6 @@ class KimiK3MlaMoeLayer:
             group=group,
             reduce_group=reduce_group,
             topk=topk,
-            timeline=timeline,
             reduce_backend=reduce_backend,
             kv_cache_layout=kv_cache_layout,
         )
@@ -264,7 +262,7 @@ class KimiK3MlaMoeLayer:
         # The sorter also clears this output buffer before atomic stage2.
         self.moe_buf = self.routed_partial
         if reduce_group is None:
-            raise ValueError("Kimi-K3 full MLA+MoE requires a GPU-capable TP reduce_group")
+            raise ValueError("the Kimi-K3 staged path requires a GPU-capable TP reduce_group")
 
     def _build_attention(
         self,
@@ -276,21 +274,18 @@ class KimiK3MlaMoeLayer:
         group,
         reduce_group,
         topk: int,
-        timeline: bool,
         reduce_backend: str,
         kv_cache_layout: KvCacheLayout | str,
     ):
         del reduce_group, reduce_backend
-        return KimiK3MlaLayer(
+        return KimiK3MlaAttention(
             weights,
             samples,
             rank=rank,
             npes=npes,
             group=group,
             topk=topk,
-            timeline=timeline,
-            moe_mode="a16w4",
-            attention_input_norm_override=self.inline_pre_attn,
+            attention_input_norm=self.inline_pre_attn,
             kv_cache_layout=kv_cache_layout,
         )
 
@@ -692,7 +687,7 @@ class KimiK3MlaMoeLayer:
 
     @contextmanager
     def capture(self):
-        """Context used by callers recording the graph-stable full layer."""
+        """Context used by callers recording the graph-stable decode path."""
 
         yield
 
@@ -708,8 +703,8 @@ class KimiK3MlaMoeLayer:
         self.close()
 
 
-class KimiK3KdaMoeLayer(KimiK3MlaMoeLayer):
-    """One production TP8 Kimi-K3 decode KDA + latent-MoE layer."""
+class _KimiK3KdaStagedPath(_KimiK3MlaPath):
+    """Internal staged Kimi-K3 KDA + latent-MoE reference path."""
 
     def _build_attention(
         self,
@@ -721,11 +716,10 @@ class KimiK3KdaMoeLayer(KimiK3MlaMoeLayer):
         group,
         reduce_group,
         topk: int,
-        timeline: bool,
         reduce_backend: str,
         kv_cache_layout: KvCacheLayout | str,
     ):
-        del topk, timeline, kv_cache_layout
+        del topk, kv_cache_layout
         return KimiK3KdaAttention(
             weights,
             samples,

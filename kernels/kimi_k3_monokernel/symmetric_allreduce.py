@@ -10,15 +10,15 @@ import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.common.fused_layer_config import EPS
-from kernels.common.fused_layer_layout import (
+from kernels.monokernel.config import EPS
+from kernels.monokernel.layout import (
     CM_DEV,
     CM_SYS,
     LAYER_SLOTS,
     symmetric_allreduce_nbytes,
 )
-from kernels.common.fused_layer_ops import rsq, rsrc, uniform, xred
-from kernels.common.fused_layer_runtime import SymmetricPeerBuffer
+from kernels.monokernel.ops import rsq, rsrc, uniform, xred
+from kernels.monokernel.runtime import SymmetricPeerBuffer
 
 THREADS = 512
 WAVE_SIZE = 64

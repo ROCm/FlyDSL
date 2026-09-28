@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""End-to-end GPU coverage for the complete Kimi-K3 TP8 layer."""
+"""End-to-end GPU coverage for the Kimi-K3 TP8 MonoKernel."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 _ARCH = str(get_rocm_arch() or "")
 if _ARCH != "gfx950":
-    pytest.skip(f"Kimi-K3 full layer requires gfx950, got {_ARCH}", allow_module_level=True)
+    pytest.skip(f"Kimi-K3 MonoKernel requires gfx950, got {_ARCH}", allow_module_level=True)
 
 
 def _run_tp8_tool(tool: str, *args: str) -> dict:
@@ -45,9 +45,9 @@ def _run_tp8_tool(tool: str, *args: str) -> dict:
 
 @pytest.mark.multi_gpu
 @pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
-def test_kimi_k3_full_layer_tp8() -> None:
+def test_kimi_k3_monokernel_mla_baseline_tp8() -> None:
     result = _run_tp8_tool(
-        "kernels/kimi_k3/tools/mla_layer.py",
+        "kernels/kimi_k3_monokernel/tools/mla.py",
         "--samples",
         "1",
         "--layer-idx",
@@ -70,7 +70,7 @@ def test_kimi_k3_full_layer_tp8() -> None:
 def test_kimi_k3_kda_attention_tp8(samples: int, negative_slot: bool) -> None:
     extra_args = ("--negative-slot",) if negative_slot else ()
     result = _run_tp8_tool(
-        "kernels/kimi_k3/tools/full_layer.py",
+        "kernels/kimi_k3_monokernel/tools/monokernel.py",
         "--samples",
         str(samples),
         "--layer-idx",
@@ -97,9 +97,9 @@ def test_kimi_k3_kda_attention_tp8(samples: int, negative_slot: bool) -> None:
 @pytest.mark.multi_gpu
 @pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
 @pytest.mark.parametrize(("samples", "layer_idx"), ((1, 1), (1, 12), (8, 1)))
-def test_kimi_k3_kda_moe_layer_tp8(samples: int, layer_idx: int) -> None:
+def test_kimi_k3_monokernel_kda_tp8(samples: int, layer_idx: int) -> None:
     result = _run_tp8_tool(
-        "kernels/kimi_k3/tools/full_layer.py",
+        "kernels/kimi_k3_monokernel/tools/monokernel.py",
         "--samples",
         str(samples),
         "--layer-idx",
@@ -117,9 +117,9 @@ def test_kimi_k3_kda_moe_layer_tp8(samples: int, layer_idx: int) -> None:
 
 @pytest.mark.multi_gpu
 @pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
-def test_kimi_k3_kda_staged_layer_tp8() -> None:
+def test_kimi_k3_monokernel_staged_baseline_tp8() -> None:
     result = _run_tp8_tool(
-        "kernels/kimi_k3/tools/full_layer.py",
+        "kernels/kimi_k3_monokernel/tools/monokernel.py",
         "--staged",
         "--samples",
         "8",

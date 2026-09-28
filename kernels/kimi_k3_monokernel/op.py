@@ -1,22 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Host wrapper for the single-launch Kimi-K3 KDA decode layer."""
+"""Host wrapper for the single-launch Kimi-K3 decode MonoKernel."""
 
 from __future__ import annotations
 
 import torch
 
-from kernels.kimi_k3.layer import KimiK3KdaMoeLayer
+from kernels.kimi_k3_monokernel.staged import _KimiK3KdaStagedPath
+from kernels.monokernel.weights import LayerWeights
 
 
-class KimiK3KdaFullLayer(KimiK3KdaMoeLayer):
-    """KDA, AttnRes, latent-MoE, TP reductions, and residual update in one launch."""
+class KimiK3MonoKernel(_KimiK3KdaStagedPath):
+    """Run KDA, AttnRes, latent-MoE, TP reductions, and residual update in one launch."""
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        if self.fuse_attn_res and self.symmetric_allreduce is not None:
-            self.attention.configure_full_layer(self.layer_idx, full_moe=True)
+    def __init__(
+        self,
+        weights: LayerWeights,
+        samples: int,
+        *,
+        layer_idx: int,
+        rank: int,
+        npes: int = 8,
+        group=None,
+        reduce_group=None,
+    ) -> None:
+        super().__init__(
+            weights,
+            samples,
+            layer_idx=layer_idx,
+            rank=rank,
+            npes=npes,
+            group=group,
+            reduce_group=reduce_group,
+            fuse_attn_res=True,
+            fuse_router=True,
+            fuse_shared_experts=True,
+            reduce_backend="symmetric",
+        )
+        self.attention.configure_monokernel(layer_idx, fuse_moe=True)
 
     def forward(
         self,
@@ -30,19 +52,8 @@ class KimiK3KdaFullLayer(KimiK3KdaMoeLayer):
         epoch_layer: int = 0,
         advance: bool = True,
     ) -> torch.Tensor:
-        """Run one complete Kimi-K3 KDA decode layer."""
+        """Run one complete Kimi-K3 decode layer."""
 
-        if not self.attention.fuse_attn_res:
-            return super().forward(
-                prefix_sum,
-                block_residual,
-                state_indices,
-                conv_state,
-                recurrent_state,
-                x_out=x_out,
-                epoch_layer=epoch_layer,
-                advance=advance,
-            )
         if (
             block_residual.ndim != 3
             or block_residual.shape[0] != self.S
@@ -71,7 +82,7 @@ class KimiK3KdaFullLayer(KimiK3KdaMoeLayer):
             moe_input=self.moe_input,
             quantized_moe_input=self.latent_projection.activation,
             quantized_moe_scale=self.latent_projection.activation_scale,
-            full_output=target,
+            monokernel_output=target,
             moe_symmetric=self.symmetric_allreduce.peer_buffer.local_address,
             moe_peers=self.symmetric_allreduce.peer_buffer.addresses,
             layer=epoch_layer,
@@ -82,4 +93,4 @@ class KimiK3KdaFullLayer(KimiK3KdaMoeLayer):
         return target
 
 
-__all__ = ["KimiK3KdaFullLayer"]
+__all__ = ["KimiK3MonoKernel"]

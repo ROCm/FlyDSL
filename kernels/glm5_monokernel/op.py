@@ -7,7 +7,13 @@ from __future__ import annotations
 
 import torch
 
-from kernels.common.fused_layer_config import (
+from kernels.glm5_monokernel.kernel import build_glm5_monokernel
+from kernels.glm5_monokernel.layout import (
+    INDEX_DIM,
+    layout,
+    stage_tasks,
+)
+from kernels.monokernel.config import (
     GLM5_CONFIG,
     HIDDEN,
     INTER,
@@ -24,16 +30,10 @@ from kernels.common.fused_layer_config import (
     RouterWeightLayout,
     validate_shard,
 )
-from kernels.common.fused_layer_layout import TL_COLS
-from kernels.common.fused_layer_packing import pack_bf16, pack_fp8, pack_layer_weights
-from kernels.common.fused_layer_reference import LayerWeights
-from kernels.common.fused_layer_runtime import SymmetricPeerBuffer
-from kernels.glm5_monokernel.kernel import build_glm5_monokernel
-from kernels.glm5_monokernel.layout import (
-    INDEX_DIM,
-    layout,
-    stage_tasks,
-)
+from kernels.monokernel.layout import TL_COLS
+from kernels.monokernel.packing import pack_bf16, pack_fp8, pack_layer_weights
+from kernels.monokernel.runtime import SymmetricPeerBuffer
+from kernels.monokernel.weights import LayerWeights
 
 __all__ = ["Glm5MonoKernel"]
 

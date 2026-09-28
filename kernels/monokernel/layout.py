@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernels.common.fused_layer_config import (
+from kernels.monokernel.config import (
     GLM5_CONFIG,
     MAX_LAYERS_PER_STEP,
     LayerConfig,

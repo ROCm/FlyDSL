@@ -12,11 +12,9 @@ own shard.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 
-from kernels.common.fused_layer_config import (
+from kernels.monokernel.config import (
     EPS,
     FP8_MAX,
     GLM5_CONFIG,
@@ -33,7 +31,8 @@ from kernels.common.fused_layer_config import (
     as_moe_mode,
     moe_format,
 )
-from kernels.common.mx_formats import dequantize_mxfp4, quant_dequant_mxfp8, quantize_mxfp4
+from kernels.monokernel.formats import dequantize_mxfp4, quant_dequant_mxfp8, quantize_mxfp4
+from kernels.monokernel.weights import LayerWeights
 
 
 # (name, rows, K, BK) of every attention matrix, rows given per local head count H.
@@ -49,7 +48,7 @@ def attention_mats(heads: int, model_config: LayerConfig | str = GLM5_CONFIG):
 
 
 def fp8_mats(heads: int):
-    """Backward-compatible GLM-5 attention matrix description."""
+    """Return the GLM-5 attention matrix shapes used by its test reference."""
 
     return attention_mats(heads, GLM5_CONFIG)
 
@@ -72,15 +71,6 @@ def dequant(q: torch.Tensor, s: torch.Tensor, bk: int) -> torch.Tensor:
     return q.float() * sf
 
 
-@dataclass
-class LayerWeights:
-    heads: int
-    t: dict  # name -> tensor
-    config: LayerConfig = GLM5_CONFIG
-    rank: int = 0
-    npes: int = 1
-
-
 def make_weights(
     rank: int,
     heads: int = 8,
@@ -101,7 +91,7 @@ def make_weights(
     if config == KIMI_K3_CONFIG and not attention_only and npes != 8:
         raise ValueError("Kimi-K3 full MLA+MoE weights require the production TP8 shard")
     if not attention_only and config not in (GLM5_CONFIG, KIMI_K3_CONFIG):
-        raise ValueError(f"unsupported full-layer weight profile {config.name!r}")
+        raise ValueError(f"unsupported MonoKernel weight profile {config.name!r}")
     expert_weight = moe_format(moe_mode).weight
     rep = torch.Generator(device=device).manual_seed(seed)
     shd = torch.Generator(device=device).manual_seed(seed + 1 + rank)

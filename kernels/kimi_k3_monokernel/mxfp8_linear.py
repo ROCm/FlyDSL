@@ -13,8 +13,8 @@ from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int64, ReductionOp, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.common.fused_layer_ops import rsrc
-from kernels.common.fused_layer_packing import pack_mxfp8_scale, pack_mxfp8_weight
+from kernels.monokernel.ops import rsrc
+from kernels.monokernel.packing import pack_mxfp8_scale, pack_mxfp8_weight
 
 _GROUP = 32
 _QUANT_THREADS = 64

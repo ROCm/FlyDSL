@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import torch
 
-from kernels.common.hip_ipc import close_ipc_handle, get_allocation_base, get_ipc_handle, open_ipc_handle
+from kernels.monokernel.ipc import close_ipc_handle, get_allocation_base, get_ipc_handle, open_ipc_handle
 
 
 class SymmetricPeerBuffer:

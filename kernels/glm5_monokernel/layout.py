@@ -3,7 +3,7 @@
 
 """Compile-time storage layout and CTA schedule for the GLM-5 MonoKernel."""
 
-from kernels.common.fused_layer_config import (
+from kernels.monokernel.config import (
     HIDDEN,
     INTER,
     KV_LORA,
@@ -16,7 +16,7 @@ from kernels.common.fused_layer_config import (
     TOP_K,
     V_DIM,
 )
-from kernels.common.fused_layer_layout import (
+from kernels.monokernel.layout import (
     BLOCKS,
     Q_B_TILE,
     QKV_A_TILE,

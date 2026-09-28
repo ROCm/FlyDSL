@@ -1,23 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Kimi-K3 indexed MLA decode kernel in one persistent launch per rank.
+"""Kimi-K3 MLA attention in one persistent launch per TP rank.
 
-For GLM-5, one launch of ``grid = 256 CTAs x 512 threads`` (one CTA per MI355X
-CU) runs the whole layer body for this rank's TP shard::
+One launch of ``grid = 256 CTAs x 512 threads`` (one CTA per MI355X CU)
+runs the attention body for this rank's TP shard::
 
     input RMSNorm -> q_a / kv_a projection -> q_a RMSNorm -> q_b (+RoPE)
       -> KV RMSNorm / k_pe RoPE -> KV/PE cache publish
       -> absorbed q (W_UK) -> sparse MLA split softmax -> merge -> W_UV -> W_o
-      -> attention TP8 peer reduce + residual                      (sym_attn)
-      -> post-attention RMSNorm -> router sigmoid + expert activation staging
-      -> top-8 -> 1 shared + 8 routed expert up/gate/SiLU
-      -> expert down + route weighting
-      -> MoE TP8 peer reduce + residual -> x_out                   (sym_ffn)
+      -> attention TP8 peer reduce
 
-The Kimi-K3 profile runs the full-attention MLA portion through the attention
-TP reduce and returns there. Its input is already normalized by the caller and
-its residual/attention-residual handling remains outside this kernel.
+Its input is normalized by the caller and its attention-residual and latent-MoE
+work remains in the surrounding Kimi-K3 staged path.
 
 Scheduling: every stage is a list of tasks; task ``t`` of a stage runs on CTA
 ``(stage_base + t) % 256`` and every CTA walks the stages in order.  There is
@@ -53,22 +48,20 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
 from kernels.common import buffer_ops as bo
-from kernels.common.fused_layer_config import (
+from kernels.monokernel.config import (
     EPS,
     FP8_MAX,
-    GLM5_CONFIG,
+    KIMI_K3_CONFIG,
     SCALE_BM,
     AttentionWeight,
     ExpertActivation,
     ExpertWeight,
     KvCacheLayout,
-    LayerConfig,
     MoeMode,
     as_kv_cache_layout,
-    as_layer_config,
     moe_format,
 )
-from kernels.common.fused_layer_layout import (
+from kernels.monokernel.layout import (
     BLOCKS,
     CM_DEV,
     CM_SYS,
@@ -90,69 +83,62 @@ from kernels.common.fused_layer_layout import (
     layout,
     stage_tasks,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     exp as _exp,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     f8_word as _f8_word,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     fp8_roundtrip as _fp8_roundtrip,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     fp8_to_bf16x8 as _fp8_to_bf16x8,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     rcp as _rcp,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     rsq as _rsq,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     rsrc as _rsrc,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     uniform as _uniform,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     uniform_f32 as _uniform_f32,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     wave_umax as _wave_umax,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     xred as _xred,
 )
-from kernels.common.fused_layer_ops import (
+from kernels.monokernel.ops import (
     xshfl as _xshfl,
 )
 
 
-def build_indexed_mla_moe_kernel(
+def build_kimi_k3_mla_attention(
     S: int = 1,
-    heads: int = 8,
+    heads: int = KIMI_K3_CONFIG.local_heads,
     npes: int = 8,
     sparse_attention_topk: int = 2048,
-    launches_per_step: int = 1,
-    scale: float | None = None,
-    timeline: bool = False,
-    moe_mode: MoeMode | str = MoeMode.W8A8,
-    model_config: LayerConfig | str = GLM5_CONFIG,
-    attention_only: bool = False,
-    attention_input_norm_override: bool | None = None,
+    launches_per_step: int = LAYER_SLOTS,
+    attention_input_norm: bool = False,
     kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
 ):
-    """Return the ``@flyc.jit`` launcher for one rank's whole layer.
+    """Return the JIT launcher for one rank's Kimi-K3 MLA attention."""
 
-    ``timeline=True`` records ``s_memrealtime`` (100 MHz) at the start and end of
-    every task, and once its inputs have arrived, into the ``timeline`` buffer:
-    int64 ``[sum(task counts), TL_COLS]`` (start, hint seen, inputs staged, compute
-    done, end, then free debug marks) in ``stage_tasks`` order.
-    """
-    config = as_layer_config(model_config)
+    config = KIMI_K3_CONFIG
+    attention_only = True
+    timeline = False
+    moe_mode = MoeMode.A16W4
     cache_layout = as_kv_cache_layout(kv_cache_layout)
     use_atom_kv_cache = cache_layout is KvCacheLayout.ATOM
     HIDDEN = config.hidden
@@ -168,9 +154,7 @@ def build_indexed_mla_moe_kernel(
     SHARED_EXPERT = config.shared_expert
     INTER = config.inter
     ROUTE_SCALE = config.route_scale
-    SOFTMAX_SCALE = config.softmax_scale
-    if scale is None:
-        scale = SOFTMAX_SCALE
+    scale = config.softmax_scale
     N_QKV_A = QKV_A_ROWS // QKV_A_TILE
     N_ROW_TILES = HIDDEN // ROW_TILE
     N_ROUTER = N_EXPERTS // ROUTER_TILE
@@ -182,9 +166,6 @@ def build_indexed_mla_moe_kernel(
     attention_bf16 = config.attention_weight is AttentionWeight.BF16
     attention_k_chunks_per_unit = 1 if attention_bf16 else 2
     attention_output_gate = config.attention_output_gate
-    attention_input_norm = (
-        config.attention_input_norm if attention_input_norm_override is None else attention_input_norm_override
-    )
     dedicated_input_norm = attention_input_norm and not config.attention_input_norm and S > 4
     attention_residual = config.attention_residual
 
@@ -285,7 +266,7 @@ def build_indexed_mla_moe_kernel(
         dnw: fx.Array[fx.Float32, S * MOE_SLOTS, 16]  # expert-down route weights
 
     @flyc.kernel(known_block_size=[THREADS, 1, 1])
-    def indexed_mla_moe_kernel(
+    def kimi_k3_mla_attention_kernel(
         h_in: Int64,
         x_out: Int64,
         cur_pos: Int64,
@@ -2174,7 +2155,7 @@ def build_indexed_mla_moe_kernel(
             stamp("down", t, 4)
 
     @flyc.jit
-    def launch_indexed_mla_moe(
+    def launch_kimi_k3_mla_attention(
         h_in: Int64,
         x_out: Int64,
         cur_pos: Int64,
@@ -2212,7 +2193,7 @@ def build_indexed_mla_moe_kernel(
         layer: Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        indexed_mla_moe_kernel(
+        kimi_k3_mla_attention_kernel(
             h_in,
             x_out,
             cur_pos,
@@ -2250,4 +2231,4 @@ def build_indexed_mla_moe_kernel(
             layer,
         ).launch(grid=(G,), block=(THREADS,), stream=stream)
 
-    return launch_indexed_mla_moe
+    return launch_kimi_k3_mla_attention

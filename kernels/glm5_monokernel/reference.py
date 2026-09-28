@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import torch
 
-from kernels.common.fused_layer_config import (
+from kernels.glm5_monokernel.layout import INDEX_DIM, INDEX_HEADS, INDEX_Q_ROWS
+from kernels.monokernel.config import (
     FP8_MAX,
     HIDDEN,
     INTER,
@@ -25,8 +26,7 @@ from kernels.common.fused_layer_config import (
     SHARED_EXPERT,
     ExpertWeight,
 )
-from kernels.common.fused_layer_reference import (
-    LayerWeights,
+from kernels.monokernel.reference import (
     bf,
     dequant,
     fp8_mats,
@@ -36,9 +36,9 @@ from kernels.common.fused_layer_reference import (
     route,
     scale_shape,
 )
-from kernels.common.fused_layer_reference import dequant_expert as _dequant_expert
-from kernels.common.fused_layer_reference import golden_layer as _golden_attention
-from kernels.glm5_monokernel.layout import INDEX_DIM, INDEX_HEADS, INDEX_Q_ROWS
+from kernels.monokernel.reference import dequant_expert as _dequant_expert
+from kernels.monokernel.reference import golden_layer as _golden_attention
+from kernels.monokernel.weights import LayerWeights
 
 
 def _rand_fp8(rows, k, bk, gen, device, lead=()):

@@ -10,7 +10,7 @@ from contextlib import contextmanager
 
 import torch
 
-from kernels.common.fused_layer_config import EPS
+from kernels.monokernel.config import EPS
 
 
 def rmsnorm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:

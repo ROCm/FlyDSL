@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Validate and benchmark the single-launch Kimi-K3 TP8 KDA full layer."""
+"""Validate and benchmark the Kimi-K3 TP8 decode MonoKernel."""
 
 from __future__ import annotations
 
@@ -20,29 +20,29 @@ import torch.multiprocessing as mp
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from kernels.common.fused_layer_config import (  # noqa: E402
+from kernels.kimi_k3_monokernel.kda import KimiK3KdaAttention  # noqa: E402
+from kernels.kimi_k3_monokernel.kernel import monokernel_layout  # noqa: E402
+from kernels.kimi_k3_monokernel.op import KimiK3MonoKernel  # noqa: E402
+from kernels.kimi_k3_monokernel.staged import _KimiK3KdaStagedPath  # noqa: E402
+from kernels.kimi_k3_monokernel.torch_fusions import situ  # noqa: E402
+from kernels.monokernel.config import (  # noqa: E402
     EPS,
     KIMI_K3_CONFIG,
     MAX_LAYERS_PER_STEP,
     MoeMode,
 )
-from kernels.common.fused_layer_reference import (  # noqa: E402
-    LayerWeights,
+from kernels.monokernel.formats import (  # noqa: E402
+    dequantize_mxfp8,
+    quant_dequant_mxfp8,
+    quantize_mxfp8,
+)
+from kernels.monokernel.reference import (  # noqa: E402
     golden_kimi_k3_kda_attention,
     golden_kimi_k3_kda_layer,
     golden_kimi_k3_moe,
     make_weights,
 )
-from kernels.common.mx_formats import (  # noqa: E402
-    dequantize_mxfp8,
-    quant_dequant_mxfp8,
-    quantize_mxfp8,
-)
-from kernels.kimi_k3.full_layer import KimiK3KdaFullLayer  # noqa: E402
-from kernels.kimi_k3.full_layer_kernel import kda_full_layer_layout  # noqa: E402
-from kernels.kimi_k3.kda import KimiK3KdaAttention  # noqa: E402
-from kernels.kimi_k3.layer import KimiK3KdaMoeLayer  # noqa: E402
-from kernels.kimi_k3.torch_fusions import situ  # noqa: E402
+from kernels.monokernel.weights import LayerWeights  # noqa: E402
 
 
 def _allreduce_reference(value: torch.Tensor, world_size: int) -> torch.Tensor:
@@ -89,13 +89,7 @@ def _worker(rank: int, args, port: int, results) -> None:
         attention_family="kda",
     )
     if args.attention_only:
-        layer_type = KimiK3KdaAttention
-    elif args.staged:
-        layer_type = KimiK3KdaMoeLayer
-    else:
-        layer_type = KimiK3KdaFullLayer
-    if args.attention_only:
-        layer = layer_type(
+        layer = KimiK3KdaAttention(
             weights,
             args.samples,
             rank=rank,
@@ -104,8 +98,8 @@ def _worker(rank: int, args, port: int, results) -> None:
             reduce_group=reduce_group,
             reduce_backend=args.reduce_backend,
         )
-    else:
-        layer = layer_type(
+    elif args.staged:
+        layer = _KimiK3KdaStagedPath(
             weights,
             args.samples,
             layer_idx=args.layer_idx,
@@ -117,6 +111,16 @@ def _worker(rank: int, args, port: int, results) -> None:
             fuse_router=not args.eager_router,
             fuse_shared_experts=not args.eager_shared_experts,
             reduce_backend=args.reduce_backend,
+        )
+    else:
+        layer = KimiK3MonoKernel(
+            weights,
+            args.samples,
+            layer_idx=args.layer_idx,
+            rank=rank,
+            npes=args.npes,
+            group=dist.group.WORLD,
+            reduce_group=reduce_group,
         )
 
     generator = torch.Generator(device=device).manual_seed(args.seed + 99)
@@ -281,7 +285,7 @@ def _worker(rank: int, args, port: int, results) -> None:
                 projection_states=projection_states,
             )
             output_reference = (layer.updated_prefix.float() + moe_reference["moe_delta"].float()).to(torch.bfloat16)
-            if layer.attention.full_moe:
+            if layer.attention.fuse_moe:
                 shared_gu_reference = (projection_states.float() @ reference_weights.t["w_shared_ug"].float().T).to(
                     torch.bfloat16
                 )
@@ -292,13 +296,13 @@ def _worker(rank: int, args, port: int, results) -> None:
                 config.situ_beta,
                 config.situ_linear_beta,
             )
-            if layer.attention.full_moe:
-                scratch_layout = kda_full_layer_layout(
+            if layer.attention.fuse_moe:
+                scratch_layout = monokernel_layout(
                     args.samples,
                     fuse_attn_res=True,
-                    full_moe=True,
+                    fuse_moe=True,
                 )
-                scratch = layer.attention.full_layer_scratch
+                scratch = layer.attention.monokernel_scratch
 
                 def tagged_f32(name: str, count: int) -> torch.Tensor:
                     offset = scratch_layout[name]
@@ -388,7 +392,7 @@ def _worker(rank: int, args, port: int, results) -> None:
                 output_rel_l2=_relative_l2(output, output_reference),
             )
 
-    if args.profile and not args.attention_only and not layer.attention.full_moe:
+    if args.profile and not args.attention_only and not layer.attention.fuse_moe:
         blocks.copy_(blocks0)
         conv_state.copy_(conv_state0)
         recurrent_state.copy_(recurrent_state0)
@@ -405,9 +409,9 @@ def _worker(rank: int, args, port: int, results) -> None:
         }
     elif (
         args.profile
-        and (layer.full_layer_timeline if args.attention_only else layer.attention.full_layer_timeline) is not None
+        and (layer.monokernel_timeline if args.attention_only else layer.attention.monokernel_timeline) is not None
     ):
-        timeline = layer.full_layer_timeline if args.attention_only else layer.attention.full_layer_timeline
+        timeline = layer.monokernel_timeline if args.attention_only else layer.attention.monokernel_timeline
         labels = ["pre_and_input", "recurrence_wait", "output_projection"]
         if not args.attention_only:
             labels += [
@@ -557,6 +561,11 @@ def main() -> int:
     args = parser.parse_args()
     if args.layer_idx == 0 and not args.attention_only:
         parser.error("layer 0 uses the out-of-scope dense FFN; choose a KDA MoE layer")
+    if not args.staged and not args.attention_only:
+        if args.reduce_backend != "symmetric":
+            parser.error("the MonoKernel requires --reduce-backend symmetric")
+        if args.eager_attn_res or args.eager_router or args.eager_shared_experts:
+            parser.error("eager component switches apply only to --staged")
     if not args.check and not args.bench and not args.profile:
         args.check = True
     if not 1 <= args.layers <= MAX_LAYERS_PER_STEP:

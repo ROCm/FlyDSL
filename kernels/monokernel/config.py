@@ -264,7 +264,7 @@ def as_layer_config(value: LayerConfig | str) -> LayerConfig:
         raise ValueError(f"unsupported model profile {value!r}; expected one of: {choices}") from error
 
 
-# Backward-compatible GLM-5 aliases used by the performance-specialized kernel.
+# Fixed GLM-5 geometry used by its performance-specialized MonoKernel.
 HIDDEN = GLM5_CONFIG.hidden
 Q_LORA = GLM5_CONFIG.q_lora
 KV_LORA = GLM5_CONFIG.kv_lora

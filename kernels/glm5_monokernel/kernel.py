@@ -52,61 +52,6 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
 from kernels.common import buffer_ops as bo
-from kernels.common.fused_layer_config import (
-    EPS,
-    FP8_MAX,
-    HIDDEN,
-    INTER,
-    KV_LORA,
-    MOE_SLOTS,
-    N_EXPERTS,
-    NOPE_DIM,
-    PE_DIM,
-    Q_LORA,
-    ROUTE_SCALE,
-    SCALE_BM,
-    SHARED_EXPERT,
-    SOFTMAX_SCALE,
-    TOP_K,
-    V_DIM,
-)
-from kernels.common.fused_layer_layout import CM_DEV, CM_SYS, LAYER_SLOTS, NEG, POLL_MAX, THREADS, TL_COLS
-from kernels.common.fused_layer_ops import (
-    exp as _exp,
-)
-from kernels.common.fused_layer_ops import (
-    f8_word,
-)
-from kernels.common.fused_layer_ops import (
-    fp8_roundtrip as _fp8_roundtrip,
-)
-from kernels.common.fused_layer_ops import (
-    fp8_to_bf16x8 as _fp8_to_bf16x8,
-)
-from kernels.common.fused_layer_ops import (
-    mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
-)
-from kernels.common.fused_layer_ops import (
-    rcp as _rcp,
-)
-from kernels.common.fused_layer_ops import (
-    rsq as _rsq,
-)
-from kernels.common.fused_layer_ops import (
-    rsrc as _rsrc,
-)
-from kernels.common.fused_layer_ops import (
-    uniform as _uniform,
-)
-from kernels.common.fused_layer_ops import (
-    uniform_f32 as _uniform_f32,
-)
-from kernels.common.fused_layer_ops import (
-    xred as _xred,
-)
-from kernels.common.fused_layer_ops import (
-    xshfl as _xshfl,
-)
 from kernels.glm5_monokernel.layout import (
     BLOCKS,
     INDEX_DIM,
@@ -141,6 +86,61 @@ from kernels.glm5_monokernel.primitives import (
     spin_pause,
     wave_umax,
     write_lane_i32,
+)
+from kernels.monokernel.config import (
+    EPS,
+    FP8_MAX,
+    HIDDEN,
+    INTER,
+    KV_LORA,
+    MOE_SLOTS,
+    N_EXPERTS,
+    NOPE_DIM,
+    PE_DIM,
+    Q_LORA,
+    ROUTE_SCALE,
+    SCALE_BM,
+    SHARED_EXPERT,
+    SOFTMAX_SCALE,
+    TOP_K,
+    V_DIM,
+)
+from kernels.monokernel.layout import CM_DEV, CM_SYS, LAYER_SLOTS, NEG, POLL_MAX, THREADS, TL_COLS
+from kernels.monokernel.ops import (
+    exp as _exp,
+)
+from kernels.monokernel.ops import (
+    f8_word,
+)
+from kernels.monokernel.ops import (
+    fp8_roundtrip as _fp8_roundtrip,
+)
+from kernels.monokernel.ops import (
+    fp8_to_bf16x8 as _fp8_to_bf16x8,
+)
+from kernels.monokernel.ops import (
+    mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
+)
+from kernels.monokernel.ops import (
+    rcp as _rcp,
+)
+from kernels.monokernel.ops import (
+    rsq as _rsq,
+)
+from kernels.monokernel.ops import (
+    rsrc as _rsrc,
+)
+from kernels.monokernel.ops import (
+    uniform as _uniform,
+)
+from kernels.monokernel.ops import (
+    uniform_f32 as _uniform_f32,
+)
+from kernels.monokernel.ops import (
+    xred as _xred,
+)
+from kernels.monokernel.ops import (
+    xshfl as _xshfl,
 )
 
 

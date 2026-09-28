@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Correctness and graph-latency harness for the full Kimi-K3 TP8 layer."""
+"""Correctness and graph-latency harness for the staged Kimi-K3 MLA path."""
 
 from __future__ import annotations
 
@@ -19,23 +19,23 @@ import torch.multiprocessing as mp
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from kernels.common.fused_layer_config import (  # noqa: E402
+from kernels.kimi_k3_monokernel.staged import _KimiK3MlaPath  # noqa: E402
+from kernels.kimi_k3_monokernel.torch_fusions import situ  # noqa: E402
+from kernels.monokernel.config import (  # noqa: E402
     EPS,
     KIMI_K3_CONFIG,
     MAX_LAYERS_PER_STEP,
     KvCacheLayout,
     MoeMode,
 )
-from kernels.common.fused_layer_reference import (  # noqa: E402
-    LayerWeights,
+from kernels.monokernel.formats import dequantize_mxfp8, quant_dequant_mxfp8, quantize_mxfp8  # noqa: E402
+from kernels.monokernel.reference import (  # noqa: E402
     golden_kimi_k3_layer,
     golden_kimi_k3_moe,
     make_weights,
     rope_table,
 )
-from kernels.common.mx_formats import dequantize_mxfp8, quant_dequant_mxfp8, quantize_mxfp8  # noqa: E402
-from kernels.kimi_k3.layer import KimiK3MlaMoeLayer  # noqa: E402
-from kernels.kimi_k3.torch_fusions import situ  # noqa: E402
+from kernels.monokernel.weights import LayerWeights  # noqa: E402
 
 
 def _allreduce_reference(value: torch.Tensor, world_size: int) -> torch.Tensor:
@@ -69,7 +69,7 @@ def _worker(rank: int, args, port: int, results) -> None:
         attention_only=False,
         npes=args.npes,
     )
-    layer = KimiK3MlaMoeLayer(
+    layer = _KimiK3MlaPath(
         weights,
         args.samples,
         layer_idx=args.layer_idx,
@@ -353,7 +353,14 @@ def _worker(rank: int, args, port: int, results) -> None:
 
     results[rank] = result
     if rank == 0:
-        payload = {"model": "kimi_k3", "npes": args.npes, "samples": args.samples, **result}
+        payload = {
+            "model": "kimi_k3",
+            "attention_family": "mla",
+            "launch_mode": "staged",
+            "npes": args.npes,
+            "samples": args.samples,
+            **result,
+        }
         print(json.dumps(payload), flush=True)
         if args.output:
             output_path = Path(args.output)

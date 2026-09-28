@@ -13,8 +13,8 @@ from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
-from kernels.common.fused_layer_layout import CM_DEV, LAYER_SLOTS
-from kernels.common.fused_layer_ops import exp, rcp, rsrc, uniform, xshfl
+from kernels.monokernel.layout import CM_DEV, LAYER_SLOTS
+from kernels.monokernel.ops import exp, rcp, rsrc, uniform, xshfl
 
 _THREADS = 512
 _WAVE_SIZE = 64

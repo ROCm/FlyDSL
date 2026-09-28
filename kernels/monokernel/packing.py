@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import torch
 
-from kernels.common.fused_layer_config import (
+from kernels.monokernel.config import (
     GLM5_CONFIG,
     AttentionWeight,
     ExpertWeight,
@@ -148,9 +148,8 @@ def pack_layer_weights(
 ) -> dict[str, torch.Tensor]:
     """Pack weights for a model profile and the selected kernel storage contract.
 
-    The generic indexed kernel retains its native packing by default. The
-    optimized GLM-5 wrapper resolves and passes its ATOM-compatible MXFP4
-    layouts explicitly, so model geometry and physical storage stay separate.
+    Native layouts are the shared default. Model wrappers may select alternate
+    physical layouts explicitly without coupling them to model geometry.
     """
 
     config = as_layer_config(model_config)
