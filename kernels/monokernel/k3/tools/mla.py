@@ -19,8 +19,6 @@ import torch.multiprocessing as mp
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from kernels.kimi_k3_monokernel.staged import _KimiK3MlaPath  # noqa: E402
-from kernels.kimi_k3_monokernel.torch_fusions import situ  # noqa: E402
 from kernels.monokernel.config import (  # noqa: E402
     EPS,
     KIMI_K3_CONFIG,
@@ -29,6 +27,8 @@ from kernels.monokernel.config import (  # noqa: E402
     MoeMode,
 )
 from kernels.monokernel.formats import dequantize_mxfp8, quant_dequant_mxfp8, quantize_mxfp8  # noqa: E402
+from kernels.monokernel.k3.staged import _KimiK3MlaPath  # noqa: E402
+from kernels.monokernel.k3.torch_fusions import situ  # noqa: E402
 from kernels.monokernel.reference import (  # noqa: E402
     golden_kimi_k3_layer,
     golden_kimi_k3_moe,

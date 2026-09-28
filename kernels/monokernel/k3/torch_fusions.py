@@ -77,27 +77,6 @@ def compiled_attn_res_with_delta(
     return mixed, updated
 
 
-@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
-def compiled_shared_experts(
-    hidden_states: torch.Tensor,
-    up_gate_weight: torch.Tensor,
-    down_weight: torch.Tensor,
-    up_gate_out: torch.Tensor,
-    mid_out: torch.Tensor,
-    partial_out: torch.Tensor,
-    beta: float,
-    linear_beta: float,
-) -> None:
-    """Fuse a BF16 shared-expert up/gate, SiTU, and down path."""
-
-    up_gate = hidden_states @ up_gate_weight.t()
-    mid = situ(up_gate, beta, linear_beta)
-    partial = mid @ down_weight.t()
-    up_gate_out.copy_(up_gate)
-    mid_out.copy_(mid)
-    partial_out.copy_(partial)
-
-
 class CudaStageProfiler:
     """Optional median CUDA-event profiler for composed layer stages."""
 

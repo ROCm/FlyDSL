@@ -134,30 +134,6 @@ def as_kv_cache_layout(value: KvCacheLayout | str) -> KvCacheLayout:
     return _as_layout(value, KvCacheLayout, "KV-cache layout")
 
 
-def resolve_storage_layouts(
-    moe_mode: MoeMode | str,
-    mxfp4_weight_layout: Mxfp4WeightLayout | str | None = None,
-    mxfp4_scale_layout: Mxfp4ScaleLayout | str | None = None,
-    router_weight_layout: RouterWeightLayout | str | None = None,
-    kv_cache_layout: KvCacheLayout | str | None = None,
-) -> tuple[Mxfp4WeightLayout, Mxfp4ScaleLayout, RouterWeightLayout, KvCacheLayout]:
-    """Resolve storage defaults independently from model geometry."""
-
-    is_mxfp4 = moe_format(moe_mode).weight is ExpertWeight.MXFP4_BLOCK32
-    weight_default = Mxfp4WeightLayout.ATOM if is_mxfp4 else Mxfp4WeightLayout.NATIVE
-    scale_default = Mxfp4ScaleLayout.ATOM if is_mxfp4 else Mxfp4ScaleLayout.NATIVE
-    # ATOM keeps the unquantized router row-major, but direct row-major loads
-    # regress the A16W4 S=8 mono-kernel. Preserve the MFMA-native default.
-    router_default = RouterWeightLayout.NATIVE
-    cache_default = KvCacheLayout.ATOM if is_mxfp4 else KvCacheLayout.SPLIT
-    return (
-        weight_default if mxfp4_weight_layout is None else as_mxfp4_weight_layout(mxfp4_weight_layout),
-        scale_default if mxfp4_scale_layout is None else as_mxfp4_scale_layout(mxfp4_scale_layout),
-        router_default if router_weight_layout is None else as_router_weight_layout(router_weight_layout),
-        cache_default if kv_cache_layout is None else as_kv_cache_layout(kv_cache_layout),
-    )
-
-
 @dataclass(frozen=True)
 class LayerConfig:
     """Compile-time geometry and attention semantics for one TP decode shard."""

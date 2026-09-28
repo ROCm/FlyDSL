@@ -7,21 +7,21 @@ from __future__ import annotations
 
 import torch
 
-from kernels.kimi_k3_monokernel.gemm_a16w16 import gemm_a16w16
-from kernels.kimi_k3_monokernel.kda_recurrence import KimiK3KdaRecurrence
-from kernels.kimi_k3_monokernel.kernel import (
+from kernels.monokernel.config import KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP
+from kernels.monokernel.formats import quantize_mxfp8
+from kernels.monokernel.gemm_a16w16 import gemm_a16w16
+from kernels.monokernel.k3.kda_recurrence import KimiK3KdaRecurrence
+from kernels.monokernel.k3.kernel import (
     build_kimi_k3_monokernel,
     monokernel_scratch_nbytes,
 )
-from kernels.kimi_k3_monokernel.symmetric_allreduce import SymmetricBf16Allreduce
-from kernels.monokernel.config import KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP
-from kernels.monokernel.formats import quantize_mxfp8
 from kernels.monokernel.packing import (
     pack_bf16,
     pack_mxfp4,
     pack_mxfp8_scale,
     pack_mxfp8_weight,
 )
+from kernels.monokernel.symmetric_allreduce import SymmetricBf16Allreduce
 from kernels.monokernel.weights import LayerWeights
 
 _TP_SIZE = 8

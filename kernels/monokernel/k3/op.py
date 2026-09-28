@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import torch
 
-from kernels.kimi_k3_monokernel.staged import _KimiK3KdaStagedPath
+from kernels.monokernel.k3.staged import _KimiK3KdaStagedPath
 from kernels.monokernel.weights import LayerWeights
 
 

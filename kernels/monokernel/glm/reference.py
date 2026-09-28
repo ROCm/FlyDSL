@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import torch
 
-from kernels.glm5_monokernel.layout import INDEX_DIM, INDEX_HEADS, INDEX_Q_ROWS
 from kernels.monokernel.config import (
     FP8_MAX,
     HIDDEN,
@@ -26,6 +25,7 @@ from kernels.monokernel.config import (
     SHARED_EXPERT,
     ExpertWeight,
 )
+from kernels.monokernel.glm.layout import INDEX_DIM, INDEX_HEADS, INDEX_Q_ROWS
 from kernels.monokernel.reference import (
     bf,
     dequant,

@@ -9,16 +9,17 @@ from contextlib import contextmanager
 
 import torch
 
-from kernels.kimi_k3_monokernel.attn_res import KimiK3AttnRes
-from kernels.kimi_k3_monokernel.kda import KimiK3KdaAttention
-from kernels.kimi_k3_monokernel.mla import KimiK3MlaAttention
-from kernels.kimi_k3_monokernel.moe import kimi_k3_mxfp4_gemm1, kimi_k3_mxfp4_gemm2
-from kernels.kimi_k3_monokernel.mxfp8_linear import Mxfp8Linear
-from kernels.kimi_k3_monokernel.router import SigmoidTopkRouter
-from kernels.kimi_k3_monokernel.router_projection import FusedRouterProjection
-from kernels.kimi_k3_monokernel.symmetric_allreduce import SymmetricBf16Allreduce
-from kernels.kimi_k3_monokernel.tail import FusedKimiK3Tail
-from kernels.kimi_k3_monokernel.torch_fusions import (
+from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
+from kernels.monokernel.config import EPS, KIMI_K3_CONFIG, KvCacheLayout
+from kernels.monokernel.formats import quantize_mxfp8
+from kernels.monokernel.k3.attn_res import KimiK3AttnRes
+from kernels.monokernel.k3.kda import KimiK3KdaAttention
+from kernels.monokernel.k3.mla import KimiK3MlaAttention
+from kernels.monokernel.k3.moe import kimi_k3_mxfp4_gemm1, kimi_k3_mxfp4_gemm2
+from kernels.monokernel.k3.router import SigmoidTopkRouter
+from kernels.monokernel.k3.router_projection import FusedRouterProjection
+from kernels.monokernel.k3.tail import FusedKimiK3Tail
+from kernels.monokernel.k3.torch_fusions import (
     CudaStageProfiler,
     compiled_attn_res_no_delta,
     compiled_attn_res_with_delta,
@@ -27,9 +28,7 @@ from kernels.kimi_k3_monokernel.torch_fusions import (
     rmsnorm,
     situ,
 )
-from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
-from kernels.monokernel.config import EPS, KIMI_K3_CONFIG, KvCacheLayout
-from kernels.monokernel.formats import quantize_mxfp8
+from kernels.monokernel.mxfp8_linear import Mxfp8Linear
 from kernels.monokernel.packing import (
     pack_a16w4_scale,
     pack_a16w4_weight,
@@ -37,6 +36,7 @@ from kernels.monokernel.packing import (
     pack_mxfp8_scale,
     pack_mxfp8_weight,
 )
+from kernels.monokernel.symmetric_allreduce import SymmetricBf16Allreduce
 from kernels.monokernel.weights import LayerWeights
 
 _TP_SIZE = 8

@@ -11,12 +11,12 @@ Run correctness checks and graph-replay benchmarks from a configured FlyDSL
 environment at the repository root:
 
 ```bash
-python -m kernels.kimi_k3_monokernel.tools.monokernel --samples 4 --layer-idx 1 --check
-python -m kernels.kimi_k3_monokernel.tools.monokernel \
+python -m kernels.monokernel.k3.tools.monokernel --samples 4 --layer-idx 1 --check
+python -m kernels.monokernel.k3.tools.monokernel \
   --samples 4 --layer-idx 1 --bench --layers 16 --repeats 30
-python -m kernels.kimi_k3_monokernel.tools.monokernel \
+python -m kernels.monokernel.k3.tools.monokernel \
   --staged --samples 4 --layer-idx 1 --bench --layers 16 --repeats 30
-python -m kernels.kimi_k3_monokernel.tools.monokernel \
+python -m kernels.monokernel.k3.tools.monokernel \
   --mtp --samples 8 --layer-idx 1 --check --bench --layers 16 --repeats 30
 ```
 
@@ -33,10 +33,12 @@ At S=8 it uses nine launches because the three-stage KDA attention path is
 faster than its one-launch attention specialization. The complete MonoKernel
 path always uses one application launch.
 
-True MTP is also part of that single application launch. Its KDA schedule
-uses a causal convolution publication chain followed by two disjoint 64-row
-recurrent-state chains, with device-scope state traffic between dependent
-CTAs.
+True MTP is also part of that single application launch. Its tuned KDA schedule
+uses a causal convolution publication chain followed by four 32-row recurrent
+state splits. Each recurrent CTA advances two consecutive tokens, keeps its
+state fragment resident across the pair, and publishes both intermediate and
+final snapshots with device-scope ordering. Grouped norm CTAs consume the FP32
+recurrence result and produce the packed BF16 projection input.
 
 Use `--profile` for timing, `--attention-only` to isolate KDA, and `--staged`
 for the fastest retained multi-launch path. `--dump-ir-dir DIR` emits one

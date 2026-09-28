@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from kernels.glm5_monokernel.op import Glm5MonoKernel
+    from kernels.monokernel.glm.op import Glm5MonoKernel
     from kernels.monokernel.weights import LayerWeights
 
 __all__ = ["Glm5MonoKernel", "LayerWeights"]
@@ -18,7 +18,7 @@ def __getattr__(name: str):
     """Load GPU wrappers only when callers request them."""
 
     if name == "Glm5MonoKernel":
-        from kernels.glm5_monokernel.op import Glm5MonoKernel
+        from kernels.monokernel.glm.op import Glm5MonoKernel
 
         return Glm5MonoKernel
     if name == "LayerWeights":

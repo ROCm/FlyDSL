@@ -29,9 +29,9 @@ _ARCH = str(get_rocm_arch() or "")
 if _ARCH != "gfx950":
     pytest.skip(f"GLM-5 MonoKernel requires gfx950, got {_ARCH}", allow_module_level=True)
 
-from kernels.glm5_monokernel.layout import INDEX_DIM  # noqa: E402
-from kernels.glm5_monokernel.reference import golden_layer, golden_moe, indexer_golden, make_weights  # noqa: E402
 from kernels.monokernel.config import KV_LORA, PE_DIM  # noqa: E402
+from kernels.monokernel.glm.layout import INDEX_DIM  # noqa: E402
+from kernels.monokernel.glm.reference import golden_layer, golden_moe, indexer_golden, make_weights  # noqa: E402
 from kernels.monokernel.reference import rope, rope_table  # noqa: E402
 
 MAX_SEQ = 4096
@@ -80,7 +80,7 @@ def _check(name, got, ref, report):
 
 
 def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, with_indexer=False, expert_mxfp4=False):
-    from kernels.glm5_monokernel import Glm5MonoKernel
+    from kernels.monokernel.glm import Glm5MonoKernel
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
@@ -189,7 +189,7 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, with_indexer=
 
 def bench_rank(rank, npes, S, cur_pos, iters=320, group=None, seed=1234, with_indexer=False, expert_mxfp4=False):
     """HIP-graph replay of ``GLM5_LAUNCHES_PER_STEP`` layers; returns us per layer."""
-    from kernels.glm5_monokernel import Glm5MonoKernel
+    from kernels.monokernel.glm import Glm5MonoKernel
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)

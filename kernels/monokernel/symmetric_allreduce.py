@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Kimi-K3 graph-safe BF16 all-reduce using tagged symmetric peer mailboxes."""
+"""Graph-safe BF16 all-reduce using tagged symmetric peer mailboxes."""
 
 import torch
 

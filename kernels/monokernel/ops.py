@@ -12,6 +12,20 @@ from flydsl.expr.typing import T, as_ir_value
 from kernels.common import buffer_ops as bo
 from kernels.common.dpp_utils import update_dpp_i32
 
+_UMAX_DPP_ASM = "\n".join(
+    [
+        "s_nop 1\nv_max_u32_dpp $0, $0, $0 " + control
+        for control in (
+            "row_shr:1 bound_ctrl:0",
+            "row_shr:2 bound_ctrl:0",
+            "row_shr:4 bound_ctrl:0",
+            "row_shr:8 bound_ctrl:0",
+            "row_bcast:15 row_mask:0xa",
+            "row_bcast:31 row_mask:0xc",
+        )
+    ]
+)
+
 
 def rsrc(addr):
     return bo.create_buffer_resource_from_addr(addr)
@@ -23,6 +37,44 @@ def uniform(value):
 
 def uniform_f32(value):
     return uniform(fx.Float32(value).bitcast(fx.Int32)).bitcast(fx.Float32)
+
+
+def spin_pause() -> None:
+    """Keep tagged-mailbox polling loads inside the retry loop."""
+
+    llvm.InlineAsmOp(None, [], "s_nop 0", "", has_side_effects=True)
+
+
+def read_lane_i32(value, lane):
+    """Read one i32 from ``lane`` while keeping IR conversion local."""
+
+    return fx.Int32(rocdl.readlane(T.i32, fx.Int32(value), fx.Int32(lane)))
+
+
+def write_lane_i32(value, lane, vector):
+    """Write one i32 into ``lane`` of a wave-distributed value."""
+
+    return fx.Int32(
+        llvm.call_intrinsic(
+            T.i32,
+            "llvm.amdgcn.writelane.i32",
+            [as_ir_value(fx.Int32(item)) for item in (value, lane, vector)],
+            [],
+            [],
+        )
+    )
+
+
+def bpermute_i32(byte_offset, value):
+    """Read an i32 VGPR value from the lane selected by a byte offset."""
+
+    return fx.Int32(rocdl.ds_bpermute(T.i32, fx.Int32(byte_offset), fx.Int32(value)))
+
+
+def mem_realtime():
+    """Read the device-wide 64-bit realtime counter."""
+
+    return fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
 
 
 def _hardware_f32(name, value):
@@ -63,6 +115,13 @@ def xshfl(value, offset):
 
 def wave_umax(value):
     return fx.Int32(fx.coop.warp_reduce(fx.Uint32(value), fx.ReductionOp.MAX, width=64))
+
+
+def wave_umax_dpp(value):
+    """Return a wave maximum through the tuned GLM/TileRT DPP schedule."""
+
+    result = llvm.InlineAsmOp(T.i32, [as_ir_value(fx.Int32(value))], _UMAX_DPP_ASM, "=v,0").result
+    return read_lane_i32(result, 63)
 
 
 def xred(value, offset, op):

@@ -131,11 +131,6 @@ def pack_a16w4_scale(scale: torch.Tensor) -> torch.Tensor:
     return packed.permute(0, 3, 5, 2, 4, 1).contiguous().view(-1)
 
 
-# Compatibility names used by the GLM-5 ATOM-layout experiments.
-pack_mxfp4_atom = pack_a16w4_weight
-pack_mxfp4_scale_atom = pack_a16w4_scale
-
-
 def pack_layer_weights(
     tensors: dict[str, torch.Tensor],
     moe_mode: MoeMode | str = MoeMode.W8A8,

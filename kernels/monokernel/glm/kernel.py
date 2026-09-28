@@ -52,7 +52,25 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
 from kernels.common import buffer_ops as bo
-from kernels.glm5_monokernel.layout import (
+from kernels.monokernel.config import (
+    EPS,
+    FP8_MAX,
+    HIDDEN,
+    INTER,
+    KV_LORA,
+    MOE_SLOTS,
+    N_EXPERTS,
+    NOPE_DIM,
+    PE_DIM,
+    Q_LORA,
+    ROUTE_SCALE,
+    SCALE_BM,
+    SHARED_EXPERT,
+    SOFTMAX_SCALE,
+    TOP_K,
+    V_DIM,
+)
+from kernels.monokernel.glm.layout import (
     BLOCKS,
     INDEX_DIM,
     INDEX_HEADS,
@@ -79,38 +97,18 @@ from kernels.glm5_monokernel.layout import (
     stage_tasks,
     ug_split,
 )
-from kernels.glm5_monokernel.primitives import (
+from kernels.monokernel.layout import CM_DEV, CM_SYS, LAYER_SLOTS, NEG, POLL_MAX, THREADS, TL_COLS
+from kernels.monokernel.ops import (
     bpermute_i32,
+    f8_word,
     mem_realtime,
     read_lane_i32,
     spin_pause,
-    wave_umax,
+    wave_umax_dpp,
     write_lane_i32,
 )
-from kernels.monokernel.config import (
-    EPS,
-    FP8_MAX,
-    HIDDEN,
-    INTER,
-    KV_LORA,
-    MOE_SLOTS,
-    N_EXPERTS,
-    NOPE_DIM,
-    PE_DIM,
-    Q_LORA,
-    ROUTE_SCALE,
-    SCALE_BM,
-    SHARED_EXPERT,
-    SOFTMAX_SCALE,
-    TOP_K,
-    V_DIM,
-)
-from kernels.monokernel.layout import CM_DEV, CM_SYS, LAYER_SLOTS, NEG, POLL_MAX, THREADS, TL_COLS
 from kernels.monokernel.ops import (
     exp as _exp,
-)
-from kernels.monokernel.ops import (
-    f8_word,
 )
 from kernels.monokernel.ops import (
     fp8_roundtrip as _fp8_roundtrip,
@@ -200,8 +198,9 @@ def build_glm5_monokernel(
     RED_WORDS = WAVES * 64 * 4
     LDS_KEYS = max(264 if with_indexer else 0, SPLIT_KEYS, S * MOE_SLOTS)
 
-    # One phase-overlaid arena replaces the old sum-of-fields allocation.  The
-    # largest X users are the four-sample input projection, all-sample MoE FP8
+    # TileRT lineage: use one phase-overlaid arena instead of summing every
+    # stage's LDS requirement.  The Kimi kernel reuses this same fusion pattern.
+    # The largest X users are the four-sample input projection, all-sample MoE FP8
     # activations, and sparse attention.  Metadata, reductions, and outputs live
     # after that common X region because they are simultaneously live in GEMVs.
     SPLIT_X_WORDS = PT_OFF + SPLIT_KEYS * PS
@@ -342,6 +341,8 @@ def build_glm5_monokernel(
             return (fx.Int64(_uniform(pv[1])) << 32) | fx.Int64(fx.Uint32(_uniform(pv[0])))
 
         # ---- tagged-pair mailboxes
+        # TileRT lineage: payload + launch epoch is the progress protocol for
+        # resident CTAs; the helpers below are the FlyDSL/ROCm adaptation.
         def mb(name):
             return scratch + fx.Int64(SC[name])
 
@@ -763,7 +764,7 @@ def build_glm5_monokernel(
             ks = [fx.Int32(k) for k in ks] + [fx.Int32(0)]
             mv = fx.Int32(0)  # lane k: the key of pick k
             for k in range_constexpr(TOP_K):
-                m = wave_umax(ks[0])
+                m = wave_umax_dpp(ks[0])
                 hit = ks[0] == m
                 ks = [hit.select(ks[i + 1], ks[i]) for i in range(4)] + [ks[4]]
                 mv = write_lane_i32(m, k, mv)

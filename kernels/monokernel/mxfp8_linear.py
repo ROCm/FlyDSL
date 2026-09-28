@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Kimi-K3 small-batch MXFP8 linear projection."""
+"""Reusable small-batch MXFP8 quantization and linear projection kernels."""
 
 import functools
 

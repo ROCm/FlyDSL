@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+"""Reusable gfx950 A16W16 GEMM with an optional tagged all-reduce epilogue."""
+
 import functools
 from dataclasses import dataclass
 from typing import Any, Optional

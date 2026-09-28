@@ -47,7 +47,7 @@ def _run_tp8_tool(tool: str, *args: str) -> dict:
 @pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
 def test_kimi_k3_monokernel_mla_baseline_tp8() -> None:
     result = _run_tp8_tool(
-        "kernels/kimi_k3_monokernel/tools/mla.py",
+        "kernels/monokernel/k3/tools/mla.py",
         "--samples",
         "1",
         "--layer-idx",
@@ -70,7 +70,7 @@ def test_kimi_k3_monokernel_mla_baseline_tp8() -> None:
 def test_kimi_k3_kda_attention_tp8(samples: int, negative_slot: bool) -> None:
     extra_args = ("--negative-slot",) if negative_slot else ()
     result = _run_tp8_tool(
-        "kernels/kimi_k3_monokernel/tools/monokernel.py",
+        "kernels/monokernel/k3/tools/monokernel.py",
         "--samples",
         str(samples),
         "--layer-idx",
@@ -99,7 +99,7 @@ def test_kimi_k3_kda_attention_tp8(samples: int, negative_slot: bool) -> None:
 @pytest.mark.parametrize(("samples", "layer_idx"), ((1, 1), (1, 12), (8, 1)))
 def test_kimi_k3_monokernel_kda_tp8(samples: int, layer_idx: int) -> None:
     result = _run_tp8_tool(
-        "kernels/kimi_k3_monokernel/tools/monokernel.py",
+        "kernels/monokernel/k3/tools/monokernel.py",
         "--samples",
         str(samples),
         "--layer-idx",
@@ -119,7 +119,7 @@ def test_kimi_k3_monokernel_kda_tp8(samples: int, layer_idx: int) -> None:
 @pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
 def test_kimi_k3_monokernel_staged_baseline_tp8() -> None:
     result = _run_tp8_tool(
-        "kernels/kimi_k3_monokernel/tools/monokernel.py",
+        "kernels/monokernel/k3/tools/monokernel.py",
         "--staged",
         "--samples",
         "8",
@@ -139,7 +139,7 @@ def test_kimi_k3_monokernel_staged_baseline_tp8() -> None:
 @pytest.mark.parametrize("samples", (4, 8))
 def test_kimi_k3_monokernel_mtp_tp8(samples: int) -> None:
     result = _run_tp8_tool(
-        "kernels/kimi_k3_monokernel/tools/monokernel.py",
+        "kernels/monokernel/k3/tools/monokernel.py",
         "--samples",
         str(samples),
         "--layer-idx",

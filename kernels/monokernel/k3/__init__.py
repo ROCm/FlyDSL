@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from kernels.kimi_k3_monokernel.op import KimiK3MonoKernel
+    from kernels.monokernel.k3.op import KimiK3MonoKernel
     from kernels.monokernel.weights import LayerWeights
 
 __all__ = ["KimiK3MonoKernel", "LayerWeights"]
@@ -18,7 +18,7 @@ def __getattr__(name: str):
     """Load GPU wrappers only when callers request them."""
 
     if name == "KimiK3MonoKernel":
-        from kernels.kimi_k3_monokernel.op import KimiK3MonoKernel
+        from kernels.monokernel.k3.op import KimiK3MonoKernel
 
         return KimiK3MonoKernel
     if name == "LayerWeights":

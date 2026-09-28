@@ -7,6 +7,13 @@ One cooperative launch performs both AttnRes mixers, KDA, router and latent/shar
 projections, MXFP4 experts, both TP8 reductions, and the final residual update.
 Intermediate values use launch-tagged scratch mailboxes so dependent CTAs can
 make progress without a grid barrier.
+
+The resident-grid schedule, tagged-pair mailbox protocol, and phase-overlaid
+shared-memory arena follow the TileRT/GLM MonoKernel design documented at
+``kernels/monokernel/glm/kernel.py`` and its upstream reference:
+https://github.com/SemiAnalysisAI/InferenceX/tree/8ac98344b038a3f2da20a565fe9b974772a67ef9
+The ordered KDA snapshot pipeline and its state-resident MTP recurrence are
+Kimi-K3-specific extensions.
 """
 
 import functools
@@ -99,6 +106,7 @@ def monokernel_layout(
         "mxfp8_scale": 0,
         "input": 0,
         "norm": 0,
+        "norm_packed": 0,
         "attention": 0,
     }
     offset = 0
@@ -117,7 +125,12 @@ def monokernel_layout(
     offsets["input"] = offset
     offset += samples * _FUSED_PAD * 4
     offsets["norm"] = offset
-    offset += samples * _PROJECTION * 2
+    offset += samples * _PROJECTION * (4 if mtp else 2)
+    if mtp:
+        offsets["norm_packed"] = offset
+        offset += samples * _PROJECTION * 2
+    else:
+        offsets["norm_packed"] = offsets["norm"]
     offsets["norm_ready"] = offset
     offset += samples * _HEADS * 8
     if fuse_attn_res:
@@ -148,14 +161,15 @@ def monokernel_layout(
             offsets[name] = offset
             offset += size
     if mtp:
+        mtp_splits = 4
         offsets["mtp_qkvg"] = offset
         offset += samples * 4 * _PROJECTION * 2
         offsets["mtp_conv_ready"] = offset
         offset += samples * _HEADS * 8
         offsets["mtp_state_ready"] = offset
-        offset += samples * _HEADS * _MTP_SPLITS * 8
+        offset += samples * _HEADS * mtp_splits * 8
         offsets["mtp_norm_ready"] = offset
-        offset += samples * _HEADS * _MTP_SPLITS * 8
+        offset += samples * _HEADS * 8
     offsets["_bytes"] = offset
     return offsets
 
@@ -204,7 +218,7 @@ def build_kimi_k3_monokernel(
         raise ValueError("the pre-attention block write must append at attn_res_blocks")
     latent_projection_waves = 3 if samples <= 4 else 4
     shared_projection_waves = 3 if samples <= 4 else 6
-    mtp_splits = _MTP_SPLITS
+    mtp_splits = 4 if mtp else _MTP_SPLITS
     mtp_rows_per_split = _HEAD_DIM // mtp_splits
     mtp_v_lanes = mtp_rows_per_split // _WAVES
     mtp_k_lanes = _WAVE_SIZE // mtp_v_lanes
@@ -212,6 +226,8 @@ def build_kimi_k3_monokernel(
     mtp_k_iters = _HEAD_DIM // mtp_k_tile
     staged_samples = min(samples, 4)
     sample_groups = (samples + staged_samples - 1) // staged_samples
+    output_staged_samples = min(staged_samples, 2) if mtp and samples <= 4 else staged_samples
+    output_sample_groups = (samples + output_staged_samples - 1) // output_staged_samples
     input_row_groups = 2 if samples <= 4 else _INPUT_ROW_GROUPS
     input_split_waves = _WAVES // input_row_groups
     input_row_tile = input_row_groups * 16
@@ -223,7 +239,8 @@ def build_kimi_k3_monokernel(
     moe_ready_offset = moe_mailbox_offset + samples * _HIDDEN * 2 if fuse_attn_res else 0
     input_mailbox_offset = moe_ready_offset + samples * _ATTN_RES_CTAS * 8 if fuse_attn_res else 0
     norm_mailbox_offset = input_mailbox_offset + samples * _FUSED_PAD * 4
-    norm_ready_offset = norm_mailbox_offset + samples * _PROJECTION * 2
+    norm_packed_offset = norm_mailbox_offset + samples * _PROJECTION * (4 if mtp else 2)
+    norm_ready_offset = norm_packed_offset + (samples * _PROJECTION * 2 if mtp else 0)
     attention_mailbox_offset = norm_ready_offset + samples * _HEADS * 8
     pre_stats_offset = attention_mailbox_offset + samples * _HIDDEN * 4
     post_stats_offset = pre_stats_offset + samples * _ATTN_RES_CTAS * _ATTN_RES_STATS * 8
@@ -242,32 +259,43 @@ def build_kimi_k3_monokernel(
     routed_offset = expert_mid_ready_offset + samples * _TOP_K * (_INTER // 16) * 8
     routed_stats_offset = routed_offset + samples * _ROUTED_HIDDEN * 2
     routed_inv_offset = routed_stats_offset + samples * (_ROUTED_HIDDEN // 16) * 8
-    mtp_base = monokernel_layout(
+    layout = monokernel_layout(
         samples,
         fuse_attn_res=fuse_attn_res,
         fuse_moe=fuse_moe,
-    )["_bytes"]
-    mtp_qkvg_offset = mtp_base
-    mtp_conv_ready_offset = mtp_qkvg_offset + samples * 4 * _PROJECTION * 2
-    mtp_state_ready_offset = mtp_conv_ready_offset + samples * _HEADS * 8
-    mtp_norm_ready_offset = mtp_state_ready_offset + samples * _HEADS * mtp_splits * 8
+        mtp=mtp,
+    )
+    mtp_qkvg_offset = layout.get("mtp_qkvg", 0)
+    mtp_conv_ready_offset = layout.get("mtp_conv_ready", 0)
+    mtp_state_ready_offset = layout.get("mtp_state_ready", 0)
+    mtp_norm_ready_offset = layout.get("mtp_norm_ready", 0)
     max_pairs = samples * _HIDDEN // 2
     slot_bytes = npes * max_pairs * 8
 
-    out_pairs = staged_samples * _OUTPUT_ROW_TILE // 2
+    # The S=8 kernel benefits from the TileRT/GLM-style phase overlay below.
+    # At S<=4, retaining dedicated stage-local views preserves the faster LDS
+    # bank/address placement even though it uses slightly more shared memory.
+    if samples <= 4:
 
-    @fx.struct
-    class SharedStorage:
-        x: fx.Array[fx.Float32, staged_samples * _HIDDEN // 2, 16]
-        reduction: fx.Array[fx.Float32, _WAVES * _WAVE_SIZE * 4, 16]
-        output: fx.Array[fx.Float32, out_pairs, 16]
-        query: fx.Array[fx.BFloat16, _HEAD_DIM, 16]
-        key: fx.Array[fx.BFloat16, _HEAD_DIM, 16]
-        value: fx.Array[fx.BFloat16, _HEAD_DIM, 16]
-        gate: fx.Array[fx.BFloat16, _HEAD_DIM, 16]
-        f_a: fx.Array[fx.BFloat16, _HEAD_DIM, 16]
-        norm_sums: fx.Array[fx.Float32, 2 * _WAVES, 16]
-        attn_values: fx.Array[fx.Float32, 16, 16]
+        @fx.struct
+        class SharedStorage:
+            x: fx.Array[fx.Float32, staged_samples * _HIDDEN // 2, 16]
+            reduction: fx.Array[fx.Float32, _WAVES * _WAVE_SIZE * 4, 16]
+            output: fx.Array[fx.Float32, staged_samples * _OUTPUT_ROW_TILE // 2, 16]
+            query: fx.Array[fx.BFloat16, _HEAD_DIM, 16]
+            key: fx.Array[fx.BFloat16, _HEAD_DIM, 16]
+            value: fx.Array[fx.BFloat16, _HEAD_DIM, 16]
+            gate: fx.Array[fx.BFloat16, _HEAD_DIM, 16]
+            f_a: fx.Array[fx.BFloat16, _HEAD_DIM, 16]
+            norm_sums: fx.Array[fx.Float32, 2 * _WAVES, 16]
+            attn_values: fx.Array[fx.Float32, 16, 16]
+
+    else:
+
+        @fx.struct
+        class SharedStorage:
+            x: fx.Array[fx.Float32, staged_samples * _HIDDEN // 2, 16]
+            reduction: fx.Array[fx.Float32, _WAVES * _WAVE_SIZE * 4, 16]
 
     @flyc.kernel(known_block_size=[_THREADS, 1, 1])
     def kimi_k3_monokernel(
@@ -330,14 +358,28 @@ def build_kimi_k3_monokernel(
         storage = fx.SharedAllocator().allocate(SharedStorage).peek()
         x = storage.x.ptr
         reduction = storage.reduction.ptr
-        output_values = storage.output.ptr
-        shared_query = storage.query.ptr
-        shared_key = storage.key.ptr
-        shared_value = storage.value.ptr
-        shared_gate = storage.gate.ptr
-        shared_f_a = storage.f_a.ptr
-        norm_sums = storage.norm_sums.ptr
-        attn_values = storage.attn_values.ptr
+        if const_expr(samples <= 4):
+            output_values = storage.output.ptr
+            shared_query = storage.query.ptr
+            shared_key = storage.key.ptr
+            shared_value = storage.value.ptr
+            shared_gate = storage.gate.ptr
+            shared_f_a = storage.f_a.ptr
+            norm_sums = storage.norm_sums.ptr
+            attn_values = storage.attn_values.ptr
+        else:
+            # TileRT/GLM-style phase overlay: these small stage-local views reuse
+            # the activation arena, while the MFMA reduction arena stays disjoint
+            # because its consumers can still have activation loads in flight.
+            output_values = x
+            shared_bf16 = fx.recast_iter(fx.BFloat16, x)
+            shared_query = shared_bf16
+            shared_key = shared_bf16 + _HEAD_DIM
+            shared_value = shared_bf16 + 2 * _HEAD_DIM
+            shared_gate = shared_bf16 + 3 * _HEAD_DIM
+            shared_f_a = shared_bf16 + 4 * _HEAD_DIM
+            norm_sums = x + (5 * _HEAD_DIM * 2) // 4
+            attn_values = norm_sums + 2 * _WAVES
 
         hidden_rsrc = rsrc(hidden_states)
         blocks_rsrc = rsrc(block_residual)
@@ -352,6 +394,7 @@ def build_kimi_k3_monokernel(
         output_rsrc = rsrc(output)
         input_mailbox_rsrc = rsrc(scratch + fx.Int64(input_mailbox_offset))
         norm_mailbox_rsrc = rsrc(scratch + fx.Int64(norm_mailbox_offset))
+        norm_packed_rsrc = rsrc(scratch + fx.Int64(norm_packed_offset))
         norm_ready_rsrc = rsrc(scratch + fx.Int64(norm_ready_offset))
         mtp_qkvg_rsrc = rsrc(scratch + fx.Int64(mtp_qkvg_offset))
         mtp_conv_ready_rsrc = rsrc(scratch + fx.Int64(mtp_conv_ready_offset))
@@ -1073,17 +1116,16 @@ def build_kimi_k3_monokernel(
                     lds_store(x, word, packed.bitcast(fx.Float32))
 
         def stage_norm(sample_base, sample_count):
-            ready_splits = mtp_splits if mtp else 1
-            ready_count = sample_count * _HEADS * ready_splits
+            ready_count = sample_count * _HEADS
             for ready_round in range_constexpr((ready_count + _THREADS - 1) // _THREADS):
                 ready = tid + ready_round * _THREADS
                 if ready < ready_count:
                     if const_expr(mtp):
-                        local_sample = ready // (_HEADS * mtp_splits)
-                        item = ready % (_HEADS * mtp_splits)
+                        local_sample = ready // _HEADS
+                        head = ready % _HEADS
                         load_i32(
                             mtp_norm_ready_rsrc,
-                            (sample_base + local_sample) * _HEADS * mtp_splits + item,
+                            (sample_base + local_sample) * _HEADS + head,
                         )
                     else:
                         local_sample = ready // _HEADS
@@ -1100,7 +1142,10 @@ def build_kimi_k3_monokernel(
                     local_sample = pair // (_PROJECTION // 2)
                     pair_in_sample = pair % (_PROJECTION // 2)
                     global_pair = (sample_base + local_sample) * (_PROJECTION // 2) + pair_in_sample
-                    packed = load_raw_pair(norm_mailbox_rsrc, global_pair)
+                    if const_expr(mtp):
+                        packed = load_raw_pair(norm_packed_rsrc, global_pair)
+                    else:
+                        packed = load_raw_pair(norm_mailbox_rsrc, global_pair)
                     lds_store(x, pair, packed.bitcast(fx.Float32))
 
         def bf16_mfma(
@@ -1607,12 +1652,41 @@ def build_kimi_k3_monokernel(
             )
             input_task = input_task + _BLOCKS
 
-        def prepare_kda_head(sample, head, conv_state_rsrc, conv_state_out_rsrc):
+        def prepare_kda_gate(sample, head):
             if tid < _HEAD_DIM:
                 f_a_value = get_input(sample, 4 * _PROJECTION + _HEADS + tid)
                 fx.ptr_store(f_a_value.to(fx.BFloat16), shared_f_a + tid)
             gpu.barrier()
 
+            if tid < 4 * _HEAD_DIM:
+                gate_row = tid // 4
+                gate_split = tid % 4
+                gate_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                for feature_group in range_constexpr(0, _HEAD_DIM, 4 * _VALUES_PER_THREAD):
+                    feature_base = feature_group + gate_split * _VALUES_PER_THREAD
+                    features = fx.Vector(
+                        fx.ptr_load(
+                            shared_f_a + feature_base,
+                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
+                        )
+                    ).to(fx.Float32)
+                    weights = fx.Vector(
+                        bo.buffer_load(
+                            gate_weight_rsrc,
+                            (head * _HEAD_DIM + gate_row) * _HEAD_DIM + feature_base,
+                            vec_width=_VALUES_PER_THREAD,
+                            dtype=T.bf16,
+                        )
+                    ).to(fx.Float32)
+                    gate_parts = fx.math.fma(features, weights, gate_parts)
+                gate_value = gate_parts.reduce(fx.ReductionOp.ADD)
+                for offset in (2, 1):
+                    gate_value = gate_value + xshfl(gate_value, offset)
+                if gate_split == 0:
+                    fx.ptr_store(gate_value.to(fx.BFloat16), shared_gate + gate_row)
+            gpu.barrier()
+
+        def prepare_kda_conv(sample, head, conv_state_rsrc, conv_state_out_rsrc):
             def convolve(channel):
                 state_base = channel * _CONV_STATE_LENGTH
                 state0 = fx.BFloat16(
@@ -1680,34 +1754,6 @@ def build_kimi_k3_monokernel(
                 fx.ptr_store(convolve(channel), shared_value + channel_in_head)
             gpu.barrier()
 
-            if tid < 4 * _HEAD_DIM:
-                gate_row = tid // 4
-                gate_split = tid % 4
-                gate_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
-                for feature_group in range_constexpr(0, _HEAD_DIM, 4 * _VALUES_PER_THREAD):
-                    feature_base = feature_group + gate_split * _VALUES_PER_THREAD
-                    features = fx.Vector(
-                        fx.ptr_load(
-                            shared_f_a + feature_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
-                    ).to(fx.Float32)
-                    weights = fx.Vector(
-                        bo.buffer_load(
-                            gate_weight_rsrc,
-                            (head * _HEAD_DIM + gate_row) * _HEAD_DIM + feature_base,
-                            vec_width=_VALUES_PER_THREAD,
-                            dtype=T.bf16,
-                        )
-                    ).to(fx.Float32)
-                    gate_parts = fx.math.fma(features, weights, gate_parts)
-                gate_value = gate_parts.reduce(fx.ReductionOp.ADD)
-                for offset in (2, 1):
-                    gate_value = gate_value + xshfl(gate_value, offset)
-                if gate_split == 0:
-                    fx.ptr_store(gate_value.to(fx.BFloat16), shared_gate + gate_row)
-            gpu.barrier()
-
         # Stage 2a: ordinary decode uses one CTA per independent (sample, head).
         # Ordered MTP recurrence is handled by the pipeline below.
         recurrence_task = bid
@@ -1726,7 +1772,8 @@ def build_kimi_k3_monokernel(
             conv_state_out_rsrc = conv_state_rsrc
 
             if (input_slot >= 0) & (output_slot >= 0):
-                prepare_kda_head(sample, head, conv_state_rsrc, conv_state_out_rsrc)
+                prepare_kda_gate(sample, head)
+                prepare_kda_conv(sample, head, conv_state_rsrc, conv_state_out_rsrc)
 
                 k_lane = lane % _K_LANES
                 v_lane = lane // _K_LANES
@@ -1908,11 +1955,9 @@ def build_kimi_k3_monokernel(
             if tid == 0:
                 store_i32(norm_ready_rsrc, sample * _HEADS + head, 1)
 
-        # True MTP uses a two-stage KDA pipeline.  The causal-convolution stage
-        # walks the token chain once per head and publishes q/k/v/f_b.  Two
-        # recurrence CTAs then own disjoint 64-row slices of the recurrent
-        # state, doubling the number of active CUs without duplicating conv or
-        # gate projection work.
+        # True MTP uses a producer/consumer KDA pipeline.  Per-token convolution
+        # and recurrence CTAs advance disjoint snapshot chains, while grouped
+        # norm CTAs remove the cross-split reduction from the recurrence path.
         if const_expr(mtp):
             conv_task = bid
             conv_tasks = samples * _HEADS
@@ -1920,41 +1965,55 @@ def build_kimi_k3_monokernel(
             if conv_active:
                 sample = conv_task // _HEADS
                 head = conv_task % _HEADS
+                input_slot = uniform(bo.buffer_load(indices_rsrc, sample, vec_width=1, dtype=T.i32))
+                output_slot = uniform(bo.buffer_load(indices_rsrc, sample + 1, vec_width=1, dtype=T.i32))
+                valid_state = (input_slot >= 0) & (output_slot >= 0)
+                if valid_state:
+                    prepare_kda_gate(sample, head)
                 if sample > 0:
                     if tid == 0:
                         load_i32(mtp_conv_ready_rsrc, (sample - 1) * _HEADS + head)
                     gpu.barrier()
 
-                input_slot = uniform(bo.buffer_load(indices_rsrc, sample, vec_width=1, dtype=T.i32))
-                output_slot = uniform(bo.buffer_load(indices_rsrc, sample + 1, vec_width=1, dtype=T.i32))
                 qkvg_base = (sample * _HEADS + head) * 4 * _HEAD_DIM
-                if (input_slot >= 0) & (output_slot >= 0):
+
+                def publish_mtp_component(component, values, first_row=0):
+                    first_thread = component * (_HEAD_DIM // 2) + first_row // 2
+                    pair_count = (_HEAD_DIM - first_row) // 2
+                    if (tid >= first_thread) & (tid < first_thread + pair_count):
+                        row = first_row + (tid - first_thread) * 2
+                        store_raw_pair(
+                            mtp_qkvg_rsrc,
+                            (qkvg_base + component * _HEAD_DIM + row) // 2,
+                            fx.Float32(fx.ptr_load(values + row)),
+                            fx.Float32(fx.ptr_load(values + row + 1)),
+                        )
+
+                if valid_state:
                     conv_state_rsrc = rsrc(
                         conv_state + fx.Int64(input_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
                     )
                     conv_state_out_rsrc = rsrc(
                         conv_state + fx.Int64(output_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
                     )
-                    prepare_kda_head(sample, head, conv_state_rsrc, conv_state_out_rsrc)
-
-                    if tid < _HEAD_DIM // 2:
-                        row = tid * 2
-                        for component, values in enumerate((shared_query, shared_key, shared_value, shared_gate)):
-                            store_raw_pair(
-                                mtp_qkvg_rsrc,
-                                (qkvg_base + component * _HEAD_DIM + row) // 2,
-                                fx.Float32(fx.ptr_load(values + row)),
-                                fx.Float32(fx.ptr_load(values + row + 1)),
-                            )
-                elif tid < _HEAD_DIM // 2:
-                    row = tid * 2
-                    for component in range_constexpr(4):
-                        store_raw_pair(
-                            mtp_qkvg_rsrc,
-                            (qkvg_base + component * _HEAD_DIM + row) // 2,
-                            fx.Float32(0.0),
-                            fx.Float32(0.0),
-                        )
+                    prepare_kda_conv(sample, head, conv_state_rsrc, conv_state_out_rsrc)
+                    publish_mtp_component(0, shared_query)
+                    publish_mtp_component(1, shared_key)
+                    publish_mtp_component(
+                        2,
+                        shared_value,
+                        mtp_rows_per_split if samples <= 4 else 0,
+                    )
+                    publish_mtp_component(3, shared_gate)
+                elif tid < 2 * _HEAD_DIM:
+                    component = tid // (_HEAD_DIM // 2)
+                    row = (tid % (_HEAD_DIM // 2)) * 2
+                    store_raw_pair(
+                        mtp_qkvg_rsrc,
+                        (qkvg_base + component * _HEAD_DIM + row) // 2,
+                        fx.Float32(0.0),
+                        fx.Float32(0.0),
+                    )
                 rocdl.s_waitcnt(vmcnt=0)
                 gpu.barrier()
                 if tid == 0:
@@ -1962,9 +2021,16 @@ def build_kimi_k3_monokernel(
 
             stamp(1)
 
-            def run_mtp_recurrence(sample, head, value_split):
+            def run_mtp_recurrence(sample, head, value_split, local_qkvg):
                 if tid == 0:
-                    load_i32(mtp_conv_ready_rsrc, sample * _HEADS + head)
+                    if not local_qkvg:
+                        load_i32(mtp_conv_ready_rsrc, sample * _HEADS + head)
+                    lds_store(
+                        norm_sums,
+                        _WAVES,
+                        fx.Float32(bo.buffer_load(a_log_rsrc, head, vec_width=1, dtype=T.f32)),
+                    )
+                    lds_store(norm_sums, _WAVES + 1, get_input(sample, 4 * _PROJECTION + head))
                 gpu.barrier()
 
                 input_slot = uniform(bo.buffer_load(indices_rsrc, sample, vec_width=1, dtype=T.i32))
@@ -1977,8 +2043,8 @@ def build_kimi_k3_monokernel(
                     state_out_rsrc = rsrc(recurrent_state + fx.Int64(output_slot) * fx.Int64(_STATE_SLOT_BYTES))
                     qkvg_base = (sample * _HEADS + head) * 4 * _HEAD_DIM
                     k_lane = lane % mtp_k_lanes
-                    exp_a_log = exp(fx.Float32(bo.buffer_load(a_log_rsrc, head, vec_width=1, dtype=T.f32)))
-                    beta_logit = get_input(sample, 4 * _PROJECTION + head)
+                    exp_a_log = exp(lds_load(norm_sums, _WAVES))
+                    beta_logit = lds_load(norm_sums, _WAVES + 1)
                     beta_value = sigmoid_batch([beta_logit])[0]
 
                     query_vectors = [None] * mtp_k_iters
@@ -1988,33 +2054,56 @@ def build_kimi_k3_monokernel(
                     key_square = fx.Float32(0.0)
                     for k_iter in range_constexpr(mtp_k_iters):
                         k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
-                        query_vector = fx.Vector(
-                            bo.buffer_load(
-                                mtp_qkvg_rsrc,
-                                qkvg_base + k_base,
-                                vec_width=_VALUES_PER_THREAD,
-                                dtype=T.bf16,
-                                cache_modifier=CM_DEV,
-                            )
-                        ).to(fx.Float32)
-                        key_vector = fx.Vector(
-                            bo.buffer_load(
-                                mtp_qkvg_rsrc,
-                                qkvg_base + _HEAD_DIM + k_base,
-                                vec_width=_VALUES_PER_THREAD,
-                                dtype=T.bf16,
-                                cache_modifier=CM_DEV,
-                            )
-                        ).to(fx.Float32)
-                        gate_vector = fx.Vector(
-                            bo.buffer_load(
-                                mtp_qkvg_rsrc,
-                                qkvg_base + 3 * _HEAD_DIM + k_base,
-                                vec_width=_VALUES_PER_THREAD,
-                                dtype=T.bf16,
-                                cache_modifier=CM_DEV,
-                            )
-                        ).to(fx.Float32)
+                        query_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        key_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        gate_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        if local_qkvg:
+                            query_vector = fx.Vector(
+                                fx.ptr_load(
+                                    shared_query + k_base,
+                                    result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
+                                )
+                            ).to(fx.Float32)
+                            key_vector = fx.Vector(
+                                fx.ptr_load(
+                                    shared_key + k_base,
+                                    result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
+                                )
+                            ).to(fx.Float32)
+                            gate_vector = fx.Vector(
+                                fx.ptr_load(
+                                    shared_gate + k_base,
+                                    result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
+                                )
+                            ).to(fx.Float32)
+                        else:
+                            query_vector = fx.Vector(
+                                bo.buffer_load(
+                                    mtp_qkvg_rsrc,
+                                    qkvg_base + k_base,
+                                    vec_width=_VALUES_PER_THREAD,
+                                    dtype=T.bf16,
+                                    cache_modifier=CM_DEV,
+                                )
+                            ).to(fx.Float32)
+                            key_vector = fx.Vector(
+                                bo.buffer_load(
+                                    mtp_qkvg_rsrc,
+                                    qkvg_base + _HEAD_DIM + k_base,
+                                    vec_width=_VALUES_PER_THREAD,
+                                    dtype=T.bf16,
+                                    cache_modifier=CM_DEV,
+                                )
+                            ).to(fx.Float32)
+                            gate_vector = fx.Vector(
+                                bo.buffer_load(
+                                    mtp_qkvg_rsrc,
+                                    qkvg_base + 3 * _HEAD_DIM + k_base,
+                                    vec_width=_VALUES_PER_THREAD,
+                                    dtype=T.bf16,
+                                    cache_modifier=CM_DEV,
+                                )
+                            ).to(fx.Float32)
                         dt_vector = fx.Vector(
                             bo.buffer_load(
                                 dt_bias_rsrc,
@@ -2042,7 +2131,7 @@ def build_kimi_k3_monokernel(
                         )
 
                     def mtp_subgroup_sum(value):
-                        for offset in (4, 2, 1):
+                        for offset in ((8, 4, 2, 1) if mtp_k_lanes == 16 else (4, 2, 1)):
                             value = value + xshfl(value, offset)
                         return value
 
@@ -2086,17 +2175,21 @@ def build_kimi_k3_monokernel(
                         state_query_parts = fx.math.fma(state_vector, query_vectors[k_iter], state_query_parts)
                     state_key = mtp_subgroup_sum(state_key_parts.reduce(fx.ReductionOp.ADD))
                     state_query = mtp_subgroup_sum(state_query_parts.reduce(fx.ReductionOp.ADD))
-                    value_input = fx.Float32(
-                        fx.BFloat16(
-                            bo.buffer_load(
-                                mtp_qkvg_rsrc,
-                                qkvg_base + 2 * _HEAD_DIM + value_index,
-                                vec_width=1,
-                                dtype=T.bf16,
-                                cache_modifier=CM_DEV,
+                    value_input = fx.Float32(0.0)
+                    if local_qkvg:
+                        value_input = fx.Float32(fx.ptr_load(shared_value + value_index))
+                    else:
+                        value_input = fx.Float32(
+                            fx.BFloat16(
+                                bo.buffer_load(
+                                    mtp_qkvg_rsrc,
+                                    qkvg_base + 2 * _HEAD_DIM + value_index,
+                                    vec_width=1,
+                                    dtype=T.bf16,
+                                    cache_modifier=CM_DEV,
+                                )
                             )
                         )
-                    )
                     value_new = (value_input - state_key) * beta_value
                     value_new_vector = fx.Vector.filled(_VALUES_PER_THREAD, value_new, fx.Float32)
                     for k_iter in range_constexpr(mtp_k_iters):
@@ -2114,6 +2207,12 @@ def build_kimi_k3_monokernel(
                     result = state_query + value_new * dot_key_query
 
                 k_lane = lane % mtp_k_lanes
+                if k_lane == 0:
+                    store_raw_f32(
+                        norm_mailbox_rsrc,
+                        sample * _PROJECTION + head * _HEAD_DIM + value_index,
+                        result,
+                    )
                 square_sum = (k_lane == 0).select(result * result, fx.Float32(0.0))
                 square_sum = wave_sum(square_sum)
                 if lane == 0:
@@ -2130,6 +2229,293 @@ def build_kimi_k3_monokernel(
                         (sample * _HEADS + head) * mtp_splits + value_split,
                         partial_square,
                     )
+
+            def run_mtp_pair(pair, head, value_split, local_sample):
+                sample_base = pair * 2
+                if tid == 0:
+                    if sample_base > 0:
+                        load_f32(
+                            mtp_state_ready_rsrc,
+                            ((sample_base - 1) * _HEADS + head) * mtp_splits + value_split,
+                        )
+                    lds_store(
+                        norm_sums,
+                        _WAVES,
+                        fx.Float32(bo.buffer_load(a_log_rsrc, head, vec_width=1, dtype=T.f32)),
+                    )
+                gpu.barrier()
+
+                k_lane = lane % mtp_k_lanes
+                value_index = value_split * mtp_rows_per_split + wave * mtp_v_lanes + lane // mtp_k_lanes
+                input_slot = uniform(bo.buffer_load(indices_rsrc, sample_base, vec_width=1, dtype=T.i32))
+                state_vectors = [
+                    fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32) for _ in range_constexpr(mtp_k_iters)
+                ]
+                if input_slot >= 0:
+                    state_rsrc = rsrc(recurrent_state + fx.Int64(input_slot) * fx.Int64(_STATE_SLOT_BYTES))
+                    for k_iter in range_constexpr(mtp_k_iters):
+                        k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
+                        state_offset = (head * _HEAD_DIM + value_index) * _HEAD_DIM + k_base
+                        state_vectors[k_iter] = fx.Vector(
+                            bo.buffer_load(
+                                state_rsrc,
+                                state_offset,
+                                vec_width=_VALUES_PER_THREAD,
+                                dtype=T.f32,
+                                cache_modifier=CM_DEV,
+                            )
+                        )
+
+                exp_a_log = exp(lds_load(norm_sums, _WAVES))
+                dt_vectors = [None] * mtp_k_iters
+                for k_iter in range_constexpr(mtp_k_iters):
+                    k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
+                    dt_vectors[k_iter] = fx.Vector(
+                        bo.buffer_load(
+                            dt_bias_rsrc,
+                            head * _HEAD_DIM + k_base,
+                            vec_width=_VALUES_PER_THREAD,
+                            dtype=T.bf16,
+                        )
+                    ).to(fx.Float32)
+
+                for token_offset, loop_args in range(
+                    fx.Int32(0),
+                    fx.Int32(2),
+                    fx.Int32(1),
+                    init=state_vectors,
+                ):
+                    sample = sample_base + token_offset
+                    local_qkvg = sample == local_sample
+                    if tid == 0:
+                        if not local_qkvg:
+                            load_i32(mtp_conv_ready_rsrc, sample * _HEADS + head)
+                        lds_store(norm_sums, _WAVES + 1, get_input(sample, 4 * _PROJECTION + head))
+                    gpu.barrier()
+
+                    output_slot = uniform(bo.buffer_load(indices_rsrc, sample + 1, vec_width=1, dtype=T.i32))
+                    valid_state = (input_slot >= 0) & (output_slot >= 0)
+                    next_state_vectors = [loop_args[k_iter] for k_iter in range_constexpr(mtp_k_iters)]
+                    result = fx.Float32(0.0)
+                    if valid_state:
+                        state_out_rsrc = rsrc(recurrent_state + fx.Int64(output_slot) * fx.Int64(_STATE_SLOT_BYTES))
+                        qkvg_base = (sample * _HEADS + head) * 4 * _HEAD_DIM
+                        beta_logit = lds_load(norm_sums, _WAVES + 1)
+                        beta_value = sigmoid_batch([beta_logit])[0]
+
+                        query_vectors = [None] * mtp_k_iters
+                        key_vectors = [None] * mtp_k_iters
+                        decay_vectors = [None] * mtp_k_iters
+                        query_square = fx.Float32(0.0)
+                        key_square = fx.Float32(0.0)
+                        for k_iter in range_constexpr(mtp_k_iters):
+                            k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
+                            query_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                            key_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                            gate_vector = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                            if local_qkvg:
+                                query_vector = fx.Vector(
+                                    fx.ptr_load(
+                                        shared_query + k_base,
+                                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
+                                    )
+                                ).to(fx.Float32)
+                                key_vector = fx.Vector(
+                                    fx.ptr_load(
+                                        shared_key + k_base,
+                                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
+                                    )
+                                ).to(fx.Float32)
+                                gate_vector = fx.Vector(
+                                    fx.ptr_load(
+                                        shared_gate + k_base,
+                                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
+                                    )
+                                ).to(fx.Float32)
+                            else:
+                                query_vector = fx.Vector(
+                                    bo.buffer_load(
+                                        mtp_qkvg_rsrc,
+                                        qkvg_base + k_base,
+                                        vec_width=_VALUES_PER_THREAD,
+                                        dtype=T.bf16,
+                                        cache_modifier=CM_DEV,
+                                    )
+                                ).to(fx.Float32)
+                                key_vector = fx.Vector(
+                                    bo.buffer_load(
+                                        mtp_qkvg_rsrc,
+                                        qkvg_base + _HEAD_DIM + k_base,
+                                        vec_width=_VALUES_PER_THREAD,
+                                        dtype=T.bf16,
+                                        cache_modifier=CM_DEV,
+                                    )
+                                ).to(fx.Float32)
+                                gate_vector = fx.Vector(
+                                    bo.buffer_load(
+                                        mtp_qkvg_rsrc,
+                                        qkvg_base + 3 * _HEAD_DIM + k_base,
+                                        vec_width=_VALUES_PER_THREAD,
+                                        dtype=T.bf16,
+                                        cache_modifier=CM_DEV,
+                                    )
+                                ).to(fx.Float32)
+                            query_vectors[k_iter] = query_vector
+                            key_vectors[k_iter] = key_vector
+                            query_square = query_square + (query_vector * query_vector).reduce(fx.ReductionOp.ADD)
+                            key_square = key_square + (key_vector * key_vector).reduce(fx.ReductionOp.ADD)
+                            gate_sigmoid = sigmoid_batch(
+                                [
+                                    exp_a_log * (gate_vector[item] + dt_vectors[k_iter][item])
+                                    for item in range_constexpr(_VALUES_PER_THREAD)
+                                ]
+                            )
+                            decay_vectors[k_iter] = fx.Vector.from_elements(
+                                [
+                                    exp(fx.Float32(_GATE_LOWER_BOUND) * gate_sigmoid[item])
+                                    for item in range_constexpr(_VALUES_PER_THREAD)
+                                ],
+                                fx.Float32,
+                            )
+
+                        def mtp_pair_subgroup_sum(value):
+                            for offset in (8, 4, 2, 1):
+                                value = value + xshfl(value, offset)
+                            return value
+
+                        query_inverse_norm = rsq(mtp_pair_subgroup_sum(query_square) + fx.Float32(1.0e-6))
+                        key_inverse_norm = rsq(mtp_pair_subgroup_sum(key_square) + fx.Float32(1.0e-6))
+                        for k_iter in range_constexpr(mtp_k_iters):
+                            query_vectors[k_iter] = query_vectors[k_iter] * fx.Vector.filled(
+                                _VALUES_PER_THREAD,
+                                query_inverse_norm * fx.Float32(_Q_SCALE),
+                                fx.Float32,
+                            )
+                            key_vectors[k_iter] = key_vectors[k_iter] * fx.Vector.filled(
+                                _VALUES_PER_THREAD,
+                                key_inverse_norm,
+                                fx.Float32,
+                            )
+
+                        dot_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        for k_iter in range_constexpr(mtp_k_iters):
+                            dot_parts = fx.math.fma(key_vectors[k_iter], query_vectors[k_iter], dot_parts)
+                        dot_key_query = mtp_pair_subgroup_sum(dot_parts.reduce(fx.ReductionOp.ADD))
+
+                        state_key_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        state_query_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                        for k_iter in range_constexpr(mtp_k_iters):
+                            next_state_vectors[k_iter] = loop_args[k_iter] * decay_vectors[k_iter]
+                            state_key_parts = fx.math.fma(
+                                next_state_vectors[k_iter],
+                                key_vectors[k_iter],
+                                state_key_parts,
+                            )
+                            state_query_parts = fx.math.fma(
+                                next_state_vectors[k_iter],
+                                query_vectors[k_iter],
+                                state_query_parts,
+                            )
+                        state_key = mtp_pair_subgroup_sum(state_key_parts.reduce(fx.ReductionOp.ADD))
+                        state_query = mtp_pair_subgroup_sum(state_query_parts.reduce(fx.ReductionOp.ADD))
+                        value_input = fx.Float32(0.0)
+                        if local_qkvg:
+                            value_input = fx.Float32(fx.ptr_load(shared_value + value_index))
+                        else:
+                            value_input = fx.Float32(
+                                fx.BFloat16(
+                                    bo.buffer_load(
+                                        mtp_qkvg_rsrc,
+                                        qkvg_base + 2 * _HEAD_DIM + value_index,
+                                        vec_width=1,
+                                        dtype=T.bf16,
+                                        cache_modifier=CM_DEV,
+                                    )
+                                )
+                            )
+                        value_new = (value_input - state_key) * beta_value
+                        value_new_vector = fx.Vector.filled(_VALUES_PER_THREAD, value_new, fx.Float32)
+                        for k_iter in range_constexpr(mtp_k_iters):
+                            k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
+                            state_offset = (head * _HEAD_DIM + value_index) * _HEAD_DIM + k_base
+                            next_state_vectors[k_iter] = fx.math.fma(
+                                key_vectors[k_iter],
+                                value_new_vector,
+                                next_state_vectors[k_iter],
+                            )
+                            bo.buffer_store(
+                                next_state_vectors[k_iter],
+                                state_out_rsrc,
+                                state_offset,
+                                cache_modifier=CM_DEV,
+                            )
+                        result = state_query + value_new * dot_key_query
+
+                    if k_lane == 0:
+                        store_raw_f32(
+                            norm_mailbox_rsrc,
+                            sample * _PROJECTION + head * _HEAD_DIM + value_index,
+                            result,
+                        )
+                    square_sum = (k_lane == 0).select(result * result, fx.Float32(0.0))
+                    square_sum = wave_sum(square_sum)
+                    if lane == 0:
+                        lds_store(norm_sums, wave, square_sum)
+                    gpu.barrier()
+                    partial_square = lds_load(norm_sums, 0)
+                    for source_wave in range_constexpr(1, _WAVES):
+                        partial_square = partial_square + lds_load(norm_sums, source_wave)
+                    rocdl.s_waitcnt(vmcnt=0)
+                    gpu.barrier()
+                    if tid == 0:
+                        store_f32(
+                            mtp_state_ready_rsrc,
+                            (sample * _HEADS + head) * mtp_splits + value_split,
+                            partial_square,
+                        )
+
+                    _ = yield next_state_vectors
+
+            mtp_recurrence_tasks = samples * _HEADS
+            if const_expr(samples <= 4):
+                if bid < mtp_splits * mtp_recurrence_tasks:
+                    value_split = bid // mtp_recurrence_tasks
+                    mtp_recurrence_task = bid % mtp_recurrence_tasks
+                    local_qkvg = value_split == 0
+                    sample = mtp_recurrence_task // _HEADS
+                    head = mtp_recurrence_task % _HEADS
+                    if tid == 0:
+                        if sample > 0:
+                            load_f32(
+                                mtp_state_ready_rsrc,
+                                ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
+                            )
+                    gpu.barrier()
+                    run_mtp_recurrence(sample, head, value_split, local_qkvg)
+            else:
+                mtp_pair_tasks = (samples // 2) * _HEADS
+                if bid < mtp_splits * mtp_pair_tasks:
+                    has_local_qkvg = bid < mtp_recurrence_tasks
+                    conv_sample = bid // _HEADS
+                    local_pair = conv_sample // 2
+                    local_split = conv_sample % 2
+                    remote_task = bid - mtp_recurrence_tasks
+                    remote_split = 2 + remote_task // mtp_pair_tasks
+                    remote_pair_task = remote_task % mtp_pair_tasks
+                    pair = has_local_qkvg.select(local_pair, remote_pair_task // _HEADS)
+                    head = has_local_qkvg.select(bid % _HEADS, remote_pair_task % _HEADS)
+                    value_split = has_local_qkvg.select(local_split, remote_split)
+                    local_sample = has_local_qkvg.select(conv_sample, fx.Int32(-1))
+                    run_mtp_pair(pair, head, value_split, local_sample)
+
+            mtp_norm_head_groups = _HEADS // 4
+            mtp_norm_tasks = samples * mtp_norm_head_groups
+            mtp_norm_task = bid
+            if mtp_norm_task < mtp_norm_tasks:
+                sample = mtp_norm_task // mtp_norm_head_groups
+                head_base = (mtp_norm_task % mtp_norm_head_groups) * 4
+                if tid < 4:
+                    head = head_base + tid
                     total_square = load_f32(
                         mtp_state_ready_rsrc,
                         (sample * _HEADS + head) * mtp_splits,
@@ -2139,71 +2525,59 @@ def build_kimi_k3_monokernel(
                             mtp_state_ready_rsrc,
                             (sample * _HEADS + head) * mtp_splits + source_split,
                         )
-                    lds_store(norm_sums, 0, total_square)
+                    lds_store(norm_sums, tid, total_square)
                 gpu.barrier()
-
-                inverse_rms = rsq(lds_load(norm_sums, 0) * fx.Float32(1.0 / _HEAD_DIM) + fx.Float32(EPS))
-                gated = fx.Float32(0.0)
-                if k_lane == 0:
-                    if valid_state:
-                        output_gate = get_input(sample, 3 * _PROJECTION + head * _HEAD_DIM + value_index)
-                        gain = fx.Float32(
-                            fx.BFloat16(
-                                bo.buffer_load(
-                                    norm_weight_rsrc,
-                                    value_index,
-                                    vec_width=1,
-                                    dtype=T.bf16,
-                                )
-                            )
+                local_head = tid // _HEAD_DIM
+                head = head_base + local_head
+                value_index = tid % _HEAD_DIM
+                inverse_rms = rsq(lds_load(norm_sums, local_head) * fx.Float32(1.0 / _HEAD_DIM) + fx.Float32(EPS))
+                raw_result = load_raw_f32(
+                    norm_mailbox_rsrc,
+                    sample * _PROJECTION + head * _HEAD_DIM + value_index,
+                )
+                output_gate = get_input(
+                    sample,
+                    3 * _PROJECTION + head * _HEAD_DIM + value_index,
+                )
+                gain = fx.Float32(
+                    fx.BFloat16(
+                        bo.buffer_load(
+                            norm_weight_rsrc,
+                            value_index,
+                            vec_width=1,
+                            dtype=T.bf16,
                         )
-                        gated = result * inverse_rms * gain * sigmoid_batch([output_gate])[0]
-                    bo.buffer_store(
-                        gated.to(fx.BFloat16),
-                        norm_mailbox_rsrc,
-                        sample * _PROJECTION + head * _HEAD_DIM + value_index,
-                        cache_modifier=CM_DEV,
                     )
+                )
+                gated = raw_result * inverse_rms * gain * sigmoid_batch([output_gate])[0]
+                gated_neighbor = xshfl(gated, 1)
+                if value_index % 2 == 0:
+                    packed_pair = (sample * _PROJECTION + head * _HEAD_DIM + value_index) // 2
+                    store_raw_pair(norm_packed_rsrc, packed_pair, gated, gated_neighbor)
                 rocdl.s_waitcnt(vmcnt=0)
                 gpu.barrier()
-                if tid == 0:
+                if tid < 4:
                     store_i32(
                         mtp_norm_ready_rsrc,
-                        (sample * _HEADS + head) * mtp_splits + value_split,
+                        sample * _HEADS + head_base + tid,
                         1,
                     )
-
-            mtp_recurrence_task = bid
-            mtp_recurrence_tasks = samples * _HEADS * mtp_splits
-            if mtp_recurrence_task < mtp_recurrence_tasks:
-                sample = mtp_recurrence_task // (_HEADS * mtp_splits)
-                head_split = mtp_recurrence_task % (_HEADS * mtp_splits)
-                head = head_split // mtp_splits
-                value_split = head_split % mtp_splits
-                if tid == 0:
-                    if sample > 0:
-                        load_f32(
-                            mtp_state_ready_rsrc,
-                            ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
-                        )
-                gpu.barrier()
-                run_mtp_recurrence(sample, head, value_split)
 
         # Stage 3: BF16 1536 -> 7168 output projection followed by the tagged
         # TP8 reduction.  Each wave again owns a complete-K 16-row group.
         output_row_tasks = _OUTPUT_TASKS
-        output_tasks = sample_groups * output_row_tasks
+        output_tasks = output_sample_groups * output_row_tasks
         output_task = bid
         while output_task < output_tasks:
-            if const_expr(sample_groups == 1):
+            if const_expr(output_sample_groups == 1):
                 output_row_task = output_task
                 sample_base = 0
             else:
                 sample_group = output_task // output_row_tasks
                 output_row_task = output_task % output_row_tasks
-                sample_base = sample_group * staged_samples
+                sample_base = sample_group * output_staged_samples
             stamp(2)
-            stage_norm(sample_base, staged_samples)
+            stage_norm(sample_base, output_staged_samples)
             gpu.barrier()
             output_accumulator = bf16_mfma(
                 output_weight_rsrc,
@@ -2212,7 +2586,7 @@ def build_kimi_k3_monokernel(
                 _OUTPUT_ROW_GROUPS,
                 _OUTPUT_SPLIT_WAVES,
                 6,
-                staged_samples,
+                output_staged_samples,
             )
 
             def emit_output(local_row, sample, value_low, value_high):
@@ -2228,10 +2602,10 @@ def build_kimi_k3_monokernel(
                 _OUTPUT_SPLIT_WAVES,
                 emit_output,
                 sample_base,
-                staged_samples,
+                output_staged_samples,
             )
 
-            pair_count = staged_samples * _OUTPUT_ROW_TILE // 2
+            pair_count = output_staged_samples * _OUTPUT_ROW_TILE // 2
             send_rounds = (pair_count + _WAVE_SIZE - 1) // _WAVE_SIZE
             peer_rounds = (npes + _WAVES - 1) // _WAVES
             for peer_round in range_constexpr(peer_rounds):

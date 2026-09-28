@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import torch
 
-from kernels.kimi_k3_monokernel.mla_kernel import build_kimi_k3_mla_attention
 from kernels.monokernel.config import (
     KIMI_K3_CONFIG,
     MAX_LAYERS_PER_STEP,
@@ -16,6 +15,7 @@ from kernels.monokernel.config import (
     as_kv_cache_layout,
     validate_shard,
 )
+from kernels.monokernel.k3.mla_kernel import build_kimi_k3_mla_attention
 from kernels.monokernel.layout import layout
 from kernels.monokernel.packing import pack_layer_weights
 from kernels.monokernel.runtime import SymmetricPeerBuffer
