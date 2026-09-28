@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-28T11:11:26Z",
+ "updated": "2026-09-28T11:20:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -40,13 +40,41 @@
    "branch": "main",
    "event": "push",
    "title": "Issue causal flash q-blocks longest-first. (#1186)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413114232",
    "created_at": "2026-09-28T11:01:06Z",
-   "updated_at": "2026-09-28T11:02:42Z",
+   "updated_at": "2026-09-28T11:15:58Z",
    "actor": "RichardChamberlain1",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T11:15:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413114232/job/108902672452"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T11:15:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413114232/job/108902672480"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T11:15:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413114232/job/108902672541"
+    }
+   ]
   },
   {
    "run_id": 36411612778,
@@ -65,9 +93,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T11:02:54Z",
+     "started_at": "2026-09-28T11:10:36Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36411612778/job/108898342050"
     },
@@ -156,11 +184,11 @@
    "branch": "fix/1054-single-rocdl-target",
    "event": "pull_request",
    "title": "[JIT] Attach exactly one #rocdl.target per gpu.module",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36405073334",
    "created_at": "2026-09-28T09:41:14Z",
-   "updated_at": "2026-09-28T10:13:57Z",
+   "updated_at": "2026-09-28T11:18:51Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -175,11 +203,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T10:05:17Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36405073334/job/108876184824"
+     "completed_at": "2026-09-28T11:18:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36405073334/job/108876184824",
+     "machine": "gbt350-odcdh1-b09-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
