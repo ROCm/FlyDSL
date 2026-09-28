@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-09-28T01:11:55Z",
+ "updated": "2026-09-28T03:06:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 36360333157,
+   "run_id": 36371915077,
    "pr": 1204,
-   "commit": "7ca5c735b469cfb2aace4ad0c1e37199096e1a8c",
+   "commit": "c240241d2247dd1af42e149c34ef351ea6265d03",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE / \u6dfb\u52a0\u878d\u5408\u7684 GLM-5 \u4e0e Kimi-K3 MLA/KDA MoE",
+   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371915077",
+   "created_at": "2026-09-28T02:59:24Z",
+   "updated_at": "2026-09-28T03:04:34Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36371162955,
+   "pr": 1203,
+   "commit": "ed5d348d917940526e553eeb6bf29d155826c5d3",
+   "branch": "docs/full-doc-audit-20260926",
+   "event": "pull_request",
+   "title": "[Docs] Audit and refresh repository documentation",
    "status": "queued",
    "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36360333157",
-   "created_at": "2026-09-27T23:56:00Z",
-   "updated_at": "2026-09-28T00:19:54Z",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371162955",
+   "created_at": "2026-09-28T02:47:22Z",
+   "updated_at": "2026-09-28T03:03:50Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -22,18 +37,107 @@
      "arch": "gfx942",
      "status": "queued",
      "conclusion": null,
-     "started_at": "2026-09-28T00:19:54Z",
+     "started_at": "2026-09-28T03:03:50Z",
      "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36360333157/job/108740360240"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371162955/job/108770715914"
     },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T03:03:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371162955/job/108770715950"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T03:03:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371162955/job/108770715967"
+    }
+   ]
+  },
+  {
+   "run_id": 36369967985,
+   "pr": 1184,
+   "commit": "e7be62023fab07c31607af4826d25f228ca11171",
+   "branch": "jli/fix-waves-per-eu",
+   "event": "pull_request",
+   "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36369967985",
+   "created_at": "2026-09-28T02:28:45Z",
+   "updated_at": "2026-09-28T03:02:06Z",
+   "actor": "jli-melchior",
+   "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
      "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T00:21:30Z",
+     "started_at": "2026-09-28T02:49:07Z",
      "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36360333157/job/108740360243"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36369967985/job/108767878523"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-28T03:02:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36369967985/job/108767878552"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-28T02:48:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36369967985/job/108767878581"
+    }
+   ]
+  },
+  {
+   "run_id": 36360333157,
+   "pr": 1204,
+   "commit": "7ca5c735b469cfb2aace4ad0c1e37199096e1a8c",
+   "branch": "codex/kimi-k3-mxfp4-fused",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36360333157",
+   "created_at": "2026-09-27T23:56:00Z",
+   "updated_at": "2026-09-28T03:04:26Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-28T02:49:41Z",
+     "completed_at": "2026-09-28T03:04:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36360333157/job/108740360240"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-28T00:21:30Z",
+     "completed_at": "2026-09-28T01:50:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36360333157/job/108740360243",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -52,7 +156,7 @@
    "commit": "1adea50fe6a84920f2a6cc41bee75b726e6d3e13",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE / \u6dfb\u52a0\u878d\u5408\u7684 GLM-5 \u4e0e Kimi-K3 MLA/KDA MoE",
+   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36329459246",
@@ -95,7 +199,7 @@
    "commit": "78ec4ea8226e2c5a502d46a6c68eee970e65a145",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE / \u6dfb\u52a0\u878d\u5408\u7684 GLM-5 \u4e0e Kimi-K3 MLA/KDA MoE",
+   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36327300104",
@@ -468,7 +572,7 @@
    "commit": "7eddcc962710ce55399108455f392aedeb37a8ec",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE / \u6dfb\u52a0\u878d\u5408\u7684 GLM-5 \u4e0e Kimi-K3 MLA/KDA MoE",
+   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36308335661",
@@ -557,7 +661,7 @@
    "commit": "54d92659032d019f167b8a5c43ba96820ea70d37",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE / \u6dfb\u52a0\u878d\u5408\u7684 GLM-5 \u4e0e Kimi-K3 MLA/KDA MoE",
+   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36294943885",
@@ -704,7 +808,7 @@
    "commit": "654fab4f8e16495a040b202e3a294b325e1046be",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE / \u6dfb\u52a0\u878d\u5408\u7684 GLM-5 \u4e0e Kimi-K3 MLA/KDA MoE",
+   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36289979325",
@@ -747,7 +851,7 @@
    "commit": "e12f5bb6031b2fa1a2e5ddcfc2f2ab180fd4e972",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE / \u6dfb\u52a0\u878d\u5408\u7684 GLM-5 \u4e0e Kimi-K3 MLA/KDA MoE",
+   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36289277309",
@@ -805,7 +909,7 @@
    "commit": "12f8f93a6a6e4a0a9e83cfcc98afd45d932bbcf1",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE / \u6dfb\u52a0\u878d\u5408\u7684 GLM-5 \u4e0e Kimi-K3 MLA/KDA MoE",
+   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284912910",
@@ -848,7 +952,7 @@
    "commit": "51c7081a5c0ddb3c8775aa3ed3c727eeb7e03853",
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
-   "title": "[Kernel][Perf] Add fused GLM-5 and Kimi-K3 MLA/KDA MoE / \u6dfb\u52a0\u878d\u5408\u7684 GLM-5 \u4e0e Kimi-K3 MLA/KDA MoE",
+   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284586536",
@@ -1977,113 +2081,6 @@
    "created_at": "2026-09-24T03:36:45Z",
    "updated_at": "2026-09-24T03:46:00Z",
    "actor": "Phil-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 35950855284,
-   "pr": 1187,
-   "commit": "e04246977c9cc0fef29ee6db322b6ef269c341c8",
-   "branch": "ci/fix-dumpir-v2",
-   "event": "pull_request",
-   "title": "[CI] Fix dumpir.sh silently succeeding with no command",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950855284",
-   "created_at": "2026-09-24T03:17:47Z",
-   "updated_at": "2026-09-24T05:46:45Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T04:12:44Z",
-     "completed_at": "2026-09-24T05:17:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950855284/job/107482782844"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T03:37:41Z",
-     "completed_at": "2026-09-24T05:14:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950855284/job/107482782858",
-     "machine": "gbt350-odcdh1-b04-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T05:11:17Z",
-     "completed_at": "2026-09-24T05:46:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950855284/job/107482783236"
-    }
-   ]
-  },
-  {
-   "run_id": 35950791596,
-   "pr": 1184,
-   "commit": "2b4f3e9144e565d0d5f92210ad011260f34fa3ff",
-   "branch": "jli/fix-waves-per-eu",
-   "event": "pull_request",
-   "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596",
-   "created_at": "2026-09-24T03:16:51Z",
-   "updated_at": "2026-09-24T06:07:52Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T04:06:37Z",
-     "completed_at": "2026-09-24T05:41:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596/job/107484638199",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T05:02:35Z",
-     "completed_at": "2026-09-24T06:07:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596/job/107484638221"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-24T04:37:44Z",
-     "completed_at": "2026-09-24T05:10:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950791596/job/107484638248"
-    }
-   ]
-  },
-  {
-   "run_id": 35950575712,
-   "pr": 1113,
-   "commit": "d5842b3a0e5de7f03aeed876d0f8e7517a92fb5b",
-   "branch": "fix/fused-rope-head-dim-96",
-   "event": "pull_request",
-   "title": "[Bugfix][Kernel] Fix fused RoPE for head dimension 96",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35950575712",
-   "created_at": "2026-09-24T03:13:51Z",
-   "updated_at": "2026-09-24T03:13:51Z",
-   "actor": "tangzzycc",
    "jobs": []
   }
  ]
