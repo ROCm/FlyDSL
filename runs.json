@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-28T09:34:04Z",
+ "updated": "2026-09-28T09:44:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36405073334,
+   "pr": 1195,
+   "commit": "bc51ad8274465e44b1954e8524fa1c6b4652af10",
+   "branch": "fix/1054-single-rocdl-target",
+   "event": "pull_request",
+   "title": "[JIT] Attach exactly one #rocdl.target per gpu.module",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36405073334",
+   "created_at": "2026-09-28T09:41:14Z",
+   "updated_at": "2026-09-28T09:41:44Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36403970616,
    "pr": 1209,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36403970616",
    "created_at": "2026-09-28T09:30:43Z",
-   "updated_at": "2026-09-28T09:32:19Z",
+   "updated_at": "2026-09-28T09:32:56Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -83,11 +98,11 @@
    "branch": "fix/1165-singleton-contig-segment",
    "event": "pull_request",
    "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657",
    "created_at": "2026-09-28T08:33:01Z",
-   "updated_at": "2026-09-28T08:40:06Z",
+   "updated_at": "2026-09-28T09:41:29Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -147,10 +162,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T09:16:00Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T09:38:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397000018/job/108851245926"
     },
     {
@@ -496,30 +511,21 @@
    "branch": "docs/full-doc-audit-20260926",
    "event": "pull_request",
    "title": "[Docs] Audit and refresh repository documentation",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062",
    "created_at": "2026-09-28T06:00:51Z",
-   "updated_at": "2026-09-28T08:26:05Z",
+   "updated_at": "2026-09-28T09:40:49Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-28T06:16:12Z",
-     "completed_at": "2026-09-28T06:54:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108809981813"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T06:15:16Z",
-     "completed_at": "2026-09-28T06:49:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108809981838"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-28T09:40:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108871301326"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -528,7 +534,16 @@
      "conclusion": "success",
      "started_at": "2026-09-28T06:42:53Z",
      "completed_at": "2026-09-28T08:26:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108809981917"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108871303039"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-28T06:15:16Z",
+     "completed_at": "2026-09-28T06:49:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108871303174"
     }
    ]
   },
@@ -2154,21 +2169,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36112129460/job/108001867957"
     }
    ]
-  },
-  {
-   "run_id": 36082271869,
-   "pr": 1194,
-   "commit": "34a13c197e1c0a0615918dcccfb6a4b2f05020b8",
-   "branch": "fix/1176-layout-field-overflow-diagnostic",
-   "event": "pull_request",
-   "title": "[JIT] Actionable diagnostic for dynamic layout field overflow",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36082271869",
-   "created_at": "2026-09-25T01:29:59Z",
-   "updated_at": "2026-09-25T01:29:59Z",
-   "actor": "mustafayildirim",
-   "jobs": []
   }
  ]
 }
