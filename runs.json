@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-28T04:43:05Z",
+ "updated": "2026-09-28T05:07:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36380299383,
+   "pr": null,
+   "commit": "ccd326c2258a19da383372ef17c034aa7cd25732",
+   "branch": "main",
+   "event": "push",
+   "title": "[Chore][gfx1250] Drop leftovers of the GEMM modules removed in #885 (\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36380299383",
+   "created_at": "2026-09-28T05:04:10Z",
+   "updated_at": "2026-09-28T05:05:58Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36374562613,
    "pr": null,
@@ -10,38 +25,38 @@
    "branch": "main",
    "event": "push",
    "title": "[AOT] Export C objects and support CPU-only builds (#1202)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36374562613",
    "created_at": "2026-09-28T03:39:20Z",
-   "updated_at": "2026-09-28T03:56:12Z",
+   "updated_at": "2026-09-28T05:05:42Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-28T03:56:12Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T05:04:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36374562613/job/108780808265"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T04:27:32Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T04:56:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36374562613/job/108780808294"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-28T04:23:56Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T05:05:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36374562613/job/108780808306"
     }
    ]
@@ -53,11 +68,11 @@
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371915077",
    "created_at": "2026-09-28T02:59:24Z",
-   "updated_at": "2026-09-28T03:17:30Z",
+   "updated_at": "2026-09-28T04:42:35Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -81,9 +96,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T03:17:30Z",
+     "started_at": "2026-09-28T04:42:34Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36371915077/job/108773458564"
     }
@@ -2126,21 +2141,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/35953635869/job/107495566329"
     }
    ]
-  },
-  {
-   "run_id": 35952761075,
-   "pr": 1188,
-   "commit": "a287b78d690fbfa0f547e2114a83a646b4ca6290",
-   "branch": "feat/hack-ut-asm-multi-kernel",
-   "event": "pull_request",
-   "title": "[Compiler][Debug] Add a compile path for hand-edited assembly",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/35952761075",
-   "created_at": "2026-09-24T03:45:14Z",
-   "updated_at": "2026-09-24T03:58:59Z",
-   "actor": "Phil-amd",
-   "jobs": []
   }
  ]
 }
