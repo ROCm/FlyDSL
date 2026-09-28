@@ -254,6 +254,7 @@ class capture:
             hardware,
         )
         self._records = {}
+        self._graph_bound = set()
         self._allocated_words = 0
         self._entered = False
         self._captured = False
@@ -268,6 +269,11 @@ class capture:
         if _active.get() is not None or self._entered:
             raise RuntimeError("nested/reentrant flytrace captures are unsupported")
         backend = get_trace_backend()
+        if backend.is_current_stream_capturing():
+            raise RuntimeError(
+                "enter flytrace.capture() before device graph capture; "
+                "trace launches must be warmed once outside graph capture"
+            )
         device = backend.current_device()
         if self._captured and (backend.name != self._backend.name or device != self.device):
             raise RuntimeError("a flytrace capture cannot move between backends or devices")
@@ -307,6 +313,26 @@ class capture:
         if not spec["words"]:
             return 0
         key = id(spec)
+        if self.backend.is_current_stream_capturing():
+            previous = self._records.get(key)
+            if previous is None:
+                raise RuntimeError(
+                    "flytrace launch was not prepared for graph capture; "
+                    "run this traced specialization once before beginning graph capture"
+                )
+            self._graph_bound.add(key)
+            return self.backend.buffer_pointer(previous[1])
+        if key in self._graph_bound:
+            previous = self._records.get(key)
+            if previous is None:
+                raise RuntimeError("flytrace lost storage retained by a captured graph")
+            # A captured graph owns this address for its lifetime. Reuse it for
+            # later eager launches, but clear stale rows before an arbitrary
+            # user stream can write the next recording.
+            self.backend.synchronize(self.device)
+            self.backend.clear_buffer(previous[1])
+            self.backend.synchronize(self.device)
+            return self.backend.buffer_pointer(previous[1])
         previous_words = self._records[key][0]["words"] if key in self._records else 0
         allocated_words = self._allocated_words - previous_words + spec["words"]
         if allocated_words * 4 > 512 * 1024**2:

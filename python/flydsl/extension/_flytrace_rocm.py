@@ -502,10 +502,18 @@ class RocmTraceBackend(TraceBackend):
 
         torch.cuda.synchronize(device)
 
+    def is_current_stream_capturing(self):
+        import torch
+
+        return torch.cuda.is_current_stream_capturing()
+
     def allocate_buffer(self, words, device):
         import torch
 
         return torch.zeros(words, dtype=torch.int32, device=f"cuda:{device}")
+
+    def clear_buffer(self, buffer):
+        buffer.zero_()
 
     def buffer_pointer(self, buffer):
         return buffer.data_ptr()

@@ -35,9 +35,24 @@ class TraceBackend(ABC):
     def synchronize(self, device: int) -> None:
         """Wait for work submitted to *device*."""
 
+    def is_current_stream_capturing(self) -> bool:
+        """Return whether the current device stream is being graph-captured.
+
+        Backends without a graph-capture runtime can keep the conservative
+        default. Backends that support graph capture override this so Flytrace
+        can reuse preallocated storage without allocating or synchronizing.
+        """
+
+        return False
+
     @abstractmethod
     def allocate_buffer(self, words: int, device: int):
         """Allocate a zero-initialized device buffer of 32-bit words."""
+
+    def clear_buffer(self, buffer) -> None:
+        """Clear storage whose address must remain stable for graph replay."""
+
+        raise NotImplementedError(f"trace backend {self.name!r} does not support reusable graph buffers")
 
     @abstractmethod
     def buffer_pointer(self, buffer) -> int:

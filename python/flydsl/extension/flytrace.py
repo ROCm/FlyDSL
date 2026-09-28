@@ -23,6 +23,11 @@ a manifest. ``capture(path, per_kernel=True)`` selects the latter on context
 exit. Dynamic recorder overflow is non-fatal: export reports dropped records
 and adds a warning event. Tune the per-wave capacity with ``max_events``.
 
+CUDA Graph capture is supported after one eager traced launch has compiled the
+specialization and allocated its stable buffer. Keep ``capture()`` outside
+``torch.cuda.graph()``; graph capture then reuses the buffer without allocation
+or synchronization, and each replay replaces the previous recording.
+
 For simultaneous rocprofv3 ATT, capture(hardware=True).save(path) preserves
 absolute clocks and hardware identities; merge_att() produces a combined
 Perfetto trace after rocprofv3 has decoded the dispatch. ATT identity merging is

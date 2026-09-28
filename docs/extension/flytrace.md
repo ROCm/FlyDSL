@@ -60,6 +60,37 @@ remain separate manifest entries. The equivalent automatic form is
 `per_kernel=False` to `export()` when a combined file is wanted from that same
 capture.
 
+### CUDA Graph replay
+
+Trace-enabled launchers can be captured in a CUDA Graph after one eager
+preparation launch has compiled the traced specialization and allocated its
+stable trace buffer. Enter Flytrace outside `torch.cuda.graph()` and use the
+same capture object and launch specialization:
+
+```python
+cap = flytrace.capture(mode="dynamic", max_events=128)
+with cap:
+    traced = flyc.compile(launch, *args)  # compile, execute, and allocate
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        traced(*args)
+    graph.replay()
+
+cap.export("graph-replay.json")
+```
+
+Graph capture reuses the prepared device address and performs no allocation or
+synchronization. Every replay overwrites the same recording, so export observes
+the latest completed replay. Prepare every traced specialization that the graph
+uses, and keep the Flytrace capture object alive for as long as its graph may
+replay. A later eager launch through the same capture safely clears and reuses
+the graph-bound buffer without changing its address. Entering
+`flytrace.capture()` inside `torch.cuda.graph()`, or first
+compiling a traced specialization there, is rejected because compilation and
+buffer allocation are not graph-safe. A graph recorded from an uninstrumented
+launcher remains uninstrumented; wrapping only `graph.replay()` in a Flytrace
+capture cannot retrofit tracing into it.
+
 Explicitly paired ranges can cross source-level scopes when the token remains
 available. Start and end payload forms must match:
 

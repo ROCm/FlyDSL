@@ -142,6 +142,8 @@ def test_capture_replaces_repeated_launches_and_enforces_total_allocation(monkey
 
         def __init__(self):
             self.allocations = 0
+            self.clears = 0
+            self.graph_capturing = False
 
         def lower_kernel(self, func, ctx, grid, block, stream):
             pass
@@ -152,9 +154,16 @@ def test_capture_replaces_repeated_launches_and_enforces_total_allocation(monkey
         def synchronize(self, device):
             pass
 
+        def is_current_stream_capturing(self):
+            return self.graph_capturing
+
         def allocate_buffer(self, words, device):
             self.allocations += 1
             return {"words": words, "launch": None, "pointer": self.allocations}
+
+        def clear_buffer(self, buffer):
+            self.clears += 1
+            buffer["launch"] = None
 
         def buffer_pointer(self, buffer):
             return buffer["pointer"]
@@ -180,12 +189,19 @@ def test_capture_replaces_repeated_launches_and_enforces_total_allocation(monkey
         cap._records[id(spec)][1]["launch"] = 1
         second = cap._buffer(spec)
         cap._records[id(spec)][1]["launch"] = 2
+        backend.graph_capturing = True
+        graph_pointer = cap._buffer(spec)
+        backend.graph_capturing = False
     assert first != second
+    assert graph_pointer == second
+    assert backend.allocations == 2
     assert cap.decode() == [("same-compiled-launch", 2)]
     with cap:
         third = cap._buffer(spec)
         cap._records[id(spec)][1]["launch"] = 3
-    assert third != second
+    assert third == second
+    assert backend.allocations == 2
+    assert backend.clears == 1
     assert cap.decode() == [("same-compiled-launch", 3)]
 
     oversized = implementation.capture()
@@ -195,6 +211,19 @@ def test_capture_replaces_repeated_launches_and_enforces_total_allocation(monkey
         oversized._buffer(limit)
         with pytest.raises(ValueError, match="512 MiB"):
             oversized._buffer(spec)
+
+    unprepared = implementation.capture()
+    with unprepared:
+        backend.graph_capturing = True
+        with pytest.raises(RuntimeError, match="run this traced specialization once"):
+            unprepared._buffer(spec)
+        backend.graph_capturing = False
+
+    backend.graph_capturing = True
+    with pytest.raises(RuntimeError, match="enter flytrace.capture.*before device graph capture"):
+        with implementation.capture():
+            pass
+    backend.graph_capturing = False
 
 
 def test_generic_export_supports_both_range_models():
@@ -367,6 +396,73 @@ def test_capture_exports_multiple_kernels_combined_or_separately(tmp_path):
         if event.get("name") == "thread_name"
     }
     assert len(names) == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
+def test_capture_supports_prepared_multi_kernel_cuda_graph_replay():
+    if get_rocm_arch().split(":")[0] not in ("gfx942", "gfx950"):
+        pytest.skip("flytrace recorder currently targets gfx942/gfx950")
+    stream = torch.cuda.Stream()
+    with flytrace.capture(mode="static") as cap:
+        compiled = flyc.compile(_multi_kernel_trace_launch, stream)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            compiled(stream)
+
+        # Clear the eager preparation result so only graph replay can make the
+        # following decode succeed through the captured stable buffer address.
+        for _, buffer in cap._records.values():
+            buffer.zero_()
+        torch.cuda.synchronize()
+        graph.replay()
+        assert cap.decode()[0]["epoch"] > 0
+
+        # An eager launch after graph construction must reuse rather than free
+        # the graph-owned address; a later replay must remain valid.
+        compiled(stream)
+        stream.synchronize()
+        for _, buffer in cap._records.values():
+            buffer.zero_()
+        torch.cuda.synchronize()
+        graph.replay()
+        waves = cap.decode()
+
+    assert len(waves) == 2
+    assert all(wave["epoch"] > 0 for wave in waves)
+    assert [[event["name"] for event in wave["events"]] for wave in waves] == [
+        ["event"],
+        ["second_event"],
+    ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
+def test_dynamic_kernel_envelope_supports_cuda_graph_replay():
+    if get_rocm_arch().split(":")[0] not in ("gfx942", "gfx950"):
+        pytest.skip("flytrace recorder currently targets gfx942/gfx950")
+    stream = torch.cuda.Stream()
+    with flytrace.capture(
+        block=None,
+        exclude=("event",),
+        mode="dynamic",
+        max_blocks=4,
+        max_events=32,
+    ) as cap:
+        compiled = flyc.compile(_runtime_grid_static_trace_launch, fx.Int32(1), stream)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            compiled(fx.Int32(1), stream)
+
+        for _, buffer in cap._records.values():
+            buffer.zero_()
+        torch.cuda.synchronize()
+        graph.replay()
+        waves = cap.decode()
+
+    assert len(waves) == 1
+    assert waves[0]["epoch"] > 0
+    assert waves[0]["events"] == []
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires an AMD GPU")
