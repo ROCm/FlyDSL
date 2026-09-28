@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-28T10:20:03Z",
+ "updated": "2026-09-28T10:34:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -188,19 +188,19 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T09:55:17Z",
+     "started_at": "2026-09-28T10:25:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657/job/108876463364"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-28T10:14:46Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T10:29:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657/job/108876463429"
     }
    ]
@@ -288,20 +288,20 @@
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394537727",
    "created_at": "2026-09-28T07:57:39Z",
-   "updated_at": "2026-09-28T08:41:33Z",
+   "updated_at": "2026-09-28T10:32:24Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T08:41:32Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T10:32:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394537727/job/108842624986"
     },
     {
@@ -616,21 +616,21 @@
    "branch": "docs/full-doc-audit-20260926",
    "event": "pull_request",
    "title": "[Docs] Audit and refresh repository documentation",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062",
    "created_at": "2026-09-28T06:00:51Z",
-   "updated_at": "2026-09-28T10:17:44Z",
+   "updated_at": "2026-09-28T10:31:30Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-28T09:40:48Z",
-     "completed_at": "2026-09-28T10:17:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108871301326"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-28T10:31:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108887931559"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -639,7 +639,7 @@
      "conclusion": "success",
      "started_at": "2026-09-28T06:42:53Z",
      "completed_at": "2026-09-28T08:26:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108871303039"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108887932558"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -648,7 +648,7 @@
      "conclusion": "success",
      "started_at": "2026-09-28T06:15:16Z",
      "completed_at": "2026-09-28T06:49:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108871303174"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108887966597"
     }
    ]
   },
