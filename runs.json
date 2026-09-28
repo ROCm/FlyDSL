@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-28T10:47:47Z",
+ "updated": "2026-09-28T10:52:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
    "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36411612778",
    "created_at": "2026-09-28T10:45:43Z",
-   "updated_at": "2026-09-28T10:45:44Z",
+   "updated_at": "2026-09-28T10:50:56Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -29,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36411503720",
    "created_at": "2026-09-28T10:44:38Z",
-   "updated_at": "2026-09-28T10:45:07Z",
+   "updated_at": "2026-09-28T10:46:47Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -98,20 +98,20 @@
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
    "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36403970616",
    "created_at": "2026-09-28T09:30:43Z",
-   "updated_at": "2026-09-28T10:32:58Z",
+   "updated_at": "2026-09-28T10:50:44Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-28T10:32:57Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T10:50:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36403970616/job/108873833398"
     },
     {
@@ -126,10 +126,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-28T09:48:06Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T10:46:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36403970616/job/108873833544"
     }
    ]
