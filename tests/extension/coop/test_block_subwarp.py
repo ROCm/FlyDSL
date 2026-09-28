@@ -8,7 +8,7 @@ import math
 import pytest
 import torch
 from coop_common import SUB_WARP_BLOCK_THREADS, linear_tid
-from coop_test_utils import as_items, run_kernel
+from coop_test_utils import as_items, matrix_cases, run_kernel
 from coop_test_utils import coop_default_device as coop_default_device
 
 import flydsl.expr as fx
@@ -19,10 +19,18 @@ POLICIES = [("reduce", p) for p in fx.coop.BlockReduceAlgorithm] + [("scan", p) 
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.usefixtures("coop_default_device")
-@pytest.mark.parametrize("shape", [*SUB_WARP_BLOCK_THREADS, (2, 2, 2)])
-@pytest.mark.parametrize("count", [1, 3])
-@pytest.mark.parametrize("universal", [False, True], ids=["dispatched", "universal"])
-@pytest.mark.parametrize("family,policy", POLICIES, ids=[f"{family}-{p.name}" for family, p in POLICIES])
+@pytest.mark.parametrize(
+    "shape,count,universal,family,policy",
+    [
+        (shape, count, universal, family, policy)
+        for shape, count, universal, (family, policy) in matrix_cases(
+            [*SUB_WARP_BLOCK_THREADS, (2, 2, 2)],
+            [1, 3],
+            [False, True],
+            POLICIES,
+        )
+    ],
+)
 def test_subwarp_block_collectives(shape, count, universal, family, policy):
     shape = (shape, 1, 1) if isinstance(shape, int) else shape
     threads = math.prod(shape)
