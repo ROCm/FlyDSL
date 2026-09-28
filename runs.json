@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-28T09:44:25Z",
+ "updated": "2026-09-28T09:53:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36405073334",
    "created_at": "2026-09-28T09:41:14Z",
-   "updated_at": "2026-09-28T09:41:44Z",
+   "updated_at": "2026-09-28T09:43:21Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -25,13 +25,41 @@
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
    "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36403970616",
    "created_at": "2026-09-28T09:30:43Z",
-   "updated_at": "2026-09-28T09:32:56Z",
+   "updated_at": "2026-09-28T09:47:24Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-28T09:47:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36403970616/job/108873833398"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-28T09:47:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36403970616/job/108873833488"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-28T09:48:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36403970616/job/108873833544"
+    }
+   ]
   },
   {
    "run_id": 36403361575,
@@ -153,9 +181,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T08:40:10Z",
+     "started_at": "2026-09-28T09:52:32Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397000018/job/108851245897"
     },
@@ -205,11 +233,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T08:16:28Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394537727/job/108842624989"
+     "completed_at": "2026-09-28T09:45:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394537727/job/108842624989",
+     "machine": "gbt350-odcdh1-b09-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -330,20 +361,20 @@
    "branch": "pr/fix-coop-element-types",
    "event": "pull_request",
    "title": "fix(coop): preserve declared operator element types",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36389620239",
    "created_at": "2026-09-28T07:03:51Z",
-   "updated_at": "2026-09-28T08:06:49Z",
+   "updated_at": "2026-09-28T09:52:13Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T08:06:48Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T09:52:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36389620239/job/108826046042"
     },
     {
