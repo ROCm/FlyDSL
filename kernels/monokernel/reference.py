@@ -528,8 +528,16 @@ def golden_kimi_k3_kda_attention(
     conv_state: torch.Tensor,
     recurrent_state: torch.Tensor,
     allreduce,
+    *,
+    mtp: bool = False,
 ):
-    """Torch golden for one Kimi-K3 KDA decode token per request slot."""
+    """Torch golden for independent decode samples or one ordered MTP group.
+
+    In MTP mode ``state_indices`` is a snapshot chain of length ``S + 1``:
+    token ``s`` reads entry ``s`` and writes its post-token state to entry
+    ``s + 1``.  This matches speculative verification's need to retain every
+    accepted-prefix state rather than updating independent request slots.
+    """
 
     config, t = W.config, W.t
     if config != KIMI_K3_CONFIG:
@@ -545,18 +553,23 @@ def golden_kimi_k3_kda_attention(
     gate = bf(f_a.float() @ t["w_kda_fb"].float().T).view(-1, heads, head_dim)
     recurrence_output = torch.zeros_like(gate)
 
-    for sample, slot_tensor in enumerate(state_indices):
-        slot = int(slot_tensor)
-        if slot < 0:
+    expected_indices = hidden_states.shape[0] + int(mtp)
+    if state_indices.shape != (expected_indices,):
+        raise ValueError(f"state_indices must have shape [{expected_indices}] when mtp={mtp}")
+
+    for sample in range(hidden_states.shape[0]):
+        input_slot = int(state_indices[sample])
+        output_slot = int(state_indices[sample + 1]) if mtp else input_slot
+        if input_slot < 0 or output_slot < 0:
             continue
-        previous_conv = conv_state[slot].float()
+        previous_conv = conv_state[input_slot].float()
         current = mixed_qkv[sample].float()
         conv_inputs = torch.cat((previous_conv, current[:, None]), dim=1)
         convolved = torch.nn.functional.silu((conv_inputs * t["w_kda_conv"].float()).sum(dim=1))
         convolved = bf(convolved)
-        conv_state[slot, :, 0].copy_(conv_state[slot, :, 1])
-        conv_state[slot, :, 1].copy_(conv_state[slot, :, 2])
-        conv_state[slot, :, 2].copy_(mixed_qkv[sample])
+        conv_state[output_slot, :, 0].copy_(previous_conv[:, 1])
+        conv_state[output_slot, :, 1].copy_(previous_conv[:, 2])
+        conv_state[output_slot, :, 2].copy_(mixed_qkv[sample])
 
         query, key, value = convolved.view(3, heads, head_dim)
         query = query.float()
@@ -571,12 +584,13 @@ def golden_kimi_k3_kda_attention(
                 torch.exp(t["kda_a_log"].float())[:, None] * (gate[sample].float() + t["kda_dt_bias"].float())
             )
         )
-        state = recurrent_state[slot]
+        state = recurrent_state[input_slot].clone()
         state.mul_(decay[:, None, :])
         state_key = torch.einsum("hvk,hk->hv", state, key)
         value_update = (value - state_key) * torch.sigmoid(beta[sample].float())[:, None]
         state.add_(torch.einsum("hv,hk->hvk", value_update, key))
         recurrence_output[sample].copy_(torch.einsum("hvk,hk->hv", state, query))
+        recurrent_state[output_slot].copy_(state)
 
     output_float = recurrence_output.float()
     output_float = output_float * torch.rsqrt(output_float.square().mean(-1, keepdim=True) + EPS)
@@ -603,6 +617,7 @@ def golden_kimi_k3_kda_layer(
     allreduce,
     *,
     layer_idx: int,
+    mtp: bool = False,
 ):
     """Full Kimi-K3 KDA + attention-residual + latent-MoE decode golden."""
 
@@ -631,6 +646,7 @@ def golden_kimi_k3_kda_layer(
         conv_state,
         recurrent_state,
         allreduce,
+        mtp=mtp,
     )
     attention_delta = attention["output"]
     post_prefix = attention_delta if write_block else prefix_sum

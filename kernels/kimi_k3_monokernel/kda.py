@@ -82,6 +82,7 @@ class KimiK3KdaAttention:
         reduce_backend: str = "symmetric",
         launches_per_step: int = MAX_LAYERS_PER_STEP,
         single_launch_attention: bool = True,
+        mtp: bool = False,
     ) -> None:
         config = weights.config
         if config != KIMI_K3_CONFIG:
@@ -108,6 +109,7 @@ class KimiK3KdaAttention:
         self.reduce_group = reduce_group
         self.reduce_backend = reduce_backend
         self.launches_per_step = launches_per_step
+        self.mtp = mtp
         self.local_projection = config.local_heads * _HEAD_DIM
 
         expected = {
@@ -197,7 +199,7 @@ class KimiK3KdaAttention:
             self.w_kda_in_packed = pack_bf16(monokernel_input)
             self.w_kda_o_packed = pack_bf16(self.t["w_kda_o"])
             self.monokernel_scratch = torch.zeros(
-                monokernel_scratch_nbytes(samples),
+                monokernel_scratch_nbytes(samples, mtp=mtp),
                 dtype=torch.uint8,
                 device=device,
             )
@@ -206,7 +208,10 @@ class KimiK3KdaAttention:
                 samples,
                 npes,
                 launches_per_step,
+                mtp=mtp,
             )
+        elif mtp:
+            raise ValueError("Kimi-K3 MTP requires the single-launch attention path")
         if reduce_group is None:
             raise ValueError("Kimi-K3 KDA attention requires a GPU-capable TP reduce_group")
 
@@ -255,6 +260,7 @@ class KimiK3KdaAttention:
                 self.S,
                 fuse_attn_res=True,
                 fuse_moe=fuse_moe,
+                mtp=self.mtp,
             ),
             dtype=torch.uint8,
             device=device,
@@ -268,6 +274,7 @@ class KimiK3KdaAttention:
             self.attn_res_blocks,
             self.block_write_idx,
             fuse_moe,
+            self.mtp,
         )
 
     def forward(
@@ -291,10 +298,18 @@ class KimiK3KdaAttention:
         layer: int = 0,
         advance: bool = True,
     ) -> torch.Tensor:
-        """Run one decode token per sample and mutate both KDA state pools."""
+        """Run independent decode samples or one ordered MTP token group."""
 
         if not 0 <= layer < self.launches_per_step:
             raise ValueError(f"layer must be in [0, {self.launches_per_step}), got {layer}")
+        expected_indices = (self.S + 1,) if self.mtp else (self.S,)
+        if (
+            state_indices.shape != expected_indices
+            or state_indices.dtype != torch.int32
+            or not state_indices.is_contiguous()
+        ):
+            mode = "MTP snapshot chain" if self.mtp else "decode slots"
+            raise ValueError(f"state_indices must be contiguous int32 {list(expected_indices)} for {mode}")
         expected_hidden = (self.S, self.config.hidden)
         if (
             hidden_states.shape != expected_hidden

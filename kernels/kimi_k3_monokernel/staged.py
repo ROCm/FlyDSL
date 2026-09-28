@@ -68,6 +68,7 @@ class _KimiK3MlaPath:
         fuse_shared_experts: bool = True,
         reduce_backend: str = "symmetric",
         kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
+        mtp: bool = False,
     ) -> None:
         config = weights.config
         if config != KIMI_K3_CONFIG:
@@ -138,6 +139,7 @@ class _KimiK3MlaPath:
             topk=topk,
             reduce_backend=reduce_backend,
             kv_cache_layout=kv_cache_layout,
+            mtp=mtp,
         )
         device = torch.device("cuda", torch.cuda.current_device())
         self.pre_attn = torch.empty(samples, config.hidden, dtype=torch.bfloat16, device=device)
@@ -276,8 +278,9 @@ class _KimiK3MlaPath:
         topk: int,
         reduce_backend: str,
         kv_cache_layout: KvCacheLayout | str,
+        mtp: bool,
     ):
-        del reduce_group, reduce_backend
+        del reduce_group, reduce_backend, mtp
         return KimiK3MlaAttention(
             weights,
             samples,
@@ -718,6 +721,7 @@ class _KimiK3KdaStagedPath(_KimiK3MlaPath):
         topk: int,
         reduce_backend: str,
         kv_cache_layout: KvCacheLayout | str,
+        mtp: bool,
     ):
         del topk, kv_cache_layout
         return KimiK3KdaAttention(
@@ -730,7 +734,8 @@ class _KimiK3KdaStagedPath(_KimiK3MlaPath):
             reduce_backend=reduce_backend,
             # The persistent attention kernel wins at S<=4.  At S=8 the
             # staged GEMMs retain better occupancy and remain the faster path.
-            single_launch_attention=samples <= 4,
+            single_launch_attention=samples <= 4 or mtp,
+            mtp=mtp,
         )
 
     def forward(

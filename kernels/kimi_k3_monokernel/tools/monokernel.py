@@ -97,6 +97,7 @@ def _worker(rank: int, args, port: int, results) -> None:
             group=dist.group.WORLD,
             reduce_group=reduce_group,
             reduce_backend=args.reduce_backend,
+            mtp=args.mtp,
         )
     elif args.staged:
         layer = _KimiK3KdaStagedPath(
@@ -111,6 +112,7 @@ def _worker(rank: int, args, port: int, results) -> None:
             fuse_router=not args.eager_router,
             fuse_shared_experts=not args.eager_shared_experts,
             reduce_backend=args.reduce_backend,
+            mtp=args.mtp,
         )
     else:
         layer = KimiK3MonoKernel(
@@ -121,6 +123,7 @@ def _worker(rank: int, args, port: int, results) -> None:
             npes=args.npes,
             group=dist.group.WORLD,
             reduce_group=reduce_group,
+            mtp=args.mtp,
         )
 
     generator = torch.Generator(device=device).manual_seed(args.seed + 99)
@@ -141,9 +144,12 @@ def _worker(rank: int, args, port: int, results) -> None:
         dtype=torch.bfloat16,
     )
     slots = args.samples + 3
-    state_indices = torch.arange(args.samples, device=device, dtype=torch.int32)
-    if args.samples > 1:
+    state_count = args.samples + 1 if args.mtp else args.samples
+    state_indices = torch.arange(state_count, device=device, dtype=torch.int32)
+    if args.samples > 1 and not args.mtp:
         state_indices.copy_(torch.roll(state_indices, 1) + 1)
+    if args.negative_slot and args.mtp:
+        raise ValueError("--negative-slot is only supported for independent decode samples")
     if args.negative_slot:
         state_indices[-1] = -1
     conv_state0 = torch.randn(
@@ -205,6 +211,7 @@ def _worker(rank: int, args, port: int, results) -> None:
         "launch_mode": "attention-only" if args.attention_only else ("staged" if args.staged else "single"),
         "layer_idx": args.layer_idx,
         "reduce_backend": args.reduce_backend,
+        "mtp": args.mtp,
         "rank_equal": rank_equal,
         "finite": bool(torch.isfinite(output).all()),
     }
@@ -237,6 +244,7 @@ def _worker(rank: int, args, port: int, results) -> None:
                 reference_conv,
                 reference_recurrent,
                 lambda value: _allreduce_reference(value, args.npes),
+                mtp=args.mtp,
             )
             result.update(
                 attention_rel_l2=_relative_l2(output, reference["output"]),
@@ -253,6 +261,7 @@ def _worker(rank: int, args, port: int, results) -> None:
                 reference_recurrent,
                 lambda value: _allreduce_reference(value, args.npes),
                 layer_idx=args.layer_idx,
+                mtp=args.mtp,
             )
             projection_states = quant_dequant_mxfp8(layer.moe_input).to(torch.bfloat16)
             expected_activation, expected_activation_scale = quantize_mxfp8(layer.moe_input)
@@ -544,6 +553,11 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--attention-only", action="store_true")
     parser.add_argument("--staged", action="store_true", help="benchmark the fastest staged KDA + MoE path")
+    parser.add_argument(
+        "--mtp",
+        action="store_true",
+        help="treat samples as one ordered MTP group and state_indices as an S+1 snapshot chain",
+    )
     parser.add_argument("--negative-slot", action="store_true")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--bench", action="store_true")

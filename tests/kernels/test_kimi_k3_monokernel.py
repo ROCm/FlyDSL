@@ -132,3 +132,26 @@ def test_kimi_k3_monokernel_staged_baseline_tp8() -> None:
     assert result["finite"] is True
     assert result["selection_equal"] is True
     assert result["output_rel_l2"] < 1e-2
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
+@pytest.mark.parametrize("samples", (4, 8))
+def test_kimi_k3_monokernel_mtp_tp8(samples: int) -> None:
+    result = _run_tp8_tool(
+        "kernels/kimi_k3_monokernel/tools/monokernel.py",
+        "--samples",
+        str(samples),
+        "--layer-idx",
+        "1",
+        "--mtp",
+        "--check",
+    )
+    assert result["mtp"] is True
+    assert result["rank_equal"] is True
+    assert result["finite"] is True
+    assert result["attention_rel_l2"] < 2e-3
+    assert result["conv_state_rel_l2"] < 5e-4
+    assert result["recurrent_state_rel_l2"] < 5e-4
+    assert result["selection_equal"] is True
+    assert result["output_rel_l2"] < 1e-2

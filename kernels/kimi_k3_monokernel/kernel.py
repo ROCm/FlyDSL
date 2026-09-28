@@ -68,6 +68,7 @@ _V_TILE = _WAVES * _V_LANES
 _V_ITERS = _HEAD_DIM // _V_TILE
 _Q_SCALE = _HEAD_DIM**-0.5
 _GATE_LOWER_BOUND = -5.0
+_MTP_SPLITS = 2
 _ATTN_RES_CTAS = 4
 _ATTN_RES_STATS = 19
 _N_EXPERTS = 896
@@ -83,6 +84,7 @@ def monokernel_layout(
     *,
     fuse_attn_res: bool = False,
     fuse_moe: bool = False,
+    mtp: bool = False,
 ) -> dict[str, int]:
     """Return byte offsets for the MonoKernel's tagged mailboxes."""
 
@@ -145,6 +147,15 @@ def monokernel_layout(
         ):
             offsets[name] = offset
             offset += size
+    if mtp:
+        offsets["mtp_qkvg"] = offset
+        offset += samples * 4 * _PROJECTION * 2
+        offsets["mtp_conv_ready"] = offset
+        offset += samples * _HEADS * 8
+        offsets["mtp_state_ready"] = offset
+        offset += samples * _HEADS * _MTP_SPLITS * 8
+        offsets["mtp_norm_ready"] = offset
+        offset += samples * _HEADS * _MTP_SPLITS * 8
     offsets["_bytes"] = offset
     return offsets
 
@@ -154,6 +165,7 @@ def monokernel_scratch_nbytes(
     *,
     fuse_attn_res: bool = False,
     fuse_moe: bool = False,
+    mtp: bool = False,
 ) -> int:
     """Bytes required by tagged BF16-pair projection mailboxes."""
 
@@ -161,6 +173,7 @@ def monokernel_scratch_nbytes(
         samples,
         fuse_attn_res=fuse_attn_res,
         fuse_moe=fuse_moe,
+        mtp=mtp,
     )["_bytes"]
 
 
@@ -172,6 +185,7 @@ def build_kimi_k3_monokernel(
     attn_res_blocks: int = -1,
     block_write_idx: int = -1,
     fuse_moe: bool = False,
+    mtp: bool = False,
 ):
     """Build the fixed-shape single-launch Kimi-K3 decode MonoKernel."""
 
@@ -190,6 +204,12 @@ def build_kimi_k3_monokernel(
         raise ValueError("the pre-attention block write must append at attn_res_blocks")
     latent_projection_waves = 3 if samples <= 4 else 4
     shared_projection_waves = 3 if samples <= 4 else 6
+    mtp_splits = _MTP_SPLITS
+    mtp_rows_per_split = _HEAD_DIM // mtp_splits
+    mtp_v_lanes = mtp_rows_per_split // _WAVES
+    mtp_k_lanes = _WAVE_SIZE // mtp_v_lanes
+    mtp_k_tile = mtp_k_lanes * _VALUES_PER_THREAD
+    mtp_k_iters = _HEAD_DIM // mtp_k_tile
     staged_samples = min(samples, 4)
     sample_groups = (samples + staged_samples - 1) // staged_samples
     input_row_groups = 2 if samples <= 4 else _INPUT_ROW_GROUPS
@@ -222,6 +242,15 @@ def build_kimi_k3_monokernel(
     routed_offset = expert_mid_ready_offset + samples * _TOP_K * (_INTER // 16) * 8
     routed_stats_offset = routed_offset + samples * _ROUTED_HIDDEN * 2
     routed_inv_offset = routed_stats_offset + samples * (_ROUTED_HIDDEN // 16) * 8
+    mtp_base = monokernel_layout(
+        samples,
+        fuse_attn_res=fuse_attn_res,
+        fuse_moe=fuse_moe,
+    )["_bytes"]
+    mtp_qkvg_offset = mtp_base
+    mtp_conv_ready_offset = mtp_qkvg_offset + samples * 4 * _PROJECTION * 2
+    mtp_state_ready_offset = mtp_conv_ready_offset + samples * _HEADS * 8
+    mtp_norm_ready_offset = mtp_state_ready_offset + samples * _HEADS * mtp_splits * 8
     max_pairs = samples * _HIDDEN // 2
     slot_bytes = npes * max_pairs * 8
 
@@ -324,6 +353,10 @@ def build_kimi_k3_monokernel(
         input_mailbox_rsrc = rsrc(scratch + fx.Int64(input_mailbox_offset))
         norm_mailbox_rsrc = rsrc(scratch + fx.Int64(norm_mailbox_offset))
         norm_ready_rsrc = rsrc(scratch + fx.Int64(norm_ready_offset))
+        mtp_qkvg_rsrc = rsrc(scratch + fx.Int64(mtp_qkvg_offset))
+        mtp_conv_ready_rsrc = rsrc(scratch + fx.Int64(mtp_conv_ready_offset))
+        mtp_state_ready_rsrc = rsrc(scratch + fx.Int64(mtp_state_ready_offset))
+        mtp_norm_ready_rsrc = rsrc(scratch + fx.Int64(mtp_norm_ready_offset))
         quantized_moe_rsrc = rsrc(quantized_moe_input)
         quantized_moe_scale_rsrc = rsrc(quantized_moe_scale)
         pre_mailbox_rsrc = rsrc(scratch + fx.Int64(pre_mailbox_offset))
@@ -1040,16 +1073,25 @@ def build_kimi_k3_monokernel(
                     lds_store(x, word, packed.bitcast(fx.Float32))
 
         def stage_norm(sample_base, sample_count):
-            ready_count = sample_count * _HEADS
+            ready_splits = mtp_splits if mtp else 1
+            ready_count = sample_count * _HEADS * ready_splits
             for ready_round in range_constexpr((ready_count + _THREADS - 1) // _THREADS):
                 ready = tid + ready_round * _THREADS
                 if ready < ready_count:
-                    local_sample = ready // _HEADS
-                    head = ready % _HEADS
-                    load_i32(
-                        norm_ready_rsrc,
-                        (sample_base + local_sample) * _HEADS + head,
-                    )
+                    if const_expr(mtp):
+                        local_sample = ready // (_HEADS * mtp_splits)
+                        item = ready % (_HEADS * mtp_splits)
+                        load_i32(
+                            mtp_norm_ready_rsrc,
+                            (sample_base + local_sample) * _HEADS * mtp_splits + item,
+                        )
+                    else:
+                        local_sample = ready // _HEADS
+                        head = ready % _HEADS
+                        load_i32(
+                            norm_ready_rsrc,
+                            (sample_base + local_sample) * _HEADS + head,
+                        )
             gpu.barrier()
             pairs = sample_count * _PROJECTION // 2
             for load_round in range_constexpr((pairs + _THREADS - 1) // _THREADS):
@@ -1565,86 +1607,126 @@ def build_kimi_k3_monokernel(
             )
             input_task = input_task + _BLOCKS
 
-        # Stage 2: one CTA per (sample, head).  It consumes the tagged input
-        # projection, mutates slot-indexed conv/recurrent state, and publishes
-        # the gated RMSNorm output.
+        def prepare_kda_head(sample, head, conv_state_rsrc, conv_state_out_rsrc):
+            if tid < _HEAD_DIM:
+                f_a_value = get_input(sample, 4 * _PROJECTION + _HEADS + tid)
+                fx.ptr_store(f_a_value.to(fx.BFloat16), shared_f_a + tid)
+            gpu.barrier()
+
+            def convolve(channel):
+                state_base = channel * _CONV_STATE_LENGTH
+                state0 = fx.BFloat16(
+                    bo.buffer_load(
+                        conv_state_rsrc,
+                        state_base,
+                        vec_width=1,
+                        dtype=T.bf16,
+                        cache_modifier=CM_DEV,
+                    )
+                )
+                state1 = fx.BFloat16(
+                    bo.buffer_load(
+                        conv_state_rsrc,
+                        state_base + 1,
+                        vec_width=1,
+                        dtype=T.bf16,
+                        cache_modifier=CM_DEV,
+                    )
+                )
+                state2 = fx.BFloat16(
+                    bo.buffer_load(
+                        conv_state_rsrc,
+                        state_base + 2,
+                        vec_width=1,
+                        dtype=T.bf16,
+                        cache_modifier=CM_DEV,
+                    )
+                )
+                current = get_input(sample, channel)
+                weights = fx.Vector(
+                    bo.buffer_load(
+                        conv_weight_rsrc,
+                        channel * _CONV_KERNEL_WIDTH,
+                        vec_width=_CONV_KERNEL_WIDTH,
+                        dtype=T.bf16,
+                    )
+                ).to(fx.Float32)
+                values = fx.Vector.from_elements(
+                    [fx.Float32(state0), fx.Float32(state1), fx.Float32(state2), current],
+                    fx.Float32,
+                )
+                convolution = (values * weights).reduce(fx.ReductionOp.ADD)
+                activated = convolution * sigmoid_batch([convolution])[0]
+                bo.buffer_store(state1, conv_state_out_rsrc, state_base, cache_modifier=CM_DEV)
+                bo.buffer_store(state2, conv_state_out_rsrc, state_base + 1, cache_modifier=CM_DEV)
+                bo.buffer_store(
+                    current.to(fx.BFloat16),
+                    conv_state_out_rsrc,
+                    state_base + 2,
+                    cache_modifier=CM_DEV,
+                )
+                return activated.to(fx.BFloat16)
+
+            if tid < _HEAD_DIM:
+                channel = head * _HEAD_DIM + tid
+                fx.ptr_store(convolve(channel), shared_query + tid)
+            elif tid < 2 * _HEAD_DIM:
+                channel_in_head = tid - _HEAD_DIM
+                channel = _PROJECTION + head * _HEAD_DIM + channel_in_head
+                fx.ptr_store(convolve(channel), shared_key + channel_in_head)
+            elif tid < 3 * _HEAD_DIM:
+                channel_in_head = tid - 2 * _HEAD_DIM
+                channel = 2 * _PROJECTION + head * _HEAD_DIM + channel_in_head
+                fx.ptr_store(convolve(channel), shared_value + channel_in_head)
+            gpu.barrier()
+
+            if tid < 4 * _HEAD_DIM:
+                gate_row = tid // 4
+                gate_split = tid % 4
+                gate_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                for feature_group in range_constexpr(0, _HEAD_DIM, 4 * _VALUES_PER_THREAD):
+                    feature_base = feature_group + gate_split * _VALUES_PER_THREAD
+                    features = fx.Vector(
+                        fx.ptr_load(
+                            shared_f_a + feature_base,
+                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
+                        )
+                    ).to(fx.Float32)
+                    weights = fx.Vector(
+                        bo.buffer_load(
+                            gate_weight_rsrc,
+                            (head * _HEAD_DIM + gate_row) * _HEAD_DIM + feature_base,
+                            vec_width=_VALUES_PER_THREAD,
+                            dtype=T.bf16,
+                        )
+                    ).to(fx.Float32)
+                    gate_parts = fx.math.fma(features, weights, gate_parts)
+                gate_value = gate_parts.reduce(fx.ReductionOp.ADD)
+                for offset in (2, 1):
+                    gate_value = gate_value + xshfl(gate_value, offset)
+                if gate_split == 0:
+                    fx.ptr_store(gate_value.to(fx.BFloat16), shared_gate + gate_row)
+            gpu.barrier()
+
+        # Stage 2a: ordinary decode uses one CTA per independent (sample, head).
+        # Ordered MTP recurrence is handled by the pipeline below.
         recurrence_task = bid
-        recurrence_tasks = samples * _HEADS
+        recurrence_tasks = 0 if mtp else samples * _HEADS
         if recurrence_task < recurrence_tasks:
             stamp(1)
             sample = recurrence_task // _HEADS
             head = recurrence_task % _HEADS
-            slot_index = uniform(bo.buffer_load(indices_rsrc, sample, vec_width=1, dtype=T.i32))
+            input_slot = uniform(bo.buffer_load(indices_rsrc, sample, vec_width=1, dtype=T.i32))
+            output_slot = input_slot
+            state_rsrc = rsrc(recurrent_state + fx.Int64(input_slot) * fx.Int64(_STATE_SLOT_BYTES))
+            state_out_rsrc = state_rsrc
+            conv_state_rsrc = rsrc(
+                conv_state + fx.Int64(input_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
+            )
+            conv_state_out_rsrc = conv_state_rsrc
 
-            if slot_index >= 0:
-                state_rsrc = rsrc(recurrent_state + fx.Int64(slot_index) * fx.Int64(_STATE_SLOT_BYTES))
-                conv_state_rsrc = rsrc(
-                    conv_state + fx.Int64(slot_index) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
-                )
-
-                if tid < _HEAD_DIM:
-                    f_a_value = get_input(sample, 4 * _PROJECTION + _HEADS + tid)
-                    fx.ptr_store(f_a_value.to(fx.BFloat16), shared_f_a + tid)
-                gpu.barrier()
-
-                def convolve(channel):
-                    state_base = channel * _CONV_STATE_LENGTH
-                    state0 = fx.BFloat16(bo.buffer_load(conv_state_rsrc, state_base, vec_width=1, dtype=T.bf16))
-                    state1 = fx.BFloat16(bo.buffer_load(conv_state_rsrc, state_base + 1, vec_width=1, dtype=T.bf16))
-                    state2 = fx.BFloat16(bo.buffer_load(conv_state_rsrc, state_base + 2, vec_width=1, dtype=T.bf16))
-                    current = get_input(sample, channel)
-                    weights = fx.Vector(
-                        bo.buffer_load(
-                            conv_weight_rsrc,
-                            channel * _CONV_KERNEL_WIDTH,
-                            vec_width=_CONV_KERNEL_WIDTH,
-                            dtype=T.bf16,
-                        )
-                    ).to(fx.Float32)
-                    values = fx.Vector.from_elements(
-                        [fx.Float32(state0), fx.Float32(state1), fx.Float32(state2), current],
-                        fx.Float32,
-                    )
-                    convolution = (values * weights).reduce(fx.ReductionOp.ADD)
-                    activated = convolution * sigmoid_batch([convolution])[0]
-                    bo.buffer_store(state1, conv_state_rsrc, state_base)
-                    bo.buffer_store(state2, conv_state_rsrc, state_base + 1)
-                    bo.buffer_store(current.to(fx.BFloat16), conv_state_rsrc, state_base + 2)
-                    return activated.to(fx.BFloat16)
-
-                if tid < _HEAD_DIM:
-                    channel = head * _HEAD_DIM + tid
-                    fx.ptr_store(convolve(channel), shared_query + tid)
-                    fx.ptr_store(convolve(2 * _PROJECTION + channel), shared_value + tid)
-                elif tid < 2 * _HEAD_DIM:
-                    channel_in_head = tid - _HEAD_DIM
-                    channel = _PROJECTION + head * _HEAD_DIM + channel_in_head
-                    fx.ptr_store(convolve(channel), shared_key + channel_in_head)
-                gpu.barrier()
-
-                if tid < _HEAD_DIM:
-                    gate_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
-                    for feature_base in range_constexpr(0, _HEAD_DIM, _VALUES_PER_THREAD):
-                        features = fx.Vector(
-                            fx.ptr_load(
-                                shared_f_a + feature_base,
-                                result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                            )
-                        ).to(fx.Float32)
-                        weights = fx.Vector(
-                            bo.buffer_load(
-                                gate_weight_rsrc,
-                                (head * _HEAD_DIM + tid) * _HEAD_DIM + feature_base,
-                                vec_width=_VALUES_PER_THREAD,
-                                dtype=T.bf16,
-                            )
-                        ).to(fx.Float32)
-                        gate_parts = fx.math.fma(features, weights, gate_parts)
-                    fx.ptr_store(
-                        gate_parts.reduce(fx.ReductionOp.ADD).to(fx.BFloat16),
-                        shared_gate + tid,
-                    )
-                gpu.barrier()
+            if (input_slot >= 0) & (output_slot >= 0):
+                prepare_kda_head(sample, head, conv_state_rsrc, conv_state_out_rsrc)
 
                 k_lane = lane % _K_LANES
                 v_lane = lane // _K_LANES
@@ -1740,6 +1822,7 @@ def build_kimi_k3_monokernel(
                                 state_offset,
                                 vec_width=_VALUES_PER_THREAD,
                                 dtype=T.f32,
+                                cache_modifier=CM_DEV,
                             )
                         )
 
@@ -1770,8 +1853,9 @@ def build_kimi_k3_monokernel(
                         state_offset = (head * _HEAD_DIM + value_index) * _HEAD_DIM + k_base
                         bo.buffer_store(
                             state_vectors[v_iter * _K_ITERS + k_iter],
-                            state_rsrc,
+                            state_out_rsrc,
                             state_offset,
+                            cache_modifier=CM_DEV,
                         )
 
                 square_sum = fx.Float32(0.0)
@@ -1819,10 +1903,291 @@ def build_kimi_k3_monokernel(
                         fx.Float32(0.0),
                         fx.Float32(0.0),
                     )
+            rocdl.s_waitcnt(vmcnt=0)
             gpu.barrier()
             if tid == 0:
-                rocdl.s_waitcnt(vmcnt=0)
                 store_i32(norm_ready_rsrc, sample * _HEADS + head, 1)
+
+        # True MTP uses a two-stage KDA pipeline.  The causal-convolution stage
+        # walks the token chain once per head and publishes q/k/v/f_b.  Two
+        # recurrence CTAs then own disjoint 64-row slices of the recurrent
+        # state, doubling the number of active CUs without duplicating conv or
+        # gate projection work.
+        if const_expr(mtp):
+            conv_task = bid
+            conv_tasks = samples * _HEADS
+            conv_active = conv_task < conv_tasks
+            if conv_active:
+                sample = conv_task // _HEADS
+                head = conv_task % _HEADS
+                if sample > 0:
+                    if tid == 0:
+                        load_i32(mtp_conv_ready_rsrc, (sample - 1) * _HEADS + head)
+                    gpu.barrier()
+
+                input_slot = uniform(bo.buffer_load(indices_rsrc, sample, vec_width=1, dtype=T.i32))
+                output_slot = uniform(bo.buffer_load(indices_rsrc, sample + 1, vec_width=1, dtype=T.i32))
+                qkvg_base = (sample * _HEADS + head) * 4 * _HEAD_DIM
+                if (input_slot >= 0) & (output_slot >= 0):
+                    conv_state_rsrc = rsrc(
+                        conv_state + fx.Int64(input_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
+                    )
+                    conv_state_out_rsrc = rsrc(
+                        conv_state + fx.Int64(output_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
+                    )
+                    prepare_kda_head(sample, head, conv_state_rsrc, conv_state_out_rsrc)
+
+                    if tid < _HEAD_DIM // 2:
+                        row = tid * 2
+                        for component, values in enumerate((shared_query, shared_key, shared_value, shared_gate)):
+                            store_raw_pair(
+                                mtp_qkvg_rsrc,
+                                (qkvg_base + component * _HEAD_DIM + row) // 2,
+                                fx.Float32(fx.ptr_load(values + row)),
+                                fx.Float32(fx.ptr_load(values + row + 1)),
+                            )
+                elif tid < _HEAD_DIM // 2:
+                    row = tid * 2
+                    for component in range_constexpr(4):
+                        store_raw_pair(
+                            mtp_qkvg_rsrc,
+                            (qkvg_base + component * _HEAD_DIM + row) // 2,
+                            fx.Float32(0.0),
+                            fx.Float32(0.0),
+                        )
+                rocdl.s_waitcnt(vmcnt=0)
+                gpu.barrier()
+                if tid == 0:
+                    store_i32(mtp_conv_ready_rsrc, sample * _HEADS + head, 1)
+
+            stamp(1)
+
+            def run_mtp_recurrence(sample, head, value_split):
+                if tid == 0:
+                    load_i32(mtp_conv_ready_rsrc, sample * _HEADS + head)
+                gpu.barrier()
+
+                input_slot = uniform(bo.buffer_load(indices_rsrc, sample, vec_width=1, dtype=T.i32))
+                output_slot = uniform(bo.buffer_load(indices_rsrc, sample + 1, vec_width=1, dtype=T.i32))
+                valid_state = (input_slot >= 0) & (output_slot >= 0)
+                result = fx.Float32(0.0)
+                value_index = value_split * mtp_rows_per_split + wave * mtp_v_lanes + lane // mtp_k_lanes
+                if valid_state:
+                    state_rsrc = rsrc(recurrent_state + fx.Int64(input_slot) * fx.Int64(_STATE_SLOT_BYTES))
+                    state_out_rsrc = rsrc(recurrent_state + fx.Int64(output_slot) * fx.Int64(_STATE_SLOT_BYTES))
+                    qkvg_base = (sample * _HEADS + head) * 4 * _HEAD_DIM
+                    k_lane = lane % mtp_k_lanes
+                    exp_a_log = exp(fx.Float32(bo.buffer_load(a_log_rsrc, head, vec_width=1, dtype=T.f32)))
+                    beta_logit = get_input(sample, 4 * _PROJECTION + head)
+                    beta_value = sigmoid_batch([beta_logit])[0]
+
+                    query_vectors = [None] * mtp_k_iters
+                    key_vectors = [None] * mtp_k_iters
+                    decay_vectors = [None] * mtp_k_iters
+                    query_square = fx.Float32(0.0)
+                    key_square = fx.Float32(0.0)
+                    for k_iter in range_constexpr(mtp_k_iters):
+                        k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
+                        query_vector = fx.Vector(
+                            bo.buffer_load(
+                                mtp_qkvg_rsrc,
+                                qkvg_base + k_base,
+                                vec_width=_VALUES_PER_THREAD,
+                                dtype=T.bf16,
+                                cache_modifier=CM_DEV,
+                            )
+                        ).to(fx.Float32)
+                        key_vector = fx.Vector(
+                            bo.buffer_load(
+                                mtp_qkvg_rsrc,
+                                qkvg_base + _HEAD_DIM + k_base,
+                                vec_width=_VALUES_PER_THREAD,
+                                dtype=T.bf16,
+                                cache_modifier=CM_DEV,
+                            )
+                        ).to(fx.Float32)
+                        gate_vector = fx.Vector(
+                            bo.buffer_load(
+                                mtp_qkvg_rsrc,
+                                qkvg_base + 3 * _HEAD_DIM + k_base,
+                                vec_width=_VALUES_PER_THREAD,
+                                dtype=T.bf16,
+                                cache_modifier=CM_DEV,
+                            )
+                        ).to(fx.Float32)
+                        dt_vector = fx.Vector(
+                            bo.buffer_load(
+                                dt_bias_rsrc,
+                                head * _HEAD_DIM + k_base,
+                                vec_width=_VALUES_PER_THREAD,
+                                dtype=T.bf16,
+                            )
+                        ).to(fx.Float32)
+                        query_vectors[k_iter] = query_vector
+                        key_vectors[k_iter] = key_vector
+                        query_square = query_square + (query_vector * query_vector).reduce(fx.ReductionOp.ADD)
+                        key_square = key_square + (key_vector * key_vector).reduce(fx.ReductionOp.ADD)
+                        gate_sigmoid = sigmoid_batch(
+                            [
+                                exp_a_log * (gate_vector[item] + dt_vector[item])
+                                for item in range_constexpr(_VALUES_PER_THREAD)
+                            ]
+                        )
+                        decay_vectors[k_iter] = fx.Vector.from_elements(
+                            [
+                                exp(fx.Float32(_GATE_LOWER_BOUND) * gate_sigmoid[item])
+                                for item in range_constexpr(_VALUES_PER_THREAD)
+                            ],
+                            fx.Float32,
+                        )
+
+                    def mtp_subgroup_sum(value):
+                        for offset in (4, 2, 1):
+                            value = value + xshfl(value, offset)
+                        return value
+
+                    query_inverse_norm = rsq(mtp_subgroup_sum(query_square) + fx.Float32(1.0e-6))
+                    key_inverse_norm = rsq(mtp_subgroup_sum(key_square) + fx.Float32(1.0e-6))
+                    for k_iter in range_constexpr(mtp_k_iters):
+                        query_vectors[k_iter] = query_vectors[k_iter] * fx.Vector.filled(
+                            _VALUES_PER_THREAD,
+                            query_inverse_norm * fx.Float32(_Q_SCALE),
+                            fx.Float32,
+                        )
+                        key_vectors[k_iter] = key_vectors[k_iter] * fx.Vector.filled(
+                            _VALUES_PER_THREAD,
+                            key_inverse_norm,
+                            fx.Float32,
+                        )
+
+                    dot_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                    for k_iter in range_constexpr(mtp_k_iters):
+                        dot_parts = fx.math.fma(key_vectors[k_iter], query_vectors[k_iter], dot_parts)
+                    dot_key_query = mtp_subgroup_sum(dot_parts.reduce(fx.ReductionOp.ADD))
+
+                    state_vectors = [None] * mtp_k_iters
+                    state_key_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                    state_query_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                    for k_iter in range_constexpr(mtp_k_iters):
+                        k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
+                        state_offset = (head * _HEAD_DIM + value_index) * _HEAD_DIM + k_base
+                        state_vector = fx.Vector(
+                            bo.buffer_load(
+                                state_rsrc,
+                                state_offset,
+                                vec_width=_VALUES_PER_THREAD,
+                                dtype=T.f32,
+                                cache_modifier=CM_DEV,
+                            )
+                        )
+                        state_vector = state_vector * decay_vectors[k_iter]
+                        state_vectors[k_iter] = state_vector
+                        state_key_parts = fx.math.fma(state_vector, key_vectors[k_iter], state_key_parts)
+                        state_query_parts = fx.math.fma(state_vector, query_vectors[k_iter], state_query_parts)
+                    state_key = mtp_subgroup_sum(state_key_parts.reduce(fx.ReductionOp.ADD))
+                    state_query = mtp_subgroup_sum(state_query_parts.reduce(fx.ReductionOp.ADD))
+                    value_input = fx.Float32(
+                        fx.BFloat16(
+                            bo.buffer_load(
+                                mtp_qkvg_rsrc,
+                                qkvg_base + 2 * _HEAD_DIM + value_index,
+                                vec_width=1,
+                                dtype=T.bf16,
+                                cache_modifier=CM_DEV,
+                            )
+                        )
+                    )
+                    value_new = (value_input - state_key) * beta_value
+                    value_new_vector = fx.Vector.filled(_VALUES_PER_THREAD, value_new, fx.Float32)
+                    for k_iter in range_constexpr(mtp_k_iters):
+                        k_base = k_lane * _VALUES_PER_THREAD + k_iter * mtp_k_tile
+                        state_offset = (head * _HEAD_DIM + value_index) * _HEAD_DIM + k_base
+                        state_vectors[k_iter] = fx.math.fma(
+                            key_vectors[k_iter], value_new_vector, state_vectors[k_iter]
+                        )
+                        bo.buffer_store(
+                            state_vectors[k_iter],
+                            state_out_rsrc,
+                            state_offset,
+                            cache_modifier=CM_DEV,
+                        )
+                    result = state_query + value_new * dot_key_query
+
+                k_lane = lane % mtp_k_lanes
+                square_sum = (k_lane == 0).select(result * result, fx.Float32(0.0))
+                square_sum = wave_sum(square_sum)
+                if lane == 0:
+                    lds_store(norm_sums, wave, square_sum)
+                gpu.barrier()
+                partial_square = lds_load(norm_sums, 0)
+                for source_wave in range_constexpr(1, _WAVES):
+                    partial_square = partial_square + lds_load(norm_sums, source_wave)
+                rocdl.s_waitcnt(vmcnt=0)
+                gpu.barrier()
+                if tid == 0:
+                    store_f32(
+                        mtp_state_ready_rsrc,
+                        (sample * _HEADS + head) * mtp_splits + value_split,
+                        partial_square,
+                    )
+                    total_square = load_f32(
+                        mtp_state_ready_rsrc,
+                        (sample * _HEADS + head) * mtp_splits,
+                    )
+                    for source_split in range_constexpr(1, mtp_splits):
+                        total_square = total_square + load_f32(
+                            mtp_state_ready_rsrc,
+                            (sample * _HEADS + head) * mtp_splits + source_split,
+                        )
+                    lds_store(norm_sums, 0, total_square)
+                gpu.barrier()
+
+                inverse_rms = rsq(lds_load(norm_sums, 0) * fx.Float32(1.0 / _HEAD_DIM) + fx.Float32(EPS))
+                gated = fx.Float32(0.0)
+                if k_lane == 0:
+                    if valid_state:
+                        output_gate = get_input(sample, 3 * _PROJECTION + head * _HEAD_DIM + value_index)
+                        gain = fx.Float32(
+                            fx.BFloat16(
+                                bo.buffer_load(
+                                    norm_weight_rsrc,
+                                    value_index,
+                                    vec_width=1,
+                                    dtype=T.bf16,
+                                )
+                            )
+                        )
+                        gated = result * inverse_rms * gain * sigmoid_batch([output_gate])[0]
+                    bo.buffer_store(
+                        gated.to(fx.BFloat16),
+                        norm_mailbox_rsrc,
+                        sample * _PROJECTION + head * _HEAD_DIM + value_index,
+                        cache_modifier=CM_DEV,
+                    )
+                rocdl.s_waitcnt(vmcnt=0)
+                gpu.barrier()
+                if tid == 0:
+                    store_i32(
+                        mtp_norm_ready_rsrc,
+                        (sample * _HEADS + head) * mtp_splits + value_split,
+                        1,
+                    )
+
+            mtp_recurrence_task = bid
+            mtp_recurrence_tasks = samples * _HEADS * mtp_splits
+            if mtp_recurrence_task < mtp_recurrence_tasks:
+                sample = mtp_recurrence_task // (_HEADS * mtp_splits)
+                head_split = mtp_recurrence_task % (_HEADS * mtp_splits)
+                head = head_split // mtp_splits
+                value_split = head_split % mtp_splits
+                if tid == 0:
+                    if sample > 0:
+                        load_f32(
+                            mtp_state_ready_rsrc,
+                            ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
+                        )
+                gpu.barrier()
+                run_mtp_recurrence(sample, head, value_split)
 
         # Stage 3: BF16 1536 -> 7168 output projection followed by the tagged
         # TP8 reduction.  Each wave again owns a complete-K 16-row group.

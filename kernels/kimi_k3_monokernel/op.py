@@ -24,6 +24,7 @@ class KimiK3MonoKernel(_KimiK3KdaStagedPath):
         npes: int = 8,
         group=None,
         reduce_group=None,
+        mtp: bool = False,
     ) -> None:
         super().__init__(
             weights,
@@ -37,6 +38,7 @@ class KimiK3MonoKernel(_KimiK3KdaStagedPath):
             fuse_router=True,
             fuse_shared_experts=True,
             reduce_backend="symmetric",
+            mtp=mtp,
         )
         self.attention.configure_monokernel(layer_idx, fuse_moe=True)
 
