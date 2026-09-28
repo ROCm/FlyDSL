@@ -97,6 +97,13 @@ The JIT disk cache auto-invalidates when kernel source or closure values change.
 export FLYDSL_RUNTIME_ENABLE_CACHE=0  # or: rm -rf ~/.flydsl/cache
 ```
 
+Cooperative tests use a representative parameter matrix by default so each
+axis value is covered without compiling its full Cartesian product. Set
+`FLYDSL_COOP_TESTS_FULL=1` to run every cooperative-test combination; this is
+also when the shared default-device fixture covers both CPU and CUDA defaults.
+This switch is independent of `RUN_TESTS_FULL`, which continues to control
+`large_shape`.
+
 ## MLIR FileCheck tests
 
 `tests/mlir/**/*.mlir` checks are driven by **`scripts/run_tests.sh`** (FileCheck + `fly-opt`), not by pytest. Tiering for those may be documented in parallel in this README as the RFC rollout continues; see RFC open questions.
