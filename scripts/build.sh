@@ -25,10 +25,10 @@ done
 # Build directory (default: build-fly/, overridable via FLY_BUILD_DIR)
 # For custom source, default includes the branch suffix: build-fly-<suffix>
 # ---------------------------------------------------------------------------
-if [[ "${LLVM_SOURCE}" == "custom" && -z "${FLY_BUILD_DIR:-}" ]]; then
+if [[ "${LLVM_SOURCE}" == "custom" ]]; then
   _branch=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['custom']['branch'])")
   _branch_suffix=$(echo "${_branch}" | sed 's|.*/||; s/_/-/g')
-  BUILD_DIR="${REPO_ROOT}/build-fly-${_branch_suffix}"
+  BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly-${_branch_suffix}}"
 else
   BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly}"
 fi

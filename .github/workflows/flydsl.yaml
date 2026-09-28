@@ -453,6 +453,7 @@ jobs:
             -e BASE_COMMIT_SHA \
             -e ROCM_PATH \
             -e BASE_MLIR_PATH \
+            -e LLVM_SOURCE \
             -e "MLIR_PATH=${INSTALL_DIR}" \
             flydsl_mlir_cache bash -c '
               if command -v rocm-sdk >/dev/null 2>&1; then
