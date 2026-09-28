@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-28T14:16:09Z",
+ "updated": "2026-09-28T14:17:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36434740596,
+   "pr": 1193,
+   "commit": "851e3ce8c689ab09d5165ea1392921e1af757135",
+   "branch": "fix/1165-singleton-contig-segment",
+   "event": "pull_request",
+   "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434740596",
+   "created_at": "2026-09-28T14:16:29Z",
+   "updated_at": "2026-09-28T14:16:29Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36434490137,
    "pr": null,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434490137",
    "created_at": "2026-09-28T14:14:34Z",
-   "updated_at": "2026-09-28T14:14:59Z",
+   "updated_at": "2026-09-28T14:16:33Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -29,7 +44,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434435346",
    "created_at": "2026-09-28T14:14:08Z",
-   "updated_at": "2026-09-28T14:14:26Z",
+   "updated_at": "2026-09-28T14:16:09Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -531,7 +546,7 @@
   },
   {
    "run_id": 36398017657,
-   "pr": 1193,
+   "pr": null,
    "commit": "2dc74f10ebc034aa08312783b65613cdfce60542",
    "branch": "fix/1165-singleton-contig-segment",
    "event": "pull_request",
@@ -2132,49 +2147,6 @@
    "updated_at": "2026-09-27T01:09:13Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 36284172781,
-   "pr": null,
-   "commit": "f88d2b67a6b0beca18d9576a7c05b0cdae972dbd",
-   "branch": "dev/export_c",
-   "event": "pull_request",
-   "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284172781",
-   "created_at": "2026-09-27T00:59:51Z",
-   "updated_at": "2026-09-27T03:08:51Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-27T01:15:26Z",
-     "completed_at": "2026-09-27T01:42:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284172781/job/108523864127"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-27T01:18:45Z",
-     "completed_at": "2026-09-27T03:08:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284172781/job/108523864170"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-27T01:28:45Z",
-     "completed_at": "2026-09-27T02:32:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284172781/job/108523864200"
-    }
-   ]
   }
  ]
 }
