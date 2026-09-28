@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-28T08:29:34Z",
+ "updated": "2026-09-28T08:31:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397442878",
    "created_at": "2026-09-28T08:27:12Z",
-   "updated_at": "2026-09-28T08:28:13Z",
+   "updated_at": "2026-09-28T08:29:12Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2088,11 +2088,11 @@
    "branch": "fix/1054-single-rocdl-target",
    "event": "pull_request",
    "title": "[JIT] Attach exactly one #rocdl.target per gpu.module",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36081073180",
    "created_at": "2026-09-25T01:13:29Z",
-   "updated_at": "2026-09-28T08:24:43Z",
+   "updated_at": "2026-09-28T08:28:40Z",
    "actor": "mustafayildirim",
    "jobs": []
   },
