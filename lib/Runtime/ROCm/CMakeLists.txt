@@ -3,18 +3,27 @@
 #
 # FlyJitRuntime — thin ROCm runtime with GPU module caching.
 
-# ROCM_PATH, else the SDK's own answer, else whatever is in /opt.
-if(DEFINED ENV{ROCM_PATH})
-  set(_rocm_paths "$ENV{ROCM_PATH}")
-else()
-  execute_process(COMMAND rocm-sdk path --root
-                  OUTPUT_VARIABLE _rocm_paths OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+# Prefer an explicitly selected ROCm, then the SDK in the active environment.
+# NO_DEFAULT_PATH keeps a system HIP from winning over either one.
+if(DEFINED ENV{ROCM_PATH} AND NOT "$ENV{ROCM_PATH}" STREQUAL "")
+  find_package(hip QUIET CONFIG PATHS "$ENV{ROCM_PATH}" NO_DEFAULT_PATH)
 endif()
-if(NOT _rocm_paths)
+
+if(NOT hip_FOUND)
+  execute_process(COMMAND rocm-sdk path --root
+                  OUTPUT_VARIABLE _rocm_sdk_root
+                  RESULT_VARIABLE _rocm_sdk_result
+                  OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(_rocm_sdk_result STREQUAL "0" AND _rocm_sdk_root)
+    find_package(hip QUIET CONFIG PATHS "${_rocm_sdk_root}" NO_DEFAULT_PATH)
+  endif()
+endif()
+
+if(NOT hip_FOUND)
   file(GLOB _rocm_paths LIST_DIRECTORIES true "/opt/rocm*")
   list(SORT _rocm_paths ORDER DESCENDING)
+  find_package(hip REQUIRED CONFIG PATHS ${_rocm_paths})
 endif()
-find_package(hip REQUIRED CONFIG PATHS ${_rocm_paths})
 
 add_library(FlyJitRuntime SHARED FlyRocmRuntimeWrappers.cpp)
 target_include_directories(FlyJitRuntime PRIVATE
