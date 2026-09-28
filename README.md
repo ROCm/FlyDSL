@@ -34,7 +34,8 @@ layout IR with explicit algebra and coordinate mapping, plus a composable loweri
 ```
 FlyDSL/
 ├── scripts/                   # build & test scripts
-│   ├── build_llvm.sh          # build LLVM/MLIR from source
+│   ├── build_llvm.sh          # build LLVM/MLIR from source (applies thirdparty/llvm-extensions)
+│   ├── llvm_extension.sh      # create/rebase an LLVM extension
 │   ├── build.sh               # build FlyDSL (C++ + Python bindings)
 │   ├── run_tests.sh           # run tests
 │   └── run_benchmark.sh       # run performance benchmarks

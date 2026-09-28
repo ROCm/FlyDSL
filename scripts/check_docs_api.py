@@ -45,7 +45,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # Files whose prose is executed by an agent rather than read by a human.
-DEFAULT_TARGETS = ["CLAUDE.md", ".claude/skills/*/SKILL.md"]
+DEFAULT_TARGETS = ["CLAUDE.md", ".claude/skills/*/SKILL.md", "CONTRIBUTING.md"]
 DOCS_TARGETS = ["docs/**/*.md", "docs/**/*.rst"]
 
 # Trees whose call sites vouch for a symbol that has no in-tree definition
