@@ -187,8 +187,13 @@ def _quant_test_eps(N: int) -> float:
 def _assert_rmsnorm_forward_copy_width(compiled_fn, N: int, dtype: str):
     if dtype not in ("f16", "bf16"):
         return
+    source_ir = compiled_fn._keepalive.source_ir
+    if source_ir is None:
+        # Pre-lowering IR is process-local, so a cache-loaded artifact carries none.
+        # Kernel edits change the cache key, so a real regression still gets a cold compile.
+        return
     expects_vec8 = N >= 8
-    has_128b_io = "buffer_copy<128>, 16>" in compiled_fn._keepalive.source_ir
+    has_128b_io = "buffer_copy<128>, 16>" in source_ir
     assert has_128b_io == expects_vec8, f"unexpected RMSNorm copy width for N={N}, dtype={dtype}"
 
 
@@ -1619,7 +1624,9 @@ def test_rmsnorm_small_n_mixed_weight_tail_and_rstd():
     )
     compiled = flyc.compile(launcher, x, weight, output, rstd, M, stream)
     _assert_rmsnorm_forward_copy_width(compiled, N, "bf16")
-    assert "buffer_copy<128>, 32>" in compiled._keepalive.source_ir
+    source_ir = compiled._keepalive.source_ir
+    if source_ir is not None:
+        assert "buffer_copy<128>, 32>" in source_ir
     compiled(x, weight, output, rstd, M, stream)
     torch.cuda.synchronize(device)
 
@@ -1708,7 +1715,9 @@ def test_rmsnorm_bwd_mixed_weight_keeps_vector_io(fused_add):
         )
 
     weight_copy_type = "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<128>, 32>"
-    assert compiled._keepalive.source_ir.count(weight_copy_type) >= 3
+    source_ir = compiled._keepalive.source_ir
+    if source_ir is not None:
+        assert source_ir.count(weight_copy_type) >= 3
 
 
 @pytest.mark.parametrize("fused_add", (False, True), ids=("plain", "fused_add"))
