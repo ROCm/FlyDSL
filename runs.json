@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-28T15:33:38Z",
+ "updated": "2026-09-28T15:35:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,21 +10,24 @@
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
    "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36435015445",
    "created_at": "2026-09-28T14:18:43Z",
-   "updated_at": "2026-09-28T14:51:16Z",
+   "updated_at": "2026-09-28T15:32:36Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T14:34:11Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36435015445/job/108977115647"
+     "completed_at": "2026-09-28T15:32:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36435015445/job/108977115647",
+     "machine": "smci350-rck-g03-f12-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -63,9 +66,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T14:49:09Z",
+     "started_at": "2026-09-28T15:31:46Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434740596/job/108983711714"
     },
@@ -167,10 +170,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T15:11:09Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T15:31:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434435346/job/108976530322"
     }
    ]
