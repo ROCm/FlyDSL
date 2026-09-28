@@ -22,7 +22,7 @@ All `fx.*` layout operations generate MLIR IR and must be called inside a `@flyc
 | | `fx.cosize(layout)` | `fly.cosize` | Codomain size (max index + 1) |
 | | `fx.get_shape(layout)` | `fly.get_shape` | Extract shape from layout |
 | | `fx.get_stride(layout)` | `fly.get_stride` | Extract stride from layout |
-| | `fx.get(int_tuple, idx)` | `fly.select` + `fly.get_scalar` | Extract element at index |
+| | `fx.get_(int_tuple, idx).unpack()` | `fly.select` + `fly.get_scalar` | Extract a scalar element at index |
 | **Algebra** | `fx.composition(A, B)` | `fly.composition` | Compose: A ∘ B |
 | | `fx.complement(tiler, size)` | `fly.complement` | Complement of tiler |
 | | `fx.coalesce(layout)` | `fly.coalesce` | Simplify layout |
@@ -151,7 +151,7 @@ s = fx.size(layout)           # total elements (returns Int32 for static)
 cs = fx.cosize(layout)        # codomain size (max index + 1)
 shape = fx.get_shape(layout)
 stride = fx.get_stride(layout)
-v = fx.get(shape, 0)          # first dimension
+v = fx.get_(shape, 0).unpack()  # first dimension
 r = fx.rank(shape)            # number of modes
 ```
 

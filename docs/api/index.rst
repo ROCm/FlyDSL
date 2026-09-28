@@ -1,9 +1,9 @@
-Stable API overview
-===================
+API overview
+============
 
-This reference covers only the public Python paths protected by FlyDSL's
-compatibility policy. Importable implementation modules that are not in the
-stable catalog are intentionally omitted.
+This section documents the installable FlyDSL Python API and the source-tree
+kernel library. Inclusion in the documentation does not by itself make an API
+stable: :doc:`../api_stability` is the authoritative compatibility policy.
 
 Primary namespaces
 ------------------
@@ -32,6 +32,10 @@ Primary namespaces
    * - ``flydsl.runtime.device``
      - Query the target ROCm architecture and distinguish RDNA from CDNA.
      - :doc:`runtime`
+   * - Repository ``kernels`` tree
+     - Pre-built and reference kernels used from a source checkout. These
+       interfaces are not installed by the wheel and are not stable APIs.
+     - :doc:`kernels`
 
 Recommended imports
 -------------------
@@ -81,6 +85,7 @@ GPU runtime:
    python3 scripts/list_stable_apis.py
    python3 scripts/list_stable_apis.py --format json
 
-Use the catalog when checking a release boundary; every API introduced by the
-pages in this section should appear in that catalog or be a stable member of an
-object returned by one of its entries.
+Use the catalog when checking a release boundary. The reference pages provide
+usage context, but only paths that satisfy :doc:`../api_stability` carry a
+compatibility commitment. The source-tree kernel page is explicitly outside
+that commitment.

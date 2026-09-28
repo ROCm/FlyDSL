@@ -15,6 +15,7 @@ their storage layout, or the generated protocol implementations.
 A composite is also a trace-time Python type, not a value in the generated MLIR program: grouping
 fields emits no aggregate operation.
 
+
 ## Declaring a composite
 
 `@fx.struct` declares an ordered product; the field annotations *are* the type, and class-level
@@ -58,6 +59,7 @@ fx.Struct[fx.Int32, fx.Float32] # ⇒ generated field names `_0`, `_1`
 | `⟨Type⟩(...)` | constructor | one value per field, positional or by name; a field type may coerce its value | `Pair(1, 2.0)` |
 | `value.⟨field⟩` | attribute access | read that field | `pair.left` ⇒ `Int32(1)` |
 | `value.replace(⟨field⟩=new)` | method | a new value with that field replaced | `pair.replace(left=3)` |
+
 
 ## Member methods and properties
 
@@ -109,6 +111,7 @@ class Position:
 Struct definitions are immutable by contract. After declaration, do not change fields,
 methods, annotations, compile hints or referenced class bindings.
 
+
 ### Reserved field names
 
 A field is read as an ordinary attribute, and Python resolves a real class member before it ever
@@ -125,6 +128,7 @@ User method/property names also cannot collide with declared fields. The rule co
 the inline `fx.Struct[...]` / `fx.Union[...]` forms equally — a union is reached through the same
 `Storage` view. Only the names generated for anonymous inline fields (`_0`, `_1`, …) are exempt from
 the underscore rule; it applies to every name you write.
+
 
 ## What can be a field
 
@@ -148,6 +152,7 @@ One point is worth stating outright:
 
 - a union-typed field gives a struct a byte layout but not a value form: such a struct can be
   allocated and viewed, never constructed.
+
 
 ## Nesting
 
@@ -175,6 +180,7 @@ Everything a composite does to its fields, it does recursively: flattening, reco
 signatures, ABI slots, byte offsets. A nested value is flattened only when a consumer needs its
 underlying IR values or storage.
 
+
 ## Closure over the protocols
 
 FlyDSL's [three protocols](dsl_protocols.md) — `DslType`, `JitArgument`, `Storable` describe what
@@ -194,6 +200,7 @@ struct { scalar: Int32, vector: Vector }
   JitArgument  ⇒ TypeError (Vector)              # one field disqualifies it
   Storable     ⇒ TypeError (Vector)              # likewise
 ```
+
 
 ## Compile-time fields
 
@@ -223,6 +230,7 @@ capture-free lambda is the only accepted callable; a value of the wrong type is 
 `TypeError` at construction. A run-time value is therefore never a `Constexpr` value:
 `Params(tile=fx.Int32(4), …)` is that same `TypeError`. The same rules hold for a `Constexpr` field
 nested inside another struct.
+
 
 ## JIT and kernel boundaries
 

@@ -77,7 +77,7 @@ vec_add(A, B, C, 1024)
    - Calling `vec_add_kernel(...)` captures a pending kernel call
    - `.launch()` emits the specialized `gpu.func` and `gpu.launch_func`
    - `MlirCompiler.compile()` runs the full pass pipeline
-   - `JITCFunction` wraps the resulting ExecutionEngine
+   - `CompiledArtifact` stores the compiled module and lazily owns the resulting ExecutionEngine
 4. Subsequent calls with the same type signature use the cached binary
 
 ---
@@ -95,7 +95,8 @@ def my_kernel(input: fx.Tensor, output: fx.Tensor):
     ...
 ```
 
-At the host boundary, `torch.Tensor` is converted via `TensorAdaptor`.
+At the host boundary, `torch.Tensor` is converted through the registered
+PyTorch/DLPack argument adapter.
 
 ### 2.2 `fx.Constexpr[T]`
 
@@ -642,14 +643,15 @@ FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./my_dumps python my_script.py
 
 ### 10.2 Printing IR
 
-```python
-# After compilation, access IR from the compiled function:
-result = launch(A, B, C, 1024)
+Use the supported debug controls to print IR during compilation:
 
-# Or use JITCFunction directly:
-compiled_func.print_ir()              # compiled MLIR IR
-compiled_func.print_ir(compiled=False) # original IR before passes
+```bash
+FLYDSL_DEBUG_PRINT_ORIGIN_IR=1 python my_script.py
+FLYDSL_DEBUG_PRINT_AFTER_ALL=1 python my_script.py
 ```
+
+The internal `CompiledArtifact` object also stores compiled and source IR,
+but it is not a public return value of `@flyc.jit` or `flyc.compile`.
 
 ### 10.3 AST diff
 
@@ -760,15 +762,15 @@ Writing a new kernel?
 | `python/flydsl/compiler/__init__.py` | Public API: `jit`, `kernel`, `from_dlpack` |
 | `python/flydsl/compiler/jit_function.py` | `@jit` decorator, `MlirCompiler`, `JitCacheManager` |
 | `python/flydsl/compiler/kernel_function.py` | `@kernel` decorator, `KernelFunction`, `KernelLauncher` |
-| `python/flydsl/compiler/jit_executor.py` | `JITCFunction` (ExecutionEngine wrapper) |
-| `python/flydsl/compiler/jit_argument.py` | `JitArgumentRegistry`, `TensorAdaptor` |
+| `python/flydsl/compiler/jit_executor.py` | `CompiledArtifact` (compiled IR and lazy ExecutionEngine wrapper) |
+| `python/flydsl/compiler/jit_argument.py` | `JitArgumentRegistry` and tensor/pointer argument adapters |
 | `python/flydsl/compiler/ast_rewriter.py` | `ASTRewriter` — Python AST → MLIR control flow |
 | `python/flydsl/expr/typing.py` | `Types` (`T`), `Tensor`, `Stream`, `Constexpr` |
 | `python/flydsl/expr/arith.py` | Arithmetic operations |
-| `python/flydsl/expr/gpu.py` | GPU operations (thread_id, barrier, ...) |
+| `python/flydsl/expr/gpu.py` | GPU operations (thread indices, barriers, ...) |
 | `python/flydsl/expr/rocdl/` | ROCm dialect intrinsics (MFMA/WMMA, buffer, TDM, cluster) |
 | `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, etc.) |
-| `python/flydsl/expr/gpu.py` | `SharedAllocator`, GPU ops (thread_id, barrier, ...) |
+| `python/flydsl/expr/gpu.py` | `SharedAllocator`, GPU ops (thread indices, barriers, ...) |
 | `kernels/gemm/preshuffle_gemm.py` | Preshuffle GEMM kernel example |
 | `tests/kernels/test_vec_add.py` | Vector add kernel test |
 | `tests/kernels/test_preshuffle_gemm.py` | Preshuffle GEMM test |

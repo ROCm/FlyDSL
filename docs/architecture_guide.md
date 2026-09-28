@@ -11,7 +11,7 @@ This guide covers the FlyDSL project structure, compilation stages, key abstract
 | **FlyDSL Expr** | DSL expression ops (arith, vector, gpu, buffer, rocdl) | `python/flydsl/expr/` |
 | **Fly Dialect** | Flexible Layout IR — MLIR dialect with layout algebra | `include/flydsl/Dialect/Fly/` |
 | **MlirCompiler** | End-to-end MLIR pass pipeline (DSL → binary) | `python/flydsl/compiler/jit_function.py` |
-| **JITCFunction** | MLIR ExecutionEngine wrapper for JIT execution | `python/flydsl/compiler/jit_executor.py` |
+| **CompiledArtifact** | Serializable compiled MLIR plus lazy ExecutionEngine state | `python/flydsl/compiler/jit_executor.py` |
 
 ---
 
@@ -19,28 +19,117 @@ This guide covers the FlyDSL project structure, compilation stages, key abstract
 
 ```text
 FlyDSL/
-├── include/flydsl/              # C++/TableGen declarations for Fly and FlyROCDL
-├── lib/                         # dialect, lowering, C API, and runtime implementation
-├── python/
-│   ├── flydsl/
-│   │   ├── compiler/            # JIT tracing, backends, argument adapters
-│   │   ├── expr/                # language values, layout algebra, GPU/ROCDL ops
-│   │   ├── extension/           # cooperative and random algorithm libraries
-│   │   └── runtime/             # device runtime and architecture helpers
-│   └── mlir_flydsl/             # generated/built Python bindings
-├── tools/                       # fly-opt and flydsl-lsp-server
-├── examples/                    # runnable examples and onboarding notebooks
-├── kernels/
-│   ├── gemm/                    # CDNA/RDNA/gfx1250 GEMM implementations
-│   ├── norm/                    # LayerNorm, RMSNorm, and softmax
-│   ├── attention/               # FlashAttention, paged attention, MLA, RoPE
-│   ├── moe/ and mega_moe/       # routing, expert GEMMs, fused MoE
-│   ├── conv/                    # BF16/FP8 implicit-GEMM convolution
-│   ├── comm/                    # all-reduce and intranode dispatch/combine
-│   └── common/                  # shared memory, layout, DPP, and MMA helpers
-├── tests/                       # language, extension, kernel, system, and MLIR tests
-├── docs/                        # Sphinx documentation source
-└── scripts/                     # build, test, benchmark, release, and checks
+├── include/flydsl/                   # C++ dialect headers
+│   └── Dialect/
+│       ├── Fly/                      # Fly layout dialect
+│       │   ├── IR/
+│       │   │   ├── FlyDialect.td     # Dialect declaration (name = "fly")
+│       │   │   ├── FlyOps.td         # Layout ops (make_shape, crd2idx, composition, ...)
+│       │   │   ├── FlyTypeDefs.td    # Custom types (!fly.int_tuple, !fly.layout, ...)
+│       │   │   ├── FlyAttrDefs.td    # Attributes
+│       │   │   └── FlyInterfaces.td  # Op interfaces
+│       │   └── Transforms/
+│       │       ├── Passes.td         # Pass declarations (fly-layout-lowering, etc.)
+│       │       └── LayoutLowering.td # Layout lowering pass
+│       └── FlyROCDL/                 # FlyROCDL dialect (copy/MMA atoms)
+│           └── IR/
+│               ├── Dialect.td        # FlyROCDL dialect declaration
+│               ├── CopyAtom.td       # Copy atom ops
+│               └── MmaAtom.td        # MMA atom ops
+│
+├── lib/                              # C++ dialect implementation
+│   ├── Dialect/Fly/                  # Fly dialect ops, type inference, lowering
+│   ├── Dialect/FlyROCDL/             # FlyROCDL dialect implementation
+│   ├── Conversion/                   # Dialect conversion passes
+│   └── Transforms/                   # Optimization passes
+│
+├── python/flydsl/                    # Python DSL package
+│   ├── __init__.py                   # Package version
+│   ├── compiler/
+│   │   ├── __init__.py               # Public API: jit, kernel, from_dlpack
+│   │   ├── jit_function.py           # @jit decorator, MlirCompiler, JitCacheManager
+│   │   ├── kernel_function.py        # @kernel decorator, KernelFunction, KernelLauncher
+│   │   ├── jit_executor.py           # CompiledArtifact and ExecutionEngine wrapper
+│   │   ├── jit_argument.py           # Argument conversion (Tensor, Stream, Int32)
+│   │   ├── ast_rewriter.py           # AST rewriting for Python control flow → MLIR
+│   │   └── protocol.py              # DslType / JitArgument protocols
+│   ├── expr/
+│   │   ├── __init__.py               # Public expr API
+│   │   ├── typing.py                 # Types (T.f32, Tensor, Stream, Constexpr)
+│   │   ├── numeric.py                # DSL numeric types (Float32, Int32, ...)
+│   │   ├── primitive.py              # Primitive operations (layout algebra, copy, gemm)
+│   │   ├── derived.py                # Thread-level tiled copy/MMA views and helpers
+│   │   ├── arith.py                  # Arithmetic dialect ops
+│   │   ├── gpu.py                    # GPU dialect ops (thread_idx, block_idx, barrier)
+│   │   └── rocdl/                    # ROCm-specific intrinsics (MFMA/WMMA, buffer, TDM, cluster)
+│   ├── runtime/
+│   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
+│   └── utils/
+│       ├── env.py                    # EnvManager — typed environment config
+│       └── logger.py                 # Logging utilities
+│
+├── examples/                         # Runnable examples
+│   ├── 01-vectorAdd.py               # Vector addition with layout algebra
+│   ├── 02-tiledCopy.py               # Tiled copy with partitioned tensors
+│   ├── 03-tiledMma.py                # Tiled MMA (GEMM) with MFMA atoms
+│   └── 04-preshuffle_gemm.py         # Preshuffle GEMM end-to-end example
+│
+├── kernels/                          # Production GPU kernels (organized by domain)
+│   ├── gemm/                         # Dense GEMM kernels
+│   │   ├── preshuffle_gemm.py        # GEMM (preshuffle layout)
+│   │   ├── mxfp4_preshuffle.py       # MXFP4 preshuffle GEMM
+│   │   ├── fp4_gemm_4wave.py         # FP4 4-wave GEMM
+│   │   ├── fp8_gemm_4wave.py         # FP8 4-wave GEMM
+│   │   ├── fp8_gemm_8wave.py         # FP8 8-wave GEMM
+│   │   ├── rdna_f16_gemm.py          # RDNA FP16 GEMM
+│   │   ├── rdna_fp8_preshuffle_gemm.py # RDNA FP8 GEMM
+│   │   ├── gemm_common_gfx1250.py    # GFX1250 GEMM common
+│   │   ├── gemm_a8w4_mxscale_gfx1250.py # GFX1250 FP8/FP4 GEMM
+│   │   ├── gemm_bf16_gfx1250.py      # GFX1250 BF16 WMMA GEMM
+│   │   └── fp8_gemm_utils.py         # FP8 GEMM helpers
+│   ├── norm/                         # Normalization kernels
+│   │   ├── layernorm_kernel.py       # LayerNorm (layout API)
+│   │   ├── rmsnorm_kernel.py         # RMSNorm (layout API)
+│   │   └── softmax_kernel.py         # Softmax (layout API)
+│   ├── attention/                    # Attention kernels
+│   │   ├── pa_decode_fp8.py          # Paged attention decode (FP8)
+│   │   ├── pa_decode_swa.py          # Paged attention sliding-window
+│   │   ├── flash_attn_generic.py     # FlashAttention generic fallback
+│   │   ├── flash_attn_gfx950.py      # FlashAttention gfx950 fast path
+│   │   ├── mla_fwd_decode.py         # MLA forward decode
+│   │   └── fused_rope_cache_kernel.py # Fused RoPE + KV cache
+│   ├── moe/                          # Mixture-of-experts kernels
+│   │   ├── moe_gemm_2stage/          # MoE GEMM (2-stage gate/up + reduce)
+│   │   ├── mxfp_moe/               # Fused a4w4/a8w4 MoE 2-stage (device fp4 re-quant)
+│   │   ├── moe_sorting_kernel.py     # MoE token sorting
+│   │   └── topk_gating_softmax_kernel.py # Top-k gating softmax
+│   ├── common/mma/                   # Shared MMA pipeline helpers
+│   │   └── mfma_preshuffle_pipeline.py # Preshuffle layout and XCD remapping
+│   ├── conv/                         # Convolution kernels
+│   │   ├── conv3d_implicit.py        # Implicit-GEMM 3D convolution
+│   │   └── conv3d_implicit_fp8.py    # FP8 implicit-GEMM 3D convolution
+│   ├── comm/                         # Multi-GPU communication
+│   │   └── custom_all_reduce.py      # Multi-GPU all-reduce
+│   └── common/                       # Cross-domain kernel utilities
+│       ├── kernels_common.py         # Common kernel utilities
+│       ├── layout_utils.py           # Layout helpers
+│       └── tensor_shim.py            # GTensor/STensor abstraction
+│
+├── tests/
+│   ├── mlir/                         # MLIR-level tests (Conversion, LayoutAlgebra, Transforms)
+│   ├── kernels/                      # GPU kernel tests + benchmarks
+│   ├── python/                       # Python integration tests and examples
+│   ├── unit/                         # Unit tests (streams, async, etc.)
+│   ├── conftest.py                   # Pytest fixtures
+│   ├── test_common.py                # Shared test utilities
+│   └── utils.py                      # Compilation helpers
+│
+└── scripts/                          # Build and test helpers
+    ├── build.sh                      # Build FlyDSL (CMake + ninja)
+    ├── build_llvm.sh                 # Build MLIR from ROCm llvm-project
+    ├── run_tests.sh                  # Run full test suite (pytest + examples + FileCheck)
+    ├── run_benchmark.sh              # Run benchmarks
+    └── dumpir.sh                     # Dump intermediate IR
 ```
 
 ---
@@ -105,7 +194,7 @@ Python Function (@flyc.kernel / @flyc.jit)
    └────────────────────────────────────────────────────────┘
         │
         ▼
-   JITCFunction (ExecutionEngine)
+   CompiledArtifact (ExecutionEngine)
 ```
 
 ### 3.2 Pipeline stages in detail
@@ -140,7 +229,7 @@ definition for this checkout:
 | 5 | `canonicalize` | Standard MLIR canonicalization (constant folding, etc.). |
 | 6 | `fly-convert-atom-call-to-ssa-form` | Converts `copy_atom_call` / `mma_atom_call` to their SSA counterparts; promotes register tensors to vector SSA values. |
 | 7 | `fly-promote-regmem-to-vectorssa` | Promotes `fly.make_ptr(register)` memory semantics to vector SSA values (requires #6). |
-| 8 | `convert-fly-to-rocdl` | Lowers remaining Fly ops to upstream MLIR and ROCDL operations: buffer/TDM copies plus MFMA or WMMA instructions selected for the target. |
+| 8 | `convert-fly-to-rocdl` | Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → ROCDL buffer load/store operations, or gfx1250 TDM → `rocdl.tensor.load.to.lds` / `store.from.lds`; MMA atoms → `rocdl.mfma.*` on CDNA, `rocdl.wmma.*` on gfx11/gfx1250). |
 | 9 | `canonicalize` | Second canonicalization round after ROCDL lowering. |
 | 10 | `gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, ROCDL fast-math ops lowering, GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
 
@@ -182,7 +271,7 @@ When a `@flyc.jit` function is called:
 5. **Function tracing**: Execute the transformed function body to generate MLIR ops.
 6. **GPU kernel emission**: `@kernel` calls emit `gpu.func` into `gpu.module`.
 7. **Pipeline compilation**: `MlirCompiler.compile()` runs the full pass pipeline.
-8. **Execution**: `JITCFunction` wraps MLIR ExecutionEngine to invoke the compiled code.
+8. **Execution**: `CompiledArtifact` lazily creates an MLIR ExecutionEngine and invokes the compiled code.
 9. **Cache store**: Serialize the compiled function to disk for future runs.
 
 ---
@@ -204,7 +293,6 @@ def launch(a: fx.Tensor, b: fx.Tensor, n: fx.Constexpr[int],
 ```
 
 Key behaviors:
-
 - The first call triggers compilation; subsequent calls with the same type signature use the cached binary.
 - `Constexpr[T]` parameters become compile-time constants and affect the cache key.
 - `Tensor` parameters map to memref descriptors via DLPack.
@@ -218,15 +306,14 @@ Decorates a Python function as a GPU kernel:
 ```python
 @flyc.kernel
 def my_kernel(a: fx.Tensor, b: fx.Tensor, n: fx.Constexpr[int]):
-    tid = fx.gpu.thread_id("x")
-    bid = fx.gpu.block_id("x")
+    tid = fx.thread_idx.x
+    bid = fx.block_idx.x
     # ... kernel body ...
 ```
 
 Key behaviors:
-
 - You can only call this inside a `@flyc.jit` function.
-- Calling the kernel returns a pending launcher; call `.launch()` to emit the launch op.
+- Calling the kernel returns a `KernelLauncher`; you must call `.launch()` to emit the launch op.
 - Supports `Constexpr[T]` for compile-time specialization.
 - Emits a `gpu.func` with `gpu.kernel` attribute into the `gpu.module`.
 
@@ -244,14 +331,16 @@ launcher.launch(
 )
 ```
 
-### 4.4 `JITCFunction`
+### 4.4 `CompiledArtifact`
 
-Wraps MLIR's `ExecutionEngine` for JIT execution:
+Stores the compiled MLIR and lazily creates MLIR's `ExecutionEngine` for JIT
+execution:
 
 - Thread-safe with lazy engine initialization.
 - Serializable (pickle) for disk caching.
 - Supports packed calling convention via `ctypes`.
-- Provides `.print_ir()` for debugging compiled or original IR.
+- Provides `.dump()`, `.ir`, and `.source_ir` for inspecting compiled or
+  original IR.
 
 ### 4.5 `DslType` / `JitArgument` protocols
 
@@ -277,7 +366,6 @@ class JitArgument(Protocol):
 Built-in types: `Tensor`, `Stream`, `Int32`, and `Constexpr[T]`
 
 To register custom types:
-
 ```python
 from flydsl.compiler import JitArgumentRegistry
 
@@ -337,7 +425,6 @@ Transforms Python control flow to MLIR ops at the AST level:
 ### 5.4 Architecture detection priority
 
 `get_rocm_arch()` in `runtime/device.py` checks in the following order:
-
 1. `FLYDSL_GPU_ARCH` env var
 2. `HSA_OVERRIDE_GFX_VERSION` env var (supports `9.4.2` → `gfx942` format)
 3. `rocm_agent_enumerator` system tool
@@ -352,7 +439,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `gfx942` | MI300A / MI300X | 64 KB | CDNA 3, primary development target |
 | `gfx950` | MI350 / MI355X | 160 KB | CDNA 4, larger LDS |
 | `gfx1201` | Radeon AI PRO R9700 | 64 KB | RDNA 4 |
-| `gfx1250` | — | 320 KB | GFX12, wave32, WMMA, TDM ops |
+| `gfx1250` | — | 320 KB | CDNA 5, wave32, WMMA, TDM ops |
 | `gfx90a` | MI250X | 64 KB | CDNA 2 (verified platform) |
 
 ---
@@ -366,7 +453,6 @@ FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python test_my_kernel.py
 ```
 
 This produces numbered dump files (exact pass count tracks `RocmBackend._pipeline_parts()`):
-
 ```text
 dumps/my_func_name/
 ├── 00_origin.mlir
@@ -404,13 +490,13 @@ If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra numbere
 |---|---|
 | `python/flydsl/compiler/jit_function.py` | `@jit` decorator, `MlirCompiler`, `JitCacheManager` |
 | `python/flydsl/compiler/kernel_function.py` | `@kernel` decorator, `KernelFunction`, `KernelLauncher`, `CompilationContext` |
-| `python/flydsl/compiler/jit_executor.py` | `JITCFunction` — ExecutionEngine wrapper |
-| `python/flydsl/compiler/jit_argument.py` | `JitArgumentRegistry`, `TensorAdaptor`, `from_dlpack` |
+| `python/flydsl/compiler/jit_executor.py` | `CompiledArtifact` — serialized IR and lazy ExecutionEngine wrapper |
+| `python/flydsl/compiler/jit_argument.py` | `JitArgumentRegistry`, tensor adapters, `from_dlpack` |
 | `python/flydsl/compiler/ast_rewriter.py` | `ASTRewriter` — Python AST → MLIR control flow |
 | `python/flydsl/compiler/protocol.py` | `get_ir_types`, `extract_to_ir_values`, `construct_from_ir_values` protocols |
 | `python/flydsl/expr/typing.py` | `Types` (`T`), `Tensor`, `Stream`, `Constexpr` |
 | `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, copy, gemm) |
-| `python/flydsl/expr/derived.py` | Derived types (`CopyAtom`, `MmaAtom`, `TiledCopy`) |
+| `python/flydsl/expr/derived.py` | `ThrCopy`, `ThrMma`, and tiled-operation helpers |
 | `python/flydsl/expr/numeric.py` | DSL numeric types (Float32, Int32, ...) |
 | `python/flydsl/utils/env.py` | `EnvManager` — typed environment variable configuration |
 | `python/flydsl/runtime/device.py` | `get_rocm_arch()` GPU detection |

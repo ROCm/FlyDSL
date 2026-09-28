@@ -200,6 +200,7 @@ static_assert(alignof(Item) == 16);
 static_assert(sizeof(Item) == 16);
 ```
 
+
 ## Byte layout
 
 The offsets `Storage` navigates. For a product type:

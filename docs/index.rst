@@ -62,7 +62,7 @@ to GPU/ROCDL.
 
    .. grid-item-card:: API reference
 
-      * :doc:`Stable API overview <api/index>`
+      * :doc:`API overview <api/index>`
 
       * :doc:`Expression language <api/dsl>`
 
@@ -71,3 +71,11 @@ to GPU/ROCDL.
       * :doc:`Extension libraries <api/extensions>`
 
       * :doc:`Stable runtime helpers <api/runtime>`
+
+      * :doc:`Pre-built kernels <api/kernels>`
+
+   .. grid-item-card:: Tutorials
+
+      * :doc:`Basic usage <tutorials/basic_usage>`
+
+      * :doc:`Kernel development <tutorials/kernel_development>`
