@@ -169,6 +169,30 @@ The on-disk cache stores only the compressed compiled IR required to recreate
 the runtime module. Pre-lowering source IR remains available in the compiling
 process for inspection, but is intentionally omitted from cache files.
 
+Standalone C export
+-------------------
+
+FlyDSL can also turn one ``@flyc.jit`` specialization into a linkable host
+object. This is separate from JIT cache pre-warming:
+
+.. code-block:: python
+
+   from pathlib import Path
+
+   output = Path("build/aot")
+   output.mkdir(parents=True, exist_ok=True)
+
+   compiled = flyc.compile(launch, *specialization_args)
+   compiled.export_to_c(output, "my_kernel")
+
+The output directory receives ``my_kernel.o``, ``my_kernel.h``, and the FlyDSL
+runtime shared library required by the object. The generated header contains a
+typed inline call helper and the module lifecycle entry points. On a build host
+without a visible GPU, select the architecture explicitly (for example,
+``ARCH=gfx950``) and compile with null pointer or non-device tensor
+placeholders. See :doc:`api/compiler` for the API contract and supported
+argument categories.
+
 Next steps
 ----------
 

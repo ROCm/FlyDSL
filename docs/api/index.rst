@@ -22,7 +22,7 @@ Primary namespaces
      - :doc:`dsl`
    * - ``flydsl.compiler`` (normally ``flyc``)
      - Kernel and launcher decorators, specialization, argument conversion,
-       and backend registration.
+       C object export, and backend registration.
      - :doc:`compiler`
    * - ``flydsl.extension``
      - Libraries implemented on top of the expression language, currently

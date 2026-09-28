@@ -466,8 +466,9 @@ What operation do you need?
 | `kernels/gemm/rdna_f16_gemm.py` | RDNA FP16 GEMM |
 | `kernels/gemm/rdna_fp8_preshuffle_gemm.py` | RDNA FP8 GEMM |
 | `kernels/gemm/gemm_common_gfx1250.py` | GFX1250 GEMM common |
-| `kernels/gemm/gemm_a8w4_mxscale_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| `kernels/gemm/gemm_bf16_gfx1250.py` | GFX1250 BF16 WMMA GEMM |
+| `kernels/gemm/gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
+| `kernels/gemm/gemm_a8w8_gfx1250.py` | GFX1250 FP8 GEMM (per-token/per-channel and 128x128 blockscale) |
+| `kernels/gemm/gemm_a8w4_mxscale_gfx1250.py` | GFX1250 FP8 x MXFP4 GEMM |
 | `kernels/common/mma/mfma_preshuffle_pipeline.py` | Preshuffle layout and block remapping |
 | `kernels/gemm/fp8_gemm_utils.py` | FP8 GEMM helper utilities |
 | `kernels/common/kernels_common.py` | Common kernel utilities |
@@ -491,7 +492,7 @@ What operation do you need?
 | `tests/kernels/test_allreduce.py` | Multi-GPU all-reduce |
 | `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |
 | `tests/kernels/test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| `tests/kernels/test_gemm_bf16_gfx1250.py` | GFX1250 BF16 WMMA GEMM |
+| `tests/kernels/test_gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | `tests/kernels/test_vec_add.py` | Vector addition |
 | `tests/kernels/test_quant.py` | Quantization utilities |
 | `tests/kernels/benchmark_common.py` | Shared benchmark infrastructure |

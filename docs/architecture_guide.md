@@ -7,11 +7,12 @@ This guide covers the FlyDSL project structure, compilation stages, key abstract
 | Component | Description | Key File |
 |---|---|---|
 | **FlyDSL** | Python DSL front-end for authoring GPU kernels | `python/flydsl/` |
-| **FlyDSL Compiler** | `@flyc.jit` / `@flyc.kernel` — trace-based JIT compiler | `python/flydsl/compiler/` |
+| **FlyDSL Compiler** | Trace-based JIT compilation, specialization, and C object export | `python/flydsl/compiler/` |
 | **FlyDSL Expr** | DSL expression ops (arith, vector, gpu, buffer, rocdl) | `python/flydsl/expr/` |
 | **Fly Dialect** | Flexible Layout IR — MLIR dialect with layout algebra | `include/flydsl/Dialect/Fly/` |
 | **MlirCompiler** | End-to-end MLIR pass pipeline (DSL → binary) | `python/flydsl/compiler/jit_function.py` |
 | **CompiledArtifact** | Serializable compiled MLIR plus lazy ExecutionEngine state | `python/flydsl/compiler/jit_executor.py` |
+| **CompiledFunction** | Callable specialization with `export_to_c()` support | `python/flydsl/compiler/jit_function.py` |
 
 ---
 
@@ -46,7 +47,8 @@ FlyDSL/
 ├── python/flydsl/                    # Python DSL package
 │   ├── __init__.py                   # Package version
 │   ├── compiler/
-│   │   ├── __init__.py               # Public API: jit, kernel, from_dlpack
+│   │   ├── __init__.py               # Public API: jit, kernel, compile, argument adapters
+│   │   ├── _aot.py                   # Internal C object/header export implementation
 │   │   ├── jit_function.py           # @jit decorator, MlirCompiler, JitCacheManager
 │   │   ├── kernel_function.py        # @kernel decorator, KernelFunction, KernelLauncher
 │   │   ├── jit_executor.py           # CompiledArtifact and ExecutionEngine wrapper
@@ -84,8 +86,9 @@ FlyDSL/
 │   │   ├── rdna_f16_gemm.py          # RDNA FP16 GEMM
 │   │   ├── rdna_fp8_preshuffle_gemm.py # RDNA FP8 GEMM
 │   │   ├── gemm_common_gfx1250.py    # GFX1250 GEMM common
-│   │   ├── gemm_a8w4_mxscale_gfx1250.py # GFX1250 FP8/FP4 GEMM
-│   │   ├── gemm_bf16_gfx1250.py      # GFX1250 BF16 WMMA GEMM
+│   │   ├── gemm_bf16_gfx1250.py      # GFX1250 BF16/FP16 GEMM
+│   │   ├── gemm_a8w8_gfx1250.py      # GFX1250 FP8 GEMM (per-token/channel, blockscale)
+│   │   ├── gemm_a8w4_mxscale_gfx1250.py # GFX1250 FP8 x MXFP4 GEMM
 │   │   └── fp8_gemm_utils.py         # FP8 GEMM helpers
 │   ├── norm/                         # Normalization kernels
 │   │   ├── layernorm_kernel.py       # LayerNorm (layout API)
@@ -274,6 +277,29 @@ When a `@flyc.jit` function is called:
 8. **Execution**: `CompiledArtifact` lazily creates an MLIR ExecutionEngine and invokes the compiled code.
 9. **Cache store**: Serialize the compiled function to disk for future runs.
 
+### 3.4 Precompilation and C export
+
+`flyc.compile(launcher, *specialization_args)` uses the same tracing, lowering,
+and cache path as a normal `@flyc.jit` call, then returns a `CompiledFunction`
+that retains the selected `CompiledArtifact`. Live device arguments preserve
+the initial launch; null pointer wrappers and compatible non-device tensors are
+compile placeholders, so compilation and export can run without initializing a
+GPU runtime when the target architecture is specified explicitly.
+
+`CompiledFunction.export_to_c(file_path, file_name, function_prefix="")`
+rewrites a fresh copy of the already-lowered module for standalone linkage. It:
+
+1. namespaces and internalizes the module's definitions;
+2. attaches backend-specific module lifecycle handlers;
+3. emits a packed `int32_t entry(void **args)` wrapper and ABI metadata;
+4. emits a position-independent host object and matching C header; and
+5. copies the backend runtime shared libraries required by the object into the
+   output directory.
+
+This export path reuses the same GPU binary as the compiled specialization; it
+does not retrace the Python launcher. Backend-specific implementation hooks and
+the `_AOTCompiledFunction` helper remain internal APIs.
+
 ---
 
 ## 4. Key abstractions
@@ -342,7 +368,15 @@ execution:
 - Provides `.dump()`, `.ir`, and `.source_ir` for inspecting compiled or
   original IR.
 
-### 4.5 `DslType` / `JitArgument` protocols
+### 4.5 `CompiledFunction`
+
+The public result of `flyc.compile()`. It keeps the compiled artifact alive,
+provides a positional-only fast call path for runtime arguments, and exposes
+`export_to_c()` for producing a linkable host object and generated C header.
+Runtime initialization is deferred for placeholder-based compilations until the
+callable is invoked.
+
+### 4.6 `DslType` / `JitArgument` protocols
 
 Extensible type system for mapping Python values to MLIR. The language-level
 contracts, including `Storable`, are in [DSL protocols](language/dsl_protocols.md).
@@ -380,7 +414,7 @@ class MyJitArg:
 interface; they need not be one-to-one with `__get_ir_types__()`. Do not
 implement `__get_c_pointers__` — that hook has been removed.
 
-### 4.6 `ASTRewriter`
+### 4.7 `ASTRewriter`
 
 Transforms Python control flow to MLIR ops at the AST level:
 
@@ -488,7 +522,8 @@ If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra numbere
 
 | File | Description |
 |---|---|
-| `python/flydsl/compiler/jit_function.py` | `@jit` decorator, `MlirCompiler`, `JitCacheManager` |
+| `python/flydsl/compiler/jit_function.py` | `@jit`, `flyc.compile`, `CompiledFunction`, `MlirCompiler`, and `JitCacheManager` |
+| `python/flydsl/compiler/_aot.py` | Internal C ABI construction and object/header export used by `CompiledFunction.export_to_c` |
 | `python/flydsl/compiler/kernel_function.py` | `@kernel` decorator, `KernelFunction`, `KernelLauncher`, `CompilationContext` |
 | `python/flydsl/compiler/jit_executor.py` | `CompiledArtifact` — serialized IR and lazy ExecutionEngine wrapper |
 | `python/flydsl/compiler/jit_argument.py` | `JitArgumentRegistry`, tensor adapters, `from_dlpack` |

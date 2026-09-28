@@ -102,6 +102,47 @@ descriptors with layout metadata:
    tB = flyc.from_dlpack(B)
    launch(tA, tB, A.numel(), stream=torch.cuda.Stream())
 
+Precompilation and C export
+---------------------------
+
+``flyc.compile(launcher, *specialization_args, **specialization_kwargs)``
+compiles a ``@flyc.jit`` launcher for one argument signature and returns a
+``CompiledFunction``. The result is callable with new runtime values of the
+same signature, and ``Constexpr`` values remain fixed to the specialization
+used at compile time.
+
+The same compiled specialization can be exported as a position-independent
+host object with a generated C header:
+
+.. code-block:: python
+
+   from pathlib import Path
+
+   output = Path("build/aot")
+   output.mkdir(parents=True, exist_ok=True)
+
+   compiled = flyc.compile(launch, tA, tB, A.numel())
+   compiled.export_to_c(
+       file_path=output,
+       file_name="vector_add",
+       function_prefix="flydsl_vector_add",
+   )
+
+``export_to_c`` writes ``vector_add.o``, ``vector_add.h``, and the required
+FlyDSL runtime shared library into the existing output directory. The generated
+header declares the packed entry point, a typed inline call helper, module
+initialization/load/unload functions, and embedded ABI metadata. When
+``function_prefix`` is omitted, ``file_name`` is also used as the exported C
+symbol.
+
+Passing live device arguments to ``flyc.compile`` preserves its normal initial
+launch. For an offline or CPU-only build host, use null pointer wrappers created
+with ``flyc.from_c_void_p`` (or compatible non-device tensor placeholders) and
+set the target architecture explicitly, for example with ``ARCH=gfx950``.
+Export currently supports tensor, pointer, scalar, structure, and stream
+arguments whose lowered types have a supported C ABI. Unsupported launchers
+report the export error when ``export_to_c`` is called.
+
 ROCDL operations
 -----------------
 
