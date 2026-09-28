@@ -7,18 +7,45 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
-LLVM_SRC_DIR="$BASE_DIR/llvm-project"
+LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
+LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
+LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
+
+# ---------------------------------------------------------------------------
+# Source selection: --source upstream (default) | --source custom
+# ---------------------------------------------------------------------------
+LLVM_SOURCE="${LLVM_SOURCE:-upstream}"
+for arg in "$@"; do
+  if [[ "$arg" == "--source" ]]; then
+    _next_is_source=1
+  elif [[ "${_next_is_source:-}" == "1" ]]; then
+    LLVM_SOURCE="$arg"
+    unset _next_is_source
+  fi
+done
+
+case "${LLVM_SOURCE}" in
+  upstream)
+    LLVM_SRC_DIR="${LLVM_SRC_DIR:-$BASE_DIR/llvm-project}"
+    LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
+    LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
+    ;;
+  custom)
+    LLVM_SRC_DIR="${LLVM_SRC_DIR:-$BASE_DIR/llvm-project-custom}"
+    _custom_json=$(python3 -c "import json; c=json.load(open('${LLVM_BUILD_INFO}'))['custom']; print(c['repository']); print(c['branch'])")
+    LLVM_REMOTE="${LLVM_REMOTE:-$(echo "$_custom_json" | sed -n '1p')}"
+    LLVM_REF="${LLVM_REF:-$(echo "$_custom_json" | sed -n '2p')}"
+    ;;
+  *)
+    echo "Unknown --source value: ${LLVM_SOURCE}. Use 'upstream' or 'custom'." >&2
+    exit 2
+    ;;
+esac
+
 LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-flydsl"
 LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
-LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
-
-# Read LLVM commit hash from thirdparty/llvm-build-info.json (upstream entry)
-LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
-LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
-LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
-LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
-LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
 
 case "${LLVM_BUILD_PROFILE}" in
   full)
@@ -39,7 +66,8 @@ case "${LLVM_BUILD_PROFILE}" in
 esac
 
 echo "Base directory: $BASE_DIR"
-echo "LLVM Source:    $LLVM_SRC_DIR"
+echo "LLVM Source:    $LLVM_SOURCE"
+echo "LLVM Src Dir:   $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
@@ -93,12 +121,16 @@ else
     git checkout FETCH_HEAD
 fi
 
-if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
-    echo "LLVM patch already applied: ${LLVM_PATCH}"
+if [[ "${LLVM_SOURCE}" == "upstream" ]]; then
+    if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
+        echo "LLVM patch already applied: ${LLVM_PATCH}"
+    else
+        echo "Applying LLVM patch: ${LLVM_PATCH}"
+        git apply --check "${LLVM_PATCH}"
+        git apply "${LLVM_PATCH}"
+    fi
 else
-    echo "Applying LLVM patch: ${LLVM_PATCH}"
-    git apply --check "${LLVM_PATCH}"
-    git apply "${LLVM_PATCH}"
+    echo "Skipping upstream patch for --source ${LLVM_SOURCE}"
 fi
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)

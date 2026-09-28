@@ -19,6 +19,13 @@ on:
           - linux-flydsl-mi325-1
           - linux-flydsl-mi355-1
           - linux-flydsl-navi-2
+      llvm_source:
+        description: 'LLVM source: upstream (default) or custom fork from llvm-build-info.json'
+        type: choice
+        default: upstream
+        options:
+          - upstream
+          - custom
 
 permissions:
   contents: read
@@ -32,6 +39,7 @@ concurrency:
 env:
   DOCKER_IMAGE: "rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0"
   LLVM_BUILD_PROFILE: "amd-minimal"
+  LLVM_SOURCE: ${{ inputs.llvm_source || 'upstream' }}
   # Bump when the container or LLVM build environment changes incompatibly.
   MLIR_CACHE_VERSION: "manylinux228-rocm7.2-py3.12-v1"
   GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -352,10 +360,11 @@ jobs:
       - name: Use cached MLIR install
         if: steps.mlir-cache.outputs.cache-hit == 'true'
         run: |
+          llvm_dir="/llvm-project$( [ "${LLVM_SOURCE}" = "custom" ] && echo "-custom" || true )"
           test -s ./mlir_install.tgz
           docker cp ./mlir_install.tgz flydsl_mlir_cache:/tmp/mlir_install.tgz
-          docker exec flydsl_mlir_cache bash -c "mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
-          docker exec flydsl_mlir_cache bash -c "test -d /llvm-project/mlir_install/lib/cmake/mlir"
+          docker exec flydsl_mlir_cache bash -c "mkdir -p ${llvm_dir} && tar -xzf /tmp/mlir_install.tgz -C ${llvm_dir}"
+          docker exec flydsl_mlir_cache bash -c "test -d ${llvm_dir}/mlir_install/lib/cmake/mlir"
 
       - name: Build LLVM once
         if: steps.mlir-cache.outputs.cache-hit != 'true'
@@ -365,12 +374,13 @@ jobs:
         timeout-minutes: 45
         run: |
           set -ex
-          docker exec -e LLVM_BUILD_PROFILE -e ROCM_PATH flydsl_mlir_cache bash -c '
+          llvm_dir="/llvm-project$( [ "${LLVM_SOURCE}" = "custom" ] && echo "-custom" || true )"
+          docker exec -e LLVM_BUILD_PROFILE -e LLVM_SOURCE -e ROCM_PATH flydsl_mlir_cache bash -c '
             cd /flydsl-test
-            bash scripts/build_llvm.sh
+            bash scripts/build_llvm.sh --source '"${LLVM_SOURCE}"'
           '
-          docker exec flydsl_mlir_cache bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
-          docker cp flydsl_mlir_cache:/llvm-project/mlir_install.tgz ./mlir_install.tgz
+          docker exec flydsl_mlir_cache bash -c "ls -la ${llvm_dir}/mlir_install/lib/cmake/mlir"
+          docker cp "flydsl_mlir_cache:${llvm_dir}/mlir_install.tgz" ./mlir_install.tgz
           test -s ./mlir_install.tgz
 
       # Checked against the VCSRevision.h the install ships: a wrong-pin baseline
@@ -418,13 +428,14 @@ jobs:
           BASE_MLIR_PATH: ${{ steps.base-mlir.outputs.ready == 'true' && '/llvm-project/mlir_install_base' || '' }}
           BASELINE_LLVM_HASH: ${{ steps.base-pin.outputs.base_llvm_hash }}
         run: |
+          llvm_dir="/llvm-project$( [ "${LLVM_SOURCE}" = "custom" ] && echo "-custom" || true )"
           docker exec \
             -e BASE_REPO_NAME \
             -e BASE_COMMIT_SHA \
             -e ROCM_PATH \
             -e BASE_MLIR_PATH \
+            -e "MLIR_PATH=${llvm_dir}/mlir_install" \
             flydsl_mlir_cache bash -c '
-              export MLIR_PATH=/llvm-project/mlir_install
               if command -v rocm-sdk >/dev/null 2>&1; then
                 rocm_bin="$(rocm-sdk path --bin)"
                 rocm_cmake="$(rocm-sdk path --cmake)"
