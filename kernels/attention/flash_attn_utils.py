@@ -282,30 +282,28 @@ def _anchor_v_p(traits, v_p, elem_dtype):
 
 def _anchor_v_s(traits, v_s):
     """Pin an fp32 score pair so the following P cast can reuse its registers."""
+    if const_expr(not (traits.DTYPE_STR == "bf16" and traits.HEAD_DIM == 128)):
+        return v_s
+
     s_lo, s_hi = v_s
     if not isinstance(s_lo, (list, tuple)):
         s_lo = [Vec(s_lo)[i] for i in range_constexpr(16)]
     if not isinstance(s_hi, (list, tuple)):
         s_hi = [Vec(s_hi)[i] for i in range_constexpr(16)]
-    if const_expr(traits.DTYPE_STR == "bf16" and traits.HEAD_DIM == 128):
-        # Empty inline asm still consumes a VALU slot in sched_group_barrier.
-        # Keep all scalar ties in one instruction: 32 separate anchors otherwise
-        # fill the softmax schedule with no-ops and leave a dense QK MFMA tail.
-        # Scalar outputs avoid the contiguous-register constraint of a vector<32>.
-        scores = [as_mlir_value(value) for value in list(s_lo) + list(s_hi)]
-        result = llvm.inline_asm(
-            ir.Type.parse("!llvm.struct<(" + ", ".join(["f32"] * 32) + ")>"),
-            scores,
-            "",
-            ",".join(["=v"] * 32 + [str(i) for i in range(32)]),
-            has_side_effects=True,
-        )
-        anchored = [fx.Float32(llvm.extractvalue(T.f32, result, [i])) for i in range_constexpr(32)]
-        return anchored[:16], anchored[16:]
-    return (
-        [fx.Float32(_anchor_scalar_f32(s_lo[i])) for i in range_constexpr(16)],
-        [fx.Float32(_anchor_scalar_f32(s_hi[i])) for i in range_constexpr(16)],
+    # Empty inline asm still consumes a VALU slot in sched_group_barrier.
+    # Keep all scalar ties in one instruction: 32 separate anchors otherwise
+    # fill the softmax schedule with no-ops and leave a dense QK MFMA tail.
+    # Scalar outputs avoid the contiguous-register constraint of a vector<32>.
+    scores = [as_mlir_value(value) for value in list(s_lo) + list(s_hi)]
+    result = llvm.inline_asm(
+        ir.Type.parse("!llvm.struct<(" + ", ".join(["f32"] * 32) + ")>"),
+        scores,
+        "",
+        ",".join(["=v"] * 32 + [str(i) for i in range(32)]),
+        has_side_effects=True,
     )
+    anchored = [fx.Float32(llvm.extractvalue(T.f32, result, [i])) for i in range_constexpr(32)]
+    return anchored[:16], anchored[16:]
 
 
 def _opaque_i32(x):
