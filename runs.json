@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-28T14:17:57Z",
+ "updated": "2026-09-28T14:31:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36435015445,
+   "pr": 1209,
+   "commit": "829dd71e43ffaeb587608d23bcc68c20e407676b",
+   "branch": "codex/aot-direct-hip",
+   "event": "pull_request",
+   "title": "[AOT] Embed backend runtime into exported objects",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36435015445",
+   "created_at": "2026-09-28T14:18:43Z",
+   "updated_at": "2026-09-28T14:20:35Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36434740596,
    "pr": 1193,
@@ -10,11 +25,11 @@
    "branch": "fix/1165-singleton-contig-segment",
    "event": "pull_request",
    "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434740596",
    "created_at": "2026-09-28T14:16:29Z",
-   "updated_at": "2026-09-28T14:16:29Z",
+   "updated_at": "2026-09-28T14:22:31Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -113,20 +128,20 @@
    "branch": "codex/kimi-k3-mxfp4-fused",
    "event": "pull_request",
    "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36417401095",
    "created_at": "2026-09-28T11:43:56Z",
-   "updated_at": "2026-09-28T13:30:03Z",
+   "updated_at": "2026-09-28T14:28:52Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T13:30:02Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T14:28:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36417401095/job/108918570265"
     },
     {
@@ -2132,21 +2147,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284912910/job/108525731448"
     }
    ]
-  },
-  {
-   "run_id": 36284586536,
-   "pr": null,
-   "commit": "51c7081a5c0ddb3c8775aa3ed3c727eeb7e03853",
-   "branch": "codex/kimi-k3-mxfp4-fused",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36284586536",
-   "created_at": "2026-09-27T01:07:46Z",
-   "updated_at": "2026-09-27T01:09:13Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
