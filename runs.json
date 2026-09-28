@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-28T08:31:33Z",
+ "updated": "2026-09-28T08:36:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36398017657,
+   "pr": 1193,
+   "commit": "2dc74f10ebc034aa08312783b65613cdfce60542",
+   "branch": "fix/1165-singleton-contig-segment",
+   "event": "pull_request",
+   "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657",
+   "created_at": "2026-09-28T08:33:01Z",
+   "updated_at": "2026-09-28T08:35:02Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36397720550,
+   "pr": null,
+   "commit": "5958f9d94aee009d8a26b260363401d46c37c47b",
+   "branch": "fix/1165-singleton-contig-segment",
+   "event": "pull_request",
+   "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397720550",
+   "created_at": "2026-09-28T08:30:04Z",
+   "updated_at": "2026-09-28T08:34:49Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36397442878,
    "pr": 1209,
@@ -212,11 +242,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T07:17:47Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36389620239/job/108826046107"
+     "completed_at": "2026-09-28T08:32:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36389620239/job/108826046107",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -2078,36 +2111,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36081390248",
    "created_at": "2026-09-25T01:17:51Z",
    "updated_at": "2026-09-25T01:17:51Z",
-   "actor": "mustafayildirim",
-   "jobs": []
-  },
-  {
-   "run_id": 36081073180,
-   "pr": 1195,
-   "commit": "ce0706fcee32dcb4b379e92d3868d89e1223ecd8",
-   "branch": "fix/1054-single-rocdl-target",
-   "event": "pull_request",
-   "title": "[JIT] Attach exactly one #rocdl.target per gpu.module",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36081073180",
-   "created_at": "2026-09-25T01:13:29Z",
-   "updated_at": "2026-09-28T08:28:40Z",
-   "actor": "mustafayildirim",
-   "jobs": []
-  },
-  {
-   "run_id": 36080554821,
-   "pr": null,
-   "commit": "008332641eb9771ea21ed0a4a9487ffc279509de",
-   "branch": "fix/1054-single-rocdl-target",
-   "event": "pull_request",
-   "title": "[JIT] Attach exactly one #rocdl.target per gpu.module",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36080554821",
-   "created_at": "2026-09-25T01:06:26Z",
-   "updated_at": "2026-09-25T01:06:26Z",
    "actor": "mustafayildirim",
    "jobs": []
   }
