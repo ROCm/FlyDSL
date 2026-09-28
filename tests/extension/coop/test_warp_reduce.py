@@ -7,7 +7,7 @@ import coop_warp_utils as checks
 import pytest
 import torch
 from coop_common import WARP_SIZE
-from coop_test_utils import ARCHES, batched_columns, run_kernel
+from coop_test_utils import ARCHES, batched_columns, matrix_cases, run_kernel
 from coop_test_utils import coop_default_device as coop_default_device
 
 import flydsl.compiler as flyc
@@ -17,8 +17,10 @@ import flydsl.expr as fx
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("width", [width for width in (1, 2, 8, 32, 64) if width <= WARP_SIZE])
-@pytest.mark.parametrize("head", [False, True])
+@pytest.mark.parametrize(
+    "width,head",
+    matrix_cases([width for width in (1, 2, 8, 32, 64) if width <= WARP_SIZE], [False, True]),
+)
 @pytest.mark.usefixtures("coop_default_device")
 def test_segmented_ordered_reduction(width, head):
     checks.check_segmented_ordered_reduction(width, head)
@@ -35,8 +37,7 @@ def test_warp_reduce_array_blocked_order(universal):
 
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
-@pytest.mark.parametrize("arch", ARCHES)
-@pytest.mark.parametrize("case", ["warp_noncommutative"])
+@pytest.mark.parametrize("arch,case", matrix_cases(ARCHES, ["warp_noncommutative"]))
 def test_noncommutative_collectives_compile(monkeypatch, arch, case):
     checks.check_reduce_scan_policies_compile(monkeypatch, arch, case)
 
@@ -53,8 +54,7 @@ def test_warp_reduce_record_items_blocked_order(universal):
 @pytest.mark.rocm_lower
 @pytest.mark.l2_device
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("case", ["reduce", "segmented"])
-@pytest.mark.parametrize("universal", [False, True])
+@pytest.mark.parametrize("case,universal", matrix_cases(["reduce", "segmented"], [False, True]))
 @pytest.mark.usefixtures("coop_default_device")
 def test_nested_record_reduce_forms(case, universal):
     checks.check_nested_record_warp_collectives(case, universal)
@@ -62,8 +62,7 @@ def test_nested_record_reduce_forms(case, universal):
 
 @pytest.mark.rocm_lower
 @pytest.mark.l1b_target_dialect
-@pytest.mark.parametrize("arch", ARCHES)
-@pytest.mark.parametrize("case", ["warp"])
+@pytest.mark.parametrize("arch,case", matrix_cases(ARCHES, ["warp"]))
 def test_record_collectives_compile(monkeypatch, arch, case):
     checks.check_record_collectives_compile(monkeypatch, arch, case)
 
@@ -71,11 +70,16 @@ def test_record_collectives_compile(monkeypatch, arch, case):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("width", [8, None])
-@pytest.mark.parametrize("form", ["vector", "tuple", "list"])
-@pytest.mark.parametrize("valid", [None, 0, 3])
-@pytest.mark.parametrize("universal", [False, True], ids=["dispatched", "universal"])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "width,form,valid,universal,default_device",
+    matrix_cases(
+        [8, None],
+        ["vector", "tuple", "list"],
+        [None, 0, 3],
+        [False, True],
+        ["cpu", "cuda"],
+    ),
+)
 def test_array_reduce_and_batched_columns(width, form, valid, universal, default_device):
     with torch.device(default_device):
         _check_array_reduce_and_batched_columns(width, form, valid, universal)
@@ -152,11 +156,16 @@ def _counted_reduce(universal, form, valid, runtime):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("universal", [False, True], ids=["dispatched", "universal"])
-@pytest.mark.parametrize("form", ["scalar", "vector", "tuple"])
-@pytest.mark.parametrize("valid", [0, 1, 3, 4])
-@pytest.mark.parametrize("runtime", [False, True], ids=["static", "runtime"])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "universal,form,valid,runtime,default_device",
+    matrix_cases(
+        [False, True],
+        ["scalar", "vector", "tuple"],
+        [0, 1, 3, 4],
+        [False, True],
+        ["cpu", "cuda"],
+    ),
+)
 def test_warp_reduce_skips_invalid_operators(universal, form, valid, runtime, default_device):
     with torch.device(default_device):
         block = 64
@@ -174,9 +183,10 @@ def test_warp_reduce_skips_invalid_operators(universal, form, valid, runtime, de
 
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
-@pytest.mark.parametrize("arch", ["gfx942", "gfx1100"])
-@pytest.mark.parametrize("universal", [False, True], ids=["dispatched", "universal"])
-@pytest.mark.parametrize("form", ["scalar", "vector", "tuple"])
+@pytest.mark.parametrize(
+    "arch,universal,form",
+    matrix_cases(["gfx942", "gfx1100"], [False, True], ["scalar", "vector", "tuple"]),
+)
 def test_warp_reduce_valid_compile(monkeypatch, arch, universal, form):
     monkeypatch.setenv("ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")

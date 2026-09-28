@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import pytest
 from coop_common import WARP_WIDTHS
+from coop_test_utils import matrix_cases
 from coop_test_utils import warp_default_device as warp_default_device
 
 import flydsl.compiler as flyc
@@ -113,10 +114,9 @@ def _run_both(values, call, *, block):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("width", WARP_WIDTHS, ids=width_id)
 @pytest.mark.parametrize(
-    "form",
-    ("reduce", "inclusive", "exclusive", "aggregate"),
+    "width,form",
+    matrix_cases(WARP_WIDTHS, ("reduce", "inclusive", "exclusive", "aggregate")),
 )
 @pytest.mark.usefixtures("warp_default_device")
 def test_every_form_agrees_with_the_portable_one(form, width):
@@ -183,8 +183,7 @@ def test_float_folds_agree_with_the_portable_form(op):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("width", WARP_WIDTHS, ids=width_id)
-@pytest.mark.parametrize("form", ("reduce", "exclusive"))
+@pytest.mark.parametrize("width,form", matrix_cases(WARP_WIDTHS, ("reduce", "exclusive")))
 @pytest.mark.usefixtures("warp_default_device")
 def test_max_keeps_its_identity_inside_the_group(form, width):
     """MAX is the op whose identity is visible, so it is the one that pins the edges.

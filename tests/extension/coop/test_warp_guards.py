@@ -7,7 +7,7 @@ import math
 
 import pytest
 import torch
-from coop_test_utils import run_kernel
+from coop_test_utils import matrix_cases, run_kernel
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -21,12 +21,17 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
-@pytest.mark.parametrize("universal", [False, True], ids=["public", "universal"])
-@pytest.mark.parametrize("member", [False, True], ids=["function", "class"])
-@pytest.mark.parametrize("head", [False, True], ids=["tail", "head"])
-@pytest.mark.parametrize("flag_value", [1, 1 << 32, -(1 << 32)])
-@pytest.mark.parametrize("singletons", [False, True], ids=["mixed", "singletons"])
+@pytest.mark.parametrize(
+    "default_device,universal,member,head,flag_value,singletons",
+    matrix_cases(
+        ["cpu", "cuda"],
+        [False, True],
+        [False, True],
+        [False, True],
+        [1, 1 << 32, -(1 << 32)],
+        [False, True],
+    ),
+)
 def test_segmented_reduce_flag_truth_and_operator_domain(
     default_device, universal, member, head, flag_value, singletons
 ):
@@ -79,11 +84,10 @@ def test_segmented_reduce_flag_truth_and_operator_domain(
             assert actual[:, 1].sum().item() > 0
 
 
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
-@pytest.mark.parametrize("universal", [False, True], ids=["public", "universal"])
-@pytest.mark.parametrize("member", [False, True], ids=["function", "class"])
-@pytest.mark.parametrize("bitonic", [False, True], ids=["merge", "bitonic"])
-@pytest.mark.parametrize("descending", [False, True])
+@pytest.mark.parametrize(
+    "default_device,universal,member,bitonic,descending",
+    matrix_cases(["cpu", "cuda"], [False, True], [False, True], [False, True], [False, True]),
+)
 def test_partial_sort_skips_invalid_comparisons(default_device, universal, member, bitonic, descending):
     with torch.device(default_device):
         block, width, count = 64, 8, 3
@@ -127,10 +131,10 @@ def test_partial_sort_skips_invalid_comparisons(default_device, universal, membe
             torch.testing.assert_close(ordered[group, :valid], expected)
 
 
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
-@pytest.mark.parametrize("universal", [False, True], ids=["public", "universal"])
-@pytest.mark.parametrize("policy", list(WarpLoadAlgorithm))
-@pytest.mark.parametrize("shape", [(128, 1, 1), (4, 4, 8)])
+@pytest.mark.parametrize(
+    "default_device,universal,policy,shape",
+    matrix_cases(["cpu", "cuda"], [False, True], list(WarpLoadAlgorithm), [(128, 1, 1), (4, 4, 8)]),
+)
 def test_warp_io_runtime_block_size(default_device, universal, policy, shape):
     with torch.device(default_device):
         block, width, count = math.prod(shape), 8, 4

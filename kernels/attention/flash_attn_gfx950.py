@@ -231,7 +231,11 @@ def build_flash_attn_dualwave_swp_module(
         ctx.init_runtime_indices()
         ctx.init_lds(SharedStorage)
         ctx.init_thread_mapping()
+        if const_expr(traits.CAUSAL and not traits.VARLEN):
+            ctx.init_causal_lpt_order()
         ctx.init_sequence_lengths()
+        if const_expr(traits.CAUSAL and traits.VARLEN):
+            ctx.init_varlen_causal_lpt_order()
         ctx.init_descriptors()
         ctx.init_workspace()
         ctx.init_atoms_and_lds_ptrs()
