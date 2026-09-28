@@ -88,7 +88,16 @@ Ahead-of-time C export
 specific object file and a C/C++ header. The object contains the GPU binary
 and a small backend adapter, so the deployed executable or shared library does
 not need FlyDSL or Python. The generated header records the backend and system
-link flags; for ROCm these are ``-lamdhip64 -pthread -ldl``.
+link flags; for ROCm these are ``-lamdhip64 -pthread -ldl``. The linker must
+also be able to find the HIP SDK library. For a nonstandard ROCm installation,
+add its library directory, for example::
+
+   cc -shared -o libkernel.so kernel.o -L/path/to/rocm/lib -lamdhip64 -pthread -ldl
+
+The metadata records ``libamdhip64.so`` as a link-time name. The versioned
+runtime dependency (the ELF ``DT_NEEDED`` name) is determined by the library
+selected when the final executable or shared library is linked. The deployed
+system's dynamic loader must be able to find that versioned HIP library.
 
 The header exposes two calling styles:
 
@@ -100,9 +109,11 @@ The header exposes two calling styles:
   module and loads it on the current device before each call. It intentionally
   does not unload automatically, so asynchronous launches remain safe.
 
-Exported objects are tied to the host ABI and GPU target used during
-compilation. They can be moved and linked independently, but must run on a
-compatible backend and GPU architecture.
+The current exporter targets 64-bit little-endian Linux ELF hosts and uses
+GNU-compatible relocatable linking and ``objcopy`` tools. The ROCm adapter
+requires HIP and pthread. Exported objects are tied to the host ABI and GPU
+target used during compilation. They can be moved and linked independently,
+but must run on a compatible backend and GPU architecture.
 
 Tensor arguments
 -----------------

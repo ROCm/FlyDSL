@@ -1729,6 +1729,7 @@ class CompiledFunction:
         The object embeds its backend adapter and only needs the backend's
         system runtime libraries when linked into an executable or shared
         library; it does not require FlyDSL or Python at deployment time.
+        Host export currently requires 64-bit little-endian Linux ELF tools.
         """
         if self._aot_error is not None:
             error_type, message = self._aot_error

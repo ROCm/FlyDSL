@@ -24,9 +24,10 @@ class AOTRuntimeConfig:
     """Deployment contract between the generic exporter and a backend.
 
     The archive implements FlyDSL's target-neutral AOT module ABI. It is
-    embedded into every exported object; only ``runtime_libraries`` and the
-    system libraries represented by ``linker_flags`` remain deployment-time
-    dependencies.
+    embedded into every exported object. ``runtime_libraries`` names the
+    libraries needed at link time, not their eventual ELF SONAMEs; the linker
+    selects those when building the deployed executable or shared library.
+    ``linker_flags`` does not include installation-specific search paths.
     """
 
     archive_basename: str

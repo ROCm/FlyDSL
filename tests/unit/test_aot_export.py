@@ -875,7 +875,7 @@ class TestExport:
         assert sorted(path.name for path in out.iterdir()) == ["axpy_file.h", "axpy_file.o"]
         assert "aoti_axpy" in _defined_global_symbols(out / "axpy_file.o")
         assert b'"schema_version":2' in (out / "axpy_file.o").read_bytes()
-        assert b'"runtime_libraries":[{"soname":"libamdhip64.so"}]' in (out / "axpy_file.o").read_bytes()
+        assert b'"runtime_libraries":[{"link_name":"libamdhip64.so"}]' in (out / "axpy_file.o").read_bytes()
         assert b'"linker_flags":["-lamdhip64","-pthread","-ldl"]' in (out / "axpy_file.o").read_bytes()
 
         assert compiled._export_to_c(out, "default_name") is None
