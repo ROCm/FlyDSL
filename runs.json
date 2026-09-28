@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-28T08:36:07Z",
+ "updated": "2026-09-28T08:41:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36398573542,
+   "pr": 1209,
+   "commit": "650b1617844ccbad2ec81b3d2acbd7a6b7e92b66",
+   "branch": "codex/aot-direct-hip",
+   "event": "pull_request",
+   "title": "[AOT] Embed backend runtime into exported objects",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398573542",
+   "created_at": "2026-09-28T08:38:33Z",
+   "updated_at": "2026-09-28T08:39:39Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36398017657,
    "pr": 1193,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657",
    "created_at": "2026-09-28T08:33:01Z",
-   "updated_at": "2026-09-28T08:35:02Z",
+   "updated_at": "2026-09-28T08:36:12Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
    "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397442878",
    "created_at": "2026-09-28T08:27:12Z",
-   "updated_at": "2026-09-28T08:29:12Z",
+   "updated_at": "2026-09-28T08:39:30Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -260,20 +275,20 @@
    "branch": "codex/reduce-coop-test-matrix",
    "event": "pull_request",
    "title": "[CI] Reduce cooperative test matrix",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36388757397",
    "created_at": "2026-09-28T06:53:56Z",
-   "updated_at": "2026-09-28T07:47:54Z",
+   "updated_at": "2026-09-28T08:39:29Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-28T07:47:53Z",
-     "completed_at": null,
+     "completed_at": "2026-09-28T08:39:29Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36388757397/job/108824278739"
     },
     {
@@ -2096,21 +2111,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36081507615",
    "created_at": "2026-09-25T01:19:30Z",
    "updated_at": "2026-09-25T01:19:30Z",
-   "actor": "mustafayildirim",
-   "jobs": []
-  },
-  {
-   "run_id": 36081390248,
-   "pr": null,
-   "commit": "30f2e0a2645dedd0e834d482fd9cc8f7f8d4e7f5",
-   "branch": "fix/1176-layout-field-overflow-diagnostic",
-   "event": "pull_request",
-   "title": "[JIT] Actionable diagnostic for dynamic layout field overflow",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36081390248",
-   "created_at": "2026-09-25T01:17:51Z",
-   "updated_at": "2026-09-25T01:17:51Z",
    "actor": "mustafayildirim",
    "jobs": []
   }
