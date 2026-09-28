@@ -3,7 +3,7 @@
 """Warp exchange layouts, independent groups, policies, and record fields."""
 
 import pytest
-from coop_test_utils import ARCHES, run_tile, warp_indices, warp_storage
+from coop_test_utils import ARCHES, full_matrix_enabled, matrix_cases, run_tile, warp_indices, warp_storage
 from coop_test_utils import coop_default_device as coop_default_device
 from coop_test_utils import warp_default_device as warp_default_device
 
@@ -16,15 +16,33 @@ try:
 except ImportError:
     torch = None
 import coop_warp_utils as checks
-from coop_common import DTYPES, WARP_SIZE, WARP_WIDTHS, dtype_id
+from coop_common import DTYPES, WARP_SIZE, WARP_WIDTHS
+
+ALL_RECORD_MOVEMENT_CASES = [
+    (case, policy.name, count)
+    for policy in WarpExchangeAlgorithm
+    for case in ["warp_blocked_to_striped", "warp_striped_to_blocked", "warp_scatter_to_striped"]
+    for count in ([8] if policy is WarpExchangeAlgorithm.SHUFFLE else [3, 4])
+    if policy is WarpExchangeAlgorithm.SHARED or case != "warp_scatter_to_striped"
+]
+MINIMAL_RECORD_MOVEMENT_CASES = [
+    ("warp_blocked_to_striped", WarpExchangeAlgorithm.SHARED.name, 3),
+    ("warp_striped_to_blocked", WarpExchangeAlgorithm.SHARED.name, 4),
+    ("warp_scatter_to_striped", WarpExchangeAlgorithm.SHARED.name, 3),
+    ("warp_blocked_to_striped", WarpExchangeAlgorithm.SHUFFLE.name, 8),
+    ("warp_striped_to_blocked", WarpExchangeAlgorithm.SHUFFLE.name, 8),
+]
+RECORD_MOVEMENT_CASES = ALL_RECORD_MOVEMENT_CASES if full_matrix_enabled() else MINIMAL_RECORD_MOVEMENT_CASES
+RECORD_COMPILE_CASES = tuple(dict.fromkeys((case, policy) for case, policy, _ in RECORD_MOVEMENT_CASES))
 
 
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("width", [1, 2, 8, 32, None])
-@pytest.mark.parametrize("count", [1, 3, 8])
-@pytest.mark.parametrize("inverse", [False, True])
+@pytest.mark.parametrize(
+    "width,count,inverse",
+    matrix_cases([1, 2, 8, 32, None], [1, 3, 8], [False, True]),
+)
 def test_warp_exchange(width, count, inverse):
     threads = 128
     group = width or fx.num_warp_threads()
@@ -45,9 +63,14 @@ def test_warp_exchange(width, count, inverse):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("algorithm", list(WarpExchangeAlgorithm))
-@pytest.mark.parametrize("width", [width for width in (1, 8, 32, 64) if width <= WARP_SIZE])
-@pytest.mark.parametrize("method", ["blocked_to_striped", "striped_to_blocked", "scatter_to_striped"])
+@pytest.mark.parametrize(
+    "algorithm,width,method",
+    matrix_cases(
+        list(WarpExchangeAlgorithm),
+        [width for width in (1, 8, 32, 64) if width <= WARP_SIZE],
+        ["blocked_to_striped", "striped_to_blocked", "scatter_to_striped"],
+    ),
+)
 @pytest.mark.usefixtures("warp_default_device")
 def test_warp_exchange_policies(algorithm, width, method):
     if algorithm is WarpExchangeAlgorithm.SHUFFLE and method == "scatter_to_striped":
@@ -105,16 +128,7 @@ def test_warp_smem_independent_branches(width):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize(
-    "case,policy,count",
-    [
-        (case, policy.name, count)
-        for policy in WarpExchangeAlgorithm
-        for case in ["warp_blocked_to_striped", "warp_striped_to_blocked", "warp_scatter_to_striped"]
-        for count in ([8] if policy is WarpExchangeAlgorithm.SHUFFLE else [3, 4])
-        if policy is WarpExchangeAlgorithm.SHARED or case != "warp_scatter_to_striped"
-    ],
-)
+@pytest.mark.parametrize("case,policy,count", RECORD_MOVEMENT_CASES)
 @pytest.mark.usefixtures("warp_default_device")
 def test_record_movement(case, policy, count):
     checks.check_record_movement(case, policy, count)
@@ -123,15 +137,9 @@ def test_record_movement(case, policy, count):
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
-@pytest.mark.parametrize("arch", ARCHES)
 @pytest.mark.parametrize(
-    "case,policy",
-    [
-        (case, policy.name)
-        for policy in WarpExchangeAlgorithm
-        for case in ["warp_blocked_to_striped", "warp_striped_to_blocked", "warp_scatter_to_striped"]
-        if policy is WarpExchangeAlgorithm.SHARED or case != "warp_scatter_to_striped"
-    ],
+    "arch,case,policy",
+    [(arch, case, policy) for arch, (case, policy) in matrix_cases(ARCHES, RECORD_COMPILE_CASES)],
 )
 def test_compile_record_movement(monkeypatch, arch, case, policy):
     checks.check_compile_record_movement(monkeypatch, arch, case, policy)
@@ -140,8 +148,10 @@ def test_compile_record_movement(monkeypatch, arch, case, policy):
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
-@pytest.mark.parametrize("arch", ARCHES)
-@pytest.mark.parametrize("case", ["warp_smem_blocked", "warp_smem_striped", "warp_smem_scatter"])
+@pytest.mark.parametrize(
+    "arch,case",
+    matrix_cases(ARCHES, ["warp_smem_blocked", "warp_smem_striped", "warp_smem_scatter"]),
+)
 def test_compile_movement_policies(monkeypatch, arch, case):
     checks.check_compile_movement_policies(monkeypatch, arch, case)
 
@@ -149,10 +159,15 @@ def test_compile_movement_policies(monkeypatch, arch, case):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("entry", DTYPES, ids=dtype_id)
-@pytest.mark.parametrize("width", (1, *WARP_WIDTHS))
-@pytest.mark.parametrize("count", [1, 9])
-@pytest.mark.parametrize("primitive", ["warp_blocked_to_striped", "warp_striped_to_blocked"])
+@pytest.mark.parametrize(
+    "entry,width,count,primitive",
+    matrix_cases(
+        DTYPES,
+        (1, *WARP_WIDTHS),
+        [1, 9],
+        ["warp_blocked_to_striped", "warp_striped_to_blocked"],
+    ),
+)
 @pytest.mark.usefixtures("coop_default_device")
 def test_matrix_warp_dtypes_and_widths(entry, width, count, primitive):
     checks.check_warp_dtypes_and_widths(entry, width, count, primitive)
@@ -161,7 +176,9 @@ def test_matrix_warp_dtypes_and_widths(entry, width, count, primitive):
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
-@pytest.mark.parametrize("arch", ARCHES)
-@pytest.mark.parametrize("case", ["warp_blocked_to_striped", "warp_striped_to_blocked"])
+@pytest.mark.parametrize(
+    "arch,case",
+    matrix_cases(ARCHES, ["warp_blocked_to_striped", "warp_striped_to_blocked"]),
+)
 def test_compile_family(monkeypatch, arch, case):
     checks.check_compile_family(monkeypatch, arch, case)

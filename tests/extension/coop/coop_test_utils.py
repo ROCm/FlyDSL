@@ -5,7 +5,9 @@
 
 import ast
 import inspect
+import itertools
 import math
+import os
 import textwrap
 from dataclasses import dataclass, field
 
@@ -18,6 +20,29 @@ import flydsl.expr as fx
 # Shared launch helpers, layout references and compilation targets for coop tests.
 
 ARCHES = ("gfx908", "gfx90a", "gfx942", "gfx950", "gfx1030", "gfx1100", "gfx1151", "gfx1201")
+
+
+def full_matrix_enabled():
+    """Whether cooperative tests should expand every parameter combination."""
+    return os.environ.get("FLYDSL_COOP_TESTS_FULL") == "1"
+
+
+def matrix_cases(*axes):
+    """Return a small representative matrix, or the full product on request.
+
+    The cooperative tests contain several independent parameter axes and most
+    cases compile a fresh GPU kernel.  Running their Cartesian product in every
+    presubmit job is prohibitively expensive.  The default diagonal matrix
+    visits every value from every axis at least once; exhaustive runs remain
+    available with ``FLYDSL_COOP_TESTS_FULL=1``.
+    """
+    axes = tuple(tuple(axis) for axis in axes)
+    if not axes or any(not axis for axis in axes):
+        raise ValueError("matrix_cases requires non-empty parameter axes")
+    if full_matrix_enabled():
+        return tuple(itertools.product(*axes))
+    count = max(map(len, axes))
+    return tuple(tuple(axis[index % len(axis)] for axis in axes) for index in range(count))
 
 
 def as_items(value):
@@ -133,16 +158,19 @@ def warp_valid_items(valid, width, count):
     return fx.min(fx.max(remaining, 0), group * count)
 
 
-@pytest.fixture(params=["cpu", "cuda"], ids=["default-cpu", "default-cuda"])
+_DEFAULT_DEVICES = ("cpu", "cuda") if full_matrix_enabled() else ("cuda",)
+
+
+@pytest.fixture(params=_DEFAULT_DEVICES, ids=[f"default-{device}" for device in _DEFAULT_DEVICES])
 def coop_default_device(request):
-    """Exercise host references under both defaults without leaking state."""
+    """Exercise the nonstandard CUDA default; exhaustive runs also cover CPU."""
     if not torch.cuda.is_available():
         pytest.skip("requires GPU")
     with torch.device(request.param):
         yield
 
 
-# Keep existing warp tests on the same scoped default-device coverage.
+# Keep existing warp tests on the shared default-device policy.
 warp_default_device = coop_default_device
 
 

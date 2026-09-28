@@ -6,7 +6,7 @@
 import pytest
 import torch
 from coop_common import WARP_SIZE
-from coop_test_utils import run_kernel
+from coop_test_utils import matrix_cases, run_kernel
 from coop_warp_utils import host_fold, plain_affine
 
 import flydsl.expr as fx
@@ -21,11 +21,16 @@ def add_record(lhs, rhs):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("form", ["vector", "tuple", "list", "record_tuple", "record_list"])
-@pytest.mark.parametrize("seed", ["none", "scalar"])
-@pytest.mark.parametrize("universal", [False, True])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
-@pytest.mark.parametrize("width", [1, 4])
+@pytest.mark.parametrize(
+    "form,seed,universal,default_device,width",
+    matrix_cases(
+        ["vector", "tuple", "list", "record_tuple", "record_list"],
+        ["none", "scalar"],
+        [False, True],
+        ["cpu", "cuda"],
+        [1, 4],
+    ),
+)
 def test_warp_item_containers(form, seed, universal, default_device, width):
     with torch.device(default_device):
         _check_warp_item_containers(form, seed, universal, width)
@@ -146,11 +151,16 @@ def _ordered_arrays(universal, count, width, initial):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("universal", [False, True])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
-@pytest.mark.parametrize("count", [1, 3])
-@pytest.mark.parametrize("width", [1, 4, WARP_SIZE])
-@pytest.mark.parametrize("initial", [None, (7 << 16) | 19])
+@pytest.mark.parametrize(
+    "universal,default_device,count,width,initial",
+    matrix_cases(
+        [False, True],
+        ["cpu", "cuda"],
+        [1, 3],
+        [1, 4, WARP_SIZE],
+        [None, (7 << 16) | 19],
+    ),
+)
 def test_warp_arrays_preserve_noncommutative_order(universal, default_device, count, width, initial):
     with torch.device(default_device):
         block = 64
@@ -176,9 +186,10 @@ def test_warp_arrays_preserve_noncommutative_order(universal, default_device, co
 
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
-@pytest.mark.parametrize("arch", ["gfx942", "gfx1100"])
-@pytest.mark.parametrize("universal", [False, True])
-@pytest.mark.parametrize("width", [4, None], ids=["subwarp", "fullwarp"])
+@pytest.mark.parametrize(
+    "arch,universal,width",
+    matrix_cases(["gfx942", "gfx1100"], [False, True], [4, None]),
+)
 def test_warp_arrays_compile(monkeypatch, arch, universal, width):
     monkeypatch.setenv("ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
@@ -189,11 +200,16 @@ def test_warp_arrays_compile(monkeypatch, arch, universal, width):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("form", ["list", "tuple"])
-@pytest.mark.parametrize("member", [False, True])
-@pytest.mark.parametrize("builtin", [False, True])
-@pytest.mark.parametrize("width", [1, 4, WARP_SIZE])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "form,member,builtin,width,default_device",
+    matrix_cases(
+        ["list", "tuple"],
+        [False, True],
+        [False, True],
+        [1, 4, WARP_SIZE],
+        ["cpu", "cuda"],
+    ),
+)
 def test_reduce_fallback_preserves_vector_items(form, member, builtin, width, default_device):
     """A Vector inside an outer array is one T; backend fallback must not fold it again."""
     with torch.device(default_device):
