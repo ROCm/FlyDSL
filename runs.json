@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-29T10:56:27Z",
+ "updated": "2026-09-29T11:30:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "fix/1165-singleton-contig-segment",
    "event": "pull_request",
    "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36556034230",
    "created_at": "2026-09-29T10:30:51Z",
-   "updated_at": "2026-09-29T10:46:13Z",
+   "updated_at": "2026-09-29T11:06:41Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-29T11:16:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36556034230/job/109377337685"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-29T11:07:01Z",
+     "completed_at": "2026-09-29T11:17:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36556034230/job/109377337713"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-29T11:06:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36556034230/job/109377337733"
+    }
+   ]
   },
   {
    "run_id": 36555801699,
@@ -25,13 +53,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Build] Find ROCm through rocm-sdk before falling back to /opt/rocm* \u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36555801699",
    "created_at": "2026-09-29T10:28:38Z",
-   "updated_at": "2026-09-29T10:43:28Z",
+   "updated_at": "2026-09-29T10:58:21Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-29T10:58:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36555801699/job/109374524605"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-29T10:58:42Z",
+     "completed_at": "2026-09-29T11:16:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36555801699/job/109374524621"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-29T11:01:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36555801699/job/109374524701"
+    }
+   ]
   },
   {
    "run_id": 36549448735,
@@ -159,11 +215,11 @@
    "branch": "pr1204-final_fixed",
    "event": "pull_request",
    "title": "[fix] mono kernel glm precision fixed",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36547908053",
    "created_at": "2026-09-29T09:14:47Z",
-   "updated_at": "2026-09-29T09:44:05Z",
+   "updated_at": "2026-09-29T11:28:07Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -178,10 +234,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-29T09:44:05Z",
-     "completed_at": null,
+     "completed_at": "2026-09-29T11:28:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36547908053/job/109345604495"
     },
     {
