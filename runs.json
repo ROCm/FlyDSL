@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-29T09:22:34Z",
+ "updated": "2026-09-29T09:31:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36549448735,
+   "pr": 1142,
+   "commit": "f39f41bf807ada657ce06f8ee95df51230422578",
+   "branch": "xinyazhang/theRock-support",
+   "event": "pull_request",
+   "title": "[Build] Find ROCm through rocm-sdk before falling back to /opt/rocm*",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36549448735",
+   "created_at": "2026-09-29T09:28:56Z",
+   "updated_at": "2026-09-29T09:29:36Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36548372347,
    "pr": null,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36548372347",
    "created_at": "2026-09-29T09:19:00Z",
-   "updated_at": "2026-09-29T09:20:23Z",
+   "updated_at": "2026-09-29T09:22:50Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -35,16 +50,16 @@
   },
   {
    "run_id": 36548262682,
-   "pr": 1142,
+   "pr": null,
    "commit": "6d467347202aaec9ce87ca9741896a3765da3da6",
    "branch": "xinyazhang/theRock-support",
    "event": "pull_request",
    "title": "[Build] Find ROCm through rocm-sdk before falling back to /opt/rocm*",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36548262682",
    "created_at": "2026-09-29T09:17:59Z",
-   "updated_at": "2026-09-29T09:20:14Z",
+   "updated_at": "2026-09-29T09:29:31Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -2074,52 +2089,6 @@
      "started_at": "2026-09-27T12:06:22Z",
      "completed_at": "2026-09-27T12:36:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316417794/job/108614477186"
-    }
-   ]
-  },
-  {
-   "run_id": 36316342942,
-   "pr": 1201,
-   "commit": "e138458d46fd54a63854b53f612483c0452d4340",
-   "branch": "glm5-mla-moe-layer-monokernel",
-   "event": "pull_request",
-   "title": "[Superseded by #1205] GLM-5 indexed decode MonoKernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942",
-   "created_at": "2026-09-27T11:37:43Z",
-   "updated_at": "2026-09-27T13:06:42Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-27T11:54:41Z",
-     "completed_at": "2026-09-27T13:06:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942/job/108614125047",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-27T11:57:09Z",
-     "completed_at": "2026-09-27T12:04:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942/job/108614125091"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-27T11:54:26Z",
-     "completed_at": "2026-09-27T12:06:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942/job/108614125092"
     }
    ]
   }
