@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-29T01:09:26Z",
+ "updated": "2026-09-29T03:38:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36512794899,
+   "pr": 1212,
+   "commit": "dc0069b959a8a103cbd0ea1892a42715a83a6ba2",
+   "branch": "fujun.han/fix-singleton-zip2by",
+   "event": "pull_request",
+   "title": "[fix] Correct zipped_divide tiler hierarchy handling",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36512794899",
+   "created_at": "2026-09-29T02:28:57Z",
+   "updated_at": "2026-09-29T02:28:57Z",
+   "actor": "Peter9606",
+   "jobs": []
+  },
+  {
+   "run_id": 36512743635,
+   "pr": null,
+   "commit": "f94d8bf943570c637de2de602efc593931937b5e",
+   "branch": "fujun.han/fix-singleton-zip2by",
+   "event": "pull_request",
+   "title": "[fix] Correct zipped_divide tiler hierarchy handling",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36512743635",
+   "created_at": "2026-09-29T02:28:17Z",
+   "updated_at": "2026-09-29T02:28:17Z",
+   "actor": "Peter9606",
+   "jobs": []
+  },
   {
    "run_id": 36452604265,
    "pr": 1194,
@@ -71,11 +101,11 @@
    "branch": "fix/1165-singleton-contig-segment",
    "event": "pull_request",
    "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434740596",
    "created_at": "2026-09-28T14:16:29Z",
-   "updated_at": "2026-09-28T14:49:10Z",
+   "updated_at": "2026-09-29T02:51:07Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -99,9 +129,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-28T14:49:09Z",
+     "started_at": "2026-09-29T02:51:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434740596/job/108983711905"
     }
@@ -2180,64 +2210,6 @@
      "started_at": "2026-09-27T03:15:21Z",
      "completed_at": "2026-09-27T04:40:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36289979325/job/108540014357"
-    }
-   ]
-  },
-  {
-   "run_id": 36289277309,
-   "pr": null,
-   "commit": "e12f5bb6031b2fa1a2e5ddcfc2f2ab180fd4e972",
-   "branch": "codex/kimi-k3-mxfp4-fused",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36289277309",
-   "created_at": "2026-09-27T02:42:09Z",
-   "updated_at": "2026-09-27T02:43:43Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 36285338037,
-   "pr": 1203,
-   "commit": "013fde4e0cfe19ea1d4ba064fbe42dad1f337f26",
-   "branch": "docs/full-doc-audit-20260926",
-   "event": "pull_request",
-   "title": "[Docs] Audit and refresh repository documentation",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36285338037",
-   "created_at": "2026-09-27T01:22:30Z",
-   "updated_at": "2026-09-27T11:31:19Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T10:55:33Z",
-     "completed_at": "2026-09-27T11:31:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36285338037/job/108605292522"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T10:54:57Z",
-     "completed_at": "2026-09-27T11:30:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36285338037/job/108605292681"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-27T01:42:36Z",
-     "completed_at": "2026-09-27T02:11:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36285338037/job/108605293255"
     }
    ]
   }
