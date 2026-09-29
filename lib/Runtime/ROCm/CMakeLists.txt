@@ -4,7 +4,7 @@
 # FlyJitRuntime — thin ROCm runtime with GPU module caching.
 
 # Prefer an explicitly selected ROCm, then the SDK in the active environment.
-# NO_DEFAULT_PATH keeps a system HIP from winning over either one.
+# NO_DEFAULT_PATH excludes default search locations; a cached hip_DIR still wins.
 if(DEFINED ENV{ROCM_PATH} AND NOT "$ENV{ROCM_PATH}" STREQUAL "")
   find_package(hip QUIET CONFIG PATHS "$ENV{ROCM_PATH}" NO_DEFAULT_PATH)
 endif()
