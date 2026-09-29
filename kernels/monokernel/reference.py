@@ -65,9 +65,9 @@ def _rand_fp8(rows, k, bk, gen, device, lead=()):
     return q, s
 
 
-def dequant(q: torch.Tensor, s: torch.Tensor, bk: int) -> torch.Tensor:
+def dequant(q: torch.Tensor, s: torch.Tensor, bk: int, bm: int = SCALE_BM) -> torch.Tensor:
     rows, k = q.shape
-    sf = s.repeat_interleave(SCALE_BM, 0)[:rows].repeat_interleave(bk, 1)
+    sf = s.repeat_interleave(bm, 0)[:rows].repeat_interleave(bk, 1)
     return q.float() * sf
 
 
@@ -308,17 +308,20 @@ def quant_dequant(x: torch.Tensor, block: int = 128) -> torch.Tensor:
     return (q * scale).reshape(x.shape)
 
 
-def route(scores: torch.Tensor, bias: torch.Tensor, config: LayerConfig = GLM5_CONFIG):
+def route(scores: torch.Tensor, bias: torch.Tensor, config: LayerConfig = GLM5_CONFIG, *, exact: bool = False):
     """sigmoid scores [E] -> (indices [8], probs [8]) in score order.
 
     Selection key (as in the kernel's packed-key argmax): the order-preserving bits
     of the f32 ``score + bias`` with the low byte replaced by ``255 - expert id``,
-    so keys are unique and near-ties go to the lower expert id."""
+    so keys are unique and near-ties go to the lower expert id. ``exact=True``
+    preserves the full FP32 score and uses expert ID only to break exact ties."""
     bits = (scores.float() + bias.float()).view(torch.int32).long()
     okey = torch.where(bits >= 0, bits ^ (1 << 31), ~bits & 0xFFFFFFFF) & 0xFFFFFFFF
     # GLM's packed-key implementation has an 8-bit expert-id tie break.  The
     # generic path uses the full index so Kimi-K3's 896 experts are not aliased.
-    if config.n_experts <= 256:
+    if exact:
+        idx = torch.argsort(scores.float() + bias.float(), descending=True, stable=True)[: config.top_k]
+    elif config.n_experts <= 256:
         key = (okey & 0xFFFFFF00) | (255 - torch.arange(config.n_experts, device=scores.device))
         idx = torch.argsort(key, descending=True)[: config.top_k]
     else:
@@ -355,7 +358,13 @@ def golden_layer(
         dq = {name: t[f"w_{name}"].float() for name in attention_mats(H, config)}
     else:
         dq = {
-            name: dequant(t[f"w_{name}"], t[f"s_{name}"], bk) for name, (_, _, bk) in attention_mats(H, config).items()
+            name: dequant(
+                t[f"w_{name}"],
+                t[f"s_{name}"],
+                bk,
+                t[f"w_{name}"].shape[0] // t[f"s_{name}"].shape[0] if name == "uv" else SCALE_BM,
+            )
+            for name, (_, _, bk) in attention_mats(H, config).items()
         }
     # GEMV activations are bf16 (MFMA inputs); weights retain their configured format.
     x = bf(rmsnorm(h, t["g_in"])) if config.attention_input_norm else h.float()
@@ -377,7 +386,7 @@ def golden_layer(
         kv_cache[pos[s]] = rmsnorm(kv_a[s, : config.kv_lora], t["g_kv"]).to(torch.bfloat16)
         pe_cache[pos[s]] = rope(kv_a[s, config.kv_lora :], cos[pos[s]], sin[pos[s]]).to(torch.bfloat16)
     kvf, pef = kv_cache.float(), pe_cache.float()
-    o_lat = torch.empty(S, H, config.kv_lora, device=h.device)
+    o_lat = torch.empty(S, H, config.kv_lora, device=h.device, dtype=torch.float32)
     for s in range(S):
         kv_len = pos[s] + 1
         keys = sparse_indices[s].long() if kv_len > sparse_attention_topk else torch.arange(kv_len, device=h.device)
@@ -443,7 +452,7 @@ def golden_moe(
     else:
         xq_ref = bf(x2)
     xq = xq_ref if xq is None else xq.float()
-    y = torch.zeros(S, HIDDEN, device=a.device)
+    y = torch.zeros(S, HIDDEN, device=a.device, dtype=torch.float32)
     for s in range(S):
         idx, p = route(scores[s], t["bias"], W.config)
         experts = [W.config.shared_expert] + idx.tolist()
@@ -454,7 +463,7 @@ def golden_moe(
             value = torch.nn.functional.silu(ug[:INTER]) * ug[INTER:]
             mids.append(bf(value) if fmt.activation is ExpertActivation.BF16 else value)
         out["sel"].append(torch.tensor(experts, device=a.device, dtype=torch.int32))
-        out["prob"].append(torch.tensor(weights, device=a.device))
+        out["prob"].append(torch.tensor(weights, device=a.device, dtype=torch.float32))
         out["mid"].append(torch.stack(mids))
     for s in range(S):
         experts = out["sel"][s].tolist() if sel is None else sel[s].tolist()

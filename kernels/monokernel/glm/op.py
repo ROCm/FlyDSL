@@ -131,6 +131,7 @@ class Glm5MonoKernel:
             with_indexer=with_indexer,
             index_max_seq=index_max_seq,
             expert_mxfp4=self.expert_mxfp4,
+            uv_scale_rows=W.t["w_uv"].shape[0] // W.t["s_uv"].shape[0],
             timeline=timeline,
         )
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)  # decode-step counter
@@ -168,6 +169,14 @@ class Glm5MonoKernel:
         this scratch within a decode step need distinct ``layer``; call
         ``advance_step`` (or pass ``advance=True``) once per step.  Both are
         stream-ordered device ops, so the sequence can be captured in a HIP graph."""
+        if h.shape != (self.S, HIDDEN):
+            raise ValueError(f"hidden must be [{self.S}, {HIDDEN}], got {tuple(h.shape)}")
+        if cur_pos.shape != (1,) or cur_pos.dtype is not torch.int32:
+            raise ValueError("cur_pos must be int32[1]; samples are consecutive tokens of one request")
+        if kv_cache.ndim != 2 or kv_cache.shape[1] != KV_LORA:
+            raise ValueError("kv_cache must be [capacity, 512] for one request")
+        if pe_cache.shape != (kv_cache.shape[0], PE_DIM):
+            raise ValueError("pe_cache must be [capacity, 64] for the same request")
         if not 0 <= layer < self.launches_per_step:
             raise ValueError(f"layer must be in [0, {self.launches_per_step}), got {layer}")
         if self.with_indexer:
