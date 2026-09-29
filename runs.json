@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-09-29T18:38:51Z",
+ "updated": "2026-09-29T21:29:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36631631552,
+   "pr": 1214,
+   "commit": "7ac7462fd4aaa4655a92159a0e69249c11eaf760",
+   "branch": "feat/gfx1250-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][gfx1250] Add the GLM-5 MonoKernel",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36631631552",
+   "created_at": "2026-09-29T21:11:47Z",
+   "updated_at": "2026-09-29T21:26:42Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-29T21:27:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36631631552/job/109627595227"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-29T21:26:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36631631552/job/109627595245"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-29T21:27:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36631631552/job/109627595512"
+    }
+   ]
+  },
   {
    "run_id": 36556034230,
    "pr": 1193,
@@ -10,11 +53,11 @@
    "branch": "fix/1165-singleton-contig-segment",
    "event": "pull_request",
    "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36556034230",
    "created_at": "2026-09-29T10:30:51Z",
-   "updated_at": "2026-09-29T11:06:41Z",
+   "updated_at": "2026-09-29T21:28:10Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -38,9 +81,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-29T11:06:41Z",
+     "started_at": "2026-09-29T21:28:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36556034230/job/109377337733"
     }
@@ -2167,49 +2210,6 @@
      "started_at": "2026-09-27T12:00:20Z",
      "completed_at": "2026-09-27T12:12:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141/job/108614956204"
-    }
-   ]
-  },
-  {
-   "run_id": 36316616265,
-   "pr": null,
-   "commit": "6b0019d829778a4434b68e4edebb9f0cc1b4fcb3",
-   "branch": "codex/glm5-monokernel",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] GLM-5 MonoKernel: indexer + mla + moe fused kernel for a full decode layer",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316616265",
-   "created_at": "2026-09-27T11:42:42Z",
-   "updated_at": "2026-09-27T12:27:07Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T11:59:36Z",
-     "completed_at": "2026-09-27T12:27:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316616265/job/108614843174"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T11:59:18Z",
-     "completed_at": "2026-09-27T12:25:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316616265/job/108614843186"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T11:59:18Z",
-     "completed_at": "2026-09-27T12:25:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316616265/job/108614843203"
     }
    ]
   }
