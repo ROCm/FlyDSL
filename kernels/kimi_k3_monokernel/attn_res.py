@@ -100,7 +100,7 @@ def build_kimi_k3_attn_res(
 
         def load_updated(pair):
             prefix_word = fx.Int32(bo.buffer_load(prefix_rsrc, pair, vec_width=1, dtype=T.i32))
-            if has_delta:
+            if const_expr(has_delta):
                 delta_word = fx.Int32(bo.buffer_load(delta_rsrc, pair, vec_width=1, dtype=T.i32))
                 prefix_lo = (prefix_word << 16).bitcast(fx.Float32)
                 prefix_hi = (prefix_word & fx.Int32(-65536)).bitcast(fx.Float32)

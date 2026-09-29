@@ -24,6 +24,8 @@ from kernels.kimi_k3_monokernel.kda import KimiK3KdaAttention  # noqa: E402
 from kernels.kimi_k3_monokernel.kernel import monokernel_layout  # noqa: E402
 from kernels.kimi_k3_monokernel.op import KimiK3MonoKernel  # noqa: E402
 from kernels.kimi_k3_monokernel.staged import _KimiK3KdaStagedPath  # noqa: E402
+from kernels.kimi_k3_monokernel.routed_pipeline import SOFT_FIELDS  # noqa: E402
+from kernels.kimi_k3_monokernel.tools.tail_check import check_routed_pipeline, check_tail_reduction  # noqa: E402
 from kernels.kimi_k3_monokernel.torch_fusions import situ  # noqa: E402
 from kernels.monokernel.config import (  # noqa: E402
     EPS,
@@ -41,6 +43,7 @@ from kernels.monokernel.reference import (  # noqa: E402
     golden_kimi_k3_kda_layer,
     golden_kimi_k3_moe,
     make_weights,
+    route,
 )
 from kernels.monokernel.weights import LayerWeights  # noqa: E402
 
@@ -113,6 +116,16 @@ def _worker(rank: int, args, port: int, results) -> None:
             fuse_shared_experts=not args.eager_shared_experts,
             reduce_backend=args.reduce_backend,
             mtp=args.mtp,
+            routed_pipeline=args.routed_pipeline,
+            routed_producers=args.routed_producers,
+            routed_prefetch=args.routed_prefetch,
+            routed_grid=args.routed_grid,
+            routed_sample_group=args.routed_sample_group,
+            routed_down_tile=args.routed_down_tile,
+            routed_tp_mode=args.routed_tp_mode,
+            routed_up_order=args.routed_up_order,
+            routed_soft_profile=args.routed_soft_profile,
+            routed_route_prefetch=args.routed_route_prefetch,
         )
     else:
         layer = KimiK3MonoKernel(
@@ -212,13 +225,32 @@ def _worker(rank: int, args, port: int, results) -> None:
         "layer_idx": args.layer_idx,
         "reduce_backend": args.reduce_backend,
         "mtp": args.mtp,
+        "routed_pipeline": args.routed_pipeline,
+        "routed_tp_mode": args.routed_tp_mode if args.routed_pipeline else None,
+        "benchmark_scope": "moe" if args.moe_only_bench else "layer",
+        "instrumented": bool(args.routed_soft_profile),
         "rank_equal": rank_equal,
         "finite": bool(torch.isfinite(output).all()),
     }
     if args.negative_slot and args.attention_only:
         result["negative_output_zero"] = bool(torch.count_nonzero(output[-1]) == 0)
+    if args.routed_pipeline:
+        pipeline = layer.routed_pipeline
+        result["pipeline_config"] = {
+            "grid": pipeline.grid,
+            "producers": pipeline.producers,
+            "prefetch": pipeline.prefetch,
+            "down_tile": pipeline.down_tile,
+            "up_order": pipeline.up_order,
+            "route_prefetch": pipeline.route_prefetch,
+            "tp_mode": pipeline.tp_mode,
+        }
 
     if args.check:
+        if args.mtp:
+            slot = int(state_indices[0])
+            result["incoming_conv_unchanged"] = torch.equal(conv_state[slot], conv_state0[slot])
+            result["incoming_recurrent_unchanged"] = torch.equal(recurrent_state[slot], recurrent_state0[slot])
         reference_tensors = weights.t.copy()
         if not args.attention_only:
             quantized_names = ["w_latent_down", "w_shared_ug"]
@@ -366,7 +398,14 @@ def _worker(rank: int, args, port: int, results) -> None:
                 fused_latent = layer.latent
                 fused_routed = layer.routed_reduced
                 fused_routed_norm = layer.latent_norm
-                fused_mid = moe_reference["mid"]
+                fused_mid = (
+                    layer.routed_pipeline.mid[..., 0]
+                    .contiguous()
+                    .view(torch.bfloat16)
+                    .reshape(args.samples, config.top_k, config.inter)
+                    if args.routed_pipeline
+                    else moe_reference["mid"]
+                )
                 fused_shared_mid = layer.shared_mid
                 routed_reduced_reference = _allreduce_reference(layer.routed_partial, args.npes)
             routed_norm_reference = (
@@ -398,7 +437,28 @@ def _worker(rank: int, args, port: int, results) -> None:
                 routed_norm_rel_l2=_relative_l2(fused_routed_norm, routed_norm_reference),
                 shared_mid_rel_l2=_relative_l2(fused_shared_mid, shared_mid_reference),
                 selection_equal=bool(torch.equal(fused_ids, moe_reference["sel"])),
+                unique_routed_experts=int(fused_ids.unique().numel()),
                 output_rel_l2=_relative_l2(output, output_reference),
+            )
+
+    def check_staged_tail():
+        checks = check_tail_reduction(layer, output, args.npes)
+        expected_scores = torch.sigmoid((layer.moe_input @ layer.t["w_r"].T).float())
+        expected_ids = torch.stack([route(row, layer.t["bias"], config)[0] for row in expected_scores])
+        checks["selection_equal"] = torch.equal(layer.topk_ids, expected_ids.to(torch.int32))
+        if args.mtp:
+            slot = int(state_indices[0])
+            checks["incoming_conv_unchanged"] = torch.equal(conv_state[slot], conv_state0[slot])
+            checks["incoming_recurrent_unchanged"] = torch.equal(recurrent_state[slot], recurrent_state0[slot])
+        if args.routed_pipeline:
+            checks.update(check_routed_pipeline(layer, args.npes))
+        return checks
+
+    if args.check and args.staged and not args.attention_only and layer.fused_tail is not None:
+        result.update(check_staged_tail())
+        if args.layer_idx % config.attn_res_block_size != 0:
+            result["attnres_delta_equal"] = torch.equal(
+                layer.updated_prefix, (prefix.float() + layer.attention_delta.float()).to(torch.bfloat16)
             )
 
     if args.profile and not args.attention_only and not layer.attention.fuse_moe:
@@ -474,7 +534,10 @@ def _worker(rank: int, args, port: int, results) -> None:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             for epoch in range(args.layers):
-                run_layer(epoch_layer=epoch, advance=False)
+                if args.moe_only_bench:
+                    layer._moe(layer.moe_input, epoch, layer.updated_prefix, output)
+                else:
+                    run_layer(epoch_layer=epoch, advance=False)
             layer.advance_step()
         for _ in range(2):
             graph.replay()
@@ -498,7 +561,10 @@ def _worker(rank: int, args, port: int, results) -> None:
             max_us=max(critical),
             layers=args.layers,
             repeats=args.repeats,
+            critical_times_us=critical,
         )
+        if args.check and args.staged and not args.attention_only and layer.fused_tail is not None:
+            result.update({f"replay_{key}": value for key, value in check_staged_tail().items()})
         if args.kernel_profile:
             dist.barrier()
             if rank == 0:
@@ -526,13 +592,36 @@ def _worker(rank: int, args, port: int, results) -> None:
                 torch.cuda.synchronize()
             dist.barrier()
 
+    if args.routed_soft_profile:
+        soft_dir = Path(args.soft_output_dir)
+        soft_dir.mkdir(parents=True, exist_ok=True)
+        (soft_dir / f"rank{rank}.json").write_text(
+            json.dumps(
+                {
+                    "rank": rank,
+                    "mode": args.routed_soft_profile,
+                    "fields": SOFT_FIELDS,
+                    "counter": "s_memrealtime",
+                    "ticks_per_us": 100,
+                    "last_graph_layer": args.layers - 1,
+                    "scope": result["benchmark_scope"],
+                    "pipeline_config": result["pipeline_config"],
+                    "durations": layer.routed_pipeline.soft_durations.cpu().tolist(),
+                }
+            )
+            + "\n"
+        )
+
     results[rank] = result
+    all_results = [None] * args.npes
+    dist.all_gather_object(all_results, result)
     if rank == 0:
         payload = {
             "model": "kimi_k3",
             "npes": args.npes,
             "samples": args.samples,
             **result,
+            "all_ranks": all_results,
         }
         print(json.dumps(payload), flush=True)
         if args.output:
@@ -553,6 +642,24 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--attention-only", action="store_true")
     parser.add_argument("--staged", action="store_true", help="benchmark the fastest staged KDA + MoE path")
+    parser.add_argument("--routed-pipeline", action="store_true")
+    parser.add_argument("--routed-producers", type=int)
+    parser.add_argument("--routed-prefetch", type=int)
+    parser.add_argument("--routed-grid", type=int, choices=(256, 512, 768), default=256)
+    parser.add_argument(
+        "--routed-route-prefetch",
+        action="store_true",
+        help="reuse metadata across three K128 chunks; requires S4 and grid/producers 512/256 or 768/544",
+    )
+    parser.add_argument("--routed-sample-group", type=int, choices=(0, 1, 2, 4), default=0)
+    parser.add_argument("--routed-down-tile", type=int, choices=(0, 16, 32, 64), default=0)
+    parser.add_argument("--routed-tp-mode", choices=("complete", "reduce_scatter"), default="complete")
+    parser.add_argument("--routed-up-order", choices=("sample", "interleaved"), default="sample")
+    parser.add_argument("--routed-soft-profile", type=int, choices=(0, 1, 2), default=0)
+    parser.add_argument("--soft-output-dir")
+    parser.add_argument(
+        "--moe-only-bench", action="store_true", help="time router through tail after the same KDA warmup"
+    )
     parser.add_argument(
         "--mtp",
         action="store_true",
@@ -573,6 +680,16 @@ def main() -> int:
     parser.add_argument("--dump-ir-dir")
     parser.add_argument("--output")
     args = parser.parse_args()
+    if args.routed_route_prefetch and not args.routed_pipeline:
+        parser.error("--routed-route-prefetch requires --routed-pipeline")
+    if args.routed_soft_profile and (not args.routed_pipeline or not args.bench or not args.soft_output_dir):
+        parser.error("soft profiling requires --routed-pipeline --bench --soft-output-dir")
+    if (args.routed_pipeline or args.moe_only_bench) and (not args.staged or args.attention_only):
+        parser.error("routed pipeline and MoE-only timing require --staged full-layer mode")
+    if args.moe_only_bench and not args.bench:
+        parser.error("--moe-only-bench requires --bench")
+    if args.routed_pipeline and (args.reduce_backend != "symmetric" or args.eager_shared_experts):
+        parser.error("routed pipeline requires the symmetric fused tail")
     if args.layer_idx == 0 and not args.attention_only:
         parser.error("layer 0 uses the out-of-scope dense FFN; choose a KDA MoE layer")
     if not args.staged and not args.attention_only:
@@ -593,6 +710,24 @@ def main() -> int:
     mp.spawn(_worker, args=(args, port, results), nprocs=args.npes)
     ok = all(result["rank_equal"] and result["finite"] for result in results.values())
     if args.check:
+        for result in results.values():
+            ok = ok and all(
+                value
+                for key, value in result.items()
+                if key.endswith(("_equal", "_unchanged")) and isinstance(value, bool)
+            )
+            for prefix in ("", "replay_"):
+                if args.routed_pipeline:
+                    if prefix == "replay_" and not args.bench:
+                        continue
+                    ok = ok and result[f"{prefix}pipeline_mid_rel_l2"] < 2e-3
+                    ok = ok and result[f"{prefix}pipeline_output_rel_l2"] < 1e-2
+            if args.mtp:
+                ok = ok and result["attention_rel_l2"] < 2e-3
+                ok = ok and result["conv_state_rel_l2"] < 5e-4
+                ok = ok and result["recurrent_state_rel_l2"] < 5e-4
+                if not args.attention_only:
+                    ok = ok and result["output_rel_l2"] < 1e-2
         ok = ok and all(
             result["attention_rel_l2"] < 0.02
             and result["conv_state_rel_l2"] < 0.001

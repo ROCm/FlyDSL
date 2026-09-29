@@ -16,6 +16,7 @@ from kernels.kimi_k3_monokernel.moe import kimi_k3_mxfp4_gemm1, kimi_k3_mxfp4_ge
 from kernels.kimi_k3_monokernel.mxfp8_linear import Mxfp8Linear
 from kernels.kimi_k3_monokernel.router import SigmoidTopkRouter
 from kernels.kimi_k3_monokernel.router_projection import FusedRouterProjection
+from kernels.kimi_k3_monokernel.routed_pipeline import RoutedTilePipeline
 from kernels.kimi_k3_monokernel.symmetric_allreduce import SymmetricBf16Allreduce
 from kernels.kimi_k3_monokernel.tail import FusedKimiK3Tail
 from kernels.kimi_k3_monokernel.torch_fusions import (
@@ -69,6 +70,17 @@ class _KimiK3MlaPath:
         reduce_backend: str = "symmetric",
         kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
         mtp: bool = False,
+        routed_pipeline: bool = False,
+        routed_producers: int | None = None,
+        routed_prefetch: int | None = None,
+        routed_grid: int = 256,
+        routed_sample_group: int = 0,
+        routed_down_tile: int = 0,
+        routed_tp_mode: str = "complete",
+        routed_up_order: str = "sample",
+        routed_soft_profile: int = 0,
+        routed_route_prefetch: bool = False,
+        routed_trace: bool = False,
     ) -> None:
         config = weights.config
         if config != KIMI_K3_CONFIG:
@@ -93,6 +105,8 @@ class _KimiK3MlaPath:
         self.reduce_group = reduce_group
         if reduce_backend not in {"symmetric", "nccl"}:
             raise ValueError(f"unsupported reduce backend {reduce_backend!r}; expected 'symmetric' or 'nccl'")
+        if routed_pipeline and (reduce_backend != "symmetric" or not fuse_shared_experts):
+            raise ValueError("routed_pipeline requires the symmetric fused tail")
         self.reduce_backend = reduce_backend
         self.layer_idx = layer_idx
         self.topk = topk
@@ -247,6 +261,30 @@ class _KimiK3MlaPath:
             if reduce_backend == "symmetric"
             else None
         )
+        self.routed_pipeline = (
+            RoutedTilePipeline(
+                samples,
+                self.t["w_ug"],
+                self.t["s_ug"],
+                self.t["w_dn"],
+                self.t["s_dn"],
+                npes=npes,
+                rank=rank,
+                max_pairs=self.symmetric_allreduce.max_pairs,
+                producers=routed_producers,
+                prefetch=routed_prefetch,
+                grid=routed_grid,
+                sample_group=routed_sample_group,
+                down_tile=routed_down_tile,
+                tp_mode=routed_tp_mode,
+                up_order=routed_up_order,
+                soft_profile=routed_soft_profile,
+                route_prefetch=routed_route_prefetch,
+                trace=routed_trace,
+            )
+            if routed_pipeline
+            else None
+        )
         self.fused_tail = (
             FusedKimiK3Tail(
                 samples,
@@ -256,6 +294,7 @@ class _KimiK3MlaPath:
                 rank,
                 npes,
                 self.symmetric_allreduce.max_pairs,
+                routed_pre_reduced=routed_pipeline,
             )
             if self.symmetric_allreduce is not None and self.fuse_shared_experts
             else None
@@ -469,32 +508,46 @@ class _KimiK3MlaPath:
         with self._profile_stage("router_sort"):
             self._route_and_sort(hidden_states, epoch_layer)
 
-        with self._profile_stage("routed_gemm1"):
-            kimi_k3_mxfp4_gemm1(
-                self.latent,
-                self.w_ug,
-                self.s_ug,
-                sorted_expert_ids=self.sorted_expert_ids,
-                num_valid_ids=self.num_valid_ids,
-                sorted_token_ids=self.sorted_token_ids,
-                output=self.inter_sorted,
-                samples=self.S,
-                situ_beta=self.config.situ_beta,
-                situ_linear_beta=self.config.situ_linear_beta,
-            )
-        with self._profile_stage("routed_gemm2"):
-            kimi_k3_mxfp4_gemm2(
-                self.inter_sorted,
-                self.w_dn,
-                self.s_dn,
-                sorted_expert_ids=self.sorted_expert_ids,
-                num_valid_ids=self.num_valid_ids,
-                sorted_token_ids=self.sorted_token_ids,
-                sorted_weights=self.sorted_weights,
-                output=self.routed_partial,
-                samples=self.S,
-                max_sorted=self.max_sorted,
-            )
+        if self.routed_pipeline is not None:
+            with self._profile_stage("routed_pipeline"):
+                self.routed_pipeline(
+                    self.latent,
+                    self.topk_ids,
+                    self.topk_weights,
+                    self.routed_partial,
+                    self.routed_reduced,
+                    self.attention.step,
+                    epoch_layer,
+                    symmetric=self.symmetric_allreduce.peer_buffer.local_address,
+                    peers=self.symmetric_allreduce.peer_buffer.addresses,
+                )
+        else:
+            with self._profile_stage("routed_gemm1"):
+                kimi_k3_mxfp4_gemm1(
+                    self.latent,
+                    self.w_ug,
+                    self.s_ug,
+                    sorted_expert_ids=self.sorted_expert_ids,
+                    num_valid_ids=self.num_valid_ids,
+                    sorted_token_ids=self.sorted_token_ids,
+                    output=self.inter_sorted,
+                    samples=self.S,
+                    situ_beta=self.config.situ_beta,
+                    situ_linear_beta=self.config.situ_linear_beta,
+                )
+            with self._profile_stage("routed_gemm2"):
+                kimi_k3_mxfp4_gemm2(
+                    self.inter_sorted,
+                    self.w_dn,
+                    self.s_dn,
+                    sorted_expert_ids=self.sorted_expert_ids,
+                    num_valid_ids=self.num_valid_ids,
+                    sorted_token_ids=self.sorted_token_ids,
+                    sorted_weights=self.sorted_weights,
+                    output=self.routed_partial,
+                    samples=self.S,
+                    max_sorted=self.max_sorted,
+                )
 
         if self.fused_tail is None:
             # Shared experts are tensor-parallel over their combined 6144-wide

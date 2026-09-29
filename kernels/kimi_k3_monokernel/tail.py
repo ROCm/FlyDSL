@@ -9,7 +9,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.config import EPS
@@ -34,6 +34,7 @@ def build_kimi_k3_tail(
     shared_inter: int,
     npes: int,
     max_pairs: int,
+    routed_pre_reduced: bool = False,
 ):
     """Build the shared-down + latent-up + final all-reduce launcher."""
 
@@ -153,26 +154,85 @@ def build_kimi_k3_tail(
             valid = pair_in_row < fx.Int32(routed_pairs_per_row)
             pair = sample * fx.Int32(routed_pairs_per_row) + pair_in_row
 
-            if valid:
-                value = fx.Int32(bo.buffer_load(routed_partial_rsrc, pair, vec_width=1, dtype=T.i32))
-                mailbox = rank * max_pairs + pair
-                bo.buffer_store(
-                    fx.Vector.from_elements([value, tag], fx.Int32),
-                    routed_peer_rsrc,
-                    mailbox * 2,
-                    cache_modifier=CM_SYS,
-                )
-            gpu.barrier()
+            if const_expr(routed_pre_reduced):
+                reduced_lo, reduced_hi = fx.Float32(0.0), fx.Float32(0.0)
+                if valid:
+                    packed = fx.Int32(bo.buffer_load(routed_reduced_rsrc, pair, vec_width=1, dtype=T.i32))
+                    reduced_lo = (packed << 16).bitcast(fx.Float32)
+                    reduced_hi = (packed & fx.Int32(-65536)).bitcast(fx.Float32)
+            else:
+                if valid:
+                    value = fx.Int32(bo.buffer_load(routed_partial_rsrc, pair, vec_width=1, dtype=T.i32))
+                    mailbox = rank * max_pairs + pair
+                    bo.buffer_store(
+                        fx.Vector.from_elements([value, tag], fx.Int32),
+                        routed_peer_rsrc,
+                        mailbox * 2,
+                        cache_modifier=CM_SYS,
+                    )
+                gpu.barrier()
 
-            reduced_lo = fx.Float32(0.0)
-            reduced_hi = fx.Float32(0.0)
-            if (rank == wave) & valid:
+                reduced_lo = fx.Float32(0.0)
+                reduced_hi = fx.Float32(0.0)
+                if (rank == wave) & valid:
 
-                def load_routed_peers():
-                    words = []
+                    def load_routed_peers():
+                        words = []
+                        for source_rank in range_constexpr(npes):
+                            mailbox = source_rank * max_pairs + pair
+                            value_tag = fx.Vector(
+                                bo.buffer_load(
+                                    routed_local_rsrc,
+                                    mailbox * 2,
+                                    vec_width=2,
+                                    dtype=T.i32,
+                                    cache_modifier=CM_DEV,
+                                )
+                            )
+                            words += [value_tag[0], value_tag[1]]
+                        return fx.Vector.from_elements(words, fx.Int32)
+
+                    values = load_routed_peers()
+                    pending = values[1] != tag
+                    for source_rank in range_constexpr(1, npes):
+                        pending = pending | (values[source_rank * 2 + 1] != tag)
+                    while pending:
+                        rocdl.s_nop(0)
+                        values = load_routed_peers()
+                        pending = values[1] != tag
+                        for source_rank in range_constexpr(1, npes):
+                            pending = pending | (values[source_rank * 2 + 1] != tag)
+
+                    sum_lo = fx.Float32(0.0)
+                    sum_hi = fx.Float32(0.0)
                     for source_rank in range_constexpr(npes):
-                        mailbox = source_rank * max_pairs + pair
-                        value_tag = fx.Vector(
+                        word = values[source_rank * 2]
+                        sum_lo = sum_lo + (word << 16).bitcast(fx.Float32)
+                        sum_hi = sum_hi + (word & fx.Int32(-65536)).bitcast(fx.Float32)
+                    packed = fx.Vector.from_elements([sum_lo, sum_hi], fx.Float32).to(fx.BFloat16).bitcast(fx.Int32)[0]
+                    fx.ptr_store(packed.bitcast(fx.Float32), reduction + tid)
+                gpu.barrier()
+
+                result_tag = tag + fx.Int32(1 << 30)
+                owned_pair_in_row = block_in_row * fx.Int32(_THREADS) + rank * _WAVE_SIZE + lane
+                owned_valid = owned_pair_in_row < fx.Int32(routed_pairs_per_row)
+                if (wave < npes) & owned_valid:
+                    owned_pair = sample * fx.Int32(routed_pairs_per_row) + owned_pair_in_row
+                    packed = fx.ptr_load(reduction + rank * _WAVE_SIZE + lane).bitcast(fx.Int32)
+                    mailbox = rank * max_pairs + owned_pair
+                    bo.buffer_store(
+                        fx.Vector.from_elements([packed, result_tag], fx.Int32),
+                        routed_peer_rsrc,
+                        mailbox * 2,
+                        cache_modifier=CM_SYS,
+                    )
+                gpu.barrier()
+
+                if valid:
+                    mailbox = wave * max_pairs + pair
+
+                    def load_routed_reduced():
+                        return fx.Vector(
                             bo.buffer_load(
                                 routed_local_rsrc,
                                 mailbox * 2,
@@ -181,67 +241,15 @@ def build_kimi_k3_tail(
                                 cache_modifier=CM_DEV,
                             )
                         )
-                        words += [value_tag[0], value_tag[1]]
-                    return fx.Vector.from_elements(words, fx.Int32)
 
-                values = load_routed_peers()
-                pending = values[1] != tag
-                for source_rank in range_constexpr(1, npes):
-                    pending = pending | (values[source_rank * 2 + 1] != tag)
-                while pending:
-                    rocdl.s_nop(0)
-                    values = load_routed_peers()
-                    pending = values[1] != tag
-                    for source_rank in range_constexpr(1, npes):
-                        pending = pending | (values[source_rank * 2 + 1] != tag)
-
-                sum_lo = fx.Float32(0.0)
-                sum_hi = fx.Float32(0.0)
-                for source_rank in range_constexpr(npes):
-                    word = values[source_rank * 2]
-                    sum_lo = sum_lo + (word << 16).bitcast(fx.Float32)
-                    sum_hi = sum_hi + (word & fx.Int32(-65536)).bitcast(fx.Float32)
-                packed = fx.Vector.from_elements([sum_lo, sum_hi], fx.Float32).to(fx.BFloat16).bitcast(fx.Int32)[0]
-                fx.ptr_store(packed.bitcast(fx.Float32), reduction + tid)
-            gpu.barrier()
-
-            result_tag = tag + fx.Int32(1 << 30)
-            owned_pair_in_row = block_in_row * fx.Int32(_THREADS) + rank * _WAVE_SIZE + lane
-            owned_valid = owned_pair_in_row < fx.Int32(routed_pairs_per_row)
-            if (wave < npes) & owned_valid:
-                owned_pair = sample * fx.Int32(routed_pairs_per_row) + owned_pair_in_row
-                packed = fx.ptr_load(reduction + rank * _WAVE_SIZE + lane).bitcast(fx.Int32)
-                mailbox = rank * max_pairs + owned_pair
-                bo.buffer_store(
-                    fx.Vector.from_elements([packed, result_tag], fx.Int32),
-                    routed_peer_rsrc,
-                    mailbox * 2,
-                    cache_modifier=CM_SYS,
-                )
-            gpu.barrier()
-
-            if valid:
-                mailbox = wave * max_pairs + pair
-
-                def load_routed_reduced():
-                    return fx.Vector(
-                        bo.buffer_load(
-                            routed_local_rsrc,
-                            mailbox * 2,
-                            vec_width=2,
-                            dtype=T.i32,
-                            cache_modifier=CM_DEV,
-                        )
-                    )
-
-                reduced = load_routed_reduced()
-                while reduced[1] != result_tag:
-                    rocdl.s_nop(0)
                     reduced = load_routed_reduced()
-                packed = reduced[0]
-                bo.buffer_store(packed, routed_reduced_rsrc, pair, cache_modifier=CM_DEV)
-                reduced_lo = (packed << 16).bitcast(fx.Float32)
-                reduced_hi = (packed & fx.Int32(-65536)).bitcast(fx.Float32)
+                    while reduced[1] != result_tag:
+                        rocdl.s_nop(0)
+                        reduced = load_routed_reduced()
+                    packed = reduced[0]
+                    bo.buffer_store(packed, routed_reduced_rsrc, pair, cache_modifier=CM_DEV)
+                    reduced_lo = (packed << 16).bitcast(fx.Float32)
+                    reduced_hi = (packed & fx.Int32(-65536)).bitcast(fx.Float32)
 
             square_sum = reduced_lo * reduced_lo + reduced_hi * reduced_hi
             for offset in (32, 16, 8, 4, 2, 1):
@@ -583,7 +591,9 @@ def build_kimi_k3_tail(
                         reduced_word = (
                             fx.Vector.from_elements([sum_lo, sum_hi], fx.Float32).to(fx.BFloat16).bitcast(fx.Int32)[0]
                         )
-                        fx.ptr_store(reduced_word.bitcast(fx.Float32), local_values + tid)
+                        # Keep packed results separate from the FP32 tail
+                        # values: at S=8 a second wave is still reading them.
+                        fx.ptr_store(reduced_word.bitcast(fx.Float32), reduction + tid)
                     gpu.barrier()
 
                     result_tag = tag + fx.Int32(1 << 30)
@@ -598,7 +608,7 @@ def build_kimi_k3_tail(
                                 row_tile = row_tile_base + tile_in_task
                                 sample_out = sample_base + local_sample
                                 pair = sample_out * (hidden // 2) + row_tile * (_ROW_TILE // 2) + row_pair
-                                reduced_word = fx.ptr_load(local_values + output_pair).bitcast(fx.Int32)
+                                reduced_word = fx.ptr_load(reduction + output_pair).bitcast(fx.Int32)
                                 mailbox = owner_rank * max_pairs + pair
                                 bo.buffer_store(
                                     fx.Vector.from_elements([reduced_word, result_tag], fx.Int32),
@@ -698,7 +708,9 @@ def build_kimi_k3_tail(
             value_attrs={"rocdl.flat_work_group_size": f"{_THREADS},{_THREADS}"},
         ).launch(grid=(launch_blocks, 1, 1), block=(_THREADS, 1, 1), stream=stream)
 
-    launch.func.__name__ = f"kimi_k3_tail_s{samples}_h{hidden}_r{routed_hidden}_i{shared_inter}"
+    launch.func.__name__ = (
+        f"kimi_k3_tail_s{samples}_h{hidden}_r{routed_hidden}_i{shared_inter}_pr{int(routed_pre_reduced)}"
+    )
     return launch
 
 
@@ -714,6 +726,7 @@ class FusedKimiK3Tail:
         rank: int,
         npes: int,
         max_pairs: int,
+        routed_pre_reduced: bool = False,
     ) -> None:
         self.samples = samples
         self.hidden = hidden
@@ -721,7 +734,9 @@ class FusedKimiK3Tail:
         self.shared_inter = shared_inter
         self.rank = rank
         self.npes = npes
-        self.launch = build_kimi_k3_tail(samples, hidden, routed_hidden, shared_inter, npes, max_pairs)
+        self.launch = build_kimi_k3_tail(
+            samples, hidden, routed_hidden, shared_inter, npes, max_pairs, routed_pre_reduced
+        )
 
     def __call__(
         self,
