@@ -1,0 +1,35 @@
+{
+  "config": {
+    "samples": 4,
+    "npes": 8,
+    "launches_per_step": 128,
+    "attn_res_blocks": 1,
+    "block_write_idx": -1,
+    "fuse_moe": true,
+    "mtp": true
+  },
+  "source": "/tmp/flydsl-kimi-tail-20260929/front_wave_pf7_recur_events/kernels/kimi_k3_monokernel/kernel.py",
+  "source_sha256": "db1d734411302c65f83df0b674a1196f2bc9162ab1ec8f4b4d16c027ca7ba705",
+  "kernels": [
+    {
+      "name": "kimi_k3_mtp_relocate_0",
+      "hsaco": "/tmp/flydsl-kimi-tail-20260929/resources_front_wave_pf7_recur_events/launch_c1d7ae9e71726d47194d2999594e18dd.hsaco",
+      "sha256": "2a071edafd20281f64ef093c20beb6498f61765897088f7946a42f002d669509",
+      "agpr_count": 0,
+      "group_segment_fixed_size": 67456,
+      "max_flat_workgroup_size": 512,
+      "private_segment_fixed_size": 0,
+      "sgpr_count": 106,
+      "sgpr_spill_count": 22,
+      "vgpr_count": 121,
+      "vgpr_spill_count": 0,
+      "wavefront_size": 64,
+      "resident_blocks_per_cu": 2,
+      "residency_pass": true,
+      "no_scratch_pass": true
+    }
+  ],
+  "gpu_execution": false,
+  "hip_occupancy_checked": true,
+  "pass": true
+}

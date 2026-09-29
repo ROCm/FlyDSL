@@ -1689,7 +1689,7 @@ def build_kimi_k3_monokernel(
                     )
             return list(accumulator)
 
-        def moe_peer_reduce(local_pairs, pair_base, local_values, region, emit):
+        def moe_peer_push(local_pairs, pair_base, local_values, region):
             moe_max_pairs = samples * _HIDDEN // 2
             moe_slot_bytes = npes * moe_max_pairs * 8
             region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
@@ -1713,6 +1713,11 @@ def build_kimi_k3_monokernel(
                             cache_modifier=CM_SYS,
                         )
             gpu.barrier()
+
+        def moe_peer_collect(local_pairs, pair_base, region, emit):
+            moe_max_pairs = samples * _HIDDEN // 2
+            moe_slot_bytes = npes * moe_max_pairs * 8
+            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
             if tid < local_pairs:
                 global_pair = pair_base + tid
                 local_rsrc = rsrc(moe_symmetric + region_base)
@@ -3109,6 +3114,16 @@ def build_kimi_k3_monokernel(
 
                 pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
 
+                moe_peer_push(16 // 2, pair_base, output_values, 0)
+                down_task = down_task + _BLOCKS
+
+            # All per-CTA down tiles are now in symmetric tagged mailboxes.
+            down_task = bid
+            while down_task < down_tasks:
+                sample = down_task // routed_tiles
+                row_group = down_task % routed_tiles
+                pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
+
                 def emit_routed(local_pair, value_low, value_high):
                     reduced_low = bf16_round(value_low)
                     reduced_high = bf16_round(value_high)
@@ -3124,7 +3139,7 @@ def build_kimi_k3_monokernel(
                         reduced_low * reduced_low + reduced_high * reduced_high,
                     )
 
-                moe_peer_reduce(16 // 2, pair_base, output_values, 0, emit_routed)
+                moe_peer_collect(16 // 2, pair_base, 0, emit_routed)
                 square_part = (tid < 16 // 2).select(
                     lds_load(output_values, fx.min(tid, 16 // 2 - 1)),
                     fx.Float32(0.0),
