@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-29T11:30:00Z",
+ "updated": "2026-09-29T12:45:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,10 +20,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-29T11:16:34Z",
-     "completed_at": null,
+     "completed_at": "2026-09-29T11:29:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36556034230/job/109377337685"
     },
     {
@@ -53,20 +53,20 @@
    "branch": "main",
    "event": "push",
    "title": "[Build] Find ROCm through rocm-sdk before falling back to /opt/rocm* \u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36555801699",
    "created_at": "2026-09-29T10:28:38Z",
-   "updated_at": "2026-09-29T10:58:21Z",
+   "updated_at": "2026-09-29T12:36:39Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-29T10:58:21Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-29T11:56:16Z",
+     "completed_at": "2026-09-29T12:36:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36555801699/job/109374524605"
     },
     {
@@ -81,11 +81,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-29T11:01:25Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36555801699/job/109374524701"
+     "completed_at": "2026-09-29T12:28:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36555801699/job/109374524701",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
