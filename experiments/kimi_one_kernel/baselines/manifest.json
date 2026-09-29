@@ -1,0 +1,85 @@
+{
+  "patch_base": "tail_rotate192_downsplit_events",
+  "patch_base_kernel_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+  "independent_patches": true,
+  "sources": [
+    {
+      "name": "base_checked_events",
+      "original_source": "kimi_full_token_pipeline_20260929/base_checked_events",
+      "kernel_sha256": "01952aea2827cba50af7c04c9132bee1fed057b9d4e995e4c414c8782c528c9e",
+      "source_tree_sha256": "6932d36d425d90d715f7e88b7d877cb3340b28d6530c31b26b4ba36062dbb2a8",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "01952aea2827cba50af7c04c9132bee1fed057b9d4e995e4c414c8782c528c9e"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "staged_relocate_events",
+      "original_source": "kimi_tail_async_20260929/staged_relocate_events",
+      "kernel_sha256": "17f3c66479d4eec4ce4a7bd1921786ae8899cb3063700aab9e97912692693aa9",
+      "source_tree_sha256": "9b9c66ced9e924dd92b7a8dd1a1818fd526d5bcefcccbf050c2f10c5c47c6aef",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "17f3c66479d4eec4ce4a7bd1921786ae8899cb3063700aab9e97912692693aa9"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "c68c3d7edc6e343368e6874f17d43a26970f5787d5e75d5373e2599c06e99b0f"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "17f3c66479d4eec4ce4a7bd1921786ae8899cb3063700aab9e97912692693aa9",
+          "binary_sha256": "6428cbcca4b83870392c424676f31ba42136e6a3cd1493e674a7ef90b2a9a86e",
+          "vgpr": 115,
+          "sgpr_spills": 8,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": null
+        },
+        "screen": {
+          "median_us": 128.75019013881683,
+          "min_us": 128.34393978118896,
+          "max_us": 135.23468375205994,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "17f3c66479d4eec4ce4a7bd1921786ae8899cb3063700aab9e97912692693aa9",
+          "file": "screen_staged_relocate_events_seed1234.json",
+          "reduction_vs_base_pct": -1.2892509550072262,
+          "reduction_vs_staged_pct": 0.0,
+          "target_us": 115.87517112493515
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    }
+  ]
+}

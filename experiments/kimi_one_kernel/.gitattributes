@@ -1,0 +1,2 @@
+# Preserve required blank context lines in exact historical patches.
+*.patch -whitespace

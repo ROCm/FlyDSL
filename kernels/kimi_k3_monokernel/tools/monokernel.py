@@ -592,6 +592,11 @@ def _worker(rank: int, args, port: int, results) -> None:
                 torch.cuda.synchronize()
             dist.barrier()
 
+    if args.full_replay_check:
+        from full_replay import run as check_full_replay
+        result.update(check_full_replay(layer, reference_weights, prefix, blocks, state_indices,
+                                       conv_state, recurrent_state, output, args))
+
     if args.routed_soft_profile:
         soft_dir = Path(args.soft_output_dir)
         soft_dir.mkdir(parents=True, exist_ok=True)
@@ -679,7 +684,10 @@ def main() -> int:
     parser.add_argument("--kernel-profile", action="store_true")
     parser.add_argument("--dump-ir-dir")
     parser.add_argument("--output")
+    parser.add_argument("--full-replay-check", action="store_true")
     args = parser.parse_args()
+    if args.full_replay_check and not (args.check and args.mtp and args.samples == 4 and not args.staged and not args.attention_only):
+        parser.error("Full replay check requires complete S4 MTP MonoKernel --check")
     if args.routed_route_prefetch and not args.routed_pipeline:
         parser.error("--routed-route-prefetch requires --routed-pipeline")
     if args.routed_soft_profile and (not args.routed_pipeline or not args.bench or not args.soft_output_dir):
@@ -709,6 +717,8 @@ def main() -> int:
     results = manager.dict()
     mp.spawn(_worker, args=(args, port, results), nprocs=args.npes)
     ok = all(result["rank_equal"] and result["finite"] for result in results.values())
+    if args.full_replay_check:
+        ok = ok and len(results) == args.npes and all(result["full_replay_correct"] for result in results.values())
     if args.check:
         for result in results.values():
             ok = ok and all(

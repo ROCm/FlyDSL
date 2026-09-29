@@ -387,7 +387,7 @@ def build_kimi_k3_monokernel(
         symmetric_base = fx.Int64(slot) * fx.Int64(slot_bytes)
 
         def stamp(index):
-            if (bid == 0) & (tid == 0):
+            if const_expr(False):
                 now = fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
                 bo.buffer_store(now, rsrc(timeline), index, cache_modifier=CM_DEV)
 
