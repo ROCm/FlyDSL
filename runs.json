@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-29T09:31:57Z",
+ "updated": "2026-09-29T09:35:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36549448735",
    "created_at": "2026-09-29T09:28:56Z",
-   "updated_at": "2026-09-29T09:29:36Z",
+   "updated_at": "2026-09-29T09:30:49Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -70,13 +70,41 @@
    "branch": "pr1204-final_fixed",
    "event": "pull_request",
    "title": "[fix] mono kernel glm precision fixed",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36547908053",
    "created_at": "2026-09-29T09:14:47Z",
-   "updated_at": "2026-09-29T09:16:50Z",
+   "updated_at": "2026-09-29T09:34:11Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-29T09:34:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36547908053/job/109345604479"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-29T09:34:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36547908053/job/109345604495"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-29T09:34:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36547908053/job/109345604524"
+    }
+   ]
   },
   {
    "run_id": 36542419948,
