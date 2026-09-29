@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-29T03:38:25Z",
+ "updated": "2026-09-29T04:09:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -101,11 +101,11 @@
    "branch": "fix/1165-singleton-contig-segment",
    "event": "pull_request",
    "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434740596",
    "created_at": "2026-09-28T14:16:29Z",
-   "updated_at": "2026-09-29T02:51:07Z",
+   "updated_at": "2026-09-29T04:07:19Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -129,10 +129,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-29T02:51:06Z",
-     "completed_at": null,
+     "completed_at": "2026-09-29T04:07:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434740596/job/108983711905"
     }
    ]
