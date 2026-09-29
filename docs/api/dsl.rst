@@ -42,7 +42,8 @@ Layout inspection
 - **fx.depth(layout)** -- nesting depth
 - **fx.get_shape(layout)** -- extract shape tuple
 - **fx.get_stride(layout)** -- extract stride tuple
-- **fx.get_scalar(int_tuple)** -- extract the scalar from a single-leaf int tuple (per-mode access is ``fx.get``)
+- **fx.get_scalar(int_tuple)** -- extract the scalar from a single-leaf int tuple;
+  use ``fx.get_(int_tuple, mode).unpack()`` for per-mode access
 
 Layout algebra
 ~~~~~~~~~~~~~~~
@@ -69,7 +70,9 @@ Coordinate mapping
 - **fx.crd2idx(coord, layout)** -- coordinate to linear index
 - **fx.idx2crd(idx, layout)** -- linear index to coordinate
 - **fx.slice(tensor, slices)** -- slice a tensor by coordinates or ``None``
-- **fx.get(layout, idx)** -- access element at index
+- **fx.get_(int_tuple, mode)** -- select a mode while preserving its structured
+  result; use ``.unpack()`` when a scalar result is required. The older
+  ``fx.get`` spelling is deprecated
 
 Memory operations
 ~~~~~~~~~~~~~~~~~~
@@ -102,7 +105,8 @@ High-level classes for tiled copy and MMA partitioning:
 
 - **CopyAtom** (``flydsl.expr.typing``) -- single hardware copy instruction descriptor
 - **MmaAtom** (``flydsl.expr.typing``) -- single MMA instruction descriptor (MFMA)
-- **CopyAtomType**, **MmaAtomType** -- atom type wrappers exposed by ``flydsl.expr.derived``
+- **CopyAtomType**, **MmaAtomType** -- atom type wrappers exported by
+  ``flydsl.expr.primitive``
 - **TiledCopy** -- multi-thread tiled copy; use ``get_slice(tid)`` → ``ThrCopy``
 - **TiledMma** -- multi-thread tiled MMA; use ``get_slice(tid)`` → ``ThrMma``
 - **ThrCopy** -- per-thread copy view: ``partition_S(src)``, ``partition_D(dst)``, ``retile(t)``
@@ -189,17 +193,22 @@ ROCDL operations (``flydsl.expr.rocdl``)
 
 AMD-specific operations for ROCm:
 
+The exported universal and architecture namespaces are governed by
+:doc:`../api_stability`. Importable target helpers or generated upstream ROCDL
+builders that are absent from the export chain remain unstable even when they
+are useful for source-tree kernel development.
+
 - **fx.rocdl.make_buffer_tensor(tensor)** -- create buffer resource from tensor (CDNA buffer copy)
 - **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy instruction atoms
 - **fx.rocdl.MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None)** -- MFMA instruction atom constructor (CDNA3/CDNA4; 4th arg is the A/B element type; accumulator defaults to f32)
 - **fx.rocdl.WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, \*\*kwargs)** -- WMMA MMA atom constructor (arch-dispatched: gfx11 / gfx120x / gfx1250). ``elem_ty_b`` optionally selects a different B operand type. gfx1250 supports f32(K4), f16/bf16(K32), fp8/bf8(K64/128), i8(K64), i4(K32); integer paths take ``sign_a`` / ``sign_b`` / ``clamp``. gfx120x (RDNA4) supports 16x16x16 f16/bf16 and every fp8(E4M3FN)/bf8(E5M2) A/B combination to f32, on the v8 operand ABI
-- **fx.rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, \*, opsel_a=0, opsel_b=0, mod_c=0, reuse_a=False, reuse_b=False, block_size=32)** -- gfx1250 MX-scaled WMMA (E8M0 block scale, f8/f6/f4; ``16x16x128`` or ``32x16x128`` fp4-only). Per-operand scales are atom state (``scale_a`` / ``scale_b``)
-- **fx.rocdl.make_tdm_atom(tensor, tensor_extents, strides=None, \*, num_warps, ...)** -- build a gfx1250 TDM (Tensor Data Mover) async Global↔LDS whole-tile copy atom (rank 1-5); the global base comes from the ``copy_atom_call`` operand pointer, while the per-dim extent (OOB), stride, ``imm_offset``, and MCAST ``workgroup_mask`` are atom state. ``fx.rocdl.TDM(rank, num_warps, ...)`` builds the atom type only. Advance the K-loop tile with ``fx.copy(atom, gt, dst, imm_offset=...)``
+- **fx.rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, \*, opsel_a=0, opsel_b=0, mod_c=0, reuse_a=False, reuse_b=False, block_size=32)** -- unstable, target-specific gfx1250 MX-scaled WMMA (E8M0 block scale, f8/f6/f4; ``16x16x128`` or ``32x16x128`` fp4-only). Per-operand scales are atom state (``scale_a`` / ``scale_b``)
+- **fx.rocdl.make_tdm_atom(tensor, tensor_extents, strides=None, \*, num_warps, ...)** -- unstable, target-specific gfx1250 TDM (Tensor Data Mover) async Global↔LDS whole-tile copy atom (rank 1-5); the global base comes from the ``copy_atom_call`` operand pointer, while the per-dim extent (OOB), stride, ``imm_offset``, and MCAST ``workgroup_mask`` are atom state. ``fx.rocdl.TDM(rank, num_warps, ...)`` builds the atom type only. Advance the K-loop tile with ``fx.copy(atom, gt, dst, imm_offset=...)``
 - **fx.rocdl.sched_mfma(cnt)** -- insert MFMA scheduling barrier
 - **fx.rocdl.sched_vmem(cnt)** -- insert VMEM scheduling barrier
 - **fx.rocdl.sched_dsrd(cnt)** -- insert DS read scheduling barrier
 - **fx.rocdl.sched_dswr(cnt)** -- insert DS write scheduling barrier
-- **mfma_f32_16x16x16f16**, **mfma_f32_16x16x16bf16_1k**, etc. -- direct MFMA intrinsics
+- **mfma_f32_16x16x16f16**, **mfma_f32_16x16x16bf16_1k**, etc. -- generated direct MFMA intrinsics; these low-level builders are unstable
 
 Compiler API (``flydsl.compiler``)
 -----------------------------------
@@ -212,6 +221,8 @@ Compiler API (``flydsl.compiler``)
 - **@flyc.jit** -- decorator for host-side JIT launch functions
 - **flyc.from_dlpack(tensor)** -- convert DLPack-compatible tensors (PyTorch, etc.) to FlyDSL
 - **JitArgumentRegistry** -- registry for custom argument type adapters
-- **flydsl.compiler.kernel_function.CompilationContext** -- context object available during kernel compilation (not a top-level ``flydsl.compiler`` symbol)
+- **flydsl.compiler.kernel_function.CompilationContext** -- unstable implementation
+  context available during kernel compilation; it is not a top-level
+  ``flydsl.compiler`` symbol
 
 .. seealso:: :doc:`compiler` for the full compilation pipeline and pass details.
