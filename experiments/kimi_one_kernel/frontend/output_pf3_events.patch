@@ -1,0 +1,324 @@
+--- a/kernels/kimi_k3_monokernel/kernel.py
++++ b/kernels/kimi_k3_monokernel/kernel.py
+@@ -870,65 +870,30 @@
+                     store_f32(stats_rsrc, stats_base + source * 2, total_square)
+                     store_f32(stats_rsrc, stats_base + source * 2 + 1, total_weighted)
+ 
+-            if const_expr(_ATTN_RES_CTAS * (2 * num_sources) <= _WAVE_SIZE):
+-                if wave == 0:
+-                    # Each active lane retains its own tagged value until the
+-                    # wave reconverges. All readlane sources are initialized.
+-                    stats_value = fx.Float32(0.0)
+-                    if lane < _ATTN_RES_CTAS * (2 * num_sources):
+-                        gather_chunk = lane // (2 * num_sources)
+-                        gather_field = lane % (2 * num_sources)
+-                        gather_base = (sample * _ATTN_RES_CTAS + gather_chunk) * _ATTN_RES_STATS
+-                        stats_value = load_f32(stats_rsrc, gather_base + gather_field)
+-                    logits = []
+-                    for source in range_constexpr(num_sources):
+-                        total_square = fx.Float32(0.0)
+-                        total_weighted = fx.Float32(0.0)
+-                        for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+-                            source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
+-                            total_square = total_square + fx.Int32(rocdl.readlane(T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk * (2 * num_sources) + source * 2))).bitcast(fx.Float32)
+-                            total_weighted = total_weighted + fx.Int32(rocdl.readlane(T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk * (2 * num_sources) + source * 2 + 1))).bitcast(fx.Float32)
+-                        logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
+-                    max_logit = logits[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        max_logit = fx.max(max_logit, logits[source])
+-                    probabilities = [exp(logit - max_logit) for logit in logits]
+-                    probability_sum = probabilities[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        probability_sum = probability_sum + probabilities[source]
+-                    inverse_probability_sum = rcp(probability_sum)
+-                    if lane == 0:
+-                        for source in range_constexpr(num_sources):
+-                            lds_store(
+-                                attn_values,
+-                                source,
+-                                probabilities[source] * inverse_probability_sum,
+-                            )
+-            else:
+-                if tid == 0:
+-                    logits = []
+-                    for source in range_constexpr(num_sources):
+-                        total_square = fx.Float32(0.0)
+-                        total_weighted = fx.Float32(0.0)
+-                        for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+-                            source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
+-                            total_square = total_square + load_f32(stats_rsrc, source_base + source * 2)
+-                            total_weighted = total_weighted + load_f32(stats_rsrc, source_base + source * 2 + 1)
+-                        logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
+-                    max_logit = logits[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        max_logit = fx.max(max_logit, logits[source])
+-                    probabilities = [exp(logit - max_logit) for logit in logits]
+-                    probability_sum = probabilities[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        probability_sum = probability_sum + probabilities[source]
+-                    inverse_probability_sum = rcp(probability_sum)
+-                    for source in range_constexpr(num_sources):
+-                        lds_store(
+-                            attn_values,
+-                            source,
+-                            probabilities[source] * inverse_probability_sum,
+-                        )
++            if tid == 0:
++                logits = []
++                for source in range_constexpr(num_sources):
++                    total_square = fx.Float32(0.0)
++                    total_weighted = fx.Float32(0.0)
++                    for source_chunk in range_constexpr(_ATTN_RES_CTAS):
++                        source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
++                        total_square = total_square + load_f32(stats_rsrc, source_base + source * 2)
++                        total_weighted = total_weighted + load_f32(stats_rsrc, source_base + source * 2 + 1)
++                    logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
++                max_logit = logits[0]
++                for source in range_constexpr(1, num_sources):
++                    max_logit = fx.max(max_logit, logits[source])
++                probabilities = [exp(logit - max_logit) for logit in logits]
++                probability_sum = probabilities[0]
++                for source in range_constexpr(1, num_sources):
++                    probability_sum = probability_sum + probabilities[source]
++                inverse_probability_sum = rcp(probability_sum)
++                for source in range_constexpr(num_sources):
++                    lds_store(
++                        attn_values,
++                        source,
++                        probabilities[source] * inverse_probability_sum,
++                    )
+             gpu.barrier()
+ 
+             mixed_pairs = []
+@@ -959,19 +924,11 @@
+             total_mixed_square = block_sum(mixed_square_sum)
+             if tid == 0:
+                 store_f32(stats_rsrc, stats_base + 2 * num_sources, total_mixed_square)
+-            if wave == 0:
+-                stats_value = fx.Float32(0.0)
+-                if lane < _ATTN_RES_CTAS:
+-                    source_base = (sample * _ATTN_RES_CTAS + lane) * _ATTN_RES_STATS
+-                    stats_value = load_f32(stats_rsrc, source_base + 2 * num_sources)
+                 full_square = fx.Float32(0.0)
+                 for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+-                    chunk_square = fx.Int32(rocdl.readlane(
+-                        T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk),
+-                    )).bitcast(fx.Float32)
+-                    full_square = full_square + chunk_square
+-                if lane == 0:
+-                    lds_store(attn_values, num_sources, rsq(full_square * (1.0 / _HIDDEN) + EPS))
++                    source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
++                    full_square = full_square + load_f32(stats_rsrc, source_base + 2 * num_sources)
++                lds_store(attn_values, num_sources, rsq(full_square * (1.0 / _HIDDEN) + EPS))
+             gpu.barrier()
+             output_inverse_rms = lds_load(attn_values, num_sources)
+ 
+@@ -1689,7 +1646,7 @@
+                     )
+             return list(accumulator)
+ 
+-        def moe_peer_push(local_pairs, pair_base, local_values, region):
++        def moe_peer_reduce(local_pairs, pair_base, local_values, region, emit):
+             moe_max_pairs = samples * _HIDDEN // 2
+             moe_slot_bytes = npes * moe_max_pairs * 8
+             region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+@@ -1713,11 +1670,6 @@
+                             cache_modifier=CM_SYS,
+                         )
+             gpu.barrier()
+-
+-        def moe_peer_collect(local_pairs, pair_base, region, emit):
+-            moe_max_pairs = samples * _HIDDEN // 2
+-            moe_slot_bytes = npes * moe_max_pairs * 8
+-            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+             if tid < local_pairs:
+                 global_pair = pair_base + tid
+                 local_rsrc = rsrc(moe_symmetric + region_base)
+@@ -1757,7 +1709,7 @@
+                 emit(tid, sum_low, sum_high)
+             gpu.barrier()
+ 
+-        def moe_peer_push_samples(local_pairs, pair_base, local_values, region):
++        def moe_peer_reduce_samples(local_pairs, pair_base, local_values, region, emit):
+             moe_max_pairs = samples * _HIDDEN // 2
+             moe_slot_bytes = npes * moe_max_pairs * 8
+             region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+@@ -1781,11 +1733,6 @@
+                             cache_modifier=CM_SYS,
+                         )
+             gpu.barrier()
+-
+-        def moe_peer_collect_samples(local_pairs, pair_base, region, emit):
+-            moe_max_pairs = samples * _HIDDEN // 2
+-            moe_slot_bytes = npes * moe_max_pairs * 8
+-            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+             if tid < local_pairs:
+                 global_pair = pair_base + (tid // 8) * (_HIDDEN // 2) + tid % 8
+                 local_rsrc = rsrc(moe_symmetric + region_base)
+@@ -1903,10 +1850,6 @@
+                 sample_group = input_task // input_row_tasks
+                 input_row_task = input_task % input_row_tasks
+                 sample_base = sample_group * staged_samples
+-            input_prefetch = prefetch_bf16_units(
+-                input_weight_rsrc, input_row_task * input_row_groups,
+-                _HIDDEN, input_split_waves, 7,
+-            )
+             stage_hidden(sample_base, staged_samples)
+             gpu.barrier()
+             input_accumulator = bf16_mfma(
+@@ -1917,7 +1860,6 @@
+                 input_split_waves,
+                 14,
+                 staged_samples,
+-                input_prefetch,
+             )
+ 
+             def emit_input(local_row, sample, value_low, value_high):
+@@ -2289,15 +2231,6 @@
+                     store_i32(mtp_conv_ready_rsrc, sample * _HEADS + head, 1)
+ 
+             stamp(1)
+-
+-            def wait_mtp_previous_state(sample, head, value_split):
+-                if tid == 0:
+-                    if sample > 0:
+-                        load_f32(
+-                            mtp_state_ready_rsrc,
+-                            ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
+-                        )
+-                gpu.barrier()
+ 
+             def run_mtp_recurrence(sample, head, value_split):
+                 if tid == 0:
+@@ -2402,8 +2335,6 @@
+                         dot_parts = fx.math.fma(key_vectors[k_iter], query_vectors[k_iter], dot_parts)
+                     dot_key_query = mtp_subgroup_sum(dot_parts.reduce(fx.ReductionOp.ADD))
+ 
+-                    wait_mtp_previous_state(sample, head, value_split)
+-
+                     state_vectors = [None] * mtp_k_iters
+                     state_key_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                     state_query_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+@@ -2451,8 +2382,6 @@
+                             cache_modifier=CM_DEV,
+                         )
+                     result = state_query + value_new * dot_key_query
+-                else:
+-                    wait_mtp_previous_state(sample, head, value_split)
+ 
+                 k_lane = lane % mtp_k_lanes
+                 square_sum = (k_lane == 0).select(result * result, fx.Float32(0.0))
+@@ -2521,6 +2450,13 @@
+                 head_split = mtp_recurrence_task % (_HEADS * mtp_splits)
+                 head = head_split // mtp_splits
+                 value_split = head_split % mtp_splits
++                if tid == 0:
++                    if sample > 0:
++                        load_f32(
++                            mtp_state_ready_rsrc,
++                            ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
++                        )
++                gpu.barrier()
+                 run_mtp_recurrence(sample, head, value_split)
+ 
+         # Stage 3: BF16 1536 -> 7168 output projection followed by the tagged
+@@ -2537,6 +2473,10 @@
+                 output_row_task = output_task % output_row_tasks
+                 sample_base = sample_group * staged_samples
+             stamp(2)
++            output_prefetch = prefetch_bf16_units(
++                output_weight_rsrc, output_row_task * _OUTPUT_ROW_GROUPS,
++                _PROJECTION, _OUTPUT_SPLIT_WAVES, 3,
++            )
+             stage_norm(sample_base, staged_samples)
+             gpu.barrier()
+             output_accumulator = bf16_mfma(
+@@ -2547,6 +2487,7 @@
+                 _OUTPUT_SPLIT_WAVES,
+                 6,
+                 staged_samples,
++                output_prefetch,
+             )
+ 
+             def emit_output(local_row, sample, value_low, value_high):
+@@ -2714,10 +2655,6 @@
+                         sample_group = projection_task // router_row_tasks
+                         router_row_task = projection_task % router_row_tasks
+                         sample_base = sample_group * staged_samples
+-                    router_prefetch = prefetch_bf16_units(
+-                        rsrc(packed_router_weight), router_row_task * _ROUTER_ROW_GROUPS,
+-                        _HIDDEN, _ROUTER_SPLIT_WAVES, 7,
+-                    )
+                     stage_moe_hidden(sample_base, staged_samples)
+                     gpu.barrier()
+                     row_base = router_row_task * _ROUTER_ROW_GROUPS
+@@ -2729,7 +2666,6 @@
+                         _ROUTER_SPLIT_WAVES,
+                         14,
+                         staged_samples,
+-                        router_prefetch,
+                     )
+ 
+                     def emit_router(local_row, sample, value_low, value_high):
+@@ -3114,16 +3050,6 @@
+ 
+                 pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
+ 
+-                moe_peer_push(16 // 2, pair_base, output_values, 0)
+-                down_task = down_task + _BLOCKS
+-
+-            # All per-CTA down tiles are now in symmetric tagged mailboxes.
+-            down_task = bid
+-            while down_task < down_tasks:
+-                sample = down_task // routed_tiles
+-                row_group = down_task % routed_tiles
+-                pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
+-
+                 def emit_routed(local_pair, value_low, value_high):
+                     reduced_low = bf16_round(value_low)
+                     reduced_high = bf16_round(value_high)
+@@ -3139,7 +3065,7 @@
+                         reduced_low * reduced_low + reduced_high * reduced_high,
+                     )
+ 
+-                moe_peer_collect(16 // 2, pair_base, 0, emit_routed)
++                moe_peer_reduce(16 // 2, pair_base, output_values, 0, emit_routed)
+                 square_part = (tid < 16 // 2).select(
+                     lds_load(output_values, fx.min(tid, 16 // 2 - 1)),
+                     fx.Float32(0.0),
+@@ -3181,7 +3107,7 @@
+             tail_task = bid
+             while tail_task < tail_tasks:
+                 sample_base = (tail_task // hidden_tiles) * staged_samples
+-                row_group = (tail_task % hidden_tiles + rank * (_HIDDEN_SHARD // 16) + hidden_tiles - 192) % hidden_tiles
++                row_group = tail_task % hidden_tiles
+                 shared_pairs = _SHARED_INTER // 2
+                 accumulator = [fx.Float32(0.0) for _ in range(4)]
+                 if wave < 4:
+@@ -3258,17 +3184,6 @@
+ 
+                 pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
+ 
+-                moe_peer_push_samples(staged_samples * (16 // 2), pair_base, output_values, 1)
+-                tail_task = tail_task + _BLOCKS
+-
+-            # The tagged symmetric mailboxes retain every partial, so LDS can
+-            # be reused for the next compute task before any peer is polled.
+-            tail_task = bid
+-            while tail_task < tail_tasks:
+-                sample_base = (tail_task // hidden_tiles) * staged_samples
+-                row_group = (tail_task % hidden_tiles + rank * (_HIDDEN_SHARD // 16) + hidden_tiles - 192) % hidden_tiles
+-                pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
+-
+                 def emit_final(local_pair, value_low, value_high):
+                     residual_word = fx.Int32(
+                         bo.buffer_load(
+@@ -3291,7 +3206,7 @@
+                         cache_modifier=CM_DEV,
+                     )
+ 
+-                moe_peer_collect_samples(staged_samples * (16 // 2), pair_base, 1, emit_final)
++                moe_peer_reduce_samples(staged_samples * (16 // 2), pair_base, output_values, 1, emit_final)
+                 tail_task = tail_task + _BLOCKS
+             stamp(9)
+ 

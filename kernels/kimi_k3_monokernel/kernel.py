@@ -870,30 +870,65 @@ def build_kimi_k3_monokernel(
                     store_f32(stats_rsrc, stats_base + source * 2, total_square)
                     store_f32(stats_rsrc, stats_base + source * 2 + 1, total_weighted)
 
-            if tid == 0:
-                logits = []
-                for source in range_constexpr(num_sources):
-                    total_square = fx.Float32(0.0)
-                    total_weighted = fx.Float32(0.0)
-                    for source_chunk in range_constexpr(_ATTN_RES_CTAS):
-                        source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
-                        total_square = total_square + load_f32(stats_rsrc, source_base + source * 2)
-                        total_weighted = total_weighted + load_f32(stats_rsrc, source_base + source * 2 + 1)
-                    logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
-                max_logit = logits[0]
-                for source in range_constexpr(1, num_sources):
-                    max_logit = fx.max(max_logit, logits[source])
-                probabilities = [exp(logit - max_logit) for logit in logits]
-                probability_sum = probabilities[0]
-                for source in range_constexpr(1, num_sources):
-                    probability_sum = probability_sum + probabilities[source]
-                inverse_probability_sum = rcp(probability_sum)
-                for source in range_constexpr(num_sources):
-                    lds_store(
-                        attn_values,
-                        source,
-                        probabilities[source] * inverse_probability_sum,
-                    )
+            if const_expr(_ATTN_RES_CTAS * (2 * num_sources) <= _WAVE_SIZE):
+                if wave == 0:
+                    # Each active lane retains its own tagged value until the
+                    # wave reconverges. All readlane sources are initialized.
+                    stats_value = fx.Float32(0.0)
+                    if lane < _ATTN_RES_CTAS * (2 * num_sources):
+                        gather_chunk = lane // (2 * num_sources)
+                        gather_field = lane % (2 * num_sources)
+                        gather_base = (sample * _ATTN_RES_CTAS + gather_chunk) * _ATTN_RES_STATS
+                        stats_value = load_f32(stats_rsrc, gather_base + gather_field)
+                    logits = []
+                    for source in range_constexpr(num_sources):
+                        total_square = fx.Float32(0.0)
+                        total_weighted = fx.Float32(0.0)
+                        for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+                            source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
+                            total_square = total_square + fx.Int32(rocdl.readlane(T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk * (2 * num_sources) + source * 2))).bitcast(fx.Float32)
+                            total_weighted = total_weighted + fx.Int32(rocdl.readlane(T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk * (2 * num_sources) + source * 2 + 1))).bitcast(fx.Float32)
+                        logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
+                    max_logit = logits[0]
+                    for source in range_constexpr(1, num_sources):
+                        max_logit = fx.max(max_logit, logits[source])
+                    probabilities = [exp(logit - max_logit) for logit in logits]
+                    probability_sum = probabilities[0]
+                    for source in range_constexpr(1, num_sources):
+                        probability_sum = probability_sum + probabilities[source]
+                    inverse_probability_sum = rcp(probability_sum)
+                    if lane == 0:
+                        for source in range_constexpr(num_sources):
+                            lds_store(
+                                attn_values,
+                                source,
+                                probabilities[source] * inverse_probability_sum,
+                            )
+            else:
+                if tid == 0:
+                    logits = []
+                    for source in range_constexpr(num_sources):
+                        total_square = fx.Float32(0.0)
+                        total_weighted = fx.Float32(0.0)
+                        for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+                            source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
+                            total_square = total_square + load_f32(stats_rsrc, source_base + source * 2)
+                            total_weighted = total_weighted + load_f32(stats_rsrc, source_base + source * 2 + 1)
+                        logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
+                    max_logit = logits[0]
+                    for source in range_constexpr(1, num_sources):
+                        max_logit = fx.max(max_logit, logits[source])
+                    probabilities = [exp(logit - max_logit) for logit in logits]
+                    probability_sum = probabilities[0]
+                    for source in range_constexpr(1, num_sources):
+                        probability_sum = probability_sum + probabilities[source]
+                    inverse_probability_sum = rcp(probability_sum)
+                    for source in range_constexpr(num_sources):
+                        lds_store(
+                            attn_values,
+                            source,
+                            probabilities[source] * inverse_probability_sum,
+                        )
             gpu.barrier()
 
             mixed_pairs = []
@@ -924,11 +959,19 @@ def build_kimi_k3_monokernel(
             total_mixed_square = block_sum(mixed_square_sum)
             if tid == 0:
                 store_f32(stats_rsrc, stats_base + 2 * num_sources, total_mixed_square)
+            if wave == 0:
+                stats_value = fx.Float32(0.0)
+                if lane < _ATTN_RES_CTAS:
+                    source_base = (sample * _ATTN_RES_CTAS + lane) * _ATTN_RES_STATS
+                    stats_value = load_f32(stats_rsrc, source_base + 2 * num_sources)
                 full_square = fx.Float32(0.0)
                 for source_chunk in range_constexpr(_ATTN_RES_CTAS):
-                    source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
-                    full_square = full_square + load_f32(stats_rsrc, source_base + 2 * num_sources)
-                lds_store(attn_values, num_sources, rsq(full_square * (1.0 / _HIDDEN) + EPS))
+                    chunk_square = fx.Int32(rocdl.readlane(
+                        T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk),
+                    )).bitcast(fx.Float32)
+                    full_square = full_square + chunk_square
+                if lane == 0:
+                    lds_store(attn_values, num_sources, rsq(full_square * (1.0 / _HIDDEN) + EPS))
             gpu.barrier()
             output_inverse_rms = lds_load(attn_values, num_sources)
 
@@ -1105,6 +1148,23 @@ def build_kimi_k3_monokernel(
                     packed = load_raw_pair(norm_mailbox_rsrc, global_pair)
                     lds_store(x, pair, packed.bitcast(fx.Float32))
 
+        def prefetch_bf16_units(weight_rsrc, first_row_group, k_size, split_waves, count):
+            chunks = k_size // 64
+            chunks_per_wave = chunks // split_waves
+            row_group = first_row_group + wave // split_waves
+            split = wave % split_waves
+            units = []
+            for local_chunk in range_constexpr(count):
+                chunk = split * chunks_per_wave + local_chunk
+                units.append([
+                    fx.Vector(bo.buffer_load(
+                        weight_rsrc,
+                        (((row_group * chunks + chunk) * 2 + step_index) * _WAVE_SIZE + lane) * 4,
+                        vec_width=4, dtype=T.i32,
+                    )) for step_index in range_constexpr(2)
+                ])
+            return units
+
         def bf16_mfma(
             weight_rsrc,
             first_row_group,
@@ -1113,6 +1173,7 @@ def build_kimi_k3_monokernel(
             split_waves,
             batch_size,
             sample_count,
+            prefetched=None,
         ):
             chunks = k_size // 64
             chunks_per_wave = chunks // split_waves
@@ -1137,7 +1198,13 @@ def build_kimi_k3_monokernel(
                     ]
 
                 starts = list(range(0, chunks_per_wave, batch_size))
-                current = [load_unit(chunk) for chunk in range(0, min(batch_size, chunks_per_wave))]
+                if const_expr(prefetched is None):
+                    current = [load_unit(chunk) for chunk in range(0, min(batch_size, chunks_per_wave))]
+                else:
+                    current = [
+                        prefetched[chunk] if chunk < len(prefetched) else load_unit(chunk)
+                        for chunk in range(0, min(batch_size, chunks_per_wave))
+                    ]
                 for batch_index in range_constexpr(len(starts)):
                     following = None
                     if const_expr(batch_index + 1 < len(starts)):
@@ -1826,6 +1893,10 @@ def build_kimi_k3_monokernel(
                 sample_group = input_task // input_row_tasks
                 input_row_task = input_task % input_row_tasks
                 sample_base = sample_group * staged_samples
+            input_prefetch = prefetch_bf16_units(
+                input_weight_rsrc, input_row_task * input_row_groups,
+                _HIDDEN, input_split_waves, 7,
+            )
             stage_hidden(sample_base, staged_samples)
             gpu.barrier()
             input_accumulator = bf16_mfma(
@@ -1836,6 +1907,7 @@ def build_kimi_k3_monokernel(
                 input_split_waves,
                 14,
                 staged_samples,
+                input_prefetch,
             )
 
             def emit_input(local_row, sample, value_low, value_high):
@@ -2626,6 +2698,10 @@ def build_kimi_k3_monokernel(
                         sample_group = projection_task // router_row_tasks
                         router_row_task = projection_task % router_row_tasks
                         sample_base = sample_group * staged_samples
+                    router_prefetch = prefetch_bf16_units(
+                        rsrc(packed_router_weight), router_row_task * _ROUTER_ROW_GROUPS,
+                        _HIDDEN, _ROUTER_SPLIT_WAVES, 7,
+                    )
                     stage_moe_hidden(sample_base, staged_samples)
                     gpu.barrier()
                     row_base = router_row_task * _ROUTER_ROW_GROUPS
@@ -2637,6 +2713,7 @@ def build_kimi_k3_monokernel(
                         _ROUTER_SPLIT_WAVES,
                         14,
                         staged_samples,
+                        router_prefetch,
                     )
 
                     def emit_router(local_row, sample, value_low, value_high):
