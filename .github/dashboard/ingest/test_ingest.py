@@ -14,10 +14,59 @@ Run:  python3 -m pytest .github/dashboard/ingest/test_ingest.py
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # importable from repo root
 
 import ingest  # noqa: E402
+
+
+# --------------------------------------------------------------------------- #
+# gh_text
+# --------------------------------------------------------------------------- #
+def test_gh_text_allows_captured_escape_sequences(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout="\x1b[32mbenchmark log\x1b[0m", stderr="")
+
+    monkeypatch.setattr(ingest, "_gh_api_allow_escape_sequences", True)
+    monkeypatch.setattr(ingest.subprocess, "run", fake_run)
+
+    assert ingest.gh_text("repos/ROCm/FlyDSL/actions/jobs/1/logs") == "\x1b[32mbenchmark log\x1b[0m"
+    assert calls == [
+        (
+            ["gh", "api", "--allow-escape-sequences", "repos/ROCm/FlyDSL/actions/jobs/1/logs"],
+            {"capture_output": True, "text": True},
+        )
+    ]
+
+
+def test_gh_text_falls_back_for_older_gh(monkeypatch):
+    calls = []
+    responses = iter(
+        [
+            SimpleNamespace(returncode=1, stdout="", stderr="unknown flag: --allow-escape-sequences"),
+            SimpleNamespace(returncode=0, stdout="benchmark log", stderr=""),
+            SimpleNamespace(returncode=0, stdout="next log", stderr=""),
+        ]
+    )
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return next(responses)
+
+    monkeypatch.setattr(ingest, "_gh_api_allow_escape_sequences", True)
+    monkeypatch.setattr(ingest.subprocess, "run", fake_run)
+
+    assert ingest.gh_text("repos/ROCm/FlyDSL/actions/jobs/1/logs") == "benchmark log"
+    assert ingest.gh_text("repos/ROCm/FlyDSL/actions/jobs/2/logs") == "next log"
+    assert calls == [
+        ["gh", "api", "--allow-escape-sequences", "repos/ROCm/FlyDSL/actions/jobs/1/logs"],
+        ["gh", "api", "repos/ROCm/FlyDSL/actions/jobs/1/logs"],
+        ["gh", "api", "repos/ROCm/FlyDSL/actions/jobs/2/logs"],
+    ]
 
 
 # --------------------------------------------------------------------------- #

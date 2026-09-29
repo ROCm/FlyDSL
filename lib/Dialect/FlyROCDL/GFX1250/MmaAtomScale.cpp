@@ -4,7 +4,6 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
-#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
@@ -22,8 +21,9 @@ namespace mlir::fly_rocdl {
 // MmaOpGFX1250_WMMAScaleType — MX-scaled WMMA (E8M0 block scale)
 //
 // gfx1250 wave32 scaled WMMA for the unified f8/f6/f4 operand format. Per-operand
-// E8M0 scales are carried as atom state (ScaleA / ScaleB, i32), mirroring
-// MmaOpCDNA4_MFMAScaleType.
+// E8M0 scales are carried as atom state (ScaleA / ScaleB): i32 for block-32,
+// i64 for block-16. An extra scale operand in an atom-call group overrides the
+// corresponding state for that call. Omitted scale operands use atom state.
 //===----------------------------------------------------------------------===//
 
 std::optional<unsigned> MmaOpGFX1250_WMMAScaleType::getFieldIndex(AtomStateField field) {
@@ -205,11 +205,18 @@ static Type getScaledWmmaABType(MLIRContext *ctx, int32_t rows, int32_t k, Type 
   return VectorType::get({i32count}, IntegerType::get(ctx, 32));
 }
 
-FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc,
-                                                             Type resultTy, Type mmaAtomTyArg,
-                                                             Type dTyArg, Type aTyArg, Type bTyArg,
-                                                             Type cTyArg, Value atomVal, Value d,
-                                                             Value a, Value b, Value c) const {
+FailureOr<Value>
+MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type resultTy,
+                                            Type mmaAtomTyArg, Type dTyArg, TypeRange aTyArgs,
+                                            TypeRange bTyArgs, Type cTyArg, Value atomVal, Value d,
+                                            ValueRange aValues, ValueRange bValues, Value c) const {
+  if (aValues.empty() || aValues.size() > 2 || bValues.empty() || bValues.size() > 2) {
+    emitError(loc, "scaled MMA expects [data] or [data, scale] for each operand");
+    return failure();
+  }
+  Value a = aValues.front();
+  Value b = bValues.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -231,10 +238,19 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
   if (c.getType() != accTy)
     c = LLVM::BitcastOp::create(builder, loc, accTy, c);
 
-  Value scaleA = LLVM::ExtractValueOp::create(
-      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});
-  Value scaleB = LLVM::ExtractValueOp::create(
-      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
+  Type scaleType = builder.getIntegerType(getBlockSize() == 16 ? 64 : 32);
+  Value scaleA = aValues.size() == 2
+                     ? aValues[1]
+                     : builder.createOrFold<LLVM::ExtractValueOp>(
+                           loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});
+  Value scaleB = bValues.size() == 2
+                     ? bValues[1]
+                     : builder.createOrFold<LLVM::ExtractValueOp>(
+                           loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
+  if (scaleA.getType() != scaleType)
+    scaleA = LLVM::BitcastOp::create(builder, loc, scaleType, scaleA);
+  if (scaleB.getType() != scaleType)
+    scaleB = LLVM::BitcastOp::create(builder, loc, scaleType, scaleB);
 
   // fmtScaleA / fmtScaleB default to 0 (E8M0). modC / reuseA / reuseB come from
   // the atom's compile-time params. block-16 selects the V_WMMA_SCALE16 form
@@ -277,10 +293,18 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
 }
 
 LogicalResult MmaOpGFX1250_WMMAScaleType::emitAtomCall(OpBuilder &builder, Location loc,
-                                                       Type mmaAtomTy, Type dMemTy, Type aMemTy,
-                                                       Type bMemTy, Type cMemTy, Value atomVal,
-                                                       Value dPtr, Value aPtr, Value bPtr,
+                                                       Type mmaAtomTy, Type dMemTy,
+                                                       TypeRange aMemTys, TypeRange bMemTys,
+                                                       Type cMemTy, Value atomVal, Value dPtr,
+                                                       ValueRange aPtrs, ValueRange bPtrs,
                                                        Value cPtr) const {
+  if (aPtrs.empty() || aPtrs.size() > 2 || bPtrs.empty() || bPtrs.size() > 2) {
+    emitError(loc, "scaled MMA expects [data] or [data, scale] for each operand");
+    return failure();
+  }
+  Value aPtr = aPtrs.front();
+  Value bPtr = bPtrs.front();
+
   MLIRContext *ctx = builder.getContext();
   Type abTyA = getScaledWmmaABType(ctx, getM(), getK(), getElemTyA());
   Type abTyB = getScaledWmmaABType(ctx, getN(), getK(), getElemTyB());
@@ -292,8 +316,15 @@ LogicalResult MmaOpGFX1250_WMMAScaleType::emitAtomCall(OpBuilder &builder, Locat
   Value a = LLVM::LoadOp::create(builder, loc, abTyA, aPtr);
   Value b = LLVM::LoadOp::create(builder, loc, abTyB, bPtr);
   Value c = LLVM::LoadOp::create(builder, loc, accTy, cPtr);
-  auto res = emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, abTyA, abTyB, accTy, atomVal,
-                             Value{}, a, b, c);
+  SmallVector<Value> aValues{a}, bValues{b};
+  Type scaleType = builder.getIntegerType(getBlockSize() == 16 ? 64 : 32);
+  if (aPtrs.size() == 2)
+    aValues.push_back(LLVM::LoadOp::create(builder, loc, scaleType, aPtrs[1]));
+  if (bPtrs.size() == 2)
+    bValues.push_back(LLVM::LoadOp::create(builder, loc, scaleType, bPtrs[1]));
+  auto res =
+      emitAtomCallSSA(builder, loc, accTy, mmaAtomTy, Type{}, ValueRange(aValues).getTypes(),
+                      ValueRange(bValues).getTypes(), accTy, atomVal, Value{}, aValues, bValues, c);
   if (failed(res))
     return failure();
   LLVM::StoreOp::create(builder, loc, *res, dPtr);

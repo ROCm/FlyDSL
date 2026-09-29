@@ -3552,6 +3552,13 @@ class DualwaveKernelContext:
     def init_thread_mapping(self):
         _init_dualwave_thread_mapping(self)
 
+    def init_causal_lpt_order(self):
+        """Issue fixed-length causal query blocks longest-first."""
+        traits = self.traits
+        num_q_blocks = (self.seq_len_v + traits.BLOCK_M - 1) // traits.BLOCK_M
+        self.q_block_idx = num_q_blocks - fx.Index(1) - self.q_block_idx
+        self.q_start = self.q_block_idx * traits.BLOCK_M
+
     def init_sequence_lengths(self, CuSeqQ=None, CuSeqKv=None):
         if CuSeqQ is None:
             CuSeqQ = self.CuSeqQ
@@ -3579,6 +3586,14 @@ class DualwaveKernelContext:
             self.seqlen_q_v = self.seq_len_v
             self.seqlen_kv_v = self.seq_len_kv_v
             self.seqlen_kv_i32 = self.seq_len_kv
+
+    def init_varlen_causal_lpt_order(self):
+        """Reverse only active varlen query blocks, preserving padded guards."""
+        num_q_blocks = (self.seqlen_q_v + self.traits.BLOCK_M - 1) // self.traits.BLOCK_M
+        active_q_block = self.q_block_idx < num_q_blocks
+        reversed_q_block = num_q_blocks - 1 - self.q_block_idx
+        self.q_block_idx = active_q_block.select(reversed_q_block, self.q_block_idx)
+        self.q_start = self.q_block_idx * self.traits.BLOCK_M
 
     def init_descriptors(
         self,
@@ -6471,3 +6486,20 @@ def dualwave_splitk_workspace_elems(batch_size, num_heads, seq_len, num_kv_split
     """
     rows = batch_size * num_kv_splits * num_heads * seq_len
     return rows * (head_dim // 2) + 2 * rows
+
+
+def daz_denormal_attr():
+    """Denormals-are-zero for f32, as an attribute the backend honours.
+
+    Attach under the key ``llvm.denormal_fpenv``: the prefix is what carries it
+    through GPU-to-ROCDL lowering onto the inherent attribute upstream reads.
+    The old ``denormal-fp-math-f32`` passthrough string reaches the IR but no
+    longer moves the denorm mode -- so verify via
+    ``.amdhsa_float_denorm_mode_32`` in ``*_final_isa.s``, never by grepping
+    the IR.
+    """
+    return ir.Attribute.parse(
+        "#llvm.denormal_fpenv<"
+        "default_output_mode = ieee, default_input_mode = ieee, "
+        "float_output_mode = preservesign, float_input_mode = preservesign>"
+    )

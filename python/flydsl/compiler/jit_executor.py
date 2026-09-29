@@ -5,6 +5,7 @@ import ctypes
 import importlib
 import pickle
 import threading
+import zlib
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -237,8 +238,12 @@ class CompiledArtifact:
         self._lock = threading.Lock()
 
     def __getstate__(self):
-        # Serialise post-load processors by fully-qualified name so the
-        # pickle stream carries no concrete callables.
+        # Keep pre-lowering source IR process-local. The compiled MLIR is needed
+        # to recreate the ExecutionEngine and compresses well because its GPU
+        # binary is represented as escaped text.
+        #
+        # Serialise post-load processors by fully-qualified name so the pickle
+        # stream carries no concrete callables.
         #
         # If any processor cannot be represented as module:qualname
         # (e.g. lambdas, functools.partial, bound methods) we *refuse*
@@ -272,18 +277,21 @@ class CompiledArtifact:
                 "path for it."
             )
         return {
-            "ir_text": self._ir_text,
+            "ir_zlib": zlib.compress(self._ir_text.encode("utf-8")),
             "entry": self._entry,
-            "source_ir": self._source_ir,
             "processor_refs": refs,
             "link_libs": self._link_libs,
             "uses_explicit_module": self._uses_explicit_module,
         }
 
     def __setstate__(self, state):
-        self._ir_text = state["ir_text"]
+        # Accept the uncompressed format written by older FlyDSL versions.
+        if "ir_zlib" in state:
+            self._ir_text = zlib.decompress(state["ir_zlib"]).decode("utf-8")
+        else:
+            self._ir_text = state["ir_text"]
         self._entry = state["entry"]
-        self._source_ir = state["source_ir"]
+        self._source_ir = state.get("source_ir")
         self._link_libs = state.get("link_libs", [])
         self._uses_explicit_module = state.get("uses_explicit_module", False)
         self._post_load_processors = []
@@ -383,5 +391,5 @@ class CompiledArtifact:
         return self._ir_text
 
     @property
-    def source_ir(self) -> str:
+    def source_ir(self) -> Optional[str]:
         return self._source_ir

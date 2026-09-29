@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
@@ -49,16 +49,10 @@ class RocmBackend(BaseBackend):
 
     def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         chip = self.target.arch
-        waves_per_eu = compile_hints.get("waves_per_eu")
-        maxnreg = compile_hints.get("maxnreg")
 
+        # ROCDL never reads gpu-module-to-binary's opts=, so nothing may be
+        # routed through it.
         bin_cli_opts = []
-        if env.debug.enable_debug_info:
-            bin_cli_opts.append("-g")
-        if waves_per_eu:
-            bin_cli_opts.append(f"--amdgpu-waves-per-eu={waves_per_eu}")
-        if maxnreg:
-            bin_cli_opts.append(f"--amdgpu-num-vgpr={maxnreg}")
 
         rocdl_opts = {
             "O": 2,
@@ -78,6 +72,7 @@ class RocmBackend(BaseBackend):
         pre_binary_fragments = [
             "fly-rewrite-func-signature",
             "fly-canonicalize",
+            "fly-rocdl-expand-ops",
             "fly-layout-lowering",
             "fly-int-swizzle-simplify",
             "canonicalize",
@@ -117,6 +112,17 @@ class RocmBackend(BaseBackend):
 
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Materialize a scalar waves-per-EU override on kernel entries."""
+        if compile_hints.get("maxnreg") is not None:
+            raise ValueError(
+                "maxnreg is not supported. It only ever reached LLVM through "
+                "gpu-module-to-binary opts=, which ROCDL never reads, so it has "
+                "been silently inert. The underlying amdgpu-num-vgpr attribute is "
+                "deprecated in LLVM ('use amdgpu-waves-per-eu instead') and is "
+                "silently doubled on gfx90a/gfx942/gfx950, where it is a combined "
+                "VGPR+AGPR budget rather than a VGPR cap. Use waves_per_eu to "
+                "target occupancy; see the `llvm` skill to verify it applied."
+            )
+
         waves_per_eu = compile_hints.get("waves_per_eu")
         if waves_per_eu is None:
             return
@@ -135,8 +141,15 @@ class RocmBackend(BaseBackend):
                 func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
     def gpu_module_targets(self) -> List[str]:
-        chip = self.target.arch
-        return [f'#rocdl.target<chip = "{chip}">']
+        # Intentionally empty: the ROCm pipeline attaches the authoritative
+        # #rocdl.target via `rocdl-attach-target` (binary_prep_fragments),
+        # which carries the compile options (O, abi, fast/unsafe-math,
+        # wave64, link_libs). Attaching a bare target here as well made
+        # gpu-module-to-binary serialize one object per target and select the
+        # *bare* one (first object, no offloading handler) — doubling backend
+        # work and silently discarding compile options and link_libs
+        # (ROCm/FlyDSL#1054).
+        return []
 
     # -- cache / fingerprint ---------------------------------------------
 
@@ -154,6 +167,26 @@ class RocmBackend(BaseBackend):
             "libfly_jit_runtime.so",
             "libmlir_c_runner_utils.so",
         ]
+
+    @classmethod
+    def _aot_runtime_lib_basenames(cls) -> List[str]:
+        return ["libfly_jit_runtime.so"]
+
+    @classmethod
+    def _aot_offloading_handler(cls, symbol_prefix: str) -> str:
+        return f'#fly.aot_module<"{symbol_prefix}">'
+
+    @classmethod
+    def _aot_module_symbols(cls, symbol_prefix: str) -> Dict[str, str]:
+        return {
+            "init": f"{symbol_prefix}__module_init",
+            "load": f"{symbol_prefix}__module_load",
+            "unload": f"{symbol_prefix}__module_unload",
+        }
+
+    @classmethod
+    def _aot_take_error_symbol(cls) -> str:
+        return "flydslRuntimeTakeError"
 
 
 def _iter_gpu_kernel_funcs(module):

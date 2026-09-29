@@ -25,7 +25,7 @@ _BACKEND_MODULES = {
     "tdm_ops": ".rocdl.tdm_ops",  # deprecated, use .rocdl.tdm_ops instead
 }
 
-_LIBRARY_MODULES = {
+_EXTENSION_MODULES = {
     "coop": "..extension.coop",
     "random": "..extension.random",
 }
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 # lazy load backend subpackages and extension libraries
 def __getattr__(name: str):
-    module_name = _BACKEND_MODULES.get(name) or _LIBRARY_MODULES.get(name)
+    module_name = _BACKEND_MODULES.get(name) or _EXTENSION_MODULES.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

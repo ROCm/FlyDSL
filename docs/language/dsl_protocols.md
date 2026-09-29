@@ -127,6 +127,7 @@ inside MLIR construction and therefore uses `DslType`, not the host C ABI.
 |---|:---:|:---:|:---:|
 | supported scalar `Numeric`, such as `fx.Int32` | yes | yes | yes |
 | `fx.Vector`, `fx.Pointer`, traced `fx.Tensor` | yes | no | no |
+| storable specialized `fx.Vector[...]` / `fx.Pointer[...]` | yes | no | yes |
 | `TorchTensorJitArg`, `DLTensorJitArg` | no | yes | no |
 | `fx.Stream` | yes | yes | no |
 | `fx.Array[E, N]` | yes | no | yes |

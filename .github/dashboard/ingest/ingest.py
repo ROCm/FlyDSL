@@ -76,8 +76,29 @@ def gh(path: str, paginate: bool = False) -> object:
     return json.loads(out.stdout or "null")
 
 
+_gh_api_allow_escape_sequences = True
+
+
 def gh_text(path: str) -> str:
-    out = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+    global _gh_api_allow_escape_sequences
+
+    cmd = ["gh", "api"]
+    if _gh_api_allow_escape_sequences:
+        # Current gh rejects Actions logs containing terminal escapes unless this is
+        # explicit. The response stays captured and is parsed, never replayed to a terminal.
+        cmd.append("--allow-escape-sequences")
+    cmd.append(path)
+    out = subprocess.run(cmd, capture_output=True, text=True)
+    if (
+        out.returncode != 0
+        and _gh_api_allow_escape_sequences
+        and "unknown flag" in out.stderr
+        and "--allow-escape-sequences" in out.stderr
+    ):
+        # gh before the terminal-injection hardening has no flag and emits the raw
+        # response when stdout is captured, so retain the script's laptop compatibility.
+        _gh_api_allow_escape_sequences = False
+        out = subprocess.run(["gh", "api", path], capture_output=True, text=True)
     if out.returncode != 0:
         raise RuntimeError(f"gh api {path} failed: {out.stderr.strip()}")
     return out.stdout

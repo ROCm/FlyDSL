@@ -630,7 +630,10 @@ jobs:
       - name: Run tests
         timeout-minutes: 70
         run: |
-          docker exec -e ROCM_PATH flydsl_test bash -c 'export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh'
+          # FLYDSL_REQUIRE_FILECHECK=1: this job installs FileCheck above, so the
+          # MLIR lit stage must actually run. Without it, deleting that install
+          # step would silently drop the whole stage and still report green.
+          docker exec -e ROCM_PATH flydsl_test bash -c 'export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 FLYDSL_REQUIRE_FILECHECK=1 bash scripts/run_tests.sh'
 
       - name: Show tests logs
         if: failure()

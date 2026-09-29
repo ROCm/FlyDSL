@@ -3,7 +3,7 @@
 
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,7 @@ class GPUTarget:
 
     backend: str  # e.g. "rocm"
     arch: str  # e.g. "gfx942", "gfx950"
-    warp_size: int  # 64 for CDNA, 32 for RDNA
+    warp_size: int  # Target wave size (gfx9 CDNA: 64; gfx10/11/12, including CDNA5: 32)
 
 
 class BaseBackend(metaclass=ABCMeta):
@@ -27,7 +27,7 @@ class BaseBackend(metaclass=ABCMeta):
     * MLIR pass-pipeline fragments for lowering Fly IR to device binary,
     * gpu.module target attributes,
     * native-library patterns for toolchain fingerprinting (cache key),
-    * runtime shared-library basenames for the JIT ExecutionEngine.
+    * runtime shared-library basenames for JIT and C export.
     """
 
     def __init__(self, target: GPUTarget) -> None:
@@ -70,7 +70,7 @@ class BaseBackend(metaclass=ABCMeta):
         """Ordered list of MLIR PassManager.parse fragments.
 
         ``compile_hints`` carries per-kernel knobs such as ``waves_per_eu``
-        and ``maxnreg`` (from ``CompilationContext.get_compile_hints()``).
+        (from ``CompilationContext.get_compile_hints()``).
         """
         ...
 
@@ -113,3 +113,23 @@ class BaseBackend(metaclass=ABCMeta):
     def jit_runtime_lib_basenames(self) -> List[str]:
         """Basenames of shared libraries passed to ``ExecutionEngine``."""
         ...
+
+    @classmethod
+    def _aot_runtime_lib_basenames(cls) -> List[str]:
+        """Runtime library basenames needed by exported host objects."""
+        raise NotImplementedError(f"{cls.__name__} does not support AOT export")
+
+    @classmethod
+    def _aot_offloading_handler(cls, symbol_prefix: str) -> str:
+        """MLIR offloading-handler attribute for an exported object."""
+        raise NotImplementedError(f"{cls.__name__} does not support AOT export")
+
+    @classmethod
+    def _aot_module_symbols(cls, symbol_prefix: str) -> Dict[str, str]:
+        """Lifecycle symbols emitted for ``symbol_prefix``."""
+        raise NotImplementedError(f"{cls.__name__} does not support AOT export")
+
+    @classmethod
+    def _aot_take_error_symbol(cls) -> str:
+        """Runtime symbol that returns and clears the current launch error."""
+        raise NotImplementedError(f"{cls.__name__} does not support AOT export")

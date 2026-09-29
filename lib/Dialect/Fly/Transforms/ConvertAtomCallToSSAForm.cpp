@@ -23,7 +23,12 @@ namespace fly {
 
 namespace {
 
-bool isEligibleToPromote(fly::MemRefType memRefTy) {
+// A copy operand may be a coordinate tensor rather than a memref (it names a
+// position, not storage), and such an operand is never register-promotable.
+bool isEligibleToPromote(Type ty) {
+  auto memRefTy = dyn_cast<fly::MemRefType>(ty);
+  if (!memRefTy)
+    return false;
   if (!isGenericAddressSpace<AddressSpace::Register>(memRefTy.getAddressSpace()))
     return false;
   auto layoutAttr = dyn_cast<LayoutAttr>(memRefTy.getLayout());
@@ -31,6 +36,10 @@ bool isEligibleToPromote(fly::MemRefType memRefTy) {
     return false;
   LayoutBuilder<LayoutAttr> builder(memRefTy.getContext());
   auto coalesced = layoutCoalesce(builder, layoutAttr);
+  // (TODO): Remove singleton unwrapping once meta layouts are introduced.
+  // Coalescing can retain singleton tuple nesting, e.g. (2):(1).
+  while (!coalesced.isLeaf() && coalesced.rank() == 1)
+    coalesced = coalesced.at(0);
   if (!coalesced.isLeaf())
     return false;
   return coalesced.getStride().isLeafStaticValue(1) || coalesced.getShape().isLeafStaticValue(1);
@@ -49,29 +58,36 @@ public:
     SmallVector<MmaAtomCall> mmaOpsToConvert;
 
     moduleOp->walk([&](CopyAtomCall op) {
-      auto srcTy = cast<fly::MemRefType>(op.getSrc().getType());
-      auto dstTy = cast<fly::MemRefType>(op.getDst().getType());
-      if (isEligibleToPromote(srcTy) || isEligibleToPromote(dstTy))
+      // A register-space pred needs promoting on its own account: a global ->
+      // shared copy has neither operand in registers, but leaving the pred
+      // behind strands a register pointer that the later rmem-to-vector-SSA
+      // pass cannot rewrite.
+      bool predEligible = op.getPred() && isEligibleToPromote(op.getPred().getType());
+      if (isEligibleToPromote(op.getSrc().getType()) ||
+          isEligibleToPromote(op.getDst().getType()) || predEligible)
         copyOpsToConvert.push_back(op);
     });
 
     moduleOp->walk([&](MmaAtomCall op) {
       auto dTy = cast<fly::MemRefType>(op.getD().getType());
-      auto aTy = cast<fly::MemRefType>(op.getA().getType());
-      auto bTy = cast<fly::MemRefType>(op.getB().getType());
       auto cTy = cast<fly::MemRefType>(op.getC().getType());
-      if (isEligibleToPromote(dTy) || isEligibleToPromote(aTy) || isEligibleToPromote(bTy) ||
-          isEligibleToPromote(cTy))
+      auto hasEligibleOperand = [](ValueRange operands) {
+        return llvm::any_of(operands, [](Value operand) {
+          return isEligibleToPromote(cast<fly::MemRefType>(operand.getType()));
+        });
+      };
+      if (isEligibleToPromote(dTy) || hasEligibleOperand(op.getA()) ||
+          hasEligibleOperand(op.getB()) || isEligibleToPromote(cTy))
         mmaOpsToConvert.push_back(op);
     });
 
     OpBuilder builder(moduleOp->getContext());
 
     for (CopyAtomCall copyOp : copyOpsToConvert) {
-      auto srcTy = cast<fly::MemRefType>(copyOp.getSrc().getType());
-      auto dstTy = cast<fly::MemRefType>(copyOp.getDst().getType());
-      bool srcEligible = isEligibleToPromote(srcTy);
-      bool dstEligible = isEligibleToPromote(dstTy);
+      auto srcTy = dyn_cast<fly::MemRefType>(copyOp.getSrc().getType());
+      auto dstTy = dyn_cast<fly::MemRefType>(copyOp.getDst().getType());
+      bool srcEligible = isEligibleToPromote(copyOp.getSrc().getType());
+      bool dstEligible = isEligibleToPromote(copyOp.getDst().getType());
 
       builder.setInsertionPoint(copyOp);
       Location loc = copyOp.getLoc();
@@ -108,29 +124,29 @@ public:
 
     for (MmaAtomCall mmaOp : mmaOpsToConvert) {
       auto dTy = cast<fly::MemRefType>(mmaOp.getD().getType());
-      auto aTy = cast<fly::MemRefType>(mmaOp.getA().getType());
-      auto bTy = cast<fly::MemRefType>(mmaOp.getB().getType());
       auto cTy = cast<fly::MemRefType>(mmaOp.getC().getType());
       bool dEligible = isEligibleToPromote(dTy);
-      bool aEligible = isEligibleToPromote(aTy);
-      bool bEligible = isEligibleToPromote(bTy);
       bool cEligible = isEligibleToPromote(cTy);
 
       builder.setInsertionPoint(mmaOp);
       Location loc = mmaOp.getLoc();
 
-      Value aVal = mmaOp.getA();
-      Value bVal = mmaOp.getB();
+      auto promoteGroup = [&](ValueRange operands) {
+        SmallVector<Value> values;
+        for (Value operand : operands) {
+          auto type = cast<fly::MemRefType>(operand.getType());
+          if (isEligibleToPromote(type)) {
+            Value iter = operand.getDefiningOp<MakeViewOp>().getIter();
+            operand = PtrLoadOp::create(builder, loc, RegMem2SSAType(type, true), iter);
+          }
+          values.push_back(operand);
+        }
+        return values;
+      };
+      auto aVal = promoteGroup(mmaOp.getA());
+      auto bVal = promoteGroup(mmaOp.getB());
       Value cVal = mmaOp.getC();
 
-      if (aEligible) {
-        Value aIter = aVal.getDefiningOp<MakeViewOp>().getIter();
-        aVal = PtrLoadOp::create(builder, loc, RegMem2SSAType(aTy, true), aIter).getResult();
-      }
-      if (bEligible) {
-        Value bIter = bVal.getDefiningOp<MakeViewOp>().getIter();
-        bVal = PtrLoadOp::create(builder, loc, RegMem2SSAType(bTy, true), bIter).getResult();
-      }
       if (cEligible) {
         Value cIter = cVal.getDefiningOp<MakeViewOp>().getIter();
         cVal = PtrLoadOp::create(builder, loc, RegMem2SSAType(cTy, true), cIter).getResult();

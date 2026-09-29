@@ -56,8 +56,12 @@ The following methods apply to both `Numeric` and `Vector`, and are elementwise 
 element type. It has value semantics and inherits the scalar operators, applied
 elementwise; a scalar operand is auto-broadcast across the lanes.
 
-- **Type aliases** — `Float32x4`, `BFloat16x8`, `Int32x4`, … name a
-  `dtype`×`N` vector type directly (`<dtype>x<N>`).
+`Vector[dtype, shape]` returns a specialized `Vector` subclass. Predefined aliases such as
+`Float32x4` name the same types.
+
+```python
+assert Vector[Float32, 4] is VectorAlias(Float32, 4) is Float32x4
+```
 
 ## Compile-time and run-time values
 
