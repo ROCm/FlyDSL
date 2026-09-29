@@ -313,8 +313,64 @@ def test_layer_tp8():
     assert run(8, 1, 3000, 3)
 
 
-def test_layer_single_gpu_indexer():
-    assert run(1, 1, 3000, 1, with_indexer=True)
+@pytest.mark.parametrize(
+    "S,cur_pos,expert_mxfp4",
+    [(1, 0, False), (1, 2047, False), (1, 3000, False), (8, 0, True), (8, 3000, True)],
+)
+def test_layer_single_gpu_indexer(S, cur_pos, expert_mxfp4):
+    assert run(1, S, cur_pos, 1, with_indexer=True, expert_mxfp4=expert_mxfp4)
+
+
+def test_reference_default_dtype():
+    """ATOM's BF16 default must not lower golden accumulators or probabilities."""
+    original = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float32)
+        dev = torch.device("cuda", 0)
+        W = make_weights(0, device=dev)
+        gen = torch.Generator(device=dev).manual_seed(42)
+        h = torch.randn(1, 6144, generator=gen, device=dev).bfloat16()
+        kv = torch.randn(MAX_SEQ, KV_LORA, generator=gen, device=dev).bfloat16()
+        pe = torch.randn(MAX_SEQ, PE_DIM, generator=gen, device=dev).bfloat16()
+        indices = torch.arange(2048, dtype=torch.int32, device=dev)[None]
+        cos, sin = rope_table(MAX_SEQ, device=dev)
+
+        def allreduce(value):
+            assert value.dtype == torch.float32
+            return value
+
+        outputs = []
+        for dtype in (torch.float32, torch.bfloat16):
+            torch.set_default_dtype(dtype)
+            outputs.append(golden_layer(W, h, 100, kv.clone(), pe.clone(), indices, cos, sin, allreduce))
+            assert outputs[-1]["prob"].dtype == torch.float32
+        for name, value in outputs[0].items():
+            if isinstance(value, torch.Tensor):
+                assert torch.equal(value, outputs[1][name]), name
+    finally:
+        torch.set_default_dtype(original)
+
+
+def test_router_preserves_close_scores():
+    """A higher expert score must win even when its lead is below 256 FP32 ULPs."""
+    from kernels.monokernel.glm import Glm5MonoKernel
+
+    dev = torch.device("cuda", 0)
+    W = make_weights(0, device=dev)
+    W.t["w_r"].zero_()  # All uncorrected sigmoid scores are exactly 0.5.
+    W.t["bias"].fill_(-10)
+    W.t["bias"][:7] = 8  # Equal scores: lower expert IDs break the exact tie.
+    W.t["bias"][92] = 7
+    W.t["bias"][226] = 7 + 9.5367431640625e-5
+    h = torch.ones(1, 6144, dtype=torch.bfloat16, device=dev)
+    kv = torch.zeros(MAX_SEQ, KV_LORA, dtype=torch.bfloat16, device=dev)
+    pe = torch.zeros(MAX_SEQ, PE_DIM, dtype=torch.bfloat16, device=dev)
+    indices = torch.zeros(1, 2048, dtype=torch.int32, device=dev)
+    cos, sin = rope_table(MAX_SEQ, device=dev)
+    with Glm5MonoKernel(W, 1) as op:
+        op.forward(h, torch.zeros(1, dtype=torch.int32, device=dev), kv, pe, indices, cos, sin)
+        torch.cuda.synchronize()
+        assert op.intermediates()["sel"].tolist() == [[256, 0, 1, 2, 3, 4, 5, 6, 226]]
 
 
 if __name__ == "__main__":

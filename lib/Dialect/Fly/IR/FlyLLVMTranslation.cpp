@@ -8,7 +8,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Explicit ROCm module loading for FlyDSL JIT.
+// Explicit GPU module loading for FlyDSL JIT and AOT export.
 //
 // Keep the launch lowering in this file synchronized with LLVM MLIR's
 // SelectObjectAttr implementation when updating the bundled MLIR version.
@@ -40,13 +40,33 @@ static std::string getAotStateIdentifier(llvm::StringRef moduleName) {
 
 namespace {
 
-gpu::ObjectAttr getFirstObject(gpu::BinaryOp op) {
+// Keep selection semantics aligned with upstream gpu.select_object. The
+// upstream implementation is private to its translation unit, while FlyDSL
+// needs a distinct handler to emit its explicit module lifecycle ABI.
+gpu::ObjectAttr selectObject(gpu::BinaryOp op, Attribute target) {
   ArrayRef<Attribute> objects = op.getObjectsAttr().getValue();
-  if (objects.empty()) {
-    op.emitError("expected at least one GPU object");
+  int64_t index = -1;
+  if (target) {
+    if (auto indexAttr = dyn_cast<IntegerAttr>(target)) {
+      index = indexAttr.getInt();
+    } else {
+      for (auto [i, attr] : llvm::enumerate(objects)) {
+        auto object = dyn_cast<gpu::ObjectAttr>(attr);
+        if (object && object.getTarget() == target)
+          index = i;
+      }
+    }
+  } else {
+    index = 0;
+  }
+  if (index < 0 || index >= static_cast<int64_t>(objects.size())) {
+    op.emitError("the requested target object couldn't be found");
     return nullptr;
   }
-  return dyn_cast<gpu::ObjectAttr>(objects.front());
+  auto object = dyn_cast<gpu::ObjectAttr>(objects[index]);
+  if (!object)
+    op.emitError("selected GPU binary entry is not a gpu.object");
+  return object;
 }
 
 LogicalResult embedExplicitModule(StringRef moduleName, gpu::ObjectAttr object,
@@ -325,8 +345,8 @@ public:
     if (mlir::Value asyncObject = op.getAsyncObject()) {
       stream = llvmValue(asyncObject);
     } else if (!op.getAsyncDependencies().empty()) {
-      // FlyDSL carries the HIP stream as the first gpu.launch_func async
-      // dependency.  This is a FlyDSL convention, not generic MLIR
+      // FlyDSL carries the backend stream handle as the first gpu.launch_func
+      // async dependency. This is a FlyDSL convention, not generic MLIR
       // gpu.async.token semantics.
       stream = llvmValue(op.getAsyncDependencies().front());
     } else {
@@ -390,7 +410,7 @@ public:
     auto op = dyn_cast_or_null<gpu::BinaryOp>(operation);
     if (!op)
       return operation->emitError("operation must be a GPU binary"), failure();
-    gpu::ObjectAttr object = getFirstObject(op);
+    gpu::ObjectAttr object = selectObject(op, /*target=*/nullptr);
     if (!object)
       return failure();
     return embedExplicitModule(op.getName(), object, *moduleTranslation.getLLVMModule());
@@ -417,11 +437,11 @@ public:
     auto op = dyn_cast_or_null<gpu::BinaryOp>(operation);
     if (!op)
       return operation->emitError("operation must be a GPU binary"), failure();
-    gpu::ObjectAttr object = getFirstObject(op);
+    auto aot = cast<fly::AotModuleAttr>(attribute);
+    gpu::ObjectAttr object = selectObject(op, aot.getTarget());
     if (!object)
       return failure();
-    return embedAotModule(op, object, cast<fly::AotModuleAttr>(attribute).getSymbolPrefix(),
-                          *moduleTranslation.getLLVMModule());
+    return embedAotModule(op, object, aot.getSymbolPrefix(), *moduleTranslation.getLLVMModule());
   }
 
   LogicalResult launchKernel(Attribute attribute, Operation *launchFuncOp, Operation *binaryOp,

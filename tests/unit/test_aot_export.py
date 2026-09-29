@@ -7,8 +7,8 @@
 
 Compile-tier tests check the ABI model, symbol namespacing and file publishing.
 Device-tier tests link exported objects into shared libraries with the system
-C compiler, load them with ``ctypes`` and launch the kernels through the packed
-C ABI.
+HIP compiler, load them with ``ctypes`` and launch the kernels through the
+packed C ABI.
 """
 
 import ctypes
@@ -31,9 +31,10 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir._mlir_libs._mlirDialectsFly import _emit_host_object
-from flydsl._mlir.dialects import llvm
+from flydsl._mlir.dialects import gpu, llvm
 from flydsl.compiler import _aot as aot
-from flydsl.runtime._libraries import _find_runtime_libraries
+from flydsl.compiler.backends import _get_backend_class
+from flydsl.runtime._libraries import _find_aot_runtime_archive
 from flydsl.utils._elf import _defined_global_symbols, _dynamic_info
 
 try:
@@ -43,7 +44,12 @@ except ImportError:
 
 HAS_GPU = torch is not None and torch.cuda.is_available()
 CC = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
-ROCM_CLANG = Path(os.environ.get("ROCM_PATH", "/opt/rocm")) / "llvm" / "bin" / "clang"
+HIPCC = shutil.which("hipcc")
+if HIPCC is None:
+    adjacent_hipcc = Path(sys.executable).parent / "hipcc"
+    HIPCC = str(adjacent_hipcc) if adjacent_hipcc.is_file() else None
+ROCM_PATH = Path(os.environ.get("ROCM_PATH", "/opt/rocm"))
+ROCM_CLANG = ROCM_PATH / "llvm" / "bin" / "clang"
 
 needs_gpu = pytest.mark.skipif(not HAS_GPU, reason="requires a ROCm GPU")
 needs_cc = pytest.mark.skipif(CC is None, reason="requires a C compiler")
@@ -291,11 +297,9 @@ def _pack_args(abi, values):
 
 def _link_shared(tmp_path, objects, name, extra=()):
     out = tmp_path / name
-    libraries = _find_runtime_libraries()
-    lib_dirs = dict.fromkeys(str(Path(lib.path).parent) for lib in libraries)
-    flags = [item for directory in lib_dirs for item in (f"-L{directory}", f"-Wl,-rpath,{directory}")]
-    flags += [f"-l:{lib.soname}" for lib in libraries]
-    subprocess.run([CC, "-shared", "-o", str(out), *map(str, objects), *flags, *extra], check=True)
+    linker = HIPCC or CC
+    flags = list(_get_backend_class().aot_runtime_config().linker_flags)
+    subprocess.run([linker, "-shared", "-o", str(out), *map(str, objects), *flags, *extra], check=True)
     return out
 
 
@@ -342,6 +346,9 @@ assert (out / "cpu_only.h").stat().st_size > 0
 
     shared = _link_shared(tmp_path, [tmp_path / "cpu_only.o"], "libcpu_only.so")
     assert shared.stat().st_size > 0
+    needed = _dynamic_info(shared).needed
+    assert any(name.startswith("libamdhip64.so") for name in needed)
+    assert "libfly_jit_runtime.so" not in needed
 
 
 class _Loaded:
@@ -720,19 +727,84 @@ def test_external_declaration_resolves_at_link_time(tmp_path):
     assert lib.probe() == 42 * 3
 
 
-# Runtime libraries, publishing, ELF
+# Embedded runtime archive and ELF
 
 
 @pytest.mark.l0_backend_agnostic
-def test_find_runtime_libraries():
-    libs = _find_runtime_libraries()
-    assert libs and all(Path(lib.path).is_absolute() and Path(lib.path).is_file() for lib in libs)
-    assert libs[0].soname == _dynamic_info(libs[0].path).soname == "libfly_jit_runtime.so"
+def test_find_aot_runtime_archive():
+    runtime = _get_backend_class().aot_runtime_config()
+    archive = _find_aot_runtime_archive()
+    assert archive.is_absolute() and archive.is_file()
+    assert archive.name == runtime.archive_basename == "libfly_rocm_aot_runtime.a"
+    assert archive.read_bytes().startswith(b"!<arch>\n")
+    assert runtime.runtime_libraries == ("libamdhip64.so",)
+    assert runtime.linker_flags == ("-lamdhip64", "-pthread", "-ldl")
+
+    runtime_object, symbols = aot._materialize_aot_runtime(archive)
+    assert runtime_object.startswith(b"\x7fELF")
+    assert {"flydslRuntimeTakeError", "hipModuleLoadData", "malloc"} <= symbols
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+def test_aot_backend_selects_the_first_object_by_default():
+    backend_cls = _get_backend_class("rocm")
+    assert backend_cls.aot_object_index("gfx950") == 0
+
+
+@pytest.mark.l1a_compile_no_target_dialect
+def test_aot_module_attribute_rejects_invalid_selection():
+    with aot._create_mlir_context():
+        for text, message in (
+            ('#fly.aot_module<"", 0>', "symbol prefix"),
+            ('#fly.aot_module<"kernel", -1>', "non-negative"),
+            ('#fly.aot_module<"kernel", "not a target">', "TargetAttrInterface"),
+        ):
+            with pytest.raises(ir.MLIRError, match=message):
+                ir.Attribute.parse(text)
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+def test_aot_translation_selects_target_instead_of_first_object():
+    compiled = _aot_view(axpy, _ptr(), _ptr(), 8, 1.0)
+    with aot._create_mlir_context():
+        module = ir.Module.parse(compiled._ir_text)
+        for op in module.body.operations:
+            if op.operation.name != "gpu.binary":
+                continue
+            original = ir.ArrayAttr(op.attributes["objects"])[0]
+            wrong_target = ir.Attribute.parse('#rocdl.target<chip = "gfx942">')
+            wrong = gpu.ObjectAttr.get(wrong_target, gpu.CompilationTarget.Binary, b"WRONG_GPU_OBJECT")
+            op.attributes["objects"] = ir.ArrayAttr.get([wrong, original])
+            break
+        else:
+            raise AssertionError("compiled launcher has no gpu.binary")
+        ir_text = str(module)
+
+    class SelectSecondObject(_get_backend_class("rocm")):
+        @classmethod
+        def aot_object_index(cls, arch):
+            assert arch == "gfx950"
+            return 1
+
+    host_object = aot._emit_export_object(
+        ir_text,
+        compiled._entry,
+        compiled._abi,
+        "target_selection",
+        "target_selection__metadata",
+        b"{}",
+        SelectSecondObject,
+        "gfx950",
+    )
+    assert b"WRONG_GPU_OBJECT" not in host_object
+    assert b"\x7fELF" in host_object
 
 
 @pytest.mark.l0_backend_agnostic
 def test_elf_reader_rejects_malformed_input():
-    library = Path(_find_runtime_libraries()[0].path).read_bytes()
+    library = Path(sys.executable).read_bytes()
     # Program headers follow the 64-byte ELF header; section headers sit at the end.
     for bad in (b"", b"not an elf file", library[:64]):
         with pytest.raises(ValueError):
@@ -740,60 +812,6 @@ def test_elf_reader_rejects_malformed_input():
     for bad in (b"", b"not an elf file", library[: len(library) - 1]):
         with pytest.raises(ValueError):
             _defined_global_symbols(bad)
-
-
-@pytest.mark.l0_backend_agnostic
-def test_publish_file_paths_with_spaces_symlinks_and_collisions(tmp_path):
-    src_dir = tmp_path / "src dir"
-    out_dir = tmp_path / "out dir"
-    src_dir.mkdir()
-    out_dir.mkdir()
-    real = src_dir / "libreal.so.1"
-    real.write_bytes(b"runtime v1")
-    link = src_dir / "libreal.so"
-    link.symlink_to(real.name)
-
-    dest = out_dir / "libreal.so"
-    aot._publish_file(link, dest)
-    assert dest.read_bytes() == b"runtime v1" and not dest.is_symlink()
-    aot._publish_file(link, dest)  # identical content: accepted
-    aot._publish_file(dest, dest)  # same file: no-op
-
-    other = src_dir / "other.so"
-    other.write_bytes(b"runtime v2")
-    with pytest.raises(RuntimeError, match="collision"):
-        aot._publish_file(other, dest)
-    assert dest.read_bytes() == b"runtime v1"
-
-    dangling = out_dir / "dangling.so"
-    escaped = tmp_path / "escaped.so"
-    dangling.symlink_to(escaped)
-    with pytest.raises(RuntimeError, match="symbolic link"):
-        aot._publish_file(real, dangling)
-    assert not escaped.exists()
-    assert sorted(p.name for p in out_dir.iterdir()) == ["dangling.so", "libreal.so"]  # no temporaries left
-
-
-@pytest.mark.l0_backend_agnostic
-def test_publish_file_concurrent_writers(tmp_path):
-    a, b = tmp_path / "a.so", tmp_path / "b.so"
-    a.write_bytes(b"A" * 4096)
-    b.write_bytes(b"B" * 4096)
-    dest = tmp_path / "out.so"
-    barrier = threading.Barrier(2)
-
-    def publish(src):
-        barrier.wait()
-        try:
-            aot._publish_file(src, dest)
-            return None
-        except RuntimeError as exc:
-            return exc
-
-    with ThreadPoolExecutor(2) as pool:
-        errors = list(pool.map(publish, [a, b]))
-    assert sum(e is None for e in errors) == 1
-    assert dest.read_bytes() in (a.read_bytes(), b.read_bytes())
 
 
 @pytest.mark.l0_backend_agnostic
@@ -838,8 +856,8 @@ class TestExport:
         for bad in ("not-a-c-symbol", "1abc", "a b", "int", "class", "__private", "_Reserved"):
             with pytest.raises(ValueError, match="C identifier"):
                 compiled._export_to_c(tmp_path, "k", bad)
-        for runtime_name in ("mgpuLaunchKernel", "flydslRuntimeTakeError"):
-            with pytest.raises(ValueError, match="collides with runtime symbols"):
+        for runtime_name in ("flydslRuntimeTakeError", "hipModuleLoadData", "malloc"):
+            with pytest.raises(ValueError, match="collide.*backend AOT runtime"):
                 compiled._export_to_c(tmp_path, "k", runtime_name)
         with pytest.raises(FileNotFoundError):
             compiled._export_to_c(tmp_path / "missing", "k")
@@ -854,8 +872,11 @@ class TestExport:
         assert compiled._export_to_c(out, "axpy_file", "aoti_axpy") is None
         assert (out / "axpy_file.o").is_file()
         assert (out / "axpy_file.h").is_file()
-        assert (out / "libfly_jit_runtime.so").is_file()
+        assert sorted(path.name for path in out.iterdir()) == ["axpy_file.h", "axpy_file.o"]
         assert "aoti_axpy" in _defined_global_symbols(out / "axpy_file.o")
+        assert b'"schema_version":2' in (out / "axpy_file.o").read_bytes()
+        assert b'"runtime_libraries":[{"link_name":"libamdhip64.so"}]' in (out / "axpy_file.o").read_bytes()
+        assert b'"linker_flags":["-lamdhip64","-pthread","-ldl"]' in (out / "axpy_file.o").read_bytes()
 
         assert compiled._export_to_c(out, "default_name") is None
         assert "default_name" in _defined_global_symbols(out / "default_name.o")
@@ -863,15 +884,6 @@ class TestExport:
         assert "empty_prefix" in _defined_global_symbols(out / "empty_prefix.o")
         assert compiled._export_to_c(out, "keyword_prefix", function_prefix="keyword_symbol") is None
         assert "keyword_symbol" in _defined_global_symbols(out / "keyword_prefix.o")
-
-    def test_runtime_destination_does_not_follow_leaf_symlink(self, compiled, tmp_path):
-        runtime_name = _find_runtime_libraries()[0].soname
-        escaped = tmp_path.parent / f"{tmp_path.name}-escaped-runtime"
-        (tmp_path / runtime_name).symlink_to(escaped)
-
-        with pytest.raises(RuntimeError, match="symbolic link"):
-            compiled._export_to_c(tmp_path, "kernel")
-        assert not escaped.exists()
 
     def test_metadata_and_symbols(self, compiled, tmp_path):
         out = tmp_path / "with space"
@@ -899,6 +911,9 @@ class TestExport:
         header = (tmp_path / "echo.h").read_text()
         assert "#define ECHO_NUM_ARGS 15" in header
         assert "int32_t echo(void **args);" in header
+        assert "flydsl_status_ = echo__module_init();" in header
+        assert "flydsl_status_ = echo__module_load(-1);" in header
+        assert "static inline int32_t echo_call_auto(" in header
         assert (
             "static inline int32_t echo_call(void *out, int8_t a, int16_t b, int32_t c, int64_t d, "
             "uint8_t e, uint16_t f, uint32_t g, uint64_t h, bool i, uint16_t j, uint16_t k, float m, "
@@ -957,6 +972,7 @@ class TestExport:
             module_unload_symbol="k__module_unload",
             metadata_symbol="k__metadata",
             runtime_libraries=(),
+            linker_flags=(),
             abi=(aot._AbiSlot(field="a.b", **slot), aot._AbiSlot(field="a_b", **slot)),
             return_abi=aot._ReturnAbi(),
             backend="rocm",
@@ -1066,6 +1082,40 @@ class TestEndToEnd:
         stream.synchronize()
         torch.testing.assert_close(y, expected)
         assert k.unload() == 0 and k.unload() == 0
+
+    def test_convenience_call_initializes_and_loads_lazily(self, tmp_path):
+        compiled = _aot_view(add_one_then_scale, _ptr(), 8)
+        compiled._export_to_c(tmp_path, "lazy")
+        wrapper = tmp_path / "lazy_wrapper.c"
+        wrapper.write_text(
+            '#include "lazy.h"\n'
+            "int32_t invoke_loaded(void *x, int32_t n, void *stream) {\n"
+            "  return lazy_call(x, n, stream);\n"
+            "}\n"
+            "int32_t invoke_lazy(void *x, int32_t n, void *stream) {\n"
+            "  return lazy_call_auto(x, n, stream);\n"
+            "}\n"
+        )
+        so = _link_shared(
+            tmp_path,
+            [tmp_path / "lazy.o", wrapper],
+            "liblazy.so",
+            extra=[f"-I{tmp_path}"],
+        )
+        lib = ctypes.CDLL(str(so))
+        invoke_loaded = lib.invoke_loaded
+        invoke_loaded.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p]
+        invoke_loaded.restype = ctypes.c_int32
+        invoke = lib.invoke_lazy
+        invoke.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p]
+        invoke.restype = ctypes.c_int32
+        x = torch.zeros(8, device="cuda")
+        assert invoke_loaded(x.data_ptr(), x.numel(), None) == -1
+        assert invoke(x.data_ptr(), x.numel(), None) == 0
+        torch.cuda.synchronize()
+        torch.testing.assert_close(x, torch.full((8,), 2.0, device="cuda"))
+        loaded = _Loaded(lib, compiled, "lazy")
+        assert loaded.unload() == 0
 
     def test_struct_argument(self, tmp_path):
         compiled = _aot_view(axpy_struct, _ptr(), _ptr(), _AxpyParams(n=8, alpha=1.0, block=128))

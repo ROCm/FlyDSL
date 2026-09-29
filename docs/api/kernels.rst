@@ -1,10 +1,15 @@
 Pre-built kernels
 =================
 
-FlyDSL ships with a collection of pre-built GPU kernels in the ``kernels/``
-directory, organized into subpackages (``gemm/``, ``norm/``, ``attention/``,
-``moe/``, ``mma/``, ``common/``, ``comm/``, ``conv/``). These serve as both
-ready-to-use components and reference implementations for kernel development.
+The FlyDSL repository includes a collection of pre-built GPU kernels in the
+``kernels/`` directory, organized into subpackages (``gemm/``, ``norm/``,
+``attention/``, ``moe/``, ``mma/``, ``common/``, ``comm/``, ``conv/``).
+These serve as both ready-to-use components and reference implementations for
+kernel development.
+
+The ``kernels`` tree is used from a source checkout; it is not installed by the
+``flydsl`` wheel and is not covered by the stable Python API policy. Pin the
+repository revision when integrating one of these entry points.
 
 GEMM kernels
 -------------
