@@ -3166,7 +3166,7 @@ def build_kimi_k3_monokernel(
             tail_task = bid
             while tail_task < tail_tasks:
                 sample_base = (tail_task // hidden_tiles) * staged_samples
-                row_group = tail_task % hidden_tiles
+                row_group = (tail_task % hidden_tiles + rank * (_HIDDEN_SHARD // 16) + hidden_tiles - 192) % hidden_tiles
                 shared_pairs = _SHARED_INTER // 2
                 accumulator = [fx.Float32(0.0) for _ in range(4)]
                 if wave < 4:
@@ -3251,7 +3251,7 @@ def build_kimi_k3_monokernel(
             tail_task = bid
             while tail_task < tail_tasks:
                 sample_base = (tail_task // hidden_tiles) * staged_samples
-                row_group = tail_task % hidden_tiles
+                row_group = (tail_task % hidden_tiles + rank * (_HIDDEN_SHARD // 16) + hidden_tiles - 192) % hidden_tiles
                 pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
 
                 def emit_final(local_pair, value_low, value_high):
