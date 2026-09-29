@@ -7,6 +7,10 @@ kernels. Model ownership is explicit:
   references.
 - `k3/` contains Kimi-K3 MLA/KDA state handling, AttnRes, latent-MoE logic,
   staged baselines, and benchmark tools.
+- `dsv4/` exposes a DSV4-Pro per-layer `Dsv4MonoKernel.forward` backed by
+  ATOM's native indexer/attention/mHC and an A8W4 MoE mono-kernel. The initial
+  complete-layer interface uses multiple launches. It includes native
+  checkpoint loading and separate layer/MoE fused-versus-staged comparisons.
 
 Reusable contracts and primitives stay at this package root. `config.py`,
 `layout.py`, `ops.py`, `packing.py`, `reference.py`, `runtime.py`, and
