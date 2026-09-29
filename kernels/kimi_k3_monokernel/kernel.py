@@ -2754,6 +2754,7 @@ def build_kimi_k3_monokernel(
                     for selected_index in range_constexpr(_TOP_K):
                         best_score = corrected[0]
                         best_id = fx.Int32(lane)
+                        best_bias = biases[0]
                         for value_index in range_constexpr(1, _N_EXPERTS // _WAVE_SIZE):
                             candidate_id = fx.Int32(lane + value_index * _WAVE_SIZE)
                             candidate_score = corrected[value_index]
@@ -2762,24 +2763,29 @@ def build_kimi_k3_monokernel(
                             )
                             best_score = take.select(candidate_score, best_score)
                             best_id = take.select(candidate_id, best_id)
-                        for offset in (32, 16, 8, 4, 2, 1):
-                            peer_score = xshfl(best_score, offset)
-                            peer_id = xshfl(best_id, offset)
-                            take = (peer_score > best_score) | (
-                                (ArithValue(peer_score) == ArithValue(best_score)) & (peer_id < best_id)
-                            )
-                            best_score = take.select(peer_score, best_score)
-                            best_id = take.select(peer_id, best_id)
-                        best_bias = fx.Float32(
-                            fx.BFloat16(
-                                bo.buffer_load(
-                                    rsrc(correction_bias),
-                                    best_id,
-                                    vec_width=1,
-                                    dtype=T.bf16,
-                                )
-                            )
+                            best_bias = take.select(biases[value_index], best_bias)
+                        local_best_score = best_score
+                        local_best_id = best_id
+                        local_best_bias = best_bias
+                        best_score = fx.Float32(fx.coop.warp_reduce(
+                            best_score, fx.ReductionOp.MAX, width=64,
+                        ))
+                        best_id = (ArithValue(local_best_score) == ArithValue(best_score)).select(
+                            local_best_id, fx.Int32(0x7FFFFFFF)
                         )
+                        best_id = fx.Int32(fx.coop.warp_reduce(
+                            best_id, fx.ReductionOp.MIN, width=64,
+                        ))
+                        winner_lane = uniform(best_id % _WAVE_SIZE)
+                        # Recover the original values from the winning lane,
+                        # including their exact bits; do not reconstruct raw
+                        # from a different local score or a normalized zero.
+                        best_score = fx.Int32(rocdl.readlane(
+                            T.i32, local_best_score.bitcast(fx.Int32), winner_lane,
+                        )).bitcast(fx.Float32)
+                        best_bias = fx.Int32(rocdl.readlane(
+                            T.i32, local_best_bias.bitcast(fx.Int32), winner_lane,
+                        )).bitcast(fx.Float32)
                         best_raw = best_score - best_bias
                         selected_sum = selected_sum + best_raw
                         if lane == 0:

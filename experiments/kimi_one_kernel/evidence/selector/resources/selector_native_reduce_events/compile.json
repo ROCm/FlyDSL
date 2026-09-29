@@ -1,0 +1,31 @@
+{
+  "config": {
+    "samples": 4,
+    "npes": 8,
+    "launches_per_step": 128,
+    "attn_res_blocks": 1,
+    "block_write_idx": -1,
+    "fuse_moe": true,
+    "mtp": true
+  },
+  "source": "/tmp/flydsl-kimi-moe-token-20260929/selector_native_reduce_events/kernels/kimi_k3_monokernel/kernel.py",
+  "source_sha256": "d4e4ea1ca09bb7bd20ea87e0bcb1426698db2a39f4fa977b206d2389f7b9f941",
+  "kernels": [
+    {
+      "name": "kimi_k3_mtp_relocate_0",
+      "hsaco": "/tmp/flydsl-kimi-moe-token-20260929/resources_selector_native_reduce_events/launch_2fd8be94f8c86407f1178ba35095ea50.hsaco",
+      "sha256": "831183e241cab551a8a624b5336221cfd374445c37643bdd72031fade0ae5bb1",
+      "agpr_count": 0,
+      "group_segment_fixed_size": 67456,
+      "max_flat_workgroup_size": 512,
+      "private_segment_fixed_size": 0,
+      "sgpr_count": 106,
+      "sgpr_spill_count": 50,
+      "vgpr_count": 114,
+      "vgpr_spill_count": 0,
+      "wavefront_size": 64
+    }
+  ],
+  "gpu_execution": false,
+  "hip_occupancy_checked": false
+}

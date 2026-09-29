@@ -1,0 +1,469 @@
+--- a/kernels/kimi_k3_monokernel/kernel.py
++++ b/kernels/kimi_k3_monokernel/kernel.py
+@@ -870,65 +870,30 @@
+                     store_f32(stats_rsrc, stats_base + source * 2, total_square)
+                     store_f32(stats_rsrc, stats_base + source * 2 + 1, total_weighted)
+ 
+-            if const_expr(_ATTN_RES_CTAS * (2 * num_sources) <= _WAVE_SIZE):
+-                if wave == 0:
+-                    # Each active lane retains its own tagged value until the
+-                    # wave reconverges. All readlane sources are initialized.
+-                    stats_value = fx.Float32(0.0)
+-                    if lane < _ATTN_RES_CTAS * (2 * num_sources):
+-                        gather_chunk = lane // (2 * num_sources)
+-                        gather_field = lane % (2 * num_sources)
+-                        gather_base = (sample * _ATTN_RES_CTAS + gather_chunk) * _ATTN_RES_STATS
+-                        stats_value = load_f32(stats_rsrc, gather_base + gather_field)
+-                    logits = []
+-                    for source in range_constexpr(num_sources):
+-                        total_square = fx.Float32(0.0)
+-                        total_weighted = fx.Float32(0.0)
+-                        for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+-                            source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
+-                            total_square = total_square + fx.Int32(rocdl.readlane(T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk * (2 * num_sources) + source * 2))).bitcast(fx.Float32)
+-                            total_weighted = total_weighted + fx.Int32(rocdl.readlane(T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk * (2 * num_sources) + source * 2 + 1))).bitcast(fx.Float32)
+-                        logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
+-                    max_logit = logits[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        max_logit = fx.max(max_logit, logits[source])
+-                    probabilities = [exp(logit - max_logit) for logit in logits]
+-                    probability_sum = probabilities[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        probability_sum = probability_sum + probabilities[source]
+-                    inverse_probability_sum = rcp(probability_sum)
+-                    if lane == 0:
+-                        for source in range_constexpr(num_sources):
+-                            lds_store(
+-                                attn_values,
+-                                source,
+-                                probabilities[source] * inverse_probability_sum,
+-                            )
+-            else:
+-                if tid == 0:
+-                    logits = []
+-                    for source in range_constexpr(num_sources):
+-                        total_square = fx.Float32(0.0)
+-                        total_weighted = fx.Float32(0.0)
+-                        for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+-                            source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
+-                            total_square = total_square + load_f32(stats_rsrc, source_base + source * 2)
+-                            total_weighted = total_weighted + load_f32(stats_rsrc, source_base + source * 2 + 1)
+-                        logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
+-                    max_logit = logits[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        max_logit = fx.max(max_logit, logits[source])
+-                    probabilities = [exp(logit - max_logit) for logit in logits]
+-                    probability_sum = probabilities[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        probability_sum = probability_sum + probabilities[source]
+-                    inverse_probability_sum = rcp(probability_sum)
+-                    for source in range_constexpr(num_sources):
+-                        lds_store(
+-                            attn_values,
+-                            source,
+-                            probabilities[source] * inverse_probability_sum,
+-                        )
++            if tid == 0:
++                logits = []
++                for source in range_constexpr(num_sources):
++                    total_square = fx.Float32(0.0)
++                    total_weighted = fx.Float32(0.0)
++                    for source_chunk in range_constexpr(_ATTN_RES_CTAS):
++                        source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
++                        total_square = total_square + load_f32(stats_rsrc, source_base + source * 2)
++                        total_weighted = total_weighted + load_f32(stats_rsrc, source_base + source * 2 + 1)
++                    logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
++                max_logit = logits[0]
++                for source in range_constexpr(1, num_sources):
++                    max_logit = fx.max(max_logit, logits[source])
++                probabilities = [exp(logit - max_logit) for logit in logits]
++                probability_sum = probabilities[0]
++                for source in range_constexpr(1, num_sources):
++                    probability_sum = probability_sum + probabilities[source]
++                inverse_probability_sum = rcp(probability_sum)
++                for source in range_constexpr(num_sources):
++                    lds_store(
++                        attn_values,
++                        source,
++                        probabilities[source] * inverse_probability_sum,
++                    )
+             gpu.barrier()
+ 
+             mixed_pairs = []
+@@ -959,19 +924,11 @@
+             total_mixed_square = block_sum(mixed_square_sum)
+             if tid == 0:
+                 store_f32(stats_rsrc, stats_base + 2 * num_sources, total_mixed_square)
+-            if wave == 0:
+-                stats_value = fx.Float32(0.0)
+-                if lane < _ATTN_RES_CTAS:
+-                    source_base = (sample * _ATTN_RES_CTAS + lane) * _ATTN_RES_STATS
+-                    stats_value = load_f32(stats_rsrc, source_base + 2 * num_sources)
+                 full_square = fx.Float32(0.0)
+                 for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+-                    chunk_square = fx.Int32(rocdl.readlane(
+-                        T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk),
+-                    )).bitcast(fx.Float32)
+-                    full_square = full_square + chunk_square
+-                if lane == 0:
+-                    lds_store(attn_values, num_sources, rsq(full_square * (1.0 / _HIDDEN) + EPS))
++                    source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
++                    full_square = full_square + load_f32(stats_rsrc, source_base + 2 * num_sources)
++                lds_store(attn_values, num_sources, rsq(full_square * (1.0 / _HIDDEN) + EPS))
+             gpu.barrier()
+             output_inverse_rms = lds_load(attn_values, num_sources)
+ 
+@@ -1148,23 +1105,6 @@
+                     packed = load_raw_pair(norm_mailbox_rsrc, global_pair)
+                     lds_store(x, pair, packed.bitcast(fx.Float32))
+ 
+-        def prefetch_bf16_units(weight_rsrc, first_row_group, k_size, split_waves, count):
+-            chunks = k_size // 64
+-            chunks_per_wave = chunks // split_waves
+-            row_group = first_row_group + wave // split_waves
+-            split = wave % split_waves
+-            units = []
+-            for local_chunk in range_constexpr(count):
+-                chunk = split * chunks_per_wave + local_chunk
+-                units.append([
+-                    fx.Vector(bo.buffer_load(
+-                        weight_rsrc,
+-                        (((row_group * chunks + chunk) * 2 + step_index) * _WAVE_SIZE + lane) * 4,
+-                        vec_width=4, dtype=T.i32,
+-                    )) for step_index in range_constexpr(2)
+-                ])
+-            return units
+-
+         def bf16_mfma(
+             weight_rsrc,
+             first_row_group,
+@@ -1173,7 +1113,6 @@
+             split_waves,
+             batch_size,
+             sample_count,
+-            prefetched=None,
+         ):
+             chunks = k_size // 64
+             chunks_per_wave = chunks // split_waves
+@@ -1198,13 +1137,7 @@
+                     ]
+ 
+                 starts = list(range(0, chunks_per_wave, batch_size))
+-                if const_expr(prefetched is None):
+-                    current = [load_unit(chunk) for chunk in range(0, min(batch_size, chunks_per_wave))]
+-                else:
+-                    current = [
+-                        prefetched[chunk] if chunk < len(prefetched) else load_unit(chunk)
+-                        for chunk in range(0, min(batch_size, chunks_per_wave))
+-                    ]
++                current = [load_unit(chunk) for chunk in range(0, min(batch_size, chunks_per_wave))]
+                 for batch_index in range_constexpr(len(starts)):
+                     following = None
+                     if const_expr(batch_index + 1 < len(starts)):
+@@ -1689,7 +1622,7 @@
+                     )
+             return list(accumulator)
+ 
+-        def moe_peer_push(local_pairs, pair_base, local_values, region):
++        def moe_peer_reduce(local_pairs, pair_base, local_values, region, emit):
+             moe_max_pairs = samples * _HIDDEN // 2
+             moe_slot_bytes = npes * moe_max_pairs * 8
+             region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+@@ -1713,11 +1646,6 @@
+                             cache_modifier=CM_SYS,
+                         )
+             gpu.barrier()
+-
+-        def moe_peer_collect(local_pairs, pair_base, region, emit):
+-            moe_max_pairs = samples * _HIDDEN // 2
+-            moe_slot_bytes = npes * moe_max_pairs * 8
+-            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+             if tid < local_pairs:
+                 global_pair = pair_base + tid
+                 local_rsrc = rsrc(moe_symmetric + region_base)
+@@ -1757,7 +1685,7 @@
+                 emit(tid, sum_low, sum_high)
+             gpu.barrier()
+ 
+-        def moe_peer_push_samples(local_pairs, pair_base, local_values, region):
++        def moe_peer_reduce_samples(local_pairs, pair_base, local_values, region, emit):
+             moe_max_pairs = samples * _HIDDEN // 2
+             moe_slot_bytes = npes * moe_max_pairs * 8
+             region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+@@ -1781,11 +1709,6 @@
+                             cache_modifier=CM_SYS,
+                         )
+             gpu.barrier()
+-
+-        def moe_peer_collect_samples(local_pairs, pair_base, region, emit):
+-            moe_max_pairs = samples * _HIDDEN // 2
+-            moe_slot_bytes = npes * moe_max_pairs * 8
+-            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+             if tid < local_pairs:
+                 global_pair = pair_base + (tid // 8) * (_HIDDEN // 2) + tid % 8
+                 local_rsrc = rsrc(moe_symmetric + region_base)
+@@ -1903,10 +1826,6 @@
+                 sample_group = input_task // input_row_tasks
+                 input_row_task = input_task % input_row_tasks
+                 sample_base = sample_group * staged_samples
+-            input_prefetch = prefetch_bf16_units(
+-                input_weight_rsrc, input_row_task * input_row_groups,
+-                _HIDDEN, input_split_waves, 7,
+-            )
+             stage_hidden(sample_base, staged_samples)
+             gpu.barrier()
+             input_accumulator = bf16_mfma(
+@@ -1917,7 +1836,6 @@
+                 input_split_waves,
+                 14,
+                 staged_samples,
+-                input_prefetch,
+             )
+ 
+             def emit_input(local_row, sample, value_low, value_high):
+@@ -2290,15 +2208,6 @@
+ 
+             stamp(1)
+ 
+-            def wait_mtp_previous_state(sample, head, value_split):
+-                if tid == 0:
+-                    if sample > 0:
+-                        load_f32(
+-                            mtp_state_ready_rsrc,
+-                            ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
+-                        )
+-                gpu.barrier()
+-
+             def run_mtp_recurrence(sample, head, value_split):
+                 if tid == 0:
+                     load_i32(mtp_conv_ready_rsrc, sample * _HEADS + head)
+@@ -2402,8 +2311,6 @@
+                         dot_parts = fx.math.fma(key_vectors[k_iter], query_vectors[k_iter], dot_parts)
+                     dot_key_query = mtp_subgroup_sum(dot_parts.reduce(fx.ReductionOp.ADD))
+ 
+-                    wait_mtp_previous_state(sample, head, value_split)
+-
+                     state_vectors = [None] * mtp_k_iters
+                     state_key_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                     state_query_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+@@ -2451,8 +2358,6 @@
+                             cache_modifier=CM_DEV,
+                         )
+                     result = state_query + value_new * dot_key_query
+-                else:
+-                    wait_mtp_previous_state(sample, head, value_split)
+ 
+                 k_lane = lane % mtp_k_lanes
+                 square_sum = (k_lane == 0).select(result * result, fx.Float32(0.0))
+@@ -2521,6 +2426,13 @@
+                 head_split = mtp_recurrence_task % (_HEADS * mtp_splits)
+                 head = head_split // mtp_splits
+                 value_split = head_split % mtp_splits
++                if tid == 0:
++                    if sample > 0:
++                        load_f32(
++                            mtp_state_ready_rsrc,
++                            ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
++                        )
++                gpu.barrier()
+                 run_mtp_recurrence(sample, head, value_split)
+ 
+         # Stage 3: BF16 1536 -> 7168 output projection followed by the tagged
+@@ -2714,10 +2626,6 @@
+                         sample_group = projection_task // router_row_tasks
+                         router_row_task = projection_task % router_row_tasks
+                         sample_base = sample_group * staged_samples
+-                    router_prefetch = prefetch_bf16_units(
+-                        rsrc(packed_router_weight), router_row_task * _ROUTER_ROW_GROUPS,
+-                        _HIDDEN, _ROUTER_SPLIT_WAVES, 7,
+-                    )
+                     stage_moe_hidden(sample_base, staged_samples)
+                     gpu.barrier()
+                     row_base = router_row_task * _ROUTER_ROW_GROUPS
+@@ -2729,7 +2637,6 @@
+                         _ROUTER_SPLIT_WAVES,
+                         14,
+                         staged_samples,
+-                        router_prefetch,
+                     )
+ 
+                     def emit_router(local_row, sample, value_low, value_high):
+@@ -2847,7 +2754,6 @@
+                     for selected_index in range_constexpr(_TOP_K):
+                         best_score = corrected[0]
+                         best_id = fx.Int32(lane)
+-                        best_bias = biases[0]
+                         for value_index in range_constexpr(1, _N_EXPERTS // _WAVE_SIZE):
+                             candidate_id = fx.Int32(lane + value_index * _WAVE_SIZE)
+                             candidate_score = corrected[value_index]
+@@ -2856,29 +2762,24 @@
+                             )
+                             best_score = take.select(candidate_score, best_score)
+                             best_id = take.select(candidate_id, best_id)
+-                            best_bias = take.select(biases[value_index], best_bias)
+-                        local_best_score = best_score
+-                        local_best_id = best_id
+-                        local_best_bias = best_bias
+-                        best_score = fx.Float32(fx.coop.warp_reduce(
+-                            best_score, fx.ReductionOp.MAX, width=64,
+-                        ))
+-                        best_id = (ArithValue(local_best_score) == ArithValue(best_score)).select(
+-                            local_best_id, fx.Int32(0x7FFFFFFF)
+-                        )
+-                        best_id = fx.Int32(fx.coop.warp_reduce(
+-                            best_id, fx.ReductionOp.MIN, width=64,
+-                        ))
+-                        winner_lane = uniform(best_id % _WAVE_SIZE)
+-                        # Recover the original values from the winning lane,
+-                        # including their exact bits; do not reconstruct raw
+-                        # from a different local score or a normalized zero.
+-                        best_score = fx.Int32(rocdl.readlane(
+-                            T.i32, local_best_score.bitcast(fx.Int32), winner_lane,
+-                        )).bitcast(fx.Float32)
+-                        best_bias = fx.Int32(rocdl.readlane(
+-                            T.i32, local_best_bias.bitcast(fx.Int32), winner_lane,
+-                        )).bitcast(fx.Float32)
++                        for offset in (32, 16, 8, 4, 2, 1):
++                            peer_score = xshfl(best_score, offset)
++                            peer_id = xshfl(best_id, offset)
++                            take = (peer_score > best_score) | (
++                                (ArithValue(peer_score) == ArithValue(best_score)) & (peer_id < best_id)
++                            )
++                            best_score = take.select(peer_score, best_score)
++                            best_id = take.select(peer_id, best_id)
++                        best_bias = fx.Float32(
++                            fx.BFloat16(
++                                bo.buffer_load(
++                                    rsrc(correction_bias),
++                                    best_id,
++                                    vec_width=1,
++                                    dtype=T.bf16,
++                                )
++                            )
++                        )
+                         best_raw = best_score - best_bias
+                         selected_sum = selected_sum + best_raw
+                         if lane == 0:
+@@ -3051,6 +2952,18 @@
+                 row_group = down_task % routed_tiles
+                 mid_pairs_per_route = _INTER // 2
+                 staged_pairs = _TOP_K * mid_pairs_per_route
++                # The first route ID is sufficient to issue its first K128
++                # weight fragment. Keep route-weight polling after mid staging.
++                first_route = sample * _TOP_K + wave
++                first_expert = uniform(load_i32(selection_id_rsrc, first_route))
++                first_weight_bytes = _ROUTED_HIDDEN * (_INTER // 2)
++                first_scale_bytes = _ROUTED_HIDDEN * (_INTER // 32)
++                first_down_weight_rsrc = rsrc(packed_expert_down + fx.Int64(first_expert) * fx.Int64(first_weight_bytes))
++                first_down_scale_rsrc = rsrc(expert_down_scale + fx.Int64(first_expert) * fx.Int64(first_scale_bytes))
++                first_down_fragment = mxfp4_fragment(
++                    first_down_weight_rsrc, first_down_scale_rsrc,
++                    row_group, 0, _INTER,
++                )
+                 stage_raw_vector(
+                     expert_mid_mailbox_rsrc,
+                     expert_mid_ready_rsrc,
+@@ -3065,21 +2978,29 @@
+                 for route_round in range_constexpr(_TOP_K // _WAVES):
+                     route_in_sample = wave + route_round * _WAVES
+                     route = sample * _TOP_K + route_in_sample
+-                    expert = uniform(load_i32(selection_id_rsrc, route))
++                    if const_expr(route_round == 0):
++                        expert = first_expert
++                        down_weight_rsrc = first_down_weight_rsrc
++                        down_scale_rsrc = first_down_scale_rsrc
++                    else:
++                        expert = uniform(load_i32(selection_id_rsrc, route))
++                        expert_weight_bytes = _ROUTED_HIDDEN * (_INTER // 2)
++                        expert_scale_bytes = _ROUTED_HIDDEN * (_INTER // 32)
++                        down_weight_rsrc = rsrc(packed_expert_down + fx.Int64(expert) * fx.Int64(expert_weight_bytes))
++                        down_scale_rsrc = rsrc(expert_down_scale + fx.Int64(expert) * fx.Int64(expert_scale_bytes))
+                     route_weight = uniform_f32(load_f32(selection_weight_rsrc, route))
+-                    expert_weight_bytes = _ROUTED_HIDDEN * (_INTER // 2)
+-                    expert_scale_bytes = _ROUTED_HIDDEN * (_INTER // 32)
+-                    down_weight_rsrc = rsrc(packed_expert_down + fx.Int64(expert) * fx.Int64(expert_weight_bytes))
+-                    down_scale_rsrc = rsrc(expert_down_scale + fx.Int64(expert) * fx.Int64(expert_scale_bytes))
+                     route_accumulator = [fx.Float32(0.0) for _ in range(4)]
+                     for k_chunk in range_constexpr(_INTER // 128):
+-                        fragment = mxfp4_fragment(
+-                            down_weight_rsrc,
+-                            down_scale_rsrc,
+-                            row_group,
+-                            k_chunk,
+-                            _INTER,
+-                        )
++                        if const_expr(route_round == 0 and k_chunk == 0):
++                            fragment = first_down_fragment
++                        else:
++                            fragment = mxfp4_fragment(
++                                down_weight_rsrc,
++                                down_scale_rsrc,
++                                row_group,
++                                k_chunk,
++                                _INTER,
++                            )
+                         route_accumulator = mxfp4_apply(
+                             route_accumulator,
+                             fragment,
+@@ -3114,16 +3035,6 @@
+ 
+                 pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
+ 
+-                moe_peer_push(16 // 2, pair_base, output_values, 0)
+-                down_task = down_task + _BLOCKS
+-
+-            # All per-CTA down tiles are now in symmetric tagged mailboxes.
+-            down_task = bid
+-            while down_task < down_tasks:
+-                sample = down_task // routed_tiles
+-                row_group = down_task % routed_tiles
+-                pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
+-
+                 def emit_routed(local_pair, value_low, value_high):
+                     reduced_low = bf16_round(value_low)
+                     reduced_high = bf16_round(value_high)
+@@ -3139,7 +3050,7 @@
+                         reduced_low * reduced_low + reduced_high * reduced_high,
+                     )
+ 
+-                moe_peer_collect(16 // 2, pair_base, 0, emit_routed)
++                moe_peer_reduce(16 // 2, pair_base, output_values, 0, emit_routed)
+                 square_part = (tid < 16 // 2).select(
+                     lds_load(output_values, fx.min(tid, 16 // 2 - 1)),
+                     fx.Float32(0.0),
+@@ -3181,7 +3092,7 @@
+             tail_task = bid
+             while tail_task < tail_tasks:
+                 sample_base = (tail_task // hidden_tiles) * staged_samples
+-                row_group = (tail_task % hidden_tiles + rank * (_HIDDEN_SHARD // 16) + hidden_tiles - 192) % hidden_tiles
++                row_group = tail_task % hidden_tiles
+                 shared_pairs = _SHARED_INTER // 2
+                 accumulator = [fx.Float32(0.0) for _ in range(4)]
+                 if wave < 4:
+@@ -3258,17 +3169,6 @@
+ 
+                 pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
+ 
+-                moe_peer_push_samples(staged_samples * (16 // 2), pair_base, output_values, 1)
+-                tail_task = tail_task + _BLOCKS
+-
+-            # The tagged symmetric mailboxes retain every partial, so LDS can
+-            # be reused for the next compute task before any peer is polled.
+-            tail_task = bid
+-            while tail_task < tail_tasks:
+-                sample_base = (tail_task // hidden_tiles) * staged_samples
+-                row_group = (tail_task % hidden_tiles + rank * (_HIDDEN_SHARD // 16) + hidden_tiles - 192) % hidden_tiles
+-                pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
+-
+                 def emit_final(local_pair, value_low, value_high):
+                     residual_word = fx.Int32(
+                         bo.buffer_load(
+@@ -3291,7 +3191,7 @@
+                         cache_modifier=CM_DEV,
+                     )
+ 
+-                moe_peer_collect_samples(staged_samples * (16 // 2), pair_base, 1, emit_final)
++                moe_peer_reduce_samples(staged_samples * (16 // 2), pair_base, output_values, 1, emit_final)
+                 tail_task = tail_task + _BLOCKS
+             stamp(9)
+ 

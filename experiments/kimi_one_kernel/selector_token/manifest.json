@@ -1,0 +1,645 @@
+{
+  "patch_base": "tail_rotate192_downsplit_events",
+  "patch_base_kernel_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+  "independent_patches": true,
+  "sources": [
+    {
+      "name": "best_fine_timeline",
+      "original_source": "kimi_moe_token_pipeline_20260929/best_fine_timeline",
+      "kernel_sha256": "8db4a1566fcb4f735b87b25377f667f8f191248b0f1d76305400106204037688",
+      "source_tree_sha256": "b9932104404b524dafda078bc2c3d828a5a11b28bc1192af637276cf2643953e",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kda.py",
+          "base_sha256": "c06e80e88f2ff3a5b229e30e7bd2dd14d0641fcd9749ad094eed77a890600856",
+          "target_sha256": "063025acb7d8ac50cef44840ebe54d2023da6085d7e8743924c8568e1e5d15f6"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "8db4a1566fcb4f735b87b25377f667f8f191248b0f1d76305400106204037688"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "e8be18a21792cd93951b12cf1385c8e1e83ac37799a20aa3c87bad707e796a2a"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "8db4a1566fcb4f735b87b25377f667f8f191248b0f1d76305400106204037688",
+          "binary_sha256": "972a82e50b94138b35b028c079b51eaff67912d12503a1f37d6f5ddd95636dd5",
+          "vgpr": 115,
+          "sgpr_spills": 85,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "round_summary": "kimi_moe_token_pipeline_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "down_prefetch1_events",
+      "original_source": "kimi_moe_token_pipeline_20260929/down_prefetch1_events",
+      "kernel_sha256": "c388fa890594425cdb3d498a6a0cddf27eeca7cb6ccbfb4e719fc93d283248de",
+      "source_tree_sha256": "e7eb158df4b12888477ccd224b2390e358fc8e9e693c129384cdf83b3ebd08c2",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "c388fa890594425cdb3d498a6a0cddf27eeca7cb6ccbfb4e719fc93d283248de"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "c388fa890594425cdb3d498a6a0cddf27eeca7cb6ccbfb4e719fc93d283248de",
+          "binary_sha256": "f01d9d340437858402d3005ff6b48bbc7e153cde3d8b14fd239f75f8a46143d9",
+          "vgpr": 114,
+          "sgpr_spills": 41,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 139.92643356323242,
+          "min_us": 139.41650092601776,
+          "max_us": 151.016503572464,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "c388fa890594425cdb3d498a6a0cddf27eeca7cb6ccbfb4e719fc93d283248de",
+          "file": "screen_down_prefetch1_events_seed1234.json",
+          "reduction_vs_base_pct": -0.8059220864153671,
+          "reduction_vs_staged_pct": -8.805321485562857,
+          "target_us": 115.74230790138245
+        },
+        "round_summary": "kimi_moe_token_pipeline_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "moe_g2_ug16_events",
+      "original_source": "kimi_moe_token_pipeline_20260929/moe_g2_ug16_events",
+      "kernel_sha256": "72a9ed8d94a00c023e827baac854380e204035cb19ac2520063a77acc697c511",
+      "source_tree_sha256": "ab5874945272a4ae1d5a45d99eef9f434e9069706d557203c404ea8eed4a4ea9",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "72a9ed8d94a00c023e827baac854380e204035cb19ac2520063a77acc697c511"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "72a9ed8d94a00c023e827baac854380e204035cb19ac2520063a77acc697c511",
+          "binary_sha256": "febbb97f003dd8234273671b72596cc65635e802dda4ec631e0c33322bb220c4",
+          "vgpr": 123,
+          "sgpr_spills": 84,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 150.78787505626678,
+          "min_us": 150.0091254711151,
+          "max_us": 157.04669058322906,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "72a9ed8d94a00c023e827baac854380e204035cb19ac2520063a77acc697c511",
+          "file": "screen_moe_g2_ug16_events_seed1234.json",
+          "reduction_vs_base_pct": -8.630731145085457,
+          "reduction_vs_staged_pct": -17.251064032929285,
+          "target_us": 115.74230790138245
+        },
+        "round_summary": "kimi_moe_token_pipeline_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "moe_g2_ug32_events",
+      "original_source": "kimi_moe_token_pipeline_20260929/moe_g2_ug32_events",
+      "kernel_sha256": "b94f7c3617c53cd35abc85494686dfd1376ad699781a70491f7973639089bc4a",
+      "source_tree_sha256": "370bd2db5cec3ee89248f8ac38ba91a3fae52cc37c0d9d8c81ed8b638775949e",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "b94f7c3617c53cd35abc85494686dfd1376ad699781a70491f7973639089bc4a"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "b94f7c3617c53cd35abc85494686dfd1376ad699781a70491f7973639089bc4a",
+          "binary_sha256": "def0f9d33137f6223c04f001829b22af0b3a296620a2d915cc79d431169f5eb3",
+          "vgpr": 126,
+          "sgpr_spills": 193,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 159.66293960809708,
+          "min_us": 158.11163187026978,
+          "max_us": 169.54675316810608,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "b94f7c3617c53cd35abc85494686dfd1376ad699781a70491f7973639089bc4a",
+          "file": "screen_moe_g2_ug32_events_seed1234.json",
+          "reduction_vs_base_pct": -15.024512812645918,
+          "reduction_vs_staged_pct": -24.152220784920964,
+          "target_us": 115.74230790138245
+        },
+        "round_summary": "kimi_moe_token_pipeline_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "selector_carry_bias_events",
+      "original_source": "kimi_moe_token_pipeline_20260929/selector_carry_bias_events",
+      "kernel_sha256": "952c6f94b4ad514280c9d7f4b14be505edd5f41af065a96987a3f4b21612a795",
+      "source_tree_sha256": "57c3385202442b7783ac2c30d552dff84d061072c06d43c2c9f62ac5d77db99a",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "952c6f94b4ad514280c9d7f4b14be505edd5f41af065a96987a3f4b21612a795"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "952c6f94b4ad514280c9d7f4b14be505edd5f41af065a96987a3f4b21612a795",
+          "binary_sha256": "b1d0bc63d9194531bd875bce5828ef9c7c6b44ffe6604a04d2b2486738bebd73",
+          "vgpr": 114,
+          "sgpr_spills": 43,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 138.2039710879326,
+          "min_us": 137.69643008708954,
+          "max_us": 141.0665065050125,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "952c6f94b4ad514280c9d7f4b14be505edd5f41af065a96987a3f4b21612a795",
+          "file": "screen_selector_carry_bias_events_seed1234.json",
+          "reduction_vs_base_pct": 0.43497581729190493,
+          "reduction_vs_staged_pct": -7.465952800180564,
+          "target_us": 115.74230790138245
+        },
+        "round_summary": "kimi_moe_token_pipeline_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "selector_local_gt_events",
+      "original_source": "kimi_moe_token_pipeline_20260929/selector_local_gt_events",
+      "kernel_sha256": "0e4b63e3be06f225909ebb0b995f372af395ec48c1f87b3bc86445a556d865d6",
+      "source_tree_sha256": "2f5d3eb73b6a067ad17b0e75cfce77b9e38fa59b60562c36997cca47a201e4f8",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "0e4b63e3be06f225909ebb0b995f372af395ec48c1f87b3bc86445a556d865d6"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "0e4b63e3be06f225909ebb0b995f372af395ec48c1f87b3bc86445a556d865d6",
+          "binary_sha256": "b1d0bc63d9194531bd875bce5828ef9c7c6b44ffe6604a04d2b2486738bebd73",
+          "vgpr": 114,
+          "sgpr_spills": 43,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 138.6651247739792,
+          "min_us": 138.20888102054596,
+          "max_us": 144.8989361524582,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "0e4b63e3be06f225909ebb0b995f372af395ec48c1f87b3bc86445a556d865d6",
+          "file": "screen_selector_local_gt_events_seed1234.json",
+          "reduction_vs_base_pct": 0.10275108060933125,
+          "reduction_vs_staged_pct": -7.8245410510694,
+          "target_us": 115.74230790138245
+        },
+        "round_summary": "kimi_moe_token_pipeline_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "selector_native_reduce_events",
+      "original_source": "kimi_moe_token_pipeline_20260929/selector_native_reduce_events",
+      "kernel_sha256": "d4e4ea1ca09bb7bd20ea87e0bcb1426698db2a39f4fa977b206d2389f7b9f941",
+      "source_tree_sha256": "7329db085d53928f3949529729aa0bb56ee08dadeb098956c9336921dcb1b6f9",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "d4e4ea1ca09bb7bd20ea87e0bcb1426698db2a39f4fa977b206d2389f7b9f941"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "d4e4ea1ca09bb7bd20ea87e0bcb1426698db2a39f4fa977b206d2389f7b9f941",
+          "binary_sha256": "831183e241cab551a8a624b5336221cfd374445c37643bdd72031fade0ae5bb1",
+          "vgpr": 114,
+          "sgpr_spills": 50,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 137.1815949678421,
+          "min_us": 136.66406273841858,
+          "max_us": 141.876682639122,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "d4e4ea1ca09bb7bd20ea87e0bcb1426698db2a39f4fa977b206d2389f7b9f941",
+          "file": "screen_selector_native_reduce_events_seed1234.json",
+          "reduction_vs_base_pct": 1.1715169044931306,
+          "reduction_vs_staged_pct": -6.6709638935610105,
+          "target_us": 115.74230790138245
+        },
+        "round_summary": "kimi_moe_token_pipeline_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "selector_reduce2_events",
+      "original_source": "kimi_moe_token_pipeline_20260929/selector_reduce2_events",
+      "kernel_sha256": "006bb9460d944454dee4e2d2e636e707913df0439200ba4b857801f2b8228e56",
+      "source_tree_sha256": "cbae9a935690c841b86997487599fd762eb4022de6ebe7317f8b973eafc2c1f4",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "006bb9460d944454dee4e2d2e636e707913df0439200ba4b857801f2b8228e56"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "006bb9460d944454dee4e2d2e636e707913df0439200ba4b857801f2b8228e56",
+          "binary_sha256": "296b30f57750f35e3f1244a092ccfe8005f7725737ef4038bea17eca190dbac2",
+          "vgpr": 114,
+          "sgpr_spills": 48,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 137.68918812274933,
+          "min_us": 136.94168627262115,
+          "max_us": 160.46449542045593,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "006bb9460d944454dee4e2d2e636e707913df0439200ba4b857801f2b8228e56",
+          "file": "screen_selector_reduce2_events_seed1234.json",
+          "reduction_vs_base_pct": 0.8058362055560542,
+          "reduction_vs_staged_pct": -7.06566298648541,
+          "target_us": 115.74230790138245
+        },
+        "round_summary": "kimi_moe_token_pipeline_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "selector_reduce2_fine_timeline",
+      "original_source": "kimi_moe_token_pipeline_20260929/selector_reduce2_fine_timeline",
+      "kernel_sha256": "38eaf79795008289a5aa2a1d12c16285c23b29322195c0875319b3abc4e35993",
+      "source_tree_sha256": "c46465414d970c582f925170135be9d855f4a8b1565bd734e0fe1e7964a86647",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kda.py",
+          "base_sha256": "c06e80e88f2ff3a5b229e30e7bd2dd14d0641fcd9749ad094eed77a890600856",
+          "target_sha256": "063025acb7d8ac50cef44840ebe54d2023da6085d7e8743924c8568e1e5d15f6"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "38eaf79795008289a5aa2a1d12c16285c23b29322195c0875319b3abc4e35993"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "e8be18a21792cd93951b12cf1385c8e1e83ac37799a20aa3c87bad707e796a2a"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "38eaf79795008289a5aa2a1d12c16285c23b29322195c0875319b3abc4e35993",
+          "binary_sha256": "f205131738f8bf3be99f9f9ca684ca8de259e7a564409eb11f9c14b8e121a159",
+          "vgpr": 115,
+          "sgpr_spills": 92,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "round_summary": "kimi_moe_token_pipeline_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    }
+  ]
+}

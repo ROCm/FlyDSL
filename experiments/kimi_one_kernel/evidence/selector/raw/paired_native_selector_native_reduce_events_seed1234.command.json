@@ -1,0 +1,33 @@
+{
+  "cmd": [
+    "/opt/venv/bin/python",
+    "-m",
+    "kernels.kimi_k3_monokernel.tools.monokernel",
+    "--mtp",
+    "--samples",
+    "4",
+    "--layer-idx",
+    "1",
+    "--seed",
+    "1234",
+    "--check",
+    "--output",
+    "/tmp/flydsl-kimi-moe-token-20260929/paired_native_selector_native_reduce_events_seed1234.json",
+    "--bench",
+    "--layers",
+    "16",
+    "--repeats",
+    "50"
+  ],
+  "cwd": "/tmp/flydsl-kimi-moe-token-20260929/selector_native_reduce_events",
+  "source": "selector_native_reduce_events",
+  "gpu": true,
+  "env": {
+    "PYTHONPATH": "/tmp/flydsl-kimi-moe-token-20260929/selector_native_reduce_events:/tmp/flydsl-kimi-moe-token-20260929:/tmp/flydsl-kimi-mtp-nativebf16-20260929/python_packages",
+    "LD_LIBRARY_PATH": "/tmp/flydsl-kimi-mtp-nativebf16-20260929/python_packages/flydsl/_mlir/_mlir_libs:/opt/rocm/lib",
+    "FLYDSL_RUNTIME_CACHE_DIR": "/tmp/flydsl-kimi-moe-token-20260929/cache_selector_native_reduce_events",
+    "OMP_NUM_THREADS": "1",
+    "ROCM_PATH": "/opt/rocm",
+    "FLYDSL_GPU_ARCH": "gfx950"
+  }
+}
