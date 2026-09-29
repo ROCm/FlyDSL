@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-29T09:21:08Z",
+ "updated": "2026-09-29T09:22:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "main",
    "event": "push",
    "title": "fix(kernels): correct GLM monokernel routing and indexer boundaries (\u2026",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36548372347",
    "created_at": "2026-09-29T09:19:00Z",
-   "updated_at": "2026-09-29T09:19:02Z",
+   "updated_at": "2026-09-29T09:20:23Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,11 +40,11 @@
    "branch": "xinyazhang/theRock-support",
    "event": "pull_request",
    "title": "[Build] Find ROCm through rocm-sdk before falling back to /opt/rocm*",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36548262682",
    "created_at": "2026-09-29T09:17:59Z",
-   "updated_at": "2026-09-29T09:19:17Z",
+   "updated_at": "2026-09-29T09:20:14Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -113,20 +113,20 @@
    "branch": "main",
    "event": "push",
    "title": "[Docs] Audit and refresh repository documentation (#1203)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36540786943",
    "created_at": "2026-09-29T08:07:43Z",
-   "updated_at": "2026-09-29T08:38:02Z",
+   "updated_at": "2026-09-29T09:19:56Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-29T08:27:21Z",
-     "completed_at": null,
+     "completed_at": "2026-09-29T09:19:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36540786943/job/109321930283"
     },
     {
