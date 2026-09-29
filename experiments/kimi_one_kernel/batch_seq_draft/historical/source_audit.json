@@ -1,0 +1,75 @@
+{
+  "changes": [
+    {
+      "source": "current",
+      "file": "kernels/kimi_k3_monokernel/tail.py"
+    },
+    {
+      "source": "current",
+      "file": "kernels/kimi_k3_monokernel/mxfp8_linear.py"
+    },
+    {
+      "source": "current",
+      "file": "kernels/kimi_k3_monokernel/kda.py"
+    },
+    {
+      "source": "current",
+      "file": "kernels/kimi_k3_monokernel/attn_res.py"
+    },
+    {
+      "source": "current",
+      "file": "kernels/kimi_k3_monokernel/router.py"
+    },
+    {
+      "source": "current",
+      "file": "kernels/kimi_k3_monokernel/kernel.py"
+    },
+    {
+      "source": "current",
+      "file": "kernels/kimi_k3_monokernel/op.py"
+    },
+    {
+      "source": "current",
+      "file": "kernels/monokernel/reference.py"
+    },
+    {
+      "source": "current",
+      "file": "kernels/kimi_k3_monokernel/tools/monokernel.py"
+    },
+    {
+      "source": "staged",
+      "file": "kernels/kimi_k3_monokernel/tail.py"
+    },
+    {
+      "source": "staged",
+      "file": "kernels/kimi_k3_monokernel/mxfp8_linear.py"
+    },
+    {
+      "source": "staged",
+      "file": "kernels/kimi_k3_monokernel/kda.py"
+    },
+    {
+      "source": "staged",
+      "file": "kernels/kimi_k3_monokernel/attn_res.py"
+    },
+    {
+      "source": "staged",
+      "file": "kernels/kimi_k3_monokernel/router.py"
+    },
+    {
+      "source": "staged",
+      "file": "kernels/kimi_k3_monokernel/kernel.py"
+    },
+    {
+      "source": "staged",
+      "file": "kernels/monokernel/reference.py"
+    },
+    {
+      "source": "staged",
+      "file": "kernels/kimi_k3_monokernel/tools/monokernel.py"
+    }
+  ],
+  "batch_semantics": "B disjoint L-token chains; B*(L+1) slot indices",
+  "flat_tokens": "B*L",
+  "original_sources_preserved": true
+}
