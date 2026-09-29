@@ -65,6 +65,66 @@ func.func @test_logical_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
   return %result : !fly.layout<(4, 4) : (1, 4)>
 }
 
+// CHECK-LABEL: @test_zipped_divide_singleton_tuple_tile
+func.func @test_zipped_divide_singleton_tuple_tile() -> !fly.layout<((32), (2, 8)) : ((1), (32, 128))> {
+  // tile<[32]> is a singleton-tuple tiler, not leaf tile<32>.
+  %s = fly.static : !fly.int_tuple<(64, 8)>
+  %d = fly.static : !fly.int_tuple<(1, 128)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(64, 8)>, !fly.int_tuple<(1, 128)>) -> !fly.layout<(64, 8) : (1, 128)>
+  %tiler = fly.static : !fly.tile<[32]>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(64, 8) : (1, 128)>, !fly.tile<[32]>) -> !fly.layout<((32), (2, 8)) : ((1), (32, 128))>
+  return %result : !fly.layout<((32), (2, 8)) : ((1), (32, 128))>
+}
+
+// A `*` tiler mode is skipped by logical_divide; zipped_divide gives it a 1:0
+// tile mode and keeps the whole mode in rest (pycute hier_unzip semantics).
+
+// CHECK-LABEL: @test_zipped_divide_skip_leaf
+func.func @test_zipped_divide_skip_leaf(%layout: !fly.layout<(64, 8) : (1, 64)>)
+    -> !fly.layout<(1, (64, 8)) : (0, (1, 64))> {
+  %tiler = fly.static : !fly.tile<*>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(64, 8) : (1, 64)>, !fly.tile<*>) -> !fly.layout<(1, (64, 8)) : (0, (1, 64))>
+  return %result : !fly.layout<(1, (64, 8)) : (0, (1, 64))>
+}
+
+// CHECK-LABEL: @test_zipped_divide_skip_only
+func.func @test_zipped_divide_skip_only(%layout: !fly.layout<(64, 8) : (1, 64)>)
+    -> !fly.layout<((1), (64, 8)) : ((0), (1, 64))> {
+  %tiler = fly.static : !fly.tile<[*]>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(64, 8) : (1, 64)>, !fly.tile<[*]>) -> !fly.layout<((1), (64, 8)) : ((0), (1, 64))>
+  return %result : !fly.layout<((1), (64, 8)) : ((0), (1, 64))>
+}
+
+// CHECK-LABEL: @test_zipped_divide_skip_leading
+func.func @test_zipped_divide_skip_leading(%layout: !fly.layout<(64, 8) : (1, 64)>)
+    -> !fly.layout<((1, 4), (64, 2)) : ((0, 64), (1, 256))> {
+  %tiler = fly.static : !fly.tile<[*|4]>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(64, 8) : (1, 64)>, !fly.tile<[*|4]>) -> !fly.layout<((1, 4), (64, 2)) : ((0, 64), (1, 256))>
+  return %result : !fly.layout<((1, 4), (64, 2)) : ((0, 64), (1, 256))>
+}
+
+// CHECK-LABEL: @test_zipped_divide_skip_trailing
+func.func @test_zipped_divide_skip_trailing(%layout: !fly.layout<(64, 8) : (1, 64)>)
+    -> !fly.layout<((32, 1), (2, 8)) : ((1, 0), (32, 64))> {
+  %tiler = fly.static : !fly.tile<[32|*]>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(64, 8) : (1, 64)>, !fly.tile<[32|*]>) -> !fly.layout<((32, 1), (2, 8)) : ((1, 0), (32, 64))>
+  return %result : !fly.layout<((32, 1), (2, 8)) : ((1, 0), (32, 64))>
+}
+
+// CHECK-LABEL: @test_zipped_divide_skip_rank3
+func.func @test_zipped_divide_skip_rank3(%layout: !fly.layout<(64, 8, 4) : (1, 64, 512)>)
+    -> !fly.layout<((1), (64, 8, 4)) : ((0), (1, 64, 512))> {
+  %tiler = fly.static : !fly.tile<[*]>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(64, 8, 4) : (1, 64, 512)>, !fly.tile<[*]>) -> !fly.layout<((1), (64, 8, 4)) : ((0), (1, 64, 512))>
+  return %result : !fly.layout<((1), (64, 8, 4)) : ((0), (1, 64, 512))>
+}
+
 // CHECK-LABEL: @test_zipped_divide_1d
 func.func @test_zipped_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
   %s = fly.static : !fly.int_tuple<(16)>

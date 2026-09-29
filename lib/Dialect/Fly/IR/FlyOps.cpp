@@ -1190,6 +1190,8 @@ FLY_INFER_RETURN_TYPES(LogicalDivideOp) {
   if (auto divisorLayoutTy = dyn_cast<LayoutType>(divisorTy)) {
     inferred = layoutLogicalDivide(layoutBuilder, layoutAttr, divisorLayoutTy.getAttr());
   } else if (auto divisorTileTy = dyn_cast<TileType>(divisorTy)) {
+    if (!detail::isTileRankCompatible(layoutAttr.getShape(), divisorTileTy.getAttr()))
+      return emitOptionalError(location, "LogicalDivideOp: divisor tile rank exceeds layout rank");
     inferred = layoutLogicalDivide(layoutBuilder, layoutAttr, divisorTileTy.getAttr());
   } else {
     return emitOptionalError(
@@ -1213,6 +1215,8 @@ FLY_INFER_RETURN_TYPES(ZippedDivideOp) {
   if (auto divisorLayoutTy = dyn_cast<LayoutType>(divisorTy)) {
     inferred = layoutZippedDivide(layoutBuilder, layoutAttr, divisorLayoutTy.getAttr());
   } else if (auto divisorTileTy = dyn_cast<TileType>(divisorTy)) {
+    if (!detail::isTileRankCompatible(layoutAttr.getShape(), divisorTileTy.getAttr()))
+      return emitOptionalError(location, "ZippedDivideOp: divisor tile rank exceeds layout rank");
     inferred = layoutZippedDivide(layoutBuilder, layoutAttr, divisorTileTy.getAttr());
   } else {
     return emitOptionalError(
@@ -1236,6 +1240,8 @@ FLY_INFER_RETURN_TYPES(TiledDivideOp) {
   if (auto divisorLayoutTy = dyn_cast<LayoutType>(divisorTy)) {
     inferred = layoutTiledDivide(layoutBuilder, layoutAttr, divisorLayoutTy.getAttr());
   } else if (auto divisorTileTy = dyn_cast<TileType>(divisorTy)) {
+    if (!detail::isTileRankCompatible(layoutAttr.getShape(), divisorTileTy.getAttr()))
+      return emitOptionalError(location, "TiledDivideOp: divisor tile rank exceeds layout rank");
     inferred = layoutTiledDivide(layoutBuilder, layoutAttr, divisorTileTy.getAttr());
   } else {
     return emitOptionalError(
@@ -1259,6 +1265,8 @@ FLY_INFER_RETURN_TYPES(FlatDivideOp) {
   if (auto divisorLayoutTy = dyn_cast<LayoutType>(divisorTy)) {
     inferred = layoutFlatDivide(layoutBuilder, layoutAttr, divisorLayoutTy.getAttr());
   } else if (auto divisorTileTy = dyn_cast<TileType>(divisorTy)) {
+    if (!detail::isTileRankCompatible(layoutAttr.getShape(), divisorTileTy.getAttr()))
+      return emitOptionalError(location, "FlatDivideOp: divisor tile rank exceeds layout rank");
     inferred = layoutFlatDivide(layoutBuilder, layoutAttr, divisorTileTy.getAttr());
   } else {
     return emitOptionalError(
