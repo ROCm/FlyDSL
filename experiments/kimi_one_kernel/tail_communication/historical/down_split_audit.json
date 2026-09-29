@@ -1,0 +1,26 @@
+[
+  {
+    "variant": "front_wave_pf7_recur_downsplit_events",
+    "parent": "front_wave_pf7_recur_events",
+    "source_sha256": "f3a7ac4ab0f33f66cb85117f7cce3c49435ac20459b8c2f9db513d31adab12b4",
+    "tp8_s4_dag": {
+      "nodes": 31104,
+      "edges": 71444,
+      "acyclic": true
+    },
+    "no_new_scratch": true,
+    "mailbox_and_arithmetic_and_barriers_unchanged": true
+  },
+  {
+    "variant": "tail_rotate192_downsplit_events",
+    "parent": "tail_rotate192_events",
+    "source_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+    "tp8_s4_dag": {
+      "nodes": 31104,
+      "edges": 71424,
+      "acyclic": true
+    },
+    "no_new_scratch": true,
+    "mailbox_and_arithmetic_and_barriers_unchanged": true
+  }
+]

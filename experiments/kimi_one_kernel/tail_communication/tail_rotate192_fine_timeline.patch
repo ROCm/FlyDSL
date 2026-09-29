@@ -1,0 +1,275 @@
+--- a/kernels/kimi_k3_monokernel/kda.py
++++ b/kernels/kimi_k3_monokernel/kda.py
+@@ -203,7 +203,7 @@
+                 dtype=torch.uint8,
+                 device=device,
+             )
+-            self.monokernel_timeline = torch.empty(10, dtype=torch.int64, device=device)
++            self.monokernel_timeline = torch.empty(256 * 128, dtype=torch.int64, device=device)
+             self.monokernel_launch = build_kimi_k3_monokernel(
+                 samples,
+                 npes,
+@@ -266,7 +266,7 @@
+             device=device,
+         )
+         if self.monokernel_timeline is None:
+-            self.monokernel_timeline = torch.empty(10, dtype=torch.int64, device=device)
++            self.monokernel_timeline = torch.empty(256 * 128, dtype=torch.int64, device=device)
+         self.monokernel_launch = build_kimi_k3_monokernel(
+             self.S,
+             self.npes,
+--- a/kernels/kimi_k3_monokernel/kernel.py
++++ b/kernels/kimi_k3_monokernel/kernel.py
+@@ -389,9 +389,14 @@
+         symmetric_base = fx.Int64(slot) * fx.Int64(slot_bytes)
+ 
+         def stamp(index):
+-            if const_expr(False):
++            if tid == 0:
+                 now = fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
+-                bo.buffer_store(now, rsrc(timeline), index, cache_modifier=CM_DEV)
++                bo.buffer_store(now, rsrc(timeline), bid * 128 + index, cache_modifier=CM_DEV)
++
++        def wave_mark(index):
++            if lane == 0:
++                now = fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
++                bo.buffer_store(now, rsrc(timeline), bid * 128 + index, cache_modifier=CM_DEV)
+ 
+         stamp(0)
+ 
+@@ -1689,7 +1694,7 @@
+                     )
+             return list(accumulator)
+ 
+-        def moe_peer_push(local_pairs, pair_base, local_values, region):
++        def moe_peer_reduce(local_pairs, pair_base, local_values, region, emit):
+             moe_max_pairs = samples * _HIDDEN // 2
+             moe_slot_bytes = npes * moe_max_pairs * 8
+             region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+@@ -1713,11 +1718,6 @@
+                             cache_modifier=CM_SYS,
+                         )
+             gpu.barrier()
+-
+-        def moe_peer_collect(local_pairs, pair_base, region, emit):
+-            moe_max_pairs = samples * _HIDDEN // 2
+-            moe_slot_bytes = npes * moe_max_pairs * 8
+-            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+             if tid < local_pairs:
+                 global_pair = pair_base + tid
+                 local_rsrc = rsrc(moe_symmetric + region_base)
+@@ -2956,7 +2956,9 @@
+                 route_in_sample = (up_task // paired_up_tiles) % _TOP_K
+                 first_row_group = (up_task % paired_up_tiles) * 2
+                 route = sample * _TOP_K + route_in_sample
++                stamp(16 + (up_task // _BLOCKS) * 4)
+                 expert = uniform(load_i32(selection_id_rsrc, route))
++                stamp(17 + (up_task // _BLOCKS) * 4)
+                 expert_weight_bytes = 2 * _INTER * (_ROUTED_HIDDEN // 2)
+                 expert_scale_bytes = 2 * _INTER * (_ROUTED_HIDDEN // 32)
+                 up_weight_rsrc = rsrc(packed_expert_up + fx.Int64(expert) * fx.Int64(expert_weight_bytes))
+@@ -2971,6 +2973,7 @@
+                 )
+                 gpu.barrier()
+ 
++                stamp(18 + (up_task // _BLOCKS) * 4)
+                 for paired_tile in range_constexpr(2):
+                     row_group = first_row_group + paired_tile
+                     accumulator = [fx.Float32(0.0) for _ in range(4)]
+@@ -3038,6 +3041,7 @@
+                             (sample * _TOP_K + route_in_sample) * up_tiles + row_group,
+                             1,
+                         )
++                stamp(19 + (up_task // _BLOCKS) * 4)
+                 up_task = up_task + _BLOCKS
+             stamp(6)
+ 
+@@ -3051,6 +3055,7 @@
+                 row_group = down_task % routed_tiles
+                 mid_pairs_per_route = _INTER // 2
+                 staged_pairs = _TOP_K * mid_pairs_per_route
++                stamp(32 + (down_task // _BLOCKS) * 4)
+                 stage_raw_vector(
+                     expert_mid_mailbox_rsrc,
+                     expert_mid_ready_rsrc,
+@@ -3061,6 +3066,7 @@
+                 )
+                 gpu.barrier()
+ 
++                stamp(33 + (down_task // _BLOCKS) * 4)
+                 accumulator = [fx.Float32(0.0) for _ in range(4)]
+                 for route_round in range_constexpr(_TOP_K // _WAVES):
+                     route_in_sample = wave + route_round * _WAVES
+@@ -3114,16 +3120,6 @@
+ 
+                 pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
+ 
+-                moe_peer_push(16 // 2, pair_base, output_values, 0)
+-                down_task = down_task + _BLOCKS
+-
+-            # All per-CTA down tiles are now in symmetric tagged mailboxes.
+-            down_task = bid
+-            while down_task < down_tasks:
+-                sample = down_task // routed_tiles
+-                row_group = down_task % routed_tiles
+-                pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
+-
+                 def emit_routed(local_pair, value_low, value_high):
+                     reduced_low = bf16_round(value_low)
+                     reduced_high = bf16_round(value_high)
+@@ -3139,7 +3135,8 @@
+                         reduced_low * reduced_low + reduced_high * reduced_high,
+                     )
+ 
+-                moe_peer_collect(16 // 2, pair_base, 0, emit_routed)
++                stamp(34 + (down_task // _BLOCKS) * 4)
++                moe_peer_reduce(16 // 2, pair_base, output_values, 0, emit_routed)
+                 square_part = (tid < 16 // 2).select(
+                     lds_load(output_values, fx.min(tid, 16 // 2 - 1)),
+                     fx.Float32(0.0),
+@@ -3152,6 +3149,7 @@
+                         sample * routed_tiles + row_group,
+                         square_sum,
+                     )
++                stamp(35 + (down_task // _BLOCKS) * 4)
+                 down_task = down_task + _BLOCKS
+             stamp(7)
+ 
+@@ -3159,6 +3157,7 @@
+             norm_owner_task = (bid + 11) % _BLOCKS
+             # tasks poll this inverse RMS while loading their latent input.
+             if norm_owner_task < samples:
++                stamp(48)
+                 square_part = fx.Float32(0.0)
+                 if tid < routed_tiles:
+                     square_part = load_f32(
+@@ -3172,6 +3171,7 @@
+                         norm_owner_task,
+                         rsq(total_square * (1.0 / _ROUTED_HIDDEN) + EPS),
+                     )
++                stamp(49)
+             stamp(8)
+ 
+             # Stage 8: shared-down and rank-local latent-up run together, then
+@@ -3182,6 +3182,7 @@
+             while tail_task < tail_tasks:
+                 sample_base = (tail_task // hidden_tiles) * staged_samples
+                 row_group = (tail_task % hidden_tiles + rank * (_HIDDEN_SHARD // 16) + hidden_tiles - 192) % hidden_tiles
++                stamp(64 + (tail_task // _BLOCKS) * 8)
+                 shared_pairs = _SHARED_INTER // 2
+                 accumulator = [fx.Float32(0.0) for _ in range(4)]
+                 if wave < 4:
+@@ -3196,10 +3197,14 @@
+                                 packed = load_pair(shared_mid_mailbox_rsrc, (sample_base + local_sample) * shared_pairs + pair)
+                                 lds_store(x, local_sample * shared_pairs + pair, packed.bitcast(fx.Float32))
+                     rocdl.s_waitcnt(lgkmcnt=0)
++                    if wave == 0:
++                        wave_mark(65 + (tail_task // _BLOCKS) * 8)
+                     accumulator = mxfp8_bf16_accumulate_samples(
+                         rsrc(packed_shared_down), rsrc(shared_down_scale),
+                         0, row_group, _SHARED_INTER, wave, 4, shared_pairs, staged_samples,
+                     )
++                    if wave == 0:
++                        wave_mark(66 + (tail_task // _BLOCKS) * 8)
+                 else:
+                     first_local_row = rank * _HIDDEN_SHARD
+                     global_row = row_group * 16
+@@ -3220,10 +3225,15 @@
+                                 lds_store(x, staged_samples * shared_pairs + local_sample * latent_pairs + pair,
+                                           bf16_pair(values[0] * inverse_rms * gains[0], values[1] * inverse_rms * gains[1]))
+                         rocdl.s_waitcnt(lgkmcnt=0)
++                        if wave == 4:
++                            wave_mark(67 + (tail_task // _BLOCKS) * 8)
+                         accumulator = mxfp8_bf16_accumulate_samples(
+                             rsrc(packed_latent_up), rsrc(latent_up_scale), staged_samples * shared_pairs,
+                             (global_row - first_local_row) // 16, _ROUTED_HIDDEN, split_wave, 4, latent_pairs, staged_samples,
+                         )
++
++                        if wave == 4:
++                            wave_mark(68 + (tail_task // _BLOCKS) * 8)
+ 
+                 fx.ptr_store(
+                     fx.Vector.from_elements(accumulator, fx.Float32),
+@@ -3255,10 +3265,12 @@
+                         bf16_pair(values[0], values[1]),
+                     )
+                 gpu.barrier()
++                stamp(69 + (tail_task // _BLOCKS) * 8)
+ 
+                 pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
+ 
+                 moe_peer_push_samples(staged_samples * (16 // 2), pair_base, output_values, 1)
++                stamp(70 + (tail_task // _BLOCKS) * 8)
+                 tail_task = tail_task + _BLOCKS
+ 
+             # The tagged symmetric mailboxes retain every partial, so LDS can
+@@ -3291,7 +3303,9 @@
+                         cache_modifier=CM_DEV,
+                     )
+ 
++                stamp(80 + (tail_task // _BLOCKS) * 2)
+                 moe_peer_collect_samples(staged_samples * (16 // 2), pair_base, 1, emit_final)
++                stamp(81 + (tail_task // _BLOCKS) * 2)
+                 tail_task = tail_task + _BLOCKS
+             stamp(9)
+ 
+--- a/kernels/kimi_k3_monokernel/tools/monokernel.py
++++ b/kernels/kimi_k3_monokernel/tools/monokernel.py
+@@ -228,7 +228,7 @@
+         "routed_pipeline": args.routed_pipeline,
+         "routed_tp_mode": args.routed_tp_mode if args.routed_pipeline else None,
+         "benchmark_scope": "moe" if args.moe_only_bench else "layer",
+-        "instrumented": bool(args.routed_soft_profile),
++        "instrumented": True,
+         "rank_equal": rank_equal,
+         "finite": bool(torch.isfinite(output).all()),
+     }
+@@ -481,7 +481,7 @@
+         and (layer.monokernel_timeline if args.attention_only else layer.attention.monokernel_timeline) is not None
+     ):
+         timeline = layer.monokernel_timeline if args.attention_only else layer.attention.monokernel_timeline
+-        labels = ["pre_and_input", "recurrence_wait", "output_projection"]
++        labels = ["pre_input_conv", "recurrence", "norm_wait_output_tp"]
+         if not args.attention_only:
+             labels += [
+                 "post_attn_res",
+@@ -493,16 +493,28 @@
+             ]
+         profile_graph = torch.cuda.CUDAGraph()
+         with torch.cuda.graph(profile_graph):
+-            run_layer(advance=False)
++            for epoch in range(args.layers):
++                run_layer(epoch_layer=epoch, advance=False)
+             layer.advance_step()
++        for _ in range(2):
++            profile_graph.replay()
++        torch.cuda.synchronize()
++        result["profile_graph_layers"] = args.layers
++        result["timeline_scope"] = "last layer in graph"
++        result["timeline_stride"] = 128
++        result["fine_marker_semantics"] = "producer markers follow store issue; consumer marks follow successful load; no added publication wait"
+         samples_by_stage = {label: [] for label in labels}
+         last_ticks = []
++        cta_timeline_runs = []
+         for _ in range(args.profile_repeats):
+             torch.cuda.synchronize()
+             dist.barrier()
++            timeline.fill_(-1)
+             profile_graph.replay()
+             torch.cuda.synchronize()
+-            last_ticks = timeline.cpu().tolist()[: len(labels) + 1]
++            flat_ticks = timeline.cpu().tolist()
++            cta_timeline_runs.append([flat_ticks[i * 128:(i + 1) * 128] for i in range(256)])
++            last_ticks = flat_ticks[: len(labels) + 1]
+             for index, label in enumerate(labels):
+                 samples_by_stage[label].append((last_ticks[index + 1] - last_ticks[index]) / 100.0)
+         local_runs = [
+@@ -522,6 +534,8 @@
+         result["stage_profile_us"] = critical_runs[len(critical_runs) // 2]
+         result["stage_profile_sum_us"] = sum(result["stage_profile_us"].values())
+         result["last_timeline_ticks"] = last_ticks
++        result["full_cta_timeline_runs"] = cta_timeline_runs
++        result["timeline_labels"] = labels
+ 
+     if args.bench:
+         for _ in range(2):

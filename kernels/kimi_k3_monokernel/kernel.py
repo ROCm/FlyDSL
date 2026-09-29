@@ -1752,7 +1752,7 @@ def build_kimi_k3_monokernel(
                 emit(tid, sum_low, sum_high)
             gpu.barrier()
 
-        def moe_peer_reduce_samples(local_pairs, pair_base, local_values, region, emit):
+        def moe_peer_push_samples(local_pairs, pair_base, local_values, region):
             moe_max_pairs = samples * _HIDDEN // 2
             moe_slot_bytes = npes * moe_max_pairs * 8
             region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
@@ -1776,6 +1776,11 @@ def build_kimi_k3_monokernel(
                             cache_modifier=CM_SYS,
                         )
             gpu.barrier()
+
+        def moe_peer_collect_samples(local_pairs, pair_base, region, emit):
+            moe_max_pairs = samples * _HIDDEN // 2
+            moe_slot_bytes = npes * moe_max_pairs * 8
+            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
             if tid < local_pairs:
                 global_pair = pair_base + (tid // 8) * (_HIDDEN // 2) + tid % 8
                 local_rsrc = rsrc(moe_symmetric + region_base)
@@ -3238,6 +3243,17 @@ def build_kimi_k3_monokernel(
 
                 pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
 
+                moe_peer_push_samples(staged_samples * (16 // 2), pair_base, output_values, 1)
+                tail_task = tail_task + _BLOCKS
+
+            # The tagged symmetric mailboxes retain every partial, so LDS can
+            # be reused for the next compute task before any peer is polled.
+            tail_task = bid
+            while tail_task < tail_tasks:
+                sample_base = (tail_task // hidden_tiles) * staged_samples
+                row_group = tail_task % hidden_tiles
+                pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
+
                 def emit_final(local_pair, value_low, value_high):
                     residual_word = fx.Int32(
                         bo.buffer_load(
@@ -3260,7 +3276,7 @@ def build_kimi_k3_monokernel(
                         cache_modifier=CM_DEV,
                     )
 
-                moe_peer_reduce_samples(staged_samples * (16 // 2), pair_base, output_values, 1, emit_final)
+                moe_peer_collect_samples(staged_samples * (16 // 2), pair_base, 1, emit_final)
                 tail_task = tail_task + _BLOCKS
             stamp(9)
 

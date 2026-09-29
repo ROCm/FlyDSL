@@ -1,0 +1,522 @@
+{
+  "patch_base": "tail_rotate192_downsplit_events",
+  "patch_base_kernel_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+  "independent_patches": true,
+  "sources": [
+    {
+      "name": "front_wave_pf7_recur_downsplit_events",
+      "original_source": "kimi_tail_async_20260929/front_wave_pf7_recur_downsplit_events",
+      "kernel_sha256": "f3a7ac4ab0f33f66cb85117f7cce3c49435ac20459b8c2f9db513d31adab12b4",
+      "source_tree_sha256": "a2f326fae21446ad34cc7d46ff6f00f0e7ebec66d7d91ce1e5e810f4d3d33e6e",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "f3a7ac4ab0f33f66cb85117f7cce3c49435ac20459b8c2f9db513d31adab12b4"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "f3a7ac4ab0f33f66cb85117f7cce3c49435ac20459b8c2f9db513d31adab12b4",
+          "binary_sha256": "1e710ba356d91c916599b15d8087d384e704cb0660bce8f7aa59015f7617df53",
+          "vgpr": 121,
+          "sgpr_spills": 36,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 125.38137286901474,
+          "min_us": 124.60387498140335,
+          "max_us": 131.5489411354065,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "f3a7ac4ab0f33f66cb85117f7cce3c49435ac20459b8c2f9db513d31adab12b4",
+          "file": "screen_front_wave_pf7_recur_downsplit_events_seed1234.json",
+          "reduction_vs_base_pct": 1.3610362212263971,
+          "reduction_vs_staged_pct": 2.6165532386164814,
+          "target_us": 115.87517112493515
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "front_wave_pf7_recur_events",
+      "original_source": "kimi_tail_async_20260929/front_wave_pf7_recur_events",
+      "kernel_sha256": "db1d734411302c65f83df0b674a1196f2bc9162ab1ec8f4b4d16c027ca7ba705",
+      "source_tree_sha256": "cc736f9129607bbf6f1baebc6bad9dd33dbeed07eaee73210ad7d10514ef2702",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "db1d734411302c65f83df0b674a1196f2bc9162ab1ec8f4b4d16c027ca7ba705"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "db1d734411302c65f83df0b674a1196f2bc9162ab1ec8f4b4d16c027ca7ba705",
+          "binary_sha256": "2a071edafd20281f64ef093c20beb6498f61765897088f7946a42f002d669509",
+          "vgpr": 121,
+          "sgpr_spills": 22,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 127.11140513420105,
+          "min_us": 126.46888196468353,
+          "max_us": 135.16150414943695,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "db1d734411302c65f83df0b674a1196f2bc9162ab1ec8f4b4d16c027ca7ba705",
+          "file": "screen_front_wave_pf7_recur_events_seed1234.json",
+          "reduction_vs_base_pct": 0.0,
+          "reduction_vs_staged_pct": 1.2728408422922444,
+          "target_us": 115.87517112493515
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "front_wave_pf7_recur_fine_timeline",
+      "original_source": "kimi_tail_async_20260929/front_wave_pf7_recur_fine_timeline",
+      "kernel_sha256": "e32b0b8243cc1e59d02fe6e28cc5acf2547a94ce94f3057c6c094865b2993c2d",
+      "source_tree_sha256": "096efff16bda24a9e54a041ba8358479d66949f07d2e0ee4e249c566a975e353",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kda.py",
+          "base_sha256": "c06e80e88f2ff3a5b229e30e7bd2dd14d0641fcd9749ad094eed77a890600856",
+          "target_sha256": "063025acb7d8ac50cef44840ebe54d2023da6085d7e8743924c8568e1e5d15f6"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "e32b0b8243cc1e59d02fe6e28cc5acf2547a94ce94f3057c6c094865b2993c2d"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "e8be18a21792cd93951b12cf1385c8e1e83ac37799a20aa3c87bad707e796a2a"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "e32b0b8243cc1e59d02fe6e28cc5acf2547a94ce94f3057c6c094865b2993c2d",
+          "binary_sha256": "88c085505a7d763b27994e971ea495f62880dcd19b50d8e80d86432366ab814d",
+          "vgpr": 122,
+          "sgpr_spills": 144,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "tail_rotate0_events",
+      "original_source": "kimi_tail_async_20260929/tail_rotate0_events",
+      "kernel_sha256": "cdbbad7634652b54565835c2456341c931659938372c90166286057a8eb376b6",
+      "source_tree_sha256": "ecbf63da2aa0a9e0df4ed8b12f17e353ccdece58968be2ebf71737eecaa035e9",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "cdbbad7634652b54565835c2456341c931659938372c90166286057a8eb376b6"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "cdbbad7634652b54565835c2456341c931659938372c90166286057a8eb376b6",
+          "binary_sha256": "72059c45ccd5c8f8c5743d1349923378421f712434bca625a5cec5659824b6c4",
+          "vgpr": 121,
+          "sgpr_spills": 55,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 123.92381206154823,
+          "min_us": 123.01380932331085,
+          "max_us": 131.17893040180206,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "cdbbad7634652b54565835c2456341c931659938372c90166286057a8eb376b6",
+          "file": "screen_tail_rotate0_events_seed1234.json",
+          "reduction_vs_base_pct": 2.5077160222463424,
+          "reduction_vs_staged_pct": 3.7486376307987235,
+          "target_us": 115.87517112493515
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "tail_rotate192_downsplit_fine_timeline",
+      "original_source": "kimi_tail_async_20260929/tail_rotate192_downsplit_fine_timeline",
+      "kernel_sha256": "6b149a35fb5fe1ab7bdafeb1f07c984dd7a3f845747d67668f809192437c92cb",
+      "source_tree_sha256": "01664aece383c113f21d55251dad9bf485e36a9832fc6d2b0a05a2129062e0eb",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kda.py",
+          "base_sha256": "c06e80e88f2ff3a5b229e30e7bd2dd14d0641fcd9749ad094eed77a890600856",
+          "target_sha256": "063025acb7d8ac50cef44840ebe54d2023da6085d7e8743924c8568e1e5d15f6"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "6b149a35fb5fe1ab7bdafeb1f07c984dd7a3f845747d67668f809192437c92cb"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "e8be18a21792cd93951b12cf1385c8e1e83ac37799a20aa3c87bad707e796a2a"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "6b149a35fb5fe1ab7bdafeb1f07c984dd7a3f845747d67668f809192437c92cb",
+          "binary_sha256": "5a5272111771f40a95fdcfb13d6fc9e383b0fbea0e5497e0d95969d53c945a1e",
+          "vgpr": 122,
+          "sgpr_spills": 112,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": false
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "tail_rotate192_events",
+      "original_source": "kimi_tail_async_20260929/tail_rotate192_events",
+      "kernel_sha256": "e63dd27bd3b7f995be69d1b6a71405bb56af7d893877a00c3a08914c6db36762",
+      "source_tree_sha256": "fa30a7fcd99e80d09284ed00b11fae6d2bfcb5434e37ad7d1c2cf74cdf9252c0",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "e63dd27bd3b7f995be69d1b6a71405bb56af7d893877a00c3a08914c6db36762"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "e63dd27bd3b7f995be69d1b6a71405bb56af7d893877a00c3a08914c6db36762",
+          "binary_sha256": "6eaa12e327de30dcb00910788e3624ec714d46afca0c3ff653731b1f7d2b1851",
+          "vgpr": 121,
+          "sgpr_spills": 55,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 120.90884521603584,
+          "min_us": 120.28631567955017,
+          "max_us": 125.66886842250824,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "e63dd27bd3b7f995be69d1b6a71405bb56af7d893877a00c3a08914c6db36762",
+          "file": "screen_tail_rotate192_events_seed1234.json",
+          "reduction_vs_base_pct": 4.879625012103905,
+          "reduction_vs_staged_pct": 6.090355994291386,
+          "target_us": 115.87517112493515
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "tail_rotate192_fine_timeline",
+      "original_source": "kimi_tail_async_20260929/tail_rotate192_fine_timeline",
+      "kernel_sha256": "ed682b914a070cfd937033f751714ded1df1b16ab9988a927f8301e7ff8b9e64",
+      "source_tree_sha256": "cdf3a3c48e8d6a295770b2b3cbbac6d2a3417d5319b03ac032737c81bacd1aea",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kda.py",
+          "base_sha256": "c06e80e88f2ff3a5b229e30e7bd2dd14d0641fcd9749ad094eed77a890600856",
+          "target_sha256": "063025acb7d8ac50cef44840ebe54d2023da6085d7e8743924c8568e1e5d15f6"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "ed682b914a070cfd937033f751714ded1df1b16ab9988a927f8301e7ff8b9e64"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "e8be18a21792cd93951b12cf1385c8e1e83ac37799a20aa3c87bad707e796a2a"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "ed682b914a070cfd937033f751714ded1df1b16ab9988a927f8301e7ff8b9e64",
+          "binary_sha256": "eaa102dc54a546fd83cae59f7d7008e179d4019c61338a15a0b35f6fb3ea3340",
+          "vgpr": 122,
+          "sgpr_spills": 81,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "tail_split_events",
+      "original_source": "kimi_tail_async_20260929/tail_split_events",
+      "kernel_sha256": "f703ff29a4e630a57a346c592f6d13fa261a983bfa1fc7f78adbda53816c90b3",
+      "source_tree_sha256": "86821d6eb50e14b239d9b84f1af8a51f5027bdca46bd9a14b44ac0194a44dd14",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "f703ff29a4e630a57a346c592f6d13fa261a983bfa1fc7f78adbda53816c90b3"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "f703ff29a4e630a57a346c592f6d13fa261a983bfa1fc7f78adbda53816c90b3",
+          "binary_sha256": "8e5e74a1f914c83fce0d2620d8feba434be9f365ce825c6b5c3ceef47b7b01d8",
+          "vgpr": 121,
+          "sgpr_spills": 52,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 122.49146774411201,
+          "min_us": 121.77637219429016,
+          "max_us": 131.02643191814423,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "f703ff29a4e630a57a346c592f6d13fa261a983bfa1fc7f78adbda53816c90b3",
+          "file": "screen_tail_split_events_seed1234.json",
+          "reduction_vs_base_pct": 3.6345577214030644,
+          "reduction_vs_staged_pct": 4.861136428580604,
+          "target_us": 115.87517112493515
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    }
+  ]
+}

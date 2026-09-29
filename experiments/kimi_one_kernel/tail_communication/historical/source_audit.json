@@ -1,0 +1,74 @@
+[
+  {
+    "variant": "tail_split_events",
+    "parent": "front_wave_pf7_recur_events",
+    "source_sha256": "f703ff29a4e630a57a346c592f6d13fa261a983bfa1fc7f78adbda53816c90b3",
+    "rotation": null,
+    "coverage_samples": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "all_tasks_unique": true,
+    "tp8_s4_dag": {
+      "nodes": 31104,
+      "edges": 64276,
+      "acyclic": true
+    },
+    "mailbox_layout_unchanged": true,
+    "no_new_scratch": true,
+    "packed_value_tag_sends_and_barriers_unchanged": true,
+    "arithmetic_and_bf16_boundaries_unchanged": true,
+    "peer_addition_order_unchanged": true,
+    "caveat": "DAG starts after unchanged prefix and assumes resident fair execution; actual HIP occupancy and replay required."
+  },
+  {
+    "variant": "tail_rotate0_events",
+    "parent": "front_wave_pf7_recur_events",
+    "source_sha256": "cdbbad7634652b54565835c2456341c931659938372c90166286057a8eb376b6",
+    "rotation": 0,
+    "coverage_samples": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "all_tasks_unique": true,
+    "tp8_s4_dag": {
+      "nodes": 31104,
+      "edges": 64280,
+      "acyclic": true
+    },
+    "mailbox_layout_unchanged": true,
+    "no_new_scratch": true,
+    "packed_value_tag_sends_and_barriers_unchanged": true,
+    "arithmetic_and_bf16_boundaries_unchanged": true,
+    "peer_addition_order_unchanged": true,
+    "caveat": "DAG starts after unchanged prefix and assumes resident fair execution; actual HIP occupancy and replay required."
+  },
+  {
+    "variant": "tail_rotate192_events",
+    "parent": "front_wave_pf7_recur_events",
+    "source_sha256": "e63dd27bd3b7f995be69d1b6a71405bb56af7d893877a00c3a08914c6db36762",
+    "rotation": 192,
+    "coverage_samples": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "all_tasks_unique": true,
+    "tp8_s4_dag": {
+      "nodes": 31104,
+      "edges": 64256,
+      "acyclic": true
+    },
+    "mailbox_layout_unchanged": true,
+    "no_new_scratch": true,
+    "packed_value_tag_sends_and_barriers_unchanged": true,
+    "arithmetic_and_bf16_boundaries_unchanged": true,
+    "peer_addition_order_unchanged": true,
+    "caveat": "DAG starts after unchanged prefix and assumes resident fair execution; actual HIP occupancy and replay required."
+  }
+]
