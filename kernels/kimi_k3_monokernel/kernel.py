@@ -270,7 +270,7 @@ def build_kimi_k3_monokernel(
         attn_values: fx.Array[fx.Float32, 16, 16]
 
     @flyc.kernel(known_block_size=[_THREADS, 1, 1])
-    def kimi_k3_monokernel(
+    def kimi_k3_mtp_relocate(
         hidden_states: Int64,
         output: Int64,
         block_residual: Int64,
@@ -1439,6 +1439,63 @@ def build_kimi_k3_monokernel(
                     )
             return list(accumulator)
 
+        def mxfp8_bf16_accumulate_samples(
+            weight_rsrc,
+            scale_rsrc,
+            activation_word_base,
+            row_tile,
+            k_dim,
+            split_wave,
+            split_waves,
+            sample_stride,
+            sample_count,
+        ):
+            input_sample = fx.min(lane % 16, sample_count - 1)
+            k_chunks = k_dim // 64
+            chunks_per_wave = k_chunks // split_waves
+            accumulator = fx.Vector.filled(4, 0.0, fx.Float32)
+            for local_chunk in range_constexpr(chunks_per_wave):
+                chunk = split_wave * chunks_per_wave + local_chunk
+                for step_index in range_constexpr(2):
+                    atom_group = step_index * 2 + (lane // 16) // 2
+                    weight = fx.Vector(
+                        bo.buffer_load(
+                            weight_rsrc,
+                            (((row_tile * k_chunks + chunk) * 4 + atom_group) * 16 + lane % 16) * 4
+                            + ((lane // 16) % 2) * 2,
+                            vec_width=2,
+                            dtype=T.i32,
+                        )
+                    )
+                    scale_group = chunk * 2 + step_index
+                    scale_word = fx.Int32(
+                        bo.buffer_load(
+                            scale_rsrc,
+                            (
+                                ((row_tile // 2) * (k_dim // 256) + scale_group // 8) * 64
+                                + (scale_group % 4) * 16
+                                + lane % 16
+                            ),
+                            vec_width=1,
+                            dtype=T.i32,
+                        )
+                    )
+                    scale_byte_index = ((scale_group % 8) // 4) * 2 + row_tile % 2
+                    scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & fx.Int32(0xFF)
+                    scale = (scale_byte << fx.Int32(23)).bitcast(fx.Float32)
+                    lhs = mxfp8_to_bf16x8(weight[0], weight[1], scale)
+                    rhs = fx.ptr_load(
+                        x + activation_word_base + input_sample * sample_stride + (chunk * 64) // 2 + (lane // 16) * 4 + step_index * 16,
+                        result_type=fx.Vector.make_type(4, fx.Float32),
+                    ).bitcast(fx.BFloat16)
+                    accumulator = fx.Vector(
+                        rocdl.mfma_f32_16x16x32_bf16(
+                            T.vec(4, T.f32),
+                            [lhs, rhs, accumulator],
+                        )
+                    )
+            return list(accumulator)
+
         def moe_peer_reduce(local_pairs, pair_base, local_values, region, emit):
             moe_max_pairs = samples * _HIDDEN // 2
             moe_slot_bytes = npes * moe_max_pairs * 8
@@ -1465,6 +1522,69 @@ def build_kimi_k3_monokernel(
             gpu.barrier()
             if tid < local_pairs:
                 global_pair = pair_base + tid
+                local_rsrc = rsrc(moe_symmetric + region_base)
+
+                def load_peers():
+                    words = []
+                    for source_rank in range_constexpr(npes):
+                        mailbox = source_rank * moe_max_pairs + global_pair
+                        value_tag = fx.Vector(
+                            bo.buffer_load(
+                                local_rsrc,
+                                mailbox * 2,
+                                vec_width=2,
+                                dtype=T.i32,
+                                cache_modifier=CM_DEV,
+                            )
+                        )
+                        words += [value_tag[0], value_tag[1]]
+                    return fx.Vector.from_elements(words, fx.Int32)
+
+                peer_values = load_peers()
+                pending = peer_values[1] != tag
+                for source_rank in range_constexpr(1, npes):
+                    pending = pending | (peer_values[source_rank * 2 + 1] != tag)
+                while pending:
+                    rocdl.s_nop(0)
+                    peer_values = load_peers()
+                    pending = peer_values[1] != tag
+                    for source_rank in range_constexpr(1, npes):
+                        pending = pending | (peer_values[source_rank * 2 + 1] != tag)
+                sum_low = fx.Float32(0.0)
+                sum_high = fx.Float32(0.0)
+                for source_rank in range_constexpr(npes):
+                    packed = peer_values[source_rank * 2]
+                    sum_low = sum_low + (packed << 16).bitcast(fx.Float32)
+                    sum_high = sum_high + (packed & fx.Int32(-65536)).bitcast(fx.Float32)
+                emit(tid, sum_low, sum_high)
+            gpu.barrier()
+
+        def moe_peer_reduce_samples(local_pairs, pair_base, local_values, region, emit):
+            moe_max_pairs = samples * _HIDDEN // 2
+            moe_slot_bytes = npes * moe_max_pairs * 8
+            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+            peer_rounds = (npes + _WAVES - 1) // _WAVES
+            for peer_round in range_constexpr(peer_rounds):
+                peer = wave + peer_round * _WAVES
+                if peer < npes:
+                    peer_words = fx.Vector(bo.buffer_load(rsrc(moe_peers), peer * 2, vec_width=2, dtype=T.i32))
+                    peer_address = (fx.Int64(uniform(peer_words[1])) << 32) | fx.Int64(
+                        fx.Uint32(uniform(peer_words[0]))
+                    )
+                    peer_rsrc = rsrc(peer_address + region_base)
+                    if lane < local_pairs:
+                        global_pair = pair_base + (lane // 8) * (_HIDDEN // 2) + lane % 8
+                        packed = lds_load(local_values, lane).bitcast(fx.Int32)
+                        mailbox = rank * moe_max_pairs + global_pair
+                        bo.buffer_store(
+                            fx.Vector.from_elements([packed, tag], fx.Int32),
+                            peer_rsrc,
+                            mailbox * 2,
+                            cache_modifier=CM_SYS,
+                        )
+            gpu.barrier()
+            if tid < local_pairs:
+                global_pair = pair_base + (tid // 8) * (_HIDDEN // 2) + tid % 8
                 local_rsrc = rsrc(moe_symmetric + region_base)
 
                 def load_peers():
@@ -2173,7 +2293,7 @@ def build_kimi_k3_monokernel(
                         1,
                     )
 
-            mtp_recurrence_task = bid
+            mtp_recurrence_task = (bid + 128) % _BLOCKS
             mtp_recurrence_tasks = samples * _HEADS * mtp_splits
             if mtp_recurrence_task < mtp_recurrence_tasks:
                 sample = mtp_recurrence_task // (_HEADS * mtp_splits)
@@ -2833,74 +2953,52 @@ def build_kimi_k3_monokernel(
             # Stage 8: shared-down and rank-local latent-up run together, then
             # the final TP reduction adds the post-AttnRes residual in place.
             hidden_tiles = _HIDDEN // 16
-            tail_tasks = samples * hidden_tiles
+            tail_tasks = sample_groups * hidden_tiles
             tail_task = bid
             while tail_task < tail_tasks:
-                sample = tail_task // hidden_tiles
+                sample_base = (tail_task // hidden_tiles) * staged_samples
                 row_group = tail_task % hidden_tiles
-                inverse_rms = uniform_f32(load_f32(routed_inv_rsrc, sample))
-
                 shared_pairs = _SHARED_INTER // 2
-                for load_round in range_constexpr((shared_pairs + _THREADS - 1) // _THREADS):
-                    pair = tid + load_round * _THREADS
-                    if pair < shared_pairs:
-                        packed = load_pair(
-                            shared_mid_mailbox_rsrc,
-                            sample * shared_pairs + pair,
-                        )
-                        lds_store(x, pair, packed.bitcast(fx.Float32))
-
-                latent_pairs = _ROUTED_HIDDEN // 2
-                gain_rsrc = rsrc(latent_gain)
-                for load_round in range_constexpr((latent_pairs + _THREADS - 1) // _THREADS):
-                    pair = tid + load_round * _THREADS
-                    if pair < latent_pairs:
-                        packed = load_raw_pair(
-                            routed_mailbox_rsrc,
-                            sample * latent_pairs + pair,
-                        )
-                        values = fx.Vector.from_elements([packed], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
-                        gain_word = fx.Int32(bo.buffer_load(gain_rsrc, pair, vec_width=1, dtype=T.i32))
-                        gains = fx.Vector.from_elements([gain_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
-                        lds_store(
-                            x,
-                            shared_pairs + pair,
-                            bf16_pair(
-                                values[0] * inverse_rms * gains[0],
-                                values[1] * inverse_rms * gains[1],
-                            ),
-                        )
-                gpu.barrier()
-
                 accumulator = [fx.Float32(0.0) for _ in range(4)]
                 if wave < 4:
-                    accumulator = mxfp8_bf16_accumulate(
-                        rsrc(packed_shared_down),
-                        rsrc(shared_down_scale),
-                        0,
-                        row_group,
-                        _SHARED_INTER,
-                        wave,
-                        4,
+                    # Each wave reads only the K slice that it writes. No CTA barrier is
+                    # needed before this wave's MFMA; the final reduction joins all waves.
+                    shared_pairs_per_wave = shared_pairs // 4
+                    for local_sample in range_constexpr(staged_samples):
+                        for load_round in range_constexpr((shared_pairs_per_wave + _WAVE_SIZE - 1) // _WAVE_SIZE):
+                            local_pair = lane + load_round * _WAVE_SIZE
+                            if local_pair < shared_pairs_per_wave:
+                                pair = wave * shared_pairs_per_wave + local_pair
+                                packed = load_pair(shared_mid_mailbox_rsrc, (sample_base + local_sample) * shared_pairs + pair)
+                                lds_store(x, local_sample * shared_pairs + pair, packed.bitcast(fx.Float32))
+                    rocdl.s_waitcnt(lgkmcnt=0)
+                    accumulator = mxfp8_bf16_accumulate_samples(
+                        rsrc(packed_shared_down), rsrc(shared_down_scale),
+                        0, row_group, _SHARED_INTER, wave, 4, shared_pairs, staged_samples,
                     )
                 else:
                     first_local_row = rank * _HIDDEN_SHARD
                     global_row = row_group * 16
                     latent_live = (global_row >= first_local_row) & (global_row < first_local_row + _HIDDEN_SHARD)
-                    local_row_group = fx.max(
-                        fx.Int32(0),
-                        (global_row - first_local_row) // 16,
-                    )
-                    split_wave = wave - 4
                     if latent_live:
-                        accumulator = mxfp8_bf16_accumulate(
-                            rsrc(packed_latent_up),
-                            rsrc(latent_up_scale),
-                            shared_pairs,
-                            local_row_group,
-                            _ROUTED_HIDDEN,
-                            split_wave,
-                            4,
+                        for local_sample in range_constexpr(staged_samples):
+                            inverse_rms = uniform_f32(load_f32(routed_inv_rsrc, sample_base + local_sample))
+                            latent_pairs = _ROUTED_HIDDEN // 2
+                            latent_pairs_per_wave = latent_pairs // 4
+                            split_wave = wave - 4
+                            gain_rsrc = rsrc(latent_gain)
+                            for load_round in range_constexpr(latent_pairs_per_wave // _WAVE_SIZE):
+                                pair = split_wave * latent_pairs_per_wave + lane + load_round * _WAVE_SIZE
+                                packed = load_raw_pair(routed_mailbox_rsrc, (sample_base + local_sample) * latent_pairs + pair)
+                                values = fx.Vector.from_elements([packed], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+                                gain_word = fx.Int32(bo.buffer_load(gain_rsrc, pair, vec_width=1, dtype=T.i32))
+                                gains = fx.Vector.from_elements([gain_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+                                lds_store(x, staged_samples * shared_pairs + local_sample * latent_pairs + pair,
+                                          bf16_pair(values[0] * inverse_rms * gains[0], values[1] * inverse_rms * gains[1]))
+                        rocdl.s_waitcnt(lgkmcnt=0)
+                        accumulator = mxfp8_bf16_accumulate_samples(
+                            rsrc(packed_latent_up), rsrc(latent_up_scale), staged_samples * shared_pairs,
+                            (global_row - first_local_row) // 16, _ROUTED_HIDDEN, split_wave, 4, latent_pairs, staged_samples,
                         )
 
                 fx.ptr_store(
@@ -2909,12 +3007,13 @@ def build_kimi_k3_monokernel(
                 )
                 gpu.barrier()
                 latent_live = (row_group * 16 >= rank * _HIDDEN_SHARD) & (row_group * 16 < (rank + 1) * _HIDDEN_SHARD)
-                if tid < 16 // 2:
-                    local_row = tid * 2
+                if tid < staged_samples * (16 // 2):
+                    local_sample = tid // (16 // 2)
+                    local_row = (tid % (16 // 2)) * 2
                     values = []
                     for pair_element in range_constexpr(2):
                         row = local_row + pair_element
-                        source_lane = 16 * (row // 4)
+                        source_lane = 16 * (row // 4) + local_sample
                         shared_result = fx.Float32(0.0)
                         latent_value = fx.Float32(0.0)
                         for source_wave in range_constexpr(4):
@@ -2933,13 +3032,13 @@ def build_kimi_k3_monokernel(
                     )
                 gpu.barrier()
 
-                pair_base = sample * (_HIDDEN // 2) + row_group * (16 // 2)
+                pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
 
                 def emit_final(local_pair, value_low, value_high):
                     residual_word = fx.Int32(
                         bo.buffer_load(
                             rsrc(updated_prefix),
-                            pair_base + local_pair,
+                            pair_base + (local_pair // 8) * (_HIDDEN // 2) + local_pair % 8,
                             vec_width=1,
                             dtype=T.i32,
                         )
@@ -2953,11 +3052,11 @@ def build_kimi_k3_monokernel(
                     bo.buffer_store(
                         final_word,
                         rsrc(final_output),
-                        pair_base + local_pair,
+                        pair_base + (local_pair // 8) * (_HIDDEN // 2) + local_pair % 8,
                         cache_modifier=CM_DEV,
                     )
 
-                moe_peer_reduce(16 // 2, pair_base, output_values, 1, emit_final)
+                moe_peer_reduce_samples(staged_samples * (16 // 2), pair_base, output_values, 1, emit_final)
                 tail_task = tail_task + _BLOCKS
             stamp(9)
 
@@ -3016,7 +3115,7 @@ def build_kimi_k3_monokernel(
         layer: Int32,
         stream: Stream = Stream(None),
     ):
-        kimi_k3_monokernel(
+        kimi_k3_mtp_relocate(
             hidden_states,
             output,
             block_residual,

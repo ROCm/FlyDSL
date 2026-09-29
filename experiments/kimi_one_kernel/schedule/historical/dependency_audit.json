@@ -1,0 +1,224 @@
+{
+  "variants": [
+    {
+      "variant": [
+        "tail",
+        7,
+        3,
+        439
+      ],
+      "group": 1,
+      "tasks": {
+        "input": 1600,
+        "conv": 384,
+        "recurrence": 768,
+        "output": 3584,
+        "projection": 5216,
+        "up": 12288,
+        "down": 7168,
+        "tail": 14336,
+        "post": 128,
+        "shared_mid": 32,
+        "select": 32,
+        "routed_norm": 32
+      },
+      "nodes": 76176,
+      "edges": 239872,
+      "acyclic": true,
+      "token0_final_requires_kda_tokens": [
+        0
+      ],
+      "source_sha256": "fac0d305c662148f9c20b3e7cfabee5007cc9406fdf169b7f59a122165e72877"
+    },
+    {
+      "variant": [
+        "tail",
+        7,
+        3,
+        431
+      ],
+      "group": 2,
+      "tasks": {
+        "input": 1600,
+        "conv": 384,
+        "recurrence": 768,
+        "output": 3584,
+        "projection": 5216,
+        "up": 12288,
+        "down": 7168,
+        "routed_norm": 32,
+        "tail": 14336,
+        "post": 128,
+        "shared_mid": 32,
+        "select": 32
+      },
+      "nodes": 69744,
+      "edges": 230080,
+      "acyclic": true,
+      "token0_final_requires_kda_tokens": [
+        0,
+        1
+      ],
+      "source_sha256": "68e1b1a89d41128197473c3443761fc5ce769ade971fd559bd4b15d48f78743e"
+    },
+    {
+      "variant": [
+        "tail",
+        7,
+        3,
+        415
+      ],
+      "group": 4,
+      "tasks": {
+        "input": 1600,
+        "conv": 384,
+        "recurrence": 768,
+        "output": 3584,
+        "projection": 5216,
+        "up": 12288,
+        "down": 7168,
+        "routed_norm": 32,
+        "tail": 14336,
+        "post": 128,
+        "shared_mid": 32,
+        "select": 32
+      },
+      "nodes": 66528,
+      "edges": 225184,
+      "acyclic": true,
+      "token0_final_requires_kda_tokens": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "source_sha256": "a4a535802fbfba7a98c8882a207ca78856e51a2bd028ba40b85f94fe6bf1ce6d"
+    },
+    {
+      "variant": [
+        "tail",
+        7,
+        3,
+        439
+      ],
+      "group": 1,
+      "tasks": {
+        "input": 1600,
+        "conv": 384,
+        "recurrence": 768,
+        "output": 3584,
+        "projection": 5216,
+        "up": 12288,
+        "down": 7168,
+        "tail": 14336,
+        "post": 128,
+        "shared_mid": 32,
+        "select": 32,
+        "routed_norm": 32
+      },
+      "nodes": 76176,
+      "edges": 239872,
+      "acyclic": true,
+      "token0_final_requires_kda_tokens": [
+        0
+      ],
+      "source_sha256": "320a2d4f3c1cea97c25202369cb14b83c076f07e09b438fd3c9530da7085f5e8"
+    },
+    {
+      "variant": [
+        "tail",
+        7,
+        3,
+        431
+      ],
+      "group": 2,
+      "tasks": {
+        "input": 1600,
+        "conv": 384,
+        "recurrence": 768,
+        "output": 3584,
+        "projection": 5216,
+        "up": 12288,
+        "down": 7168,
+        "routed_norm": 32,
+        "tail": 14336,
+        "post": 128,
+        "shared_mid": 32,
+        "select": 32
+      },
+      "nodes": 69744,
+      "edges": 230080,
+      "acyclic": true,
+      "token0_final_requires_kda_tokens": [
+        0,
+        1
+      ],
+      "source_sha256": "2589c3a2ebd028d969aedd9430e4fe1d8b10558a4392bd9440e315d55141030f"
+    },
+    {
+      "variant": [
+        "tail",
+        7,
+        3,
+        439
+      ],
+      "group": 1,
+      "tasks": {
+        "input": 1600,
+        "conv": 384,
+        "recurrence": 768,
+        "output": 3584,
+        "projection": 5216,
+        "up": 12288,
+        "down": 7168,
+        "tail": 14336,
+        "post": 128,
+        "shared_mid": 32,
+        "select": 32,
+        "routed_norm": 32
+      },
+      "nodes": 76176,
+      "edges": 239872,
+      "acyclic": true,
+      "token0_final_requires_kda_tokens": [
+        0
+      ],
+      "source_sha256": "191437c5a60edc56fc1a94e4f40bd809196b232d3c3c6ca565acdd4fca0ecd50"
+    },
+    {
+      "variant": [
+        "tail",
+        7,
+        3,
+        439
+      ],
+      "group": 1,
+      "tasks": {
+        "input": 1600,
+        "conv": 384,
+        "recurrence": 768,
+        "output": 3584,
+        "projection": 5216,
+        "up": 12288,
+        "down": 7168,
+        "tail": 14336,
+        "post": 128,
+        "shared_mid": 32,
+        "select": 32,
+        "routed_norm": 32
+      },
+      "nodes": 76176,
+      "edges": 239872,
+      "acyclic": true,
+      "token0_final_requires_kda_tokens": [
+        0
+      ],
+      "source_sha256": "88e7682bf9906501586741b51038aa76f35250bb76bdde317eac32421934b711"
+    }
+  ],
+  "scope": "S4 MTP full MonoKernel TP8; conservative static schedule model",
+  "limitations": [
+    "Not a proof of compiler lowering or GPU memory ordering",
+    "No GPU correctness/performance measured by this audit"
+  ]
+}

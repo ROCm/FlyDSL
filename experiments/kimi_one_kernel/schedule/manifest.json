@@ -1,0 +1,447 @@
+{
+  "patch_base": "tail_rotate192_downsplit_events",
+  "patch_base_kernel_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+  "independent_patches": true,
+  "sources": [
+    {
+      "name": "full_relocate_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_relocate_events",
+      "kernel_sha256": "17f3c66479d4eec4ce4a7bd1921786ae8899cb3063700aab9e97912692693aa9",
+      "source_tree_sha256": "bba5a3850352899d50e446083d508abbb25c51b07904cb3468ec51df1a78e062",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "17f3c66479d4eec4ce4a7bd1921786ae8899cb3063700aab9e97912692693aa9"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_relocate_sd_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_relocate_sd_events",
+      "kernel_sha256": "5d70cc9535d6527e0f72b926f70ef94ac455d55762595a4751ca9d86c516a887",
+      "source_tree_sha256": "b48744c10b772aac33785483a5130e95d6dc01f836e4143e7757ba2d542930f2",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "5d70cc9535d6527e0f72b926f70ef94ac455d55762595a4751ca9d86c516a887"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_relocate_sd_pf_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_relocate_sd_pf_events",
+      "kernel_sha256": "674b6af7645731714d49c5009f78b910a248aec0431f68d6e56f8907541cddbf",
+      "source_tree_sha256": "96d15ad0d35937e957956aa9b76978b1f9876bdf4379b1b3baa8e4a2ee647fe8",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "674b6af7645731714d49c5009f78b910a248aec0431f68d6e56f8907541cddbf"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_relocate_wave_tail4_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_relocate_wave_tail4_events",
+      "kernel_sha256": "29342a5e382d9f9c91f92684491d86384d89a817eb69ab607a9fa4105076585a",
+      "source_tree_sha256": "480e8ceba266a61abe0be20574a9074c950d2842aa9497c69930241ddf516e4f",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "29342a5e382d9f9c91f92684491d86384d89a817eb69ab607a9fa4105076585a"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_relocate_wave_tail_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_relocate_wave_tail_events",
+      "kernel_sha256": "f0fca7a6d81b3ef7f0fbc78bcf551e4579f1bc4941f87f8af3451b8e33a3ac19",
+      "source_tree_sha256": "fe43600fca1a1ce262ce501171ec4770015973c5e8d12b19fcbbb031bfeff903",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "f0fca7a6d81b3ef7f0fbc78bcf551e4579f1bc4941f87f8af3451b8e33a3ac19"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1",
+      "kernel_sha256": "fac0d305c662148f9c20b3e7cfabee5007cc9406fdf169b7f59a122165e72877",
+      "source_tree_sha256": "d267a4e1714ff8e51f816f9486fe746282aba2ecfa8243ee8970fe6a52406efe",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "fac0d305c662148f9c20b3e7cfabee5007cc9406fdf169b7f59a122165e72877"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1_const_events",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1_const_events",
+      "kernel_sha256": "30d33b528543b80add6ca93c17ad0f34d3ade7a1c27d13835dc4c440d609a3cd",
+      "source_tree_sha256": "c0ac8de888f1dfe58ef970c640b723c879946807584cd0b3d59fffc87645f7dc",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "30d33b528543b80add6ca93c17ad0f34d3ade7a1c27d13835dc4c440d609a3cd"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1_events",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1_events",
+      "kernel_sha256": "4bd9636be6d7ba90d9ff7bde7a1ca052da09fb4fe748e0f2ded9a04d69d13e17",
+      "source_tree_sha256": "51dd28797cb2dedf1b537db7b4de54242853bb354880009aefaf5943a2685f2b",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "4bd9636be6d7ba90d9ff7bde7a1ca052da09fb4fe748e0f2ded9a04d69d13e17"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1_scoped",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1_scoped",
+      "kernel_sha256": "320a2d4f3c1cea97c25202369cb14b83c076f07e09b438fd3c9530da7085f5e8",
+      "source_tree_sha256": "21171a78943f58d4bdab7f9431705b150589b056073eb1afdf57f66e555ef0dd",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "320a2d4f3c1cea97c25202369cb14b83c076f07e09b438fd3c9530da7085f5e8"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1_scoped_events",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1_scoped_events",
+      "kernel_sha256": "8ac68b24d3924a1144d3dc3ca0335ac680f75dffe1d706fab71961352ae209a4",
+      "source_tree_sha256": "cfedb5dd43451db0944d4b7d53e33b67a01ad2aa25653f787d489f51e9d628ae",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "8ac68b24d3924a1144d3dc3ca0335ac680f75dffe1d706fab71961352ae209a4"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1_sd",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1_sd",
+      "kernel_sha256": "421f96d45eb89753170eabc5cef07dc7f77b646f2070bd290834141390b1d8d9",
+      "source_tree_sha256": "50bab7af48016e778526f9559aa1fcfea5325818ce5112c92fbe354c421ba1ad",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "421f96d45eb89753170eabc5cef07dc7f77b646f2070bd290834141390b1d8d9"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1_sd_pf",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1_sd_pf",
+      "kernel_sha256": "5b3f6cfaade17d283d2618dfd7e85e172a0de2e3b9027e7ae4e609ac8f053b0d",
+      "source_tree_sha256": "55c80c634bb969ce701d0b1e657e6cf86ad54818a15a2257d0198fd75e83a78d",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "5b3f6cfaade17d283d2618dfd7e85e172a0de2e3b9027e7ae4e609ac8f053b0d"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1_sd_pf_scoped",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1_sd_pf_scoped",
+      "kernel_sha256": "88e7682bf9906501586741b51038aa76f35250bb76bdde317eac32421934b711",
+      "source_tree_sha256": "91cfe0612cd11cd7f7199e855e6e64f72bf4f51f064b17ee1fba262cf9b45ba4",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "88e7682bf9906501586741b51038aa76f35250bb76bdde317eac32421934b711"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1_sd_pf_scoped_events",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1_sd_pf_scoped_events",
+      "kernel_sha256": "9010859e8662ce54548c2a3ef4625e6c9534d1f58c11906ff0b856a87de675d7",
+      "source_tree_sha256": "542b318fc07682ec6c20289ffdfa55efd93dcc947a6cadb8d7d635c0d712cecf",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "9010859e8662ce54548c2a3ef4625e6c9534d1f58c11906ff0b856a87de675d7"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1_sd_scoped",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1_sd_scoped",
+      "kernel_sha256": "191437c5a60edc56fc1a94e4f40bd809196b232d3c3c6ca565acdd4fca0ecd50",
+      "source_tree_sha256": "6f9ba3c75ab3ef93668d5b3937c2050bc9173e3eafd20b8eabd0412856f7cd48",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "191437c5a60edc56fc1a94e4f40bd809196b232d3c3c6ca565acdd4fca0ecd50"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g1_sd_scoped_events",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g1_sd_scoped_events",
+      "kernel_sha256": "f5d061d237435aa1aa0398caf33269f9c659b71726d5fb5b48773ffe37897731",
+      "source_tree_sha256": "96ead712d4be1104a4d72e94f3c6d5a9c05c9e17ca7b3db316391b82bed4e7aa",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "f5d061d237435aa1aa0398caf33269f9c659b71726d5fb5b48773ffe37897731"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g2",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g2",
+      "kernel_sha256": "68e1b1a89d41128197473c3443761fc5ce769ade971fd559bd4b15d48f78743e",
+      "source_tree_sha256": "d23964e9f8e572287a85ce69647b2fbc4ddcfd5e355ad1e1533b970193949d6f",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "68e1b1a89d41128197473c3443761fc5ce769ade971fd559bd4b15d48f78743e"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g2_events",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g2_events",
+      "kernel_sha256": "cd9b9cf2b94e1ec0698390193973e11eed82f1c650bb1f7572ec36fa04bda0c2",
+      "source_tree_sha256": "b15ca2c49e1cef222065337744068cc36a58065751501113f1e1bd390e66fa8d",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "cd9b9cf2b94e1ec0698390193973e11eed82f1c650bb1f7572ec36fa04bda0c2"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g2_scoped",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g2_scoped",
+      "kernel_sha256": "2589c3a2ebd028d969aedd9430e4fe1d8b10558a4392bd9440e315d55141030f",
+      "source_tree_sha256": "f384ec75486224e7c922290bd40e3c03880ef716b404e87b3fc9c3189c077add",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "2589c3a2ebd028d969aedd9430e4fe1d8b10558a4392bd9440e315d55141030f"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g2_scoped_events",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g2_scoped_events",
+      "kernel_sha256": "e3031ee7e1711dec71e874c474dcea5ebbc9866d133ec328810264a6f74f6043",
+      "source_tree_sha256": "149567898d248deb4c3b546f1bf979c3eff57839b9695c2bcc9fffb4976c8260",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "e3031ee7e1711dec71e874c474dcea5ebbc9866d133ec328810264a6f74f6043"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g4",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g4",
+      "kernel_sha256": "a4a535802fbfba7a98c8882a207ca78856e51a2bd028ba40b85f94fe6bf1ce6d",
+      "source_tree_sha256": "80689c941089043d9177c2cf52043e472559b0da1b72f7125a9819ba3a3a34bd",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "a4a535802fbfba7a98c8882a207ca78856e51a2bd028ba40b85f94fe6bf1ce6d"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "token_g4_events",
+      "original_source": "kimi_full_token_pipeline_20260929/token_g4_events",
+      "kernel_sha256": "7bb65aeebb8aa4b3d24e268c6636d9867a0257598eb2d1534fcaedd76b1fafa7",
+      "source_tree_sha256": "28154dda6b711b12e752d340fcbf4fe020234ef680d86b0584de84ff3917a3fe",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "7bb65aeebb8aa4b3d24e268c6636d9867a0257598eb2d1534fcaedd76b1fafa7"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    }
+  ]
+}

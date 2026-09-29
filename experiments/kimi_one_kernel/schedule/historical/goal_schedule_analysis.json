@@ -1,0 +1,173 @@
+{
+  "scope": "TP8/S4/layer1 CPU-only conservative schedule audit",
+  "variants": [
+    {
+      "variant": "full_relocate_wave_tail4_events",
+      "source_sha256": "29342a5e382d9f9c91f92684491d86384d89a817eb69ab607a9fa4105076585a",
+      "acyclic": true,
+      "task_coverage_once": true,
+      "covered_tasks": {
+        "input": 1600,
+        "conv": 384,
+        "output": 896,
+        "post": 128,
+        "projection": 1304,
+        "select": 8,
+        "shared_mid": 32,
+        "up": 12288,
+        "down": 7168,
+        "routed_norm": 32,
+        "tail": 3584,
+        "recurrence": 768
+      },
+      "nodes": 43464,
+      "edges": 135744
+    },
+    {
+      "variant": "full_tail4_services_events",
+      "source_sha256": "3a6040d3c0d9f27faaaf5ad35bc791eb8e5a0b94d582547c0feb2b26d5c60766",
+      "acyclic": true,
+      "task_coverage_once": true,
+      "covered_tasks": {
+        "input": 1600,
+        "conv": 384,
+        "output": 896,
+        "projection": 1304,
+        "up": 12288,
+        "down": 7168,
+        "tail": 3584,
+        "recurrence": 768,
+        "post": 128,
+        "select": 8,
+        "shared_mid": 32,
+        "routed_norm": 32
+      },
+      "nodes": 43464,
+      "edges": 135744
+    },
+    {
+      "variant": "full_tail4_ug32_events",
+      "source_sha256": "9431adf979bf19ef3326118dc398ae23df014291c8fdc478122c6cd083e7ec68",
+      "acyclic": true,
+      "task_coverage_once": true,
+      "covered_tasks": {
+        "input": 1600,
+        "conv": 384,
+        "output": 896,
+        "post": 128,
+        "projection": 1304,
+        "select": 8,
+        "shared_mid": 32,
+        "up": 12288,
+        "down": 7168,
+        "routed_norm": 32,
+        "tail": 3584,
+        "recurrence": 768
+      },
+      "nodes": 37320,
+      "edges": 111168
+    },
+    {
+      "variant": "full_tail4_ug32seq_events",
+      "source_sha256": "6e70cb9e79ea10a888357600bc695338bee333771b6606b89846cc7ab57eca6b",
+      "acyclic": true,
+      "task_coverage_once": true,
+      "covered_tasks": {
+        "input": 1600,
+        "conv": 384,
+        "output": 896,
+        "post": 128,
+        "projection": 1304,
+        "select": 8,
+        "shared_mid": 32,
+        "up": 12288,
+        "down": 7168,
+        "routed_norm": 32,
+        "tail": 3584,
+        "recurrence": 768
+      },
+      "nodes": 37320,
+      "edges": 111168
+    },
+    {
+      "variant": "full_tail4_services_proj4_events",
+      "source_sha256": "4c10573b59830abcb28588e4df290e9278a1cae65fca8a6f68165c1cd1a713a2",
+      "acyclic": true,
+      "task_coverage_once": true,
+      "covered_tasks": {
+        "input": 1600,
+        "conv": 384,
+        "output": 896,
+        "projection": 1728,
+        "up": 12288,
+        "down": 7168,
+        "tail": 3584,
+        "recurrence": 768,
+        "post": 128,
+        "select": 8,
+        "shared_mid": 32,
+        "routed_norm": 32
+      },
+      "nodes": 43888,
+      "edges": 137016
+    }
+  ],
+  "projection_analysis": {
+    "current": {
+      "latent_tiles": 224,
+      "shared_tiles": 96,
+      "latent_ctas": 75,
+      "shared_ctas": 32,
+      "allocated_waves": 856,
+      "valid_active_waves": 320,
+      "executing_waves": 321,
+      "k256_per_wave": 28,
+      "native_mfma_per_wave": 56,
+      "projection_ctas_including_router": 163
+    },
+    "proposed_split4": {
+      "row_groups_per_cta": 2,
+      "k_split_waves": 4,
+      "latent_ctas": 112,
+      "shared_ctas": 48,
+      "allocated_waves": 1280,
+      "active_waves": 1280,
+      "k256_per_wave": 7,
+      "native_mfma_per_wave": 14,
+      "projection_ctas_including_router": 216,
+      "changes_fp32_accumulation_grouping": true,
+      "implemented": true,
+      "compiled": false,
+      "gpu_validated": false
+    }
+  },
+  "metrics": {
+    "ug_tasks": {
+      "current": 1536,
+      "paired": 768
+    },
+    "ug_activation_payload_logical_mib": {
+      "current": 10.5,
+      "paired": 5.25
+    },
+    "norm_owner_prior_down_tasks": {
+      "current": [
+        4,
+        4,
+        4,
+        4
+      ],
+      "shifted": [
+        3,
+        3,
+        3,
+        3
+      ]
+    }
+  },
+  "limitations": [
+    "No GPU execution or performance inferred",
+    "Readiness fan-ins overapproximate dependencies; not a memory-ordering proof",
+    "Logical payload counts are not measured HBM traffic"
+  ]
+}

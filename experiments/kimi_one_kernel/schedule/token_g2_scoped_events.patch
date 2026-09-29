@@ -1,0 +1,2922 @@
+--- a/kernels/kimi_k3_monokernel/kernel.py
++++ b/kernels/kimi_k3_monokernel/kernel.py
+@@ -34,6 +34,9 @@
+     xshfl,
+ )
+ 
++_TOKEN_GROUP = 2
++_FRONT_CTAS = 36
++_BACK_CTAS = 220
+ _BLOCKS = 256
+ _THREADS = 512
+ _WAVE_SIZE = 64
+@@ -202,16 +205,15 @@
+         raise ValueError(f"attn_res_blocks must be >= -1, got {attn_res_blocks}")
+     if block_write_idx >= 0 and block_write_idx != attn_res_blocks:
+         raise ValueError("the pre-attention block write must append at attn_res_blocks")
+-    if fuse_moe and (samples != 4 or not mtp):
+-        raise ValueError("Experimental projection split-K4 requires S4 true MTP with fused MoE")
+-    latent_projection_tiles = 2
+-    shared_projection_tiles = 2
++    latent_projection_waves = 3 if samples <= 4 else 4
++    shared_projection_waves = 3 if samples <= 4 else 6
+     mtp_splits = _MTP_SPLITS
+     mtp_rows_per_split = _HEAD_DIM // mtp_splits
+     mtp_v_lanes = mtp_rows_per_split // _WAVES
+     mtp_k_lanes = _WAVE_SIZE // mtp_v_lanes
+     mtp_k_tile = mtp_k_lanes * _VALUES_PER_THREAD
+     mtp_k_iters = _HEAD_DIM // mtp_k_tile
++    token_pipeline = samples == 4 and mtp and fuse_moe
+     staged_samples = min(samples, 4)
+     sample_groups = (samples + staged_samples - 1) // staged_samples
+     input_row_groups = 2 if samples <= 4 else _INPUT_ROW_GROUPS
+@@ -272,7 +274,7 @@
+         attn_values: fx.Array[fx.Float32, 16, 16]
+ 
+     @flyc.kernel(known_block_size=[_THREADS, 1, 1])
+-    def kimi_k3_mtp_relocate(
++    def kimi_k3_monokernel(
+         hidden_states: Int64,
+         output: Int64,
+         block_residual: Int64,
+@@ -870,65 +872,30 @@
+                     store_f32(stats_rsrc, stats_base + source * 2, total_square)
+                     store_f32(stats_rsrc, stats_base + source * 2 + 1, total_weighted)
+ 
+-            if const_expr(_ATTN_RES_CTAS * (2 * num_sources) <= _WAVE_SIZE):
+-                if wave == 0:
+-                    # Each active lane retains its own tagged value until the
+-                    # wave reconverges. All readlane sources are initialized.
+-                    stats_value = fx.Float32(0.0)
+-                    if lane < _ATTN_RES_CTAS * (2 * num_sources):
+-                        gather_chunk = lane // (2 * num_sources)
+-                        gather_field = lane % (2 * num_sources)
+-                        gather_base = (sample * _ATTN_RES_CTAS + gather_chunk) * _ATTN_RES_STATS
+-                        stats_value = load_f32(stats_rsrc, gather_base + gather_field)
+-                    logits = []
+-                    for source in range_constexpr(num_sources):
+-                        total_square = fx.Float32(0.0)
+-                        total_weighted = fx.Float32(0.0)
+-                        for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+-                            source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
+-                            total_square = total_square + fx.Int32(rocdl.readlane(T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk * (2 * num_sources) + source * 2))).bitcast(fx.Float32)
+-                            total_weighted = total_weighted + fx.Int32(rocdl.readlane(T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk * (2 * num_sources) + source * 2 + 1))).bitcast(fx.Float32)
+-                        logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
+-                    max_logit = logits[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        max_logit = fx.max(max_logit, logits[source])
+-                    probabilities = [exp(logit - max_logit) for logit in logits]
+-                    probability_sum = probabilities[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        probability_sum = probability_sum + probabilities[source]
+-                    inverse_probability_sum = rcp(probability_sum)
+-                    if lane == 0:
+-                        for source in range_constexpr(num_sources):
+-                            lds_store(
+-                                attn_values,
+-                                source,
+-                                probabilities[source] * inverse_probability_sum,
+-                            )
+-            else:
+-                if tid == 0:
+-                    logits = []
+-                    for source in range_constexpr(num_sources):
+-                        total_square = fx.Float32(0.0)
+-                        total_weighted = fx.Float32(0.0)
+-                        for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+-                            source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
+-                            total_square = total_square + load_f32(stats_rsrc, source_base + source * 2)
+-                            total_weighted = total_weighted + load_f32(stats_rsrc, source_base + source * 2 + 1)
+-                        logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
+-                    max_logit = logits[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        max_logit = fx.max(max_logit, logits[source])
+-                    probabilities = [exp(logit - max_logit) for logit in logits]
+-                    probability_sum = probabilities[0]
+-                    for source in range_constexpr(1, num_sources):
+-                        probability_sum = probability_sum + probabilities[source]
+-                    inverse_probability_sum = rcp(probability_sum)
+-                    for source in range_constexpr(num_sources):
+-                        lds_store(
+-                            attn_values,
+-                            source,
+-                            probabilities[source] * inverse_probability_sum,
+-                        )
++            if tid == 0:
++                logits = []
++                for source in range_constexpr(num_sources):
++                    total_square = fx.Float32(0.0)
++                    total_weighted = fx.Float32(0.0)
++                    for source_chunk in range_constexpr(_ATTN_RES_CTAS):
++                        source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
++                        total_square = total_square + load_f32(stats_rsrc, source_base + source * 2)
++                        total_weighted = total_weighted + load_f32(stats_rsrc, source_base + source * 2 + 1)
++                    logits.append(total_weighted * rsq(total_square * (1.0 / _HIDDEN) + EPS))
++                max_logit = logits[0]
++                for source in range_constexpr(1, num_sources):
++                    max_logit = fx.max(max_logit, logits[source])
++                probabilities = [exp(logit - max_logit) for logit in logits]
++                probability_sum = probabilities[0]
++                for source in range_constexpr(1, num_sources):
++                    probability_sum = probability_sum + probabilities[source]
++                inverse_probability_sum = rcp(probability_sum)
++                for source in range_constexpr(num_sources):
++                    lds_store(
++                        attn_values,
++                        source,
++                        probabilities[source] * inverse_probability_sum,
++                    )
+             gpu.barrier()
+ 
+             mixed_pairs = []
+@@ -959,19 +926,11 @@
+             total_mixed_square = block_sum(mixed_square_sum)
+             if tid == 0:
+                 store_f32(stats_rsrc, stats_base + 2 * num_sources, total_mixed_square)
+-            if wave == 0:
+-                stats_value = fx.Float32(0.0)
+-                if lane < _ATTN_RES_CTAS:
+-                    source_base = (sample * _ATTN_RES_CTAS + lane) * _ATTN_RES_STATS
+-                    stats_value = load_f32(stats_rsrc, source_base + 2 * num_sources)
+                 full_square = fx.Float32(0.0)
+                 for source_chunk in range_constexpr(_ATTN_RES_CTAS):
+-                    chunk_square = fx.Int32(rocdl.readlane(
+-                        T.i32, stats_value.bitcast(fx.Int32), fx.Int32(source_chunk),
+-                    )).bitcast(fx.Float32)
+-                    full_square = full_square + chunk_square
+-                if lane == 0:
+-                    lds_store(attn_values, num_sources, rsq(full_square * (1.0 / _HIDDEN) + EPS))
++                    source_base = (sample * _ATTN_RES_CTAS + source_chunk) * _ATTN_RES_STATS
++                    full_square = full_square + load_f32(stats_rsrc, source_base + 2 * num_sources)
++                lds_store(attn_values, num_sources, rsq(full_square * (1.0 / _HIDDEN) + EPS))
+             gpu.barrier()
+             output_inverse_rms = lds_load(attn_values, num_sources)
+ 
+@@ -1148,23 +1107,6 @@
+                     packed = load_raw_pair(norm_mailbox_rsrc, global_pair)
+                     lds_store(x, pair, packed.bitcast(fx.Float32))
+ 
+-        def prefetch_bf16_units(weight_rsrc, first_row_group, k_size, split_waves, count):
+-            chunks = k_size // 64
+-            chunks_per_wave = chunks // split_waves
+-            row_group = first_row_group + wave // split_waves
+-            split = wave % split_waves
+-            units = []
+-            for local_chunk in range_constexpr(count):
+-                chunk = split * chunks_per_wave + local_chunk
+-                units.append([
+-                    fx.Vector(bo.buffer_load(
+-                        weight_rsrc,
+-                        (((row_group * chunks + chunk) * 2 + step_index) * _WAVE_SIZE + lane) * 4,
+-                        vec_width=4, dtype=T.i32,
+-                    )) for step_index in range_constexpr(2)
+-                ])
+-            return units
+-
+         def bf16_mfma(
+             weight_rsrc,
+             first_row_group,
+@@ -1173,7 +1115,6 @@
+             split_waves,
+             batch_size,
+             sample_count,
+-            prefetched=None,
+         ):
+             chunks = k_size // 64
+             chunks_per_wave = chunks // split_waves
+@@ -1198,13 +1139,7 @@
+                     ]
+ 
+                 starts = list(range(0, chunks_per_wave, batch_size))
+-                if const_expr(prefetched is None):
+-                    current = [load_unit(chunk) for chunk in range(0, min(batch_size, chunks_per_wave))]
+-                else:
+-                    current = [
+-                        prefetched[chunk] if chunk < len(prefetched) else load_unit(chunk)
+-                        for chunk in range(0, min(batch_size, chunks_per_wave))
+-                    ]
++                current = [load_unit(chunk) for chunk in range(0, min(batch_size, chunks_per_wave))]
+                 for batch_index in range_constexpr(len(starts)):
+                     following = None
+                     if const_expr(batch_index + 1 < len(starts)):
+@@ -1331,91 +1266,6 @@
+                     )
+             return accumulator.load()
+ 
+-        def mxfp8_scaled_mfma_split4(
+-            weight_rsrc,
+-            scale_rsrc,
+-            row_tile,
+-            sample_base,
+-            sample_count,
+-            split_wave,
+-        ):
+-            k_chunks = _HIDDEN // 64
+-            k_scale_chunks = _HIDDEN // 256
+-            lane_div16 = lane // 16
+-            lane_mod16 = lane % 16
+-            accumulator = fx.make_rmem_tensor(4, fx.Float32)
+-            accumulator.store(fx.Vector.filled(4, 0.0, fx.Float32))
+-            valid_sample = lane_mod16 < sample_count
+-            sample = fx.min(lane_mod16, sample_count - 1)
+-            scale_lane = lane_div16 * 16 + lane_mod16
+-            for local_k256 in range_constexpr(k_scale_chunks // 4):
+-                k256 = split_wave * (k_scale_chunks // 4) + local_k256
+-                activation_scale = fx.Int32(
+-                    bo.buffer_load(
+-                        quantized_moe_scale_rsrc,
+-                        k256 * 64 + lane_div16 * 16 + sample_base + sample,
+-                        vec_width=1,
+-                        dtype=T.i32,
+-                        cache_modifier=CM_DEV,
+-                    )
+-                ) & fx.Int32(0x00FF00FF)
+-                weight_scale = fx.Int32(
+-                    bo.buffer_load(
+-                        scale_rsrc,
+-                        ((row_tile // 2) * k_scale_chunks + k256) * 64 + scale_lane,
+-                        vec_width=1,
+-                        dtype=T.i32,
+-                    )
+-                )
+-                weight_scale = ((row_tile % 2) != 0).select(
+-                    weight_scale.shrui(fx.Int32(8)),
+-                    weight_scale,
+-                )
+-                for k128_half in range_constexpr(2):
+-                    k128 = k256 * 2 + k128_half
+-                    k_base = k128 * 128 + lane_div16 * 16
+-                    activation_halves = []
+-                    for k64_half in range_constexpr(2):
+-                        loaded = fx.Vector(
+-                            fx.ptr_load(
+-                                x + (sample * _HIDDEN + k_base + k64_half * 64) // 4,
+-                                result_type=fx.Vector.make_type(4, fx.Float32),
+-                            )
+-                        ).bitcast(fx.Int32)
+-                        activation_halves.append(
+-                            fx.Vector.from_elements(
+-                                [valid_sample.select(loaded[index], fx.Int32(0)) for index in range(4)],
+-                                fx.Int32,
+-                            )
+-                        )
+-                    activation_fragment = fx.make_rmem_tensor(8, fx.Int32)
+-                    activation_fragment.store(activation_halves[0].shuffle(activation_halves[1], list(range(8))))
+-                    weight_halves = []
+-                    for k64_half in range_constexpr(2):
+-                        k64 = k128 * 2 + k64_half
+-                        weight_halves.append(
+-                            fx.Vector(
+-                                bo.buffer_load(
+-                                    weight_rsrc,
+-                                    (((row_tile * k_chunks + k64) * 4 + lane_div16) * 16 + lane_mod16) * 4,
+-                                    vec_width=4,
+-                                    dtype=T.i32,
+-                                )
+-                            )
+-                        )
+-                    weight_fragment = fx.make_rmem_tensor(8, fx.Int32)
+-                    weight_fragment.store(weight_halves[0].shuffle(weight_halves[1], list(range(8))))
+-                    fx.gemm(
+-                        mxfp8_scale_atoms[k128_half],
+-                        accumulator,
+-                        activation_fragment,
+-                        weight_fragment,
+-                        accumulator,
+-                        scale_a=activation_scale,
+-                        scale_b=weight_scale,
+-                    )
+-            return accumulator.load()
+-
+         def publish_mxfp8_tile(
+             values,
+             row_tile,
+@@ -1473,45 +1323,6 @@
+                         1,
+                     )
+ 
+-        def publish_raw_mxfp8_split_tiles(
+-            values, first_row_tile, rows, mailbox_rsrc, ready_rsrc,
+-            sample_base, sample_count,
+-        ):
+-            fx.ptr_store(values, reduction + (wave * _WAVE_SIZE + lane) * 4)
+-            gpu.barrier()
+-            if tid < 2 * 16 * sample_count // 2:
+-                local_sample = tid // 16
+-                local_row = (tid % 16) * 2
+-                pair_values = []
+-                for pair_element in range_constexpr(2):
+-                    row = local_row + pair_element
+-                    row_in_group = row % 16
+-                    first_source_wave = (row // 16) * 4
+-                    value = fx.Float32(0.0)
+-                    for source_offset in range_constexpr(4):
+-                        # Native MXFP8: lane % 16 selects row, vector element
+-                        # selects sample for S4 (the lane group is zero).
+-                        source_wave = first_source_wave + source_offset
+-                        source_index = (source_wave * _WAVE_SIZE + row_in_group) * 4 + local_sample
+-                        value = value + lds_load(reduction, source_index)
+-                    pair_values.append(value)
+-                row = first_row_tile * 16 + local_row
+-                store_raw_pair(
+-                    mailbox_rsrc, ((sample_base + local_sample) * rows + row) // 2,
+-                    pair_values[0], pair_values[1],
+-                )
+-            # Publish readiness only after the actual payload stores finish.
+-            rocdl.s_waitcnt(vmcnt=0)
+-            gpu.barrier()
+-            if tid == 0:
+-                for local_sample in range_constexpr(sample_count):
+-                    for row_offset in range_constexpr(2):
+-                        store_i32(
+-                            ready_rsrc,
+-                            (sample_base + local_sample) * (rows // 16) + first_row_tile + row_offset,
+-                            1,
+-                        )
+-
+         def stage_mailbox_vector(mailbox_rsrc, pair_base, pairs):
+             for load_round in range_constexpr((pairs + _THREADS - 1) // _THREADS):
+                 pair = tid + load_round * _THREADS
+@@ -1632,64 +1443,7 @@
+                     )
+             return list(accumulator)
+ 
+-        def mxfp8_bf16_accumulate_samples(
+-            weight_rsrc,
+-            scale_rsrc,
+-            activation_word_base,
+-            row_tile,
+-            k_dim,
+-            split_wave,
+-            split_waves,
+-            sample_stride,
+-            sample_count,
+-        ):
+-            input_sample = fx.min(lane % 16, sample_count - 1)
+-            k_chunks = k_dim // 64
+-            chunks_per_wave = k_chunks // split_waves
+-            accumulator = fx.Vector.filled(4, 0.0, fx.Float32)
+-            for local_chunk in range_constexpr(chunks_per_wave):
+-                chunk = split_wave * chunks_per_wave + local_chunk
+-                for step_index in range_constexpr(2):
+-                    atom_group = step_index * 2 + (lane // 16) // 2
+-                    weight = fx.Vector(
+-                        bo.buffer_load(
+-                            weight_rsrc,
+-                            (((row_tile * k_chunks + chunk) * 4 + atom_group) * 16 + lane % 16) * 4
+-                            + ((lane // 16) % 2) * 2,
+-                            vec_width=2,
+-                            dtype=T.i32,
+-                        )
+-                    )
+-                    scale_group = chunk * 2 + step_index
+-                    scale_word = fx.Int32(
+-                        bo.buffer_load(
+-                            scale_rsrc,
+-                            (
+-                                ((row_tile // 2) * (k_dim // 256) + scale_group // 8) * 64
+-                                + (scale_group % 4) * 16
+-                                + lane % 16
+-                            ),
+-                            vec_width=1,
+-                            dtype=T.i32,
+-                        )
+-                    )
+-                    scale_byte_index = ((scale_group % 8) // 4) * 2 + row_tile % 2
+-                    scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & fx.Int32(0xFF)
+-                    scale = (scale_byte << fx.Int32(23)).bitcast(fx.Float32)
+-                    lhs = mxfp8_to_bf16x8(weight[0], weight[1], scale)
+-                    rhs = fx.ptr_load(
+-                        x + activation_word_base + input_sample * sample_stride + (chunk * 64) // 2 + (lane // 16) * 4 + step_index * 16,
+-                        result_type=fx.Vector.make_type(4, fx.Float32),
+-                    ).bitcast(fx.BFloat16)
+-                    accumulator = fx.Vector(
+-                        rocdl.mfma_f32_16x16x32_bf16(
+-                            T.vec(4, T.f32),
+-                            [lhs, rhs, accumulator],
+-                        )
+-                    )
+-            return list(accumulator)
+-
+-        def moe_peer_push(local_pairs, pair_base, local_values, region):
++        def moe_peer_reduce(local_pairs, pair_base, local_values, region, emit):
+             moe_max_pairs = samples * _HIDDEN // 2
+             moe_slot_bytes = npes * moe_max_pairs * 8
+             region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+@@ -1713,81 +1467,8 @@
+                             cache_modifier=CM_SYS,
+                         )
+             gpu.barrier()
+-
+-        def moe_peer_collect(local_pairs, pair_base, region, emit):
+-            moe_max_pairs = samples * _HIDDEN // 2
+-            moe_slot_bytes = npes * moe_max_pairs * 8
+-            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+             if tid < local_pairs:
+                 global_pair = pair_base + tid
+-                local_rsrc = rsrc(moe_symmetric + region_base)
+-
+-                def load_peers():
+-                    words = []
+-                    for source_rank in range_constexpr(npes):
+-                        mailbox = source_rank * moe_max_pairs + global_pair
+-                        value_tag = fx.Vector(
+-                            bo.buffer_load(
+-                                local_rsrc,
+-                                mailbox * 2,
+-                                vec_width=2,
+-                                dtype=T.i32,
+-                                cache_modifier=CM_DEV,
+-                            )
+-                        )
+-                        words += [value_tag[0], value_tag[1]]
+-                    return fx.Vector.from_elements(words, fx.Int32)
+-
+-                peer_values = load_peers()
+-                pending = peer_values[1] != tag
+-                for source_rank in range_constexpr(1, npes):
+-                    pending = pending | (peer_values[source_rank * 2 + 1] != tag)
+-                while pending:
+-                    rocdl.s_nop(0)
+-                    peer_values = load_peers()
+-                    pending = peer_values[1] != tag
+-                    for source_rank in range_constexpr(1, npes):
+-                        pending = pending | (peer_values[source_rank * 2 + 1] != tag)
+-                sum_low = fx.Float32(0.0)
+-                sum_high = fx.Float32(0.0)
+-                for source_rank in range_constexpr(npes):
+-                    packed = peer_values[source_rank * 2]
+-                    sum_low = sum_low + (packed << 16).bitcast(fx.Float32)
+-                    sum_high = sum_high + (packed & fx.Int32(-65536)).bitcast(fx.Float32)
+-                emit(tid, sum_low, sum_high)
+-            gpu.barrier()
+-
+-        def moe_peer_push_samples(local_pairs, pair_base, local_values, region):
+-            moe_max_pairs = samples * _HIDDEN // 2
+-            moe_slot_bytes = npes * moe_max_pairs * 8
+-            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+-            peer_rounds = (npes + _WAVES - 1) // _WAVES
+-            for peer_round in range_constexpr(peer_rounds):
+-                peer = wave + peer_round * _WAVES
+-                if peer < npes:
+-                    peer_words = fx.Vector(bo.buffer_load(rsrc(moe_peers), peer * 2, vec_width=2, dtype=T.i32))
+-                    peer_address = (fx.Int64(uniform(peer_words[1])) << 32) | fx.Int64(
+-                        fx.Uint32(uniform(peer_words[0]))
+-                    )
+-                    peer_rsrc = rsrc(peer_address + region_base)
+-                    if lane < local_pairs:
+-                        global_pair = pair_base + (lane // 8) * (_HIDDEN // 2) + lane % 8
+-                        packed = lds_load(local_values, lane).bitcast(fx.Int32)
+-                        mailbox = rank * moe_max_pairs + global_pair
+-                        bo.buffer_store(
+-                            fx.Vector.from_elements([packed, tag], fx.Int32),
+-                            peer_rsrc,
+-                            mailbox * 2,
+-                            cache_modifier=CM_SYS,
+-                        )
+-            gpu.barrier()
+-
+-        def moe_peer_collect_samples(local_pairs, pair_base, region, emit):
+-            moe_max_pairs = samples * _HIDDEN // 2
+-            moe_slot_bytes = npes * moe_max_pairs * 8
+-            region_base = fx.Int64(region * 2 * moe_slot_bytes) + fx.Int64(slot) * fx.Int64(moe_slot_bytes)
+-            if tid < local_pairs:
+-                global_pair = pair_base + (tid // 8) * (_HIDDEN // 2) + tid % 8
+                 local_rsrc = rsrc(moe_symmetric + region_base)
+ 
+                 def load_peers():
+@@ -1903,10 +1584,6 @@
+                 sample_group = input_task // input_row_tasks
+                 input_row_task = input_task % input_row_tasks
+                 sample_base = sample_group * staged_samples
+-            input_prefetch = prefetch_bf16_units(
+-                input_weight_rsrc, input_row_task * input_row_groups,
+-                _HIDDEN, input_split_waves, 7,
+-            )
+             stage_hidden(sample_base, staged_samples)
+             gpu.barrier()
+             input_accumulator = bf16_mfma(
+@@ -1917,7 +1594,6 @@
+                 input_split_waves,
+                 14,
+                 staged_samples,
+-                input_prefetch,
+             )
+ 
+             def emit_input(local_row, sample, value_low, value_high):
+@@ -2242,62 +1918,98 @@
+         # state, doubling the number of active CUs without duplicating conv or
+         # gate projection work.
+         if const_expr(mtp):
+-            conv_task = bid
+-            conv_tasks = samples * _HEADS
+-            conv_active = conv_task < conv_tasks
+-            if conv_active:
+-                sample = conv_task // _HEADS
+-                head = conv_task % _HEADS
+-                if sample > 0:
+-                    if tid == 0:
+-                        load_i32(mtp_conv_ready_rsrc, (sample - 1) * _HEADS + head)
+-                    gpu.barrier()
+-
+-                input_slot = uniform(bo.buffer_load(indices_rsrc, sample, vec_width=1, dtype=T.i32))
+-                output_slot = uniform(bo.buffer_load(indices_rsrc, sample + 1, vec_width=1, dtype=T.i32))
+-                qkvg_base = (sample * _HEADS + head) * 4 * _HEAD_DIM
+-                if (input_slot >= 0) & (output_slot >= 0):
+-                    conv_state_rsrc = rsrc(
+-                        conv_state + fx.Int64(input_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
+-                    )
+-                    conv_state_out_rsrc = rsrc(
+-                        conv_state + fx.Int64(output_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
+-                    )
+-                    prepare_kda_head(sample, head, conv_state_rsrc, conv_state_out_rsrc)
+-
+-                    if tid < _HEAD_DIM // 2:
++            if const_expr(token_pipeline):
++                if bid < _HEADS:
++                    head = bid
++                    for sample in range(samples):
++                        if sample > 0:
++                            if tid == 0:
++                                load_i32(mtp_conv_ready_rsrc, (sample - 1) * _HEADS + head)
++                            gpu.barrier()
++
++                        input_slot = uniform(bo.buffer_load(indices_rsrc, sample, vec_width=1, dtype=T.i32))
++                        output_slot = uniform(bo.buffer_load(indices_rsrc, sample + 1, vec_width=1, dtype=T.i32))
++                        qkvg_base = (sample * _HEADS + head) * 4 * _HEAD_DIM
++                        if (input_slot >= 0) & (output_slot >= 0):
++                            conv_state_rsrc = rsrc(
++                                conv_state + fx.Int64(input_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
++                            )
++                            conv_state_out_rsrc = rsrc(
++                                conv_state + fx.Int64(output_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
++                            )
++                            prepare_kda_head(sample, head, conv_state_rsrc, conv_state_out_rsrc)
++
++                            if tid < _HEAD_DIM // 2:
++                                row = tid * 2
++                                for component, values in enumerate((shared_query, shared_key, shared_value, shared_gate)):
++                                    store_raw_pair(
++                                        mtp_qkvg_rsrc,
++                                        (qkvg_base + component * _HEAD_DIM + row) // 2,
++                                        fx.Float32(fx.ptr_load(values + row)),
++                                        fx.Float32(fx.ptr_load(values + row + 1)),
++                                    )
++                        elif tid < _HEAD_DIM // 2:
++                            row = tid * 2
++                            for component in range_constexpr(4):
++                                store_raw_pair(
++                                    mtp_qkvg_rsrc,
++                                    (qkvg_base + component * _HEAD_DIM + row) // 2,
++                                    fx.Float32(0.0),
++                                    fx.Float32(0.0),
++                                )
++                        rocdl.s_waitcnt(vmcnt=0)
++                        gpu.barrier()
++                        if tid == 0:
++                            store_i32(mtp_conv_ready_rsrc, sample * _HEADS + head, 1)
++
++            else:
++                conv_task = bid
++                conv_tasks = samples * _HEADS
++                conv_active = conv_task < conv_tasks
++                if conv_active:
++                    sample = conv_task // _HEADS
++                    head = conv_task % _HEADS
++                    if sample > 0:
++                        if tid == 0:
++                            load_i32(mtp_conv_ready_rsrc, (sample - 1) * _HEADS + head)
++                        gpu.barrier()
++
++                    input_slot = uniform(bo.buffer_load(indices_rsrc, sample, vec_width=1, dtype=T.i32))
++                    output_slot = uniform(bo.buffer_load(indices_rsrc, sample + 1, vec_width=1, dtype=T.i32))
++                    qkvg_base = (sample * _HEADS + head) * 4 * _HEAD_DIM
++                    if (input_slot >= 0) & (output_slot >= 0):
++                        conv_state_rsrc = rsrc(
++                            conv_state + fx.Int64(input_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
++                        )
++                        conv_state_out_rsrc = rsrc(
++                            conv_state + fx.Int64(output_slot) * fx.Int64(_CONV_CHANNELS * _CONV_STATE_LENGTH * 2)
++                        )
++                        prepare_kda_head(sample, head, conv_state_rsrc, conv_state_out_rsrc)
++
++                        if tid < _HEAD_DIM // 2:
++                            row = tid * 2
++                            for component, values in enumerate((shared_query, shared_key, shared_value, shared_gate)):
++                                store_raw_pair(
++                                    mtp_qkvg_rsrc,
++                                    (qkvg_base + component * _HEAD_DIM + row) // 2,
++                                    fx.Float32(fx.ptr_load(values + row)),
++                                    fx.Float32(fx.ptr_load(values + row + 1)),
++                                )
++                    elif tid < _HEAD_DIM // 2:
+                         row = tid * 2
+-                        for component, values in enumerate((shared_query, shared_key, shared_value, shared_gate)):
++                        for component in range_constexpr(4):
+                             store_raw_pair(
+                                 mtp_qkvg_rsrc,
+                                 (qkvg_base + component * _HEAD_DIM + row) // 2,
+-                                fx.Float32(fx.ptr_load(values + row)),
+-                                fx.Float32(fx.ptr_load(values + row + 1)),
+-                            )
+-                elif tid < _HEAD_DIM // 2:
+-                    row = tid * 2
+-                    for component in range_constexpr(4):
+-                        store_raw_pair(
+-                            mtp_qkvg_rsrc,
+-                            (qkvg_base + component * _HEAD_DIM + row) // 2,
+-                            fx.Float32(0.0),
+-                            fx.Float32(0.0),
+-                        )
+-                rocdl.s_waitcnt(vmcnt=0)
+-                gpu.barrier()
+-                if tid == 0:
+-                    store_i32(mtp_conv_ready_rsrc, sample * _HEADS + head, 1)
++                                fx.Float32(0.0),
++                                fx.Float32(0.0),
++                            )
++                    rocdl.s_waitcnt(vmcnt=0)
++                    gpu.barrier()
++                    if tid == 0:
++                        store_i32(mtp_conv_ready_rsrc, sample * _HEADS + head, 1)
+ 
+             stamp(1)
+-
+-            def wait_mtp_previous_state(sample, head, value_split):
+-                if tid == 0:
+-                    if sample > 0:
+-                        load_f32(
+-                            mtp_state_ready_rsrc,
+-                            ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
+-                        )
+-                gpu.barrier()
+ 
+             def run_mtp_recurrence(sample, head, value_split):
+                 if tid == 0:
+@@ -2402,8 +2114,6 @@
+                         dot_parts = fx.math.fma(key_vectors[k_iter], query_vectors[k_iter], dot_parts)
+                     dot_key_query = mtp_subgroup_sum(dot_parts.reduce(fx.ReductionOp.ADD))
+ 
+-                    wait_mtp_previous_state(sample, head, value_split)
+-
+                     state_vectors = [None] * mtp_k_iters
+                     state_key_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+                     state_query_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
+@@ -2451,8 +2161,6 @@
+                             cache_modifier=CM_DEV,
+                         )
+                     result = state_query + value_new * dot_key_query
+-                else:
+-                    wait_mtp_previous_state(sample, head, value_split)
+ 
+                 k_lane = lane % mtp_k_lanes
+                 square_sum = (k_lane == 0).select(result * result, fx.Float32(0.0))
+@@ -2514,465 +2222,1271 @@
+                         1,
+                     )
+ 
+-            mtp_recurrence_task = (bid + 128) % _BLOCKS
+-            mtp_recurrence_tasks = samples * _HEADS * mtp_splits
+-            if mtp_recurrence_task < mtp_recurrence_tasks:
+-                sample = mtp_recurrence_task // (_HEADS * mtp_splits)
+-                head_split = mtp_recurrence_task % (_HEADS * mtp_splits)
+-                head = head_split // mtp_splits
+-                value_split = head_split % mtp_splits
+-                run_mtp_recurrence(sample, head, value_split)
+-
+-        # Stage 3: BF16 1536 -> 7168 output projection followed by the tagged
+-        # TP8 reduction.  Each wave again owns a complete-K 16-row group.
+-        output_row_tasks = _OUTPUT_TASKS
+-        output_tasks = sample_groups * output_row_tasks
+-        output_task = bid
+-        while output_task < output_tasks:
+-            if const_expr(sample_groups == 1):
+-                output_row_task = output_task
+-                sample_base = 0
++            if const_expr(token_pipeline):
++                if (bid >= _HEADS) & (bid < _FRONT_CTAS):
++                    head_split = bid - _HEADS
++                    head = head_split // mtp_splits
++                    value_split = head_split % mtp_splits
++                    for sample in range(samples):
++                        if tid == 0:
++                            if sample > 0:
++                                load_f32(
++                                    mtp_state_ready_rsrc,
++                                    ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
++                                )
++                        gpu.barrier()
++                        run_mtp_recurrence(sample, head, value_split)
+             else:
+-                sample_group = output_task // output_row_tasks
+-                output_row_task = output_task % output_row_tasks
+-                sample_base = sample_group * staged_samples
+-            stamp(2)
+-            stage_norm(sample_base, staged_samples)
+-            gpu.barrier()
+-            output_accumulator = bf16_mfma(
+-                output_weight_rsrc,
+-                output_row_task * _OUTPUT_ROW_GROUPS,
+-                _PROJECTION,
+-                _OUTPUT_ROW_GROUPS,
+-                _OUTPUT_SPLIT_WAVES,
+-                6,
+-                staged_samples,
+-            )
+-
+-            def emit_output(local_row, sample, value_low, value_high):
+-                lds_store(
+-                    output_values,
+-                    ((sample - sample_base) * _OUTPUT_ROW_TILE + local_row) // 2,
+-                    bf16_pair(value_low, value_high),
+-                )
+-
+-            publish_mfma_pairs(
+-                output_accumulator,
+-                _OUTPUT_ROW_TILE,
+-                _OUTPUT_SPLIT_WAVES,
+-                emit_output,
+-                sample_base,
+-                staged_samples,
+-            )
+-
+-            pair_count = staged_samples * _OUTPUT_ROW_TILE // 2
+-            send_rounds = (pair_count + _WAVE_SIZE - 1) // _WAVE_SIZE
+-            peer_rounds = (npes + _WAVES - 1) // _WAVES
+-            for peer_round in range_constexpr(peer_rounds):
+-                peer = wave + peer_round * _WAVES
+-                if peer < npes:
+-                    peer_words = fx.Vector(bo.buffer_load(rsrc(peers), peer * 2, vec_width=2, dtype=T.i32))
+-                    peer_address = (fx.Int64(uniform(peer_words[1])) << 32) | fx.Int64(
+-                        fx.Uint32(uniform(peer_words[0]))
+-                    )
+-                    peer_rsrc = rsrc(peer_address + symmetric_base)
+-                    for send_round in range_constexpr(send_rounds):
+-                        local_pair = lane + send_round * _WAVE_SIZE
+-                        if local_pair < pair_count:
+-                            local_sample = local_pair // (_OUTPUT_ROW_TILE // 2)
+-                            sample = sample_base + local_sample
+-                            row_pair = local_pair % (_OUTPUT_ROW_TILE // 2)
+-                            local_row = row_pair * 2
+-                            row = output_row_task * _OUTPUT_ROW_TILE + local_row
+-                            packed = lds_load(
++                mtp_recurrence_task = bid
++                mtp_recurrence_tasks = samples * _HEADS * mtp_splits
++                if mtp_recurrence_task < mtp_recurrence_tasks:
++                    sample = mtp_recurrence_task // (_HEADS * mtp_splits)
++                    head_split = mtp_recurrence_task % (_HEADS * mtp_splits)
++                    head = head_split // mtp_splits
++                    value_split = head_split % mtp_splits
++                    if tid == 0:
++                        if sample > 0:
++                            load_f32(
++                                mtp_state_ready_rsrc,
++                                ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
++                            )
++                    gpu.barrier()
++                    run_mtp_recurrence(sample, head, value_split)
++
++        if const_expr(token_pipeline):
++            if bid >= _FRONT_CTAS:
++                backend_id = bid - _FRONT_CTAS
++                def run_token_group(token_group):
++                    # Stage 3: BF16 1536 -> 7168 output projection followed by the tagged
++                    # TP8 reduction.  Each wave again owns a complete-K 16-row group.
++                    output_row_tasks = _OUTPUT_TASKS
++                    output_tasks = sample_groups * output_row_tasks
++                    output_task = backend_id
++                    while output_task < output_tasks:
++                        if const_expr(sample_groups == 1):
++                            output_row_task = output_task
++                            sample_base = token_group * _TOKEN_GROUP
++                        else:
++                            sample_group = output_task // output_row_tasks
++                            output_row_task = output_task % output_row_tasks
++                            sample_base = sample_group * _TOKEN_GROUP
++                        stamp(2)
++                        stage_norm(sample_base, _TOKEN_GROUP)
++                        gpu.barrier()
++                        output_accumulator = bf16_mfma(
++                            output_weight_rsrc,
++                            output_row_task * _OUTPUT_ROW_GROUPS,
++                            _PROJECTION,
++                            _OUTPUT_ROW_GROUPS,
++                            _OUTPUT_SPLIT_WAVES,
++                            6,
++                            _TOKEN_GROUP,
++                        )
++
++                        def emit_output(local_row, sample, value_low, value_high):
++                            lds_store(
+                                 output_values,
+-                                (local_sample * _OUTPUT_ROW_TILE + local_row) // 2,
+-                            ).bitcast(fx.Int32)
+-                            global_pair = (sample * _HIDDEN + row) // 2
+-                            mailbox = rank * max_pairs + global_pair
+-                            bo.buffer_store(
+-                                fx.Vector.from_elements([packed, tag], fx.Int32),
+-                                peer_rsrc,
+-                                mailbox * 2,
+-                                cache_modifier=CM_SYS,
+-                            )
+-            gpu.barrier()
+-
+-            local_rsrc = rsrc(symmetric + symmetric_base)
+-            pair_rounds = (pair_count + _THREADS - 1) // _THREADS
+-            for pair_round in range_constexpr(pair_rounds):
+-                local_pair = tid + pair_round * _THREADS
+-                if local_pair < pair_count:
+-                    local_sample = local_pair // (_OUTPUT_ROW_TILE // 2)
+-                    sample = sample_base + local_sample
+-                    row_pair = local_pair % (_OUTPUT_ROW_TILE // 2)
+-                    row = output_row_task * _OUTPUT_ROW_TILE + row_pair * 2
+-                    global_pair = (sample * _HIDDEN + row) // 2
+-
+-                    def load_peers():
+-                        words = []
+-                        for source_rank in range_constexpr(npes):
+-                            mailbox = source_rank * max_pairs + global_pair
+-                            value_tag = fx.Vector(
+-                                bo.buffer_load(
+-                                    local_rsrc,
+-                                    mailbox * 2,
+-                                    vec_width=2,
+-                                    dtype=T.i32,
++                                ((sample - sample_base) * _OUTPUT_ROW_TILE + local_row) // 2,
++                                bf16_pair(value_low, value_high),
++                            )
++
++                        publish_mfma_pairs(
++                            output_accumulator,
++                            _OUTPUT_ROW_TILE,
++                            _OUTPUT_SPLIT_WAVES,
++                            emit_output,
++                            sample_base,
++                            _TOKEN_GROUP,
++                        )
++
++                        pair_count = _TOKEN_GROUP * _OUTPUT_ROW_TILE // 2
++                        send_rounds = (pair_count + _WAVE_SIZE - 1) // _WAVE_SIZE
++                        peer_rounds = (npes + _WAVES - 1) // _WAVES
++                        for peer_round in range_constexpr(peer_rounds):
++                            peer = wave + peer_round * _WAVES
++                            if peer < npes:
++                                peer_words = fx.Vector(bo.buffer_load(rsrc(peers), peer * 2, vec_width=2, dtype=T.i32))
++                                peer_address = (fx.Int64(uniform(peer_words[1])) << 32) | fx.Int64(
++                                    fx.Uint32(uniform(peer_words[0]))
++                                )
++                                peer_rsrc = rsrc(peer_address + symmetric_base)
++                                for send_round in range_constexpr(send_rounds):
++                                    local_pair = lane + send_round * _WAVE_SIZE
++                                    if local_pair < pair_count:
++                                        local_sample = local_pair // (_OUTPUT_ROW_TILE // 2)
++                                        sample = sample_base + local_sample
++                                        row_pair = local_pair % (_OUTPUT_ROW_TILE // 2)
++                                        local_row = row_pair * 2
++                                        row = output_row_task * _OUTPUT_ROW_TILE + local_row
++                                        packed = lds_load(
++                                            output_values,
++                                            (local_sample * _OUTPUT_ROW_TILE + local_row) // 2,
++                                        ).bitcast(fx.Int32)
++                                        global_pair = (sample * _HIDDEN + row) // 2
++                                        mailbox = rank * max_pairs + global_pair
++                                        bo.buffer_store(
++                                            fx.Vector.from_elements([packed, tag], fx.Int32),
++                                            peer_rsrc,
++                                            mailbox * 2,
++                                            cache_modifier=CM_SYS,
++                                        )
++                        gpu.barrier()
++
++                        local_rsrc = rsrc(symmetric + symmetric_base)
++                        pair_rounds = (pair_count + _THREADS - 1) // _THREADS
++                        for pair_round in range_constexpr(pair_rounds):
++                            local_pair = tid + pair_round * _THREADS
++                            if local_pair < pair_count:
++                                local_sample = local_pair // (_OUTPUT_ROW_TILE // 2)
++                                sample = sample_base + local_sample
++                                row_pair = local_pair % (_OUTPUT_ROW_TILE // 2)
++                                row = output_row_task * _OUTPUT_ROW_TILE + row_pair * 2
++                                global_pair = (sample * _HIDDEN + row) // 2
++
++                                def load_peers():
++                                    words = []
++                                    for source_rank in range_constexpr(npes):
++                                        mailbox = source_rank * max_pairs + global_pair
++                                        value_tag = fx.Vector(
++                                            bo.buffer_load(
++                                                local_rsrc,
++                                                mailbox * 2,
++                                                vec_width=2,
++                                                dtype=T.i32,
++                                                cache_modifier=CM_DEV,
++                                            )
++                                        )
++                                        words += [value_tag[0], value_tag[1]]
++                                    return fx.Vector.from_elements(words, fx.Int32)
++
++                                peer_values = load_peers()
++                                pending = peer_values[1] != tag
++                                for source_rank in range_constexpr(1, npes):
++                                    pending = pending | (peer_values[source_rank * 2 + 1] != tag)
++                                while pending:
++                                    rocdl.s_nop(0)
++                                    peer_values = load_peers()
++                                    pending = peer_values[1] != tag
++                                    for source_rank in range_constexpr(1, npes):
++                                        pending = pending | (peer_values[source_rank * 2 + 1] != tag)
++
++                                sum_low = fx.Float32(0.0)
++                                sum_high = fx.Float32(0.0)
++                                for source_rank in range_constexpr(npes):
++                                    packed = peer_values[source_rank * 2]
++                                    sum_low = sum_low + (packed << 16).bitcast(fx.Float32)
++                                    sum_high = sum_high + (packed & fx.Int32(-65536)).bitcast(fx.Float32)
++                                packed_sum = (
++                                    fx.Vector.from_elements([sum_low, sum_high], fx.Float32).to(fx.BFloat16).bitcast(fx.Int32)[0]
++                                )
++                                bo.buffer_store(packed_sum, output_rsrc, global_pair, cache_modifier=CM_DEV)
++                                if const_expr(fuse_attn_res):
++                                    store_pair(
++                                        attention_mailbox_rsrc,
++                                        global_pair,
++                                        sum_low,
++                                        sum_high,
++                                    )
++                        output_task = output_task + _BACK_CTAS
++                    stamp(3)
++
++                    # Stage 4: post-attention AttnRes and MXFP8 activation quantization for
++                    # the latent/router/shared projection stage that follows this kernel.
++                    if const_expr(fuse_attn_res):
++                        post_task = (backend_id + _BACK_CTAS - _OUTPUT_TASKS) % _BACK_CTAS
++                        if post_task < _TOKEN_GROUP * _ATTN_RES_CTAS:
++                            if const_expr(block_write_idx >= 0):
++                                post_prefix = output
++                                post_delta = output
++                                post_has_delta = False
++                            else:
++                                post_prefix = hidden_states
++                                post_delta = output
++                                post_has_delta = True
++                            run_attn_res_chunk(
++                                token_group * _TOKEN_GROUP + post_task // _ATTN_RES_CTAS,
++                                post_task % _ATTN_RES_CTAS,
++                                post_prefix,
++                                post_delta,
++                                mlp_res_norm,
++                                mlp_res_qk,
++                                post_norm,
++                                updated_prefix,
++                                moe_input,
++                                moe_mailbox_rsrc,
++                                moe_ready_rsrc,
++                                post_stats_rsrc,
++                                attn_res_blocks + int(block_write_idx >= 0),
++                                post_has_delta,
++                                block_write_idx >= 0,
++                                block_write_idx < 0,
++                                -1,
++                                True,
++                            )
++                    stamp(4)
++
++                    if const_expr(fuse_moe):
++                        # Stage 5: the BF16 router and the two production MXFP8 dense
++                        # projections.  All consume the post-AttnRes result; the dense
++                        # branches directly reuse the quantized activation emitted there.
++                        router_row_tasks = _N_EXPERTS // _ROUTER_ROW_TILE
++                        router_tasks = sample_groups * router_row_tasks
++                        latent_tiles = _ROUTED_HIDDEN // 16
++                        shared_tiles = (2 * _SHARED_INTER) // 16
++                        latent_blocks = (latent_tiles + latent_projection_waves - 1) // latent_projection_waves
++                        shared_blocks = (shared_tiles + shared_projection_waves - 1) // shared_projection_waves
++                        latent_tasks = sample_groups * latent_blocks
++                        shared_tasks = sample_groups * shared_blocks
++                        projection_tasks = router_tasks + latent_tasks + shared_tasks
++                        projection_task = (backend_id + _BACK_CTAS - (_OUTPUT_TASKS + _TOKEN_GROUP * _ATTN_RES_CTAS)) % _BACK_CTAS
++                        if projection_task < projection_tasks:
++                            if projection_task < router_tasks:
++                                if const_expr(sample_groups == 1):
++                                    router_row_task = projection_task
++                                    sample_base = token_group * _TOKEN_GROUP
++                                else:
++                                    sample_group = projection_task // router_row_tasks
++                                    router_row_task = projection_task % router_row_tasks
++                                    sample_base = sample_group * _TOKEN_GROUP
++                                stage_moe_hidden(sample_base, _TOKEN_GROUP)
++                                gpu.barrier()
++                                row_base = router_row_task * _ROUTER_ROW_GROUPS
++                                projection_accumulator = bf16_mfma(
++                                    rsrc(packed_router_weight),
++                                    row_base,
++                                    _HIDDEN,
++                                    _ROUTER_ROW_GROUPS,
++                                    _ROUTER_SPLIT_WAVES,
++                                    14,
++                                    _TOKEN_GROUP,
++                                )
++
++                                def emit_router(local_row, sample, value_low, value_high):
++                                    row = router_row_task * _ROUTER_ROW_TILE + local_row
++                                    logit_low = bf16_round(value_low)
++                                    logit_high = bf16_round(value_high)
++                                    store_raw_f32(
++                                        router_mailbox_rsrc,
++                                        sample * _N_EXPERTS + row,
++                                        rcp(fx.Float32(1.0) + exp(-logit_low)),
++                                    )
++                                    store_raw_f32(
++                                        router_mailbox_rsrc,
++                                        sample * _N_EXPERTS + row + 1,
++                                        rcp(fx.Float32(1.0) + exp(-logit_high)),
++                                    )
++
++                                publish_mfma_pairs(
++                                    projection_accumulator,
++                                    _ROUTER_ROW_TILE,
++                                    _ROUTER_SPLIT_WAVES,
++                                    emit_router,
++                                    sample_base,
++                                    _TOKEN_GROUP,
++                                )
++                                rocdl.s_waitcnt(vmcnt=0)
++                                gpu.barrier()
++                                if tid == 0:
++                                    for local_sample in range_constexpr(_TOKEN_GROUP):
++                                        store_i32(
++                                            router_ready_rsrc,
++                                            (sample_base + local_sample) * router_row_tasks + router_row_task,
++                                            1,
++                                        )
++                            elif projection_task < router_tasks + latent_tasks:
++                                latent_task = projection_task - router_tasks
++                                if const_expr(sample_groups == 1):
++                                    latent_block = latent_task
++                                    sample_base = token_group * _TOKEN_GROUP
++                                else:
++                                    sample_group = latent_task // latent_blocks
++                                    latent_block = latent_task % latent_blocks
++                                    sample_base = sample_group * _TOKEN_GROUP
++                                stage_mxfp8_hidden(sample_base, _TOKEN_GROUP)
++                                gpu.barrier()
++                                latent_tile = latent_block * latent_projection_waves + wave
++                                if wave < latent_projection_waves:
++                                    projection_values = mxfp8_scaled_mfma(
++                                        rsrc(packed_latent_weight),
++                                        rsrc(latent_weight_scale),
++                                        fx.min(latent_tile, latent_tiles - 1),
++                                        sample_base,
++                                        _TOKEN_GROUP,
++                                    )
++                                    if latent_tile < latent_tiles:
++                                        publish_raw_mxfp8_tile(
++                                            projection_values,
++                                            latent_tile,
++                                            _ROUTED_HIDDEN,
++                                            latent_mailbox_rsrc,
++                                            latent_ready_rsrc,
++                                            sample_base,
++                                            _TOKEN_GROUP,
++                                        )
++                            else:
++                                shared_task = projection_task - router_tasks - latent_tasks
++                                if const_expr(sample_groups == 1):
++                                    shared_block = shared_task
++                                    sample_base = token_group * _TOKEN_GROUP
++                                else:
++                                    sample_group = shared_task // shared_blocks
++                                    shared_block = shared_task % shared_blocks
++                                    sample_base = sample_group * _TOKEN_GROUP
++                                stage_mxfp8_hidden(sample_base, _TOKEN_GROUP)
++                                gpu.barrier()
++                                shared_tile = shared_block * shared_projection_waves + wave
++                                if wave < shared_projection_waves:
++                                    projection_values = mxfp8_scaled_mfma(
++                                        rsrc(packed_shared_up),
++                                        rsrc(shared_up_scale),
++                                        fx.min(shared_tile, shared_tiles - 1),
++                                        sample_base,
++                                        _TOKEN_GROUP,
++                                    )
++                                    if shared_tile < shared_tiles:
++                                        publish_raw_mxfp8_tile(
++                                            projection_values,
++                                            shared_tile,
++                                            2 * _SHARED_INTER,
++                                            shared_gu_mailbox_rsrc,
++                                            shared_gu_ready_rsrc,
++                                            sample_base,
++                                            _TOKEN_GROUP,
++                                        )
++
++                        # One selector CTA handles four samples, one sample per wave.
++                        selector_tasks = (samples + _WAVES - 1) // _WAVES
++                        selector_task = (backend_id + 1) % _BACK_CTAS
++                        if selector_task < selector_tasks:
++                            sample = token_group * _TOKEN_GROUP + wave
++                            if wave < _TOKEN_GROUP:
++                                if lane < router_row_tasks:
++                                    load_i32(
++                                        router_ready_rsrc,
++                                        sample * router_row_tasks + lane,
++                                    )
++                            gpu.barrier()
++                            if wave < _TOKEN_GROUP:
++                                scores = []
++                                biases = []
++                                for value_index in range_constexpr(_N_EXPERTS // _WAVE_SIZE):
++                                    expert = lane + value_index * _WAVE_SIZE
++                                    scores.append(
++                                        load_raw_f32(
++                                            router_mailbox_rsrc,
++                                            sample * _N_EXPERTS + expert,
++                                        )
++                                    )
++                                    biases.append(
++                                        fx.Float32(
++                                            fx.BFloat16(
++                                                bo.buffer_load(
++                                                    rsrc(correction_bias),
++                                                    expert,
++                                                    vec_width=1,
++                                                    dtype=T.bf16,
++                                                )
++                                            )
++                                        )
++                                    )
++                                corrected = [scores[index] + biases[index] for index in range_constexpr(_N_EXPERTS // _WAVE_SIZE)]
++                                selected_sum = fx.Float32(0.0)
++                                for selected_index in range_constexpr(_TOP_K):
++                                    best_score = corrected[0]
++                                    best_id = fx.Int32(lane)
++                                    for value_index in range_constexpr(1, _N_EXPERTS // _WAVE_SIZE):
++                                        candidate_id = fx.Int32(lane + value_index * _WAVE_SIZE)
++                                        candidate_score = corrected[value_index]
++                                        take = (candidate_score > best_score) | (
++                                            (ArithValue(candidate_score) == ArithValue(best_score)) & (candidate_id < best_id)
++                                        )
++                                        best_score = take.select(candidate_score, best_score)
++                                        best_id = take.select(candidate_id, best_id)
++                                    for offset in (32, 16, 8, 4, 2, 1):
++                                        peer_score = xshfl(best_score, offset)
++                                        peer_id = xshfl(best_id, offset)
++                                        take = (peer_score > best_score) | (
++                                            (ArithValue(peer_score) == ArithValue(best_score)) & (peer_id < best_id)
++                                        )
++                                        best_score = take.select(peer_score, best_score)
++                                        best_id = take.select(peer_id, best_id)
++                                    best_bias = fx.Float32(
++                                        fx.BFloat16(
++                                            bo.buffer_load(
++                                                rsrc(correction_bias),
++                                                best_id,
++                                                vec_width=1,
++                                                dtype=T.bf16,
++                                            )
++                                        )
++                                    )
++                                    best_raw = best_score - best_bias
++                                    selected_sum = selected_sum + best_raw
++                                    if lane == 0:
++                                        route = sample * _TOP_K + selected_index
++                                        store_i32(selection_id_rsrc, route, best_id)
++                                        lds_store(output_values, wave * _TOP_K + selected_index, best_raw)
++                                    for value_index in range_constexpr(_N_EXPERTS // _WAVE_SIZE):
++                                        expert = fx.Int32(lane + value_index * _WAVE_SIZE)
++                                        corrected[value_index] = (expert == best_id).select(
++                                            fx.Float32(float("-inf")), corrected[value_index]
++                                        )
++                                if lane == 0:
++                                    inverse_sum = rcp(selected_sum)
++                                    for selected_index in range_constexpr(_TOP_K):
++                                        route = sample * _TOP_K + selected_index
++                                        store_f32(
++                                            selection_weight_rsrc,
++                                            route,
++                                            lds_load(output_values, wave * _TOP_K + selected_index) * inverse_sum,
++                                        )
++
++                        # Shared SiTU activation is cheap enough to run as one CTA/sample.
++                        shared_sample = (backend_id + 1 + _TOKEN_GROUP) % _BACK_CTAS
++                        if shared_sample < _TOKEN_GROUP:
++                            shared_pairs = _SHARED_INTER // 2
++                            shared_tiles = (2 * _SHARED_INTER) // 16
++                            if tid < shared_tiles:
++                                load_i32(
++                                    shared_gu_ready_rsrc,
++                                    (token_group * _TOKEN_GROUP + shared_sample) * shared_tiles + tid,
++                                )
++                            gpu.barrier()
++                            for pair_round in range_constexpr((shared_pairs + _THREADS - 1) // _THREADS):
++                                pair_in_row = tid + pair_round * _THREADS
++                                if pair_in_row < shared_pairs:
++                                    gate_word = load_raw_pair(
++                                        shared_gu_mailbox_rsrc,
++                                        ((token_group * _TOKEN_GROUP + shared_sample) * (2 * _SHARED_INTER)) // 2 + pair_in_row,
++                                    )
++                                    up_word = load_raw_pair(
++                                        shared_gu_mailbox_rsrc,
++                                        ((token_group * _TOKEN_GROUP + shared_sample) * (2 * _SHARED_INTER) + _SHARED_INTER) // 2 + pair_in_row,
++                                    )
++                                    gate_values = fx.Vector.from_elements([gate_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
++                                    up_values = fx.Vector.from_elements([up_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
++                                    mids = []
++                                    for item in range_constexpr(2):
++                                        gate_value = gate_values[item]
++                                        up_value = up_values[item]
++                                        gate_tanh = fx.Float32(2.0) * rcp(
++                                            fx.Float32(1.0) + exp(fx.Float32(-0.5) * gate_value)
++                                        ) - fx.Float32(1.0)
++                                        gate_sigmoid = rcp(fx.Float32(1.0) + exp(-gate_value))
++                                        up_tanh = fx.Float32(2.0) * rcp(
++                                            fx.Float32(1.0) + exp(fx.Float32(-0.08) * up_value)
++                                        ) - fx.Float32(1.0)
++                                        mids.append(fx.Float32(4.0) * gate_tanh * gate_sigmoid * fx.Float32(25.0) * up_tanh)
++                                    store_pair(
++                                        shared_mid_mailbox_rsrc,
++                                        (token_group * _TOKEN_GROUP + shared_sample) * shared_pairs + pair_in_row,
++                                        mids[0],
++                                        mids[1],
++                                    )
++                        stamp(5)
++
++                        # Stage 6: direct top-16 routed expert up/gate.  Avoid sorting at
++                        # decode scale: each task owns one 16-row intermediate tile for one
++                        # selected route and reads the selected expert directly.
++                        up_tiles = _INTER // 16
++                        up_tasks = _TOKEN_GROUP * _TOP_K * up_tiles
++                        up_task = backend_id
++                        while up_task < up_tasks:
++                            sample = token_group * _TOKEN_GROUP + up_task // (_TOP_K * up_tiles)
++                            route_in_sample = (up_task // up_tiles) % _TOP_K
++                            row_group = up_task % up_tiles
++                            route = sample * _TOP_K + route_in_sample
++                            expert = uniform(load_i32(selection_id_rsrc, route))
++                            expert_weight_bytes = 2 * _INTER * (_ROUTED_HIDDEN // 2)
++                            expert_scale_bytes = 2 * _INTER * (_ROUTED_HIDDEN // 32)
++                            up_weight_rsrc = rsrc(packed_expert_up + fx.Int64(expert) * fx.Int64(expert_weight_bytes))
++                            up_scale_rsrc = rsrc(expert_up_scale + fx.Int64(expert) * fx.Int64(expert_scale_bytes))
++                            stage_raw_vector(
++                                latent_mailbox_rsrc,
++                                latent_ready_rsrc,
++                                sample * (_ROUTED_HIDDEN // 16),
++                                _ROUTED_HIDDEN // 16,
++                                sample * (_ROUTED_HIDDEN // 2),
++                                _ROUTED_HIDDEN // 2,
++                            )
++                            gpu.barrier()
++
++                            accumulator = [fx.Float32(0.0) for _ in range(4)]
++                            split = wave % 4
++                            selected_row_group = (wave < 4).select(
++                                row_group,
++                                row_group + _INTER // 16,
++                            )
++                            chunks_per_wave = (_ROUTED_HIDDEN // 128) // 4
++                            for local_chunk in range_constexpr(chunks_per_wave):
++                                k_chunk = split * chunks_per_wave + local_chunk
++                                fragment = mxfp4_fragment(
++                                    up_weight_rsrc,
++                                    up_scale_rsrc,
++                                    selected_row_group,
++                                    k_chunk,
++                                    _ROUTED_HIDDEN,
++                                )
++                                accumulator = mxfp4_apply(
++                                    accumulator,
++                                    fragment,
++                                    k_chunk * 64,
++                                )
++
++                            fx.ptr_store(
++                                fx.Vector.from_elements(accumulator, fx.Float32),
++                                reduction + (wave * _WAVE_SIZE + lane) * 4,
++                            )
++                            gpu.barrier()
++                            if tid < 16 // 2:
++                                local_row = tid * 2
++                                activated = []
++                                for pair_element in range_constexpr(2):
++                                    row = local_row + pair_element
++                                    source_lane = 16 * (row // 4)
++                                    gate_value = fx.Float32(0.0)
++                                    up_value = fx.Float32(0.0)
++                                    for source_wave in range_constexpr(4):
++                                        source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
++                                        gate_value = gate_value + lds_load(reduction, source_index)
++                                        up_index = ((source_wave + 4) * _WAVE_SIZE + source_lane) * 4 + row % 4
++                                        up_value = up_value + lds_load(reduction, up_index)
++                                    gate_value = bf16_round(gate_value)
++                                    up_value = bf16_round(up_value)
++                                    gate_tanh = fx.Float32(2.0) * rcp(
++                                        fx.Float32(1.0) + exp(fx.Float32(-0.5) * gate_value)
++                                    ) - fx.Float32(1.0)
++                                    gate_sigmoid = rcp(fx.Float32(1.0) + exp(-gate_value))
++                                    up_tanh = fx.Float32(2.0) * rcp(
++                                        fx.Float32(1.0) + exp(fx.Float32(-0.08) * up_value)
++                                    ) - fx.Float32(1.0)
++                                    activated.append(fx.Float32(4.0) * gate_tanh * gate_sigmoid * fx.Float32(25.0) * up_tanh)
++                                pair = ((sample * _TOP_K + route_in_sample) * _INTER + row_group * 16 + local_row) // 2
++                                store_raw_pair(
++                                    expert_mid_mailbox_rsrc,
++                                    pair,
++                                    activated[0],
++                                    activated[1],
++                                )
++                            gpu.barrier()
++                            if tid == 0:
++                                rocdl.s_waitcnt(vmcnt=0)
++                                store_i32(
++                                    expert_mid_ready_rsrc,
++                                    (sample * _TOP_K + route_in_sample) * up_tiles + row_group,
++                                    1,
++                                )
++                            up_task = up_task + _BACK_CTAS
++                        stamp(6)
++
++                        # Stage 7: expert down, route weighting, TP reduction, and per-tile
++                        # squared-norm publication for the latent RMSNorm.
++                        routed_tiles = _ROUTED_HIDDEN // 16
++                        down_tasks = _TOKEN_GROUP * routed_tiles
++                        down_task = backend_id
++                        while down_task < down_tasks:
++                            sample = token_group * _TOKEN_GROUP + down_task // routed_tiles
++                            row_group = down_task % routed_tiles
++                            mid_pairs_per_route = _INTER // 2
++                            staged_pairs = _TOP_K * mid_pairs_per_route
++                            stage_raw_vector(
++                                expert_mid_mailbox_rsrc,
++                                expert_mid_ready_rsrc,
++                                sample * _TOP_K * up_tiles,
++                                _TOP_K * up_tiles,
++                                sample * staged_pairs,
++                                staged_pairs,
++                            )
++                            gpu.barrier()
++
++                            accumulator = [fx.Float32(0.0) for _ in range(4)]
++                            for route_round in range_constexpr(_TOP_K // _WAVES):
++                                route_in_sample = wave + route_round * _WAVES
++                                route = sample * _TOP_K + route_in_sample
++                                expert = uniform(load_i32(selection_id_rsrc, route))
++                                route_weight = uniform_f32(load_f32(selection_weight_rsrc, route))
++                                expert_weight_bytes = _ROUTED_HIDDEN * (_INTER // 2)
++                                expert_scale_bytes = _ROUTED_HIDDEN * (_INTER // 32)
++                                down_weight_rsrc = rsrc(packed_expert_down + fx.Int64(expert) * fx.Int64(expert_weight_bytes))
++                                down_scale_rsrc = rsrc(expert_down_scale + fx.Int64(expert) * fx.Int64(expert_scale_bytes))
++                                route_accumulator = [fx.Float32(0.0) for _ in range(4)]
++                                for k_chunk in range_constexpr(_INTER // 128):
++                                    fragment = mxfp4_fragment(
++                                        down_weight_rsrc,
++                                        down_scale_rsrc,
++                                        row_group,
++                                        k_chunk,
++                                        _INTER,
++                                    )
++                                    route_accumulator = mxfp4_apply(
++                                        route_accumulator,
++                                        fragment,
++                                        route_in_sample * mid_pairs_per_route + k_chunk * 64,
++                                    )
++                                accumulator = [
++                                    accumulator[item] + route_accumulator[item] * route_weight for item in range_constexpr(4)
++                                ]
++
++                            fx.ptr_store(
++                                fx.Vector.from_elements(accumulator, fx.Float32),
++                                reduction + (wave * _WAVE_SIZE + lane) * 4,
++                            )
++                            gpu.barrier()
++                            if tid < 16 // 2:
++                                local_row = tid * 2
++                                values = []
++                                for pair_element in range_constexpr(2):
++                                    row = local_row + pair_element
++                                    source_lane = 16 * (row // 4)
++                                    value = fx.Float32(0.0)
++                                    for source_wave in range_constexpr(_WAVES):
++                                        source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
++                                        value = value + lds_load(reduction, source_index)
++                                    values.append(value)
++                                lds_store(
++                                    output_values,
++                                    tid,
++                                    bf16_pair(values[0], values[1]),
++                                )
++                            gpu.barrier()
++
++                            pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
++
++                            def emit_routed(local_pair, value_low, value_high):
++                                reduced_low = bf16_round(value_low)
++                                reduced_high = bf16_round(value_high)
++                                store_raw_pair(
++                                    routed_mailbox_rsrc,
++                                    pair_base + local_pair,
++                                    reduced_low,
++                                    reduced_high,
++                                )
++                                lds_store(
++                                    output_values,
++                                    local_pair,
++                                    reduced_low * reduced_low + reduced_high * reduced_high,
++                                )
++
++                            moe_peer_reduce(16 // 2, pair_base, output_values, 0, emit_routed)
++                            square_part = (tid < 16 // 2).select(
++                                lds_load(output_values, fx.min(tid, 16 // 2 - 1)),
++                                fx.Float32(0.0),
++                            )
++                            square_sum = block_sum(square_part)
++                            if tid == 0:
++                                rocdl.s_waitcnt(vmcnt=0)
++                                store_f32(
++                                    routed_stats_rsrc,
++                                    sample * routed_tiles + row_group,
++                                    square_sum,
++                                )
++                            down_task = down_task + _BACK_CTAS
++                        stamp(7)
++
++                        # One CTA per sample collapses the routed norm partials.  Tail
++                        # tasks poll this inverse RMS while loading their latent input.
++                        norm_sample = (backend_id + 1) % _BACK_CTAS
++                        if norm_sample < _TOKEN_GROUP:
++                            square_part = fx.Float32(0.0)
++                            if tid < routed_tiles:
++                                square_part = load_f32(
++                                    routed_stats_rsrc,
++                                    (token_group * _TOKEN_GROUP + norm_sample) * routed_tiles + tid,
++                                )
++                            total_square = block_sum(square_part)
++                            if tid == 0:
++                                store_f32(
++                                    routed_inv_rsrc,
++                                    (token_group * _TOKEN_GROUP + norm_sample),
++                                    rsq(total_square * (1.0 / _ROUTED_HIDDEN) + EPS),
++                                )
++                        stamp(8)
++
++                        # Stage 8: shared-down and rank-local latent-up run together, then
++                        # the final TP reduction adds the post-AttnRes residual in place.
++                        hidden_tiles = _HIDDEN // 16
++                        tail_tasks = _TOKEN_GROUP * hidden_tiles
++                        tail_task = backend_id
++                        while tail_task < tail_tasks:
++                            sample = token_group * _TOKEN_GROUP + tail_task // hidden_tiles
++                            row_group = tail_task % hidden_tiles
++                            inverse_rms = uniform_f32(load_f32(routed_inv_rsrc, sample))
++
++                            shared_pairs = _SHARED_INTER // 2
++                            for load_round in range_constexpr((shared_pairs + _THREADS - 1) // _THREADS):
++                                pair = tid + load_round * _THREADS
++                                if pair < shared_pairs:
++                                    packed = load_pair(
++                                        shared_mid_mailbox_rsrc,
++                                        sample * shared_pairs + pair,
++                                    )
++                                    lds_store(x, pair, packed.bitcast(fx.Float32))
++
++                            latent_pairs = _ROUTED_HIDDEN // 2
++                            gain_rsrc = rsrc(latent_gain)
++                            for load_round in range_constexpr((latent_pairs + _THREADS - 1) // _THREADS):
++                                pair = tid + load_round * _THREADS
++                                if pair < latent_pairs:
++                                    packed = load_raw_pair(
++                                        routed_mailbox_rsrc,
++                                        sample * latent_pairs + pair,
++                                    )
++                                    values = fx.Vector.from_elements([packed], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
++                                    gain_word = fx.Int32(bo.buffer_load(gain_rsrc, pair, vec_width=1, dtype=T.i32))
++                                    gains = fx.Vector.from_elements([gain_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
++                                    lds_store(
++                                        x,
++                                        shared_pairs + pair,
++                                        bf16_pair(
++                                            values[0] * inverse_rms * gains[0],
++                                            values[1] * inverse_rms * gains[1],
++                                        ),
++                                    )
++                            gpu.barrier()
++
++                            accumulator = [fx.Float32(0.0) for _ in range(4)]
++                            if wave < 4:
++                                accumulator = mxfp8_bf16_accumulate(
++                                    rsrc(packed_shared_down),
++                                    rsrc(shared_down_scale),
++                                    0,
++                                    row_group,
++                                    _SHARED_INTER,
++                                    wave,
++                                    4,
++                                )
++                            else:
++                                first_local_row = rank * _HIDDEN_SHARD
++                                global_row = row_group * 16
++                                latent_live = (global_row >= first_local_row) & (global_row < first_local_row + _HIDDEN_SHARD)
++                                local_row_group = fx.max(
++                                    fx.Int32(0),
++                                    (global_row - first_local_row) // 16,
++                                )
++                                split_wave = wave - 4
++                                if latent_live:
++                                    accumulator = mxfp8_bf16_accumulate(
++                                        rsrc(packed_latent_up),
++                                        rsrc(latent_up_scale),
++                                        shared_pairs,
++                                        local_row_group,
++                                        _ROUTED_HIDDEN,
++                                        split_wave,
++                                        4,
++                                    )
++
++                            fx.ptr_store(
++                                fx.Vector.from_elements(accumulator, fx.Float32),
++                                reduction + (wave * _WAVE_SIZE + lane) * 4,
++                            )
++                            gpu.barrier()
++                            latent_live = (row_group * 16 >= rank * _HIDDEN_SHARD) & (row_group * 16 < (rank + 1) * _HIDDEN_SHARD)
++                            if tid < 16 // 2:
++                                local_row = tid * 2
++                                values = []
++                                for pair_element in range_constexpr(2):
++                                    row = local_row + pair_element
++                                    source_lane = 16 * (row // 4)
++                                    shared_result = fx.Float32(0.0)
++                                    latent_value = fx.Float32(0.0)
++                                    for source_wave in range_constexpr(4):
++                                        source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
++                                        shared_result = shared_result + lds_load(reduction, source_index)
++                                    for source_wave in range_constexpr(4):
++                                        latent_index = ((source_wave + 4) * _WAVE_SIZE + source_lane) * 4 + row % 4
++                                        latent_value = latent_value + lds_load(reduction, latent_index)
++                                    shared_result = bf16_round(shared_result)
++                                    latent_value = latent_live.select(bf16_round(latent_value), fx.Float32(0.0))
++                                    values.append(bf16_round(shared_result + latent_value))
++                                lds_store(
++                                    output_values,
++                                    tid,
++                                    bf16_pair(values[0], values[1]),
++                                )
++                            gpu.barrier()
++
++                            pair_base = sample * (_HIDDEN // 2) + row_group * (16 // 2)
++
++                            def emit_final(local_pair, value_low, value_high):
++                                residual_word = fx.Int32(
++                                    bo.buffer_load(
++                                        rsrc(updated_prefix),
++                                        pair_base + local_pair,
++                                        vec_width=1,
++                                        dtype=T.i32,
++                                    )
++                                )
++                                residual_low = (residual_word << 16).bitcast(fx.Float32)
++                                residual_high = (residual_word & fx.Int32(-65536)).bitcast(fx.Float32)
++                                final_word = bf16_pair(
++                                    residual_low + value_low,
++                                    residual_high + value_high,
++                                ).bitcast(fx.Int32)
++                                bo.buffer_store(
++                                    final_word,
++                                    rsrc(final_output),
++                                    pair_base + local_pair,
+                                     cache_modifier=CM_DEV,
+                                 )
+-                            )
+-                            words += [value_tag[0], value_tag[1]]
+-                        return fx.Vector.from_elements(words, fx.Int32)
+-
+-                    peer_values = load_peers()
+-                    pending = peer_values[1] != tag
+-                    for source_rank in range_constexpr(1, npes):
+-                        pending = pending | (peer_values[source_rank * 2 + 1] != tag)
+-                    while pending:
+-                        rocdl.s_nop(0)
++
++                            moe_peer_reduce(16 // 2, pair_base, output_values, 1, emit_final)
++                            tail_task = tail_task + _BACK_CTAS
++                        stamp(9)
++
++                for token_group in range(samples // _TOKEN_GROUP):
++                    run_token_group(token_group)
++        else:
++            # Stage 3: BF16 1536 -> 7168 output projection followed by the tagged
++            # TP8 reduction.  Each wave again owns a complete-K 16-row group.
++            output_row_tasks = _OUTPUT_TASKS
++            output_tasks = sample_groups * output_row_tasks
++            output_task = bid
++            while output_task < output_tasks:
++                if const_expr(sample_groups == 1):
++                    output_row_task = output_task
++                    sample_base = 0
++                else:
++                    sample_group = output_task // output_row_tasks
++                    output_row_task = output_task % output_row_tasks
++                    sample_base = sample_group * staged_samples
++                stamp(2)
++                stage_norm(sample_base, staged_samples)
++                gpu.barrier()
++                output_accumulator = bf16_mfma(
++                    output_weight_rsrc,
++                    output_row_task * _OUTPUT_ROW_GROUPS,
++                    _PROJECTION,
++                    _OUTPUT_ROW_GROUPS,
++                    _OUTPUT_SPLIT_WAVES,
++                    6,
++                    staged_samples,
++                )
++
++                def emit_output(local_row, sample, value_low, value_high):
++                    lds_store(
++                        output_values,
++                        ((sample - sample_base) * _OUTPUT_ROW_TILE + local_row) // 2,
++                        bf16_pair(value_low, value_high),
++                    )
++
++                publish_mfma_pairs(
++                    output_accumulator,
++                    _OUTPUT_ROW_TILE,
++                    _OUTPUT_SPLIT_WAVES,
++                    emit_output,
++                    sample_base,
++                    staged_samples,
++                )
++
++                pair_count = staged_samples * _OUTPUT_ROW_TILE // 2
++                send_rounds = (pair_count + _WAVE_SIZE - 1) // _WAVE_SIZE
++                peer_rounds = (npes + _WAVES - 1) // _WAVES
++                for peer_round in range_constexpr(peer_rounds):
++                    peer = wave + peer_round * _WAVES
++                    if peer < npes:
++                        peer_words = fx.Vector(bo.buffer_load(rsrc(peers), peer * 2, vec_width=2, dtype=T.i32))
++                        peer_address = (fx.Int64(uniform(peer_words[1])) << 32) | fx.Int64(
++                            fx.Uint32(uniform(peer_words[0]))
++                        )
++                        peer_rsrc = rsrc(peer_address + symmetric_base)
++                        for send_round in range_constexpr(send_rounds):
++                            local_pair = lane + send_round * _WAVE_SIZE
++                            if local_pair < pair_count:
++                                local_sample = local_pair // (_OUTPUT_ROW_TILE // 2)
++                                sample = sample_base + local_sample
++                                row_pair = local_pair % (_OUTPUT_ROW_TILE // 2)
++                                local_row = row_pair * 2
++                                row = output_row_task * _OUTPUT_ROW_TILE + local_row
++                                packed = lds_load(
++                                    output_values,
++                                    (local_sample * _OUTPUT_ROW_TILE + local_row) // 2,
++                                ).bitcast(fx.Int32)
++                                global_pair = (sample * _HIDDEN + row) // 2
++                                mailbox = rank * max_pairs + global_pair
++                                bo.buffer_store(
++                                    fx.Vector.from_elements([packed, tag], fx.Int32),
++                                    peer_rsrc,
++                                    mailbox * 2,
++                                    cache_modifier=CM_SYS,
++                                )
++                gpu.barrier()
++
++                local_rsrc = rsrc(symmetric + symmetric_base)
++                pair_rounds = (pair_count + _THREADS - 1) // _THREADS
++                for pair_round in range_constexpr(pair_rounds):
++                    local_pair = tid + pair_round * _THREADS
++                    if local_pair < pair_count:
++                        local_sample = local_pair // (_OUTPUT_ROW_TILE // 2)
++                        sample = sample_base + local_sample
++                        row_pair = local_pair % (_OUTPUT_ROW_TILE // 2)
++                        row = output_row_task * _OUTPUT_ROW_TILE + row_pair * 2
++                        global_pair = (sample * _HIDDEN + row) // 2
++
++                        def load_peers():
++                            words = []
++                            for source_rank in range_constexpr(npes):
++                                mailbox = source_rank * max_pairs + global_pair
++                                value_tag = fx.Vector(
++                                    bo.buffer_load(
++                                        local_rsrc,
++                                        mailbox * 2,
++                                        vec_width=2,
++                                        dtype=T.i32,
++                                        cache_modifier=CM_DEV,
++                                    )
++                                )
++                                words += [value_tag[0], value_tag[1]]
++                            return fx.Vector.from_elements(words, fx.Int32)
++
+                         peer_values = load_peers()
+                         pending = peer_values[1] != tag
+                         for source_rank in range_constexpr(1, npes):
+                             pending = pending | (peer_values[source_rank * 2 + 1] != tag)
+-
+-                    sum_low = fx.Float32(0.0)
+-                    sum_high = fx.Float32(0.0)
+-                    for source_rank in range_constexpr(npes):
+-                        packed = peer_values[source_rank * 2]
+-                        sum_low = sum_low + (packed << 16).bitcast(fx.Float32)
+-                        sum_high = sum_high + (packed & fx.Int32(-65536)).bitcast(fx.Float32)
+-                    packed_sum = (
+-                        fx.Vector.from_elements([sum_low, sum_high], fx.Float32).to(fx.BFloat16).bitcast(fx.Int32)[0]
+-                    )
+-                    bo.buffer_store(packed_sum, output_rsrc, global_pair, cache_modifier=CM_DEV)
+-                    if const_expr(fuse_attn_res):
+-                        store_pair(
+-                            attention_mailbox_rsrc,
+-                            global_pair,
+-                            sum_low,
+-                            sum_high,
+-                        )
+-            output_task = output_task + _BLOCKS
+-        stamp(3)
+-
+-        # Stage 4: post-attention AttnRes and MXFP8 activation quantization for
+-        post_owner_task = (bid + 32) % _BLOCKS
+-        # the latent/router/shared projection stage that follows this kernel.
+-        if const_expr(fuse_attn_res):
+-            if post_owner_task < samples * _ATTN_RES_CTAS:
+-                if const_expr(block_write_idx >= 0):
+-                    post_prefix = output
+-                    post_delta = output
+-                    post_has_delta = False
+-                else:
+-                    post_prefix = hidden_states
+-                    post_delta = output
+-                    post_has_delta = True
+-                run_attn_res_chunk(
+-                    post_owner_task // _ATTN_RES_CTAS,
+-                    post_owner_task % _ATTN_RES_CTAS,
+-                    post_prefix,
+-                    post_delta,
+-                    mlp_res_norm,
+-                    mlp_res_qk,
+-                    post_norm,
+-                    updated_prefix,
+-                    moe_input,
+-                    moe_mailbox_rsrc,
+-                    moe_ready_rsrc,
+-                    post_stats_rsrc,
+-                    attn_res_blocks + int(block_write_idx >= 0),
+-                    post_has_delta,
+-                    block_write_idx >= 0,
+-                    block_write_idx < 0,
+-                    -1,
+-                    True,
+-                )
+-        stamp(4)
+-
+-        if const_expr(fuse_moe):
+-            # Stage 5: the BF16 router and the two production MXFP8 dense
+-            # projections.  All consume the post-AttnRes result; the dense
+-            # branches directly reuse the quantized activation emitted there.
+-            router_row_tasks = _N_EXPERTS // _ROUTER_ROW_TILE
+-            router_tasks = sample_groups * router_row_tasks
+-            latent_tiles = _ROUTED_HIDDEN // 16
+-            shared_tiles = (2 * _SHARED_INTER) // 16
+-            latent_blocks = (latent_tiles + latent_projection_tiles - 1) // latent_projection_tiles
+-            shared_blocks = (shared_tiles + shared_projection_tiles - 1) // shared_projection_tiles
+-            latent_tasks = sample_groups * latent_blocks
+-            shared_tasks = sample_groups * shared_blocks
+-            projection_tasks = router_tasks + latent_tasks + shared_tasks
+-            projection_task = bid
+-            if projection_task < projection_tasks:
+-                if projection_task < router_tasks:
+-                    if const_expr(sample_groups == 1):
+-                        router_row_task = projection_task
+-                        sample_base = 0
++                        while pending:
++                            rocdl.s_nop(0)
++                            peer_values = load_peers()
++                            pending = peer_values[1] != tag
++                            for source_rank in range_constexpr(1, npes):
++                                pending = pending | (peer_values[source_rank * 2 + 1] != tag)
++
++                        sum_low = fx.Float32(0.0)
++                        sum_high = fx.Float32(0.0)
++                        for source_rank in range_constexpr(npes):
++                            packed = peer_values[source_rank * 2]
++                            sum_low = sum_low + (packed << 16).bitcast(fx.Float32)
++                            sum_high = sum_high + (packed & fx.Int32(-65536)).bitcast(fx.Float32)
++                        packed_sum = (
++                            fx.Vector.from_elements([sum_low, sum_high], fx.Float32).to(fx.BFloat16).bitcast(fx.Int32)[0]
++                        )
++                        bo.buffer_store(packed_sum, output_rsrc, global_pair, cache_modifier=CM_DEV)
++                        if const_expr(fuse_attn_res):
++                            store_pair(
++                                attention_mailbox_rsrc,
++                                global_pair,
++                                sum_low,
++                                sum_high,
++                            )
++                output_task = output_task + _BLOCKS
++            stamp(3)
++
++            # Stage 4: post-attention AttnRes and MXFP8 activation quantization for
++            # the latent/router/shared projection stage that follows this kernel.
++            if const_expr(fuse_attn_res):
++                if bid < samples * _ATTN_RES_CTAS:
++                    if const_expr(block_write_idx >= 0):
++                        post_prefix = output
++                        post_delta = output
++                        post_has_delta = False
+                     else:
+-                        sample_group = projection_task // router_row_tasks
+-                        router_row_task = projection_task % router_row_tasks
+-                        sample_base = sample_group * staged_samples
+-                    router_prefetch = prefetch_bf16_units(
+-                        rsrc(packed_router_weight), router_row_task * _ROUTER_ROW_GROUPS,
+-                        _HIDDEN, _ROUTER_SPLIT_WAVES, 7,
+-                    )
+-                    stage_moe_hidden(sample_base, staged_samples)
++                        post_prefix = hidden_states
++                        post_delta = output
++                        post_has_delta = True
++                    run_attn_res_chunk(
++                        bid // _ATTN_RES_CTAS,
++                        bid % _ATTN_RES_CTAS,
++                        post_prefix,
++                        post_delta,
++                        mlp_res_norm,
++                        mlp_res_qk,
++                        post_norm,
++                        updated_prefix,
++                        moe_input,
++                        moe_mailbox_rsrc,
++                        moe_ready_rsrc,
++                        post_stats_rsrc,
++                        attn_res_blocks + int(block_write_idx >= 0),
++                        post_has_delta,
++                        block_write_idx >= 0,
++                        block_write_idx < 0,
++                        -1,
++                        True,
++                    )
++            stamp(4)
++
++            if const_expr(fuse_moe):
++                # Stage 5: the BF16 router and the two production MXFP8 dense
++                # projections.  All consume the post-AttnRes result; the dense
++                # branches directly reuse the quantized activation emitted there.
++                router_row_tasks = _N_EXPERTS // _ROUTER_ROW_TILE
++                router_tasks = sample_groups * router_row_tasks
++                latent_tiles = _ROUTED_HIDDEN // 16
++                shared_tiles = (2 * _SHARED_INTER) // 16
++                latent_blocks = (latent_tiles + latent_projection_waves - 1) // latent_projection_waves
++                shared_blocks = (shared_tiles + shared_projection_waves - 1) // shared_projection_waves
++                latent_tasks = sample_groups * latent_blocks
++                shared_tasks = sample_groups * shared_blocks
++                projection_tasks = router_tasks + latent_tasks + shared_tasks
++                projection_task = bid
++                if projection_task < projection_tasks:
++                    if projection_task < router_tasks:
++                        if const_expr(sample_groups == 1):
++                            router_row_task = projection_task
++                            sample_base = 0
++                        else:
++                            sample_group = projection_task // router_row_tasks
++                            router_row_task = projection_task % router_row_tasks
++                            sample_base = sample_group * staged_samples
++                        stage_moe_hidden(sample_base, staged_samples)
++                        gpu.barrier()
++                        row_base = router_row_task * _ROUTER_ROW_GROUPS
++                        projection_accumulator = bf16_mfma(
++                            rsrc(packed_router_weight),
++                            row_base,
++                            _HIDDEN,
++                            _ROUTER_ROW_GROUPS,
++                            _ROUTER_SPLIT_WAVES,
++                            14,
++                            staged_samples,
++                        )
++
++                        def emit_router(local_row, sample, value_low, value_high):
++                            row = router_row_task * _ROUTER_ROW_TILE + local_row
++                            logit_low = bf16_round(value_low)
++                            logit_high = bf16_round(value_high)
++                            store_raw_f32(
++                                router_mailbox_rsrc,
++                                sample * _N_EXPERTS + row,
++                                rcp(fx.Float32(1.0) + exp(-logit_low)),
++                            )
++                            store_raw_f32(
++                                router_mailbox_rsrc,
++                                sample * _N_EXPERTS + row + 1,
++                                rcp(fx.Float32(1.0) + exp(-logit_high)),
++                            )
++
++                        publish_mfma_pairs(
++                            projection_accumulator,
++                            _ROUTER_ROW_TILE,
++                            _ROUTER_SPLIT_WAVES,
++                            emit_router,
++                            sample_base,
++                            staged_samples,
++                        )
++                        rocdl.s_waitcnt(vmcnt=0)
++                        gpu.barrier()
++                        if tid == 0:
++                            for local_sample in range_constexpr(staged_samples):
++                                store_i32(
++                                    router_ready_rsrc,
++                                    (sample_base + local_sample) * router_row_tasks + router_row_task,
++                                    1,
++                                )
++                    elif projection_task < router_tasks + latent_tasks:
++                        latent_task = projection_task - router_tasks
++                        if const_expr(sample_groups == 1):
++                            latent_block = latent_task
++                            sample_base = 0
++                        else:
++                            sample_group = latent_task // latent_blocks
++                            latent_block = latent_task % latent_blocks
++                            sample_base = sample_group * staged_samples
++                        stage_mxfp8_hidden(sample_base, staged_samples)
++                        gpu.barrier()
++                        latent_tile = latent_block * latent_projection_waves + wave
++                        if wave < latent_projection_waves:
++                            projection_values = mxfp8_scaled_mfma(
++                                rsrc(packed_latent_weight),
++                                rsrc(latent_weight_scale),
++                                fx.min(latent_tile, latent_tiles - 1),
++                                sample_base,
++                                staged_samples,
++                            )
++                            if latent_tile < latent_tiles:
++                                publish_raw_mxfp8_tile(
++                                    projection_values,
++                                    latent_tile,
++                                    _ROUTED_HIDDEN,
++                                    latent_mailbox_rsrc,
++                                    latent_ready_rsrc,
++                                    sample_base,
++                                    staged_samples,
++                                )
++                    else:
++                        shared_task = projection_task - router_tasks - latent_tasks
++                        if const_expr(sample_groups == 1):
++                            shared_block = shared_task
++                            sample_base = 0
++                        else:
++                            sample_group = shared_task // shared_blocks
++                            shared_block = shared_task % shared_blocks
++                            sample_base = sample_group * staged_samples
++                        stage_mxfp8_hidden(sample_base, staged_samples)
++                        gpu.barrier()
++                        shared_tile = shared_block * shared_projection_waves + wave
++                        if wave < shared_projection_waves:
++                            projection_values = mxfp8_scaled_mfma(
++                                rsrc(packed_shared_up),
++                                rsrc(shared_up_scale),
++                                fx.min(shared_tile, shared_tiles - 1),
++                                sample_base,
++                                staged_samples,
++                            )
++                            if shared_tile < shared_tiles:
++                                publish_raw_mxfp8_tile(
++                                    projection_values,
++                                    shared_tile,
++                                    2 * _SHARED_INTER,
++                                    shared_gu_mailbox_rsrc,
++                                    shared_gu_ready_rsrc,
++                                    sample_base,
++                                    staged_samples,
++                                )
++
++                # One selector CTA handles four samples, one sample per wave.
++                selector_tasks = (samples + _WAVES - 1) // _WAVES
++                if bid < selector_tasks:
++                    sample = bid * _WAVES + wave
++                    if sample < samples:
++                        if lane < router_row_tasks:
++                            load_i32(
++                                router_ready_rsrc,
++                                sample * router_row_tasks + lane,
++                            )
+                     gpu.barrier()
+-                    row_base = router_row_task * _ROUTER_ROW_GROUPS
+-                    projection_accumulator = bf16_mfma(
+-                        rsrc(packed_router_weight),
+-                        row_base,
+-                        _HIDDEN,
+-                        _ROUTER_ROW_GROUPS,
+-                        _ROUTER_SPLIT_WAVES,
+-                        14,
+-                        staged_samples,
+-                        router_prefetch,
+-                    )
+-
+-                    def emit_router(local_row, sample, value_low, value_high):
+-                        row = router_row_task * _ROUTER_ROW_TILE + local_row
+-                        logit_low = bf16_round(value_low)
+-                        logit_high = bf16_round(value_high)
+-                        store_raw_f32(
+-                            router_mailbox_rsrc,
+-                            sample * _N_EXPERTS + row,
+-                            rcp(fx.Float32(1.0) + exp(-logit_low)),
+-                        )
+-                        store_raw_f32(
+-                            router_mailbox_rsrc,
+-                            sample * _N_EXPERTS + row + 1,
+-                            rcp(fx.Float32(1.0) + exp(-logit_high)),
+-                        )
+-
+-                    publish_mfma_pairs(
+-                        projection_accumulator,
+-                        _ROUTER_ROW_TILE,
+-                        _ROUTER_SPLIT_WAVES,
+-                        emit_router,
+-                        sample_base,
+-                        staged_samples,
+-                    )
+-                    rocdl.s_waitcnt(vmcnt=0)
+-                    gpu.barrier()
+-                    if tid == 0:
+-                        for local_sample in range_constexpr(staged_samples):
+-                            store_i32(
+-                                router_ready_rsrc,
+-                                (sample_base + local_sample) * router_row_tasks + router_row_task,
+-                                1,
+-                            )
+-                elif projection_task < router_tasks + latent_tasks:
+-                    latent_task = projection_task - router_tasks
+-                    if const_expr(sample_groups == 1):
+-                        latent_block = latent_task
+-                        sample_base = 0
+-                    else:
+-                        sample_group = latent_task // latent_blocks
+-                        latent_block = latent_task % latent_blocks
+-                        sample_base = sample_group * staged_samples
+-                    stage_mxfp8_hidden(sample_base, staged_samples)
+-                    gpu.barrier()
+-                    first_latent_tile = latent_block * latent_projection_tiles
+-                    latent_tile = first_latent_tile + wave // 4
+-                    projection_values = mxfp8_scaled_mfma_split4(
+-                        rsrc(packed_latent_weight), rsrc(latent_weight_scale),
+-                        latent_tile, sample_base, staged_samples, wave % 4,
+-                    )
+-                    publish_raw_mxfp8_split_tiles(
+-                        projection_values, first_latent_tile, _ROUTED_HIDDEN,
+-                        latent_mailbox_rsrc, latent_ready_rsrc, sample_base, staged_samples,
+-                    )
+-                else:
+-                    shared_task = projection_task - router_tasks - latent_tasks
+-                    if const_expr(sample_groups == 1):
+-                        shared_block = shared_task
+-                        sample_base = 0
+-                    else:
+-                        sample_group = shared_task // shared_blocks
+-                        shared_block = shared_task % shared_blocks
+-                        sample_base = sample_group * staged_samples
+-                    stage_mxfp8_hidden(sample_base, staged_samples)
+-                    gpu.barrier()
+-                    first_shared_tile = shared_block * shared_projection_tiles
+-                    shared_tile = first_shared_tile + wave // 4
+-                    projection_values = mxfp8_scaled_mfma_split4(
+-                        rsrc(packed_shared_up), rsrc(shared_up_scale),
+-                        shared_tile, sample_base, staged_samples, wave % 4,
+-                    )
+-                    publish_raw_mxfp8_split_tiles(
+-                        projection_values, first_shared_tile, 2 * _SHARED_INTER,
+-                        shared_gu_mailbox_rsrc, shared_gu_ready_rsrc, sample_base, staged_samples,
+-                    )
+-
+-            # One selector CTA handles four samples, one sample per wave.
+-            selector_owner_task = (bid + 16) % _BLOCKS
+-            selector_tasks = (samples + _WAVES - 1) // _WAVES
+-            if selector_owner_task < selector_tasks:
+-                sample = selector_owner_task * _WAVES + wave
+-                if sample < samples:
+-                    if lane < router_row_tasks:
+-                        load_i32(
+-                            router_ready_rsrc,
+-                            sample * router_row_tasks + lane,
+-                        )
+-                gpu.barrier()
+-                if sample < samples:
+-                    scores = []
+-                    biases = []
+-                    for value_index in range_constexpr(_N_EXPERTS // _WAVE_SIZE):
+-                        expert = lane + value_index * _WAVE_SIZE
+-                        scores.append(
+-                            load_raw_f32(
+-                                router_mailbox_rsrc,
+-                                sample * _N_EXPERTS + expert,
+-                            )
+-                        )
+-                        biases.append(
+-                            fx.Float32(
++                    if sample < samples:
++                        scores = []
++                        biases = []
++                        for value_index in range_constexpr(_N_EXPERTS // _WAVE_SIZE):
++                            expert = lane + value_index * _WAVE_SIZE
++                            scores.append(
++                                load_raw_f32(
++                                    router_mailbox_rsrc,
++                                    sample * _N_EXPERTS + expert,
++                                )
++                            )
++                            biases.append(
++                                fx.Float32(
++                                    fx.BFloat16(
++                                        bo.buffer_load(
++                                            rsrc(correction_bias),
++                                            expert,
++                                            vec_width=1,
++                                            dtype=T.bf16,
++                                        )
++                                    )
++                                )
++                            )
++                        corrected = [scores[index] + biases[index] for index in range_constexpr(_N_EXPERTS // _WAVE_SIZE)]
++                        selected_sum = fx.Float32(0.0)
++                        for selected_index in range_constexpr(_TOP_K):
++                            best_score = corrected[0]
++                            best_id = fx.Int32(lane)
++                            for value_index in range_constexpr(1, _N_EXPERTS // _WAVE_SIZE):
++                                candidate_id = fx.Int32(lane + value_index * _WAVE_SIZE)
++                                candidate_score = corrected[value_index]
++                                take = (candidate_score > best_score) | (
++                                    (ArithValue(candidate_score) == ArithValue(best_score)) & (candidate_id < best_id)
++                                )
++                                best_score = take.select(candidate_score, best_score)
++                                best_id = take.select(candidate_id, best_id)
++                            for offset in (32, 16, 8, 4, 2, 1):
++                                peer_score = xshfl(best_score, offset)
++                                peer_id = xshfl(best_id, offset)
++                                take = (peer_score > best_score) | (
++                                    (ArithValue(peer_score) == ArithValue(best_score)) & (peer_id < best_id)
++                                )
++                                best_score = take.select(peer_score, best_score)
++                                best_id = take.select(peer_id, best_id)
++                            best_bias = fx.Float32(
+                                 fx.BFloat16(
+                                     bo.buffer_load(
+                                         rsrc(correction_bias),
+-                                        expert,
++                                        best_id,
+                                         vec_width=1,
+                                         dtype=T.bf16,
+                                     )
+                                 )
+                             )
+-                        )
+-                    corrected = [scores[index] + biases[index] for index in range_constexpr(_N_EXPERTS // _WAVE_SIZE)]
+-                    selected_sum = fx.Float32(0.0)
+-                    for selected_index in range_constexpr(_TOP_K):
+-                        best_score = corrected[0]
+-                        best_id = fx.Int32(lane)
+-                        best_bias = biases[0]
+-                        for value_index in range_constexpr(1, _N_EXPERTS // _WAVE_SIZE):
+-                            candidate_id = fx.Int32(lane + value_index * _WAVE_SIZE)
+-                            candidate_score = corrected[value_index]
+-                            take = (candidate_score > best_score) | (
+-                                (ArithValue(candidate_score) == ArithValue(best_score)) & (candidate_id < best_id)
+-                            )
+-                            best_score = take.select(candidate_score, best_score)
+-                            best_id = take.select(candidate_id, best_id)
+-                            best_bias = take.select(biases[value_index], best_bias)
+-                        local_best_score = best_score
+-                        local_best_id = best_id
+-                        local_best_bias = best_bias
+-                        best_score = fx.Float32(fx.coop.warp_reduce(
+-                            best_score, fx.ReductionOp.MAX, width=64,
+-                        ))
+-                        best_id = (ArithValue(local_best_score) == ArithValue(best_score)).select(
+-                            local_best_id, fx.Int32(0x7FFFFFFF)
+-                        )
+-                        best_id = fx.Int32(fx.coop.warp_reduce(
+-                            best_id, fx.ReductionOp.MIN, width=64,
+-                        ))
+-                        winner_lane = uniform(best_id % _WAVE_SIZE)
+-                        # Recover the original values from the winning lane,
+-                        # including their exact bits; do not reconstruct raw
+-                        # from a different local score or a normalized zero.
+-                        best_score = fx.Int32(rocdl.readlane(
+-                            T.i32, local_best_score.bitcast(fx.Int32), winner_lane,
+-                        )).bitcast(fx.Float32)
+-                        best_bias = fx.Int32(rocdl.readlane(
+-                            T.i32, local_best_bias.bitcast(fx.Int32), winner_lane,
+-                        )).bitcast(fx.Float32)
+-                        best_raw = best_score - best_bias
+-                        selected_sum = selected_sum + best_raw
++                            best_raw = best_score - best_bias
++                            selected_sum = selected_sum + best_raw
++                            if lane == 0:
++                                route = sample * _TOP_K + selected_index
++                                store_i32(selection_id_rsrc, route, best_id)
++                                lds_store(output_values, wave * _TOP_K + selected_index, best_raw)
++                            for value_index in range_constexpr(_N_EXPERTS // _WAVE_SIZE):
++                                expert = fx.Int32(lane + value_index * _WAVE_SIZE)
++                                corrected[value_index] = (expert == best_id).select(
++                                    fx.Float32(float("-inf")), corrected[value_index]
++                                )
+                         if lane == 0:
+-                            route = sample * _TOP_K + selected_index
+-                            store_i32(selection_id_rsrc, route, best_id)
+-                            lds_store(output_values, wave * _TOP_K + selected_index, best_raw)
+-                        for value_index in range_constexpr(_N_EXPERTS // _WAVE_SIZE):
+-                            expert = fx.Int32(lane + value_index * _WAVE_SIZE)
+-                            corrected[value_index] = (expert == best_id).select(
+-                                fx.Float32(float("-inf")), corrected[value_index]
+-                            )
+-                    if lane == 0:
+-                        inverse_sum = rcp(selected_sum)
+-                        for selected_index in range_constexpr(_TOP_K):
+-                            route = sample * _TOP_K + selected_index
+-                            store_f32(
+-                                selection_weight_rsrc,
+-                                route,
+-                                lds_load(output_values, wave * _TOP_K + selected_index) * inverse_sum,
+-                            )
+-
+-            # Shared SiTU activation is cheap enough to run as one CTA/sample.
+-            shared_owner_task = (bid + 15) % _BLOCKS
+-            if shared_owner_task < samples:
+-                shared_pairs = _SHARED_INTER // 2
+-                shared_tiles = (2 * _SHARED_INTER) // 16
+-                if tid < shared_tiles:
+-                    load_i32(
+-                        shared_gu_ready_rsrc,
+-                        shared_owner_task * shared_tiles + tid,
+-                    )
+-                gpu.barrier()
+-                for pair_round in range_constexpr((shared_pairs + _THREADS - 1) // _THREADS):
+-                    pair_in_row = tid + pair_round * _THREADS
+-                    if pair_in_row < shared_pairs:
+-                        gate_word = load_raw_pair(
+-                            shared_gu_mailbox_rsrc,
+-                            (shared_owner_task * (2 * _SHARED_INTER)) // 2 + pair_in_row,
+-                        )
+-                        up_word = load_raw_pair(
+-                            shared_gu_mailbox_rsrc,
+-                            (shared_owner_task * (2 * _SHARED_INTER) + _SHARED_INTER) // 2 + pair_in_row,
+-                        )
+-                        gate_values = fx.Vector.from_elements([gate_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+-                        up_values = fx.Vector.from_elements([up_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+-                        mids = []
+-                        for item in range_constexpr(2):
+-                            gate_value = gate_values[item]
+-                            up_value = up_values[item]
+-                            gate_tanh = fx.Float32(2.0) * rcp(
+-                                fx.Float32(1.0) + exp(fx.Float32(-0.5) * gate_value)
+-                            ) - fx.Float32(1.0)
+-                            gate_sigmoid = rcp(fx.Float32(1.0) + exp(-gate_value))
+-                            up_tanh = fx.Float32(2.0) * rcp(
+-                                fx.Float32(1.0) + exp(fx.Float32(-0.08) * up_value)
+-                            ) - fx.Float32(1.0)
+-                            mids.append(fx.Float32(4.0) * gate_tanh * gate_sigmoid * fx.Float32(25.0) * up_tanh)
+-                        store_pair(
+-                            shared_mid_mailbox_rsrc,
+-                            shared_owner_task * shared_pairs + pair_in_row,
+-                            mids[0],
+-                            mids[1],
+-                        )
+-            stamp(5)
+-
+-            # Stage 6: direct top-16 routed expert up/gate.  Avoid sorting at
+-            # decode scale: each task owns one 16-row intermediate tile for one
+-            # selected route and reads the selected expert directly.
+-            up_tiles = _INTER // 16
+-            paired_up_tiles = up_tiles // 2
+-            up_tasks = samples * _TOP_K * paired_up_tiles
+-            up_task = bid
+-            while up_task < up_tasks:
+-                sample = up_task // (_TOP_K * paired_up_tiles)
+-                route_in_sample = (up_task // paired_up_tiles) % _TOP_K
+-                first_row_group = (up_task % paired_up_tiles) * 2
+-                route = sample * _TOP_K + route_in_sample
+-                expert = uniform(load_i32(selection_id_rsrc, route))
+-                expert_weight_bytes = 2 * _INTER * (_ROUTED_HIDDEN // 2)
+-                expert_scale_bytes = 2 * _INTER * (_ROUTED_HIDDEN // 32)
+-                up_weight_rsrc = rsrc(packed_expert_up + fx.Int64(expert) * fx.Int64(expert_weight_bytes))
+-                up_scale_rsrc = rsrc(expert_up_scale + fx.Int64(expert) * fx.Int64(expert_scale_bytes))
+-                stage_raw_vector(
+-                    latent_mailbox_rsrc,
+-                    latent_ready_rsrc,
+-                    sample * (_ROUTED_HIDDEN // 16),
+-                    _ROUTED_HIDDEN // 16,
+-                    sample * (_ROUTED_HIDDEN // 2),
+-                    _ROUTED_HIDDEN // 2,
+-                )
+-                gpu.barrier()
+-
+-                for paired_tile in range_constexpr(2):
+-                    row_group = first_row_group + paired_tile
++                            inverse_sum = rcp(selected_sum)
++                            for selected_index in range_constexpr(_TOP_K):
++                                route = sample * _TOP_K + selected_index
++                                store_f32(
++                                    selection_weight_rsrc,
++                                    route,
++                                    lds_load(output_values, wave * _TOP_K + selected_index) * inverse_sum,
++                                )
++
++                # Shared SiTU activation is cheap enough to run as one CTA/sample.
++                if bid < samples:
++                    shared_pairs = _SHARED_INTER // 2
++                    shared_tiles = (2 * _SHARED_INTER) // 16
++                    if tid < shared_tiles:
++                        load_i32(
++                            shared_gu_ready_rsrc,
++                            bid * shared_tiles + tid,
++                        )
++                    gpu.barrier()
++                    for pair_round in range_constexpr((shared_pairs + _THREADS - 1) // _THREADS):
++                        pair_in_row = tid + pair_round * _THREADS
++                        if pair_in_row < shared_pairs:
++                            gate_word = load_raw_pair(
++                                shared_gu_mailbox_rsrc,
++                                (bid * (2 * _SHARED_INTER)) // 2 + pair_in_row,
++                            )
++                            up_word = load_raw_pair(
++                                shared_gu_mailbox_rsrc,
++                                (bid * (2 * _SHARED_INTER) + _SHARED_INTER) // 2 + pair_in_row,
++                            )
++                            gate_values = fx.Vector.from_elements([gate_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
++                            up_values = fx.Vector.from_elements([up_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
++                            mids = []
++                            for item in range_constexpr(2):
++                                gate_value = gate_values[item]
++                                up_value = up_values[item]
++                                gate_tanh = fx.Float32(2.0) * rcp(
++                                    fx.Float32(1.0) + exp(fx.Float32(-0.5) * gate_value)
++                                ) - fx.Float32(1.0)
++                                gate_sigmoid = rcp(fx.Float32(1.0) + exp(-gate_value))
++                                up_tanh = fx.Float32(2.0) * rcp(
++                                    fx.Float32(1.0) + exp(fx.Float32(-0.08) * up_value)
++                                ) - fx.Float32(1.0)
++                                mids.append(fx.Float32(4.0) * gate_tanh * gate_sigmoid * fx.Float32(25.0) * up_tanh)
++                            store_pair(
++                                shared_mid_mailbox_rsrc,
++                                bid * shared_pairs + pair_in_row,
++                                mids[0],
++                                mids[1],
++                            )
++                stamp(5)
++
++                # Stage 6: direct top-16 routed expert up/gate.  Avoid sorting at
++                # decode scale: each task owns one 16-row intermediate tile for one
++                # selected route and reads the selected expert directly.
++                up_tiles = _INTER // 16
++                up_tasks = samples * _TOP_K * up_tiles
++                up_task = bid
++                while up_task < up_tasks:
++                    sample = up_task // (_TOP_K * up_tiles)
++                    route_in_sample = (up_task // up_tiles) % _TOP_K
++                    row_group = up_task % up_tiles
++                    route = sample * _TOP_K + route_in_sample
++                    expert = uniform(load_i32(selection_id_rsrc, route))
++                    expert_weight_bytes = 2 * _INTER * (_ROUTED_HIDDEN // 2)
++                    expert_scale_bytes = 2 * _INTER * (_ROUTED_HIDDEN // 32)
++                    up_weight_rsrc = rsrc(packed_expert_up + fx.Int64(expert) * fx.Int64(expert_weight_bytes))
++                    up_scale_rsrc = rsrc(expert_up_scale + fx.Int64(expert) * fx.Int64(expert_scale_bytes))
++                    stage_raw_vector(
++                        latent_mailbox_rsrc,
++                        latent_ready_rsrc,
++                        sample * (_ROUTED_HIDDEN // 16),
++                        _ROUTED_HIDDEN // 16,
++                        sample * (_ROUTED_HIDDEN // 2),
++                        _ROUTED_HIDDEN // 2,
++                    )
++                    gpu.barrier()
++
+                     accumulator = [fx.Float32(0.0) for _ in range(4)]
+                     split = wave % 4
+                     selected_row_group = (wave < 4).select(
+@@ -3038,262 +3552,261 @@
+                             (sample * _TOP_K + route_in_sample) * up_tiles + row_group,
+                             1,
+                         )
+-                up_task = up_task + _BLOCKS
+-            stamp(6)
+-
+-            # Stage 7: expert down, route weighting, TP reduction, and per-tile
+-            # squared-norm publication for the latent RMSNorm.
+-            routed_tiles = _ROUTED_HIDDEN // 16
+-            down_tasks = samples * routed_tiles
+-            down_task = bid
+-            while down_task < down_tasks:
+-                sample = down_task // routed_tiles
+-                row_group = down_task % routed_tiles
+-                mid_pairs_per_route = _INTER // 2
+-                staged_pairs = _TOP_K * mid_pairs_per_route
+-                stage_raw_vector(
+-                    expert_mid_mailbox_rsrc,
+-                    expert_mid_ready_rsrc,
+-                    sample * _TOP_K * up_tiles,
+-                    _TOP_K * up_tiles,
+-                    sample * staged_pairs,
+-                    staged_pairs,
+-                )
+-                gpu.barrier()
+-
+-                accumulator = [fx.Float32(0.0) for _ in range(4)]
+-                for route_round in range_constexpr(_TOP_K // _WAVES):
+-                    route_in_sample = wave + route_round * _WAVES
+-                    route = sample * _TOP_K + route_in_sample
+-                    expert = uniform(load_i32(selection_id_rsrc, route))
+-                    route_weight = uniform_f32(load_f32(selection_weight_rsrc, route))
+-                    expert_weight_bytes = _ROUTED_HIDDEN * (_INTER // 2)
+-                    expert_scale_bytes = _ROUTED_HIDDEN * (_INTER // 32)
+-                    down_weight_rsrc = rsrc(packed_expert_down + fx.Int64(expert) * fx.Int64(expert_weight_bytes))
+-                    down_scale_rsrc = rsrc(expert_down_scale + fx.Int64(expert) * fx.Int64(expert_scale_bytes))
+-                    route_accumulator = [fx.Float32(0.0) for _ in range(4)]
+-                    for k_chunk in range_constexpr(_INTER // 128):
+-                        fragment = mxfp4_fragment(
+-                            down_weight_rsrc,
+-                            down_scale_rsrc,
++                    up_task = up_task + _BLOCKS
++                stamp(6)
++
++                # Stage 7: expert down, route weighting, TP reduction, and per-tile
++                # squared-norm publication for the latent RMSNorm.
++                routed_tiles = _ROUTED_HIDDEN // 16
++                down_tasks = samples * routed_tiles
++                down_task = bid
++                while down_task < down_tasks:
++                    sample = down_task // routed_tiles
++                    row_group = down_task % routed_tiles
++                    mid_pairs_per_route = _INTER // 2
++                    staged_pairs = _TOP_K * mid_pairs_per_route
++                    stage_raw_vector(
++                        expert_mid_mailbox_rsrc,
++                        expert_mid_ready_rsrc,
++                        sample * _TOP_K * up_tiles,
++                        _TOP_K * up_tiles,
++                        sample * staged_pairs,
++                        staged_pairs,
++                    )
++                    gpu.barrier()
++
++                    accumulator = [fx.Float32(0.0) for _ in range(4)]
++                    for route_round in range_constexpr(_TOP_K // _WAVES):
++                        route_in_sample = wave + route_round * _WAVES
++                        route = sample * _TOP_K + route_in_sample
++                        expert = uniform(load_i32(selection_id_rsrc, route))
++                        route_weight = uniform_f32(load_f32(selection_weight_rsrc, route))
++                        expert_weight_bytes = _ROUTED_HIDDEN * (_INTER // 2)
++                        expert_scale_bytes = _ROUTED_HIDDEN * (_INTER // 32)
++                        down_weight_rsrc = rsrc(packed_expert_down + fx.Int64(expert) * fx.Int64(expert_weight_bytes))
++                        down_scale_rsrc = rsrc(expert_down_scale + fx.Int64(expert) * fx.Int64(expert_scale_bytes))
++                        route_accumulator = [fx.Float32(0.0) for _ in range(4)]
++                        for k_chunk in range_constexpr(_INTER // 128):
++                            fragment = mxfp4_fragment(
++                                down_weight_rsrc,
++                                down_scale_rsrc,
++                                row_group,
++                                k_chunk,
++                                _INTER,
++                            )
++                            route_accumulator = mxfp4_apply(
++                                route_accumulator,
++                                fragment,
++                                route_in_sample * mid_pairs_per_route + k_chunk * 64,
++                            )
++                        accumulator = [
++                            accumulator[item] + route_accumulator[item] * route_weight for item in range_constexpr(4)
++                        ]
++
++                    fx.ptr_store(
++                        fx.Vector.from_elements(accumulator, fx.Float32),
++                        reduction + (wave * _WAVE_SIZE + lane) * 4,
++                    )
++                    gpu.barrier()
++                    if tid < 16 // 2:
++                        local_row = tid * 2
++                        values = []
++                        for pair_element in range_constexpr(2):
++                            row = local_row + pair_element
++                            source_lane = 16 * (row // 4)
++                            value = fx.Float32(0.0)
++                            for source_wave in range_constexpr(_WAVES):
++                                source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
++                                value = value + lds_load(reduction, source_index)
++                            values.append(value)
++                        lds_store(
++                            output_values,
++                            tid,
++                            bf16_pair(values[0], values[1]),
++                        )
++                    gpu.barrier()
++
++                    pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
++
++                    def emit_routed(local_pair, value_low, value_high):
++                        reduced_low = bf16_round(value_low)
++                        reduced_high = bf16_round(value_high)
++                        store_raw_pair(
++                            routed_mailbox_rsrc,
++                            pair_base + local_pair,
++                            reduced_low,
++                            reduced_high,
++                        )
++                        lds_store(
++                            output_values,
++                            local_pair,
++                            reduced_low * reduced_low + reduced_high * reduced_high,
++                        )
++
++                    moe_peer_reduce(16 // 2, pair_base, output_values, 0, emit_routed)
++                    square_part = (tid < 16 // 2).select(
++                        lds_load(output_values, fx.min(tid, 16 // 2 - 1)),
++                        fx.Float32(0.0),
++                    )
++                    square_sum = block_sum(square_part)
++                    if tid == 0:
++                        rocdl.s_waitcnt(vmcnt=0)
++                        store_f32(
++                            routed_stats_rsrc,
++                            sample * routed_tiles + row_group,
++                            square_sum,
++                        )
++                    down_task = down_task + _BLOCKS
++                stamp(7)
++
++                # One CTA per sample collapses the routed norm partials.  Tail
++                # tasks poll this inverse RMS while loading their latent input.
++                if bid < samples:
++                    square_part = fx.Float32(0.0)
++                    if tid < routed_tiles:
++                        square_part = load_f32(
++                            routed_stats_rsrc,
++                            bid * routed_tiles + tid,
++                        )
++                    total_square = block_sum(square_part)
++                    if tid == 0:
++                        store_f32(
++                            routed_inv_rsrc,
++                            bid,
++                            rsq(total_square * (1.0 / _ROUTED_HIDDEN) + EPS),
++                        )
++                stamp(8)
++
++                # Stage 8: shared-down and rank-local latent-up run together, then
++                # the final TP reduction adds the post-AttnRes residual in place.
++                hidden_tiles = _HIDDEN // 16
++                tail_tasks = samples * hidden_tiles
++                tail_task = bid
++                while tail_task < tail_tasks:
++                    sample = tail_task // hidden_tiles
++                    row_group = tail_task % hidden_tiles
++                    inverse_rms = uniform_f32(load_f32(routed_inv_rsrc, sample))
++
++                    shared_pairs = _SHARED_INTER // 2
++                    for load_round in range_constexpr((shared_pairs + _THREADS - 1) // _THREADS):
++                        pair = tid + load_round * _THREADS
++                        if pair < shared_pairs:
++                            packed = load_pair(
++                                shared_mid_mailbox_rsrc,
++                                sample * shared_pairs + pair,
++                            )
++                            lds_store(x, pair, packed.bitcast(fx.Float32))
++
++                    latent_pairs = _ROUTED_HIDDEN // 2
++                    gain_rsrc = rsrc(latent_gain)
++                    for load_round in range_constexpr((latent_pairs + _THREADS - 1) // _THREADS):
++                        pair = tid + load_round * _THREADS
++                        if pair < latent_pairs:
++                            packed = load_raw_pair(
++                                routed_mailbox_rsrc,
++                                sample * latent_pairs + pair,
++                            )
++                            values = fx.Vector.from_elements([packed], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
++                            gain_word = fx.Int32(bo.buffer_load(gain_rsrc, pair, vec_width=1, dtype=T.i32))
++                            gains = fx.Vector.from_elements([gain_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
++                            lds_store(
++                                x,
++                                shared_pairs + pair,
++                                bf16_pair(
++                                    values[0] * inverse_rms * gains[0],
++                                    values[1] * inverse_rms * gains[1],
++                                ),
++                            )
++                    gpu.barrier()
++
++                    accumulator = [fx.Float32(0.0) for _ in range(4)]
++                    if wave < 4:
++                        accumulator = mxfp8_bf16_accumulate(
++                            rsrc(packed_shared_down),
++                            rsrc(shared_down_scale),
++                            0,
+                             row_group,
+-                            k_chunk,
+-                            _INTER,
+-                        )
+-                        route_accumulator = mxfp4_apply(
+-                            route_accumulator,
+-                            fragment,
+-                            route_in_sample * mid_pairs_per_route + k_chunk * 64,
+-                        )
+-                    accumulator = [
+-                        accumulator[item] + route_accumulator[item] * route_weight for item in range_constexpr(4)
+-                    ]
+-
+-                fx.ptr_store(
+-                    fx.Vector.from_elements(accumulator, fx.Float32),
+-                    reduction + (wave * _WAVE_SIZE + lane) * 4,
+-                )
+-                gpu.barrier()
+-                if tid < 16 // 2:
+-                    local_row = tid * 2
+-                    values = []
+-                    for pair_element in range_constexpr(2):
+-                        row = local_row + pair_element
+-                        source_lane = 16 * (row // 4)
+-                        value = fx.Float32(0.0)
+-                        for source_wave in range_constexpr(_WAVES):
+-                            source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
+-                            value = value + lds_load(reduction, source_index)
+-                        values.append(value)
+-                    lds_store(
+-                        output_values,
+-                        tid,
+-                        bf16_pair(values[0], values[1]),
+-                    )
+-                gpu.barrier()
+-
+-                pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
+-
+-                moe_peer_push(16 // 2, pair_base, output_values, 0)
+-                down_task = down_task + _BLOCKS
+-
+-            # All per-CTA down tiles are now in symmetric tagged mailboxes.
+-            down_task = bid
+-            while down_task < down_tasks:
+-                sample = down_task // routed_tiles
+-                row_group = down_task % routed_tiles
+-                pair_base = sample * (_ROUTED_HIDDEN // 2) + row_group * (16 // 2)
+-
+-                def emit_routed(local_pair, value_low, value_high):
+-                    reduced_low = bf16_round(value_low)
+-                    reduced_high = bf16_round(value_high)
+-                    store_raw_pair(
+-                        routed_mailbox_rsrc,
+-                        pair_base + local_pair,
+-                        reduced_low,
+-                        reduced_high,
+-                    )
+-                    lds_store(
+-                        output_values,
+-                        local_pair,
+-                        reduced_low * reduced_low + reduced_high * reduced_high,
+-                    )
+-
+-                moe_peer_collect(16 // 2, pair_base, 0, emit_routed)
+-                square_part = (tid < 16 // 2).select(
+-                    lds_load(output_values, fx.min(tid, 16 // 2 - 1)),
+-                    fx.Float32(0.0),
+-                )
+-                square_sum = block_sum(square_part)
+-                if tid == 0:
+-                    rocdl.s_waitcnt(vmcnt=0)
+-                    store_f32(
+-                        routed_stats_rsrc,
+-                        sample * routed_tiles + row_group,
+-                        square_sum,
+-                    )
+-                down_task = down_task + _BLOCKS
+-            stamp(7)
+-
+-            # One CTA per sample collapses the routed norm partials.  Tail
+-            norm_owner_task = (bid + 11) % _BLOCKS
+-            # tasks poll this inverse RMS while loading their latent input.
+-            if norm_owner_task < samples:
+-                square_part = fx.Float32(0.0)
+-                if tid < routed_tiles:
+-                    square_part = load_f32(
+-                        routed_stats_rsrc,
+-                        norm_owner_task * routed_tiles + tid,
+-                    )
+-                total_square = block_sum(square_part)
+-                if tid == 0:
+-                    store_f32(
+-                        routed_inv_rsrc,
+-                        norm_owner_task,
+-                        rsq(total_square * (1.0 / _ROUTED_HIDDEN) + EPS),
+-                    )
+-            stamp(8)
+-
+-            # Stage 8: shared-down and rank-local latent-up run together, then
+-            # the final TP reduction adds the post-AttnRes residual in place.
+-            hidden_tiles = _HIDDEN // 16
+-            tail_tasks = sample_groups * hidden_tiles
+-            tail_task = bid
+-            while tail_task < tail_tasks:
+-                sample_base = (tail_task // hidden_tiles) * staged_samples
+-                row_group = (tail_task % hidden_tiles + rank * (_HIDDEN_SHARD // 16) + hidden_tiles - 192) % hidden_tiles
+-                shared_pairs = _SHARED_INTER // 2
+-                accumulator = [fx.Float32(0.0) for _ in range(4)]
+-                if wave < 4:
+-                    # Each wave reads only the K slice that it writes. No CTA barrier is
+-                    # needed before this wave's MFMA; the final reduction joins all waves.
+-                    shared_pairs_per_wave = shared_pairs // 4
+-                    for local_sample in range_constexpr(staged_samples):
+-                        for load_round in range_constexpr((shared_pairs_per_wave + _WAVE_SIZE - 1) // _WAVE_SIZE):
+-                            local_pair = lane + load_round * _WAVE_SIZE
+-                            if local_pair < shared_pairs_per_wave:
+-                                pair = wave * shared_pairs_per_wave + local_pair
+-                                packed = load_pair(shared_mid_mailbox_rsrc, (sample_base + local_sample) * shared_pairs + pair)
+-                                lds_store(x, local_sample * shared_pairs + pair, packed.bitcast(fx.Float32))
+-                    rocdl.s_waitcnt(lgkmcnt=0)
+-                    accumulator = mxfp8_bf16_accumulate_samples(
+-                        rsrc(packed_shared_down), rsrc(shared_down_scale),
+-                        0, row_group, _SHARED_INTER, wave, 4, shared_pairs, staged_samples,
+-                    )
+-                else:
+-                    first_local_row = rank * _HIDDEN_SHARD
+-                    global_row = row_group * 16
+-                    latent_live = (global_row >= first_local_row) & (global_row < first_local_row + _HIDDEN_SHARD)
+-                    if latent_live:
+-                        for local_sample in range_constexpr(staged_samples):
+-                            inverse_rms = uniform_f32(load_f32(routed_inv_rsrc, sample_base + local_sample))
+-                            latent_pairs = _ROUTED_HIDDEN // 2
+-                            latent_pairs_per_wave = latent_pairs // 4
+-                            split_wave = wave - 4
+-                            gain_rsrc = rsrc(latent_gain)
+-                            for load_round in range_constexpr(latent_pairs_per_wave // _WAVE_SIZE):
+-                                pair = split_wave * latent_pairs_per_wave + lane + load_round * _WAVE_SIZE
+-                                packed = load_raw_pair(routed_mailbox_rsrc, (sample_base + local_sample) * latent_pairs + pair)
+-                                values = fx.Vector.from_elements([packed], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+-                                gain_word = fx.Int32(bo.buffer_load(gain_rsrc, pair, vec_width=1, dtype=T.i32))
+-                                gains = fx.Vector.from_elements([gain_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+-                                lds_store(x, staged_samples * shared_pairs + local_sample * latent_pairs + pair,
+-                                          bf16_pair(values[0] * inverse_rms * gains[0], values[1] * inverse_rms * gains[1]))
+-                        rocdl.s_waitcnt(lgkmcnt=0)
+-                        accumulator = mxfp8_bf16_accumulate_samples(
+-                            rsrc(packed_latent_up), rsrc(latent_up_scale), staged_samples * shared_pairs,
+-                            (global_row - first_local_row) // 16, _ROUTED_HIDDEN, split_wave, 4, latent_pairs, staged_samples,
+-                        )
+-
+-                fx.ptr_store(
+-                    fx.Vector.from_elements(accumulator, fx.Float32),
+-                    reduction + (wave * _WAVE_SIZE + lane) * 4,
+-                )
+-                gpu.barrier()
+-                latent_live = (row_group * 16 >= rank * _HIDDEN_SHARD) & (row_group * 16 < (rank + 1) * _HIDDEN_SHARD)
+-                if tid < staged_samples * (16 // 2):
+-                    local_sample = tid // (16 // 2)
+-                    local_row = (tid % (16 // 2)) * 2
+-                    values = []
+-                    for pair_element in range_constexpr(2):
+-                        row = local_row + pair_element
+-                        source_lane = 16 * (row // 4) + local_sample
+-                        shared_result = fx.Float32(0.0)
+-                        latent_value = fx.Float32(0.0)
+-                        for source_wave in range_constexpr(4):
+-                            source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
+-                            shared_result = shared_result + lds_load(reduction, source_index)
+-                        for source_wave in range_constexpr(4):
+-                            latent_index = ((source_wave + 4) * _WAVE_SIZE + source_lane) * 4 + row % 4
+-                            latent_value = latent_value + lds_load(reduction, latent_index)
+-                        shared_result = bf16_round(shared_result)
+-                        latent_value = latent_live.select(bf16_round(latent_value), fx.Float32(0.0))
+-                        values.append(bf16_round(shared_result + latent_value))
+-                    lds_store(
+-                        output_values,
+-                        tid,
+-                        bf16_pair(values[0], values[1]),
+-                    )
+-                gpu.barrier()
+-
+-                pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
+-
+-                moe_peer_push_samples(staged_samples * (16 // 2), pair_base, output_values, 1)
+-                tail_task = tail_task + _BLOCKS
+-
+-            # The tagged symmetric mailboxes retain every partial, so LDS can
+-            # be reused for the next compute task before any peer is polled.
+-            tail_task = bid
+-            while tail_task < tail_tasks:
+-                sample_base = (tail_task // hidden_tiles) * staged_samples
+-                row_group = (tail_task % hidden_tiles + rank * (_HIDDEN_SHARD // 16) + hidden_tiles - 192) % hidden_tiles
+-                pair_base = sample_base * (_HIDDEN // 2) + row_group * (16 // 2)
+-
+-                def emit_final(local_pair, value_low, value_high):
+-                    residual_word = fx.Int32(
+-                        bo.buffer_load(
+-                            rsrc(updated_prefix),
+-                            pair_base + (local_pair // 8) * (_HIDDEN // 2) + local_pair % 8,
+-                            vec_width=1,
+-                            dtype=T.i32,
+-                        )
+-                    )
+-                    residual_low = (residual_word << 16).bitcast(fx.Float32)
+-                    residual_high = (residual_word & fx.Int32(-65536)).bitcast(fx.Float32)
+-                    final_word = bf16_pair(
+-                        residual_low + value_low,
+-                        residual_high + value_high,
+-                    ).bitcast(fx.Int32)
+-                    bo.buffer_store(
+-                        final_word,
+-                        rsrc(final_output),
+-                        pair_base + (local_pair // 8) * (_HIDDEN // 2) + local_pair % 8,
+-                        cache_modifier=CM_DEV,
+-                    )
+-
+-                moe_peer_collect_samples(staged_samples * (16 // 2), pair_base, 1, emit_final)
+-                tail_task = tail_task + _BLOCKS
+-            stamp(9)
++                            _SHARED_INTER,
++                            wave,
++                            4,
++                        )
++                    else:
++                        first_local_row = rank * _HIDDEN_SHARD
++                        global_row = row_group * 16
++                        latent_live = (global_row >= first_local_row) & (global_row < first_local_row + _HIDDEN_SHARD)
++                        local_row_group = fx.max(
++                            fx.Int32(0),
++                            (global_row - first_local_row) // 16,
++                        )
++                        split_wave = wave - 4
++                        if latent_live:
++                            accumulator = mxfp8_bf16_accumulate(
++                                rsrc(packed_latent_up),
++                                rsrc(latent_up_scale),
++                                shared_pairs,
++                                local_row_group,
++                                _ROUTED_HIDDEN,
++                                split_wave,
++                                4,
++                            )
++
++                    fx.ptr_store(
++                        fx.Vector.from_elements(accumulator, fx.Float32),
++                        reduction + (wave * _WAVE_SIZE + lane) * 4,
++                    )
++                    gpu.barrier()
++                    latent_live = (row_group * 16 >= rank * _HIDDEN_SHARD) & (row_group * 16 < (rank + 1) * _HIDDEN_SHARD)
++                    if tid < 16 // 2:
++                        local_row = tid * 2
++                        values = []
++                        for pair_element in range_constexpr(2):
++                            row = local_row + pair_element
++                            source_lane = 16 * (row // 4)
++                            shared_result = fx.Float32(0.0)
++                            latent_value = fx.Float32(0.0)
++                            for source_wave in range_constexpr(4):
++                                source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
++                                shared_result = shared_result + lds_load(reduction, source_index)
++                            for source_wave in range_constexpr(4):
++                                latent_index = ((source_wave + 4) * _WAVE_SIZE + source_lane) * 4 + row % 4
++                                latent_value = latent_value + lds_load(reduction, latent_index)
++                            shared_result = bf16_round(shared_result)
++                            latent_value = latent_live.select(bf16_round(latent_value), fx.Float32(0.0))
++                            values.append(bf16_round(shared_result + latent_value))
++                        lds_store(
++                            output_values,
++                            tid,
++                            bf16_pair(values[0], values[1]),
++                        )
++                    gpu.barrier()
++
++                    pair_base = sample * (_HIDDEN // 2) + row_group * (16 // 2)
++
++                    def emit_final(local_pair, value_low, value_high):
++                        residual_word = fx.Int32(
++                            bo.buffer_load(
++                                rsrc(updated_prefix),
++                                pair_base + local_pair,
++                                vec_width=1,
++                                dtype=T.i32,
++                            )
++                        )
++                        residual_low = (residual_word << 16).bitcast(fx.Float32)
++                        residual_high = (residual_word & fx.Int32(-65536)).bitcast(fx.Float32)
++                        final_word = bf16_pair(
++                            residual_low + value_low,
++                            residual_high + value_high,
++                        ).bitcast(fx.Int32)
++                        bo.buffer_store(
++                            final_word,
++                            rsrc(final_output),
++                            pair_base + local_pair,
++                            cache_modifier=CM_DEV,
++                        )
++
++                    moe_peer_reduce(16 // 2, pair_base, output_values, 1, emit_final)
++                    tail_task = tail_task + _BLOCKS
++                stamp(9)
+ 
+     @flyc.jit
+     def launch(
+@@ -3350,7 +3863,7 @@
+         layer: Int32,
+         stream: Stream = Stream(None),
+     ):
+-        kimi_k3_mtp_relocate(
++        kimi_k3_monokernel(
+             hidden_states,
+             output,
+             block_residual,
+--- a/kernels/kimi_k3_monokernel/op.py
++++ b/kernels/kimi_k3_monokernel/op.py
+@@ -26,8 +26,6 @@
+         reduce_group=None,
+         mtp: bool = False,
+     ) -> None:
+-        if samples != 4 or npes != 8 or not mtp:
+-            raise ValueError("This experimental candidate requires TP8, S4, true MTP")
+         super().__init__(
+             weights,
+             samples,
