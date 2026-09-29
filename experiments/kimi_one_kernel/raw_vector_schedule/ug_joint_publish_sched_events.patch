@@ -1,0 +1,95 @@
+--- a/kernels/kimi_k3_monokernel/kernel.py
++++ b/kernels/kimi_k3_monokernel/kernel.py
+@@ -2995,47 +2995,53 @@
+                             k_chunk * 64,
+                         )
+ 
+-                    fx.ptr_store(
+-                        fx.Vector.from_elements(accumulator, fx.Float32),
+-                        reduction + (wave * _WAVE_SIZE + lane) * 4,
+-                    )
+-                    gpu.barrier()
+-                    if tid < 16 // 2:
+-                        local_row = tid * 2
+-                        activated = []
+-                        for pair_element in range_constexpr(2):
+-                            row = local_row + pair_element
+-                            source_lane = 16 * (row // 4)
+-                            gate_value = fx.Float32(0.0)
+-                            up_value = fx.Float32(0.0)
+-                            for source_wave in range_constexpr(4):
+-                                source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
+-                                gate_value = gate_value + lds_load(reduction, source_index)
+-                                up_index = ((source_wave + 4) * _WAVE_SIZE + source_lane) * 4 + row % 4
+-                                up_value = up_value + lds_load(reduction, up_index)
+-                            gate_value = bf16_round(gate_value)
+-                            up_value = bf16_round(up_value)
+-                            gate_tanh = fx.Float32(2.0) * rcp(
+-                                fx.Float32(1.0) + exp(fx.Float32(-0.5) * gate_value)
+-                            ) - fx.Float32(1.0)
+-                            gate_sigmoid = rcp(fx.Float32(1.0) + exp(-gate_value))
+-                            up_tanh = fx.Float32(2.0) * rcp(
+-                                fx.Float32(1.0) + exp(fx.Float32(-0.08) * up_value)
+-                            ) - fx.Float32(1.0)
+-                            activated.append(fx.Float32(4.0) * gate_tanh * gate_sigmoid * fx.Float32(25.0) * up_tanh)
+-                        pair = ((sample * _TOP_K + route_in_sample) * _INTER + row_group * 16 + local_row) // 2
+-                        store_raw_pair(
+-                            expert_mid_mailbox_rsrc,
+-                            pair,
+-                            activated[0],
+-                            activated[1],
+-                        )
+-                    gpu.barrier()
+-                    if tid == 0:
+-                        rocdl.s_waitcnt(vmcnt=0)
++                    rocdl.sched_barrier(0)
++                    if lane % 16 == 0:
++                        fx.ptr_store(
++                            fx.Vector.from_elements(accumulator, fx.Float32),
++                            reduction + paired_tile * (_WAVES * 16) + wave * 16 + (lane // 16) * 4,
++                        )
++                    rocdl.sched_barrier(0)
++                gpu.barrier()
++                if tid < 2 * (16 // 2):
++                    paired_tile = tid // (16 // 2)
++                    row_group = first_row_group + paired_tile
++                    local_row = (tid % (16 // 2)) * 2
++                    activated = []
++                    for pair_element in range_constexpr(2):
++                        row = local_row + pair_element
++                        source_lane = 16 * (row // 4)
++                        gate_value = fx.Float32(0.0)
++                        up_value = fx.Float32(0.0)
++                        for source_wave in range_constexpr(4):
++                            source_index = paired_tile * (_WAVES * 16) + source_wave * 16 + row
++                            gate_value = gate_value + lds_load(reduction, source_index)
++                            up_index = paired_tile * (_WAVES * 16) + (source_wave + 4) * 16 + row
++                            up_value = up_value + lds_load(reduction, up_index)
++                        gate_value = bf16_round(gate_value)
++                        up_value = bf16_round(up_value)
++                        gate_tanh = fx.Float32(2.0) * rcp(
++                            fx.Float32(1.0) + exp(fx.Float32(-0.5) * gate_value)
++                        ) - fx.Float32(1.0)
++                        gate_sigmoid = rcp(fx.Float32(1.0) + exp(-gate_value))
++                        up_tanh = fx.Float32(2.0) * rcp(
++                            fx.Float32(1.0) + exp(fx.Float32(-0.08) * up_value)
++                        ) - fx.Float32(1.0)
++                        activated.append(fx.Float32(4.0) * gate_tanh * gate_sigmoid * fx.Float32(25.0) * up_tanh)
++                    pair = ((sample * _TOP_K + route_in_sample) * _INTER + row_group * 16 + local_row) // 2
++                    store_raw_pair(
++                        expert_mid_mailbox_rsrc,
++                        pair,
++                        activated[0],
++                        activated[1],
++                    )
++                gpu.barrier()
++                if tid == 0:
++                    rocdl.s_waitcnt(vmcnt=0)
++                    for ready_tile in range_constexpr(2):
+                         store_i32(
+                             expert_mid_ready_rsrc,
+-                            (sample * _TOP_K + route_in_sample) * up_tiles + row_group,
++                            (sample * _TOP_K + route_in_sample) * up_tiles + first_row_group + ready_tile,
+                             1,
+                         )
+                 up_task = up_task + _BLOCKS

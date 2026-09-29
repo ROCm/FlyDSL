@@ -1,0 +1,223 @@
+{
+  "patch_base": "tail_rotate192_downsplit_events",
+  "patch_base_kernel_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+  "independent_patches": true,
+  "sources": [
+    {
+      "name": "moe_raw_vec2_events",
+      "original_source": "kimi_tail_async_20260929/moe_raw_vec2_events",
+      "kernel_sha256": "b252fb5669a4bb037a6a8170c3765e402186be7769843d16f31c681ba3802b80",
+      "source_tree_sha256": "4736cfa519660ee0350c40bf8b5d88e70074f30cd3739ea6b13d89dce5a57fa6",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "b252fb5669a4bb037a6a8170c3765e402186be7769843d16f31c681ba3802b80"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "b252fb5669a4bb037a6a8170c3765e402186be7769843d16f31c681ba3802b80",
+          "binary_sha256": "6157517ea2945de2f72635ea7e68bef98e03f3f211de61045cf86a6d08f78efc",
+          "vgpr": 253,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": false
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "moe_raw_vec2_sched_events",
+      "original_source": "kimi_tail_async_20260929/moe_raw_vec2_sched_events",
+      "kernel_sha256": "edeee4ab33b066dd4ca3b92dceb15813ee59981910a0b8cb01a049c9e944a71b",
+      "source_tree_sha256": "1bac670739372d724c58c47658f8b981bb7e9c604519552e51fb9b966331bb5b",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "edeee4ab33b066dd4ca3b92dceb15813ee59981910a0b8cb01a049c9e944a71b"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "edeee4ab33b066dd4ca3b92dceb15813ee59981910a0b8cb01a049c9e944a71b",
+          "binary_sha256": "a474dc6e91d33205dfbd6ce86a72a8e3727d1951a2295d9be540c93117ad44ee",
+          "vgpr": 155,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": false
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "moe_raw_vec4_baseline_events",
+      "original_source": "kimi_tail_async_20260929/moe_raw_vec4_baseline_events",
+      "kernel_sha256": "d27beec17ab33dfa24452110ce2544965620800f71ba87ef206fdb08634038d1",
+      "source_tree_sha256": "697dfbb22346ebfcf8026362ed5528ba85cafa221e53fef696f5cef3ad2e4d26",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "d27beec17ab33dfa24452110ce2544965620800f71ba87ef206fdb08634038d1"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "d27beec17ab33dfa24452110ce2544965620800f71ba87ef206fdb08634038d1",
+          "binary_sha256": "8cc12c624b5409f104a1c6eec2021822253c4fe4605ad387eafa13c23997782e",
+          "vgpr": 121,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": false
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "moe_raw_vec4_events",
+      "original_source": "kimi_tail_async_20260929/moe_raw_vec4_events",
+      "kernel_sha256": "8fc789188009d77f1308e7279c9d7bf08f6a9182f2922192558c28bdc91c3080",
+      "source_tree_sha256": "53f998b3fd9665f556633e9b5cc1fb79e2351b79f6e1efeabf80945b6ed3932e",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "8fc789188009d77f1308e7279c9d7bf08f6a9182f2922192558c28bdc91c3080"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "8fc789188009d77f1308e7279c9d7bf08f6a9182f2922192558c28bdc91c3080",
+          "binary_sha256": "7f0586bcad7ef858b47719c6ac52ce193452a079691d0431dc7ba579247695f8",
+          "vgpr": 253,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": false
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "moe_raw_vec4_sched_events",
+      "original_source": "kimi_tail_async_20260929/moe_raw_vec4_sched_events",
+      "kernel_sha256": "c4c14c244d7149f8d141dde69e66ac39712c86d4f987a0f0d4c66e48dbbc6c6b",
+      "source_tree_sha256": "34c2a38a70e7cb32dc2273291b81696a261dcbd1cf4de05e061430d0c70b24bc",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "c4c14c244d7149f8d141dde69e66ac39712c86d4f987a0f0d4c66e48dbbc6c6b"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "c4c14c244d7149f8d141dde69e66ac39712c86d4f987a0f0d4c66e48dbbc6c6b",
+          "binary_sha256": "2328c2b30977eaa7b973291e8aeb7b5e8cfb89f38054fd89eb895baad8741ce8",
+          "vgpr": 141,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": false
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "moe_raw_vec4_schedk2_events",
+      "original_source": "kimi_tail_async_20260929/moe_raw_vec4_schedk2_events",
+      "kernel_sha256": "5e8d19ffb058622b6724328e49cb0a2bd0335ca9c846b5d99367e412d53450c9",
+      "source_tree_sha256": "9c5d86069196d45fb9c8224f3e844c8579d802e6cad01dd8938a967f4c9a2d93",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "5e8d19ffb058622b6724328e49cb0a2bd0335ca9c846b5d99367e412d53450c9"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "5e8d19ffb058622b6724328e49cb0a2bd0335ca9c846b5d99367e412d53450c9",
+          "binary_sha256": "7aed0df7c67c59040598baf17ae4c20e976bdf27c2036991a995044936886be2",
+          "vgpr": 164,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": false
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "ug_joint_publish_sched_events",
+      "original_source": "kimi_tail_async_20260929/ug_joint_publish_sched_events",
+      "kernel_sha256": "8f9409b86448c1e45f3ea1a2456bd7b30ce45121a2b3b4a88bb5bd794fcf58ca",
+      "source_tree_sha256": "465052dd5a3883a0ef38e42e3eb5ef2c92c97bb80e684a59a68f2b8875d189d0",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "8f9409b86448c1e45f3ea1a2456bd7b30ce45121a2b3b4a88bb5bd794fcf58ca"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "8f9409b86448c1e45f3ea1a2456bd7b30ce45121a2b3b4a88bb5bd794fcf58ca",
+          "binary_sha256": "dda8c33530bf9d036feb1305ec816470081c867967ad9bbffe5dbc1a5222b592",
+          "vgpr": 155,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": false
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "ug_joint_publish_schedk2_events",
+      "original_source": "kimi_tail_async_20260929/ug_joint_publish_schedk2_events",
+      "kernel_sha256": "4088c4831078202711851251557341bf5845f8969c4115ba1d28ac2c0e930aa0",
+      "source_tree_sha256": "ba7aa8f706feb2b3f3961ad8dd9b69594d78d7c6e8af072c53fa8631c0e8556c",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "4088c4831078202711851251557341bf5845f8969c4115ba1d28ac2c0e930aa0"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "4088c4831078202711851251557341bf5845f8969c4115ba1d28ac2c0e930aa0",
+          "binary_sha256": "48782be4296209ea7805f8b71f26d2aac9f730be5e42e2fcf96e4d0e61f7933d",
+          "vgpr": 165,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": false
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "variant": "ug_joint_publish_sched_events",
+    "parent": "ug_joint_publish_events",
+    "source_sha256": "8f9409b86448c1e45f3ea1a2456bd7b30ce45121a2b3b4a88bb5bd794fcf58ca",
+    "all_non_sched_source_unchanged": true,
+    "added_cta_barriers": 0,
+    "mode": "compile-only while node46 occupied"
+  },
+  {
+    "variant": "moe_raw_vec2_sched_events",
+    "parent": "moe_raw_vec2_events",
+    "source_sha256": "edeee4ab33b066dd4ca3b92dceb15813ee59981910a0b8cb01a049c9e944a71b",
+    "all_non_sched_source_unchanged": true,
+    "added_cta_barriers": 0,
+    "mode": "compile-only while node46 occupied"
+  },
+  {
+    "variant": "moe_raw_vec4_sched_events",
+    "parent": "moe_raw_vec4_events",
+    "source_sha256": "c4c14c244d7149f8d141dde69e66ac39712c86d4f987a0f0d4c66e48dbbc6c6b",
+    "all_non_sched_source_unchanged": true,
+    "added_cta_barriers": 0,
+    "mode": "compile-only while node46 occupied"
+  }
+]

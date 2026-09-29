@@ -1,0 +1,7 @@
+{
+  "variant": "moe_raw_vec4_baseline_events",
+  "parent": "tail_rotate192_downsplit_events",
+  "source_sha256": "d27beec17ab33dfa24452110ce2544965620800f71ba87ef206fdb08634038d1",
+  "exact_audited_raw_helper": "moe_raw_vec4_events",
+  "other_source_unchanged": true
+}

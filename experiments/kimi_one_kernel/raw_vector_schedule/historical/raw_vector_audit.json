@@ -1,0 +1,22 @@
+[
+  {
+    "variant": "moe_raw_vec2_events",
+    "parent": "ug_joint_publish_events",
+    "source_sha256": "b252fb5669a4bb037a6a8170c3765e402186be7769843d16f31c681ba3802b80",
+    "dwords_per_load": 2,
+    "ready_polls_and_barrier_exactly_unchanged": true,
+    "raw_pair_coverage_once": true,
+    "source_and_lds_alignment_verified": true,
+    "arithmetic_unchanged": true
+  },
+  {
+    "variant": "moe_raw_vec4_events",
+    "parent": "ug_joint_publish_events",
+    "source_sha256": "8fc789188009d77f1308e7279c9d7bf08f6a9182f2922192558c28bdc91c3080",
+    "dwords_per_load": 4,
+    "ready_polls_and_barrier_exactly_unchanged": true,
+    "raw_pair_coverage_once": true,
+    "source_and_lds_alignment_verified": true,
+    "arithmetic_unchanged": true
+  }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "variant": "ug_joint_publish_schedk2_events",
+    "parent": "ug_joint_publish_sched_events",
+    "source_sha256": "4088c4831078202711851251557341bf5845f8969c4115ba1d28ac2c0e930aa0",
+    "all_non_sched_source_unchanged": true,
+    "added_cta_barriers": 0
+  },
+  {
+    "variant": "moe_raw_vec4_schedk2_events",
+    "parent": "moe_raw_vec4_sched_events",
+    "source_sha256": "5e8d19ffb058622b6724328e49cb0a2bd0335ca9c846b5d99367e412d53450c9",
+    "all_non_sched_source_unchanged": true,
+    "added_cta_barriers": 0
+  }
+]

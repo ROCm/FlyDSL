@@ -1,0 +1,18 @@
+--- a/kernels/kimi_k3_monokernel/kernel.py
++++ b/kernels/kimi_k3_monokernel/kernel.py
+@@ -1532,11 +1532,11 @@
+                 if ready < ready_count:
+                     load_i32(ready_rsrc, ready_base + ready)
+             gpu.barrier()
+-            for load_round in range_constexpr((pairs + _THREADS - 1) // _THREADS):
+-                pair = tid + load_round * _THREADS
++            for load_round in range_constexpr((pairs + 4 * _THREADS - 1) // (4 * _THREADS)):
++                pair = (tid + load_round * _THREADS) * 4
+                 if pair < pairs:
+-                    packed = load_raw_pair(mailbox_rsrc, pair_base + pair)
+-                    lds_store(x, pair, packed.bitcast(fx.Float32))
++                    packed = fx.Vector(bo.buffer_load(mailbox_rsrc, pair_base + pair, vec_width=4, dtype=T.i32, cache_modifier=CM_DEV))
++                    fx.ptr_store(packed.bitcast(fx.Float32), x + pair)
+ 
+         def mxfp4_fragment(weight_rsrc, scale_rsrc, row_group, k_chunk, k_size):
+             raw = fx.Vector(
