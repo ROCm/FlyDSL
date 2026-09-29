@@ -23,6 +23,7 @@ The primary API for defining and compiling kernels:
    @flyc.jit
    def launch(A: fx.Tensor, B: fx.Tensor, n: fx.Constexpr[int],
               stream: fx.Stream = fx.Stream(None)):
+       grid_x = (n + 255) // 256
        my_kernel(A, B, n).launch(
            grid=(grid_x, 1, 1),
            block=(256, 1, 1),
@@ -84,12 +85,13 @@ On first call, ``@flyc.jit`` runs the following pipeline:
 Ahead-of-time C export
 -----------------------
 
-``CompiledFunction.export_to_c(directory, name, symbol)`` writes a target-
-specific object file and a C/C++ header. The object contains the GPU binary
-and a small backend adapter, so the deployed executable or shared library does
-not need FlyDSL or Python. The generated header records the backend and system
-link flags; for ROCm these are ``-lamdhip64 -pthread -ldl``. The linker must
-also be able to find the HIP SDK library. For a nonstandard ROCm installation,
+``CompiledFunction.export_to_c(file_path, file_name, function_prefix="")``
+writes a target-specific object file and a C/C++ header. The object contains
+the GPU binary and a small backend adapter, so the deployed executable or
+shared library does not need FlyDSL or Python. The generated header records the
+backend and system link flags; for ROCm these are
+``-lamdhip64 -pthread -ldl``. The linker must also be able to find the HIP SDK
+library. For a nonstandard ROCm installation,
 add its library directory, for example::
 
    cc -shared -o libkernel.so kernel.o -L/path/to/rocm/lib -lamdhip64 -pthread -ldl
@@ -123,17 +125,68 @@ descriptors with layout metadata:
 
 .. code-block:: python
 
+   import torch
+
    import flydsl.compiler as flyc
 
-   tA = flyc.from_dlpack(torch_tensor).mark_layout_dynamic(
+   A = torch.randn(1024, device="cuda", dtype=torch.float32)
+   B = torch.empty_like(A)
+   tA = flyc.from_dlpack(A).mark_layout_dynamic(
        leading_dim=0, divisibility=4
    )
-   launch(tA, B, n, stream=torch.cuda.Stream())
+   tB = flyc.from_dlpack(B)
+   launch(tA, tB, A.numel(), stream=torch.cuda.Stream())
+
+Precompilation and C export
+---------------------------
+
+``flyc.compile(launcher, *specialization_args, **specialization_kwargs)``
+compiles a ``@flyc.jit`` launcher for one argument signature and returns a
+``CompiledFunction``. The result is callable with new runtime values of the
+same signature, and ``Constexpr`` values remain fixed to the specialization
+used at compile time.
+
+The same compiled specialization can be exported as a position-independent
+host object with a generated C header:
+
+.. code-block:: python
+
+   from pathlib import Path
+
+   output = Path("build/aot")
+   output.mkdir(parents=True, exist_ok=True)
+
+   compiled = flyc.compile(launch, tA, tB, A.numel())
+   compiled.export_to_c(
+       file_path=output,
+       file_name="vector_add",
+       function_prefix="flydsl_vector_add",
+   )
+
+``export_to_c`` writes ``vector_add.o`` and ``vector_add.h`` into the existing
+output directory. The object embeds the FlyDSL backend adapter; link the final
+binary against the backend system libraries listed in the header. The header
+declares the packed entry point, typed inline call helpers, module
+initialization/load/unload functions, and embedded ABI metadata. When
+``function_prefix`` is omitted, ``file_name`` is also used as the exported C
+symbol.
+
+Passing live device arguments to ``flyc.compile`` preserves its normal initial
+launch. For an offline or CPU-only build host, use null pointer wrappers created
+with ``flyc.from_c_void_p`` (or compatible non-device tensor placeholders) and
+set the target architecture explicitly, for example with ``ARCH=gfx950``.
+Export currently supports tensor, pointer, scalar, structure, and stream
+arguments whose lowered types have a supported C ABI. Unsupported launchers
+report the export error when ``export_to_c`` is called.
 
 ROCDL operations
 -----------------
 
 The ``flydsl.expr.rocdl`` module provides AMD-specific operations:
+
+The universal exported entries follow :doc:`../api_stability`. The gfx1250
+``WMMAScale`` and TDM helpers below are target-specific implementation APIs and
+remain unstable.
 
 - **fx.rocdl.make_buffer_tensor** -- create buffer resource descriptor from tensor (CDNA buffer copy)
 - **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy atoms

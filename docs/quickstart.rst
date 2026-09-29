@@ -142,30 +142,57 @@ and compiles it through the Fly MLIR pipeline. The pass list is built by
            ▼
       Cached Compiled Artifact (ExecutionEngine)
 
-AOT pre-compilation
---------------------
+JIT cache pre-warming
+---------------------
 
-FlyDSL supports ahead-of-time (AOT) compilation of kernels for deployment
-without JIT overhead. The ``tests/python/examples/aot_example.py`` script
-shows how to pre-compile preshuffle GEMM kernels into a cache directory:
+FlyDSL can populate its normal JIT cache before a workload runs. This is cache
+pre-warming through the existing JIT path; it does not create standalone
+linkable artifacts. The historically named
+``tests/python/examples/aot_example.py`` script shows how to compile
+preshuffle GEMM specializations into a cache directory:
 
 .. code-block:: bash
 
-   # Pre-compile with default configurations (auto-detect GPU arch)
+   # Pre-warm default configurations (auto-detect GPU arch)
    python tests/python/examples/aot_example.py
 
-   # Pre-compile and verify by running kernels on GPU
+   # Compile and verify by running kernels on GPU
    python tests/python/examples/aot_example.py --run_kernel
 
    # Custom cache directory
    FLYDSL_RUNTIME_CACHE_DIR=/my/cache python tests/python/examples/aot_example.py
 
-At runtime, FlyDSL loads compiled kernels from the cache automatically when
-``FLYDSL_RUNTIME_CACHE_DIR`` is set.
+At runtime, FlyDSL loads matching compiled kernels from the cache automatically
+when ``FLYDSL_RUNTIME_CACHE_DIR`` points to the same cache directory.
 
 The on-disk cache stores only the compressed compiled IR required to recreate
 the runtime module. Pre-lowering source IR remains available in the compiling
-process for inspection, but is intentionally omitted from AOT cache files.
+process for inspection, but is intentionally omitted from cache files.
+
+Standalone C export
+-------------------
+
+FlyDSL can also turn one ``@flyc.jit`` specialization into a linkable host
+object. This is separate from JIT cache pre-warming:
+
+.. code-block:: python
+
+   from pathlib import Path
+
+   output = Path("build/aot")
+   output.mkdir(parents=True, exist_ok=True)
+
+   compiled = flyc.compile(launch, *specialization_args)
+   compiled.export_to_c(output, "my_kernel")
+
+The output directory receives ``my_kernel.o`` and ``my_kernel.h``. The object
+embeds its FlyDSL backend adapter; the generated header lists the backend
+system libraries needed when linking the final binary, along with typed inline
+call helpers and module lifecycle entry points. On a build host
+without a visible GPU, select the architecture explicitly (for example,
+``ARCH=gfx950``) and compile with null pointer or non-device tensor
+placeholders. See :doc:`api/compiler` for the API contract and supported
+argument categories.
 
 Next steps
 ----------
