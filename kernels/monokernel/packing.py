@@ -36,6 +36,53 @@ def pack_fp8(q: torch.Tensor) -> torch.Tensor:
     return w8.permute(*order).contiguous().view(-1)
 
 
+def pack_fp8_gfx1250(q: torch.Tensor) -> torch.Tensor:
+    """Pack FP8 ``[..., N, K]`` for gfx1250's 16-row, 64-K wave32 WMMA tiles.
+
+    Each 1 KB tile holds 32 lanes x 32 bytes. Lane ``g * 16 + r`` owns row ``r``
+    and, for each 32-K half, the two 8-value blocks ``K = block * 16 + g * 8 + j``
+    of the WMMA A operand.
+    """
+
+    *lead, rows, k = q.shape
+    if rows % 16 or k % 64:
+        raise ValueError(f"FP8 matrix dimensions must be divisible by (16, 64), got {(rows, k)}")
+    w8 = q.view(torch.uint8).reshape(*lead, rows // 16, 16, k // 64, 2, 2, 2, 8)
+    nlead = len(lead)
+    order = list(range(nlead)) + [nlead + position for position in (0, 2, 5, 1, 3, 4, 6)]
+    return w8.permute(*order).contiguous().view(-1)
+
+
+def pack_bf16_gfx1250(w: torch.Tensor) -> torch.Tensor:
+    """Pack BF16 ``[N, K]`` for gfx1250's 16-row wave32 WMMA tiles, one 1 KB tile per 32-K step."""
+
+    if w.ndim != 2:
+        raise ValueError(f"BF16 packing expects a matrix, got shape {tuple(w.shape)}")
+    rows, k = w.shape
+    if rows % 16 or k % 64:
+        raise ValueError(f"BF16 matrix dimensions must be divisible by (16, 64), got {(rows, k)}")
+    w16 = w.view(torch.int16).reshape(rows // 16, 16, k // 64, 2, 2, 2, 8)
+    return w16.permute(0, 2, 3, 5, 1, 4, 6).contiguous().view(-1)
+
+
+def pack_mxfp4_gfx1250(q: torch.Tensor) -> torch.Tensor:
+    """Pack MXFP4 for four gfx1250 BF16 WMMA K32 steps in each 128-K tile.
+
+    Lane ``g * 16 + r`` owns row ``r`` and eight dwords per tile; dword
+    ``step * 2 + block`` holds the eight values ``K = step * 32 + block * 16 + g * 8 + j``.
+    """
+
+    q = q.view(torch.uint8)
+    *lead, rows, packed_k = q.shape
+    k = packed_k * 2
+    if rows % 16 or k % 128:
+        raise ValueError(f"MXFP4 matrix dimensions must be divisible by (16, 128), got {(rows, k)}")
+    w4 = q.reshape(*lead, rows // 16, 16, k // 128, 4, 2, 2, 4)
+    nlead = len(lead)
+    order = list(range(nlead)) + [nlead + position for position in (0, 2, 5, 1, 3, 4, 6)]
+    return w4.permute(*order).contiguous().view(-1)
+
+
 def pack_mxfp8_weight(q: torch.Tensor) -> torch.Tensor:
     """Preshuffle row-major MXFP8 weights for gfx950 scaled MFMA GEMM."""
 
@@ -140,11 +187,13 @@ def pack_layer_weights(
     mxfp4_weight_layout: Mxfp4WeightLayout | str | None = None,
     mxfp4_scale_layout: Mxfp4ScaleLayout | str | None = None,
     router_weight_layout: RouterWeightLayout | str | None = None,
+    gfx1250: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Pack weights for a model profile and the selected kernel storage contract.
 
     Native layouts are the shared default. Model wrappers may select alternate
     physical layouts explicitly without coupling them to model geometry.
+    ``gfx1250=True`` selects the gfx1250 wave32 WMMA tile order for native layouts.
     """
 
     config = as_layer_config(model_config)
@@ -155,7 +204,10 @@ def pack_layer_weights(
     if missing:
         raise ValueError(f"missing layer weights: {', '.join(missing)}")
 
-    pack_attention = pack_bf16 if config.attention_weight is AttentionWeight.BF16 else pack_fp8
+    fp8_tiles, bf16_tiles, mxfp4_tiles = (
+        (pack_fp8_gfx1250, pack_bf16_gfx1250, pack_mxfp4_gfx1250) if gfx1250 else (pack_fp8, pack_bf16, pack_mxfp4)
+    )
+    pack_attention = bf16_tiles if config.attention_weight is AttentionWeight.BF16 else fp8_tiles
     packed = {name: pack_attention(tensors[name]) for name in attention_names}
     if attention_only:
         return packed
@@ -169,16 +221,22 @@ def pack_layer_weights(
         RouterWeightLayout.NATIVE if router_weight_layout is None else as_router_weight_layout(router_weight_layout)
     )
 
+    if gfx1250 and (
+        weight_layout is not Mxfp4WeightLayout.NATIVE
+        or scale_layout is not Mxfp4ScaleLayout.NATIVE
+        or router_layout is not RouterWeightLayout.NATIVE
+    ):
+        raise ValueError("gfx1250 tile packing supports only the native expert, scale, and router layouts")
     if weight is ExpertWeight.MXFP4_BLOCK32:
-        pack_expert = pack_a16w4_weight if weight_layout is Mxfp4WeightLayout.ATOM else pack_mxfp4
+        pack_expert = pack_a16w4_weight if weight_layout is Mxfp4WeightLayout.ATOM else mxfp4_tiles
     else:
         if weight_layout is not Mxfp4WeightLayout.NATIVE or scale_layout is not Mxfp4ScaleLayout.NATIVE:
             raise ValueError("ATOM MXFP4 layouts require an MXFP4 expert mode")
-        pack_expert = pack_fp8
+        pack_expert = fp8_tiles
     packed.update({name: pack_expert(tensors[name]) for name in expert_names})
     if scale_layout is Mxfp4ScaleLayout.ATOM:
         packed.update({name: pack_a16w4_scale(tensors[name]) for name in ("s_ug", "s_dn")})
     packed["w_r"] = (
-        pack_bf16_atom(tensors["w_r"]) if router_layout is RouterWeightLayout.ATOM else pack_bf16(tensors["w_r"])
+        pack_bf16_atom(tensors["w_r"]) if router_layout is RouterWeightLayout.ATOM else bf16_tiles(tensors["w_r"])
     )
     return packed

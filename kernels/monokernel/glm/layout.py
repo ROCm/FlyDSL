@@ -43,6 +43,24 @@ XQ_WAVES = (XQ_BLOCKS + N_ROUTER - 1) // N_ROUTER
 assert XQ_WAVES * 4 <= WAVES
 
 
+POLL_STAGES = (
+    "qkv_a",
+    "q_norm",
+    "cache",
+    "q_b",
+    "index_q",
+    "uk",
+    "index_score",
+    "index_select",
+    "split",
+    "uv",
+    "o",
+    "router",
+    "ug",
+    "down",
+)
+
+
 def dn_tile(samples: int, expert_mxfp4: bool = False) -> int:
     """Return rows per expert-down/FFN-reduce task for the tuned schedule."""
 
@@ -117,6 +135,9 @@ def layout(
             ("indices", samples * sparse_attention_topk * 4),
             ("indices_ready", samples * pair_bytes),
         ]
+    # One word per stage, set by bounded mailbox polls that time out; appended
+    # last so every other offset is independent of it.
+    items.append(("poll_err", 4 * len(POLL_STAGES)))
 
     offset, scratch = 0, {}
     for name, size in items:
