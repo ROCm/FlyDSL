@@ -1,0 +1,46 @@
+[
+  {
+    "variant": "latent_pf7_events",
+    "parent": "tail_rotate192_downsplit_events",
+    "source_sha256": "4833dcc5ef660ee40fffac76f96d90106a2a1f1f02607b7197093cf0c6e284b2",
+    "prefetch_k64_chunks": 7,
+    "inverse_rms_wave_gather": false,
+    "gain_loads_reused_across_tokens": false,
+    "prefetch_load_expression_exact_copy": true,
+    "mfma_and_bf16_order_unchanged": true,
+    "dag_unchanged": true
+  },
+  {
+    "variant": "latent_pf14_events",
+    "parent": "tail_rotate192_downsplit_events",
+    "source_sha256": "df91b612930d0d1fe7bee812264d0071153fc16d65802d06b645785db495c485",
+    "prefetch_k64_chunks": 14,
+    "inverse_rms_wave_gather": false,
+    "gain_loads_reused_across_tokens": false,
+    "prefetch_load_expression_exact_copy": true,
+    "mfma_and_bf16_order_unchanged": true,
+    "dag_unchanged": true
+  },
+  {
+    "variant": "latent_pf0_normgain_events",
+    "parent": "tail_rotate192_downsplit_events",
+    "source_sha256": "f668dc4bad5b6dd98fa8f356669dc0b48aa9b6b09446f3b4fcd9cf2521ea0129",
+    "prefetch_k64_chunks": 0,
+    "inverse_rms_wave_gather": true,
+    "gain_loads_reused_across_tokens": true,
+    "prefetch_load_expression_exact_copy": true,
+    "mfma_and_bf16_order_unchanged": true,
+    "dag_unchanged": true
+  },
+  {
+    "variant": "latent_pf14_normgain_events",
+    "parent": "tail_rotate192_downsplit_events",
+    "source_sha256": "b53c9dc3dfe45cfcaffa390ea97924f1e7e68e118d336e1243df92b44b4ed00a",
+    "prefetch_k64_chunks": 14,
+    "inverse_rms_wave_gather": true,
+    "gain_loads_reused_across_tokens": true,
+    "prefetch_load_expression_exact_copy": true,
+    "mfma_and_bf16_order_unchanged": true,
+    "dag_unchanged": true
+  }
+]

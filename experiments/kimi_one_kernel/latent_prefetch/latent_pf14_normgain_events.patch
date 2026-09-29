@@ -1,0 +1,153 @@
+--- a/kernels/kimi_k3_monokernel/kernel.py
++++ b/kernels/kimi_k3_monokernel/kernel.py
+@@ -1632,6 +1632,36 @@
+                     )
+             return list(accumulator)
+ 
++        def latent_mxfp8_fragment(weight_rsrc, scale_rsrc, row_tile, k_dim, chunk, step_index):
++            k_chunks = k_dim // 64
++            atom_group = step_index * 2 + (lane // 16) // 2
++            weight = fx.Vector(
++                bo.buffer_load(
++                    weight_rsrc,
++                    (((row_tile * k_chunks + chunk) * 4 + atom_group) * 16 + lane % 16) * 4
++                    + ((lane // 16) % 2) * 2,
++                    vec_width=2,
++                    dtype=T.i32,
++                )
++            )
++            scale_group = chunk * 2 + step_index
++            scale_word = fx.Int32(
++                bo.buffer_load(
++                    scale_rsrc,
++                    (
++                        ((row_tile // 2) * (k_dim // 256) + scale_group // 8) * 64
++                        + (scale_group % 4) * 16
++                        + lane % 16
++                    ),
++                    vec_width=1,
++                    dtype=T.i32,
++                )
++            )
++            scale_byte_index = ((scale_group % 8) // 4) * 2 + row_tile % 2
++            scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & fx.Int32(0xFF)
++            scale = (scale_byte << fx.Int32(23)).bitcast(fx.Float32)
++            return weight, scale
++
+         def mxfp8_bf16_accumulate_samples(
+             weight_rsrc,
+             scale_rsrc,
+@@ -1642,6 +1672,7 @@
+             split_waves,
+             sample_stride,
+             sample_count,
++            prefetched=None,
+         ):
+             input_sample = fx.min(lane % 16, sample_count - 1)
+             k_chunks = k_dim // 64
+@@ -1650,32 +1681,35 @@
+             for local_chunk in range_constexpr(chunks_per_wave):
+                 chunk = split_wave * chunks_per_wave + local_chunk
+                 for step_index in range_constexpr(2):
+-                    atom_group = step_index * 2 + (lane // 16) // 2
+-                    weight = fx.Vector(
+-                        bo.buffer_load(
+-                            weight_rsrc,
+-                            (((row_tile * k_chunks + chunk) * 4 + atom_group) * 16 + lane % 16) * 4
+-                            + ((lane // 16) % 2) * 2,
+-                            vec_width=2,
+-                            dtype=T.i32,
+-                        )
+-                    )
+-                    scale_group = chunk * 2 + step_index
+-                    scale_word = fx.Int32(
+-                        bo.buffer_load(
+-                            scale_rsrc,
+-                            (
+-                                ((row_tile // 2) * (k_dim // 256) + scale_group // 8) * 64
+-                                + (scale_group % 4) * 16
+-                                + lane % 16
+-                            ),
+-                            vec_width=1,
+-                            dtype=T.i32,
+-                        )
+-                    )
+-                    scale_byte_index = ((scale_group % 8) // 4) * 2 + row_tile % 2
+-                    scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & fx.Int32(0xFF)
+-                    scale = (scale_byte << fx.Int32(23)).bitcast(fx.Float32)
++                    if const_expr(prefetched is not None and local_chunk < len(prefetched) // 2):
++                        weight, scale = prefetched[local_chunk * 2 + step_index]
++                    else:
++                        atom_group = step_index * 2 + (lane // 16) // 2
++                        weight = fx.Vector(
++                            bo.buffer_load(
++                                weight_rsrc,
++                                (((row_tile * k_chunks + chunk) * 4 + atom_group) * 16 + lane % 16) * 4
++                                + ((lane // 16) % 2) * 2,
++                                vec_width=2,
++                                dtype=T.i32,
++                            )
++                        )
++                        scale_group = chunk * 2 + step_index
++                        scale_word = fx.Int32(
++                            bo.buffer_load(
++                                scale_rsrc,
++                                (
++                                    ((row_tile // 2) * (k_dim // 256) + scale_group // 8) * 64
++                                    + (scale_group % 4) * 16
++                                    + lane % 16
++                                ),
++                                vec_width=1,
++                                dtype=T.i32,
++                            )
++                        )
++                        scale_byte_index = ((scale_group % 8) // 4) * 2 + row_tile % 2
++                        scale_byte = scale_word.shrui(fx.Int32(scale_byte_index * 8)) & fx.Int32(0xFF)
++                        scale = (scale_byte << fx.Int32(23)).bitcast(fx.Float32)
+                     lhs = mxfp8_to_bf16x8(weight[0], weight[1], scale)
+                     rhs = fx.ptr_load(
+                         x + activation_word_base + input_sample * sample_stride + (chunk * 64) // 2 + (lane // 16) * 4 + step_index * 16,
+@@ -3205,8 +3239,25 @@
+                     global_row = row_group * 16
+                     latent_live = (global_row >= first_local_row) & (global_row < first_local_row + _HIDDEN_SHARD)
+                     if latent_live:
++                        tail_fragments = []
++                        for prefetch_chunk in range_constexpr(14):
++                            for prefetch_step in range_constexpr(2):
++                                tail_fragments.append(latent_mxfp8_fragment(
++                                    rsrc(packed_latent_up), rsrc(latent_up_scale),
++                                    (global_row - first_local_row) // 16, _ROUTED_HIDDEN,
++                                    (wave - 4) * ((_ROUTED_HIDDEN // 64) // 4) + prefetch_chunk, prefetch_step,
++                                ))
++                        # Gains are shared across tokens; gather independent
++                        # tagged inverse RMS words before the original token order.
++                        gain_prefetch = []
++                        for gain_round in range_constexpr((_ROUTED_HIDDEN // 2 // 4) // _WAVE_SIZE):
++                            gain_pair = (wave - 4) * (_ROUTED_HIDDEN // 2 // 4) + lane + gain_round * _WAVE_SIZE
++                            gain_prefetch.append(fx.Int32(bo.buffer_load(rsrc(latent_gain), gain_pair, vec_width=1, dtype=T.i32)))
++                        inverse_value = fx.Float32(0.0)
++                        if lane < staged_samples:
++                            inverse_value = load_f32(routed_inv_rsrc, sample_base + lane)
+                         for local_sample in range_constexpr(staged_samples):
+-                            inverse_rms = uniform_f32(load_f32(routed_inv_rsrc, sample_base + local_sample))
++                            inverse_rms = fx.Int32(rocdl.readlane(T.i32, inverse_value.bitcast(fx.Int32), fx.Int32(local_sample))).bitcast(fx.Float32)
+                             latent_pairs = _ROUTED_HIDDEN // 2
+                             latent_pairs_per_wave = latent_pairs // 4
+                             split_wave = wave - 4
+@@ -3215,14 +3266,14 @@
+                                 pair = split_wave * latent_pairs_per_wave + lane + load_round * _WAVE_SIZE
+                                 packed = load_raw_pair(routed_mailbox_rsrc, (sample_base + local_sample) * latent_pairs + pair)
+                                 values = fx.Vector.from_elements([packed], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+-                                gain_word = fx.Int32(bo.buffer_load(gain_rsrc, pair, vec_width=1, dtype=T.i32))
++                                gain_word = gain_prefetch[load_round]
+                                 gains = fx.Vector.from_elements([gain_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+                                 lds_store(x, staged_samples * shared_pairs + local_sample * latent_pairs + pair,
+                                           bf16_pair(values[0] * inverse_rms * gains[0], values[1] * inverse_rms * gains[1]))
+                         rocdl.s_waitcnt(lgkmcnt=0)
+                         accumulator = mxfp8_bf16_accumulate_samples(
+                             rsrc(packed_latent_up), rsrc(latent_up_scale), staged_samples * shared_pairs,
+-                            (global_row - first_local_row) // 16, _ROUTED_HIDDEN, split_wave, 4, latent_pairs, staged_samples,
++                            (global_row - first_local_row) // 16, _ROUTED_HIDDEN, split_wave, 4, latent_pairs, staged_samples, prefetched=tail_fragments,
+                         )
+ 
+                 fx.ptr_store(

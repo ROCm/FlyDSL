@@ -1,0 +1,327 @@
+{
+  "patch_base": "tail_rotate192_downsplit_events",
+  "patch_base_kernel_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+  "independent_patches": true,
+  "sources": [
+    {
+      "name": "latent_pf0_normgain_events",
+      "original_source": "kimi_tail_async_20260929/latent_pf0_normgain_events",
+      "kernel_sha256": "f668dc4bad5b6dd98fa8f356669dc0b48aa9b6b09446f3b4fcd9cf2521ea0129",
+      "source_tree_sha256": "e6a83df434b34684f58aabf1544baedb89f34b825cc8a116c1b43e2195bb03a6",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "f668dc4bad5b6dd98fa8f356669dc0b48aa9b6b09446f3b4fcd9cf2521ea0129"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "f668dc4bad5b6dd98fa8f356669dc0b48aa9b6b09446f3b4fcd9cf2521ea0129",
+          "binary_sha256": "32b84ccd7891d999519165c5e2337e88a617e0784967114b8e89ae71390bf9f5",
+          "vgpr": 121,
+          "sgpr_spills": 97,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 120.9900937974453,
+          "min_us": 120.48881500959396,
+          "max_us": 132.23643600940704,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "f668dc4bad5b6dd98fa8f356669dc0b48aa9b6b09446f3b4fcd9cf2521ea0129",
+          "file": "screen_latent_pf0_normgain_events_seed1234.json",
+          "reduction_vs_base_pct": 4.815705821435157,
+          "reduction_vs_staged_pct": 6.027250393187533,
+          "target_us": 115.87517112493515
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "latent_pf14_events",
+      "original_source": "kimi_tail_async_20260929/latent_pf14_events",
+      "kernel_sha256": "df91b612930d0d1fe7bee812264d0071153fc16d65802d06b645785db495c485",
+      "source_tree_sha256": "da6c5647412390d69a89e47398c6a02767396ef4a925e04d76bb5c04527ac8b2",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "df91b612930d0d1fe7bee812264d0071153fc16d65802d06b645785db495c485"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "df91b612930d0d1fe7bee812264d0071153fc16d65802d06b645785db495c485",
+          "binary_sha256": "3dbeeaf50c0e731d2962e4a98f8aa57a636812f8a4cb3201de6bb5f890180b35",
+          "vgpr": 154,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 1
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 120.77253311872482,
+          "min_us": 120.07381021976471,
+          "max_us": 128.27637791633606,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "df91b612930d0d1fe7bee812264d0071153fc16d65802d06b645785db495c485",
+          "file": "screen_latent_pf14_events_seed1234.json",
+          "reduction_vs_base_pct": 4.986863302143352,
+          "reduction_vs_staged_pct": 6.196229311576628,
+          "target_us": 115.87517112493515
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "latent_pf14_normgain_events",
+      "original_source": "kimi_tail_async_20260929/latent_pf14_normgain_events",
+      "kernel_sha256": "b53c9dc3dfe45cfcaffa390ea97924f1e7e68e118d336e1243df92b44b4ed00a",
+      "source_tree_sha256": "645e63b7ba271c2f86466382e5edcf155420a0696f3b042402bcf8fd4f5d90d7",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "b53c9dc3dfe45cfcaffa390ea97924f1e7e68e118d336e1243df92b44b4ed00a"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "b53c9dc3dfe45cfcaffa390ea97924f1e7e68e118d336e1243df92b44b4ed00a",
+          "binary_sha256": "d8ccd0924f1e3f185520998842a43110ceed207a0c7ff6edb83e13bceaf1a23a",
+          "vgpr": 154,
+          "sgpr_spills": 97,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 1
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 119.99756097793579,
+          "min_us": 119.38881129026413,
+          "max_us": 128.01393866539001,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "b53c9dc3dfe45cfcaffa390ea97924f1e7e68e118d336e1243df92b44b4ed00a",
+          "file": "screen_latent_pf14_normgain_events_seed1234.json",
+          "reduction_vs_base_pct": 5.596542771873725,
+          "reduction_vs_staged_pct": 6.798148532009208,
+          "target_us": 115.87517112493515
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "latent_pf7_events",
+      "original_source": "kimi_tail_async_20260929/latent_pf7_events",
+      "kernel_sha256": "4833dcc5ef660ee40fffac76f96d90106a2a1f1f02607b7197093cf0c6e284b2",
+      "source_tree_sha256": "fe66bc4f3da46237ea681ffd89d4b7622255f82f7846b501a3899a2edb29961a",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "4833dcc5ef660ee40fffac76f96d90106a2a1f1f02607b7197093cf0c6e284b2"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "4833dcc5ef660ee40fffac76f96d90106a2a1f1f02607b7197093cf0c6e284b2",
+          "binary_sha256": "0ea794e75f0a0bcb2dd8117d0658401076847c8dab57ca01f47507d6461f52f5",
+          "vgpr": 121,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "screen": {
+          "median_us": 119.80631202459335,
+          "min_us": 119.34131383895874,
+          "max_us": 126.29887461662292,
+          "layers": 16,
+          "repeats": 50,
+          "instrumented": false,
+          "source_sha256": "4833dcc5ef660ee40fffac76f96d90106a2a1f1f02607b7197093cf0c6e284b2",
+          "file": "screen_latent_pf7_events_seed1234.json",
+          "reduction_vs_base_pct": 5.747000516511602,
+          "reduction_vs_staged_pct": 6.946691189022946,
+          "target_us": 115.87517112493515
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    }
+  ]
+}

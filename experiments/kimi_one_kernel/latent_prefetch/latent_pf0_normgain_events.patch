@@ -1,0 +1,30 @@
+--- a/kernels/kimi_k3_monokernel/kernel.py
++++ b/kernels/kimi_k3_monokernel/kernel.py
+@@ -3205,8 +3205,17 @@
+                     global_row = row_group * 16
+                     latent_live = (global_row >= first_local_row) & (global_row < first_local_row + _HIDDEN_SHARD)
+                     if latent_live:
++                        # Gains are shared across tokens; gather independent
++                        # tagged inverse RMS words before the original token order.
++                        gain_prefetch = []
++                        for gain_round in range_constexpr((_ROUTED_HIDDEN // 2 // 4) // _WAVE_SIZE):
++                            gain_pair = (wave - 4) * (_ROUTED_HIDDEN // 2 // 4) + lane + gain_round * _WAVE_SIZE
++                            gain_prefetch.append(fx.Int32(bo.buffer_load(rsrc(latent_gain), gain_pair, vec_width=1, dtype=T.i32)))
++                        inverse_value = fx.Float32(0.0)
++                        if lane < staged_samples:
++                            inverse_value = load_f32(routed_inv_rsrc, sample_base + lane)
+                         for local_sample in range_constexpr(staged_samples):
+-                            inverse_rms = uniform_f32(load_f32(routed_inv_rsrc, sample_base + local_sample))
++                            inverse_rms = fx.Int32(rocdl.readlane(T.i32, inverse_value.bitcast(fx.Int32), fx.Int32(local_sample))).bitcast(fx.Float32)
+                             latent_pairs = _ROUTED_HIDDEN // 2
+                             latent_pairs_per_wave = latent_pairs // 4
+                             split_wave = wave - 4
+@@ -3215,7 +3224,7 @@
+                                 pair = split_wave * latent_pairs_per_wave + lane + load_round * _WAVE_SIZE
+                                 packed = load_raw_pair(routed_mailbox_rsrc, (sample_base + local_sample) * latent_pairs + pair)
+                                 values = fx.Vector.from_elements([packed], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+-                                gain_word = fx.Int32(bo.buffer_load(gain_rsrc, pair, vec_width=1, dtype=T.i32))
++                                gain_word = gain_prefetch[load_round]
+                                 gains = fx.Vector.from_elements([gain_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
+                                 lds_store(x, staged_samples * shared_pairs + local_sample * latent_pairs + pair,
+                                           bf16_pair(values[0] * inverse_rms * gains[0], values[1] * inverse_rms * gains[1]))
