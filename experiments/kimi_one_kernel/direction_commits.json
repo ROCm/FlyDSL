@@ -1,0 +1,58 @@
+[
+  {
+    "commit": "ea2f6809cda3ab4dd287c3a2574def0c91c1e9a7",
+    "title": "feat(kimi): preserve staged and routed-pipeline tuning baseline"
+  },
+  {
+    "commit": "6f4ee6e1cea057e29eaa8d66daf03ef97b94be2b",
+    "title": "test(kimi): preserve full-replay checks and GPU-event benchmark sources"
+  },
+  {
+    "commit": "7098c0854a01ed46bad57ee719c70ce8dc2607f5",
+    "title": "perf(kimi): relocate recurrence CTAs and batch tail work by token group"
+  },
+  {
+    "commit": "06edcf136541f327c8ac13a94706d330b2f47111",
+    "title": "perf(kimi): use split-K4 projections and paired UG32 tasks"
+  },
+  {
+    "commit": "93ab0a81cf9a1e89f44a42e4269392308fe0d2b9",
+    "title": "perf(kimi): reduce strict selector scores and IDs with native wave operations"
+  },
+  {
+    "commit": "a7b56f420ad5cffd76d504d7eeb41f37cbec5306",
+    "title": "perf(kimi): prefetch frontend weights before activation waits"
+  },
+  {
+    "commit": "7f8dbc3a1fa17dd04019e985d4b9e65b8e5f7e92",
+    "title": "perf(kimi): move stateless recurrence math ahead of the predecessor fence"
+  },
+  {
+    "commit": "db1a414ff174c5256396178b2f1e9db22572c419",
+    "title": "perf(kimi): push every local tail task before collecting peers"
+  },
+  {
+    "commit": "49b148b50c8e1a1b34f0ac19cbff2365339b7114",
+    "title": "perf(kimi): rotate rank-local tail tiles onto CTAs 192 through 247"
+  },
+  {
+    "commit": "5f8af0f6b8f90406720ff4e10e733cd48efc31c9",
+    "title": "perf(kimi): split down sends from collect and norm publication"
+  },
+  {
+    "commit": "e88c80eb6f93bdd47fa0856e98aafc862645293e",
+    "title": "chore(kimi): archive latent prefetch and norm-gain experiments"
+  },
+  {
+    "commit": "2fa685c23a95a1a80d9f5bec4dabd98686608573",
+    "title": "chore(kimi): archive UG prefetch and joint-publication candidates"
+  },
+  {
+    "commit": "da966abd41cde0b75fe00479e102b573f0655cd4",
+    "title": "chore(kimi): archive compile-only vector-copy and scheduling experiments"
+  },
+  {
+    "commit": "cfc6142cd69cfdb4b6413c2ce393be4c03a7147c",
+    "title": "chore(kimi): preserve uncompiled batch-sequence matrix draft separately"
+  }
+]
