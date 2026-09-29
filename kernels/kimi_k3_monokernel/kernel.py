@@ -202,8 +202,10 @@ def build_kimi_k3_monokernel(
         raise ValueError(f"attn_res_blocks must be >= -1, got {attn_res_blocks}")
     if block_write_idx >= 0 and block_write_idx != attn_res_blocks:
         raise ValueError("the pre-attention block write must append at attn_res_blocks")
-    latent_projection_waves = 3 if samples <= 4 else 4
-    shared_projection_waves = 3 if samples <= 4 else 6
+    if fuse_moe and (samples != 4 or not mtp):
+        raise ValueError("Experimental projection split-K4 requires S4 true MTP with fused MoE")
+    latent_projection_tiles = 2
+    shared_projection_tiles = 2
     mtp_splits = _MTP_SPLITS
     mtp_rows_per_split = _HEAD_DIM // mtp_splits
     mtp_v_lanes = mtp_rows_per_split // _WAVES
@@ -1262,6 +1264,91 @@ def build_kimi_k3_monokernel(
                     )
             return accumulator.load()
 
+        def mxfp8_scaled_mfma_split4(
+            weight_rsrc,
+            scale_rsrc,
+            row_tile,
+            sample_base,
+            sample_count,
+            split_wave,
+        ):
+            k_chunks = _HIDDEN // 64
+            k_scale_chunks = _HIDDEN // 256
+            lane_div16 = lane // 16
+            lane_mod16 = lane % 16
+            accumulator = fx.make_rmem_tensor(4, fx.Float32)
+            accumulator.store(fx.Vector.filled(4, 0.0, fx.Float32))
+            valid_sample = lane_mod16 < sample_count
+            sample = fx.min(lane_mod16, sample_count - 1)
+            scale_lane = lane_div16 * 16 + lane_mod16
+            for local_k256 in range_constexpr(k_scale_chunks // 4):
+                k256 = split_wave * (k_scale_chunks // 4) + local_k256
+                activation_scale = fx.Int32(
+                    bo.buffer_load(
+                        quantized_moe_scale_rsrc,
+                        k256 * 64 + lane_div16 * 16 + sample_base + sample,
+                        vec_width=1,
+                        dtype=T.i32,
+                        cache_modifier=CM_DEV,
+                    )
+                ) & fx.Int32(0x00FF00FF)
+                weight_scale = fx.Int32(
+                    bo.buffer_load(
+                        scale_rsrc,
+                        ((row_tile // 2) * k_scale_chunks + k256) * 64 + scale_lane,
+                        vec_width=1,
+                        dtype=T.i32,
+                    )
+                )
+                weight_scale = ((row_tile % 2) != 0).select(
+                    weight_scale.shrui(fx.Int32(8)),
+                    weight_scale,
+                )
+                for k128_half in range_constexpr(2):
+                    k128 = k256 * 2 + k128_half
+                    k_base = k128 * 128 + lane_div16 * 16
+                    activation_halves = []
+                    for k64_half in range_constexpr(2):
+                        loaded = fx.Vector(
+                            fx.ptr_load(
+                                x + (sample * _HIDDEN + k_base + k64_half * 64) // 4,
+                                result_type=fx.Vector.make_type(4, fx.Float32),
+                            )
+                        ).bitcast(fx.Int32)
+                        activation_halves.append(
+                            fx.Vector.from_elements(
+                                [valid_sample.select(loaded[index], fx.Int32(0)) for index in range(4)],
+                                fx.Int32,
+                            )
+                        )
+                    activation_fragment = fx.make_rmem_tensor(8, fx.Int32)
+                    activation_fragment.store(activation_halves[0].shuffle(activation_halves[1], list(range(8))))
+                    weight_halves = []
+                    for k64_half in range_constexpr(2):
+                        k64 = k128 * 2 + k64_half
+                        weight_halves.append(
+                            fx.Vector(
+                                bo.buffer_load(
+                                    weight_rsrc,
+                                    (((row_tile * k_chunks + k64) * 4 + lane_div16) * 16 + lane_mod16) * 4,
+                                    vec_width=4,
+                                    dtype=T.i32,
+                                )
+                            )
+                        )
+                    weight_fragment = fx.make_rmem_tensor(8, fx.Int32)
+                    weight_fragment.store(weight_halves[0].shuffle(weight_halves[1], list(range(8))))
+                    fx.gemm(
+                        mxfp8_scale_atoms[k128_half],
+                        accumulator,
+                        activation_fragment,
+                        weight_fragment,
+                        accumulator,
+                        scale_a=activation_scale,
+                        scale_b=weight_scale,
+                    )
+            return accumulator.load()
+
         def publish_mxfp8_tile(
             values,
             row_tile,
@@ -1318,6 +1405,45 @@ def build_kimi_k3_monokernel(
                         (sample_base + local_sample) * (rows // 16) + row_tile,
                         1,
                     )
+
+        def publish_raw_mxfp8_split_tiles(
+            values, first_row_tile, rows, mailbox_rsrc, ready_rsrc,
+            sample_base, sample_count,
+        ):
+            fx.ptr_store(values, reduction + (wave * _WAVE_SIZE + lane) * 4)
+            gpu.barrier()
+            if tid < 2 * 16 * sample_count // 2:
+                local_sample = tid // 16
+                local_row = (tid % 16) * 2
+                pair_values = []
+                for pair_element in range_constexpr(2):
+                    row = local_row + pair_element
+                    row_in_group = row % 16
+                    first_source_wave = (row // 16) * 4
+                    value = fx.Float32(0.0)
+                    for source_offset in range_constexpr(4):
+                        # Native MXFP8: lane % 16 selects row, vector element
+                        # selects sample for S4 (the lane group is zero).
+                        source_wave = first_source_wave + source_offset
+                        source_index = (source_wave * _WAVE_SIZE + row_in_group) * 4 + local_sample
+                        value = value + lds_load(reduction, source_index)
+                    pair_values.append(value)
+                row = first_row_tile * 16 + local_row
+                store_raw_pair(
+                    mailbox_rsrc, ((sample_base + local_sample) * rows + row) // 2,
+                    pair_values[0], pair_values[1],
+                )
+            # Publish readiness only after the actual payload stores finish.
+            rocdl.s_waitcnt(vmcnt=0)
+            gpu.barrier()
+            if tid == 0:
+                for local_sample in range_constexpr(sample_count):
+                    for row_offset in range_constexpr(2):
+                        store_i32(
+                            ready_rsrc,
+                            (sample_base + local_sample) * (rows // 16) + first_row_tile + row_offset,
+                            1,
+                        )
 
         def stage_mailbox_vector(mailbox_rsrc, pair_base, pairs):
             for load_round in range_constexpr((pairs + _THREADS - 1) // _THREADS):
@@ -2443,9 +2569,10 @@ def build_kimi_k3_monokernel(
         stamp(3)
 
         # Stage 4: post-attention AttnRes and MXFP8 activation quantization for
+        post_owner_task = (bid + 32) % _BLOCKS
         # the latent/router/shared projection stage that follows this kernel.
         if const_expr(fuse_attn_res):
-            if bid < samples * _ATTN_RES_CTAS:
+            if post_owner_task < samples * _ATTN_RES_CTAS:
                 if const_expr(block_write_idx >= 0):
                     post_prefix = output
                     post_delta = output
@@ -2455,8 +2582,8 @@ def build_kimi_k3_monokernel(
                     post_delta = output
                     post_has_delta = True
                 run_attn_res_chunk(
-                    bid // _ATTN_RES_CTAS,
-                    bid % _ATTN_RES_CTAS,
+                    post_owner_task // _ATTN_RES_CTAS,
+                    post_owner_task % _ATTN_RES_CTAS,
                     post_prefix,
                     post_delta,
                     mlp_res_norm,
@@ -2484,8 +2611,8 @@ def build_kimi_k3_monokernel(
             router_tasks = sample_groups * router_row_tasks
             latent_tiles = _ROUTED_HIDDEN // 16
             shared_tiles = (2 * _SHARED_INTER) // 16
-            latent_blocks = (latent_tiles + latent_projection_waves - 1) // latent_projection_waves
-            shared_blocks = (shared_tiles + shared_projection_waves - 1) // shared_projection_waves
+            latent_blocks = (latent_tiles + latent_projection_tiles - 1) // latent_projection_tiles
+            shared_blocks = (shared_tiles + shared_projection_tiles - 1) // shared_projection_tiles
             latent_tasks = sample_groups * latent_blocks
             shared_tasks = sample_groups * shared_blocks
             projection_tasks = router_tasks + latent_tasks + shared_tasks
@@ -2555,25 +2682,16 @@ def build_kimi_k3_monokernel(
                         sample_base = sample_group * staged_samples
                     stage_mxfp8_hidden(sample_base, staged_samples)
                     gpu.barrier()
-                    latent_tile = latent_block * latent_projection_waves + wave
-                    if wave < latent_projection_waves:
-                        projection_values = mxfp8_scaled_mfma(
-                            rsrc(packed_latent_weight),
-                            rsrc(latent_weight_scale),
-                            fx.min(latent_tile, latent_tiles - 1),
-                            sample_base,
-                            staged_samples,
-                        )
-                        if latent_tile < latent_tiles:
-                            publish_raw_mxfp8_tile(
-                                projection_values,
-                                latent_tile,
-                                _ROUTED_HIDDEN,
-                                latent_mailbox_rsrc,
-                                latent_ready_rsrc,
-                                sample_base,
-                                staged_samples,
-                            )
+                    first_latent_tile = latent_block * latent_projection_tiles
+                    latent_tile = first_latent_tile + wave // 4
+                    projection_values = mxfp8_scaled_mfma_split4(
+                        rsrc(packed_latent_weight), rsrc(latent_weight_scale),
+                        latent_tile, sample_base, staged_samples, wave % 4,
+                    )
+                    publish_raw_mxfp8_split_tiles(
+                        projection_values, first_latent_tile, _ROUTED_HIDDEN,
+                        latent_mailbox_rsrc, latent_ready_rsrc, sample_base, staged_samples,
+                    )
                 else:
                     shared_task = projection_task - router_tasks - latent_tasks
                     if const_expr(sample_groups == 1):
@@ -2585,30 +2703,22 @@ def build_kimi_k3_monokernel(
                         sample_base = sample_group * staged_samples
                     stage_mxfp8_hidden(sample_base, staged_samples)
                     gpu.barrier()
-                    shared_tile = shared_block * shared_projection_waves + wave
-                    if wave < shared_projection_waves:
-                        projection_values = mxfp8_scaled_mfma(
-                            rsrc(packed_shared_up),
-                            rsrc(shared_up_scale),
-                            fx.min(shared_tile, shared_tiles - 1),
-                            sample_base,
-                            staged_samples,
-                        )
-                        if shared_tile < shared_tiles:
-                            publish_raw_mxfp8_tile(
-                                projection_values,
-                                shared_tile,
-                                2 * _SHARED_INTER,
-                                shared_gu_mailbox_rsrc,
-                                shared_gu_ready_rsrc,
-                                sample_base,
-                                staged_samples,
-                            )
+                    first_shared_tile = shared_block * shared_projection_tiles
+                    shared_tile = first_shared_tile + wave // 4
+                    projection_values = mxfp8_scaled_mfma_split4(
+                        rsrc(packed_shared_up), rsrc(shared_up_scale),
+                        shared_tile, sample_base, staged_samples, wave % 4,
+                    )
+                    publish_raw_mxfp8_split_tiles(
+                        projection_values, first_shared_tile, 2 * _SHARED_INTER,
+                        shared_gu_mailbox_rsrc, shared_gu_ready_rsrc, sample_base, staged_samples,
+                    )
 
             # One selector CTA handles four samples, one sample per wave.
+            selector_owner_task = (bid + 16) % _BLOCKS
             selector_tasks = (samples + _WAVES - 1) // _WAVES
-            if bid < selector_tasks:
-                sample = bid * _WAVES + wave
+            if selector_owner_task < selector_tasks:
+                sample = selector_owner_task * _WAVES + wave
                 if sample < samples:
                     if lane < router_row_tasks:
                         load_i32(
@@ -2692,13 +2802,14 @@ def build_kimi_k3_monokernel(
                             )
 
             # Shared SiTU activation is cheap enough to run as one CTA/sample.
-            if bid < samples:
+            shared_owner_task = (bid + 15) % _BLOCKS
+            if shared_owner_task < samples:
                 shared_pairs = _SHARED_INTER // 2
                 shared_tiles = (2 * _SHARED_INTER) // 16
                 if tid < shared_tiles:
                     load_i32(
                         shared_gu_ready_rsrc,
-                        bid * shared_tiles + tid,
+                        shared_owner_task * shared_tiles + tid,
                     )
                 gpu.barrier()
                 for pair_round in range_constexpr((shared_pairs + _THREADS - 1) // _THREADS):
@@ -2706,11 +2817,11 @@ def build_kimi_k3_monokernel(
                     if pair_in_row < shared_pairs:
                         gate_word = load_raw_pair(
                             shared_gu_mailbox_rsrc,
-                            (bid * (2 * _SHARED_INTER)) // 2 + pair_in_row,
+                            (shared_owner_task * (2 * _SHARED_INTER)) // 2 + pair_in_row,
                         )
                         up_word = load_raw_pair(
                             shared_gu_mailbox_rsrc,
-                            (bid * (2 * _SHARED_INTER) + _SHARED_INTER) // 2 + pair_in_row,
+                            (shared_owner_task * (2 * _SHARED_INTER) + _SHARED_INTER) // 2 + pair_in_row,
                         )
                         gate_values = fx.Vector.from_elements([gate_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
                         up_values = fx.Vector.from_elements([up_word], fx.Int32).bitcast(fx.BFloat16).to(fx.Float32)
@@ -2728,7 +2839,7 @@ def build_kimi_k3_monokernel(
                             mids.append(fx.Float32(4.0) * gate_tanh * gate_sigmoid * fx.Float32(25.0) * up_tanh)
                         store_pair(
                             shared_mid_mailbox_rsrc,
-                            bid * shared_pairs + pair_in_row,
+                            shared_owner_task * shared_pairs + pair_in_row,
                             mids[0],
                             mids[1],
                         )
@@ -2738,12 +2849,13 @@ def build_kimi_k3_monokernel(
             # decode scale: each task owns one 16-row intermediate tile for one
             # selected route and reads the selected expert directly.
             up_tiles = _INTER // 16
-            up_tasks = samples * _TOP_K * up_tiles
+            paired_up_tiles = up_tiles // 2
+            up_tasks = samples * _TOP_K * paired_up_tiles
             up_task = bid
             while up_task < up_tasks:
-                sample = up_task // (_TOP_K * up_tiles)
-                route_in_sample = (up_task // up_tiles) % _TOP_K
-                row_group = up_task % up_tiles
+                sample = up_task // (_TOP_K * paired_up_tiles)
+                route_in_sample = (up_task // paired_up_tiles) % _TOP_K
+                first_row_group = (up_task % paired_up_tiles) * 2
                 route = sample * _TOP_K + route_in_sample
                 expert = uniform(load_i32(selection_id_rsrc, route))
                 expert_weight_bytes = 2 * _INTER * (_ROUTED_HIDDEN // 2)
@@ -2760,71 +2872,73 @@ def build_kimi_k3_monokernel(
                 )
                 gpu.barrier()
 
-                accumulator = [fx.Float32(0.0) for _ in range(4)]
-                split = wave % 4
-                selected_row_group = (wave < 4).select(
-                    row_group,
-                    row_group + _INTER // 16,
-                )
-                chunks_per_wave = (_ROUTED_HIDDEN // 128) // 4
-                for local_chunk in range_constexpr(chunks_per_wave):
-                    k_chunk = split * chunks_per_wave + local_chunk
-                    fragment = mxfp4_fragment(
-                        up_weight_rsrc,
-                        up_scale_rsrc,
-                        selected_row_group,
-                        k_chunk,
-                        _ROUTED_HIDDEN,
+                for paired_tile in range_constexpr(2):
+                    row_group = first_row_group + paired_tile
+                    accumulator = [fx.Float32(0.0) for _ in range(4)]
+                    split = wave % 4
+                    selected_row_group = (wave < 4).select(
+                        row_group,
+                        row_group + _INTER // 16,
                     )
-                    accumulator = mxfp4_apply(
-                        accumulator,
-                        fragment,
-                        k_chunk * 64,
-                    )
+                    chunks_per_wave = (_ROUTED_HIDDEN // 128) // 4
+                    for local_chunk in range_constexpr(chunks_per_wave):
+                        k_chunk = split * chunks_per_wave + local_chunk
+                        fragment = mxfp4_fragment(
+                            up_weight_rsrc,
+                            up_scale_rsrc,
+                            selected_row_group,
+                            k_chunk,
+                            _ROUTED_HIDDEN,
+                        )
+                        accumulator = mxfp4_apply(
+                            accumulator,
+                            fragment,
+                            k_chunk * 64,
+                        )
 
-                fx.ptr_store(
-                    fx.Vector.from_elements(accumulator, fx.Float32),
-                    reduction + (wave * _WAVE_SIZE + lane) * 4,
-                )
-                gpu.barrier()
-                if tid < 16 // 2:
-                    local_row = tid * 2
-                    activated = []
-                    for pair_element in range_constexpr(2):
-                        row = local_row + pair_element
-                        source_lane = 16 * (row // 4)
-                        gate_value = fx.Float32(0.0)
-                        up_value = fx.Float32(0.0)
-                        for source_wave in range_constexpr(4):
-                            source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
-                            gate_value = gate_value + lds_load(reduction, source_index)
-                            up_index = ((source_wave + 4) * _WAVE_SIZE + source_lane) * 4 + row % 4
-                            up_value = up_value + lds_load(reduction, up_index)
-                        gate_value = bf16_round(gate_value)
-                        up_value = bf16_round(up_value)
-                        gate_tanh = fx.Float32(2.0) * rcp(
-                            fx.Float32(1.0) + exp(fx.Float32(-0.5) * gate_value)
-                        ) - fx.Float32(1.0)
-                        gate_sigmoid = rcp(fx.Float32(1.0) + exp(-gate_value))
-                        up_tanh = fx.Float32(2.0) * rcp(
-                            fx.Float32(1.0) + exp(fx.Float32(-0.08) * up_value)
-                        ) - fx.Float32(1.0)
-                        activated.append(fx.Float32(4.0) * gate_tanh * gate_sigmoid * fx.Float32(25.0) * up_tanh)
-                    pair = ((sample * _TOP_K + route_in_sample) * _INTER + row_group * 16 + local_row) // 2
-                    store_raw_pair(
-                        expert_mid_mailbox_rsrc,
-                        pair,
-                        activated[0],
-                        activated[1],
+                    fx.ptr_store(
+                        fx.Vector.from_elements(accumulator, fx.Float32),
+                        reduction + (wave * _WAVE_SIZE + lane) * 4,
                     )
-                gpu.barrier()
-                if tid == 0:
-                    rocdl.s_waitcnt(vmcnt=0)
-                    store_i32(
-                        expert_mid_ready_rsrc,
-                        (sample * _TOP_K + route_in_sample) * up_tiles + row_group,
-                        1,
-                    )
+                    gpu.barrier()
+                    if tid < 16 // 2:
+                        local_row = tid * 2
+                        activated = []
+                        for pair_element in range_constexpr(2):
+                            row = local_row + pair_element
+                            source_lane = 16 * (row // 4)
+                            gate_value = fx.Float32(0.0)
+                            up_value = fx.Float32(0.0)
+                            for source_wave in range_constexpr(4):
+                                source_index = (source_wave * _WAVE_SIZE + source_lane) * 4 + row % 4
+                                gate_value = gate_value + lds_load(reduction, source_index)
+                                up_index = ((source_wave + 4) * _WAVE_SIZE + source_lane) * 4 + row % 4
+                                up_value = up_value + lds_load(reduction, up_index)
+                            gate_value = bf16_round(gate_value)
+                            up_value = bf16_round(up_value)
+                            gate_tanh = fx.Float32(2.0) * rcp(
+                                fx.Float32(1.0) + exp(fx.Float32(-0.5) * gate_value)
+                            ) - fx.Float32(1.0)
+                            gate_sigmoid = rcp(fx.Float32(1.0) + exp(-gate_value))
+                            up_tanh = fx.Float32(2.0) * rcp(
+                                fx.Float32(1.0) + exp(fx.Float32(-0.08) * up_value)
+                            ) - fx.Float32(1.0)
+                            activated.append(fx.Float32(4.0) * gate_tanh * gate_sigmoid * fx.Float32(25.0) * up_tanh)
+                        pair = ((sample * _TOP_K + route_in_sample) * _INTER + row_group * 16 + local_row) // 2
+                        store_raw_pair(
+                            expert_mid_mailbox_rsrc,
+                            pair,
+                            activated[0],
+                            activated[1],
+                        )
+                    gpu.barrier()
+                    if tid == 0:
+                        rocdl.s_waitcnt(vmcnt=0)
+                        store_i32(
+                            expert_mid_ready_rsrc,
+                            (sample * _TOP_K + route_in_sample) * up_tiles + row_group,
+                            1,
+                        )
                 up_task = up_task + _BLOCKS
             stamp(6)
 
@@ -2933,19 +3047,20 @@ def build_kimi_k3_monokernel(
             stamp(7)
 
             # One CTA per sample collapses the routed norm partials.  Tail
+            norm_owner_task = (bid + 11) % _BLOCKS
             # tasks poll this inverse RMS while loading their latent input.
-            if bid < samples:
+            if norm_owner_task < samples:
                 square_part = fx.Float32(0.0)
                 if tid < routed_tiles:
                     square_part = load_f32(
                         routed_stats_rsrc,
-                        bid * routed_tiles + tid,
+                        norm_owner_task * routed_tiles + tid,
                     )
                 total_square = block_sum(square_part)
                 if tid == 0:
                     store_f32(
                         routed_inv_rsrc,
-                        bid,
+                        norm_owner_task,
                         rsq(total_square * (1.0 / _ROUTED_HIDDEN) + EPS),
                     )
             stamp(8)

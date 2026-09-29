@@ -26,6 +26,8 @@ class KimiK3MonoKernel(_KimiK3KdaStagedPath):
         reduce_group=None,
         mtp: bool = False,
     ) -> None:
+        if samples != 4 or npes != 8 or not mtp:
+            raise ValueError("This experimental candidate requires TP8, S4, true MTP")
         super().__init__(
             weights,
             samples,

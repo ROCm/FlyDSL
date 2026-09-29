@@ -1,0 +1,83 @@
+{
+  "selected_variant": "full_tail4_proj4_ug32_events",
+  "node": 46,
+  "goal_achieved": false,
+  "target": {
+    "npes": 8,
+    "samples": 4,
+    "mtp": true,
+    "layer_idx": 1,
+    "launch_mode": "single"
+  },
+  "comparison": {
+    "seeds": [
+      {
+        "seed": 1234,
+        "candidate_us": 138.6452168226242,
+        "staged_us": 128.71509790420532,
+        "base_us": 142.36528426408768,
+        "target_us": 115.84358811378479,
+        "gap_to_target_us": 22.801628708839417,
+        "improvement_over_base_pct": 2.6130439458560306,
+        "slowdown_vs_staged_pct": 7.714805085110732,
+        "goal_pass": false
+      },
+      {
+        "seed": 2025,
+        "candidate_us": 138.886496424675,
+        "staged_us": 128.31134349107742,
+        "base_us": 143.10277998447418,
+        "target_us": 115.48020914196968,
+        "gap_to_target_us": 23.406287282705307,
+        "improvement_over_base_pct": 2.946332391485784,
+        "slowdown_vs_staged_pct": 8.241791135429066,
+        "goal_pass": false
+      },
+      {
+        "seed": 3141,
+        "candidate_us": 138.98522406816483,
+        "staged_us": 128.6301240324974,
+        "base_us": 143.56406778097153,
+        "target_us": 115.76711162924767,
+        "gap_to_target_us": 23.21811243891716,
+        "improvement_over_base_pct": 3.189407895429941,
+        "slowdown_vs_staged_pct": 8.0502915732642,
+        "goal_pass": false
+      }
+    ],
+    "goal_achieved": false,
+    "median_us": 138.886496424675
+  },
+  "resource": {
+    "source_sha256": "7ae7e9c79189d239cd3cacab97379f278ac0199aca0807b39f28f7a6d89276cc",
+    "pass_all": true,
+    "vgpr": 114,
+    "sgpr_spills": 43,
+    "lds": 67456,
+    "scratch": 0,
+    "ctas_per_cu": 2
+  },
+  "correctness": {
+    "full_replay_correct": true,
+    "records": 144,
+    "source_sha256": "7ae7e9c79189d239cd3cacab97379f278ac0199aca0807b39f28f7a6d89276cc",
+    "maxima": {
+      "attention_rel_l2": 0.0014857861679047346,
+      "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+      "expert_mid_rel_l2": 0.0016437944723293185,
+      "output_rel_l2": 0.0037058524321764708,
+      "e2e_attention_rel_l2": 0.0020407240372151136,
+      "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915
+    },
+    "all_routing_exact": true,
+    "reference": "unchanged full_replay.py thresholds; e2e diagnostic caveat retained"
+  },
+  "kernel_dispatch": {
+    "graph_layers": 16,
+    "main_kernel_calls": 16,
+    "epoch_update_calls": 1
+  },
+  "patch": "full_tail4_proj4_ug32_cumulative.patch",
+  "patch_apply_check_pass": true,
+  "worktree_modified": false
+}

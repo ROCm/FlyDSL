@@ -1,0 +1,19 @@
+{
+  "variant": "full_tail4_ug32seq_events",
+  "source_sha256": "6e70cb9e79ea10a888357600bc695338bee333771b6606b89846cc7ab57eca6b",
+  "per_tile_ast_identical": true,
+  "every_ug_tile_once": true,
+  "activation_staging_once_per_pair": true,
+  "source_accumulator_tiles_live": 1,
+  "uses_original_reduction_storage": true,
+  "ug_tasks": 768,
+  "logical_activation_payload_mib": 5.25,
+  "cta_barriers_per_two_tiles": {
+    "original": 8,
+    "sequential": 6
+  },
+  "compiled": false,
+  "vgpr_unknown": true,
+  "gpu_validated": false,
+  "caveat": "Compiler live ranges and occupancy are unknown; no claim that VGPR stays at baseline"
+}

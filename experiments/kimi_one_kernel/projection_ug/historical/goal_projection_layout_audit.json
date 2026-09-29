@@ -1,0 +1,90 @@
+{
+  "variant": "full_tail4_services_proj4_events",
+  "source_sha256": "4c10573b59830abcb28588e4df290e9278a1cae65fca8a6f68165c1cd1a713a2",
+  "original_helpers_unchanged": true,
+  "split_helper_changes_only_k_partition": true,
+  "native_layout_coordinate_mapping_pass": true,
+  "lds_words_allocated": 2048,
+  "lds_words_read": 512,
+  "k128_terms_exactly_once": true,
+  "payload_before_ready_in_source": true,
+  "payload_coverage": [
+    {
+      "kind": "latent",
+      "ctas": 112,
+      "every_bf16_pair_once": true,
+      "every_ready_flag_once": true,
+      "every_weight_fragment_once": true
+    },
+    {
+      "kind": "shared_gate_up",
+      "ctas": 48,
+      "every_bf16_pair_once": true,
+      "every_ready_flag_once": true,
+      "every_weight_fragment_once": true
+    }
+  ],
+  "bf16_helper_would_misindex_count": 480,
+  "bf16_helper_misindex_examples": [
+    {
+      "sample": 0,
+      "row": 1,
+      "split": 0,
+      "expected": [
+        0,
+        1,
+        0,
+        0
+      ],
+      "would_read": [
+        0,
+        0,
+        1,
+        0
+      ]
+    },
+    {
+      "sample": 0,
+      "row": 1,
+      "split": 1,
+      "expected": [
+        0,
+        1,
+        0,
+        1
+      ],
+      "would_read": [
+        0,
+        0,
+        1,
+        1
+      ]
+    },
+    {
+      "sample": 0,
+      "row": 1,
+      "split": 2,
+      "expected": [
+        0,
+        1,
+        0,
+        2
+      ],
+      "would_read": [
+        0,
+        0,
+        1,
+        2
+      ]
+    }
+  ],
+  "projection_ctas": 216,
+  "services_begin_at_cta": 224,
+  "bf16_rounding_boundary": "Only the final store_raw_pair rounds the FP32 split sum to BF16",
+  "fp32_accumulation_grouping_changed": true,
+  "gpu_numerical_validation": false,
+  "limitations": [
+    "CPU coordinate audit relies on retained native publisher mapping",
+    "Does not prove compiler lowering, memory ordering, FP32 error, or performance"
+  ]
+}

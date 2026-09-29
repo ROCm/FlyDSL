@@ -1,0 +1,292 @@
+{
+  "patch_base": "tail_rotate192_downsplit_events",
+  "patch_base_kernel_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+  "independent_patches": true,
+  "sources": [
+    {
+      "name": "full_tail4_downrot128_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_downrot128_events",
+      "kernel_sha256": "f9b9df29dbca3c7b7b7da62a4b5d668065d5c9660d1fe8ca9f7f29be3cbc1b2f",
+      "source_tree_sha256": "0a71d5becbcda395c63a05d63ecf2ebeba0c8991fb605af4c7001bec1c02a0d5",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "f9b9df29dbca3c7b7b7da62a4b5d668065d5c9660d1fe8ca9f7f29be3cbc1b2f"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_proj4_ug32_downrot128_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_proj4_ug32_downrot128_events",
+      "kernel_sha256": "74210cc5d45449b2c181ab6ee8d50d4df9503739d9448fde147840bce751d81c",
+      "source_tree_sha256": "25712f4493e6b8e0ee7b4397c6f2c5848fc3b9855de2ac5c8b919751fb883786",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "74210cc5d45449b2c181ab6ee8d50d4df9503739d9448fde147840bce751d81c"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_proj4_ug32_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_proj4_ug32_events",
+      "kernel_sha256": "7ae7e9c79189d239cd3cacab97379f278ac0199aca0807b39f28f7a6d89276cc",
+      "source_tree_sha256": "dcd04f36f6b307ba685cc76812479467092420400a69d8ff24a83f1899581836",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "7ae7e9c79189d239cd3cacab97379f278ac0199aca0807b39f28f7a6d89276cc"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_proj4_ug32_timeline_warm",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_proj4_ug32_timeline_warm",
+      "kernel_sha256": "4d245ecfe6fcf794a410b9c47b334eeeacc3efdc554ecc2b6497c495ed50f2de",
+      "source_tree_sha256": "c72d172a8a6be6270523922c606a5329d9b055324dbbc0a7c9ab38ecf0c52220",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kda.py",
+          "base_sha256": "c06e80e88f2ff3a5b229e30e7bd2dd14d0641fcd9749ad094eed77a890600856",
+          "target_sha256": "f2228afc3c292c06ec22b4ca400c2e675403d467ee4c36b01e14c45f82a928c4"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "4d245ecfe6fcf794a410b9c47b334eeeacc3efdc554ecc2b6497c495ed50f2de"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "08f988df0876e75cec5ba773529a028c63411f6289c5a1637f1814b4383d99b5"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_services_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_services_events",
+      "kernel_sha256": "3a6040d3c0d9f27faaaf5ad35bc791eb8e5a0b94d582547c0feb2b26d5c60766",
+      "source_tree_sha256": "29f1ce5f41c86250921d279f0a2308af20726a526fdd87dea17bbf9db6fa29de",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "3a6040d3c0d9f27faaaf5ad35bc791eb8e5a0b94d582547c0feb2b26d5c60766"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_services_proj4_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_services_proj4_events",
+      "kernel_sha256": "4c10573b59830abcb28588e4df290e9278a1cae65fca8a6f68165c1cd1a713a2",
+      "source_tree_sha256": "de989c62153b96e50ebcb6861d077caacbbea3745343dc92b4a5e423712a9417",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "4c10573b59830abcb28588e4df290e9278a1cae65fca8a6f68165c1cd1a713a2"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_services_proj4_v2_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_services_proj4_v2_events",
+      "kernel_sha256": "df90214de87ab03a4aacfa71c9562928ccfe009c89137901c2360e9e7b3d755a",
+      "source_tree_sha256": "e3acedd2f7d6947a3a28e387f1dd619577e29633eff3b22ea9b20e3d6aa5a549",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "df90214de87ab03a4aacfa71c9562928ccfe009c89137901c2360e9e7b3d755a"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_timeline",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_timeline",
+      "kernel_sha256": "afd38d1a06e85465b97e0c225dc3c3ec4325b4b201138b85b4fbda919d3081aa",
+      "source_tree_sha256": "371ae6f88d23494c75e11850f4d68829c1f04ad8a36038dacbb9a1cbd67a0a5c",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kda.py",
+          "base_sha256": "c06e80e88f2ff3a5b229e30e7bd2dd14d0641fcd9749ad094eed77a890600856",
+          "target_sha256": "f2228afc3c292c06ec22b4ca400c2e675403d467ee4c36b01e14c45f82a928c4"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "afd38d1a06e85465b97e0c225dc3c3ec4325b4b201138b85b4fbda919d3081aa"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "846634cd8555a8cba03cce8b5fbc8b571151e57afcf24bef22e26d99c7e74345"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_timeline_v2",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_timeline_v2",
+      "kernel_sha256": "3f31023a578538b66ac0f42f7a3b5c30307f50e5b7c25241f303ab913a0131b0",
+      "source_tree_sha256": "9c3ac193e15a2d55f575adbc473e7c13b8e44014134f1e53bd67953ad7c1aa93",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kda.py",
+          "base_sha256": "c06e80e88f2ff3a5b229e30e7bd2dd14d0641fcd9749ad094eed77a890600856",
+          "target_sha256": "f2228afc3c292c06ec22b4ca400c2e675403d467ee4c36b01e14c45f82a928c4"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "3f31023a578538b66ac0f42f7a3b5c30307f50e5b7c25241f303ab913a0131b0"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "97d38e68ad2190557a079c9a1f1719f86cf4710b3c3c29b627fd66ca6b26224f"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_timeline_warm",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_timeline_warm",
+      "kernel_sha256": "3f31023a578538b66ac0f42f7a3b5c30307f50e5b7c25241f303ab913a0131b0",
+      "source_tree_sha256": "c4f15bf5124e4618ad910711e2fe89c3185ed86ccd329911e7ec5bb2bad98c17",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kda.py",
+          "base_sha256": "c06e80e88f2ff3a5b229e30e7bd2dd14d0641fcd9749ad094eed77a890600856",
+          "target_sha256": "f2228afc3c292c06ec22b4ca400c2e675403d467ee4c36b01e14c45f82a928c4"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "3f31023a578538b66ac0f42f7a3b5c30307f50e5b7c25241f303ab913a0131b0"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/op.py",
+          "base_sha256": "d1e2010e218e100c09d28a4e282885cf9421dfdf472e58093510fe471645065a",
+          "target_sha256": "66ab7826cb36e4c9c32debf4bf7d3b678a4e45adad3c3c8034d61f91761ff3fe"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "08f988df0876e75cec5ba773529a028c63411f6289c5a1637f1814b4383d99b5"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_ug32_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_ug32_events",
+      "kernel_sha256": "9431adf979bf19ef3326118dc398ae23df014291c8fdc478122c6cd083e7ec68",
+      "source_tree_sha256": "d0678ec2834283345d50a4f93ea399b2bfbe2afe31a136ea56a4bf6305e7bcd6",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "9431adf979bf19ef3326118dc398ae23df014291c8fdc478122c6cd083e7ec68"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_ug32seq_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_ug32seq_events",
+      "kernel_sha256": "6e70cb9e79ea10a888357600bc695338bee333771b6606b89846cc7ab57eca6b",
+      "source_tree_sha256": "a7c82eb00a29ad4dc62a705a913b0f07aa45c3faac3c8572e4d4204e516ea56e",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "6e70cb9e79ea10a888357600bc695338bee333771b6606b89846cc7ab57eca6b"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_ug32seq_v2_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_ug32seq_v2_events",
+      "kernel_sha256": "87e7a887e3974159285b74398fb8e2eaf6ff43bb40e9cd5b44790b3ee68c32e1",
+      "source_tree_sha256": "83062ae33092399c370de4b9b00f3384bb79f091fab15f6b7c5e9b58023a8244",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "87e7a887e3974159285b74398fb8e2eaf6ff43bb40e9cd5b44790b3ee68c32e1"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_ug48seq_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_ug48seq_events",
+      "kernel_sha256": "f4ee91ff5cd4de3c7885d316f69b00342798c2362bae40db71343fd59453bba7",
+      "source_tree_sha256": "38b4a1770158fea15d85d3875cf61990e680d3183390e03b849dc1715261ef91",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "f4ee91ff5cd4de3c7885d316f69b00342798c2362bae40db71343fd59453bba7"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "full_tail4_ug96seq_events",
+      "original_source": "kimi_full_token_pipeline_20260929/full_tail4_ug96seq_events",
+      "kernel_sha256": "f3fe4c3e09bfc9becdf038d1c622a1d463f7edb45369a0c01ec6ed1713e0c0dd",
+      "source_tree_sha256": "ad0717d3a983caf6b5572ced8ea951253a13c3abb94c87e44e935034707a105d",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "f3fe4c3e09bfc9becdf038d1c622a1d463f7edb45369a0c01ec6ed1713e0c0dd"
+        }
+      ],
+      "recorded_evidence": {},
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    }
+  ]
+}
