@@ -1,8 +1,68 @@
 {
  "schema": 1,
- "updated": "2026-09-29T08:32:28Z",
+ "updated": "2026-09-29T09:21:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36548372347,
+   "pr": null,
+   "commit": "32d2d72828e6fb3f1d80240c7a16216119da54da",
+   "branch": "main",
+   "event": "push",
+   "title": "fix(kernels): correct GLM monokernel routing and indexer boundaries (\u2026",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36548372347",
+   "created_at": "2026-09-29T09:19:00Z",
+   "updated_at": "2026-09-29T09:19:02Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36548334814,
+   "pr": null,
+   "commit": "65526a22578adeabb7003e861e9b3c6cb5695086",
+   "branch": "main",
+   "event": "push",
+   "title": "[AOT] Embed backend runtime into exported objects (#1209)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36548334814",
+   "created_at": "2026-09-29T09:18:40Z",
+   "updated_at": "2026-09-29T09:19:02Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36548262682,
+   "pr": 1142,
+   "commit": "6d467347202aaec9ce87ca9741896a3765da3da6",
+   "branch": "xinyazhang/theRock-support",
+   "event": "pull_request",
+   "title": "[Build] Find ROCm through rocm-sdk before falling back to /opt/rocm*",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36548262682",
+   "created_at": "2026-09-29T09:17:59Z",
+   "updated_at": "2026-09-29T09:19:17Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 36547908053,
+   "pr": 1213,
+   "commit": "aa83ee5460ca2052a37a041b5cb9ee8dbf925350",
+   "branch": "pr1204-final_fixed",
+   "event": "pull_request",
+   "title": "[fix] mono kernel glm precision fixed",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36547908053",
+   "created_at": "2026-09-29T09:14:47Z",
+   "updated_at": "2026-09-29T09:16:50Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36542419948,
    "pr": 1209,
@@ -10,13 +70,41 @@
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
    "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36542419948",
    "created_at": "2026-09-29T08:23:29Z",
-   "updated_at": "2026-09-29T08:25:44Z",
+   "updated_at": "2026-09-29T08:40:11Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-29T08:52:16Z",
+     "completed_at": "2026-09-29T09:09:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36542419948/job/109326486699"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-29T08:40:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36542419948/job/109326486753"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-29T08:40:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36542419948/job/109326486797"
+    }
+   ]
   },
   {
    "run_id": 36540786943,
@@ -25,11 +113,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Docs] Audit and refresh repository documentation (#1203)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36540786943",
    "created_at": "2026-09-29T08:07:43Z",
-   "updated_at": "2026-09-29T08:27:01Z",
+   "updated_at": "2026-09-29T08:38:02Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -44,26 +132,26 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-29T08:27:01Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-29T08:38:02Z",
+     "completed_at": "2026-09-29T09:19:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36540786943/job/109321930331"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-29T08:31:18Z",
-     "completed_at": null,
+     "completed_at": "2026-09-29T08:51:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36540786943/job/109321930362"
     }
    ]
   },
   {
    "run_id": 36532755740,
-   "pr": 1213,
+   "pr": null,
    "commit": "f98edeab0d0b866393211f62ecbc7b08df67bdac",
    "branch": "pr1204-final_fixed",
    "event": "pull_request",
@@ -181,7 +269,7 @@
   },
   {
    "run_id": 36435015445,
-   "pr": 1209,
+   "pr": null,
    "commit": "829dd71e43ffaeb587608d23bcc68c20e407676b",
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
@@ -604,7 +692,7 @@
   },
   {
    "run_id": 36411612778,
-   "pr": 1209,
+   "pr": null,
    "commit": "2f7b7a3198a3e55b805985484c692d3af294704e",
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
@@ -650,7 +738,7 @@
   },
   {
    "run_id": 36411503720,
-   "pr": 1142,
+   "pr": null,
    "commit": "7d76692f97b50dd6ff0b0f57e88bd41f1713f073",
    "branch": "xinyazhang/theRock-support",
    "event": "pull_request",
@@ -757,7 +845,7 @@
   },
   {
    "run_id": 36403970616,
-   "pr": 1209,
+   "pr": null,
    "commit": "c6ff67068d96f631013fe23e773b2c1ffb60d8ca",
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
@@ -800,7 +888,7 @@
   },
   {
    "run_id": 36403361575,
-   "pr": 1209,
+   "pr": null,
    "commit": "f7f2906e5125e12af3213c86a342c54f15aeb526",
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
@@ -815,7 +903,7 @@
   },
   {
    "run_id": 36398573542,
-   "pr": 1209,
+   "pr": null,
    "commit": "650b1617844ccbad2ec81b3d2acbd7a6b7e92b66",
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
@@ -916,7 +1004,7 @@
   },
   {
    "run_id": 36397442878,
-   "pr": 1209,
+   "pr": null,
    "commit": "6ba29273398feec69e386d66f855e1090354f7ea",
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
@@ -1023,7 +1111,7 @@
   },
   {
    "run_id": 36394315958,
-   "pr": 1209,
+   "pr": null,
    "commit": "2ce232816af29a7b2328a70f8960b1d771e11240",
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
@@ -2032,125 +2120,6 @@
      "started_at": "2026-09-27T11:54:26Z",
      "completed_at": "2026-09-27T12:06:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316342942/job/108614125092"
-    }
-   ]
-  },
-  {
-   "run_id": 36316221387,
-   "pr": null,
-   "commit": "aeadf0538d84bd362684ab0d8bac29e291a0def2",
-   "branch": "glm5-mla-moe-layer-monokernel",
-   "event": "pull_request",
-   "title": "[Superseded by #1205] GLM-5 indexed decode MonoKernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316221387",
-   "created_at": "2026-09-27T11:35:25Z",
-   "updated_at": "2026-09-27T11:38:35Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 36315923044,
-   "pr": null,
-   "commit": "1a935b4a29b3068453abe5ba059bb0cd500df66d",
-   "branch": "docs/full-doc-audit-20260926",
-   "event": "pull_request",
-   "title": "[Docs] Audit and refresh repository documentation",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36315923044",
-   "created_at": "2026-09-27T11:30:01Z",
-   "updated_at": "2026-09-27T11:39:32Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 36308335661,
-   "pr": null,
-   "commit": "7eddcc962710ce55399108455f392aedeb37a8ec",
-   "branch": "codex/kimi-k3-mxfp4-fused",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36308335661",
-   "created_at": "2026-09-27T09:06:53Z",
-   "updated_at": "2026-09-27T12:05:32Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-27T09:21:50Z",
-     "completed_at": "2026-09-27T09:51:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36308335661/job/108591475719"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-27T10:55:31Z",
-     "completed_at": "2026-09-27T12:05:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36308335661/job/108591475733"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-27T09:24:06Z",
-     "completed_at": "2026-09-27T11:02:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36308335661/job/108591475746",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 36298592651,
-   "pr": null,
-   "commit": "96e40f9a8ee857dd7a2e245d63d1020d312c642f",
-   "branch": "dev/export_c",
-   "event": "pull_request",
-   "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36298592651",
-   "created_at": "2026-09-27T05:55:23Z",
-   "updated_at": "2026-09-27T10:30:37Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-27T06:14:17Z",
-     "completed_at": "2026-09-27T06:41:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36298592651/job/108564385603"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-27T09:22:02Z",
-     "completed_at": "2026-09-27T10:30:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36298592651/job/108564385619"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-27T06:44:58Z",
-     "completed_at": "2026-09-27T06:55:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36298592651/job/108564385674"
     }
    ]
   }
