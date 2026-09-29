@@ -2280,6 +2280,15 @@ def build_kimi_k3_monokernel(
 
             stamp(1)
 
+            def wait_mtp_previous_state(sample, head, value_split):
+                if tid == 0:
+                    if sample > 0:
+                        load_f32(
+                            mtp_state_ready_rsrc,
+                            ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
+                        )
+                gpu.barrier()
+
             def run_mtp_recurrence(sample, head, value_split):
                 if tid == 0:
                     load_i32(mtp_conv_ready_rsrc, sample * _HEADS + head)
@@ -2383,6 +2392,8 @@ def build_kimi_k3_monokernel(
                         dot_parts = fx.math.fma(key_vectors[k_iter], query_vectors[k_iter], dot_parts)
                     dot_key_query = mtp_subgroup_sum(dot_parts.reduce(fx.ReductionOp.ADD))
 
+                    wait_mtp_previous_state(sample, head, value_split)
+
                     state_vectors = [None] * mtp_k_iters
                     state_key_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
                     state_query_parts = fx.Vector.filled(_VALUES_PER_THREAD, 0.0, fx.Float32)
@@ -2430,6 +2441,8 @@ def build_kimi_k3_monokernel(
                             cache_modifier=CM_DEV,
                         )
                     result = state_query + value_new * dot_key_query
+                else:
+                    wait_mtp_previous_state(sample, head, value_split)
 
                 k_lane = lane % mtp_k_lanes
                 square_sum = (k_lane == 0).select(result * result, fx.Float32(0.0))
@@ -2498,13 +2511,6 @@ def build_kimi_k3_monokernel(
                 head_split = mtp_recurrence_task % (_HEADS * mtp_splits)
                 head = head_split // mtp_splits
                 value_split = head_split % mtp_splits
-                if tid == 0:
-                    if sample > 0:
-                        load_f32(
-                            mtp_state_ready_rsrc,
-                            ((sample - 1) * _HEADS + head) * mtp_splits + value_split,
-                        )
-                gpu.barrier()
                 run_mtp_recurrence(sample, head, value_split)
 
         # Stage 3: BF16 1536 -> 7168 output projection followed by the tagged
