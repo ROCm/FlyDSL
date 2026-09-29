@@ -1,0 +1,245 @@
+{
+  "patch_base": "tail_rotate192_downsplit_events",
+  "patch_base_kernel_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+  "independent_patches": true,
+  "sources": [
+    {
+      "name": "ug_joint_publish_events",
+      "original_source": "kimi_tail_async_20260929/ug_joint_publish_events",
+      "kernel_sha256": "4d10ed1a2f50a7330b5edb153a298746f9be74ba2297f48dc16ddc75ce9709c4",
+      "source_tree_sha256": "68d9cf21cd228557f0539ef701bdb9fe4627cbc187ec315f01b4cf6dcde8b6a1",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "4d10ed1a2f50a7330b5edb153a298746f9be74ba2297f48dc16ddc75ce9709c4"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "4d10ed1a2f50a7330b5edb153a298746f9be74ba2297f48dc16ddc75ce9709c4",
+          "binary_sha256": "1e9e8bb4e91584464b9ea5771fb1b569fc2fa69cca75c47c6819f548b54a2ccd",
+          "vgpr": 253,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 1
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "ug_joint_publish_fine_timeline",
+      "original_source": "kimi_tail_async_20260929/ug_joint_publish_fine_timeline",
+      "kernel_sha256": "a7a26f9f2301c2d3aee6c69c13e294515ad279b981d69c3960afd24dcb5f240b",
+      "source_tree_sha256": "dc1f51dd5fb0111fd54f2de6c1b0954262c0086c0c2dea40c3599eb285d7c873",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kda.py",
+          "base_sha256": "c06e80e88f2ff3a5b229e30e7bd2dd14d0641fcd9749ad094eed77a890600856",
+          "target_sha256": "063025acb7d8ac50cef44840ebe54d2023da6085d7e8743924c8568e1e5d15f6"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "a7a26f9f2301c2d3aee6c69c13e294515ad279b981d69c3960afd24dcb5f240b"
+        },
+        {
+          "path": "kernels/kimi_k3_monokernel/tools/monokernel.py",
+          "base_sha256": "b4abffad531ea9f45a3d20200640929267ab7c45990ded7dea0633267bc9b31e",
+          "target_sha256": "e8be18a21792cd93951b12cf1385c8e1e83ac37799a20aa3c87bad707e796a2a"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "a7a26f9f2301c2d3aee6c69c13e294515ad279b981d69c3960afd24dcb5f240b",
+          "binary_sha256": "e3710f0693e631c0eed6a479ad4e067d9ebdadbc8df8e3a8046c2ae8c3cb1d7d",
+          "vgpr": 254,
+          "sgpr_spills": 118,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": false
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "ug_pf1_events",
+      "original_source": "kimi_tail_async_20260929/ug_pf1_events",
+      "kernel_sha256": "244f960f48969b7d1275450994016dfd4d5484680ee38d6168eae7ae43392f6e",
+      "source_tree_sha256": "b9d422f0fd44ba75f2a6af8604904c69f8b66d1a946d85c57ac6d906c34c80df",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "244f960f48969b7d1275450994016dfd4d5484680ee38d6168eae7ae43392f6e"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "244f960f48969b7d1275450994016dfd4d5484680ee38d6168eae7ae43392f6e",
+          "binary_sha256": "9ed6694ffdc2631543cbc317103fcc97952f9abceaf144bb9bcd2cfdc2330381",
+          "vgpr": 121,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 2
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    },
+    {
+      "name": "ug_pf2_events",
+      "original_source": "kimi_tail_async_20260929/ug_pf2_events",
+      "kernel_sha256": "521d5b41bf9a995df81ba0ef4c2f3a32c8df05301d569d85662b37fa2e481d27",
+      "source_tree_sha256": "21c2cc63bade9aa4fcec7835d631bb3ba5b972593e2381944d062035f06368be",
+      "changed_files": [
+        {
+          "path": "kernels/kimi_k3_monokernel/kernel.py",
+          "base_sha256": "cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da",
+          "target_sha256": "521d5b41bf9a995df81ba0ef4c2f3a32c8df05301d569d85662b37fa2e481d27"
+        }
+      ],
+      "recorded_evidence": {
+        "resources": {
+          "source_sha256": "521d5b41bf9a995df81ba0ef4c2f3a32c8df05301d569d85662b37fa2e481d27",
+          "binary_sha256": "7b1a4e4f1c349b2fc1ca3e4d66f8fc7900a749b62a1a41fdf5de5334ac0fa17b",
+          "vgpr": 154,
+          "sgpr_spills": 95,
+          "lds": 67456,
+          "scratch": 0,
+          "source_and_binary_hashes_verified": true,
+          "hip_occupancy_checked": true,
+          "resource_gate_pass": true,
+          "resident_blocks_per_cu": 1
+        },
+        "checks": {
+          "rc": 0,
+          "ranks": 8,
+          "finite_and_rank_equal": true,
+          "full_replay_correct": true,
+          "records": 144,
+          "limits": {
+            "pre_attn_rel_l2": 0.002,
+            "attention_rel_l2": 0.002,
+            "moe_input_rel_l2": 0.002,
+            "updated_prefix_rel_l2": 0.002,
+            "conv_snapshot_max_rel_l2": 0.0005,
+            "recurrent_snapshot_max_rel_l2": 0.0005,
+            "selection_weight_rel_l2": 0.002,
+            "expert_mid_rel_l2": 0.002,
+            "routed_rel_l2": 0.02,
+            "routed_inv_rel_l2": 0.001,
+            "output_rel_l2": 0.01
+          },
+          "maxima": {
+            "e2e_attention_rel_l2": 0.0020407240372151136,
+            "e2e_recurrent_snapshot_max_rel_l2": 0.0007796454592607915,
+            "pre_attn_rel_l2": 4.7672827349742875e-05,
+            "attention_rel_l2": 0.0014857861679047346,
+            "moe_input_rel_l2": 4.7329955123132095e-05,
+            "updated_prefix_rel_l2": 0.0,
+            "conv_snapshot_max_rel_l2": 0.00013283605221658945,
+            "recurrent_snapshot_max_rel_l2": 0.0004703964223153889,
+            "selection_weight_rel_l2": 1.3834109324761812e-07,
+            "expert_mid_rel_l2": 0.0016437944723293185,
+            "routed_rel_l2": 0.003223671577870846,
+            "routed_inv_rel_l2": 1.0645740644577018e-07,
+            "output_rel_l2": 0.0037058524321764708
+          },
+          "all_routing_exact": true,
+          "all_epoch_replay_equal": true,
+          "replay_metric_records_equal_to_baseline": true
+        },
+        "round_summary": "kimi_tail_async_20260929/node46/validation_summary.json"
+      },
+      "validation_note": "Historical evidence only; absence of a result is not a pass."
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+--- a/kernels/kimi_k3_monokernel/kernel.py
++++ b/kernels/kimi_k3_monokernel/kernel.py
+@@ -2961,6 +2961,15 @@
+                 expert_scale_bytes = 2 * _INTER * (_ROUTED_HIDDEN // 32)
+                 up_weight_rsrc = rsrc(packed_expert_up + fx.Int64(expert) * fx.Int64(expert_weight_bytes))
+                 up_scale_rsrc = rsrc(expert_up_scale + fx.Int64(expert) * fx.Int64(expert_scale_bytes))
++                up_prefetched = []
++                for pre_tile in range_constexpr(2):
++                    pre_row = (wave < 4).select(first_row_group + pre_tile, first_row_group + pre_tile + _INTER // 16)
++                    for pre_chunk in range_constexpr((_ROUTED_HIDDEN // 128) // 4):
++                        up_prefetched.append(mxfp4_fragment(
++                            up_weight_rsrc, up_scale_rsrc, pre_row,
++                            (wave % 4) * ((_ROUTED_HIDDEN // 128) // 4) + pre_chunk,
++                            _ROUTED_HIDDEN,
++                        ))
+                 stage_raw_vector(
+                     latent_mailbox_rsrc,
+                     latent_ready_rsrc,
+@@ -2982,13 +2991,16 @@
+                     chunks_per_wave = (_ROUTED_HIDDEN // 128) // 4
+                     for local_chunk in range_constexpr(chunks_per_wave):
+                         k_chunk = split * chunks_per_wave + local_chunk
+-                        fragment = mxfp4_fragment(
+-                            up_weight_rsrc,
+-                            up_scale_rsrc,
+-                            selected_row_group,
+-                            k_chunk,
+-                            _ROUTED_HIDDEN,
+-                        )
++                        if const_expr(paired_tile < 2):
++                            fragment = up_prefetched[paired_tile * chunks_per_wave + local_chunk]
++                        else:
++                            fragment = mxfp4_fragment(
++                                up_weight_rsrc,
++                                up_scale_rsrc,
++                                selected_row_group,
++                                k_chunk,
++                                _ROUTED_HIDDEN,
++                            )
+                         accumulator = mxfp4_apply(
+                             accumulator,
+                             fragment,

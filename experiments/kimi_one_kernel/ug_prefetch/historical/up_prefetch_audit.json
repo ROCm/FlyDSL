@@ -1,0 +1,22 @@
+[
+  {
+    "variant": "ug_pf1_events",
+    "parent": "tail_rotate192_downsplit_events",
+    "source_sha256": "244f960f48969b7d1275450994016dfd4d5484680ee38d6168eae7ae43392f6e",
+    "prefetch_tiles": 1,
+    "arithmetic_and_bf16_order_unchanged": true,
+    "selected_expert_id_wait_retained": true,
+    "activation_waits_unchanged": true,
+    "dag_unchanged": true
+  },
+  {
+    "variant": "ug_pf2_events",
+    "parent": "tail_rotate192_downsplit_events",
+    "source_sha256": "521d5b41bf9a995df81ba0ef4c2f3a32c8df05301d569d85662b37fa2e481d27",
+    "prefetch_tiles": 2,
+    "arithmetic_and_bf16_order_unchanged": true,
+    "selected_expert_id_wait_retained": true,
+    "activation_waits_unchanged": true,
+    "dag_unchanged": true
+  }
+]

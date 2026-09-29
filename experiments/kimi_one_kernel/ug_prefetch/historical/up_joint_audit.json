@@ -1,0 +1,13 @@
+{
+  "variant": "ug_joint_publish_events",
+  "parent": "tail_rotate192_downsplit_events",
+  "source_sha256": "4d10ed1a2f50a7330b5edb153a298746f9be74ba2297f48dc16ddc75ce9709c4",
+  "compact_lds_words": 256,
+  "original_per_tile_lds_words": 2048,
+  "new_lds_allocation": false,
+  "original_mfma_components_preserved": true,
+  "source_wave_addition_order_preserved": true,
+  "ready_tags_follow_both_tiles_and_same_vmcnt_fence": true,
+  "activation_and_bf16_boundaries_unchanged": true,
+  "readiness_dag_note": "Down already waits all tile flags for a token; paired publication adds no reverse dependency."
+}
