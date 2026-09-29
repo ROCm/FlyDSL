@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-29T10:31:39Z",
+ "updated": "2026-09-29T10:56:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36556034230,
+   "pr": 1193,
+   "commit": "e146551c9e0ba37db50c601e58ac1b33b6cda86b",
+   "branch": "fix/1165-singleton-contig-segment",
+   "event": "pull_request",
+   "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36556034230",
+   "created_at": "2026-09-29T10:30:51Z",
+   "updated_at": "2026-09-29T10:46:13Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 36555801699,
    "pr": null,
@@ -10,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Build] Find ROCm through rocm-sdk before falling back to /opt/rocm* \u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36555801699",
    "created_at": "2026-09-29T10:28:38Z",
-   "updated_at": "2026-09-29T10:29:58Z",
+   "updated_at": "2026-09-29T10:43:28Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -44,11 +59,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-29T09:43:40Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36549448735/job/109348749821"
+     "completed_at": "2026-09-29T10:42:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36549448735/job/109348749821",
+     "machine": "smci350-rck-g03-f19-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -187,11 +205,11 @@
    "branch": "codex/aot-direct-hip",
    "event": "pull_request",
    "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36542419948",
    "created_at": "2026-09-29T08:23:29Z",
-   "updated_at": "2026-09-29T09:35:21Z",
+   "updated_at": "2026-09-29T10:54:09Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -206,10 +224,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-29T09:35:19Z",
-     "completed_at": null,
+     "completed_at": "2026-09-29T10:54:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36542419948/job/109326486753"
     },
     {
@@ -435,7 +453,7 @@
   },
   {
    "run_id": 36434740596,
-   "pr": 1193,
+   "pr": null,
    "commit": "851e3ce8c689ab09d5165ea1392921e1af757135",
    "branch": "fix/1165-singleton-contig-segment",
    "event": "pull_request",
@@ -2135,21 +2153,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316616265/job/108614843203"
     }
    ]
-  },
-  {
-   "run_id": 36316437403,
-   "pr": null,
-   "commit": "e138458d46fd54a63854b53f612483c0452d4340",
-   "branch": "codex/glm5-monokernel",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] GLM-5 MonoKernel: indexer + mla + moe fused kernel for a full decode layer",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316437403",
-   "created_at": "2026-09-27T11:39:27Z",
-   "updated_at": "2026-09-27T11:43:34Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
