@@ -15,7 +15,20 @@ if(NOT hip_FOUND)
                   RESULT_VARIABLE _rocm_sdk_result
                   OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
   if(_rocm_sdk_result STREQUAL "0" AND _rocm_sdk_root)
+    # HIP's config uses ROCM_PATH to find its dependencies. A stale or empty
+    # value must not redirect those lookups away from the selected SDK.
+    set(_rocm_path_was_set FALSE)
+    if(DEFINED ENV{ROCM_PATH})
+      set(_rocm_path_was_set TRUE)
+      set(_rocm_original_path "$ENV{ROCM_PATH}")
+    endif()
+    set(ENV{ROCM_PATH} "${_rocm_sdk_root}")
     find_package(hip QUIET CONFIG PATHS "${_rocm_sdk_root}" NO_DEFAULT_PATH)
+    if(_rocm_path_was_set)
+      set(ENV{ROCM_PATH} "${_rocm_original_path}")
+    else()
+      unset(ENV{ROCM_PATH})
+    endif()
   endif()
 endif()
 
