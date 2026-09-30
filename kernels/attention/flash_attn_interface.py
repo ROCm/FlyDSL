@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""High-level FlyDSL Flash Attention API for gfx950 / gfx942.
+"""High-level FlyDSL Flash Attention API for gfx1100 / gfx950 / gfx942.
 
-Wraps ``flash_attn_generic.build_flash_attn_func_module`` (gfx942-compatible,
-dense self/cross-attention) and ``flash_attn_gfx950.build_flash_attn_dualwave_swp_module``
+Wraps ``flash_attn_gfx1100.build_flash_attn_func_module`` (RDNA3 dense MHA),
+``flash_attn_generic.build_flash_attn_func_module`` (gfx942-compatible, dense
+self/cross-attention) and ``flash_attn_gfx950.build_flash_attn_dualwave_swp_module``
 (gfx950 DUALWAVE_SWP, varlen + split-K) behind a single function:
 
     ``flydsl_flash_attn_func(q, k, v, ...)``
@@ -194,6 +195,32 @@ def _build_dense(
         waves_per_eu=waves_per_eu,
         daz=daz,
         return_lse=return_lse,
+    )
+
+
+@functools.lru_cache(maxsize=256)
+def _build_dense_gfx1100(
+    batch: int,
+    num_heads: int,
+    seq_q: int,
+    seq_kv: int,
+    head_dim: int,
+    causal: bool,
+    dtype_str: str,
+):
+    """Build (and cache) the dense RDNA3 gfx1100 launcher."""
+    from kernels.attention.flash_attn_gfx1100 import build_flash_attn_func_module
+
+    return build_flash_attn_func_module(
+        batch=batch,
+        num_heads=num_heads,
+        seq_q=seq_q,
+        seq_kv=seq_kv,
+        head_dim=head_dim,
+        causal=causal,
+        layout="bshd",
+        in_dtype=dtype_str,
+        out_dtype=dtype_str,
     )
 
 
@@ -1034,7 +1061,7 @@ def flydsl_flash_attn_func(
     # CUDA/HIP stream; defaults to the current stream for q.device.
     stream: Optional[torch.cuda.Stream] = None,
 ) -> torch.Tensor:
-    """Run FlyDSL Flash Attention (gfx950 DUALWAVE_SWP / gfx942 generic fallback).
+    """Run FlyDSL Flash Attention (gfx1100 dense / gfx950 DUALWAVE_SWP / gfx942 generic).
 
     Args:
         q: Query tensor. Dense: ``[B, Sq, H, D]`` (BSHD).
@@ -1512,6 +1539,44 @@ def flydsl_flash_attn_func(
                 )
         else:
             _arch = _gpu_arch(q.device)
+            if (
+                _arch.startswith("gfx1100")
+                and D in (64, 128, 256)
+                and dtype_str in ("bf16", "f16")
+                and num_kv_heads == H
+                and not splitk
+                and not debug_lazy
+                and not has_bias
+                and not has_alibi
+                and not has_sink
+                and not return_lse
+                and (not cross or Sq <= 16)
+            ):
+                if out is None:
+                    out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+                elif out.dtype != q.dtype:
+                    raise ValueError(
+                        f"flydsl_flash_attn_func: output dtype must match q dtype {q.dtype}, got {out.dtype}"
+                    )
+                elif not out.is_contiguous():
+                    raise ValueError("flydsl_flash_attn_func: gfx1100 output tensor must be contiguous")
+                exe = _build_dense_gfx1100(
+                    batch=B,
+                    num_heads=H,
+                    seq_q=Sq,
+                    seq_kv=Skv,
+                    head_dim=D,
+                    causal=causal,
+                    dtype_str=dtype_str,
+                )
+                exe(
+                    q.contiguous(),
+                    k.contiguous(),
+                    v.contiguous(),
+                    out,
+                    stream=launch_stream,
+                )
+                return out
             can_dualwave = D in (64, 128) and dtype_str in ("bf16", "f16") and _arch.startswith("gfx950")
             if debug_lazy and not can_dualwave:
                 raise NotImplementedError("flydsl_flash_attn_func: debug_counts requires the gfx950 DUALWAVE_SWP path")
