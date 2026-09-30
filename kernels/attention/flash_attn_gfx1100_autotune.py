@@ -82,8 +82,15 @@ def pick_tile(head_dim, seq_q, causal, bh):
     if head_dim == 64:
         if causal and seq_q < 32768:
             return 4, 2, 64, 4, False
-        if not causal and bh <= 16:
-            return 4, 2, 64, 4, False
+        if not causal:
+            # An unaligned KV length makes every iteration use bounds-checked
+            # global fetches, not just the tail, so halve the iteration count.
+            if seq_q % 64:
+                return (4, 2, 64, 8, False) if bh <= 16 else (8, 2, 64, 8, False)
+            if bh <= 16:
+                return (4, 2, 32, 4, False) if seq_q <= 32768 else (4, 2, 64, 8, False)
+            if seq_q <= 16384:
+                return 4, 2, 32, 4, False
         return 8, 2, 32, 4, False
     if not causal and bh <= 16:
         return 8, 1, 64, 8, False
