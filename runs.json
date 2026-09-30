@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-30T03:38:24Z",
+ "updated": "2026-09-30T03:44:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36665547665,
+   "pr": 1215,
+   "commit": "64b413df9321d73cf438ea87eecb124c15c39b0f",
+   "branch": "jli/schedule_bank",
+   "event": "pull_request",
+   "title": "[compiler][opt] add schedule_bank api for gfx1250",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36665547665",
+   "created_at": "2026-09-30T03:41:41Z",
+   "updated_at": "2026-09-30T03:42:39Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 36659011138,
    "pr": 1184,
@@ -99,11 +114,11 @@
    "branch": "jli/schedule_bank",
    "event": "pull_request",
    "title": "[compiler][opt] add schedule_bank api for gfx1250",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653174311",
    "created_at": "2026-09-30T01:02:12Z",
-   "updated_at": "2026-09-30T02:52:02Z",
+   "updated_at": "2026-09-30T03:42:17Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -118,10 +133,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-09-30T02:52:01Z",
-     "completed_at": null,
+     "completed_at": "2026-09-30T03:42:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653174311/job/109701037477"
     },
     {
@@ -2170,49 +2185,6 @@
      "started_at": "2026-09-27T15:44:20Z",
      "completed_at": "2026-09-27T16:26:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36329459246/job/108651711089"
-    }
-   ]
-  },
-  {
-   "run_id": 36327300104,
-   "pr": null,
-   "commit": "78ec4ea8226e2c5a502d46a6c68eee970e65a145",
-   "branch": "codex/kimi-k3-mxfp4-fused",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36327300104",
-   "created_at": "2026-09-27T14:49:18Z",
-   "updated_at": "2026-09-27T15:26:18Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T15:12:21Z",
-     "completed_at": "2026-09-27T15:24:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36327300104/job/108646326070"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T15:12:41Z",
-     "completed_at": "2026-09-27T15:26:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36327300104/job/108646326123"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T15:12:27Z",
-     "completed_at": "2026-09-27T15:26:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36327300104/job/108646326153"
     }
    ]
   }
