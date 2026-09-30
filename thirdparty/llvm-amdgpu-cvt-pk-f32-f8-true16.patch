@@ -1,0 +1,104 @@
+diff --git a/llvm/lib/Target/AMDGPU/AMDGPUMCInstLower.cpp b/llvm/lib/Target/AMDGPU/AMDGPUMCInstLower.cpp
+index 3f0fb64be..37a3db3d4 100644
+--- a/llvm/lib/Target/AMDGPU/AMDGPUMCInstLower.cpp
++++ b/llvm/lib/Target/AMDGPU/AMDGPUMCInstLower.cpp
+@@ -16,6 +16,7 @@
+ #include "AMDGPU.h"
+ #include "AMDGPUAsmPrinter.h"
+ #include "AMDGPUMachineFunctionInfo.h"
++#include "GCNSubtarget.h"
+ #include "MCTargetDesc/AMDGPUInstPrinter.h"
+ #include "MCTargetDesc/AMDGPUMCExpr.h"
+ #include "MCTargetDesc/AMDGPUMCTargetDesc.h"
+@@ -262 +263,17 @@ void AMDGPUMCInstLower::lower(const MachineInstr *MI, MCInst &OutMI) const {
++  // These packed-conversion patterns use an i32 fake16 pseudo because the
++  // intrinsic carries two selectable 16-bit words. Select the real true16
++  // opcode explicitly on subtargets which require it.
++  const bool LowerPackedCvtAsTrue16 =
++      static_cast<const GCNSubtarget &>(ST).useRealTrue16Insts() &&
++      (Opcode == AMDGPU::V_CVT_PK_F32_BF8_fake16_e32 ||
++       Opcode == AMDGPU::V_CVT_PK_F32_FP8_fake16_e32);
++  if (LowerPackedCvtAsTrue16) {
++    const unsigned True16Opcode = Opcode == AMDGPU::V_CVT_PK_F32_BF8_fake16_e32
++                                      ? AMDGPU::V_CVT_PK_F32_BF8_t16_e32
++                                      : AMDGPU::V_CVT_PK_F32_FP8_t16_e32;
++    MCOpcode = TII->pseudoToMCOpcode(True16Opcode);
++    assert(MCOpcode != -1 &&
++           "True16 packed conversion has no target-specific version");
++  }
++
+   OutMI.setOpcode(MCOpcode);
+@@ -264,5 +280,23 @@ void AMDGPUMCInstLower::lower(const MachineInstr *MI, MCInst &OutMI) const {
++  // The cvt.pk.f32.{bf8,fp8} intrinsic carries a packed i32 source, so its
++  // SelectionDAG pattern intentionally uses the fake16 pseudo. When that
++  // pseudo maps to a real true16 e32 encoding, a VGPR source must name its low
++  // half explicitly. SGPR and immediate sources retain their regular spelling.
++  const bool NarrowPackedCvtSource = LowerPackedCvtAsTrue16;
++  const int Src0Idx =
++      NarrowPackedCvtSource
++          ? AMDGPU::getNamedOperandIdx(Opcode, AMDGPU::OpName::src0)
++          : -1;
++  const SIRegisterInfo &TRI = TII->getRegisterInfo();
++
++  int OperandIdx = 0;
+   for (const MachineOperand &MO : MI->explicit_operands()) {
+     MCOperand MCOp;
+-    lowerOperand(MO, MCOp);
++    if (OperandIdx == Src0Idx && MO.isReg() && TRI.isVGPRPhysReg(MO.getReg())) {
++      Register LoReg = TRI.getSubReg(MO.getReg(), AMDGPU::lo16);
++      MCOp = MCOperand::createReg(AMDGPU::getMCReg(LoReg, ST));
++    } else {
++      lowerOperand(MO, MCOp);
++    }
+     OutMI.addOperand(MCOp);
++    ++OperandIdx;
+   }
+diff --git a/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cvt.fp8.ll b/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cvt.fp8.ll
+index 7f3dd0400..372b44d81 100644
+--- a/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cvt.fp8.ll
++++ b/llvm/test/CodeGen/AMDGPU/llvm.amdgcn.cvt.fp8.ll
+@@ -310,3 +310,4 @@ define <2 x float> @test_cvt_pk_f32_bf8_word0(i32 %a) {
+ ; GFX1170-NEXT:    s_waitcnt vmcnt(0) expcnt(0) lgkmcnt(0)
+ ; GFX1170-NEXT:    v_cvt_pk_f32_bf8_e32 v[0:1], v0
++; GFX1170-TRUE16-SAME: .l
+ ; GFX1170-NEXT:    s_setpc_b64 s[30:31]
+@@ -320,3 +321,4 @@ define <2 x float> @test_cvt_pk_f32_bf8_word0(i32 %a) {
+ ; GFX12-NEXT:    s_wait_kmcnt 0x0
+ ; GFX12-NEXT:    v_cvt_pk_f32_bf8_e32 v[0:1], v0
++; GFX12-TRUE16-SAME: .l
+ ; GFX12-NEXT:    s_setpc_b64 s[30:31]
+@@ -327,3 +329,4 @@ define <2 x float> @test_cvt_pk_f32_bf8_word0(i32 %a) {
+ ; GFX1250-NEXT:    s_wait_kmcnt 0x0
+ ; GFX1250-NEXT:    v_cvt_pk_f32_bf8_e32 v[0:1], v0
++; GFX1250-TRUE16-SAME: .l
+ ; GFX1250-NEXT:    s_set_pc_i64 s[30:31]
+@@ -376,3 +379,4 @@ define <2 x float> @test_cvt_pk_f32_fp8_word0(i32 %a) {
+ ; GFX1170-NEXT:    s_waitcnt vmcnt(0) expcnt(0) lgkmcnt(0)
+ ; GFX1170-NEXT:    v_cvt_pk_f32_fp8_e32 v[0:1], v0
++; GFX1170-TRUE16-SAME: .l
+ ; GFX1170-NEXT:    s_setpc_b64 s[30:31]
+@@ -386,3 +390,4 @@ define <2 x float> @test_cvt_pk_f32_fp8_word0(i32 %a) {
+ ; GFX12-NEXT:    s_wait_kmcnt 0x0
+ ; GFX12-NEXT:    v_cvt_pk_f32_fp8_e32 v[0:1], v0
++; GFX12-TRUE16-SAME: .l
+ ; GFX12-NEXT:    s_setpc_b64 s[30:31]
+@@ -393,3 +398,4 @@ define <2 x float> @test_cvt_pk_f32_fp8_word0(i32 %a) {
+ ; GFX1250-NEXT:    s_wait_kmcnt 0x0
+ ; GFX1250-NEXT:    v_cvt_pk_f32_fp8_e32 v[0:1], v0
++; GFX1250-TRUE16-SAME: .l
+ ; GFX1250-NEXT:    s_set_pc_i64 s[30:31]
+@@ -1288,3 +1294,4 @@ define <2 x float> @test_sext_cvt_pk_f32_fp8_word0(i16 %a) {
+ ; GFX1170-NEXT:    s_delay_alu instid0(VALU_DEP_1)
+ ; GFX1170-NEXT:    v_cvt_pk_f32_fp8_e32 v[0:1], v0
++; GFX1170-TRUE16-SAME: .l
+ ; GFX1170-NEXT:    s_setpc_b64 s[30:31]
+@@ -1300,3 +1307,4 @@ define <2 x float> @test_sext_cvt_pk_f32_fp8_word0(i16 %a) {
+ ; GFX12-NEXT:    s_delay_alu instid0(VALU_DEP_1)
+ ; GFX12-NEXT:    v_cvt_pk_f32_fp8_e32 v[0:1], v0
++; GFX12-TRUE16-SAME: .l
+ ; GFX12-NEXT:    s_setpc_b64 s[30:31]
+@@ -1309,3 +1317,4 @@ define <2 x float> @test_sext_cvt_pk_f32_fp8_word0(i16 %a) {
+ ; GFX1250-NEXT:    s_delay_alu instid0(VALU_DEP_1)
+ ; GFX1250-NEXT:    v_cvt_pk_f32_fp8_e32 v[0:1], v0
++; GFX1250-TRUE16-SAME: .l
+ ; GFX1250-NEXT:    s_set_pc_i64 s[30:31]
