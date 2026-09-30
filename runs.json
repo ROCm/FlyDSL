@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-30T07:40:40Z",
+ "updated": "2026-09-30T09:13:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36694312216,
+   "pr": 1217,
+   "commit": "dd0e2d70885f48ca3fb4d951903a69d9d93abe24",
+   "branch": "feat/conv3d-align-aiter",
+   "event": "pull_request",
+   "title": "feat(conv3d): align bf16 implicit GEMM with aiter #5370",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36694312216",
+   "created_at": "2026-09-30T09:09:38Z",
+   "updated_at": "2026-09-30T09:10:38Z",
+   "actor": "huizzhan",
+   "jobs": []
+  },
+  {
+   "run_id": 36687067734,
+   "pr": 1217,
+   "commit": "beeacc17538134b06befc03f0daec47ba19563fc",
+   "branch": "feat/conv3d-align-aiter",
+   "event": "pull_request",
+   "title": "feat(conv3d): align bf16 implicit GEMM with aiter #5370",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36687067734",
+   "created_at": "2026-09-30T08:00:43Z",
+   "updated_at": "2026-09-30T09:10:32Z",
+   "actor": "huizzhan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-30T08:29:44Z",
+     "completed_at": "2026-09-30T09:10:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36687067734/job/109804676845"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-30T08:29:18Z",
+     "completed_at": "2026-09-30T09:09:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36687067734/job/109804677010"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-30T08:29:31Z",
+     "completed_at": "2026-09-30T08:47:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36687067734/job/109804677047"
+    }
+   ]
+  },
   {
    "run_id": 36684787636,
    "pr": 1215,
@@ -10,13 +68,41 @@
    "branch": "jli/schedule_bank",
    "event": "pull_request",
    "title": "[compiler][opt] add schedule_bank api for gfx1250",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684787636",
    "created_at": "2026-09-30T07:37:40Z",
-   "updated_at": "2026-09-30T07:38:39Z",
+   "updated_at": "2026-09-30T08:29:40Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-30T08:29:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684787636/job/109793739013"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-30T08:05:36Z",
+     "completed_at": "2026-09-30T08:17:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684787636/job/109793739121"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-09-30T07:56:43Z",
+     "completed_at": "2026-09-30T08:16:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684787636/job/109793739441"
+    }
+   ]
   },
   {
    "run_id": 36684093024,
@@ -29,9 +115,40 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684093024",
    "created_at": "2026-09-30T07:30:34Z",
-   "updated_at": "2026-09-30T07:32:48Z",
+   "updated_at": "2026-09-30T07:56:54Z",
    "actor": "vlluvia",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-30T07:45:45Z",
+     "completed_at": "2026-09-30T08:46:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684093024/job/109790410009",
+     "machine": "cv350-1e707-c03-2",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-30T07:45:37Z",
+     "completed_at": "2026-09-30T08:05:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684093024/job/109790410020"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-30T07:56:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684093024/job/109790410034"
+    }
+   ]
   },
   {
    "run_id": 36683484073,
@@ -143,19 +260,19 @@
    "branch": "jli/fix-waves-per-eu",
    "event": "pull_request",
    "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36659011138",
    "created_at": "2026-09-30T02:15:35Z",
-   "updated_at": "2026-09-30T04:23:21Z",
+   "updated_at": "2026-09-30T07:53:45Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-30T04:23:21Z",
+     "started_at": "2026-09-30T07:53:44Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36659011138/job/109738573501"
     },
@@ -2008,36 +2125,6 @@
      "bench_skipped": "host MI350 != MI355"
     }
    ]
-  },
-  {
-   "run_id": 36380506765,
-   "pr": null,
-   "commit": "65532b71bb20ac767cfdbb185c7e7d68764c0fb4",
-   "branch": "main",
-   "event": "push",
-   "title": "[Fix][gfx1250] Reject a K that tile_k does not divide in the A8W4 MoE\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36380506765",
-   "created_at": "2026-09-28T05:07:10Z",
-   "updated_at": "2026-09-28T05:07:50Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 36380299383,
-   "pr": null,
-   "commit": "ccd326c2258a19da383372ef17c034aa7cd25732",
-   "branch": "main",
-   "event": "push",
-   "title": "[Chore][gfx1250] Drop leftovers of the GEMM modules removed in #885 (\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36380299383",
-   "created_at": "2026-09-28T05:04:10Z",
-   "updated_at": "2026-09-28T05:07:43Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
