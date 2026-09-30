@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-30T09:14:46Z",
+ "updated": "2026-09-30T09:32:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "feat/conv3d-align-aiter",
    "event": "pull_request",
    "title": "feat(conv3d): align bf16 implicit GEMM with aiter #5370",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36694312216",
    "created_at": "2026-09-30T09:09:38Z",
-   "updated_at": "2026-09-30T09:11:50Z",
+   "updated_at": "2026-09-30T09:26:51Z",
    "actor": "huizzhan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-30T09:27:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36694312216/job/109824530357"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-30T09:27:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36694312216/job/109824530388"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-30T09:26:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36694312216/job/109824530649"
+    }
+   ]
   },
   {
    "run_id": 36687067734,
@@ -111,11 +139,11 @@
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
    "title": "[Kernel] Add dense Flash Attention for gfx1100",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684093024",
    "created_at": "2026-09-30T07:30:34Z",
-   "updated_at": "2026-09-30T07:56:54Z",
+   "updated_at": "2026-09-30T09:31:04Z",
    "actor": "vlluvia",
    "jobs": [
     {
@@ -142,10 +170,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-30T07:56:53Z",
-     "completed_at": null,
+     "completed_at": "2026-09-30T09:31:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684093024/job/109790410034"
     }
    ]
