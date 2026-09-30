@@ -13,9 +13,9 @@ LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
 # ---------------------------------------------------------------------------
-# Source selection: --source upstream (default) | --source custom
+# Source selection: --source upstream | --source custom (default)
 # ---------------------------------------------------------------------------
-LLVM_SOURCE="${LLVM_SOURCE:-upstream}"
+LLVM_SOURCE="${LLVM_SOURCE:-custom}"
 for arg in "$@"; do
   if [[ "$arg" == "--source" ]]; then
     _next_is_source=1
