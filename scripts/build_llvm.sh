@@ -17,7 +17,13 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
 LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
 LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
-LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+LLVM_PATCH_DIR="${REPO_ROOT}/thirdparty/llvm-patches"
+mapfile -t LLVM_PATCHES < <(python3 -c "
+import json, os
+info = json.load(open('${LLVM_BUILD_INFO}'))
+for p in info.get('upstream', {}).get('patches', []):
+    print(os.path.join('${LLVM_PATCH_DIR}', p))
+")
 LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
 
 case "${LLVM_BUILD_PROFILE}" in
@@ -48,6 +54,7 @@ echo "LLVM Profile:   $LLVM_BUILD_PROFILE"
 echo "LLVM Projects:  $LLVM_ENABLE_PROJECTS"
 echo "LLVM Targets:   $LLVM_TARGETS_TO_BUILD"
 echo "LLVM Runtimes:  ${LLVM_ENABLE_RUNTIMES:-<none>}"
+echo "LLVM Patches:   ${LLVM_PATCHES[*]:-(none)}"
 
 # 1. Clone LLVM
 LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
@@ -93,12 +100,20 @@ else
     git checkout FETCH_HEAD
 fi
 
-if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
-    echo "LLVM patch already applied: ${LLVM_PATCH}"
-else
-    echo "Applying LLVM patch: ${LLVM_PATCH}"
-    git apply --check "${LLVM_PATCH}"
-    git apply "${LLVM_PATCH}"
+if [ ${#LLVM_PATCHES[@]} -gt 0 ]; then
+    # Reset to the pristine upstream commit so patches apply cleanly regardless
+    # of what a previous run left behind.  The per-patch --reverse --check that
+    # was here before breaks when patches stack (a later patch rewrites lines an
+    # earlier one touched, so the earlier one no longer reverse-applies).
+    git checkout -- .
+    for _patch in "${LLVM_PATCHES[@]}"; do
+        if [ ! -f "$_patch" ]; then
+            echo "ERROR: patch listed in llvm-build-info.json not found: $_patch" >&2
+            exit 1
+        fi
+        echo "Applying LLVM patch: $_patch"
+        git apply "$_patch"
+    done
 fi
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)

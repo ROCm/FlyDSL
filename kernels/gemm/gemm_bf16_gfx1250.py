@@ -294,3 +294,4 @@ def launch_gemm_bf16(
 launch_gemm_bf16.compile_hints["llvm_options"] = {
     "amdgpu-expert-scheduling-mode": True,
 }
+launch_gemm_bf16.compile_hints["waves_per_eu"] = (1, 1)
