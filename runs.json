@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-30T02:26:10Z",
+ "updated": "2026-09-30T02:45:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,11 +25,11 @@
    "branch": "jli/fix-lld-issue",
    "event": "pull_request",
    "title": "[Feat] Fix `lld invocation failed` when ROCm is not at the baked-in path, link hsa code with in-process LLD and bundle device bitcode",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653729486",
    "created_at": "2026-09-30T01:09:04Z",
-   "updated_at": "2026-09-30T01:41:25Z",
+   "updated_at": "2026-09-30T02:43:50Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -44,19 +44,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-30T01:31:43Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653729486/job/109698749318"
+     "completed_at": "2026-09-30T02:43:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653729486/job/109698749318",
+     "machine": "gbt350-odcdh2-b02-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-30T01:41:24Z",
-     "completed_at": null,
+     "completed_at": "2026-09-30T02:37:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653729486/job/109698749335"
     }
    ]
@@ -96,11 +99,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-30T01:40:57Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653174311/job/109701037500"
+     "completed_at": "2026-09-30T02:41:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653174311/job/109701037500",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
