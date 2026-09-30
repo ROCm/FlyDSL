@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-09-29T21:43:49Z",
+ "updated": "2026-09-30T01:05:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36653174311,
+   "pr": 1215,
+   "commit": "79b1b6276850aecb80b389acb7f21e5ad251305d",
+   "branch": "jli/schedule_bank",
+   "event": "pull_request",
+   "title": "[compiler][opt] add schedule_bank api for gfx1250",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653174311",
+   "created_at": "2026-09-30T01:02:12Z",
+   "updated_at": "2026-09-30T01:02:49Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 36653077702,
+   "pr": 1215,
+   "commit": "6aac785c8a1a92de7b2c439a8770bbc8d33166a8",
+   "branch": "jli/schedule_bank",
+   "event": "pull_request",
+   "title": "[compiler][opt] add schedule_bank api for gfx1250",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653077702",
+   "created_at": "2026-09-30T01:01:01Z",
+   "updated_at": "2026-09-30T01:02:18Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 36631631552,
    "pr": 1214,
@@ -20,10 +50,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-29T21:27:14Z",
-     "completed_at": null,
+     "completed_at": "2026-09-29T21:47:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36631631552/job/109627595227"
     },
     {
@@ -38,11 +68,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-29T21:27:39Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36631631552/job/109627595512"
+     "completed_at": "2026-09-29T22:44:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36631631552/job/109627595512",
+     "machine": "gbt350-odcdh1-b09-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -2152,64 +2185,6 @@
      "started_at": "2026-09-27T12:36:31Z",
      "completed_at": "2026-09-27T13:05:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318304733/job/108620506531"
-    }
-   ]
-  },
-  {
-   "run_id": 36318208520,
-   "pr": null,
-   "commit": "2e7ac03709fd9aa7bb7460f1a27a9c4c13b5c576",
-   "branch": "dev/export_c",
-   "event": "pull_request",
-   "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318208520",
-   "created_at": "2026-09-27T12:12:15Z",
-   "updated_at": "2026-09-27T12:14:07Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 36316946141,
-   "pr": null,
-   "commit": "f06113ce18759c5fde2b5d17d911680ba22b7e39",
-   "branch": "dev/export_c",
-   "event": "pull_request",
-   "title": "[AOT] Export linkable C objects and support CPU-only builds",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141",
-   "created_at": "2026-09-27T11:48:54Z",
-   "updated_at": "2026-09-27T12:13:14Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T12:00:04Z",
-     "completed_at": "2026-09-27T12:12:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141/job/108614956163"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T12:04:45Z",
-     "completed_at": "2026-09-27T12:13:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141/job/108614956195"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-27T12:00:20Z",
-     "completed_at": "2026-09-27T12:12:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36316946141/job/108614956204"
     }
    ]
   }
