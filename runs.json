@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-30T01:10:54Z",
+ "updated": "2026-09-30T02:26:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36659011138,
+   "pr": 1184,
+   "commit": "4b567250d986b432fde3f8ef53f88645a2b434b4",
+   "branch": "jli/fix-waves-per-eu",
+   "event": "pull_request",
+   "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36659011138",
+   "created_at": "2026-09-30T02:15:35Z",
+   "updated_at": "2026-09-30T02:17:39Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 36653729486,
    "pr": 987,
@@ -14,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653729486",
    "created_at": "2026-09-30T01:09:04Z",
-   "updated_at": "2026-09-30T01:09:27Z",
+   "updated_at": "2026-09-30T01:41:25Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-30T01:31:05Z",
+     "completed_at": "2026-09-30T01:50:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653729486/job/109698749267"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-30T01:31:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653729486/job/109698749318"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-30T01:41:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653729486/job/109698749335"
+    }
+   ]
   },
   {
    "run_id": 36653174311,
@@ -25,13 +68,41 @@
    "branch": "jli/schedule_bank",
    "event": "pull_request",
    "title": "[compiler][opt] add schedule_bank api for gfx1250",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653174311",
    "created_at": "2026-09-30T01:02:12Z",
-   "updated_at": "2026-09-30T01:04:21Z",
+   "updated_at": "2026-09-30T01:40:17Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-30T01:50:45Z",
+     "completed_at": "2026-09-30T02:10:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653174311/job/109701037427"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-09-30T01:40:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653174311/job/109701037477"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-09-30T01:40:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36653174311/job/109701037500"
+    }
+   ]
   },
   {
    "run_id": 36653077702,
@@ -55,11 +126,11 @@
    "branch": "feat/gfx1250-monokernel",
    "event": "pull_request",
    "title": "[Kernel][gfx1250] Add the GLM-5 MonoKernel",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36631631552",
    "created_at": "2026-09-29T21:11:47Z",
-   "updated_at": "2026-09-29T21:26:42Z",
+   "updated_at": "2026-09-30T02:23:52Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -74,10 +145,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-09-29T21:26:42Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-09-30T01:31:46Z",
+     "completed_at": "2026-09-30T02:23:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36631631552/job/109627595245"
     },
     {
@@ -2108,52 +2179,6 @@
      "started_at": "2026-09-27T15:12:27Z",
      "completed_at": "2026-09-27T15:26:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36327300104/job/108646326153"
-    }
-   ]
-  },
-  {
-   "run_id": 36318947964,
-   "pr": null,
-   "commit": "f16fa97b24a38c5f83f683b10f5129a55facacb9",
-   "branch": "codex/glm5-monokernel",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] GLM-5 MonoKernel: indexer + mla + moe fused kernel for a full decode layer",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318947964",
-   "created_at": "2026-09-27T12:25:42Z",
-   "updated_at": "2026-09-27T15:19:48Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-27T13:06:13Z",
-     "completed_at": "2026-09-27T13:21:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318947964/job/108622072127"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-27T12:49:04Z",
-     "completed_at": "2026-09-27T14:43:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318947964/job/108622072148",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-27T15:13:15Z",
-     "completed_at": "2026-09-27T15:19:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36318947964/job/108622072164"
     }
    ]
   }
