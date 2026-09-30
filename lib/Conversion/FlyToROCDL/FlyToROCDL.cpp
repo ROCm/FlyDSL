@@ -812,9 +812,8 @@ public:
 
     rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
         op, kernelRef, grid, block, adaptor.getDynamicSharedMemorySize(),
-        adaptor.getKernelOperands(), asyncTokenType,
-        adaptor.getAsyncDependencies(), adaptor.getAsyncObject(),
-        clusterSize);
+        adaptor.getKernelOperands(), asyncTokenType, adaptor.getAsyncDependencies(),
+        adaptor.getAsyncObject(), clusterSize);
     return success();
   }
 };
