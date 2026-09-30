@@ -1557,15 +1557,18 @@ def build_glm5_monokernel_gfx1250(
                 kr = lds_ld(attn_keys, j)
                 if kr >= pos0:
                     sn = kr - pos0
-                    kvp = get2_many([(mb("kvnew"), sn * KV_LORA + lane * 16 + m * 2) for m in range(8)])
-                    w = [bf16_pair(a0, a1) for a0, a1 in kvp]
+                    # the row's latent and k_pe pairs in one poll
+                    kvp = get2_many(
+                        [(mb("kvnew"), sn * KV_LORA + lane * 16 + m * 2) for m in range(8)]
+                        + [(mb("penew"), sn * PE_DIM + lane * 2)]
+                    )
+                    w = [bf16_pair(a0, a1) for a0, a1 in kvp[:8]]
                     for hh in range_constexpr(2):
                         fx.ptr_store(
                             fx.Vector.from_elements(w[hh * 4 : hh * 4 + 4], fx.Float32),
                             ktile + (j * KS + lane * 8 + hh * 4),
                         )
-                    a0, a1 = get2(mb("penew"), sn * PE_DIM + lane * 2)
-                    lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
+                    lds_st(petile, j * PS + lane, bf16_pair(*kvp[8]))
 
         enter("split")
         for tt in range(start("split"), S * N_SPLIT, G):
@@ -1732,10 +1735,25 @@ def build_glm5_monokernel_gfx1250(
             dp_lo = tid % (KV_LORA // 4)
             hf = tid // (KV_LORA // 4)
             spis = [fx.min(lane + rep * WAVE, N_SPLIT - 1) for rep in range(SPLIT_REPS)]
-            ml_got = poll(
-                [(mb("sp_m"), (s * N_SPLIT + sp) * H + head, 1) for sp in spis]
-                + [(mb("sp_l"), (s * N_SPLIT + sp) * H + head, 1) for sp in spis]
-            )
+            ml_specs = [(mb("sp_m"), (s * N_SPLIT + sp) * H + head, 1) for sp in spis] + [
+                (mb("sp_l"), (s * N_SPLIT + sp) * H + head, 1) for sp in spis
+            ]
+
+            def acc_specs(dh):
+                dp = dp_lo + dh * (KV_LORA // 4)
+                return [
+                    (mb("sp_acc"), ((s * N_SPLIT + hf * SPH + j) * H + head) * (KV_LORA // 2) + dp, 1)
+                    for j in range(SPH)
+                ]
+
+            # pre_poll has seen every split's sp_l, so the weights and both payload
+            # halves are polled in one batch while it stays small (18 pairs, S <= 4).
+            UV_ONE_POLL = len(ml_specs) + 2 * SPH <= 18
+            if const_expr(UV_ONE_POLL):
+                polled = poll(ml_specs + acc_specs(0) + acc_specs(1), batch=len(ml_specs) + 2 * SPH)
+                ml_got = polled[: len(ml_specs)]
+            else:
+                ml_got = poll(ml_specs)
             if wave == 0:  # per-split weights exp(m - M) / L for this head -> misc[sp]
                 oks = [lane + rep * WAVE < N_SPLIT for rep in range(SPLIT_REPS)]
                 m_sp = [oks[r].select(ml_got[r][0].bitcast(fx.Float32), fx.Float32(NEG)) for r in range(SPLIT_REPS)]
@@ -1759,16 +1777,10 @@ def build_glm5_monokernel_gfx1250(
             gpu.barrier()
             for dh in range_constexpr(2):
                 dp = dp_lo + dh * (KV_LORA // 4)
-                got = poll(
-                    [
-                        (
-                            mb("sp_acc"),
-                            ((s * N_SPLIT + hf * SPH + j) * H + head) * (KV_LORA // 2) + dp,
-                            1,
-                        )
-                        for j in range(SPH)
-                    ]
-                )
+                if const_expr(UV_ONE_POLL):
+                    got = polled[len(ml_specs) + dh * SPH : len(ml_specs) + (dh + 1) * SPH]
+                else:
+                    got = poll(acc_specs(dh))
                 o0 = fx.Float32(0.0)
                 o1 = fx.Float32(0.0)
                 for j in range_constexpr(SPH):
