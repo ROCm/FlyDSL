@@ -104,9 +104,7 @@ def build_flash_attn_func_module_primary(
     in_dtype = dtype_str
     if head_dim not in SUPPORTED_HEAD_DIMS:
         raise ValueError(f"head_dim must be one of {list(SUPPORTED_HEAD_DIMS)}, got {head_dim}")
-    num_waves, q_tiles, block_n, vt_rows, k_from_gmem = pick_tile(
-        head_dim, seq_q, causal, batch * num_heads
-    )
+    num_waves, q_tiles, block_n, vt_rows, k_from_gmem = pick_tile(head_dim, seq_q, causal, batch * num_heads)
     prefetch = seq_q <= WMMA_M and head_dim == 128 and batch * num_heads <= 128
     hoist_q = head_dim <= 128 or seq_kv >= 8192
 
@@ -510,9 +508,7 @@ def build_flash_attn_func_module_primary(
                 for sub in range_constexpr(1, n_kv_sub):
                     l_blk = l_blk + _row_sum(pt[sub])
                 m_new.append(mt)
-                l_new.append(
-                    fmath.fma(l_run[t], corr, l_blk, fastmath=fm)
-                )
+                l_new.append(fmath.fma(l_run[t], corr, l_blk, fastmath=fm))
                 probs.append(pt)
                 o_run[t] = [o * corr for o in o_run[t]]
 
