@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-30T09:13:10Z",
+ "updated": "2026-09-30T09:14:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,7 +14,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36694312216",
    "created_at": "2026-09-30T09:09:38Z",
-   "updated_at": "2026-09-30T09:10:38Z",
+   "updated_at": "2026-09-30T09:11:50Z",
    "actor": "huizzhan",
    "jobs": []
   },
@@ -68,20 +68,20 @@
    "branch": "jli/schedule_bank",
    "event": "pull_request",
    "title": "[compiler][opt] add schedule_bank api for gfx1250",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684787636",
    "created_at": "2026-09-30T07:37:40Z",
-   "updated_at": "2026-09-30T08:29:40Z",
+   "updated_at": "2026-09-30T09:13:01Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-09-30T08:29:39Z",
-     "completed_at": null,
+     "completed_at": "2026-09-30T09:13:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684787636/job/109793739013"
     },
     {
@@ -260,20 +260,20 @@
    "branch": "jli/fix-waves-per-eu",
    "event": "pull_request",
    "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36659011138",
    "created_at": "2026-09-30T02:15:35Z",
-   "updated_at": "2026-09-30T07:53:45Z",
+   "updated_at": "2026-09-30T09:12:09Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-09-30T07:53:44Z",
-     "completed_at": null,
+     "completed_at": "2026-09-30T09:12:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36659011138/job/109738573501"
     },
     {
