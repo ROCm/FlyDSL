@@ -99,32 +99,59 @@ jobs:
               git submodule update --init --recursive
             '
 
+      - name: Compute LLVM container paths
+        id: llvm-paths
+        run: |
+          # Read the default LLVM_SOURCE from build_llvm.sh
+          LLVM_SOURCE=$(grep -oP '(?<=LLVM_SOURCE="\$\{LLVM_SOURCE:-)\w+' flydsl/scripts/build_llvm.sh)
+          if [ "${LLVM_SOURCE}" = "custom" ]; then
+            branch=$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-build-info.json'))['custom']['branch'])")
+            suffix=$(echo "${branch}" | sed 's|.*/||; s/_/-/g')
+            echo "llvm_dir=/llvm-project-custom"                          >>"${GITHUB_OUTPUT}"
+            echo "install_dir=/llvm-project-custom/mlir_install-${suffix}" >>"${GITHUB_OUTPUT}"
+            echo "container_tgz=/llvm-project-custom/mlir_install-${suffix}.tgz" >>"${GITHUB_OUTPUT}"
+            echo "tgz_name=mlir_install-custom.tgz"                        >>"${GITHUB_OUTPUT}"
+          else
+            echo "llvm_dir=/llvm-project"                                  >>"${GITHUB_OUTPUT}"
+            echo "install_dir=/llvm-project/mlir_install"                  >>"${GITHUB_OUTPUT}"
+            echo "container_tgz=/llvm-project/mlir_install.tgz"              >>"${GITHUB_OUTPUT}"
+            echo "tgz_name=mlir_install.tgz"                              >>"${GITHUB_OUTPUT}"
+          fi
+
       - name: Restore cached MLIR install tarball
         id: mlir-cache
         uses: actions/cache@v4
         with:
-          path: mlir_install.tgz
+          path: ${{ steps.llvm-paths.outputs.tgz_name }}
           key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-build-info.json', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
+        env:
+          LLVM_DIR: ${{ steps.llvm-paths.outputs.llvm_dir }}
+          INSTALL_DIR: ${{ steps.llvm-paths.outputs.install_dir }}
+          TGZ_NAME: ${{ steps.llvm-paths.outputs.tgz_name }}
         run: |
-          docker cp mlir_install.tgz flydsl_build:/tmp/mlir_install.tgz
-          docker exec flydsl_build bash -c "mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
-          docker exec flydsl_build bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
+          docker cp "${TGZ_NAME}" flydsl_build:/tmp/mlir_install.tgz
+          docker exec flydsl_build bash -c "mkdir -p ${LLVM_DIR} && tar -xzf /tmp/mlir_install.tgz -C ${LLVM_DIR}"
+          docker exec flydsl_build bash -c "ls -la ${INSTALL_DIR}/lib/cmake/mlir"
 
       - name: Build LLVM
         if: steps.mlir-cache.outputs.cache-hit != 'true'
+        env:
+          CONTAINER_TGZ: ${{ steps.llvm-paths.outputs.container_tgz }}
+          TGZ_NAME: ${{ steps.llvm-paths.outputs.tgz_name }}
         run: |
           docker exec flydsl_build bash -c "cd /flydsl && bash scripts/build_llvm.sh"
-          docker cp flydsl_build:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
+          docker cp "flydsl_build:${CONTAINER_TGZ}" "./${TGZ_NAME}" || true
 
       - name: Build wheels
         env:
           PACKAGE_VERSION_OVERRIDE: ${{ inputs.package_version_override }}
+          INSTALL_DIR: ${{ steps.llvm-paths.outputs.install_dir }}
         run: |
           docker exec \
-            -e MLIR_PATH=/llvm-project/mlir_install \
+            -e "MLIR_PATH=${INSTALL_DIR}" \
             -e EXPECTED_GLIBC=2.28 \
             -e FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} \
             -e "FLYDSL_PACKAGE_VERSION_OVERRIDE=${PACKAGE_VERSION_OVERRIDE}" \
