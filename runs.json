@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-09-30T18:37:31Z",
+ "updated": "2026-09-30T22:26:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36785221163,
+   "pr": 1214,
+   "commit": "50658f7a986b1eccb36aa776de88579742de816e",
+   "branch": "feat/gfx1250-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][gfx1250] Add the GLM-5 MonoKernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36785221163",
+   "created_at": "2026-09-30T22:22:47Z",
+   "updated_at": "2026-09-30T22:24:43Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 36782087236,
+   "pr": 1214,
+   "commit": "bd97d85967d7e45d7b9a405f0b2fafa2ac667ce3",
+   "branch": "feat/gfx1250-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][gfx1250] Add the GLM-5 MonoKernel",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36782087236",
+   "created_at": "2026-09-30T21:51:36Z",
+   "updated_at": "2026-09-30T22:24:13Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-30T22:10:18Z",
+     "completed_at": "2026-09-30T22:22:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36782087236/job/110120855536"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-30T22:11:19Z",
+     "completed_at": "2026-09-30T22:23:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36782087236/job/110120855577"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-30T22:10:35Z",
+     "completed_at": "2026-09-30T22:24:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36782087236/job/110120855682"
+    }
+   ]
+  },
   {
    "run_id": 36747274082,
    "pr": 1194,
@@ -25,11 +83,11 @@
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
    "title": "[Kernel] Add dense Flash Attention for gfx1100",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36716949707",
    "created_at": "2026-09-30T12:46:24Z",
-   "updated_at": "2026-09-30T13:07:11Z",
+   "updated_at": "2026-09-30T22:10:48Z",
    "actor": "vlluvia",
    "jobs": [
     {
@@ -44,9 +102,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-09-30T13:07:11Z",
+     "started_at": "2026-09-30T22:10:47Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36716949707/job/109900173166"
     },
@@ -2037,95 +2095,6 @@
      "machine": "cv350-odcdh2-a06-1",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 36388757397,
-   "pr": 1207,
-   "commit": "760fcd297e02baaaf005c5bee42572a786b31dd7",
-   "branch": "codex/reduce-coop-test-matrix",
-   "event": "pull_request",
-   "title": "[CI] Reduce cooperative test matrix",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36388757397",
-   "created_at": "2026-09-28T06:53:56Z",
-   "updated_at": "2026-09-28T08:39:29Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T07:47:53Z",
-     "completed_at": "2026-09-28T08:39:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36388757397/job/108824278739"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T07:11:21Z",
-     "completed_at": "2026-09-28T08:26:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36388757397/job/108824278748",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T07:13:30Z",
-     "completed_at": "2026-09-28T07:37:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36388757397/job/108824278768"
-    }
-   ]
-  },
-  {
-   "run_id": 36386744572,
-   "pr": null,
-   "commit": "2d5dd6a399baba85673fed52890f057dd3bca55d",
-   "branch": "codex/reduce-coop-test-matrix",
-   "event": "pull_request",
-   "title": "[CI] Reduce cooperative test matrix",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36386744572",
-   "created_at": "2026-09-28T06:29:40Z",
-   "updated_at": "2026-09-28T06:55:06Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-28T06:47:42Z",
-     "completed_at": "2026-09-28T06:53:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36386744572/job/108818105340"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-28T06:48:15Z",
-     "completed_at": "2026-09-28T06:54:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36386744572/job/108818105441"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-28T06:49:50Z",
-     "completed_at": "2026-09-28T06:55:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36386744572/job/108818105494"
     }
    ]
   }
