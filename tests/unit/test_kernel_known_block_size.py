@@ -4,8 +4,33 @@ import re
 
 import pytest
 
-import flydsl.compiler as flyc
-import flydsl.expr as fx
+
+def _extract_max_flat_workgroup_size(ir_text: str):
+    """Extract max_flat_workgroup_size from compiled IR.
+
+    The value lives in the AMDGPU HSA metadata, which is msgpack-encoded inside
+    the ELF binary blob embedded in a ``gpu.binary`` attribute.  When the binary
+    is in assembly/ISA format the key appears as plain text; when it is a linked
+    fatbin the key appears as literal ASCII inside the msgpack note section and
+    the value follows in msgpack encoding (uint8 ``\\CC XX`` or uint16
+    ``\\CD XX XX``).
+    """
+    m = re.search(r"max_flat_workgroup_size\s*=\s*(\d+)", ir_text)
+    if m:
+        return int(m.group(1))
+    key = ".max_flat_workgroup_size"
+    idx = ir_text.find(key)
+    if idx < 0:
+        return None
+    after = ir_text[idx + len(key) :]
+    m = re.match("\\\\CD\\\\([0-9A-Fa-f]{2})\\\\([0-9A-Fa-f]{2})", after)
+    if m:
+        return (int(m.group(1), 16) << 8) | int(m.group(2), 16)
+    m = re.match("\\\\CC\\\\([0-9A-Fa-f]{2})", after)
+    if m:
+        return int(m.group(1), 16)
+    return None
+
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -16,6 +41,9 @@ except ImportError:
 
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available", allow_module_level=True)
+
+import flydsl.compiler as flyc  # noqa: E402
+import flydsl.expr as fx  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Kernels with various known_block_size values
@@ -170,10 +198,8 @@ class TestKnownBlockSize:
 
     def test_compiled_ir_has_max_flat_workgroup_size(self):
         compiled_ir = _get_compiled_ir(_launch_bs128_4_2, self.x)
-        # The compiled IR should report max_flat_workgroup_size >= total_threads
-        match = re.search(r"max_flat_workgroup_size\\CD\\([0-9A-Fa-f]{2})\\([0-9A-Fa-f]{2})", compiled_ir)
-        assert match is not None, f"max_flat_workgroup_size not found in compiled IR:\n{compiled_ir}"
-        max_wg = int("".join(match.groups()), 16)
+        max_wg = _extract_max_flat_workgroup_size(compiled_ir)
+        assert max_wg is not None, f"max_flat_workgroup_size not found in compiled IR:\n{compiled_ir}"
         assert max_wg >= 1024, f"max_flat_workgroup_size={max_wg} < total_threads=1024"
 
     def test_dynamic_block_size_omits_exact_attribute(self):
