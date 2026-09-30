@@ -96,8 +96,12 @@ def layout(
     sparse_attention_topk: int,
     with_indexer: bool = False,
     index_max_seq: int = 4096,
+    tagged_indices: bool = False,
 ):
-    """Return byte offsets for per-rank scratch and symmetric peer buffers."""
+    """Return byte offsets for per-rank scratch and symmetric peer buffers.
+
+    ``tagged_indices`` stores the compact top-k indices as ``(value, tag)`` pairs,
+    as the gfx1250 kernel does, instead of plain words behind ``indices_ready``."""
 
     split_count = sparse_attention_topk // sparse_keys_per_task(samples)
     pair_bytes = 8
@@ -132,9 +136,11 @@ def layout(
             ("index_w", samples * INDEX_HEADS * pair_bytes),
             ("index_q", samples * INDEX_Q_ROWS // 2 * pair_bytes),
             ("index_scores", samples * index_max_seq * pair_bytes),
-            ("indices", samples * sparse_attention_topk * 4),
-            ("indices_ready", samples * pair_bytes),
         ]
+        if tagged_indices:
+            items.append(("indices", samples * sparse_attention_topk * pair_bytes))
+        else:
+            items += [("indices", samples * sparse_attention_topk * 4), ("indices_ready", samples * pair_bytes)]
     # One word per stage, set by bounded mailbox polls that time out; appended
     # last so every other offset is independent of it.
     items.append(("poll_err", 4 * len(POLL_STAGES)))

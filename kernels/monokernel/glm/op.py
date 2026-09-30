@@ -54,7 +54,8 @@ class Glm5MonoKernel:
     because every launch uses a fresh ``tag``.
 
     gfx950 runs the wave64 MFMA kernel and gfx1250 the wave32 WMMA kernel; both
-    share this ABI, the scratch layout and the golden.  ``poll_limit`` (gfx1250
+    share this ABI, the scratch layout (gfx1250 tags each compact top-k index)
+    and the golden.  ``poll_limit`` (gfx1250
     only) bounds the re-polls of every mailbox wait and reports expiry through
     :meth:`poll_error`.
     """
@@ -111,7 +112,10 @@ class Glm5MonoKernel:
             self.packed["w_index_k"] = fp8_tiles(t["w_index_k"])
             self.packed["w_index_q"] = fp8_tiles(t["w_index_q"])
             self.packed["w_index_w"] = bf16_tiles(t["w_index_w"])
-        self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk, with_indexer, index_max_seq)
+        self.tagged_indices = gfx1250
+        self.scr_layout, self.sym_layout = layout(
+            samples, W.heads, npes, topk, with_indexer, index_max_seq, tagged_indices=gfx1250
+        )
         dev = torch.device("cuda", torch.cuda.current_device())
         self.stages = stage_tasks(samples, W.heads, topk, with_indexer, index_max_seq, self.expert_mxfp4)
         n_tasks = sum(n for _, n in self.stages)
@@ -324,6 +328,5 @@ class Glm5MonoKernel:
         if self.with_indexer:
             result["index_q"] = self.debug("index_q", (S, 32, INDEX_DIM), bf2=True)
             result["index_w"] = self.debug("index_w", (S, 32))
-            off = self.scr_layout["indices"]
-            result["indices"] = self.scratch[off : off + S * self.topk * 4].view(torch.int32).view(S, self.topk)
+            result["indices"] = self.debug("indices", (S, self.topk), torch.int32, pairs=self.tagged_indices)
         return result

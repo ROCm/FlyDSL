@@ -5,7 +5,8 @@
 
 This is the wave32 WMMA counterpart of ``kernel.py``.  It keeps that kernel's
 stage list, CTA placement, tagged-pair mailbox protocol, scratch and symmetric
-layouts, and numerics, so the host wrapper, golden and tests are shared.  One
+layouts (except the compact indices below), and numerics, so the host wrapper,
+golden and tests are shared.  One
 launch of ``grid = 256 CTAs x 512 threads`` (one CTA per gfx1250 WGP) runs the
 whole decoder-layer body for this rank's TP shard.
 
@@ -26,6 +27,9 @@ Differences from the gfx950 kernel:
   per lane, and top-8 routing sorts eight expert candidates per lane.
 * Mailboxes use the gfx12 ``scope`` field: ``SCOPE_DEV`` within the GPU and
   ``SCOPE_SYS`` for peer buffers.
+* The index-select CTA writes each compact top-k index as a tagged pair, which
+  the attention CTAs poll directly, instead of plain words published by a
+  release fence and one ``indices_ready`` tag.
 * ``timeline=True`` reads the 100 MHz steady counter.
 * ``poll_limit`` bounds the re-polls of every mailbox wait.  An expired wait
   sets its stage's ``poll_err`` scratch word and continues, so a protocol defect
@@ -191,7 +195,7 @@ def build_glm5_monokernel_gfx1250(
     H = heads
     W = npes
     G = BLOCKS
-    SC, SY = layout(S, H, W, topk, with_indexer, index_max_seq)
+    SC, SY = layout(S, H, W, topk, with_indexer, index_max_seq, tagged_indices=True)
     N_SPLIT = topk // SPLIT_KEYS
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
@@ -1461,7 +1465,6 @@ def build_glm5_monokernel_gfx1250(
                 # the number of keys equal to it that are selected.
                 threshold = prefix
                 out_gt = need - remain
-                r_index_out = _rsrc(mb("indices"))
                 items = index_max_seq // THREADS
                 item_indices = [tid * items + j for j in range_constexpr(items)]
                 item_keys = []
@@ -1487,33 +1490,20 @@ def build_glm5_monokernel_gfx1250(
                 for w in range_constexpr(WAVES):
                     before_wave = before_wave + (wave > w).select(lds_ld(keys, 256 + w), fx.Int32(0))
                 thread_base = before_wave + inclusive - local
+                # Every one of the topk tagged slots is written each launch, so the
+                # attention CTAs poll their indices directly: no release fence and
+                # no separate readiness tag on the critical path.
                 for j in range_constexpr(items):
                     offset = thread_base + local_offsets[j]
                     if gt[j]:
-                        bo.buffer_store(
-                            fx.Int32(item_indices[j]),
-                            r_index_out,
-                            s * topk + (offset & fx.Int32(0xFFFF)),
-                            cache_modifier=CM_DEV,
-                        )
+                        put(mb("indices"), s * topk + (offset & fx.Int32(0xFFFF)), fx.Int32(item_indices[j]))
                     eq_offset = offset.shrui(fx.Int32(16))
                     if eq[j] & (eq_offset < remain):
-                        bo.buffer_store(
-                            fx.Int32(item_indices[j]),
-                            r_index_out,
-                            s * topk + out_gt + eq_offset,
-                            cache_modifier=CM_DEV,
-                        )
+                        put(mb("indices"), s * topk + out_gt + eq_offset, fx.Int32(item_indices[j]))
                 for batch in range_constexpr((topk + THREADS - 1) // THREADS):
                     j = tid + batch * THREADS
                     if j >= bound:
-                        bo.buffer_store(fx.Int32(0), r_index_out, s * topk + j, cache_modifier=CM_DEV)
-                # Make every lane's compact-index stores visible before lane 0
-                # publishes the one readiness tag consumed by the attention CTAs.
-                fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
-                gpu.barrier()
-                if tid == 0:
-                    put(mb("indices_ready"), s, fx.Int32(1))
+                        put(mb("indices"), s * topk + j, fx.Int32(0))
                 stamp("index_select", s, 4)
 
         # ================================== 5. sparse MLA split: 64 (S>4: 32) keys x 8 heads
@@ -1527,34 +1517,24 @@ def build_glm5_monokernel_gfx1250(
             kv_len = pos0 + s + 1
             sparse = kv_len > topk
             nkeys = sparse.select(fx.Int32(topk), kv_len)
-            if const_expr(with_indexer):
-                if sparse:
-                    if wave == 0:
-                        if lane == 0:
-                            get(mb("indices_ready"), s)
-                        # Only wave 0 consumes the compact index payload; its
-                        # divergent ready poll reconverges before this acquire.
-                        fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
             if wave == 0:
-                for rep in range_constexpr(KEY_REPS):
-                    j = lane + rep * WAVE
+                slots = [lane + rep * WAVE for rep in range(KEY_REPS)]
+                k_cls = []
+                for j in slots:
                     k_pos = t * SPLIT_KEYS + j
-                    k_cl = (k_pos < nkeys).select(k_pos, 0)
-                    if const_expr(with_indexer):
-                        idx = k_cl
-                        if sparse:
-                            idx = fx.Int32(
-                                bo.buffer_load(
-                                    _rsrc(mb("indices")),
-                                    s * topk + k_cl,
-                                    vec_width=1,
-                                    dtype=T.i32,
-                                    cache_modifier=CM_DEV,
-                                )
-                            )
+                    k_cls.append((k_pos < nkeys).select(k_pos, 0))
+                if const_expr(with_indexer):
+                    if sparse:
+                        tagged = poll([(mb("indices"), s * topk + k_cl, 1) for k_cl in k_cls])
+                        for j, idx in zip(slots, tagged):
+                            lds_st(attn_keys, j, idx[0])
                     else:
+                        for j, k_cl in zip(slots, k_cls):
+                            lds_st(attn_keys, j, k_cl)
+                else:
+                    for j, k_cl in zip(slots, k_cls):
                         idx = fx.Int32(bo.buffer_load(r_idx, s * topk + k_cl, vec_width=1, dtype=T.i32))
-                    lds_st(attn_keys, j, sparse.select(idx, k_cl))
+                        lds_st(attn_keys, j, sparse.select(idx, k_cl))
             return nkeys, sparse
 
         def gather_old_kv():
