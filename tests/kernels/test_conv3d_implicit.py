@@ -402,7 +402,8 @@ _TUNED = _tuned_rows()
 )
 @pytest.mark.parametrize("layout", ["NCDHW", "NDHWC"])
 def test_tuned_csv_shapes(src, idx, shape, layout):
-    # Match aiter op_tests seed so bf16 rounding stays in the 0-mismatch bar.
+    # Seed 0 as in aiter's op test and tuner: with other seeds a handful of
+    # elements on the largest VAE shapes land just past the 2e-2 bf16 bar.
     torch.manual_seed(0)
     n, c, d, h, w = (int(shape[x]) for x in ("N", "C", "D", "H", "W"))
     k, kt, kh, kw = (int(shape[x]) for x in ("K", "kT", "kH", "kW"))
@@ -440,15 +441,7 @@ def test_tuned_csv_shapes(src, idx, shape, layout):
 
     out = _run()
     torch.cuda.synchronize()
-    close = torch.isclose(out.float(), ref.float(), **TOL)
-    n_bad = int((~close).sum().item())
-    if n_bad:
-        # Rare bf16 accumulation flake on huge VAE shapes: one retry.
-        out = _run()
-        torch.cuda.synchronize()
-        close = torch.isclose(out.float(), ref.float(), **TOL)
-        n_bad = int((~close).sum().item())
-    assert n_bad == 0, f"{src}[{idx}] {layout}: {n_bad}/{out.numel()} elements mismatch"
+    _assert_allclose(out, ref, f"{src}[{idx}] {layout}")
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +464,23 @@ def test_tuned_table_duplicate_key_raises(tmp_path, monkeypatch):
     try:
         with pytest.raises(ValueError, match="duplicate"):
             _load_tuned_table()
+    finally:
+        monkeypatch.delenv("FLYDSL_CONV3D_BF16_CONFIG", raising=False)
+        _load_tuned_table.cache_clear()
+
+
+def test_tuned_table_bad_cell_falls_back(tmp_path, monkeypatch):
+    """Like aiter: a malformed table degrades to the heuristic instead of raising."""
+    src = CONFIG_DIR / "qwenimage_vae_bf16_tuned_conv3d.csv"
+    df = pd.read_csv(src)
+    df["bias"] = df["bias"].astype(str)
+    df.loc[0, "bias"] = "maybe"
+    bad = tmp_path / "bad.csv"
+    df.to_csv(bad, index=False)
+    monkeypatch.setenv("FLYDSL_CONV3D_BF16_CONFIG", str(bad))
+    _load_tuned_table.cache_clear()
+    try:
+        assert _load_tuned_table() == {}
     finally:
         monkeypatch.delenv("FLYDSL_CONV3D_BF16_CONFIG", raising=False)
         _load_tuned_table.cache_clear()

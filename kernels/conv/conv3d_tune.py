@@ -7,7 +7,9 @@
 
 Reads an untuned CSV, sweeps ``conv3d_policy`` configs, writes winners to a
 tuned CSV. Same candidate set, CSV columns, err=0 bar, splitK pinning, and
-NDHWC timing as aiter ``csrc/flydsl_conv3d/conv3d_tune.py``.
+NDHWC timing as aiter ``csrc/flydsl_conv3d/conv3d_tune.py``; ``us`` comes from
+the same ``run_perftest`` protocol (see ``conv3d_perftest``), so it includes
+the weight repack and any channel pad, not just the conv kernel.
 
     python -m kernels.conv.conv3d_tune \\
         -i kernels/conv/configs/qwenimage_vae_bf16_untuned_conv3d.csv \\
@@ -28,8 +30,6 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from flydsl.autotune import do_bench
-
 from .conv3d_gfx950_utils import out_extent
 from .conv3d_implicit import (
     LIBTYPE_FLYDSL,
@@ -49,6 +49,7 @@ from .conv3d_implicit import (
     _tuned_rows_by_layer,
     flydsl_conv_implicit,
 )
+from .conv3d_perftest import run_perftest
 from .conv3d_policy import get_flydsl_conv3d_configs, tile_kernel_name
 
 log = logging.getLogger("conv3d_tune")
@@ -176,26 +177,23 @@ def _shape_configs(kv, max_configs, gfx, cu_num):
     return configs, m_gemm
 
 
-def _bench_one(kv, tile_m, tile_n, wave_m, wave_n, wgm, splitk, err_ratio_bar):
+def _shape_data(kv):
     n, c, d, h, w = (int(kv[x]) for x in ("N", "C", "D", "H", "W"))
     k, kt, kh, kw = (int(kv[x]) for x in ("K", "kT", "kH", "kW"))
     groups = int(kv["groups"])
     has_bias = _parse_tuned_bool(kv["bias"])
     params = _row_params(kv)
-    tile = (tile_m, tile_n, wave_m, wave_n)
     data = generate_data(n, c, d, h, w, k, kt, kh, kw, groups, has_bias)
+    ref = conv3d_ref(data["x"], data["weight"], data["bias"], params)
+    return data, params, ref
+
+
+def _bench_one(data, params, ref, tile, wgm, splitk):
+    """``(us, err_ratio)`` the way aiter's ``mp_tuner`` worker measures a candidate."""
     try:
-        out = run_flydsl_conv3d(data["x"], data["weight"], data["bias"], params, tile, wgm, splitk)
-        ref = conv3d_ref(data["x"], data["weight"], data["bias"], params)
-        err = _err_ratio(out, ref)
-        if err > err_ratio_bar:
-            return INVALID_TIME, err
-        us = do_bench(
-            lambda: run_flydsl_conv3d(data["x"], data["weight"], data["bias"], params, tile, wgm, splitk),
-            warmup=5,
-            rep=20,
-        )
-        return float(us), err
+        out, us = run_perftest(run_flydsl_conv3d, data["x"], data["weight"], data["bias"], params, tile, wgm, splitk)
+        torch.cuda.synchronize()
+        return round(us, 4), round(_err_ratio(out, ref), 4)
     except Exception as exc:  # noqa: BLE001
         log.debug("candidate failed: %s", exc)
         return INVALID_TIME, 1.0
@@ -209,13 +207,14 @@ def _tune_shape(kv, max_configs, err_ratio_bar, gfx, cu_num):
     kt, kh, kw = int(kv["kT"]), int(kv["kH"]), int(kv["kW"])
     cgp = _pad_channels(c // groups)
     crs = cgp * kt * kh * kw
+    data, params, ref = _shape_data(kv)
 
     best = None
     profile_rows = []
     for tile_m, tile_n, wave_m, wave_n, wgm in configs:
         tile = (tile_m, tile_n, wave_m, wave_n)
         sk = _resolve_splitk(None, m_gemm, crs, k, None, tile, groups, num_cu=cu_num)
-        us, err = _bench_one(kv, tile_m, tile_n, wave_m, wave_n, wgm, sk, err_ratio_bar)
+        us, err = _bench_one(data, params, ref, tile, wgm, sk)
         name = tile_kernel_name(tile_m, tile_n, wave_m, wave_n, wgm)
         tflops, bw = _calculate(kv, us)
         row = {
@@ -236,7 +235,7 @@ def _tune_shape(kv, max_configs, err_ratio_bar, gfx, cu_num):
             "bw": bw,
         }
         profile_rows.append(row)
-        if us == INVALID_TIME:
+        if us <= 0 or err > err_ratio_bar:
             continue
         if best is None or us < best["us"]:
             best = row
@@ -327,28 +326,17 @@ def _run_config(untunedf, err_ratio_bar):
             data = generate_data(n, c, d, h, w, k, kt, kh, kw, groups, has_bias)
             out, us = None, float("inf")
             for _ in range(RUN_CONFIG_REPS):
-                t = do_bench(
-                    lambda: flydsl_conv_implicit(
-                        data["x"],
-                        data["weight"],
-                        bias=data["bias"],
-                        input_layout=LAYOUT,
-                        output_layout=LAYOUT,
-                        **params,
-                    ),
-                    warmup=5,
-                    rep=20,
+                out_i, us_i = run_perftest(
+                    flydsl_conv_implicit,
+                    data["x"],
+                    data["weight"],
+                    bias=data["bias"],
+                    input_layout=LAYOUT,
+                    output_layout=LAYOUT,
+                    **params,
                 )
-                if t < us:
-                    us = t
-                    out = flydsl_conv_implicit(
-                        data["x"],
-                        data["weight"],
-                        bias=data["bias"],
-                        input_layout=LAYOUT,
-                        output_layout=LAYOUT,
-                        **params,
-                    )
+                if us_i < us:
+                    out, us = out_i, us_i
             ref = conv3d_ref(data["x"], data["weight"], data["bias"], params)
             ok = _err_ratio(out, ref) <= err_ratio_bar
             results.append({"shape": shape, "e2e_us": round(us, 4), "status": "ok" if ok else "mismatch"})

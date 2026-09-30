@@ -48,6 +48,7 @@ from .conv3d_transpose import (
 SUPPORTED_GFX = ("gfx950",)
 
 
+@functools.lru_cache(maxsize=1)
 def _get_gfx():
     """GPU arch string matching tuned CSV stamps; strip feature suffixes."""
     from flydsl.runtime.device import get_rocm_arch
@@ -55,6 +56,7 @@ def _get_gfx():
     return get_rocm_arch().split(":", 1)[0]
 
 
+@functools.lru_cache(maxsize=1)
 def _get_cu_num():
     """CU count for tile/split-K heuristics and tuned-table lookup.
 
@@ -261,6 +263,10 @@ def _dyn_hw_ok(n, c_padded, d, h, w, k, npq, tile):
 _TUNED_LOOKUP_LOGGED = set()
 
 
+class DuplicateTunedKeyError(ValueError):
+    """Two tuned rows claim one (gfx, cu_num, shape); the only table error that raises."""
+
+
 def _default_tuned_csv_paths():
     """Shipped per-model tuned tables under kernels/conv/configs/."""
     cfg_dir = Path(__file__).resolve().parent / "configs"
@@ -328,7 +334,7 @@ def _load_tuned_table():
                 (_parse_tuned_bool(getattr(row, c)) if c == "bias" else int(getattr(row, c))) for c in TUNED_KEY_COLUMNS
             )
             if key in table:
-                raise ValueError(
+                raise DuplicateTunedKeyError(
                     f"duplicate tuned conv3d shape key {key}; "
                     f"check FLYDSL_CONV3D_BF16_CONFIG / kernels/conv/configs/"
                 )
@@ -358,9 +364,7 @@ def _load_tuned_table():
                 + ", ".join(f"{n} x {TUNED_LIBTYPE_COLUMN}={lt}" for lt, n in sorted(skipped_libtypes.items()))
             )
         return table
-    except ValueError:
-        # Duplicate keys / malformed bias cells: surface so a bad merge cannot
-        # silently fall back to the heuristic and look like a performance bug.
+    except DuplicateTunedKeyError:
         raise
     except Exception as exc:  # noqa: BLE001  a bad config table must never break a conv
         _logger().warning(
