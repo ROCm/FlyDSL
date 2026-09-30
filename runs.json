@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-30T11:22:23Z",
+ "updated": "2026-09-30T12:48:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36716949707,
+   "pr": 1216,
+   "commit": "96c3321e99314f70b19de96f0f88a087946789aa",
+   "branch": "kernel/gfx1100-flash-attn",
+   "event": "pull_request",
+   "title": "[Kernel] Add dense Flash Attention for gfx1100",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36716949707",
+   "created_at": "2026-09-30T12:46:24Z",
+   "updated_at": "2026-09-30T12:46:24Z",
+   "actor": "vlluvia",
+   "jobs": []
+  },
   {
    "run_id": 36697619745,
    "pr": 1184,
@@ -183,7 +198,7 @@
   },
   {
    "run_id": 36684093024,
-   "pr": 1216,
+   "pr": null,
    "commit": "bbdca703cee28d764511e2efef0b28d9fff7f3ff",
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
@@ -2111,49 +2126,6 @@
      "started_at": "2026-09-28T06:55:13Z",
      "completed_at": "2026-09-28T07:13:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36386491522/job/108816706561"
-    }
-   ]
-  },
-  {
-   "run_id": 36384404062,
-   "pr": null,
-   "commit": "3ee49fb5f832ec8ddae5d75520f46b704e24bb53",
-   "branch": "docs/full-doc-audit-20260926",
-   "event": "pull_request",
-   "title": "[Docs] Audit and refresh repository documentation",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062",
-   "created_at": "2026-09-28T06:00:51Z",
-   "updated_at": "2026-09-28T11:09:35Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-28T10:31:30Z",
-     "completed_at": "2026-09-28T11:09:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108887931559"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T06:42:53Z",
-     "completed_at": "2026-09-28T08:26:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108887932558"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T06:15:16Z",
-     "completed_at": "2026-09-28T06:49:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36384404062/job/108887966597"
     }
    ]
   }
