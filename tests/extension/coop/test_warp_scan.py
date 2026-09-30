@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import coop_warp_utils as checks
 import pytest
-from coop_common import WARP_WIDTHS, dtype_id, sample, wrap
-from coop_test_utils import run_kernel
+from coop_common import WARP_WIDTHS, sample, wrap
+from coop_test_utils import matrix_cases, run_kernel
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -81,9 +81,10 @@ def expected_scan(values, name, *, width, inclusive):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("entry", SCAN_DTYPES, ids=dtype_id)
-@pytest.mark.parametrize("width", WARP_WIDTHS, ids=width_id)
-@pytest.mark.parametrize("inclusive", (True, False), ids=("inclusive", "exclusive"))
+@pytest.mark.parametrize(
+    "entry,width,inclusive",
+    matrix_cases(SCAN_DTYPES, WARP_WIDTHS, (True, False)),
+)
 def test_sum(entry, width, inclusive):
     """Each group of *width* lanes scans on its own."""
     _, name = entry
@@ -137,9 +138,10 @@ def test_combination_scan(width):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("entry", SCAN_DTYPES, ids=dtype_id)
-@pytest.mark.parametrize("width", WARP_WIDTHS, ids=width_id)
-@pytest.mark.parametrize("inclusive", (True, False), ids=("inclusive", "exclusive"))
+@pytest.mark.parametrize(
+    "entry,width,inclusive",
+    matrix_cases(SCAN_DTYPES, WARP_WIDTHS, (True, False)),
+)
 def test_warp_aggregate(entry, width, inclusive):
     """The scan still holds, and every lane reads its own group's total."""
     _, name = entry
@@ -177,8 +179,7 @@ def test_warp_aggregate(entry, width, inclusive):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("width", WARP_WIDTHS, ids=width_id)
-@pytest.mark.parametrize("inclusive", (True, False), ids=("inclusive", "exclusive"))
+@pytest.mark.parametrize("width,inclusive", matrix_cases(WARP_WIDTHS, (True, False)))
 def test_initial_value(width, inclusive):
     """*init* folds in ahead of the group, so lane 0 sees it and nothing else."""
     INIT = 3
@@ -302,9 +303,10 @@ def test_warp_width_defaults_to_the_whole_warp():
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("universal", [False, True])
-@pytest.mark.parametrize("valid", [0, 1, 5, 8])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "universal,valid,default_device",
+    matrix_cases([False, True], [0, 1, 5, 8], ["cpu", "cuda"]),
+)
 def test_warp_valid_counts_seed_broadcast(universal, valid, default_device):
     with torch.device(default_device):
         checks.check_warp_valid_counts_seed_broadcast(universal, valid)
@@ -313,8 +315,7 @@ def test_warp_valid_counts_seed_broadcast(universal, valid, default_device):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("valid", [1, 5, 8])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+@pytest.mark.parametrize("valid,default_device", matrix_cases([1, 5, 8], ["cpu", "cuda"]))
 def test_warp_partial_scan_semigroup_without_identity(valid, default_device):
     with torch.device(default_device):
         checks.check_warp_partial_scan_semigroup_without_identity(valid)
@@ -323,10 +324,10 @@ def test_warp_partial_scan_semigroup_without_identity(valid, default_device):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("policy", ["warp"])
-@pytest.mark.parametrize("op", [fx.ReductionOp.MIN, fx.ReductionOp.MAX])
-@pytest.mark.parametrize("valid", [0, 5])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "policy,op,valid,default_device",
+    matrix_cases(["warp"], [fx.ReductionOp.MIN, fx.ReductionOp.MAX], [0, 5], ["cpu", "cuda"]),
+)
 def test_boolean_partial_identities(policy, op, valid, default_device):
     with torch.device(default_device):
         checks.check_boolean_partial_identities(policy, op, valid)
@@ -335,9 +336,14 @@ def test_boolean_partial_identities(policy, op, valid, default_device):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("dtype", [fx.Int128, fx.Uint128])
-@pytest.mark.parametrize("op", [fx.ReductionOp.ADD, fx.ReductionOp.MIN, fx.ReductionOp.MAX])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "dtype,op,default_device",
+    matrix_cases(
+        [fx.Int128, fx.Uint128],
+        [fx.ReductionOp.ADD, fx.ReductionOp.MIN, fx.ReductionOp.MAX],
+        ["cpu", "cuda"],
+    ),
+)
 def test_warp_128_bit_reduce_scan(dtype, op, default_device):
     with torch.device(default_device):
         checks.check_warp_128_bit_reduce_scan(dtype, op)
@@ -346,9 +352,10 @@ def test_warp_128_bit_reduce_scan(dtype, op, default_device):
 @pytest.mark.rocm_lower
 @pytest.mark.l2_device
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("case", ["scan"])
-@pytest.mark.parametrize("universal", [False, True])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "case,universal,default_device",
+    matrix_cases(["scan"], [False, True], ["cpu", "cuda"]),
+)
 def test_nested_record_scan(case, universal, default_device):
     with torch.device(default_device):
         checks.check_nested_record_warp_collectives(case, universal)
@@ -401,13 +408,19 @@ def _counted_scan(universal, form, prefix, entry, valid):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("universal", [False, True], ids=["dispatched", "universal"])
-@pytest.mark.parametrize("form,prefix", [("scalar", "none"), ("scalar", "init"), ("record", "init")])
 @pytest.mark.parametrize(
-    "entry", ["warp_inclusive_scan", "warp_exclusive_scan", "warp_scan", "warp_scan_with_aggregate"]
+    "universal,form,prefix,entry,valid,default_device",
+    [
+        (universal, *form, entry, valid, default_device)
+        for universal, form, entry, valid, default_device in matrix_cases(
+            [False, True],
+            [("scalar", "none"), ("scalar", "init"), ("record", "init")],
+            ["warp_inclusive_scan", "warp_exclusive_scan", "warp_scan", "warp_scan_with_aggregate"],
+            [0, 1, 3, 4, "runtime"],
+            ["cpu", "cuda"],
+        )
+    ],
 )
-@pytest.mark.parametrize("valid", [0, 1, 3, 4, "runtime"])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
 def test_warp_scan_skips_invalid_operators(universal, form, prefix, entry, valid, default_device):
     with torch.device(default_device):
         block, width = 64, 4
@@ -439,8 +452,15 @@ def test_warp_scan_skips_invalid_operators(universal, form, prefix, entry, valid
 
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
-@pytest.mark.parametrize("arch", ["gfx942", "gfx1100"])
-@pytest.mark.parametrize("form,prefix", [("scalar", "none"), ("scalar", "init"), ("record", "init")])
+@pytest.mark.parametrize(
+    "arch,form,prefix",
+    [
+        (arch, *form)
+        for arch, form in matrix_cases(
+            ["gfx942", "gfx1100"], [("scalar", "none"), ("scalar", "init"), ("record", "init")]
+        )
+    ],
+)
 def test_warp_scan_valid_compile(monkeypatch, arch, form, prefix):
     monkeypatch.setenv("ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")

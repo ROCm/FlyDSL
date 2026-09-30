@@ -3552,6 +3552,13 @@ class DualwaveKernelContext:
     def init_thread_mapping(self):
         _init_dualwave_thread_mapping(self)
 
+    def init_causal_lpt_order(self):
+        """Issue fixed-length causal query blocks longest-first."""
+        traits = self.traits
+        num_q_blocks = (self.seq_len_v + traits.BLOCK_M - 1) // traits.BLOCK_M
+        self.q_block_idx = num_q_blocks - fx.Index(1) - self.q_block_idx
+        self.q_start = self.q_block_idx * traits.BLOCK_M
+
     def init_sequence_lengths(self, CuSeqQ=None, CuSeqKv=None):
         if CuSeqQ is None:
             CuSeqQ = self.CuSeqQ
@@ -3579,6 +3586,14 @@ class DualwaveKernelContext:
             self.seqlen_q_v = self.seq_len_v
             self.seqlen_kv_v = self.seq_len_kv_v
             self.seqlen_kv_i32 = self.seq_len_kv
+
+    def init_varlen_causal_lpt_order(self):
+        """Reverse only active varlen query blocks, preserving padded guards."""
+        num_q_blocks = (self.seqlen_q_v + self.traits.BLOCK_M - 1) // self.traits.BLOCK_M
+        active_q_block = self.q_block_idx < num_q_blocks
+        reversed_q_block = num_q_blocks - 1 - self.q_block_idx
+        self.q_block_idx = active_q_block.select(reversed_q_block, self.q_block_idx)
+        self.q_start = self.q_block_idx * self.traits.BLOCK_M
 
     def init_descriptors(
         self,

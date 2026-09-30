@@ -5,7 +5,7 @@ from typing import List, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
-from .base import BaseBackend, GPUTarget
+from .base import AOTRuntimeConfig, BaseBackend, GPUTarget
 
 
 class RocmBackend(BaseBackend):
@@ -139,8 +139,15 @@ class RocmBackend(BaseBackend):
                 func_op.attributes["rocdl.waves_per_eu"] = wpe_attr
 
     def gpu_module_targets(self) -> List[str]:
-        chip = self.target.arch
-        return [f'#rocdl.target<chip = "{chip}">']
+        # Intentionally empty: the ROCm pipeline attaches the authoritative
+        # #rocdl.target via `rocdl-attach-target` (binary_prep_fragments),
+        # which carries the compile options (O, abi, fast/unsafe-math,
+        # wave64, link_libs). Attaching a bare target here as well made
+        # gpu-module-to-binary serialize one object per target and select the
+        # *bare* one (first object, no offloading handler) — doubling backend
+        # work and silently discarding compile options and link_libs
+        # (ROCm/FlyDSL#1054).
+        return []
 
     # -- cache / fingerprint ---------------------------------------------
 
@@ -148,6 +155,7 @@ class RocmBackend(BaseBackend):
         return [
             "_mlirDialectsFly*.so",
             "libFly*.so",
+            "libfly_rocm_aot_runtime.a",
             "libfly_jit_runtime.so",
             "libmlir_rocm_runtime.so",
             "_mlirRegisterEverything*.so",
@@ -158,6 +166,14 @@ class RocmBackend(BaseBackend):
             "libfly_jit_runtime.so",
             "libmlir_c_runner_utils.so",
         ]
+
+    @classmethod
+    def aot_runtime_config(cls) -> AOTRuntimeConfig:
+        return AOTRuntimeConfig(
+            archive_basename="libfly_rocm_aot_runtime.a",
+            runtime_libraries=("libamdhip64.so",),
+            linker_flags=("-lamdhip64", "-pthread", "-ldl"),
+        )
 
 
 def _normalize_waves_per_eu(waves_per_eu) -> "str | None":

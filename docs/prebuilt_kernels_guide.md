@@ -287,8 +287,9 @@ Returns a `@flyc.jit`-decorated function that auto-compiles on first call.
 E8M0 scales, selecting the A element type via `a_dtype` (`"fp4"`, `"fp6"`, or
 `"fp8"`; B is always MXFP4). This unified `launch_gemm` is the current gfx950
 entry point (it replaced the earlier standalone `compile_mxfp6_gemm` from #780);
-the separate `compile_mxfp4_gemm` in `kernels/gemm/gemm_fp8fp4_gfx1250.py` is the
-distinct gfx1250 kernel. `batch>1` runs a strided-batched GEMM over `grid.z`.
+the separate `launch_gemm_a8w4_mxscale` entry point in
+`kernels/gemm/gemm_a8w4_mxscale_gfx1250.py` is the distinct gfx1250 kernel.
+`batch>1` runs a strided-batched GEMM over `grid.z`.
 Covered by `tests/kernels/test_preshuffle_gemm.py`.
 
 **Pipeline details:**
@@ -384,7 +385,7 @@ Coordinate mapping in `flydsl.expr`:
 |---|---|
 | `fx.crd2idx(crd, layout)` | Coordinate → flat index (Fly dialect op) |
 | `fx.idx2crd(idx, layout)` | Flat index → coordinate tuple (Fly dialect op) |
-| `fx.get(int_tuple, mode)` | Extract element at index from `!fly.int_tuple` |
+| `fx.get_(int_tuple, mode).unpack()` | Extract a scalar element at index from `!fly.int_tuple` |
 
 ---
 
@@ -435,7 +436,7 @@ What operation do you need?
 ├── MoE (Mixture of Experts)
 │   ├── Blockscale MoE (gate+up+reduce)
 │   └── Standard MoE (fp8/f16/bf16/int8/int4)
-│       └── → kernels/moe/moe_gemm_2stage.py
+│       └── → kernels/moe/moe_gemm_2stage/
 │
 └── Building blocks
     ├── Common kernel helpers → kernels/common/kernels_common.py
@@ -449,7 +450,7 @@ What operation do you need?
 | File | Description |
 |---|---|
 | `kernels/gemm/preshuffle_gemm.py` | GEMM (preshuffle layout) |
-| `kernels/moe/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce) |
+| `kernels/moe/moe_gemm_2stage/` | MoE GEMM 2-stage (gate/up + reduce) |
 | `kernels/moe/mxfp_moe/` | Fused a4w4/a8w4 MoE 2-stage GEMM (device fp4 re-quant) |
 | `kernels/attention/pa_decode_fp8.py` | Paged attention decode (FP8) |
 | `kernels/attention/flash_attn_generic.py` | FlashAttention generic fallback |
@@ -465,10 +466,11 @@ What operation do you need?
 | `kernels/gemm/rdna_f16_gemm.py` | RDNA FP16 GEMM |
 | `kernels/gemm/rdna_fp8_preshuffle_gemm.py` | RDNA FP8 GEMM |
 | `kernels/gemm/gemm_common_gfx1250.py` | GFX1250 GEMM common |
-| `kernels/gemm/gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| `kernels/gemm/wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| `kernels/gemm/gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
+| `kernels/gemm/gemm_a8w8_gfx1250.py` | GFX1250 FP8 GEMM (per-token/per-channel and 128x128 blockscale) |
+| `kernels/gemm/gemm_a8w4_mxscale_gfx1250.py` | GFX1250 FP8 x MXFP4 GEMM |
 | `kernels/common/mma/mfma_preshuffle_pipeline.py` | Preshuffle layout and block remapping |
-| `kernels/mma/pipeline_utils.py` | Pipeline utility helpers |
+| `kernels/gemm/fp8_gemm_utils.py` | FP8 GEMM helper utilities |
 | `kernels/common/kernels_common.py` | Common kernel utilities |
 | `kernels/common/tensor_shim.py` | GTensor/STensor abstraction |
 
@@ -490,7 +492,7 @@ What operation do you need?
 | `tests/kernels/test_allreduce.py` | Multi-GPU all-reduce |
 | `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |
 | `tests/kernels/test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
-| `tests/kernels/test_wmma_gemm_gfx1250.py` | GFX1250 WMMA GEMM |
+| `tests/kernels/test_gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | `tests/kernels/test_vec_add.py` | Vector addition |
 | `tests/kernels/test_quant.py` | Quantization utilities |
 | `tests/kernels/benchmark_common.py` | Shared benchmark infrastructure |

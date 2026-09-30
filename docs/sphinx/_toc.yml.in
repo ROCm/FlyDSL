@@ -53,12 +53,18 @@ subtrees:
         title: External bitcode integration
   - caption: API reference
     entries:
+      - file: api/index
+        title: API overview
       - file: api/dsl
-        title: FlyDSL Python DSL
+        title: Expression language
       - file: api/compiler
-        title: Compiler and pipeline
+        title: Compiler
+      - file: api/extensions
+        title: Extension libraries
+      - file: api/runtime
+        title: Stable runtime helpers
       - file: api/kernels
-        title: Prebuilt kernels
+        title: Pre-built kernels
   - caption: Tutorials
     entries:
       - file: tutorials/basic_usage

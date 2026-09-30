@@ -7,9 +7,9 @@ import inspect
 
 import pytest
 import torch
+from coop_test_utils import matrix_cases, warp_storage
 from coop_test_utils import run_kernel as run
 from coop_test_utils import warp_default_device as warp_default_device
-from coop_test_utils import warp_storage
 
 import flydsl.expr as fx
 from flydsl.compiler.protocol import dsl_align_of, dsl_size_of, extract_to_ir_values
@@ -26,12 +26,12 @@ OPERATORS = (
 )
 
 
-@pytest.fixture(params=[False, True], ids=["dispatched", "universal"])
+@pytest.fixture
 def api(request):
     return fx.coop.universal if request.param else fx.coop
 
 
-@pytest.fixture(params=["omitted", "static", "dynamic"])
+@pytest.fixture
 def storage_mode(request):
     return request.param
 
@@ -45,7 +45,11 @@ def empty_storage(mode, *operators):
     return storage
 
 
-@pytest.mark.parametrize("name,tile", OPERATORS)
+@pytest.mark.parametrize(
+    "name,tile,api",
+    [(*operator, universal) for operator, universal in matrix_cases(OPERATORS, [False, True])],
+    indirect=["api"],
+)
 def test_specialization_metadata_and_target_cache(monkeypatch, name, tile, api):
     monkeypatch.setenv("ARCH", "gfx942")
     root = getattr(api, name)
@@ -148,7 +152,11 @@ def test_member_dispatch_and_portable_namespace(monkeypatch, insert_point):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.usefixtures("warp_default_device")
-@pytest.mark.parametrize("width", [1, 8, 32])
+@pytest.mark.parametrize(
+    "api,width,storage_mode",
+    matrix_cases([False, True], [1, 8, 32], ["omitted", "static", "dynamic"]),
+    indirect=["api", "storage_mode"],
+)
 def test_reduce_members_and_direct_functions(api, width, storage_mode):
     host = torch.arange(64, dtype=torch.int32, device="cpu") + 1
 
@@ -176,7 +184,11 @@ def test_reduce_members_and_direct_functions(api, width, storage_mode):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.usefixtures("warp_default_device")
-@pytest.mark.parametrize("width", [1, 8, 32])
+@pytest.mark.parametrize(
+    "api,width,storage_mode",
+    matrix_cases([False, True], [1, 8, 32], ["omitted", "static", "dynamic"]),
+    indirect=["api", "storage_mode"],
+)
 def test_scan_members_and_direct_functions(api, width, storage_mode):
     host = torch.arange(64, dtype=torch.int32, device="cpu") % 7
 
@@ -214,8 +226,11 @@ def test_scan_members_and_direct_functions(api, width, storage_mode):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.usefixtures("warp_default_device")
-@pytest.mark.parametrize("count", [3, 9])
-@pytest.mark.parametrize("layout", ["blocked", "striped"])
+@pytest.mark.parametrize(
+    "api,count,layout,storage_mode",
+    matrix_cases([False, True], [3, 9], ["blocked", "striped"], ["omitted", "static", "dynamic"]),
+    indirect=["api", "storage_mode"],
+)
 def test_batched_members_and_direct_functions(api, count, layout, storage_mode):
     width = 8
     output_count = (count + width - 1) // width
@@ -247,7 +262,11 @@ def test_batched_members_and_direct_functions(api, count, layout, storage_mode):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.usefixtures("warp_default_device")
-@pytest.mark.parametrize("family", ["Bitonic", "Merge"])
+@pytest.mark.parametrize(
+    "api,family,storage_mode",
+    matrix_cases([False, True], ["Bitonic", "Merge"], ["omitted", "static", "dynamic"]),
+    indirect=["api", "storage_mode"],
+)
 def test_sort_members_and_direct_functions(api, family, storage_mode):
     count, width = 3, 8
     host = (torch.arange(64 * count, device="cpu", dtype=torch.int32) * 17) % 191
@@ -280,8 +299,15 @@ def test_sort_members_and_direct_functions(api, family, storage_mode):
 
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
-@pytest.mark.parametrize("arch", ["gfx90a", "gfx942", "gfx950", "gfx1100", "gfx1201"])
-@pytest.mark.parametrize("default_device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "arch,api,default_device",
+    matrix_cases(
+        ["gfx90a", "gfx942", "gfx950", "gfx1100", "gfx1201"],
+        [False, True],
+        ["cpu", "cuda"],
+    ),
+    indirect=["api"],
+)
 def test_compile_operator_pipeline(monkeypatch, arch, api, default_device):
     monkeypatch.setenv("ARCH", arch)
     monkeypatch.setenv("COMPILE_ONLY", "1")
@@ -316,6 +342,7 @@ def test_compile_operator_pipeline(monkeypatch, arch, api, default_device):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.usefixtures("warp_default_device")
+@pytest.mark.parametrize("api", [False, True], indirect=True)
 def test_native_record_operator_members(api):
     record = fx.Struct["value" : fx.Int32, "tag" : fx.Int32]
     host = torch.arange(64, device="cpu", dtype=torch.int32) + 1
@@ -374,7 +401,11 @@ def test_explicit_storage_type_is_checked(insert_point):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.usefixtures("warp_default_device")
-@pytest.mark.parametrize("static", [True, False])
+@pytest.mark.parametrize(
+    "api,static",
+    matrix_cases([False, True], [True, False]),
+    indirect=["api"],
+)
 def test_empty_storage_io_and_shuffle(api, static):
     width, count, block = 8, 8, 64
     host = torch.arange(block * count, dtype=torch.int32, device="cpu")

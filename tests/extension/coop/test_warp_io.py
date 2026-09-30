@@ -4,8 +4,8 @@
 """Warp load/store policies, logical widths, valid-item scopes, and conversions."""
 
 import pytest
-from coop_common import DTYPES, dtype_id
-from coop_test_utils import ARCHES, dtype_entry, run_kernel, warp_indices
+from coop_common import DTYPES
+from coop_test_utils import ARCHES, dtype_entry, matrix_cases, run_kernel, warp_indices
 from coop_test_utils import coop_default_device as coop_default_device
 from coop_test_utils import warp_default_device as warp_default_device
 
@@ -20,12 +20,18 @@ except ImportError:
     torch = None
 import coop_warp_utils as checks
 
+MOVEMENT_IO_CASES = [(True, policy.name) for policy in WarpLoadAlgorithm]
+CROSS_DTYPE_CASES = [
+    (fx.Int32, "int32", fx.Int64, "int64"),
+    (fx.Float32, "float32", fx.Float64, "float64"),
+    (fx.Int64, "int64", fx.Int16, "int16"),
+]
+
 
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("policy", ["warp", "warp_striped"])
-@pytest.mark.parametrize("valid", [None, 0, 1, 95, 96])
+@pytest.mark.parametrize("policy,valid", matrix_cases(["warp", "warp_striped"], [None, 0, 1, 95, 96]))
 @pytest.mark.usefixtures("warp_default_device")
 def test_guarded_io(
     policy, valid, block=32, count=3, entry=(fx.Int32, "int32"), universal=False, width=8, dynamic=False
@@ -36,8 +42,7 @@ def test_guarded_io(
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("policy", ["warp", "warp_striped"])
-@pytest.mark.parametrize("valid", [0, 1, 95, 96])
+@pytest.mark.parametrize("policy,valid", matrix_cases(["warp", "warp_striped"], [0, 1, 95, 96]))
 @pytest.mark.usefixtures("coop_default_device")
 def test_runtime_valid_items(policy, valid):
     checks.check_guarded_io(policy, valid, dynamic=True)
@@ -46,8 +51,7 @@ def test_runtime_valid_items(policy, valid):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("policy", list(WarpLoadAlgorithm))
-@pytest.mark.parametrize("valid", [0, 1, 9, 31, 32])
+@pytest.mark.parametrize("policy,valid", matrix_cases(list(WarpLoadAlgorithm), [0, 1, 9, 31, 32]))
 def test_warp_valid_items_are_per_warp(policy, valid):
     block, width, count = 32, 8, 4
     size = block * count
@@ -77,9 +81,10 @@ def test_warp_valid_items_are_per_warp(policy, valid):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("warp,policy", [(True, p.name) for p in WarpLoadAlgorithm])
-@pytest.mark.parametrize("count", [3, 4])
-@pytest.mark.parametrize("valid", [0, 1, 95])
+@pytest.mark.parametrize(
+    "warp,policy,count,valid",
+    [(*movement, count, valid) for movement, count, valid in matrix_cases(MOVEMENT_IO_CASES, [3, 4], [0, 1, 95])],
+)
 @pytest.mark.usefixtures("coop_default_device")
 def test_movement_io_policies(warp, policy, count, valid):
     checks.check_movement_io_policies(warp, policy, count, valid)
@@ -88,10 +93,10 @@ def test_movement_io_policies(warp, policy, count, valid):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("entry", DTYPES, ids=dtype_id)
-@pytest.mark.parametrize("count", [1, 9])
-@pytest.mark.parametrize("policy", ["warp", "warp_striped"])
-@pytest.mark.parametrize("universal", [False, True])
+@pytest.mark.parametrize(
+    "entry,count,policy,universal",
+    matrix_cases(DTYPES, [1, 9], ["warp", "warp_striped"], [False, True]),
+)
 @pytest.mark.usefixtures("coop_default_device")
 def test_io_dtypes(entry, count, policy, universal):
     checks.check_guarded_io(
@@ -102,9 +107,10 @@ def test_io_dtypes(entry, count, policy, universal):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("entry", DTYPES, ids=dtype_id)
-@pytest.mark.parametrize("width", [1, 2, 4, 8, 16, 32, None])
-@pytest.mark.parametrize("striped", [False, True])
+@pytest.mark.parametrize(
+    "entry,width,striped",
+    matrix_cases(DTYPES, [1, 2, 4, 8, 16, 32, None], [False, True]),
+)
 @pytest.mark.usefixtures("coop_default_device")
 def test_warp_io_widths(entry, width, striped):
     checks.check_guarded_io(
@@ -115,8 +121,16 @@ def test_warp_io_widths(entry, width, striped):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("case,policy", [("warp_io", policy.name) for policy in WarpLoadAlgorithm])
-@pytest.mark.parametrize("count", [3, 4])
+@pytest.mark.parametrize(
+    "case,policy,count",
+    [
+        (*case, count)
+        for case, count in matrix_cases(
+            [("warp_io", policy.name) for policy in WarpLoadAlgorithm],
+            [3, 4],
+        )
+    ],
+)
 @pytest.mark.usefixtures("warp_default_device")
 def test_record_movement(case, policy, count):
     checks.check_record_movement(case, policy, count)
@@ -125,8 +139,13 @@ def test_record_movement(case, policy, count):
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
-@pytest.mark.parametrize("arch", ARCHES)
-@pytest.mark.parametrize("case,policy", [("warp_io", policy.name) for policy in WarpLoadAlgorithm])
+@pytest.mark.parametrize(
+    "arch,case,policy",
+    [
+        (arch, case, policy)
+        for arch, (case, policy) in matrix_cases(ARCHES, [("warp_io", policy.name) for policy in WarpLoadAlgorithm])
+    ],
+)
 def test_compile_record_movement(monkeypatch, arch, case, policy):
     checks.check_compile_record_movement(monkeypatch, arch, case, policy)
 
@@ -134,8 +153,10 @@ def test_compile_record_movement(monkeypatch, arch, case, policy):
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
-@pytest.mark.parametrize("arch", ARCHES)
-@pytest.mark.parametrize("case", ["warp_io_VECTORIZE", "warp_io_TRANSPOSE"])
+@pytest.mark.parametrize(
+    "arch,case",
+    matrix_cases(ARCHES, ["warp_io_VECTORIZE", "warp_io_TRANSPOSE"]),
+)
 def test_compile_movement_policies(monkeypatch, arch, case):
     checks.check_compile_movement_policies(monkeypatch, arch, case)
 
@@ -144,18 +165,17 @@ def test_compile_movement_policies(monkeypatch, arch, case):
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
 @pytest.mark.parametrize(
-    "warp,policy,count", [(True, policy.name, 4) for policy in WarpLoadAlgorithm] + [(True, "VECTORIZE", 3)]
-)
-@pytest.mark.parametrize(
-    "source_dtype,source_name,target_dtype,target_name",
+    "warp,policy,count,source_dtype,source_name,target_dtype,target_name,convert_load,partial",
     [
-        (fx.Int32, "int32", fx.Int64, "int64"),
-        (fx.Float32, "float32", fx.Float64, "float64"),
-        (fx.Int64, "int64", fx.Int16, "int16"),
+        (*movement, *conversion, convert_load, partial)
+        for movement, conversion, convert_load, partial in matrix_cases(
+            [(True, policy.name, 4) for policy in WarpLoadAlgorithm] + [(True, "VECTORIZE", 3)],
+            CROSS_DTYPE_CASES,
+            [False, True],
+            ["one", "tail"],
+        )
     ],
 )
-@pytest.mark.parametrize("convert_load", [False, True])
-@pytest.mark.parametrize("partial", ["one", "tail"])
 @pytest.mark.usefixtures("warp_default_device")
 def test_guarded_cross_dtype_io(
     warp, policy, count, source_dtype, source_name, target_dtype, target_name, convert_load, partial
@@ -168,8 +188,7 @@ def test_guarded_cross_dtype_io(
 @pytest.mark.l1b_target_dialect
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
-@pytest.mark.parametrize("arch", ARCHES)
-@pytest.mark.parametrize("case", ["warp_load", "warp_store"])
+@pytest.mark.parametrize("arch,case", matrix_cases(ARCHES, ["warp_load", "warp_store"]))
 def test_compile_family(monkeypatch, arch, case):
     checks.check_compile_family(monkeypatch, arch, case)
 
@@ -177,10 +196,15 @@ def test_compile_family(monkeypatch, arch, case):
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 @pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("policy", list(WarpLoadAlgorithm))
-@pytest.mark.parametrize("addressing", ["offset", "view", "shared_source"])
-@pytest.mark.parametrize("scope", ["warp", "block", "block_unsigned"])
-@pytest.mark.parametrize("universal", [False, True], ids=["dispatched", "universal"])
+@pytest.mark.parametrize(
+    "policy,addressing,scope,universal",
+    matrix_cases(
+        list(WarpLoadAlgorithm),
+        ["offset", "view", "shared_source"],
+        ["warp", "block", "block_unsigned"],
+        [False, True],
+    ),
+)
 @pytest.mark.usefixtures("warp_default_device")
 def test_tile_addresses(policy, addressing, scope, universal):
     """Caller-selected tiles work across physical warps and a 3D block."""
