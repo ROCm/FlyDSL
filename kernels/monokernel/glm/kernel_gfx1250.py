@@ -92,7 +92,6 @@ from kernels.monokernel.ops import (
     bpermute_i32,
     fp4x8_to_bf16_gfx1250,
     fp8x8_to_bf16_gfx1250,
-    read_lane_i32,
     spin_pause,
     steady_counter,
     wave32_umax,
@@ -187,6 +186,7 @@ def build_glm5_monokernel_gfx1250(
     assert topk % SPLIT_KEYS == 0 and 1 <= S <= 8
     assert 1 <= launches_per_step <= LAYER_SLOTS
     assert not with_indexer or (topk == 2048 and index_max_seq % INDEX_KEYS_PER_TASK == 0)
+    assert index_max_seq < 1 << 16, "the index-select compaction scans two key counts packed in 16-bit halves"
     assert poll_limit is None or poll_limit > 0
     H = heads
     W = npes
@@ -212,19 +212,24 @@ def build_glm5_monokernel_gfx1250(
     KT_OFF = H * QS
     PT_OFF = KT_OFF + SPLIT_KEYS * KS
     KEY_REPS = SPLIT_KEYS // WAVE  # keys per lane in the split-local softmax
-    SAMPLE_TILE = min(S, 4)
+    # The 320 KB LDS holds every sample's normalized input (S * XW words, already
+    # reserved for the MoE activation), so the input projection reads its
+    # weights once instead of once per four samples.
+    SAMPLE_TILE = S
     DN_TILE = dn_tile(S, expert_mxfp4)
     N_DN_TILES = HIDDEN // DN_TILE
     RED_WORDS = WAVES * WAVE * ACC
-    # keys[256:256 + WAVES] hold the radix-select wave totals
-    LDS_KEYS = max(256 + WAVES if with_indexer else 0, SPLIT_KEYS, S * MOE_SLOTS)
+    # index select: keys[0:256] hold the radix histogram, keys[256:256 + WAVES] the
+    # compaction's wave totals and keys[SEL_OUT:SEL_OUT + 2] each pass's digit
+    SEL_OUT = 256 + WAVES
+    LDS_KEYS = max(SEL_OUT + 2 if with_indexer else 0, SPLIT_KEYS, S * MOE_SLOTS)
     XW = HIDDEN // 2  # LDS words of one sample's BF16 activation
 
     # TileRT lineage: one phase-overlaid arena.  FP8 activations are staged as
     # BF16, so the all-sample MoE activation is twice the gfx950 FP8 tile; the
     # 320 KB WGP LDS holds it with room to spare.
     SPLIT_X_WORDS = PT_OFF + SPLIT_KEYS * PS
-    X_WORDS = max(SAMPLE_TILE * XW, S * XW, SPLIT_X_WORDS, index_max_seq)
+    X_WORDS = max(S * XW, SPLIT_X_WORDS, index_max_seq)
     MISC_OFF = X_WORDS
     MISC_WORDS = max(8 + S * XQ_BLOCKS, S * MOE_SLOTS * (INTER // 128), N_SPLIT)
     KEYS_OFF = MISC_OFF + MISC_WORDS
@@ -942,7 +947,9 @@ def build_glm5_monokernel_gfx1250(
                         res.append([v[j] for j in range(4)])
                     return res
 
-                if const_expr(S <= SAMPLE_TILE):
+                # Up to four samples, the first weight units are issued ahead of the
+                # input wait; with eight samples' inputs live they spill.
+                if const_expr(group_count <= 4):
                     h_ld = load_x_rmsnorm(ld_h, HIDDEN, g_in, group_count)
                     pre = [u_qa(c) for c in range(QA_UNITS)]
                     stage_x_rmsnorm(ld_h, HIDDEN, g_in, loaded=h_ld, count=group_count)
@@ -1083,18 +1090,21 @@ def build_glm5_monokernel_gfx1250(
                 # and K leaves their dot products unchanged.
                 r_gik, r_bik = _rsrc(index_arg(5)), _rsrc(index_arg(6))
                 r_index_cache = _rsrc(indices)
-                for s in range_constexpr(S):
-                    ik = getf(mb("index_k"), s * INDEX_DIM + fx.min(tid, INDEX_DIM - 1))
-                    live = tid < INDEX_DIM
-                    iv = live.select(ik, fx.Float32(0.0))
-                    mean = block_sum(iv) * (1.0 / INDEX_DIM)
-                    centered = live.select(ik - mean, fx.Float32(0.0))
-                    rstd = _rsq(block_sum(centered * centered) * (1.0 / INDEX_DIM) + 1.0e-6)
-                    if tid < INDEX_DIM // 2:
-                        i0 = tid * 2
-                        k0, k1 = get2(mb("index_k"), s * INDEX_DIM + i0)
-                        v0 = (k0 - mean) * rstd * ld_f32(r_gik, i0) + ld_f32(r_bik, i0)
-                        v1 = (k1 - mean) * rstd * ld_f32(r_gik, i0 + 1) + ld_f32(r_bik, i0 + 1)
+                # every sample's index key in one poll and two block reductions
+                live = tid < INDEX_DIM
+                iks = getf_many([(mb("index_k"), s * INDEX_DIM + fx.min(tid, INDEX_DIM - 1)) for s in range(S)])
+                means = [m * (1.0 / INDEX_DIM) for m in block_sums([live.select(ik, fx.Float32(0.0)) for ik in iks])]
+                centered = [live.select(iks[s] - means[s], fx.Float32(0.0)) for s in range(S)]
+                rstds = [_rsq(v * (1.0 / INDEX_DIM) + 1.0e-6) for v in block_sums([c * c for c in centered])]
+                if tid < INDEX_DIM // 2:
+                    i0 = tid * 2
+                    kks = get2_many([(mb("index_k"), s * INDEX_DIM + i0) for s in range(S)])
+                    g0, g1 = ld_f32(r_gik, i0), ld_f32(r_gik, i0 + 1)
+                    b0, b1 = ld_f32(r_bik, i0), ld_f32(r_bik, i0 + 1)
+                    for s in range_constexpr(S):
+                        k0, k1 = kks[s]
+                        v0 = (k0 - means[s]) * rstds[s] * g0 + b0
+                        v1 = (k1 - means[s]) * rstds[s] * g1 + b1
                         if tid < PE_DIM // 2:
                             c, sn = cs[s], sns[s]
                             v0, v1 = v0 * c - v1 * sn, v0 * sn + v1 * c
@@ -1104,9 +1114,9 @@ def build_glm5_monokernel_gfx1250(
                             (pos0 + s) * INDEX_DIM + i0,
                         )
                         put_bf(mb("index_k_new"), s * INDEX_DIM + i0, [v0, v1])
-                    gpu.barrier()
-                    if tid == 0:
-                        put(mb("index_ready"), s, fx.Int32(1))
+                gpu.barrier()
+                if tid < S:
+                    put(mb("index_ready"), tid, fx.Int32(1))
             stamp("cache", t, 4)
 
         # =============================================== 4. normalized q_a -> q_b (+RoPE)
@@ -1302,11 +1312,15 @@ def build_glm5_monokernel_gfx1250(
                     # Every key group reuses the same 32x128 query.  Stage and RoPE
                     # it once per scoring CTA instead of polling and rotating it in
                     # each of the four key-group wave pairs.
-                    for b in range_constexpr((INDEX_Q_ROWS // 2) // THREADS):
+                    Q_REPS = (INDEX_Q_ROWS // 2) // THREADS
+                    q_all = get_bf2_many(
+                        [(mb("index_q"), s * INDEX_Q_ROWS + (tid + b * THREADS) * 2) for b in range(Q_REPS)]
+                    )
+                    for b in range_constexpr(Q_REPS):
                         q_pair = tid + b * THREADS
                         q_elem = q_pair * 2
                         kq = q_elem % INDEX_DIM
-                        q0, q1 = get_bf2_many([(mb("index_q"), s * INDEX_Q_ROWS + q_elem)])[0]
+                        q0, q1 = q_all[b]
                         if kq < PE_DIM:
                             c = ld_f32(_rsrc(rope_cos), (pos0 + s) * (PE_DIM // 2) + kq // 2)
                             sn = ld_f32(_rsrc(rope_sin), (pos0 + s) * (PE_DIM // 2) + kq // 2)
@@ -1361,8 +1375,6 @@ def build_glm5_monokernel_gfx1250(
                         put(mb("index_scores"), s * index_max_seq + key_pos, score)
                 stamp("index_score", tt, 4)
 
-            SEL_WAVES = 256 // WAVE  # waves holding the 256 radix digits
-
             enter("index_select")
             for s in range(start("index_select"), S, G):
                 s = fx.Int32(s)
@@ -1370,113 +1382,132 @@ def build_glm5_monokernel_gfx1250(
                 bound = pos0 + s + 1
 
                 def select_digit(shift, prefix, remain):
-                    digit = 255 - fx.min(tid, 255)
-                    count = (tid < 256).select(lds_ld(keys, digit), fx.Int32(0))
-                    inclusive = fx.coop.warp_inclusive_scan(count, fx.ReductionOp.ADD, width=WAVE)
-                    wave_total = read_lane_i32(inclusive, WAVE - 1)
-                    if (wave < SEL_WAVES) & (lane == WAVE - 1):
-                        lds_st(keys, 256 + wave, wave_total)
+                    """Wave 0 finds the digit holding the remain-th largest key, publishes
+                    it to keys[SEL_OUT:SEL_OUT + 2] and clears the histogram for the next
+                    pass: one wave scan and one barrier, no cross-wave totals."""
+                    if wave == 0:
+                        top = 255 - lane * 8  # this lane's eight digits, in descending order
+                        counts = [lds_ld(keys, top - j) for j in range(8)]
+                        total = counts[0]
+                        for j in range_constexpr(1, 8):
+                            total = total + counts[j]
+                        above = fx.coop.warp_inclusive_scan(total, fx.ReductionOp.ADD, width=WAVE) - total
+                        for j in range_constexpr(8):
+                            if (above < remain) & (above + counts[j] >= remain):
+                                lds_st(keys, SEL_OUT, fx.Int32(prefix | (fx.Uint32(top - j) << shift)))
+                                lds_st(keys, SEL_OUT + 1, remain - above)
+                            above = above + counts[j]
+                            lds_st(keys, top - j, fx.Int32(0))
                     gpu.barrier()
-                    before_wave = fx.Int32(0)
-                    for w in range_constexpr(SEL_WAVES):
-                        before_wave = before_wave + (wave > w).select(lds_ld(keys, 256 + w), fx.Int32(0))
-                    above = before_wave + inclusive - count
-                    hit = (tid < 256) & (above < remain) & (above + count >= remain)
-                    gpu.barrier()
-                    if hit:
-                        lds_st(keys, 256, fx.Int32(prefix | (fx.Uint32(digit) << shift)))
-                        lds_st(keys, 257, remain - above)
-                    gpu.barrier()
-                    return fx.Uint32(lds_ld(keys, 256)), lds_ld(keys, 257)
+                    return fx.Uint32(lds_ld(keys, SEL_OUT)), lds_ld(keys, SEL_OUT + 1)
 
-                # Transform scores to monotonic integer keys and build the high
-                # byte histogram in the same pass, avoiding one extra 4-K LDS
-                # scan before the remaining radix digits.
+                # Clearing the histogram before the wait hides its barrier behind it.
                 if tid < 256:
                     lds_st(keys, tid, fx.Int32(0))
                 gpu.barrier()
-                for batch in range_constexpr((index_max_seq + THREADS - 1) // THREADS):
-                    i = tid + batch * THREADS
+                SEL_REPS = (index_max_seq + THREADS - 1) // THREADS
+                # One batched poll for this thread's scores; indices past the bound
+                # re-read the last valid score and are masked below.
+                scores_all = getf_many(
+                    [
+                        (mb("index_scores"), s * index_max_seq + fx.min(tid + b * THREADS, bound - 1))
+                        for b in range(SEL_REPS)
+                    ]
+                )
+                # Monotonic integer keys stay in registers for every radix pass.
+                sel_keys, sel_live = [], []
+                for b in range_constexpr(SEL_REPS):
+                    i = tid + b * THREADS
+                    bits = scores_all[b].bitcast(fx.Int32)
+                    key = (bits >= 0).select(bits ^ fx.Int32(-(2**31)), ~bits)
+                    sel_keys.append(fx.Uint32(key))
+                    sel_live.append(i < bound)
                     if i < bound:
-                        bits = getf(mb("index_scores"), s * index_max_seq + i).bitcast(fx.Int32)
-                        key = (bits >= 0).select(bits ^ fx.Int32(-(2**31)), ~bits)
                         # The selector CTA no longer needs the large GEMV staging
                         # region, so reuse it for the 4-K radix keys instead of
                         # increasing the monokernel's LDS allocation.
                         lds_st(xs, i, key.bitcast(fx.Float32))
-                        digit = fx.Int32((fx.Uint32(key) >> 24) & fx.Uint32(255))
-                        fx.atomic_add(keys + digit, fx.Int32(1), syncscope="workgroup")
-                gpu.barrier()
-                prefix, remain = select_digit(24, fx.Uint32(0), fx.min(fx.Int32(topk), bound))
-                prefix_mask = 255 << 24
-                for shift in (16, 8, 0):
-                    if tid < 256:
-                        lds_st(keys, tid, fx.Int32(0))
-                    gpu.barrier()
-                    for batch in range_constexpr((index_max_seq + THREADS - 1) // THREADS):
-                        i = tid + batch * THREADS
-                        if i < bound:
-                            key = fx.Uint32(lds_ld(xs, i).bitcast(fx.Int32))
-                            if (key & fx.Uint32(prefix_mask)) == prefix:
+                need = fx.min(fx.Int32(topk), bound)
+                prefix, remain = fx.Uint32(0), need
+                prefix_mask = 0
+                for shift in (24, 16, 8, 0):
+                    if const_expr(shift == 24):
+                        # Most scores share their high byte (sign and exponent), and
+                        # same-address LDS atomics serialize per lane: each thread adds
+                        # every distinct high byte of its keys once, with its count.
+                        digits = [
+                            sel_live[b].select(fx.Int32(sel_keys[b] >> 24), fx.Int32(256)) for b in range(SEL_REPS)
+                        ]
+                        for j in range_constexpr(SEL_REPS):
+                            new_digit = digits[j] < 256
+                            for i in range_constexpr(j):
+                                new_digit = new_digit & (digits[i] != digits[j])
+                            count = fx.Int32(1)
+                            for i in range_constexpr(j + 1, SEL_REPS):
+                                count = count + (digits[i] == digits[j]).select(fx.Int32(1), fx.Int32(0))
+                            if new_digit:
+                                fx.atomic_add(keys + digits[j], count, syncscope="workgroup")
+                    else:
+                        for b in range_constexpr(SEL_REPS):
+                            key = sel_keys[b]
+                            if sel_live[b] & ((key & fx.Uint32(prefix_mask)) == prefix):
                                 digit = fx.Int32((key >> shift) & fx.Uint32(255))
                                 fx.atomic_add(keys + digit, fx.Int32(1), syncscope="workgroup")
                     gpu.barrier()
                     prefix, remain = select_digit(shift, prefix, remain)
                     prefix_mask |= 255 << shift
 
+                # ``prefix`` is now the key of the need-th largest score and ``remain``
+                # the number of keys equal to it that are selected.
                 threshold = prefix
+                out_gt = need - remain
                 r_index_out = _rsrc(mb("indices"))
                 items = index_max_seq // THREADS
                 item_indices = [tid * items + j for j in range_constexpr(items)]
-                item_keys = [fx.Uint32(lds_ld(xs, fx.min(i, bound - 1)).bitcast(fx.Int32)) for i in item_indices]
+                item_keys = []
+                for h in range_constexpr(items // 4):
+                    quad = fx.Vector(fx.ptr_load(xs + (tid * items + h * 4), result_type=v4f))
+                    item_keys += [fx.Uint32(quad[q].bitcast(fx.Int32)) for q in range(4)]
                 gt = [(i < bound) & (key > threshold) for i, key in zip(item_indices, item_keys)]
                 eq = [(i < bound) & (key == threshold) for i, key in zip(item_indices, item_keys)]
 
-                def scan_flags(flags):
-                    """Thread-major exclusive offsets for the per-thread flags; the wave
-                    totals reuse keys[256:256 + WAVES]."""
-                    local = fx.Int32(0)
-                    local_offsets = []
-                    for flag in flags:
-                        local_offsets.append(local)
-                        local = local + flag.select(fx.Int32(1), fx.Int32(0))
-                    inclusive = fx.coop.warp_inclusive_scan(local, fx.ReductionOp.ADD, width=WAVE)
-                    wave_total = read_lane_i32(inclusive, WAVE - 1)
-                    if lane == WAVE - 1:
-                        lds_st(keys, 256 + wave, wave_total)
-                    gpu.barrier()
-                    before_wave = fx.Int32(0)
-                    total = fx.Int32(0)
-                    for w in range_constexpr(WAVES):
-                        wave_count = lds_ld(keys, 256 + w)
-                        before_wave = before_wave + (wave > w).select(wave_count, fx.Int32(0))
-                        total = total + wave_count
-                    thread_base = before_wave + inclusive - local
-                    return [thread_base + off for off in local_offsets], total
-
-                gt_offsets, out_gt = scan_flags(gt)
+                # Thread-major exclusive offsets of both flag sets in one scan:
+                # greater-than counts in the low 16 bits, equal counts in the high
+                # 16 bits.  The wave totals use keys[256:256 + WAVES].
+                local = fx.Int32(0)
+                local_offsets = []
+                for g, e in zip(gt, eq):
+                    local_offsets.append(local)
+                    local = local + g.select(fx.Int32(1), fx.Int32(0)) + e.select(fx.Int32(1 << 16), fx.Int32(0))
+                inclusive = fx.coop.warp_inclusive_scan(local, fx.ReductionOp.ADD, width=WAVE)
+                if lane == WAVE - 1:
+                    lds_st(keys, 256 + wave, inclusive)
                 gpu.barrier()
-                eq_offsets, _ = scan_flags(eq)
-                gpu.barrier()
+                before_wave = fx.Int32(0)
+                for w in range_constexpr(WAVES):
+                    before_wave = before_wave + (wave > w).select(lds_ld(keys, 256 + w), fx.Int32(0))
+                thread_base = before_wave + inclusive - local
                 for j in range_constexpr(items):
+                    offset = thread_base + local_offsets[j]
                     if gt[j]:
                         bo.buffer_store(
                             fx.Int32(item_indices[j]),
                             r_index_out,
-                            s * topk + gt_offsets[j],
+                            s * topk + (offset & fx.Int32(0xFFFF)),
                             cache_modifier=CM_DEV,
                         )
-                    if eq[j] & (eq_offsets[j] < topk):
-                        lds_st(red, eq_offsets[j], item_indices[j].bitcast(fx.Float32))
-                gpu.barrier()
-                need_eq = fx.min(fx.Int32(topk), bound) - out_gt
+                    eq_offset = offset.shrui(fx.Int32(16))
+                    if eq[j] & (eq_offset < remain):
+                        bo.buffer_store(
+                            fx.Int32(item_indices[j]),
+                            r_index_out,
+                            s * topk + out_gt + eq_offset,
+                            cache_modifier=CM_DEV,
+                        )
                 for batch in range_constexpr((topk + THREADS - 1) // THREADS):
                     j = tid + batch * THREADS
                     if j >= bound:
                         bo.buffer_store(fx.Int32(0), r_index_out, s * topk + j, cache_modifier=CM_DEV)
-                    if j < need_eq:
-                        i = lds_ld(red, j).bitcast(fx.Int32)
-                        bo.buffer_store(i, r_index_out, s * topk + out_gt + j, cache_modifier=CM_DEV)
                 # Make every lane's compact-index stores visible before lane 0
                 # publishes the one readiness tag consumed by the attention CTAs.
                 fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
