@@ -100,16 +100,21 @@ else
     git checkout FETCH_HEAD
 fi
 
-for _patch in "${LLVM_PATCHES[@]}"; do
-    [ -f "$_patch" ] || continue
-    if git apply --reverse --check "$_patch" >/dev/null 2>&1; then
-        echo "LLVM patch already applied: $_patch"
-    else
+if [ ${#LLVM_PATCHES[@]} -gt 0 ]; then
+    # Reset to the pristine upstream commit so patches apply cleanly regardless
+    # of what a previous run left behind.  The per-patch --reverse --check that
+    # was here before breaks when patches stack (a later patch rewrites lines an
+    # earlier one touched, so the earlier one no longer reverse-applies).
+    git checkout -- .
+    for _patch in "${LLVM_PATCHES[@]}"; do
+        if [ ! -f "$_patch" ]; then
+            echo "ERROR: patch listed in llvm-build-info.json not found: $_patch" >&2
+            exit 1
+        fi
         echo "Applying LLVM patch: $_patch"
-        git apply --check "$_patch"
         git apply "$_patch"
-    fi
-done
+    done
+fi
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd
