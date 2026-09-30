@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-09-30T05:15:56Z",
+ "updated": "2026-09-30T05:43:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "jli/schedule_bank",
    "event": "pull_request",
    "title": "[compiler][opt] add schedule_bank api for gfx1250",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36672432710",
    "created_at": "2026-09-30T05:13:33Z",
-   "updated_at": "2026-09-30T05:14:26Z",
+   "updated_at": "2026-09-30T05:41:11Z",
    "actor": "jli-melchior",
    "jobs": []
   },
