@@ -82,6 +82,7 @@ Launch kernels via ``@flyc.jit`` host-side functions:
        n: fx.Constexpr[int],
        stream: fx.Stream = fx.Stream(None),
    ):
+       grid_x = (n + 255) // 256
        my_kernel(data, n).launch(
            grid=(grid_x, 1, 1),
            block=(256, 1, 1),

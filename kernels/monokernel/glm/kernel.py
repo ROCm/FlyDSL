@@ -152,6 +152,7 @@ def build_glm5_monokernel(
     index_max_seq: int = 4096,
     expert_mxfp4: bool = False,
     scale: float = SOFTMAX_SCALE,
+    uv_scale_rows: int = 128,
     timeline: bool = False,
 ):
     """Return the ``@flyc.jit`` launcher for one rank's whole layer.
@@ -161,6 +162,7 @@ def build_glm5_monokernel(
     int64 ``[sum(task counts), TL_COLS]`` (start, hint seen, inputs staged, compute
     done, end, then free debug marks) in ``stage_tasks`` order.
     """
+    assert uv_scale_rows in (64, 128)
     assert heads == 8, "the split-attention mapping uses one wave per local head"
     SPLIT_KEYS = sparse_keys_per_task(S)
     assert topk % SPLIT_KEYS == 0 and 1 <= S <= 8
@@ -506,13 +508,13 @@ def build_glm5_monokernel(
                 s = s * coef
             return ("fp8", [wv], s, b_word + (lane // 16) * 4)
 
-        def unit_fp8x2(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, coef=None):
+        def unit_fp8x2(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, coef=None, scale_rows=SCALE_BM):
             """Issue both 64-k halves of one 128-k FP8 weight-scale block."""
             wv = [
                 fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc + h) * 64 + lane) * 4, vec_width=4, dtype=T.i32))
                 for h in range(2)
             ]
-            s = ld_f32(s_rsrc, (rg * 16 // SCALE_BM) * (K // 128) + kc // 2)
+            s = ld_f32(s_rsrc, (rg * 16 // scale_rows) * (K // 128) + kc // 2)
             if const_expr(callable(coef)):
                 return ("fp8x2", wv, lambda: s * coef(), b_word + (lane // 16) * 4)
             if const_expr(coef is not None):
@@ -741,10 +743,11 @@ def build_glm5_monokernel(
         def route_top8(s, raws=None, bs=None):
             """Top-8 of sample s (call from one whole wave, after the router scores landed).
 
-            Packed-key argmax: key = order-preserving bits of (sigmoid + bias) with the
-            low byte replaced by 255 - expert id (unique; near-ties go to the lower id),
-            so each of the 8 rounds is one u32 wave max (candidate i of this lane is
-            expert lane + 64 i).  Returns (expert id, route weight = raw score / sum of
+            Preserve all FP32 bits of (sigmoid + bias). Each round reduces the score
+            first, then the expert ID only among exactly equal winners. Packing the
+            ID into the score's low byte can change GLM's top-k on real checkpoints.
+            Candidate i of this lane is expert lane + 64 i.
+            Returns (expert id, route weight = raw score / sum of
             the 8 raw scores * ROUTE_SCALE) of pick ``lane`` in score order, valid in
             lanes < TOP_K."""
             if const_expr(bs is None):
@@ -756,19 +759,27 @@ def build_glm5_monokernel(
             for i in range_constexpr(N_EXPERTS // 64):
                 kb = (raws[i] + bs[i]).bitcast(fx.Int32)
                 ok = (kb >= 0).select(kb ^ fx.Int32(-(2**31)), ~kb)
-                ks.append(fx.Uint32((ok & fx.Int32(-256)) | (255 - (lane + i * 64))))
+                ks.append(fx.Uint32(ok))
+            ids = [lane + i * 64 for i in range(N_EXPERTS // 64)]
             # sort this lane's 4 keys descending; each round then takes the wave max of
             # the lane heads and shifts the winning lane's list (0 is below every key)
             for a, b in ((0, 1), (2, 3), (0, 2), (1, 3), (1, 2)):
-                ks[a], ks[b] = fx.max(ks[a], ks[b]), fx.min(ks[a], ks[b])
+                first = (ks[a] > ks[b]) | ((ks[a] == ks[b]) & (ids[a] < ids[b]))
+                ka, kb, ia, ib = ks[a], ks[b], ids[a], ids[b]
+                ks[a], ks[b] = first.select(ka, kb), first.select(kb, ka)
+                ids[a], ids[b] = first.select(ia, ib), first.select(ib, ia)
             ks = [fx.Int32(k) for k in ks] + [fx.Int32(0)]
-            mv = fx.Int32(0)  # lane k: the key of pick k
+            ids = ids + [fx.Int32(N_EXPERTS)]
+            mv = fx.Int32(0)  # lane k: the expert ID of pick k
             for k in range_constexpr(TOP_K):
                 m = wave_umax_dpp(ks[0])
-                hit = ks[0] == m
+                winner = wave_umax_dpp((ks[0] == m).select(255 - ids[0], fx.Int32(0)))
+                expert = 255 - winner
+                hit = (ks[0] == m) & (ids[0] == expert)
                 ks = [hit.select(ks[i + 1], ks[i]) for i in range(4)] + [ks[4]]
-                mv = write_lane_i32(m, k, mv)
-            e = 255 - (mv & 255)
+                ids = [hit.select(ids[i + 1], ids[i]) for i in range(4)] + [ids[4]]
+                mv = write_lane_i32(expert, k, mv)
+            e = mv
             src = (e % 64) * 4
             got = [bpermute_i32(src, r.bitcast(fx.Int32)) for r in raws]
             raw = got[0]
@@ -1338,7 +1349,7 @@ def build_glm5_monokernel(
                         digit = fx.Int32((fx.Uint32(key) >> 24) & fx.Uint32(255))
                         fx.atomic_add(keys + digit, fx.Int32(1), syncscope="workgroup")
                 gpu.barrier()
-                prefix, remain = select_digit(24, fx.Uint32(0), fx.Int32(topk))
+                prefix, remain = select_digit(24, fx.Uint32(0), fx.min(fx.Int32(topk), bound))
                 prefix_mask = 255 << 24
                 for shift in (16, 8, 0):
                     if tid < 256:
@@ -1404,9 +1415,11 @@ def build_glm5_monokernel(
                     if eq[j] & (eq_offsets[j] < topk):
                         lds_st(red, eq_offsets[j], item_indices[j].bitcast(fx.Float32))
                 gpu.barrier()
-                need_eq = topk - out_gt
+                need_eq = fx.min(fx.Int32(topk), bound) - out_gt
                 for batch in range_constexpr((topk + THREADS - 1) // THREADS):
                     j = tid + batch * THREADS
+                    if j >= bound:
+                        bo.buffer_store(fx.Int32(0), r_index_out, s * topk + j, cache_modifier=CM_DEV)
                     if j < need_eq:
                         i = lds_ld(red, j).bitcast(fx.Int32)
                         bo.buffer_store(i, r_index_out, s * topk + out_gt + j, cache_modifier=CM_DEV)
@@ -1624,7 +1637,16 @@ def build_glm5_monokernel(
 
             def u_uv(c):
                 kc = ((wave % UV_WPR) * UV_UNITS + c) * 2
-                return unit_fp8x2(r_wuv, r_suv, t * UV_R + wave // UV_WPR, kc, UV_NKC, KV_LORA, (kc * 64) // 2)
+                return unit_fp8x2(
+                    r_wuv,
+                    r_suv,
+                    t * UV_R + wave // UV_WPR,
+                    kc,
+                    UV_NKC,
+                    KV_LORA,
+                    (kc * 64) // 2,
+                    scale_rows=uv_scale_rows,
+                )
 
             pre = [u_uv(c) for c in range(UV_UNITS)]
             hint_wait(N_SPLIT, lambda k: (mb("sp_l"), (s * N_SPLIT + k) * H + head), mark=("uv", tt))

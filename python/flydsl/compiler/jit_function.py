@@ -1748,7 +1748,13 @@ class CompiledFunction:
         return state(args)
 
     def export_to_c(self, file_path: str, file_name: str, function_prefix: str = "") -> None:
-        """Export this specialization as ``<file_name>.o`` and ``<file_name>.h``."""
+        """Export this specialization as a standalone ``.o`` and C header.
+
+        The object embeds its backend adapter and only needs the backend's
+        system runtime libraries when linked into an executable or shared
+        library; it does not require FlyDSL or Python at deployment time.
+        Host export currently requires 64-bit little-endian Linux ELF tools.
+        """
         if self._aot_error is not None:
             error_type, message = self._aot_error
             raise error_type(message)
