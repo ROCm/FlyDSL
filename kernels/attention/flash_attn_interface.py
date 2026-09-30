@@ -208,7 +208,7 @@ def _build_dense_gfx1100(
     causal: bool,
     dtype_str: str,
 ):
-    """Build (and cache) the dense RDNA3 gfx1100 launcher."""
+    """Build the dense RDNA3 gfx1100 launcher."""
     from kernels.attention.flash_attn_gfx1100 import build_flash_attn_func_module
 
     return build_flash_attn_func_module(
@@ -218,9 +218,8 @@ def _build_dense_gfx1100(
         seq_kv=seq_kv,
         head_dim=head_dim,
         causal=causal,
+        dtype_str=dtype_str,
         layout="bshd",
-        in_dtype=dtype_str,
-        out_dtype=dtype_str,
     )
 
 

@@ -8,10 +8,6 @@ Supports f16/bf16, head_dim 64/128/256, dense prefill, and dense decode
 or general cross-attention.
 """
 
-from functools import lru_cache
-
-import torch
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -22,6 +18,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
+from kernels.attention.flash_attn_gfx1100_autotune import pick_tile
 from kernels.common import buffer_ops
 from kernels.common.kernels_common import dtype_to_elem_type
 from kernels.common.tensor_shim import _run_compiled
@@ -41,7 +38,6 @@ LDS_PAD = 8
 
 _INTERLEAVE = [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15]
 
-# Byte selectors for a packed 2x2 f16 transpose.
 _VP_SEL_LO = 0x05040100
 _VP_SEL_HI = 0x07060302
 _VP_SEL_LO_REV = 0x01000504
@@ -49,14 +45,13 @@ _VP_SEL_HI_REV = 0x03020706
 _CONCAT16 = list(range(16))
 
 LDS_CAPACITY = 65536
-NUM_CU_ESTIMATE = 96
 SUPPORTED_HEAD_DIMS = (64, 128, 256)
 
 _ELEM_CLS = {"f16": fx.Float16, "bf16": fx.BFloat16}
 _OUT_CLS = {"f32": fx.Float32, "f16": fx.Float16, "bf16": fx.BFloat16}
 
 
-def ptr_arg(t: torch.Tensor, dtype=fx.Uint8):
+def _ptr_arg(t, dtype=fx.Uint8):
     """Wrap a torch tensor as a typed fx.Pointer for launch/cache signatures."""
     type_name = type(t).__name__
     module_name = type(t).__module__
@@ -74,54 +69,6 @@ def _strides(layout: str, n_heads: int, seq: int, head_dim: int):
     raise ValueError(f"layout must be 'bhsd' or 'bshd', got {layout!r}")
 
 
-def _tile_config(head_dim: int, seq_q: int, causal: bool, bh: int):
-    """Tile shape as (num_waves, q_tiles, block_n, vt_rows, k_from_gmem)."""
-    if seq_q <= WMMA_M:
-        # Dense decode (seq_q<=16). D64 is already ~Triton with 1-wave +
-        # K-from-gmem. D128/D256 need 4 waves + BN32 + K-in-LDS so the CTA
-        # can cooperatively stream KV (measured D128 Sq1/Skv8k: ~2028 ->
-        # ~780 us, ~Triton 687 us) — leave prefill branches below unchanged.
-        if head_dim == 64:
-            return 1, 1, (32 if bh >= 4 * NUM_CU_ESTIMATE else 64), 8, True
-        return 4, 1, 32, 8, False
-    m128_grid = bh * ((seq_q + 127) // 128)
-    long_prefill = m128_grid >= 4 * NUM_CU_ESTIMATE
-    # Extreme grids with block_m=128 thrash HBM (too many CTAs streaming KV).
-    # Bumping to block_m=256 (8 waves x 2 q_tiles) + block_n=32 cuts CTA count
-    # and restores bandwidth: D64 non-causal S=32k ~37 -> ~70 TFLOP/s.
-    extreme = seq_q >= 32768
-    if head_dim == 64:
-        # Short/medium causal keeps M64. Long prefill needs M128 + K-in-LDS:
-        # otherwise CTA count and GMEM K streaming collapse TFLOP/s (measured
-        # ~17 -> ~40 on B4/H32/S16384/D64 causal).
-        if long_prefill:
-            # Non-causal (any long) and causal at S>=32k prefer M256+BN32.
-            # Mid-length causal (e.g. S=16k) still prefers M128+BN64
-            # (66.7 vs 62.3 TFLOP/s).
-            if (not causal) or extreme:
-                return 8, 2, 32, 4, False
-            return 4, 2, 64, 4, False
-        return 4, (1 if causal else 2), 64, 4, True
-    if head_dim == 128:
-        # Same long-prefill pathology as D64: M64 + GMEM K collapses past ~16k
-        # (measured ~18 TFLOP/s on B4/H32/S32768/D128 causal vs ~64 Triton).
-        if long_prefill:
-            # Non-causal: M256+BN32 wins at S=32k (~50 vs ~41) but loses at
-            # S=64k (~39 vs ~41). Split the threshold.
-            if (not causal) and extreme:
-                if seq_q < 65536:
-                    return 8, 2, 32, 8, False
-                return 4, 2, 64, 8, False
-            # Causal S>=64k collapses with M128 w8x1 (~23); M256+BN32 recovers
-            # ~32. At S=32k causal, M128 w8x1 still wins (48 vs 43).
-            if causal and seq_q >= 65536:
-                return 8, 2, 32, 8, False
-            return 8, 1, 64, 8, False
-        return 4, 1, 64, 8, True
-    # D256: M256 blows VGPR/occupancy (~20 vs ~39 at S=32k causal) — stay M128.
-    return 8, 1, 32, 8, False
-
-
 def _ptr_rsrc(ptr, elem_offset, elem_bytes):
     """Buffer resource with ``elem_offset`` folded into the base."""
     base = fx.Int64(fx.ptrtoint(ptr)) + fx.Int64(elem_offset) * elem_bytes
@@ -129,72 +76,39 @@ def _ptr_rsrc(ptr, elem_offset, elem_bytes):
 
 
 def build_flash_attn_func_module_primary(
-    batch: int,
-    num_heads: int,
-    seq_q: int,
-    seq_kv: int,
-    head_dim: int,
-    *,
-    causal: bool = False,
-    layout: str = "bshd",
-    out_dtype: str = "f32",
-    block_n: int | None = None,
-    num_waves: int | None = None,
-    sm_scale: float | None = None,
-    in_dtype: str = "f16",
-    fast_math: bool = True,
-    raw_exp2: bool = False,
-    fma_lse: bool = True,
-    specialize_aligned: bool = True,
-    fast_max: bool = True,
-    pack_cvt: bool = True,
-    perm_p: bool | None = None,
-    prefetch: bool | None = None,
-    vt_rows: int | None = None,
-    k_from_gmem: bool | None = None,
-    q_tiles: int | None = None,
-    hoist_q: bool | None = None,
-    perm_tr: bool | None = None,
-    vector_store: bool | None = None,
-    cooperative_v: bool = True,
-    cooperative_store_group: int = 2,
-    waves_per_eu: int | None = None,
-    flat_work_group_size: int | None = None,
-    unsafe_fp_math: bool = False,
-    fast_fp_math: bool = False,
-    daz: bool = False,
+    batch,
+    num_heads,
+    seq_q,
+    seq_kv,
+    head_dim,
+    causal=True,
+    dtype_str="f16",
+    sm_scale=None,
+    layout="bshd",
+    out_dtype=None,
+    waves_per_eu=None,
+    flat_work_group_size=None,
+    daz=False,
+    unsafe_fp_math=False,
+    fast_fp_math=False,
 ):
-    """O = softmax(Q @ K^T * scale) @ V over a batch of multi-head sequences.
+    """Build a dense f16/bf16 flash-attention launcher for gfx1100.
 
-    Q/K/V/O are all ``[batch, seq, num_heads, head_dim]`` under the default
-    ``layout='bshd'``, or the seq/head-swapped equivalents under ``'bhsd'``.
-    Q and K/V share num_heads: this is multi-head attention, not grouped-query.
-    seq_q and seq_kv are free, but the two regimes the tile config is chosen
-    for are prefill (seq_q == seq_kv) and decode (seq_q == 1).
-
-    Tile overrides default to the shape-specific `_tile_config` choice.
+    ``batch``, ``seq_q`` and ``seq_kv`` are compile-time constants: they choose
+    the tile and the KV loop. The tile comes from ``pick_tile``. Q/K/V/O are
+    BSHD under ``layout='bshd'``. This is multi-head attention; K/V use the same
+    head count as Q. Prefill is ``seq_q == seq_kv``; decode is ``seq_q <= 16``.
     """
+    if out_dtype is None:
+        out_dtype = dtype_str
+    in_dtype = dtype_str
     if head_dim not in SUPPORTED_HEAD_DIMS:
         raise ValueError(f"head_dim must be one of {list(SUPPORTED_HEAD_DIMS)}, got {head_dim}")
-    auto_waves, auto_q_tiles, auto_block_n, auto_vt_rows, auto_k_gmem = _tile_config(
+    num_waves, q_tiles, block_n, vt_rows, k_from_gmem = pick_tile(
         head_dim, seq_q, causal, batch * num_heads
     )
-    num_waves = auto_waves if num_waves is None else num_waves
-    q_tiles = auto_q_tiles if q_tiles is None else q_tiles
-    block_n = auto_block_n if block_n is None else block_n
-    vt_rows = auto_vt_rows if vt_rows is None else vt_rows
-    k_from_gmem = auto_k_gmem if k_from_gmem is None else k_from_gmem
-    if prefetch is None:
-        # Decode-only D128 + small grid: register-staged KV prefetch overlaps
-        # LDS compute (B4/H32/Sq1/Skv8k: ~799 -> ~703 us; B1: ~581 -> ~330 us).
-        # Same flag regresses B>=8 D128 decode (~1.02x -> ~1.30x), D64 decode,
-        # D256 long-KV decode, and long prefill — keep those at False.
-        prefetch = seq_q <= WMMA_M and head_dim == 128 and batch * num_heads <= 128
-    if hoist_q is None:
-        # D256 defaults to no Q hoist to stay in VGPR budget on mid-length
-        # prefills. On long KV the reload cost dominates, so hoist again
-        # (measured ~21 -> ~45 TFLOP/s on B4/H32/S16384/D256 non-causal).
-        hoist_q = head_dim <= 128 or seq_kv >= 8192
+    prefetch = seq_q <= WMMA_M and head_dim == 128 and batch * num_heads <= 128
+    hoist_q = head_dim <= 128 or seq_kv >= 8192
 
     block_m = WMMA_M * num_waves * q_tiles
     threads = num_waves * WAVE_SIZE
@@ -206,7 +120,7 @@ def build_flash_attn_func_module_primary(
     if head_dim % LOAD_VEC:
         raise ValueError(f"head_dim must be a multiple of {LOAD_VEC}, got {head_dim}")
     if in_dtype not in _ELEM_CLS:
-        raise ValueError(f"in_dtype must be one of {sorted(_ELEM_CLS)}, got {in_dtype!r}")
+        raise ValueError(f"dtype_str must be one of {sorted(_ELEM_CLS)}, got {dtype_str!r}")
     if out_dtype not in _OUT_CLS:
         raise ValueError(f"out_dtype must be one of {sorted(_OUT_CLS)}, got {out_dtype!r}")
 
@@ -217,14 +131,10 @@ def build_flash_attn_func_module_primary(
     is_bf16 = in_dtype == "bf16"
     elem_cls = _ELEM_CLS[in_dtype]
     out_cls = _OUT_CLS[out_dtype]
-    use_pack_cvt = pack_cvt and not is_bf16
-    # perm_p / vector_store help mid-length non-causal, but at S>=64k they
-    # collapse throughput (D64 nc: ~48 -> ~66 TFLOP/s with both off; measured).
-    use_perm_p = (seq_q > WMMA_M and not causal and seq_q < 65536) if perm_p is None else perm_p
-    use_vector_store = (
-        (head_dim <= 64 and seq_q > WMMA_M and not causal and seq_q < 65536) if vector_store is None else vector_store
-    )
-    fm = arith.FastMathFlags.fast if fast_math else None
+    use_pack_cvt = not is_bf16
+    use_perm_p = seq_q > WMMA_M and not causal and seq_q < 65536
+    use_vector_store = head_dim <= 64 and seq_q > WMMA_M and not causal and seq_q < 65536
+    fm = arith.FastMathFlags.fast
 
     q_stride_b, q_stride_h, q_stride_s = _strides(layout, num_heads, seq_q, head_dim)
     kv_stride_b, kv_stride_h, kv_stride_s = _strides(layout, num_heads, seq_kv, head_dim)
@@ -257,16 +167,13 @@ def build_flash_attn_func_module_primary(
         raise ValueError(f"K tile is {k_total_chunks} chunks, not divisible by {threads} threads")
     k_steps = 0 if k_from_gmem else k_total_chunks // threads
 
-    if vt_rows not in (1, 2, 4, 8):
-        raise ValueError(f"vt_rows must be 1, 2, 4 or 8, got {vt_rows}")
-    use_perm_tr = (False if perm_tr is None else perm_tr) and vt_rows >= 2
+    if vt_rows not in (4, 8):
+        raise ValueError(f"vt_rows must be 4 or 8, got {vt_rows}")
     if block_n % vt_rows:
         raise ValueError(f"block_n={block_n} must be a multiple of vt_rows={vt_rows}")
     v_total_chunks = (block_n // vt_rows) * chunks_per_row
     v_partial = v_total_chunks < threads
-    use_cooperative_v = cooperative_v and v_partial and vt_rows == 8 and threads == 2 * v_total_chunks
-    if cooperative_store_group not in (1, 2, 4, 8):
-        raise ValueError("cooperative_store_group must be 1, 2, 4 or 8")
+    use_cooperative_v = v_partial and vt_rows == 8 and threads == 2 * v_total_chunks
     if v_partial:
         if threads % v_total_chunks:
             raise ValueError(
@@ -302,12 +209,9 @@ def build_flash_attn_func_module_primary(
         lhalf = lane // 16
         is_lo = lhalf == 0
 
-        # Tail lanes read a clamped row; stores are predicated below.
         q_base = pid_m * block_m + wave_id * (WMMA_M * q_tiles) + l16
         q_idx = [q_base + t * WMMA_M for t in range_constexpr(q_tiles)]
-        q_idx_safe = (
-            q_idx if const_expr(specialize_aligned and q_aligned) else [fx.min(qi, fx.Int32(seq_q - 1)) for qi in q_idx]
-        )
+        q_idx_safe = q_idx if const_expr(q_aligned) else [fx.min(qi, fx.Int32(seq_q - 1)) for qi in q_idx]
 
         if const_expr(causal):
             score_limit = [fx.min(fx.Int32(seq_kv), qi + fx.Int32(causal_delta + 1)) for qi in q_idx]
@@ -316,7 +220,6 @@ def build_flash_attn_func_module_primary(
 
         smem = fx.SharedAllocator().allocate(_SharedStorage).peek()
         lds_ptr = smem.lds.ptr
-        lds_view = smem.lds.view(fx.make_layout(one_buf, 1))
 
         elem_bytes = elem_cls.width // 8
         kv_origin = bat * kv_stride_b + head * kv_stride_h
@@ -326,23 +229,10 @@ def build_flash_attn_func_module_primary(
         o_rsrc = _ptr_rsrc(Out, bat * o_stride_b + head * o_stride_h, out_cls.width // 8)
 
         def _exp2(x):
-            if const_expr(raw_exp2):
-                return fx.Float32(rocdl.exp2(T.f32, as_mlir_value(x)))
-            return fmath.exp2(x, fastmath=fm) if const_expr(fast_math) else fmath.exp2(x)
-
-        def _exp2_vec(x):
-            if const_expr(raw_exp2):
-                x_vec = Vec(as_mlir_value(x), (8,), fx.Float32)
-                return Vec.from_elements(
-                    [fx.Float32(rocdl.exp2(T.f32, as_mlir_value(x_vec[v]))) for v in range_constexpr(8)],
-                    fx.Float32,
-                )
-            return _exp2(x)
+            return fmath.exp2(x, fastmath=fm)
 
         def _recip(x):
-            if const_expr(fast_math):
-                return fx.Float32(rocdl.rcp(T.f32, as_mlir_value(fx.Float32(x))))
-            return fx.Float32(1.0) / x
+            return fx.Float32(rocdl.rcp(T.f32, as_mlir_value(fx.Float32(x))))
 
         def _gmem_v8(rsrc, elem_off):
             return Vec(
@@ -358,9 +248,6 @@ def build_flash_attn_func_module_primary(
         def _lds_store_v8(elem_off, vec):
             p = fx.add_offset(lds_ptr, fx.make_int_tuple(elem_off))
             fx.make_view(fx.recast_iter(elem_cls, p), fx.make_layout(LOAD_VEC, 1)).store(as_mlir_value(vec))
-
-        def _as_vec8(v):
-            return v if isinstance(v, Vec) else Vec(v, (LOAD_VEC,), elem_cls)
 
         def _lds_operand(base):
             lo = _lds_v8(base)
@@ -380,16 +267,11 @@ def build_flash_attn_func_module_primary(
         kv_last = fx.Int32(seq_kv - 1)
 
         def _gmem_fetch(kv_base, clamp_rows):
-            """Global -> staging registers, with the kv index clamped."""
             for st in range_constexpr(k_steps):
                 c = fx.Int32(tid) + st * threads
                 row = c // chunks_per_row
                 col = (c % chunks_per_row) * LOAD_VEC
-                src = (
-                    fx.min(kv_base + row, kv_last)
-                    if const_expr(clamp_rows or not specialize_aligned)
-                    else kv_base + row
-                )
+                src = fx.min(kv_base + row, kv_last) if const_expr(clamp_rows) else kv_base + row
                 fx.memref_store_vec(_gmem_v8(k_rsrc, src * kv_stride_s + col), k_stage[st])
             for st in range_constexpr(v_steps):
                 c = fx.Int32(tid) + st * threads
@@ -403,46 +285,21 @@ def build_flash_attn_func_module_primary(
                     row = (c // chunks_per_row) * vt_rows
                     col = (c % chunks_per_row) * LOAD_VEC
                 for r in range_constexpr(v_stage_rows):
-                    src = (
-                        fx.min(kv_base + row + r, kv_last)
-                        if const_expr(clamp_rows or not specialize_aligned)
-                        else kv_base + row + r
-                    )
+                    src = fx.min(kv_base + row + r, kv_last) if const_expr(clamp_rows) else kv_base + row + r
                     fx.memref_store_vec(_gmem_v8(v_rsrc, src * kv_stride_s + col), v_stage[st][r])
 
         def _publish_v_chunk(st, c):
             row = (c // chunks_per_row) * vt_rows
             col = (c % chunks_per_row) * LOAD_VEC
             vecs = [fx.memref_load_vec(v_stage[st][r]) for r in range_constexpr(vt_rows)]
-            if const_expr(use_perm_tr):
-                dws = [_as_vec8(vecs[r]).bitcast(fx.Int32) for r in range_constexpr(vt_rows)]
 
             def _store_chunk(physical_row):
                 for i in range_constexpr(LOAD_VEC):
                     logical_col = col + i
                     dst = k_elems + logical_col * vt_row + physical_row
-                    if const_expr(vt_rows == 1):
-                        fx.memref_store(vecs[0][i], lds_view, dst)
-                    else:
-                        if const_expr(use_perm_tr):
-                            sel = fx.Int32(_VP_SEL_LO if i % 2 == 0 else _VP_SEL_HI)
-                            run = Vec.from_elements(
-                                [
-                                    fx.Int32(
-                                        rocdl.perm_b32(
-                                            dws[2 * j + 1][i // 2],
-                                            dws[2 * j][i // 2],
-                                            sel,
-                                        )
-                                    )
-                                    for j in range_constexpr(vt_rows // 2)
-                                ],
-                                fx.Int32,
-                            ).bitcast(elem_cls)
-                        else:
-                            run = Vec.from_elements([vecs[r][i] for r in range_constexpr(vt_rows)], elem_cls)
-                        p = fx.add_offset(lds_ptr, fx.make_int_tuple(dst))
-                        fx.make_view(fx.recast_iter(elem_cls, p), fx.make_layout(vt_rows, 1)).store(as_mlir_value(run))
+                    run = Vec.from_elements([vecs[r][i] for r in range_constexpr(vt_rows)], elem_cls)
+                    p = fx.add_offset(lds_ptr, fx.make_int_tuple(dst))
+                    fx.make_view(fx.recast_iter(elem_cls, p), fx.make_layout(vt_rows, 1)).store(as_mlir_value(run))
 
             _store_chunk(row)
 
@@ -464,10 +321,10 @@ def build_flash_attn_func_module_primary(
                 return own_dw.shuffle(peer_dw, list(range(vt_rows // 2))).bitcast(elem_cls)
 
             def _store_group(physical_row):
-                for base_i in range_constexpr(0, LOAD_VEC, cooperative_store_group):
-                    runs = [_make_cooperative_run(base_i + j) for j in range_constexpr(cooperative_store_group)]
+                for base_i in range_constexpr(0, LOAD_VEC, 2):
+                    runs = [_make_cooperative_run(base_i + j) for j in range_constexpr(2)]
                     if pair_half == 0:
-                        for j in range_constexpr(cooperative_store_group):
+                        for j in range_constexpr(2):
                             i = base_i + j
                             logical_col = col + i
                             dst = k_elems + logical_col * vt_row + physical_row
@@ -479,7 +336,6 @@ def build_flash_attn_func_module_primary(
             _store_group(row)
 
         def _lds_publish_v():
-            """Staging registers -> LDS, transposing V on the way in."""
             for st in range_constexpr(v_steps):
                 c = fx.Int32(tid) + st * threads
                 if const_expr(use_cooperative_v):
@@ -553,7 +409,6 @@ def build_flash_attn_func_module_primary(
             return even.shuffle(odd, _INTERLEAVE)
 
         def _q_frag(qs, kd):
-            """The A-operand fragment for Q row `qs`, head_dim tile `kd`."""
             base = qs * q_stride_s + kd * WMMA_K
             return Vec(
                 buffer_ops.buffer_load(q_rsrc, base, vec_width=8, dtype=elem_cls),
@@ -580,19 +435,13 @@ def build_flash_attn_func_module_primary(
         def _row_max(v):
             m = v.reduce(ReductionOp.MAX)
             peer = m.shuffle_xor(XOR_HALF, WAVE_SIZE)
-            return fx.maxnumf(m, peer) if const_expr(fast_max) else fx.max(m, peer)
+            return fx.maxnumf(m, peer)
 
         def _row_sum(v):
             s = v.reduce(ReductionOp.ADD)
             return s + s.shuffle_xor(XOR_HALF, WAVE_SIZE)
 
         def _consume(kv_base, m_run, l_run, o_run, masked):
-            """One kv block of the flash recurrence, for every row tile at once.
-
-            The K fragment and the transposed-V fragment are the same for all of
-            the wave's row tiles, so both loads sit outside the tile loop and are
-            paid once per kv block however many tiles share them.
-            """
             scores = [[] for _ in range_constexpr(q_tiles)]
 
             def _scale_and_mask(acc, t, sub):
@@ -613,7 +462,7 @@ def build_flash_attn_func_module_primary(
                     s_accs = [zero_acc for _ in range_constexpr(q_tiles)]
                     k_row_idx = (
                         fx.min(kv_base + (sub * WMMA_K + l16), kv_last)
-                        if const_expr(masked or not specialize_aligned)
+                        if const_expr(masked)
                         else kv_base + (sub * WMMA_K + l16)
                     )
                     k_gbase = k_row_idx * kv_stride_s
@@ -627,7 +476,6 @@ def build_flash_attn_func_module_primary(
                     for t in range_constexpr(q_tiles):
                         scores[t].append(_scale_and_mask(s_accs[t], t, sub))
             else:
-                # Used for d256 to reduce live Q fragments and avoid spills.
                 s_accs = [[zero_acc for _ in range_constexpr(n_kv_sub)] for _ in range_constexpr(q_tiles)]
                 for kd in range_constexpr(n_d_tiles):
                     q_f = [_q_frag(qs, kd) for qs in q_idx_safe]
@@ -635,7 +483,7 @@ def build_flash_attn_func_module_primary(
                         if const_expr(k_from_gmem):
                             k_row_idx = (
                                 fx.min(kv_base + (sub * WMMA_K + l16), kv_last)
-                                if const_expr(masked or not specialize_aligned)
+                                if const_expr(masked)
                                 else kv_base + (sub * WMMA_K + l16)
                             )
                             k_frag = _gmem_operand(k_rsrc, k_row_idx * kv_stride_s + kd * WMMA_K)
@@ -652,18 +500,18 @@ def build_flash_attn_func_module_primary(
                 m_blk = _row_max(scores[t][0])
                 for sub in range_constexpr(1, n_kv_sub):
                     sub_max = _row_max(scores[t][sub])
-                    m_blk = fx.maxnumf(m_blk, sub_max) if const_expr(fast_max) else fx.max(m_blk, sub_max)
-                mt = fx.maxnumf(m_run[t], m_blk) if const_expr(fast_max) else fx.max(m_run[t], m_blk)
+                    m_blk = fx.maxnumf(m_blk, sub_max)
+                mt = fx.maxnumf(m_run[t], m_blk)
 
                 corr = _exp2(m_run[t] - mt)
-                pt = [_exp2_vec(s - mt) for s in scores[t]]
+                pt = [_exp2(s - mt) for s in scores[t]]
 
                 l_blk = _row_sum(pt[0])
                 for sub in range_constexpr(1, n_kv_sub):
                     l_blk = l_blk + _row_sum(pt[sub])
                 m_new.append(mt)
                 l_new.append(
-                    fmath.fma(l_run[t], corr, l_blk, fastmath=fm) if const_expr(fma_lse) else l_run[t] * corr + l_blk
+                    fmath.fma(l_run[t], corr, l_blk, fastmath=fm)
                 )
                 probs.append(pt)
                 o_run[t] = [o * corr for o in o_run[t]]
@@ -695,12 +543,6 @@ def build_flash_attn_func_module_primary(
             n_full = fx.Int32(seq_kv // block_n)
 
         def _phase(start, stop, init_state, masked):
-            """Run kv blocks [start, stop) with masking on or off.
-
-            Both phases share the LDS buffer and the staging registers, so the
-            prefetch issued by the last trip of phase 1 is consumed by the first
-            trip of phase 2 with no handover code.
-            """
             for ib, state in range(start, stop, 1, init=init_state):
                 m_run = [fx.Float32(state[t * _TILE_STATE]) for t in range_constexpr(q_tiles)]
                 l_run = [fx.Float32(state[t * _TILE_STATE + 1]) for t in range_constexpr(q_tiles)]
@@ -711,7 +553,6 @@ def build_flash_attn_func_module_primary(
                 kv_base = fx.Int32(ib) * block_n
 
                 if const_expr(use_prefetch):
-                    # The trailing prefetch may read past the visit range.
                     _gmem_fetch(kv_base + block_n, True)
                     m_run, l_run, o_run = _consume(kv_base, m_run, l_run, o_run, masked)
                     gpu.barrier()
@@ -768,13 +609,12 @@ def build_flash_attn_func_module_primary(
                         as_mlir_value(fx.Int32(qi * o_stride_s + d)),
                     )
 
-        # A fully masked q row (causal with seq_kv < seq_q) never accumulates
-        # anything, and 1/0 would poison an output that should just be zero.
+        # Fully masked rows must write zeros, not NaN from 1/0.
         for t in range_constexpr(q_tiles):
             l_sum = fx.Float32(state[t * _TILE_STATE + 1])
             inv_l = (l_sum > fx.Float32(0.0)).select(_recip(l_sum), fx.Float32(0.0))
 
-            if const_expr(specialize_aligned and q_aligned):
+            if const_expr(q_aligned):
                 for dm in range_constexpr(n_d_tiles):
                     o = Vec(state[t * _TILE_STATE + 2 + dm], (8,), fx.Float32) * inv_l
                     _store_output_tile(q_idx[t], dm, o)
@@ -850,12 +690,10 @@ def build_flash_attn_func_module_primary(
         "llvm_options": {"enable-post-misched": False, "lsr-drop-solution": True},
     }
 
-    # Keep pointer element types in the JIT cache key.
     _ptr_elems = (elem_cls, elem_cls, elem_cls, out_cls)
 
     def _ptr(t, elem):
-        """Wrap a torch tensor as a typed fx.Pointer; pass anything else through."""
-        return ptr_arg(t, elem) if hasattr(t, "data_ptr") else t
+        return _ptr_arg(t, elem) if hasattr(t, "data_ptr") else t
 
     def _wrap_qkvo(args, kwargs):
         args = list(args)
@@ -888,126 +726,3 @@ def build_flash_attn_func_module_primary(
 
 
 build_flash_attn_func_module = build_flash_attn_func_module_primary
-
-
-_TORCH_DTYPE_TO_STR = {torch.float16: "f16", torch.bfloat16: "bf16"}
-
-
-@lru_cache(maxsize=64)
-def _cached_build(
-    batch: int,
-    num_heads: int,
-    seq_q: int,
-    seq_kv: int,
-    head_dim: int,
-    causal: bool,
-    dtype_str: str,
-    sm_scale: float | None,
-):
-    """Build cache keyed on the full shape.
-
-    seq_q and seq_kv are build-time constants -- they set the tile shape, the
-    loop trip counts and which blocks can skip masking -- so unlike the gfx1201
-    kernel there is nothing to pad and no shape to share a binary with.
-    """
-    return build_flash_attn_func_module_primary(
-        batch,
-        num_heads,
-        seq_q,
-        seq_kv,
-        head_dim,
-        causal=causal,
-        layout="bshd",
-        in_dtype=dtype_str,
-        out_dtype=dtype_str,
-        sm_scale=sm_scale,
-    )
-
-
-def flash_attn_func_gfx1100(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    causal: bool = False,
-    sm_scale: float | None = None,
-    stream: torch.cuda.Stream | None = None,
-) -> torch.Tensor:
-    """Multi-head Flash Attention on RDNA3 (gfx1100), prefill and decode.
-
-    Args:
-        q: ``[batch, seq_q, num_heads, head_dim]`` (BSHD), f16 or bf16.
-        k, v: ``[batch, seq_kv, num_heads, head_dim]``, same dtype as q. This
-            is multi-head attention, so K/V carry the same num_heads as Q.
-        causal: apply causal masking when ``True``. Masking is bottom-right
-            aligned, so query ``i`` sees keys up to ``i + seq_kv - seq_q`` --
-            the usual lower triangle for prefill, and the whole cache for
-            decode.
-        sm_scale: softmax scale. Defaults to ``head_dim ** -0.5``.
-        stream: optional CUDA/HIP stream. Defaults to the current stream for
-            ``q.device``.
-
-    Returns:
-        Output tensor with the same shape and dtype as ``q``.
-
-    Raises:
-        ValueError: on a shape, dtype, device or architecture the kernel does
-            not cover. The supported seq pairs are ``seq_q == seq_kv``
-            (prefill) and ``seq_q <= 16`` (decode); those are the two regimes
-            `_tile_config` is calibrated for.
-    """
-    if not (q.is_cuda and k.is_cuda and v.is_cuda):
-        raise ValueError("flash_attn_func_gfx1100 requires CUDA/HIP tensors")
-    if not (q.device == k.device == v.device):
-        raise ValueError(f"q/k/v must reside on the same device, got q={q.device} k={k.device} v={v.device}")
-    try:
-        arch = torch.cuda.get_device_properties(q.device.index).gcnArchName
-    except Exception:  # noqa: BLE001
-        arch = ""
-    arch_base = arch.lower().split(":")[0] if arch else ""
-    if not arch_base.startswith("gfx1100"):
-        raise ValueError(f"flash_attn_func_gfx1100 requires gfx1100, got {arch!r}")
-    if not (q.dtype == k.dtype == v.dtype):
-        raise ValueError(f"q/k/v dtype must match: {q.dtype}/{k.dtype}/{v.dtype}")
-    if q.dtype not in _TORCH_DTYPE_TO_STR:
-        raise ValueError(f"expected f16 or bf16, got {q.dtype}")
-    if not (q.dim() == k.dim() == v.dim() == 4):
-        raise ValueError(f"expected 4D BSHD tensors, got ranks {q.dim()}/{k.dim()}/{v.dim()}")
-    if k.shape != v.shape:
-        raise ValueError(f"k/v must share shape, got k={tuple(k.shape)} v={tuple(v.shape)}")
-
-    batch, seq_q, num_heads, head_dim = q.shape
-    batch_kv, seq_kv, num_kv_heads, head_dim_kv = k.shape
-    if (batch_kv, head_dim_kv) != (batch, head_dim):
-        raise ValueError(f"q={tuple(q.shape)} and k/v={tuple(k.shape)} must share batch and head_dim")
-    if num_kv_heads != num_heads:
-        raise ValueError(f"multi-head only: num_kv_heads={num_kv_heads} must equal num_heads={num_heads}")
-    if head_dim not in SUPPORTED_HEAD_DIMS:
-        raise ValueError(f"head_dim must be one of {list(SUPPORTED_HEAD_DIMS)}, got {head_dim}")
-    if seq_q != seq_kv and seq_q > WMMA_M:
-        raise ValueError(
-            f"seq_q={seq_q}, seq_kv={seq_kv}: supported pairs are seq_q == seq_kv "
-            f"(prefill) and seq_q <= {WMMA_M} (decode)"
-        )
-
-    q_c = q.contiguous()
-    k_c = k.contiguous()
-    v_c = v.contiguous()
-    o = torch.empty_like(q_c)
-
-    with torch.cuda.device(q.device.index):
-        launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
-        if launch_stream.device != q.device:
-            raise ValueError(f"`stream` must be on {q.device}, got {launch_stream.device}")
-        exe = _cached_build(
-            batch=batch,
-            num_heads=num_heads,
-            seq_q=seq_q,
-            seq_kv=seq_kv,
-            head_dim=head_dim,
-            causal=causal,
-            dtype_str=_TORCH_DTYPE_TO_STR[q.dtype],
-            sm_scale=sm_scale,
-        )
-        exe(q_c, k_c, v_c, o, stream=launch_stream)
-
-    return o
