@@ -1,11 +1,16 @@
 # API Stability
 
 This document defines which `flydsl` APIs you can rely on across releases and
-the compatibility commitments that apply when they change. Its scope is
-limited to `python/flydsl/`. Below, `fx` refers to `flydsl.expr`.
+the compatibility commitments that apply when they change. Its scope is limited
+to `python/flydsl/`. Below, `fx` refers to `flydsl.expr`, and `flyc` refers to
+`flydsl.compiler`.
 
-A release means a minor-version increment (for example, `0.3` → `0.4`). A
-patch release must not break a stable API.
+A release means a minor-version increment (for example, `0.3` → `0.4`). A patch
+release must not break a stable API.
+
+These compatibility guarantees apply only between released versions. APIs on the
+main development branch may undergo semantic adjustments during development;
+intermediate commits do not carry the same stability guarantee.
 
 ## 1. Summary and general rules
 
@@ -33,24 +38,29 @@ interface's public members, signatures, and semantics. For example,
 `flyc.from_torch_tensor(x)._ensure_spec()` is unstable.
 
 Determine stability by the mechanical process below. A public export from an
-`expr` direct-child module has several equivalent access forms:
-`fx.<name>`, `fx.<module>.<name>`, and
-`from flydsl.expr.<module> import <name>` have the same stability. Otherwise,
-classify the path that a caller actually uses, not the object's identity.
+`expr` direct-child module has several equivalent access forms: `fx.<name>`,
+`fx.<module>.<name>`, and `from flydsl.expr.<module> import <name>` have the
+same stability. Otherwise, classify the path that a caller actually uses, not
+the object's identity.
 
 ## 2. Determining stability
 
 Apply the following branches by path prefix:
 
-1. A module-global name or namespace segment beginning with `_` is unstable.
-   On stable types and returned objects, only `__...__` Python special methods
-   may begin with `_`; all other underscore-prefixed members are unstable.
+1. Any path whose module path contains a segment named `experimental` is
+   unstable, at any depth, regardless of export manifests or explicit stable
+   listings. A module-global name or namespace segment beginning with `_` is
+   also unstable. On stable types and returned objects, only `__...__` Python
+   special methods may begin with `_`; all other underscore-prefixed members are
+   unstable.
 2. A path under `flydsl.expr`: classify it only under §2.1; it is unstable if it
    does not qualify.
 3. A path under `flydsl.compiler`: direct members in `compiler.__all__`, and
    members in `compiler.protocol.__all__`, are stable. Other deep paths are
-   stable only when listed exactly in §2.3.
-4. Every other path is stable only when listed exactly in §2.3.
+   stable only when listed exactly in §2.4.
+4. A path under `flydsl.extension`: classify it only under §2.3; it is unstable
+   if it does not qualify.
+5. Every other path is stable only when listed exactly in §2.4.
 
 For a member reached through a returned object, first classify its producing API
 under these branches, then apply the returned-object rule in §1.
@@ -58,7 +68,7 @@ under these branches, then apply the returned-object rule in §1.
 ### 2.1 `flydsl.expr`
 
 `expr/__init__.py` is the sole top-level aggregation manifest. It has no
-`__all__` of its own; stability is determined exclusively by the following two
+`__all__` of its own; stability is determined exclusively by the following three
 export chains.
 
 #### Symbols exported from direct-child modules
@@ -79,9 +89,11 @@ branch even if it was listed in a historical `__all__`.
 
 #### Backend entry points and recursive child namespaces
 
-`fx.<backend>...<name>` is stable if and only if:
+Subject to the first branch above, `fx.<backend>...<name>` is stable if and only
+if:
 
-1. the first-level `<backend>` appears in `_BACKEND_MODULES` in `expr/__init__.py`;
+1. the first-level `<backend>` appears in `_BACKEND_MODULES` in
+   `expr/__init__.py`;
 2. every following child namespace appears in the `__all__` of its direct parent
    package; and
 3. the final `<name>` appears in the `__all__` of its owning module or package.
@@ -98,6 +110,12 @@ from the final `__all__` is unstable as well.
 `__all__` is not access control: an attribute may exist and be callable while
 still failing the stability test above.
 
+#### Extension aliases
+
+Entries in `_EXTENSION_MODULES` expose extension libraries as `fx.<extension>`.
+These aliases and their descendants follow §2.3 and have the same stability as
+the corresponding `flydsl.extension` paths.
+
 ### 2.2 `flydsl.compiler`
 
 Only direct members of `flydsl.compiler.__all__` are stable. For example, if
@@ -107,25 +125,44 @@ Only direct members of `flydsl.compiler.__all__` are stable. For example, if
 `flydsl.compiler.protocol.<name>` in its `__all__` is stable. It is the public
 extension namespace for user implementations of JIT / DSL-value protocols.
 
-This rule is otherwise not recursive:
-`flydsl.compiler.<submodule>.<name>` does not become stable merely because
-`<submodule>` is importable; it must be listed explicitly in §2.3.
+This rule is otherwise not recursive: `flydsl.compiler.<submodule>.<name>` does
+not become stable merely because `<submodule>` is importable; it must be listed
+explicitly in §2.4.
 
-### 2.3 Other explicitly stable APIs
+### 2.3 `flydsl.extension`
 
-The following full paths are stable. This table is the only exception list; a
-new commitment must add an explicit row.
+Extension libraries follow the same recursive export-chain rule as backend
+namespaces. Subject to the first branch in §2, an extension API is stable if and
+only if:
 
-| API | Description |
-|---|---|
+1. its extension entry point is a target of `_EXTENSION_MODULES` in
+   `expr/__init__.py`;
+2. every following child namespace appears in the `__all__` of its direct parent
+   package; and
+3. the final name appears in the `__all__` of its owning module or package.
+
+`flydsl.extension`, registered extension entry points, and intermediate child
+namespaces satisfying condition 2 are stable namespaces. The rule has no
+path-depth limit. An extension alias `fx.<extension>` and its descendants have
+the same stability as the corresponding canonical paths under
+`flydsl.extension`.
+
+### 2.4 Other explicitly stable APIs
+
+Subject to the first branch in §2, the following full paths are stable. This
+table is the only exception list; a new commitment must add an explicit row.
+
+| API                                   | Description                        |
+| ------------------------------------- | ---------------------------------- |
 | `flydsl.runtime.device.get_rocm_arch` | Query the target ROCm architecture |
-| `flydsl.runtime.device.is_rdna_arch` | Choose between CDNA and RDNA paths |
+| `flydsl.runtime.device.is_rdna_arch`  | Choose between CDNA and RDNA paths |
 
-### 2.4 All other APIs
+### 2.5 All other APIs
 
-Every API that does not satisfy §2.1 or §2.2, and is not listed exactly in
-§2.3, is unstable. This includes undeclared `flydsl.*` submodules,
-`flydsl._mlir.*`, and every underscore-prefixed name.
+Every API that does not satisfy §2.1, §2.2, or §2.3, and is not listed exactly
+in §2.4, is unstable. This includes undeclared `flydsl.*` submodules,
+`flydsl._mlir.*`, every underscore-prefixed name, and any path with an
+`experimental` module segment.
 
 Direct invocation of an upstream MLIR dialect op is allowed but unstable: its
 name, arguments, and semantics are controlled by upstream MLIR, and FlyDSL
@@ -142,31 +179,36 @@ python3 scripts/list_stable_apis.py --format json
 ```
 
 The script reads export manifests without importing FlyDSL. It lists canonical
-module paths, omitting equivalent top-level `flydsl.expr` aliases. Deprecated
-APIs remain compatible but are intentionally excluded from this catalog.
+module paths, using `flydsl.extension` paths for extension libraries and
+omitting equivalent `flydsl.expr` aliases. Deprecated APIs remain compatible but
+are intentionally excluded from the default catalog. Use `--repo-root` to select
+another source tree. For release review, add `--include-deprecated` and also
+review the §3 table and the member and semantic contracts that a path list
+cannot capture.
 
 ## 3. Stable but deprecated
 
 The APIs in the table below satisfy the stable rules in §2 but are marked as
-deprecated. They remain stable during the §5 window; new code must not use
-them, and you must provide a replacement before removal.
+deprecated. They remain stable during the §5 window; new code must not use them,
+and you must provide a replacement before removal.
 
 For direct-child module exports under §2.1, the deprecated status in this table
-also applies to `fx.<name>`, `fx.<module>.<name>`, and direct-import forms.
+also applies to `fx.<name>`, `fx.<module>.<name>`, and direct-import forms. For
+extension libraries, it applies to both canonical paths and their §2.3 aliases.
 FlyDSL maintains this table separately as the compatibility-debt list and
 excludes it from the catalog above.
 
-| API | Replacement or required work before removal | Declared removal release |
-|---|---|---|
-| `fx.get` | `fx.get_().unpack()` or `IntTuple[].unpack()` | v0.4 |
-| `fx.index_cast` | `fx.Index(x)` | v0.4 |
-| `fx.constant_vector` | `Numeric` and `Vector` member functions | v0.4 |
-| `fx.tdm_ops` and content reached through this alias | `fx.rocdl.tdm_ops`; the latter is a target-specific unstable path | v0.4 |
-| `fx.Numeric.maximumf`, `fx.Numeric.minimumf` | `fx.max(x, y)`, `fx.min(x, y)` | v0.4 |
-| `fx.Numeric.shrui`, `fx.Numeric.addf` | `fx.arith.shrui(x, amount)`, `x + y` with a `fastmath` context | v0.4 |
-| `fx.Numeric.exp2` | `fx.math.exp2(x)` | v0.4 |
-| `fx.Numeric.shuffle_xor` | `fx.gpu.shuffle_xor(x, offset, width)` | v0.4 |
-| `fx.rocdl.BufferCopyLDS64b` | `fx.rocdl.BufferCopyLDS32b`, or `fx.rocdl.BufferCopyLDS128b` on gfx950. No AMD target has an 8-byte LDS DMA instruction, so this entry point could never emit a working copy; it now raises instead of silently failing instruction selection. | v0.4 |
+| API                                                 | Replacement or required work before removal                                                                              | Declared removal release |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------ |
+| `fx.get`                                            | `fx.get_().unpack()` or `IntTuple[].unpack()`                                                                            | v0.4                     |
+| `fx.index_cast`                                     | `fx.Index(x)`                                                                                                            | v0.4                     |
+| `fx.constant_vector`                                | `Numeric` and `Vector` member functions                                                                                  | v0.4                     |
+| `fx.tdm_ops` and content reached through this alias | `fx.rocdl.tdm_ops`; the latter is a target-specific unstable path                                                        | v0.4                     |
+| `fx.Numeric.maximumf`, `fx.Numeric.minimumf`        | `fx.max(x, y)`, `fx.min(x, y)`                                                                                           | v0.4                     |
+| `fx.Numeric.shrui`, `fx.Numeric.addf`               | `fx.arith.shrui(x, amount)`, `x + y` with a `fastmath` context                                                           | v0.4                     |
+| `fx.Numeric.exp2`                                   | `fx.math.exp2(x)`                                                                                                        | v0.4                     |
+| `fx.Numeric.shuffle_xor`                            | `fx.gpu.shuffle_xor(x, offset, width)`                                                                                   | v0.4                     |
+| `fx.rocdl.BufferCopyLDS64b`                         | `fx.rocdl.BufferCopyLDS32b`, or `fx.rocdl.BufferCopyLDS128b` on gfx950. No AMD target has an 8-byte LDS DMA instruction. | v0.4                     |
 
 ## 4. What counts as a breaking change
 
@@ -174,15 +216,17 @@ For a stable API, each of the following is a breaking change:
 
 - removing a stable API or breaking its export chain: removing an entry from a
   direct-child module's `__all__`, `flydsl.compiler.__all__`, or
-  `flydsl.compiler.protocol.__all__`; or removing a §2.3 entry without a new
-  rule that covers it;
+  `flydsl.compiler.protocol.__all__`; removing a backend or extension entry
+  point from `_BACKEND_MODULES` or `_EXTENSION_MODULES`, or an entry from any
+  `__all__` in their recursive export chains; or removing a §2.4 entry without a
+  new rule that covers it;
 - removing an argument, renaming an argument that may be passed by keyword,
   reordering positional arguments, removing a default, or changing a default;
 - narrowing accepted types, architectures, or value ranges;
 - changing a returned scalar or value type, tuple arity, or a returned object's
   stable public result interface (including non-private members and `__...__`
-  Python special methods), or the numerical, layout, or emitted-op semantics
-  for previously valid input.
+  Python special methods), or the numerical, layout, or emitted-op semantics for
+  previously valid input.
 
 The following are not breaking changes:
 

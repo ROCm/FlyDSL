@@ -29,6 +29,11 @@ jobs:
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           SOURCE_VERSION="$(awk -F'"' '/^__version__ = / {print $2; exit}' python/flydsl/__init__.py)"
 
+          if [ "$(git rev-parse --is-shallow-repository)" != "false" ]; then
+            echo "Release validation requires the complete Git history" >&2
+            exit 1
+          fi
+
           if [ -z "${SOURCE_VERSION}" ]; then
             echo "Failed to find __version__ in python/flydsl/__init__.py" >&2
             exit 1
@@ -37,17 +42,41 @@ jobs:
           if [ "${TAG_VERSION}" = "${SOURCE_VERSION}" ]; then
             PACKAGE_VERSION="${SOURCE_VERSION}"
           else
-            DEV_NUMBER="$(git rev-list --count HEAD)"
-            if [ -z "${DEV_NUMBER}" ]; then
+            TAG_PREFIX="${SOURCE_VERSION}.dev"
+            TAG_DEV_NUMBER="${TAG_VERSION#${TAG_PREFIX}}"
+            if [ "${TAG_DEV_NUMBER}" = "${TAG_VERSION}" ] || [[ ! "${TAG_DEV_NUMBER}" =~ ^[0-9]+$ ]]; then
+              echo "Tag ${GITHUB_REF_NAME} must match ${TAG_PREFIX}<number> or ${SOURCE_VERSION}" >&2
+              exit 1
+            fi
+
+            COMMIT_COUNT="$(git rev-list --count HEAD)"
+            if [ -z "${COMMIT_COUNT}" ]; then
               echo "Failed to derive dev version from git rev-list" >&2
               exit 1
             fi
-            EXPECTED_DEV_VERSION="${SOURCE_VERSION}.dev${DEV_NUMBER}"
-            if [ "${TAG_VERSION}" != "${EXPECTED_DEV_VERSION}" ]; then
-              echo "Tag ${GITHUB_REF_NAME} must match source version ${SOURCE_VERSION} or ${EXPECTED_DEV_VERSION}" >&2
+
+            MAX_PREVIOUS_DEV_NUMBER=0
+            while IFS= read -r EXISTING_TAG; do
+              if [ "${EXISTING_TAG}" = "${GITHUB_REF_NAME}" ]; then
+                continue
+              fi
+              SUFFIX="${EXISTING_TAG#v${SOURCE_VERSION}.dev}"
+              if [[ "${SUFFIX}" =~ ^[0-9]+$ ]] && ((10#${SUFFIX} > MAX_PREVIOUS_DEV_NUMBER)); then
+                MAX_PREVIOUS_DEV_NUMBER=$((10#${SUFFIX}))
+              fi
+            done < <(git tag --list "v${SOURCE_VERSION}.dev*")
+
+            EXPECTED_DEV_NUMBER=$((10#${COMMIT_COUNT}))
+            if ((MAX_PREVIOUS_DEV_NUMBER >= EXPECTED_DEV_NUMBER)); then
+              EXPECTED_DEV_NUMBER=$((MAX_PREVIOUS_DEV_NUMBER + 1))
+            fi
+
+            if ((10#${TAG_DEV_NUMBER} != EXPECTED_DEV_NUMBER)); then
+              echo "Tag ${GITHUB_REF_NAME} must be the next dev version: v${SOURCE_VERSION}.dev${EXPECTED_DEV_NUMBER}" >&2
               exit 1
             fi
-            PACKAGE_VERSION="${EXPECTED_DEV_VERSION}"
+
+            PACKAGE_VERSION="${TAG_VERSION}"
           fi
 
           echo "package_version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
@@ -69,6 +98,7 @@ jobs:
     uses: ./.github/workflows/test-whl.yaml
     with:
       docker_image: rocm/pytorch:rocm7.14_ubuntu24.04_py3.11_pytorch_release_2.12.0@sha256:05743468394cc8f9cce06822635836a31ddfd5956bac36976666d7057713441d
+      aiter_ref: main
     permissions:
       contents: read
 

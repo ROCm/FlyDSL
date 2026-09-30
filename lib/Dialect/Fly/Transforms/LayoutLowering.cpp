@@ -2171,15 +2171,13 @@ public:
     auto *ctx = rewriter.getContext();
 
     Value copyAtomVal = op.getCopyAtom();
-    if (auto tiledCopyOp = copyAtomVal.getDefiningOp<MakeTiledCopyOp>())
-      copyAtomVal = tiledCopyOp.getCopyAtom();
+    if (isa<TiledCopyType>(copyAtomVal.getType()))
+      copyAtomVal = GetCopyAtomOp::create(rewriter, loc, copyAtomVal);
 
     Value src = op.getSrc();
     Value dst = op.getDst();
     Value pred = op.getPred();
 
-    auto srcMemRefTy = cast<fly::MemRefType>(src.getType());
-    auto dstMemRefTy = cast<fly::MemRefType>(dst.getType());
     auto predMemRefTy = pred ? cast<fly::MemRefType>(pred.getType()) : nullptr;
 
     std::function<LayoutAttr(Attribute)> getLayoutAttr = [&](Attribute attr) -> LayoutAttr {
@@ -2187,9 +2185,19 @@ public:
         return layout;
       return getLayoutAttr(cast<ComposedLayoutAttr>(attr).getOuter());
     };
+    // An operand is a memref or a coordinate tensor
+    auto tensorLikeLayout = [&](Type ty) -> LayoutAttr {
+      if (auto memref = dyn_cast<fly::MemRefType>(ty))
+        return getLayoutAttr(memref.getLayout());
+      if (auto coord = dyn_cast<fly::CoordTensorType>(ty))
+        return getLayoutAttr(coord.getLayout());
+      return nullptr;
+    };
 
-    LayoutAttr srcLayoutAttr = getLayoutAttr(srcMemRefTy.getLayout());
-    LayoutAttr dstLayoutAttr = getLayoutAttr(dstMemRefTy.getLayout());
+    LayoutAttr srcLayoutAttr = tensorLikeLayout(src.getType());
+    LayoutAttr dstLayoutAttr = tensorLikeLayout(dst.getType());
+    if (!srcLayoutAttr || !dstLayoutAttr)
+      return rewriter.notifyMatchFailure(op, "src/dst are not tensor-like");
     LayoutAttr predLayoutAttr = nullptr;
     if (pred)
       predLayoutAttr = getLayoutAttr(predMemRefTy.getLayout());
@@ -2197,21 +2205,48 @@ public:
     int32_t srcRank = srcLayoutAttr.rank();
     int32_t dstRank = dstLayoutAttr.rank();
 
-    if (srcRank != dstRank)
-      return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
-
-    // A whole-tile copy atom (e.g. the gfx1250 TDM DMA) moves the entire N-D tile
-    // in one call and reads its geometry from the operand memref layout, so emit a
-    // single call on the tile instead of decomposing it per element. The atom's own
-    // emitAtomCall verifies the operand rank matches the tile. Detected via a
-    // boundary-safe type trait rather than a concrete cross-dialect cast.
+    // tests `size(src) == NumValSrc` *before* it peels or loops: a call is
+    // issued the moment the operand holds exactly one atom's worth of values.
+    // Without that test the decomposition below keeps descending until the
+    // shape is a leaf, which is only accidentally right -- it is wrong for
+    // every atom whose values are a nested tuple.
+    // TODO: need a better solution for this.
+    LayoutBuilder<LayoutAttr> layoutBuilder(ctx);
+    auto sizeOf = [&](LayoutAttr layout) {
+      return intTupleProduct(layoutBuilder, layout.getShape()).getLeafAsInt();
+    };
+    auto numValOf = [&](Attribute thrVal) { return sizeOf(cast<LayoutAttr>(thrVal).at(1)); };
     if (auto copyAtomTy = dyn_cast<CopyAtomType>(copyAtomVal.getType())) {
-      if (copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+      IntAttr srcVals = sizeOf(srcLayoutAttr);
+      IntAttr dstVals = sizeOf(dstLayoutAttr);
+      IntAttr atomSrcVals = numValOf(copyAtomTy.getThrValLayoutSrc());
+      IntAttr atomDstVals = numValOf(copyAtomTy.getThrValLayoutDst());
+      bool singleAtomCall = srcVals.isStatic() && dstVals.isStatic() && atomSrcVals.isStatic() &&
+                            atomDstVals.isStatic() &&
+                            srcVals.getValue() == atomSrcVals.getValue() &&
+                            dstVals.getValue() == atomDstVals.getValue();
+      if (singleAtomCall || copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+        // As in the leaf case below, materialize composed-layout offsets before
+        // the atom consumes the pointer. Bypassing decomposition loses the LDS
+        // swizzle offset even when the operands hold exactly one atom's values.
+        // Whole-tile atoms instead consume the original layout themselves.
+        if (!copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+          if (isa<fly::MemRefType>(src.getType()))
+            src = DecompositionOp::create(rewriter, loc, src);
+          if (isa<fly::MemRefType>(dst.getType()))
+            dst = DecompositionOp::create(rewriter, loc, dst);
+        }
         CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
         rewriter.eraseOp(op);
         return success();
       }
     }
+
+    // A single atom may have different source/destination profiles (coordinate
+    // bases do not coalesce like contiguous LDS addresses). Only recursive
+    // decomposition requires equal outer ranks.
+    if (srcRank != dstRank)
+      return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
 
     if (pred && predLayoutAttr.rank() == srcRank - 1) {
       LayoutBuilder<LayoutValueAdaptor> builder(rewriter, loc);
@@ -2289,13 +2324,12 @@ public:
     auto *ctx = rewriter.getContext();
 
     Value mmaAtomVal = op.getMmaAtom();
-    if (auto tiledMmaOp = mmaAtomVal.getDefiningOp<MakeTiledMmaOp>()) {
-      mmaAtomVal = tiledMmaOp.getMmaAtom();
-    }
+    if (isa<TiledMmaType>(mmaAtomVal.getType()))
+      mmaAtomVal = GetMmaAtomOp::create(rewriter, loc, mmaAtomVal);
 
     Value d = op.getD();
-    Value a = op.getA();
-    Value b = op.getB();
+    Value a = op.getA().front();
+    Value b = op.getB().front();
     Value c = op.getC();
 
     LayoutAttr dLayoutAttr = cast<LayoutAttr>(cast<fly::MemRefType>(d.getType()).getLayout());
@@ -2309,7 +2343,7 @@ public:
     int32_t cRank = cLayoutAttr.rank();
 
     if (dRank == 1 && aRank == 1 && bRank == 1 && cRank == 1) {
-      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, a, b, c);
+      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, op.getA(), op.getB(), c);
       rewriter.eraseOp(op);
       return success();
     }
@@ -2340,10 +2374,18 @@ public:
           rewriter, loc, IntTupleType::get(IntTupleAttr::get(ArrayAttr::get(ctx, coordElems))), {});
     };
 
+    auto sliceGroup = [&](ValueRange operands, ArrayRef<int32_t> idx) {
+      SmallVector<Value> slices;
+      Value coord = getSliceCoord(idx);
+      for (Value operand : operands)
+        slices.push_back(SliceOp::create(rewriter, loc, operand, coord));
+      return slices;
+    };
+
     if (aRank == 2 && bRank == 2) {
       auto emitMmaCall2D = [&](int32_t m, int32_t n) {
-        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m}));
-        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
+        auto aSlice = sliceGroup(op.getA(), {m});
+        auto bSlice = sliceGroup(op.getB(), {n});
         Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
         Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
         MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
@@ -2444,8 +2486,8 @@ public:
         bool &visited = mnVisited[m * loop_n + n];
         Value cSrc = visited ? d : c;
         visited = true;
-        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
-        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
+        auto aSlice = sliceGroup(op.getA(), {m, k});
+        auto bSlice = sliceGroup(op.getB(), {n, k});
         Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
         Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
         MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);

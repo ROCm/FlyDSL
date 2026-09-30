@@ -133,14 +133,18 @@ class Config:
         *,
         num_warps=None,
         waves_per_eu=None,
-        maxnreg=None,
         pre_hook=None,
         **kwargs,
     ):
+        # Explicit, or **kwargs would silently accept it as a Constexpr arg.
+        if "maxnreg" in kwargs:
+            raise TypeError(
+                "Config(maxnreg=...) is no longer supported: it never reached LLVM. "
+                "Use waves_per_eu to target occupancy instead."
+            )
         self.kwargs = kwargs
         self.num_warps = num_warps
         self.waves_per_eu = waves_per_eu
-        self.maxnreg = maxnreg
         self.pre_hook = pre_hook
 
     def all_kwargs(self):
@@ -152,14 +156,7 @@ class Config:
 
     def compiler_opts(self):
         """Compiler-level options (not user kwargs)."""
-        return {
-            k: v
-            for k, v in [
-                ("waves_per_eu", self.waves_per_eu),
-                ("maxnreg", self.maxnreg),
-            ]
-            if v is not None
-        }
+        return {k: v for k, v in [("waves_per_eu", self.waves_per_eu)] if v is not None}
 
     def __repr__(self):
         parts = [f"{k}={v}" for k, v in self.kwargs.items()]
@@ -167,13 +164,11 @@ class Config:
             parts.append(f"num_warps={self.num_warps}")
         if self.waves_per_eu is not None:
             parts.append(f"waves_per_eu={self.waves_per_eu}")
-        if self.maxnreg is not None:
-            parts.append(f"maxnreg={self.maxnreg}")
         return f"Config({', '.join(parts)})"
 
     def to_dict(self):
         d = dict(self.kwargs)
-        for k in ("num_warps", "waves_per_eu", "maxnreg"):
+        for k in ("num_warps", "waves_per_eu"):
             v = getattr(self, k)
             if v is not None:
                 d[k] = v
@@ -182,10 +177,11 @@ class Config:
     @classmethod
     def from_dict(cls, d):
         d = dict(d)
+        # Tolerate maxnreg in caches written before its removal.
+        d.pop("maxnreg", None)
         return cls(
             num_warps=d.pop("num_warps", None),
             waves_per_eu=d.pop("waves_per_eu", None),
-            maxnreg=d.pop("maxnreg", None),
             **d,
         )
 

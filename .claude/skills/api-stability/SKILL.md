@@ -1,10 +1,11 @@
 ---
 name: api-stability
 description: >
-  Review a FlyDSL PR, commit, branch, kernel, or consuming module for API-stability
-  compliance. Detect breaking changes to stable APIs, usage of unstable FlyDSL APIs,
-  and direct upstream MLIR dialect operations. Use when asked to review API
-  compatibility, a stable-API change, or whether a kernel/module uses only stable APIs.
+  Review a FlyDSL PR, commit, branch, kernel, or consuming module for
+  API-stability compliance. Detect breaking changes to stable APIs, usage of
+  unstable FlyDSL APIs, and direct upstream MLIR dialect operations. Use when
+  asked to review API compatibility, a stable-API change, or whether a
+  kernel/module uses only stable APIs.
 allowed-tools: Read Edit Write Bash Grep Glob
 ---
 
@@ -60,9 +61,9 @@ stability from whether an attribute happens to be importable or callable.
 Read these implementation manifests at the reviewed revision as applicable:
 
 - `python/flydsl/expr/__init__.py` — direct-child aggregation and
-  `_BACKEND_MODULES`.
-- `python/flydsl/compiler/__init__.py` and
-  `python/flydsl/compiler/protocol.py` — compiler export manifests.
+  `_BACKEND_MODULES` / `_EXTENSION_MODULES`.
+- `python/flydsl/compiler/__init__.py` and `python/flydsl/compiler/protocol.py`
+  — compiler export manifests.
 - The relevant module or package `__all__` declarations.
 
 Use the static catalog as an aid:
@@ -71,10 +72,12 @@ Use the static catalog as an aid:
 python3 scripts/list_stable_apis.py --format json
 ```
 
-The catalog intentionally does **not** import FlyDSL, omits equivalent
-top-level `expr` aliases, excludes §3 deprecated APIs, and does not enumerate
-public type or result-object members. It can detect declared export-chain
-changes, but it cannot by itself prove signature or semantic compatibility.
+The catalog intentionally does **not** import FlyDSL, omits equivalent top-level
+`expr` aliases, excludes §3 deprecated APIs, and does not enumerate public type
+or result-object members. It can detect declared export-chain changes, but it
+cannot by itself prove signature or semantic compatibility. For a
+release-to-release compatibility check, use the **release-api-check**
+skill's baseline selection and deprecation-window workflow.
 
 ## 1. Producer review: PR, commit, or branch
 
@@ -82,8 +85,8 @@ changes, but it cannot by itself prove signature or semantic compatibility.
 
 Use an explicit base and head before examining the diff:
 
-- **PR**: obtain its base and head commits with `gh pr view <PR-or-URL>`; compare
-  the PR head with the merge base of its base branch and head.
+- **PR**: obtain its base and head commits with `gh pr view <PR-or-URL>`;
+  compare the PR head with the merge base of its base branch and head.
 - **Single commit**: compare `<commit>^` to `<commit>`; for a merge commit, ask
   which parent represents the intended baseline if it is not clear.
 - **Current branch**: compare `HEAD` with its merge base against the nominated
@@ -97,17 +100,18 @@ git diff --find-renames --find-copies --unified=80 "$base" "$head" -- \
 ```
 
 Do not limit the review to edited function bodies. Inspect all touched
-`__init__.py`, `__all__`, `_BACKEND_MODULES`, `compiler.protocol`, and §2.3 / §3
-documentation-table changes.
+`__init__.py`, `__all__`, `_BACKEND_MODULES`, `_EXTENSION_MODULES`,
+`compiler.protocol`, and §2.4 / §3 documentation-table changes.
 
 ### Compare declared stable surfaces
 
-Run `scripts/list_stable_apis.py` against **both** revisions. Prefer disposable
-detached worktrees so the primary worktree is not changed. Compare the two JSON
-outputs:
+Run `scripts/list_stable_apis.py` with `--repo-root` pointing to **each**
+reviewed source tree, after checking that its policy matches the collector's
+rules. For older policies, use that revision's collector when available. Prefer
+disposable detached worktrees so the primary worktree is not changed. Compare
+the two JSON outputs:
 
-- a path present at the base and absent at the head is a candidate
-  **BLOCKER**;
+- a path present at the base and absent at the head is a candidate **BLOCKER**;
 - a new path is not breaking, but creates a new compatibility commitment and
   should be called out;
 - inspect §3 separately, because the catalog deliberately excludes deprecated
@@ -119,13 +123,13 @@ dunder methods.
 
 ### Check for breaking changes
 
-For each base-stable API affected by the diff, compare base and head for all
-§4 break conditions:
+For each base-stable API affected by the diff, compare base and head for all §4
+break conditions:
 
-- removal, loss of an export-chain link, or removal from the explicit §2.3
+- removal, loss of an export-chain link, or removal from the explicit §2.4
   table;
-- removed parameters, renamed keyword parameters, positional reordering,
-  removed defaults, or changed defaults;
+- removed parameters, renamed keyword parameters, positional reordering, removed
+  defaults, or changed defaults;
 - narrower accepted types, architectures, or value ranges;
 - changed return type, tuple arity, public type members, numerical semantics,
   layout semantics, or emitted-operation semantics for previously valid input.
@@ -180,17 +184,16 @@ rg -n --glob '*.py' '^\s*(from|import)\s+(flydsl|mlir)(\.|$)|flydsl\._mlir' <sco
 Resolve examples such as:
 
 - `import flydsl.expr as fx` + `fx.foo` → `flydsl.expr.foo`;
-- `from flydsl.expr import arith as ea` + `ea.addi` →
-  `flydsl.expr.arith.addi`;
+- `from flydsl.expr import arith as ea` + `ea.addi` → `flydsl.expr.arith.addi`;
 - `from flydsl.expr.typing import Vector as Vec` + `Vec.method` →
   `flydsl.expr.typing.Vector.method`;
 - `from flydsl.compiler import kernel` → `flydsl.compiler.kernel`.
 
 Classify every direct FlyDSL import and every accessed/called FlyDSL member
-under `docs/api_stability.md`. For a fluent chain such as
-`factory(...).member`, resolve the factory first, then apply the policy's
-returned-object rule. Do not infer stability from a dynamic binding. Report
-direct imports that are unused separately from actual calls.
+under `docs/api_stability.md`. For a fluent chain such as `factory(...).member`,
+resolve the factory first, then apply the policy's returned-object rule. Do not
+infer stability from a dynamic binding. Report direct imports that are unused
+separately from actual calls.
 
 Use these statuses:
 
@@ -206,24 +209,24 @@ Use these statuses:
   FlyDSL object; a strictly higher-severity form of UNSTABLE.
 
 A module is **stable-only** only if it has no DEPRECATED, UNSTABLE,
-PRIVATE-WRITE, UPSTREAM-MLIR, or UNRESOLVED FlyDSL uses. Existing internal code may
-intentionally rely on unstable APIs; report that fact rather than treating it
-as a producer-API compatibility break.
+PRIVATE-WRITE, UPSTREAM-MLIR, or UNRESOLVED FlyDSL uses. Existing internal code
+may intentionally rely on unstable APIs; report that fact rather than treating
+it as a producer-API compatibility break.
 
 ### Mandatory private-field-write warning
 
-Reading an unstable member is a compatibility bet; *writing* one mutates FlyDSL
-internal state, so it can break FlyDSL's invariants at the reviewed revision, not
-only after an upgrade. Rank these above every other unstable finding.
+Reading an unstable member is a compatibility bet; _writing_ one mutates FlyDSL
+internal state, so it can break FlyDSL's invariants at the reviewed revision,
+not only after an upgrade. Rank these above every other unstable finding.
 
 Give a `[PRIVATE-WRITE]` finding for each assignment to an underscore-prefixed
 attribute of a FlyDSL object — overwriting a field FlyDSL sets, attaching one it
 does not define, and the `setattr` / `__dict__` forms. Locate where FlyDSL
 assigns, validates, and reads the field, then state the concrete consequence and
-any aggravating factor: **bypassed validation** (the public path runs a check the
-write skips) or **shared mutable object** (the write leaks across calls, configs,
-or threads). Note the missing public API, since that is why the workaround
-exists.
+any aggravating factor: **bypassed validation** (the public path runs a check
+the write skips) or **shared mutable object** (the write leaks across calls,
+configs, or threads). Note the missing public API, since that is why the
+workaround exists.
 
 ```text
 [PRIVATE-WRITE] kernels/example.py:1003: kernel_impl._known_block_size = [...]
@@ -245,23 +248,23 @@ arith, builtin, func, gpu, llvm, math, memref, rocdl, scf, vector
 ```
 
 It also applies to direct generated ODS-builder modules such as
-`flydsl._mlir.dialects._arith_ops_gen`. Typical findings include
-`arith.addi`, `scf.ForOp`, `vector.LoadOp`, and `llvm.*` calls.
+`flydsl._mlir.dialects._arith_ops_gen`. Typical findings include `arith.addi`,
+`scf.ForOp`, `vector.LoadOp`, and `llvm.*` calls.
 
 Use wording equivalent to:
 
 ```text
 [UPSTREAM-MLIR] kernels/example.py:42: vector.LoadOp
 Direct upstream MLIR builder; allowed, but unstable under
-docs/api_stability.md §2.4. FlyDSL does not guarantee its name, signature,
+docs/api_stability.md §2.5. FlyDSL does not guarantee its name, signature,
 or semantics across releases. Prefer a stable FlyDSL wrapper when one exists.
 ```
 
 `flydsl._mlir.ir` alone is raw, unstable MLIR infrastructure but is not by
-itself an operation-use reminder. Raw `fly` and `fly_rocdl` dialect bindings
-are FlyDSL-specific rather than upstream; classify them as **UNSTABLE** raw
-FlyDSL bindings, not as `UPSTREAM-MLIR`. Do not suppress the reminder merely
-because an external dialect is accessed through an alias.
+itself an operation-use reminder. Raw `fly` and `fly_rocdl` dialect bindings are
+FlyDSL-specific rather than upstream; classify them as **UNSTABLE** raw FlyDSL
+bindings, not as `UPSTREAM-MLIR`. Do not suppress the reminder merely because an
+external dialect is accessed through an alias.
 
 ### Report
 
@@ -282,7 +285,7 @@ Scope: <file or directory>
 - [DEPRECATED/UNSTABLE] <resolved path> — <locations>; <policy reason>.
 
 ### Upstream MLIR operations
-- [UPSTREAM-MLIR] <operation> — <locations>; §2.4 reminder.
+- [UPSTREAM-MLIR] <operation> — <locations>; §2.5 reminder.
 
 ### Unresolved paths
 - <source expression> — <why static resolution was insufficient>.

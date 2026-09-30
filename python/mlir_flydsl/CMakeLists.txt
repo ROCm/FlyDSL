@@ -84,6 +84,7 @@ declare_mlir_python_extension(FlyPythonSources.RegisterEverything
     MLIRCAPIIR
     MLIRCPIFly
     ${_backend_embed_capi_libs}
+    MLIRCPIHostObject
     MLIRCPILLVMOption
     MLIRCAPIArith
     MLIRCAPIGPU
@@ -270,4 +271,10 @@ if(TARGET FlyJitRuntime)
   set_target_properties(FlyJitRuntime PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
   add_dependencies(FlyPythonCAPI FlyJitRuntime)
+endif()
+
+if(TARGET FlyRocmAotRuntime)
+  set_target_properties(FlyRocmAotRuntime PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
+  add_dependencies(FlyPythonCAPI FlyRocmAotRuntime)
 endif()

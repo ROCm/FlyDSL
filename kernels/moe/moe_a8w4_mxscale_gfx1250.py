@@ -53,6 +53,9 @@ def launch_moe_gemm_a8w4(
 ):
     if cluster_m != 1:
         raise ValueError("moe grouped GEMM supports cluster_n only (cluster_m must be 1)")
+    if K % tile_k:
+        # K_TILES = K // tile_k below would silently drop the remainder of K.
+        raise ValueError(f"K={K} must be a multiple of tile_k={tile_k}")
     use_cluster = cluster_n > 1
     cache_tag = (
         K,

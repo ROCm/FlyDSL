@@ -22,7 +22,7 @@ All `fx.*` layout operations generate MLIR IR and must be called inside a `@flyc
 | | `fx.cosize(layout)` | `fly.cosize` | Codomain size (max index + 1) |
 | | `fx.get_shape(layout)` | `fly.get_shape` | Extract shape from layout |
 | | `fx.get_stride(layout)` | `fly.get_stride` | Extract stride from layout |
-| | `fx.get(int_tuple, idx)` | `fly.select` + `fly.get_scalar` | Extract element at index |
+| | `fx.get_(int_tuple, idx).unpack()` | `fly.select` + `fly.get_scalar` | Extract a scalar element at index |
 | **Algebra** | `fx.composition(A, B)` | `fly.composition` | Compose: A ∘ B |
 | | `fx.complement(tiler, size)` | `fly.complement` | Complement of tiler |
 | | `fx.coalesce(layout)` | `fly.coalesce` | Simplify layout |
@@ -127,6 +127,7 @@ coord = fx.idx2crd(idx, layout)
 ### Example
 
 For layout `((8, 16), (1, 8))` (8x16, column-major):
+
 - `crd2idx((3, 5), layout)` = `3*1 + 5*8` = `43`
 - `idx2crd(43, layout)` = `(43 % 8, 43 / 8)` = `(3, 5)`
 
@@ -150,7 +151,7 @@ s = fx.size(layout)           # total elements (returns Int32 for static)
 cs = fx.cosize(layout)        # codomain size (max index + 1)
 shape = fx.get_shape(layout)
 stride = fx.get_stride(layout)
-v = fx.get(shape, 0)          # first dimension
+v = fx.get_(shape, 0).unpack()  # first dimension
 r = fx.rank(shape)            # number of modes
 ```
 
@@ -185,6 +186,7 @@ rest = fx.complement(tiler, target_size)
 Simplifies a layout by flattening nested modes and combining adjacent modes when possible.
 
 **Post-conditions**:
+
 - `size(result) == size(layout)` (preserves total size)
 - For all valid indices: `layout(i) == result(i)` (preserves mapping)
 
@@ -456,6 +458,7 @@ fx.printf("tid={} bid={} val={}", tid, bid, value)
 ```
 
 Supports:
+
 - `ir.Value` — dynamic values
 - `int`, `float`, `bool` — auto-converted to constants
 - `str`, `type` — embedded as static text
@@ -465,7 +468,7 @@ Supports:
 
 ## 13. Decision tree
 
-```
+```text
 Which layout operation do I need?
 
 ├── Creating a layout?

@@ -236,7 +236,7 @@ For kernel PRs, include in the PR description:
 
 Example:
 
-```
+```markdown
 ## Performance Results (MI300X)
 
 | Config | Baseline | Optimized | Improvement |
@@ -391,6 +391,7 @@ A: We strongly prefer to avoid new dependencies. If necessary, provide justifica
 **Q: How do I run only the tests related to my change?**
 
 A: Use pytest's `-k` flag:
+
 ```bash
 pytest tests/ -k "test_rmsnorm" -v
 ```
@@ -398,6 +399,7 @@ pytest tests/ -k "test_rmsnorm" -v
 **Q: My PR conflicts with the main branch. How do I resolve?**
 
 A:
+
 ```bash
 git fetch upstream
 git rebase upstream/main
@@ -415,6 +417,6 @@ We follow the [Contributor Covenant Code of Conduct](https://www.contributor-cov
 
 ---
 
-## Thank You!
+## Thank You
 
 Thank you for contributing to FlyDSL! Whether you're optimizing a single kernel, adding a new DSL feature, or improving documentation, we appreciate your effort and dedication to the project.

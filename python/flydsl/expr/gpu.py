@@ -28,6 +28,7 @@ from .primitive import get_dyn_shared, make_ptr
 from .struct import (
     Arena,
     CompositeKind,
+    Empty,
     Storage,
     _effective_field_defs,
     _is_constexpr_type,
@@ -231,6 +232,8 @@ class SharedAllocator(Arena):
         - leaf    → single `make_ptr`.
         """
 
+        if type_spec is Empty:
+            return Storage[Empty](None)
         if is_composite_type(type_spec) and type_spec.__dsl_composite_kind__ == CompositeKind.Sum:
             nbytes = dsl_size_of(type_spec)
             align = dsl_align_of(type_spec)

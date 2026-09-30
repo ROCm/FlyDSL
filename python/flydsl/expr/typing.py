@@ -1216,8 +1216,12 @@ class CopyAtom(BuiltinDslType):
         if isinstance(field, dict):
             result = self
             for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
                 result = atom_set_value(result, k, v)
             return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
         return atom_set_value(self, field, value)
 
 
@@ -1257,13 +1261,35 @@ class MmaAtom(BuiltinDslType):
         if isinstance(field, dict):
             result = self
             for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
                 result = atom_set_value(result, k, v)
             return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
         return atom_set_value(self, field, value)
 
 
 @ir.register_value_caster(TiledCopyType.static_typeid, replace=True)
 class TiledCopy(BuiltinDslType):
+    @overload
+    def set_value(self, field: str, value): ...
+    @overload
+    def set_value(self, field: dict): ...
+
+    @dsl_loc_tracing
+    def set_value(self, field, value=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
+                result = atom_set_value(result, k, v)
+            return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
+        return atom_set_value(self, field, value)
+
     @property
     def tile_mn(self):
         return static(self.type.tile_mn)
@@ -1291,6 +1317,24 @@ class TiledCopy(BuiltinDslType):
 
 @ir.register_value_caster(TiledMmaType.static_typeid, replace=True)
 class TiledMma(BuiltinDslType):
+    @overload
+    def set_value(self, field: str, value): ...
+    @overload
+    def set_value(self, field: dict): ...
+
+    @dsl_loc_tracing
+    def set_value(self, field, value=None):
+        if isinstance(field, dict):
+            result = self
+            for k, v in field.items():
+                if not isinstance(v, ir.Value):
+                    v = as_ir_value(v)
+                result = atom_set_value(result, k, v)
+            return result
+        if not isinstance(value, ir.Value):
+            value = as_ir_value(value)
+        return atom_set_value(self, field, value)
+
     @property
     def mma_atom(self):
         return self.type.mma_atom

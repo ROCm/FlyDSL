@@ -219,7 +219,7 @@ def test_do_bench_fails_closed_without_a_gpu_backlog(monkeypatch):
 
 # ── Config ───────────────────────────────────────────────────────────────
 def test_config_roundtrip():
-    c = Config(BLOCK=128, num_warps=4, waves_per_eu=2, maxnreg=128)
+    c = Config(BLOCK=128, num_warps=4, waves_per_eu=2)
     d = c.to_dict()
     c2 = Config.from_dict(d)
     assert c2.to_dict() == d
@@ -228,10 +228,22 @@ def test_config_roundtrip():
 
 
 def test_config_kwargs_vs_compiler_opts():
-    c = Config(BLOCK=128, num_warps=4, waves_per_eu=2, maxnreg=96)
-    # num_warps is a jit kwarg; waves_per_eu/maxnreg are compiler opts.
+    c = Config(BLOCK=128, num_warps=4, waves_per_eu=2)
+    # num_warps is a jit kwarg; waves_per_eu is a compiler opt.
     assert c.all_kwargs() == {"BLOCK": 128, "num_warps": 4}
-    assert c.compiler_opts() == {"waves_per_eu": 2, "maxnreg": 96}
+    assert c.compiler_opts() == {"waves_per_eu": 2}
+
+
+def test_config_rejects_maxnreg():
+    with pytest.raises(TypeError, match="maxnreg"):
+        Config(BLOCK=128, maxnreg=96)
+
+
+def test_config_from_dict_drops_stale_maxnreg():
+    # An autotune cache written before the removal must still load.
+    c = Config.from_dict({"BLOCK": 128, "waves_per_eu": 2, "maxnreg": 96})
+    assert c.kwargs == {"BLOCK": 128}
+    assert c.compiler_opts() == {"waves_per_eu": 2}
 
 
 def test_config_no_compiler_opts_when_unset():

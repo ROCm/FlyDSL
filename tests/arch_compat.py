@@ -1,6 +1,6 @@
 """Architecture compatibility configuration for GPU tests and examples.
 
-Single source of truth for what runs on CDNA vs RDNA GPUs.
+Single source of truth for GPU architecture restrictions.
 Referenced by:
   - tests/kernels/conftest.py  (pytest collection filter)
   - scripts/run_tests.sh       (example script filter)
@@ -23,11 +23,16 @@ CDNA_ONLY_TESTS = frozenset(
     }
 )
 
-# Example scripts verified to work on RDNA (non-CDNA) GPUs.
-# On CDNA all examples run; on RDNA only whitelisted ones run.
-RDNA_COMPATIBLE_EXAMPLES = frozenset(
-    {
-        "01-vectorAdd.py",
-        "02-tiledCopy.py",
-    }
-)
+# Paths relative to examples/ -> supported architectures (shell glob patterns).
+# "*" allows any backend
+# Register each standalone example here so CI selects it before starting Python.
+EXAMPLE_ARCHITECTURES = {
+    "01-vectorAdd.py": ("*",),
+    "02-tiledCopy.py": ("gfx*",),
+    "03-tiledMma.py": ("gfx9*",),
+    "04-preshuffle_gemm.py": ("gfx9*",),
+    "05-gather_scatter.py": ("*",),
+    "06-cdna5_tensor_copy.py": ("gfx1250",),
+    "extension/coop/01-warp_collectives.py": ("*",),
+    "extension/coop/02-block_scan.py": ("*",),
+}

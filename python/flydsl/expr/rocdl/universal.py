@@ -32,7 +32,7 @@ from ..typing import (
     is_target_address_space,
 )
 from . import cdna3, rdna3, rdna4
-from .utils import normalize_s_waitcnt_field
+from .utils import normalize_s_waitcnt_field, require_lds_dma_support
 
 
 @dsl_loc_tracing
@@ -108,11 +108,12 @@ def BufferCopyLDS(bit_size):
     - `soffset` (`i32`), default zero
     - `imm_offset` (`i32`), default zero
     """
+    require_lds_dma_support(f"BufferCopyLDS({bit_size})")
     return CopyOpCDNA3BufferCopyLDSType.get(bit_size)
 
 
-BufferCopyLDS32b = lambda: CopyOpCDNA3BufferCopyLDSType.get(32)
-BufferCopyLDS128b = lambda: CopyOpCDNA3BufferCopyLDSType.get(128)
+BufferCopyLDS32b = lambda: BufferCopyLDS(32)
+BufferCopyLDS128b = lambda: BufferCopyLDS(128)
 
 
 def BufferCopyLDS64b():
