@@ -220,9 +220,20 @@ def fp4x8_to_bf16_gfx1250(word, scale, scale_sel):
 
 
 def wmma_bf16_gfx1250(a, b, c):
-    """``c += a @ b`` for one wave32 16x16x32 BF16 tile with an FP32 accumulator."""
+    """``c += a @ b`` for one wave32 16x16x32 BF16 tile with an FP32 accumulator.
 
-    return fx.Vector(rocdl.wmma_f32_16x16x32_bf16_(T.vec(8, T.f32), as_ir_value(a), as_ir_value(b), as_ir_value(c)))
+    ``a`` and ``b`` are the 16 BF16 operand values of this lane and ``c`` its 8
+    accumulator values, in the instruction's register layouts."""
+
+    atom = fx.make_mma_atom(fx.rocdl.WMMA(16, 16, 32, fx.BFloat16, fx.Float32))
+    a_frag = fx.make_rmem_tensor(16, fx.BFloat16)
+    b_frag = fx.make_rmem_tensor(16, fx.BFloat16)
+    acc = fx.make_rmem_tensor(8, fx.Float32)
+    a_frag.store(fx.Vector(a))
+    b_frag.store(fx.Vector(b))
+    acc.store(fx.Vector(c))
+    fx.gemm(atom, acc, a_frag, b_frag, acc)
+    return acc.load()
 
 
 def mxfp4_to_bf16x8(word, scale):
