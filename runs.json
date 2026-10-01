@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-10-01T10:43:52Z",
+ "updated": "2026-10-01T11:13:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 36850657108,
+   "run_id": 36852838623,
    "pr": 1222,
+   "commit": "71b0bc1e81c580a151f9a0735bce294ba7bd322f",
+   "branch": "fix_cmake_rocm7.14",
+   "event": "pull_request",
+   "title": "[Build] Fall back to HIP runtime from rocm-sdk core wheels",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36852838623",
+   "created_at": "2026-10-01T11:02:16Z",
+   "updated_at": "2026-10-01T11:05:57Z",
+   "actor": "apinge",
+   "jobs": []
+  },
+  {
+   "run_id": 36850657108,
+   "pr": null,
    "commit": "9e9d7d9ef42ad256add0afbe55cb31489e05f4ff",
    "branch": "fix_cmake_rocm7.14",
    "event": "pull_request",
@@ -25,38 +40,38 @@
    "branch": "jli/compare-latest-llvm",
    "event": "pull_request",
    "title": "[dont merge] compare latest base main llvm",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36847292133",
    "created_at": "2026-10-01T10:08:59Z",
-   "updated_at": "2026-10-01T10:38:58Z",
+   "updated_at": "2026-10-01T11:10:55Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-10-01T10:38:54Z",
-     "completed_at": null,
+     "completed_at": "2026-10-01T11:10:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36847292133/job/110330391835"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-10-01T10:38:46Z",
-     "completed_at": null,
+     "completed_at": "2026-10-01T10:48:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36847292133/job/110330391845"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-10-01T10:38:57Z",
-     "completed_at": null,
+     "completed_at": "2026-10-01T11:02:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36847292133/job/110330392105"
     }
    ]
@@ -2043,52 +2058,6 @@
      "started_at": "2026-09-28T11:33:09Z",
      "completed_at": "2026-09-28T11:54:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36411612778/job/108898342208"
-    }
-   ]
-  },
-  {
-   "run_id": 36411503720,
-   "pr": null,
-   "commit": "7d76692f97b50dd6ff0b0f57e88bd41f1713f073",
-   "branch": "xinyazhang/theRock-support",
-   "event": "pull_request",
-   "title": "[Build] Find ROCm through rocm-sdk before falling back to /opt/rocm*",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36411503720",
-   "created_at": "2026-09-28T10:44:38Z",
-   "updated_at": "2026-09-29T08:30:52Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-29T08:12:41Z",
-     "completed_at": "2026-09-29T08:30:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36411503720/job/109317050569"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T11:05:01Z",
-     "completed_at": "2026-09-28T11:49:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36411503720/job/109317052214"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T11:03:37Z",
-     "completed_at": "2026-09-28T12:21:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36411503720/job/109317052557",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
