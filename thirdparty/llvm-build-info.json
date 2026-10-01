@@ -6,7 +6,13 @@
 
   "custom": {
     "repository":  "https://github.com/jli-melchior/llvm-project.git",
-    "branch": "jli/amd/schedule_bank",
+    "branch": "main",
+    "description": "VGPR bank scheduling hints for gfx1250"
+  },
+
+  "custom0": {
+    "repository":  "https://github.com/jli-melchior/llvm-project.git",
+    "branch": "jli/schedule_bank",
     "description": "VGPR bank scheduling hints for gfx1250"
   },
 
