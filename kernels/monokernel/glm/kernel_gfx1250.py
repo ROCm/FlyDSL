@@ -1828,6 +1828,17 @@ def build_glm5_monokernel_gfx1250(
                 return unit_fp8x2(r_wo, r_so, t * O_R + wave // O_WPR, kc, O_NKC, O_K, (n_sel() * O_K + kc * 64) // 2)
 
             pre = [u_o(c) for c in range(O_UNITS)]
+
+            def resid_h(s, row):
+                w = fx.Vector.from_elements(
+                    [fx.Int32(bo.buffer_load(r_h, (s * HIDDEN + row) // 2, vec_width=1, dtype=T.i32))], fx.Int32
+                )
+                v = w.bitcast(fx.BFloat16).to(fx.Float32)
+                return v[0], v[1]
+
+            # The residual is this layer's input, so its loads go out ahead of the waits;
+            # peer_reduce's threads (tid < S * ROW_TILE / 2) use their own pair.
+            o_resid = resid_h(fx.min(tid // (ROW_TILE // 2), S - 1), t * ROW_TILE + (tid % (ROW_TILE // 2)) * 2)
             hint_wait(
                 S * N_UV, lambda k: (mb("o"), (k // N_UV) * O_K + (k % N_UV) * UV_TILE + UV_TILE - 1), mark=("o", t)
             )
@@ -1838,18 +1849,10 @@ def build_glm5_monokernel_gfx1250(
             reduce_rows(O_R, acc, emit_out(ROW_TILE))
             stamp("o", t, 3)
             gpu.barrier()
-
-            def resid_h(s, row):
-                w = fx.Vector.from_elements(
-                    [fx.Int32(bo.buffer_load(r_h, (s * HIDDEN + row) // 2, vec_width=1, dtype=T.i32))], fx.Int32
-                )
-                v = w.bitcast(fx.BFloat16).to(fx.Float32)
-                return v[0], v[1]
-
             peer_reduce(
                 "attn",
                 t,
-                resid_h,
+                lambda s, row: o_resid,
                 lambda s, row, v0, v1: put_bf(mb("a"), s * HIDDEN + row, [v0, v1]),
             )
             stamp("o", t, 4)
@@ -2186,6 +2189,14 @@ def build_glm5_monokernel_gfx1250(
             # (same cache lines) and are dropped in the output
             dn_lr = gu * 16 + lane % 16 - dn_off
             dn_ln = ((dn_lr >= 0) & (dn_lr < DN_TILE)).select(lane, lane ^ 8)
+            # The residual a was consumed by the router, so its poll returns at once;
+            # taking it ahead of the mid wait keeps it off the layer's last hop.
+            dn_resid = bf2_f32(
+                get(
+                    mb("a"),
+                    (fx.min(tid // (DN_TILE // 2), S - 1) * HIDDEN + t * DN_TILE + (tid % (DN_TILE // 2)) * 2) // 2,
+                )
+            )
 
             DN_NU = S * MOE_SLOTS * DN_NKC // 2
             DN_UPW = (DN_NU + DN_WPR - 1) // DN_WPR
@@ -2276,7 +2287,7 @@ def build_glm5_monokernel_gfx1250(
                     fx.Vector.from_elements([v0, v1], fx.Float32).to(fx.BFloat16), _rsrc(x_out), s * HIDDEN + row
                 )
 
-            peer_reduce("ffn", t, mb("a"), store_x, tile=DN_TILE)
+            peer_reduce("ffn", t, lambda s, row: dn_resid, store_x, tile=DN_TILE)
             gpu.barrier()
             stamp("down", t, 4)
 
