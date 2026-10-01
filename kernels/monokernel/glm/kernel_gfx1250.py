@@ -1118,9 +1118,7 @@ def build_glm5_monokernel_gfx1250(
                             (pos0 + s) * INDEX_DIM + i0,
                         )
                         put_bf(mb("index_k_new"), s * INDEX_DIM + i0, [v0, v1])
-                gpu.barrier()
-                if tid < S:
-                    put(mb("index_ready"), tid, fx.Int32(1))
+                gpu.barrier()  # the next stage's ``red`` writes wait for these block reductions
             stamp("cache", t, 4)
 
         # =============================================== 4. normalized q_a -> q_b (+RoPE)
@@ -1310,7 +1308,27 @@ def build_glm5_monokernel_gfx1250(
                 stamp("index_score", tt, 0)
                 bound = pos0 + s + 1
                 if tile * INDEX_KEYS_PER_TASK < bound:
-                    get(mb("index_ready"), s)
+                    # 4 key groups x 2 head groups of 16 on the working waves
+                    key_group = (wave % WORK_WAVES) // 2
+                    head_group = wave % 2
+                    key_pos = tile * INDEX_KEYS_PER_TASK + key_group * 16 + lane % 16
+                    safe_key = fx.min(key_pos, bound - 1)
+                    head = head_group * 16 + lane % 16
+                    # Cache rows before pos0 were written by earlier launches, so their
+                    # loads are issued ahead of this launch's waits; the rows of this
+                    # launch come from the tagged index_k_new pairs below.
+                    cached_keys = []
+                    for k32 in range_constexpr(INDEX_DIM // 32):
+                        k = k32 * 32 + (lane // 16) * 8
+                        halves = [
+                            fx.Vector(
+                                bo.buffer_load(
+                                    r_index_cache, (safe_key * INDEX_DIM + k + hk) // 2, vec_width=4, dtype=T.i32
+                                )
+                            ).bitcast(fx.BFloat16)
+                            for hk in (0, 16)
+                        ]
+                        cached_keys.append(cat8(halves[0], halves[1]))
                     if tid < INDEX_HEADS:
                         lds_st(keys, tid, get(mb("index_w"), s * INDEX_HEADS + tid))
                     # Every key group reuses the same 32x128 query.  Stage and RoPE
@@ -1331,26 +1349,11 @@ def build_glm5_monokernel_gfx1250(
                             q0, q1 = q0 * c - q1 * sn, q0 * sn + q1 * c
                         lds_st(xs, q_pair, bf16_pair(q0, q1))
                     gpu.barrier()
-                    # 4 key groups x 2 head groups of 16 on the working waves
-                    key_group = (wave % WORK_WAVES) // 2
-                    head_group = wave % 2
-                    key_pos = tile * INDEX_KEYS_PER_TASK + key_group * 16 + lane % 16
-                    safe_key = fx.min(key_pos, bound - 1)
-                    head = head_group * 16 + lane % 16
                     score_frag = fx.Vector.filled(ACC, 0.0, fx.Float32)
                     for k32 in range_constexpr(INDEX_DIM // 32):
                         k = k32 * 32 + (lane // 16) * 8
                         qv = load_index_q16(head, k)
-                        kv = cat8(
-                            fx.Vector(
-                                bo.buffer_load(r_index_cache, (safe_key * INDEX_DIM + k) // 2, vec_width=4, dtype=T.i32)
-                            ).bitcast(fx.BFloat16),
-                            fx.Vector(
-                                bo.buffer_load(
-                                    r_index_cache, (safe_key * INDEX_DIM + k + 16) // 2, vec_width=4, dtype=T.i32
-                                )
-                            ).bitcast(fx.BFloat16),
-                        )
+                        kv = cached_keys[k32]
                         if safe_key >= pos0:
                             sn = safe_key - pos0
                             kv_pairs = get_bf2_many(
