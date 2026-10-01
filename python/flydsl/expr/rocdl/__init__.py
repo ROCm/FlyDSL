@@ -131,14 +131,14 @@ def _mask_to_attr(mask):
     if isinstance(mask, _ir.Attribute):
         return mask
     if isinstance(mask, str):
-        return _ir.Attribute.parse(f"#rocdl<sched_group_mask {mask}>")
+        return _ir.Attribute.parse(f"#rocdl.sched_group_mask<{mask}>")
     val = int(mask)
     if val == 0:
-        return _ir.Attribute.parse("#rocdl<sched_group_mask none>")
+        return _ir.Attribute.parse("#rocdl.sched_group_mask<none>")
     parts = [kw for bit, kw in _SCHED_MASK_INT_TO_KW.items() if bit and val & bit]
     if not parts:
-        return _ir.Attribute.parse("#rocdl<sched_group_mask none>")
-    return _ir.Attribute.parse(f"#rocdl<sched_group_mask {'|'.join(parts)}>")
+        return _ir.Attribute.parse("#rocdl.sched_group_mask<none>")
+    return _ir.Attribute.parse(f"#rocdl.sched_group_mask<{'|'.join(parts)}>")
 
 
 @dsl_loc_tracing
@@ -213,7 +213,7 @@ def _blgp_attr(val):
     if isinstance(val, _ir.Attribute):
         return val
     kw = _BLGP_INT_TO_KW.get(int(val), "none")
-    return _ir.Attribute.parse(f"#rocdl<mfma_perm_b {kw}>")
+    return _ir.Attribute.parse(f"#rocdl.mfma_perm_b<{kw}>")
 
 
 def _split_mfma_operands(operands):
@@ -375,7 +375,7 @@ def _wmma_attr(val, mapping, attr_name):
     kw = mapping.get(int(val))
     if kw is None:
         return val
-    return _ir.Attribute.parse(f"#rocdl<{attr_name} {kw}>")
+    return _ir.Attribute.parse(f"#rocdl.{attr_name}<{kw}>")
 
 
 def _wmma_fmt(val):
