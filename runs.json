@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-10-01T03:43:13Z",
+ "updated": "2026-10-01T05:49:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36821433075,
+   "pr": 1219,
+   "commit": "83f941bf044818eba27017da0a13777d07e96217",
+   "branch": "docs/atomic-float-minmax-stream-race",
+   "event": "pull_request",
+   "title": "[Bugfix][Test] Fix atomic_fmin/fmax Out left at +inf on side-stream launch",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36821433075",
+   "created_at": "2026-10-01T05:46:53Z",
+   "updated_at": "2026-10-01T05:47:53Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 36821392201,
+   "pr": null,
+   "commit": "fa15c5565feb30e4dc7f8f630b4ff1fb99d27ec6",
+   "branch": "docs/atomic-float-minmax-stream-race",
+   "event": "pull_request",
+   "title": "[Bugfix][Test] Fix atomic_fmin/fmax Out left at +inf on side-stream launch",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36821392201",
+   "created_at": "2026-10-01T05:46:22Z",
+   "updated_at": "2026-10-01T05:46:22Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 36815032660,
+   "pr": 1215,
+   "commit": "aaea41fce3c630f552743a83ac1c0aebef990594",
+   "branch": "jli/schedule_bank",
+   "event": "pull_request",
+   "title": "[compiler][opt] add schedule_bank api for gfx1250",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36815032660",
+   "created_at": "2026-10-01T04:25:16Z",
+   "updated_at": "2026-10-01T05:09:01Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-10-01T05:05:49Z",
+     "completed_at": "2026-10-01T05:15:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36815032660/job/110227531231"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-10-01T05:06:02Z",
+     "completed_at": "2026-10-01T05:34:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36815032660/job/110227531240"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-01T05:09:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36815032660/job/110227531361"
+    }
+   ]
+  },
   {
    "run_id": 36801061686,
    "pr": 1215,
@@ -2047,82 +2120,6 @@
      "started_at": "2026-09-28T10:14:46Z",
      "completed_at": "2026-09-28T10:29:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657/job/108876463429"
-    }
-   ]
-  },
-  {
-   "run_id": 36397720550,
-   "pr": null,
-   "commit": "5958f9d94aee009d8a26b260363401d46c37c47b",
-   "branch": "fix/1165-singleton-contig-segment",
-   "event": "pull_request",
-   "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397720550",
-   "created_at": "2026-09-28T08:30:04Z",
-   "updated_at": "2026-09-28T08:34:49Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 36397442878,
-   "pr": null,
-   "commit": "6ba29273398feec69e386d66f855e1090354f7ea",
-   "branch": "codex/aot-direct-hip",
-   "event": "pull_request",
-   "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397442878",
-   "created_at": "2026-09-28T08:27:12Z",
-   "updated_at": "2026-09-28T08:39:30Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 36397000018,
-   "pr": null,
-   "commit": "d993f0cfbac01ecfcb1ee1faf0f274f1ee48f4c7",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI] Reduce cooperative test matrix (#1207)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397000018",
-   "created_at": "2026-09-28T08:22:44Z",
-   "updated_at": "2026-09-28T10:45:52Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T09:52:32Z",
-     "completed_at": "2026-09-28T10:45:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397000018/job/108851245897"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T09:16:00Z",
-     "completed_at": "2026-09-28T09:38:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397000018/job/108851245926"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T08:41:52Z",
-     "completed_at": "2026-09-28T10:04:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36397000018/job/108851246084",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
