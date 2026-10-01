@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-01T00:02:39Z",
+ "updated": "2026-10-01T00:20:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36795480460,
+   "pr": 1214,
+   "commit": "928fab77f28d33ee21f5b2e14d03337cfdc127d1",
+   "branch": "feat/gfx1250-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][gfx1250] Add the GLM-5 MonoKernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36795480460",
+   "created_at": "2026-10-01T00:18:03Z",
+   "updated_at": "2026-10-01T00:18:54Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 36793985944,
    "pr": 1214,
@@ -10,13 +25,41 @@
    "branch": "feat/gfx1250-monokernel",
    "event": "pull_request",
    "title": "[Kernel][gfx1250] Add the GLM-5 MonoKernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36793985944",
    "created_at": "2026-10-01T00:00:41Z",
-   "updated_at": "2026-10-01T00:01:08Z",
+   "updated_at": "2026-10-01T00:18:28Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-01T00:16:16Z",
+     "completed_at": "2026-10-01T00:18:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36793985944/job/110157218667"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-01T00:15:54Z",
+     "completed_at": "2026-10-01T00:18:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36793985944/job/110157218772"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-01T00:17:30Z",
+     "completed_at": "2026-10-01T00:18:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36793985944/job/110157218800"
+    }
+   ]
   },
   {
    "run_id": 36792765042,
@@ -2082,21 +2125,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36394315958/job/108843222816"
     }
    ]
-  },
-  {
-   "run_id": 36393395910,
-   "pr": null,
-   "commit": "4ea131b3908d95982da0fb6ae229157c290620bd",
-   "branch": "codex/kimi-k3-mxfp4-fused",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36393395910",
-   "created_at": "2026-09-28T07:45:26Z",
-   "updated_at": "2026-09-28T07:58:23Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
