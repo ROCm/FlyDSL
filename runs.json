@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-10-01T05:49:45Z",
+ "updated": "2026-10-01T06:15:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
+   "run_id": 36822210174,
+   "pr": 1220,
+   "commit": "83f941bf044818eba27017da0a13777d07e96217",
+   "branch": "docs/atomic-float-minmax-stream-race",
+   "event": "pull_request",
+   "title": "[Bugfix][Test] Fix atomic_fmin/fmax Out left at +inf on side-stream launch",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36822210174",
+   "created_at": "2026-10-01T05:56:36Z",
+   "updated_at": "2026-10-01T05:56:36Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
    "run_id": 36821433075,
-   "pr": 1219,
+   "pr": 1220,
    "commit": "83f941bf044818eba27017da0a13777d07e96217",
    "branch": "docs/atomic-float-minmax-stream-race",
    "event": "pull_request",
@@ -40,11 +55,11 @@
    "branch": "jli/schedule_bank",
    "event": "pull_request",
    "title": "[compiler][opt] add schedule_bank api for gfx1250",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36815032660",
    "created_at": "2026-10-01T04:25:16Z",
-   "updated_at": "2026-10-01T05:09:01Z",
+   "updated_at": "2026-10-01T06:14:22Z",
    "actor": "jli-melchior",
    "jobs": [
     {
@@ -68,10 +83,10 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-10-01T05:09:00Z",
-     "completed_at": null,
+     "completed_at": "2026-10-01T06:14:21Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36815032660/job/110227531361"
     }
    ]
@@ -2077,49 +2092,6 @@
      "started_at": "2026-09-28T08:53:42Z",
      "completed_at": "2026-09-28T09:26:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398573542/job/108855480728"
-    }
-   ]
-  },
-  {
-   "run_id": 36398017657,
-   "pr": null,
-   "commit": "2dc74f10ebc034aa08312783b65613cdfce60542",
-   "branch": "fix/1165-singleton-contig-segment",
-   "event": "pull_request",
-   "title": "[LayoutLowering] Ignore size-one leaves in contiguous-segment detection",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657",
-   "created_at": "2026-09-28T08:33:01Z",
-   "updated_at": "2026-09-28T11:21:40Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-28T10:51:40Z",
-     "completed_at": "2026-09-28T11:21:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657/job/108876463300"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-28T10:25:52Z",
-     "completed_at": "2026-09-28T10:36:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657/job/108876463364"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-28T10:14:46Z",
-     "completed_at": "2026-09-28T10:29:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398017657/job/108876463429"
     }
    ]
   }
