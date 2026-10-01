@@ -212,6 +212,14 @@ build_one() {
 
 
 main() {
+  # Derive build-fly prefix: build-fly-<suffix> for custom LLVM, build-fly otherwise
+  local _fly_build_prefix="build-fly"
+  if [[ "${LLVM_SOURCE:-upstream}" == "custom" ]]; then
+    local _branch
+    _branch=$(python3 -c "import json; print(json.load(open('thirdparty/llvm-build-info.json'))['custom']['branch'])")
+    _fly_build_prefix="build-fly-$(echo "${_branch}" | sed 's|.*/||; s/_/-/g')"
+  fi
+
   echo "Building wheels for Python versions: ${PYTHON_VERSIONS[*]}"
 
   ensure_host_deps
@@ -229,7 +237,7 @@ main() {
       py_bin="$(py_bin_for_version "${ver}")"
       py_tag="$(py_tag_for_version "${ver}")"
       venv="${VENV_ROOT}/${py_tag}"
-      build_dir="build-fly/build_py${ver//./}"
+      build_dir="${_fly_build_prefix}/build_py${ver//./}"
       build_one "${py_bin}" "${venv}" "${build_dir}" "${py_tag}"
     done
   fi
