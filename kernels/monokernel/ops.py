@@ -178,6 +178,64 @@ def mxfp8_to_bf16x8(word0, word1, scale):
     return fx.Vector.from_elements(parts, fx.BFloat16)
 
 
+def steady_counter():
+    """Read the 100 MHz constant-rate counter (``s_memrealtime`` does not exist on gfx11+)."""
+
+    return fx.Int64(llvm.call_intrinsic(T.i64, "llvm.readsteadycounter", [], [], []))
+
+
+def wave32_umax(value):
+    """Return the unsigned wave32 maximum in every lane."""
+
+    return fx.Int32(fx.coop.warp_reduce(fx.Uint32(value), fx.ReductionOp.MAX, width=32))
+
+
+# Four E8M0 bytes equal to 1.0: any lane or byte a gfx1250 scaled convert reads is exact.
+_E8M0_ONES = 0x7F7F7F7F
+
+
+def fp8x8_to_bf16_gfx1250(word0, word1):
+    """Widen eight E4M3 values (two dwords) to BF16 exactly on gfx1250."""
+
+    src = fx.Vector.from_elements([fx.Int32(word0), fx.Int32(word1)], fx.Int32)
+    return fx.Vector(
+        rocdl.cvt_scale_pk8_bf16_fp8(T.vec(8, T.bf16), as_ir_value(src), as_ir_value(fx.Int32(_E8M0_ONES)), 0)
+    )
+
+
+def fp4x8_to_bf16_gfx1250(word, scale, scale_sel):
+    """Decode eight E2M1 values (one dword) to BF16 times one E8M0 scale on gfx1250.
+
+    The instruction reads its scale from another lane: lane ``l`` uses lane
+    ``l % 16`` (even ``scale_sel``) or ``16 + l % 16`` (odd), byte
+    ``(0, 1)``, ``(2, 3)``, ``(0, 2)`` or ``(1, 3)`` for lanes below / above 16
+    as ``(scale_sel >> 1) & 3`` is 0, 1, 2 or 3 (measured on gfx1250).
+    """
+
+    return fx.Vector(
+        rocdl.cvt_scale_pk8_bf16_fp4(
+            T.vec(8, T.bf16), as_ir_value(fx.Int32(word)), as_ir_value(fx.Int32(scale)), scale_sel
+        )
+    )
+
+
+def wmma_bf16_gfx1250(a, b, c):
+    """``c += a @ b`` for one wave32 16x16x32 BF16 tile with an FP32 accumulator.
+
+    ``a`` and ``b`` are the 16 BF16 operand values of this lane and ``c`` its 8
+    accumulator values, in the instruction's register layouts."""
+
+    atom = fx.make_mma_atom(fx.rocdl.WMMA(16, 16, 32, fx.BFloat16, fx.Float32))
+    a_frag = fx.make_rmem_tensor(16, fx.BFloat16)
+    b_frag = fx.make_rmem_tensor(16, fx.BFloat16)
+    acc = fx.make_rmem_tensor(8, fx.Float32)
+    a_frag.store(fx.Vector(a))
+    b_frag.store(fx.Vector(b))
+    acc.store(fx.Vector(c))
+    fx.gemm(atom, acc, a_frag, b_frag, acc)
+    return acc.load()
+
+
 def mxfp4_to_bf16x8(word, scale):
     """Convert one packed dword of eight scaled E2M1 values to BF16."""
 
