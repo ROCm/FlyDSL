@@ -32,8 +32,6 @@ if(NOT hip_FOUND)
   endif()
 endif()
 
-# Traditional ROCm installations (for example ROCm 7.2) export HIP's CMake
-# package from an /opt/rocm* prefix.
 if(NOT hip_FOUND)
   file(GLOB _rocm_paths LIST_DIRECTORIES true "/opt/rocm*")
   list(SORT _rocm_paths ORDER DESCENDING)
