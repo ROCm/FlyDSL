@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-01T06:50:18Z",
+ "updated": "2026-10-01T07:32:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36830623926,
+   "pr": 1215,
+   "commit": "bc54f742b6e1af41035239cc79c32088a3187386",
+   "branch": "jli/schedule_bank",
+   "event": "pull_request",
+   "title": "[compiler][opt] add schedule_bank api for gfx1250",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36830623926",
+   "created_at": "2026-10-01T07:29:31Z",
+   "updated_at": "2026-10-01T07:31:17Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 36822210174,
    "pr": 1220,
@@ -2051,49 +2066,6 @@
    "updated_at": "2026-09-28T09:31:52Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 36398573542,
-   "pr": null,
-   "commit": "650b1617844ccbad2ec81b3d2acbd7a6b7e92b66",
-   "branch": "codex/aot-direct-hip",
-   "event": "pull_request",
-   "title": "[AOT] Embed backend runtime into exported objects",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398573542",
-   "created_at": "2026-09-28T08:38:33Z",
-   "updated_at": "2026-09-28T09:26:27Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-28T08:53:09Z",
-     "completed_at": "2026-09-28T09:25:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398573542/job/108855480593"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-28T08:53:09Z",
-     "completed_at": "2026-09-28T09:25:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398573542/job/108855480627"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-28T08:53:42Z",
-     "completed_at": "2026-09-28T09:26:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36398573542/job/108855480728"
-    }
-   ]
   }
  ]
 }
