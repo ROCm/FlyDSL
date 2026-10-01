@@ -63,6 +63,7 @@ __all__ = [
     "sched_vmem",
     "sched_dsrd",
     "sched_dswr",
+    "schedule_bank",
 ]
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
@@ -104,6 +105,7 @@ mask_dswr = 0x200
 
 _ods_sched_barrier = globals().get("sched_barrier")
 _ods_sched_group_barrier = globals().get("sched_group_barrier")
+_ods_schedule_bank = globals().get("schedule_bank")
 
 _SCHED_MASK_INT_TO_KW = {
     0x000: "none",
@@ -129,14 +131,14 @@ def _mask_to_attr(mask):
     if isinstance(mask, _ir.Attribute):
         return mask
     if isinstance(mask, str):
-        return _ir.Attribute.parse(f"#rocdl<sched_group_mask {mask}>")
+        return _ir.Attribute.parse(f"#rocdl.sched_group_mask<{mask}>")
     val = int(mask)
     if val == 0:
-        return _ir.Attribute.parse("#rocdl<sched_group_mask none>")
+        return _ir.Attribute.parse("#rocdl.sched_group_mask<none>")
     parts = [kw for bit, kw in _SCHED_MASK_INT_TO_KW.items() if bit and val & bit]
     if not parts:
-        return _ir.Attribute.parse("#rocdl<sched_group_mask none>")
-    return _ir.Attribute.parse(f"#rocdl<sched_group_mask {'|'.join(parts)}>")
+        return _ir.Attribute.parse("#rocdl.sched_group_mask<none>")
+    return _ir.Attribute.parse(f"#rocdl.sched_group_mask<{'|'.join(parts)}>")
 
 
 @dsl_loc_tracing
@@ -169,6 +171,18 @@ def sched_dswr(cnt):
     sched_group_barrier(mask_dswr, cnt, 0)
 
 
+@dsl_loc_tracing
+def schedule_bank(value, bank, soft=False, **kw):
+    """VGPR bank scheduling hint (gfx1250).
+
+    Returns *value* unchanged (identity at IR level).  Guides the register
+    allocator to place *value* in the requested 256-register bank (0-3).
+    Default is strict; pass ``soft=True`` for an advisory hint.
+    """
+    val_ir = _to_ir(value)
+    return _ods_schedule_bank(res=val_ir.type, value=val_ir, bank=bank, soft=soft or None, **kw)
+
+
 def _unwrap_mfma_operand(v):
     """MFMA operands are MLIR Values; some trailing operands are i32 flags.
 
@@ -199,7 +213,7 @@ def _blgp_attr(val):
     if isinstance(val, _ir.Attribute):
         return val
     kw = _BLGP_INT_TO_KW.get(int(val), "none")
-    return _ir.Attribute.parse(f"#rocdl<mfma_perm_b {kw}>")
+    return _ir.Attribute.parse(f"#rocdl.mfma_perm_b<{kw}>")
 
 
 def _split_mfma_operands(operands):
@@ -361,7 +375,7 @@ def _wmma_attr(val, mapping, attr_name):
     kw = mapping.get(int(val))
     if kw is None:
         return val
-    return _ir.Attribute.parse(f"#rocdl<{attr_name} {kw}>")
+    return _ir.Attribute.parse(f"#rocdl.{attr_name}<{kw}>")
 
 
 def _wmma_fmt(val):

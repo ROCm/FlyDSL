@@ -14,9 +14,15 @@ import pytest
 
 _repo_root = Path(__file__).resolve().parents[1]
 
-# New Fly dialect build
-_fly_pkg_dir = _repo_root / "build-fly" / "python_packages"
-if _fly_pkg_dir.exists():
+# New Fly dialect build — pick the newest build-fly* directory so that
+# branch-suffixed builds (e.g. build-fly-schedule-bank/) are found.
+_fly_pkg_candidates = sorted(
+    (d / "python_packages" for d in _repo_root.glob("build-fly*/") if (d / "python_packages").is_dir()),
+    key=lambda p: p.parent.stat().st_mtime,
+    reverse=True,
+)
+_fly_pkg_dir = _fly_pkg_candidates[0] if _fly_pkg_candidates else None
+if _fly_pkg_dir is not None:
     _p = str(_fly_pkg_dir)
     _already = _p in sys.path or any(os.path.isdir(ep) and os.path.samefile(ep, _p) for ep in sys.path if ep)
     if not _already:

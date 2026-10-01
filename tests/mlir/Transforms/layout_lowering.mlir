@@ -15,11 +15,11 @@
 // CHECK-NOT: fly.copy(
 // CHECK: fly.copy_atom_call
 func.func @test_vector_buffer_atomic_copy(
-    %atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly<atomic_op add>, vector<2xbf16>>, 16>,
+    %atom: !fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly.atomic_op<add>, vector<2xbf16>>, 16>,
     %src: !fly.memref<bf16, register, 2:1>,
     %dst: !fly.memref<bf16, #fly_rocdl.buffer_desc, 2:1>) {
   fly.copy(%atom, %src, %dst)
-      : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly<atomic_op add>, vector<2xbf16>>, 16>,
+      : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_atomic<#fly.atomic_op<add>, vector<2xbf16>>, 16>,
          !fly.memref<bf16, register, 2:1>,
          !fly.memref<bf16, #fly_rocdl.buffer_desc, 2:1>) -> ()
   return

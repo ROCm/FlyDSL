@@ -432,7 +432,11 @@ def address_space_from_attr(address_space):
 
     text = str(address_space)
     for candidate in AddressSpace:
-        if text == str(candidate) or text == f"#fly<address_space {candidate}>":
+        if (
+            text == str(candidate)
+            or text == f"#fly<address_space {candidate}>"
+            or text == f"#fly.address_space<{candidate}>"
+        ):
             return candidate
     return address_space
 
