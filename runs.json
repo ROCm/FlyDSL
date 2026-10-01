@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-01T15:33:53Z",
+ "updated": "2026-10-01T18:39:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36899722859,
+   "pr": 1223,
+   "commit": "f9261af6d69c4c06ef0a2fce1a7ba96c450cf02b",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][FA][AOT][Feature][Dialect][DSL][ROCDL][Perf][Doc][Test] Add \u2026",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36899722859",
+   "created_at": "2026-10-01T17:29:12Z",
+   "updated_at": "2026-10-01T17:29:12Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 36893534701,
+   "pr": null,
+   "commit": "b4f7d0ad49ea43126f49d8b880445864b6537a24",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][FA][AOT][Feature][Dialect][DSL][ROCDL][Perf][Doc][Test] Add \u2026",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36893534701",
+   "created_at": "2026-10-01T16:38:41Z",
+   "updated_at": "2026-10-01T16:38:41Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
   {
    "run_id": 36854600648,
    "pr": 1222,
@@ -1963,98 +1993,6 @@
      "started_at": "2026-09-28T12:37:47Z",
      "completed_at": "2026-09-28T13:07:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413622989/job/108905516320"
-    }
-   ]
-  },
-  {
-   "run_id": 36413538494,
-   "pr": 1210,
-   "commit": "a32b833d68e9925441df5baa646c22fff55eb5d2",
-   "branch": "codex/release-coop-full-ci",
-   "event": "pull_request",
-   "title": "[CI] Run full cooperative matrix before PyPI releases",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413538494",
-   "created_at": "2026-09-28T11:05:21Z",
-   "updated_at": "2026-09-28T13:39:33Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T12:25:27Z",
-     "completed_at": "2026-09-28T13:39:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413538494/job/108904799910",
-     "machine": "gbt350-odcdh1-b09-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T11:50:20Z",
-     "completed_at": "2026-09-28T12:38:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413538494/job/108904799943"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T12:13:56Z",
-     "completed_at": "2026-09-28T12:37:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413538494/job/108904800107"
-    }
-   ]
-  },
-  {
-   "run_id": 36413114232,
-   "pr": null,
-   "commit": "e4245c2316b2abb6c3a5cc2a123a09d17ef8c974",
-   "branch": "main",
-   "event": "push",
-   "title": "Issue causal flash q-blocks longest-first. (#1186)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413114232",
-   "created_at": "2026-09-28T11:01:06Z",
-   "updated_at": "2026-09-28T13:11:30Z",
-   "actor": "RichardChamberlain1",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T11:54:58Z",
-     "completed_at": "2026-09-28T12:13:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413114232/job/108902672452"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T12:06:16Z",
-     "completed_at": "2026-09-28T13:11:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413114232/job/108902672480"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T11:19:26Z",
-     "completed_at": "2026-09-28T12:34:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413114232/job/108902672541",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
     }
    ]
   }
