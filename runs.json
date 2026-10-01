@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-09-30T23:47:56Z",
+ "updated": "2026-10-01T00:02:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 36793985944,
+   "pr": 1214,
+   "commit": "a98145a6aea81d83da751e9ab5fe8b235574059a",
+   "branch": "feat/gfx1250-monokernel",
+   "event": "pull_request",
+   "title": "[Kernel][gfx1250] Add the GLM-5 MonoKernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36793985944",
+   "created_at": "2026-10-01T00:00:41Z",
+   "updated_at": "2026-10-01T00:01:08Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 36792765042,
    "pr": 1214,
@@ -10,13 +25,41 @@
    "branch": "feat/gfx1250-monokernel",
    "event": "pull_request",
    "title": "[Kernel][gfx1250] Add the GLM-5 MonoKernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36792765042",
    "created_at": "2026-09-30T23:45:55Z",
-   "updated_at": "2026-09-30T23:46:02Z",
+   "updated_at": "2026-10-01T00:00:53Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-30T23:59:51Z",
+     "completed_at": "2026-10-01T00:00:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36792765042/job/110152833726"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-09-30T23:59:51Z",
+     "completed_at": "2026-10-01T00:00:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36792765042/job/110152833839"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-01T00:00:32Z",
+     "completed_at": "2026-10-01T00:00:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36792765042/job/110152833882"
+    }
+   ]
   },
   {
    "run_id": 36785221163,
@@ -2054,49 +2097,6 @@
    "updated_at": "2026-09-28T07:58:23Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 36391294393,
-   "pr": 1208,
-   "commit": "d3263d46033ac59ea318bea4f9eb41476bd0ed1d",
-   "branch": "fix/preshuffle-gemm-dup-stride-v2",
-   "event": "pull_request",
-   "title": "[Fix][Examples] Remove duplicated k-stride computation in preshuffle GEMM example",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36391294393",
-   "created_at": "2026-09-28T07:22:23Z",
-   "updated_at": "2026-09-28T10:11:17Z",
-   "actor": "yicyang",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T08:09:52Z",
-     "completed_at": "2026-09-28T08:40:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36391294393/job/108831970196"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T08:26:32Z",
-     "completed_at": "2026-09-28T10:11:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36391294393/job/108831970204"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-28T07:38:31Z",
-     "completed_at": "2026-09-28T08:20:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36391294393/job/108831970233"
-    }
-   ]
   }
  ]
 }
