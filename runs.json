@@ -1,11 +1,41 @@
 {
  "schema": 1,
- "updated": "2026-10-01T21:30:25Z",
+ "updated": "2026-10-02T00:37:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 36899722859,
+   "run_id": 36946272368,
    "pr": 1223,
+   "commit": "540bc18dac357764ee9770d09f047a8adfd550bb",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][FA][AOT][Feature][Dialect][DSL][ROCDL][Perf][Doc][Test] Add \u2026",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36946272368",
+   "created_at": "2026-10-02T00:29:47Z",
+   "updated_at": "2026-10-02T00:29:47Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 36941155662,
+   "pr": null,
+   "commit": "e8c6cca0977e07079c3803434718bef5c19595e4",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][FA][AOT][Feature][Dialect][DSL][ROCDL][Perf][Doc][Test] Add \u2026",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36941155662",
+   "created_at": "2026-10-01T23:30:15Z",
+   "updated_at": "2026-10-01T23:30:15Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 36899722859,
+   "pr": null,
    "commit": "f9261af6d69c4c06ef0a2fce1a7ba96c450cf02b",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -403,11 +433,11 @@
    "branch": "feat/gfx1250-monokernel",
    "event": "pull_request",
    "title": "[Kernel][gfx1250] Add the GLM-5 MonoKernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36795480460",
    "created_at": "2026-10-01T00:18:03Z",
-   "updated_at": "2026-10-01T01:43:37Z",
+   "updated_at": "2026-10-02T00:35:21Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -1901,98 +1931,6 @@
      "started_at": "2026-09-28T13:30:01Z",
      "completed_at": "2026-09-28T14:14:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36427130880/job/108949844939"
-    }
-   ]
-  },
-  {
-   "run_id": 36417401095,
-   "pr": 1204,
-   "commit": "21a3d1ee6ba2d6c0f33e3feb56e23cbf9e79c085",
-   "branch": "codex/kimi-k3-mxfp4-fused",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36417401095",
-   "created_at": "2026-09-28T11:43:56Z",
-   "updated_at": "2026-09-28T14:28:52Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T13:30:02Z",
-     "completed_at": "2026-09-28T14:28:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36417401095/job/108918570265"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T13:07:42Z",
-     "completed_at": "2026-09-28T13:29:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36417401095/job/108918570313"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T12:36:21Z",
-     "completed_at": "2026-09-28T13:55:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36417401095/job/108918570396",
-     "machine": "gbt350-odcdh1-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 36413622989,
-   "pr": 848,
-   "commit": "da396b887700dc6361a4c8cc4de223b699943b3a",
-   "branch": "cjl/norm_perf",
-   "event": "pull_request",
-   "title": "[Perf] Optimize rmsnorm/layernorm",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413622989",
-   "created_at": "2026-09-28T11:06:11Z",
-   "updated_at": "2026-09-28T13:59:34Z",
-   "actor": "cschenjunlin",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T12:36:31Z",
-     "completed_at": "2026-09-28T13:59:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413622989/job/108905515128"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T12:26:17Z",
-     "completed_at": "2026-09-28T13:55:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413622989/job/108905515391",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T12:37:47Z",
-     "completed_at": "2026-09-28T13:07:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36413622989/job/108905516320"
     }
    ]
   }
