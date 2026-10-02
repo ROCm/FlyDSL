@@ -9,9 +9,10 @@ BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
 
 # ---------------------------------------------------------------------------
-# Source selection: --source upstream | --source custom (default)
+# Source selection: --source <entry>   (default: read from build_llvm.sh)
 # ---------------------------------------------------------------------------
-LLVM_SOURCE="${LLVM_SOURCE:-custom}"
+_default_source=$(sed -n 's/^LLVM_SOURCE="${LLVM_SOURCE:-\(.*\)}"$/\1/p' "${SCRIPT_DIR}/build_llvm.sh")
+LLVM_SOURCE="${LLVM_SOURCE:-${_default_source}}"
 for arg in "$@"; do
   if [[ "$arg" == "--source" ]]; then
     _next_is_source=1
@@ -23,10 +24,10 @@ done
 
 # ---------------------------------------------------------------------------
 # Build directory (default: build-fly/, overridable via FLY_BUILD_DIR)
-# For custom source, default includes the branch suffix: build-fly-<suffix>
+# For non-upstream source, default includes the branch suffix: build-fly-<suffix>
 # ---------------------------------------------------------------------------
-if [[ "${LLVM_SOURCE}" == "custom" ]]; then
-  _branch=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['custom']['branch'])")
+if [[ "${LLVM_SOURCE}" != "upstream" ]]; then
+  _branch=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['${LLVM_SOURCE}']['branch'])")
   _branch_suffix=$(echo "${_branch}" | sed 's|.*/||; s/_/-/g')
   BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly-${_branch_suffix}}"
 else
@@ -50,11 +51,10 @@ done
 # Discover MLIR_PATH
 # ---------------------------------------------------------------------------
 if [ -z "${MLIR_PATH:-}" ]; then
-  if [[ "${LLVM_SOURCE}" == "custom" ]]; then
-    # Custom: look for mlir_install-<suffix> in llvm-project-custom
+  if [[ "${LLVM_SOURCE}" != "upstream" ]]; then
     candidates=(
-      "${BASE_DIR}/llvm-project-custom/mlir_install-${_branch_suffix}"
-      "${BASE_DIR}/llvm-project-custom/mlir_install"
+      "${BASE_DIR}/llvm-project-${LLVM_SOURCE}/mlir_install-${_branch_suffix}"
+      "${BASE_DIR}/llvm-project-${LLVM_SOURCE}/mlir_install"
     )
   else
     candidates=(

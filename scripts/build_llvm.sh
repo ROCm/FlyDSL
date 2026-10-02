@@ -13,61 +13,60 @@ LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
 # ---------------------------------------------------------------------------
-# Source selection: --source upstream | --source custom (default)
+# Source selection: --source <entry>   (default: custom-old)
+#   "upstream"  → uses llvm_hash from the "upstream" entry
+#   any other   → looks up "repository" + "branch" from that entry name
+# The entry name must exist as a top-level key in llvm-build-info.json.
 # ---------------------------------------------------------------------------
-LLVM_SOURCE="${LLVM_SOURCE:-custom}"
+LLVM_SOURCE="${LLVM_SOURCE:-custom-old}"
 for arg in "$@"; do
-  if [[ "$arg" == "--source" ]]; then
-    _next_is_source=1
-  elif [[ "${_next_is_source:-}" == "1" ]]; then
-    LLVM_SOURCE="$arg"
-    unset _next_is_source
-  fi
+    if [[ "$arg" == "--source" ]]; then
+        _next_is_source=1
+    elif [[ "${_next_is_source:-}" == "1" ]]; then
+        LLVM_SOURCE="$arg"
+        unset _next_is_source
+    fi
 done
 
-case "${LLVM_SOURCE}" in
-  upstream)
+# Validate that the entry exists in the JSON.
+if ! python3 -c "import json,sys; d=json.load(open('${LLVM_BUILD_INFO}')); sys.exit(0 if '${LLVM_SOURCE}' in d else 1)"; then
+    _valid_keys=$(python3 -c "import json; print(', '.join(json.load(open('${LLVM_BUILD_INFO}')).keys()))")
+    echo "Unknown --source value: ${LLVM_SOURCE}. Valid entries: ${_valid_keys}" >&2
+    exit 2
+fi
+
+if [[ "${LLVM_SOURCE}" == "upstream" ]]; then
     LLVM_SRC_DIR="${LLVM_SRC_DIR:-$BASE_DIR/llvm-project}"
     LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
     LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
-    ;;
-  custom)
-    LLVM_SRC_DIR="${LLVM_SRC_DIR:-$BASE_DIR/llvm-project-custom}"
-    _custom_json=$(python3 -c "import json; c=json.load(open('${LLVM_BUILD_INFO}'))['custom']; print(c['repository']); print(c['branch'])")
+    LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-$LLVM_SRC_DIR/build-flydsl}"
+    LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
+    LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
+else
+    # Generic custom entry: derive paths from the entry name + branch suffix.
+    LLVM_SRC_DIR="${LLVM_SRC_DIR:-$BASE_DIR/llvm-project-${LLVM_SOURCE}}"
+    _custom_json=$(python3 -c "import json; c=json.load(open('${LLVM_BUILD_INFO}'))['${LLVM_SOURCE}']; print(c['repository']); print(c['branch'])")
     LLVM_REMOTE="${LLVM_REMOTE:-$(echo "$_custom_json" | sed -n '1p')}"
     LLVM_REF="${LLVM_REF:-$(echo "$_custom_json" | sed -n '2p')}"
-    # Derive a short suffix from the branch: last segment, _ → -
     _branch_suffix=$(echo "${LLVM_REF}" | sed 's|.*/||; s/_/-/g')
-    ;;
-  *)
-    echo "Unknown --source value: ${LLVM_SOURCE}. Use 'upstream' or 'custom'." >&2
-    exit 2
-    ;;
-esac
-
-if [[ "${LLVM_SOURCE}" == "upstream" ]]; then
-  LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-$LLVM_SRC_DIR/build-flydsl}"
-  LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
-  LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
-else
-  LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-$LLVM_SRC_DIR/build-flydsl-${_branch_suffix}}"
-  LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install-${_branch_suffix}}"
-  LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install-${_branch_suffix}.tgz}"
+    LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-$LLVM_SRC_DIR/build-flydsl-${_branch_suffix}}"
+    LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install-${_branch_suffix}}"
+    LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install-${_branch_suffix}.tgz}"
 fi
 
 case "${LLVM_BUILD_PROFILE}" in
-  full)
+full)
     LLVM_ENABLE_PROJECTS="${LLVM_ENABLE_PROJECTS:-mlir;clang;lld}"
     LLVM_TARGETS_TO_BUILD="${LLVM_TARGETS_TO_BUILD:-X86;NVPTX;AMDGPU}"
     # Use `-` rather than `:-` so callers can explicitly disable runtimes.
     LLVM_ENABLE_RUNTIMES="${LLVM_ENABLE_RUNTIMES-compiler-rt}"
     ;;
-  amd-minimal)
+amd-minimal)
     LLVM_ENABLE_PROJECTS="mlir"
     LLVM_TARGETS_TO_BUILD="X86;AMDGPU"
     LLVM_ENABLE_RUNTIMES=
     ;;
-  *)
+*)
     echo "Unknown LLVM_BUILD_PROFILE: ${LLVM_BUILD_PROFILE}" >&2
     exit 2
     ;;
@@ -91,8 +90,8 @@ LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
 # A leftover partial ("promisor") clone is unusable here: every checkout, patch
 # and rev-parse would trigger per-blob lazy fetches against github.com. Unsetting
 # the config does not bring the missing blobs back, so start over instead.
-if [ -d "$LLVM_SRC_DIR/.git" ] && \
-   [ -n "$(git -C "$LLVM_SRC_DIR" config --get remote.origin.promisor || true)" ]; then
+if [ -d "$LLVM_SRC_DIR/.git" ] &&
+    [ -n "$(git -C "$LLVM_SRC_DIR" config --get remote.origin.promisor || true)" ]; then
     echo "Discarding partial (promisor) llvm-project checkout at ${LLVM_SRC_DIR} ..."
     rm -rf "$LLVM_SRC_DIR"
 fi
@@ -104,6 +103,8 @@ if [ ! -d "$LLVM_SRC_DIR" ]; then
     git remote add origin "$LLVM_REMOTE"
 else
     pushd "$LLVM_SRC_DIR"
+    # Update remote URL in case credentials or repo changed.
+    git remote set-url origin "$LLVM_REMOTE"
 fi
 
 # Plain shallow fetch. Do NOT add --filter=blob:none here: a blob-filtered fetch
@@ -142,6 +143,12 @@ else
 fi
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
+
+# Strip credentials from the remote URL so LLVM's VCSRevision.h generator
+# does not refuse to build (it rejects URLs with embedded passwords).
+_clean_remote=$(git remote get-url origin | sed 's|://[^@]*@|://|')
+git remote set-url origin "$_clean_remote"
+
 popd
 echo "LLVM Commit:    $LLVM_COMMIT_RESOLVED"
 
@@ -159,7 +166,7 @@ pip install "nanobind==${NANOBIND_VERSION}" numpy pybind11
 
 # Check for ninja
 GENERATOR="Unix Makefiles"
-if command -v ninja &> /dev/null; then
+if command -v ninja &>/dev/null; then
     GENERATOR="Ninja"
     echo "Using Ninja generator."
 else
@@ -192,7 +199,7 @@ cmake -G "$GENERATOR" \
     -DCMAKE_INSTALL_RPATH="\$ORIGIN"
 
 # 4. Build
-PARALLEL_JOBS=$(( $(nproc) / 2 ))
+PARALLEL_JOBS=$(($(nproc) / 2))
 for arg in "$@"; do
     if [[ "$arg" =~ ^-j([0-9]+)$ ]]; then
         PARALLEL_JOBS="${BASH_REMATCH[1]}"
@@ -204,44 +211,44 @@ echo "Starting build with ${PARALLEL_JOBS} parallel jobs..."
 cmake --build . -j${PARALLEL_JOBS}
 
 if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
-  echo "=============================================="
-  echo "Installing MLIR/LLVM to a clean prefix..."
-  rm -rf "${LLVM_INSTALL_DIR}"
-  mkdir -p "${LLVM_INSTALL_DIR}"
-  cmake --install "${LLVM_BUILD_DIR}" --prefix "${LLVM_INSTALL_DIR}"
+    echo "=============================================="
+    echo "Installing MLIR/LLVM to a clean prefix..."
+    rm -rf "${LLVM_INSTALL_DIR}"
+    mkdir -p "${LLVM_INSTALL_DIR}"
+    cmake --install "${LLVM_BUILD_DIR}" --prefix "${LLVM_INSTALL_DIR}"
 
-  if [[ ! -d "${LLVM_INSTALL_DIR}/lib/cmake/mlir" ]]; then
-    echo "Error: install prefix missing lib/cmake/mlir: ${LLVM_INSTALL_DIR}" >&2
-    exit 1
-  fi
+    if [[ ! -d "${LLVM_INSTALL_DIR}/lib/cmake/mlir" ]]; then
+        echo "Error: install prefix missing lib/cmake/mlir: ${LLVM_INSTALL_DIR}" >&2
+        exit 1
+    fi
 
-  # The install tree is ~80% bin/, and those binaries carry a symbol table the
-  # build does not need: stripping takes ~20% off the tarball, which the CI
-  # cache transfers on every job. Static archives are left alone - they gained
-  # nothing when measured, and stripping an archive can drop symbols the link
-  # still needs. Set LLVM_STRIP_INSTALL=0 to keep symbols for crash backtraces.
-  if [[ "${LLVM_STRIP_INSTALL:-1}" == "1" ]] && command -v strip >/dev/null 2>&1; then
-    echo "Stripping installed binaries and shared libraries..."
-    before_kb=$(du -sk "${LLVM_INSTALL_DIR}" | cut -f1)
-    # -type f skips the symlinks in bin/; non-ELF entries (the Python and Perl
-    # helper scripts) simply fail to strip and are skipped.
-    find "${LLVM_INSTALL_DIR}/bin" "${LLVM_INSTALL_DIR}/lib" \
-         "${LLVM_INSTALL_DIR}/python_packages" \
-         -type f ! -name '*.a' -print0 2>/dev/null |
-      while IFS= read -r -d '' f; do
-        strip --strip-unneeded "${f}" 2>/dev/null || true
-      done
-    after_kb=$(du -sk "${LLVM_INSTALL_DIR}" | cut -f1)
-    echo "Install tree: $((before_kb / 1024)) MB -> $((after_kb / 1024)) MB"
-  fi
+    # The install tree is ~80% bin/, and those binaries carry a symbol table the
+    # build does not need: stripping takes ~20% off the tarball, which the CI
+    # cache transfers on every job. Static archives are left alone - they gained
+    # nothing when measured, and stripping an archive can drop symbols the link
+    # still needs. Set LLVM_STRIP_INSTALL=0 to keep symbols for crash backtraces.
+    if [[ "${LLVM_STRIP_INSTALL:-1}" == "1" ]] && command -v strip >/dev/null 2>&1; then
+        echo "Stripping installed binaries and shared libraries..."
+        before_kb=$(du -sk "${LLVM_INSTALL_DIR}" | cut -f1)
+        # -type f skips the symlinks in bin/; non-ELF entries (the Python and Perl
+        # helper scripts) simply fail to strip and are skipped.
+        find "${LLVM_INSTALL_DIR}/bin" "${LLVM_INSTALL_DIR}/lib" \
+            "${LLVM_INSTALL_DIR}/python_packages" \
+            -type f ! -name '*.a' -print0 2>/dev/null |
+            while IFS= read -r -d '' f; do
+                strip --strip-unneeded "${f}" 2>/dev/null || true
+            done
+        after_kb=$(du -sk "${LLVM_INSTALL_DIR}" | cut -f1)
+        echo "Install tree: $((before_kb / 1024)) MB -> $((after_kb / 1024)) MB"
+    fi
 
-  echo "Creating tarball..."
-  # The install tree may still have files whose mtimes change (e.g. Python bytecode caches),
-  # which can cause GNU tar to exit(1) with "file changed as we read it". Treat those as
-  # non-fatal for packaging.
-  tar --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \
-      -C "$(dirname "${LLVM_INSTALL_DIR}")" \
-      -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
+    echo "Creating tarball..."
+    # The install tree may still have files whose mtimes change (e.g. Python bytecode caches),
+    # which can cause GNU tar to exit(1) with "file changed as we read it". Treat those as
+    # non-fatal for packaging.
+    tar --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \
+        -C "$(dirname "${LLVM_INSTALL_DIR}")" \
+        -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
 fi
 
 echo "=============================================="
@@ -250,12 +257,12 @@ echo ""
 echo "To configure flydsl, use:"
 echo "cmake .. -DMLIR_DIR=$LLVM_BUILD_DIR/lib/cmake/mlir"
 if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
-  echo ""
-  echo "Packaged install prefix:"
-  echo "  ${LLVM_INSTALL_DIR}"
-  echo "Use with:"
-  echo "  export MLIR_PATH=${LLVM_INSTALL_DIR}"
-  echo "Tarball:"
-  echo "  ${LLVM_INSTALL_TGZ}"
+    echo ""
+    echo "Packaged install prefix:"
+    echo "  ${LLVM_INSTALL_DIR}"
+    echo "Use with:"
+    echo "  export MLIR_PATH=${LLVM_INSTALL_DIR}"
+    echo "Tarball:"
+    echo "  ${LLVM_INSTALL_TGZ}"
 fi
 echo "=============================================="
