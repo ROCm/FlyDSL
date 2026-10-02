@@ -106,25 +106,47 @@ jobs:
           path: mlir_install.tgz
           key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-build-info.json', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
 
+      - name: Compute LLVM container paths
+        id: llvm-paths
+        run: |
+          LLVM_SOURCE=$(sed -n 's/^LLVM_SOURCE="${LLVM_SOURCE:-\(.*\)}"$/\1/p' flydsl/scripts/build_llvm.sh)
+          if [ "${LLVM_SOURCE}" = "upstream" ]; then
+            echo "llvm_dir=/llvm-project"                      >>"${GITHUB_OUTPUT}"
+            echo "install_dir=/llvm-project/mlir_install"      >>"${GITHUB_OUTPUT}"
+            echo "tgz_path=/llvm-project/mlir_install.tgz"     >>"${GITHUB_OUTPUT}"
+          else
+            branch=$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-build-info.json'))['${LLVM_SOURCE}']['branch'])")
+            suffix=$(echo "${branch}" | sed 's|.*/||; s/_/-/g')
+            echo "llvm_dir=/llvm-project-${LLVM_SOURCE}"               >>"${GITHUB_OUTPUT}"
+            echo "install_dir=/llvm-project-${LLVM_SOURCE}/mlir_install-${suffix}" >>"${GITHUB_OUTPUT}"
+            echo "tgz_path=/llvm-project-${LLVM_SOURCE}/mlir_install-${suffix}.tgz" >>"${GITHUB_OUTPUT}"
+          fi
+
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
+        env:
+          LLVM_DIR: ${{ steps.llvm-paths.outputs.llvm_dir }}
+          INSTALL_DIR: ${{ steps.llvm-paths.outputs.install_dir }}
         run: |
           docker cp mlir_install.tgz flydsl_build:/tmp/mlir_install.tgz
-          docker exec flydsl_build bash -c "mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
-          docker exec flydsl_build bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
+          docker exec flydsl_build bash -c "mkdir -p ${LLVM_DIR} && tar -xzf /tmp/mlir_install.tgz -C ${LLVM_DIR}"
+          docker exec flydsl_build bash -c "ls -la ${INSTALL_DIR}/lib/cmake/mlir"
 
       - name: Build LLVM
         if: steps.mlir-cache.outputs.cache-hit != 'true'
+        env:
+          TGZ_PATH: ${{ steps.llvm-paths.outputs.tgz_path }}
         run: |
           docker exec flydsl_build bash -c "cd /flydsl && bash scripts/build_llvm.sh"
-          docker cp flydsl_build:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
+          docker cp "flydsl_build:${TGZ_PATH}" ./mlir_install.tgz || true
 
       - name: Build wheels
         env:
           PACKAGE_VERSION_OVERRIDE: ${{ inputs.package_version_override }}
+          INSTALL_DIR: ${{ steps.llvm-paths.outputs.install_dir }}
         run: |
           docker exec \
-            -e MLIR_PATH=/llvm-project/mlir_install \
+            -e MLIR_PATH=${INSTALL_DIR} \
             -e EXPECTED_GLIBC=2.28 \
             -e FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} \
             -e "FLYDSL_PACKAGE_VERSION_OVERRIDE=${PACKAGE_VERSION_OVERRIDE}" \
@@ -164,7 +186,8 @@ jobs:
           SUMMARY_RELEASE_TYPE: ${{ inputs.release_type }}
           SUMMARY_WHEEL_DIR: dist
         run: |
-          SUMMARY_LLVM_COMMIT="$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-build-info.json'))['upstream']['llvm_hash'])")"
+          LLVM_SOURCE=$(sed -n 's/^LLVM_SOURCE="${LLVM_SOURCE:-\(.*\)}"$/\1/p' flydsl/scripts/build_llvm.sh)
+          SUMMARY_LLVM_COMMIT="$(python3 -c "import json; d=json.load(open('flydsl/thirdparty/llvm-build-info.json'))['${LLVM_SOURCE}']; print(d.get('llvm_hash', d.get('branch', 'unknown')))")"
           export SUMMARY_LLVM_COMMIT
           python3 flydsl/.github/scripts/generate_summary.py build
 

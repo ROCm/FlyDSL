@@ -63,6 +63,7 @@ __all__ = [
     "sched_vmem",
     "sched_dsrd",
     "sched_dswr",
+    "schedule_bank",
 ]
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
@@ -104,6 +105,7 @@ mask_dswr = 0x200
 
 _ods_sched_barrier = globals().get("sched_barrier")
 _ods_sched_group_barrier = globals().get("sched_group_barrier")
+_ods_schedule_bank = globals().get("schedule_bank")
 
 _SCHED_MASK_INT_TO_KW = {
     0x000: "none",
@@ -167,6 +169,18 @@ def sched_dsrd(cnt):
 @dsl_loc_tracing
 def sched_dswr(cnt):
     sched_group_barrier(mask_dswr, cnt, 0)
+
+
+@dsl_loc_tracing
+def schedule_bank(value, bank, soft=False, **kw):
+    """VGPR bank scheduling hint (gfx1250).
+
+    Returns *value* unchanged (identity at IR level).  Guides the register
+    allocator to place *value* in the requested 256-register bank (0-3).
+    Default is strict; pass ``soft=True`` for an advisory hint.
+    """
+    val_ir = _to_ir(value)
+    return _ods_schedule_bank(res=val_ir.type, value=val_ir, bank=bank, soft=soft or None, **kw)
 
 
 def _unwrap_mfma_operand(v):
