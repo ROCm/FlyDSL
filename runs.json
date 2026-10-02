@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-10-02T15:33:15Z",
+ "updated": "2026-10-02T18:37:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 37028787630,
+   "pr": 1225,
+   "commit": "786ffadee368f0c7e7db42fda7d10bc5655a322c",
+   "branch": "jli/schedule_bank_upstream_oldllvm",
+   "event": "pull_request",
+   "title": "[compiler][opt] schedule bank based on a verified llvm version",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37028787630",
+   "created_at": "2026-10-02T15:41:47Z",
+   "updated_at": "2026-10-02T16:58:09Z",
+   "actor": "jli-melchior",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-02T16:15:44Z",
+     "completed_at": "2026-10-02T16:33:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37028787630/job/110923020097"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-10-02T16:15:50Z",
+     "completed_at": "2026-10-02T16:53:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37028787630/job/110923020263"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-02T16:15:57Z",
+     "completed_at": "2026-10-02T16:58:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37028787630/job/110923020317"
+    }
+   ]
+  },
   {
    "run_id": 36957257937,
    "pr": 1223,
@@ -1857,52 +1900,6 @@
      "started_at": "2026-09-28T14:31:30Z",
      "completed_at": "2026-09-28T14:51:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434490137/job/108976069473"
-    }
-   ]
-  },
-  {
-   "run_id": 36434435346,
-   "pr": 1203,
-   "commit": "490549e68e829023ef61bfe31a2ea7b3e791637e",
-   "branch": "docs/full-doc-audit-20260926",
-   "event": "pull_request",
-   "title": "[Docs] Audit and refresh repository documentation",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434435346",
-   "created_at": "2026-09-28T14:14:08Z",
-   "updated_at": "2026-09-28T15:53:17Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T14:33:22Z",
-     "completed_at": "2026-09-28T15:53:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434435346/job/108976530062",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T14:34:16Z",
-     "completed_at": "2026-09-28T15:07:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434435346/job/108976530086"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T15:11:09Z",
-     "completed_at": "2026-09-28T15:31:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434435346/job/108976530322"
     }
    ]
   }
