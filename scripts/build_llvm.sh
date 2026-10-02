@@ -18,7 +18,7 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 #   any other   → looks up "repository" + "branch" from that entry name
 # The entry name must exist as a top-level key in llvm-build-info.json.
 # ---------------------------------------------------------------------------
-LLVM_SOURCE="${LLVM_SOURCE:-custom-old}"
+LLVM_SOURCE="${LLVM_SOURCE:-custom-upstream-old}"
 for arg in "$@"; do
     if [[ "$arg" == "--source" ]]; then
         _next_is_source=1

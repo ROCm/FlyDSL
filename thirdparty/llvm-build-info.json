@@ -10,9 +10,9 @@
     "description": "VGPR bank scheduling hints for gfx1250"
   },
 
-  "custom-latest": {
+  "custom-upstream-old": {
     "repository":  "https://github.com/jli-melchior/llvm-project.git",
-    "branch": "jli/amd/schedule_bank",
+    "branch": "jli/gfx1250/schedule-bank-upstream-oldllvm",
     "description": "VGPR bank scheduling hints for gfx1250"
   }
 }
