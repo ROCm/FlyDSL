@@ -1,11 +1,41 @@
 {
  "schema": 1,
- "updated": "2026-10-02T01:07:51Z",
+ "updated": "2026-10-02T03:37:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 36946272368,
+   "run_id": 36957257937,
    "pr": 1223,
+   "commit": "fba0948762f6c7841085833d7977d28c70046e80",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][FA][AOT][Feature][Dialect][DSL][ROCDL][Perf][Doc][Test] Add \u2026",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36957257937",
+   "created_at": "2026-10-02T02:47:35Z",
+   "updated_at": "2026-10-02T02:47:35Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 36951020169,
+   "pr": null,
+   "commit": "92d7a1236c53b100d88772b30724e848d53248bd",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][FA][AOT][Feature][Dialect][DSL][ROCDL][Perf][Doc][Test] Add \u2026",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36951020169",
+   "created_at": "2026-10-02T01:27:28Z",
+   "updated_at": "2026-10-02T01:27:28Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 36946272368,
+   "pr": null,
    "commit": "540bc18dac357764ee9770d09f047a8adfd550bb",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -1873,64 +1903,6 @@
      "started_at": "2026-09-28T15:11:09Z",
      "completed_at": "2026-09-28T15:31:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434435346/job/108976530322"
-    }
-   ]
-  },
-  {
-   "run_id": 36434338784,
-   "pr": null,
-   "commit": "31f389b3838d83f82e5bd9ccf646076243e24e18",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel][Perf] Add GLM-5 and Kimi-K3 MonoKernels: fuse KDA, MLA, MOE,\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36434338784",
-   "created_at": "2026-09-28T14:13:22Z",
-   "updated_at": "2026-09-28T14:14:38Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 36427130880,
-   "pr": null,
-   "commit": "8672a4157eede1448dd7933e413879e7772c588a",
-   "branch": "main",
-   "event": "push",
-   "title": "examples: remove duplicated gA/gB k-stride computation in preshuffle \u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36427130880",
-   "created_at": "2026-09-28T13:13:55Z",
-   "updated_at": "2026-09-28T14:14:51Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-28T13:30:01Z",
-     "completed_at": "2026-09-28T13:52:15Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36427130880/job/108949844726"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-28T13:29:11Z",
-     "completed_at": "2026-09-28T14:13:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36427130880/job/108949844753"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-28T13:30:01Z",
-     "completed_at": "2026-09-28T14:14:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36427130880/job/108949844939"
     }
    ]
   }
