@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-10-03T05:37:52Z",
+ "updated": "2026-10-03T06:06:18Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37099448434,
+   "run_id": 37101776971,
    "pr": 1223,
+   "commit": "1661721c3c0541e0fe01593c6cbb95a784f7c1e8",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][FA][AOT][Feature][Dialect][DSL][ROCDL][Perf][Doc][Test] Add \u2026",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37101776971",
+   "created_at": "2026-10-03T06:03:02Z",
+   "updated_at": "2026-10-03T06:03:02Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37099448434,
+   "pr": null,
    "commit": "f99d40bd6504df7688b829d855bf07215bacc1c3",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -40,39 +55,42 @@
    "branch": "feature/kimi-k3-agentic-staged",
    "event": "pull_request",
    "title": "feat(k3): optimize staged Agentic q8 KDA",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37096833218",
    "created_at": "2026-10-03T04:31:36Z",
-   "updated_at": "2026-10-03T05:09:46Z",
+   "updated_at": "2026-10-03T06:04:28Z",
    "actor": "gbyu-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-03T05:09:45Z",
-     "completed_at": null,
+     "completed_at": "2026-10-03T06:04:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37096833218/job/111134267053"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-03T05:09:23Z",
-     "completed_at": null,
+     "completed_at": "2026-10-03T05:46:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37096833218/job/111134267093"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-03T05:09:30Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37096833218/job/111134267118"
+     "completed_at": "2026-10-03T05:57:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37096833218/job/111134267118",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -1826,21 +1844,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36512794899",
    "created_at": "2026-09-29T02:28:57Z",
    "updated_at": "2026-09-29T02:28:57Z",
-   "actor": "Peter9606",
-   "jobs": []
-  },
-  {
-   "run_id": 36512743635,
-   "pr": null,
-   "commit": "f94d8bf943570c637de2de602efc593931937b5e",
-   "branch": "fujun.han/fix-singleton-zip2by",
-   "event": "pull_request",
-   "title": "[fix] Correct zipped_divide tiler hierarchy handling",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36512743635",
-   "created_at": "2026-09-29T02:28:17Z",
-   "updated_at": "2026-09-29T02:28:17Z",
    "actor": "Peter9606",
    "jobs": []
   }
