@@ -365,7 +365,11 @@ copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
 ## 7. Compute operations (MFMA)
 
-AMD GPUs use MFMA (Matrix Fused Multiply-Add) instructions for matrix math. FlyDSL provides direct access to MFMA intrinsics:
+CDNA uses MFMA. gfx120x (RDNA4) does not. Its matrix instruction is WMMA
+16×16×16, wave32. Copy `examples/07-tiledMma_gfx120x.py` for that, not the
+MFMA atom below. See `docs/gfx120x_call_graph.md`.
+
+AMD CDNA GPUs use MFMA (Matrix Fused Multiply-Add) instructions for matrix math. FlyDSL provides direct access to MFMA intrinsics:
 
 ```python
 mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))

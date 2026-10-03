@@ -78,4 +78,4 @@ def test_num_records_enables_checked_buffer_load(records_source):
     launch(a, out, 4, stream=stream)
     torch.cuda.synchronize()
 
-    torch.testing.assert_close(out.cpu(), torch.tensor([7.0, 0.0]))
+    torch.testing.assert_close(out.cpu(), torch.tensor([7.0, 0.0], device="cpu"))

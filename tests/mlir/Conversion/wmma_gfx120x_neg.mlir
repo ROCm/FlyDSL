@@ -6,9 +6,9 @@
 
 // -----
 
-// The supported floating-point RDNA4 WMMA forms have K=16. In particular,
-// 16x16x32 BF16 is a gfx1250 instruction and must not be accepted here.
-// CHECK: GFX120X WMMA floating-point forms require M=N=K=16, got 16x16x32
+// RDNA4 WMMA forms have K=16. In particular, 16x16x32 BF16 is a gfx1250
+// instruction and must not be accepted here.
+// CHECK: GFX120X WMMA requires M=N=K=16, got 16x16x32
 func.func @bad_shape_k32(
     %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x32, (bf16, bf16) -> f32, signA = false, signB = false, clamp = false>>) {
   return
@@ -30,5 +30,14 @@ func.func @bad_elem_ty_mixed_16bit(
 // CHECK: GFX120X WMMA floating-point path does not accept signA/signB/clamp
 func.func @bad_sign_clamp(
     %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (bf16, bf16) -> f32, signA = true, signB = true, clamp = true>>) {
+  return
+}
+
+// -----
+
+// iu8 requires Acc=i32 (not f32).
+// CHECK: unsupported GFX120X WMMA configuration: 16x16x16 with A='i8', B='i8', Acc='f32'
+func.func @bad_i8_acc(
+    %a: !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i8, i8) -> f32, signA = true, signB = true, clamp = false>>) {
   return
 }

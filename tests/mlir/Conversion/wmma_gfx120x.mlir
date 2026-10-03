@@ -5,6 +5,10 @@
 // GFX120X (RDNA4: gfx1200 / gfx1201) WMMA wave32 atom lowering tests:
 //   fly.mma_atom_call -> rocdl.wmma.f32.16x16x16
 //     .{f16,bf16,fp8_fp8,fp8_bf8,bf8_fp8,bf8_bf8} intrinsic
+//   fly.mma_atom_call -> rocdl.wmma.i32.16x16x16.iu8
+//     (A/B = vector<2xi32>, Acc = vector<8xi32>; NOT gfx11 v4i32)
+//   fly.mma_atom_call -> rocdl.wmma.i32.16x16x16.iu4
+//     (A/B = scalar i32, Acc = vector<8xi32>; NOT gfx11 v2i32)
 //
 // These RDNA4 floating-point forms use 16x16x16 and the gfx1250 "v8"
 // register ABI, so the per-lane fragment shapes are half the gfx11 ones:
@@ -143,4 +147,79 @@ func.func @test_gfx120x_wmma_atom_call_ssa_f16(
   // CHECK: %[[RES:.*]] = rocdl.wmma.f32.16x16x16.f16 %[[A]], %[[B]], %[[C]]
   %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (f16, f16) -> f32, signA = false, signB = false, clamp = false>>, vector<8xf16>, vector<8xf16>, vector<8xf32>) -> vector<8xf32>
   return %res : vector<8xf32>
+}
+
+
+// CHECK-LABEL: @test_gfx120x_wmma_atom_call_iu8
+// CHECK-SAME: (%[[D:.*]]: !llvm.ptr<5>, %[[A:.*]]: !llvm.ptr<5>, %[[B:.*]]: !llvm.ptr<5>, %[[C:.*]]: !llvm.ptr<5>)
+func.func @test_gfx120x_wmma_atom_call_iu8(
+    %d: !fly.memref<i32, register, 8:1>,
+    %a: !fly.memref<i8, register, 8:1>,
+    %b: !fly.memref<i8, register, 8:1>,
+    %c: !fly.memref<i32, register, 8:1>) {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i8, i8) -> i32, signA = true, signB = true, clamp = false>>
+  // CHECK: %[[A_VAL:.*]] = llvm.load %[[A]] : !llvm.ptr<5> -> vector<2xi32>
+  // CHECK: %[[B_VAL:.*]] = llvm.load %[[B]] : !llvm.ptr<5> -> vector<2xi32>
+  // CHECK: %[[C_VAL:.*]] = llvm.load %[[C]] : !llvm.ptr<5> -> vector<8xi32>
+  // CHECK: %[[RES:.*]] = rocdl.wmma.i32.16x16x16.iu8 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]] {{{.*}}signA = true{{.*}}signB = true
+  // CHECK: llvm.store %[[RES]], %[[D]] : vector<8xi32>, !llvm.ptr<5>
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i8, i8) -> i32, signA = true, signB = true, clamp = false>>, !fly.memref<i32, register, 8:1>, !fly.memref<i8, register, 8:1>, !fly.memref<i8, register, 8:1>, !fly.memref<i32, register, 8:1>) -> ()
+  return
+}
+
+// CHECK-LABEL: @test_gfx120x_wmma_atom_call_ssa_iu8_signed
+// CHECK-SAME: (%[[A:.*]]: vector<8xi8>, %[[B:.*]]: vector<8xi8>, %[[C:.*]]: vector<8xi32>)
+func.func @test_gfx120x_wmma_atom_call_ssa_iu8_signed(
+    %a: vector<8xi8>,
+    %b: vector<8xi8>,
+    %c: vector<8xi32>) -> vector<8xi32> {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i8, i8) -> i32, signA = true, signB = true, clamp = false>>
+  // CHECK: %[[A_CAST:.*]] = llvm.bitcast %[[A]] : vector<8xi8> to vector<2xi32>
+  // CHECK: %[[B_CAST:.*]] = llvm.bitcast %[[B]] : vector<8xi8> to vector<2xi32>
+  // CHECK: %[[RES:.*]] = rocdl.wmma.i32.16x16x16.iu8 %[[A_CAST]], %[[B_CAST]], %[[C]] {{{.*}}signA = true{{.*}}signB = true
+  %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i8, i8) -> i32, signA = true, signB = true, clamp = false>>, vector<8xi8>, vector<8xi8>, vector<8xi32>) -> vector<8xi32>
+  return %res : vector<8xi32>
+}
+
+
+// CHECK-LABEL: @test_gfx120x_wmma_atom_call_iu4
+// CHECK-SAME: (%[[D:.*]]: !llvm.ptr<5>, %[[A:.*]]: !llvm.ptr<5>, %[[B:.*]]: !llvm.ptr<5>, %[[C:.*]]: !llvm.ptr<5>)
+func.func @test_gfx120x_wmma_atom_call_iu4(
+    %d: !fly.memref<i32, register, 8:1>,
+    %a: !fly.memref<i4, register, 8:1>,
+    %b: !fly.memref<i4, register, 8:1>,
+    %c: !fly.memref<i32, register, 8:1>) {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> i32, signA = true, signB = true, clamp = false>>
+  // CHECK: %[[A_VAL:.*]] = llvm.load %[[A]] : !llvm.ptr<5> -> i32
+  // CHECK: %[[B_VAL:.*]] = llvm.load %[[B]] : !llvm.ptr<5> -> i32
+  // CHECK: %[[C_VAL:.*]] = llvm.load %[[C]] : !llvm.ptr<5> -> vector<8xi32>
+  // CHECK: %[[RES:.*]] = rocdl.wmma.i32.16x16x16.iu4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]] {{{.*}}signA = true{{.*}}signB = true
+  // CHECK: llvm.store %[[RES]], %[[D]] : vector<8xi32>, !llvm.ptr<5>
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> i32, signA = true, signB = true, clamp = false>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 8:1>, !fly.memref<i4, register, 8:1>, !fly.memref<i32, register, 8:1>) -> ()
+  return
+}
+
+// CHECK-LABEL: @test_gfx120x_wmma_atom_call_ssa_iu4_signed
+// CHECK-SAME: (%[[A:.*]]: vector<8xi4>, %[[B:.*]]: vector<8xi4>, %[[C:.*]]: vector<8xi32>)
+func.func @test_gfx120x_wmma_atom_call_ssa_iu4_signed(
+    %a: vector<8xi4>,
+    %b: vector<8xi4>,
+    %c: vector<8xi32>) -> vector<8xi32> {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> i32, signA = true, signB = true, clamp = false>>
+  // CHECK: %[[A_CAST:.*]] = llvm.bitcast %[[A]] : vector<8xi4> to i32
+  // CHECK: %[[B_CAST:.*]] = llvm.bitcast %[[B]] : vector<8xi4> to i32
+  // CHECK: %[[RES:.*]] = rocdl.wmma.i32.16x16x16.iu4 %[[A_CAST]], %[[B_CAST]], %[[C]] {{{.*}}signA = true{{.*}}signB = true
+  %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> i32, signA = true, signB = true, clamp = false>>, vector<8xi4>, vector<8xi4>, vector<8xi32>) -> vector<8xi32>
+  return %res : vector<8xi32>
+}
+
+// CHECK-LABEL: @test_gfx120x_wmma_atom_call_ssa_iu4_unsigned_clamp
+func.func @test_gfx120x_wmma_atom_call_ssa_iu4_unsigned_clamp(
+    %a: vector<8xi4>,
+    %b: vector<8xi4>,
+    %c: vector<8xi32>) -> vector<8xi32> {
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> i32, signA = false, signB = false, clamp = true>>
+  // CHECK: rocdl.wmma.i32.16x16x16.iu4 {{.*}} {clamp = true}
+  %res = fly.mma_atom_call_ssa(%atom, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> i32, signA = false, signB = false, clamp = true>>, vector<8xi4>, vector<8xi4>, vector<8xi32>) -> vector<8xi32>
+  return %res : vector<8xi32>
 }

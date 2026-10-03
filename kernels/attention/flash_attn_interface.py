@@ -1,7 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""High-level FlyDSL Flash Attention API for gfx950 / gfx942.
+"""High-level FlyDSL Flash Attention API for gfx950 / gfx942 / gfx120x.
+
+Routing (additive; other arches unchanged):
+- **gfx120x family** (``arch.startswith("gfx120")``): dense bf16/fp16/fp8/int8
+  → ``flash_attn_gfx120x_host`` (causal×cross, mask ranks, in-kernel return_lse,
+  uniform/per-head ALiBi in one launch, in-kernel attention sink). Packed iu4
+  is also ``torch.int8``, so this function does not detect it. Call
+  ``flydsl_flash_attn_iu4_func`` on that host for nibble-packed iu4. Native pack is
+  **dense BSHD + packed varlen + linear-4D paged + varlen with paged KV**.
+  Split-K is the wave32 partial kernel plus the combine in
+  ``flash_attn_gfx120x_splitk.py`` (not a host online-softmax loop).
+  Varlen+paged is that same kernel with both cu_seqlens and the block table; it is not a raise.
+  Dense/varlen/paged sink + return_lse fold in-kernel where supported.
+  FP8/int8 sink, bias, and LSE run in the dense quant kernels. Varlen, paged,
+  and split-K still raise. bf16/fp16 and dense fp8/int8 GQA/MQA are allowed
+  when ``Hq % Hkv == 0`` (``reject_gqa``, including MHA). The kernel indexes
+  ``kv_head = q_head // (Hq // Hkv)`` for K and V. No host KV repeat.
+  Vectorized/linear3d caches are in-kernel.
+  Never silent-routes gfx120x traffic onto gfx950 dualwave.
+- **gfx950 / gfx942**: existing dualwave / generic paths below (unchanged).
 
 Wraps ``flash_attn_generic.build_flash_attn_func_module`` (gfx942-compatible,
 dense self/cross-attention) and ``flash_attn_gfx950.build_flash_attn_dualwave_swp_module``
@@ -39,7 +58,7 @@ from kernels.attention.flash_attn_utils import (
     dualwave_splitk_workspace_elems,
 )
 
-__all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
+__all__ = ["flydsl_flash_attn_func", "flydsl_flash_attn_fp8_func", "dualwave_splitk_workspace_elems"]
 
 _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn: "fp8"}
 
@@ -131,8 +150,9 @@ def _dtype_str(t: torch.Tensor) -> str:
 
 @functools.lru_cache(maxsize=16)
 def _gpu_arch(device: torch.device) -> str:
+    """Best-effort GCN arch for this device; never raises. Lower-cased, colon-stripped."""
     try:
-        return torch.cuda.get_device_properties(device.index).gcnArchName.split(":")[0]
+        return (torch.cuda.get_device_properties(device).gcnArchName or "").lower().split(":")[0]
     except Exception:
         return ""
 
@@ -997,12 +1017,16 @@ def flydsl_flash_attn_func(
     block_table: Optional[torch.Tensor] = None,
     seqlen_k: Optional[torch.Tensor] = None,
     kv_cache_layout: str = "linear",
-    # Split-K (gfx950 only, seq_len >= 384, D=64/128, bf16/f16).
+    # Split-K. gfx950: seq_len >= 384, D=64/128, bf16/f16.
+    # gfx120x: bf16/fp16 in the RDNA4 host. Other arches are unchanged.
     num_kv_splits: Optional[int] = None,
     fp8_block_m: Optional[int] = None,
     # Additive attention bias, folded into the scores after sm_scale and before
-    # masking. gfx950 DUALWAVE_SWP only (dense / varlen / split-K / paged KV).
+    # masking. gfx950 DUALWAVE_SWP (dense / varlen / split-K / paged KV).
+    # gfx120x also applies it on dense bf16/fp16/fp8/int8.
     bias: Optional[torch.Tensor] = None,
+    # SDPA-style alias for additive mask; merged with bias (either may be set).
+    attn_mask: Optional[torch.Tensor] = None,
     # Per-head ALiBi slope table, computed analytically into the scores. Same
     # path as `bias` but no paged-KV support; may be combined with `bias`.
     alibi_slopes: Optional[torch.Tensor] = None,
@@ -1016,7 +1040,8 @@ def flydsl_flash_attn_func(
     # Output tensor; allocated if None.
     out: Optional[torch.Tensor] = None,
     # Also return per-row LSE = ln(sum_j exp(sm_scale * q_i.k_j)); fp32
-    # [B, num_heads, Sq]. Needed by backward; not supported for fp8.
+    # [B, num_heads, Sq]. Needed by backward. The gfx950 fp8 path rejects it.
+    # gfx120x fp8 and int8 dense return it.
     return_lse: bool = False,
     # Kernel build options.
     waves_per_eu: int = 2,
@@ -1034,7 +1059,7 @@ def flydsl_flash_attn_func(
     # CUDA/HIP stream; defaults to the current stream for q.device.
     stream: Optional[torch.cuda.Stream] = None,
 ) -> torch.Tensor:
-    """Run FlyDSL Flash Attention (gfx950 DUALWAVE_SWP / gfx942 generic fallback).
+    """Run FlyDSL Flash Attention (gfx120x RDNA4 / gfx950 DUALWAVE_SWP / gfx942 generic).
 
     Args:
         q: Query tensor. Dense: ``[B, Sq, H, D]`` (BSHD).
@@ -1046,7 +1071,8 @@ def flydsl_flash_attn_func(
            ``kv_cache_layout`` values:
            - ``linear``: 4D paged K/V, ``[NumBlocks, PageSize, NumKVHeads, HeadDim]``.
            - ``linear3d``: page_size=1 special case,
-             ``[NumBlocks, NumKVHeads, HeadDim]`` (gfx950 FP8 only).
+             ``[NumBlocks, NumKVHeads, HeadDim]`` (gfx950 FP8 page-1, and
+             gfx120x bf16/fp16 page-1).
            - ``vectorized``: aiter-style 5D K/V, where
              ``K = [NumBlocks, NumKVHeads, HeadDim / kVectorSize, PageSize, kVectorSize]``
              and
@@ -1067,8 +1093,9 @@ def flydsl_flash_attn_func(
         cross_seqlen: Whether seqlen_q and seqlen_kv differ. Required in varlen mode;
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
         block_table / seqlen_k: vLLM-style 2D block table metadata. Enables the
-            native paged-KV path, which supports ``bias`` but not
-            ``alibi_slopes``, ``sink``, or ``return_lse``. gfx950 FP8 supports
+            native paged-KV path. On gfx950 that path supports ``bias`` but not
+            ``alibi_slopes``, ``sink``, or ``return_lse``. gfx120x bf16/fp16 paged
+            runs bias, ALiBi, sink, and LSE. gfx950 FP8 supports
             causal packed-varlen D128/V128 and D192/V128-or-V192 paths,
             with vectorized page sizes 16/64/1024 or linear/linear3d page 1.
             FP8 cu-seqlens must be int32 on Q's device; strided views are copied
@@ -1079,20 +1106,24 @@ def flydsl_flash_attn_func(
             Active page IDs must address the cache; unused table slots and
             inactive cache tokens are ignored and need not be initialized.
             These value invariants are caller-owned to avoid device
-            synchronization. BF16/F16 native paged paths require page size 64.
-        num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
+            synchronization. gfx950 BF16/F16 native paged paths require page
+            size 64. gfx120x uses the cache's own page size.
+        num_kv_splits: Split-K factor (>1). gfx950: D=64/128, bf16/f16, seq>=384.
+            gfx120x: bf16/fp16 in the RDNA4 host. Other arches are unchanged.
             ``None`` lets fp8 autotune it; ``1`` keeps the kernel unsplit.
         fp8_block_m: Pin the fp8 tile height to 128 or 256. Paged FP8 supports
             only its fixed 256-row tile (``None`` or ``256``).
-        bias: Additive attention bias with the same dtype as q, folded in as
+        bias: Additive attention bias, folded in as
             ``softmax(q @ k^T * sm_scale + bias)`` -- after the scale, before the
-            causal/padding mask. Dense: ``[Sq, Skv]``, broadcast over batch and
+            causal/padding mask. gfx950 keeps the same dtype as q. gfx120x casts
+            ``bias`` and ``attn_mask`` to fp32. Dense: ``[Sq, Skv]``, broadcast over batch and
             head. Varlen: ``[total_q, max_seqlen_kv]``, where the row is the
             *global* packed q token index and the column is the *per-batch-local*
             key index, broadcast over head. Varlen self-attention leaves
             ``max_seqlen_kv`` unset, so its column bound is ``max_seqlen_q``.
-            Routes to the gfx950 DUALWAVE_SWP kernel; fp8 raises
+            Routes to the gfx950 DUALWAVE_SWP kernel on that arch. gfx950 fp8 raises
             NotImplementedError rather than silently dropping the bias.
+            gfx120x dense, including fp8 and int8, applies the bias.
             Paged KV is supported (dense, varlen, and paged split-K) with the
             same row/column convention: rows are ``seq_len_q`` (dense) or
             ``total_q`` (varlen) q tokens, columns are batch-local key indices
@@ -1108,9 +1139,9 @@ def flydsl_flash_attn_func(
             1/sqrt(D) scaling (the slope is not divided by it), bottom-right
             aligned like the causal mask. Positions are measured *within* the
             sequence, so varlen does not offset by the packed-token base. Same
-            kernel path as ``bias`` and may be combined with it, but unlike
-            ``bias`` it is not supported with paged KV (raises
-            NotImplementedError), nor with fp8.
+            kernel path as ``bias`` and may be combined with it. gfx950 rejects
+            it with paged KV and with fp8. gfx120x bf16/fp16 paged and dense
+            fp8/int8 apply it.
         sink: fp32 ``[H]`` per-head attention-sink logit -- one extra softmax
             denominator term that has no matching V row::
 
@@ -1120,11 +1151,13 @@ def flydsl_flash_attn_func(
             post-sm_scale logit space as the scores. Applied in the epilogue, so
             it touches no score element; under split-K the per-split partials
             stay sink-free and the combine pass folds it in exactly once. Same
-            kernel path and restrictions as ``alibi_slopes`` -- not supported
-            with paged KV or fp8 -- but freely combinable with ``bias`` and
-            ``alibi_slopes``.
-        q_descale / k_descale / v_descale: fp32 shape-[1] descales required
-            for dense or paged fp8 e4m3fn inputs. Paged FP8 also accepts scalar
+            kernel path and restrictions as ``alibi_slopes``. gfx950 rejects it
+            with paged KV or fp8. gfx120x bf16/fp16 paged and dense fp8/int8
+            apply it. Freely combinable with ``bias`` and ``alibi_slopes``.
+        q_descale / k_descale / v_descale: fp32 shape-[1] descales. Required
+            on gfx950 for dense or paged fp8 e4m3fn. On gfx120x dense fp8
+            (e4m3fn or e5m2) they are optional and default to 1.0. gfx120x has
+            no paged fp8 path. Paged FP8 on gfx950 also accepts scalar
             and other single-element tensors.
         out: Optional pre-allocated output tensor. For fp8, output is bf16;
             otherwise it has the same dtype as q.
@@ -1148,6 +1181,322 @@ def flydsl_flash_attn_func(
         ``[B, num_heads, max_seqlen_q]``, padded) holding the per-row
         natural-log, scale-folded log-sum-exp.
     """
+
+    # attn_mask is a gfx120x alias of bias. Other arches do not have this
+    # argument on main, so a set mask raises here instead of entering their path.
+    # None leaves gfx950 and gfx942 unchanged.
+    from kernels.common.gfx120x_arch import is_gfx120x as _is_gfx120x
+
+    if not _is_gfx120x(q.device):
+        if attn_mask is not None:
+            raise ValueError(
+                "flydsl_flash_attn_func: attn_mask is only accepted on gfx120x. " "Pass bias on this architecture."
+            )
+    elif attn_mask is not None:
+        if bias is not None and bias is not attn_mask:
+            raise ValueError(
+                "flydsl_flash_attn_func: pass only one of attn_mask or bias "
+                "(attn_mask is an alias for bias); both were set to different tensors"
+            )
+        bias = attn_mask
+
+    # ── gfx120x / RDNA4 dense FA (bf16/fp16; FP8 via flydsl_flash_attn_fp8_func) ──
+    # Soft family check only (never raises): other arches fall through unchanged.
+    if _is_gfx120x(q.device):
+        from kernels.attention import flash_attn_gfx120x_ext as _g12x_ext
+        from kernels.attention.flash_attn_gfx120x_host import (
+            flydsl_flash_attn_func as _gfx120x_fa,
+        )
+
+        _varlen = cu_seqlens_q is not None or cu_seqlens_kv is not None
+        _paged = block_table is not None
+        _layout_g = kv_cache_layout or "linear"
+        if _varlen and _paged:
+            if _layout_g == "vectorized":
+                _hkv = int(k.shape[1])
+                _hq = int(q.shape[1])
+            elif _layout_g == "linear3d":
+                _hkv = int(k.shape[1])
+                _hq = int(q.shape[1])
+            else:
+                _hkv = int(k.shape[2])
+                _hq = int(q.shape[1])
+            _g12x_ext.reject_gqa(_hq, _hkv, num_kv_heads)
+        elif _varlen:
+            _g12x_ext.reject_gqa(int(q.shape[1]), int(k.shape[1]), num_kv_heads)
+        elif _paged:
+            _g12x_ext.reject_paged_layout(kv_cache_layout)
+            if _layout_g == "vectorized":
+                if k.dim() != 5:
+                    raise ValueError(f"flydsl_flash_attn_func: vectorized paged K must be 5D, got {k.dim()}D")
+                _hkv = int(k.shape[1])
+            elif _layout_g == "linear3d":
+                if k.dim() != 3:
+                    raise ValueError("flydsl_flash_attn_func: linear3d paged K must be 3D [NumBlocks,Hkv,D]")
+                _hkv = int(k.shape[1])
+            else:
+                if k.dim() != 4:
+                    raise ValueError(
+                        "flydsl_flash_attn_func: gfx120x linear paged KV requires 4D "
+                        f"[num_blocks, page_size, num_kv_heads, head_dim], got rank {k.dim()}"
+                    )
+                _hkv = int(k.shape[2])
+            _g12x_ext.reject_gqa(int(q.shape[2]), _hkv, num_kv_heads)
+        elif q.dim() == 4 and k.dim() == 4:
+            _g12x_ext.reject_gqa(int(q.shape[2]), int(k.shape[2]), num_kv_heads)
+
+        def _gfx120x_reject_non_dense_quant(dtype_label: str) -> None:
+            """FP8/int8 gfx120x pack is dense-only; do not fall through to gfx950."""
+            if cu_seqlens_q is not None or cu_seqlens_kv is not None:
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func: gfx120x {dtype_label} FA has no packed-varlen "
+                    "path yet (dense BSHD only)."
+                )
+            if block_table is not None:
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func: gfx120x {dtype_label} FA has no paged-KV " "path yet (dense BSHD only)."
+                )
+            if num_kv_splits is not None and int(num_kv_splits) > 1:
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func: gfx120x {dtype_label} FA has no split-K path yet (dense BSHD only)."
+                )
+
+        def _gfx120x_call(qb, kb, vb, *, bias_b, out_b):
+            """Dense gfx120x FA. Sink and LSE are in-kernel; ALiBi+sink raises."""
+            _g12x_ext.reject_sink_with_alibi(sink, alibi_slopes)
+            got = _gfx120x_fa(
+                qb,
+                kb,
+                vb,
+                causal=causal,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                stream=stream,
+                bias=bias_b,
+                alibi_slopes=alibi_slopes,
+                return_lse=return_lse,
+                sink=sink,
+                out=out_b,
+            )
+            lse = None
+            if return_lse:
+                got, lse = got
+            return got, lse
+
+        if q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            _gfx120x_reject_non_dense_quant("fp8")
+            _g12x_ext.reject_quant_extras(
+                "fp8",
+                bias=bias,
+                attn_mask=attn_mask,
+                alibi_slopes=alibi_slopes,
+                sink=sink,
+                return_lse=return_lse,
+            )
+            from kernels.attention.flash_attn_gfx120x_host import (
+                flydsl_flash_attn_fp8_func as _gfx120x_fp8,
+            )
+
+            return _gfx120x_fp8(
+                q,
+                k,
+                v,
+                causal=causal,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                stream=stream,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                out=out,
+                bias=bias,
+                alibi_slopes=alibi_slopes,
+                sink=sink,
+                return_lse=return_lse,
+                num_kv_heads=num_kv_heads,
+            )
+        if q.dtype == torch.int8:
+            # Dense int8 QKV (iu8 WMMA). Nibble-packed int4 uses
+            # flydsl_flash_attn_iu4_func explicitly (packed last-dim ABI).
+            _gfx120x_reject_non_dense_quant("int8")
+            _g12x_ext.reject_quant_extras(
+                "int8",
+                bias=bias,
+                attn_mask=attn_mask,
+                alibi_slopes=alibi_slopes,
+                sink=sink,
+                return_lse=return_lse,
+            )
+            from kernels.attention.flash_attn_gfx120x_host import (
+                flydsl_flash_attn_int8_func as _gfx120x_i8,
+            )
+
+            return _gfx120x_i8(
+                q,
+                k,
+                v,
+                causal=causal,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                stream=stream,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                out=out,
+                bias=bias,
+                alibi_slopes=alibi_slopes,
+                sink=sink,
+                return_lse=return_lse,
+                num_kv_heads=num_kv_heads,
+            )
+        # Dense bf16/fp16. Varlen, paged (linear/linear3d/vectorized), varlen+paged,
+        # and split-K are in-kernel wave32 paths.
+        if (cu_seqlens_q is not None or cu_seqlens_kv is not None) and block_table is not None:
+            if cu_seqlens_q is None or cu_seqlens_kv is None:
+                raise ValueError("flydsl_flash_attn_func: gfx120x varlen paged requires both cu_seqlens")
+            if seqlen_k is None:
+                raise ValueError("flydsl_flash_attn_func: gfx120x varlen paged requires seqlen_k")
+            _max_q = max_seqlen_q
+            _max_kv = max_seqlen_kv
+            if _max_q is None or _max_kv is None:
+                _cq = cu_seqlens_q.to(torch.int64)
+                _ck = cu_seqlens_kv.to(torch.int64)
+                if _max_q is None:
+                    _max_q = int((_cq[1:] - _cq[:-1]).max().item())
+                if _max_kv is None:
+                    _max_kv = int((_ck[1:] - _ck[:-1]).max().item())
+            from kernels.attention.flash_attn_gfx120x_host import (
+                flydsl_flash_attn_varlen_paged_func as _gfx120x_vp,
+            )
+
+            return _gfx120x_vp(
+                q,
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                block_table,
+                seqlen_k,
+                int(_max_q),
+                int(_max_kv),
+                causal=causal,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                stream=stream,
+                bias=bias,
+                alibi_slopes=alibi_slopes,
+                return_lse=return_lse,
+                sink=sink,
+                out=out,
+                kv_cache_layout=kv_cache_layout or "linear",
+            )
+
+        if cu_seqlens_q is not None or cu_seqlens_kv is not None:
+            if cu_seqlens_q is None or cu_seqlens_kv is None:
+                raise ValueError(
+                    "flydsl_flash_attn_func: gfx120x packed varlen requires both cu_seqlens_q and cu_seqlens_kv"
+                )
+            _max_q = max_seqlen_q
+            _max_kv = max_seqlen_kv
+            if _max_q is None or _max_kv is None:
+                _cq = cu_seqlens_q.to(torch.int64)
+                _ck = cu_seqlens_kv.to(torch.int64)
+                if _max_q is None:
+                    _max_q = int((_cq[1:] - _cq[:-1]).max().item())
+                if _max_kv is None:
+                    _max_kv = int((_ck[1:] - _ck[:-1]).max().item())
+            _max_q = int(_max_q)
+            _max_kv = int(_max_kv)
+            from kernels.attention.flash_attn_gfx120x_host import (
+                flydsl_flash_attn_varlen_func as _gfx120x_varlen,
+            )
+
+            _g12x_ext.reject_sink_with_alibi(sink, alibi_slopes)
+            got = _gfx120x_varlen(
+                q,
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                _max_q,
+                _max_kv,
+                causal=causal,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                stream=stream,
+                bias=bias,
+                attn_mask=None,  # already folded into bias above when alias
+                alibi_slopes=alibi_slopes,
+                return_lse=return_lse,
+                sink=sink,
+                out=out,
+            )
+            if return_lse:
+                return got
+            return got
+
+        if block_table is not None:
+            if seqlen_k is None:
+                raise ValueError("flydsl_flash_attn_func: gfx120x paged KV requires seqlen_k")
+            _layout = kv_cache_layout or "linear"
+            _g12x_ext.reject_paged_layout(_layout)
+            from kernels.attention.flash_attn_gfx120x_host import (
+                flydsl_flash_attn_paged_func as _gfx120x_paged,
+            )
+
+            _g12x_ext.reject_sink_with_alibi(sink, alibi_slopes)
+            # Ragged paged + bias: kernel masks per-batch sk; shared bias vs max_sk
+            # is OK when lengths are uniform. Ragged + unique bias still unsupported.
+            if bias is not None and not _g12x_ext.lengths_uniform(
+                seqlen_k, int(seqlen_k.max().item()) if seqlen_k.numel() else 0
+            ):
+                raise NotImplementedError(
+                    "flydsl_flash_attn_func: gfx120x ragged paged KV does not support bias "
+                    "(padding would be attended)"
+                )
+            got = _gfx120x_paged(
+                q,
+                k,
+                v,
+                block_table,
+                seqlen_k,
+                page_size=None,
+                kv_cache_layout=_layout,
+                causal=causal,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                stream=stream,
+                bias=bias,
+                alibi_slopes=alibi_slopes,
+                return_lse=return_lse,
+                sink=sink,
+                out=out,
+            )
+            if return_lse:
+                return got
+            return got
+
+        if num_kv_splits is not None and int(num_kv_splits) > 1:
+            return _gfx120x_fa(
+                q,
+                k,
+                v,
+                causal=causal,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                stream=stream,
+                bias=bias,
+                alibi_slopes=alibi_slopes,
+                return_lse=return_lse,
+                sink=sink,
+                out=out,
+                num_kv_splits=int(num_kv_splits),
+            )
+
+        out_dense, lse = _gfx120x_call(q, k, v, bias_b=bias, out_b=out)
+        if return_lse:
+            return out_dense, lse
+        return out_dense
     # ── validation ──────────────────────────────────────────────────────────
     if not (q.is_cuda and k.is_cuda and v.is_cuda):
         raise ValueError("flydsl_flash_attn_func: q/k/v must be CUDA tensors")
@@ -1641,3 +1990,37 @@ def flydsl_flash_attn_func(
     if return_lse:
         return out, lse
     return out
+
+
+def flydsl_flash_attn_fp8_func(*args, **kwargs):
+    """FP8 Flash Attention.
+
+    Public contract matches ``flydsl_flash_attn_func`` (keyword-only after
+    q, k, v; ``causal`` defaults to True). gfx120x selects the RDNA4 FP8
+    kernel inside that entry. GQA/MQA is allowed when ``Hq % Hkv == 0`` (same
+    ``kv_head`` index as bf16; no host KV repeat). Varlen and paged KV still
+    raise. ``sm_scale`` is accepted only at
+    the ``1/sqrt(head_dim)`` default. Other arches still see ``sm_scale`` as
+    an unexpected keyword, same as before.
+    """
+    sm = kwargs.pop("sm_scale", None)
+    q = args[0] if args else kwargs.get("q")
+    on_120 = False
+    if q is not None:
+        from kernels.common.gfx120x_arch import is_gfx120x as _is_gfx120x
+
+        on_120 = _is_gfx120x(getattr(q, "device", None))
+    if sm is not None:
+        if not on_120:
+            kwargs["sm_scale"] = sm
+        else:
+            import math
+
+            if not hasattr(q, "shape"):
+                raise TypeError("flydsl_flash_attn_fp8_func() missing q")
+            default = 1.0 / math.sqrt(int(q.shape[-1]))
+            if abs(float(sm) - default) > 1e-7:
+                raise ValueError(
+                    "flydsl_flash_attn_fp8_func only supports default " f"sm_scale=1/sqrt(D) ({default}), got {sm}"
+                )
+    return flydsl_flash_attn_func(*args, **kwargs)
