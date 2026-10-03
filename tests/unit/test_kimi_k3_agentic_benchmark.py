@@ -21,6 +21,7 @@ from kernels.monokernel.k3.tools.agentic_kda import (
     parity_metrics,
     q8_conv_reference,
     q8_recurrence_reference,
+    staged_speedup,
 )
 from kernels.monokernel.k3.kernel import (
     agentic_conv_writeback_requires_all,
@@ -69,6 +70,10 @@ def test_critical_rank_medians_take_each_replay_slowest_rank() -> None:
     assert critical_rank_medians(rank_samples, layers=10) == pytest.approx(
         (20.0, 30.0, 60.0)
     )
+
+
+def test_staged_speedup_reports_full_over_staged() -> None:
+    assert staged_speedup(full_us=300.0, staged_us=150.0) == 2.0
 
 
 def test_kernel_profile_selects_median_replay_critical_rank() -> None:

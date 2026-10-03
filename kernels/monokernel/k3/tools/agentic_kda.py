@@ -162,6 +162,12 @@ def critical_rank_medians(
     )
 
 
+def staged_speedup(*, full_us: float, staged_us: float) -> float:
+    """Return how many times faster staged execution is than full execution."""
+
+    return full_us / staged_us
+
+
 def critical_rank_kernel_profile(
     rank_profiles: Sequence[Sequence[dict]],
     *,
@@ -1131,7 +1137,10 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
                 "staged": staged_us,
                 "full": full_us,
             },
-            "speedup_staged_over_full": staged_us / full_us,
+            "speedup_staged_over_full": staged_speedup(
+                full_us=full_us,
+                staged_us=staged_us,
+            ),
             "launches_per_layer": {
                 "staged": staged_counts.get("kernel", 0) / args.layers,
                 "full": full_counts.get("kernel", 0) / args.layers,
