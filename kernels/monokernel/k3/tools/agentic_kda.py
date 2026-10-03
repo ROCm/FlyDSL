@@ -162,22 +162,33 @@ def critical_rank_medians(
 
 
 def critical_rank_kernel_profile(
-    rank_profiles: Sequence[dict],
+    rank_profiles: Sequence[Sequence[dict]],
     *,
     layers: int,
-    repeats: int,
 ) -> dict:
-    """Select the slowest profiled rank and normalize its kernels per layer."""
+    """Select the median replay's exact critical-rank kernel/stage profile."""
 
-    if not rank_profiles or layers <= 0 or repeats <= 0:
-        raise ValueError("rank profiles, layers, and repeats must be positive")
-    critical = max(rank_profiles, key=lambda profile: profile["graph_us"])
-    invocations = layers * repeats
+    if not rank_profiles or layers <= 0:
+        raise ValueError("rank profiles and layers must be positive")
+    repeats = len(rank_profiles[0])
+    if repeats == 0 or any(len(profiles) != repeats for profiles in rank_profiles):
+        raise ValueError("all ranks must provide the same nonzero repeat count")
+    critical_repeats = [
+        max(
+            (profiles[repeat] for profiles in rank_profiles),
+            key=lambda profile: profile["graph_us"],
+        )
+        for repeat in range(repeats)
+    ]
+    critical = sorted(
+        critical_repeats,
+        key=lambda profile: profile["graph_us"],
+    )[len(critical_repeats) // 2]
     kernels = [
         {
             "name": name,
-            "calls_per_layer": values["calls"] / invocations,
-            "total_us_per_layer": values["total_us"] / invocations,
+            "calls_per_layer": values["calls"] / layers,
+            "total_us_per_layer": values["total_us"] / layers,
             "mean_us": values["total_us"] / values["calls"],
         }
         for name, values in critical["kernels"].items()
@@ -186,8 +197,10 @@ def critical_rank_kernel_profile(
     kernels.sort(key=lambda kernel: kernel["total_us_per_layer"], reverse=True)
     return {
         "critical_rank": critical["rank"],
-        "profiled_graph_us_per_layer": critical["graph_us"] / invocations,
+        "median_repeat": critical["repeat"],
+        "profiled_graph_us_per_layer": critical["graph_us"] / layers,
         "kernels": kernels,
+        "stages": critical["stages"],
     }
 
 
@@ -517,48 +530,82 @@ def _profile_full(
 
 def _profile_staged_graph(
     graph: torch.cuda.CUDAGraph,
+    timeline: torch.Tensor,
     *,
     rank: int,
     layers: int,
     repeats: int,
+    labels: Sequence[str],
 ) -> dict:
-    """Profile graph kernels and report the slowest rank's per-layer launches."""
+    """Profile each replay and return its exact median critical-rank record."""
 
-    dist.barrier()
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+    local_runs = []
+    marker_prefix = "staged_graph_repeat_"
     with torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.CUDA,
         ],
-        acc_events=True,
     ) as profiler:
-        start.record()
-        for _ in range(repeats):
-            graph.replay()
-        end.record()
-        end.synchronize()
-    kernels = {
-        event.key: {
-            "calls": event.count,
-            "total_us": event.self_device_time_total,
-        }
-        for event in profiler.key_averages()
-        if event.self_device_time_total > 0
+        for repeat in range(repeats):
+            dist.barrier()
+            torch.cuda.synchronize()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            with torch.profiler.record_function(f"{marker_prefix}{repeat}"):
+                start.record()
+                graph.replay()
+                end.record()
+                end.synchronize()
+            ticks = timeline.cpu().tolist()[: len(labels) + 1]
+            local_runs.append(
+                {
+                    "rank": rank,
+                    "repeat": repeat,
+                    "graph_us": start.elapsed_time(end) * 1000.0,
+                    "kernels": {},
+                    "stages": {
+                        label: (ticks[index + 1] - ticks[index]) / 100.0
+                        for index, label in enumerate(labels)
+                    },
+                }
+            )
+
+    device_events = [
+        event
+        for event in profiler.events()
+        if event.device_type == torch.autograd.DeviceType.CUDA
+    ]
+    repeat_ranges = {
+        int(event.name.removeprefix(marker_prefix)): event.time_range
+        for event in device_events
+        if event.name.startswith(marker_prefix)
     }
-    local = {
-        "rank": rank,
-        "graph_us": start.elapsed_time(end) * 1000.0,
-        "kernels": kernels,
-    }
-    gathered: list[dict | None] = [None] * dist.get_world_size()
-    dist.all_gather_object(gathered, local)
+    if len(repeat_ranges) != repeats:
+        raise RuntimeError(
+            f"profiler recorded {len(repeat_ranges)} of {repeats} repeat markers"
+        )
+    for run in local_runs:
+        repeat_range = repeat_ranges[run["repeat"]]
+        for event in device_events:
+            if event.name.startswith(marker_prefix):
+                continue
+            if (
+                event.time_range.start < repeat_range.start
+                or event.time_range.end > repeat_range.end
+            ):
+                continue
+            values = run["kernels"].setdefault(
+                event.name,
+                {"calls": 0, "total_us": 0.0},
+            )
+            values["calls"] += 1
+            values["total_us"] += event.self_device_time_total
+    gathered: list[list[dict] | None] = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, local_runs)
     return critical_rank_kernel_profile(
-        [profile for profile in gathered if profile is not None],
+        [profiles for profiles in gathered if profiles is not None],
         layers=layers,
-        repeats=repeats,
     )
 
 
@@ -966,30 +1013,6 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
 
     staged_kernel_profile = None
     staged_front_stage_profile = None
-    if args.kernel_profile:
-        staged_kernel_fixture = _fixture(shape, device, args.seed + 349)
-        staged_kernel_graph = _capture_layer_graph(
-            lambda layer: staged_call(
-                staged_kernel_fixture,
-                layer,
-                advance=False,
-            ),
-            staged.advance_step,
-            args.layers,
-        )
-        staged_kernel_profile = _profile_staged_graph(
-            staged_kernel_graph,
-            rank=rank,
-            layers=args.layers,
-            repeats=args.profile_repeats,
-        )
-        staged_front_stage_profile = _profile_full(
-            staged_kernel_graph,
-            staged.front.attention.monokernel_timeline,
-            repeats=args.profile_repeats,
-            labels=_STAGE_LABELS[:4],
-        )
-        del staged_kernel_graph
 
     # Timing fixtures are fresh and used only by their corresponding graph.
     full_timing = _fixture(shape, device, args.seed + 399)
@@ -1018,6 +1041,27 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         warmups=args.warmups,
         repeats=args.repeats,
     )
+    if args.kernel_profile:
+        staged_kernel_fixture = _fixture(shape, device, args.seed + 349)
+        staged_kernel_graph = _capture_layer_graph(
+            lambda layer: staged_call(
+                staged_kernel_fixture,
+                layer,
+                advance=False,
+            ),
+            staged.advance_step,
+            args.layers,
+        )
+        staged_kernel_profile = _profile_staged_graph(
+            staged_kernel_graph,
+            staged.front.attention.monokernel_timeline,
+            rank=rank,
+            layers=args.layers,
+            repeats=args.profile_repeats,
+            labels=_STAGE_LABELS[:4],
+        )
+        staged_front_stage_profile = staged_kernel_profile["stages"]
+        del staged_kernel_graph
     eager_parity = parity_metrics(
         expected_output=full_parity.output,
         actual_output=staged_parity.output,
