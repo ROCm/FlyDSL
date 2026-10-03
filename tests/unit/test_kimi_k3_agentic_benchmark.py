@@ -12,7 +12,11 @@ from kernels.monokernel.k3.tools.agentic_kda import (
     WARMUPS,
     AgenticKdaShape,
     critical_rank_medians,
+    graph_epoch_plan,
     make_argument_parser,
+    parity_metrics,
+    q8_conv_reference,
+    q8_recurrence_reference,
 )
 
 
@@ -78,3 +82,97 @@ def test_agentic_shape_builds_mixed_acceptance_conv_rollback_plan() -> None:
 
         assert source[reads[request]].tolist() == independent_reads
         assert torch.equal(source[final[request]], expected_final)
+
+
+def test_graph_epoch_plan_uses_all_layers_and_one_advance() -> None:
+    layers, advances = graph_epoch_plan(32)
+
+    assert layers == tuple(range(32))
+    assert advances == 1
+
+
+def test_parity_metrics_compute_booleans_from_untouched_values() -> None:
+    expected = torch.tensor((1.0, 2.0))
+    actual = expected.clone()
+    metrics = parity_metrics(
+        expected_output=expected,
+        actual_output=actual,
+        expected_state=expected,
+        actual_state=actual,
+        expected_conv=expected,
+        actual_conv=actual,
+        rank_equal=False,
+    )
+
+    assert metrics["conv_exact"] is True
+    assert metrics["state_exact"] is True
+    assert metrics["rank_equal"] is False
+    assert metrics["output_nonzero"] is True
+
+
+def test_q8_reference_uses_mixed_input_slots_and_fp32_carry() -> None:
+    batch, query_len, slots, heads, width = 8, 8, 64, 1, 2
+    snapshots = torch.arange(slots, dtype=torch.int32).view(batch, query_len)
+    accepted = torch.arange(1, query_len + 1, dtype=torch.int32)
+    initial = torch.empty(slots, heads, width, width, dtype=torch.float16)
+    for slot in range(slots):
+        initial[slot].fill_(slot + 1)
+    query = torch.zeros(batch, query_len, heads, width)
+    key = torch.zeros_like(query)
+    query[..., 0] = 1
+    key[..., 0] = 1
+    value = torch.zeros_like(query)
+    gate = torch.zeros_like(query)
+    beta = torch.full((batch, query_len, heads), -100.0)
+
+    _, persisted, carry = q8_recurrence_reference(
+        initial,
+        snapshots,
+        accepted,
+        query,
+        key,
+        value,
+        gate,
+        beta,
+        torch.zeros(heads),
+        torch.zeros(heads, width),
+    )
+
+    decay = torch.exp(torch.tensor(-2.5))
+    for request, count in enumerate(accepted.tolist()):
+        input_slot = int(snapshots[request, count - 1])
+        for token in range(query_len):
+            expected = initial[input_slot].float() * decay ** (token + 1)
+            torch.testing.assert_close(
+                persisted[int(snapshots[request, token])].float(),
+                expected.half().float(),
+            )
+        torch.testing.assert_close(carry[request], expected)
+
+
+def test_q8_conv_reference_rolls_back_two_committed_rows_and_eight_drafts() -> None:
+    snapshots = torch.arange(64, dtype=torch.int32).view(8, 8)
+    accepted = torch.arange(1, 9, dtype=torch.int32)
+    conv = torch.arange(64 * 10, dtype=torch.bfloat16).view(64, 10, 1)
+    drafts = torch.arange(800, 864, dtype=torch.bfloat16).view(8, 8, 1)
+    weight = torch.ones(1, 4, dtype=torch.bfloat16)
+
+    output, persisted = q8_conv_reference(
+        conv, snapshots, accepted, drafts, weight
+    )
+
+    for request, count in enumerate(accepted.tolist()):
+        slot = int(snapshots[request, 0])
+        expected_first = (
+            conv[slot, count - 1 : count + 2, 0].float().sum()
+            + drafts[request, 0, 0].float()
+        )
+        torch.testing.assert_close(
+            output[request, 0, 0],
+            expected_first * torch.sigmoid(expected_first),
+        )
+        assert torch.equal(
+            persisted[slot, :2, 0],
+            conv[slot, count : count + 2, 0],
+        )
+        assert torch.equal(persisted[slot, 2:, 0], drafts[request, :, 0])

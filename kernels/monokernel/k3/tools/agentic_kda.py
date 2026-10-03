@@ -161,6 +161,125 @@ def critical_rank_medians(
     )
 
 
+def graph_epoch_plan(layers: int) -> tuple[tuple[int, ...], int]:
+    """Return the common per-layer tags and decode-step advance count."""
+
+    if not 0 < layers <= 128:
+        raise ValueError("layers must be in [1, 128]")
+    return tuple(range(layers)), 1
+
+
+def parity_metrics(
+    *,
+    expected_output: torch.Tensor,
+    actual_output: torch.Tensor,
+    expected_state: torch.Tensor,
+    actual_state: torch.Tensor,
+    expected_conv: torch.Tensor,
+    actual_conv: torch.Tensor,
+    rank_equal: bool,
+) -> dict[str, float | bool]:
+    """Compute parity facts from dedicated, untimed fixtures."""
+
+    return {
+        "output_max_abs": float(
+            (expected_output.float() - actual_output.float()).abs().max()
+        ),
+        "state_max_abs": float(
+            (expected_state.float() - actual_state.float()).abs().max()
+        ),
+        "conv_exact": bool(torch.equal(expected_conv, actual_conv)),
+        "state_exact": bool(torch.equal(expected_state, actual_state)),
+        "output_nonzero": bool(torch.count_nonzero(actual_output)),
+        "rank_equal": bool(rank_equal),
+    }
+
+
+def q8_recurrence_reference(
+    recurrent_state: torch.Tensor,
+    snapshot_slots: torch.Tensor,
+    accepted: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    gate: torch.Tensor,
+    beta: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Independent ordered q8 delta-rule recurrence with FP16 publication."""
+
+    batch, query_len, heads, width = query.shape
+    if query_len != QUERY_LEN or snapshot_slots.shape != (batch, QUERY_LEN):
+        raise ValueError("q8 recurrence requires snapshot slots [B,8]")
+    persisted = recurrent_state.clone()
+    output = torch.empty_like(query, dtype=torch.float32)
+    carries = torch.empty(
+        batch,
+        heads,
+        width,
+        width,
+        dtype=torch.float32,
+        device=query.device,
+    )
+    q_scale = width**-0.5
+    for request in range(batch):
+        input_slot = int(snapshot_slots[request, int(accepted[request]) - 1])
+        state = recurrent_state[input_slot].float()
+        for token in range(QUERY_LEN):
+            q = query[request, token].float()
+            k = key[request, token].float()
+            q = q * torch.rsqrt(q.square().sum(-1, keepdim=True) + 1.0e-6)
+            q = q * q_scale
+            k = k * torch.rsqrt(k.square().sum(-1, keepdim=True) + 1.0e-6)
+            dt = torch.sigmoid(
+                torch.exp(a_log.float())[:, None]
+                * (gate[request, token].float() + dt_bias.float())
+            )
+            decay = torch.exp(-5.0 * dt)
+            decayed = state * decay[:, None, :]
+            state_key = torch.einsum("hvk,hk->hv", decayed, k)
+            state_query = torch.einsum("hvk,hk->hv", decayed, q)
+            new_value = (
+                value[request, token].float() - state_key
+            ) * torch.sigmoid(beta[request, token].float())[:, None]
+            state = decayed + new_value[:, :, None] * k[:, None, :]
+            output[request, token] = state_query + new_value * (k * q).sum(-1)[:, None]
+            persisted[int(snapshot_slots[request, token])].copy_(state.to(torch.float16))
+        carries[request].copy_(state)
+    return output, persisted, carries
+
+
+def q8_conv_reference(
+    conv_state: torch.Tensor,
+    snapshot_slots: torch.Tensor,
+    accepted: torch.Tensor,
+    drafts: torch.Tensor,
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Independent causal width-4 convolution and 10-row rollback."""
+
+    batch, query_len, _ = drafts.shape
+    output = torch.empty_like(drafts, dtype=torch.float32)
+    persisted = conv_state.clone()
+    for request in range(batch):
+        count = int(accepted[request])
+        slot = int(snapshot_slots[request, 0])
+        old = conv_state[slot].clone()
+        for token in range(query_len):
+            history = torch.cat(
+                (old[count - 1 : count + 2], drafts[request, :token])
+            )
+            values = torch.cat(
+                (history[-3:], drafts[request, token : token + 1])
+            )
+            convolved = (values.float() * weight.float().T).sum(0)
+            output[request, token] = convolved * torch.sigmoid(convolved)
+        persisted[slot, :2].copy_(old[count : count + 2])
+        persisted[slot, 2:].copy_(drafts[request])
+    return output, persisted
+
+
 def make_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--batches", type=int, nargs="+", default=SUPPORTED_BATCHES)
@@ -253,26 +372,17 @@ def _fixture(shape: AgenticKdaShape, device: torch.device, seed: int) -> _Fixtur
     )
 
 
-def _capture(call, layers: int) -> torch.cuda.CUDAGraph:
+def _capture_layer_graph(call, advance, layers: int) -> torch.cuda.CUDAGraph:
+    """Capture layer tags 0..N-1 and exactly one decode-step advance."""
+
+    epoch_layers, advances = graph_epoch_plan(layers)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph(keep_graph=True)
     with torch.cuda.graph(graph):
-        for _ in range(layers):
-            call()
-    graph.instantiate()
-    torch.cuda.synchronize()
-    return graph
-
-
-def _capture_staged(call, advance, layers: int) -> torch.cuda.CUDAGraph:
-    """Capture one decode step with layer-tagged mailboxes and one epoch bump."""
-
-    torch.cuda.synchronize()
-    graph = torch.cuda.CUDAGraph(keep_graph=True)
-    with torch.cuda.graph(graph):
-        for layer in range(layers):
+        for layer in epoch_layers:
             call(layer)
-        advance()
+        for _ in range(advances):
+            advance()
     graph.instantiate()
     torch.cuda.synchronize()
     return graph
@@ -394,18 +504,23 @@ def _check_observable_full_path(layer, shape: AgenticKdaShape) -> None:
             raise AssertionError(f"{name} path was not observable")
 
 
-def _check_rank_equal(output: torch.Tensor) -> None:
+def _rank_equal(output: torch.Tensor) -> bool:
+    """Compare CPU checksums through the control group; never send CUDA to Gloo."""
+
     checksum = torch.stack(
         (
             output.float().sum(),
             output.float().square().sum(),
             output.float().abs().sum(),
         )
+    ).cpu()
+    gathered: list[torch.Tensor | None] = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, checksum)
+    return all(
+        peer is not None
+        and torch.allclose(peer, checksum, atol=1e-2, rtol=1e-5)
+        for peer in gathered
     )
-    gathered = [torch.empty_like(checksum) for _ in range(dist.get_world_size())]
-    dist.all_gather(gathered, checksum)
-    for peer in gathered[1:]:
-        torch.testing.assert_close(peer, gathered[0], atol=1e-2, rtol=1e-5)
 
 
 def _deterministic_weights(device, rank):
@@ -535,6 +650,70 @@ def _deterministic_weights(device, rank):
     )
 
 
+def _projected_input(prefix: torch.Tensor, weights: dict[str, torch.Tensor]) -> torch.Tensor:
+    rows = torch.arange(weights["w_kda_in"].shape[0], device=prefix.device)
+    columns = rows.remainder(16)
+    return (
+        prefix[:, columns].float()
+        * weights["w_kda_in"][rows, columns].float().unsqueeze(0)
+    ).to(torch.bfloat16)
+
+
+def _independent_kda_oracle(
+    fixture: _Fixture,
+    initial_conv: torch.Tensor,
+    initial_recurrent: torch.Tensor,
+    projected: torch.Tensor,
+    weights: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute cache and recurrent snapshots without using either KDA kernel."""
+
+    from kernels.monokernel.config import KIMI_K3_CONFIG
+
+    config = KIMI_K3_CONFIG
+    projection = config.local_heads * config.v_dim
+    batch = fixture.snapshots.shape[0]
+    drafts = projected[:, : 3 * projection].view(batch, QUERY_LEN, 3 * projection)
+    convolved, expected_conv = q8_conv_reference(
+        initial_conv,
+        fixture.snapshots,
+        fixture.accepted,
+        drafts,
+        weights["w_kda_conv"],
+    )
+    qkv = convolved.to(torch.bfloat16).view(
+        batch, QUERY_LEN, 3, config.local_heads, config.v_dim
+    )
+    f_a = projected[
+        :,
+        4 * projection
+        + config.local_heads : 4 * projection
+        + config.local_heads
+        + config.v_dim,
+    ]
+    gate = (
+        f_a.float() @ weights["w_kda_fb"].float().T
+    ).to(torch.bfloat16).view(
+        batch, QUERY_LEN, config.local_heads, config.v_dim
+    )
+    beta = projected[
+        :, 4 * projection : 4 * projection + config.local_heads
+    ].view(batch, QUERY_LEN, config.local_heads)
+    _, expected_recurrent, _ = q8_recurrence_reference(
+        initial_recurrent,
+        fixture.snapshots,
+        fixture.accepted,
+        qkv[:, :, 0],
+        qkv[:, :, 1],
+        qkv[:, :, 2],
+        gate,
+        beta,
+        weights["kda_a_log"],
+        weights["kda_dt_bias"],
+    )
+    return expected_conv, expected_recurrent
+
+
 def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
     from kernels.monokernel.config import ConvStateLayout
     from kernels.monokernel.k3.op import KimiK3MonoKernel, KimiK3StagedAgenticOp
@@ -566,71 +745,156 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         packed_artifacts=packed,
     )
 
-    full_fixture = _fixture(shape, device, args.seed + 99)
-    staged_fixture = _fixture(shape, device, args.seed + 99)
-
-    def full_call() -> None:
+    def full_call(
+        fixture: _Fixture,
+        epoch_layer: int,
+        *,
+        advance: bool,
+    ) -> None:
         full.forward(
-            full_fixture.prefix,
-            full_fixture.blocks,
-            full_fixture.snapshots,
-            full_fixture.conv,
-            full_fixture.recurrent,
-            x_out=full_fixture.output,
-            num_accepted_tokens=full_fixture.accepted,
-            epoch_layer=0,
-        )
-
-    def staged_call(epoch_layer: int = 0, advance: bool = True) -> None:
-        staged.forward(
-            staged_fixture.prefix,
-            staged_fixture.blocks,
-            staged_fixture.snapshots,
-            staged_fixture.conv,
-            staged_fixture.recurrent,
-            x_out=staged_fixture.output,
-            num_accepted_tokens=staged_fixture.accepted,
+            fixture.prefix,
+            fixture.blocks,
+            fixture.snapshots,
+            fixture.conv,
+            fixture.recurrent,
+            x_out=fixture.output,
+            num_accepted_tokens=fixture.accepted,
             epoch_layer=epoch_layer,
             advance=advance,
         )
 
-    full_call()
-    staged_call()
+    def staged_call(
+        fixture: _Fixture,
+        epoch_layer: int,
+        *,
+        advance: bool,
+    ) -> None:
+        staged.forward(
+            fixture.prefix,
+            fixture.blocks,
+            fixture.snapshots,
+            fixture.conv,
+            fixture.recurrent,
+            x_out=fixture.output,
+            num_accepted_tokens=fixture.accepted,
+            epoch_layer=epoch_layer,
+            advance=advance,
+        )
+
+    # Dedicated eager parity fixtures are consumed before profiling or timing.
+    full_parity = _fixture(shape, device, args.seed + 99)
+    staged_parity = _fixture(shape, device, args.seed + 99)
+    initial_conv = full_parity.conv.clone()
+    initial_recurrent = full_parity.recurrent.clone()
+    full_call(full_parity, 0, advance=True)
+    staged_call(staged_parity, 0, advance=True)
     torch.cuda.synchronize()
-    if not torch.equal(full_fixture.conv, staged_fixture.conv):
-        raise AssertionError("full/staged convolution cache differs")
-    torch.testing.assert_close(
-        full_fixture.recurrent,
-        staged_fixture.recurrent,
-        atol=1e-3,
-        rtol=1e-3,
+    expected_conv, expected_recurrent = _independent_kda_oracle(
+        full_parity,
+        initial_conv,
+        initial_recurrent,
+        _projected_input(full.pre_attn, weights.t),
+        weights.t,
     )
+    for name, fixture in (("full", full_parity), ("staged", staged_parity)):
+        if not torch.equal(fixture.conv, expected_conv):
+            raise AssertionError(f"{name} convolution cache differs from oracle")
+        torch.testing.assert_close(
+            fixture.recurrent,
+            expected_recurrent,
+            atol=2e-3,
+            rtol=2e-3,
+        )
     torch.testing.assert_close(
-        full_fixture.output,
-        staged_fixture.output,
+        full_parity.output,
+        staged_parity.output,
         atol=8e-2,
         rtol=8e-2,
     )
-    if int(torch.count_nonzero(full_fixture.output)) == 0:
+    if not torch.count_nonzero(full_parity.output):
         raise AssertionError("full output must be nonzero")
-    _check_rank_equal(full_fixture.output)
-    _check_rank_equal(staged_fixture.output)
+    eager_rank_equal = _rank_equal(full_parity.output) and _rank_equal(
+        staged_parity.output
+    )
+    if not eager_rank_equal:
+        raise AssertionError("eager output checksums differ across TP ranks")
     _check_observable_full_path(full, shape)
 
+    # Dedicated graph parity fixtures use the identical layer/epoch protocol.
+    full_graph_parity = _fixture(shape, device, args.seed + 199)
+    staged_graph_parity = _fixture(shape, device, args.seed + 199)
+    full_parity_graph = _capture_layer_graph(
+        lambda layer: full_call(full_graph_parity, layer, advance=False),
+        full.advance_step,
+        args.layers,
+    )
+    staged_parity_graph = _capture_layer_graph(
+        lambda layer: staged_call(staged_graph_parity, layer, advance=False),
+        staged.advance_step,
+        args.layers,
+    )
+    full_parity_graph.replay()
+    staged_parity_graph.replay()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(
+        full_graph_parity.output,
+        staged_graph_parity.output,
+        atol=8e-2,
+        rtol=8e-2,
+    )
+    torch.testing.assert_close(
+        full_graph_parity.recurrent,
+        staged_graph_parity.recurrent,
+        atol=2e-3,
+        rtol=2e-3,
+    )
+    if not torch.equal(full_graph_parity.conv, staged_graph_parity.conv):
+        raise AssertionError("graph convolution caches differ")
+    graph_rank_equal = _rank_equal(full_graph_parity.output) and _rank_equal(
+        staged_graph_parity.output
+    )
+    if not graph_rank_equal:
+        raise AssertionError("graph output checksums differ across TP ranks")
+    del full_parity_graph, staged_parity_graph
+
+    # Profiling has its own state/cache and cannot perturb parity or timing.
     staged_profile = None
+    full_profile = None
     if args.profile:
+        full_profile_fixture = _fixture(shape, device, args.seed + 299)
+        staged_profile_fixture = _fixture(shape, device, args.seed + 299)
+        staged_call(staged_profile_fixture, 0, advance=True)
+        torch.cuda.synchronize()
         for tail in staged.tails:
             tail.start_stage_profile()
-        staged_call()
+        staged_call(staged_profile_fixture, 1, advance=True)
         tail_profiles = [tail.finish_stage_profile() for tail in staged.tails]
         staged_profile = {
             name: statistics.median(profile[name] for profile in tail_profiles)
             for name in tail_profiles[0]
         }
+        full_profile_graph = _capture_layer_graph(
+            lambda layer: full_call(full_profile_fixture, layer, advance=False),
+            full.advance_step,
+            args.layers,
+        )
+        full_profile = _profile_full(
+            full_profile_graph,
+            full.attention.monokernel_timeline,
+            repeats=args.profile_repeats,
+        )
+        del full_profile_graph
 
-    full_graph = _capture(full_call, args.layers)
-    staged_graph = _capture_staged(
-        lambda layer: staged_call(layer, False),
+    # Timing fixtures are fresh and used only by their corresponding graph.
+    full_timing = _fixture(shape, device, args.seed + 399)
+    staged_timing = _fixture(shape, device, args.seed + 399)
+    full_graph = _capture_layer_graph(
+        lambda layer: full_call(full_timing, layer, advance=False),
+        full.advance_step,
+        args.layers,
+    )
+    staged_graph = _capture_layer_graph(
+        lambda layer: staged_call(staged_timing, layer, advance=False),
         staged.advance_step,
         args.layers,
     )
@@ -648,14 +912,23 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         warmups=args.warmups,
         repeats=args.repeats,
     )
-    stage_profile = (
-        _profile_full(
-            full_graph,
-            full.attention.monokernel_timeline,
-            repeats=args.profile_repeats,
-        )
-        if args.profile
-        else None
+    eager_parity = parity_metrics(
+        expected_output=full_parity.output,
+        actual_output=staged_parity.output,
+        expected_state=expected_recurrent,
+        actual_state=staged_parity.recurrent,
+        expected_conv=expected_conv,
+        actual_conv=staged_parity.conv,
+        rank_equal=eager_rank_equal,
+    )
+    graph_parity = parity_metrics(
+        expected_output=full_graph_parity.output,
+        actual_output=staged_graph_parity.output,
+        expected_state=full_graph_parity.recurrent,
+        actual_state=staged_graph_parity.recurrent,
+        expected_conv=full_graph_parity.conv,
+        actual_conv=staged_graph_parity.conv,
+        rank_equal=graph_rank_equal,
     )
     result = None
     if rank == 0:
@@ -684,28 +957,22 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
                 "full": full_counts,
             },
             "parity": {
-                "output_max_abs": float(
-                    (full_fixture.output.float() - staged_fixture.output.float())
-                    .abs()
-                    .max()
-                ),
-                "state_max_abs": float(
+                "eager": eager_parity,
+                "graph": graph_parity,
+                "full_oracle_state_max_abs": float(
                     (
-                        full_fixture.recurrent.float()
-                        - staged_fixture.recurrent.float()
+                        full_parity.recurrent.float()
+                        - expected_recurrent.float()
                     )
                     .abs()
                     .max()
                 ),
-                "conv_exact": True,
-                "output_nonzero": True,
-                "rank_equal": True,
             },
             "starting_point_us": STARTING_POINTS_US[shape.batch],
         }
-        if stage_profile is not None:
-            result["full_stage_profile_us"] = stage_profile
-            result["full_stage_profile_sum_us"] = sum(stage_profile.values())
+        if full_profile is not None:
+            result["full_stage_profile_us"] = full_profile
+            result["full_stage_profile_sum_us"] = sum(full_profile.values())
         if staged_profile is not None:
             result["staged_tail_profile_us"] = staged_profile
             result["staged_tail_profile_sum_us"] = sum(staged_profile.values())
