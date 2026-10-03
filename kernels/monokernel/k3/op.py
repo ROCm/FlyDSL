@@ -248,6 +248,9 @@ class KimiK3StagedAgenticOp:
     def packed_artifacts(self) -> dict[str, object]:
         return self.front.packed_artifacts()
 
+    def advance_step(self) -> None:
+        self.front.advance_step()
+
     def close(self) -> None:
         for tail in self.tails:
             tail.close()

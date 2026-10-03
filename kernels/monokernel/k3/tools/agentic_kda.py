@@ -264,6 +264,20 @@ def _capture(call, layers: int) -> torch.cuda.CUDAGraph:
     return graph
 
 
+def _capture_staged(call, advance, layers: int) -> torch.cuda.CUDAGraph:
+    """Capture one decode step with layer-tagged mailboxes and one epoch bump."""
+
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph(keep_graph=True)
+    with torch.cuda.graph(graph):
+        for layer in range(layers):
+            call(layer)
+        advance()
+    graph.instantiate()
+    torch.cuda.synchronize()
+    return graph
+
+
 def _hip_graph_counts(graph: torch.cuda.CUDAGraph) -> dict[str, int]:
     hip = ctypes.CDLL("libamdhip64.so")
     hip.hipGraphGetNodes.argtypes = [
@@ -567,7 +581,7 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
             epoch_layer=0,
         )
 
-    def staged_call() -> None:
+    def staged_call(epoch_layer: int = 0, advance: bool = True) -> None:
         staged.forward(
             staged_fixture.prefix,
             staged_fixture.blocks,
@@ -576,7 +590,8 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
             staged_fixture.recurrent,
             x_out=staged_fixture.output,
             num_accepted_tokens=staged_fixture.accepted,
-            epoch_layer=0,
+            epoch_layer=epoch_layer,
+            advance=advance,
         )
 
     full_call()
@@ -614,7 +629,11 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         }
 
     full_graph = _capture(full_call, args.layers)
-    staged_graph = _capture(staged_call, args.layers)
+    staged_graph = _capture_staged(
+        lambda layer: staged_call(layer, False),
+        staged.advance_step,
+        args.layers,
+    )
     full_counts = _hip_graph_counts(full_graph)
     staged_counts = _hip_graph_counts(staged_graph)
     full_us, _ = _time_graph(
