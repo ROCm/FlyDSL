@@ -9,7 +9,7 @@ __all__ = [
 ]
 
 
-def s_waitcnt(vmcnt=None, lgkmcnt=None, expcnt=None):
+def s_waitcnt(vmcnt: int | None = None, lgkmcnt: int | None = None, expcnt: int | None = None) -> object:
     """Emit a RDNA4/GFX120-encoded s_waitcnt operation.
 
     expcnt: [2:0]

@@ -4,7 +4,10 @@ Practical techniques for optimizing FlyDSL GPU kernels on AMD CDNA GPUs
 (MI300X `gfx942`, MI350/MI355X `gfx950`). The running example is the production
 preshuffle GEMM (`kernels/gemm/preshuffle_gemm.py`), but the levers — tiling,
 LDS double-buffering, bank-conflict swizzle, prefetch, MFMA scheduling, epilogue
-choice, and occupancy management — apply to any compute-bound kernel.
+choice, and occupancy management — apply to any compute-bound kernel on those
+CDNA chips. They do not transfer to gfx120x. That arch is wave32 and WMMA
+16×16×16, with 64 KB of LDS. A tile multiple of 64 is a wave64 rule. See
+`docs/gfx120x_call_graph.md`.
 
 This guide distills the project-local tuning skills. Each section points to the
 skill that carries the full detail and reproducible commands:

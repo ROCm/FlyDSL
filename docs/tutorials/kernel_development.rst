@@ -3,7 +3,9 @@ Kernel development
 
 This tutorial covers advanced kernel development techniques in FlyDSL,
 including tiled data movement, MFMA instructions, shared memory, and
-performance optimization.
+performance optimization. The examples below are the CDNA / MFMA path
+(``examples/03-tiledMma.py``). gfx120x is wave32 WMMA, not that path.
+Who calls whom, and which example to copy, is :doc:`../gfx120x_call_graph`.
 
 Tiled copies
 -------------

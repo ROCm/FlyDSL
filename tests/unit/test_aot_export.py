@@ -750,6 +750,9 @@ def test_find_aot_runtime_archive():
 def test_aot_backend_selects_the_first_object_by_default():
     backend_cls = _get_backend_class("rocm")
     assert backend_cls.aot_object_index("gfx950") == 0
+    # ROCm AOT object index is arch-agnostic (single object); gfx120x family included.
+    for arch in ("gfx1200", "gfx1201", "gfx1202", "gfx120x"):
+        assert backend_cls.aot_object_index(arch) == 0
 
 
 @pytest.mark.l1a_compile_no_target_dialect

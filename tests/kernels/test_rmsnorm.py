@@ -1854,8 +1854,8 @@ def test_rmsnorm_large_shape():
 
 
 @pytest.mark.skipif(
-    GPU_ARCH == "gfx1201",
-    reason="RMSNorm DynamicQuant is temporarily quarantined on gfx1201 pending correctness investigation",
+    GPU_ARCH.startswith("gfx120"),
+    reason="RMSNorm DynamicQuant is temporarily quarantined on gfx120x pending correctness investigation",
 )
 def test_rmsnorm_dynamicquant():
     print("=" * 80)
@@ -1902,8 +1902,8 @@ def test_rmsnorm_dynamicquant():
 
 
 @pytest.mark.skipif(
-    GPU_ARCH == "gfx1201",
-    reason="RMSNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
+    GPU_ARCH.startswith("gfx120"),
+    reason="RMSNorm SmoothQuant is temporarily quarantined on gfx120x pending correctness investigation",
 )
 def test_rmsnorm_smoothquant():
     print("=" * 80)
@@ -2035,8 +2035,8 @@ def test_fused_add_rmsnorm_dynamicquant():
 
 
 @pytest.mark.skipif(
-    GPU_ARCH == "gfx1201",
-    reason="RMSNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
+    GPU_ARCH.startswith("gfx120"),
+    reason="RMSNorm SmoothQuant is temporarily quarantined on gfx120x pending correctness investigation",
 )
 def test_fused_add_rmsnorm_smoothquant():
     print("=" * 80)

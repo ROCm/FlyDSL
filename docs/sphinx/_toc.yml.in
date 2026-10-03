@@ -45,6 +45,8 @@ subtrees:
         title: Offline autotune configs
       - file: prebuilt_kernels_guide
         title: Prebuilt kernel library
+      - file: gfx120x_call_graph
+        title: gfx120x call graph
       - file: testing_benchmarking_guide
         title: Testing and benchmarking
       - file: cute_layout_algebra_guide

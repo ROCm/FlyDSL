@@ -43,9 +43,8 @@ current source tree; consult the tests and CI results for the revision you use.
      - Architecture-gated RDNA GEMM tests exist. Test presence alone is not
        evidence of a passing wheel validation run on every RDNA device.
    * - ``gfx120*``
-     - RDNA WMMA paths, with separate dtype/shape restrictions
-     - Architecture-gated RDNA GEMM tests exist; source CI includes a Navi
-       runner. The wheel CI matrix is narrower than the source target set.
+     - RDNA4 wave32 WMMA. FlashAttention, int8/iu4/FP8 linear, quant, and norms in this tree are gfx120x-only. See :doc:`gfx120x_call_graph`.
+     - Tests: ``tests/kernels/test_flash_attn_gfx120x.py``, ``test_gfx120x_*.py``, ``test_rdna4_*.py``. Examples ``07``–``15`` are allowlisted to ``gfx120*`` in ``tests/arch_compat.py`` and skip on every other architecture.
    * - ``gfx1250``
      - CDNA5 wave32 target with WMMA support and 320-KB LDS
      - Dedicated GEMM, MoE, and atom tests exist in the source tree, but the

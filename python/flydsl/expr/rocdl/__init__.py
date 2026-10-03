@@ -703,6 +703,26 @@ def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
 
 
 @dsl_loc_tracing
+def cvt_pk_bf8_f32(res, src_a, src_b, old, word_sel, **kw):
+    """ROCDL ``cvt_pk_bf8_f32``: pack two f32 → E5M2 (bf8) bytes into an i32 lane.
+
+    Same ABI as :func:`cvt_pk_fp8_f32` but the E5M2 / bf8 path used by
+    ``float8_e5m2`` FA / scaled_mm / quant. Wrapper applies ``_to_ir`` so
+    Float32/Int32 DSL values are accepted (raw ODS op requires bare Values).
+    """
+    from ..._mlir.dialects.rocdl import cvt_pk_bf8_f32 as _op
+
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        word_sel=word_sel,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
 def cvt_pk_f32_fp8(res, src, word_sel, **kw):
     """ROCDL ``cvt_pk_f32_fp8``: unpack one i32 (4 packed fp8) into ``vector<2xf32>``.
 

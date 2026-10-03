@@ -76,6 +76,10 @@ FlyDSL/
 │   ├── 03-tiledMma.py                # Tiled MMA (GEMM) with MFMA atoms
 │   └── 04-preshuffle_gemm.py         # Preshuffle GEMM end-to-end example
 │
+│   gfx120x-only siblings, allowlisted to gfx120* in tests/arch_compat.py:
+│   07-tiledMma_gfx120x.py through 15-fused_mlp_gfx120x.py.
+│   01 through 06 are unchanged. Who calls whom: docs/gfx120x_call_graph.md.
+│
 ├── kernels/                          # Production GPU kernels (organized by domain)
 │   ├── gemm/                         # Dense GEMM kernels
 │   │   ├── preshuffle_gemm.py        # GEMM (preshuffle layout)
@@ -232,7 +236,7 @@ definition for this checkout:
 | 5 | `canonicalize` | Standard MLIR canonicalization (constant folding, etc.). |
 | 6 | `fly-convert-atom-call-to-ssa-form` | Converts `copy_atom_call` / `mma_atom_call` to their SSA counterparts; promotes register tensors to vector SSA values. |
 | 7 | `fly-promote-regmem-to-vectorssa` | Promotes `fly.make_ptr(register)` memory semantics to vector SSA values (requires #6). |
-| 8 | `convert-fly-to-rocdl` | Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → ROCDL buffer load/store operations, or gfx1250 TDM → `rocdl.tensor.load.to.lds` / `store.from.lds`; MMA atoms → `rocdl.mfma.*` on CDNA, `rocdl.wmma.*` on gfx11/gfx1250). |
+| 8 | `convert-fly-to-rocdl` | Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → ROCDL buffer load/store operations, or gfx1250 TDM → `rocdl.tensor.load.to.lds` / `store.from.lds`; MMA atoms → `rocdl.mfma.*` on CDNA, `rocdl.wmma.*` on gfx11, gfx120x, and gfx1250). |
 | 9 | `canonicalize` | Second canonicalization round after ROCDL lowering. |
 | 10 | `gpu.module(convert-scf-to-cf, cse, convert-rocdl-fastmath-ops, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, ROCDL fast-math ops lowering, GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
 
@@ -472,7 +476,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 |---|---|---|---|
 | `gfx942` | MI300A / MI300X | 64 KB | CDNA 3, primary development target |
 | `gfx950` | MI350 / MI355X | 160 KB | CDNA 4, larger LDS |
-| `gfx1201` | Radeon AI PRO R9700 | 64 KB | RDNA 4 |
+| `gfx1201` | Radeon AI PRO R9700 | 64 KB | RDNA 4, wave32, WMMA. The gfx120x family (gfx1200/gfx1201/gfx1202) shares this LDS size. |
 | `gfx1250` | — | 320 KB | CDNA 5, wave32, WMMA, TDM ops |
 | `gfx90a` | MI250X | 64 KB | CDNA 2 (verified platform) |
 

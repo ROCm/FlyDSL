@@ -54,6 +54,8 @@ to GPU/ROCDL.
 
       * :doc:`Prebuilt kernel library <prebuilt_kernels_guide>`
 
+      * :doc:`gfx120x call graph <gfx120x_call_graph>`
+
       * :doc:`Testing and benchmarking <testing_benchmarking_guide>`
 
       * :doc:`CuTe layout algebra <cute_layout_algebra_guide>`

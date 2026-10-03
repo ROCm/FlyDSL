@@ -294,6 +294,14 @@ class RuntimeEnvManager(EnvManager):
     )
     cache_dir = OptStr(str(Path.home() / ".flydsl" / "cache"), description="Directory for caching compiled kernels")
     enable_cache = OptBool(True, description="Enable kernel caching")
+    dispatch_mode = OptStr(
+        "auto",
+        env_var="FLYDSL_DISPATCH_MODE",
+        description=(
+            "gfx120x size-dispatch override: auto, force_flydsl, or force_hip. "
+            "Read by kernels.common.dispatch_mode. Other arches ignore it."
+        ),
+    )
     run_only = OptBool(
         False,
         description=("Skip JIT compilation; only load AOT cache. " "Raise RuntimeError on cache miss."),

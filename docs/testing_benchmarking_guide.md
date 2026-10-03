@@ -83,6 +83,7 @@ Full end-to-end tests that compile FlyDSL kernels, execute them on the GPU, and 
 | `test_pa.py` | Paged Attn | Paged attention decode |
 | `test_quant.py` | Quantization | Quantization ops |
 | `test_ref.py` | Reference | Reference implementations |
+| `test_flash_attn_gfx120x.py`, `test_gfx120x_*.py`, `test_rdna4_*.py` | gfx120x | RDNA4 suite. The file list is in `docs/prebuilt_kernels_guide.md`. These skip unless the device is gfx120x. |
 
 **Running individually:**
 ```bash

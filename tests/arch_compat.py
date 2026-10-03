@@ -33,6 +33,15 @@ EXAMPLE_ARCHITECTURES = {
     "04-preshuffle_gemm.py": ("gfx9*",),
     "05-gather_scatter.py": ("*",),
     "06-cdna5_tensor_copy.py": ("gfx1250",),
+    "07-tiledMma_gfx120x.py": ("gfx120*",),  # RDNA4 WMMA sibling of 03-tiledMma (MFMA)
+    "08-flash_attn_gfx120x.py": ("gfx120*",),
+    "09-int8_linear_gfx120x.py": ("gfx120*",),
+    "10-scaled_mm_fp8_gfx120x.py": ("gfx120*",),
+    "11-convrot_w4a4_gfx120x.py": ("gfx120*",),
+    "12-norm_rope_gfx120x.py": ("gfx120*",),
+    "13-quant_int8_gfx120x.py": ("gfx120*",),
+    "14-iu4_gemm_gfx120x.py": ("gfx120*",),
+    "15-fused_mlp_gfx120x.py": ("gfx120*",),
     "extension/coop/01-warp_collectives.py": ("*",),
     "extension/coop/02-block_scan.py": ("*",),
 }

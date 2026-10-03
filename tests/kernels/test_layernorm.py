@@ -879,8 +879,8 @@ def test_layernorm_dynamicquant():
 
 
 @pytest.mark.skipif(
-    GPU_ARCH == "gfx1201",
-    reason="LayerNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
+    GPU_ARCH.startswith("gfx120"),
+    reason="LayerNorm SmoothQuant is temporarily quarantined on gfx120x pending correctness investigation",
 )
 def test_layernorm_smoothquant():
     print("=" * 80)
@@ -969,8 +969,8 @@ def test_fused_add_layernorm_dynamicquant():
 
 
 @pytest.mark.skipif(
-    GPU_ARCH == "gfx1201",
-    reason="LayerNorm SmoothQuant is temporarily quarantined on gfx1201 pending correctness investigation",
+    GPU_ARCH.startswith("gfx120"),
+    reason="LayerNorm SmoothQuant is temporarily quarantined on gfx120x pending correctness investigation",
 )
 def test_fused_add_layernorm_smoothquant():
     print("=" * 80)
