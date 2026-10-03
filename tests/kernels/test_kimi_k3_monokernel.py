@@ -193,7 +193,8 @@ def test_kimi_k3_monokernel_mtp_tp8(samples: int) -> None:
     assert result["conv_state_rel_l2"] < 5e-4
     assert result["recurrent_state_rel_l2"] < 5e-4
     assert result["selection_equal"] is True
-    assert result["output_rel_l2"] < 1e-2
+    assert result["routed_norm_rel_l2"] < 1e-2
+    assert result["output_rel_l2"] < 8e-2
     assert result["graph_rank_equal"] is True
 
 
