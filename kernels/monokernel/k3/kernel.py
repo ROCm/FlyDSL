@@ -116,6 +116,12 @@ def agentic_conv_writeback_requires_all(token):
     return token == 7
 
 
+def agentic_recurrence_tokens_per_cta(*, agentic_batch_size: int) -> int:
+    """Keep enough q8 state resident without under-filling the GPU."""
+
+    return 4 if agentic_batch_size else 2
+
+
 def monokernel_layout(
     samples: int,
     *,
@@ -3200,8 +3206,12 @@ def build_kimi_k3_monokernel(
                         partial_square,
                     )
 
+            mtp_tokens_per_cta = agentic_recurrence_tokens_per_cta(
+                agentic_batch_size=agentic_batch_size
+            )
+
             def run_mtp_pair(pair, head, value_split):
-                sample_base = pair * 2
+                sample_base = pair * mtp_tokens_per_cta
                 token_base = sample_base
                 request = fx.Int32(0)
                 if const_expr(agentic_batch_size > 0):
@@ -3274,7 +3284,7 @@ def build_kimi_k3_monokernel(
 
                 for token_offset, loop_args in range(
                     fx.Int32(0),
-                    fx.Int32(2),
+                    fx.Int32(mtp_tokens_per_cta),
                     fx.Int32(1),
                     init=state_vectors,
                 ):
@@ -3447,7 +3457,7 @@ def build_kimi_k3_monokernel(
                                 next_state_vectors[k_iter],
                             )
                             state_value = next_state_vectors[k_iter]
-                            if token_offset == 1:
+                            if token_offset == mtp_tokens_per_cta - 1:
                                 bo.buffer_store(
                                     state_value,
                                     mtp_state_handoff_rsrc,
@@ -3506,22 +3516,34 @@ def build_kimi_k3_monokernel(
                     gpu.barrier()
                     run_mtp_recurrence(sample, head, value_split)
             else:
-                mtp_pair_tasks = (samples // 2) * _HEADS
+                mtp_pair_tasks = (samples // mtp_tokens_per_cta) * _HEADS
                 mtp_task = bid
                 while mtp_task < mtp_splits * mtp_pair_tasks:
-                    primary_task = mtp_task < mtp_recurrence_tasks
-                    conv_sample = mtp_task // _HEADS
-                    local_pair = conv_sample // 2
-                    local_split = conv_sample % 2
-                    remote_task = mtp_task - mtp_recurrence_tasks
-                    remote_split = 2 + remote_task // mtp_pair_tasks
-                    remote_pair_task = remote_task % mtp_pair_tasks
-                    pair = primary_task.select(local_pair, remote_pair_task // _HEADS)
-                    head = primary_task.select(
-                        mtp_task % _HEADS,
-                        remote_pair_task % _HEADS,
-                    )
-                    value_split = primary_task.select(local_split, remote_split)
+                    if const_expr(agentic_batch_size > 0):
+                        conv_sample = mtp_task // _HEADS
+                        pair = conv_sample // mtp_tokens_per_cta
+                        head = mtp_task % _HEADS
+                        value_split = conv_sample % mtp_tokens_per_cta
+                    else:
+                        primary_task = mtp_task < mtp_recurrence_tasks
+                        conv_sample = mtp_task // _HEADS
+                        local_pair = conv_sample // 2
+                        local_split = conv_sample % 2
+                        remote_task = mtp_task - mtp_recurrence_tasks
+                        remote_split = 2 + remote_task // mtp_pair_tasks
+                        remote_pair_task = remote_task % mtp_pair_tasks
+                        pair = primary_task.select(
+                            local_pair,
+                            remote_pair_task // _HEADS,
+                        )
+                        head = primary_task.select(
+                            mtp_task % _HEADS,
+                            remote_pair_task % _HEADS,
+                        )
+                        value_split = primary_task.select(
+                            local_split,
+                            remote_split,
+                        )
                     run_mtp_pair(pair, head, value_split)
                     mtp_task = mtp_task + _BLOCKS
 
