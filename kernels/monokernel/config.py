@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 
@@ -37,6 +37,7 @@ class AttentionWeight(str, Enum):
     """Packed attention-weight representation."""
 
     FP8_BLOCK128 = "fp8_block128"
+    FP8_PER_ROW = "fp8_per_row"
     BF16 = "bf16"
 
 
@@ -62,10 +63,49 @@ class RouterWeightLayout(str, Enum):
 
 
 class KvCacheLayout(str, Enum):
-    """Physical layout of the BF16 MLA KV cache."""
+    """Physical layout of the MLA KV cache."""
 
     SPLIT = "split"
     ATOM = "atom"
+    ATOM_FP8 = "atom_fp8"
+
+
+class ConvStateLayout(str, Enum):
+    """Physical layout of one slot's causal-convolution history."""
+
+    CHANNEL_MAJOR = "channel_major"
+    TIME_MAJOR = "time_major"
+
+
+def conv_state_offset(
+    layout: ConvStateLayout,
+    channel,
+    time: int,
+    channels: int,
+    state_length: int = 3,
+):
+    if not isinstance(layout, ConvStateLayout):
+        raise TypeError(f"conv-state layout must be ConvStateLayout, got {layout!r}")
+    if not 0 <= time < state_length:
+        raise ValueError(f"conv-state time must be in [0, {state_length}), got {time}")
+    if channels <= 0:
+        raise ValueError(f"conv-state channels must be positive, got {channels}")
+    if layout is ConvStateLayout.TIME_MAJOR:
+        return time * channels + channel
+    return channel * state_length + time
+
+
+def conv_state_shape(
+    layout: ConvStateLayout,
+    slots: int,
+    channels: int,
+    state_length: int = 3,
+) -> tuple[int, int, int]:
+    if layout is ConvStateLayout.TIME_MAJOR:
+        return slots, state_length, channels
+    if layout is ConvStateLayout.CHANNEL_MAJOR:
+        return slots, channels, state_length
+    raise TypeError(f"conv-state layout must be ConvStateLayout, got {layout!r}")
 
 
 @dataclass(frozen=True)
@@ -199,6 +239,47 @@ GLM5_CONFIG = LayerConfig(
     route_scale=2.5,
     local_heads=8,
 )
+
+GLM5_GLOBAL_HEADS = 64
+GLM5_GLOBAL_EXPERT_INTER = 2048
+
+
+def glm5_shard_config(tp_size: int) -> LayerConfig:
+    """Derive GLM-5.2's attention and expert shard geometry."""
+
+    if tp_size not in (4, 8):
+        raise ValueError(f"GLM-5.2 native TP size must be 4 or 8, got {tp_size}")
+    return replace(
+        GLM5_CONFIG,
+        local_heads=GLM5_GLOBAL_HEADS // tp_size,
+        inter=GLM5_GLOBAL_EXPERT_INTER // tp_size,
+    )
+
+
+@dataclass(frozen=True)
+class GlmDecodeShape:
+    """Separate request, query, and flattened-token dimensions for MTP."""
+
+    running_bs: int
+    query_len: int
+    rows: int
+    tiles: int
+    tail_rows: int
+
+
+def glm5_decode_shape(
+    running_bs: int,
+    query_len: int,
+    *,
+    tile_rows: int = 8,
+) -> GlmDecodeShape:
+    if running_bs <= 0 or query_len <= 0 or tile_rows <= 0:
+        raise ValueError("GLM-5.2 decode dimensions must be positive")
+    rows = running_bs * query_len
+    tiles = (rows + tile_rows - 1) // tile_rows
+    tail_rows = rows - (tiles - 1) * tile_rows
+    return GlmDecodeShape(running_bs, query_len, rows, tiles, tail_rows)
+
 
 KIMI_K3_CONFIG = LayerConfig(
     name="kimi_k3",

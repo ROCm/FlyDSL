@@ -8,10 +8,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from kernels.monokernel.k3.op import KimiK3MonoKernel
+    from kernels.monokernel.k3.op import KimiK3MonoKernel, KimiK3StagedAgenticOp
     from kernels.monokernel.weights import LayerWeights
 
-__all__ = ["KimiK3MonoKernel", "LayerWeights"]
+__all__ = ["KimiK3MonoKernel", "KimiK3StagedAgenticOp", "LayerWeights"]
 
 
 def __getattr__(name: str):
@@ -21,6 +21,10 @@ def __getattr__(name: str):
         from kernels.monokernel.k3.op import KimiK3MonoKernel
 
         return KimiK3MonoKernel
+    if name == "KimiK3StagedAgenticOp":
+        from kernels.monokernel.k3.op import KimiK3StagedAgenticOp
+
+        return KimiK3StagedAgenticOp
     if name == "LayerWeights":
         from kernels.monokernel.weights import LayerWeights
 

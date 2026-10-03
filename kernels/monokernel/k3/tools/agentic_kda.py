@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import math
 import socket
 import statistics
 from dataclasses import dataclass
@@ -366,8 +367,6 @@ def _check_observable_full_path(layer, shape: AgenticKdaShape) -> None:
         fuse_attn_res=True,
         fuse_moe=True,
         mtp=True,
-        agentic_batch_size=shape.batch,
-        state_dtype=torch.float16,
     )
     scratch = layer.attention.monokernel_scratch
     regions = (
@@ -395,27 +394,139 @@ def _check_rank_equal(output: torch.Tensor) -> None:
         torch.testing.assert_close(peer, gathered[0], atol=1e-2, rtol=1e-5)
 
 
-def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
+def _deterministic_weights(device, rank):
+    import torch
+
     from kernels.monokernel.config import (
         KIMI_K3_CONFIG,
-        ConvStateLayout,
-        MoeMode,
+        Mxfp4ScaleLayout,
+        Mxfp4WeightLayout,
     )
-    from kernels.monokernel.k3.op import KimiK3MonoKernel
-    from kernels.monokernel.k3.staged import _KimiK3KdaStagedPath
-    from kernels.monokernel.reference import make_weights
+    from kernels.monokernel.weights import LayerWeights
+
+    config = KIMI_K3_CONFIG
+    hidden = config.hidden
+    routed = config.routed_hidden
+    shared = config.shared_inter
+    assert routed is not None and shared is not None
+    projection = config.local_heads * config.v_dim
+    fused = 4 * projection + config.local_heads + config.v_dim
+    shard = hidden // 8
+
+    def bf16(*shape, value=0):
+        return torch.full(shape, value, dtype=torch.bfloat16, device=device)
+
+    tensors = {
+        "w_r": bf16(config.n_experts, hidden),
+        "bias": torch.zeros(config.n_experts, dtype=torch.float32, device=device),
+        "w_latent_down": bf16(routed, hidden),
+        "g_latent": bf16(routed, value=1),
+        "w_latent_up": bf16(shard, routed),
+        "w_shared_ug": bf16(2 * shared, hidden),
+        "w_shared_dn": bf16(hidden, shared),
+        "w_kda_in": bf16(fused, hidden),
+        "w_kda_fb": bf16(projection, config.v_dim),
+        "w_kda_conv": bf16(3 * projection, 4),
+        "kda_a_log": torch.zeros(
+            config.local_heads,
+            dtype=torch.float32,
+            device=device,
+        ),
+        "kda_dt_bias": bf16(
+            config.local_heads,
+            config.v_dim,
+            value=-10.375,
+        ),
+        "g_kda_out": bf16(config.v_dim, value=1),
+        "w_kda_o": bf16(hidden, projection),
+    }
+    for name in (
+        "g_self_res",
+        "w_self_res",
+        "g_in",
+        "g_mlp_res",
+        "w_mlp_res",
+        "g_post",
+    ):
+        tensors[name] = bf16(hidden, value=1)
+
+    rows = torch.arange(fused, device=device)
+    tensors["w_kda_in"][rows, rows.remainder(16)] = (
+        0.015625 + rows.remainder(7).to(torch.float32) / 1024
+    ).to(torch.bfloat16)
+    tensors["w_kda_conv"][:, 0] = 0.0625
+    tensors["w_kda_conv"][:, 1] = 0.125
+    tensors["w_kda_conv"][:, 2] = 0.25
+    tensors["w_kda_conv"][:, 3] = 0.5
+    gate_rows = torch.arange(projection, device=device)
+    tensors["w_kda_fb"][gate_rows, gate_rows.remainder(config.v_dim)] = 0.03125
+    output_rows = torch.arange(hidden, device=device)
+    rank_scale = (rank + 1) / 1024
+    tensors["w_kda_o"][
+        output_rows, output_rows.remainder(projection)
+    ] = rank_scale
+    tensors["w_r"][0, :16] = torch.linspace(
+        -0.125, 0.125, 16, dtype=torch.bfloat16, device=device
+    )
+    latent_rows = torch.arange(routed, device=device)
+    tensors["w_latent_down"][latent_rows, latent_rows.remainder(16)] = 0.03125
+    shared_rows = torch.arange(2 * shared, device=device)
+    tensors["w_shared_ug"][shared_rows, shared_rows.remainder(16)] = 0.03125
+    tensors["w_shared_dn"][
+        output_rows, output_rows.remainder(shared)
+    ] = rank_scale
+    shard_rows = torch.arange(shard, device=device)
+    tensors["w_latent_up"][
+        shard_rows, shard_rows.remainder(routed)
+    ] = rank_scale
+
+    experts = config.n_experts
+    ug_rows = experts * 2 * config.inter
+    dn_rows = experts * routed
+    tensors["w_ug"] = torch.zeros(
+        ug_rows * routed // 2,
+        dtype=torch.uint8,
+        device=device,
+    )
+    tensors["w_dn"] = torch.zeros(
+        dn_rows * config.inter // 2,
+        dtype=torch.uint8,
+        device=device,
+    )
+    tensors["w_ug"].is_shuffled = True
+    tensors["w_dn"].is_shuffled = True
+
+    def scale(rows, width):
+        return torch.zeros(
+            math.ceil(rows / 256) * 256,
+            math.ceil((width // 32) / 8) * 8,
+            dtype=torch.uint8,
+            device=device,
+        )
+
+    tensors["s_ug"] = scale(ug_rows, routed)
+    tensors["s_dn"] = scale(dn_rows, config.inter)
+    tensors["w_ug"].fill_(0x11)
+    tensors["w_dn"].fill_(0x11)
+    tensors["s_ug"].fill_(120)
+    tensors["s_dn"].fill_(120)
+    return LayerWeights(
+        heads=config.local_heads,
+        t=tensors,
+        config=config,
+        rank=rank,
+        npes=8,
+        mxfp4_weight_layout=Mxfp4WeightLayout.ATOM,
+        mxfp4_scale_layout=Mxfp4ScaleLayout.ATOM,
+    )
+
+
+def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
+    from kernels.monokernel.config import ConvStateLayout
+    from kernels.monokernel.k3.op import KimiK3MonoKernel, KimiK3StagedAgenticOp
 
     device = torch.device("cuda", rank)
-    weights = make_weights(
-        rank,
-        heads=KIMI_K3_CONFIG.local_heads,
-        device=device,
-        seed=args.seed,
-        moe_mode=MoeMode.A16W4,
-        model_config=KIMI_K3_CONFIG,
-        npes=8,
-        attention_family="kda",
-    )
+    weights = _deterministic_weights(device, rank)
     full = KimiK3MonoKernel(
         weights,
         shape.rows,
@@ -430,40 +541,16 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         state_dtype=torch.float16,
     )
     packed = full.packed_artifacts()
-    front = _KimiK3KdaStagedPath(
+    staged = KimiK3StagedAgenticOp(
         weights,
-        shape.rows,
+        batch_size=shape.batch,
         layer_idx=0,
         rank=rank,
         npes=8,
         group=dist.group.WORLD,
         reduce_group=dist.group.WORLD,
-        mtp=True,
-        agentic_batch_size=shape.batch,
-        conv_state_layout=ConvStateLayout.TIME_MAJOR,
-        state_dtype=torch.float16,
         packed_artifacts=packed,
-        monokernel_only=True,
     )
-    front.attention.configure_monokernel(0, fuse_moe=False)
-    tails = []
-    for _ in range(shape.batch):
-        tail = _KimiK3KdaStagedPath(
-            weights,
-            QUERY_LEN,
-            layer_idx=0,
-            rank=rank,
-            npes=8,
-            group=dist.group.WORLD,
-            reduce_group=dist.group.WORLD,
-            mtp=True,
-            agentic_batch_size=1,
-            conv_state_layout=ConvStateLayout.TIME_MAJOR,
-            state_dtype=torch.float16,
-            packed_artifacts=packed,
-        )
-        tail.attention.step = front.attention.step
-        tails.append(tail)
 
     full_fixture = _fixture(shape, device, args.seed + 99)
     staged_fixture = _fixture(shape, device, args.seed + 99)
@@ -481,32 +568,16 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         )
 
     def staged_call() -> None:
-        front.attention.forward(
+        staged.forward(
             staged_fixture.prefix,
+            staged_fixture.blocks,
             staged_fixture.snapshots,
             staged_fixture.conv,
             staged_fixture.recurrent,
-            x_out=front.attention_delta,
+            x_out=staged_fixture.output,
             num_accepted_tokens=staged_fixture.accepted,
-            block_residual=staged_fixture.blocks,
-            pre_updated=front.pre_updated,
-            pre_output=front.pre_attn,
-            updated_prefix=front.updated_prefix,
-            moe_input=front.moe_input,
-            quantized_moe_input=front.latent_projection.activation,
-            quantized_moe_scale=front.latent_projection.activation_scale,
-            layer=0,
-            advance=False,
+            epoch_layer=0,
         )
-        for request, tail in enumerate(tails):
-            chunk = slice(request * QUERY_LEN, (request + 1) * QUERY_LEN)
-            tail._moe(
-                front.moe_input[chunk],
-                0,
-                front.updated_prefix[chunk],
-                staged_fixture.output[chunk],
-            )
-        front.advance_step()
 
     full_call()
     staged_call()
@@ -530,6 +601,17 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
     _check_rank_equal(full_fixture.output)
     _check_rank_equal(staged_fixture.output)
     _check_observable_full_path(full, shape)
+
+    staged_profile = None
+    if args.profile:
+        for tail in staged.tails:
+            tail.start_stage_profile()
+        staged_call()
+        tail_profiles = [tail.finish_stage_profile() for tail in staged.tails]
+        staged_profile = {
+            name: statistics.median(profile[name] for profile in tail_profiles)
+            for name in tail_profiles[0]
+        }
 
     full_graph = _capture(full_call, args.layers)
     staged_graph = _capture(staged_call, args.layers)
@@ -605,12 +687,13 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         if stage_profile is not None:
             result["full_stage_profile_us"] = stage_profile
             result["full_stage_profile_sum_us"] = sum(stage_profile.values())
+        if staged_profile is not None:
+            result["staged_tail_profile_us"] = staged_profile
+            result["staged_tail_profile_sum_us"] = sum(staged_profile.values())
         print(json.dumps(result, sort_keys=True), flush=True)
 
     del full_graph, staged_graph
-    for tail in tails:
-        tail.close()
-    front.close()
+    staged.close()
     full.close()
     dist.barrier()
     return result

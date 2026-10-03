@@ -13,7 +13,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from flydsl.runtime.device import SMEM_CAPACITY_MAP, get_rocm_arch
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops as bo
 from kernels.gemm.gemm_a16w16_gfx950_utils import (
     GFX950_DMA_BYTES,
@@ -29,6 +29,12 @@ from kernels.gemm.gemm_a16w16_gfx950_utils import (
     transposed_contiguous_idx,
     wait_vmcnt_and_barrier,
 )
+
+try:
+    from flydsl.runtime.device import SMEM_CAPACITY_MAP
+except ImportError:
+    # Compatibility with deployed FlyDSL packages predating the exported map.
+    SMEM_CAPACITY_MAP = {"gfx942": 65536, "gfx950": 163840}
 
 GEMM_A16W16_DTYPE_FP32 = 1
 GEMM_A16W16_DTYPE_BF16 = 2

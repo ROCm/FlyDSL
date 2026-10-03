@@ -10,7 +10,12 @@ from contextlib import contextmanager
 import torch
 
 from kernels.moe.moe_sorting_kernel import moe_sorting_flydsl
-from kernels.monokernel.config import EPS, KIMI_K3_CONFIG, KvCacheLayout
+from kernels.monokernel.config import (
+    EPS,
+    KIMI_K3_CONFIG,
+    ConvStateLayout,
+    KvCacheLayout,
+)
 from kernels.monokernel.formats import quantize_mxfp8
 from kernels.monokernel.k3.attn_res import KimiK3AttnRes
 from kernels.monokernel.k3.kda import KimiK3KdaAttention
@@ -30,14 +35,12 @@ from kernels.monokernel.k3.torch_fusions import (
 )
 from kernels.monokernel.mxfp8_linear import Mxfp8Linear
 from kernels.monokernel.packing import (
-    pack_a16w4_scale,
-    pack_a16w4_weight,
     pack_bf16,
     pack_mxfp8_scale,
     pack_mxfp8_weight,
 )
 from kernels.monokernel.symmetric_allreduce import SymmetricBf16Allreduce
-from kernels.monokernel.weights import LayerWeights
+from kernels.monokernel.weights import LayerWeights, prepare_mxfp4_expert_storage
 
 _TP_SIZE = 8
 _ROUTING_TILE_M = 16
@@ -69,6 +72,14 @@ class _KimiK3MlaPath:
         reduce_backend: str = "symmetric",
         kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
         mtp: bool = False,
+        agentic_batch_size: int = 0,
+        conv_state_layout: ConvStateLayout = ConvStateLayout.CHANNEL_MAJOR,
+        attention_symmetric_allreduce=None,
+        moe_symmetric_allreduce: SymmetricBf16Allreduce | None = None,
+        state_dtype: torch.dtype = torch.float32,
+        defer_collectives: bool = False,
+        packed_artifacts: dict[str, object] | None = None,
+        monokernel_only: bool = False,
     ) -> None:
         config = weights.config
         if config != KIMI_K3_CONFIG:
@@ -90,6 +101,7 @@ class _KimiK3MlaPath:
         self.S = samples
         self.rank = rank
         self.npes = npes
+        self.group = group
         self.reduce_group = reduce_group
         if reduce_backend not in {"symmetric", "nccl"}:
             raise ValueError(f"unsupported reduce backend {reduce_backend!r}; expected 'symmetric' or 'nccl'")
@@ -100,9 +112,11 @@ class _KimiK3MlaPath:
         self.inline_pre_attn = fuse_attn_res and layer_idx == 0
         self.fuse_router = fuse_router
         self.fuse_shared_experts = fuse_shared_experts
+        self.monokernel_only = monokernel_only
         self.routed_hidden = config.routed_hidden
         self.shared_inter = config.shared_inter
         self.hidden_shard = config.hidden // npes
+        packed_artifacts = packed_artifacts or {}
 
         expected = {
             "w_r",
@@ -140,131 +154,445 @@ class _KimiK3MlaPath:
             reduce_backend=reduce_backend,
             kv_cache_layout=kv_cache_layout,
             mtp=mtp,
+            agentic_batch_size=agentic_batch_size,
+            conv_state_layout=conv_state_layout,
+            attention_symmetric_allreduce=attention_symmetric_allreduce,
+            state_dtype=state_dtype,
+            defer_collectives=defer_collectives,
+            packed_artifacts=packed_artifacts.get("attention"),
+            monokernel_only=monokernel_only,
         )
+        retain_staged_workspaces = not monokernel_only
         device = torch.device("cuda", torch.cuda.current_device())
         self.pre_attn = torch.empty(samples, config.hidden, dtype=torch.bfloat16, device=device)
         self.pre_updated = torch.empty_like(self.pre_attn)
         self.moe_input = torch.empty_like(self.pre_attn)
         self.updated_prefix = torch.empty_like(self.pre_attn)
-        self.pre_attn_res = KimiK3AttnRes(
-            samples,
-            config.hidden,
-            self.previous_valid_blocks,
-            False,
-            self.block_write_idx if self.is_block_write_layer else -1,
-        )
-        self.post_attn_res = KimiK3AttnRes(
-            samples,
-            config.hidden,
-            self.previous_valid_blocks + int(self.is_block_write_layer),
-            not self.is_block_write_layer,
-            -1,
-            quantize_output=True,
-            source_override_idx=0 if self.inline_pre_attn else -1,
-        )
+        self.pre_attn_res = self.post_attn_res = None
+        if not monokernel_only:
+            self.pre_attn_res = KimiK3AttnRes(
+                samples,
+                config.hidden,
+                self.previous_valid_blocks,
+                False,
+                self.block_write_idx if self.is_block_write_layer else -1,
+            )
+            self.post_attn_res = KimiK3AttnRes(
+                samples,
+                config.hidden,
+                self.previous_valid_blocks + int(self.is_block_write_layer),
+                not self.is_block_write_layer,
+                -1,
+                quantize_output=True,
+                source_override_idx=0 if self.inline_pre_attn else -1,
+            )
 
-        # A16W4 production layouts.  Raw checkpoint-format tensors remain in W
-        # for reference checks; these packed copies are launch-ready.
-        self.w_ug = pack_a16w4_weight(self.t["w_ug"])
-        self.s_ug = pack_a16w4_scale(self.t["s_ug"])
-        self.w_dn = pack_a16w4_weight(self.t["w_dn"])
-        self.s_dn = pack_a16w4_scale(self.t["s_dn"])
-        self.w_router = pack_bf16(self.t["w_r"])
-        latent_weight, self.s_latent_down = quantize_mxfp8(self.t["w_latent_down"])
-        shared_weight, self.s_shared_ug = quantize_mxfp8(self.t["w_shared_ug"])
-        shared_down_weight, self.s_shared_dn = quantize_mxfp8(self.t["w_shared_dn"])
-        latent_up_weight, self.s_latent_up = quantize_mxfp8(self.t["w_latent_up"])
-        self.latent_projection = Mxfp8Linear(latent_weight, self.s_latent_down, samples)
-        self.shared_projection = Mxfp8Linear(shared_weight, self.s_shared_ug, samples)
+        injected_moe = packed_artifacts.get("moe_packed")
+        if injected_moe is None:
+            (
+                self.w_ug,
+                self.s_ug,
+                self.w_dn,
+                self.s_dn,
+            ) = prepare_mxfp4_expert_storage(weights)
+        else:
+            self.w_ug = injected_moe["w_ug"]
+            self.s_ug = injected_moe["s_ug"]
+            self.w_dn = injected_moe["w_dn"]
+            self.s_dn = injected_moe["s_dn"]
+        if packed_artifacts:
+            required = {
+                "w_router",
+                "w_latent_down",
+                "s_latent_down",
+                "w_shared_ug",
+                "s_shared_ug",
+                "w_shared_dn",
+                "s_shared_dn",
+                "w_latent_up",
+                "s_latent_up",
+            }
+            missing = sorted(required.difference(packed_artifacts))
+            if missing:
+                raise ValueError(
+                    f"missing shared Kimi packed artifacts: {', '.join(missing)}"
+                )
+            self.w_router = packed_artifacts["w_router"]
+            self.latent_projection = Mxfp8Linear.from_packed(
+                packed_artifacts["w_latent_down"],
+                packed_artifacts["s_latent_down"],
+                n=self.routed_hidden,
+                k=config.hidden,
+                rows=samples,
+                workspace_only=monokernel_only,
+            )
+            self.shared_projection = Mxfp8Linear.from_packed(
+                packed_artifacts["w_shared_ug"],
+                packed_artifacts["s_shared_ug"],
+                n=2 * self.shared_inter,
+                k=config.hidden,
+                rows=samples,
+                workspace_only=monokernel_only,
+            )
+            self.w_shared_dn = packed_artifacts["w_shared_dn"]
+            self.s_shared_dn = packed_artifacts["s_shared_dn"]
+            self.w_latent_up = packed_artifacts["w_latent_up"]
+            self.s_latent_up = packed_artifacts["s_latent_up"]
+        else:
+            self.w_router = pack_bf16(self.t["w_r"])
+            latent_weight, latent_scale = quantize_mxfp8(
+                self.t["w_latent_down"]
+            )
+            shared_weight, shared_scale = quantize_mxfp8(
+                self.t["w_shared_ug"]
+            )
+            shared_down_weight, shared_down_scale = quantize_mxfp8(
+                self.t["w_shared_dn"]
+            )
+            latent_up_weight, latent_up_scale = quantize_mxfp8(
+                self.t["w_latent_up"]
+            )
+            self.latent_projection = Mxfp8Linear(
+                latent_weight,
+                latent_scale,
+                samples,
+                workspace_only=monokernel_only,
+            )
+            self.shared_projection = Mxfp8Linear(
+                shared_weight,
+                shared_scale,
+                samples,
+                workspace_only=monokernel_only,
+            )
+            self.w_shared_dn = pack_mxfp8_weight(shared_down_weight)
+            self.s_shared_dn = pack_mxfp8_scale(shared_down_scale)
+            self.w_latent_up = pack_mxfp8_weight(latent_up_weight)
+            self.s_latent_up = pack_mxfp8_scale(latent_up_scale)
         self.w_latent_down = self.latent_projection.weight
         self.s_latent_down = self.latent_projection.scale
         self.w_shared_ug = self.shared_projection.weight
         self.s_shared_ug = self.shared_projection.scale
-        self.w_shared_dn = pack_mxfp8_weight(shared_down_weight)
-        self.s_shared_dn = pack_mxfp8_scale(self.s_shared_dn)
-        self.w_latent_up = pack_mxfp8_weight(latent_up_weight)
-        self.s_latent_up = pack_mxfp8_scale(self.s_latent_up)
+        local_moe = {
+            "w_r": self.w_router,
+            "w_latent_down": self.w_latent_down,
+            "s_latent_down": self.s_latent_down,
+            "w_shared_ug": self.w_shared_ug,
+            "s_shared_ug": self.s_shared_ug,
+            "w_ug": self.w_ug,
+            "s_ug": self.s_ug,
+            "w_dn": self.w_dn,
+            "s_dn": self.s_dn,
+            "w_shared_dn": self.w_shared_dn,
+            "s_shared_dn": self.s_shared_dn,
+            "w_latent_up": self.w_latent_up,
+            "s_latent_up": self.s_latent_up,
+        }
+        canonical_moe = packed_artifacts.get("moe_packed")
+        attention_moe = getattr(self.attention, "moe_packed", None)
+        if canonical_moe is None and attention_moe:
+            canonical_moe = attention_moe
+        if canonical_moe is None:
+            canonical_moe = local_moe
+        elif any(
+            canonical_moe.get(name) is not tensor
+            for name, tensor in local_moe.items()
+        ):
+            raise ValueError("Kimi MoE packed artifact alias mismatch")
+        self.moe_packed = canonical_moe
+        self.shared_activation_owner = None
+        if (
+            monokernel_only
+            and not retain_staged_workspaces
+            and isinstance(self.attention, KimiK3KdaAttention)
+        ):
+            # KDA's fused full-layer launch requires this graph-stable backing
+            # allocation to remain live. Keep only the exact activation tile;
+            # the unused scale workspace and projection object are discarded.
+            self.shared_activation_owner = self.shared_projection.activation
+            self.shared_projection = None
+        elif monokernel_only and not retain_staged_workspaces:
+            # The fused application kernel consumes only the shared packed
+            # weights; staged projection activation workspaces are dead.
+            self.shared_projection = None
 
-        # At most one padded BM tile is needed per selected route: there can be
-        # no more active experts than routes.  The old ``routes + E*(BM-1)``
-        # bound made the expert GEMMs launch tens of thousands of empty CTAs at
-        # low token counts.
-        max_sorted = samples * config.top_k * _ROUTING_TILE_M
-        max_blocks = (max_sorted + _ROUTING_TILE_M - 1) // _ROUTING_TILE_M
-        self.max_sorted = max_sorted
-        self.sorted_token_ids = torch.empty(max_sorted, dtype=torch.int32, device=device)
-        self.sorted_weights = torch.empty(max_sorted, dtype=torch.float32, device=device)
-        self.sorted_expert_ids = torch.empty(max_blocks, dtype=torch.int32, device=device)
-        self.num_valid_ids = torch.empty(2, dtype=torch.int32, device=device)
-        self.inter_sorted = torch.empty(max_sorted, config.inter, dtype=torch.bfloat16, device=device)
-
-        self.router_logits = torch.empty(samples, config.n_experts, dtype=torch.bfloat16, device=device)
-        self.router_scores = torch.empty(samples, config.n_experts, dtype=torch.float32, device=device)
-        self.topk_keys = torch.empty(samples, config.top_k, dtype=torch.float32, device=device)
-        self.topk_ids_i64 = torch.empty(samples, config.top_k, dtype=torch.int64, device=device)
-        self.topk_ids = torch.empty(samples, config.top_k, dtype=torch.int32, device=device)
-        self.topk_weights = torch.empty(samples, config.top_k, dtype=torch.float32, device=device)
-        self.router_select = SigmoidTopkRouter(config.n_experts, config.top_k, samples)
-        self.router_projection = FusedRouterProjection(
-            config.hidden,
-            config.n_experts,
-            config.top_k,
-            samples,
-            samples * self.routed_hidden,
-            self.routed_hidden,
-            2 * self.shared_inter,
-            config.situ_beta,
-            config.situ_linear_beta,
-        )
-        self.router_score_mailbox = torch.zeros(
-            samples * config.n_experts * 2,
-            dtype=torch.int32,
-            device=device,
-        )
-        self.latent = torch.empty(samples, self.routed_hidden, dtype=torch.bfloat16, device=device)
-        self.routed_partial = torch.empty_like(self.latent)
-        self.routed_reduced = torch.empty_like(self.latent)
-        self.latent_norm = torch.empty_like(self.latent)
-        self.shared_gu = torch.empty(samples, 2 * self.shared_inter, dtype=torch.bfloat16, device=device)
-        self.shared_mid = torch.empty(samples, self.shared_inter, dtype=torch.bfloat16, device=device)
-        self.shared_partial = torch.empty(samples, config.hidden, dtype=torch.bfloat16, device=device)
-        self.tail = torch.empty(samples, self.hidden_shard, dtype=torch.bfloat16, device=device)
-        self.final_partial = torch.empty_like(self.shared_partial)
-        self.moe_delta = torch.empty_like(self.shared_partial)
-        self.output = torch.empty_like(self.shared_partial)
-        self.attention_delta = torch.empty_like(self.shared_partial)
-        self._profiler = CudaStageProfiler()
-        self.symmetric_allreduce = (
-            SymmetricBf16Allreduce(
-                (self.routed_partial.numel(), self.final_partial.numel()),
-                rank=rank,
-                npes=npes,
-                group=group,
-                final_hidden=config.hidden,
-                final_shard_width=self.hidden_shard,
-                rmsnorm_width=self.routed_hidden,
+        self.max_sorted = 0
+        self.sorted_token_ids = self.sorted_weights = None
+        self.sorted_expert_ids = self.num_valid_ids = None
+        self.inter_sorted = None
+        self.router_logits = self.router_scores = None
+        self.topk_keys = self.topk_ids_i64 = None
+        self.topk_ids = self.topk_weights = None
+        if retain_staged_workspaces:
+            # At most one padded BM tile is needed per selected route: there
+            # can be no more active experts than routes.
+            max_sorted = samples * config.top_k * _ROUTING_TILE_M
+            max_blocks = (
+                max_sorted + _ROUTING_TILE_M - 1
+            ) // _ROUTING_TILE_M
+            self.max_sorted = max_sorted
+            self.sorted_token_ids = torch.empty(
+                max_sorted, dtype=torch.int32, device=device
             )
-            if reduce_backend == "symmetric"
-            else None
-        )
-        self.fused_tail = (
-            FusedKimiK3Tail(
+            self.sorted_weights = torch.empty(
+                max_sorted, dtype=torch.float32, device=device
+            )
+            self.sorted_expert_ids = torch.empty(
+                max_blocks, dtype=torch.int32, device=device
+            )
+            self.num_valid_ids = torch.empty(
+                2, dtype=torch.int32, device=device
+            )
+            self.inter_sorted = torch.empty(
+                max_sorted,
+                config.inter,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self.router_logits = torch.empty(
+                samples,
+                config.n_experts,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self.router_scores = torch.empty(
+                samples,
+                config.n_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+            self.topk_keys = torch.empty(
+                samples,
+                config.top_k,
+                dtype=torch.float32,
+                device=device,
+            )
+            self.topk_ids_i64 = torch.empty(
+                samples,
+                config.top_k,
+                dtype=torch.int64,
+                device=device,
+            )
+            self.topk_ids = torch.empty(
+                samples,
+                config.top_k,
+                dtype=torch.int32,
+                device=device,
+            )
+            self.topk_weights = torch.empty(
+                samples,
+                config.top_k,
+                dtype=torch.float32,
+                device=device,
+            )
+        self.router_select = self.router_projection = None
+        if not monokernel_only:
+            self.router_select = SigmoidTopkRouter(
+                config.n_experts, config.top_k, samples
+            )
+            self.router_projection = FusedRouterProjection(
+                config.hidden,
+                config.n_experts,
+                config.top_k,
+                samples,
+                samples * self.routed_hidden,
+                self.routed_hidden,
+                2 * self.shared_inter,
+                config.situ_beta,
+                config.situ_linear_beta,
+            )
+        self.router_score_mailbox = None
+        self.latent = self.routed_partial = self.routed_reduced = None
+        self.latent_norm = self.shared_gu = self.shared_mid = None
+        self.shared_partial = self.tail = self.final_partial = None
+        self.moe_delta = None
+        if retain_staged_workspaces:
+            self.router_score_mailbox = torch.zeros(
+                samples * config.n_experts * 2,
+                dtype=torch.int32,
+                device=device,
+            )
+            self.latent = torch.empty(
+                samples,
+                self.routed_hidden,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self.routed_partial = torch.empty_like(self.latent)
+            self.routed_reduced = torch.empty_like(self.latent)
+            self.latent_norm = torch.empty_like(self.latent)
+            self.shared_gu = torch.empty(
+                samples,
+                2 * self.shared_inter,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self.shared_mid = torch.empty(
+                samples,
+                self.shared_inter,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self.shared_partial = torch.empty(
                 samples,
                 config.hidden,
-                self.routed_hidden,
-                self.shared_inter,
-                rank,
-                npes,
-                self.symmetric_allreduce.max_pairs,
+                dtype=torch.bfloat16,
+                device=device,
             )
-            if self.symmetric_allreduce is not None and self.fuse_shared_experts
-            else None
+            self.tail = torch.empty(
+                samples,
+                self.hidden_shard,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self.final_partial = torch.empty_like(self.shared_partial)
+            self.moe_delta = torch.empty_like(self.shared_partial)
+        self.output = torch.empty(
+            samples, config.hidden, dtype=torch.bfloat16, device=device
         )
+        self.attention_delta = torch.empty_like(self.output)
+        self._profiler = CudaStageProfiler()
+        if reduce_backend == "symmetric":
+            self.symmetric_allreduce = moe_symmetric_allreduce
+            if self.symmetric_allreduce is None and not defer_collectives:
+                self.symmetric_allreduce = SymmetricBf16Allreduce(
+                    (
+                        samples * self.routed_hidden,
+                        samples * config.hidden,
+                    ),
+                    rank=rank,
+                    npes=npes,
+                    group=group,
+                    final_hidden=config.hidden,
+                    final_shard_width=self.hidden_shard,
+                    rmsnorm_width=self.routed_hidden,
+                )
+        else:
+            if moe_symmetric_allreduce is not None:
+                raise ValueError("an injected MoE all-reduce requires reduce_backend='symmetric'")
+            self.symmetric_allreduce = None
+        self.fused_tail = self._build_fused_tail()
 
         # The sorter also clears this output buffer before atomic stage2.
         self.moe_buf = self.routed_partial
         if reduce_group is None:
             raise ValueError("the Kimi-K3 staged path requires a GPU-capable TP reduce_group")
+
+    def packed_artifacts(self) -> dict[str, object]:
+        return {
+            "attention": self.attention.packed_artifacts(),
+            "moe_packed": self.moe_packed,
+            "w_router": self.w_router,
+            "w_latent_down": self.w_latent_down,
+            "s_latent_down": self.s_latent_down,
+            "w_shared_ug": self.w_shared_ug,
+            "s_shared_ug": self.s_shared_ug,
+            "w_shared_dn": self.w_shared_dn,
+            "s_shared_dn": self.s_shared_dn,
+            "w_latent_up": self.w_latent_up,
+            "s_latent_up": self.s_latent_up,
+        }
+
+    def full_plan_workspace_tensors(self) -> tuple[torch.Tensor, ...]:
+        """Enumerate exact bucket-local tensors retained by fused layers."""
+
+        if not self.monokernel_only:
+            raise ValueError("workspace enumeration requires monokernel_only")
+        tensors = (
+            self.pre_attn,
+            self.pre_updated,
+            self.moe_input,
+            self.updated_prefix,
+            self.latent_projection.activation,
+            self.latent_projection.activation_scale,
+            self.output,
+            self.attention_delta,
+            *self.attention.full_plan_workspace_tensors(),
+        )
+        if self.shared_activation_owner is not None:
+            tensors = (*tensors, self.shared_activation_owner)
+        if self.routed_partial is None:
+            return tensors
+        return (
+            *tensors,
+            self.shared_projection.activation,
+            self.shared_projection.activation_scale,
+            self.sorted_token_ids,
+            self.sorted_weights,
+            self.sorted_expert_ids,
+            self.num_valid_ids,
+            self.inter_sorted,
+            self.router_logits,
+            self.router_scores,
+            self.topk_keys,
+            self.topk_ids_i64,
+            self.topk_ids,
+            self.topk_weights,
+            self.router_score_mailbox,
+            self.latent,
+            self.routed_partial,
+            self.routed_reduced,
+            self.latent_norm,
+            self.shared_gu,
+            self.shared_mid,
+            self.shared_partial,
+            self.tail,
+            self.final_partial,
+            self.moe_delta,
+        )
+
+    def _build_fused_tail(self):
+        if (
+            self.monokernel_only
+            or self.symmetric_allreduce is None
+            or not self.fuse_shared_experts
+        ):
+            return None
+        return FusedKimiK3Tail(
+            self.S,
+            self.config.hidden,
+            self.routed_hidden,
+            self.shared_inter,
+            self.rank,
+            self.npes,
+            self.symmetric_allreduce.max_pairs,
+        )
+
+    def initialize_collectives(
+        self,
+        attention: SymmetricBf16Allreduce | None = None,
+        moe: SymmetricBf16Allreduce | None = None,
+    ) -> tuple[SymmetricBf16Allreduce, SymmetricBf16Allreduce]:
+        """Publish shared reductions after all ranks built local artifacts."""
+
+        initialize_attention = getattr(
+            self.attention,
+            "initialize_symmetric_allreduce",
+            None,
+        )
+        if initialize_attention is None:
+            raise ValueError("deferred collectives require KDA attention")
+        attention = initialize_attention(attention)
+        if self.symmetric_allreduce is None:
+            self.symmetric_allreduce = (
+                moe
+                if moe is not None
+                else SymmetricBf16Allreduce(
+                    (
+                        self.S * self.routed_hidden,
+                        self.S * self.config.hidden,
+                    ),
+                    rank=self.rank,
+                    npes=self.npes,
+                    group=self.group,
+                    final_hidden=self.config.hidden,
+                    final_shard_width=self.hidden_shard,
+                    rmsnorm_width=self.routed_hidden,
+                )
+            )
+        elif moe is not None and self.symmetric_allreduce is not moe:
+            raise ValueError("MoE all-reduce was initialized with a different resource")
+        self.fused_tail = self._build_fused_tail()
+        return attention, self.symmetric_allreduce
 
     def _build_attention(
         self,
@@ -279,8 +607,27 @@ class _KimiK3MlaPath:
         reduce_backend: str,
         kv_cache_layout: KvCacheLayout | str,
         mtp: bool,
+        agentic_batch_size: int,
+        conv_state_layout: ConvStateLayout,
+        attention_symmetric_allreduce,
+        state_dtype: torch.dtype,
+        defer_collectives: bool,
+        packed_artifacts: dict[str, torch.Tensor] | None,
+        monokernel_only: bool,
     ):
-        del reduce_group, reduce_backend, mtp
+        if attention_symmetric_allreduce is not None:
+            raise ValueError("Kimi-K3 MLA does not accept a KDA all-reduce")
+        del (
+            reduce_group,
+            reduce_backend,
+            mtp,
+            agentic_batch_size,
+            conv_state_layout,
+            state_dtype,
+            defer_collectives,
+            packed_artifacts,
+            monokernel_only,
+        )
         return KimiK3MlaAttention(
             weights,
             samples,
@@ -699,6 +1046,25 @@ class _KimiK3MlaPath:
             self.symmetric_allreduce.close()
         self.attention.close()
 
+    def release_packed_sources(self) -> None:
+        """Keep only tensors read by the selected fused runtime path."""
+
+        keep = {
+            "bias",
+            "g_in",
+            "g_latent",
+            "g_mlp_res",
+            "g_post",
+            "g_self_res",
+            "w_mlp_res",
+            "w_self_res",
+        }
+        self.t = {name: value for name, value in self.t.items() if name in keep}
+        self.W = None
+        release = getattr(self.attention, "release_packed_sources", None)
+        if callable(release):
+            release()
+
     def __enter__(self):
         return self
 
@@ -722,6 +1088,13 @@ class _KimiK3KdaStagedPath(_KimiK3MlaPath):
         reduce_backend: str,
         kv_cache_layout: KvCacheLayout | str,
         mtp: bool,
+        agentic_batch_size: int,
+        conv_state_layout: ConvStateLayout,
+        attention_symmetric_allreduce,
+        state_dtype: torch.dtype,
+        defer_collectives: bool,
+        packed_artifacts: dict[str, torch.Tensor] | None,
+        monokernel_only: bool,
     ):
         del topk, kv_cache_layout
         return KimiK3KdaAttention(
@@ -736,6 +1109,13 @@ class _KimiK3KdaStagedPath(_KimiK3MlaPath):
             # staged GEMMs retain better occupancy and remain the faster path.
             single_launch_attention=samples <= 4 or mtp,
             mtp=mtp,
+            agentic_batch_size=agentic_batch_size,
+            conv_state_layout=conv_state_layout,
+            symmetric_allreduce=attention_symmetric_allreduce,
+            state_dtype=state_dtype,
+            defer_collectives=defer_collectives,
+            packed_artifacts=packed_artifacts,
+            monokernel_only=monokernel_only,
         )
 
     def forward(

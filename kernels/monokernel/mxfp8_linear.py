@@ -312,6 +312,8 @@ class Mxfp8Linear:
         weight: torch.Tensor,
         scale: torch.Tensor,
         rows: int,
+        *,
+        workspace_only: bool = False,
     ) -> None:
         if weight.ndim != 2:
             raise ValueError(f"MXFP8 weight must be a matrix, got {tuple(weight.shape)}")
@@ -321,16 +323,62 @@ class Mxfp8Linear:
         self.rows = rows
         self.weight = pack_mxfp8_weight(weight)
         self.scale = pack_mxfp8_scale(scale)
+        self._initialize_workspace(rows, weight.device, workspace_only)
+
+    @classmethod
+    def from_packed(
+        cls,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        *,
+        n: int,
+        k: int,
+        rows: int,
+        workspace_only: bool = False,
+    ) -> "Mxfp8Linear":
+        """Reuse immutable packed weights with a bucket-local activation workspace."""
+
+        if weight.dtype is not torch.uint8 or not weight.is_contiguous():
+            raise ValueError("packed MXFP8 weight must be contiguous uint8")
+        if scale.dtype is not torch.uint8 or not scale.is_contiguous():
+            raise ValueError("packed MXFP8 scale must be contiguous uint8")
+        if weight.numel() != n * k:
+            raise ValueError(f"packed MXFP8 weight needs {n * k} bytes")
+        padded_n = (n + 255) // 256 * 256
+        if scale.numel() != padded_n * (k // _GROUP):
+            raise ValueError("packed MXFP8 scale has the wrong size")
+        instance = cls.__new__(cls)
+        instance.n, instance.k, instance.rows = n, k, rows
+        instance.weight, instance.scale = weight, scale
+        instance._initialize_workspace(rows, weight.device, workspace_only)
+        return instance
+
+    def _initialize_workspace(
+        self,
+        rows: int,
+        device: torch.device,
+        workspace_only: bool = False,
+    ) -> None:
+        if workspace_only and rows not in {1, 2, 4, 8, 16, 32, 64}:
+            raise ValueError(f"unsupported MXFP8 workspace row count {rows}")
         padded_rows = (rows + 31) // 32 * 32
         self.padded_rows = padded_rows
-        self.activation = torch.zeros((padded_rows, self.k), dtype=torch.uint8, device=weight.device)
+        self.activation = torch.zeros(
+            (padded_rows, self.k),
+            dtype=torch.uint8,
+            device=device,
+        )
         self.activation_scale = torch.zeros(
             padded_rows * (self.k // _GROUP),
             dtype=torch.uint8,
-            device=weight.device,
+            device=device,
         )
-        self.quantize = build_mxfp8_quantize(rows, self.k)
-        self.project = build_mxfp8_project(rows, self.n, self.k)
+        self.quantize = (
+            None if workspace_only else build_mxfp8_quantize(rows, self.k)
+        )
+        self.project = (
+            None if workspace_only else build_mxfp8_project(rows, self.n, self.k)
+        )
 
     def __call__(self, source: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         if source.shape != (self.rows, self.k) or source.dtype != torch.bfloat16:

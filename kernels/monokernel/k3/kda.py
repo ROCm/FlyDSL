@@ -7,7 +7,14 @@ from __future__ import annotations
 
 import torch
 
-from kernels.monokernel.config import KIMI_K3_CONFIG, MAX_LAYERS_PER_STEP
+from kernels.monokernel.config import (
+    KIMI_K3_CONFIG,
+    MAX_LAYERS_PER_STEP,
+    ConvStateLayout,
+    Mxfp4ScaleLayout,
+    Mxfp4WeightLayout,
+    conv_state_shape,
+)
 from kernels.monokernel.formats import quantize_mxfp8
 from kernels.monokernel.gemm_a16w16 import gemm_a16w16
 from kernels.monokernel.k3.kda_recurrence import KimiK3KdaRecurrence
@@ -17,12 +24,14 @@ from kernels.monokernel.k3.kernel import (
 )
 from kernels.monokernel.packing import (
     pack_bf16,
-    pack_mxfp4,
     pack_mxfp8_scale,
     pack_mxfp8_weight,
 )
 from kernels.monokernel.symmetric_allreduce import SymmetricBf16Allreduce
-from kernels.monokernel.weights import LayerWeights
+from kernels.monokernel.weights import (
+    LayerWeights,
+    prepare_mxfp4_expert_storage,
+)
 
 _TP_SIZE = 8
 _HEAD_DIM = 128
@@ -83,6 +92,13 @@ class KimiK3KdaAttention:
         launches_per_step: int = MAX_LAYERS_PER_STEP,
         single_launch_attention: bool = True,
         mtp: bool = False,
+        agentic_batch_size: int = 0,
+        conv_state_layout: ConvStateLayout = ConvStateLayout.CHANNEL_MAJOR,
+        symmetric_allreduce: SymmetricBf16Allreduce | None = None,
+        state_dtype: torch.dtype = torch.float32,
+        defer_collectives: bool = False,
+        packed_artifacts: dict[str, torch.Tensor] | None = None,
+        monokernel_only: bool = False,
     ) -> None:
         config = weights.config
         if config != KIMI_K3_CONFIG:
@@ -97,6 +113,21 @@ class KimiK3KdaAttention:
             )
         if reduce_backend not in {"symmetric", "nccl"}:
             raise ValueError(f"unsupported reduce backend {reduce_backend!r}; expected 'symmetric' or 'nccl'")
+        if not isinstance(conv_state_layout, ConvStateLayout):
+            raise TypeError(f"conv_state_layout must be ConvStateLayout, got {conv_state_layout!r}")
+        if state_dtype not in (torch.float16, torch.float32):
+            raise ValueError(f"state_dtype must be float16 or float32, got {state_dtype}")
+        if agentic_batch_size and (
+            not mtp
+            or agentic_batch_size not in (1, 2, 4, 8)
+            or samples != agentic_batch_size * 8
+            or state_dtype is not torch.float16
+            or conv_state_layout is not ConvStateLayout.TIME_MAJOR
+        ):
+            raise ValueError(
+                "Kimi Agentic KDA requires B in {1,2,4,8}, q=8, "
+                "MTP, FP16 recurrent state, and time-major conv state"
+            )
         if not 1 <= launches_per_step <= MAX_LAYERS_PER_STEP:
             raise ValueError(f"launches_per_step must be in [1, {MAX_LAYERS_PER_STEP}], " f"got {launches_per_step}")
 
@@ -106,10 +137,22 @@ class KimiK3KdaAttention:
         self.S = samples
         self.rank = rank
         self.npes = npes
+        self.group = group
         self.reduce_group = reduce_group
         self.reduce_backend = reduce_backend
         self.launches_per_step = launches_per_step
         self.mtp = mtp
+        self.agentic_batch_size = agentic_batch_size
+        self.conv_state_layout = conv_state_layout
+        self.state_dtype = state_dtype
+        self.monokernel_only = monokernel_only
+        atom_weight_layout = weights.mxfp4_weight_layout is Mxfp4WeightLayout.ATOM
+        atom_scale_layout = weights.mxfp4_scale_layout is Mxfp4ScaleLayout.ATOM
+        if atom_weight_layout != atom_scale_layout:
+            raise ValueError(
+                "the Kimi-K3 MonoKernel requires matching MXFP4 weight and scale layouts"
+            )
+        self.atom_expert_layout = atom_weight_layout
         self.local_projection = config.local_heads * _HEAD_DIM
 
         expected = {
@@ -149,35 +192,63 @@ class KimiK3KdaAttention:
         device = self.t["w_kda_in"].device
         padded_fused_width = (fused_width + _INPUT_GEMM_ALIGNMENT - 1) // _INPUT_GEMM_ALIGNMENT
         padded_fused_width *= _INPUT_GEMM_ALIGNMENT
-        self.fused_input_storage = torch.empty(
-            samples,
-            padded_fused_width,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        self.fused_input = self.fused_input_storage[:, :fused_width]
-        self.w_kda_in_padded = torch.zeros(
-            padded_fused_width,
-            config.hidden,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        self.w_kda_in_padded[:fused_width].copy_(self.t["w_kda_in"])
-        self.partial = torch.empty(samples, config.hidden, dtype=torch.bfloat16, device=device)
-        self.output = torch.empty_like(self.partial)
-        self.step = torch.zeros(1, dtype=torch.int32, device=device)
-        self.normed = torch.empty(samples, config.local_heads, _HEAD_DIM, dtype=torch.bfloat16, device=device)
-        self.core = KimiK3KdaRecurrence(samples)
-        self.symmetric_allreduce = (
-            SymmetricBf16Allreduce(
-                (self.partial.numel(),),
-                rank=rank,
-                npes=npes,
-                group=group,
+        self.fused_input_storage = self.fused_input = None
+        if not monokernel_only:
+            self.fused_input_storage = torch.empty(
+                samples,
+                padded_fused_width,
+                dtype=torch.bfloat16,
+                device=device,
             )
-            if reduce_backend == "symmetric"
-            else None
+            self.fused_input = self.fused_input_storage[:, :fused_width]
+        packed_artifacts = packed_artifacts or {}
+        self.w_kda_in_padded = packed_artifacts.get("w_kda_in_padded")
+        self.w_kda_in_packed = packed_artifacts.get("w_kda_in_packed")
+        if self.w_kda_in_padded is None and self.w_kda_in_packed is None:
+            self.w_kda_in_padded = torch.zeros(
+                padded_fused_width,
+                config.hidden,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self.w_kda_in_padded[:fused_width].copy_(self.t["w_kda_in"])
+        self.partial = self.output = None
+        if not monokernel_only:
+            self.partial = torch.empty(
+                samples,
+                config.hidden,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self.output = torch.empty_like(self.partial)
+        self.step = torch.zeros(1, dtype=torch.int32, device=device)
+        self.normed = None
+        if not monokernel_only:
+            self.normed = torch.empty(
+                samples,
+                config.local_heads,
+                _HEAD_DIM,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+        self.core = (
+            None
+            if agentic_batch_size
+            else KimiK3KdaRecurrence(samples, conv_state_layout, state_dtype)
         )
+        if reduce_backend == "symmetric":
+            self.symmetric_allreduce = symmetric_allreduce
+            if self.symmetric_allreduce is None and not defer_collectives:
+                self.symmetric_allreduce = SymmetricBf16Allreduce(
+                    (samples * config.hidden,),
+                    rank=rank,
+                    npes=npes,
+                    group=group,
+                )
+        else:
+            if symmetric_allreduce is not None:
+                raise ValueError("an injected KDA all-reduce requires reduce_backend='symmetric'")
+            self.symmetric_allreduce = None
         self.monokernel_launch = None
         self.monokernel_scratch = None
         self.monokernel_timeline = None
@@ -185,19 +256,18 @@ class KimiK3KdaAttention:
         self.attn_res_blocks = -1
         self.block_write_idx = -1
         self.fuse_moe = False
-        self.moe_packed: dict[str, torch.Tensor] = {}
-        self.w_kda_in_packed = None
-        self.w_kda_o_packed = None
-        if self.symmetric_allreduce is not None and single_launch_attention:
-            monokernel_input = torch.zeros(
-                _MONOKERNEL_INPUT_ROWS,
-                config.hidden,
-                dtype=torch.bfloat16,
-                device=device,
-            )
-            monokernel_input[:fused_width].copy_(self.t["w_kda_in"])
-            self.w_kda_in_packed = pack_bf16(monokernel_input)
-            self.w_kda_o_packed = pack_bf16(self.t["w_kda_o"])
+        self.moe_packed: dict[str, torch.Tensor] = packed_artifacts.get(
+            "moe_packed",
+            {},
+        )
+        self.w_kda_o_packed = packed_artifacts.get("w_kda_o_packed")
+        if (
+            reduce_backend == "symmetric"
+            and single_launch_attention
+            and (state_dtype is torch.float32 or agentic_batch_size)
+            and (self.symmetric_allreduce is not None or defer_collectives)
+        ):
+            self._pack_monokernel_projections()
             self.monokernel_scratch = torch.zeros(
                 monokernel_scratch_nbytes(samples, mtp=mtp),
                 dtype=torch.uint8,
@@ -209,13 +279,79 @@ class KimiK3KdaAttention:
                 npes,
                 launches_per_step,
                 mtp=mtp,
+                agentic_batch_size=agentic_batch_size,
+                state_dtype=state_dtype,
+                conv_state_layout=conv_state_layout,
+                atom_expert_layout=self.atom_expert_layout,
             )
-        elif mtp:
-            raise ValueError("Kimi-K3 MTP requires the single-launch attention path")
+        elif mtp and not agentic_batch_size:
+            raise ValueError("Kimi-K3 MTP currently requires FP32 state")
         if reduce_group is None:
             raise ValueError("Kimi-K3 KDA attention requires a GPU-capable TP reduce_group")
 
-    def configure_monokernel(self, layer_idx: int, *, fuse_moe: bool = False) -> None:
+    def packed_artifacts(self) -> dict[str, torch.Tensor]:
+        artifacts = {}
+        if self.w_kda_in_padded is not None and not self.monokernel_only:
+            artifacts["w_kda_in_padded"] = self.w_kda_in_padded
+        if self.w_kda_in_packed is not None:
+            artifacts["w_kda_in_packed"] = self.w_kda_in_packed
+            artifacts["w_kda_o_packed"] = self.w_kda_o_packed
+        if self.moe_packed:
+            artifacts["moe_packed"] = self.moe_packed
+        return artifacts
+
+    def full_plan_workspace_tensors(self) -> tuple[torch.Tensor, ...]:
+        """Return bucket-local tensors retained after full-plan rebinding."""
+
+        if not self.monokernel_only:
+            raise ValueError("workspace enumeration requires monokernel_only")
+        return (self.monokernel_timeline,)
+
+    def initialize_symmetric_allreduce(
+        self,
+        shared: SymmetricBf16Allreduce | None = None,
+    ) -> SymmetricBf16Allreduce:
+        """Initialize the collective only after rank-local construction agrees."""
+
+        if self.reduce_backend != "symmetric":
+            raise ValueError("deferred KDA collectives require the symmetric backend")
+        if self.symmetric_allreduce is None:
+            self.symmetric_allreduce = (
+                shared
+                if shared is not None
+                else SymmetricBf16Allreduce(
+                    (self.S * self.config.hidden,),
+                    rank=self.rank,
+                    npes=self.npes,
+                    group=self.group,
+                )
+            )
+        elif shared is not None and self.symmetric_allreduce is not shared:
+            raise ValueError("KDA all-reduce was initialized with a different resource")
+        return self.symmetric_allreduce
+
+    def _pack_monokernel_projections(self) -> None:
+        if self.w_kda_in_packed is not None:
+            return
+
+        fused_width = 4 * self.local_projection + self.config.local_heads + _HEAD_DIM
+        monokernel_input = torch.zeros(
+            _MONOKERNEL_INPUT_ROWS,
+            self.config.hidden,
+            dtype=torch.bfloat16,
+            device=self.t["w_kda_in"].device,
+        )
+        monokernel_input[:fused_width].copy_(self.t["w_kda_in"])
+        self.w_kda_in_packed = pack_bf16(monokernel_input)
+        self.w_kda_o_packed = pack_bf16(self.t["w_kda_o"])
+
+    def configure_monokernel(
+        self,
+        layer_idx: int,
+        *,
+        fuse_moe: bool = False,
+        moe_packed: dict[str, torch.Tensor] | None = None,
+    ) -> None:
         """Specialize the single launch for both AttnRes mixers and latent-MoE."""
 
         block = self.config.attn_res_block_size
@@ -225,31 +361,28 @@ class KimiK3KdaAttention:
         self.block_write_idx = layer_idx // block if layer_idx % block == 0 else -1
         self.fuse_attn_res = True
         self.fuse_moe = fuse_moe
+        if moe_packed is not None:
+            if self.moe_packed and self.moe_packed is not moe_packed:
+                raise ValueError("KDA MoE packed artifact owner mismatch")
+            self.moe_packed = moe_packed
         device = self.t["w_kda_in"].device
-        if self.w_kda_in_packed is None:
-            fused_width = 4 * self.local_projection + self.config.local_heads + _HEAD_DIM
-            monokernel_input = torch.zeros(
-                _MONOKERNEL_INPUT_ROWS,
-                self.config.hidden,
-                dtype=torch.bfloat16,
-                device=device,
-            )
-            monokernel_input[:fused_width].copy_(self.t["w_kda_in"])
-            self.w_kda_in_packed = pack_bf16(monokernel_input)
-            self.w_kda_o_packed = pack_bf16(self.t["w_kda_o"])
-        if fuse_moe:
+        self._pack_monokernel_projections()
+        if fuse_moe and not self.moe_packed:
             latent_down, latent_down_scale = quantize_mxfp8(self.t["w_latent_down"])
             shared_up, shared_up_scale = quantize_mxfp8(self.t["w_shared_ug"])
             shared_down, shared_down_scale = quantize_mxfp8(self.t["w_shared_dn"])
             latent_up, latent_up_scale = quantize_mxfp8(self.t["w_latent_up"])
+            w_ug, s_ug, w_dn, s_dn = prepare_mxfp4_expert_storage(self.W)
             self.moe_packed = {
                 "w_r": pack_bf16(self.t["w_r"]),
                 "w_latent_down": pack_mxfp8_weight(latent_down),
                 "s_latent_down": pack_mxfp8_scale(latent_down_scale),
                 "w_shared_ug": pack_mxfp8_weight(shared_up),
                 "s_shared_ug": pack_mxfp8_scale(shared_up_scale),
-                "w_ug": pack_mxfp4(self.t["w_ug"]),
-                "w_dn": pack_mxfp4(self.t["w_dn"]),
+                "w_ug": w_ug,
+                "s_ug": s_ug,
+                "w_dn": w_dn,
+                "s_dn": s_dn,
                 "w_shared_dn": pack_mxfp8_weight(shared_down),
                 "s_shared_dn": pack_mxfp8_scale(shared_down_scale),
                 "w_latent_up": pack_mxfp8_weight(latent_up),
@@ -275,6 +408,10 @@ class KimiK3KdaAttention:
             self.block_write_idx,
             fuse_moe,
             self.mtp,
+            agentic_batch_size=self.agentic_batch_size,
+            state_dtype=self.state_dtype,
+            conv_state_layout=self.conv_state_layout,
+            atom_expert_layout=self.atom_expert_layout,
         )
 
     def forward(
@@ -285,6 +422,7 @@ class KimiK3KdaAttention:
         recurrent_state: torch.Tensor,
         *,
         x_out: torch.Tensor | None = None,
+        num_accepted_tokens: torch.Tensor | None = None,
         block_residual: torch.Tensor | None = None,
         pre_updated: torch.Tensor | None = None,
         pre_output: torch.Tensor | None = None,
@@ -302,14 +440,37 @@ class KimiK3KdaAttention:
 
         if not 0 <= layer < self.launches_per_step:
             raise ValueError(f"layer must be in [0, {self.launches_per_step}), got {layer}")
-        expected_indices = (self.S + 1,) if self.mtp else (self.S,)
+        expected_indices = (
+            (self.agentic_batch_size, 8)
+            if self.agentic_batch_size
+            else ((self.S + 1,) if self.mtp else (self.S,))
+        )
         if (
             state_indices.shape != expected_indices
             or state_indices.dtype != torch.int32
             or not state_indices.is_contiguous()
         ):
-            mode = "MTP snapshot chain" if self.mtp else "decode slots"
+            mode = "Agentic snapshot matrix" if self.agentic_batch_size else (
+                "MTP snapshot chain" if self.mtp else "decode slots"
+            )
             raise ValueError(f"state_indices must be contiguous int32 {list(expected_indices)} for {mode}")
+        if self.agentic_batch_size:
+            expected_accepted = (self.agentic_batch_size,)
+            if (
+                num_accepted_tokens is None
+                or num_accepted_tokens.shape != expected_accepted
+                or num_accepted_tokens.dtype != torch.int32
+                or not num_accepted_tokens.is_contiguous()
+                or num_accepted_tokens.device != state_indices.device
+            ):
+                raise ValueError(
+                    "num_accepted_tokens must be contiguous int32 "
+                    f"{list(expected_accepted)} on the snapshot device"
+                )
+        elif num_accepted_tokens is not None:
+            raise ValueError(
+                "num_accepted_tokens is valid only for Agentic q=8"
+            )
         expected_hidden = (self.S, self.config.hidden)
         if (
             hidden_states.shape != expected_hidden
@@ -321,6 +482,37 @@ class KimiK3KdaAttention:
         target = self.output if x_out is None else x_out
         if target.shape != expected_hidden or target.dtype != torch.bfloat16 or not target.is_contiguous():
             raise ValueError(f"x_out must be contiguous BF16 {list(expected_hidden)}")
+
+        expected_conv_state = conv_state_shape(
+            self.conv_state_layout,
+            conv_state.shape[0] if conv_state.ndim == 3 else 0,
+            3 * self.local_projection,
+            state_length=10 if self.agentic_batch_size else 3,
+        )
+        if (
+            conv_state.shape != expected_conv_state
+            or conv_state.dtype != torch.bfloat16
+            or not conv_state.is_contiguous()
+        ):
+            raise ValueError(
+                f"conv_state must be contiguous BF16 {list(expected_conv_state)} "
+                f"for {self.conv_state_layout.value} layout"
+            )
+        expected_recurrent_state = (
+            conv_state.shape[0],
+            self.config.local_heads,
+            _HEAD_DIM,
+            _HEAD_DIM,
+        )
+        if (
+            recurrent_state.shape != expected_recurrent_state
+            or recurrent_state.dtype != self.state_dtype
+            or not recurrent_state.is_contiguous()
+        ):
+            raise ValueError(
+                f"recurrent_state must be contiguous {self.state_dtype} "
+                f"{list(expected_recurrent_state)}"
+            )
 
         if self.monokernel_launch is not None:
             if self.fuse_attn_res:
@@ -355,6 +547,7 @@ class KimiK3KdaAttention:
                 moe_peers = hidden_states
             packed = self.moe_packed
             pointer_or_hidden = lambda name: packed[name].data_ptr() if name in packed else hidden_states.data_ptr()
+            tensor_or_hidden = lambda name: self.t[name].data_ptr() if name in self.t else hidden_states.data_ptr()
             self.monokernel_launch(
                 hidden_states.data_ptr(),
                 target.data_ptr(),
@@ -373,16 +566,16 @@ class KimiK3KdaAttention:
                 quantized_moe_scale.data_ptr(),
                 block_stride,
                 pointer_or_hidden("w_r"),
-                self.t["bias"].data_ptr() if self.fuse_moe else hidden_states.data_ptr(),
+                tensor_or_hidden("bias") if self.fuse_moe else hidden_states.data_ptr(),
                 pointer_or_hidden("w_latent_down"),
                 pointer_or_hidden("s_latent_down"),
                 pointer_or_hidden("w_shared_ug"),
                 pointer_or_hidden("s_shared_ug"),
                 pointer_or_hidden("w_ug"),
-                self.t["s_ug"].data_ptr() if self.fuse_moe else hidden_states.data_ptr(),
+                pointer_or_hidden("s_ug"),
                 pointer_or_hidden("w_dn"),
-                self.t["s_dn"].data_ptr() if self.fuse_moe else hidden_states.data_ptr(),
-                self.t["g_latent"].data_ptr() if self.fuse_moe else hidden_states.data_ptr(),
+                pointer_or_hidden("s_dn"),
+                tensor_or_hidden("g_latent") if self.fuse_moe else hidden_states.data_ptr(),
                 pointer_or_hidden("w_shared_dn"),
                 pointer_or_hidden("s_shared_dn"),
                 pointer_or_hidden("w_latent_up"),
@@ -398,6 +591,11 @@ class KimiK3KdaAttention:
                 self.t["g_kda_out"].data_ptr(),
                 self.w_kda_o_packed.data_ptr(),
                 state_indices.data_ptr(),
+                (
+                    num_accepted_tokens.data_ptr()
+                    if num_accepted_tokens is not None
+                    else state_indices.data_ptr()
+                ),
                 conv_state.data_ptr(),
                 recurrent_state.data_ptr(),
                 self.monokernel_scratch.data_ptr(),
@@ -405,12 +603,28 @@ class KimiK3KdaAttention:
                 self.symmetric_allreduce.peer_buffer.addresses.data_ptr(),
                 self.step.data_ptr(),
                 self.monokernel_timeline.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                1,
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
+                hidden_states.data_ptr(),
                 self.rank,
                 layer,
+                int(advance),
                 stream=torch.cuda.current_stream(),
             )
-            if advance:
-                self.advance_step()
             return target
 
         gemm_a16w16(
@@ -426,6 +640,7 @@ class KimiK3KdaAttention:
         output_gate = self.fused_input[:, 3 * projection : 4 * projection]
         beta = self.fused_input[:, 4 * projection : 4 * projection + heads].view(self.S, 1, heads)
         f_a = self.fused_input[:, 4 * projection + heads :]
+        assert self.core is not None
         self.core(
             mixed_qkv,
             beta,
@@ -477,6 +692,29 @@ class KimiK3KdaAttention:
 
     def advance_step(self) -> None:
         self.step.add_(1)
+
+    def release_packed_sources(self) -> None:
+        """Drop dense source snapshots after their packed artifacts are built."""
+
+        if self.monokernel_only:
+            self.w_kda_in_padded = None
+        keep = {
+            "bias",
+            "g_in",
+            "g_kda_out",
+            "g_latent",
+            "g_mlp_res",
+            "g_post",
+            "g_self_res",
+            "kda_a_log",
+            "kda_dt_bias",
+            "w_kda_conv",
+            "w_kda_fb",
+            "w_mlp_res",
+            "w_self_res",
+        }
+        self.t = {name: value for name, value in self.t.items() if name in keep}
+        self.W = None
 
     def close(self) -> None:
         if self.symmetric_allreduce is not None:
