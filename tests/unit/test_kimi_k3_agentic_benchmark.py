@@ -8,6 +8,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from kernels.monokernel.k3.kernel import (
+    agentic_conv_writeback_requires_all,
+    agentic_recurrence_tokens_per_cta,
+    mtp_conv_waits_for_previous,
+    symmetric_mailbox_epoch,
+)
 from kernels.monokernel.k3.tools.agentic_kda import (
     INVOCATIONS_PER_GRAPH,
     MIN_REPEATS,
@@ -23,12 +29,6 @@ from kernels.monokernel.k3.tools.agentic_kda import (
     q8_recurrence_reference,
     staged_speedup,
 )
-from kernels.monokernel.k3.kernel import (
-    agentic_conv_writeback_requires_all,
-    agentic_recurrence_tokens_per_cta,
-    mtp_conv_waits_for_previous,
-    symmetric_mailbox_epoch,
-)
 
 
 def test_agentic_benchmark_protocol_defaults_are_reproducible() -> None:
@@ -39,10 +39,7 @@ def test_agentic_benchmark_protocol_defaults_are_reproducible() -> None:
     assert MIN_REPEATS == args.repeats == 50
     assert args.batches == (1, 2, 4)
     assert args.rank_skew_ms == 0
-    assert (
-        make_argument_parser().parse_args(["--rank-skew-ms", "25"]).rank_skew_ms
-        == 25
-    )
+    assert make_argument_parser().parse_args(["--rank-skew-ms", "25"]).rank_skew_ms == 25
 
 
 def test_agentic_recurrence_uses_four_token_resident_chunks() -> None:
@@ -55,10 +52,7 @@ def test_symmetric_mailbox_slot_tracks_full_launch_epoch() -> None:
     assert symmetric_mailbox_epoch(0, launches_per_step=32, layer=0) == 0
     assert symmetric_mailbox_epoch(0, launches_per_step=32, layer=31) == 31
     assert symmetric_mailbox_epoch(1, launches_per_step=32, layer=0) == 32
-    assert [
-        symmetric_mailbox_epoch(0, launches_per_step=32, layer=layer) & 1
-        for layer in range(4)
-    ] == [0, 1, 0, 1]
+    assert [symmetric_mailbox_epoch(0, launches_per_step=32, layer=layer) & 1 for layer in range(4)] == [0, 1, 0, 1]
 
 
 def test_critical_rank_medians_take_each_replay_slowest_rank() -> None:
@@ -67,9 +61,7 @@ def test_critical_rank_medians_take_each_replay_slowest_rank() -> None:
         (200.0, 250.0, 600.0),
     )
 
-    assert critical_rank_medians(rank_samples, layers=10) == pytest.approx(
-        (20.0, 30.0, 60.0)
-    )
+    assert critical_rank_medians(rank_samples, layers=10) == pytest.approx((20.0, 30.0, 60.0))
 
 
 def test_staged_speedup_reports_full_over_staged() -> None:
@@ -194,13 +186,8 @@ def test_graph_epoch_plan_uses_all_layers_and_one_advance() -> None:
 
 
 def test_agentic_convolution_tokens_have_no_false_dependency_chain() -> None:
-    assert [
-        mtp_conv_waits_for_previous(agentic_batch_size=4, token=token)
-        for token in range(8)
-    ] == [False] * 8
-    assert [
-        agentic_conv_writeback_requires_all(token) for token in range(8)
-    ] == [False] * 7 + [True]
+    assert [mtp_conv_waits_for_previous(agentic_batch_size=4, token=token) for token in range(8)] == [False] * 8
+    assert [agentic_conv_writeback_requires_all(token) for token in range(8)] == [False] * 7 + [True]
     assert mtp_conv_waits_for_previous(agentic_batch_size=0, token=1)
 
 
@@ -270,16 +257,11 @@ def test_q8_conv_reference_rolls_back_two_committed_rows_and_eight_drafts() -> N
     drafts = torch.arange(800, 864, dtype=torch.bfloat16).view(8, 8, 1)
     weight = torch.ones(1, 4, dtype=torch.bfloat16)
 
-    output, persisted = q8_conv_reference(
-        conv, snapshots, accepted, drafts, weight
-    )
+    output, persisted = q8_conv_reference(conv, snapshots, accepted, drafts, weight)
 
     for request, count in enumerate(accepted.tolist()):
         slot = int(snapshots[request, 0])
-        expected_first = (
-            conv[slot, count - 1 : count + 2, 0].float().sum()
-            + drafts[request, 0, 0].float()
-        )
+        expected_first = conv[slot, count - 1 : count + 2, 0].float().sum() + drafts[request, 0, 0].float()
         torch.testing.assert_close(
             output[request, 0, 0],
             expected_first * torch.sigmoid(expected_first),

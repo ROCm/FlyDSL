@@ -36,15 +36,8 @@ class KimiK3MonoKernel(_KimiK3KdaStagedPath):
         packed_artifacts: dict[str, object] | None = None,
     ) -> None:
         if agentic_batch_size:
-            if (
-                not mtp
-                or samples != agentic_batch_size * 8
-                or state_dtype is not torch.float16
-            ):
-                raise ValueError(
-                    "Kimi Agentic MonoKernel requires q=8 MTP rows "
-                    "and FP16 recurrent state"
-                )
+            if not mtp or samples != agentic_batch_size * 8 or state_dtype is not torch.float16:
+                raise ValueError("Kimi Agentic MonoKernel requires q=8 MTP rows " "and FP16 recurrent state")
         elif state_dtype is not torch.float32:
             raise ValueError("Kimi-K3 single-launch MonoKernel requires FP32 state")
         super().__init__(

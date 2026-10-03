@@ -214,9 +214,7 @@ class _KimiK3MlaPath:
             }
             missing = sorted(required.difference(packed_artifacts))
             if missing:
-                raise ValueError(
-                    f"missing shared Kimi packed artifacts: {', '.join(missing)}"
-                )
+                raise ValueError(f"missing shared Kimi packed artifacts: {', '.join(missing)}")
             self.w_router = packed_artifacts["w_router"]
             self.latent_projection = Mxfp8Linear.from_packed(
                 packed_artifacts["w_latent_down"],
@@ -240,18 +238,10 @@ class _KimiK3MlaPath:
             self.s_latent_up = packed_artifacts["s_latent_up"]
         else:
             self.w_router = pack_bf16(self.t["w_r"])
-            latent_weight, latent_scale = quantize_mxfp8(
-                self.t["w_latent_down"]
-            )
-            shared_weight, shared_scale = quantize_mxfp8(
-                self.t["w_shared_ug"]
-            )
-            shared_down_weight, shared_down_scale = quantize_mxfp8(
-                self.t["w_shared_dn"]
-            )
-            latent_up_weight, latent_up_scale = quantize_mxfp8(
-                self.t["w_latent_up"]
-            )
+            latent_weight, latent_scale = quantize_mxfp8(self.t["w_latent_down"])
+            shared_weight, shared_scale = quantize_mxfp8(self.t["w_shared_ug"])
+            shared_down_weight, shared_down_scale = quantize_mxfp8(self.t["w_shared_dn"])
+            latent_up_weight, latent_up_scale = quantize_mxfp8(self.t["w_latent_up"])
             self.latent_projection = Mxfp8Linear(
                 latent_weight,
                 latent_scale,
@@ -293,18 +283,11 @@ class _KimiK3MlaPath:
             canonical_moe = attention_moe
         if canonical_moe is None:
             canonical_moe = local_moe
-        elif any(
-            canonical_moe.get(name) is not tensor
-            for name, tensor in local_moe.items()
-        ):
+        elif any(canonical_moe.get(name) is not tensor for name, tensor in local_moe.items()):
             raise ValueError("Kimi MoE packed artifact alias mismatch")
         self.moe_packed = canonical_moe
         self.shared_activation_owner = None
-        if (
-            monokernel_only
-            and not retain_staged_workspaces
-            and isinstance(self.attention, KimiK3KdaAttention)
-        ):
+        if monokernel_only and not retain_staged_workspaces and isinstance(self.attention, KimiK3KdaAttention):
             # KDA's fused full-layer launch requires this graph-stable backing
             # allocation to remain live. Keep only the exact activation tile;
             # the unused scale workspace and projection object are discarded.
@@ -326,22 +309,12 @@ class _KimiK3MlaPath:
             # At most one padded BM tile is needed per selected route: there
             # can be no more active experts than routes.
             max_sorted = samples * config.top_k * _ROUTING_TILE_M
-            max_blocks = (
-                max_sorted + _ROUTING_TILE_M - 1
-            ) // _ROUTING_TILE_M
+            max_blocks = (max_sorted + _ROUTING_TILE_M - 1) // _ROUTING_TILE_M
             self.max_sorted = max_sorted
-            self.sorted_token_ids = torch.empty(
-                max_sorted, dtype=torch.int32, device=device
-            )
-            self.sorted_weights = torch.empty(
-                max_sorted, dtype=torch.float32, device=device
-            )
-            self.sorted_expert_ids = torch.empty(
-                max_blocks, dtype=torch.int32, device=device
-            )
-            self.num_valid_ids = torch.empty(
-                2, dtype=torch.int32, device=device
-            )
+            self.sorted_token_ids = torch.empty(max_sorted, dtype=torch.int32, device=device)
+            self.sorted_weights = torch.empty(max_sorted, dtype=torch.float32, device=device)
+            self.sorted_expert_ids = torch.empty(max_blocks, dtype=torch.int32, device=device)
+            self.num_valid_ids = torch.empty(2, dtype=torch.int32, device=device)
             self.inter_sorted = torch.empty(
                 max_sorted,
                 config.inter,
@@ -386,9 +359,7 @@ class _KimiK3MlaPath:
             )
         self.router_select = self.router_projection = None
         if not monokernel_only:
-            self.router_select = SigmoidTopkRouter(
-                config.n_experts, config.top_k, samples
-            )
+            self.router_select = SigmoidTopkRouter(config.n_experts, config.top_k, samples)
             self.router_projection = FusedRouterProjection(
                 config.hidden,
                 config.n_experts,
@@ -446,9 +417,7 @@ class _KimiK3MlaPath:
             )
             self.final_partial = torch.empty_like(self.shared_partial)
             self.moe_delta = torch.empty_like(self.shared_partial)
-        self.output = torch.empty(
-            samples, config.hidden, dtype=torch.bfloat16, device=device
-        )
+        self.output = torch.empty(samples, config.hidden, dtype=torch.bfloat16, device=device)
         self.attention_delta = torch.empty_like(self.output)
         self._profiler = CudaStageProfiler()
         if reduce_backend == "symmetric":
@@ -541,11 +510,7 @@ class _KimiK3MlaPath:
         )
 
     def _build_fused_tail(self):
-        if (
-            self.monokernel_only
-            or self.symmetric_allreduce is None
-            or not self.fuse_shared_experts
-        ):
+        if self.monokernel_only or self.symmetric_allreduce is None or not self.fuse_shared_experts:
             return None
         return FusedKimiK3Tail(
             self.S,

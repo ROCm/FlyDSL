@@ -70,11 +70,7 @@ class AgenticKdaShape:
         return (self.batch, QUERY_LEN)
 
     def _validate_accepted(self, accepted: torch.Tensor) -> None:
-        if (
-            accepted.shape != (self.batch,)
-            or accepted.dtype != torch.int32
-            or not accepted.is_contiguous()
-        ):
+        if accepted.shape != (self.batch,) or accepted.dtype != torch.int32 or not accepted.is_contiguous():
             raise ValueError(f"accepted must be contiguous int32 [{self.batch}]")
         if bool(torch.any((accepted < 1) | (accepted > QUERY_LEN))):
             raise ValueError("accepted counts must be in [1, 8]")
@@ -84,20 +80,18 @@ class AgenticKdaShape:
         snapshots: torch.Tensor,
         accepted: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if (
-            snapshots.shape != self.snapshot_shape
-            or snapshots.dtype != torch.int32
-            or not snapshots.is_contiguous()
-        ):
-            raise ValueError(
-                "snapshots must be contiguous int32 " f"{list(self.snapshot_shape)}"
-            )
+        if snapshots.shape != self.snapshot_shape or snapshots.dtype != torch.int32 or not snapshots.is_contiguous():
+            raise ValueError("snapshots must be contiguous int32 " f"{list(self.snapshot_shape)}")
         self._validate_accepted(accepted)
-        columns = torch.arange(
-            QUERY_LEN,
-            dtype=torch.int64,
-            device=snapshots.device,
-        ).expand(self.batch, QUERY_LEN).clone()
+        columns = (
+            torch.arange(
+                QUERY_LEN,
+                dtype=torch.int64,
+                device=snapshots.device,
+            )
+            .expand(self.batch, QUERY_LEN)
+            .clone()
+        )
         columns[:, 0] = accepted.to(torch.int64) - 1
         columns[:, 1:] -= 1
         return snapshots.gather(1, columns), snapshots
@@ -111,9 +105,7 @@ class AgenticKdaShape:
         self._validate_accepted(accepted)
         device = accepted.device
         count = accepted.to(torch.int64).view(-1, 1, 1)
-        token = torch.arange(QUERY_LEN, dtype=torch.int64, device=device).view(
-            1, QUERY_LEN, 1
-        )
+        token = torch.arange(QUERY_LEN, dtype=torch.int64, device=device).view(1, QUERY_LEN, 1)
         history = torch.arange(3, dtype=torch.int64, device=device).view(1, 1, 3)
         logical = count - 1 + token + history
         first_draft = count + 2
@@ -122,9 +114,7 @@ class AgenticKdaShape:
             logical,
             10 + logical - first_draft,
         )
-        committed = count.view(-1, 1) + torch.arange(
-            2, dtype=torch.int64, device=device
-        )
+        committed = count.view(-1, 1) + torch.arange(2, dtype=torch.int64, device=device)
         draft = 10 + torch.arange(QUERY_LEN, dtype=torch.int64, device=device)
         final = torch.cat((committed, draft.expand(self.batch, QUERY_LEN)), dim=1)
         return reads, final
@@ -156,8 +146,7 @@ def critical_rank_medians(
     if repeat_count == 0 or any(len(samples) != repeat_count for samples in rank_samples):
         raise ValueError("all ranks must provide the same nonzero repeat count")
     return tuple(
-        max(float(rank_samples[rank][repeat]) for rank in range(len(rank_samples)))
-        / layers
+        max(float(rank_samples[rank][repeat]) for rank in range(len(rank_samples))) / layers
         for repeat in range(repeat_count)
     )
 
@@ -223,26 +212,19 @@ def correlate_repeat_kernel_events(
     repeat_ranges = {
         int(event.name.removeprefix(marker_prefix)): event.time_range
         for event in events
-        if event.device_type == torch.autograd.DeviceType.CPU
-        and event.name.startswith(marker_prefix)
+        if event.device_type == torch.autograd.DeviceType.CPU and event.name.startswith(marker_prefix)
     }
     if len(repeat_ranges) != repeats:
-        raise RuntimeError(
-            f"profiler recorded {len(repeat_ranges)} of {repeats} CPU repeat markers"
-        )
+        raise RuntimeError(f"profiler recorded {len(repeat_ranges)} of {repeats} CPU repeat markers")
     kernels_by_repeat = [{} for _ in range(repeats)]
     device_events = [
         event
         for event in events
-        if event.device_type == torch.autograd.DeviceType.CUDA
-        and not event.name.startswith(marker_prefix)
+        if event.device_type == torch.autograd.DeviceType.CUDA and not event.name.startswith(marker_prefix)
     ]
     for repeat, repeat_range in repeat_ranges.items():
         for event in device_events:
-            if (
-                event.time_range.start < repeat_range.start
-                or event.time_range.end > repeat_range.end
-            ):
+            if event.time_range.start < repeat_range.start or event.time_range.end > repeat_range.end:
                 continue
             values = kernels_by_repeat[repeat].setdefault(
                 event.name,
@@ -274,12 +256,8 @@ def parity_metrics(
     """Compute parity facts from dedicated, untimed fixtures."""
 
     return {
-        "output_max_abs": float(
-            (expected_output.float() - actual_output.float()).abs().max()
-        ),
-        "state_max_abs": float(
-            (expected_state.float() - actual_state.float()).abs().max()
-        ),
+        "output_max_abs": float((expected_output.float() - actual_output.float()).abs().max()),
+        "state_max_abs": float((expected_state.float() - actual_state.float()).abs().max()),
         "conv_exact": bool(torch.equal(expected_conv, actual_conv)),
         "state_exact": bool(torch.equal(expected_state, actual_state)),
         "output_nonzero": bool(torch.count_nonzero(actual_output)),
@@ -324,17 +302,14 @@ def q8_recurrence_reference(
             q = q * torch.rsqrt(q.square().sum(-1, keepdim=True) + 1.0e-6)
             q = q * q_scale
             k = k * torch.rsqrt(k.square().sum(-1, keepdim=True) + 1.0e-6)
-            dt = torch.sigmoid(
-                torch.exp(a_log.float())[:, None]
-                * (gate[request, token].float() + dt_bias.float())
-            )
+            dt = torch.sigmoid(torch.exp(a_log.float())[:, None] * (gate[request, token].float() + dt_bias.float()))
             decay = torch.exp(-5.0 * dt)
             decayed = state * decay[:, None, :]
             state_key = torch.einsum("hvk,hk->hv", decayed, k)
             state_query = torch.einsum("hvk,hk->hv", decayed, q)
-            new_value = (
-                value[request, token].float() - state_key
-            ) * torch.sigmoid(beta[request, token].float())[:, None]
+            new_value = (value[request, token].float() - state_key) * torch.sigmoid(beta[request, token].float())[
+                :, None
+            ]
             state = decayed + new_value[:, :, None] * k[:, None, :]
             output[request, token] = state_query + new_value * (k * q).sum(-1)[:, None]
             persisted[int(snapshot_slots[request, token])].copy_(state.to(torch.float16))
@@ -359,12 +334,8 @@ def q8_conv_reference(
         slot = int(snapshot_slots[request, 0])
         old = conv_state[slot].clone()
         for token in range(query_len):
-            history = torch.cat(
-                (old[count - 1 : count + 2], drafts[request, :token])
-            )
-            values = torch.cat(
-                (history[-3:], drafts[request, token : token + 1])
-            )
+            history = torch.cat((old[count - 1 : count + 2], drafts[request, :token]))
+            values = torch.cat((history[-3:], drafts[request, token : token + 1]))
             convolved = (values.float() * weight.float().T).sum(0)
             output[request, token] = convolved * torch.sigmoid(convolved)
         persisted[slot, :2].copy_(old[count : count + 2])
@@ -395,8 +366,8 @@ def _free_port() -> int:
 
 def _slot_table(shape: AgenticKdaShape, slots: int, device: torch.device) -> torch.Tensor:
     return (
-        torch.arange(shape.rows, dtype=torch.int32, device=device) * 7 + 3
-    ).remainder(slots).view(shape.snapshot_shape)
+        (torch.arange(shape.rows, dtype=torch.int32, device=device) * 7 + 3).remainder(slots).view(shape.snapshot_shape)
+    )
 
 
 def _fixture(shape: AgenticKdaShape, device: torch.device, seed: int) -> _Fixture:
@@ -426,16 +397,20 @@ def _fixture(shape: AgenticKdaShape, device: torch.device, seed: int) -> _Fixtur
         dtype=torch.bfloat16,
         device=device,
     )
-    conv = torch.linspace(
-        -0.125,
-        0.125,
-        slots * 10 * 3 * config.local_heads * config.v_dim,
-        dtype=torch.float32,
-        device=device,
-    ).to(torch.bfloat16).view(
-        slots,
-        10,
-        3 * config.local_heads * config.v_dim,
+    conv = (
+        torch.linspace(
+            -0.125,
+            0.125,
+            slots * 10 * 3 * config.local_heads * config.v_dim,
+            dtype=torch.float32,
+            device=device,
+        )
+        .to(torch.bfloat16)
+        .view(
+            slots,
+            10,
+            3 * config.local_heads * config.v_dim,
+        )
     )
     recurrent = torch.empty(
         slots,
@@ -568,12 +543,7 @@ def _profile_full(
         graph.replay()
         torch.cuda.synchronize()
         ticks = timeline.cpu().tolist()[: len(labels) + 1]
-        local_runs.append(
-            {
-                label: (ticks[index + 1] - ticks[index]) / 100.0
-                for index, label in enumerate(labels)
-            }
-        )
+        local_runs.append({label: (ticks[index + 1] - ticks[index]) / 100.0 for index, label in enumerate(labels)})
     gathered: list[list[dict[str, float]] | None] = [None] * dist.get_world_size()
     dist.all_gather_object(gathered, local_runs)
     critical_runs = []
@@ -620,10 +590,7 @@ def _profile_staged_graph(
                     "repeat": repeat,
                     "graph_us": start.elapsed_time(end) * 1000.0,
                     "kernels": {},
-                    "stages": {
-                        label: (ticks[index + 1] - ticks[index]) / 100.0
-                        for index, label in enumerate(labels)
-                    },
+                    "stages": {label: (ticks[index + 1] - ticks[index]) / 100.0 for index, label in enumerate(labels)},
                 }
             )
 
@@ -675,11 +642,7 @@ def _rank_equal(output: torch.Tensor) -> bool:
     ).cpu()
     gathered: list[torch.Tensor | None] = [None] * dist.get_world_size()
     dist.all_gather_object(gathered, checksum)
-    return all(
-        peer is not None
-        and torch.allclose(peer, checksum, atol=1e-2, rtol=1e-5)
-        for peer in gathered
-    )
+    return all(peer is not None and torch.allclose(peer, checksum, atol=1e-2, rtol=1e-5) for peer in gathered)
 
 
 def _deterministic_weights(device, rank):
@@ -739,9 +702,9 @@ def _deterministic_weights(device, rank):
         tensors[name] = bf16(hidden, value=1)
 
     rows = torch.arange(fused, device=device)
-    tensors["w_kda_in"][rows, rows.remainder(16)] = (
-        0.015625 + rows.remainder(7).to(torch.float32) / 1024
-    ).to(torch.bfloat16)
+    tensors["w_kda_in"][rows, rows.remainder(16)] = (0.015625 + rows.remainder(7).to(torch.float32) / 1024).to(
+        torch.bfloat16
+    )
     tensors["w_kda_conv"][:, 0] = 0.0625
     tensors["w_kda_conv"][:, 1] = 0.125
     tensors["w_kda_conv"][:, 2] = 0.25
@@ -750,23 +713,15 @@ def _deterministic_weights(device, rank):
     tensors["w_kda_fb"][gate_rows, gate_rows.remainder(config.v_dim)] = 0.03125
     output_rows = torch.arange(hidden, device=device)
     rank_scale = (rank + 1) / 1024
-    tensors["w_kda_o"][
-        output_rows, output_rows.remainder(projection)
-    ] = rank_scale
-    tensors["w_r"][0, :16] = torch.linspace(
-        -0.125, 0.125, 16, dtype=torch.bfloat16, device=device
-    )
+    tensors["w_kda_o"][output_rows, output_rows.remainder(projection)] = rank_scale
+    tensors["w_r"][0, :16] = torch.linspace(-0.125, 0.125, 16, dtype=torch.bfloat16, device=device)
     latent_rows = torch.arange(routed, device=device)
     tensors["w_latent_down"][latent_rows, latent_rows.remainder(16)] = 0.03125
     shared_rows = torch.arange(2 * shared, device=device)
     tensors["w_shared_ug"][shared_rows, shared_rows.remainder(16)] = 0.03125
-    tensors["w_shared_dn"][
-        output_rows, output_rows.remainder(shared)
-    ] = rank_scale
+    tensors["w_shared_dn"][output_rows, output_rows.remainder(shared)] = rank_scale
     shard_rows = torch.arange(shard, device=device)
-    tensors["w_latent_up"][
-        shard_rows, shard_rows.remainder(routed)
-    ] = rank_scale
+    tensors["w_latent_up"][shard_rows, shard_rows.remainder(routed)] = rank_scale
 
     experts = config.n_experts
     ug_rows = experts * 2 * config.inter
@@ -812,10 +767,7 @@ def _deterministic_weights(device, rank):
 def _projected_input(prefix: torch.Tensor, weights: dict[str, torch.Tensor]) -> torch.Tensor:
     rows = torch.arange(weights["w_kda_in"].shape[0], device=prefix.device)
     columns = rows.remainder(16)
-    return (
-        prefix[:, columns].float()
-        * weights["w_kda_in"][rows, columns].float().unsqueeze(0)
-    ).to(torch.bfloat16)
+    return (prefix[:, columns].float() * weights["w_kda_in"][rows, columns].float().unsqueeze(0)).to(torch.bfloat16)
 
 
 def _independent_kda_oracle(
@@ -840,24 +792,17 @@ def _independent_kda_oracle(
         drafts,
         weights["w_kda_conv"],
     )
-    qkv = convolved.to(torch.bfloat16).view(
-        batch, QUERY_LEN, 3, config.local_heads, config.v_dim
-    )
+    qkv = convolved.to(torch.bfloat16).view(batch, QUERY_LEN, 3, config.local_heads, config.v_dim)
     f_a = projected[
         :,
-        4 * projection
-        + config.local_heads : 4 * projection
-        + config.local_heads
-        + config.v_dim,
+        4 * projection + config.local_heads : 4 * projection + config.local_heads + config.v_dim,
     ]
     gate = (
-        f_a.float() @ weights["w_kda_fb"].float().T
-    ).to(torch.bfloat16).view(
-        batch, QUERY_LEN, config.local_heads, config.v_dim
+        (f_a.float() @ weights["w_kda_fb"].float().T)
+        .to(torch.bfloat16)
+        .view(batch, QUERY_LEN, config.local_heads, config.v_dim)
     )
-    beta = projected[
-        :, 4 * projection : 4 * projection + config.local_heads
-    ].view(batch, QUERY_LEN, config.local_heads)
+    beta = projected[:, 4 * projection : 4 * projection + config.local_heads].view(batch, QUERY_LEN, config.local_heads)
     _, expected_recurrent, _ = q8_recurrence_reference(
         initial_recurrent,
         fixture.snapshots,
@@ -972,9 +917,7 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
     )
     if not torch.count_nonzero(full_parity.output):
         raise AssertionError("full output must be nonzero")
-    eager_rank_equal = _rank_equal(full_parity.output) and _rank_equal(
-        staged_parity.output
-    )
+    eager_rank_equal = _rank_equal(full_parity.output) and _rank_equal(staged_parity.output)
     if not eager_rank_equal:
         raise AssertionError("eager output checksums differ across TP ranks")
     _check_observable_full_path(full, shape)
@@ -1013,9 +956,7 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
     )
     if not torch.equal(full_graph_parity.conv, staged_graph_parity.conv):
         raise AssertionError("graph convolution caches differ")
-    graph_rank_equal = _rank_equal(full_graph_parity.output) and _rank_equal(
-        staged_graph_parity.output
-    )
+    graph_rank_equal = _rank_equal(full_graph_parity.output) and _rank_equal(staged_graph_parity.output)
     if not graph_rank_equal:
         raise AssertionError("graph output checksums differ across TP ranks")
     del full_parity_graph, staged_parity_graph
@@ -1033,8 +974,7 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         staged_call(staged_profile_fixture, 1, advance=True)
         tail_profiles = [tail.finish_stage_profile() for tail in staged.tails]
         staged_profile = {
-            name: statistics.median(profile[name] for profile in tail_profiles)
-            for name in tail_profiles[0]
+            name: statistics.median(profile[name] for profile in tail_profiles) for name in tail_profiles[0]
         }
         full_profile_graph = _capture_layer_graph(
             lambda layer: full_call(full_profile_fixture, layer, advance=False),
@@ -1153,12 +1093,7 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
                 "eager": eager_parity,
                 "graph": graph_parity,
                 "full_oracle_state_max_abs": float(
-                    (
-                        full_parity.recurrent.float()
-                        - expected_recurrent.float()
-                    )
-                    .abs()
-                    .max()
+                    (full_parity.recurrent.float() - expected_recurrent.float()).abs().max()
                 ),
             },
             "starting_point_us": STARTING_POINTS_US[shape.batch],

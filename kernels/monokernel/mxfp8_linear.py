@@ -373,12 +373,8 @@ class Mxfp8Linear:
             dtype=torch.uint8,
             device=device,
         )
-        self.quantize = (
-            None if workspace_only else build_mxfp8_quantize(rows, self.k)
-        )
-        self.project = (
-            None if workspace_only else build_mxfp8_project(rows, self.n, self.k)
-        )
+        self.quantize = None if workspace_only else build_mxfp8_quantize(rows, self.k)
+        self.project = None if workspace_only else build_mxfp8_project(rows, self.n, self.k)
 
     def __call__(self, source: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         if source.shape != (self.rows, self.k) or source.dtype != torch.bfloat16:

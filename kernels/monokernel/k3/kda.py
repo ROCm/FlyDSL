@@ -126,8 +126,7 @@ class KimiK3KdaAttention:
             or conv_state_layout is not ConvStateLayout.TIME_MAJOR
         ):
             raise ValueError(
-                "Kimi Agentic KDA requires B in {1,2,4,8}, q=8, "
-                "MTP, FP16 recurrent state, and time-major conv state"
+                "Kimi Agentic KDA requires B in {1,2,4,8}, q=8, " "MTP, FP16 recurrent state, and time-major conv state"
             )
         if not 1 <= launches_per_step <= MAX_LAYERS_PER_STEP:
             raise ValueError(f"launches_per_step must be in [1, {MAX_LAYERS_PER_STEP}], " f"got {launches_per_step}")
@@ -150,9 +149,7 @@ class KimiK3KdaAttention:
         atom_weight_layout = weights.mxfp4_weight_layout is Mxfp4WeightLayout.ATOM
         atom_scale_layout = weights.mxfp4_scale_layout is Mxfp4ScaleLayout.ATOM
         if atom_weight_layout != atom_scale_layout:
-            raise ValueError(
-                "the Kimi-K3 MonoKernel requires matching MXFP4 weight and scale layouts"
-            )
+            raise ValueError("the Kimi-K3 MonoKernel requires matching MXFP4 weight and scale layouts")
         self.atom_expert_layout = atom_weight_layout
         self.local_projection = config.local_heads * _HEAD_DIM
 
@@ -232,11 +229,7 @@ class KimiK3KdaAttention:
                 dtype=torch.bfloat16,
                 device=device,
             )
-        self.core = (
-            None
-            if agentic_batch_size
-            else KimiK3KdaRecurrence(samples)
-        )
+        self.core = None if agentic_batch_size else KimiK3KdaRecurrence(samples)
         if reduce_backend == "symmetric":
             self.symmetric_allreduce = symmetric_allreduce
             if self.symmetric_allreduce is None and not defer_collectives:
@@ -374,9 +367,7 @@ class KimiK3KdaAttention:
             shared_down, shared_down_scale = quantize_mxfp8(self.t["w_shared_dn"])
             latent_up, latent_up_scale = quantize_mxfp8(self.t["w_latent_up"])
             if self.atom_expert_layout:
-                w_ug, s_ug, w_dn, s_dn = prepare_mxfp4_expert_storage(
-                    self.W
-                )
+                w_ug, s_ug, w_dn, s_dn = prepare_mxfp4_expert_storage(self.W)
             else:
                 w_ug = pack_mxfp4(self.t["w_ug"])
                 s_ug = self.t["s_ug"].contiguous().view(-1)
@@ -450,17 +441,17 @@ class KimiK3KdaAttention:
         if not 0 <= layer < self.launches_per_step:
             raise ValueError(f"layer must be in [0, {self.launches_per_step}), got {layer}")
         expected_indices = (
-            (self.agentic_batch_size, 8)
-            if self.agentic_batch_size
-            else ((self.S + 1,) if self.mtp else (self.S,))
+            (self.agentic_batch_size, 8) if self.agentic_batch_size else ((self.S + 1,) if self.mtp else (self.S,))
         )
         if (
             state_indices.shape != expected_indices
             or state_indices.dtype != torch.int32
             or not state_indices.is_contiguous()
         ):
-            mode = "Agentic snapshot matrix" if self.agentic_batch_size else (
-                "MTP snapshot chain" if self.mtp else "decode slots"
+            mode = (
+                "Agentic snapshot matrix"
+                if self.agentic_batch_size
+                else ("MTP snapshot chain" if self.mtp else "decode slots")
             )
             raise ValueError(f"state_indices must be contiguous int32 {list(expected_indices)} for {mode}")
         if self.agentic_batch_size:
@@ -473,13 +464,10 @@ class KimiK3KdaAttention:
                 or num_accepted_tokens.device != state_indices.device
             ):
                 raise ValueError(
-                    "num_accepted_tokens must be contiguous int32 "
-                    f"{list(expected_accepted)} on the snapshot device"
+                    "num_accepted_tokens must be contiguous int32 " f"{list(expected_accepted)} on the snapshot device"
                 )
         elif num_accepted_tokens is not None:
-            raise ValueError(
-                "num_accepted_tokens is valid only for Agentic q=8"
-            )
+            raise ValueError("num_accepted_tokens is valid only for Agentic q=8")
         expected_hidden = (self.S, self.config.hidden)
         if (
             hidden_states.shape != expected_hidden
@@ -519,8 +507,7 @@ class KimiK3KdaAttention:
             or not recurrent_state.is_contiguous()
         ):
             raise ValueError(
-                f"recurrent_state must be contiguous {self.state_dtype} "
-                f"{list(expected_recurrent_state)}"
+                f"recurrent_state must be contiguous {self.state_dtype} " f"{list(expected_recurrent_state)}"
             )
 
         if self.monokernel_launch is not None:
@@ -600,11 +587,7 @@ class KimiK3KdaAttention:
                 self.t["g_kda_out"].data_ptr(),
                 self.w_kda_o_packed.data_ptr(),
                 state_indices.data_ptr(),
-                (
-                    num_accepted_tokens.data_ptr()
-                    if num_accepted_tokens is not None
-                    else state_indices.data_ptr()
-                ),
+                (num_accepted_tokens.data_ptr() if num_accepted_tokens is not None else state_indices.data_ptr()),
                 conv_state.data_ptr(),
                 recurrent_state.data_ptr(),
                 self.monokernel_scratch.data_ptr(),

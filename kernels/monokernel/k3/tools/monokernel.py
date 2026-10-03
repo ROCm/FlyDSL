@@ -509,9 +509,7 @@ def _worker(rank: int, args, port: int, results) -> None:
             layers=args.layers,
             repeats=args.repeats,
             rank_skew_ms=args.rank_skew_ms,
-            graph_rank_equal=all(
-                torch.equal(graph_peers[0], peer) for peer in graph_peers[1:]
-            ),
+            graph_rank_equal=all(torch.equal(graph_peers[0], peer) for peer in graph_peers[1:]),
         )
         if args.kernel_profile:
             dist.barrier()

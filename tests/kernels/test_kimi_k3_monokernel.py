@@ -45,9 +45,7 @@ def _run_tp8_tool(tool: str, *args: str) -> dict:
 
 def _run_agentic_tool(*args: str) -> list[dict]:
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(
-        path for path in (str(ROOT), env.get("PYTHONPATH", "")) if path
-    )
+    env["PYTHONPATH"] = os.pathsep.join(path for path in (str(ROOT), env.get("PYTHONPATH", "")) if path)
     result = subprocess.run(
         [
             sys.executable,
@@ -61,17 +59,13 @@ def _run_agentic_tool(*args: str) -> list[dict]:
         timeout=300,
         check=False,
     )
-    assert result.returncode == 0, (
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     payloads = [
         json.loads(line.removeprefix("BENCHMARK_JSON="))
         for line in result.stdout.splitlines()
         if line.startswith("BENCHMARK_JSON=")
     ]
-    assert len(payloads) == 1, (
-        f"expected one BENCHMARK_JSON payload, got stdout:\n{result.stdout}"
-    )
+    assert len(payloads) == 1, f"expected one BENCHMARK_JSON payload, got stdout:\n{result.stdout}"
     return payloads[0]
 
 
