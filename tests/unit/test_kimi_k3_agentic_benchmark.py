@@ -19,6 +19,10 @@ from kernels.monokernel.k3.tools.agentic_kda import (
     q8_conv_reference,
     q8_recurrence_reference,
 )
+from kernels.monokernel.k3.kernel import (
+    agentic_conv_writeback_requires_all,
+    mtp_conv_waits_for_previous,
+)
 
 
 def test_agentic_benchmark_protocol_defaults_are_reproducible() -> None:
@@ -122,6 +126,17 @@ def test_graph_epoch_plan_uses_all_layers_and_one_advance() -> None:
 
     assert layers == tuple(range(32))
     assert advances == 1
+
+
+def test_agentic_convolution_tokens_have_no_false_dependency_chain() -> None:
+    assert [
+        mtp_conv_waits_for_previous(agentic_batch_size=4, token=token)
+        for token in range(8)
+    ] == [False] * 8
+    assert [
+        agentic_conv_writeback_requires_all(token) for token in range(8)
+    ] == [False] * 7 + [True]
+    assert mtp_conv_waits_for_previous(agentic_batch_size=0, token=1)
 
 
 def test_parity_metrics_compute_booleans_from_untouched_values() -> None:

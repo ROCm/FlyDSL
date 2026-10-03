@@ -102,6 +102,20 @@ _MLA_VALUE_CHUNKS = _MLA_KV_LORA // _WAVE_SIZE
 _MLA_NORM_EPS = 1.0e-6
 
 
+def mtp_conv_waits_for_previous(*, agentic_batch_size: int, token):
+    """Return the true data dependency for legacy sequential MTP convolution."""
+
+    if agentic_batch_size:
+        return False
+    return token > 0
+
+
+def agentic_conv_writeback_requires_all(token):
+    """Return whether this q8 token publishes the rolled-back conv window."""
+
+    return token == 7
+
+
 def monokernel_layout(
     samples: int,
     *,
@@ -2890,10 +2904,23 @@ def build_kimi_k3_monokernel(
                 token = sample
                 if const_expr(agentic_batch_size > 0):
                     token = sample % 8
-                if token > 0:
-                    if tid == 0:
-                        load_i32(mtp_conv_ready_rsrc, (sample - 1) * _HEADS + head)
-                    gpu.barrier()
+                if const_expr(agentic_batch_size > 0):
+                    if agentic_conv_writeback_requires_all(token):
+                        if tid == 0:
+                            for prior_token in range_constexpr(7):
+                                load_i32(
+                                    mtp_conv_ready_rsrc,
+                                    (sample - 7 + prior_token) * _HEADS + head,
+                                )
+                        gpu.barrier()
+                else:
+                    if mtp_conv_waits_for_previous(
+                        agentic_batch_size=agentic_batch_size,
+                        token=token,
+                    ):
+                        if tid == 0:
+                            load_i32(mtp_conv_ready_rsrc, (sample - 1) * _HEADS + head)
+                        gpu.barrier()
 
                 qkvg_base = (sample * _HEADS + head) * 4 * _HEAD_DIM
 
