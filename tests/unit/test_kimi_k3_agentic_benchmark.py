@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -11,6 +13,7 @@ from kernels.monokernel.k3.tools.agentic_kda import (
     MIN_REPEATS,
     WARMUPS,
     AgenticKdaShape,
+    correlate_repeat_kernel_events,
     critical_rank_kernel_profile,
     critical_rank_medians,
     graph_epoch_plan,
@@ -103,6 +106,35 @@ def test_kernel_profile_selects_median_replay_critical_rank() -> None:
         "total_us_per_layer": 40.0,
         "mean_us": 10.0,
     }
+
+
+def test_profiler_correlates_cuda_kernels_from_cpu_repeat_markers() -> None:
+    def event(name, device_type, start, end, device_us=0.0):
+        return SimpleNamespace(
+            name=name,
+            device_type=device_type,
+            time_range=SimpleNamespace(start=start, end=end),
+            self_device_time_total=device_us,
+        )
+
+    prefix = "staged_graph_repeat_"
+    events = [
+        event(f"{prefix}0", torch.autograd.DeviceType.CPU, 0, 10),
+        event(f"{prefix}1", torch.autograd.DeviceType.CPU, 10, 20),
+        event("front", torch.autograd.DeviceType.CUDA, 2, 4, 2.0),
+        event("tail", torch.autograd.DeviceType.CUDA, 12, 15, 3.0),
+    ]
+
+    kernels = correlate_repeat_kernel_events(
+        events,
+        marker_prefix=prefix,
+        repeats=2,
+    )
+
+    assert kernels == [
+        {"front": {"calls": 1, "total_us": 2.0}},
+        {"tail": {"calls": 1, "total_us": 3.0}},
+    ]
 
 
 def test_agentic_shape_selects_mixed_recurrence_snapshots() -> None:

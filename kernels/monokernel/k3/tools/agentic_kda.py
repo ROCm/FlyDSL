@@ -205,6 +205,48 @@ def critical_rank_kernel_profile(
     }
 
 
+def correlate_repeat_kernel_events(
+    events,
+    *,
+    marker_prefix: str,
+    repeats: int,
+) -> list[dict[str, dict[str, float | int]]]:
+    """Group CUDA kernels under their enclosing CPU repeat marker."""
+
+    events = list(events)
+    repeat_ranges = {
+        int(event.name.removeprefix(marker_prefix)): event.time_range
+        for event in events
+        if event.device_type == torch.autograd.DeviceType.CPU
+        and event.name.startswith(marker_prefix)
+    }
+    if len(repeat_ranges) != repeats:
+        raise RuntimeError(
+            f"profiler recorded {len(repeat_ranges)} of {repeats} CPU repeat markers"
+        )
+    kernels_by_repeat = [{} for _ in range(repeats)]
+    device_events = [
+        event
+        for event in events
+        if event.device_type == torch.autograd.DeviceType.CUDA
+        and not event.name.startswith(marker_prefix)
+    ]
+    for repeat, repeat_range in repeat_ranges.items():
+        for event in device_events:
+            if (
+                event.time_range.start < repeat_range.start
+                or event.time_range.end > repeat_range.end
+            ):
+                continue
+            values = kernels_by_repeat[repeat].setdefault(
+                event.name,
+                {"calls": 0, "total_us": 0.0},
+            )
+            values["calls"] += 1
+            values["total_us"] += event.self_device_time_total
+    return kernels_by_repeat
+
+
 def graph_epoch_plan(layers: int) -> tuple[tuple[int, ...], int]:
     """Return the common per-layer tags and decode-step advance count."""
 
@@ -579,36 +621,13 @@ def _profile_staged_graph(
                 }
             )
 
-    device_events = [
-        event
-        for event in profiler.events()
-        if event.device_type == torch.autograd.DeviceType.CUDA
-    ]
-    repeat_ranges = {
-        int(event.name.removeprefix(marker_prefix)): event.time_range
-        for event in device_events
-        if event.name.startswith(marker_prefix)
-    }
-    if len(repeat_ranges) != repeats:
-        raise RuntimeError(
-            f"profiler recorded {len(repeat_ranges)} of {repeats} repeat markers"
-        )
+    kernels_by_repeat = correlate_repeat_kernel_events(
+        profiler.events(),
+        marker_prefix=marker_prefix,
+        repeats=repeats,
+    )
     for run in local_runs:
-        repeat_range = repeat_ranges[run["repeat"]]
-        for event in device_events:
-            if event.name.startswith(marker_prefix):
-                continue
-            if (
-                event.time_range.start < repeat_range.start
-                or event.time_range.end > repeat_range.end
-            ):
-                continue
-            values = run["kernels"].setdefault(
-                event.name,
-                {"calls": 0, "total_us": 0.0},
-            )
-            values["calls"] += 1
-            values["total_us"] += event.self_device_time_total
+        run["kernels"] = kernels_by_repeat[run["repeat"]]
     gathered: list[list[dict] | None] = [None] * dist.get_world_size()
     dist.all_gather_object(gathered, local_runs)
     return critical_rank_kernel_profile(
