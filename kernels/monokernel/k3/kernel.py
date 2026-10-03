@@ -122,6 +122,12 @@ def agentic_recurrence_tokens_per_cta(*, agentic_batch_size: int) -> int:
     return 4 if agentic_batch_size else 2
 
 
+def symmetric_mailbox_epoch(step_value, *, launches_per_step: int, layer):
+    """Return the launch epoch shared by symmetric mailbox tags and slots."""
+
+    return step_value * launches_per_step + layer
+
+
 def monokernel_layout(
     samples: int,
     *,
@@ -588,8 +594,13 @@ def build_kimi_k3_monokernel(
         mla_gate_rsrc = rsrc(scratch + fx.Int64(mla_gate_offset))
 
         step_value = uniform(bo.buffer_load(rsrc(step), 0, vec_width=1, dtype=T.i32))
-        tag = step_value * launches_per_step + layer + 1
-        slot = step_value & 1
+        launch_epoch = symmetric_mailbox_epoch(
+            step_value,
+            launches_per_step=launches_per_step,
+            layer=layer,
+        )
+        tag = launch_epoch + 1
+        slot = launch_epoch & 1
         symmetric_base = fx.Int64(slot) * fx.Int64(slot_bytes)
 
         def state_slots(sample):
@@ -2943,9 +2954,10 @@ def build_kimi_k3_monokernel(
                         )
 
                 if valid_state:
-                    conv_slot = input_slot
+                    conv_input_slot = input_slot
+                    conv_output_slot = output_slot
                     if const_expr(agentic_batch_size > 0):
-                        conv_slot = uniform(
+                        conv_input_slot = uniform(
                             bo.buffer_load(
                                 indices_rsrc,
                                 (sample // 8) * 8,
@@ -2953,11 +2965,15 @@ def build_kimi_k3_monokernel(
                                 dtype=T.i32,
                             )
                         )
+                        conv_output_slot = conv_input_slot
                     conv_state_rsrc = rsrc(
                         conv_state
-                        + fx.Int64(conv_slot) * fx.Int64(conv_slot_bytes)
+                        + fx.Int64(conv_input_slot) * fx.Int64(conv_slot_bytes)
                     )
-                    conv_state_out_rsrc = conv_state_rsrc
+                    conv_state_out_rsrc = rsrc(
+                        conv_state
+                        + fx.Int64(conv_output_slot) * fx.Int64(conv_slot_bytes)
+                    )
                     prepare_kda_conv(sample, head, conv_state_rsrc, conv_state_out_rsrc)
                     publish_mtp_component(0, shared_query)
                     publish_mtp_component(1, shared_key)

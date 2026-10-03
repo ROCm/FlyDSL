@@ -23,6 +23,7 @@ from kernels.monokernel.k3.kernel import (
     agentic_conv_writeback_requires_all,
     agentic_recurrence_tokens_per_cta,
     mtp_conv_waits_for_previous,
+    symmetric_mailbox_epoch,
 )
 
 
@@ -33,12 +34,27 @@ def test_agentic_benchmark_protocol_defaults_are_reproducible() -> None:
     assert WARMUPS == args.warmups == 8
     assert MIN_REPEATS == args.repeats == 50
     assert args.batches == (1, 2, 4)
+    assert args.rank_skew_ms == 0
+    assert (
+        make_argument_parser().parse_args(["--rank-skew-ms", "25"]).rank_skew_ms
+        == 25
+    )
 
 
 def test_agentic_recurrence_uses_four_token_resident_chunks() -> None:
     assert agentic_recurrence_tokens_per_cta(agentic_batch_size=0) == 2
     assert agentic_recurrence_tokens_per_cta(agentic_batch_size=1) == 4
     assert agentic_recurrence_tokens_per_cta(agentic_batch_size=4) == 4
+
+
+def test_symmetric_mailbox_slot_tracks_full_launch_epoch() -> None:
+    assert symmetric_mailbox_epoch(0, launches_per_step=32, layer=0) == 0
+    assert symmetric_mailbox_epoch(0, launches_per_step=32, layer=31) == 31
+    assert symmetric_mailbox_epoch(1, launches_per_step=32, layer=0) == 32
+    assert [
+        symmetric_mailbox_epoch(0, launches_per_step=32, layer=layer) & 1
+        for layer in range(4)
+    ] == [0, 1, 0, 1]
 
 
 def test_critical_rank_medians_take_each_replay_slowest_rank() -> None:

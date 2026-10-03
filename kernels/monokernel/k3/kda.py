@@ -24,6 +24,7 @@ from kernels.monokernel.k3.kernel import (
 )
 from kernels.monokernel.packing import (
     pack_bf16,
+    pack_mxfp4,
     pack_mxfp8_scale,
     pack_mxfp8_weight,
 )
@@ -234,7 +235,7 @@ class KimiK3KdaAttention:
         self.core = (
             None
             if agentic_batch_size
-            else KimiK3KdaRecurrence(samples, conv_state_layout, state_dtype)
+            else KimiK3KdaRecurrence(samples)
         )
         if reduce_backend == "symmetric":
             self.symmetric_allreduce = symmetric_allreduce
@@ -372,7 +373,15 @@ class KimiK3KdaAttention:
             shared_up, shared_up_scale = quantize_mxfp8(self.t["w_shared_ug"])
             shared_down, shared_down_scale = quantize_mxfp8(self.t["w_shared_dn"])
             latent_up, latent_up_scale = quantize_mxfp8(self.t["w_latent_up"])
-            w_ug, s_ug, w_dn, s_dn = prepare_mxfp4_expert_storage(self.W)
+            if self.atom_expert_layout:
+                w_ug, s_ug, w_dn, s_dn = prepare_mxfp4_expert_storage(
+                    self.W
+                )
+            else:
+                w_ug = pack_mxfp4(self.t["w_ug"])
+                s_ug = self.t["s_ug"].contiguous().view(-1)
+                w_dn = pack_mxfp4(self.t["w_dn"])
+                s_dn = self.t["s_dn"].contiguous().view(-1)
             self.moe_packed = {
                 "w_r": pack_bf16(self.t["w_r"]),
                 "w_latent_down": pack_mxfp8_weight(latent_down),

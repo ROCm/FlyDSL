@@ -11,6 +11,7 @@ import os
 import socket
 import statistics
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -478,11 +479,17 @@ def _worker(rank: int, args, port: int, results) -> None:
                 run_layer(epoch_layer=epoch, advance=False)
             layer.advance_step()
         for _ in range(2):
+            dist.barrier()
+            if args.rank_skew_ms and rank == 0:
+                time.sleep(args.rank_skew_ms / 1000.0)
             graph.replay()
         torch.cuda.synchronize()
         dist.barrier()
         times = []
         for _ in range(args.repeats):
+            dist.barrier()
+            if args.rank_skew_ms and rank == 0:
+                time.sleep(args.rank_skew_ms / 1000.0)
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
@@ -493,12 +500,18 @@ def _worker(rank: int, args, port: int, results) -> None:
         gathered = [None] * args.npes
         dist.all_gather_object(gathered, times)
         critical = [max(values) for values in zip(*gathered)]
+        graph_peers = [torch.empty_like(output.cpu()) for _ in range(args.npes)]
+        dist.all_gather(graph_peers, output.cpu().contiguous())
         result.update(
             median_us=statistics.median(critical),
             min_us=min(critical),
             max_us=max(critical),
             layers=args.layers,
             repeats=args.repeats,
+            rank_skew_ms=args.rank_skew_ms,
+            graph_rank_equal=all(
+                torch.equal(graph_peers[0], peer) for peer in graph_peers[1:]
+            ),
         )
         if args.kernel_profile:
             dist.barrier()
@@ -571,6 +584,7 @@ def main() -> int:
     parser.add_argument("--layers", type=int, default=16)
     parser.add_argument("--repeats", type=int, default=7)
     parser.add_argument("--kernel-profile", action="store_true")
+    parser.add_argument("--rank-skew-ms", type=float, default=0)
     parser.add_argument("--dump-ir-dir")
     parser.add_argument("--output")
     args = parser.parse_args()
@@ -585,6 +599,8 @@ def main() -> int:
         args.check = True
     if not 1 <= args.layers <= MAX_LAYERS_PER_STEP:
         parser.error(f"--layers must be in [1, {MAX_LAYERS_PER_STEP}]")
+    if 0 < args.rank_skew_ms < 25:
+        parser.error("--rank-skew-ms must be zero or at least 25")
 
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -593,6 +609,8 @@ def main() -> int:
     results = manager.dict()
     mp.spawn(_worker, args=(args, port, results), nprocs=args.npes)
     ok = all(result["rank_equal"] and result["finite"] for result in results.values())
+    if args.bench:
+        ok = ok and all(result["graph_rank_equal"] for result in results.values())
     if args.check:
         ok = ok and all(
             result["attention_rel_l2"] < 0.02

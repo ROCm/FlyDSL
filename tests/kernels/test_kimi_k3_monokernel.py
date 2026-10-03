@@ -43,6 +43,38 @@ def _run_tp8_tool(tool: str, *args: str) -> dict:
     return records[0]
 
 
+def _run_agentic_tool(*args: str) -> list[dict]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        path for path in (str(ROOT), env.get("PYTHONPATH", "")) if path
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "kernels/monokernel/k3/tools/agentic_kda.py"),
+            *args,
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payloads = [
+        json.loads(line.removeprefix("BENCHMARK_JSON="))
+        for line in result.stdout.splitlines()
+        if line.startswith("BENCHMARK_JSON=")
+    ]
+    assert len(payloads) == 1, (
+        f"expected one BENCHMARK_JSON payload, got stdout:\n{result.stdout}"
+    )
+    return payloads[0]
+
+
 @pytest.mark.multi_gpu
 @pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
 def test_kimi_k3_monokernel_mla_baseline_tp8() -> None:
@@ -146,6 +178,13 @@ def test_kimi_k3_monokernel_mtp_tp8(samples: int) -> None:
         "1",
         "--mtp",
         "--check",
+        "--bench",
+        "--layers",
+        "32",
+        "--repeats",
+        "2",
+        "--rank-skew-ms",
+        "25",
     )
     assert result["mtp"] is True
     assert result["rank_equal"] is True
@@ -155,3 +194,23 @@ def test_kimi_k3_monokernel_mtp_tp8(samples: int) -> None:
     assert result["recurrent_state_rel_l2"] < 5e-4
     assert result["selection_equal"] is True
     assert result["output_rel_l2"] < 1e-2
+    assert result["graph_rank_equal"] is True
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
+def test_kimi_k3_agentic_skewed_graph_tp8() -> None:
+    results = _run_agentic_tool(
+        "--batches",
+        "1",
+        "2",
+        "4",
+        "--rank-skew-ms",
+        "25",
+    )
+    assert [result["batch"] for result in results] == [1, 2, 4]
+    for result in results:
+        assert result["rank_skew_ms"] == 25
+        assert result["parity"]["eager"]["rank_equal"] is True
+        assert result["parity"]["graph"]["rank_equal"] is True
+        assert result["parity"]["graph"]["conv_exact"] is True

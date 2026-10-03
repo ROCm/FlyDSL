@@ -18,6 +18,7 @@ import json
 import math
 import socket
 import statistics
+import time
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -332,6 +333,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--kernel-profile", action="store_true")
     parser.add_argument("--profile-repeats", type=int, default=MIN_REPEATS)
+    parser.add_argument("--rank-skew-ms", type=float, default=0)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--output")
     return parser
@@ -478,13 +480,19 @@ def _time_graph(
     layers: int,
     warmups: int,
     repeats: int,
+    rank_skew_ms: float = 0,
 ) -> tuple[float, list[float]]:
     for _ in range(warmups):
+        dist.barrier()
+        if rank_skew_ms and dist.get_rank() == 0:
+            time.sleep(rank_skew_ms / 1000.0)
         graph.replay()
     torch.cuda.synchronize()
     local = []
     for _ in range(repeats):
         dist.barrier()
+        if rank_skew_ms and dist.get_rank() == 0:
+            time.sleep(rank_skew_ms / 1000.0)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
@@ -959,8 +967,12 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         staged.advance_step,
         args.layers,
     )
-    full_parity_graph.replay()
-    staged_parity_graph.replay()
+    for graph in (full_parity_graph, staged_parity_graph):
+        for _ in range(2):
+            dist.barrier()
+            if args.rank_skew_ms and rank == 0:
+                time.sleep(args.rank_skew_ms / 1000.0)
+            graph.replay()
     torch.cuda.synchronize()
     torch.testing.assert_close(
         full_graph_parity.output,
@@ -1034,12 +1046,14 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         layers=args.layers,
         warmups=args.warmups,
         repeats=args.repeats,
+        rank_skew_ms=args.rank_skew_ms,
     )
     staged_us, _ = _time_graph(
         staged_graph,
         layers=args.layers,
         warmups=args.warmups,
         repeats=args.repeats,
+        rank_skew_ms=args.rank_skew_ms,
     )
     if args.kernel_profile:
         staged_kernel_fixture = _fixture(shape, device, args.seed + 349)
@@ -1093,6 +1107,7 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
             "layers": args.layers,
             "warmups": args.warmups,
             "repeats": args.repeats,
+            "rank_skew_ms": args.rank_skew_ms,
             "critical_rank_median_us": {
                 "staged": staged_us,
                 "full": full_us,
@@ -1172,6 +1187,8 @@ def main() -> int:
         parser.error(f"--repeats must be at least {MIN_REPEATS}")
     if args.profile_repeats < MIN_REPEATS:
         parser.error(f"--profile-repeats must be at least {MIN_REPEATS}")
+    if 0 < args.rank_skew_ms < 25:
+        parser.error("--rank-skew-ms must be zero or at least 25")
 
     manager = mp.Manager()
     results = manager.list()
