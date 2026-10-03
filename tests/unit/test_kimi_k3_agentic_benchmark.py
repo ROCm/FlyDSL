@@ -11,6 +11,7 @@ from kernels.monokernel.k3.tools.agentic_kda import (
     MIN_REPEATS,
     WARMUPS,
     AgenticKdaShape,
+    critical_rank_kernel_profile,
     critical_rank_medians,
     graph_epoch_plan,
     make_argument_parser,
@@ -38,6 +39,38 @@ def test_critical_rank_medians_take_each_replay_slowest_rank() -> None:
     assert critical_rank_medians(rank_samples, layers=10) == pytest.approx(
         (20.0, 30.0, 60.0)
     )
+
+
+def test_kernel_profile_selects_critical_rank_and_normalizes_per_layer() -> None:
+    profiles = (
+        {
+            "rank": 0,
+            "graph_us": 2000.0,
+            "kernels": {
+                "front": {"calls": 64, "total_us": 800.0},
+                "tail": {"calls": 256, "total_us": 1000.0},
+            },
+        },
+        {
+            "rank": 1,
+            "graph_us": 2400.0,
+            "kernels": {
+                "front": {"calls": 64, "total_us": 960.0},
+                "tail": {"calls": 256, "total_us": 1200.0},
+            },
+        },
+    )
+
+    result = critical_rank_kernel_profile(profiles, layers=32, repeats=2)
+
+    assert result["critical_rank"] == 1
+    assert result["profiled_graph_us_per_layer"] == pytest.approx(37.5)
+    assert result["kernels"][0] == {
+        "name": "tail",
+        "calls_per_layer": 4.0,
+        "total_us_per_layer": 18.75,
+        "mean_us": pytest.approx(1200.0 / 256),
+    }
 
 
 def test_agentic_shape_selects_mixed_recurrence_snapshots() -> None:

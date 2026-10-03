@@ -161,6 +161,36 @@ def critical_rank_medians(
     )
 
 
+def critical_rank_kernel_profile(
+    rank_profiles: Sequence[dict],
+    *,
+    layers: int,
+    repeats: int,
+) -> dict:
+    """Select the slowest profiled rank and normalize its kernels per layer."""
+
+    if not rank_profiles or layers <= 0 or repeats <= 0:
+        raise ValueError("rank profiles, layers, and repeats must be positive")
+    critical = max(rank_profiles, key=lambda profile: profile["graph_us"])
+    invocations = layers * repeats
+    kernels = [
+        {
+            "name": name,
+            "calls_per_layer": values["calls"] / invocations,
+            "total_us_per_layer": values["total_us"] / invocations,
+            "mean_us": values["total_us"] / values["calls"],
+        }
+        for name, values in critical["kernels"].items()
+        if values["calls"]
+    ]
+    kernels.sort(key=lambda kernel: kernel["total_us_per_layer"], reverse=True)
+    return {
+        "critical_rank": critical["rank"],
+        "profiled_graph_us_per_layer": critical["graph_us"] / invocations,
+        "kernels": kernels,
+    }
+
+
 def graph_epoch_plan(layers: int) -> tuple[tuple[int, ...], int]:
     """Return the common per-layer tags and decode-step advance count."""
 
@@ -287,6 +317,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmups", type=int, default=WARMUPS)
     parser.add_argument("--repeats", type=int, default=MIN_REPEATS)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--kernel-profile", action="store_true")
     parser.add_argument("--profile-repeats", type=int, default=MIN_REPEATS)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--output")
@@ -460,17 +491,18 @@ def _profile_full(
     timeline: torch.Tensor,
     *,
     repeats: int,
+    labels: Sequence[str] = _STAGE_LABELS,
 ) -> dict[str, float]:
     local_runs = []
     for _ in range(repeats):
         dist.barrier()
         graph.replay()
         torch.cuda.synchronize()
-        ticks = timeline.cpu().tolist()[: len(_STAGE_LABELS) + 1]
+        ticks = timeline.cpu().tolist()[: len(labels) + 1]
         local_runs.append(
             {
                 label: (ticks[index + 1] - ticks[index]) / 100.0
-                for index, label in enumerate(_STAGE_LABELS)
+                for index, label in enumerate(labels)
             }
         )
     gathered: list[list[dict[str, float]] | None] = [None] * dist.get_world_size()
@@ -481,6 +513,53 @@ def _profile_full(
         critical_runs.append(max(rank_runs, key=lambda run: sum(run.values())))
     critical_runs.sort(key=lambda run: sum(run.values()))
     return critical_runs[len(critical_runs) // 2]
+
+
+def _profile_staged_graph(
+    graph: torch.cuda.CUDAGraph,
+    *,
+    rank: int,
+    layers: int,
+    repeats: int,
+) -> dict:
+    """Profile graph kernels and report the slowest rank's per-layer launches."""
+
+    dist.barrier()
+    torch.cuda.synchronize()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        acc_events=True,
+    ) as profiler:
+        start.record()
+        for _ in range(repeats):
+            graph.replay()
+        end.record()
+        end.synchronize()
+    kernels = {
+        event.key: {
+            "calls": event.count,
+            "total_us": event.self_device_time_total,
+        }
+        for event in profiler.key_averages()
+        if event.self_device_time_total > 0
+    }
+    local = {
+        "rank": rank,
+        "graph_us": start.elapsed_time(end) * 1000.0,
+        "kernels": kernels,
+    }
+    gathered: list[dict | None] = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, local)
+    return critical_rank_kernel_profile(
+        [profile for profile in gathered if profile is not None],
+        layers=layers,
+        repeats=repeats,
+    )
 
 
 def _check_observable_full_path(layer, shape: AgenticKdaShape) -> None:
@@ -885,6 +964,33 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         )
         del full_profile_graph
 
+    staged_kernel_profile = None
+    staged_front_stage_profile = None
+    if args.kernel_profile:
+        staged_kernel_fixture = _fixture(shape, device, args.seed + 349)
+        staged_kernel_graph = _capture_layer_graph(
+            lambda layer: staged_call(
+                staged_kernel_fixture,
+                layer,
+                advance=False,
+            ),
+            staged.advance_step,
+            args.layers,
+        )
+        staged_kernel_profile = _profile_staged_graph(
+            staged_kernel_graph,
+            rank=rank,
+            layers=args.layers,
+            repeats=args.profile_repeats,
+        )
+        staged_front_stage_profile = _profile_full(
+            staged_kernel_graph,
+            staged.front.attention.monokernel_timeline,
+            repeats=args.profile_repeats,
+            labels=_STAGE_LABELS[:4],
+        )
+        del staged_kernel_graph
+
     # Timing fixtures are fresh and used only by their corresponding graph.
     full_timing = _fixture(shape, device, args.seed + 399)
     staged_timing = _fixture(shape, device, args.seed + 399)
@@ -976,6 +1082,9 @@ def _benchmark_batch(rank: int, args, shape: AgenticKdaShape) -> dict | None:
         if staged_profile is not None:
             result["staged_tail_profile_us"] = staged_profile
             result["staged_tail_profile_sum_us"] = sum(staged_profile.values())
+        if staged_kernel_profile is not None:
+            result["staged_kernel_profile"] = staged_kernel_profile
+            result["staged_front_stage_profile_us"] = staged_front_stage_profile
         print(json.dumps(result, sort_keys=True), flush=True)
 
     del full_graph, staged_graph
