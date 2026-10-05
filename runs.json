@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-05T07:06:54Z",
+ "updated": "2026-10-05T09:46:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 37291980374,
+   "pr": 1222,
+   "commit": "4a0200de8a049c7aeb5f23d34d8954cc719b0295",
+   "branch": "fix_cmake_rocm7.14",
+   "event": "pull_request",
+   "title": "[Build] Fall back to HIP runtime from rocm-sdk core wheels",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37291980374",
+   "created_at": "2026-10-05T09:44:00Z",
+   "updated_at": "2026-10-05T09:46:04Z",
+   "actor": "apinge",
+   "jobs": []
+  },
   {
    "run_id": 37246461815,
    "pr": 1223,
@@ -532,7 +547,7 @@
   },
   {
    "run_id": 36854600648,
-   "pr": 1222,
+   "pr": null,
    "commit": "8b0beac1822acc46428c373e23dd0d3ca77ae8da",
    "branch": "fix_cmake_rocm7.14",
    "event": "pull_request",
@@ -1469,21 +1484,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36681562842",
    "created_at": "2026-09-30T07:03:35Z",
    "updated_at": "2026-09-30T07:05:13Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 36672432710,
-   "pr": 1215,
-   "commit": "637fb15a1ea3ecfb4cf217a78e6ddb0e2c7dd584",
-   "branch": "jli/schedule_bank",
-   "event": "pull_request",
-   "title": "[compiler][opt] add schedule_bank api for gfx1250",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36672432710",
-   "created_at": "2026-09-30T05:13:33Z",
-   "updated_at": "2026-09-30T05:41:11Z",
    "actor": "jli-melchior",
    "jobs": []
   }
