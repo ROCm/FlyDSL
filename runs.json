@@ -1,11 +1,56 @@
 {
  "schema": 1,
- "updated": "2026-10-05T15:34:10Z",
+ "updated": "2026-10-05T18:39:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37330793634,
+   "run_id": 37353368670,
    "pr": 1223,
+   "commit": "b9f26613ceb875a3f8ce543792b3b74d2ea7bdb8",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37353368670",
+   "created_at": "2026-10-05T18:05:51Z",
+   "updated_at": "2026-10-05T18:05:51Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37352015778,
+   "pr": null,
+   "commit": "abbb1010c85202f3d3949ca8ed084063b05b540c",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37352015778",
+   "created_at": "2026-10-05T17:55:05Z",
+   "updated_at": "2026-10-05T17:55:05Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37333763213,
+   "pr": null,
+   "commit": "74d7f62484a1c5efa34236c2a25488529ef94696",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37333763213",
+   "created_at": "2026-10-05T15:33:17Z",
+   "updated_at": "2026-10-05T15:33:17Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37330793634,
+   "pr": null,
    "commit": "e8eb58e86bfb459ccb1b27f972fbd7e1871ebd01",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -1411,138 +1456,6 @@
      "started_at": "2026-09-30T10:00:36Z",
      "completed_at": "2026-09-30T11:20:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36694312216/job/109824530649"
-    }
-   ]
-  },
-  {
-   "run_id": 36687067734,
-   "pr": 1217,
-   "commit": "beeacc17538134b06befc03f0daec47ba19563fc",
-   "branch": "feat/conv3d-align-aiter",
-   "event": "pull_request",
-   "title": "feat(conv3d): align bf16 implicit GEMM with aiter #5370",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36687067734",
-   "created_at": "2026-09-30T08:00:43Z",
-   "updated_at": "2026-09-30T09:10:32Z",
-   "actor": "huizzhan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-30T08:29:44Z",
-     "completed_at": "2026-09-30T09:10:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36687067734/job/109804676845"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-30T08:29:18Z",
-     "completed_at": "2026-09-30T09:09:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36687067734/job/109804677010"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-30T08:29:31Z",
-     "completed_at": "2026-09-30T08:47:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36687067734/job/109804677047"
-    }
-   ]
-  },
-  {
-   "run_id": 36684787636,
-   "pr": 1215,
-   "commit": "fccbd0bf97941d4738240f323576235ae7dd4e5e",
-   "branch": "jli/schedule_bank",
-   "event": "pull_request",
-   "title": "[compiler][opt] add schedule_bank api for gfx1250",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684787636",
-   "created_at": "2026-09-30T07:37:40Z",
-   "updated_at": "2026-09-30T09:13:01Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-30T08:29:39Z",
-     "completed_at": "2026-09-30T09:13:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684787636/job/109793739013"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-30T08:05:36Z",
-     "completed_at": "2026-09-30T08:17:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684787636/job/109793739121"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-09-30T07:56:43Z",
-     "completed_at": "2026-09-30T08:16:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684787636/job/109793739441"
-    }
-   ]
-  },
-  {
-   "run_id": 36684093024,
-   "pr": null,
-   "commit": "bbdca703cee28d764511e2efef0b28d9fff7f3ff",
-   "branch": "kernel/gfx1100-flash-attn",
-   "event": "pull_request",
-   "title": "[Kernel] Add dense Flash Attention for gfx1100",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684093024",
-   "created_at": "2026-09-30T07:30:34Z",
-   "updated_at": "2026-09-30T09:31:04Z",
-   "actor": "vlluvia",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-30T07:45:45Z",
-     "completed_at": "2026-09-30T08:46:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684093024/job/109790410009",
-     "machine": "cv350-1e707-c03-2",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-30T07:45:37Z",
-     "completed_at": "2026-09-30T08:05:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684093024/job/109790410020"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-09-30T07:56:53Z",
-     "completed_at": "2026-09-30T09:31:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36684093024/job/109790410034"
     }
    ]
   }
