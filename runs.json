@@ -1,22 +1,65 @@
 {
  "schema": 1,
- "updated": "2026-10-05T09:46:51Z",
+ "updated": "2026-10-05T10:59:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37291980374,
+   "run_id": 37299835332,
    "pr": 1222,
+   "commit": "e39b2d5d53287515ecc4fbc720ca2c24bcc73ab6",
+   "branch": "fix_cmake_rocm7.14",
+   "event": "pull_request",
+   "title": "[Build][JIT] Support core-only ROCm SDK environments",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37299835332",
+   "created_at": "2026-10-05T10:57:19Z",
+   "updated_at": "2026-10-05T10:58:36Z",
+   "actor": "apinge",
+   "jobs": []
+  },
+  {
+   "run_id": 37291980374,
+   "pr": null,
    "commit": "4a0200de8a049c7aeb5f23d34d8954cc719b0295",
    "branch": "fix_cmake_rocm7.14",
    "event": "pull_request",
-   "title": "[Build] Fall back to HIP runtime from rocm-sdk core wheels",
-   "status": "queued",
-   "conclusion": null,
+   "title": "[Build][JIT] Support core-only ROCm SDK environments",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37291980374",
    "created_at": "2026-10-05T09:44:00Z",
-   "updated_at": "2026-10-05T09:46:04Z",
+   "updated_at": "2026-10-05T10:58:10Z",
    "actor": "apinge",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-05T10:27:52Z",
+     "completed_at": "2026-10-05T10:58:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37291980374/job/111719266785"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-05T10:27:26Z",
+     "completed_at": "2026-10-05T10:58:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37291980374/job/111719266836"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-10-05T10:27:13Z",
+     "completed_at": "2026-10-05T10:42:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37291980374/job/111719267044"
+    }
+   ]
   },
   {
    "run_id": 37246461815,
@@ -551,7 +594,7 @@
    "commit": "8b0beac1822acc46428c373e23dd0d3ca77ae8da",
    "branch": "fix_cmake_rocm7.14",
    "event": "pull_request",
-   "title": "[Build] Fall back to HIP runtime from rocm-sdk core wheels",
+   "title": "[Build][JIT] Support core-only ROCm SDK environments",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36854600648",
@@ -594,7 +637,7 @@
    "commit": "71b0bc1e81c580a151f9a0735bce294ba7bd322f",
    "branch": "fix_cmake_rocm7.14",
    "event": "pull_request",
-   "title": "[Build] Fall back to HIP runtime from rocm-sdk core wheels",
+   "title": "[Build][JIT] Support core-only ROCm SDK environments",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36852838623",
@@ -609,7 +652,7 @@
    "commit": "9e9d7d9ef42ad256add0afbe55cb31489e05f4ff",
    "branch": "fix_cmake_rocm7.14",
    "event": "pull_request",
-   "title": "[Build] Fall back to HIP runtime from rocm-sdk core wheels",
+   "title": "[Build][JIT] Support core-only ROCm SDK environments",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36850657108",
@@ -1471,21 +1514,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/36682051977/job/109787858834"
     }
    ]
-  },
-  {
-   "run_id": 36681562842,
-   "pr": 1215,
-   "commit": "70f8448d5e8e88efa0997dca36d0334e25fa606f",
-   "branch": "jli/schedule_bank",
-   "event": "pull_request",
-   "title": "[compiler][opt] add schedule_bank api for gfx1250",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36681562842",
-   "created_at": "2026-09-30T07:03:35Z",
-   "updated_at": "2026-09-30T07:05:13Z",
-   "actor": "jli-melchior",
-   "jobs": []
   }
  ]
 }
