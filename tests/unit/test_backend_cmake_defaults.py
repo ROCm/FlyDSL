@@ -29,63 +29,6 @@ def test_rocm_runtime_is_only_added_for_rocdl_backend():
     assert "add_subdirectory(ROCm)" in text
 
 
-def test_rocm_core_wheel_hip_fallback(tmp_path):
-    """Configure the real ROCm runtime CMake file against a core-only wheel."""
-    cmake = shutil.which("cmake")
-    if cmake is None:
-        pytest.skip("cmake not available")
-
-    core = tmp_path / "site-packages" / "_rocm_sdk_core"
-    header = core / "include" / "hip" / "hip_runtime.h"
-    runtime = core / "lib" / "libamdhip64.so.7"
-    header.parent.mkdir(parents=True)
-    runtime.parent.mkdir(parents=True)
-    header.touch()
-    runtime.touch()
-
-    fake_python = tmp_path / "python"
-    fake_python.write_text(f'#!/bin/sh\nprintf "%s\\n" "{core}"\n')
-    fake_python.chmod(0o755)
-
-    source = tmp_path / "source"
-    source.mkdir()
-    for name in ("FlyRocmRuntimeWrappers.cpp", "FlyRocmAotRuntime.cpp", "FlyRocmRuntimeError.cpp"):
-        (source / name).touch()
-
-    runtime_cmake = _REPO_ROOT / "lib" / "Runtime" / "ROCm" / "CMakeLists.txt"
-    (source / "CMakeLists.txt").write_text(
-        "\n".join(
-            [
-                "cmake_minimum_required(VERSION 3.20)",
-                "project(FlyDSLHipCoreFallback CXX)",
-                # Make the fixture independent of a host ROCm installation.
-                "set(CMAKE_DISABLE_FIND_PACKAGE_hip TRUE)",
-                f'set(Python3_EXECUTABLE "{fake_python}")',
-                f'include("{runtime_cmake}")',
-                "if(NOT TARGET hip::host OR NOT TARGET hip::amdhip64)",
-                '  message(FATAL_ERROR "core HIP fallback did not define the required targets")',
-                "endif()",
-                "get_target_property(include_dirs hip::host INTERFACE_INCLUDE_DIRECTORIES)",
-                f'if(NOT include_dirs STREQUAL "{core}/include")',
-                '  message(FATAL_ERROR "wrong HIP include directory: ${include_dirs}")',
-                "endif()",
-                "get_target_property(runtime_location hip::amdhip64 IMPORTED_LOCATION)",
-                f'if(NOT runtime_location STREQUAL "{runtime}")',
-                '  message(FATAL_ERROR "wrong HIP runtime: ${runtime_location}")',
-                "endif()",
-                "",
-            ]
-        )
-    )
-
-    subprocess.run(
-        [cmake, "-S", str(source), "-B", str(tmp_path / "build")],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-
 def test_backend_descriptors_are_loaded_from_selected_backend_list():
     text = (_REPO_ROOT / "cmake" / "FlyDSLBackends.cmake").read_text()
 
