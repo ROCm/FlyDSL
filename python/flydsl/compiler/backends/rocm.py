@@ -1,11 +1,106 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-from typing import List, Tuple
+import hashlib
+import importlib.util
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 from ...runtime.device import get_rocm_arch, get_warp_size
 from ...utils import env
 from .base import AOTRuntimeConfig, BaseBackend, GPUTarget
+
+BINARY_PASS = "fly-rocm-module-to-binary"
+_PATH_ENV = ("FLYDSL_ROCM_TOOLKIT_PATH", "ROCM_PATH", "ROCM_ROOT", "ROCM_HOME")
+_DEVICE_LIBRARIES = ("ocml.bc", "ockl.bc", "hip.bc", "opencl.bc")
+
+
+def pass_path(path: Path) -> str:
+    """Quote a path for MLIR's pass option parser (not for a shell)."""
+    value = str(path)
+    if any(c in value for c in "\x00\n\r{},"):
+        raise ValueError(f"ROCm compiler path contains unsupported MLIR option characters: {value!r}")
+    for quote in ('"', "'"):
+        if quote not in value:
+            return f"{quote}{value}{quote}"
+    raise ValueError(f"ROCm compiler path contains both quote characters: {value!r}")
+
+
+@dataclass(frozen=True)
+class RocmToolchain:
+    toolkit: Path
+    linker: Path
+
+    def pass_options(self, *, link: bool = True) -> str:
+        options = f"toolkit={pass_path(self.toolkit)}"
+        if link:
+            options += f" linker={pass_path(self.linker)}"
+        return options
+
+
+def _at_root(root: Path) -> Optional[RocmToolchain]:
+    root = root.expanduser().resolve()
+    for toolkit in (root, root / "lib" / "llvm"):
+        if not (toolkit / "amdgcn" / "bitcode").is_dir():
+            continue
+        for linker in (toolkit / "llvm" / "bin" / "ld.lld", toolkit / "bin" / "ld.lld"):
+            if linker.is_file() and os.access(linker, os.X_OK):
+                # Preserve ld.lld's basename: resolving a symlink to lld would
+                # change argv[0] and lose the linker's ELF driver selection.
+                return RocmToolchain(toolkit, linker)
+    return None
+
+
+def get_rocm_toolchain() -> Optional[RocmToolchain]:
+    return _discover(tuple(os.environ.get(name, "").strip() for name in _PATH_ENV))
+
+
+@lru_cache(maxsize=8)
+def _discover(overrides: tuple) -> Optional[RocmToolchain]:
+    for name, value in zip(_PATH_ENV, overrides):
+        if value:
+            toolchain = _at_root(Path(value))
+            if toolchain is None:
+                raise ValueError(
+                    f"{name}={value!r} has no executable ld.lld and amdgcn/bitcode; "
+                    "select a ROCm installation, LLVM prefix, or rocm-sdk-core package root."
+                )
+            return toolchain
+    toolchain = _at_root(Path("/opt/rocm"))
+    if toolchain:
+        return toolchain
+    spec = importlib.util.find_spec("_rocm_sdk_core")
+    if spec and spec.origin:
+        toolchain = _at_root(Path(spec.origin).parent)
+        if toolchain is None:
+            raise ValueError("rocm-sdk-core does not contain an executable ld.lld and amdgcn/bitcode")
+        return toolchain
+    # Preserve MLIR's build-time ROCm default when Python cannot discover it.
+    return None
+
+
+@lru_cache(maxsize=8)
+def toolchain_fingerprint(toolchain: Optional[RocmToolchain]) -> str:
+    if toolchain is None:
+        return "mlir-default"
+    digest = hashlib.sha256()
+    digest.update(str(toolchain).encode())
+    # Wheel launchers may stay identical while their companion libraries change.
+    try:
+        digest.update(version("rocm-sdk-core").encode())
+    except PackageNotFoundError:
+        pass
+    for path in (toolchain.linker, *(toolchain.toolkit / "amdgcn" / "bitcode" / n for n in _DEVICE_LIBRARIES)):
+        digest.update(path.name.encode())
+        if path.is_file():
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+    return digest.hexdigest()
 
 
 class RocmBackend(BaseBackend):
@@ -47,7 +142,7 @@ class RocmBackend(BaseBackend):
         """Format {key: value, ...} as 'key=value key2=value2' for MLIR pass options."""
         return " ".join(f"{k}={v}" for k, v in opts.items())
 
-    def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
+    def _pipeline_parts(self, *, compile_hints: dict, external: bool = False) -> Tuple[List[str], str]:
         chip = self.target.arch
 
         # ROCDL never reads gpu-module-to-binary's opts=, so nothing may be
@@ -100,7 +195,13 @@ class RocmBackend(BaseBackend):
                 else []
             ),
         ]
-        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"}}'
+        toolchain = get_rocm_toolchain()
+        # External mlir-opt only knows upstream passes. It emits ISA; FlyDSL
+        # assembles it with the external LLVM and explicitly links the objects.
+        pass_name = "gpu-module-to-binary" if external else BINARY_PASS
+        output_format = "isa" if external else "fatbin"
+        resources = f" {toolchain.pass_options(link=not external)}" if toolchain else ""
+        binary_fragment = f'{pass_name}{{format={output_format} opts="{" ".join(bin_cli_opts)}"{resources}}}'
         return [*pre_binary_fragments, *binary_prep_fragments], binary_fragment
 
     def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:
@@ -108,7 +209,7 @@ class RocmBackend(BaseBackend):
         return [*pre_binary_fragments, binary_fragment]
 
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
-        return self._pipeline_parts(compile_hints=compile_hints)
+        return self._pipeline_parts(compile_hints=compile_hints, external=True)
 
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Materialize a scalar waves-per-EU override on kernel entries."""
@@ -152,6 +253,9 @@ class RocmBackend(BaseBackend):
         return []
 
     # -- cache / fingerprint ---------------------------------------------
+
+    def hash(self) -> str:
+        return f"{self.target}:{toolchain_fingerprint(get_rocm_toolchain())}"
 
     def native_lib_patterns(self) -> List[str]:
         return [
