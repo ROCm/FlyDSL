@@ -1,22 +1,65 @@
 {
  "schema": 1,
- "updated": "2026-10-05T10:59:50Z",
+ "updated": "2026-10-05T12:01:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37299835332,
+   "run_id": 37306396961,
    "pr": 1222,
-   "commit": "e39b2d5d53287515ecc4fbc720ca2c24bcc73ab6",
+   "commit": "3371268839690ec16a361037a2c094a5bfc21097",
    "branch": "fix_cmake_rocm7.14",
    "event": "pull_request",
    "title": "[Build][JIT] Support core-only ROCm SDK environments",
    "status": "in_progress",
    "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37299835332",
-   "created_at": "2026-10-05T10:57:19Z",
-   "updated_at": "2026-10-05T10:58:36Z",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37306396961",
+   "created_at": "2026-10-05T11:58:35Z",
+   "updated_at": "2026-10-05T12:00:12Z",
    "actor": "apinge",
    "jobs": []
+  },
+  {
+   "run_id": 37299835332,
+   "pr": null,
+   "commit": "e39b2d5d53287515ecc4fbc720ca2c24bcc73ab6",
+   "branch": "fix_cmake_rocm7.14",
+   "event": "pull_request",
+   "title": "[Build][JIT] Support core-only ROCm SDK environments",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37299835332",
+   "created_at": "2026-10-05T10:57:19Z",
+   "updated_at": "2026-10-05T11:59:39Z",
+   "actor": "apinge",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-05T11:35:29Z",
+     "completed_at": "2026-10-05T11:59:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37299835332/job/111742666891"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-05T11:35:54Z",
+     "completed_at": "2026-10-05T11:59:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37299835332/job/111742666971"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-05T11:35:14Z",
+     "completed_at": "2026-10-05T11:53:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37299835332/job/111742667056"
+    }
+   ]
   },
   {
    "run_id": 37291980374,
@@ -1471,49 +1514,6 @@
    "updated_at": "2026-09-30T07:26:51Z",
    "actor": "vlluvia",
    "jobs": []
-  },
-  {
-   "run_id": 36682051977,
-   "pr": 1215,
-   "commit": "41a66c0832646450c9ac6188c6c1091e0a60d7b3",
-   "branch": "jli/schedule_bank",
-   "event": "pull_request",
-   "title": "[compiler][opt] add schedule_bank api for gfx1250",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36682051977",
-   "created_at": "2026-09-30T07:08:52Z",
-   "updated_at": "2026-09-30T07:38:39Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-30T07:37:07Z",
-     "completed_at": "2026-09-30T07:37:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36682051977/job/109787858675"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-30T07:37:24Z",
-     "completed_at": "2026-09-30T07:38:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36682051977/job/109787858721"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-09-30T07:37:18Z",
-     "completed_at": "2026-09-30T07:38:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36682051977/job/109787858834"
-    }
-   ]
   }
  ]
 }
