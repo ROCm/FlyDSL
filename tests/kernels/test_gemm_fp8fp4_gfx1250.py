@@ -22,7 +22,11 @@ import flydsl.expr as fx  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.gemm_a8w4_mxscale_gfx1250 import launch_gemm_a8w4_mxscale  # noqa: E402
-from kernels.gemm.gemm_a8w8_gfx1250 import launch_gemm_a8w8  # noqa: E402
+from kernels.gemm.gemm_a8w8_gfx1250 import (  # noqa: E402
+    launch_gemm_a8w8,
+    launch_gemm_a8w8_splitk,
+    select_gemm_a8w8_decode_config,
+)
 from tests.kernels.utils import gemm_common_utils  # noqa: E402
 
 if not torch.cuda.is_available():
@@ -537,6 +541,62 @@ def test_gemm_ragged_m(mode, M):
 @pytest.mark.parametrize("mode", sorted(_MODES))
 def test_gemm_cluster(mode, M, cluster_m, cluster_n):
     _run_smoke(mode, M, cluster_m=cluster_m, cluster_n=cluster_n)
+
+
+def _run_splitk_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, split_k):
+    """Launch launch_gemm_a8w8_splitk twice on one workspace; both launches must match the reference."""
+    c_gpu, make_args, ref, (rtol, atol) = _MODES[mode]["build"](
+        M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers
+    )
+    tiles = -(-M // tile_m) * -(-N // tile_n)
+    workspace = torch.empty(split_k * tiles * tile_m * tile_n, dtype=torch.float32, device="cuda")
+    counters = torch.zeros(tiles, dtype=torch.int32, device="cuda")
+    args = make_args(torch.cuda.current_stream()) + (split_k, workspace.data_ptr(), counters.data_ptr())
+    c_gpu.fill_(float("nan"))
+    compiled = flyc.compile(launch_gemm_a8w8_splitk, *args)
+    for launch in range(2):
+        if launch:
+            c_gpu.fill_(float("nan"))
+            compiled(*args)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(c_gpu[:M, :N].float(), ref.float(), rtol=rtol, atol=atol)
+        assert int(counters.abs().sum()) == 0, f"launch {launch}: the arrival counters were not reset"
+
+
+# (mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, split_k)
+_SPLITK_CASES = [
+    ("ptpc_a8w8", 1, 1536, 7168, 16, 128, 128, 1, 4, 4, 4),
+    ("blockscale_a8w8", 16, 1536, 7168, 16, 128, 128, 1, 4, 4, 4),
+    ("blockscale_a8w8", 16, 512, 7168, 16, 128, 128, 1, 4, 4, 3),  # 3 splits do not divide the 56 K-tiles
+    ("ptpc_a8w8", 65, 256, 2048, 64, 128, 128, 2, 2, 2, 2),  # ragged M over two M-tiles
+]
+
+
+@pytest.mark.parametrize("mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, split_k", _SPLITK_CASES)
+def test_gemm_a8w8_splitk(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, split_k):
+    _require_gpu()
+    _run_splitk_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, split_k)
+
+
+# Decode rows (M, N, K); each runs the config the selector picks, through the launcher that config needs.
+_DECODE_SELECTOR_ROWS = [(1, 1536, 7168), (16, 7168, 2048), (64, 1536, 1024), (256, 16384, 512), (256, 16384, 8192)]
+
+
+@pytest.mark.parametrize("M, N, K", _DECODE_SELECTOR_ROWS)
+@pytest.mark.parametrize("mode", ("blockscale_a8w8", "ptpc_a8w8"))
+def test_gemm_a8w8_decode_selector(mode, M, N, K):
+    _require_gpu()
+    *cfg, split_k = select_gemm_a8w8_decode_config(M, N, K)
+    if split_k > 1:
+        _run_splitk_case(mode, M, N, K, *cfg, split_k)
+    else:
+        _run_case(mode, M, N, K, *cfg)
+
+
+def test_gemm_a8w8_decode_selector_rejects_unsupported_shapes():
+    for M, N, K in ((257, 1024, 1024), (16, 1000, 1024), (16, 1024, 1000), (16, 1024, 128)):
+        with pytest.raises(ValueError):
+            select_gemm_a8w8_decode_config(M, N, K)
 
 
 def _parse_csv_ints(value: str, n: int, name: str) -> list[int]:

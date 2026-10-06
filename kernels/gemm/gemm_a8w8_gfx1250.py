@@ -22,8 +22,41 @@ from .gemm_common_gfx1250 import (
 )
 
 
-@flyc.jit
-def launch_gemm_a8w8(
+def select_gemm_a8w8_decode_config(M, N, K, max_split=4):
+    """(tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, split_k) for a decode-sized FP8 GEMM (M <= 256).
+
+    The upstream-tested 128/256-row tiles compute at most 16 valid rows per 16-row WMMA slot at M <= 16 and launch
+    fewer workgroups than there are CUs, so decode uses 16-row tiles up to M = 64 and 64x128 tiles up to M = 256,
+    except that above M = 16 an N of 16384 or more already fills the GPU with 128x256 tiles (256x256 above M = 128
+    when the weights reach 128 MiB, so that they are read once), which then win.
+    For M <= 16, K is also split 4 ways (launch_gemm_a8w8_splitk) when the K walk dominates: K >= 12288 with at
+    most 64 128-wide N tiles, or K >= 6144 with at most 24. Each split pays an agent-scope release/acquire, so with
+    more tiles or a shorter K the split loses. Configs with split_k == 1 run on launch_gemm_a8w8. Blockscale and
+    per-token/per-channel modes use the same tiles.
+    """
+    if M > 256:
+        raise ValueError(f"decode config selector covers M <= 256, got M={M}")
+    if K % 128 or K < 256 or N % 64:
+        raise ValueError(f"needs K % 128 == 0, K >= 256 and N % 64 == 0, got N={N}, K={K}")
+    k_tiles = K // 128
+    if M <= 16:
+        n_tiles = N // 128 if N % 128 == 0 else None
+        deep = n_tiles is not None and ((K >= 12288 and n_tiles <= 64) or (K >= 6144 and n_tiles <= 24))
+        if max_split >= 4 and deep and k_tiles % 4 == 0:
+            return (16, 128, 128, 1, 4, min(4, k_tiles // 4), 4)
+        return (16, 64, 128, 1, 4, min(6, k_tiles), 1)
+    if N >= 16384 and N % 256 == 0:
+        # Wide N fills the GPU with 128x256 tiles. Above M = 128, a 256-row tile also halves the weight reads, which
+        # dominate once the FP8 weights reach 128 MiB.
+        if M > 128 and N * K >= 1 << 27:
+            return (256, 256, 128, 2, 2, min(4, k_tiles), 1)
+        return (128, 256, 128, 2, 2, min(3, k_tiles), 1)
+    if M <= 64:
+        return (16, 64, 128, 1, 4, min(6, k_tiles), 1)
+    return (64, 128 if N % 128 == 0 else 64, 128, 2, 2, min(4, k_tiles), 1)
+
+
+def _launch_gemm_a8w8(
     arg_c: fx.Pointer,
     arg_a: fx.Pointer,
     arg_b: fx.Pointer,
@@ -46,8 +79,13 @@ def launch_gemm_a8w8(
     cluster_m: Constexpr[int],
     cluster_n: Constexpr[int],
     is_bsc: Constexpr[bool],
+    split_k: Constexpr[int],
+    i64_ws: fx.Int64,
+    i64_counters: fx.Int64,
 ):
     use_cluster = cluster_m > 1 or cluster_n > 1
+    if split_k > 1 and use_cluster:
+        raise ValueError("split_k > 1 is not supported with cluster launch")
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
     WAVE = 32
@@ -82,6 +120,9 @@ def launch_gemm_a8w8(
     out_cls = fx.Float16 if out_is_f16 else fx.BFloat16
     C_STORE_B = (tile_m * tile_n * 2 + 127) // 128 * 128
     ARENA_B = max(num_buffers * PITCH, C_STORE_B)
+    ARRIVE_OFF = ((ARENA_B + 15) // 16) * 16  # split-K: LDS slot that broadcasts the arrival count
+    if split_k > 1:
+        ARENA_B = ARRIVE_OFF + 16
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
     use_quadrant = (wmma_m_rep % 2 == 0) and (wmma_n_rep % 2 == 0) and (n_acc >= 8)
 
@@ -98,6 +139,8 @@ def launch_gemm_a8w8(
         i32_stride_ascale_k: fx.Int32,
         i32_lda: fx.Int32,
         i32_ldc: fx.Int32,
+        i64_ws: fx.Int64,
+        i64_counters: fx.Int64,
     ):
         K_TILES = i32_k // tile_k
         k64 = fx.Int64(i32_k)
@@ -105,7 +148,16 @@ def launch_gemm_a8w8(
         ldc64 = fx.Int64(i32_ldc)
 
         tid = fx.Int32(fx.thread_idx.x)
-        bid_x, bid_y, _ = fx.block_idx
+        bid_x, bid_y, bid_z = fx.block_idx
+        kt_base = None
+        if const_expr(split_k > 1):
+            # Split z walks K-tiles [z*T//S, (z+1)*T//S), so every K-tile is covered even when S does not divide T.
+            kt_base = bid_z * K_TILES // split_k
+            K_TILES = (bid_z + 1) * K_TILES // split_k - kt_base
+
+        def _gkt(kt):  # global K-tile index of local K-tile kt
+            return kt if const_expr(split_k == 1) else kt + kt_base
+
         wave = rocdl.readfirstlane(T.i32, tid // WAVE)
         lane = tid % WAVE
         lane16 = lane % 16
@@ -200,13 +252,13 @@ def launch_gemm_a8w8(
 
         def issue(s, kt):
             pa = _buf_ptr(s)
-            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), fx.Int64(kt) * tile_k)
+            _wcopy(W_A, atomA, gA, _lv(pa, (tile_m, tile_k), (A_LDS_ROW, 1)), fx.Int64(_gkt(kt)) * tile_k)
             _wcopy(
                 W_B,
                 atomB,
                 gB,
                 _lv(fx.add_offset(pa, STAGE_A), (tile_n // 16, tile_k * 16), (B_LDS_ROW, 1)),
-                fx.Int64(kt) * (tile_k * 16),
+                fx.Int64(_gkt(kt)) * (tile_k * 16),
             )
             if const_expr(is_bsc):
                 _wcopy(
@@ -214,14 +266,14 @@ def launch_gemm_a8w8(
                     atomSA,
                     gSA,
                     _lv(fx.add_offset(pa, SA_OFF), (K_WS, tile_m), (tile_m, 1)),
-                    fx.Int64(kt * K_WS) * stride_ask64,
+                    fx.Int64(_gkt(kt) * K_WS) * stride_ask64,
                 )
                 _wcopy(
                     W_SB,
                     atomSB,
                     gSB,
                     _lv(fx.add_offset(pa, SB_OFF), (N_BLOCKS, K_WS), (K_WS, 1)),
-                    fx.Int64(kt) * K_WS,
+                    fx.Int64(_gkt(kt)) * K_WS,
                 )
 
         wmb = wave_m * warp_tile_m
@@ -494,28 +546,75 @@ def launch_gemm_a8w8(
         pipeline_fence(outstanding=0, use_cluster=use_cluster)
         if const_expr(not is_bsc):
             accs = epilogue_apply_ptpc_scale(scale_regs)
-        for wm in range_constexpr(wmma_m_rep):
-            row_rel = wmb + wm * 16 + lane16
-            for wn in range_constexpr(wmma_n_rep):
+
+        def store_c(accs):
+            for wm in range_constexpr(wmma_m_rep):
+                row_rel = wmb + wm * 16 + lane16
+                for wn in range_constexpr(wmma_n_rep):
+                    col_rel = wnb + wn * 16 + kgrp * 8
+                    h = accs[wm * wmma_n_rep + wn].to(out_cls)
+                    fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * tile_n + col_rel) * 2)
+            workgroup_barrier(use_cluster=False)
+            c_off_rt = blk_m64 * ldc64 + blk_n64
+            gtC = _gv(gC_base, c_off_rt, (tile_m, tile_n), (tile_n, 1))
+            atomC = fx.rocdl.make_tdm_atom(
+                gtC,
+                [mn_oob, None],
+                strides=[ldc64, None],
+                num_warps=num_waves,
+                early_timeout=False,
+            )
+            fx.copy(
+                atomC,
+                _lv(fx.recast_iter(out_cls, base_ptr), (tile_m, tile_n), (tile_n, 1)),
+                gtC,
+            )
+            tdm_ops.tensor_wait(0)
+
+        if const_expr(split_k == 1):
+            store_c(accs)
+        else:
+            # Each lane writes its fragments (8 contiguous fp32 per 16x16 block) to this split's workspace slot, the
+            # workgroup releases them and bumps the tile's arrival counter; the last arrival sums all slots.
+            tile_lin = bid_x * ((i32_n + (tile_n - 1)) // tile_n) + bid_y
+            ws_ptr = fx.inttoptr(fx.PointerType.get(fx.Float32.ir_type, fx.AddressSpace.Global, 16), i64_ws)
+            cnt_ptr = fx.inttoptr(fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Global, 4), i64_counters)
+            arrive_lds = fx.recast_iter(
+                fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Shared, 4), base_ptr + ARRIVE_OFF
+            )
+
+            def frag_off(z, wm, wn):
+                row_rel = wmb + wm * 16 + lane16
                 col_rel = wnb + wn * 16 + kgrp * 8
-                h = accs[wm * wmma_n_rep + wn].to(out_cls)
-                fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * tile_n + col_rel) * 2)
-        workgroup_barrier(use_cluster=False)
-        c_off_rt = blk_m64 * ldc64 + blk_n64
-        gtC = _gv(gC_base, c_off_rt, (tile_m, tile_n), (tile_n, 1))
-        atomC = fx.rocdl.make_tdm_atom(
-            gtC,
-            [mn_oob, None],
-            strides=[ldc64, None],
-            num_warps=num_waves,
-            early_timeout=False,
-        )
-        fx.copy(
-            atomC,
-            _lv(fx.recast_iter(out_cls, base_ptr), (tile_m, tile_n), (tile_n, 1)),
-            gtC,
-        )
-        tdm_ops.tensor_wait(0)
+                slot = fx.Int64(tile_lin) * split_k + fx.Int64(z)
+                return slot * (tile_m * tile_n) + fx.Int64(row_rel * tile_n + col_rel)
+
+            for wm in range_constexpr(wmma_m_rep):
+                for wn in range_constexpr(wmma_n_rep):
+                    fx.ptr_store(accs[wm * wmma_n_rep + wn], ws_ptr + frag_off(bid_z, wm, wn))
+            fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope=fx.rocdl.SyncScope.Agent)
+            workgroup_barrier(use_cluster=False)
+            if tid == 0:
+                arrived = fx.atomic_add(
+                    cnt_ptr + tile_lin,
+                    fx.Int32(1),
+                    syncscope=fx.rocdl.SyncScope.Agent,
+                    ordering=fx.AtomicOrdering.AcqRel,
+                )
+                fx.ptr_store(arrived, arrive_lds)
+            workgroup_barrier(use_cluster=False)
+            if fx.ptr_load(arrive_lds) == split_k - 1:
+                fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope=fx.rocdl.SyncScope.Agent)
+                total = []
+                for wm in range_constexpr(wmma_m_rep):
+                    for wn in range_constexpr(wmma_n_rep):
+                        acc = Vec(fx.ptr_load(ws_ptr + frag_off(0, wm, wn), result_type=T.vec(8, T.f32)))
+                        for z in range_constexpr(1, split_k):
+                            acc = acc + Vec(fx.ptr_load(ws_ptr + frag_off(z, wm, wn), result_type=T.vec(8, T.f32)))
+                        total.append(acc)
+                store_c(total)
+                if tid == 0:
+                    fx.ptr_store(fx.Int32(0), cnt_ptr + tile_lin)
 
     gx = (i32_m + (tile_m - 1)) // tile_m
     gy = (N + (tile_n - 1)) // tile_n
@@ -534,10 +633,136 @@ def launch_gemm_a8w8(
         stride_ascale_k,
         i32_lda,
         i32_ldc,
+        i64_ws,
+        i64_counters,
         value_attrs={"rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if use_cluster else None},
-    ).launch(grid=(gx, gy, 1), block=(block, 1, 1), stream=stream, cluster=cluster_arg)
+    ).launch(grid=(gx, gy, split_k), block=(block, 1, 1), stream=stream, cluster=cluster_arg)
 
 
-launch_gemm_a8w8.compile_hints["llvm_options"] = {
-    "amdgpu-expert-scheduling-mode": True,
-}
+@flyc.jit
+def launch_gemm_a8w8(
+    arg_c: fx.Pointer,
+    arg_a: fx.Pointer,
+    arg_b: fx.Pointer,
+    arg_scale_a: fx.Pointer,
+    arg_scale_b: fx.Pointer,
+    i32_m: fx.Int32,
+    stream: fx.Stream,
+    N: fx.Int32,
+    K: fx.Int32,
+    stride_ascale_k: fx.Int32,
+    i32_lda: fx.Int32,
+    i32_ldc: fx.Int32,
+    tile_m: Constexpr[int],
+    tile_n: Constexpr[int],
+    tile_k: Constexpr[int],
+    m_warp: Constexpr[int],
+    n_warp: Constexpr[int],
+    out_is_f16: Constexpr[int],
+    num_buffers: Constexpr[int],
+    cluster_m: Constexpr[int],
+    cluster_n: Constexpr[int],
+    is_bsc: Constexpr[bool],
+):
+    _launch_gemm_a8w8(
+        arg_c,
+        arg_a,
+        arg_b,
+        arg_scale_a,
+        arg_scale_b,
+        i32_m,
+        stream,
+        N,
+        K,
+        stride_ascale_k,
+        i32_lda,
+        i32_ldc,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        out_is_f16,
+        num_buffers,
+        cluster_m,
+        cluster_n,
+        is_bsc,
+        1,
+        fx.Int64(0),
+        fx.Int64(0),
+    )
+
+
+@flyc.jit
+def launch_gemm_a8w8_splitk(
+    arg_c: fx.Pointer,
+    arg_a: fx.Pointer,
+    arg_b: fx.Pointer,
+    arg_scale_a: fx.Pointer,
+    arg_scale_b: fx.Pointer,
+    i32_m: fx.Int32,
+    stream: fx.Stream,
+    N: fx.Int32,
+    K: fx.Int32,
+    stride_ascale_k: fx.Int32,
+    i32_lda: fx.Int32,
+    i32_ldc: fx.Int32,
+    tile_m: Constexpr[int],
+    tile_n: Constexpr[int],
+    tile_k: Constexpr[int],
+    m_warp: Constexpr[int],
+    n_warp: Constexpr[int],
+    out_is_f16: Constexpr[int],
+    num_buffers: Constexpr[int],
+    cluster_m: Constexpr[int],
+    cluster_n: Constexpr[int],
+    is_bsc: Constexpr[bool],
+    split_k: Constexpr[int],
+    i64_ws: fx.Int64,
+    i64_counters: fx.Int64,
+):
+    """launch_gemm_a8w8 with K split across grid z (split_k >= 1).
+
+    Split z accumulates K-tiles [z * T // split_k, (z + 1) * T // split_k) of the T = K // tile_k tiles. As for
+    launch_gemm_a8w8, the caller guarantees K % tile_k == 0; every split also needs T // split_k >= num_buffers - 1.
+
+    Each workgroup writes its fp32 partial tile to the workspace at i64_ws
+    (split_k * ceil(M / tile_m) * ceil(N / tile_n) * tile_m * tile_n fp32) and bumps the tile's int32 arrival
+    counter at i64_counters (ceil(M / tile_m) * ceil(N / tile_n) counters, zero before the first launch). The last
+    workgroup to arrive sums the partials in split order (independent of arrival order), stores C, and resets the
+    counter to zero. Launches that can overlap (other streams, parallel graph branches) need their own workspace and
+    counters. Cluster launch is not supported with split_k > 1.
+    """
+    _launch_gemm_a8w8(
+        arg_c,
+        arg_a,
+        arg_b,
+        arg_scale_a,
+        arg_scale_b,
+        i32_m,
+        stream,
+        N,
+        K,
+        stride_ascale_k,
+        i32_lda,
+        i32_ldc,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        out_is_f16,
+        num_buffers,
+        cluster_m,
+        cluster_n,
+        is_bsc,
+        split_k,
+        i64_ws,
+        i64_counters,
+    )
+
+
+for _launcher in (launch_gemm_a8w8, launch_gemm_a8w8_splitk):
+    _launcher.compile_hints["llvm_options"] = {
+        "amdgpu-expert-scheduling-mode": True,
+    }
