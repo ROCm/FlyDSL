@@ -18,6 +18,8 @@ from kernels.common.gfx1250_cluster import compute_mcast_masks
 from .gemm_common_gfx1250 import (
     make_lds_copy_ops,
     pipeline_fence,
+    pipeline_fence_signal,
+    pipeline_fence_wait,
     workgroup_barrier,
 )
 
@@ -142,6 +144,9 @@ def _launch_gemm_a8w8(
         i64_ws: fx.Int64,
         i64_counters: fx.Int64,
     ):
+        # With one wave per SIMD nothing else can use the cycles the arbiter would hold this wave after each WMMA, so
+        # let it issue LDS, SALU and VALU work while WMMAs execute (SCHED_MODE.DISABLE_XDL_ARB_STALL).
+        rocdl.disable_xdl_arb_stall()
         K_TILES = i32_k // tile_k
         k64 = fx.Int64(i32_k)
         lda64 = fx.Int64(i32_lda)
@@ -298,7 +303,9 @@ def _launch_gemm_a8w8(
             return v01.shuffle(v23, list(range(16)))
 
         def _bcast_byte(byte):
-            return byte.to(fx.Int32) * fx.Int32(0x01010101)
+            # Selector 0 replicates byte 0 at the full VALU rate; the equivalent multiply by 0x01010101 is quarter rate.
+            v = byte.to(fx.Int32)
+            return fx.Int32(rocdl.perm_b32(v, v, 0))
 
         def load_sa(pbuf, wm, ks):
             row = wmb + wm * 16 + lane16
@@ -470,6 +477,104 @@ def _launch_gemm_a8w8(
             else:
                 compute_ktile_row(buf, pbuf, prefetch_kt)
 
+        # Cross-K-tile pipeline (quadrant schedule): K-tile kt+1's fence and its K-step-0 operands (scales, B left half,
+        # A top half) are issued between the last K-step's third and fourth quadrants of K-tile kt, into carry
+        # registers, so their LDS latency overlaps that quadrant's WMMAs instead of stalling the start of K-tile kt+1.
+        # Cluster launch needs no extra fence: a multicast TDM load writes only the LDS of workgroups that issued it,
+        # and each workgroup issues it after its own fence, so the workgroup barrier still guards every buffer reuse.
+        XT = use_quadrant
+        xt_b = xt_a = xt_sb = xt_sa = None
+        if const_expr(XT):
+            xt_b = [fx.make_rmem_tensor(16, fx.Int32) for _ in range_constexpr(HALF_N)]
+            xt_a = [fx.make_rmem_tensor(16, fx.Int32) for _ in range_constexpr(HALF_M)]
+            if const_expr(is_bsc):
+                xt_sb = [fx.make_rmem_tensor(1, fx.Int32) for _ in range_constexpr(wmma_n_rep)]
+                xt_sa = [fx.make_rmem_tensor(1, fx.Int32) for _ in range_constexpr(wmma_m_rep)]
+
+        XT_Q = XT_LD_A = XT_LD_NEXT = 0
+        if const_expr(XT):
+            XT_Q = HALF_M * HALF_N  # WMMAs per quadrant
+            XT_LD_A = (HALF_M * DS_A + HALF_N * DS_B + XT_Q - 1) // XT_Q  # A-bottom + B-right loads per WMMA
+            XT_LD_NEXT = (HALF_M * DS_A + HALF_N * DS_B + (wmma_m_rep + 1 if is_bsc else 0) + XT_Q - 1) // XT_Q
+
+        def _sched_interleave(n_mma, n_ds):
+            # Address VALU first, then the first loads, then one WMMA per n_ds loads. In expert scheduling mode a load
+            # whose address a VALU op just wrote waits on depctr_va_vdst(0), which also drains every WMMA issued in
+            # between; computing all addresses before the first WMMA leaves one such wait per region.
+            rocdl.sched_group_barrier(0x002, 16, 0)  # VALU
+            rocdl.sched_dsrd(n_ds)
+            for _ in range_constexpr(n_mma):
+                rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(n_ds)
+
+        def _xt_load_first(buf, pbuf):
+            if const_expr(is_bsc):
+                sb_k, sa_k = _load_scales(pbuf, 0)
+                for wn in range_constexpr(wmma_n_rep):
+                    xt_sb[wn].store(Vec.from_elements([sb_k[wn]], fx.Int32))
+                for wm in range_constexpr(wmma_m_rep):
+                    xt_sa[wm].store(Vec.from_elements([sa_k[wm]], fx.Int32))
+            for wn in range_constexpr(HALF_N):
+                xt_b[wn].store(load_b(buf, wn, 0))
+            for wm in range_constexpr(HALF_M):
+                xt_a[wm].store(load_a(buf, wm, 0))
+
+        def compute_ktile_quad_xt(buf, pbuf, prefetch_kt, nxt):
+            """compute_ktile_quad with K-step 0's operands taken from the carry registers; nxt = (buf, pbuf,
+            outstanding TDM groups) of K-tile kt+1, or None for the last K-tile."""
+            b_left, a_top = xt_b, xt_a
+            sb_k = sa_k = None
+            if const_expr(is_bsc):
+                sb_k = [t.load()[0] for t in xt_sb]
+                sa_k = [t.load()[0] for t in xt_sa]
+            for ks in range_constexpr(K_WS):
+                nxt_ks = ks + 1 if const_expr(ks + 1 < K_WS) else None
+                pf = ks == 0 and prefetch_kt is not None
+                if const_expr(ks > 0):
+                    a_top = [_rmem(16, load_a(buf, wm, ks)) for wm in range_constexpr(HALF_M)]
+                rocdl.sched_barrier(0)
+                _emit_block(0, 0, a_top, b_left, sa_k, sb_k)
+                if const_expr(pf and QUAD_PREFETCH_EARLY):
+                    rocdl.sched_barrier(0)
+                    issue(prefetch_kt % num_buffers, prefetch_kt)
+                    rocdl.sched_barrier(0)
+                a_bot = [_rmem(16, load_a(buf, HALF_M + wm, ks)) for wm in range_constexpr(HALF_M)]
+                b_right = _load_b_half(buf, HALF_N, ks)
+                _emit_block(HALF_M, 0, a_bot, b_left, sa_k, sb_k)
+                # Spread the A-bottom / B-right loads evenly over the first quadrant's WMMAs: a SIMD pair shares one
+                # LDS port, so bursts from both waves collide while the port idles during WMMA runs.
+                _sched_interleave(XT_Q, XT_LD_A)
+                rocdl.sched_mfma(XT_Q)
+                rocdl.sched_barrier(0)
+                if const_expr(pf and not QUAD_PREFETCH_EARLY):
+                    issue(prefetch_kt % num_buffers, prefetch_kt)
+                    rocdl.sched_barrier(0)
+                if const_expr(nxt_ks is not None):
+                    nxt_b_left = _load_b_half(buf, 0, nxt_ks)
+                    nxt_sb_k, nxt_sa_k = _load_scales(pbuf, nxt_ks)
+                xt_fence = nxt_ks is None and nxt is not None
+                if const_expr(xt_fence):
+                    # Every LDS read of this K-tile has completed, so the fence also frees its buffer for TDM reuse.
+                    # Signal now and wait after the third quadrant, so its WMMAs absorb the skew between waves.
+                    rocdl.s_wait_dscnt(0)
+                    pipeline_fence_signal(outstanding=nxt[2], use_cluster=False)
+                    rocdl.sched_barrier(0)
+                _emit_block(0, HALF_N, a_top, b_right, sa_k, sb_k)
+                if const_expr(xt_fence):
+                    rocdl.sched_barrier(0)
+                    pipeline_fence_wait(use_cluster=False)
+                    _xt_load_first(nxt[0], nxt[1])
+                _emit_block(HALF_M, HALF_N, a_bot, b_right, sa_k, sb_k)
+                if const_expr(xt_fence):
+                    # Same for the next K-tile's operand loads over the last quadrant; the scale broadcasts go last,
+                    # when their byte loads have returned.
+                    _sched_interleave(XT_Q, XT_LD_NEXT)
+                    if const_expr(is_bsc):
+                        rocdl.sched_group_barrier(0x002, wmma_m_rep + wmma_n_rep, 0)  # VALU
+                rocdl.sched_barrier(0)
+                if const_expr(nxt_ks is not None):
+                    b_left, sb_k, sa_k = nxt_b_left, nxt_sb_k, nxt_sa_k
+
         def issue_ptpc_scale_loads():
             gSA_base = fx.recast_iter(
                 fx.PointerType.get(fx.Float32.ir_type, arg_scale_a.address_space),
@@ -523,12 +628,19 @@ def _launch_gemm_a8w8(
         for i in range_constexpr(num_buffers - 1):
             issue(i, i)
         n_steady = K_TILES - (num_buffers - 1)
+        if const_expr(XT):
+            pipeline_fence(outstanding=(num_buffers - 2), use_cluster=False)
+            _xt_load_first(_bidx(_buf_ptr(0)), _buf_ptr(0))
         for kt in range(n_steady):
             s = kt % num_buffers
             pbuf = _buf_ptr(s)
             buf = _bidx(pbuf)
-            pipeline_fence(outstanding=(num_buffers - 2), use_cluster=False)
-            compute_ktile(buf, pbuf, kt + (num_buffers - 1))
+            if const_expr(XT):
+                pnxt = _buf_ptr((kt + 1) % num_buffers)
+                compute_ktile_quad_xt(buf, pbuf, kt + (num_buffers - 1), (_bidx(pnxt), pnxt, num_buffers - 2))
+            else:
+                pipeline_fence(outstanding=(num_buffers - 2), use_cluster=False)
+                compute_ktile(buf, pbuf, kt + (num_buffers - 1))
             if const_expr(use_cluster) and kt % num_buffers == num_buffers - 1:
                 cluster.cluster_barrier()
         scale_regs = None
@@ -537,10 +649,18 @@ def _launch_gemm_a8w8(
             s = kt % num_buffers
             pbuf = _buf_ptr(s)
             buf = _bidx(pbuf)
-            pipeline_fence(outstanding=(num_buffers - 2 - j), use_cluster=False)
+            if const_expr(not XT):
+                pipeline_fence(outstanding=(num_buffers - 2 - j), use_cluster=False)
             if const_expr(not is_bsc and split_k == 1 and j == num_buffers - 2):
                 scale_regs = issue_ptpc_scale_loads()
-            compute_ktile(buf, pbuf, None)
+            if const_expr(XT):
+                nxt = None
+                if const_expr(j < num_buffers - 2):
+                    pnxt = _buf_ptr((kt + 1) % num_buffers)
+                    nxt = (_bidx(pnxt), pnxt, num_buffers - 3 - j)
+                compute_ktile_quad_xt(buf, pbuf, None, nxt)
+            else:
+                compute_ktile(buf, pbuf, None)
 
         accs = None
         if const_expr(is_bsc):
