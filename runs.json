@@ -1,11 +1,41 @@
 {
  "schema": 1,
- "updated": "2026-10-06T20:46:04Z",
+ "updated": "2026-10-06T21:29:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37528617821,
+   "run_id": 37532282935,
    "pr": 1223,
+   "commit": "f7c718627700f427d5dd8800a3b7002dbed25186",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37532282935",
+   "created_at": "2026-10-06T21:13:07Z",
+   "updated_at": "2026-10-06T21:13:07Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37529756212,
+   "pr": null,
+   "commit": "a7a7385b075298bea5fe0a256cb711c87aa786bd",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37529756212",
+   "created_at": "2026-10-06T20:52:41Z",
+   "updated_at": "2026-10-06T20:52:41Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37528617821,
+   "pr": null,
    "commit": "11e607abb39cce483ce09f970ce7db7c33bbcb7e",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -85,13 +115,41 @@
    "branch": "perf/gfx1250-a8w8-decode-splitk",
    "event": "pull_request",
    "title": "[Perf][gfx1250] Add split-K and a decode config selector to the FP8 GEMM",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37507571071",
    "created_at": "2026-10-06T17:57:34Z",
-   "updated_at": "2026-10-06T18:00:57Z",
+   "updated_at": "2026-10-06T21:26:51Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-06T21:27:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37507571071/job/112510013358"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-06T21:26:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37507571071/job/112510013378"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-06T21:27:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37507571071/job/112510013767"
+    }
+   ]
   },
   {
    "run_id": 37507567319,
@@ -1050,36 +1108,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/36957257937",
    "created_at": "2026-10-02T02:47:35Z",
    "updated_at": "2026-10-02T02:47:35Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 36951020169,
-   "pr": null,
-   "commit": "92d7a1236c53b100d88772b30724e848d53248bd",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36951020169",
-   "created_at": "2026-10-02T01:27:28Z",
-   "updated_at": "2026-10-02T01:27:28Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 36946272368,
-   "pr": null,
-   "commit": "540bc18dac357764ee9770d09f047a8adfd550bb",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36946272368",
-   "created_at": "2026-10-02T00:29:47Z",
-   "updated_at": "2026-10-02T00:29:47Z",
    "actor": "dimitri91209",
    "jobs": []
   }
