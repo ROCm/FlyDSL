@@ -30,17 +30,23 @@ def select_moe_a8w4_config(tokens, model_dim, inter_dim, experts, topk, num_cus=
 
     Expected routed rows per expert r = tokens * topk / experts picks the tile height: from r = 256 a 128x256 tile with
     2x2 warps and two buffers (two workgroups per CU) is faster on both stages despite the deeper padding; below
-    that 64-row tiles, and 16-row tiles for decode (r < 16, or r < 40 with inter_dim <= 256, where 64-row padding
-    triples the rows). When most active experts hold a single routed row (r <= 0.25), a stage whose 256-wide tiles
-    would occupy at most num_cus / 2 workgroups (estimated from the expected number of distinct experts) is a pure
-    weight stream over few CUs, and 128-wide tiles spread it over twice as many.
+    that 64-row tiles, 32-row tiles for 16 <= r < 32 (and up to r < 40 when inter_dim <= 256, where 64-row padding
+    nearly doubles the rows), and 16-row tiles for decode (r < 16). When most active experts hold a single routed
+    row (r <= 0.25), a stage whose 256-wide tiles would occupy at most num_cus / 2 workgroups (estimated from the
+    expected number of distinct experts) is a pure weight stream over few CUs, and 128-wide tiles spread it over
+    twice as many.
     """
     rows = tokens * topk / experts
     k1, k2 = model_dim // 256, inter_dim // 256
     if rows >= 256 and k1 >= 2 and k2 >= 2:
         cfg = (128, 256, 256, 2, 2, 2)
         return cfg, cfg
-    tile_m = 16 if rows < 16 or (rows < 40 and inter_dim <= 256) else 64
+    if rows < 16:
+        tile_m = 16
+    elif rows < 32 or (rows < 40 and inter_dim <= 256):
+        tile_m = 32
+    else:
+        tile_m = 64
     active = experts * (1.0 - (1.0 - 1.0 / experts) ** (tokens * topk))
     cfgs = []
     for n, k_tiles in ((2 * inter_dim, k1), (model_dim, k2)):

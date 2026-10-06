@@ -340,8 +340,14 @@ def test_grouped_moe_rejects_k_not_multiple_of_tile_k():
 
 
 # (E, model_dim, inter_dim, token_num, topk): one case per select_moe_a8w4_config branch -- 128x256 tiles with 2x2 warps
-# (256 routed rows per expert), 64-row tiles, 16-row tiles for a small inter_dim, and 128-wide decode tiles.
-_SELECTOR_CASES = [(8, 512, 512, 1024, 2), (8, 512, 512, 256, 2), (8, 512, 256, 128, 2), (8, 512, 256, 1, 2)]
+# (256 routed rows per expert), 64-row tiles, 32-row tiles, 16-row tiles, and 128-wide decode tiles.
+_SELECTOR_CASES = [
+    (8, 512, 512, 1024, 2),
+    (8, 512, 512, 256, 2),
+    (8, 512, 256, 128, 2),
+    (8, 512, 512, 32, 2),
+    (8, 512, 256, 1, 2),
+]
 
 
 @pytest.mark.parametrize("E, model_dim, inter_dim, token_num, topk", _SELECTOR_CASES)
