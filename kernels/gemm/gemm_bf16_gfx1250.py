@@ -232,7 +232,25 @@ def launch_gemm_bf16(
                     # B is the instruction's A operand: the accumulator's fast dim is N.
                     fx.gemm(wmma_atom, c_frags[idx], wt[wn], act[wm], c_frags[idx])
 
-        def compute_ktile(buf, prefetch_kt):
+        def compute_ktile_interleaved(buf, prefetch_kt):
+            # With the arbitration stall off the wave can issue LDS reads while its WMMAs run: spread the next
+            # K-step's fragment reads over this K-step's WMMAs instead of issuing them as one block between K-steps.
+            cur = _load_ks(buf, 0)
+            if const_expr(prefetch_kt is not None):
+                rocdl.sched_barrier(0)
+                issue(prefetch_kt % num_buffers, prefetch_kt)
+            rocdl.sched_barrier(0)
+            for ks in range_constexpr(K_WS):
+                nxt = _load_ks(buf, ks + 1) if const_expr(ks + 1 < K_WS) else None
+                _mma_ks(cur)
+                if const_expr(nxt is not None):
+                    for _ in range_constexpr(KS_DS):
+                        rocdl.sched_mfma(max(1, n_acc // KS_DS))
+                        rocdl.sched_dsrd(1)
+                    cur = nxt
+                rocdl.sched_barrier(0)
+
+        def compute_ktile_blocked(buf, prefetch_kt):
             cur = _load_ks(buf, 0)
             for ks in range_constexpr(K_WS):
                 nxt = _load_ks(buf, ks + 1) if const_expr(ks + 1 < K_WS) else None
@@ -254,6 +272,12 @@ def launch_gemm_bf16(
                     rocdl.sched_dsrd(KS_DS)
                 rocdl.sched_mfma(n_acc)
             rocdl.sched_barrier(0)
+
+        def compute_ktile(buf, prefetch_kt):
+            if const_expr(wmma_b2b):
+                compute_ktile_interleaved(buf, prefetch_kt)
+            else:
+                compute_ktile_blocked(buf, prefetch_kt)
 
         if const_expr(use_cluster):
             cluster.cluster_barrier()
