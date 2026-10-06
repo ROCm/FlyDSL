@@ -171,8 +171,9 @@ def _launch_gemm_a8w8(
         i64_ws: fx.Int64,
         i64_counters: fx.Int64,
     ):
-        # With one wave per SIMD nothing else can use the cycles the arbiter would hold this wave after each WMMA, so
-        # let it issue LDS, SALU and VALU work while WMMAs execute (SCHED_MODE.DISABLE_XDL_ARB_STALL).
+        # Let the wave issue LDS, SALU and VALU work while its WMMAs execute (SCHED_MODE.DISABLE_XDL_ARB_STALL). With
+        # one wave per SIMD nothing else can use the cycles the arbiter would hold; configs with more waves per SIMD
+        # (the 16-row decode tiles) measured no slower with it, so it is set for every config.
         rocdl.disable_xdl_arb_stall()
         K_TILES = i32_k // tile_k
         k64 = fx.Int64(i32_k)
