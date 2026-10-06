@@ -578,12 +578,52 @@ def test_gemm_a8w8_splitk(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
     _run_splitk_case(mode, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, split_k)
 
 
-# Decode rows (M, N, K); each runs the config the selector picks, through the launcher that config needs.
-_DECODE_SELECTOR_ROWS = [(1, 1536, 7168), (16, 7168, 2048), (64, 1536, 1024), (256, 16384, 512), (256, 16384, 8192)]
+def test_gemm_a8w8_splitk_ptpc_scales_multiply_the_sum():
+    # Each output is a sum of four partials of +-1792 that cancel. Scaled by scale_a = 2**120 one by one, every
+    # partial overflows to +-inf and their sum is NaN; scaling the sum gives the exact result, 0.
+    _require_gpu()
+    M, N, K, split_k = 1, 1536, 7168, 4
+    tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers = 16, 128, 128, 1, 4, 4
+    one = _const_code(1.0, fp4=False)
+    a = torch.full((M, K), one, dtype=torch.uint8, device="cuda")
+    b = torch.full((N, K), one, dtype=torch.uint8, device="cuda")
+    b[:, K // 2 :] = one | 0x80  # -1
+    b_gpu = gemm_common_utils.preshuffle_b_16x16(b, N, K).contiguous()
+    sa = torch.full((M,), 2.0**120, dtype=torch.float32, device="cuda")
+    sb = torch.ones(N, dtype=torch.float32, device="cuda")
+    c = torch.full((M, N), float("nan"), dtype=torch.bfloat16, device="cuda")
+    tiles = -(-M // tile_m) * -(-N // tile_n)
+    workspace = torch.empty(split_k * tiles * tile_m * tile_n, dtype=torch.float32, device="cuda")
+    counters = torch.zeros(tiles, dtype=torch.int32, device="cuda")
+    ptrs = [flyc.from_c_void_p(fx.Uint8, t.data_ptr()) for t in (c, a, b_gpu, sa, sb)]
+    args = (*ptrs, M, torch.cuda.current_stream(), N, K, 0, K, N)
+    args += (tile_m, tile_n, tile_k, m_warp, n_warp, 0, num_buffers, 1, 1, False)
+    args += (split_k, workspace.data_ptr(), counters.data_ptr())
+    flyc.compile(launch_gemm_a8w8_splitk, *args)(*args)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(c.float(), torch.zeros(M, N, device="cuda"), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("M, N, K", _DECODE_SELECTOR_ROWS)
-@pytest.mark.parametrize("mode", ("blockscale_a8w8", "ptpc_a8w8"))
+# Decode rows (M, N, K), one per selector return; each runs the config the selector picks, through the launcher that
+# config needs. Blockscale needs N % 128 == 0, so the N = 192 row (the 64-wide return) runs per-token/per-channel only.
+_DECODE_SELECTOR_ROWS = [
+    (1, 1536, 7168),
+    (16, 7168, 2048),
+    (64, 1536, 1024),
+    (65, 192, 512),
+    (256, 1536, 7168),
+    (256, 16384, 512),
+    (256, 16384, 8192),
+]
+_DECODE_SELECTOR_CASES = [
+    (mode, M, N, K)
+    for M, N, K in _DECODE_SELECTOR_ROWS
+    for mode in ("blockscale_a8w8", "ptpc_a8w8")
+    if mode == "ptpc_a8w8" or N % 128 == 0
+]
+
+
+@pytest.mark.parametrize("mode, M, N, K", _DECODE_SELECTOR_CASES)
 def test_gemm_a8w8_decode_selector(mode, M, N, K):
     _require_gpu()
     *cfg, split_k = select_gemm_a8w8_decode_config(M, N, K)

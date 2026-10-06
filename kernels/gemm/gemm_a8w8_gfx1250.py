@@ -152,8 +152,10 @@ def _launch_gemm_a8w8(
         kt_base = None
         if const_expr(split_k > 1):
             # Split z walks K-tiles [z*T//S, (z+1)*T//S), so every K-tile is covered even when S does not divide T.
-            kt_base = bid_z * K_TILES // split_k
-            K_TILES = (bid_z + 1) * K_TILES // split_k - kt_base
+            # z*T//S is computed as z*(T//S) + z*(T%S)//S, because the product z*T can overflow i32.
+            t_q, t_r = K_TILES // split_k, K_TILES % split_k
+            kt_base = bid_z * t_q + bid_z * t_r // split_k
+            K_TILES = t_q + (bid_z + 1) * t_r // split_k - bid_z * t_r // split_k
 
         def _gkt(kt):  # global K-tile index of local K-tile kt
             return kt if const_expr(split_k == 1) else kt + kt_base
@@ -505,9 +507,9 @@ def _launch_gemm_a8w8(
             ]
             return sa_r, sb_r
 
-        def epilogue_apply_ptpc_scale(scale_regs):
+        def epilogue_apply_ptpc_scale(scale_regs, accs):
             sa_r, sb_r = scale_regs
-            accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]
+            accs = list(accs)
             sa = [Vec.from_elements([sa_r[wm].load()[0]] * 8) for wm in range_constexpr(wmma_m_rep)]
             sb = [sb_r[wn][0].load().shuffle(sb_r[wn][1].load(), list(range(8))) for wn in range_constexpr(wmma_n_rep)]
             for wm in range_constexpr(wmma_m_rep):
@@ -536,7 +538,7 @@ def _launch_gemm_a8w8(
             pbuf = _buf_ptr(s)
             buf = _bidx(pbuf)
             pipeline_fence(outstanding=(num_buffers - 2 - j), use_cluster=False)
-            if const_expr(not is_bsc and j == num_buffers - 2):
+            if const_expr(not is_bsc and split_k == 1 and j == num_buffers - 2):
                 scale_regs = issue_ptpc_scale_loads()
             compute_ktile(buf, pbuf, None)
 
@@ -545,7 +547,9 @@ def _launch_gemm_a8w8(
             accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]
         pipeline_fence(outstanding=0, use_cluster=use_cluster)
         if const_expr(not is_bsc):
-            accs = epilogue_apply_ptpc_scale(scale_regs)
+            accs = [c_frags[idx].load() for idx in range_constexpr(n_acc)]
+            if const_expr(split_k == 1):
+                accs = epilogue_apply_ptpc_scale(scale_regs, accs)
 
         def store_c(accs):
             for wm in range_constexpr(wmma_m_rep):
@@ -575,7 +579,9 @@ def _launch_gemm_a8w8(
             store_c(accs)
         else:
             # Each lane writes its fragments (8 contiguous fp32 per 16x16 block) to this split's workspace slot, the
-            # workgroup releases them and bumps the tile's arrival counter; the last arrival sums all slots.
+            # workgroup releases them and bumps the tile's arrival counter; the last arrival sums all slots. The
+            # per-token/per-channel scales multiply the sum, not each partial: scaled partials can overflow to +-inf
+            # where the unscaled sum cancels.
             tile_lin = bid_x * ((i32_n + (tile_n - 1)) // tile_n) + bid_y
             ws_ptr = fx.inttoptr(fx.PointerType.get(fx.Float32.ir_type, fx.AddressSpace.Global, 16), i64_ws)
             cnt_ptr = fx.inttoptr(fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Global, 4), i64_counters)
@@ -605,6 +611,9 @@ def _launch_gemm_a8w8(
             workgroup_barrier(use_cluster=False)
             if fx.ptr_load(arrive_lds) == split_k - 1:
                 fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope=fx.rocdl.SyncScope.Agent)
+                # Loaded here rather than in the drain: scale registers held across the workspace stores leave too
+                # few VGPRs to keep every workspace load below in flight.
+                sum_scales = issue_ptpc_scale_loads() if const_expr(not is_bsc) else None
                 total = []
                 for wm in range_constexpr(wmma_m_rep):
                     for wn in range_constexpr(wmma_n_rep):
@@ -612,6 +621,8 @@ def _launch_gemm_a8w8(
                         for z in range_constexpr(1, split_k):
                             acc = acc + Vec(fx.ptr_load(ws_ptr + frag_off(z, wm, wn), result_type=T.vec(8, T.f32)))
                         total.append(acc)
+                if const_expr(not is_bsc):
+                    total = epilogue_apply_ptpc_scale(sum_scales, total)
                 store_c(total)
                 if tid == 0:
                     fx.ptr_store(fx.Int32(0), cnt_ptr + tile_lin)
@@ -724,14 +735,16 @@ def launch_gemm_a8w8_splitk(
     """launch_gemm_a8w8 with K split across grid z (split_k >= 1).
 
     Split z accumulates K-tiles [z * T // split_k, (z + 1) * T // split_k) of the T = K // tile_k tiles. As for
-    launch_gemm_a8w8, the caller guarantees K % tile_k == 0; every split also needs T // split_k >= num_buffers - 1.
+    launch_gemm_a8w8, the caller guarantees K % tile_k == 0 and N % tile_n == 0; every split also needs
+    T // split_k >= num_buffers - 1.
 
     Each workgroup writes its fp32 partial tile to the workspace at i64_ws
     (split_k * ceil(M / tile_m) * ceil(N / tile_n) * tile_m * tile_n fp32) and bumps the tile's int32 arrival
     counter at i64_counters (ceil(M / tile_m) * ceil(N / tile_n) counters, zero before the first launch). The last
-    workgroup to arrive sums the partials in split order (independent of arrival order), stores C, and resets the
-    counter to zero. Launches that can overlap (other streams, parallel graph branches) need their own workspace and
-    counters. Cluster launch is not supported with split_k > 1.
+    workgroup to arrive sums the partials in split order (independent of arrival order), applies the
+    per-token/per-channel scales to the sum, stores C, and resets the counter to zero. Launches that can overlap
+    (other streams, parallel graph branches) need their own workspace and counters. Cluster launch is not supported
+    with split_k > 1.
     """
     _launch_gemm_a8w8(
         arg_c,
