@@ -44,7 +44,8 @@ def launch_gemm_bf16(
     tdm_balance: Constexpr[int] = 0,
     wmma_b2b: Constexpr[int] = 0,
 ):
-    """Requires N % tile_n == 0 and K % tile_k == 0; M is clamped per tile."""
+    """Requires N % tile_n == 0 and K % 8 == 0; M is clamped per tile, and when tile_k does not divide K the last
+    K-tile is clamped by the TDM K extent (the hardware zero-fills A and B past K)."""
     WMMA_M = WMMA_N = 16
     WMMA_K = 32
     WAVE = 32
@@ -92,7 +93,8 @@ def launch_gemm_bf16(
     ):
         if const_expr(wmma_b2b):
             rocdl.disable_xdl_arb_stall()
-        K_TILES = i32_k // tile_k
+        K_TILES = (i32_k + (tile_k - 1)) // tile_k
+        k_bytes = i32_k * EB  # valid bytes per A / B row: the TDM K extent of K-tile kt is k_bytes - kt * KB
         lda_b = fx.Int64(i32_lda) * EB  # global row strides in bytes
         ldb_b = fx.Int64(i32_ldb) * EB
         ldc64 = fx.Int64(i32_ldc)
@@ -161,11 +163,13 @@ def launch_gemm_bf16(
         def issue(s, kt):
             pa = _buf_ptr(s)
             koff = fx.Int64(kt) * fx.Int64(KB)
+            k_left = k_bytes - fx.Int32(kt) * KB
             for j in range_constexpr(len(tdm_jobs)):
                 w, atom, gt, lds_off, rows = tdm_jobs[j]
                 if wave == w % num_waves:
                     dst = pa if const_expr(lds_off == 0) else fx.add_offset(pa, lds_off)
-                    fx.copy(atom, gt, _lv(dst, (rows, KB), (LDS_ROW, 1)), imm_offset=koff)
+                    atom_k = fx.atom_set_value(atom, "extent_1", k_left)
+                    fx.copy(atom_k, gt, _lv(dst, (rows, KB), (LDS_ROW, 1)), imm_offset=koff)
 
         wmb = wave_m * warp_tile_m
         wnb = wave_n * warp_tile_n
