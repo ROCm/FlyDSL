@@ -58,6 +58,33 @@ def select_gemm_a8w8_decode_config(M, N, K, max_split=4):
     return (64, 128 if N % 128 == 0 else 64, 128, 2, 2, min(4, k_tiles), 1)
 
 
+def select_gemm_a8w8_prefill_config(M, N, K, is_bsc=True, num_cus=256):
+    """(tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) for a prefill FP8 GEMM (M > 256).
+
+    Prefill GEMMs with 256x256 tiles stream every A row-block and B column-block from L2 into LDS once per workgroup,
+    and that tile traffic, not the WMMA rate, bounds them. A 2x2 cluster multicasts each A tile to the cluster's two
+    N-neighbours and each B tile to its two M-neighbours, halving the traffic. For blockscale, 128x256 tiles (3 buffers)
+    replace 256x256 when 256x256 tiles would leave CUs idle and 128x256 tiles still fit in one wave of workgroups;
+    per-token/per-channel (is_bsc=False) grids that 256x256 tiles do not fill raise ValueError, since no tile here
+    beat a hand-picked one there. cluster_n is 1 when the N-tile count is odd (the launcher needs N / tile_n divisible
+    by cluster_n); the M-tile count is padded up to a multiple of cluster_m by the launcher. Launch with
+    launch_gemm_a8w8 and the returned cluster dims.
+    """
+    if M <= 256:
+        raise ValueError(f"prefill config selector covers M > 256, got M={M}")
+    if K % 128 or K < 512 or N % 256:
+        raise ValueError(f"needs K % 128 == 0, K >= 512 and N % 256 == 0, got N={N}, K={K}")
+    n_tiles = N // 256
+    small = -(-M // 256) * n_tiles < num_cus
+    if small and not is_bsc:
+        raise ValueError(f"per-token/per-channel grid of {-(-M // 256) * n_tiles} 256x256 tiles leaves CUs idle")
+    if small and -(-M // 128) * n_tiles <= num_cus:
+        tile_m, num_buffers = 128, 3
+    else:
+        tile_m, num_buffers = 256, 4
+    return (tile_m, 256, 128, 2, 2, num_buffers, 2, 2 if n_tiles % 2 == 0 else 1)
+
+
 def _launch_gemm_a8w8(
     arg_c: fx.Pointer,
     arg_a: fx.Pointer,

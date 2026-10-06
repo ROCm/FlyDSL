@@ -26,6 +26,7 @@ from kernels.gemm.gemm_a8w8_gfx1250 import (  # noqa: E402
     launch_gemm_a8w8,
     launch_gemm_a8w8_splitk,
     select_gemm_a8w8_decode_config,
+    select_gemm_a8w8_prefill_config,
 )
 from tests.kernels.utils import gemm_common_utils  # noqa: E402
 
@@ -637,6 +638,30 @@ def test_gemm_a8w8_decode_selector_rejects_unsupported_shapes():
     for M, N, K in ((257, 1024, 1024), (16, 1000, 1024), (16, 1024, 1000), (16, 1024, 128)):
         with pytest.raises(ValueError):
             select_gemm_a8w8_decode_config(M, N, K)
+
+
+# Prefill rows (M, N, K): 256x256 with a 2x2 cluster, 128x256 with a 2x2 cluster (small grid), an odd N-tile count
+# (2x1 cluster), and an M that is not a multiple of the tile or of the cluster.
+_PREFILL_SELECTOR_ROWS = [(2048, 7168, 2048), (2048, 2048, 1024), (1024, 1280, 512), (1288, 1536, 640)]
+
+
+@pytest.mark.parametrize("M, N, K", _PREFILL_SELECTOR_ROWS)
+@pytest.mark.parametrize("mode", ("blockscale_a8w8", "ptpc_a8w8"))
+def test_gemm_a8w8_prefill_selector(mode, M, N, K):
+    _require_gpu()
+    *cfg, cluster_m, cluster_n = select_gemm_a8w8_prefill_config(M, N, K, num_cus=4)
+    _run_case(mode, M, N, K, *cfg, cluster_m=cluster_m, cluster_n=cluster_n)
+    if mode == "blockscale_a8w8":  # the 128x256 branch is blockscale-only
+        *cfg, cluster_m, cluster_n = select_gemm_a8w8_prefill_config(M, N, K)
+        _run_case(mode, M, N, K, *cfg, cluster_m=cluster_m, cluster_n=cluster_n)
+
+
+def test_gemm_a8w8_prefill_selector_rejects_unsupported_shapes():
+    for M, N, K in ((256, 1024, 1024), (1024, 2112, 1024), (1024, 1024, 1000), (1024, 1024, 384)):
+        with pytest.raises(ValueError):
+            select_gemm_a8w8_prefill_config(M, N, K)
+    with pytest.raises(ValueError):  # per-token/per-channel grid that 256x256 tiles do not fill
+        select_gemm_a8w8_prefill_config(2048, 2048, 2048, is_bsc=False)
 
 
 def _parse_csv_ints(value: str, n: int, name: str) -> list[int]:
