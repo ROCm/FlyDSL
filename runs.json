@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-06T15:30:35Z",
+ "updated": "2026-10-06T18:02:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 37507571071,
+   "pr": 1228,
+   "commit": "afacf9827a9a0d088b8a1ad821ede52a07fdf119",
+   "branch": "perf/gfx1250-a8w8-decode-splitk",
+   "event": "pull_request",
+   "title": "[Perf][gfx1250] Add split-K and a decode config selector to the FP8 GEMM",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37507571071",
+   "created_at": "2026-10-06T17:57:34Z",
+   "updated_at": "2026-10-06T18:00:57Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 37507567319,
+   "pr": 1227,
+   "commit": "ae4fde39859485ae8c74bf103069dc5b1b0678a0",
+   "branch": "perf/gfx1250-rmsnorm-vector-tail",
+   "event": "pull_request",
+   "title": "[Kernel][Perf] Keep RMSNorm on the 128-bit path for partial tiles and small N",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37507567319",
+   "created_at": "2026-10-06T17:57:32Z",
+   "updated_at": "2026-10-06T18:01:26Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 37462610284,
    "pr": 1223,
@@ -1049,64 +1079,6 @@
    "updated_at": "2026-10-01T11:21:14Z",
    "actor": "apinge",
    "jobs": []
-  },
-  {
-   "run_id": 36850657108,
-   "pr": null,
-   "commit": "9e9d7d9ef42ad256add0afbe55cb31489e05f4ff",
-   "branch": "fix_cmake_rocm7.14",
-   "event": "pull_request",
-   "title": "[Build][JIT] Support core-only ROCm SDK environments",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36850657108",
-   "created_at": "2026-10-01T10:41:00Z",
-   "updated_at": "2026-10-01T10:42:33Z",
-   "actor": "apinge",
-   "jobs": []
-  },
-  {
-   "run_id": 36847292133,
-   "pr": 1221,
-   "commit": "449972d59da5c3fc4498e01b058a947c51789be9",
-   "branch": "jli/compare-latest-llvm",
-   "event": "pull_request",
-   "title": "[dont merge] compare latest base main llvm",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/36847292133",
-   "created_at": "2026-10-01T10:08:59Z",
-   "updated_at": "2026-10-01T11:10:55Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-01T10:38:54Z",
-     "completed_at": "2026-10-01T11:10:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36847292133/job/110330391835"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-01T10:38:46Z",
-     "completed_at": "2026-10-01T10:48:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36847292133/job/110330391845"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-01T10:38:57Z",
-     "completed_at": "2026-10-01T11:02:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/36847292133/job/110330392105"
-    }
-   ]
   }
  ]
 }
