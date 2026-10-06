@@ -22,7 +22,7 @@ import flydsl.compiler as flyc  # noqa: E402,I001
 import flydsl.expr as fx  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.gemm.gemm_bf16_gfx1250 import launch_gemm_bf16  # noqa: E402
+from kernels.gemm.gemm_bf16_gfx1250 import launch_gemm_bf16, select_gemm_bf16_prefill_config  # noqa: E402
 from tests.test_common import run_perftest  # noqa: E402
 
 _DT = {"bf16": torch.bfloat16, "f16": torch.float16}
@@ -164,6 +164,20 @@ def test_gemm_bf16(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers)
 @pytest.mark.parametrize("dtype", ["bf16", "f16"])
 def test_gemm_dtypes(dtype):
     _run_case(128, 128, 512, 128, 128, 128, 2, 2, 2, dtype=dtype)
+
+
+# Prefill rows (M, N, K) whose 256x256 grid fills the (here 4) CUs: the selected four-wave layout with wmma_b2b,
+# including an M that is not a multiple of the tile.
+@pytest.mark.parametrize("M, N, K", [(512, 1024, 768), (520, 768, 1024)])
+def test_gemm_bf16_prefill_selector(M, N, K):
+    *cfg, wmma_b2b = select_gemm_bf16_prefill_config(M, N, K, num_cus=4)
+    _run_case(M, N, K, *cfg, wmma_b2b=wmma_b2b)
+
+
+def test_gemm_bf16_prefill_selector_rejects_unsupported_shapes():
+    for M, N, K in ((256, 1024, 1024), (1024, 1000, 1024), (1024, 1024, 512), (2048, 8448, 7168)):
+        with pytest.raises(ValueError):
+            select_gemm_bf16_prefill_config(M, N, K)
 
 
 # A multicasts along N, B along M. Kept small on purpose: a single 16-wide
