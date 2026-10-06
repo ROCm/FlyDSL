@@ -122,10 +122,11 @@ def launch_gemm_a8w8(
         blk_m64 = fx.Int64(blk_m)
         blk_n64 = fx.Int64(blk_n)
         mn_oob = i32_m - blk_m  # valid M rows (A / scale_a / C)
+        n_oob = i32_n - blk_n  # valid N columns (B / C); a partial last N-tile is zero-filled / dropped by the TDM
         nb_oob = None
         stride_ask64 = None
         if const_expr(is_bsc):
-            nb_oob = (i32_n // 128 - blk_n // 128) if not ALIGNED_N else None
+            nb_oob = i32_n // 128 - blk_n // 128
             stride_ask64 = fx.Int64(i32_stride_ascale_k)
 
         arena = fx.SharedAllocator(static=False)
@@ -169,7 +170,7 @@ def launch_gemm_a8w8(
         )
         gB = _gv(gB_base, b_off0, (tile_n // 16, tile_k * 16), (tile_k * 16, 1))
         atomB = fx.atom_set_value(
-            fx.rocdl.make_tdm_atom(gB, [None, None], strides=[k64 * 16, None], num_warps=1, early_timeout=True),
+            fx.rocdl.make_tdm_atom(gB, [n_oob // 16, None], strides=[k64 * 16, None], num_warps=1, early_timeout=True),
             "workgroup_mask",
             b_mask,
         )
@@ -505,7 +506,7 @@ def launch_gemm_a8w8(
         gtC = _gv(gC_base, c_off_rt, (tile_m, tile_n), (tile_n, 1))
         atomC = fx.rocdl.make_tdm_atom(
             gtC,
-            [mn_oob, None],
+            [mn_oob, n_oob],
             strides=[ldc64, None],
             num_warps=num_waves,
             early_timeout=False,
