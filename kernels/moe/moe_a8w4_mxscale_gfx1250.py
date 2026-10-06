@@ -23,6 +23,32 @@ from kernels.gemm.gemm_common_gfx1250 import (
 TDM_DESCRIPTOR_VERSION = 1
 
 
+def select_moe_a8w4_config(tokens, model_dim, inter_dim, experts, topk, num_cus=256):
+    """(stage-1 config, stage-2 config) for launch_moe_gemm_a8w4, each (tile_m, tile_n, tile_k, m_warp, n_warp,
+    num_buffers). Stage 1 is gate_up (N = 2 * inter_dim, K = model_dim), stage 2 is down (N = model_dim,
+    K = inter_dim). Both stages share one routing layout, padded per expert to the larger tile_m of the two.
+
+    Expected routed rows per expert r = tokens * topk / experts picks the tile height: from r = 256 a 128x256 tile with
+    2x2 warps and two buffers (two workgroups per CU) is faster on both stages despite the deeper padding; below
+    that 64-row tiles, and 16-row tiles for decode (r < 16, or r < 40 with inter_dim <= 256, where 64-row padding
+    triples the rows). When most active experts hold a single routed row (r <= 0.25), a stage whose 256-wide tiles
+    would occupy at most num_cus / 2 workgroups (estimated from the expected number of distinct experts) is a pure
+    weight stream over few CUs, and 128-wide tiles spread it over twice as many.
+    """
+    rows = tokens * topk / experts
+    k1, k2 = model_dim // 256, inter_dim // 256
+    if rows >= 256 and k1 >= 2 and k2 >= 2:
+        cfg = (128, 256, 256, 2, 2, 2)
+        return cfg, cfg
+    tile_m = 16 if rows < 16 or (rows < 40 and inter_dim <= 256) else 64
+    active = experts * (1.0 - (1.0 - 1.0 / experts) ** (tokens * topk))
+    cfgs = []
+    for n, k_tiles in ((2 * inter_dim, k1), (model_dim, k2)):
+        tile_n = 128 if rows <= 0.25 and active * (n // 256) <= num_cus // 2 else 256
+        cfgs.append((tile_m, tile_n, 256, 1, 4, min(3, max(1, k_tiles))))
+    return tuple(cfgs)
+
+
 @flyc.jit
 def launch_moe_gemm_a8w4(
     arg_c: fx.Tensor,
