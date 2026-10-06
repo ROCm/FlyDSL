@@ -23,19 +23,20 @@ from .gemm_common_gfx1250 import (
 def select_gemm_bf16_prefill_config(M, N, K, num_cus=256):
     """(tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, wmma_b2b) for a prefill-sized BF16 GEMM (M > 256).
 
-    For grids that 256x256 tiles fill (at least three quarters of the CUs in their last wave), four waves of 128x128
-    with the WMMA arbitration stall disabled (wmma_b2b=1) beat the eight-wave 128x64 layout: the workgroup reads each A
-    fragment twice instead of four times per K-step (a third less LDS read traffic), and its one wave per SIMD can issue
-    LDS and scalar work while its WMMAs execute. Other shapes raise ValueError and keep the caller's tile (smaller
-    tiles, N not a multiple of 256, K < 768).
+    For grids whose 256x256 tiles keep at least three quarters of the CUs busy, averaged over their waves, four waves
+    of 128x128 with the WMMA arbitration stall disabled (wmma_b2b=1) beat the eight-wave 128x64 layout: the workgroup
+    reads each A fragment twice instead of four times per K-step (a third less LDS read traffic), and its one wave per
+    SIMD can issue LDS and scalar work while its WMMAs execute. Other shapes raise ValueError and keep the caller's
+    tile (smaller tiles, N not a multiple of 256, K < 768).
     """
     if M <= 256:
         raise ValueError(f"prefill config selector covers M > 256, got M={M}")
     if N % 256 or K % 128 or K < 768:
         raise ValueError(f"needs N % 256 == 0, K % 128 == 0 and K >= 768, got N={N}, K={K}")
     tiles = -(-M // 256) * (N // 256)
-    if 4 * tiles < 3 * num_cus * -(-tiles // num_cus):
-        raise ValueError(f"{tiles} 256x256 tiles fill less than 3/4 of their last wave of {num_cus} CUs")
+    waves = -(-tiles // num_cus)
+    if 4 * tiles < 3 * num_cus * waves:
+        raise ValueError(f"{tiles} 256x256 tiles keep less than 3/4 of {num_cus} CUs busy over {waves} waves")
     return (256, 256, 128, 2, 2, 2, 1)
 
 
