@@ -155,7 +155,7 @@ _CASES = [
     (256, 256, 512, 128, 256, 128, 2, 4, 2),
     (64, 256, 2880, 16, 128, 128, 1, 2, 4),  # K tail: 22.5 K-tiles, the last half past K (gpt-oss K = 2880)
     (129, 256, 2888, 128, 128, 128, 2, 2, 2),  # K % tile_k = 72 with ragged M
-    (16, 256, 96, 16, 128, 256, 1, 2, 3),  # K < tile_k: a single partial K-tile
+    (16, 256, 96, 16, 128, 256, 1, 2, 2),  # K < tile_k: a single partial K-tile
 ]
 
 
