@@ -466,8 +466,9 @@ def _launch_gemm_a8w8(
         # Cross-K-tile pipeline (quadrant schedule): K-tile kt+1's fence and its K-step-0 operands (scales, B left half,
         # A top half) are issued between the last K-step's third and fourth quadrants of K-tile kt, into carry
         # registers, so their LDS latency overlaps that quadrant's WMMAs instead of stalling the start of K-tile kt+1.
-        # Cluster launch needs no extra fence: a multicast TDM load writes only the LDS of workgroups that issued it,
-        # and each workgroup issues it after its own fence, so the workgroup barrier still guards every buffer reuse.
+        # Cluster launch needs no extra fence: a multicast load returns data only to the workgroups that requested it
+        # (CDNA5 ISA §10.7), and each workgroup requests it after its own fence, so the workgroup barrier still guards
+        # every buffer reuse.
         XT = use_quadrant
         xt_b = xt_a = xt_sb = xt_sa = None
         if const_expr(XT):
