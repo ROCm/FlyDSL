@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-07T00:39:47Z",
+ "updated": "2026-10-07T01:01:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -145,11 +145,11 @@
    "branch": "perf/gfx1250-moe-a8w4-selector",
    "event": "pull_request",
    "title": "[Perf][gfx1250] Add a per-stage config selector to the A8W4 MoE GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542125496",
    "created_at": "2026-10-06T22:41:01Z",
-   "updated_at": "2026-10-07T00:03:15Z",
+   "updated_at": "2026-10-07T00:59:52Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -164,10 +164,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T00:03:15Z",
-     "completed_at": null,
+     "completed_at": "2026-10-07T00:59:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542125496/job/112547389017"
     },
     {
