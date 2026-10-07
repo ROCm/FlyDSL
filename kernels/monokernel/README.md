@@ -7,6 +7,8 @@ kernels. Model ownership is explicit:
   references.
 - `k3/` contains Kimi-K3 MLA/KDA state handling, AttnRes, latent-MoE logic,
   staged baselines, and benchmark tools.
+- `dsv4/` contains the DeepSeek-V4 decode layer: CSA / HCA sparse attention
+  with its compressors and indexer, mHC, MoE, and its checkpoint loader.
 
 Reusable contracts and primitives stay at this package root. `config.py`,
 `layout.py`, `ops.py`, `packing.py`, `reference.py`, `runtime.py`, and
