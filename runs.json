@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-07T22:02:23Z",
+ "updated": "2026-10-07T22:20:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,29 +10,32 @@
    "branch": "fix/norm-quant-reduction-race",
    "event": "pull_request",
    "title": "[Bugfix] Sync waves before the RMSNorm/LayerNorm quant kernels reuse their reduction slot",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682368262",
    "created_at": "2026-10-07T20:29:21Z",
-   "updated_at": "2026-10-07T21:26:04Z",
+   "updated_at": "2026-10-07T22:18:47Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T21:04:59Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682368262/job/113015743959"
+     "completed_at": "2026-10-07T22:14:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682368262/job/113015743959",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T21:07:03Z",
-     "completed_at": null,
+     "completed_at": "2026-10-07T22:18:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682368262/job/113015744228"
     },
     {
@@ -81,11 +84,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T21:04:41Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682285079/job/113014581304"
+     "completed_at": "2026-10-07T22:05:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682285079/job/113014581304",
+     "machine": "smci350-rck-g03-d07-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
