@@ -22,7 +22,7 @@ from .gemm_common_gfx1250 import (
 )
 
 
-def select_gemm_a8w8_decode_config(M, N, K, max_split=4):
+def select_gemm_a8w8_decode_config(M: int, N: int, K: int) -> tuple[int, int, int, int, int, int, int]:
     """(tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, split_k) for a decode-sized FP8 GEMM (M <= 256).
 
     The upstream-tested 128/256-row tiles compute at most 16 valid rows per 16-row WMMA slot at M <= 16 and launch
@@ -42,7 +42,7 @@ def select_gemm_a8w8_decode_config(M, N, K, max_split=4):
     if M <= 16:
         n_tiles = N // 128 if N % 128 == 0 else None
         deep = n_tiles is not None and ((K >= 12288 and n_tiles <= 64) or (K >= 6144 and n_tiles <= 24))
-        if max_split >= 4 and deep and k_tiles % 4 == 0:
+        if deep and k_tiles % 4 == 0:
             return (16, 128, 128, 1, 4, min(4, k_tiles // 4), 4)
         return (16, 64, 128, 1, 4, min(6, k_tiles), 1)
     if N >= 16384 and N % 256 == 0:

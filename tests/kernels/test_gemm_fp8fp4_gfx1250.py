@@ -604,17 +604,18 @@ def test_gemm_a8w8_splitk_ptpc_scales_multiply_the_sum():
     torch.testing.assert_close(c.float(), torch.zeros(M, N, device="cuda"), rtol=0, atol=0)
 
 
-# Decode rows (M, N, K), one per selector return; each runs the config the selector picks, through the launcher that
-# config needs. Blockscale needs N % 128 == 0, so the N = 192 row (the 64-wide return) runs per-token/per-channel only.
-_DECODE_SELECTOR_ROWS = [
-    (1, 1536, 7168),
-    (16, 7168, 2048),
-    (64, 1536, 1024),
-    (65, 192, 512),
-    (256, 1536, 7168),
-    (256, 16384, 512),
-    (256, 16384, 8192),
-]
+# Decode rows (M, N, K), one per selector return, with the config each selects. Each row runs that config through the
+# launcher it needs. Blockscale needs N % 128 == 0, so the N = 192 row (the 64-wide return) runs per-token/per-channel
+# only.
+_DECODE_SELECTOR_ROWS = {
+    (1, 1536, 7168): (16, 128, 128, 1, 4, 4, 4),
+    (16, 7168, 2048): (16, 64, 128, 1, 4, 6, 1),
+    (64, 1536, 1024): (16, 64, 128, 1, 4, 6, 1),
+    (65, 192, 512): (64, 64, 128, 2, 2, 4, 1),
+    (256, 1536, 7168): (64, 128, 128, 2, 2, 4, 1),
+    (256, 16384, 512): (128, 256, 128, 2, 2, 3, 1),
+    (256, 16384, 8192): (256, 256, 128, 2, 2, 4, 1),
+}
 _DECODE_SELECTOR_CASES = [
     (mode, M, N, K)
     for M, N, K in _DECODE_SELECTOR_ROWS
@@ -631,6 +632,11 @@ def test_gemm_a8w8_decode_selector(mode, M, N, K):
         _run_splitk_case(mode, M, N, K, *cfg, split_k)
     else:
         _run_case(mode, M, N, K, *cfg)
+
+
+def test_gemm_a8w8_decode_selector_configs():
+    for (M, N, K), expected in _DECODE_SELECTOR_ROWS.items():
+        assert select_gemm_a8w8_decode_config(M, N, K) == expected, (M, N, K)
 
 
 def test_gemm_a8w8_decode_selector_rejects_unsupported_shapes():
