@@ -1,11 +1,56 @@
 {
  "schema": 1,
- "updated": "2026-10-07T07:17:39Z",
+ "updated": "2026-10-07T09:36:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37585191972,
+   "run_id": 37589605089,
    "pr": 1223,
+   "commit": "c0a46f1ad4b5f57501cabef5226625ae120b1e5b",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37589605089",
+   "created_at": "2026-10-07T07:48:15Z",
+   "updated_at": "2026-10-07T07:48:15Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37587347722,
+   "pr": null,
+   "commit": "ec5b0157ed6ad40054b83138d4dce227fbc28113",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37587347722",
+   "created_at": "2026-10-07T07:26:40Z",
+   "updated_at": "2026-10-07T07:26:40Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37586765330,
+   "pr": null,
+   "commit": "9738b8456d272d98c8d9d10334a47455d8a89f2b",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37586765330",
+   "created_at": "2026-10-07T07:20:55Z",
+   "updated_at": "2026-10-07T07:20:55Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37585191972,
+   "pr": null,
    "commit": "503565b4a2c176f05878b73c1ac40ec3c952ed46",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -1285,110 +1330,6 @@
    "updated_at": "2026-10-05T15:33:17Z",
    "actor": "dimitri91209",
    "jobs": []
-  },
-  {
-   "run_id": 37330793634,
-   "pr": null,
-   "commit": "e8eb58e86bfb459ccb1b27f972fbd7e1871ebd01",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37330793634",
-   "created_at": "2026-10-05T15:11:28Z",
-   "updated_at": "2026-10-05T15:11:28Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37306396961,
-   "pr": 1222,
-   "commit": "3371268839690ec16a361037a2c094a5bfc21097",
-   "branch": "fix_cmake_rocm7.14",
-   "event": "pull_request",
-   "title": "[Build][JIT] Support core-only ROCm SDK environments",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37306396961",
-   "created_at": "2026-10-05T11:58:35Z",
-   "updated_at": "2026-10-05T13:59:14Z",
-   "actor": "apinge",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-05T12:43:55Z",
-     "completed_at": "2026-10-05T13:59:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37306396961/job/111767617556"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-05T12:43:31Z",
-     "completed_at": "2026-10-05T13:00:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37306396961/job/111767617565"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-05T12:43:38Z",
-     "completed_at": "2026-10-05T13:45:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37306396961/job/111767617598",
-     "machine": "smci350-rck-g03-d07-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 37299835332,
-   "pr": null,
-   "commit": "e39b2d5d53287515ecc4fbc720ca2c24bcc73ab6",
-   "branch": "fix_cmake_rocm7.14",
-   "event": "pull_request",
-   "title": "[Build][JIT] Support core-only ROCm SDK environments",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37299835332",
-   "created_at": "2026-10-05T10:57:19Z",
-   "updated_at": "2026-10-05T11:59:39Z",
-   "actor": "apinge",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-05T11:35:29Z",
-     "completed_at": "2026-10-05T11:59:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37299835332/job/111742666891"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-05T11:35:54Z",
-     "completed_at": "2026-10-05T11:59:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37299835332/job/111742666971"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-05T11:35:14Z",
-     "completed_at": "2026-10-05T11:53:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37299835332/job/111742667056"
-    }
-   ]
   }
  ]
 }
