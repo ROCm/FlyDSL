@@ -640,19 +640,33 @@ def test_gemm_a8w8_decode_selector_rejects_unsupported_shapes():
             select_gemm_a8w8_decode_config(M, N, K)
 
 
-# Prefill rows (M, N, K): 256x256 with a 2x2 cluster, 128x256 with a 2x2 cluster (small grid), an odd N-tile count
-# (2x1 cluster), and an M that is not a multiple of the tile or of the cluster.
-_PREFILL_SELECTOR_ROWS = [(2048, 7168, 2048), (2048, 2048, 1024), (1024, 1280, 512), (1288, 1536, 640)]
+# Prefill rows (M, N, K) -> (blockscale config for 256 CUs, config for 4 CUs). They cover 256x256 with a 2x2 cluster,
+# 128x256 with a 2x2 cluster (small grid), an odd N-tile count (2x1 cluster), and an M that is not a multiple of the
+# tile or of the cluster.
+_PREFILL_SELECTOR_ROWS = {
+    (2048, 7168, 2048): ((256, 256, 128, 2, 2, 4, 2, 2), (256, 256, 128, 2, 2, 4, 2, 2)),
+    (2048, 2048, 1024): ((128, 256, 128, 2, 2, 3, 2, 2), (256, 256, 128, 2, 2, 4, 2, 2)),
+    (1024, 1280, 512): ((128, 256, 128, 2, 2, 3, 2, 1), (256, 256, 128, 2, 2, 4, 2, 1)),
+    (1288, 1536, 640): ((128, 256, 128, 2, 2, 3, 2, 2), (256, 256, 128, 2, 2, 4, 2, 2)),
+}
 
 
-@pytest.mark.parametrize("M, N, K", _PREFILL_SELECTOR_ROWS)
+def test_gemm_a8w8_prefill_selector_configs():
+    for (M, N, K), (bsc_cfg, four_cu_cfg) in _PREFILL_SELECTOR_ROWS.items():
+        assert select_gemm_a8w8_prefill_config(M, N, K) == bsc_cfg, (M, N, K)
+        for is_bsc in (True, False):
+            assert select_gemm_a8w8_prefill_config(M, N, K, is_bsc=is_bsc, num_cus=4) == four_cu_cfg, (M, N, K)
+
+
+@pytest.mark.parametrize("M, N, K", list(_PREFILL_SELECTOR_ROWS))
 @pytest.mark.parametrize("mode", ("blockscale_a8w8", "ptpc_a8w8"))
 def test_gemm_a8w8_prefill_selector(mode, M, N, K):
     _require_gpu()
-    *cfg, cluster_m, cluster_n = select_gemm_a8w8_prefill_config(M, N, K, num_cus=4)
+    is_bsc = mode == "blockscale_a8w8"
+    *cfg, cluster_m, cluster_n = select_gemm_a8w8_prefill_config(M, N, K, is_bsc=is_bsc, num_cus=4)
     _run_case(mode, M, N, K, *cfg, cluster_m=cluster_m, cluster_n=cluster_n)
-    if mode == "blockscale_a8w8":  # the 128x256 branch is blockscale-only
-        *cfg, cluster_m, cluster_n = select_gemm_a8w8_prefill_config(M, N, K)
+    if is_bsc:  # the 128x256 branch is blockscale-only
+        *cfg, cluster_m, cluster_n = select_gemm_a8w8_prefill_config(M, N, K, is_bsc=True)
         _run_case(mode, M, N, K, *cfg, cluster_m=cluster_m, cluster_n=cluster_n)
 
 

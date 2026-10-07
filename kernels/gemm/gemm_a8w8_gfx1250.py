@@ -58,7 +58,9 @@ def select_gemm_a8w8_decode_config(M, N, K, max_split=4):
     return (64, 128 if N % 128 == 0 else 64, 128, 2, 2, min(4, k_tiles), 1)
 
 
-def select_gemm_a8w8_prefill_config(M, N, K, is_bsc=True, num_cus=256):
+def select_gemm_a8w8_prefill_config(
+    M: int, N: int, K: int, is_bsc: bool = True, num_cus: int = 256
+) -> tuple[int, int, int, int, int, int, int, int]:
     """(tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, cluster_m, cluster_n) for a prefill FP8 GEMM (M > 256).
 
     Prefill GEMMs with 256x256 tiles stream every A row-block and B column-block from L2 into LDS once per workgroup,
@@ -461,50 +463,6 @@ def _launch_gemm_a8w8(
 
         QUAD_PREFETCH_EARLY = (not is_bsc) and K_WS >= 2
 
-        def compute_ktile_quad(buf, pbuf, prefetch_kt):
-            b_left = _load_b_half(buf, 0, 0)
-            sb_k, sa_k = _load_scales(pbuf, 0)
-            for ks in range_constexpr(K_WS):
-                nxt_ks = ks + 1 if const_expr(ks + 1 < K_WS) else None
-                pf = ks == 0 and prefetch_kt is not None
-                a_top = [_rmem(16, load_a(buf, wm, ks)) for wm in range_constexpr(HALF_M)]
-
-                if const_expr(is_bsc):
-                    rocdl.s_wait_dscnt(DS_A * HALF_M + 2 * DS_B * HALF_N)
-                rocdl.sched_barrier(0)
-                _emit_block(0, 0, a_top, b_left, sa_k, sb_k)
-                if const_expr(pf and QUAD_PREFETCH_EARLY):
-                    rocdl.sched_barrier(0)
-                    issue(prefetch_kt % num_buffers, prefetch_kt)
-                    rocdl.sched_barrier(0)
-                a_bot = [_rmem(16, load_a(buf, HALF_M + wm, ks)) for wm in range_constexpr(HALF_M)]
-                b_right = _load_b_half(buf, HALF_N, ks)
-                if const_expr(is_bsc):
-                    rocdl.s_wait_dscnt(DS_A * HALF_M + DS_B * HALF_N)
-                _emit_block(HALF_M, 0, a_bot, b_left, sa_k, sb_k)
-                if const_expr(pf and not QUAD_PREFETCH_EARLY):
-                    rocdl.sched_barrier(0)
-                    issue(prefetch_kt % num_buffers, prefetch_kt)
-                    rocdl.sched_barrier(0)
-                if const_expr(nxt_ks is not None):
-                    nxt_b_left = _load_b_half(buf, 0, nxt_ks)
-                    nxt_sb_k, nxt_sa_k = _load_scales(pbuf, nxt_ks)
-                if const_expr(is_bsc):
-                    rocdl.s_wait_dscnt(DS_B * HALF_N if const_expr(nxt_ks is None) else _BS_DS)
-                _emit_block(0, HALF_N, a_top, b_right, sa_k, sb_k)
-                if const_expr(is_bsc):
-                    rocdl.s_wait_dscnt(0)
-                _emit_block(HALF_M, HALF_N, a_bot, b_right, sa_k, sb_k)
-                rocdl.sched_barrier(0)
-                if const_expr(nxt_ks is not None):
-                    b_left, sb_k, sa_k = nxt_b_left, nxt_sb_k, nxt_sa_k
-
-        def compute_ktile(buf, pbuf, prefetch_kt):
-            if const_expr(use_quadrant):
-                compute_ktile_quad(buf, pbuf, prefetch_kt)
-            else:
-                compute_ktile_row(buf, pbuf, prefetch_kt)
-
         # Cross-K-tile pipeline (quadrant schedule): K-tile kt+1's fence and its K-step-0 operands (scales, B left half,
         # A top half) are issued between the last K-step's third and fourth quadrants of K-tile kt, into carry
         # registers, so their LDS latency overlaps that quadrant's WMMAs instead of stalling the start of K-tile kt+1.
@@ -529,7 +487,7 @@ def _launch_gemm_a8w8(
             # Address VALU first, then the first loads, then one WMMA per n_ds loads. In expert scheduling mode a load
             # whose address a VALU op just wrote waits on depctr_va_vdst(0), which also drains every WMMA issued in
             # between; computing all addresses before the first WMMA leaves one such wait per region.
-            rocdl.sched_group_barrier(0x002, 16, 0)  # VALU
+            rocdl.sched_group_barrier("valu", 16, 0)
             rocdl.sched_dsrd(n_ds)
             for _ in range_constexpr(n_mma):
                 rocdl.sched_mfma(1)
@@ -548,8 +506,8 @@ def _launch_gemm_a8w8(
                 xt_a[wm].store(load_a(buf, wm, 0))
 
         def compute_ktile_quad_xt(buf, pbuf, prefetch_kt, nxt):
-            """compute_ktile_quad with K-step 0's operands taken from the carry registers; nxt = (buf, pbuf,
-            outstanding TDM groups) of K-tile kt+1, or None for the last K-tile."""
+            """One K-tile of the quadrant schedule, with K-step 0's operands taken from the carry registers; nxt = (buf,
+            pbuf, outstanding TDM groups) of K-tile kt+1, or None for the last K-tile."""
             b_left, a_top = xt_b, xt_a
             sb_k = sa_k = None
             if const_expr(is_bsc):
@@ -598,7 +556,7 @@ def _launch_gemm_a8w8(
                     # when their byte loads have returned.
                     _sched_interleave(XT_Q, XT_LD_NEXT)
                     if const_expr(is_bsc):
-                        rocdl.sched_group_barrier(0x002, wmma_m_rep + wmma_n_rep, 0)  # VALU
+                        rocdl.sched_group_barrier("valu", wmma_m_rep + wmma_n_rep, 0)
                 rocdl.sched_barrier(0)
                 if const_expr(nxt_ks is not None):
                     b_left, sb_k, sa_k = nxt_b_left, nxt_sb_k, nxt_sa_k
@@ -668,7 +626,7 @@ def _launch_gemm_a8w8(
                 compute_ktile_quad_xt(buf, pbuf, kt + (num_buffers - 1), (_bidx(pnxt), pnxt, num_buffers - 2))
             else:
                 pipeline_fence(outstanding=(num_buffers - 2), use_cluster=False)
-                compute_ktile(buf, pbuf, kt + (num_buffers - 1))
+                compute_ktile_row(buf, pbuf, kt + (num_buffers - 1))
             if const_expr(use_cluster) and kt % num_buffers == num_buffers - 1:
                 cluster.cluster_barrier()
         scale_regs = None
@@ -688,7 +646,7 @@ def _launch_gemm_a8w8(
                     nxt = (_bidx(pnxt), pnxt, num_buffers - 3 - j)
                 compute_ktile_quad_xt(buf, pbuf, None, nxt)
             else:
-                compute_ktile(buf, pbuf, None)
+                compute_ktile_row(buf, pbuf, None)
 
         accs = None
         if const_expr(is_bsc):
