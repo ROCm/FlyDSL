@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-07T04:15:42Z",
+ "updated": "2026-10-07T04:40:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -177,11 +177,11 @@
    "branch": "feat/gfx1250-bf16-k-tail",
    "event": "pull_request",
    "title": "[Kernel][gfx1250] Support K tails in the BF16 GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564300838",
    "created_at": "2026-10-07T02:55:23Z",
-   "updated_at": "2026-10-07T03:55:27Z",
+   "updated_at": "2026-10-07T04:38:39Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -196,10 +196,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T03:17:32Z",
-     "completed_at": null,
+     "completed_at": "2026-10-07T04:38:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564300838/job/112613531793"
     },
     {
@@ -230,9 +230,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-07T03:22:17Z",
+     "started_at": "2026-10-07T04:16:42Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564299837/job/112615089768"
     },
@@ -263,28 +263,28 @@
    "branch": "perf/gfx1250-a8w8-decode-splitk",
    "event": "pull_request",
    "title": "[Perf][gfx1250] Add split-K and a decode config selector to the FP8 GEMM",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564297699",
    "created_at": "2026-10-07T02:55:21Z",
-   "updated_at": "2026-10-07T03:21:28Z",
+   "updated_at": "2026-10-07T04:39:08Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T04:12:10Z",
-     "completed_at": null,
+     "completed_at": "2026-10-07T04:30:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564297699/job/112614886639"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-07T03:21:28Z",
+     "started_at": "2026-10-07T04:39:08Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564297699/job/112614886652"
     },
@@ -316,9 +316,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-07T03:24:28Z",
+     "started_at": "2026-10-07T04:30:47Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564292463/job/112615625383"
     },
@@ -334,9 +334,9 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-07T03:24:28Z",
+     "started_at": "2026-10-07T04:17:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564292463/job/112615625416"
     }
