@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-07T20:33:50Z",
+ "updated": "2026-10-07T21:31:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "fix/norm-quant-reduction-race",
    "event": "pull_request",
    "title": "[Bugfix] Sync waves before the RMSNorm/LayerNorm quant kernels reuse their reduction slot",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682368262",
    "created_at": "2026-10-07T20:29:21Z",
-   "updated_at": "2026-10-07T20:31:11Z",
+   "updated_at": "2026-10-07T21:26:04Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-07T21:04:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682368262/job/113015743959"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-07T21:07:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682368262/job/113015744228"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-07T21:26:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682368262/job/113015744362"
+    }
+   ]
   },
   {
    "run_id": 37682285079,
@@ -25,13 +53,41 @@
    "branch": "fix/gfx1250-a8w8-n-tail",
    "event": "pull_request",
    "title": "[Bugfix][gfx1250] Keep the FP8 GEMM's B reads and C stores inside N",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682285079",
    "created_at": "2026-10-07T20:28:43Z",
-   "updated_at": "2026-10-07T20:32:02Z",
+   "updated_at": "2026-10-07T20:59:56Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-07T21:00:43Z",
+     "completed_at": "2026-10-07T21:25:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682285079/job/113014580995"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-07T20:59:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682285079/job/113014581233"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-07T21:04:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682285079/job/113014581304"
+    }
+   ]
   },
   {
    "run_id": 37650182672,
@@ -40,11 +96,11 @@
    "branch": "dsv4_megakernel",
    "event": "pull_request",
    "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37650182672",
    "created_at": "2026-10-07T16:12:05Z",
-   "updated_at": "2026-10-07T16:41:05Z",
+   "updated_at": "2026-10-07T21:03:43Z",
    "actor": "amd-weisun",
    "jobs": [
     {
@@ -68,9 +124,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-07T16:41:05Z",
+     "started_at": "2026-10-07T21:03:42Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37650182672/job/112904256550"
     }
