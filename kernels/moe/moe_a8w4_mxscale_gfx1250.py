@@ -23,12 +23,15 @@ from kernels.gemm.gemm_common_gfx1250 import (
 TDM_DESCRIPTOR_VERSION = 1
 
 
-def select_moe_a8w4_config(tokens, model_dim, inter_dim, experts, topk, num_cus=256):
+def select_moe_a8w4_config(
+    tokens: int, model_dim: int, inter_dim: int, experts: int, topk: int, num_cus: int = 256
+) -> tuple[tuple[int, int, int, int, int, int], tuple[int, int, int, int, int, int]]:
     """(stage-1 config, stage-2 config) for launch_moe_gemm_a8w4, each (tile_m, tile_n, tile_k, m_warp, n_warp,
     num_buffers). Stage 1 is gate_up (N = 2 * inter_dim, K = model_dim), stage 2 is down (N = model_dim,
     K = inter_dim). Both stages share one routing layout, padded per expert to the larger tile_m of the two. The
     kernel reads the A scales preshuffled in groups of (tile_m // m_warp) // 16 row blocks, so A must be quantized
-    for the returned m_warp: with the 2x2-warp config a group is half of tile_m // 16.
+    for the returned m_warp: with the 2x2-warp config a group is half of tile_m // 16. Raises ValueError unless
+    model_dim and inter_dim are multiples of 256, because the kernel does not bound N and needs K % tile_k == 0.
 
     Expected routed rows per expert r = tokens * topk / experts picks the tile height: from r = 256 a 128x256 tile with
     2x2 warps and two buffers (two workgroups per CU) is faster on both stages despite the deeper padding; below
@@ -38,6 +41,8 @@ def select_moe_a8w4_config(tokens, model_dim, inter_dim, experts, topk, num_cus=
     expected number of distinct experts) is a pure weight stream over few CUs, and 128-wide tiles spread it over
     twice as many.
     """
+    if model_dim % 256 or inter_dim % 256:
+        raise ValueError(f"needs model_dim % 256 == 0 and inter_dim % 256 == 0, got {model_dim}, {inter_dim}")
     rows = tokens * topk / experts
     k1, k2 = model_dim // 256, inter_dim // 256
     if rows >= 256 and k1 >= 2 and k2 >= 2:

@@ -341,16 +341,24 @@ def test_grouped_moe_rejects_k_not_multiple_of_tile_k():
 
 # (E, model_dim, inter_dim, token_num, topk): one case per select_moe_a8w4_config branch -- 128x256 tiles with 2x2 warps
 # (256 routed rows per expert), 64-row tiles, 32-row tiles, 16-row tiles, and 128-wide decode tiles.
-_SELECTOR_CASES = [
-    (8, 512, 512, 1024, 2),
-    (8, 512, 512, 256, 2),
-    (8, 512, 256, 128, 2),
-    (8, 512, 512, 32, 2),
-    (8, 512, 256, 1, 2),
-]
+_SELECTOR_CASES = {
+    (8, 512, 512, 1024, 2): ((128, 256, 256, 2, 2, 2), (128, 256, 256, 2, 2, 2)),
+    (8, 512, 512, 256, 2): ((64, 256, 256, 1, 4, 2), (64, 256, 256, 1, 4, 2)),
+    (8, 512, 256, 128, 2): ((32, 256, 256, 1, 4, 2), (32, 256, 256, 1, 4, 1)),
+    (8, 512, 512, 32, 2): ((16, 256, 256, 1, 4, 2), (16, 256, 256, 1, 4, 2)),
+    (8, 512, 256, 1, 2): ((16, 128, 256, 1, 4, 2), (16, 128, 256, 1, 4, 1)),
+}
 
 
-@pytest.mark.parametrize("E, model_dim, inter_dim, token_num, topk", _SELECTOR_CASES)
+def test_grouped_moe_selector_configs():
+    for (E, model_dim, inter_dim, token_num, topk), expected in _SELECTOR_CASES.items():
+        assert select_moe_a8w4_config(token_num, model_dim, inter_dim, E, topk) == expected
+    for model_dim, inter_dim in ((320, 512), (512, 320)):
+        with pytest.raises(ValueError):
+            select_moe_a8w4_config(64, model_dim, inter_dim, 8, 2)
+
+
+@pytest.mark.parametrize("E, model_dim, inter_dim, token_num, topk", list(_SELECTOR_CASES))
 def test_grouped_moe_selector(E, model_dim, inter_dim, token_num, topk):
     # Every selected config keeps the K order of the default 64x256x256 path, so the outputs must match exactly.
     args, ref = _build_case(E, model_dim, inter_dim, token_num, topk, seed=token_num)
