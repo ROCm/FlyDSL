@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-07T00:03:55Z",
+ "updated": "2026-10-07T00:37:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,18 +20,18 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-06T23:25:02Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-07T00:15:30Z",
+     "completed_at": "2026-10-07T00:33:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37544610820/job/112551442265"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-06T23:25:02Z",
+     "started_at": "2026-10-07T00:06:38Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37544610820/job/112551442291"
     },
@@ -53,29 +53,32 @@
    "branch": "perf/gfx1250-a8w8-decode-splitk",
    "event": "pull_request",
    "title": "[Perf][gfx1250] Add split-K and a decode config selector to the FP8 GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542328438",
    "created_at": "2026-10-06T22:43:00Z",
-   "updated_at": "2026-10-06T23:11:33Z",
+   "updated_at": "2026-10-07T00:35:50Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-06T23:09:40Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542328438/job/112546334361"
+     "completed_at": "2026-10-07T00:21:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542328438/job/112546334361",
+     "machine": "gbt350-odcdh1-b08-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-06T23:11:33Z",
-     "completed_at": null,
+     "completed_at": "2026-10-07T00:35:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542328438/job/112546334415"
     },
     {
@@ -96,38 +99,41 @@
    "branch": "perf/gfx1250-bf16-prefill",
    "event": "pull_request",
    "title": "[Perf][gfx1250] Add a prefill config selector to the BF16 GEMM",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542158463",
    "created_at": "2026-10-06T22:41:20Z",
-   "updated_at": "2026-10-06T23:14:04Z",
+   "updated_at": "2026-10-07T00:36:28Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-06T23:14:04Z",
+     "started_at": "2026-10-07T00:36:27Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542158463/job/112548085770"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-06T23:15:00Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542158463/job/112548085772"
+     "completed_at": "2026-10-07T00:15:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542158463/job/112548085772",
+     "machine": "cv350-1e707-c03-2",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-06T23:59:29Z",
-     "completed_at": null,
+     "completed_at": "2026-10-07T00:15:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542158463/job/112548085776"
     }
    ]
@@ -167,11 +173,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-06T23:13:38Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542125496/job/112547389173"
+     "completed_at": "2026-10-07T00:24:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542125496/job/112547389173",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -192,11 +201,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-06T23:11:25Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542121979/job/112546931932"
+     "completed_at": "2026-10-07T00:06:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542121979/job/112546931932",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
