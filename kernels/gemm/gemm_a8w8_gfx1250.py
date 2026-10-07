@@ -25,10 +25,10 @@ from .gemm_common_gfx1250 import (
 def select_gemm_a8w8_decode_config(M: int, N: int, K: int) -> tuple[int, int, int, int, int, int, int]:
     """(tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, split_k) for a decode-sized FP8 GEMM (M <= 256).
 
-    The upstream-tested 128/256-row tiles compute at most 16 valid rows per 16-row WMMA slot at M <= 16 and launch
-    fewer workgroups than there are CUs, so decode uses 16-row tiles up to M = 64 and 64x128 tiles up to M = 256,
-    except that above M = 16 an N of 16384 or more already fills the GPU with 128x256 tiles (256x256 above M = 128
-    when the weights reach 128 MiB, so that they are read once), which then win.
+    The thresholds come from measurements on one gfx1250 part with 256 CUs. At small M, 128- and 256-row tiles leave
+    most of their rows empty and launch few workgroups, so decode uses 16-row tiles up to M = 64 and 64x128 tiles up
+    to M = 256. Above M = 16, an N of 16384 or more measured faster with 128x256 tiles, and above M = 128 with
+    256x256 tiles once the FP8 weights reach 128 MiB, because each weight is then read once.
     For M <= 16, K is also split 4 ways (launch_gemm_a8w8_splitk) when the K walk dominates: K >= 12288 with at
     most 64 128-wide N tiles, or K >= 6144 with at most 24. Each split pays an agent-scope release/acquire, so with
     more tiles or a shorter K the split loses. Configs with split_k == 1 run on launch_gemm_a8w8. Blockscale and
@@ -46,8 +46,8 @@ def select_gemm_a8w8_decode_config(M: int, N: int, K: int) -> tuple[int, int, in
             return (16, 128, 128, 1, 4, min(4, k_tiles // 4), 4)
         return (16, 64, 128, 1, 4, min(6, k_tiles), 1)
     if N >= 16384 and N % 256 == 0:
-        # Wide N fills the GPU with 128x256 tiles. Above M = 128, a 256-row tile also halves the weight reads, which
-        # dominate once the FP8 weights reach 128 MiB.
+        # Wide N measured faster with 128x256 tiles. Above M = 128, a 256-row tile also halves the weight reads,
+        # which dominate once the FP8 weights reach 128 MiB.
         if M > 128 and N * K >= 1 << 27:
             return (256, 256, 128, 2, 2, min(4, k_tiles), 1)
         return (128, 256, 128, 2, 2, min(3, k_tiles), 1)
