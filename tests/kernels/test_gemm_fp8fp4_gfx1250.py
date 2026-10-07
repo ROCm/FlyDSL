@@ -106,13 +106,15 @@ def _tflops(M: int, N: int, K: int, us: float) -> float:
 def _run_and_check(build_fn, launch_fn, M, N, K, *rest, **kwargs):
     """Build inputs, compile+run once, and compare against the reference; C columns past N must stay untouched."""
     c_gpu, make_args, ref, (rtol, atol) = build_fn(M, N, K, *rest, **kwargs)
-    c_gpu[:, N:] = float("nan")
+    # A signaling-NaN bit pattern that no computed output carries, so any store past N changes it.
+    pad_sentinel = 0x7FA5 if c_gpu.dtype == torch.bfloat16 else 0x7D5A
+    c_gpu[:, N:].view(torch.int16).fill_(pad_sentinel)
     compiled = flyc.compile(launch_fn, *make_args(torch.cuda.current_stream()))
     torch.cuda.synchronize()
     error = None
     try:
         torch.testing.assert_close(c_gpu[:M, :N].float(), ref.float(), rtol=rtol, atol=atol)
-        assert torch.isnan(c_gpu[:, N:].float()).all(), "the kernel wrote C columns past N"
+        assert (c_gpu[:, N:].view(torch.int16) == pad_sentinel).all(), "the kernel wrote C columns past N"
     except AssertionError as exc:
         error = exc
     return c_gpu, make_args, compiled, error
