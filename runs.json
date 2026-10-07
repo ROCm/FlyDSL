@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-07T01:10:24Z",
+ "updated": "2026-10-07T01:34:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,11 +29,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T00:06:38Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37544610820/job/112551442291"
+     "completed_at": "2026-10-07T01:20:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37544610820/job/112551442291",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -99,20 +102,20 @@
    "branch": "perf/gfx1250-bf16-prefill",
    "event": "pull_request",
    "title": "[Perf][gfx1250] Add a prefill config selector to the BF16 GEMM",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542158463",
    "created_at": "2026-10-06T22:41:20Z",
-   "updated_at": "2026-10-07T00:36:28Z",
+   "updated_at": "2026-10-07T01:33:10Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T00:36:27Z",
-     "completed_at": null,
+     "completed_at": "2026-10-07T01:33:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542158463/job/112548085770"
     },
     {
