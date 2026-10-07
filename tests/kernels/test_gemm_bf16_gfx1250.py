@@ -174,6 +174,11 @@ def test_gemm_bf16_prefill_selector(M, N, K):
     _run_case(M, N, K, *cfg, wmma_b2b=wmma_b2b)
 
 
+def test_gemm_bf16_prefill_selector_config():
+    for M, N, K in ((512, 1024, 768), (520, 768, 1024)):
+        assert select_gemm_bf16_prefill_config(M, N, K, num_cus=4) == (256, 256, 128, 2, 2, 2, 1), (M, N, K)
+
+
 def test_gemm_bf16_prefill_selector_rejects_unsupported_shapes():
     for M, N, K in ((256, 1024, 1024), (1024, 1000, 1024), (1024, 1024, 512), (2048, 8448, 7168)):
         with pytest.raises(ValueError):

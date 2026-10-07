@@ -20,7 +20,9 @@ from .gemm_common_gfx1250 import (
 )
 
 
-def select_gemm_bf16_prefill_config(M, N, K, num_cus=256):
+def select_gemm_bf16_prefill_config(
+    M: int, N: int, K: int, num_cus: int = 256
+) -> tuple[int, int, int, int, int, int, int]:
     """(tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, wmma_b2b) for a prefill-sized BF16 GEMM (M > 256).
 
     For grids whose 256x256 tiles keep at least three quarters of the CUs busy, averaged over their waves, four waves
