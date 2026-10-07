@@ -104,13 +104,15 @@ def _tflops(M: int, N: int, K: int, us: float) -> float:
 
 
 def _run_and_check(build_fn, launch_fn, M, N, K, *rest, **kwargs):
-    """Build inputs, compile+run once, and compare against the reference."""
+    """Build inputs, compile+run once, and compare against the reference; C columns past N must stay untouched."""
     c_gpu, make_args, ref, (rtol, atol) = build_fn(M, N, K, *rest, **kwargs)
+    c_gpu[:, N:] = float("nan")
     compiled = flyc.compile(launch_fn, *make_args(torch.cuda.current_stream()))
     torch.cuda.synchronize()
     error = None
     try:
         torch.testing.assert_close(c_gpu[:M, :N].float(), ref.float(), rtol=rtol, atol=atol)
+        assert torch.isnan(c_gpu[:, N:].float()).all(), "the kernel wrote C columns past N"
     except AssertionError as exc:
         error = exc
     return c_gpu, make_args, compiled, error
@@ -331,6 +333,7 @@ _PTPC_CASES = [
     (128, 256, 512, 128, 256, 128, 2, 2, 4, "bf16", 1.0, 128, 256),
     (64, 2112, 512, 128, 256, 128, 2, 2, 4, "bf16", 1.0, 0, 0),  # N tail: 8.25 N-tiles (DeepSeek fused qkv_a N)
     (129, 2112, 512, 128, 128, 128, 1, 2, 2, "bf16", 1.0, 0, 0),  # N tail (16.5 N-tiles) with ragged M
+    (64, 2112, 512, 128, 256, 128, 2, 2, 4, "bf16", 1.0, 0, 192),  # N tail; the pad holds every column past N
 ]
 
 
@@ -439,6 +442,7 @@ _BLOCKSCALE_CASES = [
     (1024, 1024, 1024, 128, 256, 128, 2, 2, 3, 0, 0),
     (128, 256, 512, 128, 256, 128, 2, 2, 2, 128, 192),
     (128, 1152, 512, 128, 256, 128, 2, 2, 2, 0, 0),  # N tail: 4.5 N-tiles, the last one also past the B scales
+    (128, 1152, 512, 128, 256, 128, 2, 2, 2, 0, 128),  # N tail; the pad holds every column past N
 ]
 
 

@@ -47,6 +47,8 @@ def launch_gemm_a8w8(
     cluster_n: Constexpr[int],
     is_bsc: Constexpr[bool],
 ):
+    """Requires K % tile_k == 0, K // tile_k >= num_buffers - 1 and N % 16 == 0 (blockscale also N % 128 == 0);
+    partial M and N tiles are clamped."""
     use_cluster = cluster_m > 1 or cluster_n > 1
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
