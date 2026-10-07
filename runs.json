@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-07T04:40:05Z",
+ "updated": "2026-10-07T05:50:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -220,38 +220,41 @@
    "branch": "fix/gfx1250-a8w8-n-tail",
    "event": "pull_request",
    "title": "[Bugfix][gfx1250] Keep the FP8 GEMM's B reads and C stores inside N",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564299837",
    "created_at": "2026-10-07T02:55:23Z",
-   "updated_at": "2026-10-07T03:22:17Z",
+   "updated_at": "2026-10-07T05:47:41Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T04:16:42Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564299837/job/112615089768"
+     "completed_at": "2026-10-07T05:47:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564299837/job/112615089768",
+     "machine": "gbt350-odcdh1-b08-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T04:12:21Z",
-     "completed_at": null,
+     "completed_at": "2026-10-07T05:06:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564299837/job/112615089835"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-07T03:22:17Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-07T04:50:29Z",
+     "completed_at": "2026-10-07T05:08:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564299837/job/112615089836"
     }
    ]
@@ -291,11 +294,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T03:25:42Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564297699/job/112614886671"
+     "completed_at": "2026-10-07T04:49:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564297699/job/112614886671",
+     "machine": "gbt350-odcdh1-b08-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -306,39 +312,42 @@
    "branch": "perf/gfx1250-rmsnorm-vector-tail",
    "event": "pull_request",
    "title": "[Kernel][Perf] Keep RMSNorm on the 128-bit path for partial tiles and small N",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564292463",
    "created_at": "2026-10-07T02:55:18Z",
-   "updated_at": "2026-10-07T03:24:28Z",
+   "updated_at": "2026-10-07T05:48:36Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T04:30:47Z",
-     "completed_at": null,
+     "completed_at": "2026-10-07T04:48:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564292463/job/112615625383"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-07T03:24:28Z",
+     "started_at": "2026-10-07T05:48:36Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564292463/job/112615625408"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-07T04:17:16Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564292463/job/112615625416"
+     "completed_at": "2026-10-07T05:38:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37564292463/job/112615625416",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
