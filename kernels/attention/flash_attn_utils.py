@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm
+from flydsl._mlir.dialects import fly, llvm, vector
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
@@ -74,36 +74,89 @@ def _read_exec_i64():
     return rocdl.ballot(T.i64, true_i1)
 
 
-def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
-    """gfx950 ds_read_b64_tr_b16 with DUALWAVE_SWP immediate byte offset."""
-    imm = int(imm_offset)
-    raw_type = T.vec(2, T.i32)
-    raw = llvm.inline_asm(
-        raw_type,
-        [as_mlir_value(addr_i32)],
-        f"ds_read_b64_tr_b16 $0, $1 offset:{imm}\n",
-        "=v,v,~{memory}",
-        has_side_effects=True,
+def _lds_ptr_ty():
+    # Parsed per call rather than cached in a module global: `ir.Type.parse`
+    # needs a live MLIR context, and the context differs between JIT builds.
+    return ir.Type.parse("!llvm.ptr<3>")
+
+
+def _lds_ptr_with_imm(addr_i32, imm):
+    """addrspace(3) pointer to `addr_i32 + imm`, for the DS transpose reads.
+
+    A GEP off the base rather than integer arithmetic folded into an
+    `inttoptr`: the DS instructions carry a 16-bit immediate `offset:` field,
+    and the backend can only fold a constant back into it when it can see the
+    addend as a pointer offset. Computing `inttoptr(addr + imm)` instead costs
+    a `v_add_u32` per read.
+    """
+    ty = _lds_ptr_ty()
+    base = llvm.inttoptr(ty, as_mlir_value(fx.Int32(addr_i32)))
+    if imm == 0:
+        return base
+    return llvm.getelementptr(
+        ty,
+        base,
+        [],
+        [imm],
+        ir.IntegerType.get_signless(8),
+        llvm.GEPNoWrapFlags.inbounds,
     )
-    return fx.Vector(raw).bitcast(fx.Numeric.from_ir_type(ir.VectorType(result_type).element_type)).ir_value()
 
 
-def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0):
+def _tag_lds_alias(op, scope_name, scope_names):
+    """Mark a DS read as touching only `scope_name` among `scope_names`.
+
+    The same alias-scope scheme `_load_k_pack_aligned` puts on its `ds_read_b128`,
+    and it is a *performance* requirement, not decoration. `SIInsertWaitcnts`
+    treats `buffer_load ... lds` as an LDS-writing VMEM op and, before any DS
+    read that may alias one still in flight, inserts `s_waitcnt vmcnt(0)` -- a
+    full drain that collapses the KV prefetch the pipeline is built on. A read
+    scoped to the buffer it actually reads is provably disjoint from a DMA
+    writing the other half of the double buffer, so the drain is not emitted.
+    """
+    if scope_name is None:
+        return op
+    op.operation.attributes["alias_scopes"] = _dualwave_lds_alias_scopes(scope_name)
+    op.operation.attributes["noalias_scopes"] = _dualwave_lds_noalias_scopes(scope_name, scope_names)
+    return op
+
+
+def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0, scope_name=None, scope_names=()):
+    """gfx950 ds_read_b64_tr_b16 with DUALWAVE_SWP immediate byte offset.
+
+    **Uses the ROCDL op, not inline asm, and that is a correctness
+    requirement.** `SIInsertWaitcnts` discovers outstanding LDS traffic by
+    scanning the MIR for DS instructions; an inline asm is opaque to it, and a
+    `~{memory}` clobber is not an lgkm event. Emitted as asm, the backend does
+    not know a read is in flight and inserts no `s_waitcnt lgkmcnt` before uses
+    of the result, leaving the kernel's own cluster-boundary wait as the only
+    protection. That is sound only while nothing reads the destination before
+    that wait. Above head_dim 128 the kernel exceeds the 256 architectural-VGPR
+    cap, the allocator uses AGPRs, and it places `v_accvgpr_write` copies of the
+    destination right after the read and ahead of the wait, which gave
+    non-deterministic NaN.
+    """
+    raw_type = T.vec(2, T.i32)
+    ptr = _lds_ptr_with_imm(addr_i32, int(imm_offset))
+    # The intrinsic is typed v4f16; `Cannot select` on a vector<2xi32> result.
+    op = rocdl.ds_read_tr16_b64(ir.VectorType.get([4], ir.F16Type.get()), ptr)
+    raw = _tag_lds_alias(op, scope_name, scope_names).result
+    raw = vector.BitCastOp(raw_type, raw).result
+    return vector.BitCastOp(result_type, raw).result
+
+
+def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0, scope_name=None, scope_names=()):
     """gfx950 ds_read_b64_tr_b8 (8-bit transpose) with immediate byte offset.
 
     Returns 64 bits = 8 fp8 (the fp8 analog of ds_read_b64_tr_b16's 4 bf16),
-    used for the fp8 V transpose load.
+    used for the fp8 V transpose load. Uses the ROCDL op for the same
+    correctness reason as `_ds_read_tr16_b64_imm`.
     """
-    imm = int(imm_offset)
     raw_type = T.vec(2, T.i32)
-    raw = llvm.inline_asm(
-        raw_type,
-        [as_mlir_value(addr_i32)],
-        f"ds_read_b64_tr_b8 $0, $1 offset:{imm}\n",
-        "=v,v,~{memory}",
-        has_side_effects=True,
-    )
-    return fx.Vector(raw).bitcast(fx.Numeric.from_ir_type(ir.VectorType(result_type).element_type)).ir_value()
+    ptr = _lds_ptr_with_imm(addr_i32, int(imm_offset))
+    op = rocdl.ds_read_tr8_b64(raw_type, ptr)
+    raw = _tag_lds_alias(op, scope_name, scope_names).result
+    return vector.BitCastOp(result_type, raw).result
 
 
 # Arithmetic and inline-asm primitives
@@ -910,10 +963,14 @@ def _swizzled_v_imm_lo(traits, dc, k_substep):
     return (k_substep * traits.V_LDS_TO_REG_K_SUBSTEP_STRIDE + _swizzled_v_dc_off(traits, dc)) * traits.BF16_BYTES
 
 
-def _ds_read_tr_v4f16_imm(lds_base_elem_idx, imm_bytes, lds_kv_base_idx, v_lds_read_vec4_type):
+def _ds_read_tr_v4f16_imm(
+    lds_base_elem_idx, imm_bytes, lds_kv_base_idx, v_lds_read_vec4_type, scope_name=None, scope_names=()
+):
     byte_offset = lds_base_elem_idx * 2 + lds_kv_base_idx
     addr_i32 = fx.Int32(byte_offset)
-    return _ds_read_tr16_b64_imm(v_lds_read_vec4_type, addr_i32, imm_bytes)
+    return _ds_read_tr16_b64_imm(
+        v_lds_read_vec4_type, addr_i32, imm_bytes, scope_name=scope_name, scope_names=scope_names
+    )
 
 
 def _seq_pad_col_base(traits, tile_idx, lane_div_32):
@@ -4375,6 +4432,7 @@ class DualwaveKvLdsToVgprLoader(DualwaveKernelContext):
             return packs
 
         lds_base = v_base + urv_base
+        v_scope = _dualwave_lds_scope("v", buf_id)
         for dc in range_constexpr(self.traits.D_CHUNKS):
             for k_substep in range_constexpr(4):
                 imm_lo = _swizzled_v_imm_lo(self.traits, dc, k_substep)
@@ -4383,12 +4441,16 @@ class DualwaveKvLdsToVgprLoader(DualwaveKernelContext):
                     imm_lo,
                     lds_kv_base_idx=self.lds_kv_base_idx,
                     v_lds_read_vec4_type=self.v_lds_read_vec4_type,
+                    scope_name=v_scope,
+                    scope_names=self.traits.LDS_SCOPE_NAMES,
                 )
                 b = _ds_read_tr_v4f16_imm(
                     lds_base,
                     imm_lo + self.traits.V_LDS_TO_REG_TRANSPOSE_PAIR_STRIDE * self.traits.BF16_BYTES,
                     lds_kv_base_idx=self.lds_kv_base_idx,
                     v_lds_read_vec4_type=self.v_lds_read_vec4_type,
+                    scope_name=v_scope,
+                    scope_names=self.traits.LDS_SCOPE_NAMES,
                 )
                 packs[k_substep][dc] = Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
         return packs
@@ -6446,12 +6508,18 @@ def _sched_barrier_exp_pairs(traits, pairs, exp_cnt, group):
 
 
 def _stagger_extra_barrier_if_zero(stagger_i32):
-    """Emit `s_barrier;` only when stagger == 0."""
+    """Emit `s_barrier;` only when stagger == 0, declaring the SCC clobber.
+
+    The asm runs `s_cmp_eq_u32` and `s_cbranch_scc0`, so it destroys SCC; the
+    constraint string must say so (`~{scc}`), or LLVM may keep an SCC-producing
+    compare live across it and a later `s_cbranch_scc*` reads the asm's
+    leftover `stagger == 0` (observed as a skipped null-LSE-guarded store).
+    """
     llvm.inline_asm(
         ir.Type.parse("!llvm.void"),
         [stagger_i32],
         ("s_cmp_eq_u32 $0, 0\n\ts_cbranch_scc0 1f\n\ts_barrier\n\t1:"),
-        "s",
+        "s,~{scc}",
         has_side_effects=True,
     )
 
