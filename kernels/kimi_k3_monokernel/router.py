@@ -28,8 +28,8 @@ def build_sigmoid_topk_router(num_experts: int, topk: int, samples: int):
         raise ValueError(f"num_experts must be a positive multiple of {WAVE_SIZE}, got {num_experts}")
     if not 0 < topk <= 32:
         raise ValueError(f"topk must be in [1, 32], got {topk}")
-    if not 1 <= samples <= 32:
-        raise ValueError(f"samples must be in [1, 32], got {samples}")
+    if not 1 <= samples <= 64:
+        raise ValueError(f"samples must be in [1, 64], got {samples}")
 
     values_per_lane = num_experts // WAVE_SIZE
     waves_per_block = min(samples, 8)

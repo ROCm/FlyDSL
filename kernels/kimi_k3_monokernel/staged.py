@@ -302,7 +302,7 @@ class _KimiK3MlaPath:
                 self.symmetric_allreduce.max_pairs,
                 routed_pre_reduced=routed_pipeline,
             )
-            if self.symmetric_allreduce is not None and self.fuse_shared_experts
+            if self.symmetric_allreduce is not None and self.fuse_shared_experts and not full_monokernel
             else None
         )
 

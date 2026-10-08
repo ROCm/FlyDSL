@@ -1,0 +1,624 @@
+[
+  {
+    "samples": 5,
+    "best": {
+      "parts": 10,
+      "depth": 32,
+      "exact": 40,
+      "count": 40,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 32,
+        "exact": 40,
+        "count": 40,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 6,
+    "best": {
+      "parts": 10,
+      "depth": 32,
+      "exact": 48,
+      "count": 48,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 32,
+        "exact": 48,
+        "count": 48,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 7,
+    "best": {
+      "parts": 10,
+      "depth": 32,
+      "exact": 56,
+      "count": 56,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 32,
+        "exact": 56,
+        "count": 56,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 8,
+    "best": {
+      "parts": 10,
+      "depth": 64,
+      "exact": 64,
+      "count": 64,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 64,
+        "exact": 64,
+        "count": 64,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 10,
+    "best": {
+      "parts": 10,
+      "depth": 64,
+      "exact": 80,
+      "count": 80,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 64,
+        "exact": 80,
+        "count": 80,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 12,
+    "best": {
+      "parts": 10,
+      "depth": 64,
+      "exact": 96,
+      "count": 96,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 64,
+        "exact": 96,
+        "count": 96,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 14,
+    "best": {
+      "parts": 10,
+      "depth": 64,
+      "exact": 112,
+      "count": 112,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 64,
+        "exact": 112,
+        "count": 112,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 15,
+    "best": {
+      "parts": 10,
+      "depth": 64,
+      "exact": 120,
+      "count": 120,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 64,
+        "exact": 120,
+        "count": 120,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 16,
+    "best": {
+      "parts": 10,
+      "depth": 64,
+      "exact": 128,
+      "count": 128,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 64,
+        "exact": 128,
+        "count": 128,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 18,
+    "best": {
+      "parts": 7,
+      "depth": 32,
+      "exact": 144,
+      "count": 144,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 7,
+        "depth": 32,
+        "exact": 144,
+        "count": 144,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 64,
+        "exact": 144,
+        "count": 144,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 128,
+        "exact": 144,
+        "count": 144,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 256,
+        "exact": 144,
+        "count": 144,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 20,
+    "best": {
+      "parts": 7,
+      "depth": 32,
+      "exact": 160,
+      "count": 160,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 7,
+        "depth": 32,
+        "exact": 160,
+        "count": 160,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 64,
+        "exact": 160,
+        "count": 160,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 128,
+        "exact": 160,
+        "count": 160,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 256,
+        "exact": 160,
+        "count": 160,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 21,
+    "best": {
+      "parts": 7,
+      "depth": 32,
+      "exact": 168,
+      "count": 168,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 7,
+        "depth": 32,
+        "exact": 168,
+        "count": 168,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 64,
+        "exact": 168,
+        "count": 168,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 128,
+        "exact": 168,
+        "count": 168,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 256,
+        "exact": 168,
+        "count": 168,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 24,
+    "best": {
+      "parts": 7,
+      "depth": 32,
+      "exact": 192,
+      "count": 192,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 7,
+        "depth": 32,
+        "exact": 192,
+        "count": 192,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 64,
+        "exact": 192,
+        "count": 192,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 128,
+        "exact": 192,
+        "count": 192,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 256,
+        "exact": 192,
+        "count": 192,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 25,
+    "best": {
+      "parts": 7,
+      "depth": 32,
+      "exact": 200,
+      "count": 200,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 7,
+        "depth": 32,
+        "exact": 200,
+        "count": 200,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 64,
+        "exact": 200,
+        "count": 200,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 128,
+        "exact": 200,
+        "count": 200,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 7,
+        "depth": 256,
+        "exact": 200,
+        "count": 200,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 28,
+    "best": {
+      "parts": 6,
+      "depth": 64,
+      "exact": 224,
+      "count": 224,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 6,
+        "depth": 64,
+        "exact": 224,
+        "count": 224,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 30,
+    "best": {
+      "parts": 1,
+      "depth": 32,
+      "exact": 240,
+      "count": 240,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 1,
+        "depth": 32,
+        "exact": 240,
+        "count": 240,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 1,
+        "depth": 64,
+        "exact": 240,
+        "count": 240,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 1,
+        "depth": 128,
+        "exact": 240,
+        "count": 240,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 1,
+        "depth": 256,
+        "exact": 240,
+        "count": 240,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 32,
+    "best": {
+      "parts": 1,
+      "depth": 32,
+      "exact": 256,
+      "count": 256,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 1,
+        "depth": 32,
+        "exact": 256,
+        "count": 256,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 1,
+        "depth": 64,
+        "exact": 256,
+        "count": 256,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 1,
+        "depth": 128,
+        "exact": 256,
+        "count": 256,
+        "max_abs": 0.0
+      },
+      {
+        "parts": 1,
+        "depth": 256,
+        "exact": 256,
+        "count": 256,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 35,
+    "best": {
+      "parts": 10,
+      "depth": 32,
+      "exact": 280,
+      "count": 280,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 32,
+        "exact": 280,
+        "count": 280,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 36,
+    "best": {
+      "parts": 10,
+      "depth": 32,
+      "exact": 288,
+      "count": 288,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 32,
+        "exact": 288,
+        "count": 288,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 40,
+    "best": {
+      "parts": 10,
+      "depth": 32,
+      "exact": 320,
+      "count": 320,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 32,
+        "exact": 320,
+        "count": 320,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 42,
+    "best": {
+      "parts": 10,
+      "depth": 32,
+      "exact": 336,
+      "count": 336,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 32,
+        "exact": 336,
+        "count": 336,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 48,
+    "best": {
+      "parts": 10,
+      "depth": 32,
+      "exact": 384,
+      "count": 384,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 10,
+        "depth": 32,
+        "exact": 384,
+        "count": 384,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 49,
+    "best": {
+      "parts": 5,
+      "depth": 64,
+      "exact": 392,
+      "count": 392,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 5,
+        "depth": 64,
+        "exact": 392,
+        "count": 392,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 56,
+    "best": {
+      "parts": 5,
+      "depth": 64,
+      "exact": 448,
+      "count": 448,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 5,
+        "depth": 64,
+        "exact": 448,
+        "count": 448,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  {
+    "samples": 64,
+    "best": {
+      "parts": 5,
+      "depth": 64,
+      "exact": 512,
+      "count": 512,
+      "max_abs": 0.0
+    },
+    "exact_configs": [
+      {
+        "parts": 5,
+        "depth": 64,
+        "exact": 512,
+        "count": 512,
+        "max_abs": 0.0
+      }
+    ]
+  }
+]

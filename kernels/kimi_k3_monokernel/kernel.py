@@ -95,8 +95,8 @@ def monokernel_layout(
 ) -> dict[str, int]:
     """Return byte offsets for the MonoKernel's tagged mailboxes."""
 
-    if not 1 <= samples <= 32:
-        raise ValueError(f"samples must be in [1, 32], got {samples}")
+    if not 1 <= samples <= 64:
+        raise ValueError(f"samples must be in [1, 64], got {samples}")
     offsets = {
         "pre": 0,
         "pre_ready": 0,
@@ -220,8 +220,8 @@ def build_kimi_k3_monokernel(
 ):
     """Build the fixed-shape single-launch Kimi-K3 decode MonoKernel."""
 
-    if not 1 <= samples <= 32:
-        raise ValueError(f"samples must be in [1, 32], got {samples}")
+    if not 1 <= samples <= 64:
+        raise ValueError(f"samples must be in [1, 64], got {samples}")
     if npes != 8:
         raise ValueError(f"Kimi-K3 MonoKernel requires TP8, got TP{npes}")
     if not 1 <= launches_per_step <= MAX_LAYERS_PER_STEP:
@@ -1367,7 +1367,15 @@ def build_kimi_k3_monokernel(
                             )
                         if lane % 16 == 0:
                             scale_column = pair_in_row // 16
-                            if const_expr(packed_scale_high_rows):
+                            if const_expr(samples > 32):
+                                scale_offset = (
+                                    (sample // 32) * (_HIDDEN // 32) * 32
+                                    + (scale_column // 8) * 256
+                                    + (scale_column % 4) * 64
+                                    + (sample % 16) * 4 + (sample % 32) // 16
+                                    + ((scale_column // 4) % 2) * 2
+                                )
+                            elif const_expr(packed_scale_high_rows):
                                 scale_offset = (
                                     (scale_column // 8) * 256
                                     + (scale_column % 4) * 64
@@ -1868,7 +1876,19 @@ def build_kimi_k3_monokernel(
             sample = fx.min(lane_mod16, sample_count - 1)
             scale_lane = lane_div16 * 16 + lane_mod16
             for k256 in range_constexpr(k_scale_chunks):
-                if const_expr(packed_scale_high_rows):
+                if const_expr(samples > 32):
+                    global_sample = sample_base + sample
+                    activation_scale = fx.Int32(
+                        bo.buffer_load(
+                            quantized_moe_scale_rsrc,
+                            ((global_sample // 32) * k_scale_chunks + k256) * 64
+                            + lane_div16 * 16 + global_sample % 16,
+                            vec_width=1,
+                            dtype=T.i32,
+                            cache_modifier=CM_DEV,
+                        )
+                    ).shrui(fx.Int32(((global_sample % 32) // 16) * 8)) & fx.Int32(0x00FF00FF)
+                elif const_expr(packed_scale_high_rows):
                     activation_scale = fx.Int32(
                         bo.buffer_load(
                             quantized_moe_scale_rsrc,
@@ -1964,7 +1984,19 @@ def build_kimi_k3_monokernel(
             scale_lane = lane_div16 * 16 + lane_mod16
             for local_k256 in range_constexpr(k_scale_chunks // 4):
                 k256 = split_wave * (k_scale_chunks // 4) + local_k256
-                if const_expr(packed_scale_high_rows):
+                if const_expr(samples > 32):
+                    global_sample = sample_base + sample
+                    activation_scale = fx.Int32(
+                        bo.buffer_load(
+                            quantized_moe_scale_rsrc,
+                            ((global_sample // 32) * k_scale_chunks + k256) * 64
+                            + lane_div16 * 16 + global_sample % 16,
+                            vec_width=1,
+                            dtype=T.i32,
+                            cache_modifier=CM_DEV,
+                        )
+                    ).shrui(fx.Int32(((global_sample % 32) // 16) * 8)) & fx.Int32(0x00FF00FF)
+                elif const_expr(packed_scale_high_rows):
                     activation_scale = fx.Int32(
                         bo.buffer_load(
                             quantized_moe_scale_rsrc,
@@ -2575,12 +2607,18 @@ def build_kimi_k3_monokernel(
                         result_type=fx.Vector.make_type(2, fx.Float32),
                     ).bitcast(fx.Int32)
                     global_sample = activation_word_base + input_sample
+                    if const_expr(samples > 32):
+                        scale_word_offset = ((global_sample // 32) * (_HIDDEN // 256) + scale_group // 8) * 64
+                        scale_word_offset = scale_word_offset + (scale_group % 4) * 16 + global_sample % 16
+                        shift = ((scale_group % 8) // 4) * 16 + ((global_sample % 32) // 16) * 8
+                    else:
+                        scale_word_offset = (scale_group // 8) * 64 + (scale_group % 4) * 16 + global_sample % 16
+                        shift = ((scale_group % 8) // 4) * 16 + (global_sample // 16) * 8
                     activation_scale = fx.Int32(bo.buffer_load(
                         quantized_moe_scale_rsrc,
-                        (scale_group // 8) * 64 + (scale_group % 4) * 16 + global_sample % 16,
+                        scale_word_offset,
                         vec_width=1, dtype=T.i32, cache_modifier=CM_DEV,
                     ))
-                    shift = ((scale_group % 8) // 4) * 16 + (global_sample // 16) * 8
                     activation_byte = activation_scale.shrui(fx.Int32(shift)) & fx.Int32(0xFF)
                     activation_gain = (activation_byte << fx.Int32(23)).bitcast(fx.Float32)
                     rhs = mxfp8_to_bf16x8(activation_words[0], activation_words[1], activation_gain)

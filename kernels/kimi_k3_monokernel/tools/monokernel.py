@@ -163,7 +163,7 @@ def _worker(rank: int, args, port: int, results) -> None:
         device=device,
         dtype=torch.bfloat16,
     )
-    slot_stride = 7 if args.full_replay_check else args.seq + 3
+    slot_stride = max(7, args.seq + 3) if args.full_replay_check else args.seq + 3
     slots = args.batch * slot_stride
     state_count = args.batch * (args.seq + 1) if args.mtp else args.samples
     state_indices = torch.tensor([b * slot_stride + t for b in range(args.batch) for t in range(args.seq + 1)], device=device, dtype=torch.int32) if args.mtp else torch.arange(state_count, device=device,dtype=torch.int32)
@@ -265,7 +265,9 @@ def _worker(rank: int, args, port: int, results) -> None:
         reference_tensors = weights.t.copy()
         if not args.attention_only:
             quantized_names = ["w_latent_down", "w_shared_ug"]
-            if layer.fused_tail is not None:
+            # The complete kernel owns its quantized tail without constructing
+            # the separate staged-tail launcher.
+            if layer.fused_tail is not None or layer.attention.fuse_moe:
                 quantized_names += ["w_shared_dn", "w_latent_up"]
             for name in quantized_names:
                 quantized, scale = quantize_mxfp8(reference_tensors[name])
@@ -606,7 +608,7 @@ def _worker(rank: int, args, port: int, results) -> None:
             dist.barrier()
 
     if args.full_replay_check:
-        from full_replay import run as check_full_replay
+        from kernels.kimi_k3_monokernel.tools.full_replay import run as check_full_replay
         result.update(check_full_replay(layer, reference_weights, prefix, blocks, state_indices,
                                        conv_state, recurrent_state, output, args))
 
@@ -658,7 +660,7 @@ def _worker(rank: int, args, port: int, results) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--npes", type=int, choices=(8,), default=8)
-    parser.add_argument("--samples", type=int, choices=range(1, 33), default=None)
+    parser.add_argument("--samples", type=int, choices=range(1, 65), default=None)
     parser.add_argument("--layer-idx", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--attention-only", action="store_true")
@@ -707,7 +709,7 @@ def main() -> int:
     parser.add_argument('--gate-schedule', choices=('auto', 'serial', 'overlap'), default='auto')
     parser.add_argument('--route-publication', choices=('auto', 'stream', 'wave'), default='auto')
     parser.add_argument("--batch", type=int, choices=range(1, 9))
-    parser.add_argument("--seq", type=int, choices=(1,2,3,4))
+    parser.add_argument("--seq", type=int, choices=range(1, 9))
     parser.add_argument('--output-prefetch-units', choices=('auto', '0', '1', '6'), default='auto')
     args = parser.parse_args()
     explicit_shape = args.batch is not None or args.seq is not None
@@ -722,8 +724,8 @@ def main() -> int:
         args.samples = args.samples or 1
         args.batch = 1 if args.mtp else args.samples
         args.seq = args.samples if args.mtp else 1
-    if not 1 <= args.batch <= 8 or not 1 <= args.seq <= 4:
-        parser.error("batch must be in [1, 8] and seq in [1, 4]")
+    if not 1 <= args.batch <= 8 or not 1 <= args.seq <= 8:
+        parser.error("batch must be in [1, 8] and seq in [1, 8]")
     if args.full_replay_check and not (args.check and not args.staged and not args.attention_only):
         parser.error("Full replay check requires the complete MonoKernel with --check")
     if args.routed_route_prefetch and not args.routed_pipeline:

@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 KERNEL = 'kernels/kimi_k3_monokernel/kernel.py'
 HISTORICAL_REVISION = '8137256d25ccea61eeca4f43d26fc3aad280cb1d'
+OPT254_REVISION = '9cb1d40e0c3c344007852be1d9aa92b5b69a4ce3'
 
 
 def sha(data):
@@ -51,13 +52,20 @@ def restore(base, patch, changes):
 
 def main():
     # The September patches retain their original base after promoting Opt254.
-    current = json.loads((ROOT / 'opt254/source_manifest.json').read_text())
+    opt254 = json.loads((ROOT / 'opt254/source_manifest.json').read_text())
+    for name, digest in opt254['files'].items():
+        data = subprocess.check_output(['git', 'show', f'{OPT254_REVISION}:{name}'], cwd=REPO)
+        assert sha(data) == digest, name
+        ast.parse(data, filename=name)
+    for name, digest in opt254['supporting_files'].items():
+        assert sha((ROOT / 'opt254' / name).read_bytes()) == digest, name
+    current = json.loads((ROOT / 'seq8/source_manifest.json').read_text())
     for name, digest in current['files'].items():
         data = (REPO / name).read_bytes()
         assert sha(data) == digest, name
         ast.parse(data, filename=name)
     for name, digest in current['supporting_files'].items():
-        assert sha((ROOT / 'opt254' / name).read_bytes()) == digest, name
+        assert sha((ROOT / 'seq8' / name).read_bytes()) == digest, name
     sys.path.insert(0, str(REPO))
     from dataclasses import asdict
     from kernels.kimi_k3_monokernel.compile_config import KimiK3CompileConfig
@@ -72,6 +80,19 @@ def main():
         resolved = KimiK3CompileConfig().resolve(batch * seq, seq > 1, seq)
         assert asdict(resolved) == row['specialization'], (batch, seq)
         assert resolved.grid_blocks == row['grid_blocks']
+
+    extended_shapes = json.loads((ROOT / 'seq8/compiled_shapes.json').read_text())
+    assert len(extended_shapes) == 64
+    assert {(row['batch'], row['seq']) for row in extended_shapes} == {
+        (batch, seq) for batch in range(1, 9) for seq in range(1, 9)
+    }
+    for row in extended_shapes:
+        batch, seq = row['batch'], row['seq']
+        resolved = KimiK3CompileConfig().resolve(batch * seq, seq > 1, seq)
+        assert asdict(resolved) == row['specialization'], (batch, seq)
+        assert row['private_segment_fixed_size'] == row['vgpr_spill_count'] == 0
+        if seq <= 4:
+            assert row['unchanged_opt254_binary'], (batch, seq)
 
     manifest = json.loads((ROOT / 'selected_source_manifest.json').read_text())
     selected = {
@@ -103,8 +124,9 @@ def main():
         restored = restore(base, ROOT / 'batch_seq_draft' / (source['source'] + '.patch'), source['changed_files'])
         assert hashes(restored) == source['target_files']
         patch_count += 1
-    print(json.dumps(dict(selected_source_files=len(current['files']), historical_source_files=len(selected),
-                          compiled_shape_configs_matched=len(shapes), independent_patches_restored=patch_count,
+    print(json.dumps(dict(selected_source_files=len(current['files']), opt254_source_files=len(opt254['files']),
+                          historical_source_files=len(selected), compiled_shape_configs_matched=len(extended_shapes),
+                          unchanged_opt254_configs=len(shapes), independent_patches_restored=patch_count,
                           exact_source_hashes=True, python_ast_parse=True, gpu_execution=False), indent=2))
 
 

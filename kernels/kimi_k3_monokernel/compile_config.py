@@ -9,6 +9,20 @@ from dataclasses import dataclass
 from kernels.kimi_k3_monokernel.shapes import resolve_sequence_shape
 
 
+def _input_k_partition(samples: int) -> tuple[int, int]:
+    # Native FP32 GEMM reduction order for K=7168, N=6284. The larger
+    # token counts select different native kernels; retain their partition
+    # boundaries so BF16 rounding does not amplify through the KDA chain.
+    if samples > 48:
+        return (5, 64)
+    if samples > 32:
+        return (10, 32)
+    if samples == 25:
+        return (7, 64)
+    return ((10, 32) if samples < 8 else (10, 64) if samples <= 16 else
+            (7, 64) if samples <= 24 else (6, 64) if samples == 28 else (1, 256))
+
+
 @dataclass(frozen=True)
 class KimiK3CompileConfig:
     path: str = 'auto'
@@ -36,13 +50,25 @@ class KimiK3CompileConfig:
         batch, seq = resolve_sequence_shape(samples, mtp, seq_len)
         if self.path not in {'auto', 'small_batch', 'general'}:
             raise ValueError('path must be auto, small_batch, or general')
-        small = batch in {1, 2, 4}
+        small = batch in {1, 2, 4} and seq <= 4
         path = ('small_batch' if small else 'general') if self.path == 'auto' else self.path
         if path == 'small_batch' and not small:
-            raise ValueError('small_batch specializes batch 1, 2, and 4 only')
+            raise ValueError('small_batch specializes batch 1, 2, and 4 with seq <= 4')
         staged = self.staged_samples
         if staged is None:
             staged = 2 if samples == 24 or (batch, seq) == (7, 4) else max(n for n in range(1, min(samples, 4) + 1) if samples % n == 0)
+            if seq > 4 and staged == 3:
+                # Three staged rows spill with the long-K, >28-token path.
+                # Keep the established short-sequence configurations intact.
+                staged = 2 if samples % 2 == 0 else 1
+            if seq > 4 and samples == 28:
+                # The four-row S7 recurrence allocates private memory; use
+                # the same two-row input staging as the validated B7/S4 path.
+                staged = 2
+            if seq > 4 and samples in {36, 40, 48, 56}:
+                # Two rows keep the native-partition input projection free
+                # of private allocations at these larger token counts.
+                staged = 2
         if type(staged) is not int or staged not in {1, 2, 3, 4} or samples % staged:
             raise ValueError('staged_samples must divide samples and be in [1, 4]')
         if self.arithmetic not in {'auto', 'legacy', 'native_fp32'}:
@@ -56,9 +82,15 @@ class KimiK3CompileConfig:
             row_groups = (8 if samples == 32 else 2) if arithmetic == 'native_fp32' else (2 if samples <= 4 else 4)
             if batch == 1 and seq == 4 and arithmetic == 'native_fp32':
                 row_groups = 1
+            if seq > 4 and samples == 30 and arithmetic == 'native_fp32':
+                # Distribute the long-K input projection across eight groups
+                # to keep the 30-token polling specialization scratch-free.
+                row_groups = 8
+            if seq > 4 and samples == 25 and arithmetic == 'native_fp32':
+                row_groups = 1
         if type(row_groups) is not int or row_groups not in {1, 2, 4, 8}:
             raise ValueError('input_row_groups must be one of 1, 2, 4, 8')
-        parts = 10 if samples <= 16 else 7 if samples <= 24 else 6 if samples == 28 else 1
+        parts, _ = _input_k_partition(samples)
         if arithmetic == 'native_fp32' and row_groups * parts * staged * 16 > 2048:
             raise ValueError('native partials exceed the fixed reduction LDS capacity')
         grid = self.grid_blocks
@@ -138,7 +170,7 @@ class KimiK3CompileConfig:
             raise ValueError('cooperative router guard requires an enabled guard')
         if self.pre_attn_res not in {'auto', 'chunked', 'exact2', 'parallel4'}:
             raise ValueError('pre_attn_res must be auto, chunked, or exact2')
-        pre_attn_res = ('chunked' if batch == 1 or seq == 1 else 'parallel4') if self.pre_attn_res == 'auto' else self.pre_attn_res
+        pre_attn_res = ('chunked' if (batch == 1 and seq <= 4) or seq == 1 else 'parallel4') if self.pre_attn_res == 'auto' else self.pre_attn_res
         if pre_attn_res == 'parallel4' and samples < 4:
             raise ValueError('parallel4 requires at least four samples')
         weight_pool_eligible = batch == 1 and seq in (1,4)
@@ -201,9 +233,7 @@ class ResolvedKimiK3Config:
         # Native FP32 accumulation order for the fixed K=7168, N=6284
         # projection. Each pair is (partitions, K quantum); all integer
         # shapes in the public B/S range were independently profiled.
-        n = self.samples
-        return ((10, 32) if n < 8 else (10, 64) if n <= 16 else
-                (7, 64) if n <= 24 else (6, 64) if n == 28 else (1, 256))
+        return _input_k_partition(self.samples)
 
     @property
     def cache_suffix(self):

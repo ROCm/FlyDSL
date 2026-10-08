@@ -1,0 +1,5922 @@
+[
+  {
+    "batch": 1,
+    "seq": 1,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 1,
+      "seq": 1,
+      "staged_samples": 1,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "legacy",
+      "latent_arithmetic": "decoded_bf16",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 6,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "k16_pair_half",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "chunked",
+      "weight_pool": "dense_expert",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "2421bdd0fba9ee222e1edf60b1c3f81e8949f54dcc0e68001389696afffecc7a",
+    "vgpr_count": 111,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 2,
+    "seq": 1,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 2,
+      "seq": 1,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "legacy",
+      "latent_arithmetic": "decoded_bf16",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "chunked",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "f0be57d3551ee2392f7096f7459db1b361dde49dcb3e204906a94c7ed351814a",
+    "vgpr_count": 114,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 3,
+    "seq": 1,
+    "specialization": {
+      "path": "general",
+      "batch": 3,
+      "seq": 1,
+      "staged_samples": 3,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "legacy",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "chunked",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "58b2610b3544a0b22de17c22c078cc5d2a6f7934c9ff564446f856593ee846fe",
+    "vgpr_count": 114,
+    "group_segment_fixed_size": 52992,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 4,
+    "seq": 1,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 4,
+      "seq": 1,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "legacy",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "chunked",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "0107016e7033a20ebcaa1c3788a87ab61f35a510661f4c6a78487847f5b48f34",
+    "vgpr_count": 121,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 5,
+    "seq": 1,
+    "specialization": {
+      "path": "general",
+      "batch": 5,
+      "seq": 1,
+      "staged_samples": 1,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 64,
+      "router_guard_lanes": 8,
+      "pre_attn_res": "chunked",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "51f7ed1c0db8efee13e2c5db611b7738fb6a768231d8c0db764b3f04b943d928",
+    "vgpr_count": 130,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 6,
+    "seq": 1,
+    "specialization": {
+      "path": "general",
+      "batch": 6,
+      "seq": 1,
+      "staged_samples": 3,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "chunked",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "50172fa5db6214b74c7fc6ef0012601b687a07b2ab1c6c67c96fdee5c2bcdcc1",
+    "vgpr_count": 194,
+    "group_segment_fixed_size": 52992,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 7,
+    "seq": 1,
+    "specialization": {
+      "path": "general",
+      "batch": 7,
+      "seq": 1,
+      "staged_samples": 1,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "chunked",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "4af45b6d8ceb9e0ac955e2bfdbae38ebfbfabecaa773d22236d2bdbb36a61fea",
+    "vgpr_count": 132,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 8,
+    "seq": 1,
+    "specialization": {
+      "path": "general",
+      "batch": 8,
+      "seq": 1,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "chunked",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "0cf8908edc0e409ea1864ae648be8fe0ab9049b8ea03c861cddac5e87b24132e",
+    "vgpr_count": 202,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 1,
+    "seq": 2,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 1,
+      "seq": 2,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "legacy",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "chunked",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "73ca2490d7db511f757fdd97facef81fd04034eb39c2aedf067f5630dddf4f1e",
+    "vgpr_count": 114,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 2,
+    "seq": 2,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 2,
+      "seq": 2,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "legacy",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": true,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "1324cd05dcfa76d253ef65662a679e29a2e7826fce83328e8c2f85ec433e486f",
+    "vgpr_count": 112,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 3,
+    "seq": 2,
+    "specialization": {
+      "path": "general",
+      "batch": 3,
+      "seq": 2,
+      "staged_samples": 3,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "846191781839d527f84a5de4c0c53b667e970c319d44caaac1a025451ece1c2f",
+    "vgpr_count": 193,
+    "group_segment_fixed_size": 52992,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 4,
+    "seq": 2,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 4,
+      "seq": 2,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "2334afeb4f2b561e626ffdd12f0870025345ebcf0dd73a3a1e1b68f4cfbfced7",
+    "vgpr_count": 202,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 5,
+    "seq": 2,
+    "specialization": {
+      "path": "general",
+      "batch": 5,
+      "seq": 2,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "ca1cf571f494ac0cdef1ab73d29c4ffb3282d518800ed18063985c89ce1c5999",
+    "vgpr_count": 206,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 6,
+    "seq": 2,
+    "specialization": {
+      "path": "general",
+      "batch": 6,
+      "seq": 2,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "4c85c3650f345ab13eedd775c38d101de7e74986f8cf45cdad1c2f886d9a30b8",
+    "vgpr_count": 209,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 7,
+    "seq": 2,
+    "specialization": {
+      "path": "general",
+      "batch": 7,
+      "seq": 2,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "4fbe2cd728a48dd389aa18e1c117c61a4adb9dc3a06bb80eb6771e160a4e9625",
+    "vgpr_count": 208,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 8,
+    "seq": 2,
+    "specialization": {
+      "path": "general",
+      "batch": 8,
+      "seq": 2,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "6fe1f470274a2ab9cc52cd1e1dff21cdc4cdf34a6b18a10ed7e1bc6494bad862",
+    "vgpr_count": 209,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 1,
+    "seq": 3,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 1,
+      "seq": 3,
+      "staged_samples": 3,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "legacy",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "chunked",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "aa1e9504c38f19f2ae3b984f18970b61365f38acc186545455f6c2925073f632",
+    "vgpr_count": 115,
+    "group_segment_fixed_size": 52992,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 2,
+    "seq": 3,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 2,
+      "seq": 3,
+      "staged_samples": 3,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 64,
+      "router_guard_lanes": 8,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "b3d5b2d0cb2b43a9a4137b4aa4242e3f0784cddc91fd401937ea4fff3592140d",
+    "vgpr_count": 189,
+    "group_segment_fixed_size": 52992,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 3,
+    "seq": 3,
+    "specialization": {
+      "path": "general",
+      "batch": 3,
+      "seq": 3,
+      "staged_samples": 3,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "3bafa7a592c977cb2e3241c97d1a255e21f910358cdd9b2c020649447c91ef30",
+    "vgpr_count": 189,
+    "group_segment_fixed_size": 52992,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 4,
+    "seq": 3,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 4,
+      "seq": 3,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "fc11003fa7dd27c87b865bf4888f2c50238c053b90dd3c9e90122cf9668cef85",
+    "vgpr_count": 209,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 5,
+    "seq": 3,
+    "specialization": {
+      "path": "general",
+      "batch": 5,
+      "seq": 3,
+      "staged_samples": 3,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "d0fe4238403a574a596ff417cc588798d47a9c224b41e1dafbcea5745500fcc5",
+    "vgpr_count": 191,
+    "group_segment_fixed_size": 52992,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 6,
+    "seq": 3,
+    "specialization": {
+      "path": "general",
+      "batch": 6,
+      "seq": 3,
+      "staged_samples": 3,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "2bb227cc2a4bdae442aec928a67da1ab3d0275731b8fcd36aff18e4642e12d8b",
+    "vgpr_count": 191,
+    "group_segment_fixed_size": 52992,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 7,
+    "seq": 3,
+    "specialization": {
+      "path": "general",
+      "batch": 7,
+      "seq": 3,
+      "staged_samples": 3,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "9338c03de1552e4fc169adeb89125ee39acb5f0a6f251086713418938bb18be9",
+    "vgpr_count": 191,
+    "group_segment_fixed_size": 52992,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 8,
+    "seq": 3,
+    "specialization": {
+      "path": "general",
+      "batch": 8,
+      "seq": 3,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "cb21197bff0f3d7440f9031bf22c54408773c80d61f74bb1a561cfdcebed7f55",
+    "vgpr_count": 198,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 1,
+    "seq": 4,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 1,
+      "seq": 4,
+      "staged_samples": 4,
+      "input_row_groups": 1,
+      "grid_blocks": 512,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "flat",
+      "gate_schedule": "overlap",
+      "route_publication": "wave",
+      "output_prefetch_units": 6,
+      "down_task_mapping": "ready64",
+      "input_mfma": "bf16_k16",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "native_split",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "chunked",
+      "weight_pool": "dense",
+      "mtp_prepare": "cta"
+    },
+    "grid_blocks": 512,
+    "sha256": "f56c5f42dd5af1ee797ae89c95e5d138470bdea89725c77d4089db01ae52e644",
+    "vgpr_count": 123,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 512,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 512,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 512,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 512,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 512,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 512,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 512,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 2,
+        "grid_blocks": 512,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 2,
+    "seq": 4,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 2,
+      "seq": 4,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "73cc9a827688b659e524eb52601056738e0cbf59a9a3512961b122dab3612c6a",
+    "vgpr_count": 202,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 3,
+    "seq": 4,
+    "specialization": {
+      "path": "general",
+      "batch": 3,
+      "seq": 4,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "dcf0a1d86fb952e0104439b19f89b4cc23ba39776b50eb88acd99ad78da70201",
+    "vgpr_count": 209,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 4,
+    "seq": 4,
+    "specialization": {
+      "path": "small_batch",
+      "batch": 4,
+      "seq": 4,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "a45607fa677f573db739e8d79c023b2b42ab0a7de86b45165fc2810f7c7f43cf",
+    "vgpr_count": 209,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 5,
+    "seq": 4,
+    "specialization": {
+      "path": "general",
+      "batch": 5,
+      "seq": 4,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "c045799fd324820efa4fda5b19a0375a47df26ea597671278b8ac2ba2de4f493",
+    "vgpr_count": 210,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 6,
+    "seq": 4,
+    "specialization": {
+      "path": "general",
+      "batch": 6,
+      "seq": 4,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "af928492319bfb7a7c15baf76ad4753106536c1f6733f32fe3209616e2b579c4",
+    "vgpr_count": 198,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 7,
+    "seq": 4,
+    "specialization": {
+      "path": "general",
+      "batch": 7,
+      "seq": 4,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "a3305a806cb1e6aa2223551213e35f6c47fa9bb8806baabdb1f5a84f1340870b",
+    "vgpr_count": 198,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 8,
+    "seq": 4,
+    "specialization": {
+      "path": "general",
+      "batch": 8,
+      "seq": 4,
+      "staged_samples": 4,
+      "input_row_groups": 8,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "e9a90c9568a71e06e0a926f800ff77980dfab315aaf1a13f22ddb04ad0fda9f3",
+    "vgpr_count": 211,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ],
+    "unchanged_opt254_binary": true
+  },
+  {
+    "batch": 1,
+    "seq": 5,
+    "specialization": {
+      "path": "general",
+      "batch": 1,
+      "seq": 5,
+      "staged_samples": 1,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "c9372a3d9e02e08c242ca8739b77954bb05ce734074f2a7f51abf64cf90533b2",
+    "vgpr_count": 133,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 2,
+    "seq": 5,
+    "specialization": {
+      "path": "general",
+      "batch": 2,
+      "seq": 5,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "f03e19583385adc9e053f68598106f64b882ae98ec75a8cf67aaf36513c42035",
+    "vgpr_count": 206,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 3,
+    "seq": 5,
+    "specialization": {
+      "path": "general",
+      "batch": 3,
+      "seq": 5,
+      "staged_samples": 1,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "e444cd8dcdd09c5e3cf3567d6c3074d5d08a897e6383b835c875c18f7231943a",
+    "vgpr_count": 134,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 4,
+    "seq": 5,
+    "specialization": {
+      "path": "general",
+      "batch": 4,
+      "seq": 5,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "a5ea78f5b17ab8ecde572e9a7553d5af6858d69e7191eb2d9d1a79ad78fbd2ec",
+    "vgpr_count": 210,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 5,
+    "seq": 5,
+    "specialization": {
+      "path": "general",
+      "batch": 5,
+      "seq": 5,
+      "staged_samples": 1,
+      "input_row_groups": 1,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "b639a5212b46fb596f8e3cecce37f25f9fd28709b656ad38a19e129cd2f58bb1",
+    "vgpr_count": 134,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 6,
+    "seq": 5,
+    "specialization": {
+      "path": "general",
+      "batch": 6,
+      "seq": 5,
+      "staged_samples": 2,
+      "input_row_groups": 8,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "9e6f0a57bb67d4f0f1d78ae4e5dc0bf4d59d510dd3277b1fe7e60db99df23cda",
+    "vgpr_count": 198,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 7,
+    "seq": 5,
+    "specialization": {
+      "path": "general",
+      "batch": 7,
+      "seq": 5,
+      "staged_samples": 1,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "9620c368e6e9f2ad2267aa43885b833f33b1258976cbaf31366b0e88d2ce436a",
+    "vgpr_count": 144,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 8,
+    "seq": 5,
+    "specialization": {
+      "path": "general",
+      "batch": 8,
+      "seq": 5,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "40aade1c304991a66129b08fd0f4ea01f7d3fe6e2741932e2f043078d43de8b8",
+    "vgpr_count": 176,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 1,
+    "seq": 6,
+    "specialization": {
+      "path": "general",
+      "batch": 1,
+      "seq": 6,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "cb6284cbf7f3fb12b848e76f70240533be322f1a0fad0be527a75558a1c4e9ce",
+    "vgpr_count": 206,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 2,
+    "seq": 6,
+    "specialization": {
+      "path": "general",
+      "batch": 2,
+      "seq": 6,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "3028b8b568315376ab7a330431db913658198f0b96bab0db9b6ec85504066623",
+    "vgpr_count": 209,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 3,
+    "seq": 6,
+    "specialization": {
+      "path": "general",
+      "batch": 3,
+      "seq": 6,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "0abb41854d2906341bbdf875661bffb21cced1bb4fb4d2b27b6fe2e79b0c102e",
+    "vgpr_count": 197,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 4,
+    "seq": 6,
+    "specialization": {
+      "path": "general",
+      "batch": 4,
+      "seq": 6,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "50eab63483ba69e437a3c7c759132e40910bec47a95469a151ce71e0820aac57",
+    "vgpr_count": 198,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 5,
+    "seq": 6,
+    "specialization": {
+      "path": "general",
+      "batch": 5,
+      "seq": 6,
+      "staged_samples": 2,
+      "input_row_groups": 8,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "bd257caa4f192997f8af5587e3ae585b4afd79214ed784b6aa44ef509b32e42b",
+    "vgpr_count": 198,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 6,
+    "seq": 6,
+    "specialization": {
+      "path": "general",
+      "batch": 6,
+      "seq": 6,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "22059dbb19f3169b61095e30861ac61326161e4e94270287aa046cbfefa0ec88",
+    "vgpr_count": 176,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 7,
+    "seq": 6,
+    "specialization": {
+      "path": "general",
+      "batch": 7,
+      "seq": 6,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "2589579d76edf6018274a1a5517d3e8fdf750cae6795e0d3e562093a0947b704",
+    "vgpr_count": 176,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 8,
+    "seq": 6,
+    "specialization": {
+      "path": "general",
+      "batch": 8,
+      "seq": 6,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "7f092e735510626feefd6a6b2d5c697ee4d99926e9707889c87919f55b720f6c",
+    "vgpr_count": 176,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 1,
+    "seq": 7,
+    "specialization": {
+      "path": "general",
+      "batch": 1,
+      "seq": 7,
+      "staged_samples": 1,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "6c0109d941db4b52a14fa0781a307f38b02799dcb658bb326deb86a1394ff9fe",
+    "vgpr_count": 131,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 2,
+    "seq": 7,
+    "specialization": {
+      "path": "general",
+      "batch": 2,
+      "seq": 7,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "c44f75b8be799bc4a890502dbb38f2205b18da05f2270c9335e0c8a9ae157cff",
+    "vgpr_count": 208,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 3,
+    "seq": 7,
+    "specialization": {
+      "path": "general",
+      "batch": 3,
+      "seq": 7,
+      "staged_samples": 1,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "71bae90b6f329ab6d25b37ee1f150a239702655f4e599d622338035710485ed8",
+    "vgpr_count": 134,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 4,
+    "seq": 7,
+    "specialization": {
+      "path": "general",
+      "batch": 4,
+      "seq": 7,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "13b4f2cf5f44f285a4ec9226a541c24b675bb9b14bc897d108c77f771ee7c9e8",
+    "vgpr_count": 198,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 5,
+    "seq": 7,
+    "specialization": {
+      "path": "general",
+      "batch": 5,
+      "seq": 7,
+      "staged_samples": 1,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "ca4b7968ec171f7858232a171d618e775416c32d6bfe57f60a609b7d1eee3c1f",
+    "vgpr_count": 144,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 6,
+    "seq": 7,
+    "specialization": {
+      "path": "general",
+      "batch": 6,
+      "seq": 7,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "7988551ed6eb77e10ebac51e569736b83cf11e5872c59ebab724b929c9922df3",
+    "vgpr_count": 176,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 7,
+    "seq": 7,
+    "specialization": {
+      "path": "general",
+      "batch": 7,
+      "seq": 7,
+      "staged_samples": 1,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "cbbedcee9660fcd75052a688d7a7db863bd6e817db6912533dc7745f4a4d4916",
+    "vgpr_count": 144,
+    "group_segment_fixed_size": 24064,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 8,
+    "seq": 7,
+    "specialization": {
+      "path": "general",
+      "batch": 8,
+      "seq": 7,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "5991db7bdc7928fbb9d2115bc50abfdc60cdda515fa4ab7a4191fed1aaf96919",
+    "vgpr_count": 176,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 1,
+    "seq": 8,
+    "specialization": {
+      "path": "general",
+      "batch": 1,
+      "seq": 8,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "dc86fe8b1a49a94fe55dac6a1599d68b93e992ce9e3a432693822cd06deff4b5",
+    "vgpr_count": 202,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 2,
+    "seq": 8,
+    "specialization": {
+      "path": "general",
+      "batch": 2,
+      "seq": 8,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "d51a3289dbd388c611039e402bb1d0e7bad633b5b37480b23329d51f2f787992",
+    "vgpr_count": 209,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 3,
+    "seq": 8,
+    "specialization": {
+      "path": "general",
+      "batch": 3,
+      "seq": 8,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "d59003a9395f923e43951c7da19e18b4a06b23bcff262abf445ec65c934326bb",
+    "vgpr_count": 198,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 4,
+    "seq": 8,
+    "specialization": {
+      "path": "general",
+      "batch": 4,
+      "seq": 8,
+      "staged_samples": 4,
+      "input_row_groups": 8,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "9c3078e77123d860734448f682a591c7e94ddbe0cc8e144e5c7dceb1b727abe3",
+    "vgpr_count": 211,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 5,
+    "seq": 8,
+    "specialization": {
+      "path": "general",
+      "batch": 5,
+      "seq": 8,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "d7dac9c7c572443caa56ea41f54acb06522ba11ec442cbf5bed27dc491a5be9a",
+    "vgpr_count": 176,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 6,
+    "seq": 8,
+    "specialization": {
+      "path": "general",
+      "batch": 6,
+      "seq": 8,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "d061aaec7220a7fc3e0fb969651ed331dead3f1db873ec4bf1e27f6917dd2eea",
+    "vgpr_count": 176,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 7,
+    "seq": 8,
+    "specialization": {
+      "path": "general",
+      "batch": 7,
+      "seq": 8,
+      "staged_samples": 2,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "271812636a7117ac933a3d95898c1f7050787dba9030df01dc5d392073676bc9",
+    "vgpr_count": 176,
+    "group_segment_fixed_size": 38528,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  },
+  {
+    "batch": 8,
+    "seq": 8,
+    "specialization": {
+      "path": "general",
+      "batch": 8,
+      "seq": 8,
+      "staged_samples": 4,
+      "input_row_groups": 2,
+      "grid_blocks": 256,
+      "arithmetic": "native_fp32",
+      "latent_arithmetic": "scaled_mxfp8",
+      "input_schedule": "cta",
+      "gate_schedule": "serial",
+      "route_publication": "stream",
+      "output_prefetch_units": 0,
+      "down_task_mapping": "linear",
+      "input_mfma": "f32",
+      "gate_input_arithmetic": "original",
+      "ug_arithmetic": "bf16",
+      "input_fp32_repair": false,
+      "router_guard_ulp": 0,
+      "router_guard_lanes": 1,
+      "pre_attn_res": "parallel4",
+      "weight_pool": "separate",
+      "mtp_prepare": "replicated"
+    },
+    "grid_blocks": 256,
+    "sha256": "e21e0df752c69e0aa4de9d8bf0437c301a1629f0b2d11de1c6163280204c9eb5",
+    "vgpr_count": 204,
+    "group_segment_fixed_size": 67456,
+    "private_segment_fixed_size": 0,
+    "vgpr_spill_count": 0,
+    "devices": [
+      {
+        "device": 0,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 1,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 2,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 3,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 4,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 5,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 6,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      },
+      {
+        "device": 7,
+        "compute_units": 256,
+        "resident_blocks_per_cu": 1,
+        "grid_blocks": 256,
+        "pass_residency": true
+      }
+    ]
+  }
+]

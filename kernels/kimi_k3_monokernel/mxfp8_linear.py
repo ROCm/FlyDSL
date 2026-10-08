@@ -9,7 +9,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int64, ReductionOp, Stream, T
 from kernels.common import buffer_ops as bo
@@ -29,8 +29,8 @@ _FP8_INV_MAX_POS_BITS = 0x3B124925
 def build_mxfp8_quantize(rows: int, cols: int):
     """Build BF16 -> row-major MXFP8 quantization with preshuffled E8M0 scales."""
 
-    if not 1 <= rows <= 32:
-        raise ValueError(f"rows must be in [1, 32], got {rows}")
+    if not 1 <= rows <= 64:
+        raise ValueError(f"rows must be in [1, 64], got {rows}")
     if cols <= 0 or cols % 256:
         raise ValueError(f"cols must be a positive multiple of 256, got {cols}")
     scale_cols = cols // _GROUP
@@ -131,8 +131,8 @@ def build_mxfp8_quantize(rows: int, cols: int):
 def build_mxfp8_project(rows: int, n: int, k: int):
     """Build a low-row MXFP8 GEMM specialized for decode projections."""
 
-    if not 1 <= rows <= 32:
-        raise ValueError(f"rows must be in [1, 32], got {rows}")
+    if not 1 <= rows <= 64:
+        raise ValueError(f"rows must be in [1, 64], got {rows}")
     if n <= 0 or n % 32:
         raise ValueError(f"output width must be a positive multiple of 32, got {n}")
     if k <= 0 or k % 256:
@@ -212,14 +212,24 @@ def build_mxfp8_project(rows: int, n: int, k: int):
             scale_lane = lane_div16 * 16 + lane_mod16
 
             for k256 in range_constexpr(k_scale_chunks):
-                input_scale = fx.Int32(
-                    bo.buffer_load(
-                        activation_scale_rsrc,
-                        k256 * 64 + scale_lane,
-                        vec_width=1,
-                        dtype=T.i32,
-                    )
-                ).shrui(fx.Int32((input_row_base // 16) * 8)) & fx.Int32(0x00FF00FF)
+                if const_expr(rows > 32):
+                    input_scale = fx.Int32(
+                        bo.buffer_load(
+                            activation_scale_rsrc,
+                            ((input_row_base // 32) * k_scale_chunks + k256) * 64 + scale_lane,
+                            vec_width=1,
+                            dtype=T.i32,
+                        )
+                    ).shrui(fx.Int32(((input_row_base % 32) // 16) * 8)) & fx.Int32(0x00FF00FF)
+                else:
+                    input_scale = fx.Int32(
+                        bo.buffer_load(
+                            activation_scale_rsrc,
+                            k256 * 64 + scale_lane,
+                            vec_width=1,
+                            dtype=T.i32,
+                        )
+                    ).shrui(fx.Int32((input_row_base // 16) * 8)) & fx.Int32(0x00FF00FF)
                 output_scale = fx.Int32(
                     bo.buffer_load(
                         weight_scale_rsrc,

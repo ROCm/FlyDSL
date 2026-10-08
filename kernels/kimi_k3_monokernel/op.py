@@ -29,8 +29,8 @@ class KimiK3MonoKernel(_KimiK3KdaStagedPath):
         seq_len: int | None = None,
         compile_config: KimiK3CompileConfig | None = None,
     ) -> None:
-        if not 1 <= samples <= 32 or npes != 8:
-            raise ValueError("This experimental candidate requires TP8 and 1..32 total tokens")
+        if not 1 <= samples <= 64 or npes != 8:
+            raise ValueError("This experimental candidate requires TP8 and 1..64 total tokens")
         super().__init__(
             weights,
             samples,
