@@ -134,9 +134,10 @@ To package a Windows wheel, build FlyDSL into a directory inside the checkout be
 ```powershell
 & .\scripts\build.ps1 -MLIRPath C:\linstall -BuildDir (Join-Path $repo 'build-vs') -Python C:\fdsl-venv\Scripts\python.exe -Jobs 32
 $env:FLY_BUILD_DIR = 'build-vs'
-python setup.py bdist_wheel
+$python = 'C:\fdsl-venv\Scripts\python.exe'
+& $python setup.py bdist_wheel
 $wheel = Get-ChildItem .\dist\flydsl-*.whl | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-python -m pip install --no-deps $wheel.FullName
+& $python -m pip install --no-deps $wheel.FullName
 ```
 
 ### Run tests
