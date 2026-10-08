@@ -12,7 +12,7 @@ from flydsl.expr.typing import T, as_ir_value
 from kernels.common import buffer_ops as bo
 from kernels.monokernel import helpers
 from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROUTE_SCALE
-from kernels.monokernel.dsv4.plan import MIN_I32, THREADS, TL_COLS, WAVES
+from kernels.monokernel.dsv4.kernel.plan import MIN_I32, THREADS, TL_COLS, WAVES
 from kernels.monokernel.helpers import SHARED_SOURCE_KEY, LaunchState, traced
 from kernels.monokernel.ops import (
     exp,

@@ -9,9 +9,9 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
-from kernels.monokernel.dsv4.common import pow2_ceil
 from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROPE_DIM
-from kernels.monokernel.dsv4.plan import Q_B_TILE, QKV_A_TILE, WAVES, q_b_groups, qkv_a_groups
+from kernels.monokernel.dsv4.kernel.common import pow2_ceil
+from kernels.monokernel.dsv4.kernel.plan import Q_B_TILE, QKV_A_TILE, WAVES, q_b_groups, qkv_a_groups
 from kernels.monokernel.helpers import traced
 from kernels.monokernel.layout import NEG
 from kernels.monokernel.ops import (

@@ -295,7 +295,7 @@ def test_dsv4_compress_schedule_is_the_checkpoints():
 
 def test_dsv4_layout_sizes_moe_mailboxes_from_the_build_dims():
     """scores / sel / prob / mid follow the build's n_experts, top_k and inter, not the module defaults."""
-    from kernels.monokernel.dsv4.plan import layout, stage_tasks
+    from kernels.monokernel.dsv4.kernel.plan import layout, stage_tasks
 
     S, ne, k, inter = 2, 1024, 8, 768
     sc, _ = layout(S, 16, 1, n_experts=ne, top_k=k, inter=inter)
@@ -336,8 +336,8 @@ def test_dsv4_rejects_unsafe_inputs():
 
 def test_dsv4_bounded_poll_flags_instead_of_hanging():
     """Timeout 0 flags the launch and still terminates; the default timeout never fires on a healthy launch."""
+    from kernels.monokernel.dsv4.kernel.plan import POLL_TIMEOUT_US
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel, Dsv4Variant
-    from kernels.monokernel.dsv4.plan import POLL_TIMEOUT_US
 
     torch.manual_seed(0)
     cfg, dev = _cfg(), "cuda"
@@ -366,8 +366,8 @@ def _i32(x):
 def test_dsv4_step_advance_scrubs_stale_mailboxes(s0):
     """Over one scrub period the step advance zeroes only stale-tagged pairs, across the tag and int32 wraps."""
     from kernels.monokernel.dsv4.kernel import scrub_period
+    from kernels.monokernel.dsv4.kernel.plan import LAYER_SLOTS
     from kernels.monokernel.dsv4.op import Dsv4Variant
-    from kernels.monokernel.dsv4.plan import LAYER_SLOTS
 
     variant = Dsv4Variant(_cfg(), 1, rank=0, npes=1, moe_mode=MoeMode.A8W4)
     bufs = [variant.scratch[: variant.scr_pairs * 8], variant.sym_storage[: variant.sym_pairs * 8]]
@@ -396,8 +396,8 @@ def test_dsv4_step_advance_scrubs_stale_mailboxes(s0):
 
 def test_dsv4_layer_output_is_the_same_across_the_tag_wrap():
     """Launches whose tags straddle the 2**32 wrap give bit-identical outputs to steps 0 and 1."""
+    from kernels.monokernel.dsv4.kernel.plan import LAYER_SLOTS
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-    from kernels.monokernel.dsv4.plan import LAYER_SLOTS
 
     torch.manual_seed(0)
     cfg, dev = _cfg(), "cuda"
@@ -850,7 +850,7 @@ def test_dsv4_indexer_scores_match_on_every_rank_tp8():
 
 def test_dsv4_indexer_scores_the_new_entry_past_the_first_tile():
     """The entry written this launch is scored from the mailbox even past the first SCORE_TILE (poisoned cache)."""
-    from kernels.monokernel.dsv4.plan import SCORE_TILE
+    from kernels.monokernel.dsv4.kernel.plan import SCORE_TILE
 
     torch.manual_seed(0)
     ratio = COMPRESS_CSA
@@ -956,7 +956,7 @@ def test_dsv4_indexer_topk_over_a_decode(max_seq, index_topk, checks, min_reach,
 )
 def test_dsv4_indexer_topk_over_a_filled_cache(max_seq, index_topk, n_live):
     """The top-k over an FP4 key cache filled directly: across several CTA parts and at a full 1M context."""
-    from kernels.monokernel.dsv4.plan import THREADS, n_topk_parts
+    from kernels.monokernel.dsv4.kernel.plan import THREADS, n_topk_parts
     from kernels.monokernel.dsv4.reference import pack_fp4
 
     torch.manual_seed(0)
@@ -1349,7 +1349,7 @@ def test_dsv4_state_slots_place_the_rolling_state():
 
 def test_dsv4_split_merge_spans_the_block():
     """More than 64 key splits takes the block-wide merge path; overrunning it is silently wrong, not a crash."""
-    from kernels.monokernel.dsv4.plan import SPLIT_KEYS
+    from kernels.monokernel.dsv4.kernel.plan import SPLIT_KEYS
 
     torch.manual_seed(0)
     dev, mode, S = "cuda", MoeMode.W8A8, 1

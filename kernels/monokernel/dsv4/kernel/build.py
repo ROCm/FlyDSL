@@ -51,8 +51,6 @@ import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 from kernels.common import buffer_ops as bo
-from kernels.monokernel.dsv4.attention import attention_stages
-from kernels.monokernel.dsv4.common import common_defs
 from kernels.monokernel.dsv4.config import (
     BLOCK_TOKENS,
     HC_EPS,
@@ -74,10 +72,12 @@ from kernels.monokernel.dsv4.config import (
     MoeMode,
     moe_format,
 )
-from kernels.monokernel.dsv4.ffn import ffn_stages
-from kernels.monokernel.dsv4.hc import hc_attn_stages
-from kernels.monokernel.dsv4.indexer import index_query_stages, index_select_stages
-from kernels.monokernel.dsv4.plan import (
+from kernels.monokernel.dsv4.kernel.attention import attention_stages
+from kernels.monokernel.dsv4.kernel.common import common_defs
+from kernels.monokernel.dsv4.kernel.ffn import ffn_stages
+from kernels.monokernel.dsv4.kernel.hc import hc_attn_stages
+from kernels.monokernel.dsv4.kernel.indexer import index_query_stages, index_select_stages
+from kernels.monokernel.dsv4.kernel.plan import (
     BLOCKS,
     LAYER_SLOTS,
     Q_B_TILE,
@@ -98,7 +98,7 @@ from kernels.monokernel.dsv4.plan import (
     stage_tasks,
     uv_tile,
 )
-from kernels.monokernel.dsv4.qkv import q_b_stage, qkv_stages
+from kernels.monokernel.dsv4.kernel.qkv import q_b_stage, qkv_stages
 from kernels.monokernel.helpers import SHARED_SOURCE_KEY
 from kernels.monokernel.ops import rsrc, uniform
 
