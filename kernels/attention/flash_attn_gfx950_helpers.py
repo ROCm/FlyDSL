@@ -974,6 +974,26 @@ class ParityKernelContext(_ParityKvStaging, dualwave.DualwaveKernelContext):
 
     def init_thread_mapping(self):
         super().init_thread_mapping()
+        traits = self.traits
+        if const_expr(traits.XCD_SWIZZLE and not traits.SPLITK and not traits.CAUSAL):
+            # Swizzled head-first mapping (arXiv:2511.02132): the grid is head-fast, so one head's q blocks scatter
+            # across the eight XCDs and each re-streams K/V. Re-deriving (head, q block) from the linear workgroup id
+            # with the head as the *slow* axis keeps a head's blocks on one XCD. A bijection over the same ids, so the
+            # output is bit-identical. Only when the head count divides evenly into the XCDs, which with a runtime
+            # head count is a runtime condition: otherwise the mapping is left alone. Non-causal only (under a causal
+            # mask block i does work proportional to i, and clustering unequal work cost 7%, measured), and not under
+            # split-K, whose third grid axis would not survive it.
+            #
+            # The production code spells this in `_init_dualwave_thread_mapping` over a compile-time head count, a
+            # dummy here, so it never engages for these kernels; it is restated over `num_head_q`. It reads
+            # `grid_dim.y`, which appends the hidden-argument block: a feature knob, off for AOT, so exempt.
+            heads = fx.Index(self.num_head_q)
+            num_q_blocks = fx.Index(gpu.grid_dim.y)
+            linear_wg = fx.Index(gpu.block_idx.x) + fx.Index(gpu.block_idx.y) * heads
+            swizzle = (heads % fx.Index(dualwave.NUM_XCD_GFX950)) == fx.Index(0)
+            self.h_idx = swizzle.select(linear_wg // num_q_blocks, self.h_idx)
+            self.q_block_idx = swizzle.select(linear_wg % num_q_blocks, self.q_block_idx)
+            self.q_start = self.q_block_idx * traits.BLOCK_M
         # Re-derive the four head indices with runtime counts. The *mapping* is
         # the production one verbatim: `h_idx` is decomposed against the KV head
         # count and recomposed against the group size, which groups the Q heads
