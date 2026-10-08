@@ -1466,7 +1466,6 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
     traits = config.fwd_traits(meta, knobs)
     # Optional inputs the forward body carries but whose host side and tests land separately.
     for name, wanted in (
-        ("meta.sink", meta.sink),
         ("meta.paged", meta.paged),
         ("XCD_SWIZZLE", knobs.XCD_SWIZZLE),
         ("NUM_KV_SPLITS > 1", knobs.NUM_KV_SPLITS > 1),
@@ -1532,6 +1531,7 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
     BTS_ANN = fx.Int32 if BT_RUNTIME else fx.Constexpr
     ALIBI_ANN = fx.Tensor if traits.ALIBI else fx.Constexpr
     ALIBI_STRIDE_ANN = fx.Int32 if traits.ALIBI else fx.Constexpr
+    SINK_ANN = fx.Tensor if traits.SINK else fx.Constexpr
     # Leading_upper_snake_case parameters (AOTriton's `constexpr_or_i32`): ONE parameter whose annotation is chosen per build,
     # `fx.Constexpr` when the governing knob is on (a JIT build bakes the value) and `fx.Int32` otherwise, so every AOT
     # build, which has the knobs at their defaults, still has a real kernarg.
@@ -1588,6 +1588,7 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         block_table_stride: BTS_ANN,
         alibi_slopes: ALIBI_ANN,
         alibi_stride_b: ALIBI_STRIDE_ANN,
+        sink: SINK_ANN,
     ):
         # The six tensor operands arrive as bare pointers -- see `wire_ptr` in
         # `fmha_dualwave_gfx950.py` for why, and `helpers.wire_view` for why they are
@@ -1701,6 +1702,9 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         q_loader = helpers.ParityQLoader(ctx)
         gemm_helper = (helpers.WideGemmHelper if WIDE else _FwdGemmHelper)(ctx)
         softmax_helper = (_WideSoftmaxHelper if WIDE else _ParitySoftmaxHelper)(ctx)
+
+        def load_sink_log2():
+            return ctx.load_sink_log2(sink)
 
         def main_body():
             # Paged: stage the block-table row into LDS before any page-id ds_read.
@@ -2159,6 +2163,9 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
             # Epilogue C13
             v_o = gemm_helper.pv(v_p_1, v_packs_e13, v_o)
 
+            if const_expr(traits.SINK and not traits.SPLITK):
+                m_row, l_row = softmax_helper.fold_sink(v_o, m_row, l_row, load_sink_log2())
+
             l_inv = softmax_helper.safe_l_inv(l_row)
             softmax_helper.scale_o(v_o, l_inv)
 
@@ -2185,12 +2192,16 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
                 gemm_helper=gemm_helper,
                 softmax_helper=softmax_helper,
                 output_store=output_store,
+                load_sink_log2=load_sink_log2 if const_expr(traits.SINK and not traits.SPLITK) else None,
             )
         else:
             body = main_body
 
         if const_expr(traits.CAUSAL and traits.CROSS_SEQLEN and not traits.SPLITK):
-            output_store.zero_o_block_if_needed()
+            # A block that attends no key writes the LSE itself: with a sink the whole denominator is the sink.
+            output_store.zero_o_block_if_needed(
+                sink_log2=load_sink_log2() if const_expr(traits.SINK and traits.RETURN_LSE) else None
+            )
 
         if active is None:
             body()
@@ -2257,6 +2268,7 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         block_table_stride: BTS_ANN,
         alibi_slopes: ALIBI_ANN,
         alibi_stride_b: ALIBI_STRIDE_ANN,
+        sink: SINK_ANN,
         stream: fx.Stream = fx.Stream(None),
     ):
         # Make the build configuration visible to the JIT cache key.
@@ -2333,6 +2345,7 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
             block_table_stride,
             alibi_slopes,
             alibi_stride_b,
+            sink,
             value_attrs={
                 "rocdl.waves_per_eu": traits.WAVES_PER_EU,
                 "rocdl.flat_work_group_size": f"{traits.BLOCK_SIZE},{traits.BLOCK_SIZE}",
@@ -2368,6 +2381,7 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         num_seqlens=0,
         bias=None,
         alibi_slopes=None,
+        sink=None,
         dropout_p=None,
         philox_seed=None,
         philox_offset1=None,
@@ -2478,6 +2492,21 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
                 raise ValueError("this build was not compiled for ALiBi; pass alibi=True in FmhaInputMetadata")
             alibi_arg, alibi_stride_arg = 0, 0
 
+        # The sink: fp32 `[num_heads]`, one extra softmax-denominator logit per head. Same rule as the bias and the
+        # slopes: a build must be handed exactly what it was compiled for.
+        if traits.SINK:
+            if sink is None:
+                raise ValueError("this build has sink=True and requires an fp32 `sink` of shape (H,)")
+            if not sink.is_floating_point() or sink.element_size() != 4 or tuple(sink.shape) != (num_head_q,):
+                raise ValueError(f"sink must be fp32 of shape ({num_head_q},); got {sink.dtype} {tuple(sink.shape)}")
+            if sink.stride(0) != 1:
+                raise ValueError("sink needs a contiguous head axis")
+            sink_arg = sink
+        else:
+            if sink is not None:
+                raise ValueError("this build was not compiled for a sink; pass sink=True in FmhaInputMetadata")
+            sink_arg = 0
+
         # `abi.dropout_args` turns the probability into the i32 threshold the raw random is compared against and
         # the `1/(1-p)` survivor scale, both once per call rather than per element, and keeps the counter as the
         # (pointer, immediate) pair torch splits it into so a captured graph can re-read the pointer half.
@@ -2570,6 +2599,7 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
             0 if block_table_stride is None else block_table_stride,
             alibi_arg,
             alibi_stride_arg,
+            sink_arg,
         ), (stream, dp_keepalive)
 
     def launch(*args, **kwargs):

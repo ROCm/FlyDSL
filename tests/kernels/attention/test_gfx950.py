@@ -145,7 +145,7 @@ FWD_DEF_PARAMS = (
     "philox_offset_output idropout_p dropout_scale num_head_q num_head_k hdim_qk hdim_vo sm_scale stride_q_batch "
     "stride_q_head stride_q_seq stride_k_batch stride_k_head stride_k_seq stride_v_batch stride_v_head stride_v_seq "
     "stride_o_batch stride_o_head stride_o_seq stride_b_batch stride_b_head stride_b_seq_q block_table_stride "
-    "alibi_slopes alibi_stride_b"
+    "alibi_slopes alibi_stride_b sink"
 ).split()
 
 # The kernarg block at default metadata and knobs, `(kind, size)` per non-`Constexpr` parameter, offsets left to the
