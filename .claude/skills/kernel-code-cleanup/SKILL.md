@@ -422,8 +422,12 @@ fx.gemm(mma, frag_C, frag_A, frag_B, frag_C, scale_a=sa, scale_b=sb)   # atom st
 - **Keep** `copy_atom_call_ssa` / `mma_atom_call_ssa` (the SSA-*returning* variants
   are a different primitive) and any raw atom call whose operands have no tensor/
   partition form to pass. Prefer `fx.copy` / `fx.gemm` for supported tensor forms.
-- Diff numerics and ISA; for scheduler-sensitive hot loops compare repeated,
-  paired graph timings. Unchanged resources alone do not prove unchanged time.
+- Compare the same target and specialization through the full default pipeline.
+  Require numerical equivalence and normalized final ISA for an atom-call
+  migration; use resource diff only as complementary evidence. Identical ISA
+  does not prove unchanged layout-to-lane mapping, and identical sample outputs
+  do not prove identical ISA. For scheduler-sensitive hot loops also compare
+  repeated, paired graph timings.
 
 ---
 
@@ -478,9 +482,14 @@ _run_compiled(compiled["launch"], out.data_ptr(), a.data_ptr(), b.data_ptr(),
 
 ## 10. Procedure
 
-1. **Find** legacy usage (under `kernels/`):
+For review-only requests, use **Find** and **Triage**, then report the location,
+resolved API, suggested replacement, and relevant semantic constraints. Stop
+before migration or formatting. Use the caller's review scope.
+
+1. **Find** legacy usage, starting with these searches:
    ```bash
    rg -n 'ArithValue|_to_raw|arith\.(unwrap|index|index_cast)|fx\.Index\(' <file>
+   rg -n 'maximumf|minimumf|maxnumf|minnumf|maxsi|maxui|minsi|minui|ceildivsi|ceildivui' <file>
    rg -n 'buffer_ops\.(create_buffer_resource|buffer_load|buffer_store)' <file>
    rg -n '_mlir\.dialects|from flydsl\.expr import' <file>
    rg -n '\b(scf\.(For|If)Op|vector\.(extract|bitcast|splat)|llvm\.(load|store|mlir))' <file>
@@ -491,10 +500,19 @@ _run_compiled(compiled["launch"], out.data_ptr(), a.data_ptr(), b.data_ptr(),
    rg -n 's_waitcnt\(|_encode_waitcnt|_s_waitcnt|CNT_[0-9A-Z_]*=|0x[Cc]07[Ff]' <file>
    rg -n 'LOG2E|log2e|def .*sigmoid|def .*tanh|def .*ceildiv|def .*ptr' <file>
    ```
-   Resolve import aliases and inspect nested definitions/callers; text hits are
-   candidates, not proof of duplication or dead code.
-2. **Triage:** do mechanical swaps (operators, casts, `vector.extract/bitcast`)
-   first; structural ones (control flow, `buffer_ops` offsets, MMA loops) next.
+   Treat these searches as leads. Read the imports, enclosing functions, and
+   nested definitions/callers. Follow module aliases and direct imports to their
+   calls, and account for local rebinding. `from flydsl.expr.arith import maximumf as old_max` makes
+   `old_max(a, b)` a candidate even though the call uses a different name.
+   Text hits are not proof of duplication or dead code.
+   An empty search is not evidence that the review scope is clean.
+2. **Triage:** classify operator/cast/`vector.extract/bitcast` replacements as
+   mechanical, and control flow, `buffer_ops` offsets, or MMA loops as structural.
+   Prioritize mechanical changes before structural ones.
+   Match resolved calls against the tables above and check operand types,
+   signedness, and explicit `fastmath` flags. Preserve §3's distinct NaN behavior
+   for `maximumf`/`minimumf` and `maxnumf`/`minnumf`; recommend a replacement only
+   when those semantics are preserved.
 3. **Migrate in small commits**, one family at a time, matching local style.
 4. **Verify:**
    ```bash

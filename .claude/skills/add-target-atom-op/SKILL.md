@@ -75,11 +75,11 @@ methods — the wrapper and the kernel-level ops (`fly.mma_atom_call`, `fly.copy
 
 `include/flydsl/Dialect/Fly/IR/FlyInterfaces.td`:
 
-| Interface                         | Required for... | Methods — **mandatory** / *optional* (see §1.3) |
+| Interface                         | Required for... | Methods — **mandatory** / pipeline-dependent (see §1.3) |
 |-----------------------------------|-----------------|----------------------|
-| `Fly_MayStaticTypeInterface`      | Stateless atoms (CopyOp with *no* mutable state; all MmaOps today) | **`isStatic`**, **`rebuildStaticValue`** |
-| `Fly_CopyOpTypeInterface`         | All CopyOps    | **`getThrLayout`**, **`getThrBitLayoutSrc/Dst/Ref`**, **`emitAtomCall`** (mem + pred), *`emitAtomCallSSA`* (mem + pred — only if `fly-convert-atom-call-to-ssa-form` is in the pipeline) |
-| `Fly_MmaOpTypeInterface`          | All MmaOps     | **`getThrLayout`**, **`getShapeMNK`**, **`getValTypeA/B/C/D`**, **`getThrValLayoutA/B/C`**, **`emitAtomCall`**, *`emitAtomCallSSA`* (only if SSA-promotion pass is active) |
+| `Fly_MayStaticTypeInterface`      | Stateless atoms (CopyOp or MmaOp with no mutable state) | **`isStatic`**, **`rebuildStaticValue`** |
+| `Fly_CopyOpTypeInterface`         | All CopyOps    | **`getThrLayout`**, **`getThrBitLayoutSrc/Dst/Ref`**, **`emitAtomCall`** (mem + pred), `emitAtomCallSSA` when a legal call is SSA-reachable |
+| `Fly_MmaOpTypeInterface`          | All MmaOps     | **`getThrLayout`**, **`getShapeMNK`**, **`getValTypeA/B/C/D`**, **`getThrValLayoutA/B/C`**, **`emitAtomCall`**, `emitAtomCallSSA` when a legal call is SSA-reachable |
 | `Fly_StatefulOpTypeInterface`    | Atoms that carry mutable per-call state (e.g. `soffset`, `imm_offset`) | **`getConvertedType`**, **`getDefaultState`**, **`setAtomState`** |
 
 Backend dialect could provide four convenience base classes that pre-declare the right interface
@@ -96,7 +96,7 @@ class FlyROCDL_StatefulMmaOp  // stateful  MmaOp     : MmaOp    + Stateful
 Mnemonic: **stateful => no `MayStaticTypeInterface`**; the mutable state *is* the dynamic component,
 so the type is never "fully static" in the canonical-rebuild sense.
 
-### 1.3 `emitAtomCall` vs `emitAtomCallSSA` — only `emitAtomCall` is mandatory
+### 1.3 `emitAtomCall` and `emitAtomCallSSA` are one semantic contract
 
 Two kernel-IR ops carry the atom invocation, and they correspond to the two interface methods:
 
@@ -104,16 +104,15 @@ Two kernel-IR ops carry the atom invocation, and they correspond to the two inte
 |--------------------------|-----------------------------------------------|-----------------------|-----------------------|
 | `fly.copy_atom_call`     | `src/dst : !fly.memref<...>`                  | `emitAtomCall`        | **Required**          |
 | `fly.mma_atom_call`      | `a/b/c/d : !fly.memref<...>`                  | `emitAtomCall`        | **Required**          |
-| `fly.copy_atom_call_ssa` | `src/dst : SSA value or !fly.memref<..., addressSpace != Register>` | `emitAtomCallSSA` | **Optional** — only needed if `fly-convert-atom-call-to-ssa-form` appears in the pipeline |
-| `fly.mma_atom_call_ssa`  | `a/b/c : SSA value or !fly.memref<..., addressSpace != Register>`   | `emitAtomCallSSA`     | **Optional** (same condition) |
+| `fly.copy_atom_call_ssa` | promoted SSA values plus retained non-register memrefs | `emitAtomCallSSA` | Required when FlyROCDL's default SSA pass can rewrite a legal call |
+| `fly.mma_atom_call_ssa`  | promoted SSA values plus retained non-register memrefs | `emitAtomCallSSA` | Required when FlyROCDL's default SSA pass can rewrite a legal call |
 
-**Default path (memref / `emitAtomCall`).** Every `fly.copy_atom_call` / `fly.mma_atom_call` in the
-IR lowers through `emitAtomCall`. The Op receives the operand *pointers* into register memory
+**Memref path (`emitAtomCall`).** An unpromoted `fly.copy_atom_call` / `fly.mma_atom_call`
+lowers through `emitAtomCall`. The Op receives operand pointers/memrefs
 (`!fly.memref<..., register, layout>`), is expected to issue `llvm.load` / `llvm.store` itself to
-read/write threads' registers, and emit the backend intrinsic in between. This is sufficient for the
-full compile-to-binary pipeline — no SSA version required.
+read/write register operands, and emits or delegates to the backend operation.
 
-**Optional path (SSA / `emitAtomCallSSA`).** A pipeline may insert the
+**SSA path (`emitAtomCallSSA`).** A pipeline may insert the
 `fly-convert-atom-call-to-ssa-form` pass (see
 `lib/Dialect/Fly/Transforms/ConvertAtomCallToSSAForm.cpp`). That pass inspects every `AtomCall` and,
 for operands whose `register`-address-space memref has a **coalescable** layout
@@ -126,34 +125,33 @@ for operands whose `register`-address-space memref has a **coalescable** layout
 3. For output-producing cases, a `PtrStoreOp` writes the SSA result back to the original register
    memref.
 
-At lowering time, `AtomCallSSA` dispatches to `emitAtomCallSSA` instead of `emitAtomCall`. The Op's
-job there is **just the intrinsic + any required `LLVM::BitcastOp` between the SSA `vector<...>` and
-the intrinsic's expected packed type** — no loads or stores because the SSA values already live in
-registers.
+At lowering time, `AtomCallSSA` dispatches to `emitAtomCallSSA`. Only eligible
+register operands become SSA; global/shared/buffer memrefs remain, so this can be
+a mixed form. A payload may bitcast SSA vectors and emit the intrinsic directly,
+or delegate to memref lowering when the operation still consumes memrefs.
 
 **Concrete differences between the two methods:**
 
 |                          | `emitAtomCall`                                  | `emitAtomCallSSA`                               |
 |--------------------------|-------------------------------------------------|-------------------------------------------------|
-| Operand kinds            | `Value`s of type `!fly.memref<..., register>` (lowered to `!llvm.ptr`) | `Value`s of scalar / `vector<Nxelem>` type |
-| What the method does     | `LLVM::LoadOp` to fetch operands → intrinsic → `LLVM::StoreOp` to write result | (optional bitcast to intrinsic's packed type) → intrinsic → return `Value` / `failure` |
+| Operand kinds            | `Value`s of `!fly.memref<...>` types | promoted scalar/vector values plus retained non-register memrefs |
+| What the method does     | Load/store register operands and emit/delegate the operation | Lower the reachable full/mixed form; may bitcast and emit or delegate to memref form |
 | Return type              | `LogicalResult`                                 | `FailureOr<Value>` (the result SSA value, or `failure`) |
 | Needs layout/cosize info | No — operand type already carries it            | No — caller already packed operands into `vector<N>` |
 | Bitcast dance            | Typically unnecessary (load yields the right type) | Often necessary (SSA vector width may not match intrinsic's expected operand width) |
 | Backend intrinsic emitted | Same                                           | Same                                            |
 
-In practice every reference Op implements `emitAtomCall` as a thin shim over `emitAtomCallSSA` —
-load operands, call `emitAtomCallSSA`, store the result. See `MmaOpCDNA3_MFMAType::emitAtomCall` in
-`CDNA3/MmaAtom.cpp` for the canonical shim and `CopyOpCDNA3BufferAtomicType::emitAtomCall` in
-`CDNA3/CopyAtom.cpp` for a CopyOp instance. **If your downstream pipeline never runs
-`fly-convert-atom-call-to-ssa-form`, you may skip `emitAtomCallSSA` entirely and write a
-self-contained `emitAtomCall`** — but the shim pattern is strictly better because it keeps the two
-paths in sync for free.
+FlyROCDL's default pipeline always runs `fly-convert-atom-call-to-ssa-form`,
+so each payload must handle every form its legal calls can reach. Sharing may go
+either direction: CDNA3 MFMA loads then calls SSA, while async/TDM copies can
+delegate their SSA entry back to memref lowering. A different backend may omit
+SSA support only when its complete pipeline cannot create that call form.
 
 ### 1.4 ThrVal layouts describe the per-thread register footprint
 
-Every MmaOp / CopyOp must publish layouts that describe *which thread holds which element* of the
-tile. This is consumed by `TiledCopy` / `TiledMma` in the layout-lowering pass.
+Every MmaOp / CopyOp publishes layouts consumed by `TiledCopy` / `TiledMma`.
+Value-granular atoms describe which thread holds each element; whole-tile target
+operations may instead publish a documented sentinel layout interpreted by their payload.
 
 | Method (MmaOp)         | What it describes |
 |------------------------|-------------------|
@@ -165,7 +163,7 @@ tile. This is consumed by `TiledCopy` / `TiledMma` in the layout-lowering pass.
 | Method (CopyOp)            | What it describes |
 |----------------------------|-------------------|
 | `getThrLayout`             | thread count participating in one atom call |
-| `getThrBitLayoutSrc/Dst/Ref` | layout in **bit-granularity** — shape is `(num_threads, num_bits)` — one bit per leaf |
+| `getThrBitLayoutSrc/Dst/Ref` | value-granular copies use bit layouts; whole-tile payloads may use a sentinel contract |
 
 The base `CopyAtomType::getThrValLayoutSrc()` then "recasts" the bit layout into a
 `valBits`-granularity layout (see `CopyAtomType::getThrValLayout{Src,Dst,Ref}` in
@@ -181,7 +179,7 @@ Use the `FxLayout / FxShape / FxStride / FxThr / FxVal / FxC` macros from
 
 A wrong ThrVal/ThrBit layout is the #1 source of silent-wrong-result bugs in FlyDSL: the compiler
 accepts it, the kernel runs, and the output is garbage. There are no good runtime diagnostics for
-this. Before you commit any new `getThrValLayout*` / `getThrBitLayout*`, verify **every** rule below
+this. Before you commit any new `getThrValLayout*` / `getThrBitLayout*`, verify every applicable rule below
 on paper or in a scratch test.
 
 #### 1.5.1 Shape must be a top-level 2-tuple `((thr...), (val...))`
@@ -211,29 +209,34 @@ Let `|·|` denote "total number of elements". Then:
 | MmaOp    | `getThrValLayoutC` (and D) | `\|thr\| * \|val\|` == `M * N` |
 | MmaOp    | `\|thr\|` of ThrValLayout{A,B,C} | matches `\|thr\|` of `getThrLayout` |
 | MmaOp    | `\|val\|` of ThrValLayout | matches the thread's register vector width used in `emitAtomCallSSA` (e.g. `accVecSize` for C; `vecSize` of `abTyA` for A) |
-| CopyOp   | `getThrLayout`            | `\|thr\|` == number of threads participating in one atom call (e.g. 1 for a per-thread load, 16 for AMD `ds_read_tr16_b64`) |
-| CopyOp   | `getThrBitLayoutSrc/Dst/Ref` | `\|val\|` == `bitSize` (the Op's `bitSize` parameter or per-atom constant). Shape is always `(|thr|, bitSize)`. |
-| CopyOp   | `\|thr\|` of ThrBitLayout{Src,Dst,Ref} | all three equal and equal to `\|thr\|` of `getThrLayout` |
+| Value-granular CopyOp | `getThrLayout` | `\|thr\|` == participating threads (e.g. 1 for a per-thread load, 16 for `ds_read_tr16_b64`) |
+| Value-granular CopyOp | `getThrBitLayoutSrc/Dst/Ref` | `\|val\|` == the payload's `bitSize`; all three thread modes match `getThrLayout` |
+| Whole-tile CopyOp | layout methods | Follow the payload's documented operation-level contract; do not infer a `bitSize` footprint |
 
-Violating any of these still compiles but yields undefined behavior. Thread-count mismatch is
+Violating an applicable invariant can still compile but yield undefined behavior. Thread-count mismatch is
 especially insidious: a wave64 MFMA registered with `FxC(32)` (or a 32-thread NVIDIA warp MMA
 registered with `FxC(16)`) will happily emit the intrinsic, but half the threads will compute on stale
 registers.
 
-#### 1.5.3 Reference coordinate system is *column-major*, not row-major
+#### 1.5.3 Value-granular reference coordinates are *column-major*
 
 | Op       | Operand | Reference tile | Column-major interpretation |
 |----------|---------|----------------|-----------------------------|
 | MmaOp    | A       | `(M, K)`       | stride `(1, M)` is baseline |
 | MmaOp    | B       | `(N, K)`       | stride `(1, N)` is baseline |
 | MmaOp    | C, D    | `(M, N)`       | stride `(1, M)` is baseline |
-| CopyOp   | src/dst | `(M, N)`       | stride `(1, M)` is baseline |
+| Value-granular CopyOp | src/dst | `(M, N)` | stride `(1, M)` is baseline |
+
+Whole-tile CopyOps do not use this `(M,N)` table; follow the payload's own
+rank, dimension, state, and coordinate contract.
 
 #### 1.5.4 CopyOp bit-layout vs. value-layout — do not confuse them
 
-The interface publishes `getThrBitLayout*` (bit granularity); the `CopyAtomType` wrapper computes
-`getThrValLayout*` by calling `layoutRecast(bitLayout, /*oldBits=*/1, /*newBits=*/valBits)` (see
-`CopyAtomType::getThrValLayout{Src,Dst,Ref}` in `FlyTypeDefs.cpp`).
+For value-granular copies, the interface publishes `getThrBitLayout*` and the
+`CopyAtomType` wrapper computes `getThrValLayout*` with
+`layoutRecast(bitLayout, /*oldBits=*/1, /*newBits=*/valBits)`. Whole-tile
+operations such as GFX1250 TDM can use a `(1,1)` sentinel and carry no payload
+`bitSize`; validate the payload consumer instead of applying the recast footprint rules.
 
 Consequences:
 - A 32b buffer copy writes `FxShape(FxC(1), FxC(32))` for an f32 → the recast at `valBits=32` trivially
@@ -328,8 +331,8 @@ it.
 don't support, with a clear `emitError()` message; otherwise an invalid config silently hits
 `return failure()` in `emitAtomCallSSA` with no diagnostic.
 
-**Step 4 — `emitAtomCallSSA`** (optional, only needed when `fly-convert-atom-call-to-ssa-form` is in
-the pipeline; see §1.3). The only place you touch backend intrinsics. Pattern from
+**Step 4 — `emitAtomCallSSA`** (required when FlyROCDL can create this form; see §1.3).
+For a direct SSA implementation this is the backend intrinsic boundary. Pattern from
 `MmaOpCDNA3_MFMAType::emitAtomCallSSA` in `CDNA3/MmaAtom.cpp`: derive the intrinsic's exact operand
 types, `LLVM::BitcastOp` each SSA operand to match, then dispatch to lowered dialect ops. Find
 intrinsic names in `llvm/include/llvm/IR/IntrinsicsAMDGPU.td` (ROCDL), `NVVMOps.td` (NVVM), or
@@ -410,8 +413,10 @@ simple per-thread copy: `FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(F
 Src/Dst/Ref. If Src ≠ Dst (e.g. LDS-read-transpose), Ref usually mirrors the register side — see
 `CDNA4/CopyAtom.cpp`. All three layouts must satisfy the invariants in §1.5.
 
-**Step 4 — `emitAtomCallSSA`** (optional, see §1.3). Extract state fields with
-`LLVM::ExtractValueOp`, then dispatch to the backend intrinsic. Pattern: the unpredicated
+**Step 4 — `emitAtomCallSSA`** (required when FlyROCDL can create this form; see §1.3).
+Lower the reachable operands directly or delegate to the memref form. For a direct
+implementation, extract state fields with `LLVM::ExtractValueOp` and dispatch to
+the backend intrinsic. Pattern: the unpredicated
 `CopyOpCDNA3BufferCopyType::emitAtomCallSSA` overload in `CDNA3/CopyAtom.cpp`.
 
 **Step 5 — Predicated SSA variant.** Wrap the unpredicated form in `scf::IfOp` — load side yields
@@ -447,9 +452,34 @@ automatically via `AtomSetValueOp`.
 
 ---
 
+## 6. Review and verification
+
+Treat construction, lowering, final instruction selection, and device behavior
+as separate evidence boundaries.
+
+- The TableGen verifier's accepted parameter set must equal the configurations
+  handled by layout construction and `emitAtomCall{SSA}`. Add a positive case
+  for each new dispatch branch and a negative case at each accepted/rejected
+  boundary; a constructible atom that falls through during conversion is a bug.
+- Derive reachable call forms from the SSA pass's eligibility and each operand's
+  address space. Cover unpromoted memref and every reachable full/mixed SSA form;
+  do not require an impossible pure-SSA form for whole-tile or async copies.
+  Copy changes also cover predicates; stateful atoms cover changed state fields.
+  For MMA, exactly one layer must write D in each reachable form.
+- Build a matrix from distinct target/ABI, layout, dtype/packing, shape,
+  state/modifier, and call-path branches. Use representative and interacting
+  pairs rather than a Cartesian product, plus a sibling-target control for
+  shared changes.
+- FileCheck proves only the checked intermediate IR. Inspect normalized final
+  ISA for opcode, operand order, and modifiers; use resource diff only for
+  resource claims. Layout, signedness, packing, state, or predicate changes also
+  require a numerical test on matching hardware against an independent oracle.
+
+---
+
 ### Recommended reading order
 
-Files (4) and (8) are target-neutral; the rest are ROCDL templates a new backend mirrors in its own
+Files (4) and (7) are target-neutral; the rest are ROCDL templates a new backend mirrors in its own
 tree.
 
 1. `include/flydsl/Dialect/FlyROCDL/IR/Dialect.td` — base classes
