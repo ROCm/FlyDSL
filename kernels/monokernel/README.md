@@ -18,8 +18,7 @@ Reusable contracts and primitives stay at this package root. `config.py`,
 `layout.py`, `ops.py`, `packing.py`, `reference.py`, `runtime.py`, and
 `weights.py` define shared geometry, layouts, device operations, packing, host
 runtime, and weight containers. `helpers.py` holds the device helpers that
-GLM, Kimi-K3 MLA and DeepSeek-V4 share. Each kernel binds them to its own
-launch state with `bind_helpers`:
+GLM, Kimi-K3 MLA and DeepSeek-V4 share:
 
 - tagged-pair mailboxes, `poll` and timeline `stamp`;
 - block reductions;
@@ -27,9 +26,14 @@ launch state with `bind_helpers`:
 - RMSNorm and activation staging;
 - the TP `peer_reduce` and task placement.
 
-Where the kernels differ (the MXFP4 layout, bounded polls, alternating peer
-slots, the norm epsilon, ...), `bind_helpers` takes a build-time argument, so
-each kernel compiles exactly its own variant. FlyDSL's JIT cache keys a
+Each is a plain function whose first argument is the kernel's `LaunchState`,
+the values of one launch. `LaunchState` also exposes every helper bound to
+it (`st.put`, `st.poll`, ...), and the helpers call one another through it,
+so a kernel that installs its own variant (for example
+`st.poll = partial(helpers.poll, st, retry_spin_pause=True)`) changes it for
+every helper. Variants are keyword arguments or separate functions
+(`unit_mxfp4_atom`, `unit_mxfp4_rows`), each a build-time choice, so each
+kernel compiles exactly its own. FlyDSL's JIT cache keys a
 kernel only on its own directory's sources, so the kernels also capture
 `SHARED_SOURCE_KEY`, a digest of `helpers.py` and `ops.py`, so that edits to
 either still recompile them. `gemm_a16w16.py`, `mxfp8_linear.py`, and

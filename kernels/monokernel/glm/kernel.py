@@ -46,11 +46,14 @@ TileRT shared/reuse MonoKernel reference (fusion-boundary comparison):
 https://github.com/SemiAnalysisAI/InferenceX/tree/8ac98344b038a3f2da20a565fe9b974772a67ef9
 """
 
+from functools import partial
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, T
 from kernels.common import buffer_ops as bo
+from kernels.monokernel import helpers
 from kernels.monokernel.config import (
     EPS,
     HIDDEN,
@@ -95,7 +98,7 @@ from kernels.monokernel.glm.layout import (
     stage_tasks,
     ug_split,
 )
-from kernels.monokernel.helpers import SHARED_SOURCE_KEY, bind_helpers
+from kernels.monokernel.helpers import SHARED_SOURCE_KEY, LaunchState
 from kernels.monokernel.layout import CM_DEV, LAYER_SLOTS, NEG, THREADS
 from kernels.monokernel.ops import (
     bf2_f32,
@@ -397,7 +400,7 @@ def build_glm5_monokernel(
                 tot = _xred(tot, off, lambda a, b: a + b)
             return e, raw * (_rcp(tot) * ROUTE_SCALE)
 
-        bound_helpers = bind_helpers(
+        launch_state = LaunchState(
             source_key=shared_source_key,
             S=S,
             tid=tid,
@@ -414,12 +417,9 @@ def build_glm5_monokernel(
             xs=xs,
             bias=bias,
             N_EXPERTS=N_EXPERTS,
-            retry_spin_pause=True,
             timeline=timeline,
             timeline_buf=timeline_buf,
             first=first,
-            timeline_addr=(lambda: index_arg(7)) if with_indexer else None,
-            mxfp4_layout="rows_fp8",
             rank=rank,
             W=W,
             HIDDEN=HIDDEN,
@@ -429,41 +429,45 @@ def build_glm5_monokernel(
             peer_slot=peer_slot,
             eps=EPS,
         )
-        mb = bound_helpers["mb"]
-        put = bound_helpers["put"]
-        put2 = bound_helpers["put2"]
-        put_bf = bound_helpers["put_bf"]
-        get = bound_helpers["get"]
-        getf = bound_helpers["getf"]
-        getf_many = bound_helpers["getf_many"]
-        get2_many = bound_helpers["get2_many"]
-        pre_poll = bound_helpers["pre_poll"]
-        hint_wait = bound_helpers["hint_wait"]
-        block_sums = bound_helpers["block_sums"]
-        block_sum = bound_helpers["block_sum"]
-        unit_fp8 = bound_helpers["unit_fp8"]
-        unit_f8f8 = bound_helpers["unit_f8f8"]
-        unit_bf16 = bound_helpers["unit_bf16"]
-        run_units = bound_helpers["run_units"]
-        reduce_rows = bound_helpers["reduce_rows"]
-        emit_out = bound_helpers["emit_out"]
-        stage_x_pairs = bound_helpers["stage_x_pairs"]
-        quant_scaled = bound_helpers["quant_scaled"]
-        st_f8 = bound_helpers["st_f8"]
-        load_bias = bound_helpers["load_bias"]
-        start = bound_helpers["start"]
-        n_sel = bound_helpers["n_sel"]
-        poll = bound_helpers["poll"]
-        stamp = bound_helpers["stamp"]
-        mma_units = bound_helpers["mma_units"]
-        unit_fp8x2 = bound_helpers["unit_fp8x2"]
-        unit_mxfp4 = bound_helpers["unit_mxfp4"]
-        unit_mxfp4_bf16 = bound_helpers["unit_mxfp4_bf16"]
-        peer_reduce = bound_helpers["peer_reduce"]
-        stage_x_rmsnorm = bound_helpers["stage_x_rmsnorm"]
-        load_x_rmsnorm = bound_helpers["load_x_rmsnorm"]
-        get2 = bound_helpers["get2"]
-        get_bf2_many = bound_helpers["get_bf2_many"]
+        launch_state.poll = partial(helpers.poll, launch_state, retry_spin_pause=True)
+        launch_state.stamp = partial(
+            helpers.stamp, launch_state, timeline_addr=(lambda: index_arg(7)) if with_indexer else None
+        )
+        mb = launch_state.mb
+        put = launch_state.put
+        put2 = launch_state.put2
+        put_bf = launch_state.put_bf
+        get = launch_state.get
+        getf = launch_state.getf
+        getf_many = launch_state.getf_many
+        get2_many = launch_state.get2_many
+        pre_poll = launch_state.pre_poll
+        hint_wait = launch_state.hint_wait
+        block_sums = launch_state.block_sums
+        block_sum = launch_state.block_sum
+        unit_fp8 = launch_state.unit_fp8
+        unit_f8f8 = launch_state.unit_f8f8
+        unit_bf16 = launch_state.unit_bf16
+        run_units = launch_state.run_units
+        reduce_rows = launch_state.reduce_rows
+        emit_out = launch_state.emit_out
+        stage_x_pairs = launch_state.stage_x_pairs
+        quant_scaled = launch_state.quant_scaled
+        st_f8 = launch_state.st_f8
+        load_bias = launch_state.load_bias
+        start = launch_state.start
+        n_sel = launch_state.n_sel
+        poll = launch_state.poll
+        stamp = launch_state.stamp
+        mma_units = launch_state.mma_units
+        unit_fp8x2 = launch_state.unit_fp8x2
+        unit_mxfp4 = partial(helpers.unit_mxfp4_rows, launch_state, act="fp8")
+        unit_mxfp4_bf16 = partial(helpers.unit_mxfp4_rows, launch_state, act="bf16")
+        peer_reduce = launch_state.peer_reduce
+        stage_x_rmsnorm = launch_state.stage_x_rmsnorm
+        load_x_rmsnorm = launch_state.load_x_rmsnorm
+        get2 = launch_state.get2
+        get_bf2_many = launch_state.get_bf2_many
 
         # ================================================= 1. q_a / kv_a GEMV
         # 1 row group x 96 chunks: 8 waves split K, 12 chunks each (all prefetched)

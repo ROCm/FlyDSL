@@ -3,15 +3,18 @@
 
 """Device helpers shared by every stage of the DeepSeek-V4 MonoKernel."""
 
+from functools import partial
+
 import flydsl.expr as fx
 from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 from kernels.common import buffer_ops as bo
+from kernels.monokernel import helpers
 from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROUTE_SCALE
 from kernels.monokernel.dsv4.plan import MIN_I32, THREADS, TL_COLS, WAVES
-from kernels.monokernel.helpers import SHARED_SOURCE_KEY, bind_helpers
+from kernels.monokernel.helpers import SHARED_SOURCE_KEY, LaunchState
 from kernels.monokernel.ops import (
     exp,
     f8_word,
@@ -313,7 +316,7 @@ def common_defs(ctx):
             tot = xred(tot, off, lambda a, b: a + b)
         return e, raw * (rcp(tot) * ROUTE_SCALE)
 
-    bound_helpers = bind_helpers(
+    launch_state = LaunchState(
         source_key=SHARED_SOURCE_KEY,
         S=S,
         tid=tid,
@@ -330,13 +333,9 @@ def common_defs(ctx):
         xs=xs,
         bias=bias,
         N_EXPERTS=N_EXPERTS,
-        hang=hang,
-        poll_timeout_ticks=POLL_TIMEOUT_TICKS if BOUNDED_POLL else None,
         timeline=timeline,
         timeline_buf=timeline_buf,
         first=first,
-        stamp_fence=True,
-        mxfp4_layout="atom",
         tl_cols=TL_COLS,
         rank=rank,
         W=W,
@@ -346,39 +345,43 @@ def common_defs(ctx):
         SY=SY,
         eps=EPS,
     )
-    mb = bound_helpers["mb"]
-    put = bound_helpers["put"]
-    put2 = bound_helpers["put2"]
-    put_bf = bound_helpers["put_bf"]
-    get = bound_helpers["get"]
-    getf = bound_helpers["getf"]
-    getf_many = bound_helpers["getf_many"]
-    get2_many = bound_helpers["get2_many"]
-    pre_poll = bound_helpers["pre_poll"]
-    hint_wait = bound_helpers["hint_wait"]
-    block_sums = bound_helpers["block_sums"]
-    block_sum = bound_helpers["block_sum"]
-    unit_fp8 = bound_helpers["unit_fp8"]
-    unit_f8f8 = bound_helpers["unit_f8f8"]
-    unit_bf16 = bound_helpers["unit_bf16"]
-    run_units = bound_helpers["run_units"]
-    reduce_rows = bound_helpers["reduce_rows"]
-    emit_out = bound_helpers["emit_out"]
-    stage_x_pairs = bound_helpers["stage_x_pairs"]
-    quant_scaled = bound_helpers["quant_scaled"]
-    st_f8 = bound_helpers["st_f8"]
-    load_bias = bound_helpers["load_bias"]
-    start = bound_helpers["start"]
-    n_sel = bound_helpers["n_sel"]
-    poll = bound_helpers["poll"]
-    stamp = bound_helpers["stamp"]
-    mma_units = bound_helpers["mma_units"]
-    unit_fp8mx = bound_helpers["unit_fp8mx"]
-    unit_mxfp4 = bound_helpers["unit_mxfp4"]
-    peer_reduce = bound_helpers["peer_reduce"]
-    stage_x_rmsnorm = bound_helpers["stage_x_rmsnorm"]
-    load_x_rmsnorm = bound_helpers["load_x_rmsnorm"]
-    _rmsnorm_tail_ks = bound_helpers["rmsnorm_tail_ks"]
+    launch_state.poll = partial(
+        helpers.poll, launch_state, hang=hang, poll_timeout_ticks=POLL_TIMEOUT_TICKS if BOUNDED_POLL else None
+    )
+    launch_state.stamp = partial(helpers.stamp, launch_state, stamp_fence=True)
+    mb = launch_state.mb
+    put = launch_state.put
+    put2 = launch_state.put2
+    put_bf = launch_state.put_bf
+    get = launch_state.get
+    getf = launch_state.getf
+    getf_many = launch_state.getf_many
+    get2_many = launch_state.get2_many
+    pre_poll = launch_state.pre_poll
+    hint_wait = launch_state.hint_wait
+    block_sums = launch_state.block_sums
+    block_sum = launch_state.block_sum
+    unit_fp8 = launch_state.unit_fp8
+    unit_f8f8 = launch_state.unit_f8f8
+    unit_bf16 = launch_state.unit_bf16
+    run_units = launch_state.run_units
+    reduce_rows = launch_state.reduce_rows
+    emit_out = launch_state.emit_out
+    stage_x_pairs = launch_state.stage_x_pairs
+    quant_scaled = launch_state.quant_scaled
+    st_f8 = launch_state.st_f8
+    load_bias = launch_state.load_bias
+    start = launch_state.start
+    n_sel = launch_state.n_sel
+    poll = launch_state.poll
+    stamp = launch_state.stamp
+    mma_units = launch_state.mma_units
+    unit_fp8mx = launch_state.unit_fp8mx
+    unit_mxfp4 = launch_state.unit_mxfp4_atom
+    peer_reduce = launch_state.peer_reduce
+    stage_x_rmsnorm = launch_state.stage_x_rmsnorm
+    load_x_rmsnorm = launch_state.load_x_rmsnorm
+    _rmsnorm_tail_ks = launch_state.rmsnorm_tail_ks
 
     return dict(
         _other_parts=_other_parts,
