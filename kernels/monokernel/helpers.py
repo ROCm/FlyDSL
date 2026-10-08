@@ -18,7 +18,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel import ops
-from kernels.monokernel.config import FP8_MAX, SCALE_BM
+from kernels.monokernel.config import EPS, FP8_MAX, SCALE_BM
 from kernels.monokernel.layout import CM_DEV, CM_SYS, POLL_MAX, ROW_TILE, THREADS, TL_COLS, WAVES
 from kernels.monokernel.ops import (
     bf2_f32,
@@ -31,6 +31,7 @@ from kernels.monokernel.ops import (
     mem_realtime,
     mxfp4_to_bf16x8,
     rcp,
+    rsq,
     rsrc,
     spin_pause,
     uniform,
@@ -82,6 +83,7 @@ def bind_helpers(
     peer_slot=None,
     owner_reduce=False,
     r_peers=None,
+    eps=EPS,
 ):
     """The shared helpers, bound to one kernel's launch state (a dict of name -> function).
 
@@ -290,6 +292,71 @@ def bind_helpers(
             )
             v0, v1 = bf2_f32(got[0][0])
             out_fn(s, row, v0, v1)
+
+    def rmsnorm_tail_ks(n):
+        """This thread's group-of-4 starting indices of n elements. A ragged tail is
+        clamped to the last group (idempotent rewrites); ``active`` masks its
+        contribution to sums (None when there is no tail)."""
+        nq = n // 4
+        full = nq // THREADS
+        ks = [(tid + i * THREADS) * 4 for i in range(full)]
+        active = None
+        if const_expr(nq % THREADS):
+            w = tid + full * THREADS
+            active = w < nq
+            ks.append(fx.min(w, nq - 1) * 4)
+        return ks, active
+
+    def stage_x_rmsnorm(ld4s, n, gamma, mark=None, loaded=None, count=S):
+        """LDS bf16 X[s][0:n] = bf16(rmsnorm(x_s) * gamma) for every sample s, where
+        ld4s([(s, k)]) -> [(x_s[k], .., x_s[k+3])] (one batched load); returns the rstds.
+        ``loaded``: the (gamma, x) loads already issued by load_x_rmsnorm; ``mark``: the
+        (stage, task) whose timeline columns 6 / 7 bracket the block reduction."""
+        ks, active = rmsnorm_tail_ks(n)
+        per = len(ks)
+        gs, vals = loaded if loaded is not None else load_x_rmsnorm(ld4s, n, gamma, count)
+        sss = []
+        for s in range_constexpr(count):
+            ss = fx.Float32(0.0)
+            for i in range_constexpr(per):
+                for a in vals[s * per + i]:
+                    term = a * a
+                    if const_expr(active is not None and i == per - 1):
+                        term = active.select(term, fx.Float32(0.0))
+                    ss = ss + term
+            sss.append(ss)
+        if const_expr(mark is not None):
+            stamp(mark[0], mark[1], 6)
+        rstds = [rsq(tot * (1.0 / n) + eps) for tot in block_sums(sss)]
+        if const_expr(mark is not None):
+            stamp(mark[0], mark[1], 7)
+        for s in range_constexpr(count):
+            for i in range_constexpr(per):
+                a = vals[s * per + i]
+                for j in range_constexpr(2):
+                    lds_st(
+                        xs,
+                        (s * n + ks[i]) // 2 + j,
+                        bf16_pair(a[2 * j] * rstds[s] * gs[i][2 * j], a[2 * j + 1] * rstds[s] * gs[i][2 * j + 1]),
+                    )
+        return rstds
+
+    def load_x_rmsnorm(ld4s, n, gamma, count=S):
+        """The gamma loads (issued ahead of the wait), then ld4s -> (gammas, x values)."""
+        rg_ = rsrc(gamma)
+        ks, _ = rmsnorm_tail_ks(n)
+        gs = []
+        for k in ks:
+            g = fx.Vector(bo.buffer_load(rg_, k // 2, vec_width=2, dtype=T.i32)).bitcast(fx.BFloat16).to(fx.Float32)
+            gs.append([g[j] for j in range(4)])
+        return gs, ld4s([(s, k) for s in range(count) for k in ks])
+
+    def get2(base_addr, i):
+        return get2_many([(base_addr, i)])[0]
+
+    def get_bf2_many(specs):
+        """[(base, i)] packed bf16 elements i, i + 1 (i even) -> list of (f32, f32)."""
+        return [bf2_f32(v[0]) for v in poll([(b, i // 2, 1) for b, i in specs])]
 
     def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
         """Push BF16 partials in tagged pairs to every peer, then sum all ranks' pairs from the own
@@ -635,6 +702,11 @@ def bind_helpers(
         return fx.min(lane % 16, count - 1)
 
     return dict(
+        rmsnorm_tail_ks=rmsnorm_tail_ks,
+        stage_x_rmsnorm=stage_x_rmsnorm,
+        load_x_rmsnorm=load_x_rmsnorm,
+        get2=get2,
+        get_bf2_many=get_bf2_many,
         peer_reduce=peer_reduce,
         poll=poll,
         stamp=stamp,

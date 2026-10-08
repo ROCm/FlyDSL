@@ -328,69 +328,8 @@ def build_glm5_monokernel(
         # ---- tagged-pair mailboxes
         # TileRT lineage: payload + launch epoch is the progress protocol for
         # resident CTAs; the helpers below are the FlyDSL/ROCm adaptation.
-        def _qptr(addr):
-            return fx.inttoptr(fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8), fx.Int64(addr))
-
-        def _ld_pair(addr, scope):
-            """One (value, tag) pair as a single 64-bit relaxed atomic load: never hoisted,
-            coherent at ``scope`` (agent -> sc1, system -> sc0 sc1)."""
-            return fx.generic_load(_qptr(addr), memory_order=fx.AtomicOrdering.Monotonic, syncscope=scope)
-
-        def get2(base_addr, i):
-            return get2_many([(base_addr, i)])[0]
-
-        def get_bf2_many(specs):
-            """[(base, i)] packed bf16 elements i, i + 1 (i even) -> list of (f32, f32)."""
-            return [bf2_f32(v[0]) for v in poll([(b, i // 2, 1) for b, i in specs])]
-
         # ---- wave reductions
         # ------------------------------------------------ MFMA GEMV machinery
-        def stage_x_rmsnorm(ld4s, n, gamma, mark=None, loaded=None, count=S):
-            """LDS bf16 X[s][0:n] = bf16(rmsnorm(x_s) * gamma) for every sample s, where
-            ld4s([(s, k)]) -> [(x_s[k], .., x_s[k+3])] (one batched load); returns the rstds.
-            ``loaded``: the (gamma, x) loads already issued by load_x_rmsnorm."""
-            per = n // (4 * THREADS)
-            ks = [(tid + i * THREADS) * 4 for i in range(per)]
-            gs, vals = loaded if loaded is not None else load_x_rmsnorm(ld4s, n, gamma, count)
-            sss = []
-            for s in range_constexpr(count):
-                ss = fx.Float32(0.0)
-                for i in range_constexpr(per):
-                    for a in vals[s * per + i]:
-                        ss = ss + a * a
-                sss.append(ss)
-            if const_expr(mark is not None):
-                stamp(mark[0], mark[1], 6)
-            rstds = [_rsq(tot * (1.0 / n) + EPS) for tot in block_sums(sss)]
-            if const_expr(mark is not None):
-                stamp(mark[0], mark[1], 7)
-            for s in range_constexpr(count):
-                for i in range_constexpr(per):
-                    a = vals[s * per + i]
-                    for j in range_constexpr(2):
-                        lds_st(
-                            xs,
-                            (s * n + ks[i]) // 2 + j,
-                            bf16_pair(a[2 * j] * rstds[s] * gs[i][2 * j], a[2 * j + 1] * rstds[s] * gs[i][2 * j + 1]),
-                        )
-            return rstds
-
-        def load_x_rmsnorm(ld4s, n, gamma, count=S):
-            """The gamma loads (issued ahead of the wait), then ld4s -> (gammas, x values)."""
-            rg_ = _rsrc(gamma)
-            ks = [(tid + i * THREADS) * 4 for i in range(n // (4 * THREADS))]
-            gs = []
-            for k in ks:
-                g = fx.Vector(bo.buffer_load(rg_, k // 2, vec_width=2, dtype=T.i32)).bitcast(fx.BFloat16).to(fx.Float32)
-                gs.append([g[j] for j in range(4)])
-            return gs, ld4s([(s, k) for s in range(count) for k in ks])
-
-        def quant_block(a0, a1):
-            """quant_scaled, values returned as the FP8-rounded f32s."""
-            q0, q1, qs = quant_scaled(a0, a1)
-            d0, d1 = _fp8_roundtrip(q0, q1)
-            return d0, d1, qs
-
         def stage_xq(samples):
             """Poll the router's packed FP8 activation + block scales of ``samples``
             (sample list, or one runtime sample) into LDS words s * HIDDEN / 4 (``f8_word``
@@ -488,6 +427,7 @@ def build_glm5_monokernel(
             sym=sym,
             SY=SY,
             peer_slot=peer_slot,
+            eps=EPS,
         )
         mb = bound_helpers["mb"]
         put = bound_helpers["put"]
@@ -520,6 +460,10 @@ def build_glm5_monokernel(
         unit_mxfp4 = bound_helpers["unit_mxfp4"]
         unit_mxfp4_bf16 = bound_helpers["unit_mxfp4_bf16"]
         peer_reduce = bound_helpers["peer_reduce"]
+        stage_x_rmsnorm = bound_helpers["stage_x_rmsnorm"]
+        load_x_rmsnorm = bound_helpers["load_x_rmsnorm"]
+        get2 = bound_helpers["get2"]
+        get_bf2_many = bound_helpers["get_bf2_many"]
 
         # ================================================= 1. q_a / kv_a GEMV
         # 1 row group x 96 chunks: 8 waves split K, 12 chunks each (all prefetched)

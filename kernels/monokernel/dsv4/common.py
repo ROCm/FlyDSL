@@ -13,7 +13,6 @@ from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROUTE_SCALE
 from kernels.monokernel.dsv4.plan import MIN_I32, THREADS, TL_COLS, WAVES
 from kernels.monokernel.helpers import SHARED_SOURCE_KEY, bind_helpers
 from kernels.monokernel.ops import (
-    bf16_pair,
     exp,
     f8_word,
     fp8_roundtrip,
@@ -21,8 +20,6 @@ from kernels.monokernel.ops import (
     lds_st,
     mxfp8_to_bf16x8,
     rcp,
-    rsq,
-    rsrc,
     wave_max,
     wave_umax,
     write_lane_i32,
@@ -196,59 +193,6 @@ def common_defs(ctx):
         r >= 8) as this lane's row group of the gate/up bank in ATOM's order."""
         return (c // 2) * 2 + (lane % 16) // 8
 
-    def _rmsnorm_tail_ks(n):
-        """This thread's group-of-4 starting indices of n elements. A ragged tail is
-        clamped to the last group (idempotent rewrites); ``active`` masks its
-        contribution to sums (None when there is no tail)."""
-        nq = n // 4
-        full = nq // THREADS
-        ks = [(tid + i * THREADS) * 4 for i in range(full)]
-        active = None
-        if const_expr(nq % THREADS):
-            w = tid + full * THREADS
-            active = w < nq
-            ks.append(fx.min(w, nq - 1) * 4)
-        return ks, active
-
-    def stage_x_rmsnorm(ld4s, n, gamma, loaded=None, count=S):
-        """LDS bf16 X[s][0:n] = bf16(rmsnorm(x_s) * gamma) for every sample s, where
-        ld4s([(s, k)]) -> [(x_s[k], .., x_s[k+3])] (one batched load); returns the rstds.
-        ``loaded``: the (gamma, x) loads already issued by load_x_rmsnorm."""
-        ks, active = _rmsnorm_tail_ks(n)
-        per = len(ks)
-        gs, vals = loaded if loaded is not None else load_x_rmsnorm(ld4s, n, gamma, count)
-        sss = []
-        for s in range_constexpr(count):
-            ss = fx.Float32(0.0)
-            for i in range_constexpr(per):
-                for a in vals[s * per + i]:
-                    term = a * a
-                    if const_expr(active is not None and i == per - 1):
-                        term = active.select(term, fx.Float32(0.0))
-                    ss = ss + term
-            sss.append(ss)
-        rstds = [rsq(tot * (1.0 / n) + EPS) for tot in block_sums(sss)]
-        for s in range_constexpr(count):
-            for i in range_constexpr(per):
-                a = vals[s * per + i]
-                for j in range_constexpr(2):
-                    lds_st(
-                        xs,
-                        (s * n + ks[i]) // 2 + j,
-                        bf16_pair(a[2 * j] * rstds[s] * gs[i][2 * j], a[2 * j + 1] * rstds[s] * gs[i][2 * j + 1]),
-                    )
-        return rstds
-
-    def load_x_rmsnorm(ld4s, n, gamma, count=S):
-        """The gamma loads (issued ahead of the wait), then ld4s -> (gammas, x values)."""
-        rg_ = rsrc(gamma)
-        ks, _ = _rmsnorm_tail_ks(n)
-        gs = []
-        for k in ks:
-            g = fx.Vector(bo.buffer_load(rg_, k // 2, vec_width=2, dtype=T.i32)).bitcast(fx.BFloat16).to(fx.Float32)
-            gs.append([g[j] for j in range(4)])
-        return gs, ld4s([(s, k) for s in range(count) for k in ks])
-
     def quant_mxfp8(a0, a1):
         """Per-16-lane/32-value MXFP8 quantization; the E8M0 scale rounds up so the
         block max never clips."""
@@ -400,6 +344,7 @@ def common_defs(ctx):
         peer_dst=peer_dst,
         sym=sym,
         SY=SY,
+        eps=EPS,
     )
     mb = bound_helpers["mb"]
     put = bound_helpers["put"]
@@ -431,6 +376,9 @@ def common_defs(ctx):
     unit_fp8mx = bound_helpers["unit_fp8mx"]
     unit_mxfp4 = bound_helpers["unit_mxfp4"]
     peer_reduce = bound_helpers["peer_reduce"]
+    stage_x_rmsnorm = bound_helpers["stage_x_rmsnorm"]
+    load_x_rmsnorm = bound_helpers["load_x_rmsnorm"]
+    _rmsnorm_tail_ks = bound_helpers["rmsnorm_tail_ks"]
 
     return dict(
         _other_parts=_other_parts,
