@@ -84,6 +84,17 @@ from kernels.monokernel.layout import (
     stage_tasks,
 )
 from kernels.monokernel.ops import (
+    bf2_f32,
+    bf16_pair,
+    bf16_round,
+    ld_bf16,
+    ld_f32,
+    lds_ld,
+    lds_st,
+    wave_max,
+    wave_sum,
+)
+from kernels.monokernel.ops import (
     exp as _exp,
 )
 from kernels.monokernel.ops import (
@@ -333,25 +344,6 @@ def build_kimi_k3_mla_attention(
         peer_dst = (fx.Int64(_uniform(pv[1])) << 32) | fx.Int64(fx.Uint32(_uniform(pv[0])))
 
         # ------------------------------------------------------------ helpers
-        def ld_f32(r, i):
-            return fx.Float32(bo.buffer_load(r, i, vec_width=1, dtype=T.f32))
-
-        def ld_bf16(r, i):
-            return fx.Float32(fx.BFloat16(bo.buffer_load(r, i, vec_width=1, dtype=T.bf16)))
-
-        def lds_ld(ptr, i):
-            return fx.ptr_load(ptr + i)
-
-        def lds_st(ptr, i, v):
-            fx.ptr_store(v, ptr + i)
-
-        def bf16_pair(a, b):
-            """Two f32 -> one f32-typed word holding (bf16(a), bf16(b))."""
-            return fx.Vector.from_elements([a, b], fx.Float32).to(fx.BFloat16).bitcast(fx.Float32)[0]
-
-        def bf16_round(a):
-            return fx.Float32(fx.Float32(a).to(fx.BFloat16))
-
         # ---- tagged-pair mailboxes
         def mb(name):
             return scratch + fx.Int64(SC[name])
@@ -376,10 +368,6 @@ def build_kimi_k3_mla_attention(
             for j in range_constexpr(len(vs) // 2):
                 words += [bf16_pair(vs[2 * j], vs[2 * j + 1]).bitcast(fx.Int32), write_tag]
             bo.buffer_store(fx.Vector.from_elements(words, fx.Int32), _rsrc(base_addr), i, cache_modifier=cm)
-
-        def bf2_f32(w):
-            """Packed bf16 pair word -> (f32 low, f32 high)."""
-            return (w << 16).bitcast(fx.Float32), (w & fx.Int32(-65536)).bitcast(fx.Float32)
 
         def _qptr(addr):
             return fx.inttoptr(fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8), fx.Int64(addr))
@@ -469,16 +457,6 @@ def build_kimi_k3_mla_attention(
             return [bf2_f32(v[0]) for v in poll([(b, i // 2, 1) for b, i in specs])]
 
         # ---- wave reductions
-        def wave_sum(v):
-            for sh in range_constexpr(6):
-                v = _xred(v, 32 >> sh, lambda a, b: a + b)
-            return v
-
-        def wave_max(v):
-            for sh in range_constexpr(6):
-                v = _xred(v, 32 >> sh, fx.max)
-            return v
-
         def subgroup16_max(v):
             for off in (8, 4, 2, 1):
                 v = _xred(v, off, fx.max)

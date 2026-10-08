@@ -13,7 +13,22 @@ from kernels.monokernel.dsv4.common import FP4_MAX, fp4_roundtrip, pow2_ceil
 from kernels.monokernel.dsv4.config import EPS, ROPE_DIM
 from kernels.monokernel.dsv4.plan import IH_TASK, MIN_I32, Q_B_TILE, QKV_A_TILE, SCORE_TILE, THREADS, WAVES, q_b_groups
 from kernels.monokernel.layout import NEG
-from kernels.monokernel.ops import mxfp4_to_bf16x8, rcp, rsq, rsrc, xred, xshfl
+from kernels.monokernel.ops import (
+    bf2_f32,
+    bf16_pair,
+    bf16_round,
+    ld_bf16,
+    ld_f32,
+    lds_ld,
+    lds_st,
+    mxfp4_to_bf16x8,
+    rcp,
+    rsq,
+    rsrc,
+    wave_sum,
+    xred,
+    xshfl,
+)
 
 
 @ASTRewriter.transform
@@ -39,8 +54,6 @@ def index_query_stages(ctx):
     S = ctx["S"]
     TOK = ctx["TOK"]
     _rmsnorm_tail_ks = ctx["_rmsnorm_tail_ks"]
-    bf16_round = ctx["bf16_round"]
-    bf2_f32 = ctx["bf2_f32"]
     block_sums = ctx["block_sums"]
     bt_block = ctx["bt_block"]
     emit_out = ctx["emit_out"]
@@ -58,11 +71,8 @@ def index_query_stages(ctx):
     i_score_state = ctx["i_score_state"]
     i_w = ctx["i_w"]
     lane = ctx["lane"]
-    ld_bf16 = ctx["ld_bf16"]
-    ld_f32 = ctx["ld_f32"]
     ld_pos = ctx["ld_pos"]
     ld_slot = ctx["ld_slot"]
-    lds_ld = ctx["lds_ld"]
     load_x_rmsnorm = ctx["load_x_rmsnorm"]
     mb = ctx["mb"]
     n_sel = ctx["n_sel"]
@@ -355,7 +365,6 @@ def index_select_stages(ctx):
     TK_TRIPS = ctx["TK_TRIPS"]
     TOK = ctx["TOK"]
     _other_parts = ctx["_other_parts"]
-    bf16_pair = ctx["bf16_pair"]
     block_excl_scan = ctx["block_excl_scan"]
     bt_block = ctx["bt_block"]
     comp_row = ctx["comp_row"]
@@ -368,8 +377,6 @@ def index_select_stages(ctx):
     lane = ctx["lane"]
     ld_pos = ctx["ld_pos"]
     ld_slot = ctx["ld_slot"]
-    lds_ld = ctx["lds_ld"]
-    lds_st = ctx["lds_st"]
     mb = ctx["mb"]
     part_keys = ctx["part_keys"]
     pl = ctx["pl"]
@@ -382,7 +389,6 @@ def index_select_stages(ctx):
     tid = ctx["tid"]
     v4f = ctx["v4f"]
     wave = ctx["wave"]
-    wave_sum = ctx["wave_sum"]
     xs = ctx["xs"]
     if const_expr(IHD):
         # ===== 3d. score every compressed entry: score[c] = sum_h relu(q[h] . k[c]) * w[h]

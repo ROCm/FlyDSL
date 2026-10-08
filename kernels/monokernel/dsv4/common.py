@@ -13,10 +13,15 @@ from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROUTE_SCALE, SCALE_BM
 from kernels.monokernel.dsv4.plan import MIN_I32, POLL_MAX, ROW_TILE, THREADS, TL_COLS, WAVES
 from kernels.monokernel.layout import CM_DEV, CM_SYS
 from kernels.monokernel.ops import (
+    bf2_f32,
+    bf16_pair,
     exp,
     f8_word,
     fp8_roundtrip,
     fp8_to_bf16x8,
+    ld_f32,
+    lds_ld,
+    lds_st,
     mem_realtime,
     mxfp4_to_bf16x8,
     mxfp8_to_bf16x8,
@@ -24,6 +29,8 @@ from kernels.monokernel.ops import (
     rsq,
     rsrc,
     uniform,
+    wave_max,
+    wave_sum,
     wave_umax,
     write_lane_i32,
     xred,
@@ -135,25 +142,6 @@ def common_defs(ctx):
     xs = ctx["xs"]
 
     # ------------------------------------------------------------ helpers
-    def ld_f32(r, i):
-        return fx.Float32(bo.buffer_load(r, i, vec_width=1, dtype=T.f32))
-
-    def ld_bf16(r, i):
-        return fx.Float32(fx.BFloat16(bo.buffer_load(r, i, vec_width=1, dtype=T.bf16)))
-
-    def lds_ld(ptr, i):
-        return fx.ptr_load(ptr + i)
-
-    def lds_st(ptr, i, v):
-        fx.ptr_store(v, ptr + i)
-
-    def bf16_pair(a, b):
-        """Two f32 -> one f32-typed word holding (bf16(a), bf16(b))."""
-        return fx.Vector.from_elements([a, b], fx.Float32).to(fx.BFloat16).bitcast(fx.Float32)[0]
-
-    def bf16_round(a):
-        return fx.Float32(fx.Float32(a).to(fx.BFloat16))
-
     # ---- tagged-pair mailboxes
     def mb(name):
         return scratch + fx.Int64(SC[name])
@@ -177,10 +165,6 @@ def common_defs(ctx):
         for j in range_constexpr(len(vs) // 2):
             words += [bf16_pair(vs[2 * j], vs[2 * j + 1]).bitcast(fx.Int32), tag]
         bo.buffer_store(fx.Vector.from_elements(words, fx.Int32), rsrc(base_addr), i, cache_modifier=cm)
-
-    def bf2_f32(w):
-        """Packed bf16 pair word -> (f32 low, f32 high)."""
-        return (w << 16).bitcast(fx.Float32), (w & fx.Int32(-65536)).bitcast(fx.Float32)
 
     def poll(specs, scope="agent", batch=POLL_MAX):
         """Batched poll of mailbox pairs ``specs`` = [(base_addr, pair index, npairs in
@@ -263,16 +247,6 @@ def common_defs(ctx):
         return [(v[0].bitcast(fx.Float32), v[1].bitcast(fx.Float32)) for v in poll([(b, i, 2) for b, i in specs])]
 
     # ---- wave reductions
-    def wave_sum(v):
-        for sh in range_constexpr(6):
-            v = xred(v, 32 >> sh, lambda a, b: a + b)
-        return v
-
-    def wave_max(v):
-        for sh in range_constexpr(6):
-            v = xred(v, 32 >> sh, fx.max)
-        return v
-
     def subgroup16_max(v):
         for off in (8, 4, 2, 1):
             v = xred(v, off, fx.max)
@@ -793,9 +767,6 @@ def common_defs(ctx):
     return dict(
         _other_parts=_other_parts,
         _rmsnorm_tail_ks=_rmsnorm_tail_ks,
-        bf16_pair=bf16_pair,
-        bf16_round=bf16_round,
-        bf2_f32=bf2_f32,
         block_excl_scan=block_excl_scan,
         block_max=block_max,
         block_sum=block_sum,
@@ -806,10 +777,6 @@ def common_defs(ctx):
         getf=getf,
         getf_many=getf_many,
         hint_wait=hint_wait,
-        ld_bf16=ld_bf16,
-        ld_f32=ld_f32,
-        lds_ld=lds_ld,
-        lds_st=lds_st,
         load_bias=load_bias,
         load_x_rmsnorm=load_x_rmsnorm,
         mb=mb,
@@ -839,6 +806,4 @@ def common_defs(ctx):
         unit_fp8=unit_fp8,
         unit_fp8mx=unit_fp8mx,
         unit_mxfp4=unit_mxfp4,
-        wave_max=wave_max,
-        wave_sum=wave_sum,
     )

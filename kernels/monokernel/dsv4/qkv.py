@@ -14,7 +14,21 @@ from kernels.monokernel.dsv4.common import pow2_ceil
 from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROPE_DIM
 from kernels.monokernel.dsv4.plan import Q_B_TILE, QKV_A_TILE, WAVES, q_b_groups, qkv_a_groups
 from kernels.monokernel.layout import NEG
-from kernels.monokernel.ops import exp, rcp, rsq, rsrc, xred, xshfl
+from kernels.monokernel.ops import (
+    bf2_f32,
+    bf16_round,
+    exp,
+    ld_bf16,
+    ld_f32,
+    lds_ld,
+    lds_st,
+    rcp,
+    rsq,
+    rsrc,
+    wave_max,
+    xred,
+    xshfl,
+)
 
 
 @ASTRewriter.transform
@@ -43,8 +57,6 @@ def qkv_stages(ctx):
     S = ctx["S"]
     TOK = ctx["TOK"]
     ape = ctx["ape"]
-    bf16_round = ctx["bf16_round"]
-    bf2_f32 = ctx["bf2_f32"]
     block_sum = ctx["block_sum"]
     block_sums = ctx["block_sums"]
     comp_row = ctx["comp_row"]
@@ -59,12 +71,8 @@ def qkv_stages(ctx):
     kv_rope = ctx["kv_rope"]
     kv_state = ctx["kv_state"]
     lane = ctx["lane"]
-    ld_bf16 = ctx["ld_bf16"]
     ld_dest = ctx["ld_dest"]
-    ld_f32 = ctx["ld_f32"]
     ld_pos = ctx["ld_pos"]
-    lds_ld = ctx["lds_ld"]
-    lds_st = ctx["lds_st"]
     load_x_rmsnorm = ctx["load_x_rmsnorm"]
     mb = ctx["mb"]
     misc = ctx["misc"]
@@ -91,7 +99,6 @@ def qkv_stages(ctx):
     w_qkv_a = ctx["w_qkv_a"]
     w_qkv_c = ctx["w_qkv_c"]
     wave = ctx["wave"]
-    wave_max = ctx["wave_max"]
     # ================================================= 1. q_a / kv GEMV
     r_wqa, r_sqa = rsrc(w_qkv_a), rsrc(s_qkv_a)
     r_wqc = rsrc(w_qkv_c)
@@ -369,7 +376,6 @@ def q_b_stage(ctx):
     g_q = ctx["g_q"]
     get2_many = ctx["get2_many"]
     hint_wait = ctx["hint_wait"]
-    lds_ld = ctx["lds_ld"]
     mb = ctx["mb"]
     n_sel = ctx["n_sel"]
     outs = ctx["outs"]

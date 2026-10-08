@@ -11,7 +11,20 @@ from kernels.common import buffer_ops as bo
 from kernels.monokernel.dsv4.common import sqrt_softplus, swiglu
 from kernels.monokernel.dsv4.config import SCALE_BM
 from kernels.monokernel.dsv4.plan import ROUTER_TILE, UG8, UG_TILE, WAVES, ffn_hcc, router_spt
-from kernels.monokernel.ops import fp8_roundtrip, rsrc, uniform, uniform_f32, xshfl
+from kernels.monokernel.ops import (
+    bf2_f32,
+    bf16_pair,
+    bf16_round,
+    fp8_roundtrip,
+    ld_bf16,
+    ld_f32,
+    lds_ld,
+    lds_st,
+    rsrc,
+    uniform,
+    uniform_f32,
+    xshfl,
+)
 
 
 @ASTRewriter.transform
@@ -39,9 +52,6 @@ def ffn_stages(ctx):
     UG_PER_SLOT = ctx["UG_PER_SLOT"]
     XQ_BLOCKS = ctx["XQ_BLOCKS"]
     XQ_WAVES = ctx["XQ_WAVES"]
-    bf16_pair = ctx["bf16_pair"]
-    bf16_round = ctx["bf16_round"]
-    bf2_f32 = ctx["bf2_f32"]
     dnw = ctx["dnw"]
     emit_out = ctx["emit_out"]
     g_post = ctx["g_post"]
@@ -55,10 +65,6 @@ def ffn_stages(ctx):
     hint_wait = ctx["hint_wait"]
     keys = ctx["keys"]
     lane = ctx["lane"]
-    ld_bf16 = ctx["ld_bf16"]
-    ld_f32 = ctx["ld_f32"]
-    lds_ld = ctx["lds_ld"]
-    lds_st = ctx["lds_st"]
     load_bias = ctx["load_bias"]
     mb = ctx["mb"]
     misc = ctx["misc"]

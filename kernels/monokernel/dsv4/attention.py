@@ -12,7 +12,21 @@ from kernels.monokernel.dsv4.common import bf16x2_has_nan, wave_any
 from kernels.monokernel.dsv4.config import EPS, ROPE_DIM
 from kernels.monokernel.dsv4.plan import Q_B_TILE, ROW_TILE, SPLIT_KEYS, THREADS, WAVES, o_a_spt
 from kernels.monokernel.layout import NEG
-from kernels.monokernel.ops import exp, fp8_to_bf16x8, rcp, rsq, rsrc, xshfl
+from kernels.monokernel.ops import (
+    bf2_f32,
+    bf16_pair,
+    exp,
+    fp8_to_bf16x8,
+    ld_f32,
+    lds_ld,
+    lds_st,
+    rcp,
+    rsq,
+    rsrc,
+    wave_max,
+    wave_sum,
+    xshfl,
+)
 
 
 @ASTRewriter.transform
@@ -53,8 +67,6 @@ def attention_stages(ctx):
     UV_TILE = ctx["UV_TILE"]
     UV_WIDE = ctx["UV_WIDE"]
     attn_sink = ctx["attn_sink"]
-    bf16_pair = ctx["bf16_pair"]
-    bf2_f32 = ctx["bf2_f32"]
     block_max = ctx["block_max"]
     block_sum = ctx["block_sum"]
     comp_row = ctx["comp_row"]
@@ -73,10 +85,7 @@ def attention_stages(ctx):
     kv_rope = ctx["kv_rope"]
     lane = ctx["lane"]
     ld_dest = ctx["ld_dest"]
-    ld_f32 = ctx["ld_f32"]
     ld_pos = ctx["ld_pos"]
-    lds_ld = ctx["lds_ld"]
-    lds_st = ctx["lds_st"]
     mb = ctx["mb"]
     misc = ctx["misc"]
     n_sel = ctx["n_sel"]
@@ -106,8 +115,6 @@ def attention_stages(ctx):
     w_o_a = ctx["w_o_a"]
     w_o_b = ctx["w_o_b"]
     wave = ctx["wave"]
-    wave_max = ctx["wave_max"]
-    wave_sum = ctx["wave_sum"]
     window = ctx["window"]
     xs = ctx["xs"]
     # ============== 4. per-head query RMS (no weight) + RoPE -> bf16 query

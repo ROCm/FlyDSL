@@ -10,7 +10,7 @@ from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.dsv4.config import EPS
 from kernels.monokernel.dsv4.plan import ROW_TILE
-from kernels.monokernel.ops import exp, rcp, rsq, rsrc, xred
+from kernels.monokernel.ops import bf2_f32, bf16_round, exp, ld_f32, lds_ld, lds_st, rcp, rsq, rsrc, xred
 
 
 @ASTRewriter.transform
@@ -37,8 +37,6 @@ def hc_attn_stages(ctx):
     HIDDEN = ctx["HIDDEN"]
     N_ROW_TILES = ctx["N_ROW_TILES"]
     S = ctx["S"]
-    bf16_round = ctx["bf16_round"]
-    bf2_f32 = ctx["bf2_f32"]
     block_sum = ctx["block_sum"]
     emit_out = ctx["emit_out"]
     getf = ctx["getf"]
@@ -47,9 +45,6 @@ def hc_attn_stages(ctx):
     hc_eps = ctx["hc_eps"]
     hc_sinkhorn_iters = ctx["hc_sinkhorn_iters"]
     lane = ctx["lane"]
-    ld_f32 = ctx["ld_f32"]
-    lds_ld = ctx["lds_ld"]
-    lds_st = ctx["lds_st"]
     mb = ctx["mb"]
     misc = ctx["misc"]
     outs = ctx["outs"]
