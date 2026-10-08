@@ -1485,6 +1485,115 @@ def paged_cache_geometry(K, V, layout, page_size=PAGE_SIZE):
     return nhk, d, strides, strides
 
 
+def splitk_workspace_elems(batch_size, num_heads, seq_len, num_kv_splits, head_dim):
+    """fp32 elements of the split-K workspace: every split's `O_partial` (16-bit pairs, two columns per fp32 slot),
+    then the `m` rows and the `l` rows of every split."""
+    rows = batch_size * num_kv_splits * num_heads * seq_len
+    return rows * (head_dim // 2) + 2 * rows
+
+
+def build_flash_attn_gfx950_splitk_combine(traits, knobs):
+    """The split-K combine, from its **own builder**: one kernel per builder, so the forward's builder keeps the
+    one-uniquely-named-kernel property AOTriton locates its kernel by.
+
+    Each `(row, head)` is combined by one lane group: the splits' `m` and `l` give the global max and the weights, the
+    sink (if any) joins the denominator once, the partial `O` rows are summed with those weights, and `O` and (unless the
+    build never returns it) the LSE are written. It relies on a BSHD-flat `O` and an exact head dim, which the forward's
+    host side checks.
+
+    Returns `combine(O, workspace, lse, sink, num_head_q, batch_size, seq_len, stride_o_seq, stream)`.
+    """
+    COMBINE_BLOCK = 256
+    LANES_PER_ROW = traits.HEAD_DIM_V // 4
+    ROWS_PER_BLOCK = COMBINE_BLOCK // LANES_PER_ROW
+    SINK_ANN = fx.Tensor if traits.SINK else fx.Constexpr
+    CACHE_TAG = ("splitk_combine", config.build_cache_key(traits, knobs))
+
+    @flyc.kernel(known_block_size=[COMBINE_BLOCK, 1, 1])
+    def flash_attn_splitk_combine_kernel(
+        O: fx.Pointer,  # noqa: E741
+        workspace: fx.Tensor,
+        LSE: fx.Pointer,
+        sink: SINK_ANN,
+        num_head_q: fx.Int32,
+        batch_size: fx.Int32,
+        seq_len: fx.Int32,
+        stride_o_seq: fx.Int32,
+    ):
+        O = helpers.wire_view(O)  # noqa: E741
+        LSE = helpers.wire_view(LSE)
+        ctx = helpers.ParitySplitKCombineContext(
+            traits,
+            O,
+            workspace,
+            batch_size,
+            seq_len,
+            stride_o_seq,
+            LSE=LSE,
+            Sink=sink,
+            num_head_q=num_head_q,
+        )
+        ctx.init_types_and_constants()
+        ctx.init_runtime_indices()
+        ctx.init_thread_mapping(ROWS_PER_BLOCK, LANES_PER_ROW)
+        ctx.init_workspace()
+        ctx.init_descriptors()
+
+        merge = helpers.ParitySplitKCombineHelper(ctx)
+        m_s, l_s = merge.load_ml_rows()
+        m_max = merge.reduce_m_max(m_s)
+        if const_expr(traits.SINK):
+            m_max, sink_w = merge.fold_sink(m_max, BIAS_LOG2E)
+        acc, den = merge.accumulate_splits(m_s, l_s, m_max)
+        if const_expr(traits.SINK):
+            den = merge.add_sink_den(den, sink_w)
+        if const_expr(traits.RETURN_LSE):
+            merge.store_lse_if_not_null(m_max, den)
+        o_pack = merge.pack_output(acc, den)
+        merge.store_output(o_pack)
+
+    @flyc.jit
+    def launch_flash_attn_splitk_combine(
+        O: fx.Pointer,  # noqa: E741
+        workspace: fx.Tensor,
+        LSE: fx.Pointer,
+        sink: SINK_ANN,
+        num_head_q: fx.Int32,
+        batch_size: fx.Int32,
+        seq_len: fx.Int32,
+        stride_o_seq: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        _ = CACHE_TAG
+        # One batch per y block keeps the combine's O descriptor wave-uniform.
+        rows = fx.Index(num_head_q) * fx.Index(seq_len)
+        blocks = (rows + (ROWS_PER_BLOCK - 1)) // ROWS_PER_BLOCK
+        flash_attn_splitk_combine_kernel(O, workspace, LSE, sink, num_head_q, batch_size, seq_len, stride_o_seq).launch(
+            grid=(blocks, fx.Index(batch_size), 1), block=(COMBINE_BLOCK, 1, 1), stream=stream
+        )
+
+    compiled = abi.new_compiled_cache()
+
+    def combine(O, workspace, lse, sink, num_head_q, batch_size, seq_len, stride_o_seq, stream):  # noqa: E741
+        return abi.run_compiled(
+            compiled,
+            launch_flash_attn_splitk_combine,
+            helpers.wire_ptr(O),
+            workspace,
+            helpers.wire_ptr(lse, fx.Float32),
+            sink,
+            num_head_q,
+            batch_size,
+            seq_len,
+            stride_o_seq,
+            stream if stream is not None else fx.Stream(None),
+        )
+
+    combine.traits = traits
+    combine.launcher = launch_flash_attn_splitk_combine
+    return combine
+
+
 def build_flash_attn_gfx950_fwd(meta, knobs):
     """Build the gfx950 forward kernel for a resolved `(meta, knobs)` pair.
 
@@ -1506,10 +1615,7 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         raise ValueError("knobs must be resolved: call `fwd_knobs(arch, ...).resolve(meta)` first")
     traits = config.fwd_traits(meta, knobs)
     # Optional inputs the forward body carries but whose host side and tests land separately.
-    for name, wanted in (
-        ("XCD_SWIZZLE", knobs.XCD_SWIZZLE),
-        ("NUM_KV_SPLITS > 1", knobs.NUM_KV_SPLITS > 1),
-    ):
+    for name, wanted in (("XCD_SWIZZLE", knobs.XCD_SWIZZLE),):
         if wanted:
             raise NotImplementedError(f"{name} is not implemented by the gfx950 forward yet")
 
@@ -1529,6 +1635,15 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
                 f"the vectorized (aiter) cache layout is staged for head_dim 64 and 128, not {knobs.BLOCK_DMODEL}; "
                 "use the linear layout"
             )
+
+    if traits.SPLITK:
+        if knobs.PADDED_HEAD:
+            raise NotImplementedError(
+                "a split-K build serves exact head dims (the rungs): its combine stores a full rung of O per row, "
+                f"and head_dim {meta.head_dim} is padded to {knobs.BLOCK_DMODEL}"
+            )
+        if traits.D_STAGES > 1 or traits.VO_SHARDS > 1:
+            raise NotImplementedError("the wide body (head_dim > 256) has no split-K; use head_dim <= 256")
 
     BLOCK_DMODEL = knobs.BLOCK_DMODEL
     PADDED_HEAD = knobs.PADDED_HEAD
@@ -2337,7 +2452,8 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         bs_idx = fx.Index(num_seqlens if num_seqlens != fx.Int32(0) else batch_size)
         sl_idx = fx.Index(Max_seqlen_q)
         num_q_blocks = (sl_idx + traits.BLOCK_M - 1) // traits.BLOCK_M
-        grid_z = bs_idx
+        # Split-K adds the split index to the sequence axis: `z = sequence * splits + split`.
+        grid_z = bs_idx * traits.NUM_KV_SPLITS if const_expr(traits.SPLITK) else bs_idx
 
         # `llvm.denormal_fpenv` is what reaches the hardware (`.amdhsa_float_denorm_mode_32`); the old
         # `denormal-fp-math-f32` passthrough string never did. The two fast-math passthroughs carry no `no-infs`,
@@ -2419,6 +2535,7 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
     # identically. `flyc.compile[hints](launcher)` attaches them and returns the launcher.
     flyc.compile[_COMPILE_HINTS](launch_flash_attn_func_gfx950)
     COMPILED = {}
+    COMBINE = build_flash_attn_gfx950_splitk_combine(traits, knobs) if traits.SPLITK else None
 
     def host_args(
         Q,
@@ -2604,6 +2721,37 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         # When the build folds these away (see `WS_ANN` at the kernel), the slot still has to be *filled*: the
         # launcher's parameter is still positional, it is just constexpr, so the value is consumed at trace time
         # instead of becoming a kernarg. `0`, so the JIT cache key does not vary with an unused tensor.
+        combine_args = None
+        if traits.SPLITK:
+            # Split-K is dense self-attention over a BSHD-flat O: the combine addresses O as `token * (H * D) + head * D`,
+            # so any other layout would be written to the wrong rows without a fault.
+            if varlen is not None:
+                raise ValueError(
+                    "split-K is dense-only: a varlen call has per-sequence lengths and no fixed split chunk"
+                )
+            if seqlen_k != seqlen_q:
+                raise ValueError(
+                    f"split-K is self-attention only: seqlen_k ({seqlen_k}) must equal seqlen_q ({seqlen_q})"
+                )
+            b_o, h_o, s_o, d_o = O.shape
+            if tuple(O.stride()) != (s_o * h_o * d_o, d_o, h_o * d_o, 1) or d_o != BLOCK_DMODEL:
+                raise ValueError(
+                    "split-K needs O contiguous in (batch, seq, head, dim) order with the exact head dim "
+                    f"({BLOCK_DMODEL}); got shape {tuple(O.shape)} strides {tuple(O.stride())}. Pass "
+                    "`torch.empty(B, S, H, D).transpose(1, 2)`"
+                )
+            if lse is not None and (tuple(lse.shape) != (b_o, h_o, s_o) or not lse.is_contiguous()):
+                raise ValueError(f"lse must be a contiguous (B, H, S) fp32 tensor, got {tuple(lse.shape)}")
+            need = splitk_workspace_elems(b_o, h_o, s_o, traits.NUM_KV_SPLITS, traits.HEAD_DIM)
+            if workspace is None:
+                import torch
+
+                workspace = torch.empty(need, device=O.device, dtype=torch.float32)
+            elif workspace.element_size() != 4 or not workspace.is_floating_point() or workspace.numel() < need:
+                raise ValueError(f"split-K needs an fp32 workspace of at least {need} elements")
+            else:
+                workspace = workspace.reshape(-1)
+            combine_args = (O, workspace, lse, sink_arg, h_o, int(batch_size), s_o, int(h_o * d_o))
         ws = (workspace if workspace is not None else O) if WS_RUNTIME else 0
         if traits.PAGED:
             # The block table has one row per sequence (`ceil(seqlen_k / page)` entries long, `seqlen_k` being the longest
@@ -2702,10 +2850,10 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
             alibi_arg,
             alibi_stride_arg,
             sink_arg,
-        ), (stream, dp_keepalive)
+        ), (stream, dp_keepalive, combine_args)
 
     def launch(*args, **kwargs):
-        packed, (stream, dp_keepalive) = host_args(*args, **kwargs)
+        packed, (stream, dp_keepalive, combine_args) = host_args(*args, **kwargs)
         # The compiled function is per signature, and a baked window pair is part of it (`Constexpr` values): one
         # cache per pair, or the second pair would reuse the first one's binary.
         baked = (packed[15], packed[16]) if STATIC_SEQLEN else ()
@@ -2717,16 +2865,19 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
             *packed,
             stream if stream is not None else fx.Stream(None),
         )
+        if combine_args is not None:
+            COMBINE(*combine_args, stream)
         del dp_keepalive  # held across the launch call
         return result
 
     def compile_launcher(*args, **kwargs):
-        packed, (stream, _) = host_args(*args, **kwargs)
-        return flyc.compile(launch_flash_attn_func_gfx950, *packed, fx.Stream(stream))
+        packed, extras = host_args(*args, **kwargs)
+        return flyc.compile(launch_flash_attn_func_gfx950, *packed, fx.Stream(extras[0]))
 
     launch.compile = compile_launcher
     launch.traits = traits
     launch.knobs = knobs
     launch.launcher = launch_flash_attn_func_gfx950  # the one `@flyc.jit` the closure makes
     launch.host_args = host_args
+    launch.combine = COMBINE  # the split-K combine (its own builder); None without split-K
     return launch

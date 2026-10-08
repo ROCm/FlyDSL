@@ -8,15 +8,19 @@ same way as the rest of the forward: the fp64 reference with the rounding floor,
 (an input dropped on the way in must not pass), and the refusals of the host.
 """
 
+import math
+
 import pytest
 import torch
 
 from tests.kernels.attention.attn_testlib import (
     DTYPES,
     WINDOW_BOTRIGHT,
+    WINDOW_TOPLEFT,
     VarlenCase,
     alloc,
     fwd_check,
+    lse_alloc,
     meta_of,
     randn,
     run_fwd,
@@ -475,3 +479,226 @@ def test_paged_varlen_one_block_table_row_per_sequence(fwd_build, layout, causal
 
         exact_o, exact_lse = ref()
         check_floor("O", case.o_of(z), exact_o, floor_rel(ref, exact_o, BF16), f"paged varlen seq {z}")
+
+
+# ---------------------------------------------------------------------------
+# Split-K (knob `NUM_KV_SPLITS`): the KV range of one q block is cut into `splits` chunks run by separate workgroups, each
+# writes a normalised partial O plus (m, l) into a workspace, and a **second kernel (its own builder)** combines them.
+# Dense self-attention only, over a BSHD-flat O.
+# ---------------------------------------------------------------------------
+
+BSHD = (0, 2, 1)  # physical order of the (B, H, S) axes of a BSHD-flat allocation
+SPLITS = [2, 3, 4]
+
+
+@pytest.mark.parametrize("splits", SPLITS)
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("hdim", [64, 128])
+def test_splitk_matches_reference(fwd_build, splits, causal, hdim):
+    """O and the LSE (written by the combine) against the fp64 floor, at 2, 3 and 4 splits, with and without a causal
+    window (the causal case is where the splits' work is unequal)."""
+    fn = fwd_build(meta_of(head_dim=hdim, window=causal), NUM_KV_SPLITS=splits)
+    fwd_check(
+        fn,
+        b=1,
+        hq=8,
+        sq=2048,
+        d=hdim,
+        dtype=BF16,
+        window=BR if causal else None,
+        perms=((0, 1, 2), (0, 1, 2), (0, 1, 2), BSHD),
+        ctx=f"{splits} splits d{hdim} {causal}",
+    )
+
+
+@pytest.mark.parametrize("causal", [False, True])
+def test_splitk_gqa_batched_and_ragged_tiles(fwd_build, causal):
+    """GQA (the head remap and the workspace are indexed by the q head), a batch of two, and a length that is not a tile
+    multiple (the last split's last tile is partial)."""
+    fn = fwd_build(meta_of(head_dim=64, window=causal), NUM_KV_SPLITS=3)
+    fwd_check(
+        fn,
+        b=2,
+        hq=8,
+        hk=2,
+        sq=1000,
+        d=64,
+        dtype=BF16,
+        window=BR if causal else None,
+        perms=((0, 1, 2), (0, 1, 2), (0, 1, 2), BSHD),
+        ctx=f"gqa {causal}",
+    )
+
+
+@pytest.mark.parametrize("seq_len", [64, 130, 512])
+@pytest.mark.parametrize("hdim", [64, 128])
+def test_split_kv_writes_every_row(fwd_build, seq_len, hdim):
+    """Short sequences leave splits with no tiles: they write an empty partial (m = -1e30, l = 0) the combine ignores.
+    O is NaN-poisoned, so a row nobody wrote shows up; the answer still matches the reference."""
+    fn = fwd_build(meta_of(head_dim=hdim, window=True), NUM_KV_SPLITS=4)
+    out = fwd_check(
+        fn,
+        b=1,
+        hq=4,
+        sq=seq_len,
+        d=hdim,
+        dtype=BF16,
+        window=BR,
+        perms=((0, 1, 2), (0, 1, 2), (0, 1, 2), BSHD),
+        ctx=f"S={seq_len}",
+    )
+    assert not torch.isnan(out["o"]).any()
+
+
+@pytest.mark.parametrize("splits", SPLITS)
+def test_sink_splitk_counted_once(fwd_build, splits):
+    """Split-K writes sink-free partials and folds the sink in once, in the combine. The LSE is the sharp signal: it is
+    the log denominator, so a sink counted once per split (or not at all) shows up there directly, where O normalises it
+    away."""
+    b, h, s, d = 1, 8, 2048, 128
+    qkv, sink = sink_inputs(b, h, h, s, d, BF16, BR, 0.5)
+    split = fwd_build(meta_of(head_dim=d, window=True, sink=True), NUM_KV_SPLITS=splits)
+    whole = fwd_build(meta_of(head_dim=d, window=True, sink=True))
+    got = fwd_check(
+        split,
+        b=b,
+        hq=h,
+        sq=s,
+        d=d,
+        dtype=BF16,
+        window=BR,
+        qkv=qkv,
+        sink=sink,
+        perms=((0, 1, 2), (0, 1, 2), (0, 1, 2), BSHD),
+        ctx=f"{splits} splits + sink",
+    )
+    ref = alloc(b, h, s, d, BF16)
+    ref_lse = lse_alloc(b, h, s)
+    run_fwd(whole, *qkv, ref, lse=ref_lse, window=BR, sink=sink)
+    assert (got["lse"] - ref_lse).abs().max().item() < 0.5 * math.log(splits)  # a double count shifts it by ~ln(splits)
+    assert (got["lse"] - ref_lse).abs().max().item() < 2e-2
+
+
+def test_splitk_with_alibi_bias_and_dropout_off(fwd_build):
+    """The additive logit inputs are position-indexed, which the split's tile range does not move."""
+    b, h, s, d = 1, 4, 1024, 64
+    bias = randn(b, h, s, s, BF16, gen=seeded(2)).contiguous()
+    fn = fwd_build(meta_of(head_dim=d, bias=True, alibi=True), NUM_KV_SPLITS=2)
+    fwd_check(
+        fn,
+        b=b,
+        hq=h,
+        sq=s,
+        d=d,
+        dtype=BF16,
+        bias=bias,
+        alibi_slopes=slopes_of(b, h, False),
+        perms=((0, 1, 2), (0, 1, 2), (0, 1, 2), BSHD),
+        ctx="split+bias+alibi",
+    )
+
+
+@pytest.mark.parametrize("seqs", [(512, 2048), (2048, 512)])
+@pytest.mark.parametrize("causal", [False, True])
+def test_splitk_rejects_cross_length_kv(fwd_build, seqs, causal):
+    """Dense split-K is self-attention only, and it used to fail without saying so."""
+    sq, sk = seqs
+    fn = fwd_build(meta_of(head_dim=64, window=causal), NUM_KV_SPLITS=4)
+    q, k, v = randn(1, 4, sq, 64, BF16), randn(1, 4, sk, 64, BF16), randn(1, 4, sk, 64, BF16)
+    o = alloc(1, 4, sq, 64, BF16, BSHD)
+    with pytest.raises(ValueError, match="self-attention only"):
+        run_fwd(fn, q, k, v, o, window=BR if causal else None)
+
+
+def test_splitk_host_checks(fwd_build):
+    fn = fwd_build(meta_of(head_dim=64), NUM_KV_SPLITS=2)
+    q, k, v = (randn(1, 4, 256, 64, BF16) for _ in range(3))
+    good = alloc(1, 4, 256, 64, BF16, BSHD)
+    run_fwd(fn, q, k, v, good)  # the control
+    with pytest.raises(ValueError, match="contiguous in \\(batch, seq, head, dim\\)"):
+        run_fwd(fn, q, k, v, alloc(1, 4, 256, 64, BF16))  # BHSD-flat O
+    small = torch.empty(16, device="cuda", dtype=torch.float32)
+    with pytest.raises(ValueError, match="fp32 workspace of at least"):
+        run_fwd(fn, q, k, v, good, workspace=small)
+    case = VarlenCase("0x0B0B", [64, 64], [64, 64], 4, 4, 64, BF16)
+    with pytest.raises(ValueError, match="dense-only"):
+        case.launch(fn)
+
+
+def test_splitk_builder_refusals():
+    from kernels.attention import flash_attn_gfx950 as fwd_module
+    from kernels.attention import flash_attn_gfx950_config as cfg
+
+    for hdim, match in ((100, "exact head dims"), (384, "wide body")):
+        meta = meta_of(head_dim=hdim)
+        knobs = cfg.fwd_knobs("gfx950", NUM_KV_SPLITS=2).resolve(meta)
+        with pytest.raises(NotImplementedError, match=match):
+            fwd_module.build_flash_attn_gfx950_fwd(meta, knobs)
+
+
+def test_splitk_combine_is_its_own_builder(fwd_build):
+    """The forward builder keeps exactly one kernel (AOTriton locates its kernel by uniqueness); the combine is a second
+    builder that the forward's launcher drives."""
+    fn = fwd_build(meta_of(head_dim=64), NUM_KV_SPLITS=2)
+    assert fn.combine is not None and fn.combine.launcher is not fn.launcher
+    assert fwd_build(meta_of(head_dim=64)).combine is None
+
+
+@pytest.mark.parametrize("mode", ["runtime", "always", "never"])
+def test_splitk_return_lse_modes(fwd_build, mode):
+    """`RETURN_LSE` follows through the combine: "never" writes no LSE, "runtime" skips a null one, "always" needs one."""
+    fn = fwd_build(meta_of(head_dim=64), NUM_KV_SPLITS=2, RETURN_LSE=mode)
+    q, k, v = (randn(1, 4, 512, 64, BF16, gen=seeded(1)) for _ in range(3))
+    o = alloc(1, 4, 512, 64, BF16, BSHD)
+    lse = lse_alloc(1, 4, 512)
+    if mode == "never":
+        run_fwd(fn, q, k, v, o)
+        assert not torch.isnan(o).any()
+    else:
+        run_fwd(fn, q, k, v, o, lse=lse)
+        assert torch.isfinite(lse).all()
+        if mode == "runtime":
+            o2 = alloc(1, 4, 512, 64, BF16, BSHD)
+            run_fwd(fn, q, k, v, o2)  # a null LSE must not fault
+            assert torch.equal(o, o2)
+
+
+@pytest.mark.parametrize("what", ["paged", "paged_causal", "band", "top_left"])
+def test_splitk_composes_with_paged_and_windows(fwd_build, what):
+    """The split's tile range is the thing paging (`split_tile`) and windows (`_skip_dead_leading_tiles`) were written
+    against, so they compose with it: a paged pool, a causal paged pool, a banded window and a top-left causal window.
+    """
+    meta = dict(head_dim=64, paged=what.startswith("paged"), window=what != "paged")
+    window = {"paged": None, "paged_causal": BR, "band": (300, 0), "top_left": (WINDOW_TOPLEFT, WINDOW_TOPLEFT)}[what]
+    kw = dict(paged="linear") if meta["paged"] else {}
+    fn = fwd_build(meta_of(**meta), NUM_KV_SPLITS=2)
+    fwd_check(
+        fn,
+        b=1,
+        hq=4,
+        sq=1024,
+        d=64,
+        dtype=BF16,
+        window=window,
+        perms=((0, 1, 2), (0, 1, 2), (0, 1, 2), BSHD),
+        ctx=what,
+        **kw,
+    )
+
+
+def test_splitk_dropout_draws_the_same_mask_as_one_split(fwd_build):
+    """Dropout is keyed by (sequence, head, row, column), not by the workgroup, so a split-K run keeps and drops exactly
+    the elements the unsplit one does, and the combine's `l`-weighted sum reproduces its output (to rounding)."""
+    b, h, s, d = 1, 4, 1024, 64
+    gen = seeded(21)
+    q, k, v = (randn(b, h, s, d, BF16, gen=gen) for _ in range(3))
+    meta = meta_of(head_dim=d, dropout=True)
+    whole = alloc(b, h, s, d, BF16)
+    split = alloc(b, h, s, d, BF16, BSHD)
+    run_fwd(fwd_build(meta), q, k, v, whole, p_drop=0.25, seed=5, offset=0)
+    run_fwd(fwd_build(meta, NUM_KV_SPLITS=3), q, k, v, split, p_drop=0.25, seed=5, offset=0)
+    assert (whole.float() - split.float()).abs().max().item() < 2e-2
+    # ... and it did drop something: the dropout-free output differs
+    plain = alloc(b, h, s, d, BF16)
+    run_fwd(fwd_build(meta), q, k, v, plain, p_drop=0.0, seed=5, offset=0)
+    assert (plain.float() - split.float()).abs().max().item() > 1e-2
