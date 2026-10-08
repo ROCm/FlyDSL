@@ -1,0 +1,92 @@
+name: Test Cooperative Full Matrix
+
+on:
+  workflow_call:
+    inputs:
+      docker_image:
+        description: 'Docker base image for release GPU tests'
+        type: string
+        required: true
+
+jobs:
+  coop-full:
+    name: coop-full (${{ matrix.runner }}, shard ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ['linux-flydsl-mi325-1', 'linux-flydsl-mi35x-1']
+        shard: [0, 1]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    env:
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_NOSYSTEM: '1'
+      COOP_SHARD_INDEX: ${{ matrix.shard }}
+      COOP_SHARD_COUNT: '2'
+      CONTAINER_NAME: flydsl_coop_${{ github.run_id }}_${{ github.run_attempt }}_${{ matrix.runner }}_${{ matrix.shard }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: '1'
+        with:
+          path: flydsl
+
+      # GPU runner workspaces are reused; never let a wheel from an earlier run
+      # satisfy pip's package selection or provide an old fly-opt.
+      - name: Clear stale wheel artifacts
+        run: rm -rf dist
+
+      - name: Download release wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-wheels
+          path: dist
+
+      - name: Start GPU test container
+        run: |
+          if docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+            docker rm -f "${CONTAINER_NAME}"
+          fi
+          if [ -f /etc/podinfo/gha-render-devices ]; then
+            DEVICE_FLAG="$(cat /etc/podinfo/gha-render-devices)"
+          else
+            DEVICE_FLAG='--device /dev/dri'
+          fi
+          docker run -dt --network=host --user root --device=/dev/kfd ${DEVICE_FLAG} \
+            -v "${GITHUB_WORKSPACE}/flydsl:/flydsl" \
+            -v "${GITHUB_WORKSPACE}/dist:/dist:ro" \
+            --ipc=host --group-add video --shm-size 16g \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            -w /flydsl --name "${CONTAINER_NAME}" \
+            '${{ inputs.docker_image }}'
+
+      - name: Install release wheel and test dependencies
+        run: |
+          docker exec "${CONTAINER_NAME}" python3 -m pip install -U pip setuptools
+          docker exec "${CONTAINER_NAME}" python3 -m pip install --no-index --find-links=/dist flydsl
+          docker exec "${CONTAINER_NAME}" python3 -m pip install -U 'hypothesis>=6.82.0'
+          docker exec "${CONTAINER_NAME}" bash -c 'mkdir -p /flydsl/build-fly/bin && cp /dist/fly-opt /flydsl/build-fly/bin/fly-opt && chmod +x /flydsl/build-fly/bin/fly-opt'
+          docker exec "${CONTAINER_NAME}" git config --global --add safe.directory /flydsl
+          docker exec "${CONTAINER_NAME}" python3 -c 'import torch; assert torch.cuda.is_available(), "Release coop tests require a GPU"; print("GPU:", torch.cuda.get_device_name())'
+
+      - name: Run exhaustive cooperative tests
+        timeout-minutes: 330
+        run: |
+          docker exec \
+            -e FLYDSL_COOP_TESTS_FULL=1 \
+            -e FLYDSL_AUTOTUNE=0 \
+            -e COOP_SHARD_INDEX \
+            -e COOP_SHARD_COUNT \
+            "${CONTAINER_NAME}" \
+            bash -c 'cd /flydsl && python3 scripts/run_coop_full_tests.py --shard-index "${COOP_SHARD_INDEX}" --shard-count "${COOP_SHARD_COUNT}"'
+
+      - name: Clean up
+        if: always()
+        run: |
+          if docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+            docker rm -f "${CONTAINER_NAME}"
+          fi
