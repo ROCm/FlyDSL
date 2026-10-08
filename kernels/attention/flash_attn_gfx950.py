@@ -1614,10 +1614,6 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
     if knobs.BLOCK_DMODEL is None:
         raise ValueError("knobs must be resolved: call `fwd_knobs(arch, ...).resolve(meta)` first")
     traits = config.fwd_traits(meta, knobs)
-    # Optional inputs the forward body carries but whose host side and tests land separately.
-    for name, wanted in (("XCD_SWIZZLE", knobs.XCD_SWIZZLE),):
-        if wanted:
-            raise NotImplementedError(f"{name} is not implemented by the gfx950 forward yet")
 
     if meta.paged:
         # Where the paged path is not carried over. Each is a real limit of the staging, not a missing check.

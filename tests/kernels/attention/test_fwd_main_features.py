@@ -702,3 +702,24 @@ def test_splitk_dropout_draws_the_same_mask_as_one_split(fwd_build):
     plain = alloc(b, h, s, d, BF16)
     run_fwd(fwd_build(meta), q, k, v, plain, p_drop=0.0, seed=5, offset=0)
     assert (plain.float() - split.float()).abs().max().item() > 1e-2
+
+
+# ---------------------------------------------------------------------------
+# XCD swizzle (knob `XCD_SWIZZLE`): head-slow workgroup mapping, non-causal only, a bijection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("heads", [8, 16, 64, 12, 4], ids=["h8", "h16", "h64", "h12_not_xcd", "h4_not_xcd"])
+def test_xcd_swizzle_is_bit_identical(fwd_build, heads):
+    """The head-slow remap re-derives (head, q block) from the same linear workgroup id, so it is a bijection and must
+    not change one bit of the output. A mistake in the derivation shows as a permuted or half-recomputed output, not as
+    an error, so this pins it. Head counts that do not divide into the eight XCDs fall back to the plain mapping at run
+    time (a runtime head count makes that a runtime condition), however the knob is set."""
+    s = 8 * 128  # several q blocks per head
+    gen = seeded(heads)
+    q, k, v = (randn(1, heads, s, 128, BF16, gen=gen) for _ in range(3))
+    meta = meta_of(head_dim=128)
+    off, on = alloc(1, heads, s, 128, BF16), alloc(1, heads, s, 128, BF16)
+    run_fwd(fwd_build(meta), q, k, v, off)
+    run_fwd(fwd_build(meta, XCD_SWIZZLE=True), q, k, v, on)
+    assert torch.equal(off, on)

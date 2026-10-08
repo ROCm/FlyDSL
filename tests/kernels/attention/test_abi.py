@@ -332,3 +332,23 @@ def test_traced_conditions_stay_runtime(backend, arch, tmp_path, monkeypatch, hd
     text = _origin(_dump(backend, arch, meta_of(head_dim=hdim), tmp_path, monkeypatch))
     n_if, n_for = text.count("scf.if"), text.count("scf.for")
     assert n_if >= golden[0] and n_for >= golden[1], (n_if, n_for, golden)
+
+
+# ---------------------------------------------------------------------------
+# XCD swizzle: a compile-time no-op where it does not apply, a visible change where it does
+# ---------------------------------------------------------------------------
+
+
+def test_xcd_swizzle_is_a_noop_where_it_does_not_apply(backend, arch, tmp_path, monkeypatch):
+    """Causal builds (a causal mask makes block i's work grow with i) never swizzle, so the knob compiles to the same ISA
+    as off. A dense build that does swizzle differs and reads `grid_dim`, which appends the hidden-argument block: a
+    feature knob, off for AOT, so exempt from the no-hidden-kernargs rule (plan 1.4)."""
+    causal = meta_of(head_dim=64, window=True)
+    off = _control(backend, arch, causal, tmp_path, monkeypatch)
+    assert _same_isa(off, _dump(backend, arch, causal, tmp_path, monkeypatch, XCD_SWIZZLE=True))
+    dense = meta_of(head_dim=64)
+    plain, swizzled = _dump(backend, arch, dense, tmp_path, monkeypatch), _dump(
+        backend, arch, dense, tmp_path, monkeypatch, XCD_SWIZZLE=True
+    )
+    assert plain.hidden_args == [] and swizzled.hidden_args != []
+    assert not _same_isa(plain, swizzled)
