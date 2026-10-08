@@ -1,4 +1,9 @@
+if(WIN32)
+  set(_fly_dialect_object_arg OBJECT)
+endif()
+
 add_mlir_dialect_library(MLIRFlyDialect
+  ${_fly_dialect_object_arg}
   IR/FlyDialect.cpp
   IR/FlyOps.cpp
   IR/FlyTypeDefs.cpp

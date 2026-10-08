@@ -37,6 +37,8 @@ FlyDSL/
 ├── scripts/                   # build & test scripts
 │   ├── build_llvm.sh          # build LLVM/MLIR from source
 │   ├── build.sh               # build FlyDSL (C++ + Python bindings)
+│   ├── build_llvm.ps1         # Windows LLVM/MLIR source build
+│   ├── build.ps1              # Windows FlyDSL source build
 │   ├── run_tests.sh           # run tests
 │   └── run_benchmark.sh       # run performance benchmarks
 ├── include/flydsl/            # C++ Fly/FlyROCDL dialect headers
@@ -111,6 +113,21 @@ python -m pip install -e .
 ```
 
 > **Note**: If `MLIR_PATH` is set in your environment pointing to a wrong LLVM build, `unset MLIR_PATH` first.
+
+#### Windows ROCm JIT build
+
+Windows source builds require Visual Studio 2022 C++ tools, CMake, Ninja, and a Python environment that can see the ROCm SDK. Create the venv from the Python installation that provides the SDK so Torch and HIP remain available:
+
+```powershell
+$repo = (Get-Location).Path
+$basePython = 'C:\path\to\python.exe'
+& $basePython -m venv --system-site-packages C:\fdsl-venv
+& .\scripts\build_llvm.ps1 -Python C:\fdsl-venv\Scripts\python.exe -Jobs 32
+& .\scripts\build.ps1 -MLIRPath C:\linstall -BuildDir C:\fbuild -Python C:\fdsl-venv\Scripts\python.exe -Jobs 32
+$env:PYTHONPATH = "C:\fbuild\python_packages;$repo\python"
+```
+
+The PowerShell LLVM script uses the revision pinned in `thirdparty/llvm-build-info.json`. Windows supports native JIT compilation; AOT export remains Linux ELF-only.
 
 ### Run tests
 

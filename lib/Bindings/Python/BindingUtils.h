@@ -4,6 +4,8 @@
 #ifndef FLYDSL_BINDINGS_PYTHON_BINDINGUTILS_H
 #define FLYDSL_BINDINGS_PYTHON_BINDINGUTILS_H
 
+#include <Python.h>
+
 #include "mlir-c/Bindings/Python/Interop.h"
 #include "mlir/Bindings/Python/IRCore.h"
 #include "mlir/Bindings/Python/Nanobind.h"

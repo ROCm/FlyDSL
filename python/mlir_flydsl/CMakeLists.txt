@@ -27,12 +27,11 @@ if(FLYDSL_HAS_ROCDL)
   )
 endif()
 
-# NOTE: Do NOT link MLIRFlyDialect/MLIRFlyROCDLDialect here via PRIVATE_LINK_LIBS.
-# These symbols are already provided by FlyPythonCAPI.so (via MLIRCPIFly's transitive
-# dependencies in EMBED_CAPI_LINK_LIBS). Statically linking them here creates DUPLICATE
-# TypeID static variables, causing "storage uniquer isn't initialized" errors at runtime.
-# The COMMON_CAPI_LINK_LIBS FlyPythonCAPI in add_mlir_python_modules ensures _mlirDialectsFly.so
-# links to FlyPythonCAPI.so, which provides all needed symbols.
+# ELF resolves these dialect symbols through FlyPythonCAPI.so. COFF extensions need
+# explicit import libraries for their C++ dialect methods.
+# COMMON_CAPI_LINK_LIBS keeps FlyPythonCAPI linked into each extension.
+
+set(_fly_extension_link_libs LLVMSupport)
 
 declare_mlir_python_extension(FlyPythonSources.Core.fly
   MODULE_NAME _mlirDialectsFly
@@ -42,11 +41,11 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly
   SOURCES
     TiledOpTraits.cpp
     FlyExtension.cpp
-  PRIVATE_LINK_LIBS
-    LLVMSupport
+  PRIVATE_LINK_LIBS ${_fly_extension_link_libs}
 )
 
 if(FLYDSL_HAS_ROCDL)
+  set(_fly_rocdl_extension_link_libs ${_fly_extension_link_libs})
   declare_mlir_python_extension(FlyPythonSources.Core.fly_rocdl
     MODULE_NAME _mlirDialectsFlyROCDL
     ADD_TO_PARENT FlyPythonSources
@@ -54,8 +53,7 @@ if(FLYDSL_HAS_ROCDL)
     PYTHON_BINDINGS_LIBRARY nanobind
     SOURCES
       FlyROCDLExtension.cpp
-    PRIVATE_LINK_LIBS
-      LLVMSupport
+    PRIVATE_LINK_LIBS ${_fly_rocdl_extension_link_libs}
   )
 endif()
 
@@ -123,6 +121,10 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
   DECLARED_SOURCES ${MLIRFlyDSLSources}
 )
 
+if(WIN32)
+  set_target_properties(FlyPythonCAPI PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
 # ---------------------------------------------------------------------------
 # Symbol visibility: prevent LLVM/MLIR internals from leaking out of
 # FlyPythonCAPI.so, which would conflict with ROCm's own LLVM
@@ -167,8 +169,77 @@ add_mlir_python_modules(FlyPythonModules
   MLIR_BINDINGS_PYTHON_NB_DOMAIN "mlir"
   DECLARED_SOURCES "${MLIRFlyDSLSources}"
   COMMON_CAPI_LINK_LIBS
-    FlyPythonCAPI
+  FlyPythonCAPI
 )
+
+if(WIN32)
+  # Multi-config generators append the configuration name to generic output
+  # directories. Keep extensions and their runtime DLLs beside Python packages.
+  add_dependencies(FlyPythonCAPI MLIRFlyDialect MLIRFlyROCDLDialect)
+  target_sources(FlyPythonCAPI PRIVATE
+    $<TARGET_OBJECTS:obj.MLIRFlyDialect>
+    $<TARGET_OBJECTS:obj.MLIRFlyROCDLDialect>)
+
+  # Export dialect C++ APIs from this single DLL so all Python extensions share
+  # the same type IDs and storage uniquers.
+  set_target_properties(FlyPythonCAPI PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  set_property(TARGET FlyPythonCAPI APPEND PROPERTY MLIR_AGGREGATE_EXCLUDE_LIBS
+    MLIRIR MLIRSupport MLIRFlyDialect MLIRFlyROCDLDialect)
+  get_target_property(_flypython_links FlyPythonCAPI LINK_LIBRARIES)
+  list(FILTER _flypython_links EXCLUDE REGEX "MLIRIR|MLIRSupport")
+  set_property(TARGET FlyPythonCAPI PROPERTY LINK_LIBRARIES "${_flypython_links}")
+
+  set(_fly_export_archives MLIRIR MLIRSupport)
+  set(_fly_export_objects)
+  foreach(_archive IN LISTS _fly_export_archives)
+    set(_archive_path "${MLIR_DIR}/../../../lib/${_archive}.lib")
+    set(_extract_dir "${CMAKE_BINARY_DIR}/extracted_objs/${_archive}")
+    if(NOT EXISTS "${_archive_path}")
+      message(FATAL_ERROR "Required MLIR archive not found: ${_archive_path}")
+    endif()
+    file(MAKE_DIRECTORY "${_extract_dir}")
+    execute_process(
+      COMMAND "${LLVM_TOOLS_BINARY_DIR}/llvm-ar.exe" t "${_archive_path}"
+      OUTPUT_VARIABLE _archive_members
+      RESULT_VARIABLE _list_result
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_VARIABLE _list_error)
+    if(NOT _list_result EQUAL 0)
+      message(FATAL_ERROR "Could not list ${_archive_path}: ${_list_error}")
+    endif()
+    execute_process(
+      COMMAND "${LLVM_TOOLS_BINARY_DIR}/llvm-ar.exe" x "${_archive_path}"
+      WORKING_DIRECTORY "${_extract_dir}"
+      RESULT_VARIABLE _extract_result
+      ERROR_VARIABLE _extract_error)
+    if(NOT _extract_result EQUAL 0)
+      message(FATAL_ERROR "Could not extract ${_archive_path}: ${_extract_error}")
+    endif()
+    string(REPLACE "\n" ";" _archive_members "${_archive_members}")
+    list(FILTER _archive_members EXCLUDE REGEX "^$")
+    set(_archive_objects)
+    foreach(_member IN LISTS _archive_members)
+      get_filename_component(_member_name "${_member}" NAME)
+      list(APPEND _archive_objects "${_extract_dir}/${_member_name}")
+    endforeach()
+    list(APPEND _fly_export_objects ${_archive_objects})
+  endforeach()
+  target_sources(FlyPythonCAPI PRIVATE ${_fly_export_objects})
+
+  get_property(_fly_python_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_target IN LISTS _fly_python_targets)
+    if(_target MATCHES "^FlyPythonModules\.extension\." OR
+       _target STREQUAL "FlyPythonCAPI" OR _target STREQUAL "FlyJitRuntime" OR
+       _target STREQUAL "nanobind-mlir")
+      foreach(_config IN LISTS CMAKE_CONFIGURATION_TYPES)
+        string(TOUPPER "${_config}" _config_upper)
+        set_target_properties(${_target} PROPERTIES
+          RUNTIME_OUTPUT_DIRECTORY_${_config_upper} "${FlyPythonModules_ROOT_PREFIX}/_mlir_libs"
+          LIBRARY_OUTPUT_DIRECTORY_${_config_upper} "${FlyPythonModules_ROOT_PREFIX}/_mlir_libs")
+      endforeach()
+    endif()
+  endforeach()
+endif()
 
 ################################################################################
 # Type Stubs Generation
@@ -187,7 +258,11 @@ if(DEFINED nanobind_DIR AND NOT "${nanobind_DIR}" STREQUAL "")
     list(APPEND _STUBGEN_PYTHONPATH "${_NANOBIND_SITE_PACKAGES_DIR}")
   endif()
 endif()
-list(JOIN _STUBGEN_PYTHONPATH ":" _STUBGEN_PYTHONPATH_VALUE)
+if(WIN32)
+  list(JOIN _STUBGEN_PYTHONPATH ";" _STUBGEN_PYTHONPATH_VALUE)
+else()
+  list(JOIN _STUBGEN_PYTHONPATH ":" _STUBGEN_PYTHONPATH_VALUE)
+endif()
 
 get_property(_backend_stubgen_modules GLOBAL PROPERTY FLYDSL_BACKEND_STUBGEN_MODULES)
 set(_flydsl_stubgen_modules
@@ -199,27 +274,49 @@ list(APPEND _flydsl_stubgen_modules
   flydsl._mlir._mlir_libs._mlirDialectsGPU
   flydsl._mlir._mlir_libs._mlirDialectsLLVM
 )
+set(_flydsl_stubgen_args -q -r)
 set(_flydsl_stubgen_m_flags "")
 foreach(_m IN LISTS _flydsl_stubgen_modules)
+  list(APPEND _flydsl_stubgen_args -m "${_m}")
   string(APPEND _flydsl_stubgen_m_flags " -m ${_m}")
 endforeach()
+list(APPEND _flydsl_stubgen_args -O "${_MLIR_LIBS_DIR}")
 
-add_custom_command(
-  OUTPUT "${_STUB_MARKER_FILE}"
-  COMMAND /bin/bash -c "\
-    export PYTHONPATH='${_STUBGEN_PYTHONPATH_VALUE}'\"\${PYTHONPATH:+:\${PYTHONPATH}}\"; \
-    if '${Python3_EXECUTABLE}' -c 'import nanobind.stubgen' >/dev/null 2>&1; then \
-      '${Python3_EXECUTABLE}' -m nanobind.stubgen \
-        -q -r${_flydsl_stubgen_m_flags} \
-        -O '${_MLIR_LIBS_DIR}'; \
-    else \
-      echo 'Warning: nanobind.stubgen not available -- skipping stub generation'; \
-    fi"
-  COMMAND ${CMAKE_COMMAND} -E touch "${_STUB_MARKER_FILE}"
-  DEPENDS CopyFlyPythonSources
-  COMMENT "Generating Python stub files for all extension modules"
-  VERBATIM
-)
+if(UNIX)
+  set(_FLY_PATCH_RPATH_COMMANDS
+    COMMAND bash -c "patchelf --set-rpath '\\$$ORIGIN' '${_MLIR_LIBS_DIR}/$<TARGET_FILE_NAME:mlir_c_runner_utils>'"
+    COMMAND bash -c "patchelf --set-rpath '\\$$ORIGIN' '${_MLIR_LIBS_DIR}/$<TARGET_FILE_NAME:mlir_float16_utils>'"
+  )
+endif()
+
+if(WIN32)
+  add_custom_command(
+    OUTPUT "${_STUB_MARKER_FILE}"
+    COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${_STUBGEN_PYTHONPATH_VALUE};$ENV{PYTHONPATH}"
+      "${Python3_EXECUTABLE}" -m nanobind.stubgen ${_flydsl_stubgen_args}
+    COMMAND ${CMAKE_COMMAND} -E touch "${_STUB_MARKER_FILE}"
+    DEPENDS CopyFlyPythonSources
+    COMMENT "Generating Python stub files for all extension modules"
+    VERBATIM
+  )
+else()
+  add_custom_command(
+    OUTPUT "${_STUB_MARKER_FILE}"
+    COMMAND /bin/bash -c "\
+      export PYTHONPATH='${_STUBGEN_PYTHONPATH_VALUE}'\"\${PYTHONPATH:+:\${PYTHONPATH}}\"; \
+      if '${Python3_EXECUTABLE}' -c 'import nanobind.stubgen' >/dev/null 2>&1; then \
+        '${Python3_EXECUTABLE}' -m nanobind.stubgen \
+          -q -r${_flydsl_stubgen_m_flags} \
+          -O '${_MLIR_LIBS_DIR}'; \
+      else \
+        echo 'Warning: nanobind.stubgen not available -- skipping stub generation'; \
+      fi"
+    COMMAND ${CMAKE_COMMAND} -E touch "${_STUB_MARKER_FILE}"
+    DEPENDS CopyFlyPythonSources
+    COMMENT "Generating Python stub files for all extension modules"
+    VERBATIM
+  )
+endif()
 
 add_custom_target(FlyPythonStubs ALL
   DEPENDS "${_STUB_MARKER_FILE}"
@@ -252,12 +349,11 @@ add_custom_target(CopyFlyPythonSources ALL
   ${_FLY_COPY_ROCDL_TABLEGEN}
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_c_runner_utils>"
-    "${_MLIR_LIBS_DIR}/libmlir_c_runner_utils.so"
+    "${_MLIR_LIBS_DIR}/$<TARGET_FILE_NAME:mlir_c_runner_utils>"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_float16_utils>"
     "${_MLIR_LIBS_DIR}/$<TARGET_FILE_NAME:mlir_float16_utils>"
-  COMMAND bash -c "patchelf --set-rpath '\\$$ORIGIN' '${_MLIR_LIBS_DIR}/libmlir_c_runner_utils.so'"
-  COMMAND bash -c "patchelf --set-rpath '\\$$ORIGIN' '${_MLIR_LIBS_DIR}/$<TARGET_FILE_NAME:mlir_float16_utils>'"
+  ${_FLY_PATCH_RPATH_COMMANDS}
   COMMENT "Copying python/flydsl sources to build/python_packages/flydsl"
   DEPENDS FlyPythonModules
 )
@@ -269,7 +365,8 @@ add_dependencies(CopyFlyPythonSources FlyPythonModules)
 ################################################################################
 if(TARGET FlyJitRuntime)
   set_target_properties(FlyJitRuntime PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
+    LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
   add_dependencies(FlyPythonCAPI FlyJitRuntime)
 endif()
 

@@ -3,7 +3,6 @@
 
 import ctypes
 import enum
-import fcntl
 import hashlib
 import inspect
 import os
@@ -65,11 +64,16 @@ from .protocol import (
 
 EXTRA_SOURCE_DIRS: List[str] = []
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 CacheInfo = namedtuple("CacheInfo", ["hits", "misses", "currsize", "disk_size"])
 
 
 class FileLock:
-    """fcntl-based file lock supporting shared and exclusive modes."""
+    """Cross-process cache lock; Windows serializes readers as well as writers."""
 
     def __init__(self, path, *, exclusive=True, timeout=30):
         self._path = str(path)
@@ -80,11 +84,15 @@ class FileLock:
     def __enter__(self):
         fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o644)
         self._fd = fd
-        op = fcntl.LOCK_EX if self._exclusive else fcntl.LOCK_SH
         deadline = time.monotonic() + self._timeout
         while True:
             try:
-                fcntl.flock(fd, op | fcntl.LOCK_NB)
+                if os.name == "nt":
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    op = fcntl.LOCK_EX if self._exclusive else fcntl.LOCK_SH
+                    fcntl.flock(fd, op | fcntl.LOCK_NB)
                 return self
             except (OSError, BlockingIOError):
                 if time.monotonic() >= deadline:
@@ -103,7 +111,11 @@ class FileLock:
         fd = self._fd
         if fd is not None:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                if os.name == "nt":
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError:
                 pass
             try:
@@ -1731,6 +1743,8 @@ class CompiledFunction:
         library; it does not require FlyDSL or Python at deployment time.
         Host export currently requires 64-bit little-endian Linux ELF tools.
         """
+        if os.name == "nt":
+            raise NotImplementedError("AOT export emits ELF objects and is supported on Linux only")
         if self._aot_error is not None:
             error_type, message = self._aot_error
             raise error_type(message)
