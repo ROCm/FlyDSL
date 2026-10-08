@@ -11,7 +11,7 @@ This guide covers the available FlyDSL kernels — normalization, softmax, GEMM,
 | **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Register-buffered softmax, opt-in autotuning |
 | **Softmax backward** | `build_softmax_bwd_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | fp32 dot reduction, native-dtype register buffering |
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
-| **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
+| **FlashAttention** | `flydsl_flash_attn_func(...)` | `@flyc.kernel` | bf16, f16 (gfx950: any head dim that is a multiple of 8, up to 512; other arches generic); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd and dQ / dK/dV backward on gfx950, GQA/MQA, causal / window, bias, ALiBi, sink, dropout, paged KV, split-K, varlen |
 
 All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
@@ -311,14 +311,94 @@ launch_fn(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias, M_val, N_val,
 
 ---
 
-## 3b. FlashAttention forward (`kernels/attention/flash_attn_generic.py`, `kernels/attention/flash_attn_gfx950.py`, `kernels/attention/flash_attn_fp8_gfx950.py`)
+## 3b. FlashAttention (`kernels/attention/flash_attn_interface.py`, `flash_attn_gfx950*.py`, `flash_attn_generic.py`, `flash_attn_fp8_gfx950.py`)
 
-Dense FlashAttention forward. `build_flash_attn_func_module(num_heads, head_dim,
-causal=..., dtype_str=..., num_kv_heads=...)` is the public builder; on
-gfx950 + `head_dim == 128` it routes to the dual-wave software-pipelined fast path
-(`build_flash_attn_dualwave_swp_module`), otherwise to the generic fallback.
-Supports MHA and GQA/MQA (`num_kv_heads <= num_heads`), causal and non-causal,
-arbitrary sequence length, and (bf16/f16) packed varlen + split-K.
+`flydsl_flash_attn_func(q, k, v, ...)` (`flash_attn_interface.py`) is the entry point. Q/K/V are BSHD (varlen: packed
+`[total, H, D]` with `cu_seqlens_q` / `cu_seqlens_kv`); GQA/MQA via `num_kv_heads`; `return_lse=True` also returns the
+fp32 log-sum-exp. It routes by arch and dtype:
+
+| Call | Kernel |
+|---|---|
+| gfx950, bf16/f16, any feature below, a head dim other than 64/128, a V width of its own, or `knobs=` | the gfx950 kernels (`flash_attn_gfx950.py`) |
+| gfx950, bf16/f16, plain dense or varlen at the sizes the dual-wave kernel wins | the same kernels |
+| gfx950, bf16/f16, short plain dense or varlen | generic light kernel (`flash_attn_generic.py`) |
+| gfx950, fp8 e4m3fn, `head_dim == 128`, dense | `flash_attn_fp8_gfx950.py` (see below) |
+| other arches | generic kernel |
+
+### gfx950 bf16/f16 kernels
+
+The forward is a dual-wave, software-pipelined kernel ported from AOTriton's gfx950 forward. It takes any head dim
+that is a multiple of 8 up to 512 (D > 256 uses a wide body that stages D through LDS), a V width different from the
+QK width (`head_dim_v`), and these optional inputs, each composable except where noted:
+
+| Input | Argument | Notes |
+|---|---|---|
+| Causal | `causal=True` | bottom-right aligned |
+| Sliding window | `window=(left, right)` | replaces `causal` |
+| Bias | `bias=` | additive, after the scale; dense `[Sq, Skv]`, varlen `[total_q, max_seqlen_kv]` |
+| ALiBi | `alibi_slopes=` | fp32 `[H]` or `[B, H]`; may be combined with `bias`; not with paged KV |
+| Sink | `sink=` | fp32 `[H]` per-head sink logit |
+| Dropout | `dropout_p`, `philox_seed`, `philox_offset` | the same (seed, offset) regenerates the mask in backward |
+| Paged KV | `block_table=`, `seqlen_k=`, `kv_cache_layout="linear" or "vectorized"` | page size 64; the vectorized layout needs `head_dim` 64 or 128 |
+| Split-K | `knobs={"NUM_KV_SPLITS": n}` | workspace plus a separate combine kernel |
+| Varlen | `cu_seqlens_q`, `cu_seqlens_kv`, `max_seqlen_q` | `cross_seqlen` is no longer needed |
+
+**Bias with `causal=True` or a window raises `ValueError`.** A bias already is an attention mask; a positional mask on
+top says the same thing twice with no rule for which wins. Fold the causal pattern into the bias and pass
+`causal=False`, or drop the bias. (Earlier versions accepted the combination.)
+
+A fully masked row (for example bottom-right causal with `Sq > Sk`) has LSE `+inf` and output 0. The varlen LSE is the
+padded `[B, H, max_seqlen_q]`.
+
+**Build options go through `knobs=`**, a mapping of overrides validated against the arch's table, for example
+`knobs={"waves_per_eu": 1, "SETPRIO": False, "NUM_KV_SPLITS": 2}`. The old keyword arguments (`waves_per_eu`, `daz`,
+`dualwave_swp_*`, `num_kv_splits`, `cross_seqlen`) still work on bf16/f16 but emit a `DeprecationWarning` and are
+forwarded to their knob, or ignored when no knob exists. fp8 and the generic kernels still read them.
+
+**Backward.** `build_flash_attn_gfx950_dq` and `build_flash_attn_gfx950_dkdv` (`flash_attn_gfx950_dq.py`,
+`flash_attn_gfx950_dkdv.py`) are the dQ and dK/dV kernels: dense and varlen, GQA, causal / window, bias (with its
+gradient), dropout (the mask is the forward's). They are builders for a caller that owns the backward pass; there is no
+autograd wrapper in `flydsl_flash_attn_func`.
+
+**Builder interface.** The kernels are built from metadata, then knobs, then traits:
+
+```python
+from kernels.attention import dispatch
+from kernels.attention.flash_attn_gfx950_config import FmhaInputMetadata
+
+arch = dispatch.current_arch()
+backend = dispatch.backend_for(arch)
+meta = FmhaInputMetadata(dtype_str="bf16", head_dim=96, window=True)  # what the inputs are (causal is a window)
+knobs = backend.fwd_knobs(arch, waves_per_eu=1).resolve(meta)         # how to compute; pins are optional
+launch = backend.build_fwd(meta, knobs)
+```
+
+`FmhaInputMetadata` is the inputs, knobs are the tunables resolved for those inputs, traits are internal.
+`backend.dq_knobs` / `backend.dkdv_knobs` and `build_dq` / `build_dkdv` are the backward counterparts.
+
+#### The 8xD protocol
+
+Q, K, V, O (and dQ, dK, dV, dO) are read and written in 8-element chunks along D. `flydsl_flash_attn_func` takes only
+head dims that are multiples of 8, which need nothing; the protocol matters for the builders, which accept any head dim. Any other head dim needs `ceil8(head_dim)` contiguous elements on every row, which the kernel may read
+and, for outputs, write. Allocate the last dimension padded and pass a view:
+
+```python
+D = 20                                   # not a multiple of 8
+q = torch.randn(B, S, H, 24, device="cuda", dtype=torch.bfloat16)[..., :D]   # 24 == ceil8(20)
+```
+
+A tensor whose row pitch is not a multiple of 8, or whose `stride(-1) != 1`, is refused with `ValueError`; a
+BSHD-compact tensor with an odd head dim cannot be made safe by any view. Only the D axis is ever rounded.
+
+### Tests
+
+`tests/kernels/attention/` (arch-neutral, through `dispatch.py`; `test_gfx950.py` holds the arch-specific hazards)
+covers forward, backward, ABI, the interface and ISA fingerprints; the `tests/unit/test_flash_attn_gfx950_*.py` files
+cover the config module, the naming policy and the AOT smoke compile.
+
+```bash
+python3 -m pytest tests/kernels/attention tests/kernels/test_flash_attn_fwd.py -m "not large_shape" -v
+```
 
 ### fp8 (e4m3fn) forward
 
@@ -454,7 +534,14 @@ What operation do you need?
 | `kernels/moe/mxfp_moe/` | Fused a4w4/a8w4 MoE 2-stage GEMM (device fp4 re-quant) |
 | `kernels/attention/pa_decode_fp8.py` | Paged attention decode (FP8) |
 | `kernels/attention/flash_attn_generic.py` | FlashAttention generic fallback |
-| `kernels/attention/flash_attn_gfx950.py` | FlashAttention gfx950 bf16/f16 fast path |
+| `kernels/attention/flash_attn_interface.py` | `flydsl_flash_attn_func` entry point and routing |
+| `kernels/attention/flash_attn_gfx950.py` | FlashAttention gfx950 bf16/f16 forward (and split-K combine) |
+| `kernels/attention/flash_attn_gfx950_dq.py`, `flash_attn_gfx950_dkdv.py` | FlashAttention gfx950 backward dQ and dK/dV |
+| `kernels/attention/flash_attn_gfx950_config.py` | Metadata, knobs and traits for the gfx950 kernels |
+| `kernels/attention/common.py` | Arch-neutral attention constants |
+| `kernels/attention/abi.py` | Kernarg/ABI helpers and the 8xD check |
+| `kernels/attention/philox.py` | Dropout philox generator |
+| `kernels/attention/dispatch.py` | Per-arch attention backend dispatch |
 | `kernels/attention/flash_attn_fp8_gfx950.py` | FlashAttention gfx950 fp8 dense fast path |
 | `kernels/norm/layernorm_kernel.py` | LayerNorm (layout API) |
 | `kernels/norm/rmsnorm_kernel.py` | RMSNorm (layout API) |
@@ -482,7 +569,8 @@ What operation do you need?
 | `tests/kernels/test_moe_gemm.py` | MoE GEMM |
 | `tests/kernels/test_moe_reduce.py` | MoE reduce kernel |
 | `tests/kernels/test_pa.py` | Paged attention decode |
-| `tests/kernels/test_flash_attn_fwd.py` | FlashAttention |
+| `tests/kernels/test_flash_attn_fwd.py` | FlashAttention entry point (fp8, generic, gfx950 routes) |
+| `tests/kernels/attention/` | gfx950 attention forward, backward, ABI and interface suite |
 | `tests/kernels/test_layernorm.py` | LayerNorm |
 | `tests/kernels/test_rmsnorm.py` | RMSNorm |
 | `tests/kernels/test_softmax.py` | Softmax |
