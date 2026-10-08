@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-10-08T14:32:45Z",
+ "updated": "2026-10-08T14:38:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37792952144,
+   "run_id": 37793754358,
    "pr": 1234,
-   "commit": "d5b6ad4f39d3d0c1ba9e3bd9e95410a112f10664",
+   "commit": "b8cc514eb7f6c9f70d1a5c769861d5bbdcb78c0a",
    "branch": "dsv4_megakernel",
    "event": "pull_request",
    "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
    "status": "in_progress",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37793754358",
+   "created_at": "2026-10-08T14:35:44Z",
+   "updated_at": "2026-10-08T14:36:46Z",
+   "actor": "amd-weisun",
+   "jobs": []
+  },
+  {
+   "run_id": 37792952144,
+   "pr": null,
+   "commit": "d5b6ad4f39d3d0c1ba9e3bd9e95410a112f10664",
+   "branch": "dsv4_megakernel",
+   "event": "pull_request",
+   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37792952144",
    "created_at": "2026-10-08T14:29:57Z",
-   "updated_at": "2026-10-08T14:30:35Z",
+   "updated_at": "2026-10-08T14:36:25Z",
    "actor": "amd-weisun",
    "jobs": []
   },
@@ -1596,52 +1611,6 @@
      "started_at": "2026-10-06T23:25:02Z",
      "completed_at": "2026-10-07T02:55:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37544610820/job/112551442359"
-    }
-   ]
-  },
-  {
-   "run_id": 37542328438,
-   "pr": 1228,
-   "commit": "34f5f1a93d4b82caa8c9d4f0f17701b6869fdb21",
-   "branch": "perf/gfx1250-a8w8-decode-splitk",
-   "event": "pull_request",
-   "title": "[Perf][gfx1250] Add split-K and a decode config selector to the FP8 GEMM",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542328438",
-   "created_at": "2026-10-06T22:43:00Z",
-   "updated_at": "2026-10-07T00:35:50Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-06T23:09:40Z",
-     "completed_at": "2026-10-07T00:21:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542328438/job/112546334361",
-     "machine": "gbt350-odcdh1-b08-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-06T23:11:33Z",
-     "completed_at": "2026-10-07T00:35:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542328438/job/112546334415"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-06T23:09:09Z",
-     "completed_at": "2026-10-06T23:24:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542328438/job/112546334423"
     }
    ]
   }
