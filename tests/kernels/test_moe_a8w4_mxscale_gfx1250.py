@@ -23,7 +23,7 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 import flydsl.compiler as flyc  # noqa: E402
 import flydsl.expr as fx  # noqa: E402
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.moe.moe_a8w4_mxscale_gfx1250 import launch_moe_gemm_a8w4  # noqa: E402
+from kernels.moe.moe_a8w4_mxscale_gfx1250 import launch_moe_gemm_a8w4, select_moe_a8w4_config  # noqa: E402
 from tests.kernels.utils import gemm_common_utils as gcu  # noqa: E402
 
 if not torch.cuda.is_available():
@@ -141,8 +141,10 @@ def _gemm(
     tile_k,
     stage1_act,
     cluster_n=1,
+    warps=(1, 4),
+    num_buffers=None,
 ):
-    nb = min(3, max(1, K // tile_k))
+    nb = min(3, max(1, K // tile_k)) if num_buffers is None else num_buffers
     launch_moe_gemm_a8w4(
         out,
         _ptr(a_payload),
@@ -156,8 +158,8 @@ def _gemm(
         tile_m,
         tile_n,
         tile_k,
-        1,  # m_warp
-        4,  # n_warp
+        warps[0],  # m_warp
+        warps[1],  # n_warp
         0,  # out_is_f16
         nb,
         0,  # a_is_fp4
@@ -187,18 +189,25 @@ def _grouped_moe(
     tile_n=256,
     tile_k=256,
     cluster_n=1,
+    stage_cfgs=None,
 ):
+    """stage_cfgs: optional per-stage (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers), e.g. from
+    select_moe_a8w4_config; the routing layout is padded to the larger tile_m."""
     device = hidden.device
     tokens, model_dim = hidden.shape
-    wmma_rep = tile_m // 16
-    m_tile_map, topids_to_rows, cm = _route_contiguous_m(topk_ids, E, tile_m)
+    if stage_cfgs is None:
+        stage_cfgs = [(tile_m, tile_n, tile_k, 1, 4, None)] * 2
+    # A scales are grouped per warp_tile_m = tile_m / m_warp rows of each stage
+    reps = [c[0] // 16 // c[3] for c in stage_cfgs]
+    gemm_kw = [dict(tile_m=c[0], tile_n=c[1], tile_k=c[2], warps=(c[3], c[4]), num_buffers=c[5]) for c in stage_cfgs]
+    m_tile_map, topids_to_rows, cm = _route_contiguous_m(topk_ids, E, max(c[0] for c in stage_cfgs))
 
     # torch route+gather: scatter each token's hidden into its grouped row (pad=0).
     a1_bf16 = torch.zeros((1, cm, model_dim), dtype=torch.bfloat16, device=device)
     src = hidden[torch.arange(tokens, device=device).repeat_interleave(topk_ids.shape[1])]
     a1_bf16[0, topids_to_rows.reshape(-1).long()] = src
 
-    a1_p, a1_s = _quant_a(a1_bf16, wmma_rep)
+    a1_p, a1_s = _quant_a(a1_bf16, reps[0])
 
     # gemm1: fused silu, bf16 grouped intermediate; quant a2 in torch (like older archs).
     a2_bf16 = torch.empty((1, cm, inter_dim), dtype=torch.bfloat16, device=device)
@@ -213,13 +222,11 @@ def _grouped_moe(
         cm=cm,
         N=2 * inter_dim,
         K=model_dim,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
         stage1_act=1,
         cluster_n=cluster_n,
+        **gemm_kw[0],
     )
-    a2_p, a2_s = _quant_a(a2_bf16, wmma_rep)
+    a2_p, a2_s = _quant_a(a2_bf16, reps[1])
 
     grouped_out = torch.empty((1, cm, model_dim), dtype=torch.bfloat16, device=device)
     _gemm(
@@ -233,11 +240,9 @@ def _grouped_moe(
         cm=cm,
         N=model_dim,
         K=inter_dim,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
         stage1_act=0,
         cluster_n=cluster_n,
+        **gemm_kw[1],
     )
 
     # torch gather-reduce: out[t] = sum_k w[t,k] * grouped_out[topids_to_rows[t,k]].
@@ -332,6 +337,35 @@ def test_grouped_moe_rejects_k_not_multiple_of_tile_k():
     args, _ = _build_case(8, 640, 256, 64, 2)
     with pytest.raises(ValueError, match="multiple of tile_k"):
         _grouped_moe(**args)
+
+
+# (E, model_dim, inter_dim, token_num, topk): one case per select_moe_a8w4_config branch -- 128x256 tiles with 2x2 warps
+# (256 routed rows per expert), 64-row tiles, 32-row tiles, 16-row tiles, and 128-wide decode tiles.
+_SELECTOR_CASES = {
+    (8, 512, 512, 1024, 2): ((128, 256, 256, 2, 2, 2), (128, 256, 256, 2, 2, 2)),
+    (8, 512, 512, 256, 2): ((64, 256, 256, 1, 4, 2), (64, 256, 256, 1, 4, 2)),
+    (8, 512, 256, 128, 2): ((32, 256, 256, 1, 4, 2), (32, 256, 256, 1, 4, 1)),
+    (8, 512, 512, 32, 2): ((16, 256, 256, 1, 4, 2), (16, 256, 256, 1, 4, 2)),
+    (8, 512, 256, 1, 2): ((16, 128, 256, 1, 4, 2), (16, 128, 256, 1, 4, 1)),
+}
+
+
+def test_grouped_moe_selector_configs():
+    for (E, model_dim, inter_dim, token_num, topk), expected in _SELECTOR_CASES.items():
+        assert select_moe_a8w4_config(token_num, model_dim, inter_dim, E, topk) == expected
+    for model_dim, inter_dim in ((320, 512), (512, 320)):
+        with pytest.raises(ValueError):
+            select_moe_a8w4_config(64, model_dim, inter_dim, 8, 2)
+
+
+@pytest.mark.parametrize("E, model_dim, inter_dim, token_num, topk", list(_SELECTOR_CASES))
+def test_grouped_moe_selector(E, model_dim, inter_dim, token_num, topk):
+    # Every selected config keeps the K order of the default 64x256x256 path, so the outputs must match exactly.
+    args, ref = _build_case(E, model_dim, inter_dim, token_num, topk, seed=token_num)
+    cfgs = select_moe_a8w4_config(token_num, model_dim, inter_dim, E, topk)
+    out = _grouped_moe(**args, stage_cfgs=cfgs)
+    _check_accuracy(out, ref)
+    assert torch.equal(out, _grouped_moe(**args)), f"selected configs {cfgs} differ from the default tiles"
 
 
 def test_grouped_moe_stability():

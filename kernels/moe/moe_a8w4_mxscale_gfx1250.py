@@ -23,6 +23,45 @@ from kernels.gemm.gemm_common_gfx1250 import (
 TDM_DESCRIPTOR_VERSION = 1
 
 
+def select_moe_a8w4_config(
+    tokens: int, model_dim: int, inter_dim: int, experts: int, topk: int, num_cus: int = 256
+) -> tuple[tuple[int, int, int, int, int, int], tuple[int, int, int, int, int, int]]:
+    """(stage-1 config, stage-2 config) for launch_moe_gemm_a8w4, each (tile_m, tile_n, tile_k, m_warp, n_warp,
+    num_buffers). Stage 1 is gate_up (N = 2 * inter_dim, K = model_dim), stage 2 is down (N = model_dim,
+    K = inter_dim). Both stages share one routing layout, padded per expert to the larger tile_m of the two. The
+    kernel reads the A scales preshuffled in groups of (tile_m // m_warp) // 16 row blocks, so A must be quantized
+    for the returned m_warp: with the 2x2-warp config a group is half of tile_m // 16. Raises ValueError unless
+    model_dim and inter_dim are multiples of 256, because the kernel does not bound N and needs K % tile_k == 0.
+
+    Expected routed rows per expert r = tokens * topk / experts picks the tile height: from r = 256 a 128x256 tile with
+    2x2 warps and two buffers (two workgroups per CU) is faster on both stages despite the deeper padding; below
+    that 64-row tiles, 32-row tiles for 16 <= r < 32 (and up to r < 40 when inter_dim <= 256, where 64-row padding
+    nearly doubles the rows), and 16-row tiles for decode (r < 16). When most active experts hold a single routed
+    row (r <= 0.25), a stage whose 256-wide tiles would occupy at most num_cus / 2 workgroups (estimated from the
+    expected number of distinct experts) is a pure weight stream over few CUs, and 128-wide tiles spread it over
+    twice as many.
+    """
+    if model_dim % 256 or inter_dim % 256:
+        raise ValueError(f"needs model_dim % 256 == 0 and inter_dim % 256 == 0, got {model_dim}, {inter_dim}")
+    rows = tokens * topk / experts
+    k1, k2 = model_dim // 256, inter_dim // 256
+    if rows >= 256 and k1 >= 2 and k2 >= 2:
+        cfg = (128, 256, 256, 2, 2, 2)
+        return cfg, cfg
+    if rows < 16:
+        tile_m = 16
+    elif rows < 32 or (rows < 40 and inter_dim <= 256):
+        tile_m = 32
+    else:
+        tile_m = 64
+    active = experts * (1.0 - (1.0 - 1.0 / experts) ** (tokens * topk))
+    cfgs = []
+    for n, k_tiles in ((2 * inter_dim, k1), (model_dim, k2)):
+        tile_n = 128 if rows <= 0.25 and active * (n // 256) <= num_cus // 2 else 256
+        cfgs.append((tile_m, tile_n, 256, 1, 4, min(3, max(1, k_tiles))))
+    return tuple(cfgs)
+
+
 @flyc.jit
 def launch_moe_gemm_a8w4(
     arg_c: fx.Tensor,
