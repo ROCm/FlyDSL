@@ -59,6 +59,22 @@ def fwd_build(backend, arch):
 
 
 @pytest.fixture(scope="session")
+def bwd_build(backend, arch):
+    """`bwd_build(meta, fwd=None, dq=None, dkdv=None)` -> a namespace of the three builders for one problem (`.fwd`, `.dq`,
+    `.dkdv`), each memoised for the session. The dicts are per-kernel knob pins (`MFMA_ROWS=16`, ...)."""
+    from types import SimpleNamespace
+
+    def get(meta, fwd=None, dq=None, dkdv=None):
+        return SimpleNamespace(
+            fwd=_memo("fwd", backend, arch, meta, fwd or {}),
+            dq=_memo("dq", backend, arch, meta, dq or {}),
+            dkdv=_memo("dkdv", backend, arch, meta, dkdv or {}),
+        )
+
+    return get
+
+
+@pytest.fixture(scope="session")
 def build_count():
     """How many distinct builds the session has made so far (for the build-budget report)."""
     return lambda: len(_BUILDS)
