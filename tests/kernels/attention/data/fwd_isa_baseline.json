@@ -1,0 +1,59 @@
+{
+  "arch": "gfx950",
+  "builds": {
+    "d128_dropout": {
+      "instructions": 7717,
+      "kernarg": 296,
+      "sha256": "8170294a09721ea5d4a763702e0a102a035a16e2fba65e6dce23ddb130b0fa92"
+    },
+    "d128_window": {
+      "instructions": 5050,
+      "kernarg": 296,
+      "sha256": "c5070f1aba46a60dd4377c0295b5cd31741d6ac9120751d34e31ae0678a58cee"
+    },
+    "d256": {
+      "instructions": 5202,
+      "kernarg": 296,
+      "sha256": "928b713505d7a882bcfb87d28c4aa4a80d208017e62cae02b66f3fcd4a13d90c"
+    },
+    "d384_wide": {
+      "instructions": 2783,
+      "kernarg": 296,
+      "sha256": "3b0c5c0db493cc11d141da12797dd40cfb4b29bf71ee3279acced3c9f37babd0"
+    },
+    "d64": {
+      "instructions": 2927,
+      "kernarg": 296,
+      "sha256": "a556fcc5c04242f2e4b21f5fe56577830d261b278eff5d3b4548bd211985cdbe"
+    },
+    "d64_bias": {
+      "instructions": 3590,
+      "kernarg": 296,
+      "sha256": "500dc13249071794b4bf5bae471c2e933dd35aaf3daece5648d401fc14d6168b"
+    }
+  },
+  "configs": {
+    "d128_dropout": {
+      "dropout": true,
+      "head_dim": 128
+    },
+    "d128_window": {
+      "head_dim": 128,
+      "window": true
+    },
+    "d256": {
+      "head_dim": 256
+    },
+    "d384_wide": {
+      "head_dim": 384
+    },
+    "d64": {
+      "head_dim": 64
+    },
+    "d64_bias": {
+      "bias": true,
+      "head_dim": 64
+    }
+  },
+  "flydsl": "0.4.0"
+}

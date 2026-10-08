@@ -107,7 +107,18 @@ def causal_mask(sq, sk, bottom_right=True, device="cuda"):
     return j <= i + ((sk - sq) if bottom_right else 0)
 
 
-def reference(q, k, v, sm_scale, *, mask=None, bias=None, keep=None, p_drop=0.0, round_to=None, ftz=False):
+def alibi_bias(slopes, b, h, sq, sk, device="cuda"):
+    """The ALiBi term as an additive `(B, H, Sq, Sk)` fp64 bias, in natural units: `-slope * |i + (sk - sq) - j|`,
+    bottom-right aligned. `slopes` is `(H,)` (shared) or `(B, H)`."""
+    s = slopes.detach().to(torch.float64)
+    s = s.expand(b, h) if s.dim() == 1 else s
+    i = torch.arange(sq, device=device)[:, None]
+    j = torch.arange(sk, device=device)[None, :]
+    rel = (i + (sk - sq) - j).abs().to(torch.float64)
+    return -s[:, :, None, None] * rel[None, None]
+
+
+def reference(q, k, v, sm_scale, *, mask=None, bias=None, keep=None, p_drop=0.0, round_to=None, ftz=False, sink=None):
     """fp64 attention forward from the same low-precision inputs: `(o, lse)`.
 
     `lse` is natural-base and `-inf` for a fully masked row (the kernel stores `+inf`). `mask` is boolean,
@@ -134,7 +145,13 @@ def reference(q, k, v, sm_scale, *, mask=None, bias=None, keep=None, p_drop=0.0,
         s = s + bias.detach().to(torch.float64)
     if mask is not None:
         s = s.masked_fill(~mask, float("-inf"))
-    lse = torch.logsumexp(s, dim=-1, keepdim=True)
+    if sink is not None:
+        # An attention sink is one extra logit per head that joins the softmax denominator and has no value: it takes
+        # weight from the keys, and it makes every row live (a fully masked row has LSE == sink and O == 0).
+        extra = sink.detach().to(torch.float64).view(1, -1, 1, 1).expand(s.shape[0], s.shape[1], s.shape[2], 1)
+        lse = torch.logsumexp(torch.cat([s, extra], dim=-1), dim=-1, keepdim=True)
+    else:
+        lse = torch.logsumexp(s, dim=-1, keepdim=True)
     live = torch.isfinite(lse)
     p = torch.where(live, torch.exp(s - torch.where(live, lse, torch.zeros_like(lse))), torch.zeros_like(s))
     if keep is not None:
@@ -251,6 +268,8 @@ def fwd_check(
     want_lse=True,
     mult=FLOOR_MULT,
     qkv=None,
+    alibi_slopes=None,
+    sink=None,
     **launch_kw,
 ):
     """Run one forward and gate it against the fp64 floor (G-floor); returns the pieces for further checks.
@@ -273,12 +292,20 @@ def fwd_check(
     o = alloc(b, hq, sq, dv, dtype, po)
     lse = lse_alloc(b, hq, sq) if want_lse else None
     sm_scale = sdpa_scale(d) if scale is None else scale
+    if alibi_slopes is not None:
+        launch_kw["alibi_slopes"] = alibi_slopes
+    if sink is not None:
+        launch_kw["sink"] = sink
     run_fwd(fn, q, k, v, o, lse=lse, scale=scale, window=window, bias=bias, **launch_kw)
 
     mask = window_mask(sq, sk, *window) if window is not None else None
+    ref_bias = bias
+    if alibi_slopes is not None:
+        alibi = alibi_bias(alibi_slopes, b, hq, sq, sk)
+        ref_bias = alibi if bias is None else bias.to(torch.float64) + alibi
 
     def ref(**kw):
-        return reference(q, k, v, sm_scale, mask=mask, bias=bias, **kw)
+        return reference(q, k, v, sm_scale, mask=mask, bias=ref_bias, sink=sink, **kw)
 
     exact_o, exact_lse = ref()
     floor = floor_rel(ref, exact_o, dtype)
@@ -421,10 +448,14 @@ class VarlenCase:
         )
         torch.cuda.synchronize()
 
-    def check(self, fn, *, window=None, scale=None, ctx="", mult=FLOOR_MULT, bias=None, **kw):
+    def check(self, fn, *, window=None, scale=None, ctx="", mult=FLOOR_MULT, alibi_slopes=None, sink=None, bias=None, **kw):
         """Launch and gate every sequence against its own fp64 reference (O to the floor, LSE to fp32). `bias` is
         `(batch, H, total_q or max_q, cols >= max_k)` following Q's layout: a sequence's rows are its Q rows and its live
         columns are the first `seqlen_k` of them."""
+        if alibi_slopes is not None:
+            kw["alibi_slopes"] = alibi_slopes
+        if sink is not None:
+            kw["sink"] = sink
         if bias is not None:
             kw["bias"] = bias
         self.launch(fn, scale=scale, window=window, **kw)
@@ -434,13 +465,17 @@ class VarlenCase:
             sq, sk = q.shape[2], k.shape[2]
             mask = window_mask(sq, sk, *window) if window is not None else None
 
-            bz = None
+            alibi = None
+            if alibi_slopes is not None:
+                row = alibi_slopes if alibi_slopes.dim() == 1 else alibi_slopes[z]
+                alibi = alibi_bias(row, 1, self.hq, sq, sk)
             if bias is not None:
                 qb_, qr_ = self._where_q(z)
                 bz = bias[qb_ : qb_ + 1, :, qr_, :sk].to(torch.float64)
+                alibi = bz if alibi is None else alibi + bz
 
-            def ref(q=q, k=k, v=v, mask=mask, bz=bz, **rk):
-                return reference(q, k, v, sm, mask=mask, bias=bz, **rk)
+            def ref(q=q, k=k, v=v, mask=mask, alibi=alibi, **rk):
+                return reference(q, k, v, sm, mask=mask, bias=alibi, sink=sink, **rk)
 
             ex_o, ex_lse = ref()
             o = self.o_of(z)
@@ -470,4 +505,6 @@ def compile_inputs(meta, d=None, dtype=None):
         kw["bias"] = torch.zeros(1, 2, 64, 64, device="cuda", dtype=dtype)
     if meta.dropout:
         kw.update(dropout_p=0.5, philox_seed=1)
+    if meta.alibi:
+        kw["alibi_slopes"] = torch.full((2,), 0.25, device="cuda", dtype=torch.float32)
     return (q, k, v, o, 1, 64), kw

@@ -14,6 +14,8 @@ the case xfails with the reason instead of asserting.
 """
 
 import hashlib
+import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -47,6 +49,35 @@ def _control(backend, arch, meta, tmp_path, monkeypatch, **kw):
     if not _same_isa(a, b):
         pytest.xfail("C13: backend nondeterminism (the A/A control differs)")
     return a
+
+
+# ---------------------------------------------------------------------------
+# ABI-07: the optional inputs, folded away, leave the forward as it was
+# ---------------------------------------------------------------------------
+
+_BASELINE = json.loads((Path(__file__).parent / "data" / "fwd_isa_baseline.json").read_text())
+
+
+@pytest.mark.parametrize("name", sorted(_BASELINE["builds"]))
+def test_folded_features_leave_abi_and_isa(backend, arch, tmp_path, monkeypatch, name):
+    """ABI-07: with ALiBi, sink, split-K, paged and XCD swizzle all off the kernarg block and the **instruction stream**
+    equal what the forward compiled to before those features existed (`data/fwd_isa_baseline.json`, recorded at the
+    forward-only commit). A byte-identity gate needs the same-input control (C13): if the rebuild itself differs the
+    case xfails; if the toolchain is not the one the baseline was recorded with it skips."""
+    import flydsl
+
+    if flydsl.__version__ != _BASELINE["flydsl"]:
+        pytest.skip(f"the baseline was recorded with flydsl {_BASELINE['flydsl']}, this is {flydsl.__version__}")
+    want = _BASELINE["builds"][name]
+    meta = meta_of(**_BASELINE["configs"][name])
+    d = _dump(backend, arch, meta, tmp_path, monkeypatch)
+    assert d.metadata[".kernarg_segment_size"] == want["kernarg"] and d.hidden_args == []
+    sha, count = isa_tools.isa_fingerprint(d.isa)
+    if sha != want["sha256"]:
+        control = _dump(backend, arch, meta, tmp_path, monkeypatch)
+        if isa_tools.isa_fingerprint(control.isa)[0] != sha:
+            pytest.xfail("C13: backend nondeterminism (the A/A control differs)")
+        pytest.fail(f"{name}: the folded ISA moved: {count} instructions against the baseline's {want['instructions']}")
 
 
 # ---------------------------------------------------------------------------

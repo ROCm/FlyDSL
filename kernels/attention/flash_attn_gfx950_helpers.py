@@ -55,6 +55,7 @@ from dataclasses import replace
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr, rocdl
+from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
@@ -1087,6 +1088,23 @@ class ParityKernelContext(_ParityKvStaging, dualwave.DualwaveKernelContext):
             # (MI355X, bf16, bit-identical outputs): +1.4% to +40% at S=4096, +14% to +34% at S=16384.
             self.init_varlen_causal_lpt_order()
 
+    def init_alibi(self, alibi_slopes, alibi_stride_b):
+        """Load this workgroup's ALiBi slope once, and the sequence-length offset the bias is measured from.
+
+        The slope is indexed by the *sequence* (`seq_idx_i32`, the grid's z) and the q head, as
+        `seq * alibi_stride_b + head`: `alibi_stride_b` is 0 for a `[H]` table and the row pitch for `[B, H]`. It
+        arrives pre-multiplied by `-log2(e)` so the per-element term is one fused multiply-add in the base-2 score
+        domain. The offset is `seqlen_k - seqlen_q` per sequence (bottom-right aligned) and is read from the
+        lengths, not from `delta_i32`, which a window build re-points at its right bound.
+        """
+        slopes = fx.logical_divide(fx.rocdl.make_buffer_tensor(alibi_slopes), fx.make_layout(1, 1))
+        atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+        frag = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+        index = fx.Int32(self.seq_idx_i32) * fx.Int32(alibi_stride_b) + fx.Int32(self.q_head_idx)
+        fx.copy(atom, fx.slice(slopes, (None, index)), frag)
+        self.alibi_neg_slope = Vec(frag.load(), (1,), fx.Float32)[0] * fx.Float32(-dualwave._LOG2E)
+        self.alibi_delta_i32 = self.seqlen_kv_i32 - fx.Int32(self.seqlen_q_v)
+
     def init_philox(self):
         """Seed, counter and this workgroup's plane origin. Prologue-only.
 
@@ -1821,6 +1839,28 @@ class ParitySoftmaxHelper(dualwave.DualwaveSoftmaxHelper):
                     with fx.fastmath(MASK_SAFE_FASTMATH):
                         values[elem0 + j] = values[elem0 + j] + b * log2e
 
+    def _add_alibi_inplace(self, v_s, tile_idx):
+        """`S += -slope * |q_row + (Sk - Sq) - col|`, in place, for one KV tile.
+
+        In the same place as the bias and for the same reasons: after the scale (the term is in the base-2 domain
+        already, see `init_alibi`) and before the masks, so a column past `seqlen_k` stays `-inf` rather than
+        becoming `-inf + alibi`. The columns come from the score layout table the bias read uses, so the two agree
+        on which element is which column by construction. No memory is read: the term is computed from the row and
+        the column.
+        """
+        traits = self.traits
+        ctx = self.ctx_ref
+        s_lo, s_hi = v_s
+        lane_n_off = 8 if traits.KV_VECTORIZED else 4
+        col_base = fx.Int32(fx.Index(tile_idx * traits.BLOCK_N) + self.lane_div_32 * fx.Index(lane_n_off))
+        rel_base = fx.Int32(ctx.q_row) + ctx.alibi_delta_i32 - col_base
+        for half, values in ((0, s_lo), (1, s_hi)):
+            for elem0, col_off, width in _score_column_runs(traits.KV_VECTORIZED):
+                for j in range_constexpr(width):
+                    rel = fx.Float32(rel_base - fx.Int32(col_off + half * 32 + j))
+                    with fx.fastmath(MASK_SAFE_FASTMATH):
+                        values[elem0 + j] = fmath.absf(rel) * ctx.alibi_neg_slope + values[elem0 + j]
+
     def bias_to_lists(self, v_s, tile_idx):
         """`v_s_vec_to_lists`, with the bias folded in on the way through.
 
@@ -1831,6 +1871,8 @@ class ParitySoftmaxHelper(dualwave.DualwaveSoftmaxHelper):
         exactly once.
         """
         lists = self.v_s_vec_to_lists(v_s)
+        if const_expr(self.traits.ALIBI):
+            self._add_alibi_inplace(lists, tile_idx)
         if const_expr(self.traits.BIAS_TYPE):
             self._add_bias_inplace(lists, tile_idx)
         return lists
@@ -1847,12 +1889,15 @@ class ParitySoftmaxHelper(dualwave.DualwaveSoftmaxHelper):
         the *wide* body work unchanged: it masks every tile it visits, so this
         single override is its whole bias path.
         """
-        if const_expr(self.traits.BIAS_TYPE):
+        if const_expr(self.traits.BIAS_TYPE or self.traits.ALIBI):
             lists = self.v_s_vec_to_lists(v_s)
-            # `narrow_tail`: these are the tiles that can hold column
-            # `seqlen_k-1`, and a wide read there loses it. See
-            # `_add_bias_inplace`.
-            self._add_bias_inplace(lists, tile_idx, narrow_tail=True)
+            if const_expr(self.traits.ALIBI):
+                self._add_alibi_inplace(lists, tile_idx)
+            if const_expr(self.traits.BIAS_TYPE):
+                # `narrow_tail`: these are the tiles that can hold column
+                # `seqlen_k-1`, and a wide read there loses it. See
+                # `_add_bias_inplace`.
+                self._add_bias_inplace(lists, tile_idx, narrow_tail=True)
             v_s = dualwave._score_lists_to_vecs(lists)
         if const_expr(self.ctx_ref.KV_TAIL_FREE):
             return v_s

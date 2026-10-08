@@ -1466,7 +1466,6 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
     traits = config.fwd_traits(meta, knobs)
     # Optional inputs the forward body carries but whose host side and tests land separately.
     for name, wanted in (
-        ("meta.alibi", meta.alibi),
         ("meta.sink", meta.sink),
         ("meta.paged", meta.paged),
         ("XCD_SWIZZLE", knobs.XCD_SWIZZLE),
@@ -1531,6 +1530,8 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
     WS_ANN = fx.Tensor if WS_RUNTIME else fx.Constexpr
     BT_ANN = fx.Tensor if BT_RUNTIME else fx.Constexpr
     BTS_ANN = fx.Int32 if BT_RUNTIME else fx.Constexpr
+    ALIBI_ANN = fx.Tensor if traits.ALIBI else fx.Constexpr
+    ALIBI_STRIDE_ANN = fx.Int32 if traits.ALIBI else fx.Constexpr
     # Leading_upper_snake_case parameters (AOTriton's `constexpr_or_i32`): ONE parameter whose annotation is chosen per build,
     # `fx.Constexpr` when the governing knob is on (a JIT build bakes the value) and `fx.Int32` otherwise, so every AOT
     # build, which has the knobs at their defaults, still has a real kernarg.
@@ -1585,6 +1586,8 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         stride_b_head: fx.Int64,
         stride_b_seq_q: fx.Int64,
         block_table_stride: BTS_ANN,
+        alibi_slopes: ALIBI_ANN,
+        alibi_stride_b: ALIBI_STRIDE_ANN,
     ):
         # The six tensor operands arrive as bare pointers -- see `wire_ptr` in
         # `fmha_dualwave_gfx950.py` for why, and `helpers.wire_view` for why they are
@@ -1675,6 +1678,8 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         ctx.init_descriptors()
         ctx.init_workspace()
         ctx.init_philox()
+        if const_expr(traits.ALIBI):
+            ctx.init_alibi(alibi_slopes, alibi_stride_b)
         ctx.init_atoms_and_lds_ptrs()
         ctx.init_dma_thread_offsets()
         ctx.init_tile_bounds()
@@ -2250,6 +2255,8 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         stride_b_head: fx.Int64,
         stride_b_seq_q: fx.Int64,
         block_table_stride: BTS_ANN,
+        alibi_slopes: ALIBI_ANN,
+        alibi_stride_b: ALIBI_STRIDE_ANN,
         stream: fx.Stream = fx.Stream(None),
     ):
         # Make the build configuration visible to the JIT cache key.
@@ -2324,6 +2331,8 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
             stride_b_head,
             stride_b_seq_q,
             block_table_stride,
+            alibi_slopes,
+            alibi_stride_b,
             value_attrs={
                 "rocdl.waves_per_eu": traits.WAVES_PER_EU,
                 "rocdl.flat_work_group_size": f"{traits.BLOCK_SIZE},{traits.BLOCK_SIZE}",
@@ -2358,6 +2367,7 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         varlen=None,
         num_seqlens=0,
         bias=None,
+        alibi_slopes=None,
         dropout_p=None,
         philox_seed=None,
         philox_offset1=None,
@@ -2433,6 +2443,40 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
                 raise ValueError(f"a (batch, head) slab of the bias {tuple(bias.shape)} {reason}")
         bias_t = bias if bias is not None else O
         bias_st = tuple(int(x) for x in bias.stride()[:3]) if bias is not None else (0, 0, 0)
+
+        # ALiBi slopes: fp32, `[num_heads]` shared by every sequence or `[num_sequences, num_heads]`; the kernel
+        # indexes `sequence * alibi_stride_b + head`. A build without ALiBi must not be handed slopes, for the same
+        # reason it must not be handed a bias.
+        if traits.ALIBI:
+            if alibi_slopes is None:
+                raise ValueError(
+                    "this build has alibi=True and requires an fp32 `alibi_slopes` of shape (H,) or (B, H)"
+                )
+            if (
+                not alibi_slopes.is_floating_point()
+                or alibi_slopes.element_size() != 4
+                or alibi_slopes.dim() not in (1, 2)
+            ):
+                raise ValueError(
+                    f"alibi_slopes must be fp32 of shape (H,) or (B, H); got {alibi_slopes.dtype} {tuple(alibi_slopes.shape)}"
+                )
+            if alibi_slopes.shape[-1] != num_head_q:
+                raise ValueError(f"alibi_slopes has {alibi_slopes.shape[-1]} heads; Q has {num_head_q}")
+            if alibi_slopes.stride(-1) != 1:
+                raise ValueError("alibi_slopes needs a contiguous head axis")
+            n_sequences = int(num_seqlens) or int(batch_size)
+            if alibi_slopes.dim() == 2 and alibi_slopes.shape[0] != n_sequences:
+                raise ValueError(f"alibi_slopes has {alibi_slopes.shape[0]} rows; the call has {n_sequences} sequences")
+            alibi_stride_arg = int(alibi_slopes.stride(0)) if alibi_slopes.dim() == 2 else 0
+            # Flat, like the block table: the kernel computes `sequence * alibi_stride_b + head` as a linear index, and a
+            # 2D tensor's layout would decompose that column-major. (It also keys the compiled signature, so a `[B, H]`
+            # call after a `[H]` one would silently reuse the rank-1 build.)
+            span = (alibi_slopes.shape[0] - 1) * alibi_stride_arg + alibi_slopes.shape[-1] if alibi_slopes.dim() == 2 else alibi_slopes.shape[0]
+            alibi_arg = alibi_slopes.as_strided((span,), (1,))
+        else:
+            if alibi_slopes is not None:
+                raise ValueError("this build was not compiled for ALiBi; pass alibi=True in FmhaInputMetadata")
+            alibi_arg, alibi_stride_arg = 0, 0
 
         # `abi.dropout_args` turns the probability into the i32 threshold the raw random is compared against and
         # the `1/(1-p)` survivor scale, both once per call rather than per element, and keeps the counter as the
@@ -2524,6 +2568,8 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
             *st,
             *bias_st,
             0 if block_table_stride is None else block_table_stride,
+            alibi_arg,
+            alibi_stride_arg,
         ), (stream, dp_keepalive)
 
     def launch(*args, **kwargs):

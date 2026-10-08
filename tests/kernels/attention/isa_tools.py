@@ -8,6 +8,7 @@ A dump is made by compiling a **fresh** builder (never a memoised one: the in-pr
 `FLYDSL_DUMP_IR` pointing at a temp directory. Nothing is launched.
 """
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -103,6 +104,13 @@ def _regs(token):
         return set(range(int(m[1]), int(m[2]) + 1))
     m = re.match(r"v(\d+)$", token)
     return {int(m[1])} if m else set()
+
+
+def isa_fingerprint(isa):
+    """`(sha256, instruction count)` of an assembly listing's instruction stream: comments, labels and directives are
+    stripped, so the digest depends on the code and on nothing else (no temp path, no kernel-name suffix)."""
+    lines = [f"{m} {','.join(ops)}" for m, ops in instructions(isa)]
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest(), len(lines)
 
 
 def instructions(isa):
