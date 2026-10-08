@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-08T06:51:51Z",
+ "updated": "2026-10-08T08:40:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 37748861396,
+   "pr": 1234,
+   "commit": "efcb8f3e801c6ae113ae76713dca7bd01802f506",
+   "branch": "dsv4_megakernel",
+   "event": "pull_request",
+   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37748861396",
+   "created_at": "2026-10-08T08:17:29Z",
+   "updated_at": "2026-10-08T08:20:04Z",
+   "actor": "amd-weisun",
+   "jobs": []
+  },
   {
    "run_id": 37738606436,
    "pr": 1238,
@@ -10,13 +25,44 @@
    "branch": "migrate-kernels-tiled-tdm",
    "event": "pull_request",
    "title": "Migrate kernels tiled tdm",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37738606436",
    "created_at": "2026-10-08T06:37:11Z",
-   "updated_at": "2026-10-08T06:39:58Z",
+   "updated_at": "2026-10-08T08:38:00Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-08T07:05:43Z",
+     "completed_at": "2026-10-08T07:24:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37738606436/job/113192248147"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-08T07:05:54Z",
+     "completed_at": "2026-10-08T08:09:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37738606436/job/113192248209",
+     "machine": "cv350-1e707-c03-2",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-08T07:48:46Z",
+     "completed_at": "2026-10-08T08:37:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37738606436/job/113192248226"
+    }
+   ]
   },
   {
    "run_id": 37710796843,
@@ -338,7 +384,7 @@
   },
   {
    "run_id": 37650182672,
-   "pr": 1234,
+   "pr": null,
    "commit": "8fa03715b082e8bb07a24b6468f2d19af8480f58",
    "branch": "dsv4_megakernel",
    "event": "pull_request",
@@ -1580,21 +1626,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37410750718",
    "created_at": "2026-10-06T03:48:57Z",
    "updated_at": "2026-10-06T03:48:57Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37410636344,
-   "pr": null,
-   "commit": "dcef1d9e24a6b462571de7cd3f8e52377fa45f4b",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37410636344",
-   "created_at": "2026-10-06T03:47:27Z",
-   "updated_at": "2026-10-06T03:47:27Z",
    "actor": "dimitri91209",
    "jobs": []
   }
