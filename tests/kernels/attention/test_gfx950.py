@@ -21,10 +21,17 @@ from tests.kernels.attention.attn_testlib import (
     DTYPES,
     WINDOW_BOTRIGHT,
     alloc,
+    bwd_check,
+    bwd_reference,
+    check_floor,
+    dkdv_family_pins,
     fwd_check,
     meta_of,
     randn,
+    relrms,
+    run_bwd,
     run_fwd,
+    sdpa_scale,
     seeded,
 )
 
@@ -434,3 +441,86 @@ def test_hdim32_one_accumulator_builds(fwd_build):
         fn = fwd_build(meta_of(dtype_str=dtype_str, head_dim=32, window=True))
         assert fn.traits.D_CHUNKS == 1
         fwd_check(fn, b=1, hq=2, sq=200, d=32, dtype=DTYPES[dtype_str], window=BR, ctx=f"hdim32 {dtype_str}")
+
+
+# ---------------------------------------------------------------------------
+# Backward hazards and determinism: BWD-23..26
+# ---------------------------------------------------------------------------
+
+
+def _identity_problem(s=128, h=2, seed=40):
+    """`V = I`, so the forward's output reveals the dropout mask it used (`head_dim == seqlen_k`)."""
+    gen = seeded(seed)
+    q, k, do = (randn(1, h, s, s, DTYPES["bf16"], gen=gen) for _ in range(3))
+    v = torch.eye(s, device="cuda", dtype=DTYPES["bf16"]).expand(1, h, s, s).contiguous()
+    return q, k, v, do
+
+
+@pytest.mark.parametrize("launches", [3, pytest.param(10, marks=pytest.mark.large_shape)])
+def test_hazard_repro_dkdv_bd128_m16(bwd_build, launches):
+    """K45: the exact repro of the 16-row dK/dV hazard: BLOCK_DMODEL 128, bf16, non-causal, dropout and bias, unpadded. A
+    wait state the toolchain did not insert let one wave read stale accumulator registers in dK columns 16..31, differently
+    on every launch. So: N launches are bitwise identical, and those columns are inside the floor."""
+    q, k, v, do = _identity_problem()
+    bias = randn(1, 2, 128, 128, DTYPES["bf16"], gen=seeded(41)).contiguous()
+    meta = meta_of(head_dim=128, bias=True, dropout=True)
+    builds = bwd_build(meta, dkdv=dkdv_family_pins(128, 16))
+    outs = [run_bwd(builds, q, k, v, do, bias=bias, p_drop=0.25, seed=5, which=("dkdv",)) for _ in range(launches)]
+    for other in outs[1:]:
+        assert torch.equal(outs[0]["dk"], other["dk"]) and torch.equal(outs[0]["dv"], other["dv"]), "launches differ"
+    keep = outs[0]["o"] != 0
+    sm = sdpa_scale(128)
+
+    def ref(**kw):
+        return bwd_reference(q, k, v, do, sm, bias=bias, keep=keep, p_drop=0.25, **kw)
+
+    exact = ref()[1][..., 16:32]
+    floor = max(relrms(ref(round_to=DTYPES["bf16"], ftz=ftz)[1][..., 16:32], exact) for ftz in (False, True))
+    check_floor("dk[16:32]", outs[0]["dk"][..., 16:32], exact, floor, "K45 columns")
+
+
+def test_hazard_repro_dq_bd64_column_uniformity(bwd_build):
+    """K45: dQ at BLOCK_DMODEL 64, unpadded, bf16: the first 32 columns come out as accurate as the rest (a missing wait
+    state once gave 39% relative L2 error in columns [0, 32) against 7% in the rest)."""
+    out = bwd_check(bwd_build(meta_of(head_dim=64)), b=1, hq=2, sq=256, d=64, dtype=DTYPES["bf16"], ctx="K45 dq")
+    exact = out["exact"][0]
+    lo = relrms(out["dq"][..., :32], exact[..., :32])
+    hi = relrms(out["dq"][..., 32:], exact[..., 32:])
+    assert lo <= 1.5 * hi, f"dQ columns [0, 32) are {lo / hi:.1f}x worse than the rest"
+
+
+@pytest.mark.parametrize("rows", [32, 16])
+@pytest.mark.parametrize("hdim", [128, 192])
+def test_bwd_run_to_run_deterministic(bwd_build, hdim, rows):
+    """K42/K44: the backward is bitwise deterministic across launches (no atomics, no races: dQ, dK and dV each have one
+    writer per element)."""
+    pins = dkdv_family_pins(hdim, rows)
+    if pins is None:
+        pytest.skip("no legal dK/dV geometry for this family at this width")
+    meta = meta_of(head_dim=hdim, window=True)
+    builds = bwd_build(meta, dq=dict(MFMA_ROWS=rows), dkdv=pins)
+    gen = seeded(hdim)
+    q, k, v, do = (randn(1, 2, 200, hdim, DTYPES["bf16"], gen=gen) for _ in range(4))
+    first = run_bwd(builds, q, k, v, do, window=BR)
+    for _ in range(2):
+        again = run_bwd(builds, q, k, v, do, window=BR, o_lse=(first["o"], first["lse"]))
+        for name in ("dq", "dk", "dv"):
+            assert torch.equal(first[name], again[name]), f"{name} differs between launches"
+
+
+@pytest.mark.large_shape
+@pytest.mark.parametrize("rows", [32, 16])
+def test_dq_256_dropout_is_deterministic(bwd_build, rows):
+    """K47: dQ at 256 with dropout, the geometry whose 32-row build raced (a register file five short, LDS-DMA address
+    operands spilled into AGPRs and clobbered): five launches bitwise identical with the 32-row pin and with the default.
+    """
+    meta = meta_of(head_dim=256, dropout=True)
+    builds = bwd_build(meta, dq=dict(MFMA_ROWS=rows))
+    gen = seeded(25)
+    b, h, sq, sk = 3, 5, 2048, 8192
+    q, do = (randn(b, h, sq, 256, DTYPES["bf16"], gen=gen) for _ in range(2))
+    k, v = (randn(b, h, sk, 256, DTYPES["bf16"], gen=gen) for _ in range(2))
+    first = run_bwd(builds, q, k, v, do, p_drop=0.3, seed=7, which=("dq",))
+    for _ in range(4):
+        again = run_bwd(builds, q, k, v, do, p_drop=0.3, seed=7, which=("dq",), o_lse=(first["o"], first["lse"]))
+        assert torch.equal(first["dq"], again["dq"])
