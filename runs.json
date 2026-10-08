@@ -1,26 +1,41 @@
 {
  "schema": 1,
- "updated": "2026-10-08T14:05:10Z",
+ "updated": "2026-10-08T14:10:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37789092297,
+   "run_id": 37789934616,
    "pr": 1234,
+   "commit": "833e8c62dcbe4ff86b0ebc83b1e265580be81dde",
+   "branch": "dsv4_megakernel",
+   "event": "pull_request",
+   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37789934616",
+   "created_at": "2026-10-08T14:07:48Z",
+   "updated_at": "2026-10-08T14:09:00Z",
+   "actor": "amd-weisun",
+   "jobs": []
+  },
+  {
+   "run_id": 37789092297,
+   "pr": null,
    "commit": "22d93824aee8766371f0035c15571bb84c5f6dcf",
    "branch": "dsv4_megakernel",
    "event": "pull_request",
    "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37789092297",
    "created_at": "2026-10-08T14:01:40Z",
-   "updated_at": "2026-10-08T14:03:41Z",
+   "updated_at": "2026-10-08T14:08:32Z",
    "actor": "amd-weisun",
    "jobs": []
   },
   {
    "run_id": 37789090604,
-   "pr": 1234,
+   "pr": null,
    "commit": "22d93824aee8766371f0035c15571bb84c5f6dcf",
    "branch": "dsv4_megakernel",
    "event": "pull_request",
@@ -1694,21 +1709,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37542121979/job/112546931956"
     }
    ]
-  },
-  {
-   "run_id": 37540065966,
-   "pr": null,
-   "commit": "4f54dd9712b80f44fc46f0b08eea2f95ffcc69ab",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37540065966",
-   "created_at": "2026-10-06T22:21:31Z",
-   "updated_at": "2026-10-06T22:21:31Z",
-   "actor": "dimitri91209",
-   "jobs": []
   }
  ]
 }
