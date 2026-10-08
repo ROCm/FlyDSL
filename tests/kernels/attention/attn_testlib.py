@@ -209,6 +209,7 @@ def check_lse(got, ref_lse, live_rows, ctx=""):
 def run_fwd(fn, q, k, v, o, *, lse=None, scale=None, window=None, bias=None, p_drop=None, seed=0, offset=0, **kw):
     """Launch a built forward. Shapes and strides are read off the tensors; `seqlen_q/k` default to their extents."""
     b, _, sq, _ = q.shape
+    seqlen_k = kw.pop("seqlen_k", k.shape[2])
     extra = {}
     if p_drop is not None:
         extra.update(dropout_p=p_drop, philox_seed=seed, philox_offset2=offset)
@@ -219,7 +220,7 @@ def run_fwd(fn, q, k, v, o, *, lse=None, scale=None, window=None, bias=None, p_d
         o,
         b,
         sq,
-        seqlen_k=k.shape[2],
+        seqlen_k=seqlen_k,
         scale=scale,
         lse=lse,
         window=window,
@@ -270,6 +271,7 @@ def fwd_check(
     qkv=None,
     alibi_slopes=None,
     sink=None,
+    paged=None,
     **launch_kw,
 ):
     """Run one forward and gate it against the fp64 floor (G-floor); returns the pieces for further checks.
@@ -296,7 +298,13 @@ def fwd_check(
         launch_kw["alibi_slopes"] = alibi_slopes
     if sink is not None:
         launch_kw["sink"] = sink
-    run_fwd(fn, q, k, v, o, lse=lse, scale=scale, window=window, bias=bias, **launch_kw)
+    if paged is not None:
+        # The kernel reads the page pool (a random placement of the logical K/V), the reference the logical tensors.
+        cache = PagedCache.from_logical(k, v, paged, gen=gen)
+        launch_kw.update(seqlen_k=sk, block_table=cache.block_table)
+        run_fwd(fn, q, cache.k, cache.v, o, lse=lse, scale=scale, window=window, bias=bias, **launch_kw)
+    else:
+        run_fwd(fn, q, k, v, o, lse=lse, scale=scale, window=window, bias=bias, **launch_kw)
 
     mask = window_mask(sq, sk, *window) if window is not None else None
     ref_bias = bias
@@ -318,6 +326,81 @@ def fwd_check(
         n = int((o.permute(0, 1, 2, 3)[dead] != 0).sum())
         assert n == 0, f"{ctx}: {n} nonzero elements in fully masked O rows"
     return dict(q=q, k=k, v=v, o=o, lse=lse, exact_o=exact_o, exact_lse=exact_lse, floor=floor, ref=ref)
+
+
+# ---------------------------------------------------------------------------
+# Paged KV
+# ---------------------------------------------------------------------------
+
+PAGE = 64
+
+
+class PagedCache:
+    """A page pool, in either layout, holding logical K/V placed at random physical pages, and the block table.
+
+    Slots of the pool that no sequence owns, and the tail of a last page past `seqlen_k`, hold **finite garbage** (a
+    stale cache holds old keys, not NaN), so a kernel that reads them is wrong in a way the reference sees, without the
+    test turning every masked read into NaN arithmetic. `garbage` scales it.
+    """
+
+    def __init__(self, k, v, block_table, k_logical, v_logical, layout):
+        self.k, self.v, self.block_table, self.layout = k, v, block_table, layout
+        self.k_logical, self.v_logical = k_logical, v_logical
+
+    @classmethod
+    def from_logical(cls, k, v, layout, gen=None, garbage=1.0):
+        b, hk, s, d = k.shape
+        gen = gen or seeded(0)
+        pages = -(-s // PAGE)
+        total = b * pages + 3  # a few unowned pages
+        dtype = k.dtype
+        ids = torch.randperm(total, generator=gen, device="cuda").to(torch.int32)
+        table = ids[: b * pages].view(b, pages).contiguous()
+        pool = [torch.randn(total, PAGE, hk, d, device="cuda", generator=gen).mul_(garbage).to(dtype) for _ in range(2)]
+        for bi in range(b):
+            for j in range(pages):
+                n = min(PAGE, s - j * PAGE)
+                pid = int(table[bi, j])
+                pool[0][pid, :n] = k[bi, :, j * PAGE : j * PAGE + n].permute(1, 0, 2)
+                pool[1][pid, :n] = v[bi, :, j * PAGE : j * PAGE + n].permute(1, 0, 2)
+        kc, vc = pool
+        if layout == "vectorized":
+            kc = kc.view(-1, PAGE, hk, d // 8, 8).permute(0, 2, 3, 1, 4).contiguous()
+            vc = vc.view(-1, PAGE // 8, 8, hk, d).permute(0, 3, 1, 4, 2).contiguous()
+        return cls(kc, vc, table, k, v, layout)
+
+    @classmethod
+    def from_sequences(cls, ks, vs, layout, gen=None):
+        """One page pool shared by several sequences of **different** lengths (each `(1, Hkv, len, D)`), and a block table
+        with a row per sequence, padded with page 0 past each sequence's last page."""
+        gen = gen or seeded(0)
+        hk, d = ks[0].shape[1], ks[0].shape[3]
+        pages = [-(-k.shape[2] // PAGE) for k in ks]
+        total = sum(pages) + 3
+        ids = torch.randperm(total, generator=gen, device="cuda").to(torch.int32)
+        table = torch.zeros(len(ks), max(pages), device="cuda", dtype=torch.int32)
+        pool = [torch.randn(total, PAGE, hk, d, device="cuda", generator=gen).to(ks[0].dtype) for _ in range(2)]
+        at = 0
+        for z, (k, v) in enumerate(zip(ks, vs)):
+            for j in range(pages[z]):
+                n = min(PAGE, k.shape[2] - j * PAGE)
+                pid = int(ids[at])
+                at += 1
+                table[z, j] = pid
+                pool[0][pid, :n] = k[0, :, j * PAGE : j * PAGE + n].permute(1, 0, 2)
+                pool[1][pid, :n] = v[0, :, j * PAGE : j * PAGE + n].permute(1, 0, 2)
+        kc, vc = pool
+        if layout == "vectorized":
+            kc = kc.view(-1, PAGE, hk, d // 8, 8).permute(0, 2, 3, 1, 4).contiguous()
+            vc = vc.view(-1, PAGE // 8, 8, hk, d).permute(0, 3, 1, 4, 2).contiguous()
+        return cls(kc, vc, table, None, None, layout)
+
+    @classmethod
+    def random(cls, b, hk, s, d, dtype, layout, seed=0):
+        gen = seeded(seed)
+        k = randn(b, hk, s, d, dtype, gen=gen)
+        v = randn(b, hk, s, d, dtype, gen=gen)
+        return cls.from_logical(k, v, layout, gen=gen)
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +531,9 @@ class VarlenCase:
         )
         torch.cuda.synchronize()
 
-    def check(self, fn, *, window=None, scale=None, ctx="", mult=FLOOR_MULT, alibi_slopes=None, sink=None, bias=None, **kw):
+    def check(
+        self, fn, *, window=None, scale=None, ctx="", mult=FLOOR_MULT, alibi_slopes=None, sink=None, bias=None, **kw
+    ):
         """Launch and gate every sequence against its own fp64 reference (O to the floor, LSE to fp32). `bias` is
         `(batch, H, total_q or max_q, cols >= max_k)` following Q's layout: a sequence's rows are its Q rows and its live
         columns are the first `seqlen_k` of them."""
@@ -509,4 +594,9 @@ def compile_inputs(meta, d=None, dtype=None):
         kw["alibi_slopes"] = torch.full((2,), 0.25, device="cuda", dtype=torch.float32)
     if meta.sink:
         kw["sink"] = torch.zeros(2, device="cuda", dtype=torch.float32)
+    if meta.paged:
+        cache = PagedCache.random(1, 2, 64, d, dtype, meta.kv_cache_layout)
+        args = (q, cache.k, cache.v, o, 1, 64)
+        kw.update(seqlen_k=64, block_table=cache.block_table)
+        return args, kw
     return (q, k, v, o, 1, 64), kw

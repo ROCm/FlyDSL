@@ -54,6 +54,7 @@ from dataclasses import replace
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import fly, llvm
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
@@ -786,9 +787,28 @@ class _ParityKvStaging:
         return rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(addr)))
 
     def k_dma_base(self, buf_id, d):
+        if const_expr(self.traits.KV_VECTORIZED):
+            # aiter's vectorized cache stages by octet, not by line: the production m0 formula is that layout's own.
+            return dualwave._k_dma_m0_base(
+                self.traits,
+                buf_id,
+                d,
+                lane_in_warp=self.lane_in_warp,
+                lds_kv_base_idx=self.lds_kv_base_idx,
+                wave_id_uni=self.wave_id_uni,
+            )
         return self._dma_m0(dualwave._k_buf_base(self.traits, buf_id), self.traits.SMEM_K_LINE_STRIDE, d)
 
     def v_dma_base(self, buf_id, d):
+        if const_expr(self.traits.KV_VECTORIZED):
+            return dualwave._v_dma_m0_base(
+                self.traits,
+                buf_id,
+                d,
+                lane_in_warp=self.lane_in_warp,
+                lds_kv_base_idx=self.lds_kv_base_idx,
+                wave_id_uni=self.wave_id_uni,
+            )
         return self._dma_m0(dualwave._v_buf_base(self.traits, buf_id), self.traits.SMEM_V_LINE_STRIDE, d)
 
     # Which D stage the next DMA reads from global. Set by the loader
@@ -1424,6 +1444,47 @@ class ParityKernelContext(_ParityKvStaging, dualwave.DualwaveKernelContext):
                 self.hdim_vo,
                 batch_idx=self.kv_batch_idx,
             )
+
+
+class ParityPageIdLoader(dualwave.DualwavePageIdLoader):
+    """Page ids from the block table, one row per **sequence**.
+
+    The production loader reads the row at `batch_idx`, which is the batch *slice* a sequence lives in: for a packed
+    (stacked) varlen Q that is 0 for every sequence, so all of them would read the first sequence's pages. The row is the
+    grid's sequence (`seq_idx_i32`, the raw `z`), which is the batch index for a dense call and the sequence number for a
+    packed one. Everything else is the production body.
+    """
+
+    def load_block_table_to_lds(self):
+        traits = self.traits
+        tid = self.tid
+        split_t0 = self.split_t0
+        split_t_end = self.split_t_end
+        num_kv_tiles = self.num_kv_tiles
+        table_row = fx.Index(self.seq_idx_i32)
+        block_table_stride_v = self.block_table_stride_v
+        lds_bt_base_ptr = self.lds_bt_base_ptr
+        bt_div = self.bt_div
+        bt_atom = self.bt_atom
+        bt_v1i32 = self.bt_v1i32
+
+        @flyc.jit
+        def _load_block_table_to_lds():
+            segment_tiles = split_t_end - split_t0
+            for pass_id in range_constexpr(traits.PAGED_BT_LDS_SIZE // traits.BLOCK_SIZE):
+                local_tile = tid + fx.Index(pass_id * traits.BLOCK_SIZE)
+                if local_tile < segment_tiles:
+                    tile_idx = split_t0 + local_tile
+                    byte_off = as_mlir_value(fx.Int32(local_tile * fx.Index(4)))
+                    dst = buffer_ops.get_element_ptr(lds_bt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
+                    llvm.StoreOp(as_mlir_value(fx.Int32(0)), dst)
+                    if tile_idx < num_kv_tiles:
+                        row_idx = table_row * block_table_stride_v + tile_idx
+                        v = fly.copy_atom_call_ssa([bt_v1i32], bt_atom, fx.slice(bt_div, (None, fx.Int32(row_idx))))
+                        page_id_i32 = as_mlir_value(fx.Int32(Vec(v, (1,), fx.Int32)[0]))
+                        llvm.StoreOp(page_id_i32, dst)
+
+        _load_block_table_to_lds()
 
 
 class ParityQLoader(dualwave.DualwaveQLoader):

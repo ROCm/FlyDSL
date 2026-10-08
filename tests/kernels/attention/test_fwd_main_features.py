@@ -117,7 +117,9 @@ def test_alibi_per_sequence_table_as_the_first_call(backend, arch):
     first call's compile). A fresh builder, so no earlier test has made that call."""
     meta = meta_of(head_dim=64, alibi=True)
     fn = backend.build_fwd(meta, backend.fwd_knobs(arch).resolve(meta))
-    fwd_check(fn, b=2, hq=4, sq=130, sk=256, d=64, dtype=BF16, alibi_slopes=slopes_of(2, 4, True), ctx="first call [B, H]")
+    fwd_check(
+        fn, b=2, hq=4, sq=130, sk=256, d=64, dtype=BF16, alibi_slopes=slopes_of(2, 4, True), ctx="first call [B, H]"
+    )
 
 
 def test_alibi_and_bias_combine(fwd_build):
@@ -178,11 +180,12 @@ def calibrated_sink(q, k, hq, window, share=0.5):
     return (mean + torch.log(torch.tensor(share / (1.0 - share), dtype=torch.float64, device=mean.device))).float()
 
 
-def sink_inputs(b, hq, hk, s, d, dtype, window, share, seed=11):
+def sink_inputs(b, hq, hk, s, d, dtype, window, share, seed=11, sk=None):
     gen = seeded(seed)
+    sk = s if sk is None else sk
     q = randn(b, hq, s, d, dtype, gen=gen)
-    k = randn(b, hk, s, d, dtype, gen=gen)
-    v = randn(b, hk, s, d, dtype, gen=gen)
+    k = randn(b, hk, sk, d, dtype, gen=gen)
+    v = randn(b, hk, sk, d, dtype, gen=gen)
     return (q, k, v), calibrated_sink(q, k.repeat_interleave(hq // hk, dim=1), hq, window, share)
 
 
@@ -270,3 +273,205 @@ def test_sink_host_checks(fwd_build):
     for name, (fn, sink, msg) in bad.items():
         with pytest.raises(ValueError, match=msg):
             run_fwd(fn, q, k, v, o, **({} if sink is None else dict(sink=sink)))
+
+
+# ---------------------------------------------------------------------------
+# Paged KV (metadata `paged`, `kv_cache_layout`): K/V are a page pool of 64-token pages, a block table maps (sequence,
+# page) to a physical page. Dense: every sequence has the same `seqlen_k`.
+# ---------------------------------------------------------------------------
+
+LAYOUTS = ["linear", "vectorized"]
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize(
+    "shape",
+    [(2, 8, 4, 512, 512, 128), (1, 4, 4, 130, 300, 64), (2, 4, 2, 300, 130, 128)],
+    ids=["gqa_d128", "cross_sq_lt_sk", "cross_sq_gt_sk"],
+)
+def test_paged_dense(fwd_build, layout, causal, shape):
+    """Dense attention over a randomly placed page pool equals the same attention over the logical K/V (fp64 floor),
+    in both cache layouts, MHA/GQA, with a ragged last page and `Sq != Sk`."""
+    b, hq, hk, sq, sk, d = shape
+    fn = fwd_build(meta_of(head_dim=d, window=causal, paged=True, kv_cache_layout=layout))
+    fwd_check(
+        fn,
+        b=b,
+        hq=hq,
+        hk=hk,
+        sq=sq,
+        sk=sk,
+        d=d,
+        dtype=BF16,
+        window=BR if causal else None,
+        paged=layout,
+        ctx=f"{layout} {shape} {causal}",
+    )
+
+
+@pytest.mark.parametrize(
+    "layout,hdim",
+    [("linear", d) for d in (32, 64, 192, 256)] + [("vectorized", d) for d in (64, 128)],
+)
+def test_paged_across_rungs(fwd_build, layout, hdim):
+    """Every dual-wave rung that can be paged: all of them in the linear layout, 64 and 128 in aiter's vectorized one
+    (the wide body above 256 refuses)."""
+    fn = fwd_build(meta_of(head_dim=hdim, window=True, paged=True, kv_cache_layout=layout))
+    fwd_check(fn, b=1, hq=4, hk=2, sq=130, sk=200, d=hdim, dtype=BF16, window=BR, paged=layout, ctx=f"{layout} d{hdim}")
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_paged_long_context_and_unowned_pages(fwd_build, layout):
+    """A long sequence (128 pages, randomly placed among unowned ones), non-causal: a wrong page id anywhere changes the
+    softmax."""
+    fn = fwd_build(meta_of(head_dim=128, paged=True, kv_cache_layout=layout))
+    fwd_check(fn, b=1, hq=4, hk=4, sq=128, sk=8192, d=128, dtype=BF16, paged=layout, ctx=layout)
+
+
+@pytest.mark.parametrize("table", [[[0, 1]], [[4, 1], [2, 6]], [[0, 1], [2, 3], [4, 5]]], ids=["b1", "b2", "b3"])
+def test_paged_block_table_is_read_row_major(fwd_build, table):
+    """Which pages does each sequence read? V page `p` holds the constant `p` and K is zero, so attention is uniform and
+    sequence `b` returns the mean of its table row. (The kernel indexes the table as a flat array; a 2D tensor handed to
+    it would be decomposed column-major and every row but the first would read the wrong pages.)"""
+    b = len(table)
+    q = alloc(b, 1, 128, 64, BF16, fill=torch.zeros(b, 1, 128, 64))
+    pool_k = torch.zeros(8, 64, 1, 64, device="cuda", dtype=BF16)
+    pool_v = torch.zeros(8, 64, 1, 64, device="cuda", dtype=BF16)
+    for page in range(8):
+        pool_v[page] = float(page)
+    o = alloc(b, 1, 128, 64, BF16)
+    fn = fwd_build(meta_of(head_dim=64, paged=True))
+    run_fwd(fn, q, pool_k, pool_v, o, seqlen_k=128, block_table=torch.tensor(table, dtype=torch.int32, device="cuda"))
+    got = [o[i, 0].float().mean().item() for i in range(b)]
+    assert got == [sum(row) / len(row) for row in table]
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_paged_ignores_the_stale_tail_of_the_last_page(fwd_build, layout):
+    """The slots of the last page past `seqlen_k` hold stale keys; they must not take softmax weight."""
+    fn = fwd_build(meta_of(head_dim=64, paged=True, kv_cache_layout=layout))
+    fwd_check(fn, b=2, hq=4, sq=64, sk=70, d=64, dtype=BF16, paged=layout, ctx=f"{layout} tail", input_scale=3.0)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_paged_with_bias_alibi_and_sink(fwd_build, layout):
+    """Bias, ALiBi and a sink are all indexed by the logical KV position, which the block table does not move."""
+    b, h, sq, sk, d = 2, 4, 130, 256, 64
+    gen = seeded(9)
+    bias = randn(b, h, sq, sk, BF16, gen=gen).contiguous()
+    qkv, sink = sink_inputs(b, h, h, sq, d, BF16, None, 0.5, sk=sk)
+    fn = fwd_build(meta_of(head_dim=d, paged=True, kv_cache_layout=layout, bias=True, alibi=True, sink=True))
+    fwd_check(
+        fn,
+        b=b,
+        hq=h,
+        sq=sq,
+        sk=sk,
+        d=d,
+        dtype=BF16,
+        bias=bias,
+        alibi_slopes=slopes_of(b, h, True),
+        sink=sink,
+        paged=layout,
+        ctx=f"{layout} bias+alibi+sink",
+    )
+
+
+def test_paged_host_checks_and_refusals(fwd_build):
+    from tests.kernels.attention.attn_testlib import PagedCache
+
+    q = randn(2, 4, 64, 64, BF16)
+    o = alloc(2, 4, 64, 64, BF16)
+    cache = PagedCache.random(2, 4, 128, 64, BF16, "linear")
+    fn = fwd_build(meta_of(head_dim=64, paged=True))
+
+    def call(fn=fn, **over):
+        args = dict(k=cache.k, v=cache.v, seqlen_k=128, block_table=cache.block_table)
+        args.update(over)
+        k, v = args.pop("k"), args.pop("v")
+        run_fwd(fn, q, k, v, o, **args)
+
+    call()  # the control: each case below is wrong in exactly one way
+    cases = {
+        "no_table": (dict(block_table=None), "requires an int32"),
+        "no_seqlen": (dict(seqlen_k=None), "needs `seqlen_k`"),
+        "dtype": (dict(block_table=cache.block_table.long()), "int32"),
+        "rows": (dict(block_table=cache.block_table[:1]), "a row per sequence"),
+        "short": (dict(block_table=cache.block_table[:, :1].contiguous()), "pages for seqlen_k"),
+        "pool_page": (dict(k=cache.k[:, :32], v=cache.v[:, :32]), "64"),
+        "pool_mismatch": (dict(v=cache.v[:1].contiguous()), "share shape"),
+    }
+    for name, (over, msg) in cases.items():
+        with pytest.raises(ValueError, match=msg):
+            call(**over)
+    # a table handed to a build that is not paged
+    with pytest.raises(ValueError, match="not compiled for a paged"):
+        run_fwd(
+            fwd_build(meta_of(head_dim=64)),
+            q,
+            cache.k_logical,
+            cache.v_logical,
+            o,
+            seqlen_k=128,
+            block_table=cache.block_table,
+        )
+
+
+def test_paged_builder_refusals():
+    """Where the paged path stops: a padded head (the page layout fixes the head stride at the rung), the wide body, and
+    the vectorized layout off the two rungs it is staged for."""
+    from kernels.attention import flash_attn_gfx950 as fwd_module
+    from kernels.attention import flash_attn_gfx950_config as cfg
+
+    for hdim, layout, match in (
+        (100, "linear", "exact head dims"),
+        (384, "linear", "wide body"),
+        (96, "vectorized", "head_dim 64 and 128"),
+        (256, "vectorized", "head_dim 64 and 128"),
+    ):
+        meta = meta_of(head_dim=hdim, paged=True, kv_cache_layout=layout)
+        knobs = cfg.fwd_knobs("gfx950").resolve(meta)
+        with pytest.raises(NotImplementedError, match=match):
+            fwd_module.build_flash_attn_gfx950_fwd(meta, knobs)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("causal", [False, True])
+def test_paged_varlen_one_block_table_row_per_sequence(fwd_build, layout, causal):
+    """Packed (stacked) varlen Q over a shared page pool: sequences of different lengths, each with its own row of the block
+    table. The row is the *sequence* (the grid's z), not the batch slice, which is 0 for every stacked sequence: with that
+    mistake every sequence would read the first one's pages."""
+    from tests.kernels.attention.attn_testlib import (
+        PagedCache,
+        check_floor,
+        floor_rel,
+        reference,
+        sdpa_scale,
+        window_mask,
+    )
+
+    d, h, hk = 64, 4, 2
+    lens_q, lens_k = [100, 200, 64], [150, 70, 64]
+    case = VarlenCase("0x0B0B", lens_q, lens_k, h, hk, d, BF16)
+    ks = [case.seq(z)[1] for z in range(case.n)]
+    vs = [case.seq(z)[2] for z in range(case.n)]
+    cache = PagedCache.from_sequences(ks, vs, layout, gen=seeded(8))
+    fn = fwd_build(meta_of(head_dim=d, window=causal, paged=True, kv_cache_layout=layout))
+    window = BR if causal else None
+    k0, v0 = case.k, case.v
+    case.k, case.v = cache.k, cache.v  # the kernel reads the pool; the reference reads the logical keys (`ks`, `vs`)
+    try:
+        case.launch(fn, window=window, block_table=cache.block_table)
+    finally:
+        case.k, case.v = k0, v0
+    for z in range(case.n):
+        q = case.seq(z)[0]
+        mask = window_mask(q.shape[2], ks[z].shape[2], *window) if window is not None else None
+        sm = sdpa_scale(d)
+
+        def ref(**kw):
+            return reference(q, ks[z], vs[z], sm, mask=mask, **kw)
+
+        exact_o, exact_lse = ref()
+        check_floor("O", case.o_of(z), exact_o, floor_rel(ref, exact_o, BF16), f"paged varlen seq {z}")

@@ -1444,6 +1444,47 @@ class _FwdGemmHelper(helpers.ParityGemmHelper):
         return self.scale_scores(super().qk(v_k, q_all_bf16, stage))
 
 
+# Tokens per page of a paged KV cache: the KV tile (`BLOCK_N`) is one page, which is what lets the page id be read
+# once per tile. The cache is `[pages, 64, Hkv, D]` (linear) or aiter's 5D layout (vectorized).
+PAGE_SIZE = 64
+
+
+def paged_cache_geometry(K, V, layout, page_size=PAGE_SIZE):
+    """`(num_head_k, head_dim, k_strides, v_strides)` of a paged K/V cache pair, as the `(batch, head, seq)` slots.
+
+    The kernel addresses a page as `page_id * page_size * seq_stride` elements and reads the head and the token inside
+    it from the layout, so what the host has to establish is that the pool is what that arithmetic assumes: pages
+    contiguous, `K` and `V` the same geometry, and the head dim exact (a cache has no `ceil8` slack to lean on).
+
+    * `"linear"`: `[pages, page_size, Hkv, D]`, the head stride is `D`, the token stride `Hkv * D`.
+    * `"vectorized"` (aiter): `K = [pages, Hkv, D / 8, page_size, 8]`, `V = [pages, Hkv, page_size / 8, D, 8]`; the
+      pitch of a token is still `Hkv * D` elements per page-token, and the head stride is `D * page_size`.
+    """
+    if layout == "linear":
+        for name, t in (("K", K), ("V", V)):
+            if t.dim() != 4 or t.shape[1] != page_size:
+                raise ValueError(f"{name} must be a [pages, {page_size}, Hkv, D] cache, got {tuple(t.shape)}")
+            if t.stride(3) != 1 or t.stride(2) != t.shape[3] or t.stride(0) != page_size * t.stride(1):
+                raise ValueError(
+                    f"{name}: a linear cache needs contiguous pages and heads; strides {tuple(t.stride())}"
+                )
+        if tuple(K.shape) != tuple(V.shape) or tuple(K.stride()) != tuple(V.stride()):
+            raise ValueError("K and V caches must share shape and strides")
+        nhk, d = K.shape[2], K.shape[3]
+        seq = int(K.stride(1))
+    else:
+        if K.dim() != 5 or V.dim() != 5 or K.shape[3] != page_size or K.shape[4] != 8:
+            raise ValueError(f"a vectorized K cache is [pages, Hkv, D/8, {page_size}, 8], got {tuple(K.shape)}")
+        if not (K.is_contiguous() and V.is_contiguous()):
+            raise ValueError("vectorized K/V caches must be contiguous")
+        nhk, d = K.shape[1], K.shape[2] * 8
+        if tuple(V.shape) != (K.shape[0], nhk, page_size // 8, d, 8):
+            raise ValueError(f"V cache must be [pages, Hkv, {page_size // 8}, D, 8] to match K, got {tuple(V.shape)}")
+        seq = nhk * d
+    strides = (page_size * seq, (d if layout == "linear" else d * page_size), seq)
+    return nhk, d, strides, strides
+
+
 def build_flash_attn_gfx950_fwd(meta, knobs):
     """Build the gfx950 forward kernel for a resolved `(meta, knobs)` pair.
 
@@ -1466,12 +1507,28 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
     traits = config.fwd_traits(meta, knobs)
     # Optional inputs the forward body carries but whose host side and tests land separately.
     for name, wanted in (
-        ("meta.paged", meta.paged),
         ("XCD_SWIZZLE", knobs.XCD_SWIZZLE),
         ("NUM_KV_SPLITS > 1", knobs.NUM_KV_SPLITS > 1),
     ):
         if wanted:
             raise NotImplementedError(f"{name} is not implemented by the gfx950 forward yet")
+
+    if meta.paged:
+        # Where the paged path is not carried over. Each is a real limit of the staging, not a missing check.
+        if knobs.PADDED_HEAD:
+            raise NotImplementedError(
+                "a paged build serves exact head dims (the rungs): the page layout fixes the head stride at the rung "
+                f"width, and head_dim {meta.head_dim} is padded to {knobs.BLOCK_DMODEL}"
+            )
+        if traits.D_STAGES > 1 or traits.VO_SHARDS > 1:
+            raise NotImplementedError("the wide body (head_dim > 256) has no paged staging; use head_dim <= 256")
+        if traits.BLOCK_N != PAGE_SIZE:
+            raise NotImplementedError(f"paged KV needs BLOCK_N == the page size {PAGE_SIZE}, got {traits.BLOCK_N}")
+        if traits.KV_VECTORIZED and knobs.BLOCK_DMODEL not in (64, 128):
+            raise NotImplementedError(
+                f"the vectorized (aiter) cache layout is staged for head_dim 64 and 128, not {knobs.BLOCK_DMODEL}; "
+                "use the linear layout"
+            )
 
     BLOCK_DMODEL = knobs.BLOCK_DMODEL
     PADDED_HEAD = knobs.PADDED_HEAD
@@ -1698,7 +1755,7 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         kv_gmem_to_lds = helpers.ParityKvGmemToLdsLoader(ctx)
         kv_lds_to_regs = (helpers.WideKvLdsToVgprLoader if WIDE else helpers.ParityKvLdsToVgprLoader)(ctx)
         output_store = (helpers.WideStoreHelper if WIDE else helpers.ParityStoreHelper)(ctx)
-        page_ids = dualwave.DualwavePageIdLoader(ctx)
+        page_ids = helpers.ParityPageIdLoader(ctx)
         q_loader = helpers.ParityQLoader(ctx)
         gemm_helper = (helpers.WideGemmHelper if WIDE else _FwdGemmHelper)(ctx)
         softmax_helper = (_WideSoftmaxHelper if WIDE else _ParitySoftmaxHelper)(ctx)
@@ -2395,17 +2452,31 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         One place that turns tensors into the wire format, so `launch` and `compile_launcher` cannot drift apart --
         which is the bug this shape exists to prevent.
         """
+        if traits.PAGED and seqlen_k is None:
+            raise ValueError("a paged call needs `seqlen_k`: the K/V tensors are the page pool, not the sequence")
         seqlen_k = seqlen_q if seqlen_k is None else seqlen_k
         # `prep_tensors` checks the shapes and the 8xD contract (`abi.check_8xd`: the D axis is granted
         # `ceil8(head_dim)` contiguous elements on every row and nothing else is) and reads the strides. Its
         # pointers are `fx.Uint8`, and a byte pointer carries alignment 1; `helpers.wire_ptr` below types each
         # operand from its own tensor instead, which keeps the alignment the JIT assumes.
-        ptrs, shape_meta, st = abi.prep_tensors(
-            [("Q", Q), ("K", K), ("V", V), ("O", O)],
-            q_heads=("O",),
-        )
-        del ptrs
-        num_head_q, num_head_k, hdim_qk, hdim_vo = shape_meta
+        if traits.PAGED:
+            # K and V are the page pool, not BHSD tensors: `paged_cache_geometry` reads their layout.
+            num_head_k, hdim_cache, k_strides, v_strides = paged_cache_geometry(K, V, traits.KV_CACHE_LAYOUT)
+            num_head_q, hdim_qk, hdim_vo = Q.shape[1], Q.shape[3], O.shape[3]
+            if num_head_q % num_head_k or O.shape[1] != num_head_q:
+                raise ValueError(
+                    f"Q/O heads ({num_head_q}, {O.shape[1]}) must be a multiple of the cache's {num_head_k}"
+                )
+            if hdim_qk != hdim_cache or hdim_vo != hdim_cache:
+                raise ValueError(f"head dims ({hdim_qk}, {hdim_vo}) must equal the cache's {hdim_cache}")
+            st = [*abi.strides_of(Q, "Q"), *k_strides, *v_strides, *abi.strides_of(O, "O")]
+        else:
+            ptrs, shape_meta, st = abi.prep_tensors(
+                [("Q", Q), ("K", K), ("V", V), ("O", O)],
+                q_heads=("O",),
+            )
+            del ptrs
+            num_head_q, num_head_k, hdim_qk, hdim_vo = shape_meta
 
         # The kernel skips masking the D columns at or below the floor, so a narrower call would silently reduce
         # over the caller's padding. Cheap host-side check; the alternative is a plausible wrong answer.
@@ -2436,10 +2507,10 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         if bias is not None and not traits.BIAS_TYPE:
             raise ValueError("this build was not compiled for bias; pass bias=True in FmhaInputMetadata")
         if bias is not None:
-            # The bias follows Q's batch and row layout; its column axis is the within-sequence KV index. A dense call has
-            # exactly `seqlen_k` of them; under varlen the keys are packed (K's token axis is the batch total), so the bias
-            # is as wide as the longest sequence's keys and a row's live columns are a prefix of it.
-            cols = seqlen_k if varlen is not None else K.shape[2]
+            # The bias follows Q's batch and row layout; its column axis is the within-sequence KV index. A dense or paged call
+            # has exactly `seqlen_k` of them; under varlen the keys are packed (K's token axis is the batch total), so the
+            # bias is as wide as the longest sequence's keys and a row's live columns are a prefix of it.
+            cols = seqlen_k if (traits.PAGED or varlen is not None) else K.shape[2]
             wide_enough = bias.shape[3] >= cols if varlen is not None else bias.shape[3] == cols
             if not wide_enough or bias.shape[2] != Q.shape[2]:
                 raise ValueError(
@@ -2485,7 +2556,11 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
             # Flat, like the block table: the kernel computes `sequence * alibi_stride_b + head` as a linear index, and a
             # 2D tensor's layout would decompose that column-major. (It also keys the compiled signature, so a `[B, H]`
             # call after a `[H]` one would silently reuse the rank-1 build.)
-            span = (alibi_slopes.shape[0] - 1) * alibi_stride_arg + alibi_slopes.shape[-1] if alibi_slopes.dim() == 2 else alibi_slopes.shape[0]
+            span = (
+                (alibi_slopes.shape[0] - 1) * alibi_stride_arg + alibi_slopes.shape[-1]
+                if alibi_slopes.dim() == 2
+                else alibi_slopes.shape[0]
+            )
             alibi_arg = alibi_slopes.as_strided((span,), (1,))
         else:
             if alibi_slopes is not None:
@@ -2530,6 +2605,33 @@ def build_flash_attn_gfx950_fwd(meta, knobs):
         # launcher's parameter is still positional, it is just constexpr, so the value is consumed at trace time
         # instead of becoming a kernarg. `0`, so the JIT cache key does not vary with an unused tensor.
         ws = (workspace if workspace is not None else O) if WS_RUNTIME else 0
+        if traits.PAGED:
+            # The block table has one row per sequence (`ceil(seqlen_k / page)` entries long, `seqlen_k` being the longest
+            # sequence's keys under varlen, whose lengths come from the descriptor): a dense call has a row per batch
+            # entry, a packed one a row per sequence.
+            if block_table is None:
+                raise ValueError("a paged build requires an int32 `block_table` of shape (batch, pages)")
+            if str(block_table.dtype) != "torch.int32" or block_table.dim() != 2 or block_table.stride(1) != 1:
+                raise ValueError(
+                    f"block_table must be int32 (batch, pages) with a contiguous page axis; got {block_table.dtype} "
+                    f"{tuple(block_table.shape)} strides {tuple(block_table.stride())}"
+                )
+            need = -(-int(seqlen_k) // PAGE_SIZE)
+            rows = int(num_seqlens) or int(Q.shape[0])
+            if block_table.shape[0] != rows or block_table.shape[1] < need:
+                raise ValueError(
+                    f"block_table {tuple(block_table.shape)} must have a row per sequence ({rows}) and "
+                    f"{need} pages for seqlen_k={seqlen_k}"
+                )
+            if block_table.shape[1] > traits.PAGED_BT_LDS_SIZE:
+                raise ValueError(f"a block table row is staged in LDS: at most {traits.PAGED_BT_LDS_SIZE} pages")
+            block_table_stride = int(block_table.stride(0))
+            # The kernel indexes the table as a flat int32 array (`row * block_table_stride + page`); handed the 2D
+            # tensor, its layout would decompose the flat index column-major and read the wrong entries.
+            span = (block_table.shape[0] - 1) * block_table_stride + block_table.shape[1]
+            block_table = block_table.as_strided((span,), (1,))
+        elif block_table is not None:
+            raise ValueError("this build was not compiled for a paged KV cache; pass paged=True in FmhaInputMetadata")
         bt = (block_table if block_table is not None else O) if BT_RUNTIME else 0
 
         # `abi.varlen_args` encodes the wire format and is where the two host-side checks live that no kernel can
