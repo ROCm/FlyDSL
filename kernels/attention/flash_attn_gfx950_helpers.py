@@ -55,7 +55,7 @@ from dataclasses import replace
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import fly, llvm
-from flydsl.expr import const_expr, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
@@ -1125,6 +1125,30 @@ class ParityKernelContext(_ParityKvStaging, dualwave.DualwaveKernelContext):
         self.alibi_neg_slope = Vec(frag.load(), (1,), fx.Float32)[0] * fx.Float32(-dualwave._LOG2E)
         self.alibi_delta_i32 = self.seqlen_kv_i32 - fx.Int32(self.seqlen_q_v)
 
+    def init_workspace(self, DebugCounts=None):
+        """The split-K workspace geometry with the **runtime** head count.
+
+        `DualwaveKernelContext.init_workspace` sizes the per-split slabs with `traits.NUM_HEADS_Q`, a compile-time
+        trait that is a dummy here (the kernels take `num_head_q` as an argument), so it is restated over
+        `self.num_head_q`. The layout is the production one: per split, `O_partial` (16-bit pairs, two columns per
+        fp32 slot) then, after every split's `O_partial`, the `m` rows and then the `l` rows. `grid_dim.z` is read
+        for the split count: split-K is a feature knob, off for AOT, so the hidden-argument block it appends is
+        exempt (plan 1.4).
+        """
+        traits = self.traits
+        if const_expr(not traits.SPLITK):
+            return super().init_workspace(DebugCounts)
+        workspace = self.DebugCounts if DebugCounts is None else DebugCounts
+        heads = fx.Index(self.num_head_q)
+        self.ws_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(workspace)))
+        self.ws_opart_per_split_elems = heads * self.seq_len_v * fx.Index(traits.HEAD_DIM // 2)
+        self.ws_ml_per_split_elems = heads * self.seq_len_v
+        self.ws_opart_per_split_bytes = self.ws_opart_per_split_elems * fx.Index(4)
+        self.ws_ml_per_split_bytes = self.ws_ml_per_split_elems * fx.Index(4)
+        self.ws_grid_z = fx.Index(gpu.grid_dim.z)
+        self.ws_mrow_abs_bytes = self.ws_grid_z * self.ws_opart_per_split_bytes
+        self.ws_lrow_abs_bytes = self.ws_mrow_abs_bytes + self.ws_grid_z * self.ws_ml_per_split_bytes
+
     def load_sink_log2(self, sink):
         """This head's sink logit in the base-2 score domain (`sink * log2(e)`).
 
@@ -1485,6 +1509,102 @@ class ParityPageIdLoader(dualwave.DualwavePageIdLoader):
                         llvm.StoreOp(page_id_i32, dst)
 
         _load_block_table_to_lds()
+
+
+class ParitySplitKCombineContext(dualwave.DualwaveSplitKCombineContext):
+    """The split-K combine's per-kernel state, with the runtime head count.
+
+    The shared combine sizes the workspace slabs, the row decomposition and the LSE slice with `traits.NUM_HEADS_Q`;
+    here that is `num_head_q`, an argument, for the same reason as in the forward (one binary, any head count). The
+    layout is unchanged, and so are the two things the shared combine assumes about O: a BSHD-flat layout
+    (`stride_o_n` is `H * D`, the head is `D` elements) and an exact head dim, which the host checks.
+    """
+
+    def __init__(self, traits_or_ctx, *args, num_head_q=None, **kwargs):
+        super().__init__(traits_or_ctx, *args, **kwargs)
+        if num_head_q is not None:
+            self.num_head_q = num_head_q
+
+    def init_thread_mapping(self, combine_rows_per_block, combine_lanes_per_row):
+        self.tid = fx.Index(gpu.thread_idx.x)
+        self.blk = fx.Index(gpu.block_idx.x)
+        self.batch_idx = fx.Index(gpu.block_idx.y)
+        self.col = (self.tid % combine_lanes_per_row) * 4
+        rows_per_batch = self.seq_len_v * fx.Index(self.num_head_q)
+        row_raw = self.blk * combine_rows_per_block + self.tid // combine_lanes_per_row
+        threads_in_use = fx.Index(combine_rows_per_block * combine_lanes_per_row)
+        self.row = (self.tid < threads_in_use).select(row_raw, rows_per_batch)
+        self.row_valid = self.row < rows_per_batch
+        self.q_head_idx = self.row // self.seq_len_v
+        self.seq_idx = self.row % self.seq_len_v
+
+    def init_workspace(self):
+        traits = self.traits
+        heads = fx.Index(self.num_head_q)
+        z_total = self.batch_size_v * traits.NUM_KV_SPLITS
+        self.ws_opart_per_split_elems = heads * self.seq_len_v * fx.Index(traits.HEAD_DIM_V // 2)
+        self.ws_ml_per_split_elems = heads * self.seq_len_v
+        self.ws_opart_per_split_bytes = self.ws_opart_per_split_elems * fx.Index(4)
+        self.ws_ml_per_split_bytes = self.ws_ml_per_split_elems * fx.Index(4)
+        self.ws_mrow_abs_bytes = z_total * self.ws_opart_per_split_bytes
+        self.ws_lrow_abs_bytes = self.ws_mrow_abs_bytes + z_total * self.ws_ml_per_split_bytes
+        self.local_ml_idx = self.q_head_idx * self.seq_len_v + self.seq_idx
+        self.local_o_base = (self.q_head_idx * self.seq_len_v + self.seq_idx) * fx.Index(traits.HEAD_DIM_V // 2)
+        self.ws_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(self.WS)))
+
+    def init_descriptors(self):
+        """O's descriptor for this batch. Dense only: the combine is never built for a varlen call (the forward's host
+        refuses it), and the traits' `VARLEN` flag, which says the *forward* decodes `VarlenBits` at run time, is not
+        the question here."""
+        per_batch_elems = self.seq_len_v * self.stride_o_n_v
+        self.o_nrec_bytes = per_batch_elems * fx.Index(2)
+        self.o_rsrc = buffer_ops.create_buffer_resource_from_addr(
+            as_mlir_value(fx.Int64(fx.ptrtoint(fx.get_iter(self.O))) + fx.Int64(self.batch_idx * self.o_nrec_bytes)),
+            num_records_bytes=as_mlir_value(fx.Int64(self.o_nrec_bytes)),
+        )
+        self.load_atom_64 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
+
+
+class ParitySplitKCombineHelper(dualwave.DualwaveSplitKCombineHelper):
+    """The combine's passes, with `fold_sink` and `store_lse` sized by the runtime head count."""
+
+    def fold_sink(self, m_max, bias_log2e):
+        sink_rsrc = buffer_ops.create_buffer_resource_from_addr(
+            as_mlir_value(fx.Int64(fx.ptrtoint(fx.get_iter(self.Sink)))),
+            num_records_bytes=as_mlir_value(fx.Int64(fx.Index(self.num_head_q) * fx.Index(4))),
+        )
+        sink_f32 = buffer_ops.buffer_load(sink_rsrc, as_mlir_value(fx.Int32(self.q_head_idx)), vec_width=1, dtype=T.f32)
+        sink_log2 = sink_f32 * fx.Float32(bias_log2e)
+        m_new = fx.maxnumf(m_max, sink_log2)
+        sink_w = rocdl.exp2(T.f32, as_mlir_value(sink_log2 - m_new))
+        return m_new, sink_w
+
+    def store_lse_if_not_null(self, m_max, den):
+        """`store_lse`, skipped when `LSE` is null (`RETURN_LSE="runtime"`: the caller does not want it), as the forward's
+        LSE store is. The condition is wave-uniform, so this is a scalar branch."""
+        store = self.store_lse
+        if const_expr(not self.traits.LSE_NULL_GUARD):
+            store(m_max, den)
+            return
+        lse_not_null = fx.Int64(fx.ptrtoint(fx.get_iter(self.LSE))) != fx.Int64(0)
+
+        @flyc.jit
+        def _store_if_not_null():
+            if lse_not_null:
+                store(m_max, den)
+
+        _store_if_not_null()
+
+    def store_lse(self, m_max, den):
+        """`m_max * ln2 + ln(den)` (natural log), one lane per row, into the compact `(H, S)` slice of the batch."""
+        lse_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(self.LSE)))
+        lse_per_batch_elems = fx.Index(self.num_head_q) * self.seq_len_v
+        lse_per_batch_bytes = lse_per_batch_elems * fx.Index(4)
+        lse_rsrc = dualwave._make_ws_rsrc(lse_base_i64, self.batch_idx * lse_per_batch_bytes, lse_per_batch_bytes)
+        lse_val = m_max * self.c_ln2_f + fx.log(den, fastmath=self.fm_fast)
+        lse_in_range = self.row_valid.select(self.local_ml_idx, lse_per_batch_elems)
+        lse_off = fx.Index((self.col == fx.Index(0)).select(lse_in_range, lse_per_batch_elems))
+        buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), lse_rsrc, as_mlir_value(fx.Int32(lse_off)))
 
 
 class ParityQLoader(dualwave.DualwaveQLoader):

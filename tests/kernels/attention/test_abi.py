@@ -151,7 +151,7 @@ def test_compile_hints_ride_on_the_launcher(backend, arch, tmp_path, monkeypatch
     knobs = backend.fwd_knobs(arch).resolve(meta)
     fn = backend.build_fwd(meta, knobs)
     args, kw = compile_inputs(meta)
-    packed, (stream, _) = fn.host_args(*args, **kw)
+    packed, _ = fn.host_args(*args, **kw)
 
     def direct():
         import flydsl.expr as fx
