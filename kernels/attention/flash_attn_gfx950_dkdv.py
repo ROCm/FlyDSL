@@ -132,7 +132,7 @@ from kernels.attention import abi, common
 from kernels.attention import flash_attn_gfx950 as fwd_module
 from kernels.attention import flash_attn_gfx950_config as config
 from kernels.attention import flash_attn_utils as dualwave
-from kernels.attention.common import MaskedAxis
+from kernels.attention.common import SOFTMAX_EXPONENT_FASTMATH, MaskedAxis
 from kernels.attention.flash_attn_gfx950_helpers import (
     MFMA16_M,
     ParityGemmHelper,
@@ -511,13 +511,16 @@ class M16SoftmaxHelper(dualwave.DualwaveKernelContext):
         The exponent chain drops to `contract | reassoc` in a bias build so a
         caller's `-inf` survives `ninf` to reach `exp2`, which returns an exact
         zero for it. The 32-row family's `probabilities` says why at length.
+
+        The scale multiply and the LSE add carry no flags at all, so they can
+        never fuse into `fma(S, qk_scale, -lse2)` (`SOFTMAX_EXPONENT_FASTMATH`).
         """
         values = [Vec(v_s)[r] for r in range_constexpr(ACC16)]
         scale = self.ctx_ref.c_sm_scale_log2e
         fm = self.fm_fast
         if const_expr(bias2 is not None):
             fm = fx.arith.FastMathFlags.contract | fx.arith.FastMathFlags.reassoc
-        scaled = [fmul(values[r], scale, fm) for r in range_constexpr(ACC16)]
+        scaled = [fmul(values[r], scale, SOFTMAX_EXPONENT_FASTMATH) for r in range_constexpr(ACC16)]
         if const_expr(bias2 is not None):
             scaled = [fadd(scaled[r], bias2[r], fm) for r in range_constexpr(ACC16)]
         # The `v_exp_f32` wait state. `exp2_wait_state` says why it is needed
@@ -534,7 +537,7 @@ class M16SoftmaxHelper(dualwave.DualwaveKernelContext):
         # sites still in it.
         return exp2_wait_state(
             [
-                dualwave.rocdl.exp2(T.f32, as_mlir_value(fadd(scaled[r], neg_lse2[r], fm)))
+                dualwave.rocdl.exp2(T.f32, as_mlir_value(fadd(scaled[r], neg_lse2[r], SOFTMAX_EXPONENT_FASTMATH)))
                 for r in range_constexpr(ACC16)
             ]
         )
@@ -1916,8 +1919,8 @@ class BwdDkDvSoftmaxHelper(ParitySoftmaxHelper):
         `sm_scale * log2e` into Q and rounding to bf16 puts the error in the
         exponent, taking the error ratio from 1.29 at `sm_scale = 0.05` to 10.9
         at 1.0. `O` is a normalised average and absorbs it; `dS` is not and does
-        not. Here the scale rides the subtraction that had to happen anyway, so
-        it is also free.
+        not. Here the scale is one multiply per score ahead of the subtraction,
+        never fused with it (`SOFTMAX_EXPONENT_FASTMATH`, aotriton issue 54).
 
         **The bias goes after the scale**, which is the forward's rule read in
         this kernel's terms. There it means "after the pre-scale that already
@@ -1926,7 +1929,7 @@ class BwdDkDvSoftmaxHelper(ParitySoftmaxHelper):
         natural units and the exponent is base-2, so the conversion is the
         thing that has to line up, not the position in the expression.
 
-        The whole chain drops to `fm_bias` in a bias build so a `-inf` bias
+        The bias add drops to `fm_bias` in a bias build so a `-inf` bias
         survives to `exp2`, which returns an exact zero for it -- and a zero `P`
         then kills every downstream term, since `dS = P*(...)` and
         `dV += P.dO`. `BIAS_TYPE` is a build axis, so a build without bias
@@ -1937,11 +1940,14 @@ class BwdDkDvSoftmaxHelper(ParitySoftmaxHelper):
         fm = self.fm_fast
         if const_expr(bias2 is not None):
             fm = fx.arith.FastMathFlags.contract | fx.arith.FastMathFlags.reassoc
-        scaled = [fmul(values[r], scale, fm) for r in range_constexpr(16)]
+        scaled = [fmul(values[r], scale, SOFTMAX_EXPONENT_FASTMATH) for r in range_constexpr(16)]
         if const_expr(bias2 is not None):
             scaled = [fadd(scaled[r], bias2[r], fm) for r in range_constexpr(16)]
         return exp2_wait_state(
-            [dualwave.rocdl.exp2(T.f32, as_mlir_value(fadd(scaled[r], neg_lse2[r], fm))) for r in range_constexpr(16)]
+            [
+                dualwave.rocdl.exp2(T.f32, as_mlir_value(fadd(scaled[r], neg_lse2[r], SOFTMAX_EXPONENT_FASTMATH)))
+                for r in range_constexpr(16)
+            ]
         )
 
     # -- the forward's bias path, shadowed ---------------------------------

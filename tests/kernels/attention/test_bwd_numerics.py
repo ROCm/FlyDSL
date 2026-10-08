@@ -244,6 +244,21 @@ def test_fp16_range(bwd_build):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("seqlen", [1, 1024])
+@pytest.mark.parametrize("hdim", [16, 128, 256])
+def test_large_bf16_nan_values_bwd(bwd_build, hdim, seqlen):
+    """AOTriton's `test_large_bf16_nan_values` carried through the backward: Q = K = V = 133120 (bf16, `sm_scale` 0.125).
+    dQ formed its exponent as `fma(S, qk_scale, -lse2)`, an unrounded product against the rounded LSE (aotriton issue 54),
+    and every dQ element came out NaN, at every seqlen and in both families; dK/dV never fused. Only NaN is checked, as
+    AOTriton does: dQ and dK are rounding noise around an exact zero at these magnitudes."""
+    dt = DTYPES["bf16"]
+    q, k, v = (torch.full((1, 1, seqlen, hdim), 133120.0, dtype=dt, device="cuda") for _ in range(3))
+    do = randn(1, 1, seqlen, hdim, dt, gen=seeded(7))
+    out = run_bwd(bwd_build(meta_of(head_dim=hdim)), q, k, v, do, scale=0.125)
+    for name in ("o", "dq", "dk", "dv"):
+        assert not torch.isnan(out[name]).any(), f"{name} should not contain NaNs!"
+
+
 @pytest.mark.parametrize("hdim", [32, 64])
 def test_large_logits_bwd(bwd_build, hdim):
     """Scores of magnitude ~133120 at `sm_scale` 0.25 (AOTriton's lesson 3: the max and the exponent must come from the same
