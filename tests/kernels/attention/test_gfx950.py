@@ -524,3 +524,17 @@ def test_dq_256_dropout_is_deterministic(bwd_build, rows):
     for _ in range(4):
         again = run_bwd(builds, q, k, v, do, p_drop=0.3, seed=7, which=("dq",), o_lse=(first["o"], first["lse"]))
         assert torch.equal(first["dq"], again["dq"])
+
+
+@pytest.mark.parametrize("window", [False, True], ids=["dense", "causal"])
+def test_dkdv_256_stays_within_two_waves_per_simd(backend, arch, tmp_path, monkeypatch, window):
+    """The window mask must not tip dK/dV at head_dim 256 past 256 VGPRs. The kernel runs at `waves_per_eu=1` with 69632 B of
+    LDS per workgroup, so two workgroups share a CU only while the register file allows two waves per SIMD, i.e. at most 256
+    registers. A window build used to compare `rel0 + i` against the bounds, which kept ACC16 extra per-element values live and
+    gave 264: one wave per SIMD, a causal dK/dV of 1291 us against 764 us with the same executed MFMA count (the tile skip was
+    working; the occupancy was not). Compile-only, no timing."""
+    meta = meta_of(head_dim=256, window=window)
+    d = isa_tools.fresh_bwd_dump("dkdv", backend, arch, meta, tmp_path, monkeypatch, window=BR if window else None)
+    res = d.resources()
+    assert res["vgpr_count"] <= 256, res
+    assert res["vgpr_spill_count"] == 0 and res["private_segment_fixed_size"] == 0, res

@@ -590,14 +590,23 @@ class M16SoftmaxHelper(dualwave.DualwaveKernelContext):
             need = need | (tile_q0 + fx.Int32(traits.BLOCK_Q - 1) > kv_lo + left_i32)
         zero_f = self.c_zero_f
         window = traits.WINDOW
+        # **The per-element offset moves onto the wave-uniform bound, not the lane's `rel0`.** `rel0 + i >= lo` and
+        # `rel0 >= lo - i` are the same test, but the second compares a divergent VGPR against an SGPR with no
+        # per-element temporary. Written the first way the window build holds ACC16 extra `rel` values live across
+        # the P tile and crosses 256 VGPRs at head_dim 256: 264 against the plain-causal build's 254, which drops
+        # occupancy from two waves per SIMD to one and costs the whole causal speedup (1291 us against 764 us, with the
+        # executed MFMA count identical). The floor keeps `lo - i` from wrapping when a bound is within `ACC16` of
+        # INT_MIN, where the old form could not wrap.
+        i32_floor = fx.Int32(-(2**31) + ACC16)
+        lo_floor = common.smax(lo_i32, i32_floor)
+        left_floor = common.smax(left_i32, i32_floor) if const_expr(window) else None
 
         def _apply(vals):
             out = list(vals)
             for i in range_constexpr(ACC16):
-                rel = rel0 + fx.Int32(i)
-                keep = rel >= lo_i32
+                keep = rel0 >= lo_floor - fx.Int32(i)
                 if const_expr(window):
-                    keep = keep & (rel <= left_i32)
+                    keep = keep & (rel0 <= left_floor - fx.Int32(i))
                 out[i] = keep.select(fx.Float32(vals[i]), zero_f)
             return out
 
