@@ -367,6 +367,12 @@ if(TARGET FlyJitRuntime)
   set_target_properties(FlyJitRuntime PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
     RUNTIME_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
+  foreach(_config IN LISTS CMAKE_CONFIGURATION_TYPES)
+    string(TOUPPER "${_config}" _config_upper)
+    set_target_properties(FlyJitRuntime PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY_${_config_upper} "${_MLIR_LIBS_DIR}"
+      RUNTIME_OUTPUT_DIRECTORY_${_config_upper} "${_MLIR_LIBS_DIR}")
+  endforeach()
   add_dependencies(FlyPythonCAPI FlyJitRuntime)
 endif()
 

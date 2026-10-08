@@ -37,12 +37,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Fetching the pinned LLVM revision failed' }
 git -C $LLVMSourceDir checkout --detach $llvmCommit
 if ($LASTEXITCODE -ne 0) { throw 'Checking out the pinned LLVM revision failed' }
 foreach ($patch in $patches) {
-    git -C $LLVMSourceDir apply --check $patch 2>$null
+    git -C $LLVMSourceDir apply --unidiff-zero --check $patch 2>$null
     if ($LASTEXITCODE -eq 0) {
-        git -C $LLVMSourceDir apply $patch
+        git -C $LLVMSourceDir apply --unidiff-zero $patch
         if ($LASTEXITCODE -ne 0) { throw "Applying the FlyDSL LLVM patch failed: $patch" }
     } else {
-        git -C $LLVMSourceDir apply --reverse --check $patch 2>$null
+        git -C $LLVMSourceDir apply --unidiff-zero --reverse --check $patch 2>$null
         if ($LASTEXITCODE -ne 0) { throw "Pinned LLVM checkout has unexpected changes around patch: $patch" }
     }
 }
