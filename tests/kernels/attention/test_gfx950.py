@@ -526,6 +526,21 @@ def test_dq_256_dropout_is_deterministic(bwd_build, rows):
         assert torch.equal(first["dq"], again["dq"])
 
 
+@pytest.mark.parametrize("feat", ["dense", "causal", "bias"])
+@pytest.mark.parametrize("hdim", [64, 256])
+@pytest.mark.parametrize("kind", ["dq", "dkdv"])
+def test_bwd_softmax_exponent_is_not_an_fma(backend, arch, tmp_path, monkeypatch, kind, hdim, feat):
+    """`test_softmax_exponent_is_not_an_fma` for the backward's `P = exp2(qk_scale * S - lse2)`: dQ wrote it as
+    `fma(S, qk_scale, -lse2)` in both families (head_dim 64 is the 32-row one, 256 the 16-row one), and in a bias build
+    the bias add's FMA fed the `exp2` because the LSE came off first. Compile-only."""
+    meta = meta_of(head_dim=hdim, window=feat == "causal", bias=feat == "bias")
+    d = isa_tools.fresh_bwd_dump(
+        kind, backend, arch, meta, tmp_path, monkeypatch, window=BR if feat == "causal" else None
+    )
+    assert any(op == "v_exp_f32" for op, _ in isa_tools.instructions(d.isa)), "the scan must see the exps"
+    assert isa_tools.scan_exp2_fed_by_fma(d.isa) == []
+
+
 @pytest.mark.parametrize("window", [False, True], ids=["dense", "causal"])
 def test_dkdv_256_stays_within_two_waves_per_simd(backend, arch, tmp_path, monkeypatch, window):
     """The window mask must not tip dK/dV at head_dim 256 past 256 VGPRs. The kernel runs at `waves_per_eu=1` with 69632 B of

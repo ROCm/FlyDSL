@@ -611,7 +611,7 @@ class ParityGemmHelper(dualwave.DualwaveGemmHelper):
         the caller owns the call** -- `qk_stage` cannot do it, because it
         cannot tell a middle stage from the last one, and `qk` cannot either,
         because `fmha_bwd_dq_gfx950` calls it for raw scores on purpose and
-        applies its own scale in `scale_and_sub_lse`.
+        calls this itself.
         """
         s_lo, s_hi = v_s
         # 16 is the forward's score-pair half width, spelled as a literal
@@ -1666,7 +1666,7 @@ class ParityQLoader(dualwave.DualwaveQLoader):
               512        0.40              0.0632                 0.0155
               512        1.00              0.1658                 0.0145
 
-        `BwdDqSoftmaxHelper.scale_and_sub_lse` measured the same thing in dQ
+        `BwdDqSoftmaxHelper.sub_lse` measured the same thing in dQ
         and stopped folding there, on the grounds that the forward "tolerates
         that because O is a normalised average and the error largely cancels".
         It does not cancel far enough:

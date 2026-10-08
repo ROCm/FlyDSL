@@ -76,7 +76,7 @@ check them against our own forward rather than only against torch:
   alone to the dQ accumulator at the end.** AOTriton spells them
   `p = exp2(qk_scale*qk - l_i)` and `dq *= sm_scale`. The forward used to fold
   `qk_scale` into Q and round the product back to bf16 while this kernel
-  deliberately did not; `BwdDqSoftmaxHelper.scale_and_sub_lse` has the
+  deliberately did not; `BwdDqSoftmaxHelper.sub_lse` has the
   measurement that says why, and the forward has since been moved onto the
   same arithmetic (`ParityGemmHelper.scale_scores`). The two now agree.
 - **Neither Q nor `dO` is pre-scaled.** `ParityQLoader.scale_all` now raises
@@ -231,7 +231,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, range_constexpr
-from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
@@ -239,6 +238,7 @@ from kernels.attention import abi, common
 from kernels.attention import flash_attn_gfx950 as fwd_module
 from kernels.attention import flash_attn_gfx950_config as config
 from kernels.attention import flash_attn_utils as dualwave
+from kernels.attention.common import SOFTMAX_EXPONENT_FASTMATH
 from kernels.attention.flash_attn_gfx950_helpers import (
     MFMA16_M,
     ParityGemmHelper,
@@ -661,18 +661,25 @@ class M16DqSoftmax:
     def to_vecs(self, lists):
         return tuple(Vec.from_elements([as_mlir_value(v) for v in half], fx.Float32).ir_value() for half in lists)
 
-    def scale_and_sub_lse(self, v_s, qk_scale, lse2):
-        """`qk_scale * S - lse2`, one FMA per element.
+    def scale(self, v_s, qk_scale):
+        """`qk_scale * S`, after GEMM1. `sub_lse` takes `lse2` off after the bias and the masks, as
+        `BwdDqSoftmaxHelper.sub_lse` explains; neither half is fused (`SOFTMAX_EXPONENT_FASTMATH`).
 
         B2's finding, unchanged: folding `qk_scale` into Q and rounding back to
         bf16 puts `|S| * 2^-8` into the *exponent*, which `dQ` does not
         normalise away. Measured at 10.9x the error ratio at `sm_scale` 1.0.
         """
-        fm = self.ctx.fm_fast
         scale_v = Vec.from_elements([fx.Float32(qk_scale)], fx.Float32).broadcast_to(self.n)
-        neg = fsub(self.ctx.c_zero_f, lse2, fm)
-        neg_v = Vec.from_elements([fx.Float32(neg)], fx.Float32).broadcast_to(self.n)
-        return tuple(as_mlir_value(fmath.fma(Vec(h), scale_v, neg_v, fastmath=fm)) for h in v_s)
+        with fx.fastmath(SOFTMAX_EXPONENT_FASTMATH):
+            out = tuple(as_mlir_value(Vec(h) * scale_v) for h in v_s)
+        return out
+
+    def sub_lse(self, v_s, lse2):
+        """`S - lse2`, right before `exp2`; see `scale`."""
+        lse2_v = Vec.from_elements([fx.Float32(lse2)], fx.Float32).broadcast_to(self.n)
+        with fx.fastmath(SOFTMAX_EXPONENT_FASTMATH):
+            out = tuple(as_mlir_value(Vec(h) - lse2_v) for h in v_s)
+        return out
 
     def kv_col(self, tile_idx, lane, step, i):
         """The KV column of score element `(step, i)`.
@@ -1010,7 +1017,7 @@ def make_m16_dq_body(
             _s_barrier()
 
             v_s = gemm.qk(k_reader.load_a_all(lane), q_packs)
-            v_s = softmax.scale_and_sub_lse(v_s, ctx.c_sm_scale_log2e, lse2)
+            v_s = softmax.scale(v_s, ctx.c_sm_scale_log2e)
             if const_expr(traits.BIAS_TYPE):
                 v_s = softmax.add_bias(v_s, j, lane, q_row)
             v_s = softmax.seq_pad_mask(v_s, j, lane)
@@ -1025,7 +1032,7 @@ def make_m16_dq_body(
             dp_lists = softmax.to_lists(v_dp)
             if const_expr(traits.ENABLE_DROPOUT):
                 dp_lists = softmax.dropout_dp(dp_lists, j, lane, q_row)
-            ds = softmax.dscores(softmax.exp2(v_s), dp_lists, delta)
+            ds = softmax.dscores(softmax.exp2(softmax.sub_lse(v_s, lse2)), dp_lists, delta)
             ds_pack = softmax.pack_ds(ds)
             if const_expr(store_db):
                 db_store.store_tile_m16(ds_pack, j, q_row, lane)
@@ -1391,18 +1398,12 @@ class BwdDqKernelContext(ParityKernelContext):
         # `Sq > Sk` varlen sequence -- makes the forward's `l_row` zero and its
         # `m_row*ln2 + log(l_row)` therefore `-inf`. Our own forward writes it.
         #
-        # **This is not fixing an observed NaN, and saying so matters.**
-        # Measured with the floor removed, the varlen causal oracle still
-        # passes bitwise: `scale_and_sub_lse` computes `fma(S, qk_scale,
-        # +inf)`, and the KV/causal mask that runs *after* it overwrites every
-        # column of such a row with `-inf` before `exp2` sees it. The rescue is
-        # real and it is why the mask is ordered after the scale.
-        #
-        # The floor is kept because that rescue leans on an infinity flowing
-        # through an FMA carrying `fastmath<fast>`, whose `ninf` is a licence
-        # to assume infinities are absent. P5 recorded exactly that licence
-        # being taken up later by a different pass and silently deleting a KV
-        # tail mask on gfx1201. One `max` per kernel removes the case.
+        # **Load-bearing since the LSE subtract moved after the masks.**
+        # `sub_lse` runs on scores the KV/causal masks have already set to
+        # `-inf`, so for such a row an unfloored `-inf` LSE would make
+        # `-inf - -inf` a NaN. (While the subtract ran first, as an FMA ahead
+        # of the masks, the masks overwrote that row and the floor was only
+        # defensive.)
         #
         # After the `log2e` conversion, not before: `-3e38 * log2e` overflows
         # back to `-inf`. Same device `ParitySoftmaxHelper` uses to keep the
@@ -1411,11 +1412,10 @@ class BwdDqKernelContext(ParityKernelContext):
         # **Re-derived for f16 rather than assumed to carry.** The floor is
         # `-3.0e38`, which is an f32 magnitude and would be `-inf` in f16 --
         # but nothing here is f16. `lse` arrives f32, `log2e` is f32, the `max`
-        # is f32, and the FMA it protects in `scale_and_sub_lse` is f32. The
+        # is f32, and the subtract it protects in `sub_lse` is f32. The
         # operand dtype reaches this kernel at exactly two places, the `dS`
         # pack and the dQ store, and neither is upstream of this. So the
-        # argument is about `fastmath<fast>`'s `ninf` on an f32 FMA and is
-        # dtype-independent.
+        # argument is dtype-independent.
         lse2 = fmax(fx.Float32(lse2), self.c_neg_floor, self.fm_fast)
         return lse2, fx.Float32(delta)
 
@@ -1437,8 +1437,17 @@ class BwdRowInputLoader(ParityStoreHelper):
 class BwdDqSoftmaxHelper(ParitySoftmaxHelper):
     """The forward's softmax, minus the one place it trades accuracy for speed."""
 
-    def scale_and_sub_lse(self, v_s, qk_scale, lse2):
-        """`qk_scale * S - lse2`, one FMA per score element.
+    def sub_lse(self, v_s, lse2):
+        """`S - lse2` on the scaled, biased and masked scores, right before `exp2`: the forward's `sub_m` with the LSE as
+        the row max, so the exponent is formed as the forward formed it. The scale is `ParityGemmHelper.scale_scores`,
+        right after GEMM1.
+
+        **Neither half is an FMA, and the order is the forward's.** This used to be `fma(S, qk_scale, -lse2)` ahead of
+        the bias and the masks: an unrounded product against a rounded LSE, the pattern aotriton issue 54 forbids (at
+        scores near 5e10 the residue reaches 2**11 and `exp2` of it is inf or 0), and a bias was then added to an
+        exponent the LSE had already been taken off, where the forward adds it to the scaled score. Both halves now
+        carry no fast-math flags (`SOFTMAX_EXPONENT_FASTMATH`). A masked `-inf` reaches the subtract and stays `-inf`;
+        `load_row_scalars` floors an `-inf` LSE, so `-inf - -inf` cannot occur.
 
         **This is where the backward stopped matching the forward, and it was
         worth 10x at a large `sm_scale`.** The forward folded
@@ -1465,25 +1474,8 @@ class BwdDqSoftmaxHelper(ParitySoftmaxHelper):
         anything else as the cause. AOTriton scales after the dot in *both*
         directions (`qk += Qk_scale * tl.dot(q, k)`), so this is its
         arithmetic, not a new choice.
-
-        Not `dualwave._scale_sub_score_pair`: that one derives the offset from
-        an *unscaled* row max (`fma(s, scale, -scale*m)`), and `lse2` is
-        already in the scaled base-2 domain. Passing it there would need a
-        divide by `sm_scale` to undo a multiply.
-
-        The KV tail mask runs **after** this, not before, so no infinity ever
-        reaches the FMA -- `qk_scale * -inf` is correct but puts a real
-        infinity into arithmetic under `fastmath<fast>`, which plan section 5
-        records as the thing that silently deleted a mask on gfx1201.
         """
-        s_lo, s_hi = v_s
-        acc = self.traits.ACC_ELEMS
-        scale_v = Vec.from_elements([fx.Float32(qk_scale)], fx.Float32).broadcast_to(acc)
-        neg_lse2 = fsub(self.c_zero_f, lse2, self.fm_fast)
-        neg_v = Vec.from_elements([fx.Float32(neg_lse2)], fx.Float32).broadcast_to(acc)
-        lo = fmath.fma(Vec(s_lo), scale_v, neg_v, fastmath=self.fm_fast)
-        hi = fmath.fma(Vec(s_hi), scale_v, neg_v, fastmath=self.fm_fast)
-        return as_mlir_value(lo), as_mlir_value(hi)
+        return self.sub_m(v_s, lse2)
 
     def cast_p(self, v_p, tile_idx=None):
         """Pack to bf16 with **no dropout**, unlike the forward's `cast_p`.
@@ -2096,9 +2088,9 @@ def build_flash_attn_gfx950_dq(meta, knobs):
         def main_body():
             """One KV tile per iteration; three GEMMs and one accumulator."""
             # Neither operand is pre-scaled: `qk_scale` is applied to the f32
-            # scores below, where it costs the same FMA the `lse2` subtract
-            # needed anyway and does not round Q through bf16 a second time.
-            # See `BwdDqSoftmaxHelper.scale_and_sub_lse`.
+            # scores below, where it costs one multiply per score and does not
+            # round Q through bf16 a second time.
+            # See `BwdDqSoftmaxHelper.sub_lse`.
             q_all_bf16 = q_loader.load_all()
             do_all_bf16 = do_loader.load_all()
             lse2, delta = row_inputs.load(ctx.q_row)
@@ -2119,9 +2111,9 @@ def build_flash_attn_gfx950_dq(meta, knobs):
                 _sched_barrier(0)
                 _s_barrier()  # every wave's DMA has landed, not just mine
 
-                # -- GEMM1. S, raw. The scale and the LSE subtract follow.
+                # -- GEMM1. S, raw. The scale follows; the LSE subtract waits for the bias and the masks.
                 v_s = gemm_helper.qk(k_reader.load_k(0), q_all_bf16)
-                v_s = softmax_helper.scale_and_sub_lse(v_s, ctx.c_sm_scale_log2e, lse2)
+                v_s = gemm_helper.scale_scores(v_s)
                 # **This also adds the bias**, on the 32-row family:
                 # `ParitySoftmaxHelper.seq_pad_mask_if_needed` folds
                 # `_add_bias_inplace` in ahead of the tail mask, which is
@@ -2138,7 +2130,7 @@ def build_flash_attn_gfx950_dq(meta, knobs):
                 # Columns past `seqlen_kv` read zero from the buffer bound,
                 # which is a *score of zero*, not an absent key: without the
                 # mask `exp2(0 - lse2)` contributes a spurious P. After the
-                # scale, so the `-inf` it writes never reaches an FMA.
+                # scale, so the multiply never sees the `-inf` it writes.
                 #
                 # **Kept under causal too**, where the forward drops it. Under
                 # plain causal it is redundant -- row `i`'s bound is
@@ -2170,6 +2162,7 @@ def build_flash_attn_gfx950_dq(meta, knobs):
                 # P = exp2(qk_scale*S - lse2). `exp2` is the forward's, split
                 # into two halves there for the pipeline and simply adjacent
                 # here.
+                v_s = softmax_helper.sub_lse(v_s, lse2)
                 v_p = softmax_helper.exp2(v_s, 0, ACC_ELEMS)
                 v_p = softmax_helper.exp2(v_p, ACC_ELEMS, ACC_ELEMS)
 
