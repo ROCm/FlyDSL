@@ -96,7 +96,7 @@ from kernels.monokernel.glm.layout import (
     ug_split,
 )
 from kernels.monokernel.helpers import SHARED_SOURCE_KEY, bind_helpers
-from kernels.monokernel.layout import CM_DEV, CM_SYS, LAYER_SLOTS, NEG, THREADS
+from kernels.monokernel.layout import CM_DEV, LAYER_SLOTS, NEG, THREADS
 from kernels.monokernel.ops import (
     bf2_f32,
     bf16_pair,
@@ -458,57 +458,6 @@ def build_glm5_monokernel(
                 tot = _xred(tot, off, lambda a, b: a + b)
             return e, raw * (_rcp(tot) * ROUTE_SCALE)
 
-        def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
-            """Push BF16 partials to every peer, then sum them in rank order.
-
-            One wave owns each destination, allowing the peer stores to progress
-            concurrently without retaining all peer pointers in every wave."""
-            region_base = fx.Int64(SY[region]) + fx.Int64(peer_slot) * fx.Int64(SY["_part_stride"])
-            if const_expr(W > 1):
-                if wave < W:
-                    pair_count = S * tile // 2
-                    for batch in range_constexpr((pair_count + 63) // 64):
-                        pair = lane + batch * 64
-                        if pair < pair_count:
-                            si = pair // (tile // 2)
-                            ri = (pair % (tile // 2)) * 2
-                            put_bf(
-                                peer_dst + region_base,
-                                (rank * S + si) * HIDDEN + t * tile + ri,
-                                [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
-                                CM_SYS,
-                            )
-                gpu.barrier()
-            if tid < S * tile // 2:
-                s = tid // (tile // 2)
-                r = (tid % (tile // 2)) * 2
-                row = t * tile + r
-                if const_expr(callable(residual)):
-                    r0, r1 = residual(s, row)
-                v0 = lds_ld(outs, s * tile + r)
-                v1 = lds_ld(outs, s * tile + r + 1)
-                if const_expr(W == 1):  # no TP peers: the sum is the local value
-                    parts = [(v0, v1)]
-                    got = []
-                    if const_expr(not callable(residual)):
-                        got = poll([(residual, (s * HIDDEN + row) // 2, 1)])
-                else:
-                    own = sym + region_base
-                    specs = [(own, ((src * S + s) * HIDDEN + row) // 2, 1) for src in range(W)]
-                    if const_expr(not callable(residual)):  # packed bf16 pair
-                        specs.append((residual, (s * HIDDEN + row) // 2, 1))
-                    got = poll(specs, "one-as")
-                    parts = [bf2_f32(v[0]) for v in got[:W]]
-                    got = got[W:]
-                if const_expr(not callable(residual)):
-                    r0, r1 = bf2_f32(got[0][0])
-                t0 = fx.Float32(0.0)
-                t1 = fx.Float32(0.0)
-                for src in range_constexpr(W):
-                    t0 = t0 + parts[src][0]
-                    t1 = t1 + parts[src][1]
-                out_fn(s, row, r0 + t0, r1 + t1)
-
         bound_helpers = bind_helpers(
             source_key=shared_source_key,
             S=S,
@@ -532,6 +481,13 @@ def build_glm5_monokernel(
             first=first,
             timeline_addr=(lambda: index_arg(7)) if with_indexer else None,
             mxfp4_layout="rows_fp8",
+            rank=rank,
+            W=W,
+            HIDDEN=HIDDEN,
+            peer_dst=peer_dst,
+            sym=sym,
+            SY=SY,
+            peer_slot=peer_slot,
         )
         mb = bound_helpers["mb"]
         put = bound_helpers["put"]
@@ -563,6 +519,7 @@ def build_glm5_monokernel(
         unit_fp8x2 = bound_helpers["unit_fp8x2"]
         unit_mxfp4 = bound_helpers["unit_mxfp4"]
         unit_mxfp4_bf16 = bound_helpers["unit_mxfp4_bf16"]
+        peer_reduce = bound_helpers["peer_reduce"]
 
         # ================================================= 1. q_a / kv_a GEMV
         # 1 row group x 96 chunks: 8 waves split K, 12 chunks each (all prefetched)

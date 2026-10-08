@@ -64,7 +64,6 @@ from kernels.monokernel.config import (
 from kernels.monokernel.helpers import SHARED_SOURCE_KEY, bind_helpers
 from kernels.monokernel.layout import (
     BLOCKS,
-    CM_SYS,
     LAYER_SLOTS,
     NEG,
     Q_B_TILE,
@@ -582,132 +581,6 @@ def build_kimi_k3_mla_attention(
                 tot = _xred(tot, off, lambda a, b: a + b)
             return e, raw * (_rcp(tot) * ROUTE_SCALE)
 
-        def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
-            """Push BF16 partials in tagged pairs to every peer, then sum all
-            ranks' pairs from the own symmetric buffer in rank order (W = 1: no
-            exchange).  Consecutive epochs use alternating ``part`` slots.  A
-            rank cannot finish epoch k + 1 before every peer enters it, so no
-            rank reaches k + 2 soon enough to overwrite epoch k while it is
-            still being consumed.  ``residual`` is either fn(s, row) -> (r0,
-            r1) (plain loads, issued first) or a mailbox base (pairs s * HIDDEN
-            + row, polled in the same batch as the peers)."""
-            region_base = fx.Int64(SY[region]) + fx.Int64(peer_slot) * fx.Int64(SY["_part_stride"])
-            if const_expr(attention_only and W > 1):
-                pair_count = S * tile // 2
-                owner_rank = (t * tile) // (HIDDEN // W)
-                owner_words = fx.Vector(bo.buffer_load(r_peers, owner_rank * 2, vec_width=2, dtype=T.i32))
-                owner_dst = (fx.Int64(_uniform(owner_words[1])) << 32) | fx.Int64(fx.Uint32(_uniform(owner_words[0])))
-                if wave == 0:
-                    for batch in range_constexpr((pair_count + 63) // 64):
-                        pair = lane + batch * 64
-                        if pair < pair_count:
-                            si = pair // (tile // 2)
-                            ri = (pair % (tile // 2)) * 2
-                            put_bf(
-                                owner_dst + region_base,
-                                (rank * S + si) * HIDDEN + t * tile + ri,
-                                [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
-                                CM_SYS,
-                            )
-                gpu.barrier()
-
-                if (rank == owner_rank) & (tid < pair_count):
-                    s = tid // (tile // 2)
-                    r = (tid % (tile // 2)) * 2
-                    row = t * tile + r
-                    r0, r1 = residual(s, row)
-                    own = sym + region_base
-                    got = poll(
-                        [(own, ((src * S + s) * HIDDEN + row) // 2, 1) for src in range(W)],
-                        "one-as",
-                    )
-                    t0 = fx.Float32(0.0)
-                    t1 = fx.Float32(0.0)
-                    for src in range_constexpr(W):
-                        p0, p1 = bf2_f32(got[src][0])
-                        t0 = t0 + p0
-                        t1 = t1 + p1
-                    lds_st(outs, tid, bf16_pair(r0 + t0, r1 + t1))
-                gpu.barrier()
-
-                result_tag = tag + fx.Int32(1 << 30)
-                if (rank == owner_rank) & (wave < W):
-                    for batch in range_constexpr((pair_count + 63) // 64):
-                        pair = lane + batch * 64
-                        if pair < pair_count:
-                            s = pair // (tile // 2)
-                            r = (pair % (tile // 2)) * 2
-                            packed = lds_ld(outs, pair).bitcast(fx.Int32)
-                            mailbox = ((owner_rank * S + s) * HIDDEN + t * tile + r) // 2
-                            bo.buffer_store(
-                                fx.Vector.from_elements([packed, result_tag], fx.Int32),
-                                _rsrc(peer_dst + region_base),
-                                mailbox * 2,
-                                cache_modifier=CM_SYS,
-                            )
-                gpu.barrier()
-
-                if tid < pair_count:
-                    s = tid // (tile // 2)
-                    r = (tid % (tile // 2)) * 2
-                    row = t * tile + r
-                    own = sym + region_base
-                    got = poll(
-                        [(own, ((owner_rank * S + s) * HIDDEN + row) // 2, 1)],
-                        "one-as",
-                        expected_tag=result_tag,
-                    )
-                    v0, v1 = bf2_f32(got[0][0])
-                    out_fn(s, row, v0, v1)
-                return
-            if const_expr(W > 1):
-                # One wave per destination: peer pointers are wave-uniform, and the
-                # destinations progress concurrently instead of eight serial stores
-                # from the output wave. All waves consume outs before it is reused.
-                if wave < W:
-                    pair_count = S * tile // 2
-                    for batch in range_constexpr((pair_count + 63) // 64):
-                        pair = lane + batch * 64
-                        if pair < pair_count:
-                            si = pair // (tile // 2)
-                            ri = (pair % (tile // 2)) * 2
-                            put_bf(
-                                peer_dst + region_base,
-                                (rank * S + si) * HIDDEN + t * tile + ri,
-                                [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
-                                CM_SYS,
-                            )
-                gpu.barrier()
-            if tid < S * tile // 2:
-                s = tid // (tile // 2)
-                r = (tid % (tile // 2)) * 2
-                row = t * tile + r
-                if const_expr(callable(residual)):
-                    r0, r1 = residual(s, row)
-                v0 = lds_ld(outs, s * tile + r)
-                v1 = lds_ld(outs, s * tile + r + 1)
-                if const_expr(W == 1):  # no TP peers: the sum is the local value
-                    parts = [(v0, v1)]
-                    got = []
-                    if const_expr(not callable(residual)):
-                        got = poll([(residual, (s * HIDDEN + row) // 2, 1)])
-                else:
-                    own = sym + region_base
-                    specs = [(own, ((src * S + s) * HIDDEN + row) // 2, 1) for src in range(W)]
-                    if const_expr(not callable(residual)):  # packed bf16 pair
-                        specs.append((residual, (s * HIDDEN + row) // 2, 1))
-                    got = poll(specs, "one-as")
-                    parts = [bf2_f32(v[0]) for v in got[:W]]
-                    got = got[W:]
-                if const_expr(not callable(residual)):
-                    r0, r1 = bf2_f32(got[0][0])
-                t0 = fx.Float32(0.0)
-                t1 = fx.Float32(0.0)
-                for src in range_constexpr(W):
-                    t0 = t0 + parts[src][0]
-                    t1 = t1 + parts[src][1]
-                out_fn(s, row, r0 + t0, r1 + t1)
-
         bound_helpers = bind_helpers(
             source_key=shared_source_key,
             S=S,
@@ -729,6 +602,15 @@ def build_kimi_k3_mla_attention(
             timeline_buf=timeline_buf,
             first=first,
             mxfp4_layout="rows_split",
+            rank=rank,
+            W=W,
+            HIDDEN=HIDDEN,
+            peer_dst=peer_dst,
+            sym=sym,
+            SY=SY,
+            peer_slot=peer_slot,
+            owner_reduce=attention_only,
+            r_peers=r_peers,
         )
         mb = bound_helpers["mb"]
         put = bound_helpers["put"]
@@ -757,6 +639,7 @@ def build_kimi_k3_mla_attention(
         mma_units = bound_helpers["mma_units"]
         unit_fp8x2 = bound_helpers["unit_fp8x2"]
         unit_mxfp4 = bound_helpers["unit_mxfp4"]
+        peer_reduce = bound_helpers["peer_reduce"]
 
         if const_expr(dedicated_input_norm):
             norm_rounds = (HIDDEN + 4 * THREADS - 1) // (4 * THREADS)

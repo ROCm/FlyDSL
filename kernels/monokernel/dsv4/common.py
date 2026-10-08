@@ -10,11 +10,9 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROUTE_SCALE
-from kernels.monokernel.dsv4.plan import MIN_I32, ROW_TILE, THREADS, TL_COLS, WAVES
+from kernels.monokernel.dsv4.plan import MIN_I32, THREADS, TL_COLS, WAVES
 from kernels.monokernel.helpers import SHARED_SOURCE_KEY, bind_helpers
-from kernels.monokernel.layout import CM_SYS
 from kernels.monokernel.ops import (
-    bf2_f32,
     bf16_pair,
     exp,
     f8_word,
@@ -371,58 +369,6 @@ def common_defs(ctx):
             tot = xred(tot, off, lambda a, b: a + b)
         return e, raw * (rcp(tot) * ROUTE_SCALE)
 
-    def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
-        """Push BF16 partials to every peer, then sum all ranks' in rank order.
-        ``residual``: fn(s, row) -> (r0, r1), a mailbox base polled with the peers,
-        or None when the caller adds its own (hc_post)."""
-        if const_expr(W > 1):
-            # one wave per destination peer
-            if wave < W:
-                pair_count = S * tile // 2
-                for batch in range_constexpr((pair_count + 63) // 64):
-                    pair = lane + batch * 64
-                    if pair < pair_count:
-                        si = pair // (tile // 2)
-                        ri = (pair % (tile // 2)) * 2
-                        put_bf(
-                            peer_dst + fx.Int64(SY[region]),
-                            (rank * S + si) * HIDDEN + t * tile + ri,
-                            [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
-                            CM_SYS,
-                        )
-            gpu.barrier()
-        if tid < S * tile // 2:
-            s = tid // (tile // 2)
-            r = (tid % (tile // 2)) * 2
-            row = t * tile + r
-            r0 = fx.Float32(0.0)
-            r1 = fx.Float32(0.0)
-            if const_expr(callable(residual)):
-                r0, r1 = residual(s, row)
-            v0 = lds_ld(outs, s * tile + r)
-            v1 = lds_ld(outs, s * tile + r + 1)
-            if const_expr(W == 1):
-                parts = [(v0, v1)]
-                got = []
-                if const_expr(residual is not None and not callable(residual)):
-                    got = poll([(residual, (s * HIDDEN + row) // 2, 1)])
-            else:
-                own = sym + fx.Int64(SY[region])
-                specs = [(own, ((src * S + s) * HIDDEN + row) // 2, 1) for src in range(W)]
-                if const_expr(residual is not None and not callable(residual)):
-                    specs.append((residual, (s * HIDDEN + row) // 2, 1))
-                got = poll(specs, "one-as")
-                parts = [bf2_f32(v[0]) for v in got[:W]]
-                got = got[W:]
-            if const_expr(residual is not None and not callable(residual)):
-                r0, r1 = bf2_f32(got[0][0])
-            t0 = fx.Float32(0.0)
-            t1 = fx.Float32(0.0)
-            for src in range_constexpr(W):
-                t0 = t0 + parts[src][0]
-                t1 = t1 + parts[src][1]
-            out_fn(s, row, r0 + t0, r1 + t1)
-
     bound_helpers = bind_helpers(
         source_key=SHARED_SOURCE_KEY,
         S=S,
@@ -448,6 +394,12 @@ def common_defs(ctx):
         stamp_fence=True,
         mxfp4_layout="atom",
         tl_cols=TL_COLS,
+        rank=rank,
+        W=W,
+        HIDDEN=HIDDEN,
+        peer_dst=peer_dst,
+        sym=sym,
+        SY=SY,
     )
     mb = bound_helpers["mb"]
     put = bound_helpers["put"]
@@ -478,6 +430,7 @@ def common_defs(ctx):
     mma_units = bound_helpers["mma_units"]
     unit_fp8mx = bound_helpers["unit_fp8mx"]
     unit_mxfp4 = bound_helpers["unit_mxfp4"]
+    peer_reduce = bound_helpers["peer_reduce"]
 
     return dict(
         _other_parts=_other_parts,

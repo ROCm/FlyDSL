@@ -19,8 +19,9 @@ from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel import ops
 from kernels.monokernel.config import FP8_MAX, SCALE_BM
-from kernels.monokernel.layout import CM_DEV, CM_SYS, POLL_MAX, THREADS, TL_COLS, WAVES
+from kernels.monokernel.layout import CM_DEV, CM_SYS, POLL_MAX, ROW_TILE, THREADS, TL_COLS, WAVES
 from kernels.monokernel.ops import (
+    bf2_f32,
     bf16_pair,
     f8_word,
     fp8_to_bf16x8,
@@ -72,6 +73,15 @@ def bind_helpers(
     timeline_addr=None,
     tl_cols=TL_COLS,
     mxfp4_layout="atom",
+    rank=None,
+    W=1,
+    HIDDEN=None,
+    peer_dst=None,
+    sym=None,
+    SY=None,
+    peer_slot=None,
+    owner_reduce=False,
+    r_peers=None,
 ):
     """The shared helpers, bound to one kernel's launch state (a dict of name -> function).
 
@@ -211,6 +221,137 @@ def bind_helpers(
         """A row-scaled MXFP4 tile (``mxfp4_layout`` "rows_*") against bf16 activations."""
         _, weights, factor, _ = unit_mxfp4(w_rsrc, s_rsrc, rg, kc, K, b_word, coef, ln)
         return ("mxfp4_rows_bf16", weights, factor, b_word + (lane // 16) * 4)
+
+    def owner_peer_reduce(region_base, t, residual, out_fn, tile):
+        """``owner_reduce``: the rank owning a tile's rows sums it once and sends the result back."""
+        pair_count = S * tile // 2
+        owner_rank = (t * tile) // (HIDDEN // W)
+        owner_words = fx.Vector(bo.buffer_load(r_peers, owner_rank * 2, vec_width=2, dtype=T.i32))
+        owner_dst = (fx.Int64(uniform(owner_words[1])) << 32) | fx.Int64(fx.Uint32(uniform(owner_words[0])))
+        if wave == 0:
+            for batch in range_constexpr((pair_count + 63) // 64):
+                pair = lane + batch * 64
+                if pair < pair_count:
+                    si = pair // (tile // 2)
+                    ri = (pair % (tile // 2)) * 2
+                    put_bf(
+                        owner_dst + region_base,
+                        (rank * S + si) * HIDDEN + t * tile + ri,
+                        [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
+                        CM_SYS,
+                    )
+        gpu.barrier()
+
+        if (rank == owner_rank) & (tid < pair_count):
+            s = tid // (tile // 2)
+            r = (tid % (tile // 2)) * 2
+            row = t * tile + r
+            r0, r1 = residual(s, row)
+            own = sym + region_base
+            got = poll(
+                [(own, ((src * S + s) * HIDDEN + row) // 2, 1) for src in range(W)],
+                "one-as",
+            )
+            t0 = fx.Float32(0.0)
+            t1 = fx.Float32(0.0)
+            for src in range_constexpr(W):
+                p0, p1 = bf2_f32(got[src][0])
+                t0 = t0 + p0
+                t1 = t1 + p1
+            lds_st(outs, tid, bf16_pair(r0 + t0, r1 + t1))
+        gpu.barrier()
+
+        result_tag = tag + fx.Int32(1 << 30)
+        if (rank == owner_rank) & (wave < W):
+            for batch in range_constexpr((pair_count + 63) // 64):
+                pair = lane + batch * 64
+                if pair < pair_count:
+                    s = pair // (tile // 2)
+                    r = (pair % (tile // 2)) * 2
+                    packed = lds_ld(outs, pair).bitcast(fx.Int32)
+                    mailbox = ((owner_rank * S + s) * HIDDEN + t * tile + r) // 2
+                    bo.buffer_store(
+                        fx.Vector.from_elements([packed, result_tag], fx.Int32),
+                        rsrc(peer_dst + region_base),
+                        mailbox * 2,
+                        cache_modifier=CM_SYS,
+                    )
+        gpu.barrier()
+
+        if tid < pair_count:
+            s = tid // (tile // 2)
+            r = (tid % (tile // 2)) * 2
+            row = t * tile + r
+            own = sym + region_base
+            got = poll(
+                [(own, ((owner_rank * S + s) * HIDDEN + row) // 2, 1)],
+                "one-as",
+                expected_tag=result_tag,
+            )
+            v0, v1 = bf2_f32(got[0][0])
+            out_fn(s, row, v0, v1)
+
+    def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
+        """Push BF16 partials in tagged pairs to every peer, then sum all ranks' pairs from the own
+        symmetric buffer in rank order (W = 1: no exchange). ``residual`` is fn(s, row) -> (r0, r1)
+        (plain loads, issued first), a mailbox base (pairs s * HIDDEN + row, polled with the peers),
+        or None when the caller adds its own. With ``peer_slot`` consecutive epochs use alternating
+        ``_part_stride`` slots: a rank cannot finish epoch k + 1 before every peer enters it, so no
+        rank reaches k + 2 soon enough to overwrite epoch k while it is still being consumed. With
+        ``owner_reduce`` each tile is summed once by the rank that owns its rows and sent back."""
+        region_base = fx.Int64(SY[region])
+        if const_expr(peer_slot is not None):
+            region_base = region_base + fx.Int64(peer_slot) * fx.Int64(SY["_part_stride"])
+        if const_expr(owner_reduce and W > 1):
+            owner_peer_reduce(region_base, t, residual, out_fn, tile)
+            return
+        if const_expr(W > 1):
+            # one wave per destination peer
+            if wave < W:
+                pair_count = S * tile // 2
+                for batch in range_constexpr((pair_count + 63) // 64):
+                    pair = lane + batch * 64
+                    if pair < pair_count:
+                        si = pair // (tile // 2)
+                        ri = (pair % (tile // 2)) * 2
+                        put_bf(
+                            peer_dst + region_base,
+                            (rank * S + si) * HIDDEN + t * tile + ri,
+                            [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
+                            CM_SYS,
+                        )
+            gpu.barrier()
+        if tid < S * tile // 2:
+            s = tid // (tile // 2)
+            r = (tid % (tile // 2)) * 2
+            row = t * tile + r
+            r0 = fx.Float32(0.0)
+            r1 = fx.Float32(0.0)
+            if const_expr(callable(residual)):
+                r0, r1 = residual(s, row)
+            v0 = lds_ld(outs, s * tile + r)
+            v1 = lds_ld(outs, s * tile + r + 1)
+            if const_expr(W == 1):
+                parts = [(v0, v1)]
+                got = []
+                if const_expr(residual is not None and not callable(residual)):
+                    got = poll([(residual, (s * HIDDEN + row) // 2, 1)])
+            else:
+                own = sym + region_base
+                specs = [(own, ((src * S + s) * HIDDEN + row) // 2, 1) for src in range(W)]
+                if const_expr(residual is not None and not callable(residual)):
+                    specs.append((residual, (s * HIDDEN + row) // 2, 1))
+                got = poll(specs, "one-as")
+                parts = [bf2_f32(v[0]) for v in got[:W]]
+                got = got[W:]
+            if const_expr(residual is not None and not callable(residual)):
+                r0, r1 = bf2_f32(got[0][0])
+            t0 = fx.Float32(0.0)
+            t1 = fx.Float32(0.0)
+            for src in range_constexpr(W):
+                t0 = t0 + parts[src][0]
+                t1 = t1 + parts[src][1]
+            out_fn(s, row, r0 + t0, r1 + t1)
 
     def mma_units(acc, units):
         """acc[4] += coef * (W_chunk @ X_chunk) for every issued unit."""
@@ -494,6 +635,7 @@ def bind_helpers(
         return fx.min(lane % 16, count - 1)
 
     return dict(
+        peer_reduce=peer_reduce,
         poll=poll,
         stamp=stamp,
         mma_units=mma_units,
