@@ -424,6 +424,28 @@ def test_bwd_builder_holds_exactly_one_kernel(backend, arch, kind):
     assert len(kernels) == 1 and kernels[0]._func.__name__ == BWD[kind]
 
 
+def test_bwd_dq_static_window_drops_the_left_bound(backend, arch, tmp_path, monkeypatch):
+    """dQ counterpart of `test_static_window_drops_the_left_bound_compare`: a baked **unbounded** left edge compiles the
+    left-bound compare (a second 32-select mask per diagonal tile), the dead-tile skip and the runtime-window scalar
+    guards out, so the build is plain causal and as small as AOTriton's vendored dQ. Before the dQ context was told the
+    left edge was vacuous the baked build was within 1% of the runtime one (a baked finite bound keeps all of it)."""
+    meta = meta_of(head_dim=64, window=True)
+    br = (WINDOW_BOTRIGHT, WINDOW_BOTRIGHT)
+
+    def dump(window, **pins):
+        return isa_tools.fresh_bwd_dump(
+            "dq", backend, arch, meta, tmp_path / f"d{next(_n)}", monkeypatch, window=window, **pins
+        )
+
+    runtime = dump(br)
+    static = dump(br, STATIC_WINDOW=True)
+    finite = dump((127, 0), STATIC_WINDOW=True)
+    n = lambda d: sum(isa_tools.isa_stats(d.isa).values())  # noqa: E731
+    assert n(static) < 0.95 * n(runtime), (n(static), n(runtime))
+    assert n(finite) > n(static)
+    assert static.metadata[".kernarg_segment_size"] == runtime.metadata[".kernarg_segment_size"] - 8
+
+
 @pytest.mark.parametrize("daz,mode", [(True, 0), (False, 3)])
 @pytest.mark.parametrize("kind", ["dq", "dkdv"])
 def test_bwd_daz_reaches_the_hardware_mode(backend, arch, tmp_path, monkeypatch, kind, daz, mode):
