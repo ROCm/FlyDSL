@@ -8,7 +8,7 @@ kernels. Model ownership is explicit:
 - `k3/` contains Kimi-K3 MLA/KDA state handling, AttnRes, latent-MoE logic,
   staged baselines, and benchmark tools.
 - `dsv4/` contains the DeepSeek-V4 decode layer: CSA / HCA sparse attention
-  with its compressors and indexer, mHC, MoE, and its checkpoint loader.
+  with its compressors and indexer, mHC and MoE.
   `kernel.py` builds the one launch from per-stage modules (`hc`, `qkv`,
   `indexer`, `attention`, `ffn`); `common.py` binds the shared helpers to it
   and adds the DSV4-only ones, and `plan.py` holds the host-side task counts
