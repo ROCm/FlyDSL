@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-10-08T14:47:46Z",
+ "updated": "2026-10-08T14:53:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37793754358,
+   "run_id": 37795691290,
    "pr": 1234,
-   "commit": "b8cc514eb7f6c9f70d1a5c769861d5bbdcb78c0a",
+   "commit": "865fad3412c1854f7d01f996ffeb14f3da3513a4",
    "branch": "dsv4_megakernel",
    "event": "pull_request",
    "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
    "status": "in_progress",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37795691290",
+   "created_at": "2026-10-08T14:49:57Z",
+   "updated_at": "2026-10-08T14:51:49Z",
+   "actor": "amd-weisun",
+   "jobs": []
+  },
+  {
+   "run_id": 37793754358,
+   "pr": null,
+   "commit": "b8cc514eb7f6c9f70d1a5c769861d5bbdcb78c0a",
+   "branch": "dsv4_megakernel",
+   "event": "pull_request",
+   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37793754358",
    "created_at": "2026-10-08T14:35:44Z",
-   "updated_at": "2026-10-08T14:37:56Z",
+   "updated_at": "2026-10-08T14:51:08Z",
    "actor": "amd-weisun",
    "jobs": []
   },
@@ -1567,52 +1582,6 @@
    "updated_at": "2026-10-07T01:34:37Z",
    "actor": "dimitri91209",
    "jobs": []
-  },
-  {
-   "run_id": 37544610820,
-   "pr": 1227,
-   "commit": "e8856729fe67c41b5610843dbdbf6eee677d94dc",
-   "branch": "perf/gfx1250-rmsnorm-vector-tail",
-   "event": "pull_request",
-   "title": "[Kernel][Perf] Keep RMSNorm on the 128-bit path for partial tiles and small N",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37544610820",
-   "created_at": "2026-10-06T23:05:53Z",
-   "updated_at": "2026-10-07T02:55:19Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-07T00:15:30Z",
-     "completed_at": "2026-10-07T00:33:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37544610820/job/112551442265"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-07T00:06:38Z",
-     "completed_at": "2026-10-07T01:20:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37544610820/job/112551442291",
-     "machine": "gbt350-odcdh2-b13-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-06T23:25:02Z",
-     "completed_at": "2026-10-07T02:55:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37544610820/job/112551442359"
-    }
-   ]
   }
  ]
 }
