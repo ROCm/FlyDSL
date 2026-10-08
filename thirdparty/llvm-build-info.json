@@ -14,5 +14,15 @@
     "repository":  "https://github.com/jli-melchior/llvm-project.git",
     "branch": "jli/gfx1250/schedule-bank-upstream-oldllvm",
     "description": "VGPR bank scheduling hints for gfx1250"
+  },
+
+  "custom-upstream-old-vavdst": {
+    "repository": "https://github.com/jli-melchior/llvm-project.git",
+    "branch": "jli/gfx1250/schedule-bank-upstream-oldllvm-waitalu",
+    "base": "jli/gfx1250/schedule-bank-upstream-oldllvm",
+    "description": "upstream-old + XDL_ORDERED va_vdst relaxation (ported from custom-old)",
+    "llvm_build_dir": "build-flydsl-schedule-bank-upstream-oldllvm-vavdst",
+    "mlir_install_dir": "mlir_install-schedule-bank-upstream-oldllvm-vavdst",
+    "flydsl_build_dir": "build-fly-schedule-bank-upstream-oldllvm-vavdst"
   }
 }
