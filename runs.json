@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-08T14:31:15Z",
+ "updated": "2026-10-08T14:32:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "dsv4_megakernel",
    "event": "pull_request",
    "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37792952144",
    "created_at": "2026-10-08T14:29:57Z",
-   "updated_at": "2026-10-08T14:29:57Z",
+   "updated_at": "2026-10-08T14:30:35Z",
    "actor": "amd-weisun",
    "jobs": []
   },
@@ -25,11 +25,11 @@
    "branch": "dsv4_megakernel",
    "event": "pull_request",
    "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37792714107",
    "created_at": "2026-10-08T14:28:12Z",
-   "updated_at": "2026-10-08T14:29:55Z",
+   "updated_at": "2026-10-08T14:30:01Z",
    "actor": "amd-weisun",
    "jobs": []
   },
