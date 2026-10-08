@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-10-08T13:23:30Z",
+ "updated": "2026-10-08T13:27:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37783613633,
+   "run_id": 37784132717,
    "pr": 1234,
-   "commit": "ddd1fd4a7e0d3bf5d06c75f6fcb021a0793ab456",
+   "commit": "efd90b7917a362dcf79438243df27001679f0e10",
    "branch": "dsv4_megakernel",
    "event": "pull_request",
    "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
    "status": "in_progress",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37784132717",
+   "created_at": "2026-10-08T13:24:46Z",
+   "updated_at": "2026-10-08T13:26:12Z",
+   "actor": "amd-weisun",
+   "jobs": []
+  },
+  {
+   "run_id": 37783613633,
+   "pr": null,
+   "commit": "ddd1fd4a7e0d3bf5d06c75f6fcb021a0793ab456",
+   "branch": "dsv4_megakernel",
+   "event": "pull_request",
+   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37783613633",
    "created_at": "2026-10-08T13:20:44Z",
-   "updated_at": "2026-10-08T13:22:06Z",
+   "updated_at": "2026-10-08T13:25:47Z",
    "actor": "amd-weisun",
    "jobs": []
   },
@@ -55,13 +70,41 @@
    "branch": "main",
    "event": "push",
    "title": "[Bugfix][Test] Fix atomic_fmin/fmax Out left at +inf on side-stream l\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37780094064",
    "created_at": "2026-10-08T12:53:07Z",
-   "updated_at": "2026-10-08T12:55:19Z",
+   "updated_at": "2026-10-08T13:23:30Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-08T13:24:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37780094064/job/113333830603"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-08T13:23:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37780094064/job/113333830647"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-08T13:23:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37780094064/job/113333830946"
+    }
+   ]
   },
   {
    "run_id": 37779674467,
@@ -1638,52 +1681,6 @@
    "updated_at": "2026-10-06T22:00:31Z",
    "actor": "dimitri91209",
    "jobs": []
-  },
-  {
-   "run_id": 37535969905,
-   "pr": 1229,
-   "commit": "8cc606ce0588f92fca0f43a64e2a0f5f289b5807",
-   "branch": "fix/gfx1250-a8w8-n-tail",
-   "event": "pull_request",
-   "title": "[Bugfix][gfx1250] Keep the FP8 GEMM's B reads and C stores inside N",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37535969905",
-   "created_at": "2026-10-06T21:44:18Z",
-   "updated_at": "2026-10-07T00:02:37Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-06T22:18:07Z",
-     "completed_at": "2026-10-06T22:34:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37535969905/job/112529144774"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-06T23:10:03Z",
-     "completed_at": "2026-10-07T00:02:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37535969905/job/112529144789"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-06T22:18:15Z",
-     "completed_at": "2026-10-06T23:12:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37535969905/job/112529144916",
-     "machine": "smci350-rck-g03-b20-03",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
   }
  ]
 }
