@@ -26,8 +26,11 @@ from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 _ARCH = str(get_rocm_arch() or "")
-if _ARCH != "gfx950":
-    pytest.skip(f"GLM-5 MonoKernel requires gfx950, got {_ARCH}", allow_module_level=True)
+if _ARCH != "gfx950" and not _ARCH.startswith("gfx1250"):
+    pytest.skip(f"GLM-5 MonoKernel requires gfx950 or gfx1250, got {_ARCH}", allow_module_level=True)
+# gfx1250 bounds the re-polls of every mailbox wait, so a protocol defect fails
+# the check instead of spinning on the device.
+POLL = {"poll_limit": 1_000_000} if _ARCH.startswith("gfx1250") else {}
 
 from kernels.monokernel.config import KV_LORA, PE_DIM  # noqa: E402
 from kernels.monokernel.glm.layout import INDEX_DIM  # noqa: E402
@@ -112,6 +115,7 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, with_indexer=
         topk=topk,
         with_indexer=with_indexer,
         index_max_seq=MAX_SEQ,
+        **POLL,
     )
 
     if npes == 1:
@@ -136,6 +140,10 @@ def run_rank(rank, npes, S, cur_pos, iters, group=None, seed=1234, with_indexer=
         got["x_out"] = out
         kv_ref, pe_ref = kv0.clone(), pe0.clone()
         report = []
+        expired = op.poll_error() if POLL else ()
+        if expired:
+            ok = False
+            report.append(("poll", 0.0, 0.0, f"mailbox waits timed out in {', '.join(expired)}"))
         ref_indices = indices
         if with_indexer:
             index_ref = index0.clone()
@@ -367,9 +375,10 @@ def test_router_preserves_close_scores():
     pe = torch.zeros(MAX_SEQ, PE_DIM, dtype=torch.bfloat16, device=dev)
     indices = torch.zeros(1, 2048, dtype=torch.int32, device=dev)
     cos, sin = rope_table(MAX_SEQ, device=dev)
-    with Glm5MonoKernel(W, 1) as op:
+    with Glm5MonoKernel(W, 1, **POLL) as op:
         op.forward(h, torch.zeros(1, dtype=torch.int32, device=dev), kv, pe, indices, cos, sin)
         torch.cuda.synchronize()
+        assert not (POLL and op.poll_error()), "a gfx1250 mailbox wait timed out"
         assert op.intermediates()["sel"].tolist() == [[256, 0, 1, 2, 3, 4, 5, 6, 226]]
 
 

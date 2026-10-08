@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import torch
 
+from flydsl.runtime.device import get_rocm_arch
 from kernels.monokernel.config import (
     GLM5_CONFIG,
     HIDDEN,
@@ -25,13 +26,15 @@ from kernels.monokernel.config import (
     validate_shard,
 )
 from kernels.monokernel.glm.kernel import build_glm5_monokernel
+from kernels.monokernel.glm.kernel_gfx1250 import build_glm5_monokernel_gfx1250
 from kernels.monokernel.glm.layout import (
     INDEX_DIM,
+    POLL_STAGES,
     layout,
     stage_tasks,
 )
 from kernels.monokernel.layout import TL_COLS
-from kernels.monokernel.packing import pack_bf16, pack_fp8, pack_layer_weights
+from kernels.monokernel.packing import pack_bf16, pack_bf16_gfx1250, pack_fp8, pack_fp8_gfx1250, pack_layer_weights
 from kernels.monokernel.runtime import SymmetricPeerBuffer
 from kernels.monokernel.weights import LayerWeights
 
@@ -49,6 +52,12 @@ class Glm5MonoKernel:
     The symmetric buffer uses PyTorch's caching allocator and CUDA/ROCm IPC
     storage sharing. Scratch and symmetric buffers may be shared by all layers
     because every launch uses a fresh ``tag``.
+
+    gfx950 runs the wave64 MFMA kernel and gfx1250 the wave32 WMMA kernel; both
+    share this ABI, the scratch layout (gfx1250 tags each compact top-k index)
+    and the golden.  ``poll_limit`` (gfx1250
+    only) bounds the re-polls of every mailbox wait and reports expiry through
+    :meth:`poll_error`.
     """
 
     def __init__(
@@ -63,12 +72,22 @@ class Glm5MonoKernel:
         with_indexer: bool = False,
         index_max_seq: int = 4096,
         timeline=False,
+        poll_limit: int | None = None,
     ):
         if W.config != GLM5_CONFIG:
             raise ValueError(f"Glm5MonoKernel requires GLM-5 weights, got {W.config.name!r}")
         validate_shard(samples, W.heads, rank, npes, topk, GLM5_CONFIG)
         if not 1 <= launches_per_step <= 128:
             raise ValueError(f"launches_per_step must be in [1, 128], got {launches_per_step}")
+        arch = get_rocm_arch()
+        if arch.startswith("gfx1250"):
+            build, gfx1250 = build_glm5_monokernel_gfx1250, True
+        elif arch.startswith("gfx95"):
+            if poll_limit is not None:
+                raise ValueError("poll_limit is only implemented by the gfx1250 kernel")
+            build, gfx1250 = build_glm5_monokernel, False
+        else:
+            raise ValueError(f"Glm5MonoKernel supports gfx950 and gfx1250, got {arch}")
         self.W, self.S, self.rank, self.npes, self.topk = W, samples, rank, npes, topk
         self.launches_per_step = launches_per_step
         self.with_indexer = with_indexer
@@ -82,16 +101,21 @@ class Glm5MonoKernel:
             mxfp4_weight_layout=Mxfp4WeightLayout.NATIVE,
             mxfp4_scale_layout=Mxfp4ScaleLayout.NATIVE,
             router_weight_layout=RouterWeightLayout.NATIVE,
+            gfx1250=gfx1250,
         )
         if with_indexer:
             required = ("w_index_k", "s_index_k", "w_index_w", "w_index_q", "s_index_q", "g_index_k", "b_index_k")
             missing = [name for name in required if name not in t]
             if missing:
                 raise ValueError(f"with_indexer=True requires weights: {', '.join(missing)}")
-            self.packed["w_index_k"] = pack_fp8(t["w_index_k"])
-            self.packed["w_index_q"] = pack_fp8(t["w_index_q"])
-            self.packed["w_index_w"] = pack_bf16(t["w_index_w"])
-        self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk, with_indexer, index_max_seq)
+            fp8_tiles, bf16_tiles = (pack_fp8_gfx1250, pack_bf16_gfx1250) if gfx1250 else (pack_fp8, pack_bf16)
+            self.packed["w_index_k"] = fp8_tiles(t["w_index_k"])
+            self.packed["w_index_q"] = fp8_tiles(t["w_index_q"])
+            self.packed["w_index_w"] = bf16_tiles(t["w_index_w"])
+        self.tagged_indices = gfx1250
+        self.scr_layout, self.sym_layout = layout(
+            samples, W.heads, npes, topk, with_indexer, index_max_seq, tagged_indices=gfx1250
+        )
         dev = torch.device("cuda", torch.cuda.current_device())
         self.stages = stage_tasks(samples, W.heads, topk, with_indexer, index_max_seq, self.expert_mxfp4)
         n_tasks = sum(n for _, n in self.stages)
@@ -122,7 +146,8 @@ class Glm5MonoKernel:
         self.sym_storage = self.peer_buffer.storage
         self.sym = self.peer_buffer.local_address
         self.peers = self.peer_buffer.addresses
-        self.launch = build_glm5_monokernel(
+        extra = {} if poll_limit is None else {"poll_limit": poll_limit}
+        self.launch = build(
             samples,
             W.heads,
             npes,
@@ -133,6 +158,7 @@ class Glm5MonoKernel:
             expert_mxfp4=self.expert_mxfp4,
             uv_scale_rows=W.t["w_uv"].shape[0] // W.t["s_uv"].shape[0],
             timeline=timeline,
+            **extra,
         )
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)  # decode-step counter
 
@@ -236,6 +262,16 @@ class Glm5MonoKernel:
     def advance_step(self):
         self.step.add_(1)
 
+    def poll_error(self, clear: bool = True) -> tuple[str, ...]:
+        """Stages whose bounded mailbox waits expired since the last clear (synchronizes)."""
+
+        off = self.scr_layout["poll_err"]
+        words = self.scratch[off : off + 4 * len(POLL_STAGES)].view(torch.int32)
+        expired = tuple(name for name, word in zip(POLL_STAGES, words.tolist()) if word)
+        if clear:
+            words.zero_()
+        return expired
+
     def close(self):
         """Release this rank's remote HIP IPC mappings."""
 
@@ -250,7 +286,7 @@ class Glm5MonoKernel:
     def timeline_report(self) -> str:
         """Per stage, in us from launch start: [first start, median hint seen, last end]
         and median per-task phases (hint wait, payload staging, compute, epilogue)."""
-        tl = self.timeline[:, :5].cpu().double() / 100.0  # s_memrealtime ticks at 100 MHz
+        tl = self.timeline[:, :5].cpu().double() / 100.0  # 100 MHz realtime-counter ticks
         t0 = tl[:, 0].min()
         rows, i = [], 0
         for name, n in self.stages:
@@ -292,6 +328,5 @@ class Glm5MonoKernel:
         if self.with_indexer:
             result["index_q"] = self.debug("index_q", (S, 32, INDEX_DIM), bf2=True)
             result["index_w"] = self.debug("index_w", (S, 32))
-            off = self.scr_layout["indices"]
-            result["indices"] = self.scratch[off : off + S * self.topk * 4].view(torch.int32).view(S, self.topk)
+            result["indices"] = self.debug("indices", (S, self.topk), torch.int32, pairs=self.tagged_indices)
         return result

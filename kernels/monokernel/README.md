@@ -4,7 +4,9 @@
 kernels. Model ownership is explicit:
 
 - `glm/` contains GLM-5 scheduling, indexed attention, wrappers, and golden
-  references.
+  references. `kernel.py` is the gfx950 wave64 MFMA kernel and
+  `kernel_gfx1250.py` its gfx1250 wave32 WMMA counterpart; both share the
+  wrapper, layouts, and golden.
 - `k3/` contains Kimi-K3 MLA/KDA state handling, AttnRes, latent-MoE logic,
   staged baselines, and benchmark tools.
 
