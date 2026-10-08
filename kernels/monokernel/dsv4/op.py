@@ -16,14 +16,9 @@ from kernels.monokernel.dsv4.config import (
     moe_format,
     validate_shard,
 )
-from kernels.monokernel.dsv4.kernel import (
-    TL_COLS,
-    build_advance_step,
-    build_dsv4_kernel,
-    layout,
-    stage_tasks,
-)
+from kernels.monokernel.dsv4.kernel import build_advance_step, build_dsv4_kernel
 from kernels.monokernel.dsv4.packing import pack_layer_weights
+from kernels.monokernel.dsv4.plan import TL_COLS, layout, stage_tasks
 from kernels.monokernel.dsv4.reference import LayerWeights, fp4_pool_shapes
 from kernels.monokernel.runtime import SymmetricPeerBuffer
 

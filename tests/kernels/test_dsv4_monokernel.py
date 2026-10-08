@@ -248,7 +248,7 @@ def test_dsv4_rejects_a_bf16_router_bias():
 
 def test_dsv4_layout_sizes_moe_mailboxes_from_the_build_dims():
     """scores / sel / prob / mid follow the build's n_experts, top_k and inter, not the module defaults."""
-    from kernels.monokernel.dsv4.kernel import layout, stage_tasks
+    from kernels.monokernel.dsv4.plan import layout, stage_tasks
 
     S, ne, k, inter = 2, 1024, 8, 768
     sc, _ = layout(S, 16, 1, n_experts=ne, top_k=k, inter=inter)
@@ -303,7 +303,7 @@ def test_dsv4_bounded_poll_flags_instead_of_hanging():
     cos, sin = rope_table(4096, theta=cfg.rope_theta, device=dev)
     kv = (0.3 * torch.randn(cfg.window, cfg.head_dim, device=dev)).bfloat16()
 
-    from kernels.monokernel.dsv4.kernel import POLL_TIMEOUT_US
+    from kernels.monokernel.dsv4.plan import POLL_TIMEOUT_US
 
     for timeout, expect in [(POLL_TIMEOUT_US, False), (0, True)]:
         variant = Dsv4Variant(cfg, 1, rank=0, npes=1, moe_mode=MoeMode.A8W4, poll_timeout_us=timeout)
@@ -323,8 +323,9 @@ def _i32(x):
 @pytest.mark.parametrize("s0", [5, 2**25 - 3, 2**31 - 3])
 def test_dsv4_step_advance_scrubs_stale_mailboxes(s0):
     """Over one scrub period the step advance zeroes only stale-tagged pairs, across the tag and int32 wraps."""
-    from kernels.monokernel.dsv4.kernel import LAYER_SLOTS, scrub_period
+    from kernels.monokernel.dsv4.kernel import scrub_period
     from kernels.monokernel.dsv4.op import Dsv4Variant
+    from kernels.monokernel.dsv4.plan import LAYER_SLOTS
 
     cfg = _cfg(hc_mult=1)
     variant = Dsv4Variant(cfg, 1, rank=0, npes=1, moe_mode=MoeMode.A8W4)
@@ -357,8 +358,8 @@ def test_dsv4_step_advance_scrubs_stale_mailboxes(s0):
 
 def test_dsv4_layer_output_is_the_same_across_the_tag_wrap():
     """Launches whose tags straddle the 2**32 wrap give bit-identical outputs to steps 0 and 1."""
-    from kernels.monokernel.dsv4.kernel import LAYER_SLOTS
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel
+    from kernels.monokernel.dsv4.plan import LAYER_SLOTS
 
     torch.manual_seed(0)
     cfg = _cfg(hc_mult=1)
@@ -1349,8 +1350,8 @@ def test_dsv4_indexer_scores_match_on_every_rank_tp8():
 
 def test_dsv4_indexer_scores_the_new_entry_past_the_first_tile():
     """The entry written this launch is scored from the mailbox even past the first SCORE_TILE (poisoned cache)."""
-    from kernels.monokernel.dsv4.kernel import SCORE_TILE
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel
+    from kernels.monokernel.dsv4.plan import SCORE_TILE
 
     torch.manual_seed(0)
     ratio = COMPRESS_CSA
@@ -1541,8 +1542,8 @@ def test_dsv4_indexer_topk_spans_many_candidates_per_thread():
 @pytest.mark.parametrize("n_live", [3000, 6000])
 def test_dsv4_indexer_topk_spans_several_ctas(n_live):
     """The top-k with candidates in one CTA part (3000) and split across parts, one of them empty (6000)."""
-    from kernels.monokernel.dsv4.kernel import THREADS, n_topk_parts
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel
+    from kernels.monokernel.dsv4.plan import THREADS, n_topk_parts
     from kernels.monokernel.dsv4.reference import pack_fp4
 
     torch.manual_seed(0)
@@ -1584,8 +1585,8 @@ def test_dsv4_indexer_topk_spans_several_ctas(n_live):
 
 def test_dsv4_indexer_topk_at_a_full_1m_context():
     """The top-k at a full 1M context: eight register-held trips per thread, all live (cache filled directly)."""
-    from kernels.monokernel.dsv4.kernel import THREADS, n_topk_parts
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel
+    from kernels.monokernel.dsv4.plan import THREADS, n_topk_parts
     from kernels.monokernel.dsv4.reference import pack_fp4
 
     torch.manual_seed(0)
@@ -2058,8 +2059,8 @@ def test_dsv4_compress_schedule_is_the_checkpoints():
 
 def test_dsv4_split_merge_spans_the_block():
     """More than 64 key splits takes the block-wide merge path; overrunning it is silently wrong, not a crash."""
-    from kernels.monokernel.dsv4.kernel import SPLIT_KEYS
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel
+    from kernels.monokernel.dsv4.plan import SPLIT_KEYS
 
     torch.manual_seed(0)
     dev, mode, S = "cuda", MoeMode.W8A8, 1

@@ -9,6 +9,9 @@ kernels. Model ownership is explicit:
   staged baselines, and benchmark tools.
 - `dsv4/` contains the DeepSeek-V4 decode layer: CSA / HCA sparse attention
   with its compressors and indexer, mHC, MoE, and its checkpoint loader.
+  `kernel.py` builds the one launch from per-stage modules (`hc`, `qkv`,
+  `indexer`, `attention`, `ffn`) over the device helpers in `common.py`;
+  `plan.py` holds the host-side task counts and mailbox layout.
 
 Reusable contracts and primitives stay at this package root. `config.py`,
 `layout.py`, `ops.py`, `packing.py`, `reference.py`, `runtime.py`, and
