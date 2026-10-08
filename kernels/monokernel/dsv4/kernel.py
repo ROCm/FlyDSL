@@ -729,7 +729,7 @@ def build_dsv4_kernel(
             env_rows,
         ).launch(grid=(G,), block=(THREADS,), stream=stream)
 
-    # LLVM's VectorCombine (foldShuffleToIdentity) goes exponential on the S == 1 up/gate
+    # LLVM's VectorCombine (foldShuffleToIdentity) went exponential on an earlier up/gate; kept off
     return flyc.compile[{"llvm_options": {"disable-vector-combine": True}}](launch_dsv4)
 
 

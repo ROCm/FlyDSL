@@ -267,126 +267,8 @@ def ffn_stages(ctx):
     )
     SUG_S_BYTES = 2 * INTER // SCALE_BM * (HIDDEN // 128) * 4  # the FP8 shared expert's scales
 
-    if const_expr(S == 1):
-        # task u: 8 intermediates of routed slot u // UG_PER_SLOT (u < UG_PER_SLOT: also shared)
-        UG8_UNITS = (HIDDEN // UG_UNIT_K) // WAVES
-        for u in range(start("ug"), N_UG_TASKS, G):
-            u = fx.Int32(u)
-            stamp("ug", u, 0)
-            s_u, c = fx.Int32(0), u % UG_PER_SLOT
-            has_sh = u < UG_PER_SLOT
-            slot = has_sh.select(fx.Int32(MOE_SLOTS - 1), u // UG_PER_SLOT)
-            bs = load_bias()
-            w_rg = ((lane % 16) // 8) * (INTER // 16) + c // 2  # MFMA rows 0-7 gate, 8-15 up
-            w_ln = (lane & -16) | ((c % 2) * 8 + lane % 8)
-            s_rg = (lane // 32) * (INTER // 16) + c // 2
-
-            def u_ug8(cc, e, live=None):  # expert e's weights (loads return 0 unless live)
-                nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
-                ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
-                r_wug = bo.create_buffer_resource_from_addr(
-                    w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), num_records_bytes=nw
-                )
-                r_sug = bo.create_buffer_resource_from_addr(
-                    s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), num_records_bytes=ns
-                )
-                unit = wave * UG8_UNITS + cc
-                if const_expr(use_mxfp4_weight):
-                    coefficients = None  # MXFP8 scales are folded into the staged activations
-                    return unit_mxfp4(
-                        r_wug,
-                        r_sug,
-                        mx_rg(c),
-                        unit,
-                        HIDDEN,
-                        unit * 64,
-                        coefficients,
-                        w_ln,
-                    )
-                kc = unit * (2 if use_fp8_block128 else 1)
-                nwc = 2 if use_fp8_block128 else 1
-                wv = [
-                    fx.Vector(
-                        bo.buffer_load(r_wug, ((w_rg * UG_NKC + kc + h) * 64 + w_ln) * 4, vec_width=4, dtype=T.i32)
-                    )
-                    for h in range(nwc)
-                ]
-                sc = ld_f32(r_sug, (s_rg * 16 // SCALE_BM) * (HIDDEN // 128) + kc // 2)
-                if const_expr(use_fp8_block128):
-                    return (
-                        "f8f8",
-                        wv,
-                        lambda: sc * uniform_f32(lds_ld(misc, 8 + kc // 2)),
-                        kc * 16 + (lane // 16) * 4,
-                    )
-                return ("fp8", wv, sc, kc * 32 + (lane // 16) * 4)
-
-            # the shared expert's weights do not depend on routing: prefetch them
-            if const_expr(SHARED_FP8):
-
-                def u_ug8_sh(cc, live):
-                    unit = wave * UG8_UNITS + cc
-                    coefficients = None
-                    return unit_fp8mx(
-                        bo.create_buffer_resource_from_addr(
-                            w_sug, num_records_bytes=live.select(fx.Int32(2 * INTER * HIDDEN), fx.Int32(0))
-                        ),
-                        bo.create_buffer_resource_from_addr(
-                            s_sug, num_records_bytes=live.select(fx.Int32(SUG_S_BYTES), fx.Int32(0))
-                        ),
-                        w_rg,
-                        s_rg,
-                        unit,
-                        HIDDEN,
-                        unit * 64,
-                        coefficients,
-                        w_ln,
-                    )
-
-                pre = [u_ug8_sh(cc, has_sh) for cc in range(UG8_UNITS)]
-            else:
-                pre = [u_ug8(cc, fx.Int32(SHARED_EXPERT), has_sh) for cc in range(UG8_UNITS)]
-            # at S == 1 only a CTA's first task stages input and routing; later ones reuse LDS
-            if u == fx.Int32(start("ug")):
-                hint_wait(0, None, mark=("ug", u))
-                stage_moe_input([0])
-                if wave == 0:
-                    e, w = route_topk(s_u, bs=bs)
-                    # every pick: a later task on this CTA reads its own from here
-                    if lane < TOP_K:
-                        lds_st(keys, lane, e)
-                        lds_st(misc, lane, w)
-            stamp("ug", u, 2)
-            gpu.barrier()
-            e_sel = uniform(lds_ld(keys, slot - 1))
-            post = [u_ug8(cc, e_sel) for cc in range(UG8_UNITS)]
-            reduce_rows(1, mma_units([fx.Float32(0.0) for _ in range(4)], pre), emit_out(16))
-            gpu.barrier()
-            reduce_rows(
-                1, mma_units([fx.Float32(0.0) for _ in range(4)], post), lambda rl, n, v: lds_st(outs, 16 + rl, v)
-            )
-            stamp("ug", u, 3)
-            gpu.barrier()
-            if tid < UG8:  # threads 0-3: the shared expert's rows, 4-7: the routed slot's
-                r = (tid % (UG8 // 2)) * 2
-                o = (tid // (UG8 // 2)) * 16
-                g0, g1 = lds_ld(outs, o + r), lds_ld(outs, o + r + 1)
-                u0, u1 = lds_ld(outs, o + UG8 + r), lds_ld(outs, o + UG8 + r + 1)
-                if has_sh | (tid >= UG8 // 2):
-                    put2(
-                        mb("mid"),
-                        (tid < UG8 // 2).select(fx.Int32(0), slot) * INTER + c * UG8 + r,
-                        swiglu(g0, u0, swiglu_limit),
-                        swiglu(g1, u1, swiglu_limit),
-                    )
-            if (c == 0) & (tid == 0):  # routing record (debug / tests)
-                put(mb("sel"), slot, e_sel)
-                put(mb("prob"), slot, lds_ld(misc, slot - 1))
-                if has_sh:
-                    put(mb("sel"), 0, fx.Int32(SHARED_EXPERT))
-                    put(mb("prob"), 0, fx.Float32(1.0))
-            stamp("ug", u, 4)
-    elif const_expr(S > 1):
+    def up_gate():
+        """In its own scope: its unit lists must not join `down`'s scf.for-carried state."""
         # (tile, sample) items, unrolled at build time (the unit lists cannot be
         # scf.for-carried). An item past the end is masked by `live` (zero
         # num_records, no publishes), not skipped, so every barrier stays uniform;
@@ -532,6 +414,8 @@ def ffn_stages(ctx):
             ug8_emit(c, slot, sample, False, live)
             stamp("ug", sample * N_UG_TASKS + uu, 4, pred=live)
 
+    up_gate()
+
     # =============== 10. expert down + route weighting + MoE TP reduce
     DN_NKC = INTER // 64
     # see dn_tile: every tile starts at row 0 of a group
@@ -556,8 +440,6 @@ def ffn_stages(ctx):
     for t in range(start("down"), N_DN_TILES, G):
         t = fx.Int32(t)
         stamp("down", t, 0)
-        if const_expr(S == 1):  # multi-sample routing was staged before up/gate
-            dn_route(load_bias())
         gpu.barrier()
         gu = wave // DN_WPR
         dn_rg = t * DN_TILE // 16
