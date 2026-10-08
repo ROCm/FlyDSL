@@ -1238,6 +1238,12 @@ def flydsl_flash_attn_func(
             cross-length are runtime on the gfx950 kernels).
         stream: CUDA/HIP stream to launch on.
 
+    Input layout (the 8xD protocol):
+        On gfx950 bf16/f16 the head dim must be a multiple of 8 (at most 512), and then q, k, v and the output need no
+        padding. The kernels move D in 8-element chunks, so the builders (``build_flash_attn_gfx950_*``) accept other
+        head dims only on tensors allocated with ``ceil8(head_dim)`` contiguous elements per row and passed as a
+        ``[..., :head_dim]`` view; ``abi.check_8xd`` refuses anything tighter instead of touching a neighbouring row.
+
     Unsupported combinations:
         ``bias`` together with ``causal=True`` or ``window=`` raises ``ValueError``. A bias already *is* an attention
         mask (a large negative or ``-inf`` entry is how a caller says "do not attend here"); a causal or window mask on
