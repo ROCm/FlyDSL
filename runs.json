@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-08T00:42:52Z",
+ "updated": "2026-10-08T01:03:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 37710796843,
+   "pr": 1236,
+   "commit": "53ac5d77417f0cab2931b78be6f0627982d55ebc",
+   "branch": "fix/issue-1176-i32-shape-overflow",
+   "event": "pull_request",
+   "title": "[Bugfix] Compute dynamic layout sizes in i64 and name oversized tensor dims",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37710796843",
+   "created_at": "2026-10-08T01:01:25Z",
+   "updated_at": "2026-10-08T01:02:30Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 37708945862,
    "pr": 1188,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37708945862",
    "created_at": "2026-10-08T00:39:57Z",
-   "updated_at": "2026-10-08T00:42:05Z",
+   "updated_at": "2026-10-08T00:43:27Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -25,13 +40,41 @@
    "branch": "fix/issue-1176-i32-shape-overflow",
    "event": "pull_request",
    "title": "[Bugfix] Compute dynamic layout sizes in i64 and name oversized tensor dims",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37707500656",
    "created_at": "2026-10-08T00:23:20Z",
-   "updated_at": "2026-10-08T00:26:21Z",
+   "updated_at": "2026-10-08T01:01:52Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-08T00:57:27Z",
+     "completed_at": "2026-10-08T01:01:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37707500656/job/113094884909"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-08T00:57:27Z",
+     "completed_at": "2026-10-08T01:01:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37707500656/job/113094884911"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-08T00:58:40Z",
+     "completed_at": "2026-10-08T01:01:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37707500656/job/113094884981"
+    }
+   ]
   },
   {
    "run_id": 37706586400,
@@ -44,9 +87,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37706586400",
    "created_at": "2026-10-08T00:13:08Z",
-   "updated_at": "2026-10-08T00:16:38Z",
+   "updated_at": "2026-10-08T00:58:32Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-08T00:58:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37706586400/job/113092849732"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-08T00:54:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37706586400/job/113092849783"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-08T00:51:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37706586400/job/113092849803"
+    }
+   ]
   },
   {
    "run_id": 37706058002,
@@ -146,11 +217,11 @@
    "branch": "fix/gfx1250-a8w8-n-tail",
    "event": "pull_request",
    "title": "[Bugfix][gfx1250] Keep the FP8 GEMM's B reads and C stores inside N",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682285079",
    "created_at": "2026-10-07T20:28:43Z",
-   "updated_at": "2026-10-07T20:59:56Z",
+   "updated_at": "2026-10-08T00:51:34Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -165,9 +236,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-07T20:59:56Z",
+     "started_at": "2026-10-08T00:51:33Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37682285079/job/113014581233"
     },
@@ -1459,21 +1530,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37409146952",
    "created_at": "2026-10-06T03:28:35Z",
    "updated_at": "2026-10-06T03:28:35Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37394801935,
-   "pr": null,
-   "commit": "52bcdebe5588c4b4de1b28ae73a7c248b1de87a1",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37394801935",
-   "created_at": "2026-10-06T00:35:24Z",
-   "updated_at": "2026-10-06T00:35:24Z",
    "actor": "dimitri91209",
    "jobs": []
   }
