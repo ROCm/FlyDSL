@@ -220,6 +220,21 @@ def test_large_logits_no_nan(fwd_build, hdim):
     assert (o.double() - exact).abs().max().item() <= MAX_ABS_ERR
 
 
+@pytest.mark.parametrize("seqlen", [1, 1024], ids=["aotriton", "hot_loop"])
+@pytest.mark.parametrize("hdim", [16, 128, 512])
+def test_large_bf16_nan_values(fwd_build, hdim, seqlen):
+    """AOTriton's `test_large_bf16_nan_values` (aotriton issue 54): Q = K = V = 133120 in bf16 at `sm_scale` 0.125. At
+    head_dim 16 every scaled score is about 5.1e10, where an f32 ulp is 4096, so `exp2(fma(s, c, -m))` against the
+    rounded max `m` leaves a residue of up to 2048 on the maximal score itself: `exp2` of it is inf or 0 and the output
+    NaN. The rounded `exp2(rn(c * s) - m)` is exactly `exp2(0)`. AOTriton's case is seqlen 1; 1024 reaches the
+    dual-wave hot loop, where LLVM had fused the two (every seqlen up to 256 passed with the fusion in)."""
+    fn = fwd_build(meta_of(head_dim=hdim))
+    q, k, v = (torch.full((1, 1, seqlen, hdim), 133120.0, dtype=DTYPES["bf16"], device="cuda") for _ in range(3))
+    o = alloc(1, 1, seqlen, hdim, DTYPES["bf16"])
+    run_fwd(fn, q, k, v, o, scale=0.125)
+    assert not torch.isnan(o).any(), "Output should not contain NaNs!"
+
+
 # ---------------------------------------------------------------------------
 # FWD-08, FWD-09
 # ---------------------------------------------------------------------------

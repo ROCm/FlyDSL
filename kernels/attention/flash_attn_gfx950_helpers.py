@@ -60,7 +60,7 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from kernels.attention import common
 from kernels.attention import flash_attn_utils as dualwave
-from kernels.attention.common import MASK_SAFE_FASTMATH, MaskedAxis
+from kernels.attention.common import MASK_SAFE_FASTMATH, SOFTMAX_EXPONENT_FASTMATH, MaskedAxis
 from kernels.attention.flash_attn_gfx950_config import BF16_BYTES as _ELEM_BYTES
 from kernels.attention.flash_attn_gfx950_config import DMA_BYTES as _ACCESS_BYTES
 from kernels.attention.flash_attn_gfx950_config import STAGGER_GROUP_WAVES
@@ -590,6 +590,11 @@ class ParityGemmHelper(dualwave.DualwaveGemmHelper):
           upstream is that pattern; it is reached only by the fp8 helper, whose
           scores have a different dynamic range.
 
+          Forbidding it in source is not enough: under the ambient `fast` hint
+          LLVM contracted this multiply and `sub_m`'s subtract into exactly that
+          FMA in the dual-wave hot loop. Both are built under
+          `SOFTMAX_EXPONENT_FASTMATH`, which carries no `contract`.
+
         Called **before** the masks, which is the other half of what Triton
         does: `fwd_kernel_inner.py:134` writes `-inf` into `qk` before the
         `+= Qk_scale * dot`, so no infinity is ever an FMA operand. Here the
@@ -612,10 +617,9 @@ class ParityGemmHelper(dualwave.DualwaveGemmHelper):
         # `seq_pad_mask_inplace`). `ACC_ELEMS` is dQ's name for the same thing
         # and is not a field of the forward traits.
         scale_v = Vec.from_elements([fx.Float32(self.c_sm_scale_log2e)], fx.Float32).broadcast_to(16)
-        return (
-            as_mlir_value(Vec(s_lo) * scale_v),
-            as_mlir_value(Vec(s_hi) * scale_v),
-        )
+        with fx.fastmath(SOFTMAX_EXPONENT_FASTMATH):
+            scaled = (Vec(s_lo) * scale_v, Vec(s_hi) * scale_v)
+        return as_mlir_value(scaled[0]), as_mlir_value(scaled[1])
 
     def qk_stage(self, v_k, q_all_bf16, acc, stage=0):
         """One D stage of `S += Q·K^T`, with the Q pack held off the MFMA.
@@ -1719,6 +1723,13 @@ class ParitySoftmaxHelper(dualwave.DualwaveSoftmaxHelper):
 
     def reduce_max(self, v_s):
         return dualwave._score_pair_max(v_s, self.c_neg_floor, self.fm_fast)
+
+    def sub_m(self, v_s, row_max):
+        # `s - m` on the scores the max was taken over, never fused with `scale_scores`' multiply: see
+        # `SOFTMAX_EXPONENT_FASTMATH`.
+        with fx.fastmath(SOFTMAX_EXPONENT_FASTMATH):
+            v_d = dualwave._sub_score_pair(v_s, row_max, self.fm_fast)
+        return v_d
 
     # -- P5: bias ------------------------------------------------------------
 

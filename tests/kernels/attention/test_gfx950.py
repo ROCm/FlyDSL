@@ -250,7 +250,19 @@ def test_exp2_wait_state_scan(backend, arch, tmp_path, monkeypatch, hdim, dtype_
     model it on gfx950 (a zero-gap site carries the *pre-exp* score into the MFMA: one wrong element per pack; 7 of 108
     bf16 builds, at rungs 96, 224, 256). Zero zero-gap sites."""
     d = isa_tools.fresh_fwd_dump(backend, arch, meta_of(dtype_str=dtype_str, head_dim=hdim), tmp_path, monkeypatch)
+    assert any(op == "v_exp_f32" for op, _ in isa_tools.instructions(d.isa)), "the scan must see the exps"
     assert isa_tools.scan_exp2_wait_state(d.isa) == []
+
+
+@pytest.mark.parametrize("window", [False, True], ids=["dense", "causal"])
+@pytest.mark.parametrize("hdim", [64, 128, 512])
+def test_softmax_exponent_is_not_an_fma(backend, arch, tmp_path, monkeypatch, hdim, window):
+    """Aotriton issue 54: no `v_exp_f32` operand may come from an FMA. Under the ambient `fast` hint LLVM fused the score
+    scale into the row-max subtract, `exp2(fma(s, c, -m))`, across the dual-wave hot loop; `test_large_bf16_nan_values`
+    shows what that does to the output."""
+    d = isa_tools.fresh_fwd_dump(backend, arch, meta_of(head_dim=hdim, window=window), tmp_path, monkeypatch)
+    assert any(op == "v_exp_f32" for op, _ in isa_tools.instructions(d.isa)), "the scan must see the exps"
+    assert isa_tools.scan_exp2_fed_by_fma(d.isa) == []
 
 
 @pytest.mark.xfail(strict=False, reason="ABI-16 calibration: triage every hit, allowlist the benign ones, then gate")

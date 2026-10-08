@@ -64,6 +64,12 @@ __all__ = [
 # FMA contraction.
 MASK_SAFE_FASTMATH = fx.FastMathFlags.contract | fx.FastMathFlags.reassoc  # no ninf/nnan/afn
 
+# No fast-math flags, for the two operations that form a softmax exponent: the score scale and the row-max subtract.
+# With `contract` on both, LLVM fuses them into `exp2(fma(s, c, -m))` -- an unrounded product against a max that was
+# rounded -- whose residue reaches +-2**11 at scores near 5e10, so `exp2` gives inf or 0 and the output NaN (aotriton
+# issue 54, `test_large_bf16_nan_values`). This is not a speed trade to revisit: the FMA form must not be used.
+SOFTMAX_EXPONENT_FASTMATH = fx.FastMathFlags.none
+
 
 def lse_row_addressing(varlen_bits, batch, head, num_head_q, tokens, row_off):
     """`(base, pitch)` for a row-wise f32 side input -- logsumexp, and delta.
