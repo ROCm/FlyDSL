@@ -90,6 +90,18 @@ def compile_dump(compile_fn, tmp_path, monkeypatch):
     return Dump(dirs[-1])
 
 
+def fresh_bwd_dump(kind, backend, arch, meta, tmp_path, monkeypatch, window=None, **pins):
+    """Compile a **fresh** dQ (`kind="dq"`) or dK/dV (`"dkdv"`) build for `(meta, pins)` with the dump on; return its `Dump`."""
+    from tests.kernels.attention.attn_testlib import bwd_compile_inputs
+
+    knobs = getattr(backend, f"{kind}_knobs")(arch, **pins).resolve(meta)
+    fn = getattr(backend, f"build_{kind}")(meta, knobs)
+    args, kw = bwd_compile_inputs(kind, meta)
+    if window is not None:
+        kw["window"] = window
+    return compile_dump(lambda: fn.compile(*args, **kw), tmp_path, monkeypatch)
+
+
 # ---------------------------------------------------------------------------
 # ISA scanners
 # ---------------------------------------------------------------------------

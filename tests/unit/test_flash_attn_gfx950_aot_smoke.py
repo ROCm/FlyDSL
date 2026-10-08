@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""AOT smoke for the gfx950 attention builders (forward part): the flow AOTriton's generator and `flyc_compile` follow, with no
+"""AOT smoke for the gfx950 attention builders (forward, dQ and dK/dV): the flow AOTriton's generator and `flyc_compile` follow, with no
 tensors and no launch.
 
 1. The config is imported with flydsl blocked and `resolve`d to flat psels (what the generator records beside each hsaco).
@@ -33,15 +33,21 @@ assert 'flydsl' not in sys.modules and 'torch' not in sys.modules
 choices = json.loads(sys.argv[1])
 meta = c.FmhaInputMetadata(dtype_str=choices['dtype'], head_dim=choices['BLOCK_DMODEL'],
                            window=choices['causal_type'] == 3, bias=bool(choices['bias']), dropout=bool(choices['dropout']))
-knobs = c.fwd_knobs('gfx950', BLOCK_DMODEL=choices['BLOCK_DMODEL'], PADDED_HEAD=choices['PADDED_HEAD']).resolve(meta)
+make = getattr(c, choices['kind'] + '_knobs')
+knobs = make('gfx950', BLOCK_DMODEL=choices['BLOCK_DMODEL'], PADDED_HEAD=choices['PADDED_HEAD']).resolve(meta)
 print(json.dumps(knobs.as_psels()))
 """
 
 CHOICES = [
-    dict(dtype="bf16", BLOCK_DMODEL=64, PADDED_HEAD=False, causal_type=0, bias=0, dropout=0),
-    dict(dtype="f16", BLOCK_DMODEL=128, PADDED_HEAD=True, causal_type=3, bias=0, dropout=1),
-    dict(dtype="bf16", BLOCK_DMODEL=256, PADDED_HEAD=False, causal_type=0, bias=1, dropout=0),
+    dict(kind=kind, **base)
+    for kind in ("fwd", "dq", "dkdv")
+    for base in (
+        dict(dtype="bf16", BLOCK_DMODEL=64, PADDED_HEAD=False, causal_type=0, bias=0, dropout=0),
+        dict(dtype="f16", BLOCK_DMODEL=128, PADDED_HEAD=True, causal_type=3, bias=0, dropout=1),
+        dict(dtype="bf16", BLOCK_DMODEL=256, PADDED_HEAD=False, causal_type=0, bias=1, dropout=0),
+    )
 ]
+KERNEL_NAMES = {"fwd": "FWD_KERNEL_NAME", "dq": "DQ_KERNEL_NAME", "dkdv": "DKDV_KERNEL_NAME"}
 
 
 def _synthesised_args(launcher, dtype_str):
@@ -52,7 +58,8 @@ def _synthesised_args(launcher, dtype_str):
     import flydsl.expr as fx
 
     elem = fx.BFloat16 if dtype_str == "bf16" else fx.Float16
-    typed = {"Q": elem, "K": elem, "V": elem, "O": elem, "Bias": elem, "LSE": fx.Float32}
+    typed = {n: elem for n in ("Q", "K", "V", "O", "B", "DO", "DQ", "DK", "DV", "DB")}
+    typed.update(LSE=fx.Float32, Delta=fx.Float32)
     args = []
     for p in inspect.signature(launcher.func).parameters.values():
         ann = p.annotation
@@ -72,7 +79,7 @@ def _synthesised_args(launcher, dtype_str):
 @pytest.mark.parametrize(
     "choices",
     CHOICES,
-    ids=lambda c: f"{c['dtype']}-{c['BLOCK_DMODEL']}-c{c['causal_type']}-b{c['bias']}-d{c['dropout']}",
+    ids=lambda c: f"{c['kind']}-{c['dtype']}-{c['BLOCK_DMODEL']}-c{c['causal_type']}-b{c['bias']}-d{c['dropout']}",
 )
 def test_aot_flow_compiles_without_a_launch(choices, tmp_path, monkeypatch):
     from kernels.attention import dispatch
@@ -85,6 +92,7 @@ def test_aot_flow_compiles_without_a_launch(choices, tmp_path, monkeypatch):
         [sys.executable, "-c", _DESCRIBE, json.dumps(choices)], cwd=REPO, check=True, capture_output=True, text=True
     )
     psels = json.loads(out.stdout.strip().splitlines()[-1])
+    kind = choices["kind"]
     assert psels["BLOCK_DMODEL"] == choices["BLOCK_DMODEL"] and psels["GRID_AXIS_ORDER"] == 0
 
     from kernels.attention import flash_attn_gfx950_config as cfg
@@ -99,9 +107,9 @@ def test_aot_flow_compiles_without_a_launch(choices, tmp_path, monkeypatch):
         dropout=bool(choices["dropout"]),
     )
     pins = {k: v for k, v in psels.items() if k != "GRID_AXIS_ORDER"}
-    knobs = backend.fwd_knobs(arch, **pins).resolve(meta)
+    knobs = getattr(backend, f"{kind}_knobs")(arch, **pins).resolve(meta)
     assert knobs.as_psels() == psels
-    fn = backend.build_fwd(meta, knobs)
+    fn = getattr(backend, f"build_{kind}")(meta, knobs)
 
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("ARCH", "gfx950")
@@ -111,6 +119,6 @@ def test_aot_flow_compiles_without_a_launch(choices, tmp_path, monkeypatch):
         lambda: flyc.compile(fn.launcher, *_synthesised_args(fn.launcher, choices["dtype"])), tmp_path, monkeypatch
     )
     assert dump.hidden_args == []
-    assert dump.metadata[".name"].startswith(cfg.FWD_KERNEL_NAME)
+    assert dump.metadata[".name"].startswith(getattr(cfg, KERNEL_NAMES[kind]))
     assert dump.metadata[".max_flat_workgroup_size"] == fn.traits.BLOCK_SIZE
     assert dump.metadata[".kernarg_segment_size"] == sum(s for _, s in dump.kernel_args) + 4
