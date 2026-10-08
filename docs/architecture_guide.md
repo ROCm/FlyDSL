@@ -516,6 +516,34 @@ dumps/my_func_name/
 
 If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra numbered dump before `gpu_module_to_binary`.
 
+### Running a hand-edited `.s`
+
+To try "what if these few instructions were different" without rebuilding the compiler, edit the dumped ISA and
+patch it into a JIT cache entry with `scripts/patch_cache_asm.py`. Use a scratch cache directory that starts empty:
+
+```bash
+FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python test_my_kernel.py            # writes NN_final_isa.s
+FLYDSL_RUNTIME_CACHE_DIR=./hack-cache python test_my_kernel.py               # caches the compiler's artifact
+vim dumps/my_kernel/21_final_isa.s
+python3 scripts/patch_cache_asm.py ./hack-cache dumps/my_kernel/21_final_isa.s
+FLYDSL_RUNTIME_CACHE_DIR=./hack-cache FLYDSL_RUNTIME_RUN_ONLY=1 python test_my_kernel.py
+```
+
+A cache entry stores the compiled module as MLIR text and rebuilds its ExecutionEngine from it on load, so the tool
+assembles the `.s` with the ROCm `clang` for the entry's chip and swaps the result into the entry's `gpu.binary`.
+`FLYDSL_RUNTIME_RUN_ONLY=1` makes a cache miss an error rather than a silent recompile.
+
+Run only the case under study in both the dump and the caching step. Constexpr specializations of a kernel share its
+symbol: the dump directory is named after that symbol and keeps only the last one compiled, and their cache entries
+cannot be told apart. The tool refuses a `.s` that matches more than one entry, since patching the wrong one would
+leave the run executing the compiler's code with no error.
+
+Keep every kernel symbol unchanged: the host still launches kernels by name. The `.s` must declare every kernel the
+entry launches, since the whole binary is replaced. The tool refuses any directory that contains or lies inside the
+default cache `~/.flydsl/cache`, where a patched entry would be served to every later run; a cache you point
+`FLYDSL_RUNTIME_CACHE_DIR` at for ordinary runs is not protected, so keep the scratch directory separate from it.
+`--save-hsaco` also writes the code object next to the `.s`.
+
 ---
 
 ## 8. Source files
