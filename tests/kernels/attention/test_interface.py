@@ -240,6 +240,43 @@ def test_knobs_reach_the_build_and_are_validated(seen_knobs):
         flydsl_flash_attn_func(q, k, v, knobs=[("daz", False)])
 
 
+@pytest.fixture
+def gfx950_overrides(monkeypatch):
+    """Record the knob overrides the interface hands the gfx950 route; nothing is built or launched."""
+    seen = []
+
+    def stub(q, k, v, **kw):
+        seen.append(dict(kw["knob_overrides"]))
+        return torch.empty_like(q)
+
+    monkeypatch.setattr(iface, "_flydsl_flash_attn_gfx950", stub)
+    return seen
+
+
+# (B, S, H, call kwargs, expected XCD_SWIZZLE override: None = not set by the interface)
+XCD_AUTO_CASES = [
+    pytest.param(1, 16384, 8, {}, True, id="eligible"),
+    pytest.param(2, 16129, 16, {}, True, id="eligible_64_blocks_at_the_edge"),
+    pytest.param(1, 16128, 8, {}, None, id="63_q_blocks"),
+    pytest.param(1, 16384, 12, {}, None, id="heads_not_a_multiple_of_8"),
+    pytest.param(1, 16384, 8, {"causal": True}, None, id="causal"),
+    pytest.param(1, 16384, 8, {"window": (127, 0)}, None, id="window"),
+    pytest.param(1, 16384, 8, {"num_kv_splits": 2}, None, id="split_k"),
+    pytest.param(1, 16384, 8, {"knobs": {"XCD_SWIZZLE": False}}, False, id="a_pin_to_off_is_kept"),
+]
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # the split-K case spells num_kv_splits the old way
+@pytest.mark.parametrize("B,S,H,kw,expected", XCD_AUTO_CASES)
+def test_xcd_swizzle_is_set_for_the_calls_it_applies_to(gfx950_overrides, B, S, H, kw, expected):
+    """The knob is only ever set here: `XCD_SWIZZLE` defaults to off in the config, so an interface that stopped setting it
+    would silently turn the head-slow mapping off for every call (main enables it for dense calls with `H % 8 == 0` and at
+    least 64 q blocks). A pin from the caller wins."""
+    q, k, v = (torch.empty(B, S, H, 128, device="cuda", dtype=BF16) for _ in range(3))
+    flydsl_flash_attn_func(q, k, v, **{"causal": False, **kw})
+    assert gfx950_overrides[-1].get("XCD_SWIZZLE") is expected
+
+
 def test_fp8_calls_do_not_see_the_deprecation():
     """The fp8 kernels (out of scope) still read the old kwargs: no warning, and the legacy defaults are filled in."""
     with warnings.catch_warnings():
