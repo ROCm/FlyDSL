@@ -129,6 +129,16 @@ $env:PYTHONPATH = "C:\fbuild\python_packages;$repo\python"
 
 The PowerShell LLVM script uses the revision pinned in `thirdparty/llvm-build-info.json`. Windows supports native JIT compilation; AOT export remains Linux ELF-only.
 
+To package a Windows wheel, build FlyDSL into a directory inside the checkout because `setup.py` requires the embedded MLIR package to be in-tree:
+
+```powershell
+& .\scripts\build.ps1 -MLIRPath C:\linstall -BuildDir (Join-Path $repo 'build-vs') -Python C:\fdsl-venv\Scripts\python.exe -Jobs 32
+$env:FLY_BUILD_DIR = 'build-vs'
+python setup.py bdist_wheel
+$wheel = Get-ChildItem .\dist\flydsl-*.whl | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+python -m pip install --no-deps $wheel.FullName
+```
+
 ### Run tests
 
 Tests and examples require `pytest`, `pandas`, and a ROCm build of `torch` (not installed by `pip install -e .`):
