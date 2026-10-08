@@ -877,6 +877,8 @@ def _build_layernorm_quant_module(
             lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
             w = wave_reduce_max(val)
+            # Other waves may still be reading the previous block reduction's result from s_sum[0].
+            gpu.barrier()
             if lane == 0:
                 fx.memref_store(w, s_sum, wave)
             gpu.barrier()
@@ -1226,6 +1228,8 @@ def _build_fused_add_layernorm_quant_module(
             lane = tid % WARP_SIZE
             wave = tid // WARP_SIZE
             w = wave_reduce_max(val)
+            # Other waves may still be reading the previous block reduction's result from s_sum[0].
+            gpu.barrier()
             if lane == 0:
                 fx.memref_store(w, s_sum, wave)
             gpu.barrier()
