@@ -19,8 +19,24 @@ from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel import ops
 from kernels.monokernel.config import FP8_MAX, SCALE_BM
-from kernels.monokernel.layout import CM_DEV, THREADS, WAVES
-from kernels.monokernel.ops import bf16_pair, f8_word, ld_f32, lds_ld, lds_st, rcp, rsrc, wave_max, wave_sum, xshfl
+from kernels.monokernel.layout import CM_DEV, CM_SYS, POLL_MAX, THREADS, TL_COLS, WAVES
+from kernels.monokernel.ops import (
+    bf16_pair,
+    f8_word,
+    fp8_to_bf16x8,
+    ld_f32,
+    lds_ld,
+    lds_st,
+    mem_realtime,
+    mxfp4_to_bf16x8,
+    rcp,
+    rsrc,
+    spin_pause,
+    uniform,
+    wave_max,
+    wave_sum,
+    xshfl,
+)
 
 # A kernel's JIT disk-cache key covers only the sources in its own directory. A kernel that binds these
 # helpers captures this digest of the shared device sources, so editing this file or ops.py recompiles it.
@@ -46,14 +62,241 @@ def bind_helpers(
     xs,
     bias=None,
     N_EXPERTS=None,
-    poll,
-    stamp,
-    mma_units
+    hang=None,
+    poll_timeout_ticks=None,
+    retry_spin_pause=False,
+    timeline=False,
+    timeline_buf=None,
+    first=None,
+    stamp_fence=False,
+    timeline_addr=None,
+    tl_cols=TL_COLS,
+    mxfp4_layout="atom",
 ):
     """The shared helpers, bound to one kernel's launch state (a dict of name -> function).
 
     ``source_key`` is the caller's captured ``SHARED_SOURCE_KEY`` (see there)."""
     assert source_key == SHARED_SOURCE_KEY, "the kernel was built against older shared helper sources"
+
+    v4f = fx.Vector.make_type(4, fx.Float32)
+
+    def poll(specs, scope="agent", batch=POLL_MAX, expected_tag=None):
+        """Batched poll of mailbox pairs ``specs`` = [(base_addr, pair index, npairs in {1, 2})].
+
+        All pairs are loaded together with plain 8 / 16-byte coherent buffer loads (sc1 locally,
+        sc0 sc1 for peer memory); while any tag is not ``expected_tag`` (default: this launch's)
+        the whole batch is re-loaded, so a batch costs one round trip after its last producer
+        lands. A side-effecting op in the retry loop keeps the loads from being hoisted. With
+        ``poll_timeout_ticks`` a timed-out poll stores the tag into ``hang``, and later polls
+        seeing it give up. Returns one list of Int32 value bits per spec."""
+        if const_expr(len(specs) == 0):
+            return []
+        if const_expr(len(specs) > batch):  # bound live registers
+            return poll(specs[:batch], scope, batch, expected_tag) + poll(specs[batch:], scope, batch, expected_tag)
+        cm = CM_DEV if const_expr(scope == "agent") else CM_SYS
+        wanted_tag = tag if expected_tag is None else expected_tag
+
+        def load_all():
+            words = []
+            for b, i, n in specs:
+                w = fx.Vector(bo.buffer_load(rsrc(b), fx.Int32(i) * 2, vec_width=2 * n, dtype=T.i32, cache_modifier=cm))
+                words += [w[e] for e in range(2 * n)]
+            return fx.Vector.from_elements(words, fx.Int32)
+
+        nw = sum(2 * n for _, _, n in specs)
+
+        def unpack(v):
+            outs_, e = [], 0
+            for _, _, n in specs:
+                outs_.append([v[e + 2 * q] for q in range(n)])
+                e += 2 * n
+            return outs_
+
+        def pending(v):
+            bad = v[1] != wanted_tag
+            for e in range_constexpr(3, nw, 2):
+                bad = bad | (v[e] != wanted_tag)
+            return bad
+
+        v = load_all()
+        if const_expr(poll_timeout_ticks is not None):
+            t0 = mem_realtime()
+            stop = fx.Int32(0)
+            while pending(v) & (stop == 0):
+                rocdl.s_nop(0)
+                v = load_all()
+                flagged = uniform(bo.buffer_load(rsrc(hang), 0, vec_width=1, dtype=T.i32, cache_modifier=CM_DEV)) == tag
+                late = (mem_realtime() - t0) > fx.Int64(poll_timeout_ticks)
+                stop = late.select(fx.Int32(2), flagged.select(fx.Int32(1), fx.Int32(0)))
+            if stop == 2:
+                bo.buffer_store(tag, rsrc(hang), 0, cache_modifier=CM_DEV)
+        else:
+            while pending(v):
+                if const_expr(retry_spin_pause):
+                    spin_pause()
+                else:
+                    rocdl.s_nop(0)
+                v = load_all()
+        return unpack(v)
+
+    def stamp(name, t, which, lead=0, pred=None):
+        """Timeline column ``which`` of stage ``name``'s task ``t`` := s_memrealtime, written by
+        thread ``lead`` (and only where ``pred``); timeline builds only."""
+        if const_expr(timeline):
+            if const_expr(stamp_fence):
+                # nothing may cross the clock read (constrains timeline builds only)
+                rocdl.sched_barrier(0)
+            # a masked-off rep must not overwrite the live task's row
+            ok = (tid == lead) if const_expr(pred is None) else ((tid == lead) & pred)
+            if ok:
+                now = mem_realtime()
+                tl_addr = timeline_buf if const_expr(timeline_addr is None) else timeline_addr()
+                fx.generic_store(
+                    fx.inttoptr(
+                        fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8),
+                        tl_addr + fx.Int64((first[name] + t) * tl_cols + which) * 8,
+                    ),
+                    now,
+                )
+
+    def unit_fp8x2(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, coef=None, ln=None, scale_rows=SCALE_BM):
+        """Issue both 64-k halves of one 128-k FP8 weight-scale block."""
+        ln = lane if ln is None else ln
+        wv = [
+            fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc + h) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
+            for h in range(2)
+        ]
+        s = ld_f32(s_rsrc, (rg * 16 // scale_rows) * (K // 128) + kc // 2)
+        if const_expr(callable(coef)):
+            return ("fp8x2", wv, lambda: s * coef(), b_word + (lane // 16) * 4)
+        if const_expr(coef is not None):
+            s = s * coef
+        return ("fp8x2", wv, s, b_word + (lane // 16) * 4)
+
+    def unit_fp8mx(w_rsrc, s_rsrc, rg, s_rg, kc, K, b_word, coef=None, ln=None):
+        """One 128-K chunk of row group ``rg`` of an FP8 128x128-scaled matrix (``s_rg`` =
+        the row group of this lane's output rows) against bf16 at LDS word ``b_word``."""
+        ln = lane if ln is None else ln
+        wv = [
+            fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 64) + kc * 2 + h) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
+            for h in range(2)
+        ]
+        s = ld_f32(s_rsrc, (s_rg * 16 // SCALE_BM) * (K // 128) + kc)
+        return ("fp8mx", wv, (s, coef), b_word + (lane // 16) * 4)
+
+    def unit_mxfp4(w_rsrc, s_rsrc, rg, kc, K, b_word, coef=None, ln=None):
+        """Issue one 128-K MXFP4 tile and its E8M0 scales, in this kernel's ``mxfp4_layout``:
+        "atom" (ATOM's gfx950 bank: lane ``16 * kl + r`` holds one 32-K scale block of row
+        ``r``; the scale dword's four bytes cover tiles kc (even, odd) x row groups (even, odd)),
+        or "rows_fp8" / "rows_split" (four per-row E8M0 scales, against FP8 activations, or bf16
+        ones with one MFMA chain per 32-K part)."""
+        ln = lane if ln is None else ln
+        if const_expr(mxfp4_layout == "atom"):
+            k1n = -(-(K // 32) // 8)  # scale K blocks, padded to 8, in groups of 8
+            raw = fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 128) + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
+            word = fx.Int32(bo.buffer_load(s_rsrc, ((rg // 2) * k1n + kc // 2) * 64 + ln, vec_width=1, dtype=T.i32))
+            sc_byte = word.shrui(((kc % 2) * 2 + rg % 2) * 8) & fx.Int32(0xFF)
+            return ("mxfp4_atom", (raw, sc_byte), coef, b_word + (lane // 16) * 16)
+        raw = fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 128) + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
+        row = rg * 16 + ln % 16
+        packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
+        scales = [
+            ((packed_scale.shrui(fx.Int32(sp * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
+            for sp in range_constexpr(4)
+        ]
+        unit_format = "mxfp4_rows_fp8" if const_expr(mxfp4_layout == "rows_fp8") else "mxfp4_rows_split"
+        return (unit_format, (raw, scales), coef, b_word + (lane // 16) * 4)
+
+    def unit_mxfp4_bf16(w_rsrc, s_rsrc, rg, kc, K, b_word, coef, ln=None):
+        """A row-scaled MXFP4 tile (``mxfp4_layout`` "rows_*") against bf16 activations."""
+        _, weights, factor, _ = unit_mxfp4(w_rsrc, s_rsrc, rg, kc, K, b_word, coef, ln)
+        return ("mxfp4_rows_bf16", weights, factor, b_word + (lane // 16) * 4)
+
+    def mma_units(acc, units):
+        """acc[4] += coef * (W_chunk @ X_chunk) for every issued unit."""
+        for unit_format, wv, coef, bw in units:
+            if const_expr(unit_format == "fp8mx"):
+                # one factor per unit, so the four K32 MFMAs chain into one partial
+                ws, f = coef
+                c = fx.Vector.filled(4, 0.0, fx.Float32)
+                for sp in range_constexpr(4):
+                    a = fp8_to_bf16x8(wv[sp // 2][(sp % 2) * 2], wv[sp // 2][(sp % 2) * 2 + 1])
+                    b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
+                    c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
+                f = ws if const_expr(f is None) else ws * (f() if const_expr(callable(f)) else f)
+                acc = [acc[e] + c[e] * f for e in range(4)]
+                continue
+            if const_expr(callable(coef) and unit_format not in ("mxfp4_atom", "mxfp4_rows_split")):
+                coef = coef()
+            if const_expr(unit_format == "mxfp4_atom"):
+                # step sp takes K 32 * kl + 8 * sp .. of the lane's block (B words 16 * kl + 4 * sp)
+                raw, sc_byte = wv
+                assert not isinstance(coef, list), "per-K32 factors are folded into the operands"
+                c = fx.Vector.from_elements(acc, fx.Float32) if coef is None else fx.Vector.filled(4, 0.0, fx.Float32)
+                sc = (sc_byte << fx.Int32(23)).bitcast(fx.Float32)
+                for sp in range_constexpr(4):
+                    a = mxfp4_to_bf16x8(raw[sp], sc)
+                    b = fx.ptr_load(xs + (bw + sp * 4), result_type=v4f).bitcast(fx.BFloat16)
+                    c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
+                if const_expr(coef is None):
+                    acc = [c[e] for e in range(4)]
+                else:
+                    f = coef() if const_expr(callable(coef)) else coef
+                    acc = [acc[e] + c[e] * f for e in range(4)]
+                continue
+            if const_expr(unit_format == "mxfp4_rows_split"):
+                # one MFMA per 32-K part, each with its own factor (``coef`` may be a list)
+                raw, scales = wv
+                for sp in range_constexpr(4):
+                    a = mxfp4_to_bf16x8(raw[sp], scales[sp])
+                    b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
+                    c = fx.Vector.filled(4, 0.0, fx.Float32)
+                    c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
+                    part_coef = coef[sp] if const_expr(isinstance(coef, list)) else coef
+                    if const_expr(callable(part_coef)):
+                        part_coef = part_coef()
+                    if const_expr(part_coef is None):
+                        acc = [acc[e] + c[e] for e in range(4)]
+                    else:
+                        acc = [acc[e] + c[e] * part_coef for e in range(4)]
+                continue
+            c = fx.Vector.filled(4, 0.0, fx.Float32)
+            if const_expr(unit_format in ("mxfp4_rows_fp8", "mxfp4_rows_bf16")):
+                raw, scales = wv
+                for sp in range_constexpr(4):
+                    a = mxfp4_to_bf16x8(raw[sp], scales[sp])
+                    if const_expr(unit_format == "mxfp4_rows_fp8"):
+                        wh, ws = sp // 2, sp % 2
+                        bv = fx.Vector(fx.ptr_load(xs + (bw + wh * 16), result_type=v4f)).bitcast(fx.Int32)
+                        b = fp8_to_bf16x8(bv[ws * 2], bv[ws * 2 + 1])
+                    else:
+                        b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
+                    c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
+            if const_expr(unit_format == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
+                a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
+                bv = [fx.Vector(fx.ptr_load(xs + (bw + h * 16), result_type=v4f)).bitcast(fx.Int32) for h in range(2)]
+                b = fx.Vector.from_elements([bv[h][e] for h in range(2) for e in range(4)], fx.Int32)
+                one = fx.Int32(127)
+                c = fx.Vector(rocdl.mfma_scale_f32_16x16x128_f8f6f4(T.vec(4, T.f32), [a, b, c, 0, 0, 0, one, 0, one]))
+            nsp = (
+                4
+                if unit_format == "fp8x2"
+                else 2 if unit_format not in ("f8f8", "mxfp4_rows_fp8", "mxfp4_rows_bf16") else 0
+            )
+            for sp in range_constexpr(nsp):
+                if const_expr(unit_format in ("fp8", "fp8x2")):
+                    wh = sp // 2 if unit_format == "fp8x2" else 0
+                    ws = sp % 2 if unit_format == "fp8x2" else sp
+                    a = fp8_to_bf16x8(wv[wh][ws * 2], wv[wh][ws * 2 + 1])
+                else:
+                    a = wv[sp].bitcast(fx.BFloat16)
+                b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
+                c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
+            if const_expr(coef is None):
+                acc = [acc[e] + c[e] for e in range(4)]
+            else:
+                acc = [acc[e] + c[e] * coef for e in range(4)]
+        return acc
 
     def mb(name):
         return scratch + fx.Int64(SC[name])
@@ -251,6 +494,13 @@ def bind_helpers(
         return fx.min(lane % 16, count - 1)
 
     return dict(
+        poll=poll,
+        stamp=stamp,
+        mma_units=mma_units,
+        unit_fp8x2=unit_fp8x2,
+        unit_fp8mx=unit_fp8mx,
+        unit_mxfp4=unit_mxfp4,
+        unit_mxfp4_bf16=unit_mxfp4_bf16,
         mb=mb,
         put=put,
         put2=put2,

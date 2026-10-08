@@ -9,27 +9,22 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 from kernels.common import buffer_ops as bo
-from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROUTE_SCALE, SCALE_BM
-from kernels.monokernel.dsv4.plan import MIN_I32, POLL_MAX, ROW_TILE, THREADS, TL_COLS, WAVES
+from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROUTE_SCALE
+from kernels.monokernel.dsv4.plan import MIN_I32, ROW_TILE, THREADS, TL_COLS, WAVES
 from kernels.monokernel.helpers import SHARED_SOURCE_KEY, bind_helpers
-from kernels.monokernel.layout import CM_DEV, CM_SYS
+from kernels.monokernel.layout import CM_SYS
 from kernels.monokernel.ops import (
     bf2_f32,
     bf16_pair,
     exp,
     f8_word,
     fp8_roundtrip,
-    fp8_to_bf16x8,
-    ld_f32,
     lds_ld,
     lds_st,
-    mem_realtime,
-    mxfp4_to_bf16x8,
     mxfp8_to_bf16x8,
     rcp,
     rsq,
     rsrc,
-    uniform,
     wave_max,
     wave_umax,
     write_lane_i32,
@@ -137,63 +132,11 @@ def common_defs(ctx):
     use_fp8_block128 = ctx["use_fp8_block128"]
     use_hash = ctx["use_hash"]
     use_mxfp8_block32 = ctx["use_mxfp8_block32"]
-    v4f = ctx["v4f"]
     wave = ctx["wave"]
     xs = ctx["xs"]
 
     # ------------------------------------------------------------ helpers
     # ---- tagged-pair mailboxes
-    def poll(specs, scope="agent", batch=POLL_MAX):
-        """Batched poll of mailbox pairs ``specs`` = [(base_addr, pair index, npairs in
-        {1, 2})]: re-load the batch until every tag matches; one Int32 list per spec.
-        The s_nop in the retry loop keeps the loads from being hoisted."""
-        if const_expr(len(specs) == 0):
-            return []
-        if const_expr(len(specs) > batch):  # bound live registers
-            return poll(specs[:batch], scope, batch) + poll(specs[batch:], scope, batch)
-        cm = CM_DEV if const_expr(scope == "agent") else CM_SYS
-
-        def load_all():
-            words = []
-            for b, i, n in specs:
-                w = fx.Vector(bo.buffer_load(rsrc(b), fx.Int32(i) * 2, vec_width=2 * n, dtype=T.i32, cache_modifier=cm))
-                words += [w[e] for e in range(2 * n)]
-            return fx.Vector.from_elements(words, fx.Int32)
-
-        nw = sum(2 * n for _, _, n in specs)
-
-        def unpack(v):
-            outs_, e = [], 0
-            for _, _, n in specs:
-                outs_.append([v[e + 2 * q] for q in range(n)])
-                e += 2 * n
-            return outs_
-
-        def pending(v):
-            bad = v[1] != tag
-            for e in range_constexpr(3, nw, 2):
-                bad = bad | (v[e] != tag)
-            return bad
-
-        # bounded: a timed-out poll stores the tag into ``hang``; later polls seeing it give up
-        v = load_all()
-        if const_expr(BOUNDED_POLL):
-            t0 = mem_realtime()
-            stop = fx.Int32(0)
-            while pending(v) & (stop == 0):
-                rocdl.s_nop(0)
-                v = load_all()
-                flagged = uniform(bo.buffer_load(rsrc(hang), 0, vec_width=1, dtype=T.i32, cache_modifier=CM_DEV)) == tag
-                late = (mem_realtime() - t0) > fx.Int64(POLL_TIMEOUT_TICKS)
-                stop = late.select(fx.Int32(2), flagged.select(fx.Int32(1), fx.Int32(0)))
-            if stop == 2:
-                bo.buffer_store(tag, rsrc(hang), 0, cache_modifier=CM_DEV)
-        else:
-            while pending(v):
-                rocdl.s_nop(0)
-                v = load_all()
-        return unpack(v)
-
     # ---- wave reductions
     def subgroup16_max(v):
         for off in (8, 4, 2, 1):
@@ -250,84 +193,10 @@ def common_defs(ctx):
         return t
 
     # ------------------------------------------------ MFMA GEMV machinery
-    def unit_fp8mx(w_rsrc, s_rsrc, rg, s_rg, kc, K, b_word, coef=None, ln=None):
-        """One 128-K chunk of row group ``rg`` of an FP8 128x128-scaled matrix (``s_rg`` =
-        the row group of this lane's output rows) against bf16 at LDS word ``b_word``."""
-        ln = lane if ln is None else ln
-        wv = [
-            fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 64) + kc * 2 + h) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-            for h in range(2)
-        ]
-        s = ld_f32(s_rsrc, (s_rg * 16 // SCALE_BM) * (K // 128) + kc)
-        return ("fp8mx", wv, (s, coef), b_word + (lane // 16) * 4)
-
-    def unit_mxfp4(w_rsrc, s_rsrc, rg, kc, K, b_word, coef=None, ln=None):
-        """Issue one 128-K tile of an MXFP4 bank in ATOM's gfx950 layout and its E8M0
-        scale (lane ``16 * kl + r`` holds one 32-K scale block of row ``r``; the scale
-        dword's four bytes cover tiles kc (even, odd) x row groups (even, odd))."""
-        ln = lane if ln is None else ln
-        k1n = -(-(K // 32) // 8)  # scale K blocks, padded to 8, in groups of 8
-        raw = fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 128) + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-        word = fx.Int32(bo.buffer_load(s_rsrc, ((rg // 2) * k1n + kc // 2) * 64 + ln, vec_width=1, dtype=T.i32))
-        sc_byte = word.shrui(((kc % 2) * 2 + rg % 2) * 8) & fx.Int32(0xFF)
-        return ("mxfp4", (raw, sc_byte), coef, b_word + (lane // 16) * 16)
-
     def mx_rg(c):
         """Up/gate tile ``c`` (8 intermediates: gate rows on lanes r < 8, up rows on
         r >= 8) as this lane's row group of the gate/up bank in ATOM's order."""
         return (c // 2) * 2 + (lane % 16) // 8
-
-    def mma_units(acc, units):
-        """acc[4] += coef * (W_chunk @ X_chunk) for every issued unit."""
-        for unit_format, wv, coef, bw in units:
-            if const_expr(unit_format == "fp8mx"):
-                # one factor per unit, so the four K32 MFMAs chain into one partial
-                ws, f = coef
-                c = fx.Vector.filled(4, 0.0, fx.Float32)
-                for sp in range_constexpr(4):
-                    a = fp8_to_bf16x8(wv[sp // 2][(sp % 2) * 2], wv[sp // 2][(sp % 2) * 2 + 1])
-                    b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
-                    c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
-                f = ws if const_expr(f is None) else ws * (f() if const_expr(callable(f)) else f)
-                acc = [acc[e] + c[e] * f for e in range(4)]
-                continue
-            if const_expr(callable(coef) and unit_format != "mxfp4"):
-                coef = coef()
-            if const_expr(unit_format == "mxfp4"):
-                # step sp takes K 32 * kl + 8 * sp .. of the lane's block (B words 16 * kl + 4 * sp)
-                raw, sc_byte = wv
-                assert not isinstance(coef, list), "per-K32 factors are folded into the operands"
-                c = fx.Vector.from_elements(acc, fx.Float32) if coef is None else fx.Vector.filled(4, 0.0, fx.Float32)
-                sc = (sc_byte << fx.Int32(23)).bitcast(fx.Float32)
-                for sp in range_constexpr(4):
-                    a = mxfp4_to_bf16x8(raw[sp], sc)
-                    b = fx.ptr_load(xs + (bw + sp * 4), result_type=v4f).bitcast(fx.BFloat16)
-                    c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
-                if const_expr(coef is None):
-                    acc = [c[e] for e in range(4)]
-                else:
-                    f = coef() if const_expr(callable(coef)) else coef
-                    acc = [acc[e] + c[e] * f for e in range(4)]
-                continue
-            c = fx.Vector.filled(4, 0.0, fx.Float32)
-            if const_expr(unit_format == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
-                a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
-                bv = [fx.Vector(fx.ptr_load(xs + (bw + h * 16), result_type=v4f)).bitcast(fx.Int32) for h in range(2)]
-                b = fx.Vector.from_elements([bv[h][e] for h in range(2) for e in range(4)], fx.Int32)
-                one = fx.Int32(127)
-                c = fx.Vector(rocdl.mfma_scale_f32_16x16x128_f8f6f4(T.vec(4, T.f32), [a, b, c, 0, 0, 0, one, 0, one]))
-            for sp in range_constexpr(2 if unit_format != "f8f8" else 0):
-                if const_expr(unit_format == "fp8"):
-                    a = fp8_to_bf16x8(wv[0][sp * 2], wv[0][sp * 2 + 1])
-                else:
-                    a = wv[sp].bitcast(fx.BFloat16)
-                b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
-                c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
-            if const_expr(coef is None):
-                acc = [acc[e] + c[e] for e in range(4)]
-            else:
-                acc = [acc[e] + c[e] * coef for e in range(4)]
-        return acc
 
     def _rmsnorm_tail_ks(n):
         """This thread's group-of-4 starting indices of n elements. A ragged tail is
@@ -554,22 +423,6 @@ def common_defs(ctx):
                 t1 = t1 + parts[src][1]
             out_fn(s, row, r0 + t0, r1 + t1)
 
-    def stamp(name, t, which, pred=None):
-        if const_expr(timeline):
-            # nothing may cross the clock read (constrains timeline builds only)
-            rocdl.sched_barrier(0)
-            # a masked-off rep must not overwrite the live task's row
-            ok = (tid == 0) if const_expr(pred is None) else ((tid == 0) & pred)
-            if ok:
-                now = mem_realtime()
-                fx.generic_store(
-                    fx.inttoptr(
-                        fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8),
-                        timeline_buf + fx.Int64((first[name] + t) * TL_COLS + which) * 8,
-                    ),
-                    now,
-                )
-
     bound_helpers = bind_helpers(
         source_key=SHARED_SOURCE_KEY,
         S=S,
@@ -587,9 +440,14 @@ def common_defs(ctx):
         xs=xs,
         bias=bias,
         N_EXPERTS=N_EXPERTS,
-        poll=poll,
-        stamp=stamp,
-        mma_units=mma_units,
+        hang=hang,
+        poll_timeout_ticks=POLL_TIMEOUT_TICKS if BOUNDED_POLL else None,
+        timeline=timeline,
+        timeline_buf=timeline_buf,
+        first=first,
+        stamp_fence=True,
+        mxfp4_layout="atom",
+        tl_cols=TL_COLS,
     )
     mb = bound_helpers["mb"]
     put = bound_helpers["put"]
@@ -615,6 +473,11 @@ def common_defs(ctx):
     load_bias = bound_helpers["load_bias"]
     start = bound_helpers["start"]
     n_sel = bound_helpers["n_sel"]
+    poll = bound_helpers["poll"]
+    stamp = bound_helpers["stamp"]
+    mma_units = bound_helpers["mma_units"]
+    unit_fp8mx = bound_helpers["unit_fp8mx"]
+    unit_mxfp4 = bound_helpers["unit_mxfp4"]
 
     return dict(
         _other_parts=_other_parts,

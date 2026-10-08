@@ -96,7 +96,7 @@ from kernels.monokernel.glm.layout import (
     ug_split,
 )
 from kernels.monokernel.helpers import SHARED_SOURCE_KEY, bind_helpers
-from kernels.monokernel.layout import CM_DEV, CM_SYS, LAYER_SLOTS, NEG, POLL_MAX, THREADS, TL_COLS
+from kernels.monokernel.layout import CM_DEV, CM_SYS, LAYER_SLOTS, NEG, THREADS
 from kernels.monokernel.ops import (
     bf2_f32,
     bf16_pair,
@@ -107,9 +107,7 @@ from kernels.monokernel.ops import (
     ld_f32,
     lds_ld,
     lds_st,
-    mem_realtime,
     read_lane_i32,
-    spin_pause,
     wave_max,
     wave_sum,
     wave_umax_dpp,
@@ -120,12 +118,6 @@ from kernels.monokernel.ops import (
 )
 from kernels.monokernel.ops import (
     fp8_roundtrip as _fp8_roundtrip,
-)
-from kernels.monokernel.ops import (
-    fp8_to_bf16x8 as _fp8_to_bf16x8,
-)
-from kernels.monokernel.ops import (
-    mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
 )
 from kernels.monokernel.ops import (
     rcp as _rcp,
@@ -344,48 +336,6 @@ def build_glm5_monokernel(
             coherent at ``scope`` (agent -> sc1, system -> sc0 sc1)."""
             return fx.generic_load(_qptr(addr), memory_order=fx.AtomicOrdering.Monotonic, syncscope=scope)
 
-        def poll(specs, scope="agent", batch=POLL_MAX):
-            """Batched poll of mailbox pairs: ``specs`` = [(base_addr, pair index, npairs in {1, 2})].
-
-            All pairs are loaded together with plain 8 / 16-byte coherent buffer loads
-            (sc1 locally, sc0 sc1 for peer memory); while any tag is not this launch's
-            the whole batch is re-loaded, so a batch costs one round trip after its
-            last producer lands.  A side-effecting (compiler-opaque) asm statement in
-            the retry loop keeps the loads from being hoisted.  Returns one list of
-            Int32 value bits per spec."""
-            if const_expr(len(specs) == 0):
-                return []
-            if const_expr(len(specs) > batch):  # bound live registers
-                return poll(specs[:batch], scope, batch) + poll(specs[batch:], scope, batch)
-            cm = CM_DEV if const_expr(scope == "agent") else CM_SYS
-
-            def load_all():
-                words = []
-                for b, i, n in specs:
-                    w = fx.Vector(
-                        bo.buffer_load(_rsrc(b), fx.Int32(i) * 2, vec_width=2 * n, dtype=T.i32, cache_modifier=cm)
-                    )
-                    words += [w[e] for e in range(2 * n)]
-                return fx.Vector.from_elements(words, fx.Int32)
-
-            nw = sum(2 * n for _, _, n in specs)
-
-            def pending(v):
-                bad = v[1] != tag
-                for e in range_constexpr(3, nw, 2):
-                    bad = bad | (v[e] != tag)
-                return bad
-
-            v = load_all()
-            while pending(v):
-                spin_pause()
-                v = load_all()
-            outs_, e = [], 0
-            for _, _, n in specs:
-                outs_.append([v[e + 2 * q] for q in range(n)])
-                e += 2 * n
-            return outs_
-
         def get2(base_addr, i):
             return get2_many([(base_addr, i)])[0]
 
@@ -395,78 +345,6 @@ def build_glm5_monokernel(
 
         # ---- wave reductions
         # ------------------------------------------------ MFMA GEMV machinery
-        def unit_fp8x2(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, coef=None, scale_rows=SCALE_BM):
-            """Issue both 64-k halves of one 128-k FP8 weight-scale block."""
-            wv = [
-                fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc + h) * 64 + lane) * 4, vec_width=4, dtype=T.i32))
-                for h in range(2)
-            ]
-            s = ld_f32(s_rsrc, (rg * 16 // scale_rows) * (K // 128) + kc // 2)
-            if const_expr(callable(coef)):
-                return ("fp8x2", wv, lambda: s * coef(), b_word + (lane // 16) * 4)
-            if const_expr(coef is not None):
-                s = s * coef
-            return ("fp8x2", wv, s, b_word + (lane // 16) * 4)
-
-        def unit_mxfp4(w_rsrc, s_rsrc, rg, kc, K, b_word, coef, ln=None):
-            """Issue one native packed 128-K MXFP4 tile and four E8M0 row scales."""
-            ln = lane if ln is None else ln
-            raw = fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 128) + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-            row = rg * 16 + ln % 16
-            packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
-            scales = [
-                ((packed_scale.shrui(fx.Int32(sp * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
-                for sp in range_constexpr(4)
-            ]
-            return ("mxfp4", (raw, scales), coef, b_word + (lane // 16) * 4)
-
-        def unit_mxfp4_bf16(w_rsrc, s_rsrc, rg, kc, K, b_word, coef, ln=None):
-            fmt, weights, factor, _ = unit_mxfp4(w_rsrc, s_rsrc, rg, kc, K, b_word, coef, ln)
-            return ("mxfp4_bf16", weights, factor, b_word + (lane // 16) * 4)
-
-        def mma_units(acc, units):
-            """acc[4] += coef * (W_chunk @ X_chunk) for every issued unit."""
-            for fmt, wv, coef, bw in units:
-                if const_expr(callable(coef)):
-                    coef = coef()
-                c = fx.Vector.filled(4, 0.0, fx.Float32)
-                if const_expr(fmt in ("mxfp4", "mxfp4_bf16")):
-                    raw, scales = wv
-                    for sp in range_constexpr(4):
-                        a = _mxfp4_to_bf16x8(raw[sp], scales[sp])
-                        if const_expr(fmt == "mxfp4"):
-                            wh, ws = sp // 2, sp % 2
-                            bv = fx.Vector(fx.ptr_load(xs + (bw + wh * 16), result_type=v4f)).bitcast(fx.Int32)
-                            b = _fp8_to_bf16x8(bv[ws * 2], bv[ws * 2 + 1])
-                        else:
-                            b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
-                        c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
-                if const_expr(fmt == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
-                    a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
-                    bv = [
-                        fx.Vector(fx.ptr_load(xs + (bw + h * 16), result_type=v4f)).bitcast(fx.Int32) for h in range(2)
-                    ]
-                    b = fx.Vector.from_elements([bv[h][e] for h in range(2) for e in range(4)], fx.Int32)
-                    one = fx.Int32(127)
-                    c = fx.Vector(
-                        rocdl.mfma_scale_f32_16x16x128_f8f6f4(T.vec(4, T.f32), [a, b, c, 0, 0, 0, one, 0, one])
-                    )
-                nsp = 4 if fmt == "fp8x2" else 2 if fmt not in ("f8f8", "mxfp4", "mxfp4_bf16") else 0
-                for sp in range_constexpr(nsp):
-                    if const_expr(fmt in ("fp8", "fp8x2")):
-                        wh = sp // 2 if fmt == "fp8x2" else 0
-                        ws = sp % 2 if fmt == "fp8x2" else sp
-                        a = _fp8_to_bf16x8(wv[wh][ws * 2], wv[wh][ws * 2 + 1])
-                    else:
-                        a = wv[sp].bitcast(fx.BFloat16)
-                    b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
-                    c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
-                if const_expr(coef is None):
-                    acc = [acc[e] + c[e] for e in range(4)]
-                else:
-                    acc = [acc[e] + c[e] * coef for e in range(4)]
-            return acc
-
         def stage_x_rmsnorm(ld4s, n, gamma, mark=None, loaded=None, count=S):
             """LDS bf16 X[s][0:n] = bf16(rmsnorm(x_s) * gamma) for every sample s, where
             ld4s([(s, k)]) -> [(x_s[k], .., x_s[k+3])] (one batched load); returns the rstds.
@@ -631,19 +509,6 @@ def build_glm5_monokernel(
                     t1 = t1 + parts[src][1]
                 out_fn(s, row, r0 + t0, r1 + t1)
 
-        def stamp(name, t, which, lead=0):
-            if const_expr(timeline):
-                if tid == lead:
-                    now = mem_realtime()
-                    tl_addr = index_arg(7) if const_expr(with_indexer) else timeline_buf
-                    fx.generic_store(
-                        fx.inttoptr(
-                            fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8),
-                            tl_addr + fx.Int64((first[name] + t) * TL_COLS + which) * 8,
-                        ),
-                        now,
-                    )
-
         bound_helpers = bind_helpers(
             source_key=shared_source_key,
             S=S,
@@ -661,9 +526,12 @@ def build_glm5_monokernel(
             xs=xs,
             bias=bias,
             N_EXPERTS=N_EXPERTS,
-            poll=poll,
-            stamp=stamp,
-            mma_units=mma_units,
+            retry_spin_pause=True,
+            timeline=timeline,
+            timeline_buf=timeline_buf,
+            first=first,
+            timeline_addr=(lambda: index_arg(7)) if with_indexer else None,
+            mxfp4_layout="rows_fp8",
         )
         mb = bound_helpers["mb"]
         put = bound_helpers["put"]
@@ -689,6 +557,12 @@ def build_glm5_monokernel(
         load_bias = bound_helpers["load_bias"]
         start = bound_helpers["start"]
         n_sel = bound_helpers["n_sel"]
+        poll = bound_helpers["poll"]
+        stamp = bound_helpers["stamp"]
+        mma_units = bound_helpers["mma_units"]
+        unit_fp8x2 = bound_helpers["unit_fp8x2"]
+        unit_mxfp4 = bound_helpers["unit_mxfp4"]
+        unit_mxfp4_bf16 = bound_helpers["unit_mxfp4_bf16"]
 
         # ================================================= 1. q_a / kv_a GEMV
         # 1 row group x 96 chunks: 8 waves split K, 12 chunks each (all prefetched)
