@@ -798,7 +798,7 @@ class M16DqSoftmax:
         neg_inf = ctx.c_neg_inf
         delta_i32 = ctx.delta_i32
         to_lists, to_vecs, kv_col, n = self.to_lists, self.to_vecs, self.kv_col, self.n
-        windowed = const_expr(traits.WINDOW)
+        windowed = const_expr(traits.WINDOW and not ctx.LEFT_UNBOUNDED)
         window_left_i32 = ctx.window_left_i32 if windowed else None
         # The wave's first row, uniform. `q_row` is this lane's and is not.
         qs_i32 = fx.Int32(ctx.q_start) + fx.Int32(ctx.wave_id_uni) * fx.Int32(MFMA16_M)
@@ -1311,7 +1311,7 @@ class BwdDqKernelContext(ParityKernelContext):
         # would be correct and would throw the left-bound saving away.
         self.split_t0 = fx.Index(0)
         self.split_t_end = n
-        if const_expr(traits.WINDOW):
+        if const_expr(traits.WINDOW and not self.LEFT_UNBOUNDED):
             self._skip_dead_leading_tiles()
 
     def _skip_dead_leading_tiles(self):
@@ -2010,6 +2010,9 @@ def build_flash_attn_gfx950_dq(meta, knobs):
         # grows the `if self.O is not None` guard that dK/dV's split wants
         # anyway. That file has another owner, so this stays a duplicated
         # argument rather than a cross-file change.
+        # STATIC_WINDOW with a sentinel left edge: the left bound is vacuous, so the build is plain causal with a resolved
+        # right bound -- no left compare, no dead-tile skip, a literal-0 tile base. The forward does the same.
+        LEFT_UNBOUNDED = const_expr(STATIC_WINDOW and Window_left in (common.WINDOW_TOPLEFT, common.WINDOW_BOTRIGHT))
         ctx = BwdDqKernelContext(
             traits,
             strides=(
@@ -2035,6 +2038,7 @@ def build_flash_attn_gfx950_dq(meta, knobs):
             hdim_qk_floor=HDIM_QK_FLOOR,
             window_left=Window_left,
             window_right=Window_right,
+            left_unbounded=LEFT_UNBOUNDED,
             seqinfo=(seqinfo_q0, seqinfo_q1, seqinfo_k0, seqinfo_k1),
             varlen_bits=varlen_bits,
             num_seqlens=num_seqlens,
