@@ -626,6 +626,26 @@ def test_f16(num_tokens, flash_layout):
 
 
 # ===========================================================================
+# Category 4b: Non-power-of-two head dimension
+# ===========================================================================
+
+
+@pytest.mark.parametrize("dtype_str", ["bf16", "f16"])
+@pytest.mark.parametrize("flash_layout", [True, False], ids=["flash", "nonflash"])
+def test_head_dim_96(dtype_str, flash_layout):
+    """D=96 exercises a non-power-of-two NeoX half-wave span."""
+    passed, errs = run_test(
+        num_tokens=32,
+        head_dim=96,
+        num_q_heads=32,
+        num_kv_heads=32,
+        flash_layout=flash_layout,
+        dtype_str=dtype_str,
+    )
+    assert passed, f"FAILED (dtype={dtype_str} flash={flash_layout}): {errs}"
+
+
+# ===========================================================================
 # Category 5: pos_dtype — i32 vs i64 (stride-2 indexing)
 # ===========================================================================
 
