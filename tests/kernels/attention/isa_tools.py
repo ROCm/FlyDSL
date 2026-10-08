@@ -106,7 +106,9 @@ def _regs(token):
 
 
 def instructions(isa):
-    """`[(mnemonic, [operand tokens])]` of the real instructions of an assembly listing, in order."""
+    """`[(mnemonic, [operand tokens])]` of the real instructions of an assembly listing, in order. The mnemonic drops its
+    `_e32`/`_e64` encoding suffix: the listing spells `v_exp_f32_e32`, and a scanner matching `v_exp_f32` saw nothing.
+    """
     out = []
     for line in isa.split("\n"):
         s = line.split(";")[0].strip()
@@ -114,7 +116,7 @@ def instructions(isa):
             continue
         parts = s.split(None, 1)
         ops = [o.strip() for o in parts[1].split(",")] if len(parts) > 1 else []
-        out.append((parts[0], ops))
+        out.append((re.sub(r"_e(32|64)$", "", parts[0]), ops))
     return out
 
 
@@ -135,6 +137,50 @@ def scan_exp2_wait_state(isa):
         nxt_op, nxt_ops = ins[i + 1]
         if is_valu(nxt_op) and any(dst & _regs(o) for o in nxt_ops[1:]):
             bad.append((i, f"{op} {', '.join(ops)} ; {nxt_op} {', '.join(nxt_ops)}"))
+    return bad
+
+
+_FMA_OPS = ("v_fma_", "v_pk_fma_", "v_fmac_", "v_mad_", "v_mac_")
+_PASS_THROUGH_OPS = ("v_cndmask_b32", "v_mov_b32", "v_mov_b64")
+
+
+def _vgprs(token):
+    return _regs(token.strip("-|"))
+
+
+def _writer(ins, i, regs):
+    """Index of the nearest VALU above `i` that writes any of `regs`, wrapping past the top of the listing to its end: a
+    value carried around a loop is written below its reader."""
+    for k in range(1, len(ins)):
+        j = (i - k) % len(ins)
+        op, ops = ins[j]
+        if op.startswith("v_") and ops and _regs(ops[0]) & regs:
+            return j
+    return None
+
+
+def scan_exp2_fed_by_fma(isa):
+    """Aotriton issue 54: the `v_exp_f32` sites whose operand comes from an FMA, i.e. `exp2(fma(s, c, -m))`, an unrounded
+    product against a rounded max. The operand is traced to its writer through masks and moves (`v_cndmask`, `v_mov`).
+    Returns the sites."""
+    ins = instructions(isa)
+    bad = []
+    for i, (op, ops) in enumerate(ins):
+        if op != "v_exp_f32":
+            continue
+        todo, seen = [(i, _vgprs(ops[1]))], set()
+        while todo:
+            at, regs = todo.pop()
+            j = _writer(ins, at, regs)
+            if j is None or j in seen:
+                continue
+            seen.add(j)
+            w_op, w_ops = ins[j]
+            if w_op.startswith(_FMA_OPS):
+                bad.append((i, f"{w_op} {', '.join(w_ops)} ; {op} {', '.join(ops)}"))
+                break
+            if w_op.startswith(_PASS_THROUGH_OPS):
+                todo += [(j, r) for r in map(_vgprs, w_ops[1:]) if r]
     return bad
 
 
