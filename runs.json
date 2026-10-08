@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-08T03:41:44Z",
+ "updated": "2026-10-08T04:15:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,20 +10,20 @@
    "branch": "fix/issue-1176-i32-shape-overflow",
    "event": "pull_request",
    "title": "[Bugfix] Compute dynamic layout sizes in i64 and name oversized tensor dims",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37710796843",
    "created_at": "2026-10-08T01:01:25Z",
-   "updated_at": "2026-10-08T03:17:58Z",
+   "updated_at": "2026-10-08T04:12:50Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-08T03:17:58Z",
-     "completed_at": null,
+     "completed_at": "2026-10-08T04:12:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37710796843/job/113100276609"
     },
     {
