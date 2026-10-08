@@ -467,7 +467,7 @@ g2d = fx.make_view(fx.get_iter(A), fx.make_layout((M, N), (N, 1)))  # raw VA, no
 
 atom = rocdl.make_tdm_atom(g2d, [M, N], num_warps=4)  # rank = len(extents), 1–5D
 fx.copy_atom_call(atom, g2d, lds2d)                   # Global → LDS (base from g2d)
-rocdl.tdm_ops.tensor_wait(0)                          # await the async DMA (s_wait_tensorcnt)
+rocdl.s_wait_tensorcnt(0)                             # await the async DMA
 
 # K-loop: bump one scalar (imm_offset, carry-safe i64) instead of re-deriving base:
 fx.copy(atom, g2d, lds2d, imm_offset=k_tile * k_stride_bytes)

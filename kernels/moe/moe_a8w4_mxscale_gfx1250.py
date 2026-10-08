@@ -8,7 +8,7 @@ import math
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr, rocdl
-from flydsl.expr.rocdl import cluster, tdm_ops
+from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import Constexpr, T
 from flydsl.expr.typing import Vector as Vec
 from kernels.common.gfx1250_cluster import compute_mcast_masks
@@ -415,7 +415,7 @@ def launch_moe_gemm_a8w4(
                 for kt in range(n_steady):
                     s = kt % num_buffers
                     buf = ptr_to_idx(buf_ptr(s))
-                    tdm_ops.tensor_wait(TDM_PER * (num_buffers - 1))
+                    rocdl.s_wait_tensorcnt(TDM_PER * (num_buffers - 1))
                     workgroup_barrier()
                     compute_ktile(buf, None)
                     workgroup_barrier()
@@ -512,7 +512,7 @@ def launch_moe_gemm_a8w4(
             )
             tCsC, tCgC = fx.rocdl.cdna5.tdm_partition(atomC, wave, fx.make_layout(num_waves, 1), sC_lds, blkC)
             fx.copy(atomC, tCsC[None, 0], tCgC[None, fx.Int32(out_col_off // STORE_N)])
-            tdm_ops.tensor_wait(0)
+            rocdl.s_wait_tensorcnt(0)
 
     m_tiles = (i32_m + (tile_m - 1)) // tile_m
     n_tiles = (N + (tile_n - 1)) // tile_n
