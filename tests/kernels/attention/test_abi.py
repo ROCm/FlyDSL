@@ -23,7 +23,7 @@ import torch
 from kernels.attention import flash_attn_gfx950 as fwd_module
 from kernels.attention import flash_attn_gfx950_config as cfg
 from tests.kernels.attention import isa_tools
-from tests.kernels.attention.attn_testlib import WINDOW_BOTRIGHT, compile_inputs, meta_of
+from tests.kernels.attention.attn_testlib import WINDOW_BOTRIGHT, bwd_compile_inputs, compile_inputs, meta_of
 
 pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
@@ -352,3 +352,105 @@ def test_xcd_swizzle_is_a_noop_where_it_does_not_apply(backend, arch, tmp_path, 
     )
     assert plain.hidden_args == [] and swizzled.hidden_args != []
     assert not _same_isa(plain, swizzled)
+
+
+# ---------------------------------------------------------------------------
+# The backward builders (dQ and dK/dV): the same contract, forward's tests' twins
+# ---------------------------------------------------------------------------
+
+BWD = {"dq": cfg.DQ_KERNEL_NAME, "dkdv": cfg.DKDV_KERNEL_NAME}
+
+# The kernel `def` parameter lists AOTriton must declare, in order (the declared order is frozen and load-bearing). The
+# tensor group is `q k v b do <outputs> lse delta`, AOTriton's; none of these is folded, so the kernarg block is the list.
+_BWD_COMMON = (
+    "seqinfo_q0 seqinfo_q1 seqinfo_k0 seqinfo_k1 varlen_bits num_seqlens Max_seqlen_q Max_seqlen_k Window_left Window_right "
+    "philox_seed_ptr philox_offset1 philox_offset2 idropout_p dropout_scale num_head_q num_head_k hdim_qk hdim_vo sm_scale "
+    "stride_q_batch stride_q_head stride_q_seq stride_k_batch stride_k_head stride_k_seq stride_v_batch stride_v_head "
+    "stride_v_seq stride_do_batch stride_do_head stride_do_seq"
+)
+BWD_DEF_PARAMS = {
+    "dq": (
+        "Q K V B DO DQ DB LSE Delta " + _BWD_COMMON + " stride_dq_batch stride_dq_head stride_dq_seq stride_b_batch "
+        "stride_b_head stride_b_seq_q stride_db_batch stride_db_head stride_db_seq_q"
+    ).split(),
+    "dkdv": (
+        "Q K V B DO DK DV LSE Delta " + _BWD_COMMON + " stride_dk_batch stride_dk_head stride_dk_seq stride_dv_batch "
+        "stride_dv_head stride_dv_seq stride_b_batch stride_b_head stride_b_seq_q"
+    ).split(),
+}
+BWD_BUILDERS = {"dq": "build_flash_attn_gfx950_dq", "dkdv": "build_flash_attn_gfx950_dkdv"}
+BWD_FILES = {"dq": "flash_attn_gfx950_dq.py", "dkdv": "flash_attn_gfx950_dkdv.py"}
+
+
+@pytest.mark.parametrize("kind", ["dq", "dkdv"])
+def test_bwd_def_parameter_golden_list(kind):
+    """ABI-04 for the backward: the kernel `def` parameter list equals a checked-in golden."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3] / "kernels" / "attention"
+    tree = ast.parse((root / BWD_FILES[kind]).read_text())
+    build = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == BWD_BUILDERS[kind])
+    kernel = next(n for n in ast.walk(build) if isinstance(n, ast.FunctionDef) and n.name == BWD[kind])
+    assert [a.arg for a in kernel.args.args] == BWD_DEF_PARAMS[kind]
+
+
+@pytest.mark.parametrize("feat", ["dense", "window", "bias", "dropout"])
+@pytest.mark.parametrize("kind", ["dq", "dkdv"])
+def test_bwd_no_hidden_kernargs_and_one_named_kernel(backend, arch, tmp_path, monkeypatch, kind, feat):
+    """ABI-05/06 for the backward: at the defaults the explicit kernarg list is the whole `def` (50 arguments, 352 bytes,
+    nothing folded), there are **no hidden arguments** (a `gpu.grid_dim` read would append the 256-byte block), the code
+    object exports the one uniquely named kernel, and `known_block_size` is set."""
+    meta = meta_of(head_dim=64, window=feat == "window", bias=feat == "bias", dropout=feat == "dropout")
+    d = isa_tools.fresh_bwd_dump(kind, backend, arch, meta, tmp_path / f"{kind}{feat}", monkeypatch)
+    assert d.hidden_args == []
+    assert len(d.kernel_args) == len(BWD_DEF_PARAMS[kind])
+    assert d.metadata[".kernarg_segment_size"] == 352
+    assert d.metadata[".name"].startswith(BWD[kind])
+    knobs = getattr(backend, f"{kind}_knobs")(arch).resolve(meta)
+    traits = getattr(backend, f"{kind}_traits")(meta, knobs)
+    assert d.metadata[".max_flat_workgroup_size"] == traits.BLOCK_SIZE
+    assert d.metadata[".reqd_workgroup_size"] == [traits.BLOCK_SIZE, 1, 1]
+
+
+@pytest.mark.parametrize("kind", ["dq", "dkdv"])
+def test_bwd_builder_holds_exactly_one_kernel(backend, arch, kind):
+    from flydsl.compiler.kernel_function import KernelFunction
+
+    meta = meta_of(head_dim=64)
+    fn = getattr(backend, f"build_{kind}")(meta, getattr(backend, f"{kind}_knobs")(arch).resolve(meta))
+    cells = [c.cell_contents for c in (fn.launcher.func.__closure__ or ())]
+    kernels = [c for c in cells if isinstance(c, KernelFunction)]
+    assert len(kernels) == 1 and kernels[0]._func.__name__ == BWD[kind]
+
+
+@pytest.mark.parametrize("daz,mode", [(True, 0), (False, 3)])
+@pytest.mark.parametrize("kind", ["dq", "dkdv"])
+def test_bwd_daz_reaches_the_hardware_mode(backend, arch, tmp_path, monkeypatch, kind, daz, mode):
+    """ABI-11 for the backward: `llvm.denormal_fpenv` moves `.amdhsa_float_denorm_mode_32` (0 flush, 3 IEEE); the old
+    `denormal-fp-math-f32` passthrough in these launchers never did."""
+    d = isa_tools.fresh_bwd_dump(kind, backend, arch, meta_of(head_dim=64), tmp_path, monkeypatch, daz=daz)
+    assert d.denorm_mode_32 == mode
+
+
+@pytest.mark.parametrize("kind", ["dq", "dkdv"])
+def test_bwd_compile_hints_ride_on_the_launcher(backend, arch, tmp_path, monkeypatch, kind):
+    """ABI-10 for the backward: a direct `jf(*args)` of the launcher (what AOTriton's driver does) compiles the same binary as
+    `.compile`, because the forward's hints (`enable-post-misched=false`, ...) are attached to the launcher itself. (The
+    backward bodies spell their fast-math flags explicitly, so unlike the forward the flags do not depend on the hints.)
+    """
+    import flydsl.expr as fx
+
+    meta = meta_of(head_dim=64)
+    via_compile = isa_tools.fresh_bwd_dump(kind, backend, arch, meta, tmp_path / "c", monkeypatch)
+    knobs = getattr(backend, f"{kind}_knobs")(arch).resolve(meta)
+    fn = getattr(backend, f"build_{kind}")(meta, knobs)
+    args, kw = bwd_compile_inputs(kind, meta)
+    packed, _ = fn.host_args(*args, **kw)
+
+    def direct():
+        fn.launcher(*packed, fx.Stream(None))
+        torch.cuda.synchronize()
+
+    via_call = isa_tools.compile_dump(direct, tmp_path / "d", monkeypatch)
+    assert via_call.isa == via_compile.isa, "a direct jf(*args) call must compile the same binary as the JIT path"
