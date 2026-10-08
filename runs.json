@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-08T00:10:06Z",
+ "updated": "2026-10-08T00:14:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 37706586400,
+   "pr": 1190,
+   "commit": "c8c9f76c3bba3c195dc87a0b4bfe4e943f0c5cfb",
+   "branch": "phil/llvm-extensions-v1",
+   "event": "pull_request",
+   "title": "[llvm] Add support for custom LLVM extensions",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37706586400",
+   "created_at": "2026-10-08T00:13:08Z",
+   "updated_at": "2026-10-08T00:13:29Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
   {
    "run_id": 37706058002,
    "pr": 1188,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37706058002",
    "created_at": "2026-10-08T00:07:27Z",
-   "updated_at": "2026-10-08T00:09:04Z",
+   "updated_at": "2026-10-08T00:10:44Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -39,12 +54,12 @@
    "commit": "16cf178d1e78d7db16bf3f2a6edbe1c5f4269de6",
    "branch": "phil/llvm-extensions-v1",
    "event": "pull_request",
-   "title": "[llvm] Extend LLVM for FlyDSL end-to-end performance work",
-   "status": "in_progress",
-   "conclusion": null,
+   "title": "[llvm] Add support for custom LLVM extensions",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37704981757",
    "created_at": "2026-10-07T23:55:34Z",
-   "updated_at": "2026-10-07T23:59:07Z",
+   "updated_at": "2026-10-08T00:13:29Z",
    "actor": "Phil-amd",
    "jobs": []
   },
@@ -1459,21 +1474,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37383029422",
    "created_at": "2026-10-05T22:31:34Z",
    "updated_at": "2026-10-05T22:31:34Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37381512980,
-   "pr": null,
-   "commit": "eef333ac190c987d0b6bd8d18a0671069a0eca2a",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37381512980",
-   "created_at": "2026-10-05T22:17:33Z",
-   "updated_at": "2026-10-05T22:17:33Z",
    "actor": "dimitri91209",
    "jobs": []
   }
