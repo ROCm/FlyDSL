@@ -607,3 +607,23 @@ def test_dkdv_mask_floor_follows_the_narrower_extent():
     asym = cfg.FmhaInputMetadata(dtype_str="bf16", head_dim=120, head_dim_v=8)
     assert cfg.dkdv_traits(sym, cfg.dkdv_knobs(ARCH).resolve(sym)).HDIM_QK_FLOOR == 96
     assert cfg.dkdv_traits(asym, cfg.dkdv_knobs(ARCH).resolve(asym)).HDIM_QK_FLOOR == 0
+
+
+# ---------------------------------------------------------------------------
+# The backward's JIT-only knobs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kernel", ["dq", "dkdv"])
+def test_bwd_static_knobs(kernel):
+    """`STATIC_WINDOW` / `STATIC_SEQLEN` (the Leading_upper_snake_case parameters baked) are off by default, reach the traits when
+    set, and `STATIC_WINDOW` needs a window."""
+    make, traits_of = KERNELS[kernel]
+    windowed = meta_for(64, feat="window")
+    base = make(ARCH).resolve(windowed)
+    assert base.STATIC_WINDOW is False and base.STATIC_SEQLEN is False
+    on = make(ARCH, STATIC_WINDOW=True, STATIC_SEQLEN=True).resolve(windowed)
+    traits = traits_of(windowed, on)
+    assert traits.STATIC_WINDOW is True and traits.STATIC_SEQLEN is True
+    with pytest.raises(ValueError, match="STATIC_WINDOW"):
+        make(ARCH, STATIC_WINDOW=True).resolve(meta_for(64))

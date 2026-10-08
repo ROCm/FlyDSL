@@ -1169,6 +1169,10 @@ class Gfx950DqKnobs(_Knobs):
     BLOCK_N: int | None = None
     num_warps: int | None = None
     HEAD_DIM_GRANULE: int | None = None
+    # JIT-only, opt-in: bake call data (`Window_left`/`Window_right`, `Max_seqlen_q`/`Max_seqlen_k`) as `Constexpr`s, one
+    # compile per value. Off for every AOT build, where they are real `Int32` kernargs.
+    STATIC_WINDOW: bool | None = None
+    STATIC_SEQLEN: bool | None = None
     # 32 or 16: the MFMA's N extent, i.e. the query rows one wave owns. The MFMA shape and the KV tile
     # are derived together from it, because at 16 rows BLOCK_N is not free.
     MFMA_ROWS: int | None = None
@@ -1253,12 +1257,14 @@ class Gfx950DqKnobs(_Knobs):
         )
 
     def _checked_against_traits(self, meta):
+        if self.STATIC_WINDOW and not meta.window:
+            raise ValueError("STATIC_WINDOW bakes the window bounds, so it requires meta.window")
         dq_traits(meta, self)
         return self._check_grid_axis_order(GRID_AXIS_HEAD_FASTEST)
 
 
 # No measurement for the dQ tile walk order: LPT is off unless asked for.
-_DQ_FALLBACK = Gfx950DqKnobs(daz=True, SETPRIO=True, LPT_TILE_ORDER=False)
+_DQ_FALLBACK = Gfx950DqKnobs(daz=True, SETPRIO=True, LPT_TILE_ORDER=False, STATIC_WINDOW=False, STATIC_SEQLEN=False)
 
 # The 16-row family's transpose read folds `tok_off(4 * group)` into `group * granule`, which holds only
 # when `SMEM_N_RPT` divides 4: true at granule 64 and not at granule 32 where it is 2.
@@ -1308,7 +1314,8 @@ def dq_traits(meta: FmhaInputMetadata, knobs: Gfx950DqKnobs) -> Gfx950DqTraits:
         granule=knobs.HEAD_DIM_GRANULE,
         # D_STAGES / VO_SHARDS / QK_SHARDS are fixed at 1: refused as knobs, not defaulted away.
         window=meta.window,
-        static_window=False,
+        static_window=bool(knobs.STATIC_WINDOW),
+        static_seqlen=bool(knobs.STATIC_SEQLEN),
         bias=meta.bias,
         dropout=meta.dropout,
         lpt_tile_order=bool(knobs.LPT_TILE_ORDER),
@@ -1485,6 +1492,10 @@ class Gfx950DkdvKnobs(_Knobs):
     DKV_SHARDS: int | None = None
     MFMA_ROWS: int | None = None
     NUM_STREAM_BUFFERS: int | None = None
+    # JIT-only, opt-in: bake call data (`Window_left`/`Window_right`, `Max_seqlen_q`/`Max_seqlen_k`) as `Constexpr`s, one
+    # compile per value. Off for every AOT build, where they are real `Int32` kernargs.
+    STATIC_WINDOW: bool | None = None
+    STATIC_SEQLEN: bool | None = None
     TIGHT_REGISTERS: bool | None = None
     waves_per_eu: int | None = None
     daz: bool | None = None
@@ -1565,11 +1576,13 @@ class Gfx950DkdvKnobs(_Knobs):
         return replace(self, TIGHT_REGISTERS=self._geometry_for(meta)[5])
 
     def _checked_against_traits(self, meta):
+        if self.STATIC_WINDOW and not meta.window:
+            raise ValueError("STATIC_WINDOW bakes the window bounds, so it requires meta.window")
         dkdv_traits(meta, self)
         return self._check_grid_axis_order(GRID_AXIS_HEAD_FASTEST)
 
 
-_DKDV_FALLBACK = Gfx950DkdvKnobs(daz=True)
+_DKDV_FALLBACK = Gfx950DkdvKnobs(daz=True, STATIC_WINDOW=False, STATIC_SEQLEN=False)
 
 
 def dkdv_traits(meta: FmhaInputMetadata, knobs: Gfx950DkdvKnobs) -> Gfx950DkdvTraits:
@@ -1603,7 +1616,8 @@ def dkdv_traits(meta: FmhaInputMetadata, knobs: Gfx950DkdvKnobs) -> Gfx950DkdvTr
         granule=knobs.HEAD_DIM_GRANULE,
         vo_shards=knobs.DKV_SHARDS,
         window=meta.window,
-        static_window=False,
+        static_window=bool(knobs.STATIC_WINDOW),
+        static_seqlen=bool(knobs.STATIC_SEQLEN),
         bias=meta.bias,
         dropout=meta.dropout,
         lpt_tile_order=False,

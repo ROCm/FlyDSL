@@ -531,6 +531,97 @@ class VarlenCase:
         )
         torch.cuda.synchronize()
 
+    # ------------------------------------------------------------------ backward
+    def new_do(self, gen=None):
+        """A dO shaped like O: zeros in the padding, random in every sequence."""
+        gen = gen or seeded(77)
+        do = alloc(
+            self.batch, self.hq, self.tq, self.dv, self.dtype, fill=torch.zeros(self.batch, self.hq, self.tq, self.dv)
+        )
+        for z in range(self.n):
+            qb, qr = self._where_q(z)
+            do[qb, :, qr] = torch.randn(self.hq, self.lens_q[z], self.dv, device="cuda", generator=gen).to(self.dtype)
+        return do
+
+    def row_inputs(self, do):
+        """`(lse, delta)` in the descriptor's layout: the forward's LSE as written, delta reduced in fp32 from the stored O.
+        The padding rows of `O` are unwritten (NaN), so their delta is zeroed: the real inputs never read them."""
+        delta = torch.nan_to_num((do.float() * self.o.float()).sum(-1), nan=0.0)  # (batch, hq, tokens)
+        if self.lse_layout == "HT":
+            delta = delta.reshape(self.batch * self.hq, -1)
+        else:
+            delta = delta.permute(0, 2, 1).reshape(-1, self.hq)
+        return self.lse, delta.contiguous()
+
+    def run_bwd(
+        self,
+        builds,
+        do,
+        *,
+        window=None,
+        scale=None,
+        p_drop=None,
+        seed=0,
+        offset=0,
+        which=("dq", "dkdv"),
+        lse_delta=None,
+    ):
+        """Forward, then dQ and dK/dV through the same descriptor; outputs are NaN-prefilled `self.dq/dk/dv`."""
+        drop = {} if p_drop is None else dict(dropout_p=p_drop, philox_seed=seed, philox_offset2=offset)
+        self.launch(builds.fwd, scale=scale, window=window, **drop)
+        lse, delta = lse_delta if lse_delta is not None else self.row_inputs(do)
+        bk = self.k.shape[0]
+        self.dq = alloc(self.batch, self.hq, self.tq, self.d, self.dtype)
+        self.dk = alloc(bk, self.hk, self.tk, self.d, self.dtype)
+        self.dv_ = alloc(bk, self.hk, self.tk, self.dv, self.dtype)
+        common = dict(
+            seqlen_k=self.maxk,
+            varlen=self.varlen,
+            num_seqlens=self.num_seqlens,
+            scale=scale,
+            window=window,
+            **drop,
+        )
+        if "dq" in which:
+            builds.dq(self.q, self.k, self.v, do, self.dq, lse, delta, self.batch, self.maxq, **common)
+        if "dkdv" in which:
+            builds.dkdv(self.q, self.k, self.v, do, self.dk, self.dv_, lse, delta, self.batch, self.maxq, **common)
+        torch.cuda.synchronize()
+
+    def grad_of(self, name, z):
+        """Sequence `z`'s rows of `dq` / `dk` / `dv`, as `(1, H, S, D)`."""
+        t = {"dq": self.dq, "dk": self.dk, "dv": self.dv_}[name]
+        if name == "dq":
+            qb, qr = self._where_q(z)
+            return t[qb : qb + 1, :, qr]
+        kb, kr = self._where_k(z)
+        return t[kb : kb + 1, :, kr]
+
+    def check_bwd(
+        self, builds, *, window=None, scale=None, ctx="", mult=FLOOR_MULT, p_drop=None, seed=0, keeps=None, do=None
+    ):
+        """Forward + backward through the descriptor, every sequence gated against its own fp64 reference. `keeps` is one
+        keep mask per sequence (dropout)."""
+        do = self.new_do() if do is None else do
+        self.run_bwd(builds, do, window=window, scale=scale, p_drop=p_drop, seed=seed)
+        sm = sdpa_scale(self.d) if scale is None else scale
+        for z in range(self.n):
+            q, k, v = self.seq(z)
+            qb, qr = self._where_q(z)
+            doz = do[qb : qb + 1, :, qr]
+            sq, sk = q.shape[2], k.shape[2]
+            mask = window_mask(sq, sk, *window) if window is not None else None
+            keep = None if keeps is None else keeps[z]
+
+            def ref(q=q, k=k, v=v, doz=doz, mask=mask, keep=keep, **rk):
+                return bwd_reference(q, k, v, doz, sm, mask=mask, keep=keep, p_drop=p_drop or 0.0, **rk)
+
+            exact = ref()
+            floors = bwd_floor(ref, exact, self.dtype)
+            for i, name in enumerate(("dq", "dk", "dv")):
+                got = self.grad_of(name, z)
+                check_floor(name, got, exact[i], floors[i], f"{ctx} seq {z}", mult)
+
     def check(
         self, fn, *, window=None, scale=None, ctx="", mult=FLOOR_MULT, alibi_slopes=None, sink=None, bias=None, **kw
     ):
@@ -574,6 +665,32 @@ class VarlenCase:
                 assert int((o[0][dead] != 0).sum()) == 0, f"{ctx}: seq {z} masked O rows are not exactly 0"
 
 
+def bwd_compile_inputs(kind, meta, d=None, dtype=None):
+    """`(args, kwargs)` for `dq.compile(...)` / `dkdv.compile(...)`: small real tensors of the right types for the build
+    `meta` describes (a compile needs argument *types*, not meaningful data)."""
+    d = meta.head_dim if d is None else d
+    dtype = DTYPES[meta.dtype_str] if dtype is None else dtype
+    dv = meta.head_dim_v_real
+    b, h, s = 1, 2, 64
+    q, k = randn(b, h, s, d, dtype), randn(b, h, s, d, dtype)
+    v, do = randn(b, h, s, dv, dtype), randn(b, h, s, dv, dtype)
+    lse2 = torch.zeros(b * h, s, device="cuda", dtype=torch.float32)
+    kw = {}
+    if meta.window:
+        kw["window"] = (WINDOW_BOTRIGHT, WINDOW_BOTRIGHT)
+    if meta.bias:
+        kw["bias"] = torch.zeros(b, h, s, s, device="cuda", dtype=dtype)
+    if meta.dropout:
+        kw.update(dropout_p=0.5, philox_seed=1)
+    if kind == "dq":
+        dq = alloc(b, h, s, d, dtype)
+        if meta.bias:
+            kw["db"] = alloc(b, h, s, s, dtype)
+        return (q, k, v, do, dq, lse2, lse2.clone(), b, s), kw
+    dk, dv_out = alloc(b, h, s, d, dtype), alloc(b, h, s, dv, dtype)
+    return (q, k, v, do, dk, dv_out, lse2, lse2.clone(), b, s), kw
+
+
 def compile_inputs(meta, d=None, dtype=None):
     """`(args, kwargs)` for `launcher.compile(*args, **kwargs)`: small real tensors of the right shape and types for the
     build `meta` describes (a compile needs argument *types*, not meaningful data)."""
@@ -600,3 +717,258 @@ def compile_inputs(meta, d=None, dtype=None):
         kw.update(seqlen_k=64, block_table=cache.block_table)
         return args, kw
     return (q, k, v, o, 1, 64), kw
+
+
+# ---------------------------------------------------------------------------
+# Backward: the fp64 reference with its rounding floor, and the forward -> delta -> dQ / dK/dV pipeline
+# ---------------------------------------------------------------------------
+
+
+def bwd_reference(q, k, v, do, sm_scale, *, mask=None, bias=None, keep=None, p_drop=0.0, round_to=None, ftz=False):
+    """fp64 attention backward from the same low-precision inputs: `(dq, dk, dv, db, o, lse)`.
+
+    With `round_to=None` this is the exact answer; with a dtype it rounds **where a correct kernel must**, so its distance
+    from the exact one is the error floor: `P` before `P @ V` and before `dV = P^T dO`, `dS` before `dS @ K` and
+    `dS^T @ Q`, the stored `O` the delta is reduced from, and each output. `keep` is the dropout keep mask (the softmax
+    denominator is the *undropped* sum; the survivors are scaled `1/(1-p)` once). GQA: `dk`/`dv` sum over each group.
+    `db` is `dS` (natural units): the gradient of the score bias.
+    """
+    q, k, v, do = (t.detach().to(torch.float64) for t in (q, k, v, do))
+    hq, hk = q.shape[1], k.shape[1]
+    group = hq // hk
+    if group != 1:
+        k = k.repeat_interleave(group, dim=1)
+        v = v.repeat_interleave(group, dim=1)
+    if keep is not None and keep.shape[1] != hq:
+        keep = keep.repeat_interleave(hq // keep.shape[1], dim=1)
+
+    def rnd(x):
+        if round_to is None:
+            return x
+        x = x.to(round_to).to(torch.float64)
+        if ftz:
+            x = torch.where(x.abs() < torch.finfo(round_to).tiny, 0.0, x)
+        return x
+
+    s = (q @ k.transpose(-1, -2)) * sm_scale
+    if bias is not None:
+        s = s + bias.detach().to(torch.float64)
+    if mask is not None:
+        s = s.masked_fill(~mask, float("-inf"))
+    lse = torch.logsumexp(s, dim=-1, keepdim=True)
+    live = torch.isfinite(lse)
+    p = torch.where(live, torch.exp(s - torch.where(live, lse, torch.zeros_like(lse))), torch.zeros_like(s))
+    scale_keep = 1.0 / (1.0 - p_drop)
+    pd = p * keep.to(torch.float64) * scale_keep if keep is not None else p
+    o = rnd(rnd(p * keep.to(torch.float64)) @ v) if keep is not None else rnd(rnd(p) @ v)
+    if keep is not None:
+        o = rnd(o * scale_keep)
+    delta = (do * o).sum(-1, keepdim=True)
+    dp = do @ v.transpose(-1, -2)
+    if keep is not None:
+        dp = dp * keep.to(torch.float64) * scale_keep
+    ds = p * (dp - delta)
+    dq = rnd(rnd(ds) @ k * sm_scale)
+    dk = rnd(rnd(ds).transpose(-1, -2) @ q * sm_scale)
+    dv = rnd(rnd(pd).transpose(-1, -2) @ do)
+    if group != 1:
+        b_, _, sk_, d_ = dk.shape
+        dk = dk.view(b_, hk, group, sk_, d_).sum(dim=2)
+        dv = dv.view(b_, hk, group, sk_, dv.shape[-1]).sum(dim=2)
+    return dq, dk, dv, rnd(ds), o, lse.squeeze(-1)
+
+
+def dkdv_family_pins(hdim, rows):
+    """A pinned dK/dV geometry the family can actually serve at this width, or None. A wave owns `rows` KV rows; the
+    16-row staging needs `SMEM_N_RPT` to divide the wave count, which at granule 32 rules out the 32-row default."""
+    granule = 64 if hdim % 64 == 0 else 32
+    waves = 4
+    block_q = 32 if (rows == 16 and hdim >= 192 and granule == 64) else 64
+    if (block_q // (512 // granule)) % waves:
+        return None
+    return dict(
+        MFMA_ROWS=rows, DKV_SHARDS=1, num_warps=waves, BLOCK_N=rows * waves, BLOCK_M=block_q, HEAD_DIM_GRANULE=granule
+    )
+
+
+def bwd_floor(ref_fn, exact, round_to):
+    """Per-output rounding floors (FTZ and non-FTZ models, the larger of the two)."""
+    out = []
+    for i in range(4):
+        out.append(max(relrms(ref_fn(round_to=round_to, ftz=ftz)[i], exact[i]) for ftz in (False, True)))
+    return out
+
+
+def fwd_o_lse(fwd_fn, q, k, v, *, window=None, bias=None, p_drop=None, seed=0, offset=0, scale=None, perm_o=(0, 1, 2)):
+    """Run the (new) forward and return `(o, lse)`: what the backward is fed, as it would be in training."""
+    b, hq, sq, _ = q.shape
+    o = alloc(b, hq, sq, v.shape[3], q.dtype, perm_o)
+    lse = lse_alloc(b, hq, sq)
+    run_fwd(fwd_fn, q, k, v, o, lse=lse, scale=scale, window=window, bias=bias, p_drop=p_drop, seed=seed, offset=offset)
+    return o, lse
+
+
+def row_inputs(o, do, lse):
+    """`(lse2, delta2)` as the backward takes them: rank 2, `(B * H, S)`, fp32, delta reduced in fp32 from the *stored*
+    `O` (a delta reduced in low precision is the 2.6-2.8x-floor mistake)."""
+    b, h, s = lse.shape
+    delta = (do.float() * o.float()).sum(-1)
+    return lse.reshape(b * h, s).contiguous(), delta.reshape(b * h, s).contiguous()
+
+
+def run_bwd(
+    builds,
+    q,
+    k,
+    v,
+    do,
+    *,
+    window=None,
+    bias=None,
+    p_drop=None,
+    seed=0,
+    offset=0,
+    scale=None,
+    perms=None,
+    want_db=False,
+    o_lse=None,
+    which=("dq", "dkdv"),
+    perm_o=(0, 1, 2),
+    perm_db=(0, 1, 2),
+):
+    """Forward (the new kernel), then dQ and dK/dV; returns a dict with `o lse dq dk dv db` (outputs NaN-prefilled).
+
+    `builds` is the `bwd_build(...)` namespace (`fwd`, `dq`, `dkdv`). `perms` is `(pdq, pdk, pdv)`, the physical order of
+    the (B, H, S) axes of each output.
+    """
+    b, hq, sq, d = q.shape
+    hk, sk, dv_ = k.shape[1], k.shape[2], v.shape[3]
+    pdq, pdk, pdv = perms or ((0, 1, 2),) * 3
+    if o_lse is None:
+        o_lse = fwd_o_lse(
+            builds.fwd,
+            q,
+            k,
+            v,
+            window=window,
+            bias=bias,
+            p_drop=p_drop,
+            seed=seed,
+            offset=offset,
+            scale=scale,
+            perm_o=perm_o,
+        )
+    o, lse = o_lse
+    lse2, delta2 = row_inputs(o, do, lse)
+    drop = {} if p_drop is None else dict(dropout_p=p_drop, philox_seed=seed, philox_offset2=offset)
+    out = dict(o=o, lse=lse, dq=None, dk=None, dv=None, db=None)
+    if "dq" in which:
+        dq = alloc(b, hq, sq, d, q.dtype, pdq)
+        db = alloc(b, hq, sq, sk, q.dtype, perm_db) if want_db else None
+        builds.dq(
+            q, k, v, do, dq, lse2, delta2, b, sq, seqlen_k=sk, scale=scale, db=db, bias=bias, window=window, **drop
+        )
+        out.update(dq=dq, db=db)
+    if "dkdv" in which:
+        dk = alloc(b, hk, sk, d, q.dtype, pdk)
+        dv = alloc(b, hk, sk, dv_, q.dtype, pdv)
+        builds.dkdv(
+            q, k, v, do, dk, dv, lse2, delta2, b, sq, seqlen_k=sk, scale=scale, bias=bias, window=window, **drop
+        )
+        out.update(dk=dk, dv=dv)
+    torch.cuda.synchronize()
+    return out
+
+
+def bwd_check(
+    builds,
+    *,
+    b=1,
+    hq=2,
+    hk=None,
+    sq=129,
+    sk=None,
+    d=64,
+    dv=None,
+    dtype,
+    window=None,
+    bias=None,
+    p_drop=None,
+    seed=0,
+    keep=None,
+    scale=None,
+    input_scale=1.0,
+    perms=None,
+    data_seed=0,
+    ctx="",
+    mult=FLOOR_MULT,
+    outputs=("dq", "dk", "dv"),
+    want_db=False,
+    qkv_do=None,
+    perm_o=(0, 1, 2),
+    perm_db=(0, 1, 2),
+    in_perms=None,
+):
+    """Run forward + backward and gate every output against the fp64 floor (G-floor); returns the pieces.
+
+    `keep` is the dropout keep mask for the reference (recover it with `forward_keep_mask`); without it a dropout call has
+    no reference and only the structural checks apply.
+    """
+    hk = hq if hk is None else hk
+    sk = sq if sk is None else sk
+    dv = d if dv is None else dv
+    gen = seeded(data_seed)
+    if qkv_do is None:
+        pq, pk, pv, pdo = in_perms or ((0, 1, 2),) * 4
+        q = randn(b, hq, sq, d, dtype, pq, scale=input_scale, gen=gen)
+        k = randn(b, hk, sk, d, dtype, pk, scale=input_scale, gen=gen)
+        v = randn(b, hk, sk, dv, dtype, pv, gen=gen)
+        do = randn(b, hq, sq, dv, dtype, pdo, gen=gen)
+    else:
+        q, k, v, do = qkv_do
+    sm_scale = sdpa_scale(d) if scale is None else scale
+    got = run_bwd(
+        builds,
+        q,
+        k,
+        v,
+        do,
+        window=window,
+        bias=bias,
+        p_drop=p_drop,
+        seed=seed,
+        scale=scale,
+        perms=perms,
+        want_db=want_db,
+        perm_o=perm_o,
+        perm_db=perm_db,
+    )
+    mask = window_mask(sq, sk, *window) if window is not None else None
+
+    def ref(**kw):
+        return bwd_reference(q, k, v, do, sm_scale, mask=mask, bias=bias, keep=keep, p_drop=p_drop or 0.0, **kw)
+
+    exact = ref()
+    floors = bwd_floor(ref, exact, dtype)
+    names = ("dq", "dk", "dv", "db")
+    for i, name in enumerate(names):
+        if name == "db":
+            if not want_db:
+                continue
+        elif name not in outputs:
+            continue
+        if got[name] is None:
+            continue
+        check_floor(name, got[name], exact[i], floors[i], ctx, mult)
+    return dict(q=q, k=k, v=v, do=do, exact=exact, floors=floors, ref=ref, mask=mask, **got)
+
+
+def forward_keep_mask(fwd_fn_identity, q, k, p_drop, seed, offset=0, window=None, scale=None):
+    """The dropout keep mask the forward actually used, recovered through `V = I`: with the identity as V,
+    `O = P * keep / (1 - p)` element for element, so `O != 0` is the mask. Needs `head_dim_v == seqlen_k`."""
+    b, hq, sq, _ = q.shape
+    sk = k.shape[2]
+    v = torch.eye(sk, device="cuda", dtype=q.dtype).expand(b, k.shape[1], sk, sk).contiguous()
+    o = alloc(b, hq, sq, sk, q.dtype)
+    run_fwd(fwd_fn_identity, q, k, v, o, window=window, scale=scale, p_drop=p_drop, seed=seed, offset=offset)
+    return o != 0
