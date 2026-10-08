@@ -116,7 +116,7 @@ python -m pip install -e .
 
 #### Windows ROCm JIT build
 
-Windows source builds require Visual Studio 2022 C++ tools, CMake, Ninja, and a Python environment that can see the ROCm SDK. Create the venv from the Python installation that provides the SDK so Torch and HIP remain available:
+Windows source builds require Visual Studio 2022 C++ tools, CMake, Ninja, and a Python environment that can see the ROCm SDK. The LLVM/MLIR build uses MSVC; the FlyDSL extension uses the Visual Studio ClangCL toolset. Create the venv from the Python installation that provides the SDK so Torch and HIP remain available:
 
 ```powershell
 $repo = (Get-Location).Path

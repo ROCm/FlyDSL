@@ -65,6 +65,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not locate nanobind CMake files' }
 
 cmake -U Python3_EXECUTABLE -U nanobind_DIR -U MLIR_USE_FALLBACK_TYPE_IDS `
     -G Ninja -S (Join-Path $LLVMSourceDir 'llvm') -B $LLVMBuildDir `
+    "-DCMAKE_C_COMPILER=cl.exe" `
+    "-DCMAKE_CXX_COMPILER=cl.exe" `
     "-DLLVM_ENABLE_PROJECTS=mlir;clang;lld" `
     "-DLLVM_TARGETS_TO_BUILD=X86;AMDGPU" `
     -DLLVM_ENABLE_RUNTIMES= `

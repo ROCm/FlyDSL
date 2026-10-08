@@ -26,12 +26,12 @@ from ..expr.typing import Stream
 from ..runtime._libraries import _find_aot_runtime_archive
 from ..utils._elf import _defined_global_symbols, _global_symbols
 from .backends import _get_backend_class
-
-if os.name != "nt":
-    import fcntl
 from .jit_argument import MemRefJitArg, PointerJitArg
 from .jit_function import _create_mlir_context
 from .protocol import c_abi_spec
+
+if os.name != "nt":
+    import fcntl
 
 _SCHEMA_VERSION = 2
 
