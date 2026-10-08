@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-10-08T12:46:18Z",
+ "updated": "2026-10-08T12:51:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37778301881,
+   "run_id": 37779674467,
    "pr": 1234,
-   "commit": "1d41f1e9402d4f7e2c218614febb6542684916e6",
+   "commit": "be1a5977cc01092ef6622ad3e1b6b9248d0ae023",
    "branch": "dsv4_megakernel",
    "event": "pull_request",
    "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
    "status": "in_progress",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37779674467",
+   "created_at": "2026-10-08T12:49:42Z",
+   "updated_at": "2026-10-08T12:50:30Z",
+   "actor": "amd-weisun",
+   "jobs": []
+  },
+  {
+   "run_id": 37778301881,
+   "pr": null,
+   "commit": "1d41f1e9402d4f7e2c218614febb6542684916e6",
+   "branch": "dsv4_megakernel",
+   "event": "pull_request",
+   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37778301881",
    "created_at": "2026-10-08T12:38:21Z",
-   "updated_at": "2026-10-08T12:40:44Z",
+   "updated_at": "2026-10-08T12:50:04Z",
    "actor": "amd-weisun",
    "jobs": []
   },
@@ -1667,21 +1682,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37526864282",
    "created_at": "2026-10-06T20:29:42Z",
    "updated_at": "2026-10-06T20:29:42Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37519364251,
-   "pr": null,
-   "commit": "dfedbfbbf08e2f21264d7df75fdd3eb31f1a4005",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37519364251",
-   "created_at": "2026-10-06T19:29:32Z",
-   "updated_at": "2026-10-06T19:29:32Z",
    "actor": "dimitri91209",
    "jobs": []
   }
