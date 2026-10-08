@@ -10,17 +10,29 @@ kernels. Model ownership is explicit:
 - `dsv4/` contains the DeepSeek-V4 decode layer: CSA / HCA sparse attention
   with its compressors and indexer, mHC, MoE, and its checkpoint loader.
   `kernel.py` builds the one launch from per-stage modules (`hc`, `qkv`,
-  `indexer`, `attention`, `ffn`) over the device helpers in `common.py`;
-  `plan.py` holds the host-side task counts and mailbox layout.
+  `indexer`, `attention`, `ffn`); `common.py` binds the shared helpers to it
+  and adds the DSV4-only ones, and `plan.py` holds the host-side task counts
+  and mailbox layout.
 
 Reusable contracts and primitives stay at this package root. `config.py`,
 `layout.py`, `ops.py`, `packing.py`, `reference.py`, `runtime.py`, and
 `weights.py` define shared geometry, layouts, device operations, packing, host
-runtime, and weight containers. `helpers.py` holds the helpers the resident
-kernels bind to their own launch state (`bind_helpers`): tagged-pair
-mailboxes, block reductions, MFMA GEMV units, activation staging and task
-placement; GLM, Kimi-K3 MLA and DeepSeek-V4 share it. `gemm_a16w16.py`,
-`mxfp8_linear.py`, and
+runtime, and weight containers. `helpers.py` holds the device helpers that
+GLM, Kimi-K3 MLA and DeepSeek-V4 share. Each kernel binds them to its own
+launch state with `bind_helpers`:
+
+- tagged-pair mailboxes, `poll` and timeline `stamp`;
+- block reductions;
+- the MFMA GEMV units with `mma_units` / `run_units` / `reduce_rows`;
+- RMSNorm and activation staging;
+- the TP `peer_reduce` and task placement.
+
+Where the kernels differ (the MXFP4 layout, bounded polls, alternating peer
+slots, the norm epsilon, ...), `bind_helpers` takes a build-time argument, so
+each kernel compiles exactly its own variant. FlyDSL's JIT cache keys a
+kernel only on its own directory's sources, so the kernels also capture
+`SHARED_SOURCE_KEY`, a digest of `helpers.py` and `ops.py`, so that edits to
+either still recompile them. `gemm_a16w16.py`, `mxfp8_linear.py`, and
 `symmetric_allreduce.py` provide model-independent kernels used by the staged
 paths.
 
