@@ -175,7 +175,7 @@ def test_offsets_past_2gi(bwd_build, rows):
         window_mask,
     )
 
-    b, h, s, d, band = 2, 64, 65536, 128, 255
+    b, h, s, d, band = 2, 65, 65536, 128, 255
     assert (b * h - 1) * s * d * 2 > 2**31
     gen = seeded(27)
     meta = meta_of(head_dim=d, window=True)
