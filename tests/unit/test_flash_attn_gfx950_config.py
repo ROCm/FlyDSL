@@ -461,12 +461,6 @@ def test_no_compile_time_head_count_or_scale():
         if path.name == "flash_attn_gfx950_config.py":
             continue
         tree = ast.parse(path.read_text())
-        # `flash_attn_gfx950.py` still hosts the legacy `build_flash_attn_dualwave_swp_module` until the interface
-        # moves over; only the new builders are held to the rule.
-        if path.name == "flash_attn_gfx950.py":
-            tree.body = [
-                n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith("build_flash_attn_gfx950_")
-            ]
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in forbidden:
                 base = node.value
