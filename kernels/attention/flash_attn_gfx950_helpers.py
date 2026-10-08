@@ -1178,7 +1178,10 @@ class ParityKernelContext(_ParityKvStaging, dualwave.DualwaveKernelContext):
         atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
         frag = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
         fx.copy(atom, fx.slice(table, (None, fx.Int32(self.q_head_idx))), frag)
-        return Vec(frag.load(), (1,), fx.Float32)[0] * fx.Float32(dualwave._LOG2E)
+        # Unfused: `fold_sink` takes `exp2(sink_log2 - m)`, and with `contract` this multiply became its FMA.
+        with fx.fastmath(SOFTMAX_EXPONENT_FASTMATH):
+            sink_log2 = Vec(frag.load(), (1,), fx.Float32)[0] * fx.Float32(dualwave._LOG2E)
+        return sink_log2
 
     def init_philox(self):
         """Seed, counter and this workgroup's plane origin. Prologue-only.
@@ -1594,9 +1597,10 @@ class ParitySplitKCombineHelper(dualwave.DualwaveSplitKCombineHelper):
             num_records_bytes=as_mlir_value(fx.Int64(fx.Index(self.num_head_q) * fx.Index(4))),
         )
         sink_f32 = buffer_ops.buffer_load(sink_rsrc, as_mlir_value(fx.Int32(self.q_head_idx)), vec_width=1, dtype=T.f32)
-        sink_log2 = sink_f32 * fx.Float32(bias_log2e)
-        m_new = fx.maxnumf(m_max, sink_log2)
-        sink_w = rocdl.exp2(T.f32, as_mlir_value(sink_log2 - m_new))
+        with fx.fastmath(SOFTMAX_EXPONENT_FASTMATH):
+            sink_log2 = sink_f32 * fx.Float32(bias_log2e)
+            m_new = fx.maxnumf(m_max, sink_log2)
+            sink_w = rocdl.exp2(T.f32, as_mlir_value(sink_log2 - m_new))
         return m_new, sink_w
 
     def store_lse_if_not_null(self, m_max, den):
