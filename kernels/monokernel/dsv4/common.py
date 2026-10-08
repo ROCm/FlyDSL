@@ -6,7 +6,6 @@
 from functools import partial
 
 import flydsl.expr as fx
-from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
@@ -14,7 +13,7 @@ from kernels.common import buffer_ops as bo
 from kernels.monokernel import helpers
 from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROUTE_SCALE
 from kernels.monokernel.dsv4.plan import MIN_I32, THREADS, TL_COLS, WAVES
-from kernels.monokernel.helpers import SHARED_SOURCE_KEY, LaunchState
+from kernels.monokernel.helpers import SHARED_SOURCE_KEY, LaunchState, traced
 from kernels.monokernel.ops import (
     exp,
     f8_word,
@@ -86,7 +85,7 @@ def bf16x2_has_nan(w):
     return ((w & 0x7FFF) > fx.Int32(0x7F80)) | (((w >> 16) & 0x7FFF) > fx.Int32(0x7F80))
 
 
-@ASTRewriter.transform
+@traced
 def common_defs(ctx):
     """The helpers every stage shares: mailboxes, reductions, the MFMA GEMV machinery,
     activation staging, routing and the TP peer reduce."""

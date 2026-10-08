@@ -4,16 +4,16 @@
 """Hyper-connection mixers of the DeepSeek-V4 MonoKernel."""
 
 import flydsl.expr as fx
-from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.dsv4.config import EPS
 from kernels.monokernel.dsv4.plan import ROW_TILE
+from kernels.monokernel.helpers import traced
 from kernels.monokernel.ops import bf2_f32, bf16_round, exp, ld_f32, lds_ld, lds_st, rcp, rsq, rsrc, xred
 
 
-@ASTRewriter.transform
+@traced
 def hc_attn_stages(ctx):
     """0. Hyper-connection pre-mix on the attention side; returns the mixers the FFN
     side reuses."""

@@ -4,13 +4,13 @@
 """The MoE FFN of the DeepSeek-V4 MonoKernel: router, experts and the TP reduce."""
 
 import flydsl.expr as fx
-from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.dsv4.common import sqrt_softplus, swiglu
 from kernels.monokernel.dsv4.config import SCALE_BM
 from kernels.monokernel.dsv4.plan import ROUTER_TILE, UG8, UG_TILE, WAVES, ffn_hcc, router_spt
+from kernels.monokernel.helpers import traced
 from kernels.monokernel.ops import (
     bf2_f32,
     bf16_pair,
@@ -27,7 +27,7 @@ from kernels.monokernel.ops import (
 )
 
 
-@ASTRewriter.transform
+@traced
 def ffn_stages(ctx):
     """8-10. FFN-side mixers, router, expert up/gate and down, and the MoE TP peer reduce."""
     DN_TILE = ctx["DN_TILE"]

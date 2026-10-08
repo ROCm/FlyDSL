@@ -4,13 +4,13 @@
 """Sparse attention of the DeepSeek-V4 MonoKernel: split softmax, merge and the output projection."""
 
 import flydsl.expr as fx
-from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.dsv4.common import bf16x2_has_nan, wave_any
 from kernels.monokernel.dsv4.config import EPS, ROPE_DIM
 from kernels.monokernel.dsv4.plan import Q_B_TILE, ROW_TILE, SPLIT_KEYS, THREADS, WAVES, o_a_spt
+from kernels.monokernel.helpers import traced
 from kernels.monokernel.layout import NEG
 from kernels.monokernel.ops import (
     bf2_f32,
@@ -29,7 +29,7 @@ from kernels.monokernel.ops import (
 )
 
 
-@ASTRewriter.transform
+@traced
 def attention_stages(ctx):
     """4-7b. Query RMS + RoPE, gather-sparse split softmax, merge, o_a / o_b and the
     attention TP peer reduce."""

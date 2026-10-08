@@ -5,7 +5,6 @@
 compressor, and q_b."""
 
 import flydsl.expr as fx
-from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
@@ -13,6 +12,7 @@ from kernels.common import buffer_ops as bo
 from kernels.monokernel.dsv4.common import pow2_ceil
 from kernels.monokernel.dsv4.config import EPS, FP8_MAX, ROPE_DIM
 from kernels.monokernel.dsv4.plan import Q_B_TILE, QKV_A_TILE, WAVES, q_b_groups, qkv_a_groups
+from kernels.monokernel.helpers import traced
 from kernels.monokernel.layout import NEG
 from kernels.monokernel.ops import (
     bf2_f32,
@@ -31,7 +31,7 @@ from kernels.monokernel.ops import (
 )
 
 
-@ASTRewriter.transform
+@traced
 def qkv_stages(ctx):
     """1-2b. q_a / kv GEMV, KV RMSNorm + RoPE -> sliding-window ring, and the KV compressor."""
     CMP_CHUNK = ctx["CMP_CHUNK"]
@@ -363,7 +363,7 @@ def qkv_stages(ctx):
     return dict(kv_quant=kv_quant, ring_row=ring_row, window_pool=window_pool)
 
 
-@ASTRewriter.transform
+@traced
 def q_b_stage(ctx):
     """3. q_a RMSNorm -> q_b (raw f32 query)."""
     G = ctx["G"]
