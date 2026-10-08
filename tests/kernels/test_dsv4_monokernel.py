@@ -5,12 +5,7 @@
 
 Covers the sliding-window, HCA and CSA layers of :mod:`kernels.monokernel.dsv4.kernel`.
 The reduced shard keeps ``head_dim`` 512 and ``head_dim - rope_dim`` a multiple of 64,
-which the kernel's mappings depend on.
-
-Multi-GPU and benchmark runs::
-
-    python3 tests/kernels/test_dsv4_monokernel.py --npes 8
-    python3 tests/kernels/test_dsv4_monokernel.py --bench --npes 8 --real
+which the kernel's mappings depend on. The TP8 cases run under ``-m multi_gpu``.
 """
 
 from __future__ import annotations
@@ -62,6 +57,7 @@ SCALES_WITH_CONFIG = ("mid",)
 # relative L2: a sharply peaked softmax head turns a 0.2% query error into ~2% on one element
 L2_STAGES = ("o",)
 OUT_REL_L2 = 0.050  # worst seen 0.0278 at hc=1/tp1, 0.0914 at hc=4/tp8/a8w4
+EXACT_STAGES = ("q_a", "kv", "q", "o", "o_lora", "a", "scores")
 
 
 def _tol(base, hc_mult, npes):
@@ -69,8 +65,19 @@ def _tol(base, hc_mult, npes):
     return base * (2 if hc_mult > 1 else 1) * (2 if npes > 1 else 1)
 
 
-def _cfg(hc_mult=1):
-    return V4Config(
+def _rel(a, b):
+    """Max error relative to the reference's largest magnitude."""
+    a, b = a.float(), b.float()
+    return (a - b).abs().max().item() / max(b.abs().max().item(), 1e-6)
+
+
+def _rel_l2(a, b):
+    a, b = a.float(), b.float()
+    return ((a - b).norm() / max(b.norm().item(), 1e-6)).item()
+
+
+def _cfg(hc_mult=1, compress_ratio=0, max_seq=None, index_topk=None):
+    cfg = V4Config(
         heads=8,
         hidden=1024,
         q_lora=512,
@@ -84,6 +91,53 @@ def _cfg(hc_mult=1):
         window=128,
         hc_mult=hc_mult,
     )
+    if compress_ratio:
+        cfg.compress_ratio = compress_ratio
+    if max_seq is not None:
+        cfg.max_seq = max_seq
+    if index_topk is not None:
+        cfg.index_topk = index_topk
+    return cfg
+
+
+def _kernel(cfg, mode=MoeMode.W8A8, S=1, **kw):
+    """The weights (seed 3) and a single-rank layer over them."""
+    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
+
+    W = make_weights(rank=0, cfg=cfg, device="cuda", seed=3, moe_mode=mode)
+    return W, Dsv4MonoKernel(W, samples=S, rank=0, npes=1, moe_mode=mode, **kw)
+
+
+def _h(cfg, S=1):
+    shape = (S, cfg.hidden) if cfg.hc_mult == 1 else (S, cfg.hc_mult, cfg.hidden)
+    return (0.5 * torch.randn(*shape, device="cuda")).bfloat16()
+
+
+def _state(cfg, S=1, width=None):
+    """A fresh compressor state, -inf scores like the layer's own so unwritten rows drop out of the softmax."""
+    w = cfg.c_coff * (cfg.head_dim if width is None else width)
+    return torch.zeros(S, cfg.c_rows, w, device="cuda"), torch.full((S, cfg.c_rows, w), float("-inf"), device="cuda")
+
+
+def _golden(W, h, pos, kv, dest, idx, cos, sin, mode, state=None, allreduce=lambda z: z, **kw):
+    """golden_layer; ``state`` = (kv_state, score_state) for a compressing layer."""
+    if state is not None:
+        kw |= dict(kv_state=state[0], score_state=state[1], cos_c=cos, sin_c=sin)
+    return golden_layer(W, h, pos, kv, dest, idx, cos, sin, allreduce, moe_mode=mode, **kw)
+
+
+def _own_routing_rel(W, got, out, mode, allreduce=lambda z: z):
+    """x_out against the golden MoE run on the kernel's own routing (immune to near-tie flips)."""
+    own = golden_moe(W, got["a"], allreduce, mid=got["mid"], sel=got["sel"], prob=got["prob"], moe_mode=mode)
+    return _rel_l2(out, own["x_out"])
+
+
+def _step(layer, cfg, pos, kv, cos, sin, h=None):
+    """One single-sample decode step at ``pos``; returns (h, out)."""
+    h = _h(cfg) if h is None else h
+    idx, dest = contiguous_pool([pos], cfg, "cuda")
+    out = layer.forward(h, torch.tensor([pos], dtype=torch.int32, device="cuda"), kv, dest, idx, cos, sin)
+    return h, out
 
 
 def _icache_rows(layer, s, n):
@@ -123,13 +177,63 @@ def _compare_stages(got, ref, cfg, npes):
     """Per-stage relative error against the golden."""
     for name, base in STAGE_TOL.items():
         tol = _tol(base, cfg.hc_mult, npes) if name in SCALES_WITH_CONFIG else base
-        a = got[name].float().reshape(-1)
-        b = ref[name].float().reshape(-1)
-        if name in L2_STAGES:
-            rel = ((a - b).norm() / b.norm().clamp(min=1e-6)).item()
-        else:
-            rel = (a - b).abs().max().item() / max(b.abs().max().item(), 1e-6)
+        rel = _rel_l2(got[name], ref[name]) if name in L2_STAGES else _rel(got[name], ref[name])
         assert rel < tol, f"stage {name} diverged: rel {rel:.5f} >= {tol}"
+
+
+def _check_topk(layer, cfg, n, what=""):
+    """The indexer picked exactly min(index_topk, n) distinct slots, the top of its own scores; returns them."""
+    k = min(cfg.index_topk, n)
+    got = layer.debug("i_sel", (1, cfg.n_keys - cfg.window), torch.int32)[0]
+    sel = got[got >= 0].tolist()
+    assert len(sel) == k, f"{what}wrote {len(sel)} slots, want {k}"
+    assert len(set(sel)) == k, f"{what}{k - len(set(sel))} picks collided on a slot"
+    # judged on the kernel's own scores: golden FP4 ties can move a borderline entry
+    sc = layer.debug("i_score", (1, cfg.n_compressed))[0][:n]
+    srt = sc.sort(descending=True).values
+    margin = (srt[k - 1] - srt[k]).item() if n > k else 1.0
+    want = set((cfg.window + sc.topk(k).indices).tolist()) if k else set()
+    if set(sel) != want and margin > 1e-6:
+        raise AssertionError(f"{what}picked {len(set(sel) - want)} entries the scores do not rank")
+    return sel
+
+
+def _indexer_q(cfg, t, q_an, pos, cos, sin):
+    """The golden indexer query: projection, RoPE on the last rope_dim lanes, Hadamard, FP4."""
+    from kernels.monokernel.dsv4.reference import hadamard, quant_dequant_fp4, rope
+
+    ih, ihd, rd = cfg.index_heads, cfg.index_head_dim, cfg.rope_dim
+    q = (q_an @ dequant(t["w_i_q_b"], t["s_i_q_b"], 128).T).view(ih, ihd)
+    q = torch.stack([torch.cat([q[j, :-rd], bf(rope(q[j, -rd:], cos[pos], sin[pos]))]) for j in range(ih)])
+    return quant_dequant_fp4(bf(hadamard(bf(q))) if cfg.indexer_hadamard else bf(q))
+
+
+def _layer_vs_golden(cfg, S, mode):
+    """One launch of S sequences against the golden, stage by stage and end to end; returns (got, out)."""
+    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
+
+    cfg.validate()
+    dev = "cuda"
+    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
+    layer = Dsv4MonoKernel(W, samples=S, rank=0, npes=1, moe_mode=mode)
+    h = _h(cfg, S)
+    pos = cfg.window  # ring already wrapped once
+    cur = torch.tensor([pos] * S, dtype=torch.int32, device=dev)
+    kv0 = (0.3 * torch.randn(S * cfg.window, cfg.head_dim, device=dev)).bfloat16()
+    idx, dest = contiguous_pool([pos] * S, cfg, dev)
+    cos, sin = rope_table(4096, theta=cfg.rope_theta, device=dev)
+    out = layer.forward(h, cur, kv0.clone(), dest, idx, cos, sin)
+    torch.cuda.synchronize()
+    got = layer.intermediates()
+    ref = _golden(W, h, [pos] * S, kv0.clone(), dest, idx, cos, sin, mode)
+    if _routing_flipped(got, ref, W, cfg, S):
+        ref = _rebase_on_own_routing(got, ref, W, mode)
+    _compare_stages(got, ref, cfg, 1)
+    assert out.shape == h.shape, f"the layer must preserve its input shape, got {out.shape}"
+    # end to end by relative L2: one upstream rounding flip moves an element far, hc_post spreads it
+    rel_l2, out_tol = _rel_l2(out, ref["x_out"]), _tol(OUT_REL_L2, cfg.hc_mult, 1)
+    assert rel_l2 < out_tol, f"x_out diverged: rel_l2 {rel_l2:.5f} >= {out_tol} (rel_max {_rel(out, ref['x_out']):.5f})"
+    return got, ref
 
 
 @pytest.mark.parametrize("moe_mode", [MoeMode.A8W4, MoeMode.W8A8])
@@ -137,89 +241,27 @@ def _compare_stages(got, ref, cfg, npes):
 @pytest.mark.parametrize("S", [1, 2, 4, 8])
 def test_dsv4_layer_matches_golden(S, moe_mode, hc_mult):
     """Every stage vs the golden; S > 1 is independent sequences, hc_mult=4 the hyper-connection stream."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
     torch.manual_seed(0)
-    cfg = _cfg(hc_mult)
-    cfg.validate()
-    dev = "cuda"
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=moe_mode)
-    layer = Dsv4MonoKernel(W, samples=S, rank=0, npes=1, moe_mode=moe_mode)
-
-    hshape = (S, cfg.hidden) if cfg.hc_mult == 1 else (S, cfg.hc_mult, cfg.hidden)
-    h = (0.5 * torch.randn(*hshape, device=dev)).bfloat16()
-    pos = cfg.window  # ring already wrapped once
-    cur = torch.tensor([pos] * S, dtype=torch.int32, device=dev)
-    kv0 = (0.3 * torch.randn(S * cfg.window, cfg.head_dim, device=dev)).bfloat16()
-    idx, dest = contiguous_pool([pos] * S, cfg, dev)
-    cos, sin = rope_table(4096, theta=cfg.rope_theta, device=dev)
-
-    kv_kernel = kv0.clone()
-    out = layer.forward(h, cur, kv_kernel, dest, idx, cos, sin)
-    torch.cuda.synchronize()
-    got = layer.intermediates()
-
-    kv_ref = kv0.clone()
-    ref = golden_layer(W, h, [pos] * S, kv_ref, dest, idx, cos, sin, lambda z: z, moe_mode=moe_mode)
-
-    if _routing_flipped(got, ref, W, cfg, S):
-        ref = _rebase_on_own_routing(got, ref, W, moe_mode)
-    _compare_stages(got, ref, cfg, 1)
+    got, ref = _layer_vs_golden(_cfg(hc_mult), S, moe_mode)
     # relative L2: a lone FP8 rounding flip is one element, a clipped block max (E8M0 rounded down) ~5%
-    xq_rel = ((got["xq"].float() - ref["xq"].float()).norm() / ref["xq"].float().norm()).item()
+    xq_rel = _rel_l2(got["xq"], ref["xq"])
     assert xq_rel < 0.01, f"quantized expert input diverged: rel_l2 {xq_rel:.5f}"
-    assert out.shape == h.shape, f"the layer must preserve its input shape, got {out.shape}"
-
-    # end to end by relative L2: one upstream rounding flip moves an element far, hc_post spreads it
-    a_out, b_out = out.float(), ref["x_out"].float()
-    rel_max = (a_out - b_out).abs().max().item() / max(b_out.abs().max().item(), 1e-6)
-    rel_l2 = ((a_out - b_out).norm() / b_out.norm()).item()
-    out_tol = _tol(OUT_REL_L2, cfg.hc_mult, 1)
-    assert rel_l2 < out_tol, f"x_out diverged: rel_l2 {rel_l2:.5f} >= {out_tol} (rel_max {rel_max:.5f})"
 
 
 @pytest.mark.large_shape
 @pytest.mark.parametrize("S,hc_mult", [(1, 1), (8, 1), (1, 4), (8, 4)])
 def test_dsv4_layer_matches_golden_at_real_dims(S, hc_mult):
     """V4-Pro TP8 dims: mappings only real sizes exercise (384 expert ids, two ug tiles per CTA at S=8)."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
     torch.manual_seed(0)
     cfg = V4Config(hc_mult=hc_mult)  # defaults are DeepSeek-V4-Pro at TP8
-    cfg.validate()
-    dev, mode = "cuda", MoeMode.A8W4
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=S, rank=0, npes=1, moe_mode=mode)
-
-    hshape = (S, cfg.hidden) if hc_mult == 1 else (S, hc_mult, cfg.hidden)
-    h = (0.5 * torch.randn(*hshape, device=dev)).bfloat16()
-    pos = cfg.window
-    cur = torch.tensor([pos] * S, dtype=torch.int32, device=dev)
-    kv0 = (0.3 * torch.randn(S * cfg.window, cfg.head_dim, device=dev)).bfloat16()
-    idx, dest = contiguous_pool([pos] * S, cfg, dev)
-    cos, sin = rope_table(4096, theta=cfg.rope_theta, device=dev)
-
-    kv_kernel = kv0.clone()
-    out = layer.forward(h, cur, kv_kernel, dest, idx, cos, sin)
-    torch.cuda.synchronize()
-    got = layer.intermediates()
-    ref = golden_layer(W, h, [pos] * S, kv0.clone(), dest, idx, cos, sin, lambda z: z, moe_mode=mode)
-
-    if _routing_flipped(got, ref, W, cfg, S):
-        ref = _rebase_on_own_routing(got, ref, W, mode)
-    _compare_stages(got, ref, cfg, 1)
+    got, _ = _layer_vs_golden(cfg, S, MoeMode.A8W4)
     # an id above 255 needs more than an 8-bit key id field
     assert max(got["sel"].reshape(-1).tolist()[1:]) > 255 or cfg.n_experts <= 256
-
-    a_out, b_out = out.float(), ref["x_out"].float()
-    rel_l2 = ((a_out - b_out).norm() / b_out.norm()).item()
-    out_tol = _tol(OUT_REL_L2, cfg.hc_mult, 1)
-    assert rel_l2 < out_tol, f"x_out diverged: rel_l2 {rel_l2:.5f} >= {out_tol}"
 
 
 def test_dsv4_csa_shape_is_the_selected_one():
     """CSA's gather is sized for index_topk selected slots, not the whole compressed half."""
-    from kernels.monokernel.dsv4.config import COMPRESS_CSA, validate_shard
+    from kernels.monokernel.dsv4.config import validate_shard
 
     validate_shard(1, 16, 0, 8, compress_ratio=COMPRESS_CSA)
 
@@ -235,15 +277,20 @@ def test_dsv4_csa_shape_is_the_selected_one():
     assert far.cache_rows > far.n_keys, "the cache still holds every compressed entry"
 
 
-def test_dsv4_rejects_a_bf16_router_bias():
-    """A bf16 bias (from a bf16 default dtype) would make the kernel read past its end: a memory fault."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
+def test_dsv4_compress_schedule_is_the_checkpoints():
+    """The per-layer compress-ratio schedule is V4-Pro's."""
+    from kernels.monokernel.dsv4.config import compress_ratios
 
-    cfg = _cfg(hc_mult=1)
-    W = make_weights(rank=0, cfg=cfg, device="cuda", seed=3, moe_mode=MoeMode.A8W4)
-    W.t["bias"] = W.t["bias"].bfloat16()
-    with pytest.raises(ValueError, match="router bias must be float32"):
-        Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=MoeMode.A8W4)
+    r = compress_ratios()
+    assert len(r) == 62, f"61 layers plus one MTP entry, got {len(r)}"
+    main, mtp = r[:61], r[61:]
+    assert main.count(COMPRESS_HCA) == 31 and main.count(COMPRESS_CSA) == 30, f"31 HCA + 30 CSA, got {main}"
+    assert 0 not in main, "V4-Pro has no sliding-window-only main layer"
+    assert mtp == (0,), "the MTP block is the ratio-0 entry"
+    assert main[0] == main[1] == COMPRESS_HCA, "layers 0 and 1 are the one break in the alternation"
+    for i in range(2, 61):
+        want = COMPRESS_CSA if i % 2 == 0 else COMPRESS_HCA
+        assert main[i] == want, f"layer {i} should be {want}, schedule says {main[i]}"
 
 
 def test_dsv4_layout_sizes_moe_mailboxes_from_the_build_dims():
@@ -260,13 +307,14 @@ def test_dsv4_layout_sizes_moe_mailboxes_from_the_build_dims():
     assert dict(stage_tasks(S, 16, n_experts=ne))["router"] * 8 * 2 >= S * ne  # 8 experts, <= 2 samples a task
 
 
-def test_dsv4_rejects_int64_index_tensors():
-    """Index tensors are read as int32 by raw loads: an int64 one would address the wrong rows."""
+def test_dsv4_rejects_unsafe_inputs():
+    """Inputs that would fault or hang are refused up front: int64 index tensors (read as int32), a mis-sized
+    x_out, a bf16 router bias (read past its end), and a head_dim the PV MFMA grouping cannot fill."""
+    from kernels.monokernel.dsv4.kernel import build_dsv4_kernel
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel
 
-    cfg = _cfg(hc_mult=1)
-    W = make_weights(rank=0, cfg=cfg, device="cuda", seed=3, moe_mode=MoeMode.A8W4)
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=MoeMode.A8W4)
+    cfg = _cfg()
+    W, layer = _kernel(cfg, MoeMode.A8W4)
     cos, sin = rope_table(4096, theta=cfg.rope_base, device="cuda")
     kv = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device="cuda")
     idx, dest = contiguous_pool([cfg.window], cfg, "cuda")
@@ -279,12 +327,9 @@ def test_dsv4_rejects_int64_index_tensors():
     with pytest.raises(ValueError, match="x_out"):
         layer.forward(h, cur, kv, dest, idx, cos, sin, x_out=torch.empty(1, cfg.hidden // 2, device="cuda"))
     layer.close()
-
-
-def test_dsv4_rejects_head_dim_that_would_deadlock():
-    """A head_dim below the PV MFMA's per-wave grouping would hang on an unfillable mailbox."""
-    from kernels.monokernel.dsv4.kernel import build_dsv4_kernel
-
+    W.t["bias"] = W.t["bias"].bfloat16()
+    with pytest.raises(ValueError, match="router bias must be float32"):
+        Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=MoeMode.A8W4)
     with pytest.raises(AssertionError, match="head_dim"):
         build_dsv4_kernel(S=1, heads=8, npes=1, head_dim=128)
 
@@ -292,19 +337,16 @@ def test_dsv4_rejects_head_dim_that_would_deadlock():
 def test_dsv4_bounded_poll_flags_instead_of_hanging():
     """Timeout 0 flags the launch and still terminates; the default timeout never fires on a healthy launch."""
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel, Dsv4Variant
+    from kernels.monokernel.dsv4.plan import POLL_TIMEOUT_US
 
     torch.manual_seed(0)
-    cfg = _cfg(hc_mult=1)
-    dev = "cuda"
+    cfg, dev = _cfg(), "cuda"
     W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=MoeMode.A8W4)
-    h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
+    h = _h(cfg)
     cur = torch.tensor([cfg.window], dtype=torch.int32, device=dev)
     idx, dest = contiguous_pool([cfg.window], cfg, dev)
     cos, sin = rope_table(4096, theta=cfg.rope_theta, device=dev)
     kv = (0.3 * torch.randn(cfg.window, cfg.head_dim, device=dev)).bfloat16()
-
-    from kernels.monokernel.dsv4.plan import POLL_TIMEOUT_US
-
     for timeout, expect in [(POLL_TIMEOUT_US, False), (0, True)]:
         variant = Dsv4Variant(cfg, 1, rank=0, npes=1, moe_mode=MoeMode.A8W4, poll_timeout_us=timeout)
         layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=MoeMode.A8W4, variant=variant)
@@ -327,8 +369,7 @@ def test_dsv4_step_advance_scrubs_stale_mailboxes(s0):
     from kernels.monokernel.dsv4.op import Dsv4Variant
     from kernels.monokernel.dsv4.plan import LAYER_SLOTS
 
-    cfg = _cfg(hc_mult=1)
-    variant = Dsv4Variant(cfg, 1, rank=0, npes=1, moe_mode=MoeMode.A8W4)
+    variant = Dsv4Variant(_cfg(), 1, rank=0, npes=1, moe_mode=MoeMode.A8W4)
     bufs = [variant.scratch[: variant.scr_pairs * 8], variant.sym_storage[: variant.sym_pairs * 8]]
     pairs = [b.view(torch.int32).view(-1, 2) for b in bufs]
     period = scrub_period(variant.scr_pairs + variant.sym_pairs)
@@ -341,8 +382,7 @@ def test_dsv4_step_advance_scrubs_stale_mailboxes(s0):
         pr[:, 1] = kinds[torch.arange(pr.shape[0], device="cuda") % len(kinds)]
     want = [pr.clone() for pr in pairs]
     for w in want:
-        stale = (w[:, 1].unsqueeze(1) == kinds[: len(old)]).any(1)
-        w[stale] = 0
+        w[(w[:, 1].unsqueeze(1) == kinds[: len(old)]).any(1)] = 0
     variant.step.fill_(_i32(s0))
     for _ in range(period):
         variant.advance_step()
@@ -350,9 +390,7 @@ def test_dsv4_step_advance_scrubs_stale_mailboxes(s0):
     assert variant.step.item() == _i32(s0 + period)
     for name, pr, w in zip(["scratch", "sym"], pairs, want):
         bad = (pr != w).any(1).nonzero()
-        assert (
-            bad.numel() == 0
-        ), f"{name}: {bad.numel()} pairs wrong, first {pr[bad[0, 0]].tolist()} want {w[bad[0, 0]].tolist()}"
+        assert bad.numel() == 0, f"{name}: {bad.numel()} pairs wrong, first {pr[bad[0, 0]].tolist()}"
     variant.close()
 
 
@@ -362,14 +400,12 @@ def test_dsv4_layer_output_is_the_same_across_the_tag_wrap():
     from kernels.monokernel.dsv4.plan import LAYER_SLOTS
 
     torch.manual_seed(0)
-    cfg = _cfg(hc_mult=1)
-    dev = "cuda"
+    cfg, dev = _cfg(), "cuda"
     W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=MoeMode.A8W4)
-    h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
+    h = _h(cfg)
     idx, dest = contiguous_pool([cfg.window], cfg, dev)
     cos, sin = rope_table(4096, theta=cfg.rope_theta, device=dev)
     kv0 = (0.3 * torch.randn(cfg.window, cfg.head_dim, device=dev)).bfloat16()
-
     outs = []
     for s0 in [0, 2**32 // LAYER_SLOTS - 1]:
         layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=MoeMode.A8W4)
@@ -391,27 +427,18 @@ def test_dsv4_layer_output_is_the_same_across_the_tag_wrap():
 TP_SEED = 1234
 
 
-def _tp_cfg(real: bool, hc_mult: int = 1, compress_ratio: int = 0, max_seq: int | None = None):
-    # not a module global: mp.spawn re-imports this module in each child
-    cfg = V4Config(hc_mult=hc_mult) if real else _cfg(hc_mult)
-    if compress_ratio:
-        # max_seq sets the compressed shape: a benchmark must pass the length it reports
-        cfg.compress_ratio = compress_ratio
-        cfg.max_seq = 256 if max_seq is None else max_seq
-    return cfg
-
-
-def run_rank(rank, npes, real=False, iters=2, group=None, moe_mode=MoeMode.A8W4, hc_mult=1, compress_ratio=0):
+def run_rank(rank, npes, iters=2, moe_mode=MoeMode.A8W4, hc_mult=1, compress_ratio=0):
     import torch.distributed as dist
 
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
-    cfg = _tp_cfg(real, hc_mult, compress_ratio)
+    # not a module global: mp.spawn re-imports this module in each child
+    cfg = _cfg(hc_mult, compress_ratio, 256 if compress_ratio else None)
     cfg.validate()
     W = make_weights(rank, cfg=cfg, device=dev, seed=TP_SEED, moe_mode=moe_mode)
-    layer = Dsv4MonoKernel(W, samples=1, rank=rank, npes=npes, group=group, moe_mode=moe_mode)
+    layer = Dsv4MonoKernel(W, samples=1, rank=rank, npes=npes, moe_mode=moe_mode)
     cos, sin = rope_table(4096, theta=cfg.rope_base, device=dev)
     gen = torch.Generator(device=dev).manual_seed(TP_SEED + 99)  # identical inputs everywhere
     # the compressor carries state, so its run is a real sequential decode; otherwise re-seed from kv0
@@ -422,22 +449,24 @@ def run_rank(rank, npes, real=False, iters=2, group=None, moe_mode=MoeMode.A8W4,
         pos = 0
         kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
         kv_r = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-        ks = torch.zeros(1, cfg.c_rows, cfg.c_coff * cfg.head_dim, device=dev)
-        ss = torch.full((1, cfg.c_rows, cfg.c_coff * cfg.head_dim), float("-inf"), device=dev)
+        state = _state(cfg)
 
-    if npes == 1:
-        allreduce = lambda x: x  # noqa: E731
-    else:
+    def allreduce(x):
+        # model peer_reduce: bf16-rounded partials summed in rank order
+        if npes == 1:
+            return x
+        x = x.to(torch.bfloat16).float()
+        parts = [torch.empty_like(x.cpu()) for _ in range(npes)]
+        dist.all_gather(parts, x.cpu().contiguous())
+        return sum(parts[1:], parts[0]).to(x.device)
 
-        def allreduce(x):
-            # model peer_reduce: bf16-rounded partials summed in rank order
-            x = x.to(torch.bfloat16).float()
-            parts = [torch.empty_like(x.cpu()) for _ in range(npes)]
-            dist.all_gather(parts, x.cpu().contiguous(), group=group)
-            return sum(parts[1:], parts[0]).to(x.device)
+    def same_everywhere(t):
+        peers = [torch.empty_like(t.cpu()) for _ in range(npes)]
+        dist.all_gather(peers, t.cpu().contiguous())
+        for other in peers[1:]:
+            torch.testing.assert_close(other, peers[0], atol=0, rtol=0)
 
-    ok = True
-    boundaries = 0
+    ok, boundaries = True, 0
     for it in range(iters):
         hshape = (1, cfg.hidden) if cfg.hc_mult == 1 else (1, cfg.hc_mult, cfg.hidden)
         h = torch.randn(*hshape, generator=gen, device=dev).to(torch.bfloat16)
@@ -446,81 +475,41 @@ def run_rank(rank, npes, real=False, iters=2, group=None, moe_mode=MoeMode.A8W4,
             idx, dest = contiguous_pool([pos], cfg, dev)
             boundaries += (pos + 1) % compress_ratio == 0
         cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        kv_in = kv_k if compress_ratio else kv0.clone()
-        out = layer.forward(h, cur, kv_in, dest, idx, cos, sin)
+        out = layer.forward(h, cur, kv_k if compress_ratio else kv0.clone(), dest, idx, cos, sin)
         torch.cuda.synchronize()
         got = layer.intermediates()
-
         if npes > 1:
-            peers = [torch.empty_like(out.cpu()) for _ in range(npes)]
-            dist.all_gather(peers, out.cpu().contiguous(), group=group)
-            for other in peers[1:]:
-                torch.testing.assert_close(other, peers[0], atol=0, rtol=0)
-            sels = [torch.empty_like(got["sel"].cpu()) for _ in range(npes)]
-            dist.all_gather(sels, got["sel"].cpu().contiguous(), group=group)
-            for other in sels[1:]:
-                torch.testing.assert_close(other, sels[0], atol=0, rtol=0)
+            same_everywhere(out)
+            same_everywhere(got["sel"])
 
-        gkw = dict(kv_state=ks, score_state=ss, cos_c=cos, sin_c=sin) if compress_ratio else {}
-        ref = golden_layer(
-            W,
-            h,
-            [pos],
-            kv_r if compress_ratio else kv0.clone(),
-            dest,
-            idx,
-            cos,
-            sin,
-            allreduce,
-            moe_mode=moe_mode,
-            **gkw,
-        )
+        kv_ref = kv_r if compress_ratio else kv0.clone()
+        ref = _golden(W, h, [pos], kv_ref, dest, idx, cos, sin, moe_mode, state if compress_ratio else None, allreduce)
         if compress_ratio and (pos + 1) % compress_ratio == 0:
             slot = cfg.window + pos // compress_ratio
-            a_c, b_c = kv_k[slot].float(), kv_r[slot].float()
-            c_rel = (a_c - b_c).abs().max().item() / max(b_c.abs().max().item(), 1e-6)
+            c_rel = _rel(kv_k[slot], kv_r[slot])
             if c_rel >= 2e-2:
                 print(f"rank {rank}: compressed row at {slot} rel {c_rel:.5f}", flush=True)
                 ok = False
         # a near-tie can flip routing; then judge the expert math against the kernel's own routing
         flipped = got["sel"].tolist() != ref["sel"].tolist()
         for name, base in STAGE_TOL.items():
-            tol = _tol(base, cfg.hc_mult, npes) if name in SCALES_WITH_CONFIG else base
             if flipped and name in SCALES_WITH_CONFIG:
                 continue
-            a = got[name].float().reshape(-1)
-            b = ref[name].float().reshape(-1)
-            rel = (a - b).abs().max().item() / max(b.abs().max().item(), 1e-6)
-            l2 = ((a - b).norm() / max(b.norm().item(), 1e-6)).item()
-            frac = ((a - b).abs() > 1e-3 * max(b.abs().max().item(), 1e-6)).float().mean().item()
+            tol = _tol(base, cfg.hc_mult, npes) if name in SCALES_WITH_CONFIG else base
+            rel = _rel(got[name], ref[name])
             if rel >= tol:
-                print(
-                    f"rank {rank}: stage {name} rel_max {rel:.5f} rel_l2 {l2:.5f} " f"elems_off {frac * 100:.2f}%",
-                    flush=True,
-                )
+                print(f"rank {rank}: stage {name} rel_max {rel:.5f} rel_l2 {_rel_l2(got[name], ref[name]):.5f}")
                 ok = False
         if flipped:
             print(f"rank {rank}: routing flipped on a near-tie (expected; judging by own routing)", flush=True)
-        down = golden_moe(
-            W,
-            got["a"],
-            allreduce,
-            mid=got["mid"],
-            sel=got["sel"],
-            prob=got["prob"],
-            moe_mode=moe_mode,
-        )
-        d_out = down["x_out"].float()
-        d_rel = ((out.float() - d_out).norm() / d_out.norm()).item()
         out_tol = _tol(OUT_REL_L2, cfg.hc_mult, npes)
+        d_rel = _own_routing_rel(W, got, out, moe_mode, allreduce)
         if d_rel >= out_tol:
             print(f"rank {rank}: x_out vs own-routing golden rel_l2 {d_rel:.5f}", flush=True)
             ok = False
-        a_out, b_out = out.float(), ref["x_out"].float()
-        rel_max = (a_out - b_out).abs().max().item() / max(b_out.abs().max().item(), 1e-6)
-        rel_l2 = ((a_out - b_out).norm() / b_out.norm()).item()
+        rel_l2 = _rel_l2(out, ref["x_out"])
         if rank == 0:  # pytest captures this; it is what makes a near-miss legible
-            print(f"rank {rank}: x_out rel_max {rel_max:.5f}  rel_l2 {rel_l2:.5f}", flush=True)
+            print(f"rank {rank}: x_out rel_max {_rel(out, ref['x_out']):.5f}  rel_l2 {rel_l2:.5f}", flush=True)
         if rel_l2 >= out_tol and not flipped:  # end to end only when routing agrees
             ok = False
     layer.close()
@@ -539,847 +528,349 @@ def _free_port():
         return s.getsockname()[1]
 
 
-def _worker(rank, npes, real, iters, hc_mult, compress_ratio, port, results):
+def _worker(rank, fn, npes, port, results, kw):
     import torch.distributed as dist
 
     dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=npes)
     try:
-        results[rank] = run_rank(rank, npes, real=real, iters=iters, hc_mult=hc_mult, compress_ratio=compress_ratio)
+        results[rank] = fn(rank, npes, **kw)
     finally:
         dist.destroy_process_group()
 
 
-def run_tp(npes, real=False, iters=2, hc_mult=1, compress_ratio=0):
-    if npes == 1:
-        return run_rank(0, 1, real=real, iters=iters, hc_mult=hc_mult, compress_ratio=compress_ratio)
+def _spawn8(fn, **kw):
+    """``fn(rank, 8, **kw)`` on eight ranks; True if every rank returned True."""
+    if torch.cuda.device_count() < 8:
+        pytest.skip("needs 8 GPUs")
     import torch.multiprocessing as mp
 
     results = mp.Manager().dict()
-    mp.spawn(
-        _worker,
-        args=(npes, real, iters, hc_mult, compress_ratio, _free_port(), results),
-        nprocs=npes,
-    )
-    return all(results[r] for r in range(npes))
+    mp.spawn(_worker, args=(fn, 8, _free_port(), results, kw), nprocs=8)
+    return all(results[r] for r in range(8))
 
 
 @pytest.mark.multi_gpu
 @pytest.mark.parametrize("hc_mult", [1, 4])
 def test_dsv4_layer_tp8(hc_mult):
     """Both residual widths; the tolerances are calibrated per configuration."""
-    if torch.cuda.device_count() < 8:
-        pytest.skip("needs 8 GPUs")
-    assert run_tp(8, hc_mult=hc_mult)
+    assert _spawn8(run_rank, hc_mult=hc_mult)
 
 
 @pytest.mark.multi_gpu
 def test_dsv4_hca_layer_tp8():
     """HCA across ranks over two compression boundaries; the replicated compressor must agree on every rank."""
-    if torch.cuda.device_count() < 8:
-        pytest.skip("needs 8 GPUs")
-    assert run_tp(8, iters=20, compress_ratio=8)
+    assert _spawn8(run_rank, iters=20, compress_ratio=8)
 
 
-# Benchmark: HIP-graph replay of BENCH_LAYERS launches, so the number excludes launch overhead.
-
-BENCH_LAYERS = 16
-
-
-def bench_rank(
-    rank,
-    npes,
-    real=True,
-    iters=320,
-    group=None,
-    timeline=False,
-    moe_mode=MoeMode.A8W4,
-    hc_mult=1,
-    compress_ratio=0,
-    max_seq=None,
-    samples=1,
-):
-    """Returns (us per layer, cfg); ``compress_ratio`` 0/128/4 is sliding-window/HCA/CSA."""
-    import torch.distributed as dist
-
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
-    dev = torch.device("cuda", rank)
-    torch.cuda.set_device(dev)
-    cfg = _tp_cfg(real, hc_mult, compress_ratio, max_seq)
+def _hca_decode(cfg, mode, steps, stage_names, stage_at):
+    """Decode ``steps`` positions through an HCA layer against the golden: each compressed row at its
+    boundary, ``stage_names`` at the positions ``stage_at(pos)`` picks, and x_out on the kernel's own routing
+    every step (a long run eventually flips a near-tied expert). Returns (boundaries, stage checks, top id)."""
+    torch.manual_seed(0)
     cfg.validate()
-    W = make_weights(rank, cfg=cfg, device=dev, seed=TP_SEED, moe_mode=moe_mode)
-    cos, sin = rope_table(max(4096, cfg.max_seq), theta=cfg.rope_base, device=dev)
-    kv = torch.randn(samples * cfg.cache_rows, cfg.head_dim, device=dev).to(torch.bfloat16)
-    # a full compressed cache: the steady state of a decode
-    pos = (cfg.max_seq - 1) if compress_ratio else cfg.window
-    idx, dest = contiguous_pool([pos] * samples, cfg, dev)
-    cur = torch.tensor([pos] * samples, dtype=torch.int32, device=dev)
-    op = Dsv4MonoKernel(W, samples, rank=rank, npes=npes, group=group, moe_mode=moe_mode)
-    hshape = (samples, cfg.hidden) if cfg.hc_mult == 1 else (samples, cfg.hc_mult, cfg.hidden)
-    h = torch.randn(*hshape, device=dev).to(torch.bfloat16)
-    x = torch.empty_like(h)
-    for _ in range(10):
-        op.forward(h, cur, kv, dest, idx, cos, sin, x_out=x)
-    torch.cuda.synchronize()
-    if npes > 1:
-        dist.barrier()
-
-    if timeline:
-        top = Dsv4MonoKernel(
-            W,
-            samples,
-            rank=rank,
-            npes=npes,
-            group=group,
-            timeline=True,
-            moe_mode=moe_mode,
-        )
-        for _ in range(3):
-            top.forward(h, cur, kv, dest, idx, cos, sin, x_out=x)
+    ratio, dev = cfg.compress_ratio, "cuda"
+    W, layer = _kernel(cfg, mode)
+    # one rope table per layer (cfg.rope_base): window q/kv and compressed rows share it
+    cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
+    kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
+    kv_r = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
+    state = _state(cfg)
+    boundaries, checked, top_id = 0, 0, 0
+    for pos in range(steps):
+        h, out = _step(layer, cfg, pos, kv_k, cos, sin)
         torch.cuda.synchronize()
-        if rank == 0:
-            print(top.timeline_report(), flush=True)
-        top.close()
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        for layer in range(BENCH_LAYERS):
-            op.forward(h, cur, kv, dest, idx, cos, sin, x_out=x, layer=layer, advance=False)
-        op.advance_step()
-    for _ in range(3):
-        graph.replay()
-    torch.cuda.synchronize()
-    if npes > 1:
-        dist.barrier()
-    t0, t1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    t0.record()
-    for _ in range(iters // BENCH_LAYERS):
-        graph.replay()
-    t1.record()
-    torch.cuda.synchronize()
-    us = t0.elapsed_time(t1) * 1e3 / (iters // BENCH_LAYERS * BENCH_LAYERS)
-    op.close()
-    return us, dict(n_keys=cfg.n_keys, n_comp=cfg.n_compressed, max_seq=cfg.max_seq, samples=samples)
-
-
-def _bench_worker(rank, npes, real, timeline, moe_mode, hc_mult, compress_ratio, max_seq, samples, port, results):
-    import torch.distributed as dist
-
-    dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=npes)
-    try:
-        results[rank] = bench_rank(
-            rank,
-            npes,
-            real=real,
-            timeline=timeline,
-            moe_mode=moe_mode,
-            hc_mult=hc_mult,
-            compress_ratio=compress_ratio,
-            max_seq=max_seq,
-            samples=samples,
-        )
-    finally:
-        dist.destroy_process_group()
-
-
-def run_bench(
-    npes, real=True, timeline=False, moe_mode=MoeMode.A8W4, hc_mult=1, compress_ratio=0, max_seq=None, samples=1
-):
-    kw = dict(
-        real=real,
-        timeline=timeline,
-        moe_mode=moe_mode,
-        hc_mult=hc_mult,
-        compress_ratio=compress_ratio,
-        max_seq=max_seq,
-        samples=samples,
-    )
-    if npes == 1:
-        return {0: bench_rank(0, 1, **kw)}
-    import torch.multiprocessing as mp
-
-    results = mp.Manager().dict()
-    mp.spawn(
-        _bench_worker,
-        args=(npes, real, timeline, moe_mode, hc_mult, compress_ratio, max_seq, samples, _free_port(), results),
-        nprocs=npes,
-    )
-    return dict(results)
-
-
-if __name__ == "__main__":
-    import argparse
-
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--npes", type=int, default=8)
-    ap.add_argument("--real", action="store_true", help="use the real V4-Pro TP8 shard")
-    ap.add_argument("--iters", type=int, default=2)
-    ap.add_argument("--bench", action="store_true")
-    ap.add_argument("--timeline", action="store_true")
-    ap.add_argument("--moe-mode", default=MoeMode.A8W4.value, choices=tuple(m.value for m in MoeMode))
-    ap.add_argument("--hc-mult", type=int, default=1, help="1 = plain residual, 4 = hyper-connections")
-    a = ap.parse_args()
-    if a.bench:
-        res = run_bench(a.npes, a.real, a.timeline, MoeMode(a.moe_mode), a.hc_mult)
-        us = [res[r][0] for r in sorted(res)]
-        tag = "real V4-Pro" if a.real else "reduced"
-        print(
-            f"{tag} shard, {a.moe_mode}, hc={a.hc_mult}, npes={a.npes}: {max(us):7.1f} us/layer  (per rank: "
-            + " ".join(f"{v:.1f}" for v in us)
-            + ")"
-        )
-    else:
-        print("PASS" if run_tp(a.npes, a.real, a.iters, a.hc_mult) else "FAIL")
+        idx, dest = contiguous_pool([pos], cfg, dev)
+        ref = _golden(W, h, [pos], kv_r, dest, idx, cos, sin, mode, state)
+        if (pos + 1) % ratio == 0:
+            boundaries += 1
+            slot = cfg.window + pos // ratio
+            # not bit-exact: online softmax on hardware exp2 vs a batch softmax, rounded to bf16
+            rel = _rel(kv_k[slot], kv_r[slot])
+            assert rel < 2e-2, f"compressed row at slot {slot} differs by rel {rel:.5f}"
+        got = layer.intermediates()
+        if stage_at(pos):
+            checked += 1
+            same_route = got["sel"].tolist() == ref["sel"].tolist()
+            for name in stage_names:
+                if name == "mid" and not same_route:  # skip only `mid` on a routing flip
+                    continue
+                base = STAGE_TOL[name]
+                tol = _tol(base, cfg.hc_mult, 1) if name in SCALES_WITH_CONFIG else base
+                rel = _rel(got[name], ref[name])
+                assert rel < tol, f"pos={pos} stage {name} diverged: rel {rel:.5f} >= {tol}"
+        top_id = max(top_id, *got["sel"].reshape(-1).tolist()[1:])
+        rel_l2, tol = _own_routing_rel(W, got, out, mode), _tol(OUT_REL_L2, cfg.hc_mult, 1)
+        assert rel_l2 < tol, f"pos={pos} x_out rel_l2 {rel_l2:.5f} >= {tol}"
+    layer.close()
+    return boundaries, checked, top_id
 
 
 @pytest.mark.parametrize("moe_mode", [MoeMode.W8A8, MoeMode.A8W4])
 def test_dsv4_hca_layer_matches_golden(moe_mode):
     """The HCA layer over several compression boundaries; ratio 16 is the same code path as V4's 128."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
-    torch.manual_seed(0)
     ratio = 16
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio = ratio
-    cfg.max_seq = 512
-    cfg.validate()
-    dev = "cuda"
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=moe_mode)
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=moe_mode)
-
-    # one rope table per layer (cfg.rope_base): window q/kv and compressed rows share it
-    cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
-    kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-    kv_r = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-    ks = torch.zeros(1, cfg.c_rows, cfg.c_coff * cfg.head_dim, device=dev)
-    # -inf like the layer's own state: unwritten rows must drop out of the softmax
-    ss = torch.full((1, cfg.c_rows, cfg.c_coff * cfg.head_dim), float("-inf"), device=dev)
-
-    boundaries = 0
-    for pos in range(3 * ratio + 2):
-        h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-        cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        idx, dest = contiguous_pool([pos], cfg, dev)
-        out = layer.forward(h, cur, kv_k, dest, idx, cos, sin)
-        torch.cuda.synchronize()
-        ref = golden_layer(
-            W,
-            h,
-            [pos],
-            kv_r,
-            dest,
-            idx,
-            cos,
-            sin,
-            lambda z: z,
-            moe_mode=moe_mode,
-            kv_state=ks,
-            score_state=ss,
-            cos_c=cos,
-            sin_c=sin,
-        )
-        if (pos + 1) % ratio == 0:
-            boundaries += 1
-            slot = cfg.window + pos // ratio
-            # not bit-exact: online softmax on hardware exp2 vs a batch softmax, rounded to bf16
-            a_c, b_c = kv_k[slot].float(), kv_r[slot].float()
-            rel = (a_c - b_c).abs().max().item() / max(b_c.abs().max().item(), 1e-6)
-            assert rel < 2e-2, f"compressed row at slot {slot} differs by rel {rel:.5f}"
-
-        # the x_out check below uses the kernel's own `a`, so check attention here
-        got = layer.intermediates()
-        rel_o = (got["o"].float() - ref["o"].float()).abs().max().item() / max(
-            ref["o"].float().abs().max().item(), 1e-6
-        )
-        assert rel_o < STAGE_TOL["o"], f"pos={pos} stage o diverged: rel {rel_o:.5f}"
-
-        # a long run eventually flips a near-tied expert: judge against the kernel's own routing
-        own = golden_moe(
-            W,
-            got["a"],
-            lambda z: z,
-            mid=got["mid"],
-            sel=got["sel"],
-            prob=got["prob"],
-            moe_mode=moe_mode,
-        )
-        b_out = own["x_out"].float()
-        rel_l2 = ((out.float() - b_out).norm() / b_out.norm()).item()
-        tol = _tol(OUT_REL_L2, cfg.hc_mult, 1)
-        assert rel_l2 < tol, f"pos={pos} x_out rel_l2 {rel_l2:.5f} >= {tol}"
-
+    boundaries, _, _ = _hca_decode(_cfg(1, ratio, 512), moe_mode, 3 * ratio + 2, ("o",), lambda pos: True)
     assert boundaries >= 3, "must cross several compression boundaries"
-
-
-def test_dsv4_hca_merges_only_each_samples_live_splits():
-    """Two samples far apart: each merge must read only its own live splits (a wrong count moves `o`)."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
-    torch.manual_seed(0)
-    ratio, S = 16, 2
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq = ratio, 4096
-    cfg.validate()
-    dev, mode = "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=S, rank=0, npes=1, moe_mode=mode)
-    cos, sin = rope_table(cfg.max_seq, theta=cfg.rope_base, device=dev)
-    pos = [300 + ratio // 2, 3000 + ratio // 2]  # off the compression boundaries
-    n_split = cfg.n_keys // 64
-    live = [(cfg.window + (p + 1) // ratio + 63) // 64 for p in pos]
-    assert live[0] < live[1] < n_split, f"live splits {live} of {n_split}: the shape no longer has dead ones"
-    kv0 = (0.3 * torch.randn(S * cfg.cache_rows, cfg.head_dim, device=dev)).bfloat16()
-    h = (0.5 * torch.randn(S, cfg.hidden, device=dev)).bfloat16()
-    cur = torch.tensor(pos, dtype=torch.int32, device=dev)
-    idx, dest = contiguous_pool(pos, cfg, dev)
-    ks = torch.zeros(S, cfg.c_rows, cfg.c_coff * cfg.head_dim, device=dev)
-    ss = torch.full((S, cfg.c_rows, cfg.c_coff * cfg.head_dim), float("-inf"), device=dev)
-
-    layer.forward(h, cur, kv0.clone(), dest, idx, cos, sin)
-    torch.cuda.synchronize()
-    got = layer.intermediates()
-    ref = golden_layer(
-        W,
-        h,
-        pos,
-        kv0.clone(),
-        dest,
-        idx,
-        cos,
-        sin,
-        lambda z: z,
-        moe_mode=mode,
-        kv_state=ks,
-        score_state=ss,
-        cos_c=cos,
-        sin_c=sin,
-    )
-    for s_ in range(S):
-        a, b = got["o"][s_].float(), ref["o"][s_].float()
-        rel = (a - b).abs().max().item() / max(b.abs().max().item(), 1e-6)
-        assert rel < STAGE_TOL["o"], f"sample {s_} (pos {pos[s_]}, {live[s_]} live splits): o rel {rel:.5f}"
-    layer.close()
-
-
-def test_dsv4_hca_folds_tile_groups_at_long_context():
-    """Past one grid round (S * live tiles > 256) a split task folds several 64-key tiles; checks `o` per sample."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
-    torch.manual_seed(0)
-    ratio, S = 16, 8
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq = ratio, 65536
-    cfg.validate()
-    dev, mode = "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=S, rank=0, npes=1, moe_mode=mode)
-    cos, sin = rope_table(cfg.max_seq, theta=cfg.rope_base, device=dev)
-    pos = [30000 + 3700 * i + ratio // 2 for i in range(S)]  # off the compression boundaries
-    live = [(cfg.window + (p + 1) // ratio + 63) // 64 for p in pos]
-    assert S * max(live) > 256, f"live tiles {live}: one round of the grid, so no task folds tiles"
-    kv0 = (0.3 * torch.randn(S * cfg.cache_rows, cfg.head_dim, device=dev)).bfloat16()
-    h = (0.5 * torch.randn(S, cfg.hidden, device=dev)).bfloat16()
-    cur = torch.tensor(pos, dtype=torch.int32, device=dev)
-    idx, dest = contiguous_pool(pos, cfg, dev)
-    ks = torch.zeros(S, cfg.c_rows, cfg.c_coff * cfg.head_dim, device=dev)
-    ss = torch.full((S, cfg.c_rows, cfg.c_coff * cfg.head_dim), float("-inf"), device=dev)
-
-    layer.forward(h, cur, kv0.clone(), dest, idx, cos, sin)
-    torch.cuda.synchronize()
-    got = layer.intermediates()
-    ref = golden_layer(
-        W,
-        h,
-        pos,
-        kv0.clone(),
-        dest,
-        idx,
-        cos,
-        sin,
-        lambda z: z,
-        moe_mode=mode,
-        kv_state=ks,
-        score_state=ss,
-        cos_c=cos,
-        sin_c=sin,
-    )
-    for s_ in range(S):
-        a, b = got["o"][s_].float(), ref["o"][s_].float()
-        rel = (a - b).abs().max().item() / max(b.abs().max().item(), 1e-6)
-        assert rel < STAGE_TOL["o"], f"sample {s_} (pos {pos[s_]}, {live[s_]} live tiles): o rel {rel:.5f}"
-    layer.close()
 
 
 @pytest.mark.large_shape
 def test_dsv4_hca_layer_at_real_dims():
     """HCA at V4-Pro's real dims: ratio 128 pooling, the full ``ape`` table and the real ``n_keys``."""
-    from kernels.monokernel.dsv4.config import COMPRESS_HCA
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
-    torch.manual_seed(0)
     cfg = V4Config(hc_mult=1)  # defaults are DeepSeek-V4-Pro at TP8
     cfg.compress_ratio = COMPRESS_HCA
-    cfg.validate()
-    ratio, dev, mode = cfg.compress_ratio, "cuda", MoeMode.W8A8
     assert cfg.n_keys > cfg.window, "the gather must reach past the window"
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
-
-    cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
-    kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-    kv_r = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-    ks = torch.zeros(1, cfg.c_rows, cfg.c_coff * cfg.head_dim, device=dev)
-    ss = torch.full((1, cfg.c_rows, cfg.c_coff * cfg.head_dim), float("-inf"), device=dev)
+    ratio = cfg.compress_ratio
 
     # two boundaries: the first anchors at pos 0, where rope cannot tell the compressor's base apart
-    boundaries, checked, top_id = 0, 0, 0
-    for pos in range(2 * ratio + 4):
-        h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-        cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        idx, dest = contiguous_pool([pos], cfg, dev)
-        out = layer.forward(h, cur, kv_k, dest, idx, cos, sin)
-        torch.cuda.synchronize()
-        ref = golden_layer(
-            W,
-            h,
-            [pos],
-            kv_r,
-            dest,
-            idx,
-            cos,
-            sin,
-            lambda z: z,
-            moe_mode=mode,
-            kv_state=ks,
-            score_state=ss,
-            cos_c=cos,
-            sin_c=sin,
-        )
-        if (pos + 1) % ratio == 0:
-            boundaries += 1
-            slot = cfg.window + pos // ratio
-            a_c, b_c = kv_k[slot].float(), kv_r[slot].float()
-            rel = (a_c - b_c).abs().max().item() / max(b_c.abs().max().item(), 1e-6)
-            assert rel < 2e-2, f"compressed row at slot {slot} differs by rel {rel:.5f}"
+    def near(pos):
+        return any(abs(pos - (b * ratio - 1)) <= 2 for b in (1, 2))
 
-        got = layer.intermediates()
-        # stage-by-stage only around the boundaries
-        if any(abs(pos - (b * ratio - 1)) <= 2 for b in (1, 2)):
-            checked += 1
-            # skip only `mid` on a routing flip
-            same_route = got["sel"].tolist() == ref["sel"].tolist()
-            for name, base in STAGE_TOL.items():
-                if name == "mid" and not same_route:
-                    continue
-                tol = _tol(base, cfg.hc_mult, 1) if name in SCALES_WITH_CONFIG else base
-                a = got[name].float().reshape(-1)
-                b = ref[name].float().reshape(-1)
-                rel = (a - b).abs().max().item() / max(b.abs().max().item(), 1e-6)
-                assert rel < tol, f"pos={pos} stage {name} diverged: rel {rel:.5f} >= {tol}"
-        top_id = max(top_id, *got["sel"].reshape(-1).tolist()[1:])
-
-        # flip-immune: judge against the kernel's own routing
-        own = golden_moe(
-            W,
-            got["a"],
-            lambda z: z,
-            mid=got["mid"],
-            sel=got["sel"],
-            prob=got["prob"],
-            moe_mode=mode,
-        )
-        b_out = own["x_out"].float()
-        rel_l2 = ((out.float() - b_out).norm() / b_out.norm()).item()
-        tol = _tol(OUT_REL_L2, cfg.hc_mult, 1)
-        assert rel_l2 < tol, f"pos={pos} x_out rel_l2 {rel_l2:.5f} >= {tol}"
-
+    boundaries, checked, top_id = _hca_decode(cfg, MoeMode.W8A8, 2 * ratio + 4, tuple(STAGE_TOL), near)
     assert boundaries == 2 and checked == 10
     # an id above 255 needs more than an 8-bit key id field
     assert top_id > 255 or cfg.n_experts <= 256
 
 
-def test_dsv4_csa_compressor_in_kernel():
-    """CSA's overlapping compressor in the kernel: each compressed row vs ``compress_step``."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-    from kernels.monokernel.dsv4.reference import compress_step, qkv_a_split
+@pytest.mark.parametrize(
+    "S,max_seq,positions,why",
+    [
+        (2, 4096, (300, 3000), "two samples far apart: a wrong live-split count moves `o`"),
+        (8, 65536, tuple(30000 + 3700 * i for i in range(8)), "past one grid round a task folds several tiles"),
+    ],
+    ids=["dead_splits", "folded_tiles"],
+)
+def test_dsv4_hca_attends_each_samples_live_keys(S, max_seq, positions, why):
+    """Each sample's split / merge covers exactly its own live 64-key tiles (``why``); checks `o` per sample."""
+    torch.manual_seed(0)
+    ratio, mode = 16, MoeMode.W8A8
+    cfg = _cfg(1, ratio, max_seq)
+    cfg.validate()
+    dev = "cuda"
+    W, layer = _kernel(cfg, mode, S)
+    cos, sin = rope_table(cfg.max_seq, theta=cfg.rope_base, device=dev)
+    pos = [p + ratio // 2 for p in positions]  # off the compression boundaries
+    live = [(cfg.window + (p + 1) // ratio + 63) // 64 for p in pos]
+    if S == 2:
+        assert live[0] < live[1] < cfg.n_keys // 64, f"live splits {live}: the shape no longer has dead ones"
+    else:
+        assert S * max(live) > 256, f"live tiles {live}: one round of the grid, so no task folds tiles"
+    kv0 = (0.3 * torch.randn(S * cfg.cache_rows, cfg.head_dim, device=dev)).bfloat16()
+    h = _h(cfg, S)
+    idx, dest = contiguous_pool(pos, cfg, dev)
+    layer.forward(h, torch.tensor(pos, dtype=torch.int32, device=dev), kv0.clone(), dest, idx, cos, sin)
+    torch.cuda.synchronize()
+    got = layer.intermediates()
+    ref = _golden(W, h, pos, kv0.clone(), dest, idx, cos, sin, mode, _state(cfg, S))
+    for s_ in range(S):
+        rel = _rel(got["o"][s_], ref["o"][s_])
+        assert rel < STAGE_TOL["o"], f"sample {s_} (pos {pos[s_]}, {live[s_]} live tiles): o rel {rel:.5f}"
+    layer.close()
+
+
+@pytest.mark.parametrize(
+    "which,indexer_hadamard",
+    [("kv", True), ("index", True), ("index", False)],  # ATOM's indexer rotates neither side
+)
+def test_dsv4_csa_compressors_in_kernel(which, indexer_hadamard):
+    """CSA's overlapping KV compressor, and the indexer's (Hadamard + FP4), each row vs ``compress_step``."""
+    from kernels.monokernel.dsv4.reference import compress_step
 
     torch.manual_seed(0)
     ratio = COMPRESS_CSA
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq = ratio, 256
-    assert cfg.overlap and cfg.c_coff == 2, "ratio 4 is the overlapping form"
-    dev, mode = "cuda", MoeMode.W8A8
-    W, t = None, None
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
+    cfg = _cfg(1, ratio, 256)
+    cfg.indexer_hadamard = indexer_hadamard
+    assert cfg.overlap and cfg.c_coff == 2 and cfg.indexed, "ratio 4 is the overlapping, indexed form"
+    ihd, dev = cfg.index_head_dim, "cuda"
+    W, layer = _kernel(cfg)
     t = W.t
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
-
     cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
     kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-    ks = torch.zeros(cfg.c_rows, cfg.c_coff * cfg.head_dim, device=dev)
-    ss = torch.full((cfg.c_rows, cfg.c_coff * cfg.head_dim), float("-inf"), device=dev)
-    cache_r = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-    dq = qkv_a_matrix(t)
-    cut = qkv_a_split(cfg)
-
+    if which == "kv":
+        ks, ss = (x[0] for x in _state(cfg))
+        cache_r = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
+        kw = dict(dest_row=0)
+    else:
+        ks, ss = (x[0] for x in _state(cfg, width=ihd))
+        cache_r = torch.zeros(cfg.n_compressed, fp4_row_bytes(ihd), dtype=torch.uint8, device=dev)
+        kw = dict(head_dim=ihd, ape=t["i_ape"], gamma=t["g_ickv"], rotate=True)
+    dq, cut = qkv_a_matrix(t), qkv_a_split(cfg)
     emitted = 0
     for pos in range(5 * ratio):
-        h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-        cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        idx, dest = contiguous_pool([pos], cfg, dev)
-        layer.forward(h, cur, kv_k, dest, idx, cos, sin)
+        h, _ = _step(layer, cfg, pos, kv_k, cos, sin)
         torch.cuda.synchronize()
-
-        x = bf(rmsnorm(h.float(), t["g_in"], cfg.eps))
-        proj = x @ dq.float().T
+        proj = bf(rmsnorm(h.float(), t["g_in"], cfg.eps)) @ dq.float().T
+        if which == "kv":
+            kw["dest_row"] = cfg.window + pos // ratio
+        c_kv, c_gate = ("c_kv", "c_gate") if which == "kv" else ("i_kv", "i_gate")
         ref = compress_step(
-            proj[0, slice(*cut["c_kv"])],
-            proj[0, slice(*cut["c_gate"])],
-            pos,
-            cfg,
-            t,
-            ks,
-            ss,
-            cache_r,
-            cos,
-            sin,
-            dest_row=cfg.window + pos // ratio,
+            proj[0, slice(*cut[c_kv])], proj[0, slice(*cut[c_gate])], pos, cfg, t, ks, ss, cache_r, cos, sin, **kw
         )
         if (pos + 1) % ratio:
             assert ref is None, f"pos={pos} should emit nothing"
             continue
         emitted += 1
-        slot = cfg.window + pos // ratio
-        a, b = kv_k[slot].float(), cache_r[slot].float()
-        # a last-bit fp32 difference can push one element across an FP8 code (~9%):
-        # bound the count and the bulk; a wrong overlap moves most of the row
+        if which == "kv":
+            slot = cfg.window + pos // ratio
+            a, b, bar = kv_k[slot].float(), cache_r[slot].float(), 5e-3
+        else:
+            slot = pos // ratio
+            a, b, bar = unpack_fp4(_icache_rows(layer, 0, slot + 1)[slot]), unpack_fp4(cache_r[slot]), 1e-2
+        # a last-bit fp32 difference can push one element across an FP8 / FP4 code: bound the count and the
+        # bulk, not the max; a wrong overlap or rotation moves most of the row
         n_diff = int((a != b).sum())
-        rel_l2 = ((a - b).norm() / max(b.norm().item(), 1e-6)).item()
         assert n_diff <= 4, f"pos={pos}: {n_diff} elements differ, not a quantization tie"
-        assert rel_l2 < 5e-3, f"pos={pos} compressed row rel_l2 {rel_l2:.5f}"
-
+        assert _rel_l2(a, b) < bar, f"pos={pos} compressed row rel_l2 {_rel_l2(a, b):.5f}"
     assert emitted >= 4, f"expected several compressed entries, got {emitted}"
 
 
-@pytest.mark.parametrize("indexer_hadamard", [True, False])
-def test_dsv4_indexer_compressor_in_kernel(indexer_hadamard):
-    """The indexer's compressor (Hadamard + FP4) in the kernel, against ``compress_step(rotate=True)``."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-    from kernels.monokernel.dsv4.reference import compress_step, qkv_a_split
-
-    torch.manual_seed(0)
-    ratio = COMPRESS_CSA
-    cfg = _cfg(hc_mult=1)
-    cfg.indexer_hadamard = indexer_hadamard  # ATOM's indexer rotates neither side
-    cfg.compress_ratio, cfg.max_seq = ratio, 256
-    assert cfg.indexed, "only CSA runs an indexer"
-    ihd, dev, mode = cfg.index_head_dim, "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    t = W.t
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
-
-    cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
-    kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-    i_ks = torch.zeros(cfg.c_rows, cfg.c_coff * ihd, device=dev)
-    i_ss = torch.full((cfg.c_rows, cfg.c_coff * ihd), float("-inf"), device=dev)
-    i_ref = torch.zeros(cfg.n_compressed, fp4_row_bytes(ihd), dtype=torch.uint8, device=dev)
-    dq = qkv_a_matrix(t)
-    cut = qkv_a_split(cfg)
-
-    emitted = 0
-    for pos in range(5 * ratio):
-        h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-        cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        idx, dest = contiguous_pool([pos], cfg, dev)
-        layer.forward(h, cur, kv_k, dest, idx, cos, sin)
-        torch.cuda.synchronize()
-
-        x = bf(rmsnorm(h.float(), t["g_in"], cfg.eps))
-        proj = x @ dq.float().T
-        ref = compress_step(
-            proj[0, slice(*cut["i_kv"])],
-            proj[0, slice(*cut["i_gate"])],
-            pos,
-            cfg,
-            t,
-            i_ks,
-            i_ss,
-            i_ref,
-            cos,
-            sin,
-            head_dim=ihd,
-            ape=t["i_ape"],
-            gamma=t["g_ickv"],
-            rotate=True,
-        )
-        if (pos + 1) % ratio:
-            assert ref is None, f"pos={pos} should emit nothing"
-            continue
-        emitted += 1
-        slot = pos // ratio
-        a, b = unpack_fp4(_icache_rows(layer, 0, slot + 1)[slot]), unpack_fp4(i_ref[slot])
-        # coarse FP4 levels: bound the count and the bulk, not the max
-        n_diff = int((a != b).sum())
-        rel_l2 = ((a - b).norm() / max(b.norm().item(), 1e-6)).item()
-        assert n_diff <= 4, f"pos={pos}: {n_diff}/{ihd} elements differ, not a quantization tie"
-        assert rel_l2 < 1e-2, f"pos={pos} indexer compressed row rel_l2 {rel_l2:.5f}"
-
-    assert emitted >= 4, f"expected several compressed entries, got {emitted}"
-
-
-@pytest.mark.parametrize("indexer_hadamard", [True, False])
+@pytest.mark.parametrize("indexer_hadamard", [True, False])  # ATOM's indexer rotates neither side
 def test_dsv4_indexer_query_in_kernel(indexer_hadamard):
     """The indexer's query path in the kernel: projection, RoPE, Hadamard, FP4 (no per-head RMS)."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-    from kernels.monokernel.dsv4.reference import (
-        hadamard,
-        quant_dequant_fp4,
-        rope,
-    )
-
     torch.manual_seed(0)
-    cfg = _cfg(hc_mult=1)
-    cfg.indexer_hadamard = indexer_hadamard  # ATOM's indexer rotates neither side
-    cfg.compress_ratio, cfg.max_seq = COMPRESS_CSA, 256
-    ih, ihd, rd = cfg.index_heads, cfg.index_head_dim, cfg.rope_dim
-    dev, mode = "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
+    cfg = _cfg(1, COMPRESS_CSA, 256)
+    cfg.indexer_hadamard = indexer_hadamard
+    ih, ihd, dev = cfg.index_heads, cfg.index_head_dim, "cuda"
+    W, layer = _kernel(cfg)
     t = W.t
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
-
     cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
     kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
     dq_qkv = qkv_a_matrix(t)
-    dq_iqb = dequant(t["w_i_q_b"], t["s_i_q_b"], 128)
-
     for pos in range(3):
-        h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-        cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        idx, dest = contiguous_pool([pos], cfg, dev)
-        layer.forward(h, cur, kv_k, dest, idx, cos, sin)
+        h, _ = _step(layer, cfg, pos, kv_k, cos, sin)
         torch.cuda.synchronize()
-
         x = bf(rmsnorm(h.float(), t["g_in"], cfg.eps))
-        q_a = (x @ dq_qkv.float().T)[:, : cfg.q_lora]
-        q_an = bf(rmsnorm(q_a, t["g_q"], cfg.eps))
-        q = (q_an @ dq_iqb.T).view(ih, ihd)
-        q = torch.stack([torch.cat([q[j, :-rd], bf(rope(q[j, -rd:], cos[pos], sin[pos]))]) for j in range(ih)])
-        ref = quant_dequant_fp4(bf(hadamard(bf(q))) if cfg.indexer_hadamard else bf(q))
-
+        q_an = bf(rmsnorm((x @ dq_qkv.float().T)[:, : cfg.q_lora], t["g_q"], cfg.eps))
+        ref = _indexer_q(cfg, t, q_an, pos, cos, sin)
         got = layer.debug("i_q", (1, ih, ihd))[0]
         # one FP4 step is ~0.5 here: bound the rate of differing elements, a broken rotation moves most
         n_diff = int((got != ref).sum())
-        rel_l2 = ((got - ref).norm() / max(ref.norm().item(), 1e-6)).item()
         assert n_diff <= ih * ihd // 50, f"pos={pos}: {n_diff}/{ih * ihd} elements differ"
-        assert rel_l2 < 6e-2, f"pos={pos} indexer query rel_l2 {rel_l2:.5f}"
+        assert _rel_l2(got, ref) < 6e-2, f"pos={pos} indexer query rel_l2 {_rel_l2(got, ref):.5f}"
 
 
-@pytest.mark.parametrize("indexer_hadamard", [True, False])
+@pytest.mark.parametrize("indexer_hadamard", [True, False])  # ATOM's indexer rotates neither side
 def test_dsv4_indexer_scoring_in_kernel(indexer_hadamard):
     """The indexer score sum_h relu(q[h] . k[c]) * w[h] per written entry; unwritten entries score NEG."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-    from kernels.monokernel.dsv4.reference import (
-        compress_step,
-        hadamard,
-        qkv_a_split,
-        quant_dequant_fp4,
-        rope,
-    )
+    from kernels.monokernel.dsv4.reference import compress_step
 
     torch.manual_seed(0)
     ratio = COMPRESS_CSA
-    cfg = _cfg(hc_mult=1)
-    cfg.indexer_hadamard = indexer_hadamard  # ATOM's indexer rotates neither side
     # up to index_topk live entries nothing is scored, so a small k scores from the third entry on
-    cfg.compress_ratio, cfg.max_seq, cfg.index_topk = ratio, 256, 2
-    ih, ihd, rd = cfg.index_heads, cfg.index_head_dim, cfg.rope_dim
-    dev, mode = "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
+    cfg = _cfg(1, ratio, 256, index_topk=2)
+    cfg.indexer_hadamard = indexer_hadamard
+    ih, ihd, dev = cfg.index_heads, cfg.index_head_dim, "cuda"
+    W, layer = _kernel(cfg)
     t = W.t
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
-
     cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
     kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-    i_ks = torch.zeros(cfg.c_rows, cfg.c_coff * ihd, device=dev)
-    i_ss = torch.full((cfg.c_rows, cfg.c_coff * ihd), float("-inf"), device=dev)
+    i_ks, i_ss = (x[0] for x in _state(cfg, width=ihd))
     i_ref = torch.zeros(cfg.n_compressed, fp4_row_bytes(ihd), dtype=torch.uint8, device=dev)
-    dq_qkv = qkv_a_matrix(t)
-    dq_iqb = dequant(t["w_i_q_b"], t["s_i_q_b"], 128)
-    cut = qkv_a_split(cfg)
+    dq_qkv, cut = qkv_a_matrix(t), qkv_a_split(cfg)
     scale = ihd**-0.5 * cfg.index_heads**-0.5
-
     scored = 0
     for pos in range(4 * ratio):
-        h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-        cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        idx, dest = contiguous_pool([pos], cfg, dev)
-        layer.forward(h, cur, kv_k, dest, idx, cos, sin)
+        h, _ = _step(layer, cfg, pos, kv_k, cos, sin)
         torch.cuda.synchronize()
-
         x = bf(rmsnorm(h.float(), t["g_in"], cfg.eps))
         proj = x @ dq_qkv.float().T
+        kw = dict(head_dim=ihd, ape=t["i_ape"], gamma=t["g_ickv"], rotate=True)
         compress_step(
-            proj[0, slice(*cut["i_kv"])],
-            proj[0, slice(*cut["i_gate"])],
-            pos,
-            cfg,
-            t,
-            i_ks,
-            i_ss,
-            i_ref,
-            cos,
-            sin,
-            head_dim=ihd,
-            ape=t["i_ape"],
-            gamma=t["g_ickv"],
-            rotate=True,
+            proj[0, slice(*cut["i_kv"])], proj[0, slice(*cut["i_gate"])], pos, cfg, t, i_ks, i_ss, i_ref, cos, sin, **kw
         )
-        q_an = bf(rmsnorm(proj[:, : cfg.q_lora], t["g_q"], cfg.eps))
-        q = (q_an @ dq_iqb.T).view(ih, ihd)
-        q = torch.stack([torch.cat([q[j, :-rd], bf(rope(q[j, -rd:], cos[pos], sin[pos]))]) for j in range(ih)])
-        q = quant_dequant_fp4(bf(hadamard(bf(q))) if cfg.indexer_hadamard else bf(q))
+        q = _indexer_q(cfg, t, bf(rmsnorm(proj[:, : cfg.q_lora], t["g_q"], cfg.eps)), pos, cos, sin)
         w = bf(x @ t["i_w"].float().T)[0] * scale
-
         n = (pos + 1) // ratio
         got = layer.debug("i_score", (1, cfg.n_compressed))[0]
         if n <= cfg.index_topk:  # every live entry kept, nothing scored
             continue
         scored += 1
         ref = (torch.einsum("hd,td->ht", q, unpack_fp4(i_ref[:n])).relu() * w.view(ih, 1)).sum(0)
-        a, b = got[:n], ref
-        rel = ((a - b).norm() / max(b.norm().item(), 1e-6)).item()
-        assert rel < 2e-2, f"pos={pos} score rel_l2 {rel:.5f}"
+        assert _rel_l2(got[:n], ref) < 2e-2, f"pos={pos} score rel_l2 {_rel_l2(got[:n], ref):.5f}"
         assert bool((got[n:] < 0).all()), f"pos={pos}: unwritten entries are scorable"
-
     assert scored >= 3, f"expected several scored steps, got {scored}"
 
 
-def _indexer_score_rank(rank, npes, port, results):
+def _indexer_score_rank(rank, npes):
     """One rank of the replicated indexer's scoring; see the test below."""
     import torch.distributed as dist
 
-    dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=npes)
-    try:
-        from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-        from kernels.monokernel.dsv4.reference import (
-            dequant,
-            hadamard,
-            quant_dequant_fp4,
-            rope,
-        )
+    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
 
-        dev = torch.device("cuda", rank)
-        torch.cuda.set_device(dev)
-        ratio = COMPRESS_CSA
-        cfg = _cfg(hc_mult=1)
-        cfg.compress_ratio, cfg.max_seq, cfg.index_topk = ratio, 256, 2
-        ih, ihd, rd = cfg.index_heads, cfg.index_head_dim, cfg.rope_dim
-        mode = MoeMode.W8A8
-        W = make_weights(rank, cfg=cfg, device=dev, seed=TP_SEED, moe_mode=mode)
-        t = W.t
-        layer = Dsv4MonoKernel(W, samples=1, rank=rank, npes=npes, moe_mode=mode)
-        cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
-        kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-        dq_qkv = qkv_a_matrix(t)
-        dq_iqb = dequant(t["w_i_q_b"], t["s_i_q_b"], 128)
-        scale = ihd**-0.5 * cfg.index_heads**-0.5
-        gen = torch.Generator(device=dev).manual_seed(TP_SEED + 99)  # identical everywhere
-
-        ok, scored = True, 0
-        for pos in range(4 * ratio):  # entries 3 and 4 pass index_topk and are scored
-            h = torch.randn(1, cfg.hidden, generator=gen, device=dev).to(torch.bfloat16)
-            cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-            idx, dest = contiguous_pool([pos], cfg, dev)
-            layer.forward(h, cur, kv_k, dest, idx, cos, sin)
-            torch.cuda.synchronize()
-            got = layer.debug("i_score", (1, cfg.n_compressed))[0]
-
-            # bit-identical across ranks, or the top-k would pick different keys per rank
-            peers = [torch.empty_like(got.cpu()) for _ in range(npes)]
-            dist.all_gather(peers, got.cpu().contiguous())
-            for other in peers[1:]:
-                torch.testing.assert_close(other, peers[0], atol=0, rtol=0)
-
-            x = bf(rmsnorm(h.float(), t["g_in"], cfg.eps))
-            proj = x @ dq_qkv.float().T
-            q_an = bf(rmsnorm(proj[:, : cfg.q_lora], t["g_q"], cfg.eps))
-            q = (q_an @ dq_iqb.T).view(ih, ihd)
-            q = torch.stack([torch.cat([q[j, :-rd], bf(rope(q[j, -rd:], cos[pos], sin[pos]))]) for j in range(ih)])
-            q_ref = quant_dequant_fp4(bf(hadamard(bf(q))) if cfg.indexer_hadamard else bf(q))
-            w_ref = bf(x @ t["i_w"].float().T)[0] * scale
-            # score from the kernel's own q, w and key cache (each checked on its own bar),
-            # so only the dot product and head sum are under test
-            q = layer.debug("i_q", (1, ih, ihd))[0]
-            w = layer.debug("i_wp", (1, ih))[0]
-            dq_n = int((q != q_ref).sum())
-            dq_l2 = ((q - q_ref).norm() / max(q_ref.norm().item(), 1e-6)).item()
-            dw = (w - w_ref).abs().max().item() / max(w_ref.abs().max().item(), 1e-6)
-            if dq_n > ih * ihd // 50 or dq_l2 >= 6e-2 or dw >= 1e-2:
-                print(
-                    f"rank {rank} pos={pos} q differs on {dq_n} (l2 {dq_l2:.5f}), " f"w rel {dw:.5f}",
-                    flush=True,
-                )
-                ok = False
-            n = (pos + 1) // ratio
-            if n <= cfg.index_topk:  # every live entry kept, nothing scored
-                continue
-            scored += 1
-            kcache = unpack_fp4(_icache_rows(layer, 0, n))
-            ref = (torch.einsum("hd,td->ht", q, kcache).relu() * w.view(ih, 1)).sum(0)
-            rel = ((got[:n] - ref).norm() / max(ref.norm().item(), 1e-6)).item()
-            if rel >= 1e-3:
-                print(f"rank {rank} pos={pos} score rel_l2 {rel:.5f}", flush=True)
-                ok = False
-        layer.close()
-        results[rank] = ok and scored >= 2
-    finally:
-        dist.destroy_process_group()
+    dev = torch.device("cuda", rank)
+    torch.cuda.set_device(dev)
+    ratio = COMPRESS_CSA
+    cfg = _cfg(1, ratio, 256, index_topk=2)
+    ih, ihd, mode = cfg.index_heads, cfg.index_head_dim, MoeMode.W8A8
+    W = make_weights(rank, cfg=cfg, device=dev, seed=TP_SEED, moe_mode=mode)
+    t = W.t
+    layer = Dsv4MonoKernel(W, samples=1, rank=rank, npes=npes, moe_mode=mode)
+    cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
+    kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
+    dq_qkv = qkv_a_matrix(t)
+    scale = ihd**-0.5 * cfg.index_heads**-0.5
+    gen = torch.Generator(device=dev).manual_seed(TP_SEED + 99)  # identical everywhere
+    ok, scored = True, 0
+    for pos in range(4 * ratio):  # entries 3 and 4 pass index_topk and are scored
+        h = torch.randn(1, cfg.hidden, generator=gen, device=dev).to(torch.bfloat16)
+        _step(layer, cfg, pos, kv_k, cos, sin, h)
+        torch.cuda.synchronize()
+        got = layer.debug("i_score", (1, cfg.n_compressed))[0]
+        # bit-identical across ranks, or the top-k would pick different keys per rank
+        peers = [torch.empty_like(got.cpu()) for _ in range(npes)]
+        dist.all_gather(peers, got.cpu().contiguous())
+        for other in peers[1:]:
+            torch.testing.assert_close(other, peers[0], atol=0, rtol=0)
+        x = bf(rmsnorm(h.float(), t["g_in"], cfg.eps))
+        q_an = bf(rmsnorm((x @ dq_qkv.float().T)[:, : cfg.q_lora], t["g_q"], cfg.eps))
+        q_ref, w_ref = _indexer_q(cfg, t, q_an, pos, cos, sin), bf(x @ t["i_w"].float().T)[0] * scale
+        # score from the kernel's own q, w and key cache (each checked on its own bar),
+        # so only the dot product and head sum are under test
+        q, w = layer.debug("i_q", (1, ih, ihd))[0], layer.debug("i_wp", (1, ih))[0]
+        dq_n, dq_l2, dw = int((q != q_ref).sum()), _rel_l2(q, q_ref), _rel(w, w_ref)
+        if dq_n > ih * ihd // 50 or dq_l2 >= 6e-2 or dw >= 1e-2:
+            print(f"rank {rank} pos={pos} q differs on {dq_n} (l2 {dq_l2:.5f}), w rel {dw:.5f}", flush=True)
+            ok = False
+        n = (pos + 1) // ratio
+        if n <= cfg.index_topk:  # every live entry kept, nothing scored
+            continue
+        scored += 1
+        ref = (torch.einsum("hd,td->ht", q, unpack_fp4(_icache_rows(layer, 0, n))).relu() * w.view(ih, 1)).sum(0)
+        if _rel_l2(got[:n], ref) >= 1e-3:
+            print(f"rank {rank} pos={pos} score rel_l2 {_rel_l2(got[:n], ref):.5f}", flush=True)
+            ok = False
+    layer.close()
+    return ok and scored >= 2
 
 
 @pytest.mark.multi_gpu
 def test_dsv4_indexer_scores_match_on_every_rank_tp8():
     """Every rank scores with all index heads: the scores match the golden and are bit-identical across ranks."""
-    if torch.cuda.device_count() < 8:
-        pytest.skip("needs 8 GPUs")
-    import torch.multiprocessing as mp
-
-    results = mp.Manager().dict()
-    mp.spawn(_indexer_score_rank, args=(8, _free_port(), results), nprocs=8)
-    assert all(results[r] for r in range(8))
+    assert _spawn8(_indexer_score_rank)
 
 
 def test_dsv4_indexer_scores_the_new_entry_past_the_first_tile():
     """The entry written this launch is scored from the mailbox even past the first SCORE_TILE (poisoned cache)."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
     from kernels.monokernel.dsv4.plan import SCORE_TILE
 
     torch.manual_seed(0)
     ratio = COMPRESS_CSA
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq, cfg.index_topk = ratio, 4096, 64
-    ih, ihd = cfg.index_heads, cfg.index_head_dim
+    cfg = _cfg(1, ratio, 4096, index_topk=64)
+    ih, ihd, dev = cfg.index_heads, cfg.index_head_dim, "cuda"
     assert cfg.n_compressed > SCORE_TILE + 4, "the shape must reach the second score tile"
-    dev, mode = "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
+    W, layer = _kernel(cfg)
     layer.i_cache.copy_(torch.randint(0, 256, layer.i_cache.shape, device=dev))
     layer.i_cache_s.copy_(torch.randint(0, 256, layer.i_cache_s.shape, device=dev))
     cos, sin = rope_table(cfg.max_seq, theta=cfg.rope_base, device=dev)
     kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-
     # the last entry of tile 0 as a control, then the first four of tile 1
     checks = [ratio * (SCORE_TILE + j) - 1 for j in range(5)]
     for pos in range(checks[-1] + 1):
-        h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-        cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        idx, dest = contiguous_pool([pos], cfg, dev)
-        layer.forward(h, cur, kv_k, dest, idx, cos, sin)
+        _step(layer, cfg, pos, kv_k, cos, sin)
         if pos not in checks:
             continue
         torch.cuda.synchronize()
         new = pos // ratio
-        q = layer.debug("i_q", (1, ih, ihd))[0]
-        w = layer.debug("i_wp", (1, ih))[0]
+        q, w = layer.debug("i_q", (1, ih, ihd))[0], layer.debug("i_wp", (1, ih))[0]
         got = layer.debug("i_score", (1, cfg.n_compressed))[0][new].item()
         ref = ((q @ unpack_fp4(_icache_rows(layer, 0, new + 1)[new])).relu() * w).sum().item()
         assert abs(got - ref) <= 1e-3 * max(abs(ref), 1e-3), f"pos={pos} entry {new}: score {got} vs {ref}"
@@ -1388,305 +879,149 @@ def test_dsv4_indexer_scores_the_new_entry_past_the_first_tile():
 
 def test_dsv4_indexer_topk_in_kernel():
     """The indexer's selected set is exactly the top-k of its scores (index_topk reduced so it discards)."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
     from kernels.monokernel.dsv4.reference import indexer_step
 
     torch.manual_seed(0)
     ratio = COMPRESS_CSA
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq, cfg.index_topk = ratio, 256, 4
-    ihd, dev, mode = cfg.index_head_dim, "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
+    cfg = _cfg(1, ratio, 256, index_topk=4)
+    ihd, dev = cfg.index_head_dim, "cuda"
+    W, layer = _kernel(cfg)
     t = W.t
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
-
     cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
     kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-    i_ks = torch.zeros(cfg.c_rows, cfg.c_coff * ihd, device=dev)
-    i_ss = torch.full((cfg.c_rows, cfg.c_coff * ihd), float("-inf"), device=dev)
+    i_ks, i_ss = (x[0] for x in _state(cfg, width=ihd))
     i_ref = torch.zeros(cfg.n_compressed, fp4_row_bytes(ihd), dtype=torch.uint8, device=dev)
-    dq_qkv = qkv_a_matrix(t)
-    cut = qkv_a_split(cfg)
-
+    dq_qkv, cut = qkv_a_matrix(t), qkv_a_split(cfg)
     chose, discarded = 0, 0
     for pos in range(8 * ratio):
-        h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-        cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        idx, dest = contiguous_pool([pos], cfg, dev)
-        layer.forward(h, cur, kv_k, dest, idx, cos, sin)
+        h, _ = _step(layer, cfg, pos, kv_k, cos, sin)
         torch.cuda.synchronize()
-
         x = bf(rmsnorm(h.float(), t["g_in"], cfg.eps))
         proj = x @ dq_qkv.float().T
         q_an = bf(rmsnorm(proj[:, : cfg.q_lora], t["g_q"], cfg.eps))
         ref = indexer_step(
-            x[0],
-            q_an[0],
-            proj[0, slice(*cut["i_kv"])],
-            proj[0, slice(*cut["i_gate"])],
-            pos,
-            cfg,
-            t,
-            i_ks,
-            i_ss,
-            i_ref,
-            cos,
-            sin,
-        )
-        got = layer.debug("i_sel", (1, cfg.n_keys - cfg.window), torch.int32)[0]
-
+            x[0], q_an[0], proj[0, slice(*cut["i_kv"])], proj[0, slice(*cut["i_gate"])], pos, cfg, t,
+            i_ks, i_ss, i_ref, cos, sin,
+        )  # fmt: skip
         n = (pos + 1) // ratio
         k = min(cfg.index_topk, n)
-        assert int((got >= 0).sum()) == k, f"pos={pos}: picked {int((got >= 0).sum())}, want {k}"
+        _check_topk(layer, cfg, n, f"pos={pos}: ")
         if not k:
             continue
         chose += 1
         discarded += n > cfg.index_topk
-        # judge against the kernel's own scores: golden FP4 ties can move a borderline entry
-        sc = layer.debug("i_score", (1, cfg.n_compressed))[0][:n]
-        want = set((cfg.window + sc.topk(k).indices).tolist())
-        a = set(got[got >= 0].tolist())
-        margin = (sc.sort(descending=True).values[k - 1] - sc.sort(descending=True).values[k]).item() if n > k else 1.0
-        if a != want and margin > 1e-6:
-            raise AssertionError(f"pos={pos} picked {sorted(a)} vs {sorted(want)} (margin {margin:.3e})")
         assert len(set(ref[ref >= 0].tolist())) == k
-
     assert chose >= 6 and discarded >= 3, f"chose {chose}, discarded on {discarded}"
 
 
-def test_dsv4_indexer_topk_compaction_spans_waves():
-    """The top-k compaction writes one slot per pick when picks span all eight waves (cross-wave scan)."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
+@pytest.mark.parametrize(
+    "max_seq,index_topk,checks,min_reach,why",
+    [
+        # picks reaching past candidate 256 span five of the eight waves: the cross-wave compaction scan
+        (2048, 200, (400, 700, 1100), 256, "the compaction's cross-wave scan"),
+        # 1500 live candidates: rounds 0, 1 and part of 2 of the radix's strided per-thread walk
+        (8192, 300, (2500, 4000, 5999), 2 * 512, "several candidates per thread"),
+    ],
+    ids=["cross_wave_scan", "candidates_per_thread"],
+)
+def test_dsv4_indexer_topk_over_a_decode(max_seq, index_topk, checks, min_reach, why):
+    """The top-k stays exact over a real decode at shapes that reach ``why``."""
     torch.manual_seed(0)
     ratio = COMPRESS_CSA
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq, cfg.index_topk = ratio, 2048, 200
-    dev, mode = "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
-    cos, sin = rope_table(4096, theta=cfg.rope_base, device=dev)
+    cfg = _cfg(1, ratio, max_seq, index_topk=index_topk)
+    dev = "cuda"
+    _, layer = _kernel(cfg)
+    cos, sin = rope_table(max(4096, max_seq), theta=cfg.rope_base, device=dev)
     kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-
-    checks = [400, 700, 1100]
-    waves_hit = 0
-    for pos in range(checks[-1] + 1):
-        h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-        cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        idx, dest = contiguous_pool([pos], cfg, dev)
-        layer.forward(h, cur, kv_k, dest, idx, cos, sin)
-        if pos not in checks:
-            continue
-        torch.cuda.synchronize()
-        n = (pos + 1) // ratio
-        k = min(cfg.index_topk, n)
-        got = layer.debug("i_sel", (1, cfg.n_keys - cfg.window), torch.int32)[0]
-        sel = got[got >= 0].tolist()
-        assert len(sel) == k, f"pos={pos}: wrote {len(sel)} slots, want {k}"
-        assert len(set(sel)) == k, f"pos={pos}: {k - len(set(sel))} picks collided on a slot"
-        sc = layer.debug("i_score", (1, cfg.n_compressed))[0][:n]
-        srt = sc.sort(descending=True).values
-        margin = (srt[k - 1] - srt[k]).item() if n > k else 1.0
-        want = set((cfg.window + sc.topk(k).indices).tolist())
-        if set(sel) != want and margin > 1e-6:
-            raise AssertionError(f"pos={pos}: picked {len(set(sel) - want)} entries the scores do not rank")
-        waves_hit = max(waves_hit, (max(s - cfg.window for s in sel) // 64) + 1)
-    # the point of the shape: without this the cross-wave term is never read
-    assert waves_hit >= 5, f"picks only reached wave {waves_hit}, so the scan is still untested"
-    layer.close()
-
-
-def test_dsv4_indexer_topk_spans_many_candidates_per_thread():
-    """The top-k holds when each thread owns several candidates (the radix's strided per-thread walk)."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
-    torch.manual_seed(0)
-    ratio = COMPRESS_CSA
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq, cfg.index_topk = ratio, 8192, 300
-    dev, mode = "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
-    cos, sin = rope_table(8192, theta=cfg.rope_base, device=dev)
-    kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-
-    last = 5999  # 1500 live candidates: rounds 0, 1 and part of 2
-    checks = [2500, 4000, last]
     reach = 0
-    for pos in range(last + 1):
-        h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-        cur = torch.tensor([pos], dtype=torch.int32, device=dev)
-        idx, dest = contiguous_pool([pos], cfg, dev)
-        layer.forward(h, cur, kv_k, dest, idx, cos, sin)
+    for pos in range(checks[-1] + 1):
+        _step(layer, cfg, pos, kv_k, cos, sin)
         if pos not in checks:
             continue
         torch.cuda.synchronize()
-        n = (pos + 1) // ratio
-        k = min(cfg.index_topk, n)
-        got = layer.debug("i_sel", (1, cfg.n_keys - cfg.window), torch.int32)[0]
-        sel = got[got >= 0].tolist()
-        assert len(sel) == k, f"pos={pos}: wrote {len(sel)} slots, want {k}"
-        assert len(set(sel)) == k, f"pos={pos}: {k - len(set(sel))} picks collided on a slot"
-        sc = layer.debug("i_score", (1, cfg.n_compressed))[0][:n]
-        srt = sc.sort(descending=True).values
-        margin = (srt[k - 1] - srt[k]).item() if n > k else 1.0
-        want = set((cfg.window + sc.topk(k).indices).tolist())
-        if set(sel) != want and margin > 1e-6:
-            raise AssertionError(f"pos={pos}: picked {len(set(sel) - want)} entries the scores do not rank")
+        sel = _check_topk(layer, cfg, (pos + 1) // ratio, f"pos={pos}: ")
         reach = max(reach, max(s - cfg.window for s in sel))
-    # the point of the shape: without this only the first round is ever read
-    assert reach >= 2 * 512, f"picks stopped at candidate {reach}, so the later rounds are untested"
+    # the point of the shape: without this the path is never read
+    assert reach >= min_reach, f"picks stopped at candidate {reach}, so {why} is untested"
     layer.close()
 
 
-@pytest.mark.parametrize("n_live", [3000, 6000])
-def test_dsv4_indexer_topk_spans_several_ctas(n_live):
-    """The top-k with candidates in one CTA part (3000) and split across parts, one of them empty (6000)."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
+@pytest.mark.parametrize(
+    "max_seq,index_topk,n_live",
+    [
+        (65536, 300, 3000),  # candidates in one CTA part
+        (65536, 300, 6000),  # split across parts, one of them empty
+        (1 << 20, None, None),  # a full 1M context: eight register-held trips per thread, all live
+    ],
+)
+def test_dsv4_indexer_topk_over_a_filled_cache(max_seq, index_topk, n_live):
+    """The top-k over an FP4 key cache filled directly: across several CTA parts and at a full 1M context."""
     from kernels.monokernel.dsv4.plan import THREADS, n_topk_parts
     from kernels.monokernel.dsv4.reference import pack_fp4
 
     torch.manual_seed(0)
     ratio = COMPRESS_CSA
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq, cfg.index_topk = ratio, 65536, 300
-    parts = n_topk_parts(cfg.max_seq, ratio, cfg.index_head_dim)
-    one_part = cfg.n_compressed // parts
-    assert parts == 4 and one_part == 4096, "shape no longer splits as the cases assume"
-    dev, mode = "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
-    rows = pack_fp4(torch.randn(cfg.n_compressed, cfg.index_head_dim, device=dev))
+    cfg = _cfg(1, ratio, max_seq, index_topk=index_topk)
+    n_all, ihd, dev = cfg.n_compressed, cfg.index_head_dim, "cuda"
+    parts = n_topk_parts(cfg.max_seq, ratio, ihd)
+    if n_live is None:
+        trips = n_all // (THREADS * 4 * parts)
+        assert trips >= 8, f"only {trips} trips a thread; the point is several"
+    else:
+        assert parts == 4 and n_all // parts == 4096, "shape no longer splits as the cases assume"
+    _, layer = _kernel(cfg)
+    rows = pack_fp4(torch.randn(n_all, ihd, device=dev))
     fp4_pool_store(layer.i_cache[0], layer.i_cache_s[0], layer.block_tables[0], rows)
-    cos, sin = rope_table(65536, theta=cfg.rope_base, device=dev)
+    cos, sin = rope_table(max_seq, theta=cfg.rope_base, device=dev)
     kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-
-    pos = n_live * ratio - 1
-    h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-    idx, dest = contiguous_pool([pos], cfg, dev)
-    layer.forward(h, torch.tensor([pos], dtype=torch.int32, device=dev), kv_k, dest, idx, cos, sin)
+    pos = cfg.max_seq - 1 if n_live is None else n_live * ratio - 1
+    _step(layer, cfg, pos, kv_k, cos, sin)
     torch.cuda.synchronize()
-    n = (pos + 1) // ratio
-    k = min(cfg.index_topk, n)
-    got = layer.debug("i_sel", (1, cfg.n_keys - cfg.window), torch.int32)[0]
-    sel = got[got >= 0].tolist()
-    assert len(sel) == k, f"wrote {len(sel)} slots, want {k}"
-    assert len(set(sel)) == k, f"{k - len(set(sel))} picks collided on a slot"
-    sc = layer.debug("i_score", (1, cfg.n_compressed))[0][:n]
-    srt = sc.sort(descending=True).values
-    want = set((cfg.window + sc.topk(k).indices).tolist())
-    if set(sel) != want and (srt[k - 1] - srt[k]).item() > 1e-6:
-        raise AssertionError(f"picked {len(set(sel) - want)} entries the scores do not rank")
-    reach = max(s_ - cfg.window for s_ in sel)
-    if n_live > one_part:
+    sel = _check_topk(layer, cfg, (pos + 1) // ratio)
+    if n_live is not None and n_live > n_all // parts:
+        reach = max(s_ - cfg.window for s_ in sel)
         assert reach >= 2 * THREADS * 4, f"picks stopped at candidate {reach}, so part 2 was not tested"
     layer.close()
 
 
-def test_dsv4_indexer_topk_at_a_full_1m_context():
-    """The top-k at a full 1M context: eight register-held trips per thread, all live (cache filled directly)."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-    from kernels.monokernel.dsv4.plan import THREADS, n_topk_parts
-    from kernels.monokernel.dsv4.reference import pack_fp4
-
-    torch.manual_seed(0)
-    ratio = COMPRESS_CSA
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq = ratio, 1 << 20
-    n, ihd = cfg.n_compressed, cfg.index_head_dim
-    trips = n // (THREADS * 4 * n_topk_parts(cfg.max_seq, ratio, ihd))
-    assert trips >= 8, f"only {trips} trips a thread; the point is several"
-    dev, mode = "cuda", MoeMode.W8A8
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=1, rank=0, npes=1, moe_mode=mode)
-    rows = pack_fp4(torch.randn(n, ihd, device=dev))
-    fp4_pool_store(layer.i_cache[0], layer.i_cache_s[0], layer.block_tables[0], rows)
-    cos, sin = rope_table(cfg.max_seq, theta=cfg.rope_base, device=dev)
-    kv_k = torch.zeros(cfg.cache_rows, cfg.head_dim, dtype=torch.bfloat16, device=dev)
-
-    pos = cfg.max_seq - 1
-    h = (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16()
-    idx, dest = contiguous_pool([pos], cfg, dev)
-    layer.forward(h, torch.tensor([pos], dtype=torch.int32, device=dev), kv_k, dest, idx, cos, sin)
-    torch.cuda.synchronize()
-    k = min(cfg.index_topk, n)
-    got = layer.debug("i_sel", (1, cfg.n_keys - cfg.window), torch.int32)[0]
-    sel = got[got >= 0].tolist()
-    assert len(sel) == k, f"wrote {len(sel)} slots, want {k}"
-    assert len(set(sel)) == k, f"{k - len(set(sel))} picks collided on a slot"
-    sc = layer.debug("i_score", (1, n))[0]
-    srt = sc.sort(descending=True).values
-    want = set((cfg.window + sc.topk(k).indices).tolist())
-    if set(sel) != want and (srt[k - 1] - srt[k]).item() > 1e-6:
-        raise AssertionError(f"picked {len(set(sel) - want)} entries the scores do not rank")
-    layer.close()
-
-
-def test_dsv4_fp8_kv_reads_each_groups_own_scale():
-    """The fp8 KV read takes each 64-wide group's own scale (group g scaled 4**g, so a wrong one is >= 4x off)."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
+@pytest.mark.parametrize("case", ["group_scales", "poisoned_rows"])
+def test_dsv4_fp8_kv_read(case):
+    """The fp8 KV read: each 64-wide group takes its own scale (group g scaled 4**g, so a wrong one is >= 4x
+    off); rows ATOM never wrote (all 0xFF) or wrote with a NaN RoPE half are left out, as if the key were -1."""
     torch.manual_seed(0)
     dev, mode, S = "cuda", MoeMode.W8A8, 1
-    cfg = _cfg(hc_mult=1)
+    cfg = _cfg()
     cfg.kv_fp8 = True
     cfg.validate()
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=S, rank=0, npes=1, moe_mode=mode)
-    nope = cfg.head_dim - cfg.rope_dim
-    gain = torch.ones(cfg.head_dim, device=dev)
-    gain[:nope] = 4.0 ** (torch.arange(nope, device=dev) // 64 - 3).float()
-    kv0 = (0.3 * torch.randn(S * cfg.window, cfg.head_dim, device=dev) * gain).bfloat16()
-    planes = encode_kv_fp8(kv0)
-    kv_ref = decode_kv_fp8(*planes).bfloat16()  # the same values, as the golden's bf16 plane
-    h = (0.5 * torch.randn(S, cfg.hidden, device=dev)).bfloat16()
-    pos = cfg.window
-    cur = torch.tensor([pos] * S, dtype=torch.int32, device=dev)
-    idx, dest = contiguous_pool([pos] * S, cfg, dev)
-    cos, sin = rope_table(4096, theta=cfg.rope_theta, device=dev)
-    layer.forward(h, cur, planes, dest, idx, cos, sin)
-    torch.cuda.synchronize()
-    got = layer.intermediates()
-    ref = golden_layer(W, h, [pos] * S, kv_ref, dest, idx, cos, sin, lambda z: z, moe_mode=mode)
-    a, b = got["o"].float(), ref["o"].float()
-    rel = ((a - b).norm() / b.norm()).item()
-    assert rel < 2e-2, f"attention output off the golden by rel_l2 {rel:.4f}"
-    layer.close()
-
-
-def test_dsv4_fp8_kv_leaves_out_unwritten_and_nan_rows():
-    """Rows ATOM never wrote (all 0xFF) or wrote with a NaN RoPE half are left out, as if the key were -1."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
-
-    torch.manual_seed(0)
-    dev, mode, S = "cuda", MoeMode.W8A8, 1
-    cfg = _cfg(hc_mult=1)
-    cfg.kv_fp8 = True
-    cfg.validate()
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=S, rank=0, npes=1, moe_mode=mode)
-    kv0 = (0.3 * torch.randn(S * cfg.window, cfg.head_dim, device=dev)).bfloat16()
+    W, layer = _kernel(cfg, mode, S)
+    if case == "group_scales":
+        nope = cfg.head_dim - cfg.rope_dim
+        gain = torch.ones(cfg.head_dim, device=dev)
+        gain[:nope] = 4.0 ** (torch.arange(nope, device=dev) // 64 - 3).float()
+        kv0 = (0.3 * torch.randn(S * cfg.window, cfg.head_dim, device=dev) * gain).bfloat16()
+    else:
+        kv0 = (0.3 * torch.randn(S * cfg.window, cfg.head_dim, device=dev)).bfloat16()
     nope_u8, rope = encode_kv_fp8(kv0)
-    h = (0.5 * torch.randn(S, cfg.hidden, device=dev)).bfloat16()
+    h = _h(cfg, S)
     pos = cfg.window
     cur = torch.tensor([pos] * S, dtype=torch.int32, device=dev)
     idx, dest = contiguous_pool([pos] * S, cfg, dev)
-    unwritten, nan_rope = int(idx[0, 3]), int(idx[0, 10])
-    nope_u8[unwritten] = 0xFF
-    rope[unwritten].view(torch.int16).fill_(-1)
-    rope[nan_rope] = float("nan")
+    idx_ref = idx.clone()
+    if case == "poisoned_rows":
+        unwritten, nan_rope = int(idx[0, 3]), int(idx[0, 10])
+        nope_u8[unwritten] = 0xFF
+        rope[unwritten].view(torch.int16).fill_(-1)
+        rope[nan_rope] = float("nan")
+        idx_ref[0, 3] = idx_ref[0, 10] = -1
     cos, sin = rope_table(4096, theta=cfg.rope_theta, device=dev)
     layer.forward(h, cur, (nope_u8, rope), dest, idx, cos, sin)
     torch.cuda.synchronize()
     got = layer.intermediates()
-    kv_ref = torch.nan_to_num(decode_kv_fp8(nope_u8, rope)).bfloat16()
-    idx_ref = idx.clone()
-    idx_ref[0, 3] = idx_ref[0, 10] = -1
-    ref = golden_layer(W, h, [pos] * S, kv_ref, dest, idx_ref, cos, sin, lambda z: z, moe_mode=mode)
-    a, b = got["o"].float(), ref["o"].float()
-    assert not torch.isnan(a).any(), "a poisoned row reached the attention output"
-    rel = ((a - b).norm() / b.norm()).item()
-    assert rel < 2e-2, f"attention output off the golden (poisoned keys left out) by rel_l2 {rel:.4f}"
+    kv_ref = torch.nan_to_num(decode_kv_fp8(nope_u8, rope)).bfloat16()  # the same values, as a bf16 plane
+    ref = _golden(W, h, [pos] * S, kv_ref, dest, idx_ref, cos, sin, mode)
+    assert not torch.isnan(got["o"]).any(), "a poisoned row reached the attention output"
+    rel = _rel_l2(got["o"], ref["o"])
+    assert rel < 2e-2, f"attention output off the golden by rel_l2 {rel:.4f}"
     layer.close()
 
 
@@ -1697,16 +1032,15 @@ def test_dsv4_hash_routing_takes_the_table(S):
 
     torch.manual_seed(0)
     dev, mode = "cuda", MoeMode.W8A8
-    cfg = _cfg(hc_mult=1)
+    cfg = _cfg()
     cfg.validate()
     W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
     vocab = 1000
-    W.t["tid2eid"] = torch.stack([torch.randperm(cfg.n_experts, device=dev)[: cfg.top_k] for _ in range(vocab)]).to(
-        torch.int32
-    )
+    tid2eid = [torch.randperm(cfg.n_experts, device=dev)[: cfg.top_k] for _ in range(vocab)]
+    W.t["tid2eid"] = torch.stack(tid2eid).to(torch.int32)
     layer = Dsv4MonoKernel(W, samples=S, rank=0, npes=1, moe_mode=mode)
     tokens = torch.randint(0, vocab, (S,), dtype=torch.int32, device=dev)
-    h = (0.5 * torch.randn(S, cfg.hidden, device=dev)).bfloat16()
+    h = _h(cfg, S)
     pos = cfg.window
     cur = torch.tensor([pos] * S, dtype=torch.int32, device=dev)
     kv0 = (0.3 * torch.randn(S * cfg.window, cfg.head_dim, device=dev)).bfloat16()
@@ -1715,14 +1049,12 @@ def test_dsv4_hash_routing_takes_the_table(S):
     out = layer.forward(h, cur, kv0.clone(), dest, idx, cos, sin, tokens=tokens)
     torch.cuda.synchronize()
     got = layer.intermediates()
-    ref = golden_layer(W, h, [pos] * S, kv0.clone(), dest, idx, cos, sin, lambda z: z, moe_mode=mode, tokens=tokens)
+    ref = _golden(W, h, [pos] * S, kv0.clone(), dest, idx, cos, sin, mode, tokens=tokens)
     for s in range(S):
         want = set(W.t["tid2eid"][tokens[s].long()].tolist())
         picked = set(got["sel"][s].tolist()[1:])  # slot 0 is the shared expert
         assert picked == want, f"sample {s}: routed to {sorted(picked)}, table says {sorted(want)}"
-    a, b = out.float(), ref["x_out"].float()
-    rel = ((a - b).norm() / b.norm()).item()
-    assert rel < _tol(OUT_REL_L2, cfg.hc_mult, 1), f"x_out rel_l2 {rel:.5f}"
+    assert _rel_l2(out, ref["x_out"]) < _tol(OUT_REL_L2, cfg.hc_mult, 1), "x_out off the golden"
     layer.close()
 
 
@@ -1733,10 +1065,7 @@ def test_dsv4_batching_is_independent_sequences(ratio):
 
     torch.manual_seed(0)
     dev, mode, S = "cuda", MoeMode.W8A8, 2
-    cfg = _cfg(hc_mult=4)
-    cfg.compress_ratio, cfg.max_seq = ratio, 256
-    if ratio:
-        cfg.index_topk = 4
+    cfg = _cfg(4, ratio, 256, index_topk=4 if ratio else None)
     cfg.validate()
     W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
     cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
@@ -1744,7 +1073,6 @@ def test_dsv4_batching_is_independent_sequences(ratio):
     steps = 8 * ratio if ratio else 3
     if ratio:
         assert (steps - 1) // ratio > cfg.index_topk, "the top-k must discard, or the scores are untested"
-
     hs = [(0.5 * torch.randn(S, cfg.hc_mult, cfg.hidden, device=dev)).bfloat16() for _ in range(steps)]
     # staggered starts, not a multiple of the ratio: equal positions would hide a wrong-sample position
     OFFSETS = (0, 3)
@@ -1757,10 +1085,9 @@ def test_dsv4_batching_is_independent_sequences(ratio):
         seq = []
         for step in range(steps):
             ps = [OFFSETS[r] + step for r in rows]
-            cur = torch.tensor(ps, dtype=torch.int32, device=dev)
             idx, dest = contiguous_pool(ps, cfg, dev)
             h = torch.cat([hs[step][r : r + 1] for r in rows])
-            out = layer.forward(h, cur, kv, dest, idx, cos, sin).clone()
+            out = layer.forward(h, torch.tensor(ps, dtype=torch.int32, device=dev), kv, dest, idx, cos, sin).clone()
             torch.cuda.synchronize()
             seq.append((out, {k: v.clone() for k, v in layer.intermediates().items()}))
         layer.close()
@@ -1770,13 +1097,12 @@ def test_dsv4_batching_is_independent_sequences(ratio):
     for s in range(S):
         alone = run([s])
         for pos in range(steps):
-            for name in ("q_a", "kv", "q", "o", "o_lora", "a", "scores"):
+            for name in EXACT_STAGES:
                 d = (batched[pos][1][name][s].float() - alone[pos][1][name][0].float()).abs().max().item()
                 assert d == 0.0, f"pos={pos} sample {s}: stage {name} moved by {d:.3e} when batched"
             assert batched[pos][1]["sel"][s].tolist() == alone[pos][1]["sel"][0].tolist()
             # x_out is not bit-exact: batching regroups `down`'s f32 summation tree
-            a, b = batched[pos][0][s].float(), alone[pos][0][0].float()
-            rel = ((a - b).norm() / b.norm().clamp(min=1e-6)).item()
+            rel = _rel_l2(batched[pos][0][s], alone[pos][0][0])
             assert rel < 1e-3, f"pos={pos} sample {s}: x_out rel {rel:.3e} when batched"
 
 
@@ -1808,10 +1134,7 @@ def test_dsv4_mtp_verify_step_is_sequential_decode(ratio, rollback):
     torch.manual_seed(0)
     dev, mode, K = "cuda", MoeMode.W8A8, 3
     TOK, NSEQ = K + 1, 2
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq = ratio, 512
-    if ratio == COMPRESS_CSA:
-        cfg.index_topk = 4
+    cfg = _cfg(1, ratio, 512, index_topk=4 if ratio == COMPRESS_CSA else None)
     cfg.validate()
     W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
     cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
@@ -1839,10 +1162,7 @@ def test_dsv4_mtp_verify_step_is_sequential_decode(ratio, rollback):
         torch.cuda.synchronize()
         got = lay.intermediates()
         for r in range(NSEQ):
-            ref[(r, ps[r])] = (
-                out[r],
-                {n: got[n][r].clone() for n in ("q_a", "kv", "q", "o", "o_lora", "a", "scores", "sel")},
-            )
+            ref[(r, ps[r])] = (out[r], {n: got[n][r].clone() for n in EXACT_STAGES + ("sel",)})
     lay.close()
 
     # MTP: K + 1 tokens per sequence per launch
@@ -1863,9 +1183,8 @@ def test_dsv4_mtp_verify_step_is_sequential_decode(ratio, rollback):
                 ok = j < acc[r]
                 hs.append(h_acc(r, nxt[r] + j) if ok else (0.5 * torch.randn(1, cfg.hidden, device=dev)).bfloat16())
         idx, dest, _, _ = _mtp_pool(ps, sq, cfg, K, dev)
-        out = lay.forward(
-            torch.cat(hs), torch.tensor(ps, dtype=torch.int32, device=dev), kv, dest, idx, cos, sin
-        ).clone()
+        cur = torch.tensor(ps, dtype=torch.int32, device=dev)
+        out = lay.forward(torch.cat(hs), cur, kv, dest, idx, cos, sin).clone()
         torch.cuda.synchronize()
         got = lay.intermediates()
         for r in range(NSEQ):
@@ -1874,11 +1193,11 @@ def test_dsv4_mtp_verify_step_is_sequential_decode(ratio, rollback):
                 if (r, pos) not in ref:  # past the reference's history (the other sequence lagged)
                     continue
                 r_out, r_st = ref[(r, pos)]
-                for name in ("q_a", "kv", "q", "o", "o_lora", "a", "scores"):
+                for name in EXACT_STAGES:
                     d = (got[name][i].float() - r_st[name].float()).abs().max().item()
                     assert d == 0.0, f"seq {r} pos {pos} (token {j}): stage {name} moved by {d:.3e} in the MTP launch"
                 assert got["sel"][i].tolist() == r_st["sel"].tolist(), f"seq {r} pos {pos}: routing differs"
-                rel = ((out[i].float() - r_out.float()).norm() / r_out.float().norm().clamp(min=1e-6)).item()
+                rel = _rel_l2(out[i], r_out)
                 assert rel < 1e-3, f"seq {r} pos {pos}: x_out rel {rel:.3e}"
                 checked += 1
             nxt[r] += acc[r]
@@ -1893,8 +1212,7 @@ def test_dsv4_paged_blocks_are_pure_addressing(ratio):
 
     torch.manual_seed(0)
     dev, mode, S = "cuda", MoeMode.W8A8, 2
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq = ratio, 1024
+    cfg = _cfg(1, ratio, 1024)
     if cfg.indexed:
         cfg.index_topk = 4
     cfg.validate()
@@ -1920,7 +1238,7 @@ def test_dsv4_paged_blocks_are_pure_addressing(ratio):
 
     steps = 3 * k_pb * ratio
     for pos in range(steps):
-        h = (0.5 * torch.randn(S, cfg.hidden, device=dev)).bfloat16()
+        h = _h(cfg, S)
         cur = torch.tensor([pos] * S, dtype=torch.int32, device=dev)
         idx, dest = contiguous_pool([pos] * S, cfg, dev)
         idx_b, dest_b = idx.clone(), dest.clone()
@@ -1953,8 +1271,7 @@ def test_dsv4_rows_and_state_past_4gb():
 
     torch.manual_seed(0)
     dev, mode, S = "cuda", MoeMode.W8A8, 1
-    cfg = _cfg(hc_mult=1)
-    cfg.compress_ratio, cfg.max_seq = COMPRESS_HCA, 512
+    cfg = _cfg(1, COMPRESS_HCA, 512)
     cfg.validate()
     W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
     cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
@@ -1970,13 +1287,12 @@ def test_dsv4_rows_and_state_past_4gb():
     sst[st:] = float("-inf")
     far = dict(kv_state=kst, score_state=sst, st_kv=st, state_slots=torch.ones(S, dtype=torch.int32, device=dev))
     for pos in range(2 * cfg.compress_ratio + 3):
-        h = (0.5 * torch.randn(S, cfg.hidden, device=dev)).bfloat16()
+        h = _h(cfg, S)
         cur = torch.tensor([pos] * S, dtype=torch.int32, device=dev)
         idx, dest = contiguous_pool([pos] * S, cfg, dev)
         a = lay_a.forward(h, cur, kv_a, dest, idx, cos, sin)
-        b = lay_b.forward(
-            h, cur, kv_b, dest + far_rows, torch.where(idx >= 0, idx + far_rows, idx), cos, sin, state=far
-        )
+        far_idx = torch.where(idx >= 0, idx + far_rows, idx)
+        b = lay_b.forward(h, cur, kv_b, dest + far_rows, far_idx, cos, sin, state=far)
         torch.cuda.synchronize()
         assert torch.equal(a, b), f"pos={pos}: rows / state past 4 GB changed the output"
     assert torch.equal(kv_a, kv_b[far_rows:]), "the rows past 4 GB do not hold what the small pool does"
@@ -1990,8 +1306,7 @@ def test_dsv4_state_slots_place_the_rolling_state():
 
     torch.manual_seed(0)
     dev, mode, S, ratio = "cuda", MoeMode.W8A8, 2, COMPRESS_CSA
-    cfg = _cfg(hc_mult=4)
-    cfg.compress_ratio, cfg.max_seq, cfg.index_topk = ratio, 256, 4
+    cfg = _cfg(4, ratio, 256, index_topk=4)
     cfg.validate()
     W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
     cos, sin = rope_table(2048, theta=cfg.rope_base, device=dev)
@@ -2032,88 +1347,39 @@ def test_dsv4_state_slots_place_the_rolling_state():
         assert d == 0.0, f"pos={pos}: moving the state to other slots changed the answer by {d:.3e}"
 
 
-def test_dsv4_compress_schedule_is_the_checkpoints():
-    """The per-layer compress-ratio schedule matches V4-Pro's (and its config.json when present)."""
-    import json
-    import os
-
-    from kernels.monokernel.dsv4.config import COMPRESS_CSA as CSA
-    from kernels.monokernel.dsv4.config import COMPRESS_HCA as HCA
-    from kernels.monokernel.dsv4.config import compress_ratios
-
-    r = compress_ratios()
-    assert len(r) == 62, f"61 layers plus one MTP entry, got {len(r)}"
-    main, mtp = r[:61], r[61:]
-    assert main.count(HCA) == 31 and main.count(CSA) == 30, f"31 HCA + 30 CSA, got {main}"
-    assert 0 not in main, "V4-Pro has no sliding-window-only main layer"
-    assert mtp == (0,), "the MTP block is the ratio-0 entry"
-    assert main[0] == main[1] == HCA, "layers 0 and 1 are the one break in the alternation"
-    for i in range(2, 61):
-        want = CSA if i % 2 == 0 else HCA
-        assert main[i] == want, f"layer {i} should be {want}, schedule says {main[i]}"
-
-    path = "/tmp/dsv4_ref/config.json"
-    if os.path.exists(path):
-        assert list(r) == json.load(open(path))["compress_ratios"], "schedule differs from the config"
-
-
 def test_dsv4_split_merge_spans_the_block():
     """More than 64 key splits takes the block-wide merge path; overrunning it is silently wrong, not a crash."""
-    from kernels.monokernel.dsv4.op import Dsv4MonoKernel
     from kernels.monokernel.dsv4.plan import SPLIT_KEYS
 
     torch.manual_seed(0)
     dev, mode, S = "cuda", MoeMode.W8A8, 1
-    cfg = _cfg()
-    cfg.compress_ratio, cfg.max_seq = COMPRESS_HCA, 655360
+    cfg = _cfg(1, COMPRESS_HCA, 655360)
     cfg.validate()
     splits = cfg.n_keys // SPLIT_KEYS
     assert splits > 64, f"this shape must exercise the wide path, got {splits} splits"
-
-    W = make_weights(rank=0, cfg=cfg, device=dev, seed=3, moe_mode=mode)
-    layer = Dsv4MonoKernel(W, samples=S, rank=0, npes=1, moe_mode=mode)
-    h = (0.5 * torch.randn(S, cfg.hidden, device=dev)).bfloat16()
+    W, layer = _kernel(cfg, mode, S)
+    h = _h(cfg, S)
     pos = cfg.max_seq - 1  # every compressed entry live
     cur = torch.tensor([pos] * S, dtype=torch.int32, device=dev)
     kv0 = (0.3 * torch.randn(S * cfg.cache_rows, cfg.head_dim, device=dev)).bfloat16()
     idx, dest = contiguous_pool([pos] * S, cfg, dev)
     cos, sin = rope_table(cfg.max_seq, theta=cfg.rope_theta, device=dev)
-
     out = layer.forward(h, cur, kv0.clone(), dest, idx, cos, sin)
     torch.cuda.synchronize()
-    ref = golden_layer(
-        W,
-        h,
-        [pos] * S,
-        kv0.clone(),
-        dest,
-        idx,
-        cos,
-        sin,
-        lambda z: z,
-        moe_mode=mode,
-        kv_state=torch.zeros(S, cfg.c_rows, cfg.c_coff * cfg.head_dim, device=dev),
-        score_state=torch.full((S, cfg.c_rows, cfg.c_coff * cfg.head_dim), float("-inf"), device=dev),
-        cos_c=cos,
-        sin_c=sin,
-    )
-
-    a_out, b_out = out.float(), ref["x_out"].float()
-    assert torch.isfinite(a_out).all(), "the wide merge produced non-finite output"
-    rel_l2 = ((a_out - b_out).norm() / b_out.norm()).item()
+    ref = _golden(W, h, [pos] * S, kv0.clone(), dest, idx, cos, sin, mode, _state(cfg, S))
+    assert torch.isfinite(out.float()).all(), "the wide merge produced non-finite output"
+    rel_l2 = _rel_l2(out, ref["x_out"])
     assert rel_l2 < _tol(OUT_REL_L2, cfg.hc_mult, 1), f"x_out diverged: rel_l2 {rel_l2:.5f}"
 
 
 @pytest.mark.parametrize("kv_fp8", [False, True])
-@pytest.mark.parametrize("n_layers", [4])
-def test_dsv4_alternating_stack_matches_golden(n_layers, kv_fp8):
+def test_dsv4_alternating_stack_matches_golden(kv_fp8):
     """V4-Pro's [HCA, HCA, CSA, HCA] prefix: layers of one variant share a kernel, not weights or state."""
     from kernels.monokernel.dsv4.op import Dsv4MonoKernel, Dsv4Variant
 
     torch.manual_seed(0)
-    dev, mode, S = "cuda", MoeMode.W8A8, 1
-    base = _cfg(hc_mult=4)
-    base.max_seq = 256
+    dev, mode, S, n_layers = "cuda", MoeMode.W8A8, 1, 4
+    base = _cfg(4, max_seq=256)
     cfgs = []
     for i in range(n_layers):
         c = base.for_layer(i)
@@ -2129,16 +1395,7 @@ def test_dsv4_alternating_stack_matches_golden(n_layers, kv_fp8):
     for i, c in enumerate(cfgs):
         if c.compress_ratio not in variants:
             variants[c.compress_ratio] = Dsv4Variant(c, S, rank=0, npes=1, moe_mode=mode)
-        layers.append(
-            Dsv4MonoKernel(
-                Ws[i],
-                S,
-                rank=0,
-                npes=1,
-                moe_mode=mode,
-                variant=variants[c.compress_ratio],
-            )
-        )
+        layers.append(Dsv4MonoKernel(Ws[i], S, rank=0, npes=1, moe_mode=mode, variant=variants[c.compress_ratio]))
     assert len(variants) == 2, "three HCA layers must share one compiled kernel"
 
     tables = {c.rope_base: rope_table(2048, theta=c.rope_base, device=dev) for c in cfgs}
@@ -2151,17 +1408,11 @@ def test_dsv4_alternating_stack_matches_golden(n_layers, kv_fp8):
     def fresh_states():
         st_all = []
         for c in cfgs:
-            coff, ihd = c.c_coff, c.index_head_dim
-            st = dict(
-                kv_state=torch.zeros(S, c.c_rows, coff * c.head_dim, device=dev),
-                score_state=torch.full((S, c.c_rows, coff * c.head_dim), float("-inf"), device=dev),
-            )
+            st = dict(zip(("kv_state", "score_state"), _state(c, S)))
             if c.indexed:
-                st |= dict(
-                    i_state=torch.zeros(S, c.c_rows, coff * ihd, device=dev),
-                    i_score_state=torch.full((S, c.c_rows, coff * ihd), float("-inf"), device=dev),
-                    i_cache=torch.zeros(S, c.n_compressed, fp4_row_bytes(ihd), dtype=torch.uint8, device=dev),
-                )
+                ihd = c.index_head_dim
+                st |= dict(zip(("i_state", "i_score_state"), _state(c, S, width=ihd)))
+                st["i_cache"] = torch.zeros(S, c.n_compressed, fp4_row_bytes(ihd), dtype=torch.uint8, device=dev)
             st_all.append(st)
         return st_all
 
@@ -2188,16 +1439,13 @@ def test_dsv4_alternating_stack_matches_golden(n_layers, kv_fp8):
             ref = golden_layer(Ws[i], h_in, [pos] * S, kvs_r[i], dest, idx, cos, sin, lambda z: z, moe_mode=mode, **kw)
             if _routing_flipped(got, ref, Ws[i], c, S):
                 ref = _rebase_on_own_routing(got, ref, Ws[i], mode)
-            a, b = hk.float(), ref["x_out"].float()
-            rel = ((a - b).norm() / b.norm()).item()
-            tol = _tol(OUT_REL_L2, c.hc_mult, 1)
+            rel, tol = _rel_l2(hk, ref["x_out"]), _tol(OUT_REL_L2, c.hc_mult, 1)
             assert rel < tol, f"pos={pos} layer {i} (ratio {c.compress_ratio}): rel_l2 {rel:.4f} >= {tol}"
         for v in variants.values():
             v.advance_step()
     if kv_fp8:
         for i, c in enumerate(cfgs):
-            a, b = decode_kv_fp8(*kvs_k[i]), kvs_r[i].float()
-            rel = ((a - b).norm() / b.norm()).item()
+            rel = _rel_l2(decode_kv_fp8(*kvs_k[i]), kvs_r[i])
             assert rel < 1e-2, f"layer {i} (ratio {c.compress_ratio}): fp8 KV rows off the golden's, rel_l2 {rel:.4f}"
     for v in variants.values():
         v.close()
