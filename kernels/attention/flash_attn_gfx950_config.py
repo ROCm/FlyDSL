@@ -410,6 +410,8 @@ class Gfx950Traits:
     # A window is causal plus a left bound. The bounds are runtime i32 (or baked, see STATIC_WINDOW).
     WINDOW: bool
     STATIC_WINDOW: bool
+    # The sequence lengths are baked (dense, JIT-only): `CROSS_SEQLEN` and the KV-tail mask resolve at trace time.
+    STATIC_SEQLEN: bool
     BIAS_TYPE: int
     ENABLE_DROPOUT: bool
     ALIBI: bool
@@ -542,6 +544,7 @@ def _make_traits(
     v_dc_in_pair=None,
     window=False,
     static_window=False,
+    static_seqlen=False,
     bias=False,
     dropout=False,
     alibi=False,
@@ -780,6 +783,7 @@ def _make_traits(
         D_CHUNKS_PER_BAND=granule // D_CHUNK,
         WINDOW=bool(window),
         STATIC_WINDOW=bool(static_window),
+        STATIC_SEQLEN=bool(static_seqlen),
         BIAS_TYPE=1 if bias else 0,
         ENABLE_DROPOUT=bool(dropout),
         ALIBI=bool(alibi),
@@ -923,6 +927,8 @@ class Gfx950FwdKnobs(_Knobs):
     # outputs and window baking
     RETURN_LSE: str | None = None  # "runtime" (store unless the LSE pointer is null) | "always" | "never"
     STATIC_WINDOW: bool | None = None
+    # JIT-only, dense-only, opt-in: bakes `Max_seqlen_q`/`Max_seqlen_k` (call data, a compile per length pair). Never for AOT.
+    STATIC_SEQLEN: bool | None = None
     # feature knobs, off by default; AOTriton never sets them
     XCD_SWIZZLE: bool | None = None
     NUM_KV_SPLITS: int | None = None
@@ -1045,6 +1051,7 @@ _FWD_FALLBACK = Gfx950FwdKnobs(
     STAGGER=True,
     RETURN_LSE="runtime",
     STATIC_WINDOW=False,
+    STATIC_SEQLEN=False,
     XCD_SWIZZLE=False,
     NUM_KV_SPLITS=1,
 )
@@ -1080,6 +1087,7 @@ def fwd_traits(meta: FmhaInputMetadata, knobs: Gfx950FwdKnobs) -> Gfx950Traits:
         vo_shards=knobs.VO_SHARDS,
         window=meta.window,
         static_window=bool(knobs.STATIC_WINDOW),
+        static_seqlen=bool(knobs.STATIC_SEQLEN),
         bias=meta.bias,
         dropout=meta.dropout,
         alibi=meta.alibi,
