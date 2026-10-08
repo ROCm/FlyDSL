@@ -16,7 +16,11 @@ kernels. Model ownership is explicit:
 Reusable contracts and primitives stay at this package root. `config.py`,
 `layout.py`, `ops.py`, `packing.py`, `reference.py`, `runtime.py`, and
 `weights.py` define shared geometry, layouts, device operations, packing, host
-runtime, and weight containers. `gemm_a16w16.py`, `mxfp8_linear.py`, and
+runtime, and weight containers. `helpers.py` holds the helpers the resident
+kernels bind to their own launch state (`bind_helpers`): tagged-pair
+mailboxes, block reductions, MFMA GEMV units, activation staging and task
+placement; GLM, Kimi-K3 MLA and DeepSeek-V4 share it. `gemm_a16w16.py`,
+`mxfp8_linear.py`, and
 `symmetric_allreduce.py` provide model-independent kernels used by the staged
 paths.
 

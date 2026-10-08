@@ -99,6 +99,7 @@ from kernels.monokernel.dsv4.plan import (
     uv_tile,
 )
 from kernels.monokernel.dsv4.qkv import q_b_stage, qkv_stages
+from kernels.monokernel.helpers import SHARED_SOURCE_KEY
 from kernels.monokernel.ops import rsrc, uniform
 
 
@@ -435,9 +436,10 @@ def build_dsv4_kernel(
         # radix-select bins, replicated, plus two words to broadcast the winning digit
         hist: fx.Array[fx.Int32, (TK_BC + 4) if IHD else 1, 16]
 
-    # the stages read this build's constants from bc; _cache_tag puts them in the JIT cache key
+    # the stages read this build's constants from bc; _cache_tag puts them in the JIT cache key,
+    # with the digest of the shared helper sources (outside this directory, so outside the key)
     bc = dict(locals())
-    _cache_tag = tuple(
+    _cache_tag = (SHARED_SOURCE_KEY,) + tuple(
         (n, v) for n, v in sorted(bc.items()) if isinstance(v, (bool, int, float, str, tuple, type(None), enum.Enum))
     )
 
