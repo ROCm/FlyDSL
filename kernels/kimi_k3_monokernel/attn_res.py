@@ -32,8 +32,8 @@ def build_kimi_k3_attn_res(
 ):
     """Build one CTA per sample for AttnRes mixing followed by RMSNorm."""
 
-    if samples not in {1, 2, 4, 8}:
-        raise ValueError(f"samples must be one of {{1, 2, 4, 8}}, got {samples}")
+    if not 1 <= samples <= 32:
+        raise ValueError(f"samples must be in [1, 32], got {samples}")
     if hidden <= 0 or hidden % (2 * _THREADS):
         raise ValueError(f"hidden must be divisible by {2 * _THREADS}, got {hidden}")
     if num_blocks < 0:

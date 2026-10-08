@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import torch
+from kernels.kimi_k3_monokernel.compile_config import KimiK3CompileConfig
 
 from kernels.kimi_k3_monokernel.attn_res import KimiK3AttnRes
 from kernels.kimi_k3_monokernel.kda import KimiK3KdaAttention
@@ -70,6 +71,9 @@ class _KimiK3MlaPath:
         reduce_backend: str = "symmetric",
         kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
         mtp: bool = False,
+        seq_len: int | None = None,
+        compile_config: KimiK3CompileConfig | None = None,
+        full_monokernel: bool = False,
         routed_pipeline: bool = False,
         routed_producers: int | None = None,
         routed_prefetch: int | None = None,
@@ -154,6 +158,8 @@ class _KimiK3MlaPath:
             reduce_backend=reduce_backend,
             kv_cache_layout=kv_cache_layout,
             mtp=mtp,
+            seq_len=seq_len,
+            compile_config=compile_config,
         )
         device = torch.device("cuda", torch.cuda.current_device())
         self.pre_attn = torch.empty(samples, config.hidden, dtype=torch.bfloat16, device=device)
@@ -219,7 +225,7 @@ class _KimiK3MlaPath:
         self.topk_ids = torch.empty(samples, config.top_k, dtype=torch.int32, device=device)
         self.topk_weights = torch.empty(samples, config.top_k, dtype=torch.float32, device=device)
         self.router_select = SigmoidTopkRouter(config.n_experts, config.top_k, samples)
-        self.router_projection = FusedRouterProjection(
+        self.router_projection = None if full_monokernel else FusedRouterProjection(
             config.hidden,
             config.n_experts,
             config.top_k,
@@ -318,8 +324,10 @@ class _KimiK3MlaPath:
         reduce_backend: str,
         kv_cache_layout: KvCacheLayout | str,
         mtp: bool,
+        seq_len: int | None,
+        compile_config: KimiK3CompileConfig | None,
     ):
-        del reduce_group, reduce_backend, mtp
+        del reduce_group, reduce_backend, mtp, seq_len, compile_config
         return KimiK3MlaAttention(
             weights,
             samples,
@@ -775,6 +783,8 @@ class _KimiK3KdaStagedPath(_KimiK3MlaPath):
         reduce_backend: str,
         kv_cache_layout: KvCacheLayout | str,
         mtp: bool,
+        seq_len: int | None,
+        compile_config: KimiK3CompileConfig | None,
     ):
         del topk, kv_cache_layout
         return KimiK3KdaAttention(
@@ -789,6 +799,8 @@ class _KimiK3KdaStagedPath(_KimiK3MlaPath):
             # staged GEMMs retain better occupancy and remain the faster path.
             single_launch_attention=samples <= 4 or mtp,
             mtp=mtp,
+            seq_len=seq_len,
+            compile_config=compile_config,
         )
 
     def forward(

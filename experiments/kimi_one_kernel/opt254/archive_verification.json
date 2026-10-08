@@ -1,0 +1,9 @@
+{
+  "selected_source_files": 145,
+  "historical_source_files": 140,
+  "compiled_shape_configs_matched": 32,
+  "independent_patches_restored": 92,
+  "exact_source_hashes": true,
+  "python_ast_parse": true,
+  "gpu_execution": false
+}

@@ -38,8 +38,8 @@ def build_kimi_k3_tail(
 ):
     """Build the shared-down + latent-up + final all-reduce launcher."""
 
-    if samples not in {1, 2, 4, 8}:
-        raise ValueError(f"samples must be one of {{1, 2, 4, 8}}, got {samples}")
+    if not 1 <= samples <= 32:
+        raise ValueError(f"samples must be in [1, 32], got {samples}")
     if npes != _WAVES:
         raise ValueError(f"fused Kimi-K3 tail requires {_WAVES} peers, got {npes}")
     if hidden % (_ROW_TILE * npes):
@@ -49,7 +49,7 @@ def build_kimi_k3_tail(
     if max_pairs < samples * hidden // 2:
         raise ValueError("symmetric mailbox is too small for the final reduction")
 
-    sample_group = min(samples, _SAMPLES_PER_CTA)
+    sample_group = max(n for n in range(1, min(samples, _SAMPLES_PER_CTA) + 1) if samples % n == 0)
     sample_groups = (samples + sample_group - 1) // sample_group
     row_tiles = hidden // _ROW_TILE
     row_tile_pairs = row_tiles // _TILES_PER_TASK
@@ -61,11 +61,12 @@ def build_kimi_k3_tail(
     latent_chunks_per_wave = (latent_chunks + _WAVES_PER_TILE - 1) // _WAVES_PER_TILE
     output_values = _TILES_PER_TASK * sample_group * _ROW_TILE
     output_pairs = output_values // 2
-    task_rounds = (row_tile_pairs + _BLOCKS - 1) // _BLOCKS
+    tail_blocks = min(_BLOCKS, 256 - samples * (((routed_hidden // 2) + _THREADS - 1) // _THREADS))
+    task_rounds = (row_tile_pairs + tail_blocks - 1) // tail_blocks
     routed_pairs_per_row = routed_hidden // 2
     routed_blocks_per_row = (routed_pairs_per_row + _THREADS - 1) // _THREADS
     routed_blocks = samples * routed_blocks_per_row
-    launch_blocks = _BLOCKS + routed_blocks
+    launch_blocks = tail_blocks + routed_blocks
     if launch_blocks > 256:
         raise ValueError(f"fused tail requires a co-resident grid, got {launch_blocks} blocks")
     slot_bytes = npes * max_pairs * 8
@@ -146,8 +147,8 @@ def build_kimi_k3_tail(
 
         # Extra co-resident CTAs reduce and normalize the routed branch while
         # the regular tail CTAs compute the independent shared projection.
-        if bid >= fx.Int32(_BLOCKS):
-            reduce_bid = bid - fx.Int32(_BLOCKS)
+        if bid >= fx.Int32(tail_blocks):
+            reduce_bid = bid - fx.Int32(tail_blocks)
             sample = reduce_bid // fx.Int32(routed_blocks_per_row)
             block_in_row = reduce_bid % fx.Int32(routed_blocks_per_row)
             pair_in_row = block_in_row * fx.Int32(_THREADS) + tid
@@ -395,7 +396,7 @@ def build_kimi_k3_tail(
             gpu.barrier()
 
             for task_round in range_constexpr(task_rounds):
-                row_tile_pair = bid + task_round * _BLOCKS
+                row_tile_pair = bid + task_round * tail_blocks
                 if row_tile_pair < row_tile_pairs:
                     row_tile_base = row_tile_pair * _TILES_PER_TASK
                     sample = fx.min(lane % 16, sample_group - 1)

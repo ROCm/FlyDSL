@@ -4,11 +4,13 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 KERNEL = 'kernels/kimi_k3_monokernel/kernel.py'
+HISTORICAL_REVISION = '8137256d25ccea61eeca4f43d26fc3aad280cb1d'
 
 
 def sha(data):
@@ -48,8 +50,34 @@ def restore(base, patch, changes):
 
 
 def main():
+    # The September patches retain their original base after promoting Opt254.
+    current = json.loads((ROOT / 'opt254/source_manifest.json').read_text())
+    for name, digest in current['files'].items():
+        data = (REPO / name).read_bytes()
+        assert sha(data) == digest, name
+        ast.parse(data, filename=name)
+    for name, digest in current['supporting_files'].items():
+        assert sha((ROOT / 'opt254' / name).read_bytes()) == digest, name
+    sys.path.insert(0, str(REPO))
+    from dataclasses import asdict
+    from kernels.kimi_k3_monokernel.compile_config import KimiK3CompileConfig
+
+    shapes = json.loads((ROOT / 'opt254/compiled_shapes.json').read_text())
+    assert len(shapes) == 32
+    assert {(row['batch'], row['seq']) for row in shapes} == {
+        (batch, seq) for batch in range(1, 9) for seq in range(1, 5)
+    }
+    for row in shapes:
+        batch, seq = row['batch'], row['seq']
+        resolved = KimiK3CompileConfig().resolve(batch * seq, seq > 1, seq)
+        assert asdict(resolved) == row['specialization'], (batch, seq)
+        assert resolved.grid_blocks == row['grid_blocks']
+
     manifest = json.loads((ROOT / 'selected_source_manifest.json').read_text())
-    selected = {name: (REPO / name).read_bytes() for name in manifest['files']}
+    selected = {
+        name: subprocess.check_output(['git', 'show', f'{HISTORICAL_REVISION}:{name}'], cwd=REPO)
+        for name in manifest['files']
+    }
     assert hashes(selected) == manifest['files']
     for name, data in selected.items():
         ast.parse(data, filename=name)
@@ -75,7 +103,8 @@ def main():
         restored = restore(base, ROOT / 'batch_seq_draft' / (source['source'] + '.patch'), source['changed_files'])
         assert hashes(restored) == source['target_files']
         patch_count += 1
-    print(json.dumps(dict(selected_source_files=len(selected), independent_patches_restored=patch_count,
+    print(json.dumps(dict(selected_source_files=len(current['files']), historical_source_files=len(selected),
+                          compiled_shape_configs_matched=len(shapes), independent_patches_restored=patch_count,
                           exact_source_hashes=True, python_ast_parse=True, gpu_execution=False), indent=2))
 
 

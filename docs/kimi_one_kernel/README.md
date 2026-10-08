@@ -1,84 +1,87 @@
-# K3 one-kernel 优化归档
+# Kimi-K3 one-kernel 当前版本
 
-2026-09-29，按用户要求暂停优化和测试，整理到 `codex/kimi-k3_one_kernel`。
-分支基点为 `3563ef29b7c9f9030e5f9645940948299b03ca46`。原 `codex/kimi-k3-mtp-tuning` 工作区及其未提交文件保持不变。
+本分支 `codex/kimi-k3_one_kernel` 已迁入 session
+`01a10f4c-f6ac-7563-ad99-faf460c01281` 最终保留的
+`opt254_swizzled_input_lds_s4`。145 个 kernel Python 文件与该实验快照逐字节一致，
+包含完整 kernel、host wrapper、权重打包、编译期配置和 reference 修正。
+Opt293/294 未获得稳定性能收益，未纳入此版本。
 
-## 当前启用版本
+入口为 [KimiK3MonoKernel](../../kernels/kimi_k3_monokernel/op.py)，
+支持 TP8、batch 1–8、seq 1–4 的完整 KDA MoE layer 单次 launch。
+`samples = batch * seq`；`seq_len` 指定每个独立状态链的连续 token 数，
+`seq > 1` 使用 MTP 状态快照。`KimiK3CompileConfig(path="auto")`
+在编译期隔离 small_batch/general 路径，默认选择已验证配置。
+性能与完整精度覆盖针对 layer 1；layer 0 dense FFN 不在范围内。
 
-当前 [kernel.py](../../kernels/kimi_k3_monokernel/kernel.py) 精确恢复 `tail_rotate192_downsplit_events`。
-全部140个kernel Python文件与该实验快照逐字节一致；kernel SHA256：
-`cd72bbdffb19c4bad0c21257aa9e8bb0a678701f680176b88030af4f7033a0da`。
+## 已验证性能
 
-本分支入口仍限定完整融合实验为 TP8、B1/S4 true MTP。16组合的batch/seq草稿作为补丁保存，未应用到运行源码。
+MI355X 节点46、TP8、完整 layer 1、无插桩 GPU-event 计时，graph16/repeats50；
+每个 repeat 取最慢 rank，再取中位数。配对 seeds 为 1234/2025/3141。
 
-## 性能与证据范围
+| 形状 | 保留耗时 μs | 依据 |
+|---|---:|---|
+| B1/S1 | 71.826909 | 沿用与 Opt198/229 完全相同的二进制及已验证计时 |
+| B1/S4 | 114.204876 | Opt254 三 seed 独立确认；首轮为 113.974907 |
 
-节点46，TP8，S4 true MTP，layer1，16层graph、50 repeats，无插桩GPU-event计时；每次取最慢rank，随后取中位数。
-当前轮只有seed1234筛选，没有完成新的三seed配对。
+Opt254 相对同期 Opt229 的 S4 首轮及独立确认共六组配对均有正收益，
+但幅度很小（0.006–0.855 μs）。不同轮次的绝对数值不能作为配对收益。
+B1/S1 60 μs 阶段目标以及原 40/70 μs 目标均未达到。
 
-| 同轮来源 | 完整层耗时 μs |
-|---|---:|
-| 前一版 front_wave_pf7_recur_events | 127.111405 |
-| 当前 tail_rotate192_downsplit_events | 119.808812 |
-| staged / 7-kernel | 128.750190 |
-| staged × 0.90 目标 | 115.875171 |
+32 个形状全部编译，31 个非 B1/S4 二进制与 Opt229 一致。
+结合继承的原始记录和 Opt254 的六 seed 严格回放，覆盖
+192 cases、1536 rank checks、26496 records；精度阈值未放宽。
+B1/S1/B1/S4 分别使用 111/123 VGPR、24064/67456 B LDS，
+private/VGPR 显存 spill 为零，八卡完整网格驻留检查通过。
 
-当前筛选结果相对staged降低6.94475%，10%目标尚未达到，仍差3.93364 μs。
-最后完成三seed配对的版本是 `front_wave_pf7_recur_events`，126.16–127.12 μs；这些数据来自不同轮次，不能跨轮直接当作配对比较。
+## 运行与复核
 
-当前快照的144条阶段回放指标与前一版一致，严格routing和slot重放检查保持通过。
-既有端到端诊断偏差仍存在：attention relL2最大0.002040724、recurrent snapshot最大0.000779645；阶段回放通过不能说明这两个偏差已修复，阈值没有放宽。
-资源：121 VGPR，LDS67456 bytes，private scratch0，实际2 CTA/CU。精确结果见
-[选用记录](../../experiments/kimi_one_kernel/evidence/tail/selected_candidate_node46.json)和
-[原始计时/检查数据](../../experiments/kimi_one_kernel/evidence/tail/raw/)。
+在配置好 gfx950 FlyDSL/PyTorch 的八卡环境、确认设备空闲并完成对应二进制的
+资源与完整网格驻留检查后，从仓库根目录运行：
 
-## 按方向的提交
+```bash
+PYTHONPATH="$PWD/experiments/kimi_one_kernel/opt254${PYTHONPATH:+:$PYTHONPATH}" \
+python -m kernels.kimi_k3_monokernel.tools.monokernel \
+  --batch 1 --seq 1 --layer-idx 1 --seed 1234 --check --full-replay-check \
+  --bench --layers 16 --repeats 50 --output /tmp/kimi_b1_s1.json
+```
 
-下列14个提交保存实现、验证或独立实验方向；随后还有一条归档索引与完整性校验提交。
+改为 `--seq 4` 可运行 B1/S4。严格回放使用此目录中封存的 `full_replay.py`；
+必须保留上述 PYTHONPATH，使入口加载与历史验证相同的 oracle。
+其他五个精度种子为 2025、3141、4242、5678、9999。
+编译和驻留工具位于 [opt254](../../experiments/kimi_one_kernel/opt254/)，例如：
 
-| Commit | 方向 |
-|---|---|
-| `ea2f6809` | staged / routed-pipeline基础快照 |
-| `6f4ee6e1` | 计时与完整重放验证 |
-| `7098c085` | recurrence CTA重排、batched tail |
-| `06edcf13` | projection split-K4、UG32及服务CTA |
-| `93ab0a81` | 严格selector原生wave归约 |
-| `a7b56f42` | 前端预取、wave协作读取统计 |
-| `7f8dbc3a` | recurrence无状态计算提前 |
-| `db1a414f` | tail先全部发送再收集 |
-| `49b148b5` | rank相对tail旋转 |
-| `5f8af0f6` | down先全部发送再收集（当前选用） |
-| `e88c80eb` | latent预取实验归档 |
-| `2fa685c2` | UG预取 / 联合发布实验归档 |
-| `da966abd` | 向量搬运 / 编译器调度实验归档 |
-| `cfc6142c` | batch/seq未编译草稿归档 |
+```bash
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
+FLYDSL_RUNTIME_CACHE_DIR=/tmp/kimi_opt254_b1_s1_cache \
+python experiments/kimi_one_kernel/opt254/compile_shape.py \
+  --batch 1 --seq 1 --out /tmp/kimi_opt254_b1_s1_resources
+python experiments/kimi_one_kernel/opt254/check_shape_occupancy.py \
+  /tmp/kimi_opt254_b1_s1_resources
+```
 
-实际运行源码按上述实现提交逐步演进，最终停在已测tail/down版本。实验归档提交仅加入补丁和证据，不改变选用kernel。
+每个编译形状使用独立的空缓存目录。重新编译后的资源或二进制可能受工具链影响，
+历史驻留证据不能代替新二进制的检查。
 
-## 历史实验与未完成工作
-
-[experiments/kimi_one_kernel](../../experiments/kimi_one_kernel/) 保存90个独立历史源码补丁及2个batch/seq草稿补丁。
-历史补丁统一以当前选用源码为基底，可能回退后续优化以精确恢复当时版本，不能依次叠加。每个方向的manifest记录来源、文件前后SHA256、整树指纹及已有验证。
-
-- latent首批预取 / norm gain：pf7的单轮差异只有0.0025 μs，未作为收益启用。
-- UG pf1/pf2、联合发布：实现候选已有回放，但性能筛选未完成；相关新增profile只有编译证据。
-- raw BF16向量搬运、编译器调度屏障：仅compile-only；未补做HIP occupancy、回放或性能测试。
-- batch∈{1,2,4,8}、seq∈{1,2,3,4}：解释为独立状态链数×每链连续token数。草稿未编译、未运行、无性能矩阵；已发现MXFP8 projection缺少16行之后的row tile，其他布局/覆盖/依赖审计未完成。详见[草稿状态](../../experiments/kimi_one_kernel/batch_seq_draft/status.json)。
-
-原始大体积GPU二进制、缓存、完整逐CTA profile和压缩包继续留在外部results目录。提交的profile摘要保留聚合数据及原始文件SHA256/路径，避免把数十MB逐CTA明细放入Git。
-旧报告与historical脚本保留原实验路径语义，用于追溯；不把它们当作无需配置即可重跑的便携入口。
-
-## 本次归档校验
-
-这次没有新增GPU运行或编译。仅进行CPU静态与归档完整性检查：
-140个运行源码文件一致、92个独立补丁可应用并精确还原目标文件/整树指纹、所有归档Python可解析，原工作区155个文件及Git状态保持不变。
-节点46没有本任务遗留的GPU工作或等待控制器；SSH已退出。
-
-复核归档无需GPU或FlyDSL：
+本次提交迁移未新增 GPU 测量；CPU 复核检查源文件身份、32 个配置与封存编译记录一致、
+旧归档补丁可还原，以及历史原始精度/计时/二进制证据。
+仓库内源码和归档的复核命令不需要 GPU 或 FlyDSL：
 
 ```bash
 python3 experiments/kimi_one_kernel/verify_archive.py
 ```
 
-[机器可读校验](../../experiments/kimi_one_kernel/archive_verification.json)记录这次检查范围。
-此分支为本地提交，尚未push；后续恢复优化前应重新确认节点空闲及既定验证门槛。
+[源码 manifest](../../experiments/kimi_one_kernel/opt254/source_manifest.json)、
+[选择记录](../../experiments/kimi_one_kernel/opt254/CURRENT_SELECTION.json)、
+[完整功能覆盖](../../experiments/kimi_one_kernel/opt254/opt254_inheritance_validation.json)及
+[性能验证](../../experiments/kimi_one_kernel/opt254/opt254_validation.json)保留原始记录。
+其中 `repository_checkout_changed: false` 等字段描述实验采用时的状态，
+并非本次迁入 Git 后的状态。
+
+原始二进制、逐 rank 回放、逐次 event 计时和压缩包保留在工作区的
+`../results/kimi_shapes_20261006/`（相对于此仓库根目录）；46 容器路径为
+`/tmp/flydsl-kimi-shapes-20261006/`。
+压缩包摘要见上述验证记录，Git 中仅保留源码、工具及可审阅的证据摘要。
+
+[2026-09-29 历史归档](archive_20260929.md)中的 92 个补丁仍以
+`8137256d25ccea61eeca4f43d26fc3aad280cb1d` 为基底，不能直接叠加到 Opt254。
+归档校验器通过 Git 中该提交还原旧基底，同时校验当前 Opt254 源码。

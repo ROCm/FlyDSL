@@ -1,0 +1,588 @@
+{
+  "passed": true,
+  "compile_resources": 7,
+  "identical_controls": 6,
+  "admitted": [
+    "opt229_cta_local_qkd_s4",
+    "opt254_swizzled_input_lds_s4"
+  ],
+  "strict": {
+    "opt254_swizzled_input_lds_s4": {
+      "passed": true,
+      "rank_checks": 48,
+      "records": 864,
+      "failures": []
+    }
+  },
+  "event_jobs": 12,
+  "phases": [
+    {
+      "phase": "first",
+      "medians_us": {
+        "opt254_swizzled_input_lds_s4": 113.9749065041542,
+        "opt229_cta_local_qkd_s4": 114.11237716674805
+      },
+      "baseline_minus_candidate_us": {
+        "opt254_swizzled_input_lds_s4": [
+          0.006254762411117554,
+          0.2712830901145935,
+          0.8549690246582031
+        ]
+      }
+    },
+    {
+      "phase": "confirmation",
+      "medians_us": {
+        "opt254_swizzled_input_lds_s4": 114.20487612485886,
+        "opt229_cta_local_qkd_s4": 114.21487480401993
+      },
+      "baseline_minus_candidate_us": {
+        "opt254_swizzled_input_lds_s4": [
+          0.009998679161071777,
+          0.18003582954406738,
+          0.145692378282547
+        ]
+      }
+    }
+  ],
+  "counters": {
+    "caveats": [
+      "Counter collection perturbs cross-rank timing; profiled duration is not headline performance.",
+      "Counter totals are not directly convertible to removable critical-path time.",
+      "Profiler VGPR/SGPR/LDS metadata is retained verbatim; occupancy uses compiler metadata and HIP queries."
+    ],
+    "external_profiler": true,
+    "full_layer_jobs": 4,
+    "graph_dispatches": 2560,
+    "no_performance_claim": true,
+    "passed": true,
+    "rows": [
+      {
+        "all_dispatches_per_process": [
+          151,
+          151,
+          151,
+          151,
+          151,
+          151,
+          151,
+          151
+        ],
+        "counters": {
+          "SQ_INSTS_LDS": {
+            "max": 747048.0,
+            "median": 747048.0,
+            "min": 747048.0
+          },
+          "SQ_LDS_BANK_CONFLICT": {
+            "max": 2411392.0,
+            "median": 2411392.0,
+            "min": 2411392.0
+          },
+          "SQ_WAIT_INST_LDS": {
+            "max": 649180.0,
+            "median": 417065.5,
+            "min": 393216.0
+          },
+          "SQ_WAVES": {
+            "max": 4096.0,
+            "median": 4096.0,
+            "min": 4096.0
+          }
+        },
+        "graph_dispatch_range_zero_based": [
+          35,
+          115
+        ],
+        "graph_dispatches": 640,
+        "job": "opt254_opt229_cta_local_qkd_s4_lds_seed1234",
+        "no_performance_claim": true,
+        "profiled_kernel_duration_us": {
+          "max": 235.043,
+          "median": 123.8415,
+          "min": 113.162
+        },
+        "profiler_reported_resources": [
+          {
+            "Agent_Id": "Agent 2",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859415",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 3",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859416",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 4",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859417",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 7",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859420",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 9",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859422",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 8",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859421",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 5",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859418",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 6",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859419",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          }
+        ],
+        "seed": 1234,
+        "seq": 4,
+        "source": "opt229_cta_local_qkd_s4"
+      },
+      {
+        "all_dispatches_per_process": [
+          151,
+          151,
+          151,
+          151,
+          151,
+          151,
+          151,
+          151
+        ],
+        "counters": {
+          "SQ_INSTS_LDS": {
+            "max": 755048.0,
+            "median": 755048.0,
+            "min": 755048.0
+          },
+          "SQ_LDS_BANK_CONFLICT": {
+            "max": 1336192.0,
+            "median": 1336192.0,
+            "min": 1336192.0
+          },
+          "SQ_WAIT_INST_LDS": {
+            "max": 569506.0,
+            "median": 473682.5,
+            "min": 447167.0
+          },
+          "SQ_WAVES": {
+            "max": 4096.0,
+            "median": 4096.0,
+            "min": 4096.0
+          }
+        },
+        "graph_dispatch_range_zero_based": [
+          35,
+          115
+        ],
+        "graph_dispatches": 640,
+        "job": "opt254_opt254_swizzled_input_lds_s4_lds_seed1234",
+        "no_performance_claim": true,
+        "profiled_kernel_duration_us": {
+          "max": 191.522,
+          "median": 124.92150000000001,
+          "min": 111.801
+        },
+        "profiler_reported_resources": [
+          {
+            "Agent_Id": "Agent 8",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859552",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 2",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859546",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 6",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859550",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 3",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859547",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 5",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859549",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 9",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859553",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 7",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859551",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 4",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859548",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          }
+        ],
+        "seed": 1234,
+        "seq": 4,
+        "source": "opt254_swizzled_input_lds_s4"
+      },
+      {
+        "all_dispatches_per_process": [
+          151,
+          151,
+          151,
+          151,
+          151,
+          151,
+          151,
+          151
+        ],
+        "counters": {
+          "SQ_INSTS_LDS": {
+            "max": 755816.0,
+            "median": 755816.0,
+            "min": 755816.0
+          },
+          "SQ_LDS_BANK_CONFLICT": {
+            "max": 1337728.0,
+            "median": 1337728.0,
+            "min": 1337728.0
+          },
+          "SQ_WAIT_INST_LDS": {
+            "max": 499550.0,
+            "median": 474286.0,
+            "min": 448763.0
+          },
+          "SQ_WAVES": {
+            "max": 4096.0,
+            "median": 4096.0,
+            "min": 4096.0
+          }
+        },
+        "graph_dispatch_range_zero_based": [
+          35,
+          115
+        ],
+        "graph_dispatches": 640,
+        "job": "opt254_opt254_swizzled_input_lds_s4_lds_seed3141",
+        "no_performance_claim": true,
+        "profiled_kernel_duration_us": {
+          "max": 410.525,
+          "median": 123.741,
+          "min": 113.121
+        },
+        "profiler_reported_resources": [
+          {
+            "Agent_Id": "Agent 2",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859682",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 3",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859683",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 6",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859686",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 7",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859687",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 5",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859685",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 4",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859684",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 9",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859689",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 8",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859688",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          }
+        ],
+        "seed": 3141,
+        "seq": 4,
+        "source": "opt254_swizzled_input_lds_s4"
+      },
+      {
+        "all_dispatches_per_process": [
+          151,
+          151,
+          151,
+          151,
+          151,
+          151,
+          151,
+          151
+        ],
+        "counters": {
+          "SQ_INSTS_LDS": {
+            "max": 747816.0,
+            "median": 747816.0,
+            "min": 747816.0
+          },
+          "SQ_LDS_BANK_CONFLICT": {
+            "max": 2412928.0,
+            "median": 2412928.0,
+            "min": 2412928.0
+          },
+          "SQ_WAIT_INST_LDS": {
+            "max": 517135.0,
+            "median": 421806.0,
+            "min": 394036.0
+          },
+          "SQ_WAVES": {
+            "max": 4096.0,
+            "median": 4096.0,
+            "min": 4096.0
+          }
+        },
+        "graph_dispatch_range_zero_based": [
+          35,
+          115
+        ],
+        "graph_dispatches": 640,
+        "job": "opt254_opt229_cta_local_qkd_s4_lds_seed3141",
+        "no_performance_claim": true,
+        "profiled_kernel_duration_us": {
+          "max": 229.243,
+          "median": 118.381,
+          "min": 112.041
+        },
+        "profiler_reported_resources": [
+          {
+            "Agent_Id": "Agent 3",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859814",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 7",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859818",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 4",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859815",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 9",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859820",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 8",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859819",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 5",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859816",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 6",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859817",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          },
+          {
+            "Agent_Id": "Agent 2",
+            "LDS_Block_Size": "67584",
+            "Process_Id": "859813",
+            "SGPR_Count": "112",
+            "Scratch_Size": "0",
+            "VGPR_Count": "64"
+          }
+        ],
+        "seed": 3141,
+        "seq": 4,
+        "source": "opt229_cta_local_qkd_s4"
+      }
+    ],
+    "selection_changed": false,
+    "strict_rank_checks": 32,
+    "strict_records": 576,
+    "swizzle_pairs": [
+      {
+        "counters": {
+          "SQ_INSTS_LDS": {
+            "baseline": 747048.0,
+            "baseline_minus_candidate": -8000.0,
+            "candidate": 755048.0,
+            "candidate_over_baseline": 1.010708816568681
+          },
+          "SQ_LDS_BANK_CONFLICT": {
+            "baseline": 2411392.0,
+            "baseline_minus_candidate": 1075200.0,
+            "candidate": 1336192.0,
+            "candidate_over_baseline": 0.5541164605339987
+          },
+          "SQ_WAIT_INST_LDS": {
+            "baseline": 417065.5,
+            "baseline_minus_candidate": -56617.0,
+            "candidate": 473682.5,
+            "candidate_over_baseline": 1.1357508592774996
+          },
+          "SQ_WAVES": {
+            "baseline": 4096.0,
+            "baseline_minus_candidate": 0.0,
+            "candidate": 4096.0,
+            "candidate_over_baseline": 1.0
+          }
+        },
+        "seed": 1234
+      },
+      {
+        "counters": {
+          "SQ_INSTS_LDS": {
+            "baseline": 747816.0,
+            "baseline_minus_candidate": -8000.0,
+            "candidate": 755816.0,
+            "candidate_over_baseline": 1.0106978187147642
+          },
+          "SQ_LDS_BANK_CONFLICT": {
+            "baseline": 2412928.0,
+            "baseline_minus_candidate": 1075200.0,
+            "candidate": 1337728.0,
+            "candidate_over_baseline": 0.5544002970664687
+          },
+          "SQ_WAIT_INST_LDS": {
+            "baseline": 421806.0,
+            "baseline_minus_candidate": -52480.0,
+            "candidate": 474286.0,
+            "candidate_over_baseline": 1.1244173861917564
+          },
+          "SQ_WAVES": {
+            "baseline": 4096.0,
+            "baseline_minus_candidate": 0.0,
+            "candidate": 4096.0,
+            "candidate_over_baseline": 1.0
+          }
+        },
+        "seed": 3141
+      }
+    ]
+  },
+  "selection_changed": false,
+  "goal_complete": false,
+  "archive_sha256": "138413a2ceeb5c04dd075372ad8467e57de7a513b99b242e1a46207a65d96297"
+}

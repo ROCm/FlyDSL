@@ -20,6 +20,7 @@ import torch.multiprocessing as mp
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from kernels.kimi_k3_monokernel.compile_config import KimiK3CompileConfig
 from kernels.kimi_k3_monokernel.kda import KimiK3KdaAttention  # noqa: E402
 from kernels.kimi_k3_monokernel.kernel import monokernel_layout  # noqa: E402
 from kernels.kimi_k3_monokernel.op import KimiK3MonoKernel  # noqa: E402
@@ -101,6 +102,8 @@ def _worker(rank: int, args, port: int, results) -> None:
             reduce_group=reduce_group,
             reduce_backend=args.reduce_backend,
             mtp=args.mtp,
+            seq_len=args.seq,
+            compile_config=KimiK3CompileConfig(path=args.compile_path, input_mfma=args.input_mfma, input_schedule=args.input_schedule, gate_schedule=args.gate_schedule, route_publication=args.route_publication, output_prefetch_units=None if args.output_prefetch_units == 'auto' else int(args.output_prefetch_units)),
         )
     elif args.staged:
         layer = _KimiK3KdaStagedPath(
@@ -116,6 +119,8 @@ def _worker(rank: int, args, port: int, results) -> None:
             fuse_shared_experts=not args.eager_shared_experts,
             reduce_backend=args.reduce_backend,
             mtp=args.mtp,
+            seq_len=args.seq,
+            compile_config=KimiK3CompileConfig(path=args.compile_path, input_mfma=args.input_mfma, input_schedule=args.input_schedule, gate_schedule=args.gate_schedule, route_publication=args.route_publication, output_prefetch_units=None if args.output_prefetch_units == 'auto' else int(args.output_prefetch_units)),
             routed_pipeline=args.routed_pipeline,
             routed_producers=args.routed_producers,
             routed_prefetch=args.routed_prefetch,
@@ -137,6 +142,8 @@ def _worker(rank: int, args, port: int, results) -> None:
             group=dist.group.WORLD,
             reduce_group=reduce_group,
             mtp=args.mtp,
+            seq_len=args.seq,
+            compile_config=KimiK3CompileConfig(path=args.compile_path, input_mfma=args.input_mfma, input_schedule=args.input_schedule, gate_schedule=args.gate_schedule, route_publication=args.route_publication, output_prefetch_units=None if args.output_prefetch_units == 'auto' else int(args.output_prefetch_units)),
         )
 
     generator = torch.Generator(device=device).manual_seed(args.seed + 99)
@@ -156,9 +163,10 @@ def _worker(rank: int, args, port: int, results) -> None:
         device=device,
         dtype=torch.bfloat16,
     )
-    slots = args.samples + 3
-    state_count = args.samples + 1 if args.mtp else args.samples
-    state_indices = torch.arange(state_count, device=device, dtype=torch.int32)
+    slot_stride = 7 if args.full_replay_check else args.seq + 3
+    slots = args.batch * slot_stride
+    state_count = args.batch * (args.seq + 1) if args.mtp else args.samples
+    state_indices = torch.tensor([b * slot_stride + t for b in range(args.batch) for t in range(args.seq + 1)], device=device, dtype=torch.int32) if args.mtp else torch.arange(state_count, device=device,dtype=torch.int32)
     if args.samples > 1 and not args.mtp:
         state_indices.copy_(torch.roll(state_indices, 1) + 1)
     if args.negative_slot and args.mtp:
@@ -225,6 +233,9 @@ def _worker(rank: int, args, port: int, results) -> None:
         "layer_idx": args.layer_idx,
         "reduce_backend": args.reduce_backend,
         "mtp": args.mtp,
+        "batch": args.batch,
+            "compile_path": args.compile_path,
+        "seq": args.seq,
         "routed_pipeline": args.routed_pipeline,
         "routed_tp_mode": args.routed_tp_mode if args.routed_pipeline else None,
         "benchmark_scope": "moe" if args.moe_only_bench else "layer",
@@ -277,6 +288,7 @@ def _worker(rank: int, args, port: int, results) -> None:
                 reference_recurrent,
                 lambda value: _allreduce_reference(value, args.npes),
                 mtp=args.mtp,
+                seq_len=args.seq,
             )
             result.update(
                 attention_rel_l2=_relative_l2(output, reference["output"]),
@@ -294,6 +306,7 @@ def _worker(rank: int, args, port: int, results) -> None:
                 lambda value: _allreduce_reference(value, args.npes),
                 layer_idx=args.layer_idx,
                 mtp=args.mtp,
+                seq_len=args.seq,
             )
             projection_states = quant_dequant_mxfp8(layer.moe_input).to(torch.bfloat16)
             expected_activation, expected_activation_scale = quantize_mxfp8(layer.moe_input)
@@ -625,6 +638,9 @@ def _worker(rank: int, args, port: int, results) -> None:
             "model": "kimi_k3",
             "npes": args.npes,
             "samples": args.samples,
+            "batch": args.batch,
+            "compile_path": args.compile_path,
+            "seq": args.seq,
             **result,
             "all_ranks": all_results,
         }
@@ -642,7 +658,7 @@ def _worker(rank: int, args, port: int, results) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--npes", type=int, choices=(8,), default=8)
-    parser.add_argument("--samples", type=int, choices=(1, 2, 4, 8), default=1)
+    parser.add_argument("--samples", type=int, choices=range(1, 33), default=None)
     parser.add_argument("--layer-idx", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--attention-only", action="store_true")
@@ -685,9 +701,31 @@ def main() -> int:
     parser.add_argument("--dump-ir-dir")
     parser.add_argument("--output")
     parser.add_argument("--full-replay-check", action="store_true")
+    parser.add_argument("--compile-path", choices=("auto", "small_batch", "general"), default="auto")
+    parser.add_argument("--input-mfma", choices=("auto", "f32", "bf16_k16"), default="auto")
+    parser.add_argument("--input-schedule", choices=("auto", "cta", "flat"), default="auto")
+    parser.add_argument('--gate-schedule', choices=('auto', 'serial', 'overlap'), default='auto')
+    parser.add_argument('--route-publication', choices=('auto', 'stream', 'wave'), default='auto')
+    parser.add_argument("--batch", type=int, choices=range(1, 9))
+    parser.add_argument("--seq", type=int, choices=(1,2,3,4))
+    parser.add_argument('--output-prefetch-units', choices=('auto', '0', '1', '6'), default='auto')
     args = parser.parse_args()
-    if args.full_replay_check and not (args.check and args.mtp and args.samples == 4 and not args.staged and not args.attention_only):
-        parser.error("Full replay check requires complete S4 MTP MonoKernel --check")
+    explicit_shape = args.batch is not None or args.seq is not None
+    if explicit_shape:
+        args.batch = args.batch or 1
+        args.seq = args.seq or 1
+        if args.samples is not None and args.samples != args.batch * args.seq:
+            parser.error("samples must equal batch * seq")
+        args.samples = args.batch * args.seq
+        args.mtp = args.mtp or args.seq > 1
+    else:
+        args.samples = args.samples or 1
+        args.batch = 1 if args.mtp else args.samples
+        args.seq = args.samples if args.mtp else 1
+    if not 1 <= args.batch <= 8 or not 1 <= args.seq <= 4:
+        parser.error("batch must be in [1, 8] and seq in [1, 4]")
+    if args.full_replay_check and not (args.check and not args.staged and not args.attention_only):
+        parser.error("Full replay check requires the complete MonoKernel with --check")
     if args.routed_route_prefetch and not args.routed_pipeline:
         parser.error("--routed-route-prefetch requires --routed-pipeline")
     if args.routed_soft_profile and (not args.routed_pipeline or not args.bench or not args.soft_output_dir):

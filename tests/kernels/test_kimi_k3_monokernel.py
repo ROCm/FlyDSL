@@ -145,6 +145,10 @@ def test_kimi_k3_monokernel_mtp_tp8(samples: int) -> None:
         "--layer-idx",
         "1",
         "--mtp",
+        "--batch",
+        str(samples // 4),
+        "--seq",
+        "4",
         "--check",
     )
     assert result["mtp"] is True

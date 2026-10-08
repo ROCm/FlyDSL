@@ -11,12 +11,16 @@ if TYPE_CHECKING:
     from kernels.kimi_k3_monokernel.op import KimiK3MonoKernel
     from kernels.monokernel.weights import LayerWeights
 
-__all__ = ["KimiK3MonoKernel", "LayerWeights"]
+__all__ = ["KimiK3MonoKernel", "KimiK3CompileConfig", "LayerWeights"]
 
 
 def __getattr__(name: str):
     """Load GPU wrappers only when callers request them."""
 
+    if name == "KimiK3CompileConfig":
+        from kernels.kimi_k3_monokernel.compile_config import KimiK3CompileConfig
+
+        return KimiK3CompileConfig
     if name == "KimiK3MonoKernel":
         from kernels.kimi_k3_monokernel.op import KimiK3MonoKernel
 

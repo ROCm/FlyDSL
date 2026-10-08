@@ -13,6 +13,7 @@ own shard.
 from __future__ import annotations
 
 import torch
+from kernels.kimi_k3_monokernel.shapes import resolve_sequence_shape
 
 from kernels.monokernel.config import (
     EPS,
@@ -322,7 +323,8 @@ def route(scores: torch.Tensor, bias: torch.Tensor, config: LayerConfig = GLM5_C
         key = (okey & 0xFFFFFF00) | (255 - torch.arange(config.n_experts, device=scores.device))
         idx = torch.argsort(key, descending=True)[: config.top_k]
     else:
-        idx = torch.topk(scores.float() + bias.float(), config.top_k, sorted=True).indices
+        # Match the documented lower-index tie break for all 896 experts.
+        idx = torch.argsort(scores.float() + bias.float(), descending=True, stable=True)[: config.top_k]
     p = scores[idx]
     return idx, p / p.sum() * config.route_scale
 
@@ -530,6 +532,7 @@ def golden_kimi_k3_kda_attention(
     allreduce,
     *,
     mtp: bool = False,
+    seq_len: int | None = None,
 ):
     """Torch golden for independent decode samples or one ordered MTP group.
 
@@ -553,13 +556,15 @@ def golden_kimi_k3_kda_attention(
     gate = bf(f_a.float() @ t["w_kda_fb"].float().T).view(-1, heads, head_dim)
     recurrence_output = torch.zeros_like(gate)
 
-    expected_indices = hidden_states.shape[0] + int(mtp)
+    _, seq_len = resolve_sequence_shape(hidden_states.shape[0], mtp, seq_len)
+    expected_indices = hidden_states.shape[0] + (hidden_states.shape[0] // seq_len if mtp else 0)
     if state_indices.shape != (expected_indices,):
         raise ValueError(f"state_indices must have shape [{expected_indices}] when mtp={mtp}")
 
     for sample in range(hidden_states.shape[0]):
-        input_slot = int(state_indices[sample])
-        output_slot = int(state_indices[sample + 1]) if mtp else input_slot
+        chain_index = sample + sample // seq_len if mtp else sample
+        input_slot = int(state_indices[chain_index])
+        output_slot = int(state_indices[chain_index + 1]) if mtp else input_slot
         if input_slot < 0 or output_slot < 0:
             continue
         previous_conv = conv_state[input_slot].float()
@@ -618,6 +623,7 @@ def golden_kimi_k3_kda_layer(
     *,
     layer_idx: int,
     mtp: bool = False,
+    seq_len: int | None = None,
 ):
     """Full Kimi-K3 KDA + attention-residual + latent-MoE decode golden."""
 
@@ -647,6 +653,7 @@ def golden_kimi_k3_kda_layer(
         recurrent_state,
         allreduce,
         mtp=mtp,
+        seq_len=seq_len,
     )
     attention_delta = attention["output"]
     post_prefix = attention_delta if write_block else prefix_sum

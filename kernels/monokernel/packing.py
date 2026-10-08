@@ -187,3 +187,17 @@ def pack_layer_weights(
         pack_bf16_atom(tensors["w_r"]) if router_layout is RouterWeightLayout.ATOM else pack_bf16(tensors["w_r"])
     )
     return packed
+
+
+def pack_mxfp4_native_ug(q: torch.Tensor) -> torch.Tensor:
+    """Pack unchanged MXFP4 bytes for one native K128 UG vector load."""
+
+    q = q.view(torch.uint8)
+    *lead, rows, packed_k = q.shape
+    k = packed_k * 2
+    if rows % 16 or k % 128:
+        raise ValueError(f"MXFP4 matrix dimensions must be divisible by (16, 128), got {(rows, k)}")
+    w4 = q.reshape(*lead, rows // 16, 16, k // 128, 4, 4, 4).view(torch.int32).squeeze(-1)
+    nlead = len(lead)
+    order = list(range(nlead)) + [nlead + position for position in (0, 2, 3, 1, 4)]
+    return w4.permute(*order).contiguous().view(torch.uint8).view(-1)

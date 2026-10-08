@@ -29,8 +29,8 @@ _FP8_INV_MAX_POS_BITS = 0x3B124925
 def build_mxfp8_quantize(rows: int, cols: int):
     """Build BF16 -> row-major MXFP8 quantization with preshuffled E8M0 scales."""
 
-    if rows not in {1, 2, 4, 8}:
-        raise ValueError(f"rows must be one of {{1, 2, 4, 8}}, got {rows}")
+    if not 1 <= rows <= 32:
+        raise ValueError(f"rows must be in [1, 32], got {rows}")
     if cols <= 0 or cols % 256:
         raise ValueError(f"cols must be a positive multiple of 256, got {cols}")
     scale_cols = cols // _GROUP
@@ -131,18 +131,21 @@ def build_mxfp8_quantize(rows: int, cols: int):
 def build_mxfp8_project(rows: int, n: int, k: int):
     """Build a low-row MXFP8 GEMM specialized for decode projections."""
 
-    if rows not in {1, 2, 4, 8}:
-        raise ValueError(f"rows must be one of {{1, 2, 4, 8}}, got {rows}")
+    if not 1 <= rows <= 32:
+        raise ValueError(f"rows must be in [1, 32], got {rows}")
     if n <= 0 or n % 32:
         raise ValueError(f"output width must be a positive multiple of 32, got {n}")
     if k <= 0 or k % 256:
         raise ValueError(f"K must be a positive multiple of 256, got {k}")
 
     n_tiles = n // _N_TILE
-    blocks = (n_tiles + _PROJECT_WAVES - 1) // _PROJECT_WAVES
+    n_blocks = (n_tiles + _PROJECT_WAVES - 1) // _PROJECT_WAVES
+    row_blocks = (rows + 15) // 16
+    blocks = n_blocks * row_blocks
+    staged_rows = min(rows, 16)
     k_chunks = k // 64
     k_scale_chunks = k // 256
-    activation_words = rows * k // 4
+    activation_words = staged_rows * k // 4
 
     @fx.struct
     class SharedStorage:
@@ -157,6 +160,8 @@ def build_mxfp8_project(rows: int, n: int, k: int):
         output: Int64,
     ):
         bid = gpu.block_idx.x
+        input_row_base = (bid // n_blocks) * 16
+        n_block = bid % n_blocks
         tid = gpu.thread_idx.x
         lane = tid % _WAVE_SIZE
         wave = tid // _WAVE_SIZE
@@ -177,7 +182,7 @@ def build_mxfp8_project(rows: int, n: int, k: int):
                 values = fx.Vector(
                     bo.buffer_load(
                         activation_rsrc,
-                        word,
+                        input_row_base * (k // 4) + word,
                         vec_width=4,
                         dtype=T.i32,
                     )
@@ -185,7 +190,7 @@ def build_mxfp8_project(rows: int, n: int, k: int):
                 fx.ptr_store(values.bitcast(fx.Float32), staged + word)
         gpu.barrier()
 
-        row_tile = bid * _PROJECT_WAVES + wave
+        row_tile = n_block * _PROJECT_WAVES + wave
         if (wave < _PROJECT_WAVES) & (row_tile < n_tiles):
             scale_atoms = [
                 fx.make_mma_atom(
@@ -202,8 +207,8 @@ def build_mxfp8_project(rows: int, n: int, k: int):
             ]
             accumulator = fx.make_rmem_tensor(4, fx.Float32)
             accumulator.store(fx.Vector.filled(4, 0.0, fx.Float32))
-            valid_row = lane_mod16 < rows
-            input_row = fx.min(lane_mod16, rows - 1)
+            valid_row = input_row_base + lane_mod16 < rows
+            input_row = fx.min(lane_mod16, staged_rows - 1)
             scale_lane = lane_div16 * 16 + lane_mod16
 
             for k256 in range_constexpr(k_scale_chunks):
@@ -214,7 +219,7 @@ def build_mxfp8_project(rows: int, n: int, k: int):
                         vec_width=1,
                         dtype=T.i32,
                     )
-                )
+                ).shrui(fx.Int32((input_row_base // 16) * 8)) & fx.Int32(0x00FF00FF)
                 output_scale = fx.Int32(
                     bo.buffer_load(
                         weight_scale_rsrc,
@@ -272,7 +277,7 @@ def build_mxfp8_project(rows: int, n: int, k: int):
                     )
 
             values = accumulator.load()
-            output_row_base = lane_div16 * 4
+            output_row_base = input_row_base + lane_div16 * 4
             for element in range_constexpr(4):
                 output_row = output_row_base + element
                 if output_row < rows:

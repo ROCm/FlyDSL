@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "local_remote_selection_identical": true,
+  "selection_sha256": "dab864d5daa67652d3210ae195434564fd731d0a4cd03148c161de2dcc4e389b",
+  "previous_selection_sha256": "2c60b7dcff6dd2f56d6d77d6808270e9ab39b05b44f34e97c530d830588ed8c9",
+  "validation_sha256": "40e5bd2c9608f5c3d4092a72934cf9debe7ba9d6a3dad2fc29be4543f1c44a31",
+  "selected_source": "opt254_swizzled_input_lds_s4",
+  "goal_complete": false
+}

@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import torch
+from kernels.kimi_k3_monokernel.compile_config import KimiK3CompileConfig
+from kernels.kimi_k3_monokernel.shapes import resolve_sequence_shape
+from kernels.kimi_k3_monokernel.weight_pool import make_weight_pools
 
 from kernels.kimi_k3_monokernel.gemm_a16w16 import gemm_a16w16
 from kernels.kimi_k3_monokernel.kda_recurrence import KimiK3KdaRecurrence
@@ -19,6 +22,7 @@ from kernels.monokernel.formats import quantize_mxfp8
 from kernels.monokernel.packing import (
     pack_bf16,
     pack_mxfp4,
+    pack_mxfp4_native_ug,
     pack_mxfp8_scale,
     pack_mxfp8_weight,
 )
@@ -83,6 +87,8 @@ class KimiK3KdaAttention:
         launches_per_step: int = MAX_LAYERS_PER_STEP,
         single_launch_attention: bool = True,
         mtp: bool = False,
+        seq_len: int | None = None,
+        compile_config: KimiK3CompileConfig | None = None,
     ) -> None:
         config = weights.config
         if config != KIMI_K3_CONFIG:
@@ -110,6 +116,9 @@ class KimiK3KdaAttention:
         self.reduce_backend = reduce_backend
         self.launches_per_step = launches_per_step
         self.mtp = mtp
+        self.compile_config = compile_config or KimiK3CompileConfig()
+        self.batch_size, self.mtp_seq_len = resolve_sequence_shape(samples, mtp, seq_len)
+        self.specialization = self.compile_config.resolve(samples, mtp, self.mtp_seq_len)
         self.local_projection = config.local_heads * _HEAD_DIM
 
         expected = {
@@ -186,6 +195,7 @@ class KimiK3KdaAttention:
         self.block_write_idx = -1
         self.fuse_moe = False
         self.moe_packed: dict[str, torch.Tensor] = {}
+        self.monokernel_weight_pools = {}
         self.w_kda_in_packed = None
         self.w_kda_o_packed = None
         if self.symmetric_allreduce is not None and single_launch_attention:
@@ -199,7 +209,7 @@ class KimiK3KdaAttention:
             self.w_kda_in_packed = pack_bf16(monokernel_input)
             self.w_kda_o_packed = pack_bf16(self.t["w_kda_o"])
             self.monokernel_scratch = torch.zeros(
-                monokernel_scratch_nbytes(samples, mtp=mtp),
+                monokernel_scratch_nbytes(samples, mtp=mtp, input_partials=self.specialization.input_schedule == "flat"),
                 dtype=torch.uint8,
                 device=device,
             )
@@ -209,6 +219,8 @@ class KimiK3KdaAttention:
                 npes,
                 launches_per_step,
                 mtp=mtp,
+                mtp_seq_len=self.mtp_seq_len,
+                compile_config=self.compile_config,
             )
         elif mtp:
             raise ValueError("Kimi-K3 MTP requires the single-launch attention path")
@@ -248,19 +260,29 @@ class KimiK3KdaAttention:
                 "s_latent_down": pack_mxfp8_scale(latent_down_scale),
                 "w_shared_ug": pack_mxfp8_weight(shared_up),
                 "s_shared_ug": pack_mxfp8_scale(shared_up_scale),
-                "w_ug": pack_mxfp4(self.t["w_ug"]),
+                "w_ug": (pack_mxfp4_native_ug if self.specialization.ug_arithmetic == "native_split"
+                         else pack_mxfp4)(self.t["w_ug"]),
                 "w_dn": pack_mxfp4(self.t["w_dn"]),
                 "w_shared_dn": pack_mxfp8_weight(shared_down),
                 "s_shared_dn": pack_mxfp8_scale(shared_down_scale),
                 "w_latent_up": pack_mxfp8_weight(latent_up),
                 "s_latent_up": pack_mxfp8_scale(latent_up_scale),
             }
+        self.monokernel_weight_pools = {}
+        if fuse_moe and self.specialization.weight_pool != 'separate':
+            self.monokernel_weight_pools = make_weight_pools(
+                self.w_kda_in_packed, self.w_kda_o_packed, self.moe_packed, self.t,
+                include_experts=self.specialization.weight_pool == 'dense_expert',
+            )
         self.monokernel_scratch = torch.zeros(
             monokernel_scratch_nbytes(
                 self.S,
                 fuse_attn_res=True,
                 fuse_moe=fuse_moe,
                 mtp=self.mtp,
+                input_partials=self.specialization.input_schedule == "flat",
+                gate_input_partials=self.specialization.gate_input_arithmetic in {"fp32_distributed", "k16_distributed", "k16_pair_local", "k16_pair_dense", "k16_pair_half"},
+                native_ug=fuse_moe and self.specialization.ug_arithmetic == "native_split",
             ),
             dtype=torch.uint8,
             device=device,
@@ -275,6 +297,8 @@ class KimiK3KdaAttention:
             self.block_write_idx,
             fuse_moe,
             self.mtp,
+            mtp_seq_len=self.mtp_seq_len,
+                compile_config=self.compile_config,
         )
 
     def forward(
@@ -302,7 +326,7 @@ class KimiK3KdaAttention:
 
         if not 0 <= layer < self.launches_per_step:
             raise ValueError(f"layer must be in [0, {self.launches_per_step}), got {layer}")
-        expected_indices = (self.S + 1,) if self.mtp else (self.S,)
+        expected_indices = (self.S + self.S // self.mtp_seq_len,) if self.mtp else (self.S,)
         if (
             state_indices.shape != expected_indices
             or state_indices.dtype != torch.int32
@@ -378,7 +402,7 @@ class KimiK3KdaAttention:
                 pointer_or_hidden("s_latent_down"),
                 pointer_or_hidden("w_shared_ug"),
                 pointer_or_hidden("s_shared_ug"),
-                pointer_or_hidden("w_ug"),
+                self.monokernel_weight_pools["expert"].data_ptr() if "expert" in self.monokernel_weight_pools else pointer_or_hidden("w_ug"),
                 self.t["s_ug"].data_ptr() if self.fuse_moe else hidden_states.data_ptr(),
                 pointer_or_hidden("w_dn"),
                 self.t["s_dn"].data_ptr() if self.fuse_moe else hidden_states.data_ptr(),
@@ -390,7 +414,7 @@ class KimiK3KdaAttention:
                 moe_symmetric,
                 moe_peers.data_ptr(),
                 monokernel_output.data_ptr(),
-                self.w_kda_in_packed.data_ptr(),
+                self.monokernel_weight_pools["dense"].data_ptr() if "dense" in self.monokernel_weight_pools else self.w_kda_in_packed.data_ptr(),
                 self.t["w_kda_fb"].data_ptr(),
                 self.t["w_kda_conv"].data_ptr(),
                 self.t["kda_a_log"].data_ptr(),

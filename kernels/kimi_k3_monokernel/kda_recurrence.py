@@ -65,8 +65,8 @@ def build_kimi_k3_kda_recurrence(
 ):
     """Build the fused Kimi-K3 convolution, recurrence, and norm kernel."""
 
-    if samples not in {1, 2, 4, 8}:
-        raise ValueError(f"samples must be one of {{1, 2, 4, 8}}, got {samples}")
+    if not 1 <= samples <= 32:
+        raise ValueError(f"samples must be in [1, 32], got {samples}")
     fuse_output_norm = True
     fuse_conv = True
     fuse_gate_projection = True
@@ -512,8 +512,8 @@ class KimiK3KdaRecurrence:
     """Fused q/k/v causal convolution, recurrence, and gated RMSNorm."""
 
     def __init__(self, samples: int) -> None:
-        if samples not in {1, 2, 4, 8}:
-            raise ValueError(f"samples must be one of {{1, 2, 4, 8}}, got {samples}")
+        if not 1 <= samples <= 32:
+            raise ValueError(f"samples must be in [1, 32], got {samples}")
         self.samples = samples
         self.launch = build_kimi_k3_kda_recurrence(samples)
 

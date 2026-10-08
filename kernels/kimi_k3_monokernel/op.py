@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import torch
+from kernels.kimi_k3_monokernel.compile_config import KimiK3CompileConfig
 
 from kernels.kimi_k3_monokernel.staged import _KimiK3KdaStagedPath
 from kernels.monokernel.weights import LayerWeights
@@ -25,9 +26,11 @@ class KimiK3MonoKernel(_KimiK3KdaStagedPath):
         group=None,
         reduce_group=None,
         mtp: bool = False,
+        seq_len: int | None = None,
+        compile_config: KimiK3CompileConfig | None = None,
     ) -> None:
-        if samples != 4 or npes != 8 or not mtp:
-            raise ValueError("This experimental candidate requires TP8, S4, true MTP")
+        if not 1 <= samples <= 32 or npes != 8:
+            raise ValueError("This experimental candidate requires TP8 and 1..32 total tokens")
         super().__init__(
             weights,
             samples,
@@ -41,6 +44,9 @@ class KimiK3MonoKernel(_KimiK3KdaStagedPath):
             fuse_shared_experts=True,
             reduce_backend="symmetric",
             mtp=mtp,
+            seq_len=seq_len,
+            compile_config=compile_config,
+            full_monokernel=True,
         )
         self.attention.configure_monokernel(layer_idx, fuse_moe=True)
 

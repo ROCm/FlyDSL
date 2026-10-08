@@ -1,44 +1,38 @@
 # Kimi-K3 MonoKernel
 
-This package owns the model-specific Kimi-K3 MonoKernel. The complete KDA
-path is one GPU launch covering both AttnRes mixers, KDA
-projection/recurrence, router and top-k selection, latent/shared projections,
-MXFP4 experts, TP8 reductions, and the residual update. The benchmark also
-keeps the faster staged path so fusion work cannot hide a performance
-regression. Layer 0's dense FFN is intentionally out of scope.
+The selected Opt254 implementation runs a complete KDA MoE layer in one GPU
+launch on TP8/gfx950: both AttnRes mixers, KDA projection and recurrence,
+routing, latent/shared projections, MXFP4 experts, TP reductions, and the
+residual update. Layer 0's dense FFN is out of scope.
 
-Run correctness checks and graph-replay benchmarks from a configured FlyDSL
-environment at the repository root:
+The supported shape range is batch 1–8 and sequence length 1–4, with
+`samples = batch * seq_len`. Pass `seq_len` explicitly and set `mtp=True`
+for sequences longer than one token. `KimiK3CompileConfig(path="auto")`
+chooses the validated specialization at compile time. Non-default tuning
+configurations require their own correctness and residency validation.
+
+Decode uses contiguous int32 `state_indices` with shape `[batch]`. MTP uses
+shape `[batch * (seq_len + 1)]`, grouped by independent state chain: token
+`t` in chain `b` reads slot `b * (seq_len + 1) + t` and writes the next slot.
+Each slot indexes the convolution and recurrent snapshot pools. The first
+entry preserves the incoming snapshot. `--mtp --samples 8` alone would mean
+an unsupported sequence of eight tokens; use `--batch 2 --seq 4` instead.
+
+Run from the repository root in a configured eight-GPU FlyDSL environment,
+after checking complete-grid residency for the compiled binary:
 
 ```bash
-python -m kernels.kimi_k3_monokernel.tools.monokernel --samples 4 --layer-idx 1 --check
+PYTHONPATH="$PWD/experiments/kimi_one_kernel/opt254${PYTHONPATH:+:$PYTHONPATH}" \
 python -m kernels.kimi_k3_monokernel.tools.monokernel \
-  --samples 4 --layer-idx 1 --bench --layers 16 --repeats 30
-python -m kernels.kimi_k3_monokernel.tools.monokernel \
-  --staged --samples 4 --layer-idx 1 --bench --layers 16 --repeats 30
-python -m kernels.kimi_k3_monokernel.tools.monokernel \
-  --mtp --samples 8 --layer-idx 1 --check --bench --layers 16 --repeats 30
+  --batch 1 --seq 4 --layer-idx 1 --check --full-replay-check \
+  --bench --layers 16 --repeats 50
 ```
 
-Pass `mtp=True` to `KimiK3MonoKernel` (or `--mtp` to the benchmark tool) to
-interpret the `S` rows as one ordered speculative-token group. In this mode,
-`state_indices` must be contiguous `int32` with shape `[S + 1]`: token `s`
-reads the convolution and recurrent snapshots at `state_indices[s]` and writes
-its complete post-token snapshots to `state_indices[s + 1]`. The extra entry
-retains the incoming snapshot instead of overwriting it. Without `mtp=True`,
-the existing `[S]` independent-request decode ABI is unchanged.
+The PYTHONPATH entry selects the archived strict replay oracle. `--check`
+alone also reports the generic reference diagnostics. `--staged` selects
+the multi-launch comparison path; `--attention-only` isolates KDA.
+`--dump-ir-dir DIR` writes separate compiler dumps for each TP rank.
 
-On TP8, the retained performance path uses seven launches per layer at S=4.
-At S=8 it uses nine launches because the three-stage KDA attention path is
-faster than its one-launch attention specialization. The complete MonoKernel
-path always uses one application launch.
-
-True MTP is also part of that single application launch. Its KDA schedule
-uses a causal convolution publication chain followed by two disjoint 64-row
-recurrent-state chains, with device-scope state traffic between dependent
-CTAs.
-
-Use `--profile` for timing, `--attention-only` to isolate KDA, and `--staged`
-for the fastest retained multi-launch path. `--dump-ir-dir DIR` emits one
-compiler dump directory per TP rank for resource inspection without cross-rank
-file races.
+The retained full-layer measurements are 71.83 μs for B1/S1 and 114.20 μs
+for B1/S4. These are historical validated measurements, not a new benchmark
+of this checkout. See [selection, validation, and reproduction details](../../docs/kimi_one_kernel/README.md).

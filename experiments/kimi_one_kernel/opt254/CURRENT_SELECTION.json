@@ -1,0 +1,50 @@
+{
+  "selected_source": "opt254_swizzled_input_lds_s4",
+  "previous_source": "opt229_cta_local_qkd_s4",
+  "selection_changed": true,
+  "source_sha256": "54d0e46eaacbc24df1e665953cddbf9ed7a3620169d644b4532337a40490c321",
+  "config_sha256": "c0d2aab4490cca4c008fef395772c717d18afdcf0576347a44d35cb2cf817795",
+  "reason": "B1/S4 input LDS XOR mapping preserves BF16 operand bits, partitioning and arithmetic order. Six strict seeds pass; all three complete-layer pairs and all three independent confirmation pairs improve on Opt229, with small margins. All 32 shapes compiled; the other 31 actual binaries match Opt229 and inherit validated functional coverage.",
+  "s1_median_us": 71.82690873742104,
+  "s4_median_us": 113.9749065041542,
+  "s4_confirmation_median_us": 114.20487612485886,
+  "b1_measurement_basis": "S1 retained from the identical Opt198/Opt229 binary. S4 is uninstrumented Opt254 TP8 full-layer graph16/repeats50, maxrank per repeat then median, three paired seeds plus independent confirmation. Measured gains are small.",
+  "b1_paired_baseline_us": {
+    "1": 73.00068810582161,
+    "4": 114.11237716674805
+  },
+  "b1_paired_deltas_us": {
+    "1": [
+      2.0162761211395264,
+      0.09874626994132996,
+      2.1825656294822693
+    ],
+    "4": [
+      0.006254762411117554,
+      0.2712830901145935,
+      0.8549690246582031
+    ]
+  },
+  "s4_confirmation_deltas_us": [
+    0.009998679161071777,
+    0.18003582954406738,
+    0.145692378282547
+  ],
+  "b2s1_median_us": 88.30587193369865,
+  "b5s1_median_us": 256.68129324913025,
+  "other_retained_measurement_basis": "All non-B1/S4 actual binaries are unchanged from Opt229; historical timings retained.",
+  "validation": "opt254_inheritance_validation.json",
+  "performance_validation": "opt254_validation.json",
+  "archive_sha256": "55e1bda5ac9b441c72fce9b1b0e6275bc85bd5e24c8250e8e0e9a789c7240e50",
+  "performance_archive_sha256": "138413a2ceeb5c04dd075372ad8467e57de7a513b99b242e1a46207a65d96297",
+  "functional_cases": 192,
+  "rank_checks": 1536,
+  "records": 26496,
+  "inherited_shape_count": 31,
+  "known_extended_failures": 0,
+  "full_range_functional": true,
+  "goal_achieved": false,
+  "repository_checkout_changed": false,
+  "previous_selection_sha256": "2c60b7dcff6dd2f56d6d77d6808270e9ab39b05b44f34e97c530d830588ed8c9",
+  "previous_validation": "opt231_inheritance_validation.json"
+}
