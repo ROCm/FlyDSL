@@ -96,7 +96,7 @@ class TestLlvmWrapperIR:
             fx.generic_store(ptr, value)
 
         text = _build_pointer_module(build, address_space=address_space)
-        assert f"!fly.ptr<i64, {address_space}>" in text
+        assert f"!fly.ptr<i64, <{address_space}>>" in text
         assert "llvm.load" in text
         assert "llvm.store" in text
 

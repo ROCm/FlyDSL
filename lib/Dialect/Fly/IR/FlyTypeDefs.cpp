@@ -347,6 +347,17 @@ static FailureOr<Attribute> parseAddressSpaceAttribute(AsmParser &parser) {
       return failure();
     return attr;
   }
+  // Backward compat: accept bare keywords (global, shared, register) that
+  // older MLIR printed without the #fly.address_space<…> envelope.
+  StringRef keyword;
+  if (succeeded(parser.parseOptionalKeyword(&keyword))) {
+    auto sym = symbolizeAddressSpace(keyword);
+    if (sym)
+      return Attribute(AddressSpaceAttr::get(parser.getContext(), *sym));
+    parser.emitError(parser.getCurrentLocation(), "unknown address space keyword '")
+        << keyword << "'";
+    return failure();
+  }
   auto enumAttr = FieldParser<AddressSpaceAttr>::parse(parser);
   if (failed(enumAttr))
     return failure();
