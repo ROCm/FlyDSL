@@ -172,11 +172,11 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
     """Build + compile FlyDSL kernel, then benchmark via torch CUDA events.
 
     This intentionally avoids hip-python / HIP driver calls, aligning with the
-    style used by other tests (flydsl.compile + torch timing).
+    style used by other tests (flydsl.compiler.compile + torch timing).
     """
     import torch
 
-    import flydsl
+    import flydsl.compiler as flyc
 
     if not torch.cuda.is_available():
         return None
@@ -188,15 +188,14 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         from kernels.norm.softmax_kernel import build_softmax_module
 
         # M is runtime; module construction uses a dummy M.
-        # `flydsl.compile()` already has its own cache.
+        # `flyc.compile()` already has its own cache.
         m = build_softmax_module(1, N, dtype)
-        exe = flydsl.compile(m)
+        exe = flyc.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
         return bench_gpu_us_torch(lambda: exe(x, y, M), warmup=warmup, iters=iters)
 
     if op == "layernorm":
-        import flydsl.compiler as flyc
         import flydsl.expr as fx
         from kernels.norm.layernorm_kernel import build_layernorm_module
 
@@ -226,7 +225,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         from kernels.norm.rmsnorm_kernel import build_rmsnorm_module
 
         m = build_rmsnorm_module(N, dtype)
-        exe = flydsl.compile(m)
+        exe = flyc.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
