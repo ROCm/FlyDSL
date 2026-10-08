@@ -507,4 +507,6 @@ def compile_inputs(meta, d=None, dtype=None):
         kw.update(dropout_p=0.5, philox_seed=1)
     if meta.alibi:
         kw["alibi_slopes"] = torch.full((2,), 0.25, device="cuda", dtype=torch.float32)
+    if meta.sink:
+        kw["sink"] = torch.zeros(2, device="cuda", dtype=torch.float32)
     return (q, k, v, o, 1, 64), kw

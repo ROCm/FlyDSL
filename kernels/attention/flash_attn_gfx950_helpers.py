@@ -1105,6 +1105,17 @@ class ParityKernelContext(_ParityKvStaging, dualwave.DualwaveKernelContext):
         self.alibi_neg_slope = Vec(frag.load(), (1,), fx.Float32)[0] * fx.Float32(-dualwave._LOG2E)
         self.alibi_delta_i32 = self.seqlen_kv_i32 - fx.Int32(self.seqlen_q_v)
 
+    def load_sink_log2(self, sink):
+        """This head's sink logit in the base-2 score domain (`sink * log2(e)`).
+
+        Read where it is needed (the epilogue), not in the prologue, so the scalar is not live across the KV loop.
+        """
+        table = fx.logical_divide(fx.rocdl.make_buffer_tensor(sink), fx.make_layout(1, 1))
+        atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+        frag = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+        fx.copy(atom, fx.slice(table, (None, fx.Int32(self.q_head_idx))), frag)
+        return Vec(frag.load(), (1,), fx.Float32)[0] * fx.Float32(dualwave._LOG2E)
+
     def init_philox(self):
         """Seed, counter and this workgroup's plane origin. Prologue-only.
 
@@ -2582,6 +2593,7 @@ def make_wide_body(
     gemm_helper,
     softmax_helper,
     output_store,
+    load_sink_log2=None,
 ):
     """Return the traced body: one KV tile per iteration, D staged and sharded.
 
@@ -2704,6 +2716,11 @@ def make_wide_body(
         m_row = loop_results[0]
         l_row = loop_results[1]
         v_o = [loop_results[2 + i] for i in range_constexpr(owned)]
+
+        if const_expr(load_sink_log2 is not None):
+            # The sink is one more logit in the denominator and has no value row: fold it into (m, l) before the
+            # normalisation, exactly as the dual-wave epilogue does.
+            m_row, l_row = softmax_helper.fold_sink(v_o, m_row, l_row, load_sink_log2())
 
         l_inv = softmax_helper.safe_l_inv(l_row)
         softmax_helper.scale_o(v_o, l_inv)
