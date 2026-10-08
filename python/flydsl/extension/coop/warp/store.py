@@ -125,16 +125,16 @@ class WarpStore(WarpPrimitive):
         algorithm = cls.algorithm
         width = cls.warp_threads
         _validate_valid_items(valid_items, width * cls.items_per_thread)
-        count = len(_as_items(value))
+        count = len(_as_items(value, cls.dtype))
         lane = lane_id() % width
         if algorithm is WarpStoreAlgorithm.VECTORIZE:
-            _store_vectorized(destination, value, lane * count, offset, valid_items)
+            _store_vectorized(destination, value, lane * count, offset, valid_items, cls.dtype)
             return
         if algorithm is WarpStoreAlgorithm.TRANSPOSE:
             indices = Vector.from_elements([lane + i * width for i in range(count)])
-            value = _warp_gather(value, indices, width=width)
+            value = _warp_gather(value, indices, width=width, _dtype=cls.dtype)
         striped = algorithm in (WarpStoreAlgorithm.STRIPED, WarpStoreAlgorithm.TRANSPOSE)
-        items = _as_items(value)
+        items = _as_items(value, cls.dtype)
         for i, item in enumerate(items):
             index = i * width + lane if striped else lane * count + i
             _store_item(destination, item, index, offset, valid_items)
