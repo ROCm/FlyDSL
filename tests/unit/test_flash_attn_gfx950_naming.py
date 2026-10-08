@@ -285,13 +285,7 @@ def _new_kernel_sources():
     for path in sorted(ATTN.glob("flash_attn_gfx950*.py")):
         if path.name == "flash_attn_gfx950_config.py":
             continue
-        tree = ast.parse(path.read_text())
-        if path.name == "flash_attn_gfx950.py":
-            # The legacy builder shares the module until the interface moves over; lint only the new ones.
-            tree.body = [
-                n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith("build_flash_attn_gfx950_")
-            ]
-        yield path.name, tree
+        yield path.name, ast.parse(path.read_text())
 
 
 @pytest.mark.parametrize(
