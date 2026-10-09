@@ -461,8 +461,8 @@ def build_glm5_monokernel(
         stamp = launch_state.stamp
         mma_units = launch_state.mma_units
         unit_fp8x2 = launch_state.unit_fp8x2
-        unit_mxfp4 = partial(helpers.unit_mxfp4_rows, launch_state, act="fp8")
-        unit_mxfp4_bf16 = partial(helpers.unit_mxfp4_rows, launch_state, act="bf16")
+        unit_mxfp4 = partial(helpers.unit_mxfp4_rows, launch_state, act="fp8", scale_tiles=True)
+        unit_mxfp4_bf16 = partial(helpers.unit_mxfp4_rows, launch_state, act="bf16", scale_tiles=True)
         peer_reduce = launch_state.peer_reduce
         stage_x_rmsnorm = launch_state.stage_x_rmsnorm
         load_x_rmsnorm = launch_state.load_x_rmsnorm
@@ -1536,8 +1536,9 @@ def build_glm5_monokernel(
                 r_gp = _rsrc(g_post)
                 gps = [(ld_bf16(r_gp, k), ld_bf16(r_gp, k + 1)) for k in ks_]  # issued ahead of the wait
                 bs = load_bias()
-                w_rg = ((lane % 16) // 8) * (INTER // 16) + c // 2  # MFMA rows 0-7 gate, 8-15 up
-                w_ln = (lane & -16) | ((c % 2) * 8 + lane % 8)
+                # MXFP4 packs eight gate rows and eight up rows into one row group.
+                w_rg = c if expert_mxfp4 else ((lane % 16) // 8) * (INTER // 16) + c // 2
+                w_ln = lane if expert_mxfp4 else (lane & -16) | ((c % 2) * 8 + lane % 8)
                 s_rg = (lane // 32) * (INTER // 16) + c // 2  # this lane's output rows
 
                 def u_ug8(cc, e, live=None):  # expert e's weights (loads return 0 unless live)
@@ -1645,8 +1646,8 @@ def build_glm5_monokernel(
             c = u % (INTER // UG8)
             has_sh = u < INTER // UG8
             slot = has_sh.select(fx.Int32(MOE_SLOTS - 1), u // (INTER // UG8))
-            w_rg = ((lane % 16) // 8) * (INTER // 16) + c // 2
-            w_ln = (lane & -16) | ((c % 2) * 8 + lane % 8)
+            w_rg = c if expert_mxfp4 else ((lane % 16) // 8) * (INTER // 16) + c // 2
+            w_ln = lane if expert_mxfp4 else (lane & -16) | ((c % 2) * 8 + lane % 8)
             s_rg = (lane // 32) * (INTER // 16) + c // 2
 
             def ug8_units(e, sample, live=None):

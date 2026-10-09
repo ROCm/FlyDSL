@@ -378,14 +378,20 @@ def unit_mxfp4_atom(st, w_rsrc, s_rsrc, rg, kc, K, b_word, coef=None, ln=None):
     return ("mxfp4_atom", (raw, sc_byte), coef, b_word + (lane // 16) * 16)
 
 
-def unit_mxfp4_rows(st, w_rsrc, s_rsrc, rg, kc, K, b_word, coef=None, ln=None, *, act):
+def unit_mxfp4_rows(st, w_rsrc, s_rsrc, rg, kc, K, b_word, coef=None, ln=None, *, act, scale_tiles=False):
     """Issue one packed 128-K MXFP4 tile and its four per-row E8M0 scales, against ``act``
-    activations: "fp8", "bf16", or "split" (bf16, one MFMA chain and factor per 32-K part)."""
+    activations: "fp8", "bf16", or "split" (bf16, one MFMA chain and factor per 32-K part).
+    ``scale_tiles``: the scales are packed by ``pack_mxfp4_scale_tiles`` (the 16 rows of a
+    128-K tile contiguous), else row-major."""
     lane = st.lane
     ln = lane if ln is None else ln
     raw = fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 128) + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-    row = rg * 16 + ln % 16
-    packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
+    if const_expr(scale_tiles):
+        # four E8M0 bytes per row: all 16 rows of this 128-K tile are contiguous
+        packed_scale = fx.Int32(bo.buffer_load(s_rsrc, (rg * (K // 128) + kc) * 16 + ln % 16, vec_width=1, dtype=T.i32))
+    else:
+        row = rg * 16 + ln % 16
+        packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
     scales = [
         ((packed_scale.shrui(fx.Int32(sp * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
         for sp in range_constexpr(4)
