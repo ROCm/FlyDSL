@@ -19,9 +19,18 @@ TREE_ROOT="${1:?usage: ci_mlir_cache_key.sh <tree-root>}"
 
 INPUTS=(
   thirdparty/llvm-build-info.json
-  thirdparty/llvm-rocdl-lld-argv0.patch
   scripts/build_llvm.sh
 )
+
+# Derive patch inputs from llvm-build-info.json so the cache key tracks every
+# patch that build_llvm.sh will apply.  Falls back gracefully when the JSON is
+# missing (pre-patch-dir commits) or has no patches array.
+if [[ -f "${TREE_ROOT}/thirdparty/llvm-build-info.json" ]]; then
+  while IFS= read -r p; do
+    [[ -n "$p" ]] && INPUTS+=("thirdparty/llvm-patches/${p}")
+  done < <(sed -n '/"patches"/,/]/ s/.*"\([^"]*\.patch\)".*/\1/p' \
+             "${TREE_ROOT}/thirdparty/llvm-build-info.json")
+fi
 
 # Per-file digests, so moving bytes across a file boundary changes the key.
 digests=""

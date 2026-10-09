@@ -186,24 +186,60 @@ jobs:
           # Self-hosted workspaces are reused; drop what the last run left.
           rm -rf base-pin
           rm -f mlir_install_base.tgz
-          mkdir -p base-pin/thirdparty base-pin/scripts
+          mkdir -p base-pin/thirdparty/llvm-patches base-pin/scripts
           if ! git -C flydsl-test fetch "https://github.com/${BASE_REPO_NAME}.git" \
                  "${BASE_COMMIT_SHA}" --no-tags --depth=1; then
             echo "Could not fetch base ${BASE_REPO_NAME}@${BASE_COMMIT_SHA}; treating LLVM pin as unchanged."
             echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
             exit 0
           fi
-          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+          # Fixed inputs that are always present.  ci_mlir_cache_key.sh is
+          # extracted too so the *base* key is computed with the base commit's
+          # own formula — the PR may have changed the set of hashed inputs.
+          for f in thirdparty/llvm-build-info.json scripts/build_llvm.sh scripts/ci_mlir_cache_key.sh; do
             if ! git -C flydsl-test show "FETCH_HEAD:${f}" >"base-pin/${f}"; then
               echo "Base commit has no ${f}; treating LLVM pin as unchanged."
               echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
               exit 0
             fi
           done
+          # Extract patch files.  The base commit may use the old layout (a
+          # single patch at thirdparty/llvm-rocdl-lld-argv0.patch, hardcoded in
+          # its ci_mlir_cache_key.sh) or the new layout (patches listed in the
+          # JSON under thirdparty/llvm-patches/).  Extract both so whichever
+          # key script runs finds its inputs.
+          if git -C flydsl-test show "FETCH_HEAD:thirdparty/llvm-rocdl-lld-argv0.patch" \
+               >"base-pin/thirdparty/llvm-rocdl-lld-argv0.patch" 2>/dev/null; then
+            :  # old-layout patch extracted
+          fi
+          # sed, not python3: runners promise no host interpreter (see below).
+          base_patches="$(sed -n '/"patches"/,/]/ s/.*"\([^"]*\.patch\)".*/\1/p' \
+            base-pin/thirdparty/llvm-build-info.json)"
+          for p in ${base_patches}; do
+            if ! git -C flydsl-test show "FETCH_HEAD:thirdparty/llvm-patches/${p}" \
+                   >"base-pin/thirdparty/llvm-patches/${p}"; then
+              echo "Base commit has no thirdparty/llvm-patches/${p}; treating LLVM pin as unchanged."
+              echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          done
+          # Also extract patches from the PR side for comparison.
+          pr_patches="$(sed -n '/"patches"/,/]/ s/.*"\([^"]*\.patch\)".*/\1/p' \
+            flydsl-test/thirdparty/llvm-build-info.json)"
+          # Compare all LLVM inputs: fixed files, then the union of patch files.
           changed=false
-          for f in thirdparty/llvm-build-info.json thirdparty/llvm-rocdl-lld-argv0.patch scripts/build_llvm.sh; do
+          for f in thirdparty/llvm-build-info.json scripts/build_llvm.sh; do
             if ! diff -q "flydsl-test/${f}" "base-pin/${f}" >/dev/null; then
               echo "LLVM input differs from base: ${f}"
+              changed=true
+            fi
+          done
+          all_patches="$(printf '%s\n' ${base_patches} ${pr_patches} | sort -u)"
+          for p in ${all_patches}; do
+            pf="thirdparty/llvm-patches/${p}"
+            if [ ! -f "flydsl-test/${pf}" ] || [ ! -f "base-pin/${pf}" ] || \
+               ! diff -q "flydsl-test/${pf}" "base-pin/${pf}" >/dev/null; then
+              echo "LLVM input differs from base: ${pf}"
               changed=true
             fi
           done
@@ -221,8 +257,10 @@ jobs:
           echo "base_llvm_hash=${base_hash}" >>"${GITHUB_OUTPUT}"
           echo "Base LLVM pin: ${base_hash}"
 
-      # One script for both keys so they cannot drift; content-derived, which is
-      # what makes the base commit's key computable from the extracted files.
+      # Content-derived keys, which is what makes the base commit's key
+      # computable from the extracted files.  The base key uses the base
+      # commit's own ci_mlir_cache_key.sh to match the formula that was
+      # active when the base's MLIR install was cached.
       - name: Compute MLIR cache keys
         id: keys
         run: |
@@ -231,7 +269,14 @@ jobs:
           echo "self=${self_key}" >>"${GITHUB_OUTPUT}"
           echo "Shared MLIR cache key: ${self_key}"
           if [ "${{ steps.base-pin.outputs.pin_changed }}" = "true" ]; then
-            base_key="$(bash flydsl-test/scripts/ci_mlir_cache_key.sh base-pin)"
+            # Use the *base commit's own* key script so the key matches what
+            # was cached when that commit was built.  The PR's script may hash
+            # a different set of inputs (e.g. the patches-dir migration).
+            base_key_script=base-pin/scripts/ci_mlir_cache_key.sh
+            if [ ! -f "${base_key_script}" ]; then
+              base_key_script=flydsl-test/scripts/ci_mlir_cache_key.sh
+            fi
+            base_key="$(bash "${base_key_script}" base-pin)"
             echo "base=${base_key}" >>"${GITHUB_OUTPUT}"
             echo "Baseline MLIR cache key: ${base_key}"
           fi
