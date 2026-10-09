@@ -12,21 +12,18 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import ReductionOp, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
-from kernels.attention.flash_attn_gfx1100_autotune import pick_tile
+from kernels.attention.flash_attn_gfx1100_autotune import pick_tile, tile_fits
+from kernels.attention.flash_attn_utils import daz_denormal_attr
 from kernels.common import buffer_ops
-from kernels.common.kernels_common import dtype_to_elem_type
-from kernels.common.tensor_shim import _run_compiled
+from kernels.common.kernels_common import LOG2E, dtype_to_elem_type
 
 WMMA_M = WMMA_N = WMMA_K = 16
 WAVE_SIZE = 32
-LOG2E = 1.4426950408889634
-KERNEL_NAME = "flash_attn_func_gfx1100_kernel"
 XOR_HALF = 16
 NEG_BIG = -1.0e30
 # Must be lower than NEG_BIG; otherwise a fully masked first block contributes
@@ -42,22 +39,17 @@ _VP_SEL_LO = 0x05040100
 _VP_SEL_HI = 0x07060302
 _VP_SEL_LO_REV = 0x01000504
 _VP_SEL_HI_REV = 0x03020706
+# Keeps the high half of both source dwords, which is the f32 -> bf16
+# truncation for two values at once.
+_VP_SEL_BF16 = 0x07060302
+# Round-to-nearest bias applied to the f32 bit pattern before that truncation.
+_BF16_RND = 0x8000
 _CONCAT16 = list(range(16))
 
-LDS_CAPACITY = 65536
 SUPPORTED_HEAD_DIMS = (64, 128, 256)
 
 _ELEM_CLS = {"f16": fx.Float16, "bf16": fx.BFloat16}
 _OUT_CLS = {"f32": fx.Float32, "f16": fx.Float16, "bf16": fx.BFloat16}
-
-
-def _ptr_arg(t, dtype=fx.Uint8):
-    """Wrap a torch tensor as a typed fx.Pointer for launch/cache signatures."""
-    type_name = type(t).__name__
-    module_name = type(t).__module__
-    if type_name == "FakeTensor" or "fake_tensor" in module_name:
-        return flyc.from_c_void_p(dtype, 0)
-    return flyc.from_c_void_p(dtype, t.data_ptr())
 
 
 def _strides(layout: str, n_heads: int, seq: int, head_dim: int):
@@ -67,12 +59,6 @@ def _strides(layout: str, n_heads: int, seq: int, head_dim: int):
     if layout == "bshd":
         return seq * n_heads * head_dim, head_dim, n_heads * head_dim
     raise ValueError(f"layout must be 'bhsd' or 'bshd', got {layout!r}")
-
-
-def _ptr_rsrc(ptr, elem_offset, elem_bytes):
-    """Buffer resource with ``elem_offset`` folded into the base."""
-    base = fx.Int64(fx.ptrtoint(ptr)) + fx.Int64(elem_offset) * elem_bytes
-    return buffer_ops.create_buffer_resource_from_addr(base)
 
 
 def build_flash_attn_func_module_primary(
@@ -110,13 +96,10 @@ def build_flash_attn_func_module_primary(
 
     block_m = WMMA_M * num_waves * q_tiles
     threads = num_waves * WAVE_SIZE
+    tile = (num_waves, q_tiles, block_n, vt_rows, k_from_gmem)
+    if not tile_fits(head_dim, tile):
+        raise ValueError(f"tile {tile} does not fit head_dim={head_dim}")
 
-    if block_n % WMMA_K:
-        raise ValueError(f"block_n must be a multiple of {WMMA_K}, got {block_n}")
-    if head_dim % WMMA_K:
-        raise ValueError(f"head_dim must be a multiple of {WMMA_K}, got {head_dim}")
-    if head_dim % LOAD_VEC:
-        raise ValueError(f"head_dim must be a multiple of {LOAD_VEC}, got {head_dim}")
     if in_dtype not in _ELEM_CLS:
         raise ValueError(f"dtype_str must be one of {sorted(_ELEM_CLS)}, got {dtype_str!r}")
     if out_dtype not in _OUT_CLS:
@@ -129,7 +112,6 @@ def build_flash_attn_func_module_primary(
     is_bf16 = in_dtype == "bf16"
     elem_cls = _ELEM_CLS[in_dtype]
     out_cls = _OUT_CLS[out_dtype]
-    use_pack_cvt = not is_bf16
     use_perm_p = seq_q > WMMA_M and not causal and seq_q < 65536
     use_vector_store = head_dim <= 64 and seq_q > WMMA_M and not causal and seq_q < 65536
     fm = arith.FastMathFlags.fast
@@ -144,8 +126,6 @@ def build_flash_attn_func_module_primary(
     n_kv_sub = block_n // WMMA_K
     n_d_tiles = head_dim // WMMA_K
     _TILE_STATE = 2 + n_d_tiles
-    if q_tiles < 1:
-        raise ValueError(f"q_tiles must be at least 1, got {q_tiles}")
 
     # Bottom-right causal alignment: query i sees up to i + (seq_kv - seq_q).
     causal_delta = seq_kv - seq_q
@@ -155,35 +135,13 @@ def build_flash_attn_func_module_primary(
     k_elems = 0 if k_from_gmem else block_n * k_row
     vt_elems = head_dim * vt_row
     one_buf = k_elems + vt_elems
-    lds_bytes = one_buf * 2
-    if lds_bytes > LDS_CAPACITY:
-        raise ValueError(f"LDS tile needs {lds_bytes} B > {LDS_CAPACITY} B; reduce block_n or head_dim")
 
     chunks_per_row = head_dim // LOAD_VEC
-    k_total_chunks = block_n * chunks_per_row
-    if k_total_chunks % threads:
-        raise ValueError(f"K tile is {k_total_chunks} chunks, not divisible by {threads} threads")
-    k_steps = 0 if k_from_gmem else k_total_chunks // threads
-
-    if vt_rows not in (4, 8):
-        raise ValueError(f"vt_rows must be 4 or 8, got {vt_rows}")
-    if block_n % vt_rows:
-        raise ValueError(f"block_n={block_n} must be a multiple of vt_rows={vt_rows}")
+    k_steps = 0 if k_from_gmem else block_n * chunks_per_row // threads
     v_total_chunks = (block_n // vt_rows) * chunks_per_row
     v_partial = v_total_chunks < threads
     use_cooperative_v = v_partial and vt_rows == 8 and threads == 2 * v_total_chunks
-    if v_partial:
-        if threads % v_total_chunks:
-            raise ValueError(
-                f"V tile is {v_total_chunks} chunks at {vt_rows} rows/thread, which does not divide {threads} threads"
-            )
-        v_steps = 1
-    else:
-        if v_total_chunks % threads:
-            raise ValueError(
-                f"V tile is {v_total_chunks} chunks at {vt_rows} rows/thread, not divisible by {threads} threads"
-            )
-        v_steps = v_total_chunks // threads
+    v_steps = 1 if v_partial else v_total_chunks // threads
 
     def _wmma(a_vec, b_vec, acc):
         if is_bf16:
@@ -195,7 +153,7 @@ def build_flash_attn_func_module_primary(
         lds: fx.Array[elem_cls, one_buf, 16]
 
     @flyc.kernel(known_block_size=[threads, 1, 1])
-    def flash_attn_func_kernel(Q: fx.Pointer, K: fx.Pointer, V: fx.Pointer, Out: fx.Pointer):
+    def flash_attn_func_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, Out: fx.Tensor):
         tid = fx.thread_idx.x
         pid_m = fx.Int32(fx.block_idx.x)
         head = fx.Int32(fx.block_idx.y)
@@ -221,10 +179,22 @@ def build_flash_attn_func_module_primary(
 
         elem_bytes = elem_cls.width // 8
         kv_origin = bat * kv_stride_b + head * kv_stride_h
-        q_rsrc = _ptr_rsrc(Q, bat * q_stride_b + head * q_stride_h, elem_bytes)
-        k_rsrc = _ptr_rsrc(K, kv_origin, elem_bytes)
-        v_rsrc = _ptr_rsrc(V, kv_origin, elem_bytes)
-        o_rsrc = _ptr_rsrc(Out, bat * o_stride_b + head * o_stride_h, out_cls.width // 8)
+        q_rsrc = buffer_ops.create_buffer_resource(
+            Q,
+            base_byte_offset=as_mlir_value(fx.Index(bat * q_stride_b + head * q_stride_h) * fx.Index(elem_bytes)),
+        )
+        k_rsrc = buffer_ops.create_buffer_resource(
+            K, base_byte_offset=as_mlir_value(fx.Index(kv_origin) * fx.Index(elem_bytes))
+        )
+        v_rsrc = buffer_ops.create_buffer_resource(
+            V, base_byte_offset=as_mlir_value(fx.Index(kv_origin) * fx.Index(elem_bytes))
+        )
+        o_rsrc = buffer_ops.create_buffer_resource(
+            Out,
+            base_byte_offset=as_mlir_value(
+                fx.Index(bat * o_stride_b + head * o_stride_h) * fx.Index(out_cls.width // 8)
+            ),
+        )
 
         def _exp2(x):
             return fmath.exp2(x, fastmath=fm)
@@ -239,13 +209,15 @@ def build_flash_attn_func_module_primary(
                 elem_cls,
             )
 
-        def _lds_v8(elem_off):
+        def _lds_view(elem_off, n):
             p = fx.add_offset(lds_ptr, fx.make_int_tuple(elem_off))
-            return fx.make_view(fx.recast_iter(elem_cls, p), fx.make_layout(LOAD_VEC, 1)).load()
+            return fx.make_view(fx.recast_iter(elem_cls, p), fx.make_layout(n, 1))
+
+        def _lds_v8(elem_off):
+            return _lds_view(elem_off, LOAD_VEC).load()
 
         def _lds_store_v8(elem_off, vec):
-            p = fx.add_offset(lds_ptr, fx.make_int_tuple(elem_off))
-            fx.make_view(fx.recast_iter(elem_cls, p), fx.make_layout(LOAD_VEC, 1)).store(as_mlir_value(vec))
+            _lds_view(elem_off, LOAD_VEC).store(as_mlir_value(vec))
 
         def _lds_operand(base):
             lo = _lds_v8(base)
@@ -290,16 +262,9 @@ def build_flash_attn_func_module_primary(
             row = (c // chunks_per_row) * vt_rows
             col = (c % chunks_per_row) * LOAD_VEC
             vecs = [fx.memref_load_vec(v_stage[st][r]) for r in range_constexpr(vt_rows)]
-
-            def _store_chunk(physical_row):
-                for i in range_constexpr(LOAD_VEC):
-                    logical_col = col + i
-                    dst = k_elems + logical_col * vt_row + physical_row
-                    run = Vec.from_elements([vecs[r][i] for r in range_constexpr(vt_rows)], elem_cls)
-                    p = fx.add_offset(lds_ptr, fx.make_int_tuple(dst))
-                    fx.make_view(fx.recast_iter(elem_cls, p), fx.make_layout(vt_rows, 1)).store(as_mlir_value(run))
-
-            _store_chunk(row)
+            for i in range_constexpr(LOAD_VEC):
+                run = Vec.from_elements([vecs[r][i] for r in range_constexpr(vt_rows)], elem_cls)
+                _lds_view(k_elems + (col + i) * vt_row + row, vt_rows).store(as_mlir_value(run))
 
         def _publish_v_cooperative(st, c):
             chunk = c // 2
@@ -318,20 +283,13 @@ def build_flash_attn_func_module_primary(
                 )
                 return own_dw.shuffle(peer_dw, list(range(vt_rows // 2))).bitcast(elem_cls)
 
-            def _store_group(physical_row):
-                for base_i in range_constexpr(0, LOAD_VEC, 2):
-                    runs = [_make_cooperative_run(base_i + j) for j in range_constexpr(2)]
-                    if pair_half == 0:
-                        for j in range_constexpr(2):
-                            i = base_i + j
-                            logical_col = col + i
-                            dst = k_elems + logical_col * vt_row + physical_row
-                            p = fx.add_offset(lds_ptr, fx.make_int_tuple(dst))
-                            fx.make_view(fx.recast_iter(elem_cls, p), fx.make_layout(vt_rows, 1)).store(
-                                as_mlir_value(runs[j])
-                            )
-
-            _store_group(row)
+            for base_i in range_constexpr(0, LOAD_VEC, 2):
+                # Both halves of the pair must reach the shuffle_xor inside
+                # _make_cooperative_run, so build the runs before branching.
+                runs = [_make_cooperative_run(base_i + j) for j in range_constexpr(2)]
+                if pair_half == 0:
+                    for j in range_constexpr(2):
+                        _lds_view(k_elems + (col + base_i + j) * vt_row + row, vt_rows).store(as_mlir_value(runs[j]))
 
         def _lds_publish_v():
             for st in range_constexpr(v_steps):
@@ -342,9 +300,6 @@ def build_flash_attn_func_module_primary(
                     c = (c < v_total_chunks).select(c, fx.Int32(0)) if const_expr(v_partial) else c
                     _publish_v_chunk(st, c)
 
-        def _lds_publish():
-            _lds_publish_k_and_v0()
-
         def _lds_publish_k_and_v0():
             for st in range_constexpr(k_steps):
                 c = fx.Int32(tid) + st * threads
@@ -354,11 +309,20 @@ def build_flash_attn_func_module_primary(
             _lds_publish_v()
 
         def _to_half8(p_vec):
-            if const_expr(not use_pack_cvt):
+            if const_expr(is_bf16):
+                # gfx1100 has no f32 -> bf16 instruction, so the generic lowering
+                # spends a shift/and/bfe sequence per element. A bf16 is the high
+                # half of the f32, which v_perm_b32 extracts for two values at
+                # once once the rounding bias has been folded into the mantissa.
+                raw = p_vec.bitcast(fx.Int32)
+                biased = [fx.Int32(raw[v]) + fx.Int32(_BF16_RND) for v in range_constexpr(8)]
                 return Vec.from_elements(
-                    [fx.Float32(p_vec[v]).to(elem_cls) for v in range_constexpr(8)],
-                    elem_cls,
-                )
+                    [
+                        fx.Int32(rocdl.perm_b32(biased[2 * j + 1], biased[2 * j], fx.Int32(_VP_SEL_BF16)))
+                        for j in range_constexpr(4)
+                    ],
+                    fx.Int32,
+                ).bitcast(elem_cls)
             pk_ty = ir.VectorType.get([2], dtype_to_elem_type(in_dtype).ir_type)
             pairs = [
                 llvm.call_intrinsic(
@@ -407,19 +371,7 @@ def build_flash_attn_func_module_primary(
             return even.shuffle(odd, _INTERLEAVE)
 
         def _q_frag(qs, kd):
-            base = qs * q_stride_s + kd * WMMA_K
-            return Vec(
-                buffer_ops.buffer_load(q_rsrc, base, vec_width=8, dtype=elem_cls),
-                (8,),
-                elem_cls,
-            ).shuffle(
-                Vec(
-                    buffer_ops.buffer_load(q_rsrc, base + 8, vec_width=8, dtype=elem_cls),
-                    (8,),
-                    elem_cls,
-                ),
-                _CONCAT16,
-            )
+            return _gmem_operand(q_rsrc, qs * q_stride_s + kd * WMMA_K)
 
         q_frags = (
             [[_q_frag(qs, kd) for kd in range_constexpr(n_d_tiles)] for qs in q_idx_safe]
@@ -548,16 +500,16 @@ def build_flash_attn_func_module_primary(
                 ]
                 kv_base = fx.Int32(ib) * block_n
 
-                if const_expr(use_prefetch):
+                if const_expr(prefetch):
                     _gmem_fetch(kv_base + block_n, True)
                     m_run, l_run, o_run = _consume(kv_base, m_run, l_run, o_run, masked)
                     gpu.barrier()
-                    _lds_publish()
+                    _lds_publish_k_and_v0()
                     gpu.barrier()
                 else:
                     gpu.barrier()
                     _gmem_fetch(kv_base, masked or not kv_aligned)
-                    _lds_publish()
+                    _lds_publish_k_and_v0()
                     gpu.barrier()
                     m_run, l_run, o_run = _consume(kv_base, m_run, l_run, o_run, masked)
 
@@ -567,14 +519,12 @@ def build_flash_attn_func_module_primary(
                 results = yield packed
             return results
 
-        use_prefetch = prefetch
-
         init_state = []
         for _t in range_constexpr(q_tiles):
             init_state += [fx.Float32(NEG_BIG), fx.Float32(0.0)] + [zero_acc for _ in range_constexpr(n_d_tiles)]
-        if const_expr(use_prefetch):
+        if const_expr(prefetch):
             _gmem_fetch(fx.Int32(0), not kv_aligned)
-            _lds_publish()
+            _lds_publish_k_and_v0()
             gpu.barrier()
 
         state = _phase(fx.Int32(0), n_full, init_state, False)
@@ -622,103 +572,58 @@ def build_flash_attn_func_module_primary(
 
     @flyc.jit
     def launch_flash_attn_func(
-        Q: fx.Pointer,
-        K: fx.Pointer,
-        V: fx.Pointer,
-        Out: fx.Pointer,
+        Q: fx.Tensor,
+        K: fx.Tensor,
+        V: fx.Tensor,
+        Out: fx.Tensor,
         stream: fx.Stream = fx.Stream(  # noqa: B008  framework idiom: default is evaluated once at import on purpose
             None
         ),
     ):
-        ctx = CompilationContext.get_current()
+        q_n = batch * num_heads * seq_q * head_dim
+        kv_n = batch * num_heads * seq_kv * head_dim
+        Qf = fx.make_view(fx.get_iter(Q), fx.make_layout(q_n, 1))
+        Kf = fx.make_view(fx.get_iter(K), fx.make_layout(kv_n, 1))
+        Vf = fx.make_view(fx.get_iter(V), fx.make_layout(kv_n, 1))
+        Of = fx.make_view(fx.get_iter(Out), fx.make_layout(q_n, 1))
 
-        launcher = flash_attn_func_kernel(Q, K, V, Out)
-
+        wpe = None
         if const_expr(waves_per_eu is not None):
             _wpe = int(waves_per_eu)
             if const_expr(_wpe >= 1):
-                for op in ctx.gpu_module_body.operations:
-                    if const_expr(getattr(op, "OPERATION_NAME", None) == "gpu.func"):
-                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, _wpe)
+                wpe = _wpe
+        fwgs = None
         if const_expr(flat_work_group_size is not None):
             _fwgs = int(flat_work_group_size)
             if const_expr(_fwgs >= 1):
-                flat_wg_attr = ir.StringAttr.get(f"{_fwgs},{_fwgs}")
-                for op in ctx.gpu_module_body.operations:
-                    if const_expr(getattr(op, "OPERATION_NAME", None) == "gpu.func"):
-                        op.attributes["rocdl.flat_work_group_size"] = flat_wg_attr
+                fwgs = f"{_fwgs},{_fwgs}"
+        passthrough_entries = (
+            [
+                ["no-nans-fp-math", "true"],
+                ["unsafe-fp-math", "true"],
+            ]
+            if const_expr(daz)
+            else None
+        )
+        flash_attn_func_kernel(
+            Qf,
+            Kf,
+            Vf,
+            Of,
+            value_attrs={
+                "rocdl.waves_per_eu": wpe,
+                "rocdl.flat_work_group_size": fwgs,
+                "passthrough": passthrough_entries,
+                "llvm.denormal_fpenv": daz_denormal_attr() if const_expr(daz) else None,
+            },
+        ).launch(grid=(n_q_blocks, num_heads, batch), block=(threads, 1, 1), stream=stream)
 
-        passthrough_entries = []
-        if const_expr(daz):
-            passthrough_entries.append(
-                ir.ArrayAttr.get(
-                    [
-                        ir.StringAttr.get("denormal-fp-math-f32"),
-                        ir.StringAttr.get("preserve-sign,preserve-sign"),
-                    ]
-                )
-            )
-            passthrough_entries.append(
-                ir.ArrayAttr.get(
-                    [
-                        ir.StringAttr.get("no-nans-fp-math"),
-                        ir.StringAttr.get("true"),
-                    ]
-                )
-            )
-            passthrough_entries.append(
-                ir.ArrayAttr.get(
-                    [
-                        ir.StringAttr.get("unsafe-fp-math"),
-                        ir.StringAttr.get("true"),
-                    ]
-                )
-            )
-        for op in ctx.gpu_module_body.operations:
-            if const_expr(getattr(op, "OPERATION_NAME", None) == "gpu.func"):
-                op.attributes["passthrough"] = ir.ArrayAttr.get(passthrough_entries)
-
-        launcher.launch(grid=(n_q_blocks, num_heads, batch), block=(threads, 1, 1), stream=stream)
-
-    _fmha_compile_hints = {
+    launch_flash_attn_func.compile_hints = {
         "fast_fp_math": fast_fp_math,
         "unsafe_fp_math": unsafe_fp_math,
         "llvm_options": {"enable-post-misched": False, "lsr-drop-solution": True},
     }
-
-    _ptr_elems = (elem_cls, elem_cls, elem_cls, out_cls)
-
-    def _ptr(t, elem):
-        return _ptr_arg(t, elem) if hasattr(t, "data_ptr") else t
-
-    def _wrap_qkvo(args, kwargs):
-        args = list(args)
-        for idx in range(min(4, len(args))):
-            args[idx] = _ptr(args[idx], _ptr_elems[idx])
-        for name, elem in zip(("Q", "K", "V", "O"), _ptr_elems):
-            if name in kwargs:
-                kwargs[name] = _ptr(kwargs[name], elem)
-        return tuple(args), kwargs
-
-    launch_flash_attn_func.compile_hints = dict(_fmha_compile_hints)
-
-    def _launch(*args, **kwargs):
-        args, kwargs = _wrap_qkvo(args, kwargs)
-        stream = kwargs.pop("stream", fx.Stream(None))
-        _run_compiled(launch_flash_attn_func, *args, stream)
-
-    def _compile(Q, K, V, Out, stream=None):
-        return flyc.compile(
-            launch_flash_attn_func,
-            _ptr(Q, elem_cls),
-            _ptr(K, elem_cls),
-            _ptr(V, elem_cls),
-            _ptr(Out, out_cls),
-            fx.Stream(stream),
-        )
-
-    _launch.compile = _compile
-    return _launch
+    return launch_flash_attn_func
 
 
 build_flash_attn_func_module = build_flash_attn_func_module_primary
