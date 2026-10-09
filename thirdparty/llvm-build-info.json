@@ -2,5 +2,17 @@
   "upstream": {
     "repository": "https://github.com/llvm/llvm-project.git",
     "llvm_hash": "e2a39f504fee836e4def9581bed817ecc327b9dc"
+  },
+
+  "custom-old": {
+    "repository": "https://github.com/AMD-Lightning-Internal/llvm-project.git",
+    "branch": "amd/dev/jli/schedule_bank",
+    "description": "VGPR bank scheduling hints for gfx1250"
+  },
+
+  "custom-upstream-old": {
+    "repository":  "https://github.com/jli-melchior/llvm-project.git",
+    "branch": "jli/gfx1250/schedule-bank-upstream-oldllvm",
+    "description": "VGPR bank scheduling hints for gfx1250"
   }
 }
