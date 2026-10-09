@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-09T12:43:10Z",
+ "updated": "2026-10-09T15:31:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,44 @@
    "branch": "jli/bump-llvm-0906",
    "event": "pull_request",
    "title": "[llvm] bump llvm to 1df311a6",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37931323277",
    "created_at": "2026-10-09T12:38:04Z",
-   "updated_at": "2026-10-09T12:40:11Z",
+   "updated_at": "2026-10-09T12:50:55Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-09T12:51:19Z",
+     "completed_at": "2026-10-09T13:10:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37931323277/job/113827209177"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-09T12:51:35Z",
+     "completed_at": "2026-10-09T14:00:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37931323277/job/113827209193",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-09T12:50:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37931323277/job/113827209202"
+    }
+   ]
   },
   {
    "run_id": 37914392173,
