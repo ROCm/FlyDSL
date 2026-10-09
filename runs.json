@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-09T03:15:41Z",
+ "updated": "2026-10-09T03:22:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 37878649935,
+   "pr": 1240,
+   "commit": "10cf8eb2a6725a125e748110817b16929fad6967",
+   "branch": "bugfix-e8m0-stream-and-tests",
+   "event": "pull_request",
+   "title": "[Bugfix] Shared numerics, streams, and tests",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37878649935",
+   "created_at": "2026-10-09T03:18:14Z",
+   "updated_at": "2026-10-09T03:18:14Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
   {
    "run_id": 37878282081,
    "pr": 1216,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37878282081",
    "created_at": "2026-10-09T03:13:28Z",
-   "updated_at": "2026-10-09T03:15:14Z",
+   "updated_at": "2026-10-09T03:15:57Z",
    "actor": "vlluvia",
    "jobs": []
   },
@@ -35,7 +50,7 @@
   },
   {
    "run_id": 37876774627,
-   "pr": 1240,
+   "pr": null,
    "commit": "676d1f94da2f4dbe0ae4b114f18c9528cf6c8e34",
    "branch": "bugfix-e8m0-stream-and-tests",
    "event": "pull_request",
@@ -55,13 +70,41 @@
    "branch": "jli/fix-waves-per-eu",
    "event": "pull_request",
    "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876403024",
    "created_at": "2026-10-09T02:49:41Z",
-   "updated_at": "2026-10-09T02:51:49Z",
+   "updated_at": "2026-10-09T03:19:58Z",
    "actor": "jli-melchior",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-09T03:20:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876403024/job/113653374688"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-09T03:19:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876403024/job/113653374696"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-09T03:20:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876403024/job/113653374724"
+    }
+   ]
   },
   {
    "run_id": 37876094979,
@@ -471,11 +514,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Perf] Optimize rmsnorm/layernorm (#848)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37864473032",
    "created_at": "2026-10-09T00:22:51Z",
-   "updated_at": "2026-10-09T02:30:36Z",
+   "updated_at": "2026-10-09T03:21:27Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -502,10 +545,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-09T02:30:36Z",
-     "completed_at": null,
+     "completed_at": "2026-10-09T03:21:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37864473032/job/113612409756"
     }
    ]
@@ -974,49 +1017,6 @@
    "updated_at": "2026-10-08T17:55:44Z",
    "actor": "dimitri91209",
    "jobs": []
-  },
-  {
-   "run_id": 37795691290,
-   "pr": 1234,
-   "commit": "865fad3412c1854f7d01f996ffeb14f3da3513a4",
-   "branch": "dsv4_megakernel",
-   "event": "pull_request",
-   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37795691290",
-   "created_at": "2026-10-08T14:49:57Z",
-   "updated_at": "2026-10-09T01:38:40Z",
-   "actor": "amd-weisun",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-08T15:12:28Z",
-     "completed_at": "2026-10-08T15:43:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37795691290/job/113384847177"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T00:40:40Z",
-     "completed_at": "2026-10-09T01:38:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37795691290/job/113384847363"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-08T15:12:21Z",
-     "completed_at": "2026-10-08T15:30:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37795691290/job/113384847368"
-    }
-   ]
   }
  ]
 }
