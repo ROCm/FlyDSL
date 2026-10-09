@@ -218,18 +218,20 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
     return launch
 
 
-def _transpose_activation_fp8(x_fp8):
+def _transpose_activation_fp8(x_fp8, stream=None):
     """Fast tiled NCDHW->NDHWC fp8 transpose; falls back to torch for odd shapes."""
     n, c, d, h, w = x_fp8.shape
     s = d * h * w
+    launch_stream = torch.cuda.current_stream() if stream is None else stream
     if not (x_fp8.is_contiguous() and c % TR_VEC == 0 and s % 4 == 0):
-        return x_fp8.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
+        with torch.cuda.stream(launch_stream):
+            return x_fp8.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
     out = torch.empty((n * s * c,), device=x_fp8.device, dtype=torch.int8)
     exe = compile_transpose_ncdhw_ndhwc_fp8(n, c, s)
     exe(
         flyc.from_torch_tensor(out),
         flyc.from_torch_tensor(x_fp8.view(torch.int8).view(-1)),
-        torch.cuda.current_stream(),
+        launch_stream,
     )
     return out
 
@@ -721,7 +723,7 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, stream=None, wgm
     c = cp
 
     launch_stream = torch.cuda.current_stream() if stream is None else stream
-    x_arg = _transpose_activation_fp8(x)
+    x_arg = _transpose_activation_fp8(x, stream=launch_stream)
     w_arg = _prep_weight_fp8(weight)
 
     # The k-loop runs over crs_pad, so zero-pad the weight's crs dimension to match.

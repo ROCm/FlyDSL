@@ -241,6 +241,10 @@ def post_process_data(df, num_iters, warm_iter=1):
         if kernels_num == 0:
             print("data missed, the time may be inaccurate!")
 
+    if kernels_num < 1:
+        # Short traces: never divide by zero in groupby.
+        return [], int(num_iters)
+
     test_df = device_df.iloc[:valid_n].reset_index()
     grouped_kernel_df = test_df.groupby(test_df.index // kernels_num, sort=False).agg(
         {"self_device_time_total": "sum", "index": list}
@@ -424,17 +428,26 @@ def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg="", logits_diff_thresh
 
 
 def tensor_dump(x: torch.tensor, name: str, dir="./"):
-    x_cpu = x.cpu().view(torch.uint8)
+    x_cpu = x.detach().contiguous().cpu().view(torch.uint8)
     filename = f"{dir}/{name}.bin"
     x_cpu.numpy().tofile(filename)
     logger.info(f"saving {filename} {x.shape}, {x.dtype}")
 
     with open(f"{dir}/{name}.meta", "w") as f:
-        f.writelines([f"{el}\n" for el in [x.shape, x.dtype]])
+        # Shape as comma-separated ints, dtype as a torch attribute name.
+        # The loader must not eval() the meta file.
+        f.write(",".join(str(int(d)) for d in x.shape) + "\n")
+        f.write(str(x.dtype).replace("torch.", "") + "\n")
 
 
 def tensor_load(filename: str):
-    DWs = np.fromfile(filename, dtype=np.uint32)
+    raw = np.fromfile(filename, dtype=np.uint8)
     metafile = ".".join(filename.split(".")[:-1]) + ".meta"
-    shape, dtype = [eval(line.strip()) for line in open(metafile)]
-    return torch.tensor(DWs).view(dtype).view(shape)
+    with open(metafile) as f:
+        shape_line = f.readline().strip()
+        dtype_line = f.readline().strip()
+    shape = tuple(int(x) for x in shape_line.split(",")) if shape_line else ()
+    if not hasattr(torch, dtype_line):
+        raise ValueError(f"tensor_load: unknown dtype {dtype_line!r} in {metafile}")
+    dtype = getattr(torch, dtype_line)
+    return torch.from_numpy(raw.copy()).view(dtype).reshape(shape)

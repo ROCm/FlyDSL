@@ -29,6 +29,7 @@ from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
 from .diagnostics import (
     DSLCompileError,
+    annotation_maps_to,
     diag_records_from_mlir_error,
     dsl_ir_diagnostics,
     install_excepthook,
@@ -1432,7 +1433,12 @@ class JitFunction:
         param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
         for pname, dsl_type in zip(param_names, dsl_types):
             ann = sig.parameters[pname].annotation
-            if ann is not inspect.Parameter.empty and isinstance(ann, type) and not issubclass(dsl_type, ann):
+            if (
+                ann is not inspect.Parameter.empty
+                and isinstance(ann, type)
+                and not issubclass(dsl_type, ann)
+                and not annotation_maps_to(ann, dsl_type)
+            ):
                 warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
         has_user_stream = _ensure_stream_arg(jit_args)
         ir_types = get_ir_types(jit_args)

@@ -9,13 +9,19 @@ import torch
 
 
 def float_to_e8m0(x: torch.Tensor) -> torch.Tensor:
-    """Round positive FP32 values to E8M0 exponent bytes."""
+    """Round positive FP32 values to E8M0 exponent bytes.
+
+    A uint8 add wraps 0xFF to 0. Inf, NaN, and a value that rounds up from
+    exponent 254 must stay 0xFF.
+    """
 
     bits = x.float().contiguous().view(torch.int32)
     exponent = ((bits >> 23) & 0xFF).to(torch.uint8)
+    is_special = exponent == 0xFF
     round_up = ((bits & 0x400000) != 0) & (((bits & 0x200000) != 0) | ((bits & 0x1FFFFF) != 0) | (exponent != 0))
-    exponent = exponent + round_up.to(torch.uint8)
-    return torch.where(exponent == 0xFF, torch.full_like(exponent, 0xFF), exponent)
+    bumped = exponent.to(torch.int16) + round_up.to(torch.int16)
+    exponent = torch.clamp(bumped, max=0xFF).to(torch.uint8)
+    return torch.where(is_special, torch.full_like(exponent, 0xFF), exponent)
 
 
 def e8m0_to_float(scale: torch.Tensor) -> torch.Tensor:

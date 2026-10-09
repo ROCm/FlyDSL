@@ -311,8 +311,12 @@ def _dist_worker(
             if result is not None:
                 out.copy_(result)
         else:
-            # FlyDSL: uses out parameter
-            fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
+            # None means the custom kernel rejected the shape. The docstring
+            # says the caller falls back to NCCL. Ignoring None leaves out stale.
+            ar = fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
+            if ar is None:
+                out.copy_(x_flat)
+                dist.all_reduce(out, group=group)
 
     try:
         if mode == "eager":
@@ -420,7 +424,10 @@ def _dist_worker(
                                     if result is not None:
                                         out.copy_(result)
                                 else:
-                                    fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
+                                    ar = fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
+                                    if ar is None:
+                                        out.copy_(x_flat)
+                                        dist.all_reduce(out, group=group)
                     # IPC handles exchanged at capture exit
                 except Exception as cap_e:
                     if rank == 0:

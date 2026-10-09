@@ -73,9 +73,11 @@ def test_num_records_enables_checked_buffer_load(records_source):
     a = torch.tensor([7.0], device="cuda", dtype=torch.float32)
     out = torch.full((2,), -1.0, device="cuda", dtype=torch.float32)
     stream = torch.cuda.current_stream()
+    # One in-bounds float32 record (4 bytes); keep in sync with a.dtype/numel.
+    num_records_bytes = int(a.numel() * a.element_size())
 
     launch = _make_checked_load(records_source=records_source)
-    launch(a, out, 4, stream=stream)
+    launch(a, out, num_records_bytes, stream=stream)
     torch.cuda.synchronize()
 
-    torch.testing.assert_close(out.cpu(), torch.tensor([7.0, 0.0]))
+    torch.testing.assert_close(out.cpu(), torch.tensor([7.0, 0.0], device="cpu"))

@@ -13,15 +13,17 @@ from typing import List, Optional
 
 from .._mlir import ir
 from ..expr.meta import _is_framework_file
+from ..expr.typing import Constexpr
 from ..utils import env
-from .jit_argument import is_type_param_annotation
-from .protocol import DslType
+from .jit_argument import JitArgumentRegistry, is_type_param_annotation
+from .protocol import DslType, JitArgument
 
 __all__ = [
     "DSLCompileError",
     "diag_records_from_mlir_error",
     "dsl_ir_diagnostics",
     "install_excepthook",
+    "annotation_maps_to",
     "warn_annotation_value_mismatch",
     "warn_invalid_annotations",
 ]
@@ -47,27 +49,30 @@ def location_chain(loc) -> List[SourceFrame]:
     Handles call-site chains (``callee`` first, then ``caller`` recursively),
     name locations (unwrap ``child_loc``), and fused locations (each child in
     order).  Frames pointing at synthetic ``<...>`` sources are skipped.
+
+    FlyDSL's MLIR Python bindings expose concrete subclasses
+    (``CallSiteLoc`` / ``NameLoc`` / ``FusedLoc`` / ``FileLineColLoc``) and do
+    not implement ``Location.is_a_*`` helpers — use ``isinstance``.
     """
     if loc is None:
         return []
-    try:
-        if loc.is_a_callsite():
-            return location_chain(loc.callee) + location_chain(loc.caller)
-        if loc.is_a_name():
-            return location_chain(loc.child_loc)
-        if loc.is_a_fused():
-            out: List[SourceFrame] = []
-            for child in loc.locations:
-                out.extend(location_chain(child))
-            return out
-        if loc.is_a_file():
-            filename, line = loc.filename, loc.start_line
-            if not filename or filename.startswith("<") or not line:
-                return []  # synthetic source we cannot point a user at
-            end_col = getattr(loc, "end_col", 0) or 0
-            return [SourceFrame(filename, line, getattr(loc, "start_col", 0) or 0, end_col or None)]
-    except Exception:
-        return []
+    from flydsl._mlir import ir
+
+    if isinstance(loc, ir.CallSiteLoc):
+        return location_chain(loc.callee) + location_chain(loc.caller)
+    if isinstance(loc, ir.NameLoc):
+        return location_chain(loc.child_loc)
+    if isinstance(loc, ir.FusedLoc):
+        out: List[SourceFrame] = []
+        for child in loc.locations:
+            out.extend(location_chain(child))
+        return out
+    if isinstance(loc, ir.FileLineColLoc):
+        filename, line = loc.filename, loc.start_line
+        if not filename or filename.startswith("<") or not line:
+            return []  # synthetic source we cannot point a user at
+        end_col = getattr(loc, "end_col", 0) or 0
+        return [SourceFrame(filename, line, getattr(loc, "start_col", 0) or 0, end_col or None)]
     return []  # unknown / opaque location: nothing locatable
 
 
@@ -198,6 +203,33 @@ def warn_annotation_value_mismatch(param_name, annotation, actual_type, *, conte
     )
 
 
+def annotation_maps_to(annotation, actual_type) -> bool:
+    """True when ``annotation`` is the registered host type for ``actual_type``.
+
+    ``int`` is registered as ``Int32``. That match is not a mismatch.
+    """
+    if not isinstance(annotation, type) or not isinstance(actual_type, type):
+        return False
+    _ctor, dsl_type = JitArgumentRegistry.get(annotation)
+    if dsl_type is None:
+        return False
+    return actual_type is dsl_type or issubclass(actual_type, dsl_type)
+
+
+def _annotation_is_accepted(ann) -> bool:
+    """Host types in the JIT registry are real annotations, not mistakes."""
+    if isinstance(ann, DslType) or is_type_param_annotation(ann):
+        return True
+    if Constexpr.is_constexpr_annotation(ann):
+        return True
+    if not isinstance(ann, type):
+        return False
+    if issubclass(ann, SimpleNamespace) or issubclass(ann, JitArgument):
+        return True
+    ctor, _dsl_type = JitArgumentRegistry.get(ann)
+    return ctor is not None
+
+
 def warn_invalid_annotations(sig, *, context):
     """Definition-time check: warn about runtime parameters whose annotation is not a DSL
     value type, or a Type[T] annotation.
@@ -207,14 +239,16 @@ def warn_invalid_annotations(sig, *, context):
     the per-call value/annotation consistency check (``warn_annotation_value_mismatch``):
     whether an annotation *is* a DslValue is a property of the definition; whether an actual
     value *matches* it is a property of the call.
+
+    Registered host types are valid: ``int`` is ``Int32``, ``float`` is
+    ``Float32``, ``bool`` is ``Boolean``, and tensors and streams use the
+    same registry. ``Constexpr[T]`` and ``Type[T]`` are compile-time
+    parameters. Anything else is still a warning, because the annotation
+    is not enforced and the traced value type is what gets used.
     """
     for name, param in sig.parameters.items():
         ann = param.annotation
-        if ann is inspect.Parameter.empty:
-            continue
-        if isinstance(ann, DslType) or is_type_param_annotation(ann):
-            continue
-        if isinstance(ann, type) and issubclass(ann, SimpleNamespace):
+        if ann is inspect.Parameter.empty or _annotation_is_accepted(ann):
             continue
         warnings.warn(
             f"{context} parameter '{name}' is annotated as '{getattr(ann, '__name__', repr(ann))}', which is not "
