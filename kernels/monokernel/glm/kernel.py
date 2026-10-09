@@ -538,8 +538,10 @@ def build_glm5_monokernel(
             """Issue one native packed 128-K MXFP4 tile and four E8M0 row scales."""
             ln = lane if ln is None else ln
             raw = fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 128) + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-            row = rg * 16 + ln % 16
-            packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
+            # Four E8M0 bytes per row: all 16 rows of this 128-K tile are contiguous.
+            packed_scale = fx.Int32(
+                bo.buffer_load(s_rsrc, (rg * (K // 128) + kc) * 16 + ln % 16, vec_width=1, dtype=T.i32)
+            )
             scales = [
                 ((packed_scale.shrui(fx.Int32(sp * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
                 for sp in range_constexpr(4)
@@ -1929,8 +1931,9 @@ def build_glm5_monokernel(
                 r_gp = _rsrc(g_post)
                 gps = [(ld_bf16(r_gp, k), ld_bf16(r_gp, k + 1)) for k in ks_]  # issued ahead of the wait
                 bs = load_bias()
-                w_rg = ((lane % 16) // 8) * (INTER // 16) + c // 2  # MFMA rows 0-7 gate, 8-15 up
-                w_ln = (lane & -16) | ((c % 2) * 8 + lane % 8)
+                # MXFP4 packs eight gate rows and eight up rows into one row group.
+                w_rg = c if expert_mxfp4 else ((lane % 16) // 8) * (INTER // 16) + c // 2
+                w_ln = lane if expert_mxfp4 else (lane & -16) | ((c % 2) * 8 + lane % 8)
                 s_rg = (lane // 32) * (INTER // 16) + c // 2  # this lane's output rows
 
                 def u_ug8(cc, e, live=None):  # expert e's weights (loads return 0 unless live)
@@ -2038,8 +2041,8 @@ def build_glm5_monokernel(
             c = u % (INTER // UG8)
             has_sh = u < INTER // UG8
             slot = has_sh.select(fx.Int32(MOE_SLOTS - 1), u // (INTER // UG8))
-            w_rg = ((lane % 16) // 8) * (INTER // 16) + c // 2
-            w_ln = (lane & -16) | ((c % 2) * 8 + lane % 8)
+            w_rg = c if expert_mxfp4 else ((lane % 16) // 8) * (INTER // 16) + c // 2
+            w_ln = lane if expert_mxfp4 else (lane & -16) | ((c % 2) * 8 + lane % 8)
             s_rg = (lane // 32) * (INTER // 16) + c // 2
 
             def ug8_units(e, sample, live=None):
