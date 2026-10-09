@@ -13,10 +13,9 @@ from typing import List, Optional
 
 from .._mlir import ir
 from ..expr.meta import _is_framework_file
-from ..expr.typing import Constexpr
 from ..utils import env
 from .jit_argument import JitArgumentRegistry, is_type_param_annotation
-from .protocol import DslType, JitArgument
+from .protocol import DslType
 
 __all__ = [
     "DSLCompileError",
@@ -50,30 +49,31 @@ def location_chain(loc) -> List[SourceFrame]:
     name locations (unwrap ``child_loc``), and fused locations (each child in
     order).  Frames pointing at synthetic ``<...>`` sources are skipped.
 
-    FlyDSL's MLIR Python bindings expose concrete subclasses
-    (``CallSiteLoc`` / ``NameLoc`` / ``FusedLoc`` / ``FileLineColLoc``) and do
-    not implement ``Location.is_a_*`` helpers — use ``isinstance``.
+    These bindings have ``CallSiteLoc``, ``NameLoc``, ``FusedLoc``, and
+    ``FileLineColLoc``, and no ``Location.is_a_*``. Any other location, or a
+    walk that fails, returns no frames.
     """
     if loc is None:
         return []
-    from flydsl._mlir import ir
-
-    if isinstance(loc, ir.CallSiteLoc):
-        return location_chain(loc.callee) + location_chain(loc.caller)
-    if isinstance(loc, ir.NameLoc):
-        return location_chain(loc.child_loc)
-    if isinstance(loc, ir.FusedLoc):
-        out: List[SourceFrame] = []
-        for child in loc.locations:
-            out.extend(location_chain(child))
-        return out
-    if isinstance(loc, ir.FileLineColLoc):
-        filename, line = loc.filename, loc.start_line
-        if not filename or filename.startswith("<") or not line:
-            return []  # synthetic source we cannot point a user at
-        end_col = getattr(loc, "end_col", 0) or 0
-        return [SourceFrame(filename, line, getattr(loc, "start_col", 0) or 0, end_col or None)]
-    return []  # unknown / opaque location: nothing locatable
+    try:
+        if isinstance(loc, ir.CallSiteLoc):
+            return location_chain(loc.callee) + location_chain(loc.caller)
+        if isinstance(loc, ir.NameLoc):
+            return location_chain(loc.child_loc)
+        if isinstance(loc, ir.FusedLoc):
+            out: List[SourceFrame] = []
+            for child in loc.locations:
+                out.extend(location_chain(child))
+            return out
+        if isinstance(loc, ir.FileLineColLoc):
+            filename, line = loc.filename, loc.start_line
+            if not filename or filename.startswith("<") or not line:
+                return []  # synthetic source we cannot point a user at
+            end_col = getattr(loc, "end_col", 0) or 0
+            return [SourceFrame(filename, line, getattr(loc, "start_col", 0) or 0, end_col or None)]
+    except Exception:
+        return []
+    return []
 
 
 def diag_record_from_diagnostic(d) -> DiagRecord:
@@ -204,27 +204,24 @@ def warn_annotation_value_mismatch(param_name, annotation, actual_type, *, conte
 
 
 def annotation_maps_to(annotation, actual_type) -> bool:
-    """True when ``annotation`` is the registered host type for ``actual_type``.
+    """True when ``annotation`` is registered as exactly ``actual_type``.
 
-    ``int`` is registered as ``Int32``. That match is not a mismatch.
+    ``int`` is ``Int32``. ``Int64`` and ``Boolean`` are different types, so
+    they still warn.
     """
     if not isinstance(annotation, type) or not isinstance(actual_type, type):
         return False
     _ctor, dsl_type = JitArgumentRegistry.get(annotation)
-    if dsl_type is None:
-        return False
-    return actual_type is dsl_type or issubclass(actual_type, dsl_type)
+    return dsl_type is not None and actual_type is dsl_type
 
 
 def _annotation_is_accepted(ann) -> bool:
     """Host types in the JIT registry are real annotations, not mistakes."""
     if isinstance(ann, DslType) or is_type_param_annotation(ann):
         return True
-    if Constexpr.is_constexpr_annotation(ann):
-        return True
     if not isinstance(ann, type):
         return False
-    if issubclass(ann, SimpleNamespace) or issubclass(ann, JitArgument):
+    if issubclass(ann, SimpleNamespace):
         return True
     ctor, _dsl_type = JitArgumentRegistry.get(ann)
     return ctor is not None
@@ -242,9 +239,8 @@ def warn_invalid_annotations(sig, *, context):
 
     Registered host types are valid: ``int`` is ``Int32``, ``float`` is
     ``Float32``, ``bool`` is ``Boolean``, and tensors and streams use the
-    same registry. ``Constexpr[T]`` and ``Type[T]`` are compile-time
-    parameters. Anything else is still a warning, because the annotation
-    is not enforced and the traced value type is what gets used.
+    same registry. ``Type[T]`` is a compile-time parameter. Anything else
+    still warns. The annotation is not enforced; the traced type is used.
     """
     for name, param in sig.parameters.items():
         ann = param.annotation
