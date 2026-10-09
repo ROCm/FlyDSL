@@ -28,3 +28,9 @@ https://github.com/SemiAnalysisAI/InferenceX/tree/8ac98344b038a3f2da20a565fe9b97
 
 Model semantics and the Kimi-K3 ordered state pipeline are implemented in
 FlyDSL and remain model-specific.
+
+## GLM performance
+
+See the [GLM mono-kernel performance report](mono-kernel-glm-perf.md) (Chinese)
+for a TP8, concurrency-1 comparison against the ATOM layer, with and without
+the fused indexer, including GPU stream traces and benchmark configuration.
