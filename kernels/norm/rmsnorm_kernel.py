@@ -139,6 +139,13 @@ def build_rmsnorm_module(
     # they raise this kernel from 252 to 258 VGPRs, past the 256 it can use without s_set_vgpr_msb bank switches,
     # and M = 4096 then runs 1.56x slower.
     SKIP_FULL_TILE_CHECKS = arch == "gfx1250"
+    # Without a scheduling barrier, the scheduler sinks the gamma loads, and the x load of a partial last tile, below
+    # the first wait to save VGPRs. Each row then waits two or three memory latencies instead of one.
+    LOADS_FIRST = arch == "gfx1250"
+    # One reduction per row: every wave reads the partials after a single barrier instead of waiting for wave 0.
+    ONE_BARRIER_REDUCE = arch == "gfx1250"
+    # sum_sq / N compiles to a correctly rounded division sequence on the path of every row.
+    RCP_MEAN = arch == "gfx1250"
     INPUT_CACHE_MODIFIER = 2 if USE_NT else 0
     # Streaming the stores too costs 6-8% on gfx95x; letting them settle in LLC
     # drains them to HBM in better-scheduled bursts. gfx942 keeps its own tuning.
@@ -340,6 +347,11 @@ def build_rmsnorm_module(
                 fx.memref_store(w, s_red, wave)
             gpu.barrier()
 
+            if const_expr(ONE_BARRIER_REDUCE):
+                has_part = lane < RED_SLOTS
+                part = fx.memref_load(s_red, has_part.select(lane, 0))
+                return wave_reduce_add(has_part.select(part, 0.0))
+
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
@@ -351,6 +363,9 @@ def build_rmsnorm_module(
             gpu.barrier()
 
             return fx.memref_load(s_red, 0)
+
+        def mean_of(sum_sq):
+            return sum_sq * (1.0 / n_float) if const_expr(RCP_MEAN) else sum_sq / n_float
 
         # Vector path for the f16/bf16 vec8 prefix plus an optional scalar tail.
         if const_expr(USE_VEC_N):
@@ -381,22 +396,34 @@ def build_rmsnorm_module(
             gamma_local = []
 
             # Pass 1: load + cache + sumsq
-            for tile_i in range_constexpr(NUM_VEC_ITERS):
+            def load_tile(tile_i):
                 idx = tid + tile_i * BLOCK_THREADS
                 full_tile = SKIP_FULL_TILE_CHECKS and (tile_i + 1) * BLOCK_THREADS <= VEC_TILES
                 is_valid = idx < VEC_TILES
                 idx_safe = idx if full_tile else is_valid.select(idx, 0)
-                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe)
-                in_local.append(vec)
+                in_local.append(_load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe))
                 if const_expr(PRELOAD_GAMMA):
                     gamma_local.append(
                         _preload_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx_safe)
                     )
-                x = vec.to(fx.Float32)
+                return full_tile, is_valid
 
+            def add_sumsq(acc, tile_i, full_tile, is_valid):
+                x = in_local[tile_i].to(fx.Float32)
                 x2 = x * x
                 red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sumsq = thread_sumsq + (red2 if full_tile else is_valid.select(red2, c_zero_f))
+                return acc + (red2 if full_tile else is_valid.select(red2, c_zero_f))
+
+            if const_expr(LOADS_FIRST):
+                tiles = []
+                for tile_i in range_constexpr(NUM_VEC_ITERS):
+                    tiles.append(load_tile(tile_i))
+                fx.rocdl.sched_barrier(0)
+                for tile_i in range_constexpr(NUM_VEC_ITERS):
+                    thread_sumsq = add_sumsq(thread_sumsq, tile_i, *tiles[tile_i])
+            else:
+                for tile_i in range_constexpr(NUM_VEC_ITERS):
+                    thread_sumsq = add_sumsq(thread_sumsq, tile_i, *load_tile(tile_i))
 
             if const_expr(TAIL_ELEMS > 0):
                 if tid < TAIL_ELEMS:
@@ -406,7 +433,7 @@ def build_rmsnorm_module(
                     thread_sumsq = thread_sumsq + x_tail * x_tail
 
             sum_sq = block_reduce_add(thread_sumsq)
-            mean_sq = sum_sq / n_float
+            mean_sq = mean_of(sum_sq)
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
@@ -468,7 +495,7 @@ def build_rmsnorm_module(
                 thread_sumsq = thread_sumsq + x2_safe
 
             sum_sq = block_reduce_add(thread_sumsq)
-            mean_sq = sum_sq / n_float
+            mean_sq = mean_of(sum_sq)
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
@@ -831,6 +858,9 @@ def build_fused_add_rmsnorm_module(
     # As in build_rmsnorm_module: at N = 32768 the checks of full tiles raise this kernel from 238 to 254 VGPRs, just
     # below the 256 it can use without bank switches.
     SKIP_FULL_TILE_CHECKS = arch == "gfx1250"
+    # As in build_rmsnorm_module: one reduction per row after a single barrier, and no division for the mean.
+    ONE_BARRIER_REDUCE = arch == "gfx1250"
+    RCP_MEAN = arch == "gfx1250"
 
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
@@ -875,6 +905,16 @@ def build_fused_add_rmsnorm_module(
             return w
 
         def block_reduce_add(val):
+            if const_expr(ONE_BARRIER_REDUCE and RED_SLOTS > 1):
+                lane = tid % WARP_SIZE
+                wave = tid // WARP_SIZE
+                w = wave_reduce_add(val)
+                if lane == 0:
+                    fx.memref_store(w, s_red, wave)
+                gpu.barrier()
+                in_range = lane < RED_SLOTS
+                v = fx.memref_load(s_red, in_range.select(lane, 0))
+                return wave_reduce_add(in_range.select(v, 0.0))
             dummy = fx.Float32(0.0)
             r0, _ = block_reduce_add2(val, dummy)
             return r0
@@ -910,6 +950,9 @@ def build_fused_add_rmsnorm_module(
             gpu.barrier()
 
             return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
+
+        def mean_of(sum_sq):
+            return sum_sq * (1.0 / n_float) if const_expr(RCP_MEAN) else sum_sq / n_float
 
         # Vector path for every complete f16/bf16 vec8 row.
         if const_expr(USE_VEC_N):
@@ -978,8 +1021,11 @@ def build_fused_add_rmsnorm_module(
                     if idx < VEC_TILES:
                         _store_vec(copy_atom, VEC_WIDTH, elem_dtype, added_e, residual_out_div, idx)
 
-            _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
-            mean_sq = sum_sq / n_float
+            if const_expr(ONE_BARRIER_REDUCE):
+                sum_sq = block_reduce_add(thread_sumsq)
+            else:
+                _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
+            mean_sq = mean_of(sum_sq)
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
@@ -1038,7 +1084,7 @@ def build_fused_add_rmsnorm_module(
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
 
             sum_sq = block_reduce_add(thread_sumsq)
-            mean_sq = sum_sq / n_float
+            mean_sq = mean_of(sum_sq)
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
