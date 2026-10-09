@@ -20,6 +20,28 @@ from .gemm_common_gfx1250 import (
 )
 
 
+def select_gemm_bf16_prefill_config(
+    M: int, N: int, K: int, num_cus: int = 256
+) -> tuple[int, int, int, int, int, int, int]:
+    """(tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, wmma_b2b) for a prefill-sized BF16 GEMM (M > 256).
+
+    For grids whose 256x256 tiles keep at least three quarters of the CUs busy, averaged over their waves, four waves
+    of 128x128 with the WMMA arbitration stall disabled (wmma_b2b=1) beat the eight-wave 128x64 layout: the workgroup
+    reads each A fragment twice instead of four times per K-step (a third less LDS read traffic), and its one wave per
+    SIMD can issue LDS and scalar work while its WMMAs execute. Other shapes raise ValueError and keep the caller's
+    tile (smaller tiles, N not a multiple of 256, K < 768).
+    """
+    if M <= 256:
+        raise ValueError(f"prefill config selector covers M > 256, got M={M}")
+    if N % 256 or K % 128 or K < 768:
+        raise ValueError(f"needs N % 256 == 0, K % 128 == 0 and K >= 768, got N={N}, K={K}")
+    tiles = -(-M // 256) * (N // 256)
+    waves = -(-tiles // num_cus)
+    if 4 * tiles < 3 * num_cus * waves:
+        raise ValueError(f"{tiles} 256x256 tiles keep less than 3/4 of {num_cus} CUs busy over {waves} waves")
+    return (256, 256, 128, 2, 2, 2, 1)
+
+
 @flyc.jit
 def launch_gemm_bf16(
     arg_c: fx.Pointer,
@@ -213,7 +235,25 @@ def launch_gemm_bf16(
                     # B is the instruction's A operand: the accumulator's fast dim is N.
                     fx.gemm(wmma_atom, c_frags[idx], wt[wn], act[wm], c_frags[idx])
 
-        def compute_ktile(buf, prefetch_kt):
+        def compute_ktile_interleaved(buf, prefetch_kt):
+            # With the arbitration stall off the wave can issue LDS reads while its WMMAs run: spread the next
+            # K-step's fragment reads over this K-step's WMMAs instead of issuing them as one block between K-steps.
+            cur = _load_ks(buf, 0)
+            if const_expr(prefetch_kt is not None):
+                rocdl.sched_barrier(0)
+                issue(prefetch_kt % num_buffers, prefetch_kt)
+            rocdl.sched_barrier(0)
+            for ks in range_constexpr(K_WS):
+                nxt = _load_ks(buf, ks + 1) if const_expr(ks + 1 < K_WS) else None
+                _mma_ks(cur)
+                if const_expr(nxt is not None):
+                    for _ in range_constexpr(KS_DS):
+                        rocdl.sched_mfma(max(1, n_acc // KS_DS))
+                        rocdl.sched_dsrd(1)
+                    cur = nxt
+                rocdl.sched_barrier(0)
+
+        def compute_ktile_blocked(buf, prefetch_kt):
             cur = _load_ks(buf, 0)
             for ks in range_constexpr(K_WS):
                 nxt = _load_ks(buf, ks + 1) if const_expr(ks + 1 < K_WS) else None
@@ -235,6 +275,12 @@ def launch_gemm_bf16(
                     rocdl.sched_dsrd(KS_DS)
                 rocdl.sched_mfma(n_acc)
             rocdl.sched_barrier(0)
+
+        def compute_ktile(buf, prefetch_kt):
+            if const_expr(wmma_b2b):
+                compute_ktile_interleaved(buf, prefetch_kt)
+            else:
+                compute_ktile_blocked(buf, prefetch_kt)
 
         if const_expr(use_cluster):
             cluster.cluster_barrier()
