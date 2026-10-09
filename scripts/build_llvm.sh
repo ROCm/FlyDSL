@@ -17,7 +17,10 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
 LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
 LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
-LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+LLVM_PATCHES=(
+    "${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+    "${REPO_ROOT}/thirdparty/llvm-amdgpu-cvt-pk-f32-f8-true16.patch"
+)
 LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
 
 case "${LLVM_BUILD_PROFILE}" in
@@ -93,13 +96,15 @@ else
     git checkout FETCH_HEAD
 fi
 
-if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
-    echo "LLVM patch already applied: ${LLVM_PATCH}"
-else
-    echo "Applying LLVM patch: ${LLVM_PATCH}"
-    git apply --check "${LLVM_PATCH}"
-    git apply "${LLVM_PATCH}"
-fi
+for LLVM_PATCH in "${LLVM_PATCHES[@]}"; do
+    if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
+        echo "LLVM patch already applied: ${LLVM_PATCH}"
+    else
+        echo "Applying LLVM patch: ${LLVM_PATCH}"
+        git apply --check "${LLVM_PATCH}"
+        git apply "${LLVM_PATCH}"
+    fi
+done
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd
