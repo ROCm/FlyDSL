@@ -1355,6 +1355,8 @@ Layout layoutLogicalDivide(LayoutBuilder<Layout> &builder, Layout layout, TileAt
   };
 
   if (divisorTile.isLeaf()) {
+    if (divisorTile.isNoneMode())
+      return layout;
     return leafDivide(layout, divisorTile.getValue());
   }
 
@@ -1394,21 +1396,87 @@ Layout layoutZippedDivide(LayoutBuilder<Layout> &builder, Layout layout, Layout 
   return builder.makeLayout(retShape, retStride);
 }
 
+namespace detail {
+
+inline bool isTileRankCompatible(IntTupleAttr shape, TileAttr tile) {
+  if (tile.isLeaf()) {
+    if (auto nestedTile = dyn_cast<TileAttr>(tile.getValue()))
+      return isTileRankCompatible(shape, nestedTile);
+    return true;
+  }
+  if (shape.rank() < tile.rank())
+    return false;
+  for (int i = 0; i < tile.rank(); ++i) {
+    if (auto nestedTile = dyn_cast<TileAttr>(tile.at(i)))
+      if (!isTileRankCompatible(shape.at(i), nestedTile))
+        return false;
+  }
+  return true;
+}
+
+// Splits `layout` into a rank-2 layout (tile, rest) that mirrors the tiler's
+// own nesting:
+//   - a leaf tiler mode divides the whole layout, and logical_divide already
+//     returns the (tile, rest) pair;
+//   - a skipped mode (`*`) is not divided at all: it contributes a 1:0 tile
+//     mode and stays whole in rest;
+//   - a tuple tiler recurses per mode and transposes the results, so a leading
+//     `*` keeps its place and modes the tiler does not cover end up in rest.
+template <class Layout>
+Layout layoutHierUnzip(LayoutBuilder<Layout> &builder, Layout layout, TileAttr tile) {
+  using ElemCollector = typename LayoutBuilder<Layout>::ElemCollector;
+  auto makePair = [&](auto tileShape, auto tileStride, auto restShape, auto restStride) {
+    ElemCollector pairShape;
+    ElemCollector pairStride;
+    pairShape.push_back(tileShape);
+    pairShape.push_back(restShape);
+    pairStride.push_back(tileStride);
+    pairStride.push_back(restStride);
+    return builder.makeLayout(builder.makeTuple(pairShape), builder.makeTuple(pairStride));
+  };
+
+  if (tile.isLeaf()) {
+    if (tile.isNoneMode())
+      return makePair(builder.materializeConstantLeaf(1), builder.materializeConstantLeaf(0),
+                      builder.getShape(layout), builder.getStride(layout));
+    if (auto nestedTile = dyn_cast<TileAttr>(tile.getValue()))
+      return layoutHierUnzip(builder, layout, nestedTile);
+    return layoutLogicalDivide(builder, layout, tile);
+  }
+
+  auto shape = builder.getShape(layout);
+  auto stride = builder.getStride(layout);
+  ElemCollector tileShape;
+  ElemCollector tileStride;
+  ElemCollector restShape;
+  ElemCollector restStride;
+  for (int i = 0; i < shape.rank(); ++i) {
+    auto shapeElem = builder.at(shape, i);
+    auto strideElem = builder.at(stride, i);
+    if (i >= tile.rank()) {
+      restShape.push_back(shapeElem);
+      restStride.push_back(strideElem);
+      continue;
+    }
+    Attribute mode = tile.at(i);
+    TileAttr modeTile = isa<TileAttr>(mode) ? cast<TileAttr>(mode) : TileAttr::get(mode);
+    Layout split = layoutHierUnzip(builder, builder.makeLayout(shapeElem, strideElem), modeTile);
+    auto splitShape = builder.getShape(split);
+    auto splitStride = builder.getStride(split);
+    tileShape.push_back(builder.at(splitShape, 0));
+    tileStride.push_back(builder.at(splitStride, 0));
+    restShape.push_back(builder.at(splitShape, 1));
+    restStride.push_back(builder.at(splitStride, 1));
+  }
+  return makePair(builder.makeTuple(tileShape), builder.makeTuple(tileStride),
+                  builder.makeTuple(restShape), builder.makeTuple(restStride));
+}
+
+} // namespace detail
+
 template <class Layout>
 Layout layoutZippedDivide(LayoutBuilder<Layout> &builder, Layout layout, TileAttr divisorTile) {
-  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
-
-  Layout logicalDiv = layoutLogicalDivide(builder, layout, divisorTile);
-  auto *ctx = builder.getLayoutAttr(layout).getContext();
-
-  SmallVector<Attribute> guideElems;
-  for (int i = 0; i < divisorTile.rank(); ++i) {
-    guideElems.push_back(IntTupleAttr::getLeafNone(ctx));
-  }
-  IntTupleAttr guide = IntTupleAttr::get(ArrayAttr::get(ctx, guideElems));
-  IntTuple retShape = intTupleZip2By(builder, builder.getShape(logicalDiv), guide);
-  IntTuple retStride = intTupleZip2By(builder, builder.getStride(logicalDiv), guide);
-  return builder.makeLayout(retShape, retStride);
+  return detail::layoutHierUnzip(builder, layout, divisorTile);
 }
 
 template <class Layout>
