@@ -16,9 +16,9 @@ E4M3_MAX = float(torch.finfo(torch.float8_e4m3fn).max)
 def _blocks(rows, cols, block_m, block_k):
     """Values in [-1, 1]; every (block_m, block_k) block has max |x| = (1 + j / 64) * 448 * 2^k for j < 64, |k| <= 10."""
     g = torch.Generator().manual_seed(0)
-    x = torch.rand(rows, cols, generator=g) * 2 - 1
+    x = torch.rand(rows, cols, generator=g, device="cpu") * 2 - 1
     x[::block_m, ::block_k] = -1.0
-    i = torch.arange(rows // block_m, dtype=torch.float32)
+    i = torch.arange(rows // block_m, dtype=torch.float32, device="cpu")
     row_scale = (1 + i.remainder(64) / 64) * E4M3_MAX * torch.pow(2.0, i.remainder(21) - 10)
     return x * row_scale.repeat_interleave(block_m).unsqueeze(1)
 

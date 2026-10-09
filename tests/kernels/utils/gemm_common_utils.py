@@ -65,7 +65,7 @@ def f32_to_e8m0_roundup(amax, fmt_max):
 
     The rounding matches the in-kernel quantizers (kernels/mega_moe/quant.py, kernels/moe/mxfp_moe/mxfp4_gemm_common.py).
     """
-    u32 = (amax.float() * torch.tensor(1.0 / fmt_max, dtype=fp32)).view(torch.int32)
+    u32 = (amax.float() * torch.tensor(1.0 / fmt_max, dtype=fp32, device=amax.device)).view(torch.int32)
     exponent = ((u32 >> 23) & 0xFF) + ((u32 & 0x7FFFFF) != 0).to(torch.int32)
     return exponent.clamp_max(254).to(torch.uint8).view(fp8_e8m0)
 
