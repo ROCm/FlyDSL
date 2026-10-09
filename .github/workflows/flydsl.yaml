@@ -193,7 +193,7 @@ jobs:
             echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
             exit 0
           fi
-          for f in thirdparty/llvm-build-info.json scripts/build_llvm.sh; do
+          for f in thirdparty/llvm-build-info.json scripts/build_llvm.sh scripts/ci_mlir_cache_key.sh; do
             if ! git -C flydsl-test show "FETCH_HEAD:${f}" >"base-pin/${f}"; then
               echo "Base commit has no ${f}; treating LLVM pin as unchanged."
               echo "pin_changed=false" >>"${GITHUB_OUTPUT}"
@@ -232,8 +232,10 @@ jobs:
           echo "base_llvm_hash=${base_hash}" >>"${GITHUB_OUTPUT}"
           echo "Base LLVM pin: ${base_hash}"
 
-      # One script for both keys so they cannot drift; content-derived, which is
-      # what makes the base commit's key computable from the extracted files.
+      # Content-derived keys, which is what makes the base commit's key
+      # computable from the extracted files.  The base key uses the base
+      # commit's own ci_mlir_cache_key.sh to match the formula that was
+      # active when the base's MLIR install was cached.
       - name: Compute MLIR cache keys
         id: keys
         run: |
@@ -242,7 +244,14 @@ jobs:
           echo "self=${self_key}" >>"${GITHUB_OUTPUT}"
           echo "Shared MLIR cache key: ${self_key}"
           if [ "${{ steps.base-pin.outputs.pin_changed }}" = "true" ]; then
-            base_key="$(bash flydsl-test/scripts/ci_mlir_cache_key.sh base-pin)"
+            # Use the *base commit's own* key script so the key matches what
+            # was cached when that commit was built.  The PR's script may hash
+            # a different set of inputs (e.g. the patches-dir migration).
+            base_key_script=base-pin/scripts/ci_mlir_cache_key.sh
+            if [ ! -f "${base_key_script}" ]; then
+              base_key_script=flydsl-test/scripts/ci_mlir_cache_key.sh
+            fi
+            base_key="$(bash "${base_key_script}" base-pin)"
             echo "base=${base_key}" >>"${GITHUB_OUTPUT}"
             echo "Baseline MLIR cache key: ${base_key}"
           fi
