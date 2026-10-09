@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-09T06:49:29Z",
+ "updated": "2026-10-09T06:50:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -639,20 +639,20 @@
    "branch": "fujun.han/fix-singleton-zip2by",
    "event": "pull_request",
    "title": "[fix] Correct zipped_divide tiler hierarchy handling",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37868780641",
    "created_at": "2026-10-09T01:14:09Z",
-   "updated_at": "2026-10-09T05:40:39Z",
+   "updated_at": "2026-10-09T06:49:45Z",
    "actor": "Peter9606",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-09T05:40:39Z",
-     "completed_at": null,
+     "completed_at": "2026-10-09T06:49:44Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37868780641/job/113683921067"
     },
     {
