@@ -108,3 +108,43 @@ def urem_const(value, divisor: int):
 def unflatten_k(k_flat, qkhe_loop: int = 2):
     n = qkhe_loop * 2
     return [[k_flat[td * n + j] for j in range(n)] for td in range(len(k_flat) // n)]
+
+
+def ssel(pred, a, b):
+    """``pred ? a : b`` as an ``fx.Int32``.
+
+    ``pred`` may be an ``fx.Boolean`` (what a comparison returns), a raw i1
+    ``ir.Value``, or an ``ArithValue``. Operands are *not* coerced: pass i32.
+    An ``fx.Index`` gets a 64-bit unsigned select, a silent bug wherever the
+    value can be negative.
+    """
+    return fx.Int32(fx.Boolean(pred).select(a, b))
+
+
+def smin(a, b):
+    """Signed minimum of two i32 values. Same operand contract as `ssel`."""
+    return ssel((a < b), a, b)
+
+
+def smax(a, b):
+    """Signed maximum of two i32 values. See `smin`."""
+    return ssel((a > b), a, b)
+
+
+def sdiv_rd_pow2(value, divisor: int):
+    """``floor(value / divisor)`` for a *signed* i32 and a power-of-two divisor.
+
+    The signed counterpart to ``udiv_pow2``: an arithmetic right shift rounds
+    toward negative infinity, which a floor division needs and ``divsi``'s
+    truncation does not give on negative input.
+    """
+    assert is_pow2(divisor), f"sdiv_rd_pow2 needs a power-of-two divisor, got {divisor}"
+    return fx.Int32(value) >> fx.Int32(pow2_shift(divisor))
+
+
+def vector_elem_type(value) -> "ir.Type":
+    """Element type of a vector-typed value, raw or DSL-wrapped."""
+    ty = fx.as_ir_value(value).type
+    if not isinstance(ty, ir.VectorType):
+        raise TypeError(f"expected a vector value, got {ty}")
+    return ir.VectorType(ty).element_type

@@ -4,8 +4,9 @@
 """High-level FlyDSL Flash Attention API for gfx950 / gfx942.
 
 Wraps ``flash_attn_generic.build_flash_attn_func_module`` (gfx942-compatible,
-dense self/cross-attention) and ``flash_attn_gfx950.build_flash_attn_dualwave_swp_module``
-(gfx950 DUALWAVE_SWP, varlen + split-K) behind a single function:
+dense self/cross-attention) and the gfx950 bf16/f16 kernels (``flash_attn_gfx950``: dense, varlen,
+split-K, paged KV, window, bias, ALiBi, sink, dropout; built from metadata -> knobs -> traits)
+behind a single function:
 
     ``flydsl_flash_attn_func(q, k, v, ...)``
 
@@ -16,15 +17,15 @@ Key features vs calling build_* directly:
 - split-K fp32 workspace allocation, zeroing, and the 4 GiB descriptor guard.
 - Unified device / stream context (``torch.cuda.device`` + current stream).
 - Validates shapes, dtypes, and arch before compiling.
-- Accepts ``debug_counts`` tensor to enable the lazy-rescale branch counter
-  (gfx950 DUALWAVE_SWP dualwave_swp_debug_lazy_counts=True path).
+- Build options of the gfx950 bf16/f16 kernels are ``knobs={...}`` overrides; the old per-option kwargs are deprecated
+  (``DeprecationWarning``) for bf16/f16.
 """
 
 from __future__ import annotations
 
 import contextlib
 import functools
-from typing import Optional
+from typing import Mapping, Optional
 
 import torch
 import torch.nn.functional as F  # noqa: F401  (imported for callers' convenience)
@@ -197,50 +198,6 @@ def _build_dense(
     )
 
 
-@functools.lru_cache(maxsize=256)
-def _build_dense_dualwave(
-    num_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    causal: bool,
-    dtype_str: str,
-    cross_seqlen: bool,
-    waves_per_eu: int,
-    daz: bool,
-    lazy_rescale: bool,
-    setprio: bool,
-    debug_lazy_counts: bool,
-    enable_stagger: bool,
-    return_lse: bool = False,
-    has_bias: bool = False,
-    has_alibi: bool = False,
-    has_sink: bool = False,
-    xcd_swizzle: bool = False,
-):
-    """Build (and cache) the dense gfx950 DUALWAVE_SWP launcher."""
-    from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
-
-    return build_flash_attn_dualwave_swp_module(
-        num_heads=num_heads,
-        head_dim=head_dim,
-        causal=causal,
-        dtype_str=dtype_str,
-        num_kv_heads=num_kv_heads,
-        cross_seqlen=cross_seqlen,
-        waves_per_eu=waves_per_eu,
-        daz=daz,
-        dualwave_swp_lazy_rescale=lazy_rescale,
-        dualwave_swp_setprio=setprio,
-        dualwave_swp_debug_lazy_counts=debug_lazy_counts,
-        dualwave_swp_enable_stagger=enable_stagger,
-        return_lse=return_lse,
-        has_bias=has_bias,
-        has_alibi=has_alibi,
-        has_sink=has_sink,
-        _xcd_swizzle=xcd_swizzle,
-    )
-
-
 _FP8_BATCH_INTERLEAVE_GROUP = 2
 
 
@@ -295,49 +252,6 @@ def _build_dense_fp8(
 
 
 @functools.lru_cache(maxsize=256)
-def _build_varlen(
-    num_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    causal: bool,
-    dtype_str: str,
-    cross_seqlen: bool,
-    waves_per_eu: int,
-    daz: bool,
-    lazy_rescale: bool,
-    setprio: bool,
-    debug_lazy_counts: bool,
-    enable_stagger: bool,
-    return_lse: bool = False,
-    has_bias: bool = False,
-    has_alibi: bool = False,
-    has_sink: bool = False,
-):
-    """Build (and cache) a varlen-mode launcher (gfx950 DUALWAVE_SWP, varlen=True)."""
-    from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
-
-    return build_flash_attn_dualwave_swp_module(
-        num_heads=num_heads,
-        head_dim=head_dim,
-        causal=causal,
-        dtype_str=dtype_str,
-        num_kv_heads=num_kv_heads,
-        varlen=True,
-        cross_seqlen=cross_seqlen,
-        waves_per_eu=waves_per_eu,
-        daz=daz,
-        dualwave_swp_lazy_rescale=lazy_rescale,
-        dualwave_swp_setprio=setprio,
-        dualwave_swp_debug_lazy_counts=debug_lazy_counts,
-        dualwave_swp_enable_stagger=enable_stagger,
-        return_lse=return_lse,
-        has_bias=has_bias,
-        has_alibi=has_alibi,
-        has_sink=has_sink,
-    )
-
-
-@functools.lru_cache(maxsize=256)
 def _build_varlen_light(
     num_heads: int,
     num_kv_heads: int,
@@ -369,101 +283,6 @@ def _build_varlen_light(
         waves_per_eu=waves_per_eu,
         daz=daz,
         return_lse=return_lse,
-    )
-
-
-@functools.lru_cache(maxsize=256)
-def _build_splitk(
-    num_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    causal: bool,
-    dtype_str: str,
-    num_kv_splits: int,
-    waves_per_eu: int,
-    daz: bool,
-    lazy_rescale: bool,
-    setprio: bool,
-    enable_stagger: bool,
-    return_lse: bool = False,
-    has_bias: bool = False,
-    has_alibi: bool = False,
-    has_sink: bool = False,
-):
-    """Build (and cache) a split-K launcher (gfx950 DUALWAVE_SWP, num_kv_splits>1)."""
-    from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
-
-    return build_flash_attn_dualwave_swp_module(
-        num_heads=num_heads,
-        head_dim=head_dim,
-        causal=causal,
-        dtype_str=dtype_str,
-        num_kv_heads=num_kv_heads,
-        num_kv_splits=num_kv_splits,
-        waves_per_eu=waves_per_eu,
-        daz=daz,
-        dualwave_swp_lazy_rescale=lazy_rescale,
-        dualwave_swp_setprio=setprio,
-        dualwave_swp_enable_stagger=enable_stagger,
-        return_lse=return_lse,
-        has_bias=has_bias,
-        has_alibi=has_alibi,
-        has_sink=has_sink,
-    )
-
-
-@functools.lru_cache(maxsize=256)
-def _build_paged(
-    num_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    causal: bool,
-    dtype_str: str,
-    cross_seqlen: bool,
-    waves_per_eu: int,
-    daz: bool,
-    lazy_rescale: bool,
-    setprio: bool,
-    enable_stagger: bool,
-    num_kv_splits: int = 1,
-    varlen: bool = False,
-    kv_cache_layout: str = "linear",
-    return_lse: bool = False,
-    has_bias: bool = False,
-):
-    """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True).
-
-    ``num_kv_splits > 1`` builds the paged + split-K variant (KV dimension split
-    across grid_z = B*num_kv_splits workgroups + a combine pass), which fills the
-    GPU for low-occupancy shapes (small B / few heads).
-
-    ``varlen=True`` builds the packed-Q (cu_seqlens) + paged-KV variant: Q/O are
-    ``[total_q, H, D]`` and K/V are the physical page cache, looked up via the
-    block table per kv-tile. Mutually exclusive with split-K.
-
-    ``kv_cache_layout`` selects the physical page layout: "linear"
-    [NumBlocks,PageSize,Hkv,D] or "vectorized" (aiter 5D).
-    """
-    from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
-
-    return build_flash_attn_dualwave_swp_module(
-        num_heads=num_heads,
-        head_dim=head_dim,
-        causal=causal,
-        dtype_str=dtype_str,
-        num_kv_heads=num_kv_heads,
-        paged=True,
-        varlen=varlen,
-        num_kv_splits=num_kv_splits,
-        cross_seqlen=cross_seqlen,
-        kv_cache_layout=kv_cache_layout,
-        waves_per_eu=waves_per_eu,
-        daz=daz,
-        dualwave_swp_lazy_rescale=lazy_rescale,
-        dualwave_swp_setprio=setprio,
-        dualwave_swp_enable_stagger=enable_stagger,
-        return_lse=return_lse,
-        has_bias=has_bias,
     )
 
 
@@ -554,6 +373,8 @@ def _flydsl_flash_attn_paged(
     k_descale: Optional[torch.Tensor],
     v_descale: Optional[torch.Tensor],
     out: Optional[torch.Tensor],
+    window: Optional[tuple[int, int]],
+    knob_overrides: Optional[Mapping[str, object]],
     waves_per_eu: int,
     daz: bool,
     dualwave_swp_lazy_rescale: bool,
@@ -698,10 +519,9 @@ def _flydsl_flash_attn_paged(
                     f"flydsl_flash_attn_func: {name} must be one float32 value on {device}, "
                     f"got shape={tuple(scale.shape)} dtype={scale.dtype} device={scale.device}"
                 )
-    elif D not in (64, 128) or value_head_dim != D:
+    elif value_head_dim != D:
         raise NotImplementedError(
-            "flydsl_flash_attn_func: BF16/F16 paged KV requires matching K/V head_dim 64 or 128, "
-            f"got Q/K D{D}, V D{value_head_dim}"
+            f"flydsl_flash_attn_func: BF16/F16 paged KV requires matching K/V head_dim, got Q/K D{D}, V D{value_head_dim}"
         )
 
     if num_kv_heads is None:
@@ -867,22 +687,36 @@ def _flydsl_flash_attn_paged(
                 enable_stagger=dualwave_swp_enable_stagger,
             )
         else:
-            exe = _build_paged(
-                num_heads=H,
-                num_kv_heads=num_kv_heads,
-                head_dim=D,
-                causal=causal,
+            if not arch.startswith("gfx950"):
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func: this paged KV configuration requires gfx950, got '{arch or 'unknown'}'"
+                )
+            return _flydsl_flash_attn_gfx950(
+                q,
+                k,
+                v,
                 dtype_str=dtype_str,
-                cross_seqlen=cross,
-                waves_per_eu=waves_per_eu,
-                daz=daz,
-                lazy_rescale=dualwave_swp_lazy_rescale,
-                setprio=dualwave_swp_setprio,
-                enable_stagger=dualwave_swp_enable_stagger,
-                num_kv_splits=int(num_kv_splits),
-                varlen=varlen,
+                causal=causal,
+                window=window,
+                num_kv_heads=num_kv_heads,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=skv,
+                bias=bias,
+                alibi_slopes=None,
+                sink=None,
+                dropout_p=0.0,
+                philox_seed=None,
+                philox_offset=0,
+                block_table=block_table,
+                paged_seqlen_kv=skv,
                 kv_cache_layout=kv_cache_layout,
-                has_bias=bias is not None,
+                num_kv_splits=int(num_kv_splits),
+                return_lse=False,
+                knob_overrides=knob_overrides,
+                out=out,
+                stream=stream,
             )
         # Wrapper-owned copies must follow an explicit launch stream; the ambient
         # current stream needs no extra context.
@@ -974,12 +808,257 @@ def _build_paged_light(
 # ── public API ─────────────────────────────────────────────────────────────
 
 
+# ── the gfx950 bf16/f16 route: metadata -> knobs -> traits ───────────────────────────────────────────────────────────
+#
+# Everything the call says about its *inputs* (dtype, head dims, a window, a bias, ALiBi, a sink, dropout, a paged cache) is
+# derived into `FmhaInputMetadata`; everything about *how to compute* (waves per EU, DAZ, schedule, split-K, XCD swizzle,
+# anything else) is a knob override that `fwd_knobs(arch, **overrides).resolve(meta)` validates like any pin.
+
+_UNSET = object()  # "the caller passed nothing", for options that are deprecated and have a non-None legacy default
+
+# Deprecated build options that have a knob: the knob they forward to.
+_DEPRECATED_TO_KNOB = {
+    "waves_per_eu": "waves_per_eu",
+    "daz": "daz",
+    "dualwave_swp_setprio": "SETPRIO",
+    "dualwave_swp_enable_stagger": "STAGGER",
+    "dualwave_swp_xcd_swizzle": "XCD_SWIZZLE",
+    "num_kv_splits": "NUM_KV_SPLITS",
+}
+# Deprecated build options with no knob (nothing is left for them to select): ignored, with a warning.
+_DEPRECATED_IGNORED = {
+    "dualwave_swp_lazy_rescale": "lazy rescale stays off for precision (it is not a knob)",
+    "debug_counts": "there is nothing left to count",
+    "cross_seqlen": "varlen and cross-length are runtime on the gfx950 kernels",
+}
+_LEGACY_DEFAULTS = dict(
+    waves_per_eu=2,
+    daz=True,
+    dualwave_swp_lazy_rescale=True,
+    dualwave_swp_setprio=True,
+    dualwave_swp_enable_stagger=True,
+)
+
+_BIAS_MASK_MESSAGE = (
+    "bias and window/causal masking are mutually exclusive: a bias already is an attention mask, so combining it with a "
+    "positional one has no defined meaning. Fold the causal pattern into the bias tensor (pass causal=False), or drop the bias"
+)
+
+
+def _legacy_build_options(dtype_str, **given):
+    """Resolve the deprecated build kwargs. Returns `(values, knob_overrides)`.
+
+    `values` has every legacy option with its legacy default filled in (the fp8 and generic kernels still read them).
+    On a bf16/f16 call each one the caller passed emits a `DeprecationWarning` naming its replacement: the ones with a knob are
+    forwarded to it (so `knobs={...}` is the one way to set them), the rest are ignored.
+    """
+    import warnings
+
+    values = {
+        name: _LEGACY_DEFAULTS.get(name) if given[name] is _UNSET else given[name]
+        for name in (
+            "waves_per_eu",
+            "daz",
+            "dualwave_swp_lazy_rescale",
+            "dualwave_swp_setprio",
+            "dualwave_swp_enable_stagger",
+        )
+    }
+    overrides = {}
+    if dtype_str != "fp8":
+        for name, value in given.items():
+            if value is _UNSET or value is None:
+                continue
+            if name in _DEPRECATED_TO_KNOB:
+                knob = _DEPRECATED_TO_KNOB[name]
+                warnings.warn(
+                    f"flydsl_flash_attn_func: `{name}=` is deprecated for bf16/f16; pass knobs={{{knob!r}: ...}} instead",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+                overrides[knob] = value
+            elif name in _DEPRECATED_IGNORED:
+                warnings.warn(
+                    f"flydsl_flash_attn_func: `{name}=` is deprecated for bf16/f16 and ignored ({_DEPRECATED_IGNORED[name]})",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+    return values, overrides
+
+
+@functools.lru_cache(maxsize=256)
+def _build_gfx950_fwd(meta, knob_items):
+    """Build (and cache) one gfx950 forward launcher for `(metadata, knob overrides)`."""
+    from kernels.attention import dispatch
+
+    arch = dispatch.current_arch()
+    backend = dispatch.backend_for(arch)
+    knobs = backend.fwd_knobs(arch, **dict(knob_items)).resolve(meta)
+    return backend.build_fwd(meta, knobs)
+
+
+def _flydsl_flash_attn_gfx950(
+    q,
+    k,
+    v,
+    *,
+    dtype_str,
+    causal,
+    window,
+    num_kv_heads,
+    cu_seqlens_q,
+    cu_seqlens_kv,
+    max_seqlen_q,
+    max_seqlen_kv,
+    bias,
+    alibi_slopes,
+    sink,
+    dropout_p,
+    philox_seed,
+    philox_offset,
+    block_table,
+    paged_seqlen_kv,
+    kv_cache_layout,
+    num_kv_splits,
+    return_lse,
+    knob_overrides,
+    out,
+    stream,
+):
+    """Dense, varlen, split-K and paged attention on the gfx950 forward kernels (bf16/f16, head_dim a multiple of 8, up to 512).
+
+    The inputs are the caller's: BSHD (dense) or packed THD (varlen) tensors, or K/V as a page pool when `block_table` is given.
+    They are handed to the kernel as BHSD *views* (the kernels read strides), so nothing is copied.
+    """
+    from kernels.attention import abi, common
+    from kernels.attention.flash_attn_gfx950_config import FmhaInputMetadata
+
+    paged = block_table is not None
+    varlen = cu_seqlens_q is not None
+    device = q.device
+    D = q.shape[-1]
+    if varlen:
+        total_q, H, _ = q.shape
+        B = cu_seqlens_q.numel() - 1
+        Sq = int(max_seqlen_q)
+    else:
+        B, Sq, H, _ = q.shape
+    Dv = int(v.shape[3]) if (paged and kv_cache_layout == "vectorized") else int(v.shape[-1])
+    if D % 8 or Dv % 8 or not (8 <= D <= 512) or not (8 <= Dv <= 512):
+        raise ValueError(
+            f"flydsl_flash_attn_func: the gfx950 kernels serve head dims that are multiples of 8 up to 512, got "
+            f"head_dim={D}, head_dim_v={Dv}"
+        )
+    if window is not None and (len(window) != 2):
+        raise ValueError(f"flydsl_flash_attn_func: window must be a (left, right) pair, got {window!r}")
+    has_window = causal or window is not None
+    if bias is not None and has_window:
+        raise ValueError(f"flydsl_flash_attn_func: {_BIAS_MASK_MESSAGE}")
+    dropout = dropout_p is not None and dropout_p > 0.0
+
+    meta = FmhaInputMetadata(
+        dtype_str=dtype_str,
+        head_dim=D,
+        head_dim_v=None if Dv == D else Dv,
+        window=has_window,
+        bias=bias is not None,
+        dropout=dropout,
+        alibi=alibi_slopes is not None,
+        sink=sink is not None,
+        paged=paged,
+        kv_cache_layout=kv_cache_layout if paged else "linear",
+    )
+    overrides = {}
+    if causal and window is None:
+        overrides["STATIC_WINDOW"] = True  # bottom-right causal: the sentinels are baked, no per-call window
+    overrides["RETURN_LSE"] = "always" if return_lse else "never"
+    if num_kv_splits > 1:
+        overrides["NUM_KV_SPLITS"] = int(num_kv_splits)
+    overrides.update(knob_overrides or {})
+    fn = _build_gfx950_fwd(meta, tuple(sorted(overrides.items())))
+
+    if has_window:
+        win = window if window is not None else (common.WINDOW_BOTRIGHT, common.WINDOW_BOTRIGHT)
+        win = (int(win[0]), int(win[1]))
+    else:
+        win = None
+
+    # ── BHSD views ──────────────────────────────────────────────────────────────────────────────────────────────────
+    if varlen:
+        qt = q.transpose(0, 1).unsqueeze(0)
+        ot_shape = (total_q, H, Dv)
+    else:
+        qt = q.transpose(1, 2)
+        ot_shape = (B, Sq, H, Dv)
+    if out is None:
+        out = torch.empty(ot_shape, dtype=q.dtype, device=device)
+    elif tuple(out.shape) != ot_shape:
+        raise ValueError(f"flydsl_flash_attn_func: out must be {ot_shape}, got {tuple(out.shape)}")
+    elif out.dtype != q.dtype:
+        raise ValueError(f"flydsl_flash_attn_func: output dtype must match q dtype {q.dtype}, got {out.dtype}")
+    ot = out.transpose(0, 1).unsqueeze(0) if varlen else out.transpose(1, 2)
+    if paged:
+        kt, vt = k, v
+        seqlen_k = int(paged_seqlen_kv) if not varlen else (int(max_seqlen_kv) if max_seqlen_kv is not None else Sq)
+    elif varlen:
+        kt, vt = k.transpose(0, 1).unsqueeze(0), v.transpose(0, 1).unsqueeze(0)
+        seqlen_k = int(max_seqlen_kv) if max_seqlen_kv is not None else Sq
+    else:
+        kt, vt = k.transpose(1, 2), v.transpose(1, 2)
+        seqlen_k = int(k.shape[1])
+
+    kw = dict(window=win)
+    if paged:
+        kw.update(block_table=block_table.contiguous() if block_table.stride(-1) != 1 else block_table)
+    if varlen:
+        cu_q = cu_seqlens_q if cu_seqlens_q.dtype == torch.int32 else cu_seqlens_q.to(torch.int32)
+        cu_k = cu_seqlens_kv if cu_seqlens_kv.dtype == torch.int32 else cu_seqlens_kv.to(torch.int32)
+        kw.update(
+            varlen=abi.varlen_compact(
+                cu_q, cu_k, Sq, seqlen_k, lse_tokens=total_q, lse_layout=abi.VARLEN_LSE_LAYOUT_HT
+            ),
+            num_seqlens=B,
+        )
+    lse = None
+    if return_lse:
+        lse = torch.empty((H, total_q) if varlen else (B, H, Sq), dtype=torch.float32, device=device)
+        kw["lse"] = lse
+    if bias is not None:
+        # Main's `[Sq, Skv]` (dense) / `[total_q, cols]` (varlen) bias, broadcast over batch and head: zero strides.
+        bias = bias if bias.stride(-1) == 1 else bias.contiguous()
+        cols = seqlen_k
+        if varlen:
+            kw["bias"] = bias[:, :cols].view(1, 1, *bias[:, :cols].shape).expand(1, H, bias.shape[0], cols)
+        else:
+            kw["bias"] = bias[:, :cols].view(1, 1, Sq, cols).expand(B, H, Sq, cols)
+    if alibi_slopes is not None:
+        kw["alibi_slopes"] = alibi_slopes
+    if sink is not None:
+        kw["sink"] = sink
+    if dropout:
+        kw.update(dropout_p=float(dropout_p), philox_seed=philox_seed, philox_offset2=int(philox_offset))
+    with torch.cuda.device(device.index):
+        launch_stream = torch.cuda.current_stream(device) if stream is None else stream
+        fn(qt, kt, vt, ot, 1 if varlen else B, Sq, seqlen_k=seqlen_k, stream=launch_stream, **kw)
+    if return_lse:
+        if varlen:
+            # Compact `(H, total_q)` -> main's padded `(B, H, max_seqlen_q)`; only the first `len_b` entries are defined.
+            idx = cu_q[:-1].to(torch.int64)[:, None] + torch.arange(Sq, device=device)[None, :]
+            idx = idx.clamp(max=max(total_q - 1, 0))
+            lse = lse[:, idx].permute(1, 0, 2).contiguous()
+        return out, lse
+    return out
+
+
 def flydsl_flash_attn_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     *,
     causal: bool = True,
+    # Sliding-window attention `(left, right)` (gfx950 bf16/f16): replaces `causal` when given. A negative sentinel
+    # (`common.WINDOW_TOPLEFT` / `common.WINDOW_BOTRIGHT`) resolves against each sequence's own lengths.
+    window: Optional[tuple[int, int]] = None,
     num_kv_heads: Optional[int] = None,
     # Varlen (packed cu_seqlens): pass both to enable the varlen path.
     cu_seqlens_q: Optional[torch.Tensor] = None,
@@ -1009,6 +1088,11 @@ def flydsl_flash_attn_func(
     # Per-head attention-sink logit: one extra softmax denominator term with no
     # matching V row. Same path and restrictions as `alibi_slopes`; combinable.
     sink: Optional[torch.Tensor] = None,
+    # Attention dropout (gfx950 bf16/f16): `dropout_p` is the drop probability, `philox_seed` an int or int64 tensor,
+    # `philox_offset` the counter base. The same (seed, offset) regenerates the mask in a backward pass.
+    dropout_p: float = 0.0,
+    philox_seed: Optional[object] = None,
+    philox_offset: int = 0,
     # fp8 ABI: per-tensor descales for pre-quantized e4m3fn Q/K/V.
     q_descale: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
@@ -1018,12 +1102,16 @@ def flydsl_flash_attn_func(
     # Also return per-row LSE = ln(sum_j exp(sm_scale * q_i.k_j)); fp32
     # [B, num_heads, Sq]. Needed by backward; not supported for fp8.
     return_lse: bool = False,
-    # Kernel build options.
-    waves_per_eu: int = 2,
-    daz: bool = True,
-    dualwave_swp_lazy_rescale: bool = True,
-    dualwave_swp_setprio: bool = True,
-    dualwave_swp_enable_stagger: bool = True,
+    # Build options of the gfx950 bf16/f16 kernels, as `fwd_knobs` overrides (validated like any pin): e.g.
+    # `{"waves_per_eu": 1, "daz": False, "SETPRIO": False, "STAGGER": False, "XCD_SWIZZLE": True, "NUM_KV_SPLITS": 2}`.
+    knobs: Optional[Mapping[str, object]] = None,
+    # Deprecated build options (still read by the fp8 and generic kernels): for bf16/f16 each emits a
+    # `DeprecationWarning`; see the docstring.
+    waves_per_eu: object = _UNSET,
+    daz: object = _UNSET,
+    dualwave_swp_lazy_rescale: object = _UNSET,
+    dualwave_swp_setprio: object = _UNSET,
+    dualwave_swp_enable_stagger: object = _UNSET,
     # Re-derive (head, q_block) with head as the slow axis so one head's q-blocks
     # stay on one XCD instead of every XCD re-streaming that head's K/V. None
     # auto-selects on the shapes it helps; True/False force it. Dense non-fp8 only.
@@ -1054,6 +1142,10 @@ def flydsl_flash_attn_func(
              Here ``kVectorSize = 16 / element_size`` (bf16/fp16: 8, fp8: 16);
              page_size and head_dim must be divisible by it.
         causal: Bottom-right aligned causal mask when True.
+        window: ``(left, right)`` sliding-window attention (gfx950 bf16/f16): a query row attends the keys whose index
+            lies in ``[row - left, row + right]``. Replaces ``causal`` when given (a window is causal plus a left bound).
+            The sentinels ``common.WINDOW_TOPLEFT`` and ``common.WINDOW_BOTRIGHT`` (negative) resolve against each
+            sequence's own lengths on the device; ``causal=True`` is the bottom-right sentinel, baked at build time.
         num_kv_heads: KV head count for GQA/MQA; defaults to q num_heads (MHA),
             or the physical cache's head count for paged KV. Both head counts
             must be positive, with Q heads divisible by KV heads.
@@ -1086,7 +1178,7 @@ def flydsl_flash_attn_func(
             only its fixed 256-row tile (``None`` or ``256``).
         bias: Additive attention bias with the same dtype as q, folded in as
             ``softmax(q @ k^T * sm_scale + bias)`` -- after the scale, before the
-            causal/padding mask. Dense: ``[Sq, Skv]``, broadcast over batch and
+            padding mask. Not combinable with ``causal`` or ``window`` (see "Unsupported combinations"). Dense: ``[Sq, Skv]``, broadcast over batch and
             head. Varlen: ``[total_q, max_seqlen_kv]``, where the row is the
             *global* packed q token index and the column is the *per-batch-local*
             key index, broadcast over head. Varlen self-attention leaves
@@ -1126,19 +1218,33 @@ def flydsl_flash_attn_func(
         q_descale / k_descale / v_descale: fp32 shape-[1] descales required
             for dense or paged fp8 e4m3fn inputs. Paged FP8 also accepts scalar
             and other single-element tensors.
+        dropout_p / philox_seed / philox_offset: Attention dropout (gfx950 bf16/f16). ``dropout_p`` is the drop probability,
+            ``philox_seed`` an int or a one-element int64 tensor (required when ``dropout_p > 0``) and ``philox_offset``
+            the counter base. The mask is a function of (seed, offset, sequence, head, row, column), so the same
+            values regenerate it in a backward pass.
         out: Optional pre-allocated output tensor. For fp8, output is bf16;
             otherwise it has the same dtype as q.
-        waves_per_eu: Kernel occupancy hint.
-        daz: Enable denormals-are-zero.
-        dualwave_swp_lazy_rescale: Enable lazy online softmax rescale.
-        dualwave_swp_setprio: Enable s_setprio scheduling hints. Accepted for
-            compatibility but unused by the paged FP8 pipeline.
-        dualwave_swp_enable_stagger: Enable wave-group phase stagger. Accepted
-            for compatibility but unused by the paged FP8 pipeline.
-        debug_counts: Float32[2] tensor; when given, counts lazy-rescale branches
-            (debug_counts[0] = all-below-true, debug_counts[1] = all-below-false).
-            Non-FP8 dense attention only.
+        knobs: Build options of the gfx950 bf16/f16 kernels as ``fwd_knobs`` overrides, validated like any pin (an unknown
+            name or an illegal value raises), e.g. ``{"waves_per_eu": 1, "daz": False, "SETPRIO": False,
+            "STAGGER": False, "XCD_SWIZZLE": True, "NUM_KV_SPLITS": 2, "RETURN_LSE": "runtime"}``. The metadata (dtype,
+            head dims, window, bias, ALiBi, sink, dropout, paging) is derived from the tensors and kwargs, never passed.
+        waves_per_eu, daz, dualwave_swp_setprio, dualwave_swp_enable_stagger, dualwave_swp_xcd_swizzle, num_kv_splits:
+            **Deprecated for bf16/f16** (still read by the fp8 and generic kernels). Passing one emits a
+            ``DeprecationWarning`` naming the knob and forwards the value to it (``waves_per_eu``, ``daz``, ``SETPRIO``,
+            ``STAGGER``, ``XCD_SWIZZLE``, ``NUM_KV_SPLITS``). They leave the signature when the fp8 kernels adopt the
+            same system.
+        dualwave_swp_lazy_rescale, debug_counts, cross_seqlen: **Deprecated for bf16/f16**: a ``DeprecationWarning`` and
+            the value is ignored (lazy rescale stays off for precision; there is nothing left to count; varlen and
+            cross-length are runtime on the gfx950 kernels).
         stream: CUDA/HIP stream to launch on.
+
+    Unsupported combinations:
+        ``bias`` together with ``causal=True`` or ``window=`` raises ``ValueError``. A bias already *is* an attention
+        mask (a large negative or ``-inf`` entry is how a caller says "do not attend here"); a causal or window mask on
+        top says the same thing twice with no rule for which wins where they disagree. This is not a missing feature:
+        the kernel would produce finite, plausible numbers for it, which is exactly why it is refused. Fold the causal
+        pattern into the bias tensor and pass ``causal=False``, or drop the bias. (Earlier versions accepted the
+        combination.)
 
     Returns:
         Output tensor with q's leading dimensions and the V head width for
@@ -1157,6 +1263,43 @@ def flydsl_flash_attn_func(
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share dtype; got {q.dtype}/{k.dtype}/{v.dtype}")
 
     dtype_str = _dtype_str(q)
+    _legacy, _knob_overrides = _legacy_build_options(
+        dtype_str,
+        waves_per_eu=waves_per_eu,
+        daz=daz,
+        dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+        dualwave_swp_setprio=dualwave_swp_setprio,
+        dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+        dualwave_swp_xcd_swizzle=dualwave_swp_xcd_swizzle,
+        num_kv_splits=num_kv_splits,
+        debug_counts=debug_counts,
+        cross_seqlen=cross_seqlen,
+    )
+    waves_per_eu = _legacy["waves_per_eu"]
+    daz = _legacy["daz"]
+    dualwave_swp_lazy_rescale = _legacy["dualwave_swp_lazy_rescale"]
+    dualwave_swp_setprio = _legacy["dualwave_swp_setprio"]
+    dualwave_swp_enable_stagger = _legacy["dualwave_swp_enable_stagger"]
+    if dtype_str != "fp8":
+        debug_counts = None  # deprecated and ignored
+    if knobs is not None:
+        if not isinstance(knobs, Mapping):
+            raise TypeError(
+                f"flydsl_flash_attn_func: knobs must be a mapping of knob overrides, got {type(knobs).__name__}"
+            )
+        _knob_overrides = {**_knob_overrides, **dict(knobs)}
+    _arch_name = _gpu_arch(q.device)
+    _gfx950_half = dtype_str != "fp8" and _arch_name.startswith("gfx950")
+    for _what, _given in (("window", window is not None), ("dropout_p", bool(dropout_p)), ("knobs", bool(knobs))):
+        if _given and not _gfx950_half:
+            raise NotImplementedError(
+                f"flydsl_flash_attn_func: {_what} requires the gfx950 bf16/f16 kernels; got dtype {dtype_str}, "
+                f"arch '{_arch_name or 'unknown'}'"
+            )
+    if dropout_p and not (0.0 < float(dropout_p) < 1.0):
+        raise ValueError(f"flydsl_flash_attn_func: dropout_p must be in [0, 1), got {dropout_p}")
+    if dropout_p and philox_seed is None:
+        raise ValueError("flydsl_flash_attn_func: dropout_p > 0 requires philox_seed")
     _auto_splits = num_kv_splits is None
     if _auto_splits:
         num_kv_splits = 1
@@ -1179,6 +1322,8 @@ def flydsl_flash_attn_func(
             raise NotImplementedError(f"flydsl_flash_attn_func: {_name} is not supported for fp8")
         if not _t.is_cuda or _t.device != q.device:
             raise ValueError(f"flydsl_flash_attn_func: {_name} must be a CUDA tensor on {q.device}, got {_t.device}")
+    if has_bias and (causal or window is not None):
+        raise ValueError(f"flydsl_flash_attn_func: {_BIAS_MASK_MESSAGE}")
 
     # The fp8 path flattens Q/K/V/O to 1-D and the C-ABI packs a dynamic dim as
     # int32, so a launch aborts once any of them reaches 2**31 (S >= 131072 at
@@ -1269,6 +1414,8 @@ def flydsl_flash_attn_func(
             k_descale=k_descale,
             v_descale=v_descale,
             out=out,
+            window=window,
+            knob_overrides=_knob_overrides,
             waves_per_eu=waves_per_eu,
             daz=daz,
             dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
@@ -1309,10 +1456,10 @@ def flydsl_flash_attn_func(
         B = cu_seqlens_q.numel() - 1
         if max_seqlen_q is None:
             raise ValueError("flydsl_flash_attn_func: max_seqlen_q is required in varlen mode")
-        if cross_seqlen is None:
+        if cross_seqlen is None and not _gfx950_half:
             raise ValueError("flydsl_flash_attn_func: cross_seqlen is required in varlen mode")
         Sq = int(max_seqlen_q)
-        cross = bool(cross_seqlen)
+        cross = bool(cross_seqlen) if cross_seqlen is not None else max_seqlen_kv is not None
         if cross and max_seqlen_kv is None:
             raise ValueError("flydsl_flash_attn_func: max_seqlen_kv is required when varlen cross_seqlen=True")
     else:
@@ -1327,14 +1474,17 @@ def flydsl_flash_attn_func(
         num_kv_heads = Hkv
     if H % num_kv_heads != 0:
         raise ValueError(f"flydsl_flash_attn_func: num_heads ({H}) must be divisible by num_kv_heads ({num_kv_heads})")
-    if D < 64 or D % 32 != 0:
+    if _gfx950_half:
+        if D % 8 or not (8 <= D <= 512):
+            raise ValueError(f"flydsl_flash_attn_func: head_dim ({D}) must be a multiple of 8, at most 512")
+    elif D < 64 or D % 32 != 0:
         raise ValueError(f"flydsl_flash_attn_func: head_dim ({D}) must be >= 64 and a multiple of 32")
 
     Dv = int(v.shape[-1])
-    if Dv != D and dtype_str != "fp8":
+    if Dv != D and dtype_str != "fp8" and not _gfx950_half:
         raise NotImplementedError(
             f"flydsl_flash_attn_func: a V head_dim ({Dv}) different from the QK head_dim ({D}) "
-            f"is fp8-only, got dtype {dtype_str}"
+            f"is only supported on gfx950 (and fp8), got dtype {dtype_str}"
         )
     if k.shape[-1] != D:
         raise ValueError(f"flydsl_flash_attn_func: K head_dim ({k.shape[-1]}) must match Q head_dim ({D})")
@@ -1415,8 +1565,67 @@ def flydsl_flash_attn_func(
                 )
         ws_elems = dualwave_splitk_workspace_elems(B, H, Sq, int(num_kv_splits), head_dim=Dv)
 
+    # ── the gfx950 bf16/f16 kernels: metadata -> knobs -> traits ────────────────────────────────────────
+    if _gfx950_half:
+        _std_dims = D in (64, 128) and Dv == D
+        _feature = (
+            splitk
+            or has_bias
+            or has_alibi
+            or has_sink
+            or window is not None
+            or bool(dropout_p)
+            or bool(_knob_overrides)
+            or not _std_dims
+        )
+        if varlen:
+            # Short varlen attention uses the generic light kernel; everything else the gfx950 kernels.
+            _use_gfx950 = _feature or Sq > _VARLEN_LIGHT_MAX_SEQ
+            if not _use_gfx950 and cross_seqlen is None:
+                raise ValueError("flydsl_flash_attn_func: cross_seqlen is required in varlen mode")
+        else:
+            _use_gfx950 = _feature or _dense_routes_to_dualwave(B, Sq)
+        if _use_gfx950:
+            _overrides = dict(_knob_overrides)
+            if (
+                not varlen
+                and not causal
+                and window is None
+                and not splitk
+                and H % NUM_XCD_GFX950 == 0
+                and -(-int(Sq) // DUALWAVE_SWP_BLOCK_M) >= MIN_Q_BLOCKS_XCD_SWIZZLE
+            ):
+                _overrides.setdefault("XCD_SWIZZLE", True)  # head-slow mapping, on the shapes it helps
+            return _flydsl_flash_attn_gfx950(
+                q,
+                k,
+                v,
+                dtype_str=dtype_str,
+                causal=causal,
+                window=window,
+                num_kv_heads=num_kv_heads,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                bias=bias,
+                alibi_slopes=alibi_slopes,
+                sink=sink,
+                dropout_p=dropout_p,
+                philox_seed=philox_seed,
+                philox_offset=philox_offset,
+                block_table=None,
+                paged_seqlen_kv=None,
+                kv_cache_layout="linear",
+                num_kv_splits=int(num_kv_splits),
+                return_lse=return_lse,
+                knob_overrides=_overrides,
+                out=out,
+                stream=stream,
+            )
+
     # ── build (cached) ──────────────────────────────────────────────────────
-    debug_lazy = debug_counts is not None
+    debug_lazy = False  # deprecated for bf16/f16 and unsupported for fp8
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
@@ -1444,125 +1653,49 @@ def flydsl_flash_attn_func(
                 block_m=_fp8_block_m,
                 batch_interleave_group=_fp8_batch_interleave_group(B, causal, cross, int(num_kv_splits)),
             )
-        elif splitk:
-            exe = _build_splitk(
+        elif splitk or has_bias or has_alibi or has_sink or window is not None or dropout_p:
+            raise NotImplementedError(
+                "flydsl_flash_attn_func: split-K, bias, ALiBi, sink, window and dropout require the gfx950 bf16/f16 "
+                f"kernels; got dtype={dtype_str}, arch='{_gpu_arch(q.device) or 'unknown'}'"
+            )
+        elif varlen:
+            _arch = _gpu_arch(q.device)
+            if D not in (64, 128) or dtype_str not in ("bf16", "f16"):
+                raise NotImplementedError(
+                    f"flydsl_flash_attn_func: varlen attention requires D=64/128, bf16/f16 here; got D={D}, "
+                    f"dtype={dtype_str}, arch='{_arch or 'unknown'}'"
+                )
+            exe = _build_varlen_light(
                 num_heads=H,
                 num_kv_heads=num_kv_heads,
                 head_dim=D,
                 causal=causal,
                 dtype_str=dtype_str,
-                num_kv_splits=int(num_kv_splits),
+                cross_seqlen=cross,
                 waves_per_eu=waves_per_eu,
                 daz=daz,
                 lazy_rescale=dualwave_swp_lazy_rescale,
                 setprio=dualwave_swp_setprio,
+                debug_lazy_counts=debug_lazy,
                 enable_stagger=dualwave_swp_enable_stagger,
                 return_lse=return_lse,
-                has_bias=has_bias,
-                has_alibi=has_alibi,
-                has_sink=has_sink,
             )
-        elif varlen:
-            # Short varlen attention uses generic light; long/debug stays on dualwave.
-            _arch = _gpu_arch(q.device)
-            _prefer_light = (
-                (not debug_lazy)
-                # The light (generic) kernel folds in neither bias nor ALiBi.
-                and (not has_bias)
-                and (not has_alibi)
-                and (not has_sink)
-                and D in (64, 128)
-                and dtype_str in ("bf16", "f16")
-                and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
-            )
-            if _prefer_light:
-                exe = _build_varlen_light(
-                    num_heads=H,
-                    num_kv_heads=num_kv_heads,
-                    head_dim=D,
-                    causal=causal,
-                    dtype_str=dtype_str,
-                    cross_seqlen=cross,
-                    waves_per_eu=waves_per_eu,
-                    daz=daz,
-                    lazy_rescale=dualwave_swp_lazy_rescale,
-                    setprio=dualwave_swp_setprio,
-                    debug_lazy_counts=debug_lazy,
-                    enable_stagger=dualwave_swp_enable_stagger,
-                    return_lse=return_lse,
-                )
-            else:
-                exe = _build_varlen(
-                    num_heads=H,
-                    num_kv_heads=num_kv_heads,
-                    head_dim=D,
-                    causal=causal,
-                    dtype_str=dtype_str,
-                    cross_seqlen=cross,
-                    waves_per_eu=waves_per_eu,
-                    daz=daz,
-                    lazy_rescale=dualwave_swp_lazy_rescale,
-                    setprio=dualwave_swp_setprio,
-                    debug_lazy_counts=debug_lazy,
-                    enable_stagger=dualwave_swp_enable_stagger,
-                    return_lse=return_lse,
-                    has_bias=has_bias,
-                    has_alibi=has_alibi,
-                    has_sink=has_sink,
-                )
         else:
-            _arch = _gpu_arch(q.device)
-            can_dualwave = D in (64, 128) and dtype_str in ("bf16", "f16") and _arch.startswith("gfx950")
-            if debug_lazy and not can_dualwave:
-                raise NotImplementedError("flydsl_flash_attn_func: debug_counts requires the gfx950 DUALWAVE_SWP path")
-            if (has_bias or has_alibi or has_sink) and not can_dualwave:
-                _term = "bias" if has_bias else ("alibi_slopes" if has_alibi else "sink")
-                raise NotImplementedError(
-                    f"flydsl_flash_attn_func: {_term} requires the gfx950 DUALWAVE_SWP path "
-                    f"(D=64/128, bf16/f16, gfx950); got D={D}, dtype={dtype_str}, arch='{_arch or 'unknown'}'"
-                )
-            # bias/ALiBi force dualwave: the generic dense kernel folds in neither.
-            if debug_lazy or has_bias or has_alibi or has_sink or (can_dualwave and _dense_routes_to_dualwave(B, Sq)):
-                num_q_blocks = -(-int(Sq) // DUALWAVE_SWP_BLOCK_M)
-                if dualwave_swp_xcd_swizzle is None:
-                    xcd_swizzle = not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE
-                else:
-                    xcd_swizzle = dualwave_swp_xcd_swizzle
-                exe = _build_dense_dualwave(
-                    num_heads=H,
-                    num_kv_heads=num_kv_heads,
-                    head_dim=D,
-                    causal=causal,
-                    dtype_str=dtype_str,
-                    cross_seqlen=cross,
-                    waves_per_eu=waves_per_eu,
-                    daz=daz,
-                    lazy_rescale=dualwave_swp_lazy_rescale,
-                    setprio=dualwave_swp_setprio,
-                    debug_lazy_counts=debug_lazy,
-                    enable_stagger=dualwave_swp_enable_stagger,
-                    return_lse=return_lse,
-                    has_bias=has_bias,
-                    has_alibi=has_alibi,
-                    has_sink=has_sink,
-                    xcd_swizzle=xcd_swizzle,
-                )
-            else:
-                block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)
-                exe = _build_dense(
-                    num_heads=H,
-                    num_kv_heads=num_kv_heads,
-                    head_dim=D,
-                    causal=causal,
-                    dtype_str=dtype_str,
-                    cross_seqlen=cross,
-                    block_m=block_m,
-                    flat_work_group_size=flat_work_group_size,
-                    path_tag=path_tag,
-                    waves_per_eu=waves_per_eu,
-                    daz=daz,
-                    return_lse=return_lse,
-                )
+            block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)
+            exe = _build_dense(
+                num_heads=H,
+                num_kv_heads=num_kv_heads,
+                head_dim=D,
+                causal=causal,
+                dtype_str=dtype_str,
+                cross_seqlen=cross,
+                block_m=block_m,
+                flat_work_group_size=flat_work_group_size,
+                path_tag=path_tag,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                return_lse=return_lse,
+            )
 
         # ── allocate output ─────────────────────────────────────────────────
         _out_shape = tuple(q.shape[:-1]) + (Dv,)
@@ -1593,14 +1726,7 @@ def flydsl_flash_attn_func(
         # ── allocate LSE (fp32 [B, num_heads, Sq]) ───────────────────────────
         lse = torch.empty((B, H, Sq), dtype=torch.float32, device=q.device) if return_lse else None
 
-        # ── launch ──────────────────────────────────────────────────────────
-        _bias_kw = {}
-        if has_bias:
-            _bias_kw["bias"] = bias
-        if has_alibi:
-            _bias_kw["alibi_slopes"] = alibi_slopes
-        if has_sink:
-            _bias_kw["sink"] = sink
+        # ── launch ──────────────────────────────────────────────────────────────
         if dtype_str == "fp8":
             kwargs = dict(stream=launch_stream, q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
             if splitk:
@@ -1612,30 +1738,15 @@ def flydsl_flash_attn_func(
             elif cross:
                 kwargs["seq_len_kv"] = Skv
             exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
-        elif splitk:
-            _ws = torch.empty(ws_elems, dtype=torch.float32, device=q.device)
-            exe(q_flat, k_flat, v_flat, o_flat, B, Sq, workspace=_ws, lse=lse, stream=launch_stream, **_bias_kw)
         elif varlen:
-            kwargs = dict(
-                cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, lse=lse, stream=launch_stream, **_bias_kw
-            )
+            kwargs = dict(cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, lse=lse, stream=launch_stream)
             if cross:
                 kwargs["seq_len_kv"] = int(max_seqlen_kv)
-            if debug_lazy:
-                exe(q_flat, k_flat, v_flat, o_flat, B, Sq, debug_counts=debug_counts, **kwargs)
-            else:
-                exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
+            exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
         else:
-            kwargs: dict = dict(stream=launch_stream, **_bias_kw)
-            # fp8 has no LSE path (guarded above) and its launcher takes no `lse` arg.
-            if dtype_str != "fp8":
-                kwargs["lse"] = lse
+            kwargs = dict(stream=launch_stream, lse=lse)
             if cross:
                 kwargs["seq_len_kv"] = Skv
-            if debug_lazy:
-                kwargs["debug_counts"] = debug_counts
-            if dtype_str == "fp8":
-                kwargs.update(q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
             exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
 
     if return_lse:
