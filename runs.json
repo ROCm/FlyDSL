@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-09T18:37:46Z",
+ "updated": "2026-10-09T18:40:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 37974702627,
+   "pr": 1223,
+   "commit": "9068038173f6fa346b2260a7799b449c61e357f8",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37974702627",
+   "created_at": "2026-10-09T18:38:39Z",
+   "updated_at": "2026-10-09T18:38:39Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37974573171,
+   "pr": null,
+   "commit": "e47aed4463914e5ba5080e1db2936888fa6b6ac3",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37974573171",
+   "created_at": "2026-10-09T18:37:30Z",
+   "updated_at": "2026-10-09T18:37:30Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
   {
    "run_id": 37974267554,
    "pr": 1192,
@@ -14,13 +44,13 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37974267554",
    "created_at": "2026-10-09T18:34:51Z",
-   "updated_at": "2026-10-09T18:35:23Z",
+   "updated_at": "2026-10-09T18:37:11Z",
    "actor": "haribabug",
    "jobs": []
   },
   {
    "run_id": 37974052490,
-   "pr": 1223,
+   "pr": null,
    "commit": "e0f21e65c0b09e55729c9729671613f99cf145d9",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -576,21 +606,24 @@
    "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr3-config",
    "event": "pull_request",
    "title": "[Kernel][FA] Add gfx950 attention metadata, knobs and traits config (3/8)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957297533",
    "created_at": "2026-10-09T16:11:27Z",
-   "updated_at": "2026-10-09T17:21:17Z",
+   "updated_at": "2026-10-09T18:38:23Z",
    "actor": "xinyazhang",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-09T16:31:22Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957297533/job/113917692268"
+     "completed_at": "2026-10-09T18:38:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957297533/job/113917692268",
+     "machine": "cv350-odcdh2-a06-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1471,36 +1504,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876094979/job/113647989512"
     }
    ]
-  },
-  {
-   "run_id": 37875799216,
-   "pr": null,
-   "commit": "df1baf1b9eeaa6330a3ab0c91180ffbed927e397",
-   "branch": "kernel/gfx1100-flash-attn",
-   "event": "pull_request",
-   "title": "[Kernel] Add dense Flash Attention for gfx1100",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37875799216",
-   "created_at": "2026-10-09T02:41:57Z",
-   "updated_at": "2026-10-09T02:46:29Z",
-   "actor": "vlluvia",
-   "jobs": []
-  },
-  {
-   "run_id": 37875121762,
-   "pr": null,
-   "commit": "8c6bc9f02a3d881824819408b3bdc5898bf82a84",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37875121762",
-   "created_at": "2026-10-09T02:33:16Z",
-   "updated_at": "2026-10-09T02:33:16Z",
-   "actor": "dimitri91209",
-   "jobs": []
   }
  ]
 }
