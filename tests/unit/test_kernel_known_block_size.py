@@ -288,10 +288,16 @@ class TestKnownBlockSizeLaunchMismatch:
 
 
 class TestKnownBlockSizeTraceAccessor:
-    """Verify the trace-time ``fx.known_block_size()`` view of the same value."""
+    """Verify the trace-time ``fx.known_block_size()`` view of the same value.
+
+    These tests append to a Python list while the kernel is traced. A warm
+    disk cache skips that trace, so the list stays empty. Disable the disk
+    cache here only; the rest of the suite still uses it.
+    """
 
     @pytest.fixture(autouse=True)
-    def _setup(self):
+    def _setup(self, monkeypatch):
+        monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
         self.x = torch.zeros(64, device="cuda", dtype=torch.float32)
 
     def test_raises_outside_a_kernel(self):
