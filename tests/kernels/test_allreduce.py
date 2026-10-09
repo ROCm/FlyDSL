@@ -76,12 +76,6 @@ def post_process_data(df, num_iters, warm_iter=1):
         if kernels_num == 0:
             print("data missed, the time may be inaccurate!")
 
-    if kernels_num < 1:
-        # These device rows do not form an iteration. Drop them so they are
-        # not averaged. The dropped-iteration count stays 0, so the caller
-        # still divides by the original iteration count.
-        return device_df.index.tolist(), 0
-
     test_df = device_df.iloc[:valid_n].reset_index()
     grouped_kernel_df = test_df.groupby(test_df.index // kernels_num, sort=False).agg(
         {"self_device_time_total": "sum", "index": list}
@@ -159,9 +153,6 @@ def get_trace_perf(prof, num_iters):
             r["device_time_avg"] = r["device_time_sum"] / r["cnt"] if r["cnt"] > 0 else 0
         rets.append(r)
     df = pd.DataFrame(rets)
-    if df.empty:
-        print("no valid data after post process!")
-        return df
     cols = [
         "name",
         "cnt",

@@ -3466,53 +3466,32 @@ def main():
                                     rows.append((cfg, path, status, precompute_status))
                                     continue
 
-                            if dtype_str == "fp8" and args.block_table:
-                                # run_fp8_config builds dense Q/K/V and has no block table.
-                                r = {
-                                    "err": "fp8 flash_attn CLI does not take --block-table; "
-                                    "run_fp8_config builds dense Q/K/V"
-                                }
-                            elif dtype_str == "fp8":
-                                r = run_fp8_config(
-                                    batch,
-                                    seq_len,
-                                    nh,
-                                    hd,
-                                    causal,
-                                    warmup=args.warmup,
-                                    iters=args.iters,
-                                    seed=args.seed,
-                                    verbose=True,
-                                    num_kv_heads=nh_kv,
-                                    num_kv_splits=kv_splits,
-                                )
-                            else:
-                                r = run_attn_config(
-                                    nh,
-                                    hd,
-                                    dtype,
-                                    causal,
-                                    args.warmup,
-                                    args.iters,
-                                    batch=batch,
-                                    seqlen_q=seq_len,
-                                    num_kv_heads=nh_kv,
-                                    num_kv_splits=kv_splits,
-                                    seed=args.seed,
-                                    dtype_str=dtype_str,
-                                    verbose=True,
-                                    trigger_lazy_else=args.trigger_lazy_else,
-                                    use_block_table=args.block_table,
-                                    precomputed_ref=precomputed_ref,
-                                    precomputed_inputs=precomputed_inputs,
-                                    page_size=args.page_size,
-                                    kv_cache_layout=kv_cache_layout or "linear",
-                                    use_bias=args.bias,
-                                    use_alibi=args.alibi,
-                                    use_sink=args.sink,
-                                    sink_share=args.sink_share,
-                                    alibi_two_d=args.alibi_two_d,
-                                )
+                            r = run_attn_config(
+                                nh,
+                                hd,
+                                dtype,
+                                causal,
+                                args.warmup,
+                                args.iters,
+                                batch=batch,
+                                seqlen_q=seq_len,
+                                num_kv_heads=nh_kv,
+                                num_kv_splits=kv_splits,
+                                seed=args.seed,
+                                dtype_str=dtype_str,
+                                verbose=True,
+                                trigger_lazy_else=args.trigger_lazy_else,
+                                use_block_table=args.block_table,
+                                precomputed_ref=precomputed_ref,
+                                precomputed_inputs=precomputed_inputs,
+                                page_size=args.page_size,
+                                kv_cache_layout=kv_cache_layout or "linear",
+                                use_bias=args.bias,
+                                use_alibi=args.alibi,
+                                use_sink=args.sink,
+                                sink_share=args.sink_share,
+                                alibi_two_d=args.alibi_two_d,
+                            )
                             if "err" in r:
                                 print(f"    [FlyDSL unsupported] {_fmt_cfg(cfg)} {path}: {r['err']}", flush=True)
                                 print(_fmt_normal_row(cfg, path, "ERROR", r))

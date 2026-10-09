@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # from https://github.com/ROCm/aiter/blob/main/aiter/test_common.py
-import ast
 import copy
 import logging
 import os
@@ -242,12 +241,6 @@ def post_process_data(df, num_iters, warm_iter=1):
         if kernels_num == 0:
             print("data missed, the time may be inaccurate!")
 
-    if kernels_num < 1:
-        # These device rows do not form an iteration. Drop them so they are
-        # not averaged. The dropped-iteration count stays 0, so the caller
-        # still divides by the original iteration count.
-        return device_df.index.tolist(), 0
-
     test_df = device_df.iloc[:valid_n].reset_index()
     grouped_kernel_df = test_df.groupby(test_df.index // kernels_num, sort=False).agg(
         {"self_device_time_total": "sum", "index": list}
@@ -323,9 +316,6 @@ def get_trace_perf(prof, num_iters):
                 r["device_time_sum"] = 0
         rets.append(r)
     df = pd.DataFrame(rets)
-    if df.empty:
-        logger.info("no valida data after post process!")
-        return 0
     cols = [
         "name",
         "cnt",
@@ -434,42 +424,17 @@ def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg="", logits_diff_thresh
 
 
 def tensor_dump(x: torch.tensor, name: str, dir="./"):
-    x_cpu = x.detach().contiguous().cpu().view(torch.uint8)
+    x_cpu = x.cpu().view(torch.uint8)
     filename = f"{dir}/{name}.bin"
     x_cpu.numpy().tofile(filename)
     logger.info(f"saving {filename} {x.shape}, {x.dtype}")
 
     with open(f"{dir}/{name}.meta", "w") as f:
-        # Shape as comma-separated ints, dtype as a torch attribute name.
-        # The loader must not eval() the meta file.
-        f.write(",".join(str(int(d)) for d in x.shape) + "\n")
-        f.write(str(x.dtype).replace("torch.", "") + "\n")
-
-
-def _parse_tensor_meta(shape_line: str, dtype_line: str):
-    """Read either the plain meta format or the old torch.Size / torch.dtype lines.
-
-    The old writer stored ``str(shape)`` and ``str(dtype)``. Those lines are
-    parsed here. They are not passed to ``eval``.
-    """
-    shape_line = shape_line.strip()
-    dtype_line = dtype_line.strip()
-    if shape_line.startswith("torch.Size(") and shape_line.endswith(")"):
-        shape = tuple(ast.literal_eval(shape_line[len("torch.Size(") : -1]))
-    elif shape_line in ("", "()"):
-        shape = ()
-    else:
-        shape = tuple(int(part) for part in shape_line.split(",") if part != "")
-    if dtype_line.startswith("torch."):
-        dtype_line = dtype_line[len("torch.") :]
-    if not hasattr(torch, dtype_line):
-        raise ValueError(f"tensor_load: unknown dtype {dtype_line!r}")
-    return shape, getattr(torch, dtype_line)
+        f.writelines([f"{el}\n" for el in [x.shape, x.dtype]])
 
 
 def tensor_load(filename: str):
-    raw = np.fromfile(filename, dtype=np.uint8)
+    DWs = np.fromfile(filename, dtype=np.uint32)
     metafile = ".".join(filename.split(".")[:-1]) + ".meta"
-    with open(metafile) as f:
-        shape, dtype = _parse_tensor_meta(f.readline(), f.readline())
-    return torch.from_numpy(raw.copy()).view(dtype).reshape(shape)
+    shape, dtype = [eval(line.strip()) for line in open(metafile)]
+    return torch.tensor(DWs).view(dtype).view(shape)

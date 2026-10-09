@@ -77,22 +77,18 @@ def _pad_c_dim(t, c, cp):
     return t if cp == c else torch.nn.functional.pad(t, (0, 0, 0, 0, 0, 0, 0, cp - c))
 
 
-def _prep_weight_fp8(weight: torch.Tensor):
-    """Reorder + cache the FP8 weight (KCTRS -> KTRSC) by source identity.
-
-    Returns the packed bytes and the stream that produced them.
-    """
+def _prep_weight_fp8(weight: torch.Tensor) -> torch.Tensor:
+    """Reorder + cache the FP8 weight (KCTRS -> KTRSC) by source identity."""
     assert weight.dtype == torch.float8_e4m3fn, f"expected FP8 E4M3FN weight, got {weight.dtype}"
     key = id(weight)
     ent = _WEIGHT_FP8_CACHE.get(key)
     if ent is not None and ent[0]() is weight:
-        return ent[1], ent[2]
+        return ent[1]
     c = weight.shape[1]
     wsrc = _pad_c_dim(weight, c, _pad_channels(c))
-    produced = torch.cuda.current_stream(weight.device)
     out = wsrc.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
-    _WEIGHT_FP8_CACHE[key] = (weakref.ref(weight), out, produced)
-    return out, produced
+    _WEIGHT_FP8_CACHE[key] = (weakref.ref(weight), out)
+    return out
 
 
 # Rigid 8-wave GEMM design: 512 threads, BLOCK_M=BLOCK_N=256, BLOCK_K=128.
@@ -223,11 +219,7 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
 
 
 def _transpose_activation_fp8(x_fp8):
-    """Fast tiled NCDHW->NDHWC fp8 transpose; falls back to torch for odd shapes.
-
-    Runs on the current stream. The conv launch waits for that stream before
-    it reads the result on the caller stream.
-    """
+    """Fast tiled NCDHW->NDHWC fp8 transpose; falls back to torch for odd shapes."""
     n, c, d, h, w = x_fp8.shape
     s = d * h * w
     if not (x_fp8.is_contiguous() and c % TR_VEC == 0 and s % 4 == 0):
@@ -730,7 +722,7 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, stream=None, wgm
 
     launch_stream = torch.cuda.current_stream() if stream is None else stream
     x_arg = _transpose_activation_fp8(x)
-    w_arg, w_stream = _prep_weight_fp8(weight)
+    w_arg = _prep_weight_fp8(weight)
 
     # The k-loop runs over crs_pad, so zero-pad the weight's crs dimension to match.
     crs = c * kt * kh * kw
@@ -757,14 +749,7 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, stream=None, wgm
     def _run(the_wgm):
         y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
         exe = compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, the_wgm)
-        cur = torch.cuda.current_stream(x.device)
-        if launch_stream != cur:
-            launch_stream.wait_stream(cur)
-        if launch_stream != w_stream:
-            launch_stream.wait_stream(w_stream)
         exe(flyc.from_torch_tensor(y.view(-1)), x_arg_t, w_arg_t, bias_t, launch_stream)
-        if launch_stream != cur:
-            cur.wait_stream(launch_stream)
         return y
 
     if wgm is not None:
