@@ -205,7 +205,20 @@ def _normalize_waves_per_eu(waves_per_eu) -> "str | None":
         return f"{lo},{hi}"
 
     if isinstance(waves_per_eu, str):
-        return waves_per_eu
+        # Parse and validate the same way as a tuple so that "2,1" and "abc"
+        # are caught here instead of failing deep inside LLVM codegen.
+        parts = waves_per_eu.split(",")
+        if len(parts) not in (1, 2):
+            raise ValueError(f'waves_per_eu string must be "min" or "min,max", got {waves_per_eu!r}')
+        try:
+            vals = [int(p) for p in parts]
+        except ValueError:
+            raise ValueError(f"waves_per_eu string must contain integers, got {waves_per_eu!r}") from None
+        if any(v < 0 for v in vals):
+            raise ValueError(f"waves_per_eu values must be >= 0, got {waves_per_eu!r}")
+        if len(vals) == 2 and vals[0] > vals[1]:
+            raise ValueError(f"waves_per_eu min ({vals[0]}) must be <= max ({vals[1]})")
+        return None if vals == [0] else waves_per_eu
 
     raise TypeError(f"waves_per_eu must be an int, tuple(int, int), or str, got {type(waves_per_eu).__name__}")
 
