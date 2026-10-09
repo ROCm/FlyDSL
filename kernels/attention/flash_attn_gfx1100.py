@@ -39,10 +39,9 @@ _VP_SEL_LO = 0x05040100
 _VP_SEL_HI = 0x07060302
 _VP_SEL_LO_REV = 0x01000504
 _VP_SEL_HI_REV = 0x03020706
-# Keeps the high half of both source dwords, which is the f32 -> bf16
-# truncation for two values at once.
+# High half of both source dwords: the f32 -> bf16 truncation, two at a time.
 _VP_SEL_BF16 = 0x07060302
-# Round-to-nearest bias applied to the f32 bit pattern before that truncation.
+# Round-to-nearest bias, added before that truncation.
 _BF16_RND = 0x8000
 _CONCAT16 = list(range(16))
 
@@ -310,10 +309,8 @@ def build_flash_attn_func_module_primary(
 
         def _to_half8(p_vec):
             if const_expr(is_bf16):
-                # gfx1100 has no f32 -> bf16 instruction, so the generic lowering
-                # spends a shift/and/bfe sequence per element. A bf16 is the high
-                # half of the f32, which v_perm_b32 extracts for two values at
-                # once once the rounding bias has been folded into the mantissa.
+                # gfx1100 has no f32 -> bf16 instruction; the generic lowering
+                # costs a shift/and/bfe sequence per element.
                 raw = p_vec.bitcast(fx.Int32)
                 biased = [fx.Int32(raw[v]) + fx.Int32(_BF16_RND) for v in range_constexpr(8)]
                 return Vec.from_elements(
@@ -576,9 +573,7 @@ def build_flash_attn_func_module_primary(
         K: fx.Tensor,
         V: fx.Tensor,
         Out: fx.Tensor,
-        stream: fx.Stream = fx.Stream(  # noqa: B008  framework idiom: default is evaluated once at import on purpose
-            None
-        ),
+        stream: fx.Stream = fx.Stream(None),
     ):
         q_n = batch * num_heads * seq_q * head_dim
         kv_n = batch * num_heads * seq_kv * head_dim
