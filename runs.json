@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-09T04:03:10Z",
+ "updated": "2026-10-09T04:21:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -188,29 +188,32 @@
    "branch": "jli/fix-waves-per-eu",
    "event": "pull_request",
    "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876403024",
    "created_at": "2026-10-09T02:49:41Z",
-   "updated_at": "2026-10-09T03:30:37Z",
+   "updated_at": "2026-10-09T04:20:16Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-09T03:20:31Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876403024/job/113653374688"
+     "completed_at": "2026-10-09T04:16:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876403024/job/113653374688",
+     "machine": "smci350-rck-g03-b20-03",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-09T03:30:36Z",
-     "completed_at": null,
+     "completed_at": "2026-10-09T04:20:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876403024/job/113653374696"
     },
     {
