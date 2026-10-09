@@ -62,13 +62,11 @@ def _as_stream(stream):
     return stream if hasattr(stream, "_is_stream_param") else fx.Stream(stream)
 
 
-def _join(stream, device):
-    """Make ``stream`` wait for work already queued on the current stream."""
-    if stream is None:
+def _join(dst, src):
+    """Queue ``dst`` behind work already on ``src``."""
+    if dst is None or src is None or dst == src:
         return
-    cur = torch.cuda.current_stream(device)
-    if stream != cur:
-        stream.wait_stream(cur)
+    dst.wait_stream(src)
 
 
 def _dispatch(exe, *args, stream=None):
@@ -137,20 +135,23 @@ def _evict_weight(key, _ref):
 
 
 def _prep_weight(w, k, kt, kh, kw, c):
-    """Pack (K, C, T, R, S) -> (K, T*R*S*Cpad), memoized on the source weight."""
+    """Pack (K, C, T, R, S) -> (K, T*R*S*Cpad), memoized on the source weight.
+
+    The packed tensor stays on the stream that produced it. The return value
+    is that tensor and that stream, so a later launch can wait for it.
+    """
     anchor = w._base if w._base is not None else w
     key = w.data_ptr()
     stamp = (w._version, tuple(w.shape), w.stride(), w.dtype)
     ent = _WEIGHT_CACHE.get(key)
     if ent is not None and ent[0]() is anchor and ent[2] == stamp:
-        return ent[1]
+        return ent[1], ent[3]
     cp = _pad_channels(c)
     wsrc = torch.nn.functional.pad(w, (0, 0, 0, 0, 0, 0, 0, cp - c)) if cp != c else w
-    # Stay on the current stream. The packed tensor is cached and reused by
-    # later calls, which may pass a different stream.
+    produced = torch.cuda.current_stream(w.device)
     wk = wsrc.permute(0, 2, 3, 4, 1).contiguous().reshape(k, kt * kh * kw * cp)
-    _WEIGHT_CACHE[key] = (weakref.ref(anchor, functools.partial(_evict_weight, key)), wk, stamp)
-    return wk
+    _WEIGHT_CACHE[key] = (weakref.ref(anchor, functools.partial(_evict_weight, key)), wk, stamp, produced)
+    return wk, produced
 
 
 TR_TILE = 64
@@ -1148,13 +1149,13 @@ def _conv3d_impl(
     has_bias = bias is not None
     bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
 
-    # Prep stays on the current stream, including the cached weight pack.
-    # The launch stream waits for that work, then the current stream waits
-    # for the kernel before the epilogue. The result stays on the current stream.
+    # Prep stays on the current stream. The launch stream waits for it, and
+    # for the stream that packed a cached weight. 1x1 above does not use this.
     cur = torch.cuda.current_stream(x.device)
     x_ndhwc = x.contiguous() if in_ndhwc else _ncdhw_to_ndhwc(x, cur)
-    w_packed = _prep_weight(weight, k, kt, kh, kw, wc)
-    _join(launch_stream, x.device)
+    w_packed, w_stream = _prep_weight(weight, k, kt, kh, kw, wc)
+    _join(launch_stream, cur)
+    _join(launch_stream, w_stream)
 
     shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, dt, dh, dw, pad_mode, has_bias, groups, out_ndhwc)
 
@@ -1212,13 +1213,18 @@ def _conv3d_impl(
     if launch_stream != cur:
         cur.wait_stream(launch_stream)
     if sk > 1:
+        # Epilogue stays on the current stream, after that wait, so it sees
+        # the kernel output. The launch stream then waits for the epilogue.
         if has_bias:
             y = y + bias_arg.view(1, k)
         if out_ndhwc:
-            return y.view(n, do, ho, wo, k).to(torch.bfloat16)
-        out = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
-        out.copy_(y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3))
-        return out
+            y = y.view(n, do, ho, wo, k).to(torch.bfloat16)
+        else:
+            out = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
+            out.copy_(y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3))
+            y = out
+        if launch_stream != cur:
+            launch_stream.wait_stream(cur)
     return y
 
 

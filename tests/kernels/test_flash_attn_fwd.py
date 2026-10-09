@@ -3466,9 +3466,13 @@ def main():
                                     rows.append((cfg, path, status, precompute_status))
                                     continue
 
-                            if dtype_str == "fp8":
-                                if args.block_table:
-                                    raise ValueError("fp8 flash_attn does not support --block-table")
+                            if dtype_str == "fp8" and args.block_table:
+                                # run_fp8_config builds dense Q/K/V and has no block table.
+                                r = {
+                                    "err": "fp8 flash_attn CLI does not take --block-table; "
+                                    "run_fp8_config builds dense Q/K/V"
+                                }
+                            elif dtype_str == "fp8":
                                 r = run_fp8_config(
                                     batch,
                                     seq_len,
