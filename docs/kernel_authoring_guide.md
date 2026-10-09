@@ -426,11 +426,36 @@ When a callback is present, the callback receives the original atom with its run
 tuple of integer tile indices `(m, n, k)`, and returns the atom for that tile. Rank-2 operands use
 `k=0`; rank-1 calls use `(0, 0, 0)`.
 
-**TDM async copy atom** — the **base pointer comes from the `copy_atom_call` global
-operand** (its pointer); the per-dim extent (HW out-of-bounds handling), per-dim
-stride, `imm_offset` (K-loop tile bump), and MCAST `workgroup_mask` are runtime
-**atom state**. The global operand's address space also picks load vs store. Build
-it with `rocdl.make_tdm_atom`:
+**TDM tiled copy atom (preferred)** — build the atom over the **whole** global
+tensor with `rocdl.cdna5.make_tiled_tdm_atom`; it returns the atom plus a
+coordinate tensor. `fx.zipped_divide` picks this block's tile and
+`rocdl.cdna5.tdm_partition` cuts the LDS tile and the coordinate tile into one
+warp's share. Padding is row slack in the LDS box layout, out-of-bounds comes from
+the tensor's own extent plus `boundary_check`, and the K-loop advances by indexing
+the coordinate rest with an **i32 tile number**:
+
+```python
+lds  = fx.SharedAllocator().allocate(fx.Array[fx.Float16, TM * TK]).peek()
+box  = fx.make_layout((TM, TK), (TK, 1))          # row slack here IS the padding
+smem = fx.make_view(lds.ptr, fx.make_layout(((TM, TK), 1), ((TK, 1), TM * TK)))
+gA   = fx.make_view(fx.get_iter(A), fx.make_layout((M, K), (K, 1)))  # FULL tensor
+atom, coord = rocdl.cdna5.make_tiled_tdm_atom(rocdl.TensorLoad(), gA, box, (TM, TK))
+blk  = fx.zipped_divide(coord, (TM, TK))[None, (fx.block_idx.x, None)]
+tAs, tAg = rocdl.cdna5.tdm_partition(atom, 0, fx.make_layout(1, 1), smem, blk)
+fx.copy(atom, tAg[None, kt], tAs[None, 0])        # kt: i32 tile index, NOT a byte offset
+rocdl.s_wait_tensorcnt(0)
+```
+
+For a store pass `rocdl.TensorStore()`, flip the `fx.copy` operands, and keep the
+LDS box packed — a store cannot de-pad LDS.
+
+**Older TDM atom** — still supported, and still required where the tiled atom
+cannot express the copy (an over-wide LDS store box clamped by a narrower global
+inner extent, a non-contiguous innermost dim, gather/scatter). Here the **base
+pointer comes from the `copy_atom_call` global operand** (its pointer); the per-dim
+extent (HW out-of-bounds handling), per-dim stride, `imm_offset` (K-loop tile
+bump), and MCAST `workgroup_mask` are runtime **atom state**. The global operand's
+address space also picks load vs store. Build it with `rocdl.make_tdm_atom`:
 
 ```python
 # make_tdm_atom(tensor, tensor_extents, strides=None, *, num_warps,
@@ -442,7 +467,7 @@ g2d = fx.make_view(fx.get_iter(A), fx.make_layout((M, N), (N, 1)))  # raw VA, no
 
 atom = rocdl.make_tdm_atom(g2d, [M, N], num_warps=4)  # rank = len(extents), 1–5D
 fx.copy_atom_call(atom, g2d, lds2d)                   # Global → LDS (base from g2d)
-rocdl.tdm_ops.tensor_wait(0)                          # await the async DMA (s_wait_tensorcnt)
+rocdl.s_wait_tensorcnt(0)                             # await the async DMA
 
 # K-loop: bump one scalar (imm_offset, carry-safe i64) instead of re-deriving base:
 fx.copy(atom, g2d, lds2d, imm_offset=k_tile * k_stride_bytes)
