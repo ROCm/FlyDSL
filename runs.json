@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-09T04:43:05Z",
+ "updated": "2026-10-09T05:47:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37884177029",
    "created_at": "2026-10-09T04:30:15Z",
-   "updated_at": "2026-10-09T04:32:25Z",
+   "updated_at": "2026-10-09T05:26:49Z",
    "actor": "james-huang09",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-10-09T04:47:47Z",
+     "completed_at": "2026-10-09T05:22:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37884177029/job/113674428105"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-09T04:47:30Z",
+     "completed_at": "2026-10-09T05:05:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37884177029/job/113674428123"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-09T05:26:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37884177029/job/113674428155"
+    }
+   ]
   },
   {
    "run_id": 37881719925,
@@ -130,20 +158,20 @@
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
    "title": "[Kernel] Add dense Flash Attention for gfx1100",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37878282081",
    "created_at": "2026-10-09T03:13:28Z",
-   "updated_at": "2026-10-09T03:29:55Z",
+   "updated_at": "2026-10-09T05:46:27Z",
    "actor": "vlluvia",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-09T03:29:55Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-09T04:48:49Z",
+     "completed_at": "2026-10-09T05:46:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37878282081/job/113655812084"
     },
     {
@@ -158,11 +186,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-09T03:30:43Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37878282081/job/113655812152"
+     "completed_at": "2026-10-09T04:46:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37878282081/job/113655812152",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -593,13 +624,41 @@
    "branch": "fujun.han/fix-singleton-zip2by",
    "event": "pull_request",
    "title": "[fix] Correct zipped_divide tiler hierarchy handling",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37868780641",
    "created_at": "2026-10-09T01:14:09Z",
-   "updated_at": "2026-10-09T01:14:09Z",
+   "updated_at": "2026-10-09T05:40:39Z",
    "actor": "Peter9606",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-09T05:40:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37868780641/job/113683921067"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-09T05:26:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37868780641/job/113683921074"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-09T05:26:09Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37868780641/job/113683921197"
+    }
+   ]
   },
   {
    "run_id": 37868559218,
