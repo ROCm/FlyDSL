@@ -230,3 +230,290 @@ func.func @pyir_flat_divide_2d_bymode() -> !fly.layout<(2, (3, (2, 3)), 7, 3) : 
   %result = fly.flat_divide(%layout, %tiler) : (!fly.layout<(14, (6, 9)) : (19, (69, 1))>, !fly.tile<[2:7|(3, 6):(1, 3)]>) -> !fly.layout<(2, (3, (2, 3)), 7, 3) : (133, (69, (207, 1)), 19, 3)>
   return %result : !fly.layout<(2, (3, (2, 3)), 7, 3) : (133, (69, (207, 1)), 19, 3)>
 }
+
+// Tiler shape drives the result shape. All cases use (96, 5) : (1, 256).
+
+// A leaf tiler keeps zipped_divide identical to logical_divide.
+
+// CHECK-LABEL: @divide_tiler_leaf_logical
+func.func @divide_tiler_leaf_logical(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(16, (6, 5)) : (1, (16, 256))> {
+  %tiler = fly.static : !fly.tile<16>
+  // CHECK: fly.logical_divide
+  %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<16>) -> !fly.layout<(16, (6, 5)) : (1, (16, 256))>
+  return %result : !fly.layout<(16, (6, 5)) : (1, (16, 256))>
+}
+
+// CHECK-LABEL: @divide_tiler_leaf_zipped
+func.func @divide_tiler_leaf_zipped(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(16, (6, 5)) : (1, (16, 256))> {
+  %tiler = fly.static : !fly.tile<16>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<16>) -> !fly.layout<(16, (6, 5)) : (1, (16, 256))>
+  return %result : !fly.layout<(16, (6, 5)) : (1, (16, 256))>
+}
+
+// CHECK-LABEL: @divide_tiler_leaf_tiled
+func.func @divide_tiler_leaf_tiled(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(16, 6, 5) : (1, 16, 256)> {
+  %tiler = fly.static : !fly.tile<16>
+  // CHECK: fly.tiled_divide
+  %result = fly.tiled_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<16>) -> !fly.layout<(16, 6, 5) : (1, 16, 256)>
+  return %result : !fly.layout<(16, 6, 5) : (1, 16, 256)>
+}
+
+// A leaf tiler leaves the tile group a scalar, so flat matches tiled.
+
+// CHECK-LABEL: @divide_tiler_leaf_flat
+func.func @divide_tiler_leaf_flat(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(16, 6, 5) : (1, 16, 256)> {
+  %tiler = fly.static : !fly.tile<16>
+  // CHECK: fly.flat_divide
+  %result = fly.flat_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<16>) -> !fly.layout<(16, 6, 5) : (1, 16, 256)>
+  return %result : !fly.layout<(16, 6, 5) : (1, 16, 256)>
+}
+
+// A singleton tuple tiler must NOT collapse into logical_divide: same layout,
+// same tiler, result types have to differ.
+
+// CHECK-LABEL: @divide_tiler_singleton_logical
+func.func @divide_tiler_singleton_logical(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<((16, 6), 5) : ((1, 16), 256)> {
+  %tiler = fly.static : !fly.tile<[16]>
+  // CHECK: fly.logical_divide
+  %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[16]>) -> !fly.layout<((16, 6), 5) : ((1, 16), 256)>
+  return %result : !fly.layout<((16, 6), 5) : ((1, 16), 256)>
+}
+
+// CHECK-LABEL: @divide_tiler_singleton_zipped
+func.func @divide_tiler_singleton_zipped(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<((16), (6, 5)) : ((1), (16, 256))> {
+  %tiler = fly.static : !fly.tile<[16]>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[16]>) -> !fly.layout<((16), (6, 5)) : ((1), (16, 256))>
+  return %result : !fly.layout<((16), (6, 5)) : ((1), (16, 256))>
+}
+
+// tiled keeps the tile group, flat flattens both groups.
+
+// CHECK-LABEL: @divide_tiler_singleton_tiled
+func.func @divide_tiler_singleton_tiled(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<((16), 6, 5) : ((1), 16, 256)> {
+  %tiler = fly.static : !fly.tile<[16]>
+  // CHECK: fly.tiled_divide
+  %result = fly.tiled_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[16]>) -> !fly.layout<((16), 6, 5) : ((1), 16, 256)>
+  return %result : !fly.layout<((16), 6, 5) : ((1), 16, 256)>
+}
+
+// CHECK-LABEL: @divide_tiler_singleton_flat
+func.func @divide_tiler_singleton_flat(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(16, 6, 5) : (1, 16, 256)> {
+  %tiler = fly.static : !fly.tile<[16]>
+  // CHECK: fly.flat_divide
+  %result = fly.flat_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[16]>) -> !fly.layout<(16, 6, 5) : (1, 16, 256)>
+  return %result : !fly.layout<(16, 6, 5) : (1, 16, 256)>
+}
+
+// Both modes covered: zip regroups across modes.
+
+// CHECK-LABEL: @divide_tiler_two_modes_logical
+func.func @divide_tiler_two_modes_logical(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<((16, 6), (5, 1)) : ((1, 16), (256, 0))> {
+  %tiler = fly.static : !fly.tile<[16|5]>
+  // CHECK: fly.logical_divide
+  %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[16|5]>) -> !fly.layout<((16, 6), (5, 1)) : ((1, 16), (256, 0))>
+  return %result : !fly.layout<((16, 6), (5, 1)) : ((1, 16), (256, 0))>
+}
+
+// CHECK-LABEL: @divide_tiler_two_modes_zipped
+func.func @divide_tiler_two_modes_zipped(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<((16, 5), (6, 1)) : ((1, 256), (16, 0))> {
+  %tiler = fly.static : !fly.tile<[16|5]>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[16|5]>) -> !fly.layout<((16, 5), (6, 1)) : ((1, 256), (16, 0))>
+  return %result : !fly.layout<((16, 5), (6, 1)) : ((1, 256), (16, 0))>
+}
+
+// The tile group is a real tuple here, so tiled keeps it and flat splits it.
+
+// CHECK-LABEL: @divide_tiler_two_modes_tiled
+func.func @divide_tiler_two_modes_tiled(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<((16, 5), 6, 1) : ((1, 256), 16, 0)> {
+  %tiler = fly.static : !fly.tile<[16|5]>
+  // CHECK: fly.tiled_divide
+  %result = fly.tiled_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[16|5]>) -> !fly.layout<((16, 5), 6, 1) : ((1, 256), 16, 0)>
+  return %result : !fly.layout<((16, 5), 6, 1) : ((1, 256), 16, 0)>
+}
+
+// CHECK-LABEL: @divide_tiler_two_modes_flat
+func.func @divide_tiler_two_modes_flat(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(16, 5, 6, 1) : (1, 256, 16, 0)> {
+  %tiler = fly.static : !fly.tile<[16|5]>
+  // CHECK: fly.flat_divide
+  %result = fly.flat_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[16|5]>) -> !fly.layout<(16, 5, 6, 1) : (1, 256, 16, 0)>
+  return %result : !fly.layout<(16, 5, 6, 1) : (1, 256, 16, 0)>
+}
+
+// A nested tiler must recurse: flattening the guide to one level would put a
+// rest mode in the tile group, giving ((2,3),4) instead of ((2,2),4).
+
+// CHECK-LABEL: @divide_tiler_nested_logical
+func.func @divide_tiler_nested_logical(%layout: !fly.layout<((6, 4), 8) : ((1, 6), 24)>)
+    -> !fly.layout<(((2, 3), (2, 2)), (4, 2)) : (((1, 2), (6, 12)), (24, 96))> {
+  %tiler = fly.static : !fly.tile<[[2|2]|4]>
+  // CHECK: fly.logical_divide
+  %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<((6, 4), 8) : ((1, 6), 24)>, !fly.tile<[[2|2]|4]>) -> !fly.layout<(((2, 3), (2, 2)), (4, 2)) : (((1, 2), (6, 12)), (24, 96))>
+  return %result : !fly.layout<(((2, 3), (2, 2)), (4, 2)) : (((1, 2), (6, 12)), (24, 96))>
+}
+
+// CHECK-LABEL: @divide_tiler_nested_zipped
+func.func @divide_tiler_nested_zipped(%layout: !fly.layout<((6, 4), 8) : ((1, 6), 24)>)
+    -> !fly.layout<(((2, 2), 4), ((3, 2), 2)) : (((1, 6), 24), ((2, 12), 96))> {
+  %tiler = fly.static : !fly.tile<[[2|2]|4]>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<((6, 4), 8) : ((1, 6), 24)>, !fly.tile<[[2|2]|4]>) -> !fly.layout<(((2, 2), 4), ((3, 2), 2)) : (((1, 6), 24), ((2, 12), 96))>
+  return %result : !fly.layout<(((2, 2), 4), ((3, 2), 2)) : (((1, 6), 24), ((2, 12), 96))>
+}
+
+// CHECK-LABEL: @divide_tiler_nested_tiled
+func.func @divide_tiler_nested_tiled(%layout: !fly.layout<((6, 4), 8) : ((1, 6), 24)>)
+    -> !fly.layout<(((2, 2), 4), (3, 2), 2) : (((1, 6), 24), (2, 12), 96)> {
+  %tiler = fly.static : !fly.tile<[[2|2]|4]>
+  // CHECK: fly.tiled_divide
+  %result = fly.tiled_divide(%layout, %tiler) : (!fly.layout<((6, 4), 8) : ((1, 6), 24)>, !fly.tile<[[2|2]|4]>) -> !fly.layout<(((2, 2), 4), (3, 2), 2) : (((1, 6), 24), (2, 12), 96)>
+  return %result : !fly.layout<(((2, 2), 4), (3, 2), 2) : (((1, 6), 24), (2, 12), 96)>
+}
+
+// CHECK-LABEL: @divide_tiler_nested_flat
+func.func @divide_tiler_nested_flat(%layout: !fly.layout<((6, 4), 8) : ((1, 6), 24)>)
+    -> !fly.layout<((2, 2), 4, (3, 2), 2) : ((1, 6), 24, (2, 12), 96)> {
+  %tiler = fly.static : !fly.tile<[[2|2]|4]>
+  // CHECK: fly.flat_divide
+  %result = fly.flat_divide(%layout, %tiler) : (!fly.layout<((6, 4), 8) : ((1, 6), 24)>, !fly.tile<[[2|2]|4]>) -> !fly.layout<((2, 2), 4, (3, 2), 2) : ((1, 6), 24, (2, 12), 96)>
+  return %result : !fly.layout<((2, 2), 4, (3, 2), 2) : ((1, 6), 24, (2, 12), 96)>
+}
+
+// Mixing numbers and `*` in one tuple tiler. No zipped/tiled/flat counterparts
+// on purpose: a `*` inside a tuple tiler still aborts on the terminal rank
+// check. Add them once that becomes a diagnostic.
+
+// CHECK-LABEL: @divide_tiler_num_then_skip_logical
+func.func @divide_tiler_num_then_skip_logical(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<((16, 6), 5) : ((1, 16), 256)> {
+  %tiler = fly.static : !fly.tile<[16|*]>
+  // CHECK: fly.logical_divide
+  %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[16|*]>) -> !fly.layout<((16, 6), 5) : ((1, 16), 256)>
+  return %result : !fly.layout<((16, 6), 5) : ((1, 16), 256)>
+}
+
+// A leading `*` keeps mode 0 whole and still divides mode 1.
+
+// CHECK-LABEL: @divide_tiler_skip_then_num_logical
+func.func @divide_tiler_skip_then_num_logical(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(96, (5, 1)) : (1, (256, 0))> {
+  %tiler = fly.static : !fly.tile<[*|5]>
+  // CHECK: fly.logical_divide
+  %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[*|5]>) -> !fly.layout<(96, (5, 1)) : (1, (256, 0))>
+  return %result : !fly.layout<(96, (5, 1)) : (1, (256, 0))>
+}
+
+// A `*` wrapped in a tuple behaves like a leaf `*` for logical_divide.
+
+// CHECK-LABEL: @divide_tiler_skip_in_tuple_logical
+func.func @divide_tiler_skip_in_tuple_logical(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(96, 5) : (1, 256)> {
+  %tiler = fly.static : !fly.tile<[*]>
+  // CHECK: fly.logical_divide
+  %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<[*]>) -> !fly.layout<(96, 5) : (1, 256)>
+  return %result : !fly.layout<(96, 5) : (1, 256)>
+}
+
+// A leaf `*` divides nothing: the layout passes through all four ops.
+
+// CHECK-LABEL: @divide_tiler_skip_all_logical
+func.func @divide_tiler_skip_all_logical(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(96, 5) : (1, 256)> {
+  %tiler = fly.static : !fly.tile<*>
+  // CHECK: fly.logical_divide
+  %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<*>) -> !fly.layout<(96, 5) : (1, 256)>
+  return %result : !fly.layout<(96, 5) : (1, 256)>
+}
+
+// CHECK-LABEL: @divide_tiler_skip_all_zipped
+func.func @divide_tiler_skip_all_zipped(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(96, 5) : (1, 256)> {
+  %tiler = fly.static : !fly.tile<*>
+  // CHECK: fly.zipped_divide
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<*>) -> !fly.layout<(96, 5) : (1, 256)>
+  return %result : !fly.layout<(96, 5) : (1, 256)>
+}
+
+// CHECK-LABEL: @divide_tiler_skip_all_tiled
+func.func @divide_tiler_skip_all_tiled(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(96, 5) : (1, 256)> {
+  %tiler = fly.static : !fly.tile<*>
+  // CHECK: fly.tiled_divide
+  %result = fly.tiled_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<*>) -> !fly.layout<(96, 5) : (1, 256)>
+  return %result : !fly.layout<(96, 5) : (1, 256)>
+}
+
+// CHECK-LABEL: @divide_tiler_skip_all_flat
+func.func @divide_tiler_skip_all_flat(%layout: !fly.layout<(96, 5) : (1, 256)>)
+    -> !fly.layout<(96, 5) : (1, 256)> {
+  %tiler = fly.static : !fly.tile<*>
+  // CHECK: fly.flat_divide
+  %result = fly.flat_divide(%layout, %tiler) : (!fly.layout<(96, 5) : (1, 256)>, !fly.tile<*>) -> !fly.layout<(96, 5) : (1, 256)>
+  return %result : !fly.layout<(96, 5) : (1, 256)>
+}
+
+// Product family baseline, block (12, 3) : (1, 16) over tiler (3, 2) : (1, 4).
+// zipped_product equals logical_product; blocked and raked interleave the block
+// and tiler modes in opposite orders.
+
+// CHECK-LABEL: @product_baseline_logical
+func.func @product_baseline_logical(%block: !fly.layout<(12, 3) : (1, 16)>, %tiler: !fly.layout<(3, 2) : (1, 4)>)
+    -> !fly.layout<((12, 3), (3, 2)) : ((1, 16), (48, 192))> {
+  // CHECK: fly.logical_product
+  %result = fly.logical_product(%block, %tiler) : (!fly.layout<(12, 3) : (1, 16)>, !fly.layout<(3, 2) : (1, 4)>) -> !fly.layout<((12, 3), (3, 2)) : ((1, 16), (48, 192))>
+  return %result : !fly.layout<((12, 3), (3, 2)) : ((1, 16), (48, 192))>
+}
+
+// CHECK-LABEL: @product_baseline_zipped
+func.func @product_baseline_zipped(%block: !fly.layout<(12, 3) : (1, 16)>, %tiler: !fly.layout<(3, 2) : (1, 4)>)
+    -> !fly.layout<((12, 3), (3, 2)) : ((1, 16), (48, 192))> {
+  // CHECK: fly.zipped_product
+  %result = fly.zipped_product(%block, %tiler) : (!fly.layout<(12, 3) : (1, 16)>, !fly.layout<(3, 2) : (1, 4)>) -> !fly.layout<((12, 3), (3, 2)) : ((1, 16), (48, 192))>
+  return %result : !fly.layout<((12, 3), (3, 2)) : ((1, 16), (48, 192))>
+}
+
+// CHECK-LABEL: @product_baseline_tiled
+func.func @product_baseline_tiled(%block: !fly.layout<(12, 3) : (1, 16)>, %tiler: !fly.layout<(3, 2) : (1, 4)>)
+    -> !fly.layout<((12, 3), 3, 2) : ((1, 16), 48, 192)> {
+  // CHECK: fly.tiled_product
+  %result = fly.tiled_product(%block, %tiler) : (!fly.layout<(12, 3) : (1, 16)>, !fly.layout<(3, 2) : (1, 4)>) -> !fly.layout<((12, 3), 3, 2) : ((1, 16), 48, 192)>
+  return %result : !fly.layout<((12, 3), 3, 2) : ((1, 16), 48, 192)>
+}
+
+// CHECK-LABEL: @product_baseline_flat
+func.func @product_baseline_flat(%block: !fly.layout<(12, 3) : (1, 16)>, %tiler: !fly.layout<(3, 2) : (1, 4)>)
+    -> !fly.layout<(12, 3, 3, 2) : (1, 16, 48, 192)> {
+  // CHECK: fly.flat_product
+  %result = fly.flat_product(%block, %tiler) : (!fly.layout<(12, 3) : (1, 16)>, !fly.layout<(3, 2) : (1, 4)>) -> !fly.layout<(12, 3, 3, 2) : (1, 16, 48, 192)>
+  return %result : !fly.layout<(12, 3, 3, 2) : (1, 16, 48, 192)>
+}
+
+// CHECK-LABEL: @product_baseline_blocked
+func.func @product_baseline_blocked(%block: !fly.layout<(12, 3) : (1, 16)>, %tiler: !fly.layout<(3, 2) : (1, 4)>)
+    -> !fly.layout<((12, 3), (3, 2)) : ((1, 48), (16, 192))> {
+  // CHECK: fly.blocked_product
+  %result = fly.blocked_product(%block, %tiler) : (!fly.layout<(12, 3) : (1, 16)>, !fly.layout<(3, 2) : (1, 4)>) -> !fly.layout<((12, 3), (3, 2)) : ((1, 48), (16, 192))>
+  return %result : !fly.layout<((12, 3), (3, 2)) : ((1, 48), (16, 192))>
+}
+
+// CHECK-LABEL: @product_baseline_raked
+func.func @product_baseline_raked(%block: !fly.layout<(12, 3) : (1, 16)>, %tiler: !fly.layout<(3, 2) : (1, 4)>)
+    -> !fly.layout<((3, 12), (2, 3)) : ((48, 1), (192, 16))> {
+  // CHECK: fly.raked_product
+  %result = fly.raked_product(%block, %tiler) : (!fly.layout<(12, 3) : (1, 16)>, !fly.layout<(3, 2) : (1, 4)>) -> !fly.layout<((3, 12), (2, 3)) : ((48, 1), (192, 16))>
+  return %result : !fly.layout<((3, 12), (2, 3)) : ((48, 1), (192, 16))>
+}

@@ -1355,6 +1355,8 @@ Layout layoutLogicalDivide(LayoutBuilder<Layout> &builder, Layout layout, TileAt
   };
 
   if (divisorTile.isLeaf()) {
+    if (divisorTile.isNoneMode())
+      return layout;
     return leafDivide(layout, divisorTile.getValue());
   }
 
@@ -1399,15 +1401,9 @@ Layout layoutZippedDivide(LayoutBuilder<Layout> &builder, Layout layout, TileAtt
   using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
 
   Layout logicalDiv = layoutLogicalDivide(builder, layout, divisorTile);
-  auto *ctx = builder.getLayoutAttr(layout).getContext();
 
-  SmallVector<Attribute> guideElems;
-  for (int i = 0; i < divisorTile.rank(); ++i) {
-    guideElems.push_back(IntTupleAttr::getLeafNone(ctx));
-  }
-  IntTupleAttr guide = IntTupleAttr::get(ArrayAttr::get(ctx, guideElems));
-  IntTuple retShape = intTupleZip2By(builder, builder.getShape(logicalDiv), guide);
-  IntTuple retStride = intTupleZip2By(builder, builder.getStride(logicalDiv), guide);
+  IntTuple retShape = intTupleZip2By(builder, builder.getShape(logicalDiv), divisorTile);
+  IntTuple retStride = intTupleZip2By(builder, builder.getStride(logicalDiv), divisorTile);
   return builder.makeLayout(retShape, retStride);
 }
 
