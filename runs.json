@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-09T11:15:13Z",
+ "updated": "2026-10-09T12:39:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 37931323277,
+   "pr": 1243,
+   "commit": "d5777ecc4776eb21d72d73b796f8998bbf9dd012",
+   "branch": "jli/bump-llvm-0906",
+   "event": "pull_request",
+   "title": "[llvm] bump llvm to 1df311a6",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37931323277",
+   "created_at": "2026-10-09T12:38:04Z",
+   "updated_at": "2026-10-09T12:38:05Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
   {
    "run_id": 37914392173,
    "pr": 1244,
@@ -56,20 +71,20 @@
    "branch": "jli/bump-llvm-0906",
    "event": "pull_request",
    "title": "[llvm] bump llvm to 1df311a6",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37913726491",
    "created_at": "2026-10-09T09:49:21Z",
-   "updated_at": "2026-10-09T10:24:00Z",
+   "updated_at": "2026-10-09T12:38:05Z",
    "actor": "jli-melchior",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-09T10:24:00Z",
-     "completed_at": null,
+     "completed_at": "2026-10-09T12:38:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37913726491/job/113776681813"
     },
     {
@@ -1313,21 +1328,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37850357724",
    "created_at": "2026-10-08T21:57:43Z",
    "updated_at": "2026-10-08T21:57:43Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37849852046,
-   "pr": null,
-   "commit": "09b79540f9079f7afaa5ed9b31fefaa199b548e4",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37849852046",
-   "created_at": "2026-10-08T21:53:12Z",
-   "updated_at": "2026-10-08T21:53:12Z",
    "actor": "dimitri91209",
    "jobs": []
   }
