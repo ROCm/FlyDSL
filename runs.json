@@ -1,26 +1,114 @@
 {
  "schema": 1,
- "updated": "2026-10-09T02:47:40Z",
+ "updated": "2026-10-09T03:15:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37876094979,
+   "run_id": 37878282081,
    "pr": 1216,
-   "commit": "df1baf1b9eeaa6330a3ab0c91180ffbed927e397",
+   "commit": "f3be5025b07a694be07f93dfb940d1fe47c2a1fa",
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
    "title": "[Kernel] Add dense Flash Attention for gfx1100",
    "status": "in_progress",
    "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876094979",
-   "created_at": "2026-10-09T02:45:45Z",
-   "updated_at": "2026-10-09T02:46:59Z",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37878282081",
+   "created_at": "2026-10-09T03:13:28Z",
+   "updated_at": "2026-10-09T03:15:14Z",
    "actor": "vlluvia",
    "jobs": []
   },
   {
+   "run_id": 37876788190,
+   "pr": 1223,
+   "commit": "c328b9d6a7938cc7e85bffb4cf7a707106b145c8",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876788190",
+   "created_at": "2026-10-09T02:54:30Z",
+   "updated_at": "2026-10-09T02:54:30Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37876774627,
+   "pr": 1240,
+   "commit": "676d1f94da2f4dbe0ae4b114f18c9528cf6c8e34",
+   "branch": "bugfix-e8m0-stream-and-tests",
+   "event": "pull_request",
+   "title": "[Bugfix] Shared numerics, streams, and tests",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876774627",
+   "created_at": "2026-10-09T02:54:19Z",
+   "updated_at": "2026-10-09T02:54:19Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37876403024,
+   "pr": 1184,
+   "commit": "5289771fb237e3ede3781addae8f46782c6b6146",
+   "branch": "jli/fix-waves-per-eu",
+   "event": "pull_request",
+   "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876403024",
+   "created_at": "2026-10-09T02:49:41Z",
+   "updated_at": "2026-10-09T02:51:49Z",
+   "actor": "jli-melchior",
+   "jobs": []
+  },
+  {
+   "run_id": 37876094979,
+   "pr": null,
+   "commit": "df1baf1b9eeaa6330a3ab0c91180ffbed927e397",
+   "branch": "kernel/gfx1100-flash-attn",
+   "event": "pull_request",
+   "title": "[Kernel] Add dense Flash Attention for gfx1100",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876094979",
+   "created_at": "2026-10-09T02:45:45Z",
+   "updated_at": "2026-10-09T03:14:47Z",
+   "actor": "vlluvia",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-09T02:58:05Z",
+     "completed_at": "2026-10-09T03:13:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876094979/job/113647989470"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-09T02:59:11Z",
+     "completed_at": "2026-10-09T03:14:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876094979/job/113647989505"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-09T02:58:47Z",
+     "completed_at": "2026-10-09T03:14:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37876094979/job/113647989512"
+    }
+   ]
+  },
+  {
    "run_id": 37875799216,
-   "pr": 1216,
+   "pr": null,
    "commit": "df1baf1b9eeaa6330a3ab0c91180ffbed927e397",
    "branch": "kernel/gfx1100-flash-attn",
    "event": "pull_request",
@@ -35,7 +123,7 @@
   },
   {
    "run_id": 37875121762,
-   "pr": 1223,
+   "pr": null,
    "commit": "8c6bc9f02a3d881824819408b3bdc5898bf82a84",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -50,7 +138,7 @@
   },
   {
    "run_id": 37875109653,
-   "pr": 1240,
+   "pr": null,
    "commit": "ce3ac940fd298c258ffb7a3b6e8be894c4555cef",
    "branch": "bugfix-e8m0-stream-and-tests",
    "event": "pull_request",
@@ -70,11 +158,11 @@
    "branch": "perf/gfx1250-rmsnorm-vector-tail",
    "event": "pull_request",
    "title": "[Kernel][Perf] Tune RMSNorm for gfx1250: BF16 hardware conversion, early loads, small-N kernel choice",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37873652835",
    "created_at": "2026-10-09T02:14:54Z",
-   "updated_at": "2026-10-09T02:30:02Z",
+   "updated_at": "2026-10-09T02:57:20Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -98,9 +186,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-09T02:30:01Z",
+     "started_at": "2026-10-09T02:57:19Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37873652835/job/113640991216"
     }
@@ -927,94 +1015,6 @@
      "started_at": "2026-10-08T15:12:21Z",
      "completed_at": "2026-10-08T15:30:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37795691290/job/113384847368"
-    }
-   ]
-  },
-  {
-   "run_id": 37793754358,
-   "pr": null,
-   "commit": "b8cc514eb7f6c9f70d1a5c769861d5bbdcb78c0a",
-   "branch": "dsv4_megakernel",
-   "event": "pull_request",
-   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37793754358",
-   "created_at": "2026-10-08T14:35:44Z",
-   "updated_at": "2026-10-08T14:51:08Z",
-   "actor": "amd-weisun",
-   "jobs": []
-  },
-  {
-   "run_id": 37792952144,
-   "pr": null,
-   "commit": "d5b6ad4f39d3d0c1ba9e3bd9e95410a112f10664",
-   "branch": "dsv4_megakernel",
-   "event": "pull_request",
-   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37792952144",
-   "created_at": "2026-10-08T14:29:57Z",
-   "updated_at": "2026-10-08T14:36:25Z",
-   "actor": "amd-weisun",
-   "jobs": []
-  },
-  {
-   "run_id": 37792714107,
-   "pr": null,
-   "commit": "b28f164f630dd6f4255c027936dd259015fea94e",
-   "branch": "dsv4_megakernel",
-   "event": "pull_request",
-   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37792714107",
-   "created_at": "2026-10-08T14:28:12Z",
-   "updated_at": "2026-10-08T14:30:01Z",
-   "actor": "amd-weisun",
-   "jobs": []
-  },
-  {
-   "run_id": 37790937506,
-   "pr": null,
-   "commit": "9f17fea5d76e09840f129ea09ab8f025442e7186",
-   "branch": "dsv4_megakernel",
-   "event": "pull_request",
-   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37790937506",
-   "created_at": "2026-10-08T14:15:12Z",
-   "updated_at": "2026-10-08T14:29:17Z",
-   "actor": "amd-weisun",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-08T14:28:00Z",
-     "completed_at": "2026-10-08T14:29:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37790937506/job/113363639472"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-08T14:27:52Z",
-     "completed_at": "2026-10-08T14:29:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37790937506/job/113363639630"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-10-08T14:27:23Z",
-     "completed_at": "2026-10-08T14:28:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37790937506/job/113363639797"
     }
    ]
   }
