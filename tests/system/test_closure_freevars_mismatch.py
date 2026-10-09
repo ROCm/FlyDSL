@@ -20,7 +20,7 @@ import pytest
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-pytestmark = [pytest.mark.l1a_compile_no_target_dialect]
+pytestmark = [pytest.mark.l1a_compile]
 
 
 def _has_gpu():
