@@ -71,17 +71,6 @@ def _join(stream, device):
         stream.wait_stream(cur)
 
 
-def _contiguous_on(x, stream):
-    """Contiguous copy on ``stream``, after work already queued on the current stream."""
-    _join(stream, x.device)
-    if x.is_contiguous():
-        return x
-    if stream is None or stream == torch.cuda.current_stream(x.device):
-        return x.contiguous()
-    with torch.cuda.stream(stream):
-        return x.contiguous()
-
-
 def _dispatch(exe, *args, stream=None):
     """Run a builder's launcher, pre-compiling on first use."""
     cf = getattr(exe, "_cf", None)
@@ -297,9 +286,9 @@ def _ncdhw_to_ndhwc(x, stream):
     s = t * h * w
     big = n * c * s > 0x7FFFFFFF
     if not (x.is_contiguous() and x.dtype == torch.bfloat16 and c % TR_VEC == 0):
-        return _contiguous_on(x.permute(0, 2, 3, 4, 1), stream)
+        return x.permute(0, 2, 3, 4, 1).contiguous()
     if big and s > TR_MAX_BIG_S:
-        return _contiguous_on(x.permute(0, 2, 3, 4, 1), stream)
+        return x.permute(0, 2, 3, 4, 1).contiguous()
     out = torch.empty((n, t, h, w, c), device=x.device, dtype=x.dtype)
     exe = compile_transpose_ncdhw_ndhwc(n, c, s)
     _dispatch(exe, out, x, stream=torch.cuda.current_stream() if stream is None else stream)
@@ -1119,21 +1108,20 @@ def _conv3d_impl(
         and ph == 0
         and pw == 0
     ):
+        # 1x1 stays on the current stream, as before. It does not use the implicit GEMM launch.
         wm = weight.reshape(k, c)
-        _join(launch_stream, x.device)
-        with torch.cuda.stream(launch_stream):
-            if in_ndhwc:
-                y = torch.matmul(x.reshape(n * d * h * w, c), wm.t()).reshape(n, d, h, w, k)
-                if bias is not None:
-                    y = y + bias.to(y.dtype)
-                return y if out_ndhwc else y.permute(0, 4, 1, 2, 3).contiguous()
-            if n == 1:
-                y = torch.matmul(wm, x.reshape(c, d * h * w)).reshape(n, k, d, h, w)
-            else:
-                y = torch.matmul(wm, x.reshape(n, c, d * h * w)).reshape(n, k, d, h, w)
+        if in_ndhwc:
+            y = torch.matmul(x.reshape(n * d * h * w, c), wm.t()).reshape(n, d, h, w, k)
             if bias is not None:
-                y = y + bias.to(y.dtype).view(1, k, 1, 1, 1)
-            return y.permute(0, 2, 3, 4, 1).contiguous() if out_ndhwc else y
+                y = y + bias.to(y.dtype)
+            return y if out_ndhwc else y.permute(0, 4, 1, 2, 3).contiguous()
+        if n == 1:
+            y = torch.matmul(wm, x.reshape(c, d * h * w)).reshape(n, k, d, h, w)
+        else:
+            y = torch.matmul(wm, x.reshape(n, c, d * h * w)).reshape(n, k, d, h, w)
+        if bias is not None:
+            y = y + bias.to(y.dtype).view(1, k, 1, 1, 1)
+        return y.permute(0, 2, 3, 4, 1).contiguous() if out_ndhwc else y
 
     do = (d + 2 * pt - (dt * (kt - 1) + 1)) // st + 1
     ho = (h + 2 * ph - (dh * (kh - 1) + 1)) // sh + 1
@@ -1158,13 +1146,13 @@ def _conv3d_impl(
     crs = cgp * kt * kh * kw
 
     has_bias = bias is not None
-    bias_arg = (
-        _contiguous_on(bias.to(torch.float32), launch_stream)
-        if has_bias
-        else torch.empty(1, device=x.device, dtype=torch.float32)
-    )
+    bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
 
-    x_ndhwc = _contiguous_on(x, launch_stream) if in_ndhwc else _ncdhw_to_ndhwc(x, launch_stream)
+    # Prep stays on the current stream, including the cached weight pack.
+    # The launch stream waits for that work, then the current stream waits
+    # for the kernel before the epilogue. The result stays on the current stream.
+    cur = torch.cuda.current_stream(x.device)
+    x_ndhwc = x.contiguous() if in_ndhwc else _ncdhw_to_ndhwc(x, cur)
     w_packed = _prep_weight(weight, k, kt, kh, kw, wc)
     _join(launch_stream, x.device)
 
@@ -1221,15 +1209,16 @@ def _conv3d_impl(
         chosen_wgm = 1
 
     y, sk = _run(chosen_tile, chosen_wgm)
+    if launch_stream != cur:
+        cur.wait_stream(launch_stream)
     if sk > 1:
-        with torch.cuda.stream(launch_stream):
-            if has_bias:
-                y = y + bias_arg.view(1, k)
-            if out_ndhwc:
-                return y.view(n, do, ho, wo, k).to(torch.bfloat16)
-            out = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
-            out.copy_(y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3))
-            return out
+        if has_bias:
+            y = y + bias_arg.view(1, k)
+        if out_ndhwc:
+            return y.view(n, do, ho, wo, k).to(torch.bfloat16)
+        out = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
+        out.copy_(y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3))
+        return out
     return y
 
 

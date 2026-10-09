@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 # from https://github.com/ROCm/aiter/blob/main/aiter/test_common.py
+import ast
 import copy
 import logging
 import os
@@ -242,8 +243,9 @@ def post_process_data(df, num_iters, warm_iter=1):
             print("data missed, the time may be inaccurate!")
 
     if kernels_num < 1:
-        # Short traces: never divide by zero in groupby.
-        return [], int(num_iters)
+        # Same result as an empty device table. Do not divide by zero, and do
+        # not tell the caller that warm-up rows were dropped.
+        return [], 0
 
     test_df = device_df.iloc[:valid_n].reset_index()
     grouped_kernel_df = test_df.groupby(test_df.index // kernels_num, sort=False).agg(
@@ -440,14 +442,30 @@ def tensor_dump(x: torch.tensor, name: str, dir="./"):
         f.write(str(x.dtype).replace("torch.", "") + "\n")
 
 
+def _parse_tensor_meta(shape_line: str, dtype_line: str):
+    """Read either the plain meta format or the old torch.Size / torch.dtype lines.
+
+    The old writer stored ``str(shape)`` and ``str(dtype)``. Those lines are
+    parsed here. They are not passed to ``eval``.
+    """
+    shape_line = shape_line.strip()
+    dtype_line = dtype_line.strip()
+    if shape_line.startswith("torch.Size(") and shape_line.endswith(")"):
+        shape = tuple(ast.literal_eval(shape_line[len("torch.Size(") : -1]))
+    elif shape_line in ("", "()"):
+        shape = ()
+    else:
+        shape = tuple(int(part) for part in shape_line.split(",") if part != "")
+    if dtype_line.startswith("torch."):
+        dtype_line = dtype_line[len("torch.") :]
+    if not hasattr(torch, dtype_line):
+        raise ValueError(f"tensor_load: unknown dtype {dtype_line!r}")
+    return shape, getattr(torch, dtype_line)
+
+
 def tensor_load(filename: str):
     raw = np.fromfile(filename, dtype=np.uint8)
     metafile = ".".join(filename.split(".")[:-1]) + ".meta"
     with open(metafile) as f:
-        shape_line = f.readline().strip()
-        dtype_line = f.readline().strip()
-    shape = tuple(int(x) for x in shape_line.split(",")) if shape_line else ()
-    if not hasattr(torch, dtype_line):
-        raise ValueError(f"tensor_load: unknown dtype {dtype_line!r} in {metafile}")
-    dtype = getattr(torch, dtype_line)
+        shape, dtype = _parse_tensor_meta(f.readline(), f.readline())
     return torch.from_numpy(raw.copy()).view(dtype).reshape(shape)

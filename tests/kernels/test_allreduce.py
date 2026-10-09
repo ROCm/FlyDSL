@@ -76,6 +76,9 @@ def post_process_data(df, num_iters, warm_iter=1):
         if kernels_num == 0:
             print("data missed, the time may be inaccurate!")
 
+    if kernels_num < 1:
+        return [], 0
+
     test_df = device_df.iloc[:valid_n].reset_index()
     grouped_kernel_df = test_df.groupby(test_df.index // kernels_num, sort=False).agg(
         {"self_device_time_total": "sum", "index": list}

@@ -218,23 +218,22 @@ def compile_transpose_ncdhw_ndhwc_fp8(n, c, s):
     return launch
 
 
-def _transpose_activation_fp8(x_fp8, stream=None):
-    """Fast tiled NCDHW->NDHWC fp8 transpose; falls back to torch for odd shapes."""
+def _transpose_activation_fp8(x_fp8):
+    """Fast tiled NCDHW->NDHWC fp8 transpose; falls back to torch for odd shapes.
+
+    Runs on the current stream. The conv launch waits for that stream before
+    it reads the result on the caller stream.
+    """
     n, c, d, h, w = x_fp8.shape
     s = d * h * w
-    launch_stream = torch.cuda.current_stream() if stream is None else stream
-    cur = torch.cuda.current_stream(x_fp8.device)
-    if launch_stream != cur:
-        launch_stream.wait_stream(cur)
     if not (x_fp8.is_contiguous() and c % TR_VEC == 0 and s % 4 == 0):
-        with torch.cuda.stream(launch_stream):
-            return x_fp8.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
+        return x_fp8.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
     out = torch.empty((n * s * c,), device=x_fp8.device, dtype=torch.int8)
     exe = compile_transpose_ncdhw_ndhwc_fp8(n, c, s)
     exe(
         flyc.from_torch_tensor(out),
         flyc.from_torch_tensor(x_fp8.view(torch.int8).view(-1)),
-        launch_stream,
+        torch.cuda.current_stream(),
     )
     return out
 
@@ -726,7 +725,7 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, stream=None, wgm
     c = cp
 
     launch_stream = torch.cuda.current_stream() if stream is None else stream
-    x_arg = _transpose_activation_fp8(x, stream=launch_stream)
+    x_arg = _transpose_activation_fp8(x)
     w_arg = _prep_weight_fp8(weight)
 
     # The k-loop runs over crs_pad, so zero-pad the weight's crs dimension to match.
@@ -754,7 +753,12 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, stream=None, wgm
     def _run(the_wgm):
         y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
         exe = compile_conv3d_implicit_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, the_wgm)
+        cur = torch.cuda.current_stream(x.device)
+        if launch_stream != cur:
+            launch_stream.wait_stream(cur)
         exe(flyc.from_torch_tensor(y.view(-1)), x_arg_t, w_arg_t, bias_t, launch_stream)
+        if launch_stream != cur:
+            cur.wait_stream(launch_stream)
         return y
 
     if wgm is not None:
