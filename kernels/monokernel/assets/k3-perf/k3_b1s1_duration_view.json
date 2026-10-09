@@ -1,0 +1,320 @@
+{
+  "source": "k3_b1s1_trace.json",
+  "layout": "Back-to-back kernel durations in recorded dispatch order; idle gaps removed",
+  "axis": "Cumulative kernel duration in microseconds, shared scale",
+  "duration_rule": "End_Timestamp - Start_Timestamp, unchanged integer nanoseconds",
+  "queue_rule": "All queues summed into one row per path; overlapping kernel time counts separately",
+  "not_elapsed_time": true,
+  "colors_by_name_category": {
+    "Projection / GEMM": "#4389cf",
+    "KDA / recurrence": "#39a4a1",
+    "Router / top-k / sort": "#e7a345",
+    "MoE GEMM1 / GEMM2": "#9471c5",
+    "AttnRes / norm / quant": "#9ba7b4",
+    "TP all-reduce": "#65a35b",
+    "Fused tail": "#c16b75",
+    "Output-add adapter": "#7a6558",
+    "Fused mono-kernel": "#234872"
+  },
+  "paths": [
+    {
+      "path": "atom",
+      "node": "mi355-gpu-47",
+      "dispatches": 26,
+      "kernel_sum_ns": 137923,
+      "kernel_sum_us": 137.923,
+      "events": [
+        {
+          "dispatch_id": "16379",
+          "kernel_name": "_attn_res_fused_kernel",
+          "queue_id": "4",
+          "category": "AttnRes / norm / quant",
+          "start_ns": 0,
+          "duration_ns": 7320
+        },
+        {
+          "dispatch_id": "16380",
+          "kernel_name": "kernel_gemm_0",
+          "queue_id": "4",
+          "category": "Projection / GEMM",
+          "start_ns": 7320,
+          "duration_ns": 8320
+        },
+        {
+          "dispatch_id": "16381",
+          "kernel_name": "_strided_per_token_quant_kernel",
+          "queue_id": "4",
+          "category": "AttnRes / norm / quant",
+          "start_ns": 15640,
+          "duration_ns": 4400
+        },
+        {
+          "dispatch_id": "16382",
+          "kernel_name": "_ZN7ck_tile6kentryILi1ENS_12FlatmmKernelINS_33GemmSpatiallyLocalTilePartitionerINS_13TileGemmShapeINS_8sequenceIJLi32ELi64ELi128EEEENS4_IJLi1ELi4ELi1EEEENS4_IJLi16ELi16ELi128EEEELb0ELb0EEELi8ELi4EEENS_30FlatmmPipelineAGmemBGmemCRegV1INS_21FlatmmPipelineProblemIDB8_SC_fS8_NS_23TileGemmUniversalTraitsILb1ELb0ELb0ELb0ENS_13tensor_layout4gemm8RowMajorENSF_11ColumnMajorESG_Lb0ELb0ELb0ELi1ELb1ELi16ELNS_21DataCachePrefetchKindE0ELSI_0ELb0ELb0EEELNS_21GemmPipelineSchedulerE0ELb1ELNS_10TailNumberE0ELNS_25amd_buffer_coherence_enumE0ELb0ESC_EENS_35UniversalFlatmmPipelineAgBgCrPolicyEEENS_16CShuffleEpilogueINS_23CShuffleEpilogueProblemISC_SC_NS_5tupleIJEEEfDF16bST_SG_NS_12element_wise11PassThroughELi32ELi64ELi1ELi4ELi16ELi16ELi128ELb0ELi1ELb0ELi1ELi1ELb0EvvLb0EfDF16bEEvEEEEJNS_16FlatmmKernelArgsINS_18FlatmmScalePointerILi1ELi0EfEES11_Li0EEEEEEvDpT1_",
+          "queue_id": "4",
+          "category": "Projection / GEMM",
+          "start_ns": 20040,
+          "duration_ns": 4641
+        },
+        {
+          "dispatch_id": "16383",
+          "kernel_name": "_causal_conv1d_update_kernel",
+          "queue_id": "4",
+          "category": "KDA / recurrence",
+          "start_ns": 24681,
+          "duration_ns": 4760
+        },
+        {
+          "dispatch_id": "16384",
+          "kernel_name": "fused_sigmoid_gating_delta_rule_update_kernel",
+          "queue_id": "4",
+          "category": "KDA / recurrence",
+          "start_ns": 29441,
+          "duration_ns": 4760
+        },
+        {
+          "dispatch_id": "16385",
+          "kernel_name": "_rmsnorm_gated_fp8_per_token_kernel",
+          "queue_id": "4",
+          "category": "AttnRes / norm / quant",
+          "start_ns": 34201,
+          "duration_ns": 2321
+        },
+        {
+          "dispatch_id": "16386",
+          "kernel_name": "kernel_gemm_0",
+          "queue_id": "4",
+          "category": "Projection / GEMM",
+          "start_ns": 36522,
+          "duration_ns": 3880
+        },
+        {
+          "dispatch_id": "16387",
+          "kernel_name": "void aiter::ar_ll_gfx9<std::bfloat16_t, 8, 256>(std::bfloat16_t* const*, std::bfloat16_t*, std::bfloat16_t const*, unsigned long, int, unsigned int*, unsigned long)",
+          "queue_id": "4",
+          "category": "TP all-reduce",
+          "start_ns": 40402,
+          "duration_ns": 4920
+        },
+        {
+          "dispatch_id": "16388",
+          "kernel_name": "_attn_res_fused_kernel",
+          "queue_id": "4",
+          "category": "AttnRes / norm / quant",
+          "start_ns": 45322,
+          "duration_ns": 5080
+        },
+        {
+          "dispatch_id": "16389",
+          "kernel_name": "hgemm_bf16_t16x32x128x6_ksd_w1x2x1_gm0_bias0_lnt_pft_0",
+          "queue_id": "4",
+          "category": "Projection / GEMM",
+          "start_ns": 50402,
+          "duration_ns": 4800
+        },
+        {
+          "dispatch_id": "16390",
+          "kernel_name": "void aiter::dynamic_per_group_scaled_quant_kernel<std::bfloat16_t, opus::fp4_t, 32, 32, true, 64, true, false>(opus::fp4_t*, float*, std::bfloat16_t const*, float const*, long, int, int, long, int const*, int)",
+          "queue_id": "4",
+          "category": "AttnRes / norm / quant",
+          "start_ns": 55202,
+          "duration_ns": 1840
+        },
+        {
+          "dispatch_id": "16391",
+          "kernel_name": "aiter::f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128",
+          "queue_id": "4",
+          "category": "Projection / GEMM",
+          "start_ns": 57042,
+          "duration_ns": 8800
+        },
+        {
+          "dispatch_id": "16392",
+          "kernel_name": "void aiter::grouped_topk_kernel<hip_bfloat16, float __vector(4), 1, true, true, false>(hip_bfloat16*, hip_bfloat16 const*, float*, int*, unsigned long, unsigned long, int, int, int, int, float)",
+          "queue_id": "4",
+          "category": "Router / top-k / sort",
+          "start_ns": 65842,
+          "duration_ns": 11120
+        },
+        {
+          "dispatch_id": "16393",
+          "kernel_name": "void aiter::mxfp4_moe::moe_sort_quant::sort_quant_kernel_impl<896, 16, 16, 3584, 128, 1024, true, false>(int, __hip_bfloat16 const*, int const*, float const*, int*, int*, int*, int*, float*, unsigned char*, unsigned char*, int*, __hip_bfloat16*, void*, long long)",
+          "queue_id": "4",
+          "category": "Router / top-k / sort",
+          "start_ns": 76962,
+          "duration_ns": 4560
+        },
+        {
+          "dispatch_id": "16394",
+          "kernel_name": "gemm1_a4w4_port_fp4_h3584_i384_ne896_bm16_iq_hpf_sep_native_scale_situv2_bn128_xcd4",
+          "queue_id": "4",
+          "category": "MoE GEMM1 / GEMM2",
+          "start_ns": 81522,
+          "duration_ns": 9800
+        },
+        {
+          "dispatch_id": "16395",
+          "kernel_name": "gemm2_a4w4_port_hmax8192_imax384_bm16_bn128_bk128_atomic_bhoist_apf_spart4x2_bf16lds_kst_v2_biasabi7",
+          "queue_id": "4",
+          "category": "MoE GEMM1 / GEMM2",
+          "start_ns": 91322,
+          "duration_ns": 4480
+        },
+        {
+          "dispatch_id": "16396",
+          "kernel_name": "_ZN5aiter37dynamic_per_token_scaled_quant_kernelIDF16bDB8_Li32EEEvPT0_PfPT_PKfiPKii",
+          "queue_id": "2",
+          "category": "AttnRes / norm / quant",
+          "start_ns": 95802,
+          "duration_ns": 4240
+        },
+        {
+          "dispatch_id": "16397",
+          "kernel_name": "kernel_gemm_0",
+          "queue_id": "2",
+          "category": "Projection / GEMM",
+          "start_ns": 100042,
+          "duration_ns": 4920
+        },
+        {
+          "dispatch_id": "16398",
+          "kernel_name": "_ZN5aiter27situv2_and_mul_quant_kernelILi64ELi16ELi768ELb1EEEvPDB8_PKDF16bPfiffff",
+          "queue_id": "2",
+          "category": "AttnRes / norm / quant",
+          "start_ns": 104962,
+          "duration_ns": 2840
+        },
+        {
+          "dispatch_id": "16399",
+          "kernel_name": "kernel_gemm_0",
+          "queue_id": "2",
+          "category": "Projection / GEMM",
+          "start_ns": 107802,
+          "duration_ns": 3360
+        },
+        {
+          "dispatch_id": "16400",
+          "kernel_name": "void aiter::ar_ll_gfx9<std::bfloat16_t, 8, 256>(std::bfloat16_t* const*, std::bfloat16_t*, std::bfloat16_t const*, unsigned long, int, unsigned int*, unsigned long)",
+          "queue_id": "2",
+          "category": "TP all-reduce",
+          "start_ns": 111162,
+          "duration_ns": 5760
+        },
+        {
+          "dispatch_id": "16401",
+          "kernel_name": "void aiter::ar_ll_gfx9<std::bfloat16_t, 8, 256>(std::bfloat16_t* const*, std::bfloat16_t*, std::bfloat16_t const*, unsigned long, int, unsigned int*, unsigned long)",
+          "queue_id": "4",
+          "category": "TP all-reduce",
+          "start_ns": 116922,
+          "duration_ns": 7001
+        },
+        {
+          "dispatch_id": "16402",
+          "kernel_name": "void aiter::add_rmsnorm_quant_kernel<std::bfloat16_t, opus::fp4_t, 256, 16, false, true, false, 1>(opus::fp4_t*, std::bfloat16_t*, float*, std::bfloat16_t*, std::bfloat16_t*, std::bfloat16_t*, double, bool, int, int, int, int, int, int, int, bool, bool)",
+          "queue_id": "4",
+          "category": "AttnRes / norm / quant",
+          "start_ns": 123923,
+          "duration_ns": 4560
+        },
+        {
+          "dispatch_id": "16403",
+          "kernel_name": "aiter::f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128",
+          "queue_id": "4",
+          "category": "Projection / GEMM",
+          "start_ns": 128483,
+          "duration_ns": 5600
+        },
+        {
+          "dispatch_id": "16404",
+          "kernel_name": "add",
+          "queue_id": "4",
+          "category": "Output-add adapter",
+          "start_ns": 134083,
+          "duration_ns": 3840
+        }
+      ]
+    },
+    {
+      "path": "staged7",
+      "node": "mi355-gpu-46",
+      "dispatches": 7,
+      "kernel_sum_ns": 90961,
+      "kernel_sum_us": 90.961,
+      "events": [
+        {
+          "dispatch_id": "532",
+          "kernel_name": "kimi_k3_attn_res_kernel_0",
+          "queue_id": "1",
+          "category": "AttnRes / norm / quant",
+          "start_ns": 0,
+          "duration_ns": 6600
+        },
+        {
+          "dispatch_id": "533",
+          "kernel_name": "kimi_k3_mtp_relocate_0",
+          "queue_id": "1",
+          "category": "KDA / recurrence",
+          "start_ns": 6600,
+          "duration_ns": 25640
+        },
+        {
+          "dispatch_id": "534",
+          "kernel_name": "kimi_k3_attn_res_kernel_0",
+          "queue_id": "1",
+          "category": "AttnRes / norm / quant",
+          "start_ns": 32240,
+          "duration_ns": 8000
+        },
+        {
+          "dispatch_id": "535",
+          "kernel_name": "router_projection_kernel_0",
+          "queue_id": "1",
+          "category": "Router / top-k / sort",
+          "start_ns": 40240,
+          "duration_ns": 21201
+        },
+        {
+          "dispatch_id": "536",
+          "kernel_name": "gemm1_a16w4_port_a16w4_h3584_i384_ne896_bm16_tn32_situv2_xcd4_kw2",
+          "queue_id": "1",
+          "category": "MoE GEMM1 / GEMM2",
+          "start_ns": 61441,
+          "duration_ns": 12000
+        },
+        {
+          "dispatch_id": "537",
+          "kernel_name": "gemm2_a16w4_port_ne896_h3584_i384_bm16_tn128_xcd4",
+          "queue_id": "1",
+          "category": "MoE GEMM1 / GEMM2",
+          "start_ns": 73441,
+          "duration_ns": 5680
+        },
+        {
+          "dispatch_id": "538",
+          "kernel_name": "kimi_k3_tail_kernel_0",
+          "queue_id": "1",
+          "category": "Fused tail",
+          "start_ns": 79121,
+          "duration_ns": 11840
+        }
+      ]
+    },
+    {
+      "path": "mono",
+      "node": "mi355-gpu-47",
+      "dispatches": 1,
+      "kernel_sum_ns": 72400,
+      "kernel_sum_us": 72.4,
+      "events": [
+        {
+          "dispatch_id": "454",
+          "kernel_name": "kimi_k3_mtp_relocate_0",
+          "queue_id": "1",
+          "category": "Fused mono-kernel",
+          "start_ns": 0,
+          "duration_ns": 72400
+        }
+      ]
+    }
+  ]
+}

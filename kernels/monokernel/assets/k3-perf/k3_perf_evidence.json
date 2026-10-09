@@ -1,0 +1,210 @@
+{
+  "date": "2026-10-09",
+  "node": "mi355-gpu-47",
+  "gpu": "8 x MI355 / gfx950",
+  "tp": 8,
+  "dcp": 1,
+  "layer_idx": 1,
+  "atom_revision": "a3e2b1a2551ff8c3999505af8ba0eff0b9066655",
+  "aiter_revision": "7e07d0f63de07fa0f92990ab3b8c17bca510960c",
+  "mono_kernel_source_sha256": "8a04c5bcf4102a07c937e7a2e66b9301483ced9394ef5850ee8e4eae05385a88",
+  "timing": {
+    "instrumented": false,
+    "calls_per_graph": 16,
+    "repeats_per_seed": 50,
+    "seeds": [
+      1234,
+      2025,
+      3141
+    ],
+    "aggregation": "median of seed medians; each repeat is max TP rank event time divided by 16",
+    "scope": "full batch, full layer, repeated same-layer weights/buffers"
+  },
+  "caveat": "Implementation comparison with different numerical formats, state layouts and TP reduction strategies; does not isolate fusion or establish numerical equivalence.",
+  "sources_relative_to_mega_transformer": [
+    {
+      "path": "results/kimi_atom_layer_baseline_20261009/comparison.json",
+      "sha256": "24a976e884d137974716d51116f8bc59a7b15e53b59dba268725aafb2d565567"
+    },
+    {
+      "path": "results/kimi_atom_layer_batch24_20261009/comparison.json",
+      "sha256": "315bd06b0b44718e40ecf782be48866f7bb03af1f2971838d4605161f27fd762"
+    },
+    {
+      "path": "results/kimi_atom_layer_b8s1_20261009/comparison.json",
+      "sha256": "ce3458355736b53bb844c23d78894a89af8cb9d96b3dd194e98079598f1a8ad9"
+    }
+  ],
+  "performance": [
+    {
+      "batch": 1,
+      "seq": 1,
+      "atom_native_us": 140.85009694099426,
+      "atom_materialized_us": 142.97381788492203,
+      "mono_us": 75.69568604230881,
+      "speedup": 1.8887974382715715,
+      "shown_in_table": true
+    },
+    {
+      "batch": 1,
+      "seq": 2,
+      "atom_native_us": 147.42515236139297,
+      "atom_materialized_us": 148.3401507139206,
+      "mono_us": 97.69215807318687,
+      "speedup": 1.5184448131731347,
+      "shown_in_table": true
+    },
+    {
+      "batch": 1,
+      "seq": 4,
+      "atom_native_us": 159.0777486562729,
+      "atom_materialized_us": 163.1215363740921,
+      "mono_us": 119.73356455564499,
+      "speedup": 1.3623710024792837,
+      "shown_in_table": true
+    },
+    {
+      "batch": 1,
+      "seq": 8,
+      "atom_native_us": 190.53678214550018,
+      "atom_materialized_us": 192.64556467533112,
+      "mono_us": 273.1148451566696,
+      "speedup": 0.7053646775034214,
+      "shown_in_table": false
+    },
+    {
+      "batch": 2,
+      "seq": 1,
+      "atom_native_us": 143.43997091054916,
+      "atom_materialized_us": 147.21625298261642,
+      "mono_us": 93.24690327048302,
+      "speedup": 1.5787790030472488,
+      "shown_in_table": true
+    },
+    {
+      "batch": 2,
+      "seq": 2,
+      "atom_native_us": 157.75631368160248,
+      "atom_materialized_us": 157.7838435769081,
+      "mono_us": 167.70993918180466,
+      "speedup": 0.9408139096983618,
+      "shown_in_table": false
+    },
+    {
+      "batch": 2,
+      "seq": 4,
+      "atom_native_us": 181.4628168940544,
+      "atom_materialized_us": 182.91155993938446,
+      "mono_us": 264.65068757534027,
+      "speedup": 0.691143339226404,
+      "shown_in_table": false
+    },
+    {
+      "batch": 2,
+      "seq": 8,
+      "atom_native_us": 225.3694012761116,
+      "atom_materialized_us": 227.94193774461746,
+      "mono_us": 428.4331798553467,
+      "speedup": 0.5320361458035959,
+      "shown_in_table": false
+    },
+    {
+      "batch": 4,
+      "seq": 1,
+      "atom_native_us": 151.7062857747078,
+      "atom_materialized_us": 155.87133914232254,
+      "mono_us": 112.38212510943413,
+      "speedup": 1.3869762561487426,
+      "shown_in_table": true
+    },
+    {
+      "batch": 4,
+      "seq": 2,
+      "atom_native_us": 175.27896910905838,
+      "atom_materialized_us": 178.30649763345718,
+      "mono_us": 257.6506584882736,
+      "speedup": 0.6920475137911297,
+      "shown_in_table": false
+    },
+    {
+      "batch": 4,
+      "seq": 4,
+      "atom_native_us": 216.54559671878815,
+      "atom_materialized_us": 219.51809525489807,
+      "mono_us": null,
+      "speedup": null,
+      "shown_in_table": false
+    },
+    {
+      "batch": 4,
+      "seq": 8,
+      "atom_native_us": 253.4821182489395,
+      "atom_materialized_us": 256.1383694410324,
+      "mono_us": null,
+      "speedup": null,
+      "shown_in_table": false
+    },
+    {
+      "batch": 8,
+      "seq": 1,
+      "atom_native_us": 173.49258810281754,
+      "atom_materialized_us": 175.9801208972931,
+      "mono_us": 217.88427978754044,
+      "speedup": 0.8076769974818366,
+      "shown_in_table": false
+    }
+  ],
+  "profiling": {
+    "selected_events": "k3_b1s1_trace.json",
+    "profiling_only": true,
+    "batch": 1,
+    "seq": 1,
+    "seed": 1234,
+    "call_1based": 9,
+    "nodes": {
+      "atom": "mi355-gpu-47",
+      "staged7": "mi355-gpu-46",
+      "mono": "mi355-gpu-47"
+    },
+    "staged_runtime": {
+      "node": "mi355-gpu-46",
+      "container": "hzm_work",
+      "torch": "2.9.1+rocm7.2.0.git7e1940d4",
+      "hip": "7.2.26015-fc0010cf6a"
+    },
+    "source_directory_relative_to_mega_transformer": "results/kimi_perf_summary_profile_20261009",
+    "verified_all_eight_gpus": true,
+    "dispatch_counts": {
+      "atom_materialized": 26,
+      "staged7": 7,
+      "mono": 1
+    },
+    "note": "Plot concatenates unchanged kernel durations across GPU queues; overlap counts separately, and gaps are removed. Atom includes 25 native dispatches plus 1 output-add adapter. Original timestamps remain in k3_b1s1_trace.json. Different nodes/runtime and profiler overhead prevent treating the plotted sums as the unprofiled layer latency.",
+    "persistent_stage_binary_hashes_identical_46_47": {
+      "kimi_k3_mtp_relocate_0": "4a7b7ff340ce78bc41270d90c624995ccec225b228c65e6f22d09880dab2f72c",
+      "kimi_k3_tail_kernel_0": "4e682f6e31279f4a4bc176367ff2b3b204811ec788ca96450e1dff4f4463bd0c",
+      "router_projection_kernel_0": "7916e32ea1d06d47977e0a4064968daf1ce56359c5b9485b792d042b37dcf8a5"
+    },
+    "archives": [
+      {
+        "path": "kimi_perf_summary_profile_20261009_evidence.tar.gz",
+        "sha256": "3db262ad494bf5a794ea015349d5377e4febbc156a63d2d6c20b3e5c2acdb2fb"
+      },
+      {
+        "path": "node46/profile46_evidence.tar.gz",
+        "sha256": "ba256ebd8aab2b2767241d5d9da2f55aa27be9653e14a78380b92aaba3ffeaac"
+      }
+    ],
+    "display": {
+      "data": "k3_b1s1_duration_view.json",
+      "layout": "Back-to-back original kernel durations; gaps removed; one row per path",
+      "colors": "Kernel names grouped by function, with path context for the shared KDA/mono symbol",
+      "duration_sum_us": {
+        "atom": 137.923,
+        "staged7": 90.961,
+        "mono": 72.4
+      },
+      "is_elapsed_time": false
+    }
+  }
+}
