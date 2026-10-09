@@ -1,11 +1,86 @@
 {
  "schema": 1,
- "updated": "2026-10-09T20:06:43Z",
+ "updated": "2026-10-09T21:30:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37984565519,
+   "run_id": 37990715637,
    "pr": 1223,
+   "commit": "cf6ea169663ed7b93bf3022ea72d74a03a4b0c29",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37990715637",
+   "created_at": "2026-10-09T21:00:17Z",
+   "updated_at": "2026-10-09T21:00:17Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37989960999,
+   "pr": null,
+   "commit": "1f0e931fe0ef492c625b3bc27ca5096fdc057880",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37989960999",
+   "created_at": "2026-10-09T20:53:17Z",
+   "updated_at": "2026-10-09T20:53:17Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37987040436,
+   "pr": null,
+   "commit": "0a60f1a9f9098ea7c90fef86f8c9af75f1cb2d85",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37987040436",
+   "created_at": "2026-10-09T20:26:49Z",
+   "updated_at": "2026-10-09T20:26:49Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37986857003,
+   "pr": null,
+   "commit": "a74d3370c19dd6111ba5e228797cc9c209e64031",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37986857003",
+   "created_at": "2026-10-09T20:25:12Z",
+   "updated_at": "2026-10-09T20:25:12Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37984794293,
+   "pr": null,
+   "commit": "63a4164db95fe1a4af840fa07243e4d73668f38a",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37984794293",
+   "created_at": "2026-10-09T20:06:56Z",
+   "updated_at": "2026-10-09T20:06:56Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37984565519,
+   "pr": null,
    "commit": "ca3aa22b3cfa74ba15cf715c79d6021b82b0019c",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -1191,174 +1266,6 @@
      "started_at": "2026-10-09T10:24:28Z",
      "completed_at": "2026-10-09T10:40:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37913726491/job/113776681878"
-    }
-   ]
-  },
-  {
-   "run_id": 37912442246,
-   "pr": 1243,
-   "commit": "e49d359d9aa7c83de757cb9a5219099bfe6dc2e7",
-   "branch": "jli/bump-llvm-0906",
-   "event": "pull_request",
-   "title": "[llvm] bump llvm to 1df311a6",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37912442246",
-   "created_at": "2026-10-09T09:37:14Z",
-   "updated_at": "2026-10-09T09:50:30Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 37909731599,
-   "pr": 1234,
-   "commit": "5ac3807214289651a3834f8a77593f1a744484a7",
-   "branch": "dsv4_megakernel",
-   "event": "pull_request",
-   "title": "[Kernel]feat(dsv4): add the DeepSeek-V4 decode MonoKernel",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37909731599",
-   "created_at": "2026-10-09T09:12:02Z",
-   "updated_at": "2026-10-09T11:13:35Z",
-   "actor": "amd-weisun",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T09:44:16Z",
-     "completed_at": "2026-10-09T10:01:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37909731599/job/113760009166"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T10:24:39Z",
-     "completed_at": "2026-10-09T11:13:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37909731599/job/113760009238"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T09:36:09Z",
-     "completed_at": "2026-10-09T10:33:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37909731599/job/113760009391",
-     "machine": "smci350-rck-g03-b17-12",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 37909329434,
-   "pr": 1184,
-   "commit": "26441328b7d3f14cf5c60e363dbf6db904c4e690",
-   "branch": "jli/fix-waves-per-eu",
-   "event": "pull_request",
-   "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37909329434",
-   "created_at": "2026-10-09T09:08:14Z",
-   "updated_at": "2026-10-09T10:36:26Z",
-   "actor": "jli-melchior",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T09:22:23Z",
-     "completed_at": "2026-10-09T10:36:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37909329434/job/113754796203",
-     "machine": "gbt350-odcdh2-b02-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T09:25:08Z",
-     "completed_at": "2026-10-09T09:44:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37909329434/job/113754796207"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T09:36:25Z",
-     "completed_at": "2026-10-09T10:24:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37909329434/job/113754796278"
-    }
-   ]
-  },
-  {
-   "run_id": 37907263030,
-   "pr": 1184,
-   "commit": "0c74070da1bda4f5cabd561cb006fbe92f2a24fa",
-   "branch": "jli/fix-waves-per-eu",
-   "event": "pull_request",
-   "title": "[fix] Support waves_per_eu min,max range for full VGPR utilization",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37907263030",
-   "created_at": "2026-10-09T08:48:39Z",
-   "updated_at": "2026-10-09T08:55:02Z",
-   "actor": "jli-melchior",
-   "jobs": []
-  },
-  {
-   "run_id": 37906525100,
-   "pr": 1242,
-   "commit": "952776d1bdf2d950fbadef284a4ece40d4ad2d0a",
-   "branch": "xudong/zipped-divide-hier-unzip",
-   "event": "pull_request",
-   "title": "[fix] Correct zipped_divide tiler hierarchy handling",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37906525100",
-   "created_at": "2026-10-09T08:41:33Z",
-   "updated_at": "2026-10-09T10:09:50Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T09:08:10Z",
-     "completed_at": "2026-10-09T10:09:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37906525100/job/113749983298",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T09:07:27Z",
-     "completed_at": "2026-10-09T09:25:01Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37906525100/job/113749983437"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T09:21:30Z",
-     "completed_at": "2026-10-09T10:09:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37906525100/job/113749983472"
     }
    ]
   }
