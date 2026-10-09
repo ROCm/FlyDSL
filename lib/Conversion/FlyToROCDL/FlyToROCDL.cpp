@@ -810,24 +810,10 @@ public:
     if (Value tok = op.getAsyncToken())
       asyncTokenType = tok.getType();
 
-    // There are two relevant builder signatures in this MLIR:
-    // - (kernel, ..., asyncTokenType, asyncDependencies, clusterSize)
-    // - (kernel, ..., asyncObject, clusterSize)
-    // Pick the one that matches the original op structure.
-    if (Value asyncObj = adaptor.getAsyncObject()) {
-      if (!adaptor.getAsyncDependencies().empty())
-        return rewriter.notifyMatchFailure(
-            op, "launch_func has both asyncObject and asyncDependencies");
-
-      rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
-          op, kernelRef, grid, block, adaptor.getDynamicSharedMemorySize(),
-          adaptor.getKernelOperands(), asyncObj, clusterSize);
-      return success();
-    }
-
     rewriter.replaceOpWithNewOp<gpu::LaunchFuncOp>(
         op, kernelRef, grid, block, adaptor.getDynamicSharedMemorySize(),
-        adaptor.getKernelOperands(), asyncTokenType, adaptor.getAsyncDependencies(), clusterSize);
+        adaptor.getKernelOperands(), asyncTokenType, adaptor.getAsyncDependencies(),
+        adaptor.getAsyncObject(), clusterSize);
     return success();
   }
 };
