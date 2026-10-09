@@ -223,6 +223,9 @@ def _transpose_activation_fp8(x_fp8, stream=None):
     n, c, d, h, w = x_fp8.shape
     s = d * h * w
     launch_stream = torch.cuda.current_stream() if stream is None else stream
+    cur = torch.cuda.current_stream(x_fp8.device)
+    if launch_stream != cur:
+        launch_stream.wait_stream(cur)
     if not (x_fp8.is_contiguous() and c % TR_VEC == 0 and s % 4 == 0):
         with torch.cuda.stream(launch_stream):
             return x_fp8.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)

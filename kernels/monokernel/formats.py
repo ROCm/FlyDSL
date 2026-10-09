@@ -11,8 +11,9 @@ import torch
 def float_to_e8m0(x: torch.Tensor) -> torch.Tensor:
     """Round positive FP32 values to E8M0 exponent bytes.
 
-    A uint8 add wraps 0xFF to 0. Inf, NaN, and a value that rounds up from
-    exponent 254 must stay 0xFF.
+    The old uint8 add wraps when the exponent is already 0xFF and the round
+    bit is set. The default quiet NaN (0x7FC00000) became 0. Inf and a finite
+    value that rounds up from exponent 254 do not wrap.
     """
 
     bits = x.float().contiguous().view(torch.int32)

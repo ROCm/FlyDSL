@@ -62,8 +62,18 @@ def _as_stream(stream):
     return stream if hasattr(stream, "_is_stream_param") else fx.Stream(stream)
 
 
+def _join(stream, device):
+    """Make ``stream`` wait for work already queued on the current stream."""
+    if stream is None:
+        return
+    cur = torch.cuda.current_stream(device)
+    if stream != cur:
+        stream.wait_stream(cur)
+
+
 def _contiguous_on(x, stream):
-    """Contiguous copy on ``stream``. The kernel launch uses that same stream."""
+    """Contiguous copy on ``stream``, after work already queued on the current stream."""
+    _join(stream, x.device)
     if x.is_contiguous():
         return x
     if stream is None or stream == torch.cuda.current_stream(x.device):
@@ -137,7 +147,7 @@ def _evict_weight(key, _ref):
         del _WEIGHT_CACHE[key]
 
 
-def _prep_weight(w, k, kt, kh, kw, c, stream=None):
+def _prep_weight(w, k, kt, kh, kw, c):
     """Pack (K, C, T, R, S) -> (K, T*R*S*Cpad), memoized on the source weight."""
     anchor = w._base if w._base is not None else w
     key = w.data_ptr()
@@ -147,7 +157,9 @@ def _prep_weight(w, k, kt, kh, kw, c, stream=None):
         return ent[1]
     cp = _pad_channels(c)
     wsrc = torch.nn.functional.pad(w, (0, 0, 0, 0, 0, 0, 0, cp - c)) if cp != c else w
-    wk = _contiguous_on(wsrc.permute(0, 2, 3, 4, 1), stream).reshape(k, kt * kh * kw * cp)
+    # Stay on the current stream. The packed tensor is cached and reused by
+    # later calls, which may pass a different stream.
+    wk = wsrc.permute(0, 2, 3, 4, 1).contiguous().reshape(k, kt * kh * kw * cp)
     _WEIGHT_CACHE[key] = (weakref.ref(anchor, functools.partial(_evict_weight, key)), wk, stamp)
     return wk
 
@@ -1108,6 +1120,7 @@ def _conv3d_impl(
         and pw == 0
     ):
         wm = weight.reshape(k, c)
+        _join(launch_stream, x.device)
         with torch.cuda.stream(launch_stream):
             if in_ndhwc:
                 y = torch.matmul(x.reshape(n * d * h * w, c), wm.t()).reshape(n, d, h, w, k)
@@ -1152,7 +1165,8 @@ def _conv3d_impl(
     )
 
     x_ndhwc = _contiguous_on(x, launch_stream) if in_ndhwc else _ncdhw_to_ndhwc(x, launch_stream)
-    w_packed = _prep_weight(weight, k, kt, kh, kw, wc, stream=launch_stream)
+    w_packed = _prep_weight(weight, k, kt, kh, kw, wc)
+    _join(launch_stream, x.device)
 
     shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, dt, dh, dw, pad_mode, has_bias, groups, out_ndhwc)
 
