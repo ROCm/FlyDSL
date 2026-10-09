@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-09T04:21:17Z",
+ "updated": "2026-10-09T04:37:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 37884177029,
+   "pr": 1241,
+   "commit": "65b256d49915eaf0cb97823d0c246ae4f155c201",
+   "branch": "feat/mxfp4-monokernel-weight-rotation",
+   "event": "pull_request",
+   "title": "[Perf] Tile GLM MXFP4 scales and pair gate/up rows",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37884177029",
+   "created_at": "2026-10-09T04:30:15Z",
+   "updated_at": "2026-10-09T04:32:25Z",
+   "actor": "james-huang09",
+   "jobs": []
+  },
   {
    "run_id": 37881719925,
    "pr": 1223,
@@ -1034,21 +1049,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37839638552",
    "created_at": "2026-10-08T20:27:54Z",
    "updated_at": "2026-10-08T20:27:54Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37839139290,
-   "pr": null,
-   "commit": "96dfd5434d55ffbacc0621163303f6b8ee86d57c",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37839139290",
-   "created_at": "2026-10-08T20:23:55Z",
-   "updated_at": "2026-10-08T20:23:55Z",
    "actor": "dimitri91209",
    "jobs": []
   }
