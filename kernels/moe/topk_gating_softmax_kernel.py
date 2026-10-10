@@ -27,7 +27,6 @@ import math
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, as_ir_value, range_constexpr
-from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import LOG2E, dtype_to_elem_type, get_warp_size
@@ -225,7 +224,7 @@ def _emit_topk_gating_softmax_body(
             peer_v = wv.shuffle_xor(off, width_i32)
             peer_i = wi.shuffle_xor(off, width_i32)
             is_greater = peer_v > wv
-            is_equal = ArithValue(peer_v) == ArithValue(wv)
+            is_equal = peer_v == wv
             peer_lower_idx = peer_i < wi
             take_peer = is_greater | (is_equal & peer_lower_idx)
             wv = take_peer.select(peer_v, wv)
@@ -294,7 +293,7 @@ def _emit_topk_gating_softmax_body(
         # so its element type is f32. Reinterpret the i32 bits as f32 and
         # store via the f32 copy atom (avoids signed-vs-signless legalize
         # failures when going through si32).
-        val_f32 = ArithValue(val).bitcast(T.f32)
+        val_f32 = fx.Int32(val).bitcast(fx.Float32)
         r = fx.memref_alloca(scalar_reg_ty_f32, scalar_reg_lay)
         v = fx.Vector.from_elements([val_f32], fx.Float32)
         fx.memref_store_vec(v, r)
@@ -360,7 +359,7 @@ def _emit_topk_gating_softmax_body(
 
         for v in range_constexpr(VPT):
             ci = col_idx_list[v]
-            is_winner = ArithValue(ci) == ArithValue(global_best_idx)
+            is_winner = ci == global_best_idx
             prob_list[v] = is_winner.select(c_neg_inf, prob_list[v])
 
     # Pass 5: leader writes weights/indices/tei (with optional renorm).
@@ -369,7 +368,7 @@ def _emit_topk_gating_softmax_body(
     inv_denom = c_one_f / denom
 
     if (expert_lane == fx.Int32(0)) & (global_token < i32_num_tokens):
-        num_tokens_v = ArithValue(i32_num_tokens)
+        num_tokens_v = fx.Int32(i32_num_tokens)
         for k_idx in range_constexpr(topk):
             w_val = selected_weights[k_idx]
             if renormalize:
@@ -494,7 +493,7 @@ def _build_topk_gating_softmax_module(
                 # lowest lane among equal maxima therefore owns the lowest
                 # expert index, including ties caused by probability underflow.
                 winner_val = group_reduce(val, "max")
-                contenders = fx.Int64(fx.rocdl.ballot(T.i64, ArithValue(val) == ArithValue(winner_val)))
+                contenders = fx.Int64(fx.rocdl.ballot(T.i64, val == winner_val))
                 group_base = lane - expert_lane
                 group_bits = contenders.shrui(fx.Int64(group_base)) & fx.Int64((1 << THREADS_PER_TOKEN) - 1)
                 winner_lane = group_base + fx.Int32(fx.cttz(group_bits))
@@ -507,7 +506,7 @@ def _build_topk_gating_softmax_module(
                     peer_v = winner_val.shuffle_xor(off, width_i32)
                     peer_i = winner_idx.shuffle_xor(off, width_i32)
                     is_greater = peer_v > winner_val
-                    is_equal = ArithValue(peer_v) == ArithValue(winner_val)
+                    is_equal = peer_v == winner_val
                     peer_lower_idx = peer_i < winner_idx
                     take_peer = is_greater | (is_equal & peer_lower_idx)
                     winner_val = take_peer.select(peer_v, winner_val)
@@ -560,7 +559,7 @@ def _build_topk_gating_softmax_module(
             # so its element type is f32. Reinterpret the i32 bits as f32 and
             # store via the f32 copy atom (avoids signed-vs-signless legalize
             # failures when going through si32).
-            val_f32 = ArithValue(val).bitcast(T.f32)
+            val_f32 = fx.Int32(val).bitcast(fx.Float32)
             r = fx.make_rmem_tensor(1, fx.Float32)
             v = fx.Vector.from_elements([val_f32], fx.Float32)
             fx.memref_store_vec(v, r)
@@ -642,7 +641,7 @@ def _build_topk_gating_softmax_module(
             # the next iteration finds the runner-up.
             for v in range_constexpr(VPT):
                 ci = col_idx_list[v]
-                is_winner = ArithValue(ci) == ArithValue(global_best_idx)
+                is_winner = ci == global_best_idx
                 prob_list[v] = is_winner.select(c_neg_inf, prob_list[v])
 
         # Pass 5: Leader writes weights/indices/tei (with optional renorm)
@@ -651,7 +650,7 @@ def _build_topk_gating_softmax_module(
         inv_denom = c_one_f / denom
 
         if (expert_lane == fx.Int32(0)) & (global_token < i32_num_tokens):
-            num_tokens_v = ArithValue(i32_num_tokens)
+            num_tokens_v = fx.Int32(i32_num_tokens)
             for k_idx in range_constexpr(topk):
                 w_val = selected_weights[k_idx]
                 if renormalize:
@@ -678,7 +677,7 @@ def _build_topk_gating_softmax_module(
         # under JIT specialization in this DSL.
         c_tpb_idx = fx.Index(TOKENS_PER_BLOCK)
         c_one_idx = fx.Index(1)
-        nt_idx = arith.index_cast(T.index, num_tokens_in)
+        nt_idx = fx.Index(num_tokens_in)
         grid_x = (nt_idx - c_one_idx) // c_tpb_idx + c_one_idx
 
         launcher = topk_gating_softmax_kernel(
