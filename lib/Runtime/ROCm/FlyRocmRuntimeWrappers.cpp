@@ -45,6 +45,20 @@ extern "C" hipFunction_t mgpuModuleGetFunction(hipModule_t module, const char *n
   return function;
 }
 
+// Max active blocks of kernel `name` per CU; loads a temporary module, launches nothing.
+extern "C" int32_t mgpuModuleOccupancyMaxActiveBlocks(void *data, const char *name,
+                                                      int32_t blockSize, int32_t smem) {
+  hipModule_t module = mgpuModuleLoad(data, /*gpuBlobSize=*/0);
+  if (!module)
+    return 0;
+  int blocks = 0;
+  if (hipFunction_t function = mgpuModuleGetFunction(module, name))
+    HIP_REPORT_IF_ERROR(
+        hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, function, blockSize, smem));
+  mgpuModuleUnload(module);
+  return blocks;
+}
+
 extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX, intptr_t gridY,
                                  intptr_t gridZ, intptr_t blockX, intptr_t blockY, intptr_t blockZ,
                                  int32_t smem, hipStream_t stream, void **params, void **extra,

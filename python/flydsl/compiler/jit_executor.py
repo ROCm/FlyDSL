@@ -386,6 +386,41 @@ class CompiledArtifact:
                 print("=" * 60)
                 print(self._source_ir)
 
+    def max_blocks_per_cu(self) -> int:
+        from .._mlir.dialects import gpu
+        from .jit_function import _create_mlir_context
+
+        def constant(value):
+            if value is None:
+                return 0
+            if getattr(value.owner, "name", None) != "llvm.mlir.constant":
+                raise ValueError("max_blocks_per_cu() needs constant block and smem sizes")
+            return ir.IntegerAttr(value.owner.attributes["value"]).value
+
+        binaries, launches = {}, set()
+
+        def visit(op):
+            if op.name == "gpu.binary":
+                # The JIT loads object 0 (selectObject in FlyLLVMTranslation.cpp).
+                objects = ir.ArrayAttr(op.attributes["objects"])
+                binaries[ir.StringAttr(op.attributes["sym_name"]).value] = gpu.ObjectAttr(objects[0]).object
+            elif op.name == "gpu.launch_func":
+                launch = op.opview
+                block = constant(launch.blockSizeX) * constant(launch.blockSizeY) * constant(launch.blockSizeZ)
+                launches.add((*ir.SymbolRefAttr(launch.kernel).value, block, constant(launch.dynamicSharedMemorySize)))
+            return ir.WalkResult.ADVANCE
+
+        with _create_mlir_context():
+            ir.Module.parse(self._ir_text).operation.walk(visit)
+        if len(launches) != 1:
+            raise ValueError(f"max_blocks_per_cu() needs exactly one kernel launch, found {len(launches)}")
+        module_name, kernel_name, block, smem = launches.pop()
+        lib = ctypes.CDLL(_resolve_runtime_libs()[0])
+        blocks = lib.mgpuModuleOccupancyMaxActiveBlocks(binaries[module_name], kernel_name.encode(), block, smem)
+        if blocks <= 0:
+            raise RuntimeError("max_blocks_per_cu(): HIP occupancy query failed")
+        return blocks
+
     @property
     def ir(self) -> str:
         return self._ir_text
