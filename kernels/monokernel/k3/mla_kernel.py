@@ -41,6 +41,8 @@ the 8 partials in rank order, so all ranks produce bit-identical hidden states
 (and routing).
 """
 
+from functools import partial
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
@@ -48,6 +50,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
 from kernels.common import buffer_ops as bo
+from kernels.monokernel import helpers
 from kernels.monokernel.config import (
     EPS,
     FP8_MAX,
@@ -61,20 +64,17 @@ from kernels.monokernel.config import (
     as_kv_cache_layout,
     moe_format,
 )
+from kernels.monokernel.helpers import SHARED_SOURCE_KEY, LaunchState
 from kernels.monokernel.layout import (
     BLOCKS,
-    CM_DEV,
-    CM_SYS,
     LAYER_SLOTS,
     NEG,
-    POLL_MAX,
     Q_B_TILE,
     QKV_A_TILE,
     ROUTER_TILE,
     ROW_TILE,
     SPLIT_KEYS,
     THREADS,
-    TL_COLS,
     UG_TILE,
     UK_TILE,
     UV_TILE,
@@ -82,6 +82,17 @@ from kernels.monokernel.layout import (
     dn_tile,
     layout,
     stage_tasks,
+)
+from kernels.monokernel.ops import (
+    bf2_f32,
+    bf16_pair,
+    bf16_round,
+    ld_bf16,
+    ld_f32,
+    lds_ld,
+    lds_st,
+    wave_max,
+    wave_sum,
 )
 from kernels.monokernel.ops import (
     exp as _exp,
@@ -94,9 +105,6 @@ from kernels.monokernel.ops import (
 )
 from kernels.monokernel.ops import (
     fp8_to_bf16x8 as _fp8_to_bf16x8,
-)
-from kernels.monokernel.ops import (
-    mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
 )
 from kernels.monokernel.ops import (
     rcp as _rcp,
@@ -265,6 +273,8 @@ def build_kimi_k3_mla_attention(
         keys: fx.Array[fx.Int32, SPLIT_KEYS, 16]
         dnw: fx.Array[fx.Float32, S * MOE_SLOTS, 16]  # expert-down route weights
 
+    shared_source_key = SHARED_SOURCE_KEY  # in the closure, so in the JIT cache key
+
     @flyc.kernel(known_block_size=[THREADS, 1, 1])
     def kimi_k3_mla_attention_kernel(
         h_in: Int64,
@@ -333,253 +343,14 @@ def build_kimi_k3_mla_attention(
         peer_dst = (fx.Int64(_uniform(pv[1])) << 32) | fx.Int64(fx.Uint32(_uniform(pv[0])))
 
         # ------------------------------------------------------------ helpers
-        def ld_f32(r, i):
-            return fx.Float32(bo.buffer_load(r, i, vec_width=1, dtype=T.f32))
-
-        def ld_bf16(r, i):
-            return fx.Float32(fx.BFloat16(bo.buffer_load(r, i, vec_width=1, dtype=T.bf16)))
-
-        def lds_ld(ptr, i):
-            return fx.ptr_load(ptr + i)
-
-        def lds_st(ptr, i, v):
-            fx.ptr_store(v, ptr + i)
-
-        def bf16_pair(a, b):
-            """Two f32 -> one f32-typed word holding (bf16(a), bf16(b))."""
-            return fx.Vector.from_elements([a, b], fx.Float32).to(fx.BFloat16).bitcast(fx.Float32)[0]
-
-        def bf16_round(a):
-            return fx.Float32(fx.Float32(a).to(fx.BFloat16))
-
         # ---- tagged-pair mailboxes
-        def mb(name):
-            return scratch + fx.Int64(SC[name])
-
-        def put(base_addr, i, v, cm=CM_DEV):
-            """Pair i := (v, tag); ``v`` f32 (or int32 bits)."""
-            bits = v.bitcast(fx.Int32) if isinstance(v, fx.Float32) else fx.Int32(v)
-            bo.buffer_store(fx.Vector.from_elements([bits, tag], fx.Int32), _rsrc(base_addr), i * 2, cache_modifier=cm)
-
-        def put2(base_addr, i, v0, v1, cm=CM_DEV):
-            """Pairs i, i+1 (i even) in one 16-byte store."""
-            vec = fx.Vector.from_elements(
-                [fx.Float32(v0).bitcast(fx.Int32), tag, fx.Float32(v1).bitcast(fx.Int32), tag], fx.Int32
-            )
-            bo.buffer_store(vec, _rsrc(base_addr), i * 2, cache_modifier=cm)
-
-        def put_bf(base_addr, i, vs, cm=CM_DEV, store_tag=None):
-            """Elements i .. i + len(vs) (2 or 4, i aligned) as packed bf16 pairs: pair
-            i / 2 + j := (bf16(vs[2j]) | bf16(vs[2j + 1]) << 16, tag), one 8 / 16-byte store."""
-            write_tag = tag if store_tag is None else store_tag
-            words = []
-            for j in range_constexpr(len(vs) // 2):
-                words += [bf16_pair(vs[2 * j], vs[2 * j + 1]).bitcast(fx.Int32), write_tag]
-            bo.buffer_store(fx.Vector.from_elements(words, fx.Int32), _rsrc(base_addr), i, cache_modifier=cm)
-
-        def bf2_f32(w):
-            """Packed bf16 pair word -> (f32 low, f32 high)."""
-            return (w << 16).bitcast(fx.Float32), (w & fx.Int32(-65536)).bitcast(fx.Float32)
-
-        def _qptr(addr):
-            return fx.inttoptr(fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8), fx.Int64(addr))
-
-        def _ld_pair(addr, scope):
-            """One (value, tag) pair as a single 64-bit relaxed atomic load: never hoisted,
-            coherent at ``scope`` (agent -> sc1, system -> sc0 sc1)."""
-            return fx.generic_load(_qptr(addr), memory_order=fx.AtomicOrdering.Monotonic, syncscope=scope)
-
-        def poll(specs, scope="agent", batch=POLL_MAX, expected_tag=None):
-            """Batched poll of mailbox pairs: ``specs`` = [(base_addr, pair index, npairs in {1, 2})].
-
-            All pairs are loaded together with plain 8 / 16-byte coherent buffer loads
-            (sc1 locally, sc0 sc1 for peer memory); while any tag is not this launch's
-            the whole batch is re-loaded, so a batch costs one round trip after its
-            last producer lands.  A side-effecting scheduling op in the retry loop
-            keeps the loads from being hoisted.  Returns one list of Int32 value bits
-            per spec."""
-            if const_expr(len(specs) == 0):
-                return []
-            if const_expr(len(specs) > batch):  # bound live registers
-                return poll(specs[:batch], scope, batch, expected_tag) + poll(specs[batch:], scope, batch, expected_tag)
-            cm = CM_DEV if const_expr(scope == "agent") else CM_SYS
-            wanted_tag = tag if expected_tag is None else expected_tag
-
-            def load_all():
-                words = []
-                for b, i, n in specs:
-                    w = fx.Vector(
-                        bo.buffer_load(_rsrc(b), fx.Int32(i) * 2, vec_width=2 * n, dtype=T.i32, cache_modifier=cm)
-                    )
-                    words += [w[e] for e in range(2 * n)]
-                return fx.Vector.from_elements(words, fx.Int32)
-
-            nw = sum(2 * n for _, _, n in specs)
-
-            def pending(v):
-                bad = v[1] != wanted_tag
-                for e in range_constexpr(3, nw, 2):
-                    bad = bad | (v[e] != wanted_tag)
-                return bad
-
-            v = load_all()
-            while pending(v):
-                rocdl.s_nop(0)
-                v = load_all()
-            outs_, e = [], 0
-            for _, _, n in specs:
-                outs_.append([v[e + 2 * q] for q in range(n)])
-                e += 2 * n
-            return outs_
-
-        def hint_wait(n, addr_of, mark=None):
-            """Consumers poll their payload directly (tight per-wave spins); a wave-0
-            pre-poll of each producer's last pair only added a hop of latency."""
-            if const_expr(mark is not None):
-                stamp(mark[0], mark[1], 1)
-            gpu.barrier()
-
-        def pre_poll(n, addr_of):
-            """Wave 0 spins on one small pair per producer (lane j -> producer j < n <= 64)
-            before a large payload poll, so waiting CTAs do not flood memory."""
-            if wave == 0:
-                b, i = addr_of(fx.min(lane, n - 1))
-                poll([(b, i, 1)])
-            gpu.barrier()
-
-        def get(base_addr, i):
-            return poll([(base_addr, i, 1)])[0][0]
-
-        def getf(base_addr, i):
-            return get(base_addr, i).bitcast(fx.Float32)
-
-        def getf_many(specs):
-            """[(base, i)] single pairs -> list of f32."""
-            return [v[0].bitcast(fx.Float32) for v in poll([(b, i, 1) for b, i in specs])]
-
-        def get2_many(specs):
-            """[(base, i)] double pairs (i even) -> list of (f32, f32)."""
-            return [(v[0].bitcast(fx.Float32), v[1].bitcast(fx.Float32)) for v in poll([(b, i, 2) for b, i in specs])]
-
-        def get2(base_addr, i):
-            return get2_many([(base_addr, i)])[0]
-
-        def get_bf2_many(specs):
-            """[(base, i)] packed bf16 elements i, i + 1 (i even) -> list of (f32, f32)."""
-            return [bf2_f32(v[0]) for v in poll([(b, i // 2, 1) for b, i in specs])]
-
         # ---- wave reductions
-        def wave_sum(v):
-            for sh in range_constexpr(6):
-                v = _xred(v, 32 >> sh, lambda a, b: a + b)
-            return v
-
-        def wave_max(v):
-            for sh in range_constexpr(6):
-                v = _xred(v, 32 >> sh, fx.max)
-            return v
-
         def subgroup16_max(v):
             for off in (8, 4, 2, 1):
                 v = _xred(v, off, fx.max)
             return v
 
-        def block_sums(vs):
-            """Block-wide sums of several per-thread values with one LDS exchange."""
-            ws = [wave_sum(v) for v in vs]
-            if lane == 0:
-                for i in range_constexpr(len(vs)):
-                    lds_st(red, i * WAVES + wave, ws[i])
-            gpu.barrier()
-            tots = []
-            for i in range_constexpr(len(vs)):
-                t = lds_ld(red, i * WAVES)
-                for w in range_constexpr(1, WAVES):
-                    t = t + lds_ld(red, i * WAVES + w)
-                tots.append(t)
-            gpu.barrier()
-            return tots
-
-        def block_sum(v):
-            w = wave_sum(v)
-            if lane == 0:
-                lds_st(red, wave, w)
-            gpu.barrier()
-            t = lds_ld(red, 0)
-            for i in range_constexpr(1, WAVES):
-                t = t + lds_ld(red, i)
-            gpu.barrier()
-            return t
-
         # ------------------------------------------------ MFMA GEMV machinery
-        def unit_fp8(w_rsrc, s_rsrc, rg, kc, NKC, K, BK, b_word, coef=None, ln=None):
-            """Issue one 64-k chunk of row group ``rg`` of a packed FP8 matrix; the
-            bf16 activation chunk starts at LDS word ``b_word``."""
-            ln = lane if ln is None else ln
-            wv = fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-            s = ld_f32(s_rsrc, (rg * 16 // SCALE_BM) * (K // BK) + kc * 64 // BK)
-            if const_expr(callable(coef)):  # factor known only after a later wait
-                return ("fp8", [wv], lambda: s * coef(), b_word + (lane // 16) * 4)
-            if const_expr(coef is not None):
-                s = s * coef
-            return ("fp8", [wv], s, b_word + (lane // 16) * 4)
-
-        def unit_fp8x2(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, coef=None, ln=None):
-            """Issue both 64-k halves of one 128-k FP8 weight-scale block."""
-
-            ln = lane if ln is None else ln
-            wv = [
-                fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc + h) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-                for h in range(2)
-            ]
-            s = ld_f32(s_rsrc, (rg * 16 // SCALE_BM) * (K // 128) + kc // 2)
-            if const_expr(callable(coef)):
-                return ("fp8x2", wv, lambda: s * coef(), b_word + (lane // 16) * 4)
-            if const_expr(coef is not None):
-                s = s * coef
-            return ("fp8x2", wv, s, b_word + (lane // 16) * 4)
-
-        def unit_f8f8(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, coef, ln=None):
-            """Issue one 128-k chunk (packed 64-k chunks kc, kc + 1; kc even) of row group
-            ``rg`` against the FP8 activation of LDS words ``b_word`` + [0, 32) (``f8_word``
-            order); ``coef()`` = activation block scale (times route weight).  ``ln``
-            = the lane whose weights are loaded (default: own lane)."""
-            ln = lane if ln is None else ln
-            wv = [
-                fx.Vector(bo.buffer_load(w_rsrc, ((rg * NKC + kc + h) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-                for h in range(2)
-            ]
-            s = ld_f32(s_rsrc, (rg * 16 // SCALE_BM) * (K // 128) + kc // 2)
-            return ("f8f8", wv, lambda: s * coef(), b_word + (lane // 16) * 4)
-
-        def unit_mxfp4(w_rsrc, s_rsrc, rg, kc, K, b_word, coef=None, ln=None):
-            """Issue one packed 128-K MXFP4 tile and its four per-row E8M0 scales."""
-
-            ln = lane if ln is None else ln
-            raw = fx.Vector(bo.buffer_load(w_rsrc, ((rg * (K // 128) + kc) * 64 + ln) * 4, vec_width=4, dtype=T.i32))
-            row = rg * 16 + ln % 16
-            packed_scale = fx.Int32(bo.buffer_load(s_rsrc, row * (K // 128) + kc, vec_width=1, dtype=T.i32))
-            scales = [
-                ((packed_scale.shrui(fx.Int32(sp * 8)) & fx.Int32(0xFF)) << fx.Int32(23)).bitcast(fx.Float32)
-                for sp in range_constexpr(4)
-            ]
-            return ("mxfp4", (raw, scales), coef, b_word + (lane // 16) * 4)
-
-        def unit_bf16(w_rsrc, rg, kc, NKC, b_word, ln=None):
-            ln = lane if ln is None else ln
-            wv = [
-                fx.Vector(
-                    bo.buffer_load(
-                        w_rsrc,
-                        (((rg * NKC + kc) * 2 + sp) * 64 + ln) * 4,
-                        vec_width=4,
-                        dtype=T.i32,
-                    )
-                )
-                for sp in range(2)
-            ]
-            return ("bf16", wv, None, b_word + (lane // 16) * 4)
-
         def unit_attention(w_rsrc, s_rsrc, rg, kc, NKC, K, BK, b_word, ln=None):
             """Issue one configured attention-weight chunk."""
 
@@ -588,139 +359,6 @@ def build_kimi_k3_mla_attention(
             if const_expr(BK == 64):
                 return unit_fp8(w_rsrc, s_rsrc, rg, kc, NKC, K, BK, b_word, ln=ln)
             return unit_fp8x2(w_rsrc, s_rsrc, rg, kc, NKC, K, b_word, ln=ln)
-
-        def mma_units(acc, units):
-            """acc[4] += coef * (W_chunk @ X_chunk) for every issued unit."""
-            for unit_format, wv, coef, bw in units:
-                if const_expr(callable(coef) and unit_format != "mxfp4"):
-                    coef = coef()
-                if const_expr(unit_format == "mxfp4"):
-                    raw, scales = wv
-                    for sp in range_constexpr(4):
-                        a = _mxfp4_to_bf16x8(raw[sp], scales[sp])
-                        b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
-                        c = fx.Vector.filled(4, 0.0, fx.Float32)
-                        c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
-                        part_coef = coef[sp] if const_expr(isinstance(coef, list)) else coef
-                        if const_expr(callable(part_coef)):
-                            part_coef = part_coef()
-                        if const_expr(part_coef is None):
-                            acc = [acc[e] + c[e] for e in range(4)]
-                        else:
-                            acc = [acc[e] + c[e] * part_coef for e in range(4)]
-                    continue
-                c = fx.Vector.filled(4, 0.0, fx.Float32)
-                if const_expr(unit_format == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
-                    a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
-                    bv = [
-                        fx.Vector(fx.ptr_load(xs + (bw + h * 16), result_type=v4f)).bitcast(fx.Int32) for h in range(2)
-                    ]
-                    b = fx.Vector.from_elements([bv[h][e] for h in range(2) for e in range(4)], fx.Int32)
-                    one = fx.Int32(127)
-                    c = fx.Vector(
-                        rocdl.mfma_scale_f32_16x16x128_f8f6f4(T.vec(4, T.f32), [a, b, c, 0, 0, 0, one, 0, one])
-                    )
-                nsp = 4 if unit_format == "fp8x2" else 2 if unit_format != "f8f8" else 0
-                for sp in range_constexpr(nsp):
-                    if const_expr(unit_format in ("fp8", "fp8x2")):
-                        wh = sp // 2 if unit_format == "fp8x2" else 0
-                        ws = sp % 2 if unit_format == "fp8x2" else sp
-                        a = _fp8_to_bf16x8(wv[wh][ws * 2], wv[wh][ws * 2 + 1])
-                    else:
-                        a = wv[sp].bitcast(fx.BFloat16)
-                    b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
-                    c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
-                if const_expr(coef is None):
-                    acc = [acc[e] + c[e] for e in range(4)]
-                else:
-                    acc = [acc[e] + c[e] * coef for e in range(4)]
-            return acc
-
-        def run_units(make_unit, cpw, batch, pre=None):
-            """Software pipelined: issue batch b+1's loads before computing batch b.
-            ``pre`` = the already-issued first batch (prefetched before a wait)."""
-            acc = [fx.Float32(0.0) for _ in range(4)]
-            starts = list(range(0, cpw, batch))
-            cur = pre if pre is not None else [make_unit(c) for c in range(0, min(batch, cpw))]
-            for bi in range_constexpr(len(starts)):
-                nxt = None
-                if const_expr(bi + 1 < len(starts)):
-                    n0 = starts[bi + 1]
-                    nxt = [make_unit(c) for c in range(n0, min(n0 + batch, cpw))]
-                acc = mma_units(acc, cur)
-                cur = nxt
-            return acc
-
-        def reduce_rows(R, acc, emit):
-            """Sum the per-wave MFMA tiles of each of R row groups; emit(row_local, n, v) for n < S."""
-            wpr = WAVES // R
-            fx.ptr_store(fx.Vector.from_elements(acc, fx.Float32), red + (wave * 64 + lane) * 4)
-            gpu.barrier()
-            n_out = R * 16 * S
-            for i in range_constexpr((n_out + THREADS - 1) // THREADS):
-                t = tid + i * THREADS
-                if t < n_out:
-                    rl = t % (R * 16)
-                    n = t // (R * 16)
-                    r = rl % 16
-                    tot = fx.Float32(0.0)
-                    for j in range_constexpr(wpr):
-                        ww = (rl // 16) * wpr + j
-                        tot = tot + lds_ld(red, (ww * 64 + n + 16 * (r // 4)) * 4 + r % 4)
-                    emit(rl, n, tot)
-
-        def emit_out(stride):
-            def f(rl, n, v):
-                lds_st(outs, n * stride + rl, v)
-
-            return f
-
-        def stage_x_rmsnorm(ld4s, n, gamma, mark=None, loaded=None, count=S):
-            """LDS bf16 X[s][0:n] = bf16(rmsnorm(x_s) * gamma) for every sample s, where
-            ld4s([(s, k)]) -> [(x_s[k], .., x_s[k+3])] (one batched load); returns the rstds.
-            ``loaded``: the (gamma, x) loads already issued by load_x_rmsnorm."""
-            per = (n + 4 * THREADS - 1) // (4 * THREADS)
-            ks = [(tid + i * THREADS) * 4 for i in range(per)]
-            gs, vals = loaded if loaded is not None else load_x_rmsnorm(ld4s, n, gamma, count)
-            sss = []
-            for s in range_constexpr(count):
-                ss = fx.Float32(0.0)
-                for i in range_constexpr(per):
-                    valid = ks[i] < n
-                    for a in vals[s * per + i]:
-                        ss = ss + valid.select(a * a, fx.Float32(0.0))
-                sss.append(ss)
-            if const_expr(mark is not None):
-                stamp(mark[0], mark[1], 6)
-            rstds = [_rsq(tot * (1.0 / n) + EPS) for tot in block_sums(sss)]
-            if const_expr(mark is not None):
-                stamp(mark[0], mark[1], 7)
-            for s in range_constexpr(count):
-                for i in range_constexpr(per):
-                    a = vals[s * per + i]
-                    if ks[i] < n:
-                        for j in range_constexpr(2):
-                            lds_st(
-                                xs,
-                                (s * n + ks[i]) // 2 + j,
-                                bf16_pair(
-                                    a[2 * j] * rstds[s] * gs[i][2 * j],
-                                    a[2 * j + 1] * rstds[s] * gs[i][2 * j + 1],
-                                ),
-                            )
-            return rstds
-
-        def load_x_rmsnorm(ld4s, n, gamma, count=S):
-            """The gamma loads (issued ahead of the wait), then ld4s -> (gammas, x values)."""
-            rg_ = _rsrc(gamma)
-            per = (n + 4 * THREADS - 1) // (4 * THREADS)
-            ks = [(tid + i * THREADS) * 4 for i in range(per)]
-            safe_ks = [fx.min(k, n - 4) for k in ks]
-            gs = []
-            for k in safe_ks:
-                g = fx.Vector(bo.buffer_load(rg_, k // 2, vec_width=2, dtype=T.i32)).bitcast(fx.BFloat16).to(fx.Float32)
-                gs.append([g[j] for j in range(4)])
-            return gs, ld4s([(s, k) for s in range(count) for k in safe_ks])
 
         def load_x_bf16(ld4s, n, count=S):
             """Issue direct BF16 loads for an activation normalized by the caller."""
@@ -743,42 +381,10 @@ def build_kimi_k3_mla_attention(
                         for j in range_constexpr(2):
                             lds_st(xs, (s * n + ks[i]) // 2 + j, bf16_pair(a[2 * j], a[2 * j + 1]))
 
-        def stage_x_pairs(name, n_total, src_of):
-            """LDS bf16 X[k] = packed bf16 mailbox ``name`` element src_of(k) for k < n_total
-            (src_of contiguous over aligned groups of 4): one 16-byte poll per 4 elements."""
-            nq = n_total // 4
-            full = nq // THREADS
-            vals = poll([(mb(name), src_of((tid + i * THREADS) * 4) // 2, 2) for i in range(full)])
-            for i in range_constexpr(full):
-                for j in range_constexpr(2):
-                    lds_st(xs, (tid + i * THREADS) * 2 + j, vals[i][j].bitcast(fx.Float32))
-            if const_expr(nq % THREADS):
-                w = tid + full * THREADS
-                if w < nq:
-                    v = poll([(mb(name), src_of(w * 4) // 2, 2)])[0]
-                    for j in range_constexpr(2):
-                        lds_st(xs, w * 2 + j, v[j].bitcast(fx.Float32))
-
         def stage_attention_output():
             """Stage the BF16 attention output; Kimi-K3 gating is fused at W_UV."""
 
             stage_x_pairs("o", S * O_K, lambda k: k)
-
-        def quant_scaled(a0, a1):
-            """Per-wave FP8 quant of a 128-block held as 2 f32 per lane -> (scaled q0, q1, scale)."""
-            amax = wave_max(fx.max(fmath.absf(a0), fmath.absf(a1)))
-            nz = amax > 0.0
-            qs = nz.select(amax * (1.0 / FP8_MAX), fx.Float32(1.0))
-            inv = nz.select(_rcp(amax) * FP8_MAX, fx.Float32(1.0))  # hardware rcp, no IEEE divide
-            q0 = fx.min(fx.max(a0 * inv, -FP8_MAX), FP8_MAX)
-            q1 = fx.min(fx.max(a1 * inv, -FP8_MAX), FP8_MAX)
-            return q0, q1, qs
-
-        def quant_block(a0, a1):
-            """quant_scaled, values returned as the FP8-rounded f32s."""
-            q0, q1, qs = quant_scaled(a0, a1)
-            d0, d1 = _fp8_roundtrip(q0, q1)
-            return d0, d1, qs
 
         def quant_mxfp8(a0, a1):
             """Per-16-lane/32-value MXFP8 quantization with an E8M0 scale."""
@@ -860,18 +466,6 @@ def build_kimi_k3_mla_attention(
                             got[j * nxw + i][0].bitcast(fx.Float32),
                         )
 
-        def st_f8(k, q0, q1):
-            """LDS FP8 activation bytes k, k + 1 (k even, held by this lane; lane ^ 1 holds
-            k ^ 2) in ``f8_word`` order.  Call from the whole wave."""
-            w = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
-            nb = _xshfl(w, 1)
-            if lane % 2 == 0:
-                lds_st(xs, _f8_word(k), (w | (nb << 16)).bitcast(fx.Float32))
-
-        def load_bias():
-            """This lane's 4 expert biases (issue before the scores wait)."""
-            return [ld_f32(_rsrc(bias), lane + i * 64) for i in range(N_EXPERTS // 64)]
-
         def route_top8(s, raws=None, bs=None):
             """Top-k of sample s (call from one whole wave, after the router scores landed).
 
@@ -922,150 +516,70 @@ def build_kimi_k3_mla_attention(
                 tot = _xred(tot, off, lambda a, b: a + b)
             return e, raw * (_rcp(tot) * ROUTE_SCALE)
 
-        def peer_reduce(region, t, residual, out_fn, tile=ROW_TILE):
-            """Push BF16 partials in tagged pairs to every peer, then sum all
-            ranks' pairs from the own symmetric buffer in rank order (W = 1: no
-            exchange).  Consecutive epochs use alternating ``part`` slots.  A
-            rank cannot finish epoch k + 1 before every peer enters it, so no
-            rank reaches k + 2 soon enough to overwrite epoch k while it is
-            still being consumed.  ``residual`` is either fn(s, row) -> (r0,
-            r1) (plain loads, issued first) or a mailbox base (pairs s * HIDDEN
-            + row, polled in the same batch as the peers)."""
-            region_base = fx.Int64(SY[region]) + fx.Int64(peer_slot) * fx.Int64(SY["_part_stride"])
-            if const_expr(attention_only and W > 1):
-                pair_count = S * tile // 2
-                owner_rank = (t * tile) // (HIDDEN // W)
-                owner_words = fx.Vector(bo.buffer_load(r_peers, owner_rank * 2, vec_width=2, dtype=T.i32))
-                owner_dst = (fx.Int64(_uniform(owner_words[1])) << 32) | fx.Int64(fx.Uint32(_uniform(owner_words[0])))
-                if wave == 0:
-                    for batch in range_constexpr((pair_count + 63) // 64):
-                        pair = lane + batch * 64
-                        if pair < pair_count:
-                            si = pair // (tile // 2)
-                            ri = (pair % (tile // 2)) * 2
-                            put_bf(
-                                owner_dst + region_base,
-                                (rank * S + si) * HIDDEN + t * tile + ri,
-                                [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
-                                CM_SYS,
-                            )
-                gpu.barrier()
-
-                if (rank == owner_rank) & (tid < pair_count):
-                    s = tid // (tile // 2)
-                    r = (tid % (tile // 2)) * 2
-                    row = t * tile + r
-                    r0, r1 = residual(s, row)
-                    own = sym + region_base
-                    got = poll(
-                        [(own, ((src * S + s) * HIDDEN + row) // 2, 1) for src in range(W)],
-                        "one-as",
-                    )
-                    t0 = fx.Float32(0.0)
-                    t1 = fx.Float32(0.0)
-                    for src in range_constexpr(W):
-                        p0, p1 = bf2_f32(got[src][0])
-                        t0 = t0 + p0
-                        t1 = t1 + p1
-                    lds_st(outs, tid, bf16_pair(r0 + t0, r1 + t1))
-                gpu.barrier()
-
-                result_tag = tag + fx.Int32(1 << 30)
-                if (rank == owner_rank) & (wave < W):
-                    for batch in range_constexpr((pair_count + 63) // 64):
-                        pair = lane + batch * 64
-                        if pair < pair_count:
-                            s = pair // (tile // 2)
-                            r = (pair % (tile // 2)) * 2
-                            packed = lds_ld(outs, pair).bitcast(fx.Int32)
-                            mailbox = ((owner_rank * S + s) * HIDDEN + t * tile + r) // 2
-                            bo.buffer_store(
-                                fx.Vector.from_elements([packed, result_tag], fx.Int32),
-                                _rsrc(peer_dst + region_base),
-                                mailbox * 2,
-                                cache_modifier=CM_SYS,
-                            )
-                gpu.barrier()
-
-                if tid < pair_count:
-                    s = tid // (tile // 2)
-                    r = (tid % (tile // 2)) * 2
-                    row = t * tile + r
-                    own = sym + region_base
-                    got = poll(
-                        [(own, ((owner_rank * S + s) * HIDDEN + row) // 2, 1)],
-                        "one-as",
-                        expected_tag=result_tag,
-                    )
-                    v0, v1 = bf2_f32(got[0][0])
-                    out_fn(s, row, v0, v1)
-                return
-            if const_expr(W > 1):
-                # One wave per destination: peer pointers are wave-uniform, and the
-                # destinations progress concurrently instead of eight serial stores
-                # from the output wave. All waves consume outs before it is reused.
-                if wave < W:
-                    pair_count = S * tile // 2
-                    for batch in range_constexpr((pair_count + 63) // 64):
-                        pair = lane + batch * 64
-                        if pair < pair_count:
-                            si = pair // (tile // 2)
-                            ri = (pair % (tile // 2)) * 2
-                            put_bf(
-                                peer_dst + region_base,
-                                (rank * S + si) * HIDDEN + t * tile + ri,
-                                [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
-                                CM_SYS,
-                            )
-                gpu.barrier()
-            if tid < S * tile // 2:
-                s = tid // (tile // 2)
-                r = (tid % (tile // 2)) * 2
-                row = t * tile + r
-                if const_expr(callable(residual)):
-                    r0, r1 = residual(s, row)
-                v0 = lds_ld(outs, s * tile + r)
-                v1 = lds_ld(outs, s * tile + r + 1)
-                if const_expr(W == 1):  # no TP peers: the sum is the local value
-                    parts = [(v0, v1)]
-                    got = []
-                    if const_expr(not callable(residual)):
-                        got = poll([(residual, (s * HIDDEN + row) // 2, 1)])
-                else:
-                    own = sym + region_base
-                    specs = [(own, ((src * S + s) * HIDDEN + row) // 2, 1) for src in range(W)]
-                    if const_expr(not callable(residual)):  # packed bf16 pair
-                        specs.append((residual, (s * HIDDEN + row) // 2, 1))
-                    got = poll(specs, "one-as")
-                    parts = [bf2_f32(v[0]) for v in got[:W]]
-                    got = got[W:]
-                if const_expr(not callable(residual)):
-                    r0, r1 = bf2_f32(got[0][0])
-                t0 = fx.Float32(0.0)
-                t1 = fx.Float32(0.0)
-                for src in range_constexpr(W):
-                    t0 = t0 + parts[src][0]
-                    t1 = t1 + parts[src][1]
-                out_fn(s, row, r0 + t0, r1 + t1)
-
-        def start(name):
-            return (bid + (G - base[name])) & (G - 1)
-
-        def stamp(name, t, which, lead=0):
-            if const_expr(timeline):
-                if tid == lead:
-                    now = fx.Int64(llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], []))
-                    fx.generic_store(
-                        fx.inttoptr(
-                            fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8),
-                            timeline_buf + fx.Int64((first[name] + t) * TL_COLS + which) * 8,
-                        ),
-                        now,
-                    )
-
-        def n_sel():
-            """This lane's MFMA B column (sample); columns >= S duplicate the last one."""
-            return fx.min(lane % 16, S - 1)
+        launch_state = LaunchState(
+            source_key=shared_source_key,
+            S=S,
+            tid=tid,
+            lane=lane,
+            wave=wave,
+            bid=bid,
+            G=G,
+            base=base,
+            scratch=scratch,
+            SC=SC,
+            tag=tag,
+            red=red,
+            outs=outs,
+            xs=xs,
+            bias=bias,
+            N_EXPERTS=N_EXPERTS,
+            timeline=timeline,
+            timeline_buf=timeline_buf,
+            first=first,
+            rank=rank,
+            W=W,
+            HIDDEN=HIDDEN,
+            peer_dst=peer_dst,
+            sym=sym,
+            SY=SY,
+            peer_slot=peer_slot,
+            eps=EPS,
+        )
+        launch_state.peer_reduce = partial(
+            helpers.peer_reduce, launch_state, owner_reduce=attention_only, r_peers=r_peers
+        )
+        mb = launch_state.mb
+        put = launch_state.put
+        put2 = launch_state.put2
+        put_bf = launch_state.put_bf
+        getf_many = launch_state.getf_many
+        get2_many = launch_state.get2_many
+        pre_poll = launch_state.pre_poll
+        hint_wait = launch_state.hint_wait
+        block_sums = launch_state.block_sums
+        block_sum = launch_state.block_sum
+        unit_fp8 = launch_state.unit_fp8
+        unit_f8f8 = launch_state.unit_f8f8
+        unit_bf16 = launch_state.unit_bf16
+        run_units = launch_state.run_units
+        reduce_rows = launch_state.reduce_rows
+        emit_out = launch_state.emit_out
+        stage_x_pairs = launch_state.stage_x_pairs
+        quant_scaled = launch_state.quant_scaled
+        st_f8 = launch_state.st_f8
+        load_bias = launch_state.load_bias
+        start = launch_state.start
+        n_sel = launch_state.n_sel
+        poll = launch_state.poll
+        stamp = launch_state.stamp
+        mma_units = launch_state.mma_units
+        unit_fp8x2 = launch_state.unit_fp8x2
+        unit_mxfp4 = partial(helpers.unit_mxfp4_rows, launch_state, act="split")
+        peer_reduce = launch_state.peer_reduce
+        stage_x_rmsnorm = launch_state.stage_x_rmsnorm
+        load_x_rmsnorm = launch_state.load_x_rmsnorm
+        get2 = launch_state.get2
+        get_bf2_many = launch_state.get_bf2_many
 
         if const_expr(dedicated_input_norm):
             norm_rounds = (HIDDEN + 4 * THREADS - 1) // (4 * THREADS)

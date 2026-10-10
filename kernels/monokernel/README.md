@@ -7,11 +7,38 @@ kernels. Model ownership is explicit:
   references.
 - `k3/` contains Kimi-K3 MLA/KDA state handling, AttnRes, latent-MoE logic,
   staged baselines, and benchmark tools.
+- `dsv4/` contains the DeepSeek-V4 decode layer: CSA / HCA sparse attention
+  with its compressors and indexer, mHC and MoE.
+  The device code lives in `dsv4/kernel/`. There, `build.py` builds the one
+  launch from per-stage modules (`hc`, `qkv`, `indexer`, `attention`, `ffn`),
+  `common.py` binds the shared helpers to it and adds the DSV4-only ones, and
+  `plan.py` holds the task counts and mailbox layout the host shares. The
+  host wrapper (`op.py`), weight packing, model config and torch golden stay
+  at the `dsv4/` top level.
 
 Reusable contracts and primitives stay at this package root. `config.py`,
 `layout.py`, `ops.py`, `packing.py`, `reference.py`, `runtime.py`, and
 `weights.py` define shared geometry, layouts, device operations, packing, host
-runtime, and weight containers. `gemm_a16w16.py`, `mxfp8_linear.py`, and
+runtime, and weight containers. `helpers.py` holds the device helpers that
+GLM, Kimi-K3 MLA and DeepSeek-V4 share:
+
+- tagged-pair mailboxes, `poll` and timeline `stamp`;
+- block reductions;
+- the MFMA GEMV units with `mma_units` / `run_units` / `reduce_rows`;
+- RMSNorm and activation staging;
+- the TP `peer_reduce` and task placement.
+
+Each is a plain function whose first argument is the kernel's `LaunchState`,
+the values of one launch. `LaunchState` also exposes every helper bound to
+it (`st.put`, `st.poll`, ...), and the helpers call one another through it,
+so a kernel that installs its own variant (for example
+`st.poll = partial(helpers.poll, st, retry_spin_pause=True)`) changes it for
+every helper. Variants are keyword arguments or separate functions
+(`unit_mxfp4_atom`, `unit_mxfp4_rows`), each a build-time choice, so each
+kernel compiles exactly its own. FlyDSL's JIT cache keys a
+kernel only on its own directory's sources, so the kernels also capture
+`SHARED_SOURCE_KEY`, a digest of `helpers.py` and `ops.py`, so that edits to
+either still recompile them. `gemm_a16w16.py`, `mxfp8_linear.py`, and
 `symmetric_allreduce.py` provide model-independent kernels used by the staged
 paths.
 
