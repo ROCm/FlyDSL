@@ -13,7 +13,6 @@ import math
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith as ea
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.comm.custom_all_reduce import _KMAXBLOCKS as _MAX_BLOCKS
@@ -59,7 +58,7 @@ def _store_v4i32(rsrc, elem_off_i32, data):
 def _store_v4i32_nt(rsrc, elem_off_i32, v4i32_val):
     """Buffer-store vector<4xi32> nontemporal — bypasses L2 prefetcher."""
     buffer_ops.buffer_store(v4i32_val, rsrc, elem_off_i32, cache_modifier=_CM_NT)
-    rocdl.s_waitcnt(0)
+    rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
 
 
 # ---- signal buffer: i32 load / store --------------------------------------
@@ -73,14 +72,14 @@ def _store_i32(rsrc, val_i32):
 def _load_i32_uncached(rsrc):
     """Load i32 bypassing L2 (sc1) via pre-built rsrc descriptor."""
     val = buffer_ops.buffer_load(rsrc, 0, vec_width=1, dtype=T.i32, cache_modifier=_CM_SC1)
-    rocdl.s_waitcnt(0)
+    rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
     return val
 
 
 def _store_i32_uncached(rsrc, val_i32):
     """Store i32 bypassing L1+L2 (sc0+sc1) via pre-built rsrc descriptor."""
     buffer_ops.buffer_store(val_i32, rsrc, 0, cache_modifier=_CM_SC0_SC1)
-    rocdl.s_waitcnt(0)
+    rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
 
 
 def _invalidate_l1():
@@ -165,7 +164,7 @@ def _u64(v):
 
 def _c64(v):
     """Create i64 constant with concise syntax."""
-    return ea.constant(v, type=T.i64)
+    return fx.Int64(v)
 
 
 # ---------------------------------------------------------------------------
@@ -662,8 +661,8 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         # ---- Stage 2: reduce local tmp and write to REMOTE outputs ----
         tmp_out_rsrc_desc = _make_rsrc(tmp_out_base_i64)
         # select() operands must have identical MLIR types (use i32 constants).
-        packs_per_rank_i32 = ea.constant(part_p, type=T.i32)
-        max_packs_per_rank_i32 = ea.constant(largest_part_p, type=T.i32)
+        packs_per_rank_i32 = fx.Int32(part_p)
+        max_packs_per_rank_i32 = fx.Int32(largest_part_p)
         is_last_rank_s2 = rank_i32 == (world_size - 1)
         stage2_end_pack = is_last_rank_s2.select(max_packs_per_rank_i32, packs_per_rank_i32)
 

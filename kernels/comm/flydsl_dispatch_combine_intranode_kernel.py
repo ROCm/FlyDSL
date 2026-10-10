@@ -12,7 +12,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.extras import types as T
-from flydsl.expr import arith, as_ir_value, const_expr, range_constexpr
+from flydsl.expr import as_ir_value, const_expr, range_constexpr
 from flydsl.expr.rocdl import (
     ballot,
     cvt_pk_f32_fp8,
@@ -198,7 +198,7 @@ def make_dispatch_kernel(
                     _r_wts_remote = create_buffer_resource_from_addr(
                         buffer_load(_r_p2p_out_wts, dest_pe, vec_width=1, dtype=T.i64())
                     )
-                    buffer_store(arith.bitcast(T.i32(), wt_val), _r_wts_remote, dest_slot)
+                    buffer_store(fx.Float32(wt_val).bitcast(fx.Int32), _r_wts_remote, dest_slot)
                     _r_idx_remote = create_buffer_resource_from_addr(
                         buffer_load(_r_p2p_out_idx, dest_pe, vec_width=1, dtype=T.i64())
                     )
@@ -481,16 +481,12 @@ def make_combine_kernel(
             return Vec.filled(2, 0.0, fx.Float32)
 
     elif hidden_elem_size == 4:  # f32
-        # ``arith.bitcast`` needs a raw mlir Value; ``_maybe_load`` wrappers
-        # need explicit ``ir_value()`` (Vec paths auto-unwrap).
 
         def _to_accum(i32_val):
-            raw = i32_val.ir_value()
-            return fx.Float32(arith.bitcast(T.f32(), raw))
+            return fx.Int32(i32_val).bitcast(fx.Float32)
 
         def _from_accum(accum_val):
-            raw = accum_val.ir_value()
-            return fx.Int32(arith.bitcast(T.i32(), raw))
+            return fx.Float32(accum_val).bitcast(fx.Int32)
 
         def _zero_accum():
             return fx.Float32(0.0)
@@ -908,14 +904,7 @@ def make_combine_kernel(
                                     scale_raws[u][k_slot],
                                 )
                             )
-                            scales[u].append(
-                                fx.Float32(
-                                    arith.bitcast(
-                                        T.f32(),
-                                        arith.unwrap(sc_i32 << fx.Int32(23)),
-                                    )
-                                )
-                            )
+                            scales[u].append((sc_i32 << fx.Int32(23)).bitcast(fx.Float32))
 
                 if const_expr(_xfer_bf16_to_fp8 or blockwise_fp8_transport):
                     out_off = tok_id * out_n_i32 + ec_abs * 2
