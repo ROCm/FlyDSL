@@ -41,15 +41,9 @@ import torch
 from flydsl.compiler.jit_argument import PointerJitArg
 
 from .rdna4_scaled_mm_fp8 import TileConfig, pick_tile_config
+from flydsl.runtime.device import get_rocm_arch
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "rdna4_scaled_mm_fp8_fused"
@@ -658,7 +652,10 @@ def scaled_mm_fp8_fused(
     (and optional scale list) for N adapters in load order — dispatches to
     ``scaled_mm_fp8_fused_multi``.
     """
-    require_gfx120x(what="scaled_mm_fp8_fused (gfx120x)")
+    _why = "scaled_mm_fp8_fused (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     # Device LoRA residual: any LoRA count (1..N) uses multi/device residual path (in-kernel
     # LoRA epilogue measured slower than HIP on an otherwise idle gfx120x).
     if (
@@ -897,7 +894,10 @@ def scaled_mm_fp8_fused_multi(
     Args accept a single tensor or a sequence of tensors for downs/ups; scales
     may be a scalar (broadcast) or a per-adapter sequence.
     """
-    require_gfx120x(what="scaled_mm_fp8_fused_multi (gfx120x)")
+    _why = "scaled_mm_fp8_fused_multi (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if a_f.dim() != 2 or b_nk.dim() != 2:
         raise ValueError("scaled_mm_fp8_fused_multi expects 2D operands")
     m, k = a_f.shape

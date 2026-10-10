@@ -27,15 +27,9 @@ from typing import Optional
 import torch
 
 from kernels.gemm.rdna4_tile import TileConfig
+from flydsl.runtime.device import get_rocm_arch
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "rdna4_int8_linear"
@@ -180,7 +174,10 @@ def int8_linear(
     from flydsl.compiler.jit_argument import PointerJitArg
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="int8_linear (gfx120x)")
+    _why = "int8_linear (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if a_int8.dtype != torch.int8 or b_int8.dtype != torch.int8:
         raise ValueError("iu8 int8 linear requires int8 A/B")
     a = ensure_contiguous(a_int8, stream=stream)

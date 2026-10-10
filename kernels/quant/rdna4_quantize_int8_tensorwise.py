@@ -33,15 +33,9 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
 from kernels.common.gfx120x_pad import ensure_contiguous
+from flydsl.runtime.device import get_rocm_arch
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "rdna4_quantize_int8_tensorwise"
@@ -679,7 +673,10 @@ def quantize_int8_tensorwise(
     ``q`` matches ``x.shape`` (int8). ``scale`` is a 0-dim float32 tensor on
     ``x.device`` (reference ``quantize_int8_tensorwise``).
     """
-    require_gfx120x(what="quantize_int8_tensorwise (gfx120x)")
+    _why = "quantize_int8_tensorwise (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if stochastic_rounding:
         raise ValueError("quantize_int8_tensorwise: stochastic_rounding not supported")
     if isinstance(scale, str):
@@ -732,7 +729,10 @@ def dequantize_int8_tensorwise(
     stream: torch.cuda.Stream | None = None,
 ) -> torch.Tensor:
     """Inverse of ``quantize_int8_tensorwise``: ``q * scale``."""
-    require_gfx120x(what="dequantize_int8_tensorwise (gfx120x)")
+    _why = "dequantize_int8_tensorwise (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if q.dtype != torch.int8:
         raise ValueError(f"q must be int8, got {q.dtype}")
     names = {

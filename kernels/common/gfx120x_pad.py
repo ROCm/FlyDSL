@@ -17,6 +17,7 @@ import flydsl.expr as fx
 from flydsl.autotune import Config, autotune
 from flydsl.expr import const_expr
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from flydsl.runtime.device import get_rocm_arch
 
 _RANK = 6
 _BLOCKS = (32, 64, 128, 256, 512, 1024)
@@ -30,13 +31,6 @@ _ELEM = {
 }
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 def _elem_name(dtype: torch.dtype) -> str:
@@ -277,7 +271,10 @@ def device_pad(
 
     Pass ``stream`` so soft-pad runs on the same queue as a preceding/following kernel.
     """
-    require_gfx120x(what="device_pad (gfx120x)")
+    _why = "device_pad (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if mode == "zeros":
         mode = "constant"
     if mode not in _MODES:

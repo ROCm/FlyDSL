@@ -24,6 +24,7 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.gfx120x_buf_helpers import (
     buf_base_i64,
     buf_copy_load,
@@ -31,16 +32,6 @@ from kernels.common.gfx120x_buf_helpers import (
     kernel_signature,
     ptr_buf_tensor,
 )
-
-
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
-
 
 KERNEL_NAME = "swiglu_gfx120x"
 BLOCK = 256
@@ -340,7 +331,10 @@ def silu_mul(
     stream: torch.cuda.Stream | None = None,
 ) -> torch.Tensor:
     """Product silu(gate)*up. A length that is not a vector multiple stays in the kernel."""
-    require_gfx120x(what="silu_mul (gfx120x)")
+    _why = "silu_mul (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if gate.dtype not in _DTYPE_NAME or up.dtype != gate.dtype:
         raise ValueError(f"silu_mul requires matching bf16/fp16/f32, got {gate.dtype}/{up.dtype}")
     if gate.shape != up.shape:
@@ -392,7 +386,10 @@ def swiglu_chunk(
     4 for f32) is scalar-loaded in the kernel. ``stream`` is
     ``torch.cuda.Stream`` (host); the kernel launch uses ``fx.Stream``.
     """
-    require_gfx120x(what="swiglu_chunk (gfx120x)")
+    _why = "swiglu_chunk (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if x.dtype not in _DTYPE_NAME:
         raise ValueError(f"swiglu_chunk requires bf16/fp16/f32, got {x.dtype}")
     if x.shape[-1] % 2 != 0:

@@ -20,6 +20,7 @@ from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr import math as fmath
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
 from kernels.quant.rdna4_mxfp8_e8m0 import _TINY, _e8m0_bits, _e8m0_to_f32
+from flydsl.runtime.device import get_rocm_arch
 
 _BLOCK_CHOICES = (32, 64, 128, 256, 512, 1024)
 _DEFAULT_BLOCK = 256
@@ -29,13 +30,6 @@ _LUT = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3
 _FP4_BOUNDS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 def _stride_blocks(n_items: int) -> tuple[int, ...]:
@@ -312,7 +306,10 @@ _mxfp4_dequant_tuned = autotune(
 
 def quantize_mxfp4_device(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize ``[..., K]`` to packed MXFP4 plus per-32 E8M0 scales."""
-    require_gfx120x(what="quantize_mxfp4 (gfx120x)")
+    _why = "quantize_mxfp4 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if w.dtype not in (torch.float32, torch.bfloat16, torch.float16):
         raise ValueError(f"MXFP4 quant input must be f32/f16/bf16, got {w.dtype}")
     if w.shape[-1] % 32:
@@ -340,7 +337,10 @@ def quantize_mxfp4_device(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 def dequantize_mxfp4_device(q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     """Decode packed MXFP4 and per-32 E8M0 scales to fp32."""
-    require_gfx120x(what="dequantize_mxfp4 (gfx120x)")
+    _why = "dequantize_mxfp4 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     q = q.view(torch.uint8)
     if scale.dtype != torch.uint8:
         raise ValueError(f"MXFP4 scales must be uint8, got {scale.dtype}")

@@ -12,6 +12,7 @@ import flydsl.expr as fx
 from flydsl.autotune import Config, autotune
 from flydsl.expr import const_expr
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from flydsl.runtime.device import get_rocm_arch
 
 _DTYPES = {
     torch.float32: ("float32", fx.Float32, 4),
@@ -23,13 +24,6 @@ _BLOCKS = (32, 64, 128, 256, 512, 1024)
 _TUNING_SCHEMA = 1
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 def _as_f32(raw, name: str):
@@ -153,7 +147,10 @@ def add_row_bias(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="add_row_bias (gfx120x)")
+    _why = "add_row_bias (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if out.dtype not in _DTYPES:
         raise ValueError(f"add_row_bias input dtype {out.dtype} is not f32/f16/bf16")
     if bias.dtype not in _DTYPES:
@@ -260,7 +257,10 @@ def add_same(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="add_same (gfx120x)")
+    _why = "add_same (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if a.shape != b.shape or a.dtype != b.dtype or a.dtype not in _DTYPES:
         raise ValueError(
             f"add_same expects matching f32/f16/bf16 tensors, got {a.shape}/{a.dtype} and {b.shape}/{b.dtype}"
@@ -330,7 +330,10 @@ def mul_by_scale1(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="mul_by_scale1 (gfx120x)")
+    _why = "mul_by_scale1 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if x.dtype not in _DTYPES:
         raise ValueError(f"mul_by_scale1 expects f32/f16/bf16, got {x.dtype}")
     if scale.dtype != torch.float32 or scale.device != x.device or scale.numel() != 1:

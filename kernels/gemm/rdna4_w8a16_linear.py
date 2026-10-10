@@ -24,13 +24,6 @@ from flydsl.compiler.jit_argument import PointerJitArg  # noqa: E402
 from kernels.gemm.rdna4_tile import TileConfig
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "rdna4_w8a16_linear"
@@ -518,6 +511,7 @@ def build_w8a16_linear_module(
 
 
 import torch  # noqa: E402
+from flydsl.runtime.device import get_rocm_arch
 
 # FP8 format max parity with rdna4_scaled_mm_fp8(_fused) / rdna4_fp8_quant.
 _F8_E4M3_MAX = 448.0
@@ -570,7 +564,10 @@ def w8a16_gemm(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="w8a16_gemm (gfx120x)")
+    _why = "w8a16_gemm (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if a.dtype not in (torch.bfloat16, torch.float16):
         raise ValueError(f"W8A16 linear requires bf16/fp16 acts, got {a.dtype}")
     if b_nk.dtype not in _W8_TORCH:
@@ -672,7 +669,10 @@ def w8a16_linear(
 
     Soft-pads odd K; ``stream`` is ``torch.cuda.Stream`` (host).
     """
-    require_gfx120x(what="w8a16_linear (gfx120x)")
+    _why = "w8a16_linear (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     orig_shape = x.shape
     x2d = x.reshape(-1, orig_shape[-1])
     if out_dtype is None:

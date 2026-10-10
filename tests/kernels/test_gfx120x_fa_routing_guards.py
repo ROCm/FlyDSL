@@ -5,7 +5,7 @@
 import pytest
 import torch
 
-from kernels.attention.flash_attn_gfx120x_ext import (
+from kernels.attention.flash_attn_gfx120x_host import (
     cu_seqlens_from_seqlens,
     lengths_uniform,
     reject_gqa,
@@ -61,7 +61,7 @@ def test_varlen_with_paged_allowed() -> None:
 
 
 def test_commit_caller_out_writes_and_rejects() -> None:
-    from kernels.attention.flash_attn_gfx120x_ext import commit_caller_out
+    from kernels.attention.flash_attn_gfx120x_host import commit_caller_out
 
     produced = torch.ones(2, 3)
     assert commit_caller_out(None, produced) is produced

@@ -13,17 +13,11 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from flydsl.runtime.device import get_rocm_arch
 
 _BLOCKS = (256,)
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 @lru_cache(maxsize=4)
@@ -72,7 +66,10 @@ def bool_mask_to_additive(
     stream: torch.cuda.Stream | None = None,
 ) -> torch.Tensor:
     """Convert a bool mask to fp32 additive bias (True→0, False→-inf) on device."""
-    require_gfx120x(what="bool_mask_to_additive (gfx120x)")
+    _why = "bool_mask_to_additive (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if mask.dtype != torch.bool:
         raise TypeError(f"bool_mask_to_additive expects bool, got {mask.dtype}")
     m = mask.detach().contiguous()

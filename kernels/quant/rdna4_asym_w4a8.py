@@ -38,6 +38,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from flydsl.runtime.device import get_rocm_arch
 
 # Default Lloyd-Max table for group-normalized Gaussian (eager w4a8).
 _FIXED_LUT = (
@@ -64,13 +65,6 @@ _ALS_ITERS = 2
 _SUPPORTED_CONVROT = (16, 64, 256)
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "w4a8_dequant_int4_to_int8_gfx120x"
@@ -676,7 +670,10 @@ def quantize_w4a8_int8_weight(
     """
     import torch
 
-    require_gfx120x(what="quantize_w4a8_int8_weight (gfx120x)")
+    _why = "quantize_w4a8_int8_weight (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if scale_dtype is None:
         scale_dtype = torch.float8_e4m3fn
     if stochastic_rounding:
@@ -704,7 +701,10 @@ def dequant_int4_grouped_to_int8(
     stream: torch.cuda.Stream | None = None,
 ) -> torch.Tensor:
     """FlyDSL decode of packed W4A8 → INT8 GEMM grid."""
-    require_gfx120x(what="dequant_int4_grouped_to_int8 (gfx120x)")
+    _why = "dequant_int4_grouped_to_int8 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     import torch
 
     if qdata.dim() != 2 or qdata.dtype != torch.int8:
@@ -1164,7 +1164,10 @@ def dequantize_w4a8_int8_weight(
     ``group_size >= 4`` and (``16 % group_size == 0`` or
     ``group_size % 16 == 0``).
     """
-    require_gfx120x(what="dequantize_w4a8_int8_weight (gfx120x)")
+    _why = "dequantize_w4a8_int8_weight (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     if output_dtype is None:
         output_dtype = torch.bfloat16
@@ -1272,7 +1275,10 @@ def w4a8_int8_linear(
     is not an int8 product: ``dequantize_w4a8_int8_weight`` reconstructs the
     original-basis weight in one kernel and ``gemm_bf16_nmajor_lds`` multiplies.
     """
-    require_gfx120x(what="w4a8_int8_linear (gfx120x)")
+    _why = "w4a8_int8_linear (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     import torch
 
     from kernels.quant.rdna4_int8_convrot import int8_linear_convrot

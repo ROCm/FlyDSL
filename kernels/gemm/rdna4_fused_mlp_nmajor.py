@@ -75,19 +75,13 @@ from flydsl.compiler.jit_argument import PointerJitArg
 from flydsl.expr import math as fmath
 from flydsl.expr import range_constexpr
 from flydsl.expr.typing import Vector as Vec
+from flydsl.runtime.device import get_rocm_arch
 
 WM = WN = WK = 16
 WAVE = 32
 _TILE = 16
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 def _ptr(t: torch.Tensor) -> PointerJitArg:
@@ -709,7 +703,10 @@ def gemm_bf16_nmajor_lds(
     entry. The cache key is the dtype names and that padded-shape class, not
     one measured ``(M, N, K)``.
     """
-    require_gfx120x(what="gemm_bf16_nmajor_lds (gfx120x)")
+    _why = "gemm_bf16_nmajor_lds (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if a.ndim != 2 or b_nk.ndim != 2:
         raise ValueError("expects A[M,K], B[N,K]")
     if a.dtype not in (torch.bfloat16, torch.float16):
@@ -788,7 +785,10 @@ def fused_gemm_tn(
     out_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """``C1 = (A0 @ B0.T) @ B1.T`` via zero-LDS fused WMMA (16×16 panels only)."""
-    require_gfx120x(what="fused_gemm_tn (gfx120x)")
+    _why = "fused_gemm_tn (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     for t, name in ((a0, "a0"), (b0, "b0"), (b1, "b1")):
         if t.shape != (_TILE, _TILE):
             raise ValueError(f"{name} must be [16,16], got {tuple(t.shape)}")
@@ -871,7 +871,10 @@ def fused_swiglu_mlp_inreg(
     """
     from kernels.common.gfx120x_pad import device_pad, ensure_contiguous
 
-    require_gfx120x(what="fused_swiglu_mlp_inreg (gfx120x)")
+    _why = "fused_swiglu_mlp_inreg (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if out_dtype is None:
         out_dtype = x.dtype
     orig = x.shape
@@ -1278,7 +1281,10 @@ def fused_swiglu_mlp_lds(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="fused_swiglu_mlp_lds (gfx120x)")
+    _why = "fused_swiglu_mlp_lds (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if out_dtype is None:
         out_dtype = x.dtype
     orig = x.shape
@@ -1363,7 +1369,10 @@ def fused_swiglu_mlp_nmajor(
     in-register cube. Every other positive shape uses the LDS kernel, which
     reads the caller's K and FFN and zero-fills the tail. Weights are ``[N, K]``.
     """
-    require_gfx120x(what="fused_swiglu_mlp_nmajor (gfx120x)")
+    _why = "fused_swiglu_mlp_nmajor (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if out_dtype is None:
         out_dtype = x.dtype
     k = int(x.shape[-1])

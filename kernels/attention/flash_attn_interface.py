@@ -1016,9 +1016,14 @@ def _dispatch_gfx120_flash_attn(
             )
         bias = attn_mask
 
-    from kernels.attention import flash_attn_gfx120x_ext as _g12x_ext
     from kernels.attention.flash_attn_gfx120x_host import (
         flydsl_flash_attn_func as _gfx120x_fa,
+    )
+    from kernels.attention.flash_attn_gfx120x_host import (
+        reject_gqa,
+        reject_paged_layout,
+        reject_quant_extras,
+        reject_sink_with_alibi,
     )
 
     _varlen = cu_seqlens_q is not None or cu_seqlens_kv is not None
@@ -1036,11 +1041,11 @@ def _dispatch_gfx120_flash_attn(
         else:
             _hkv = int(k.shape[2])
             _hq = int(q.shape[1])
-        _g12x_ext.reject_gqa(_hq, _hkv, num_kv_heads)
+        reject_gqa(_hq, _hkv, num_kv_heads)
     elif _varlen:
-        _g12x_ext.reject_gqa(int(q.shape[1]), int(k.shape[1]), num_kv_heads)
+        reject_gqa(int(q.shape[1]), int(k.shape[1]), num_kv_heads)
     elif _paged:
-        _g12x_ext.reject_paged_layout(kv_cache_layout)
+        reject_paged_layout(kv_cache_layout)
         if _layout_g == "vectorized":
             if k.dim() != 5:
                 raise ValueError(f"flydsl_flash_attn_func: vectorized paged K must be 5D, got {k.dim()}D")
@@ -1056,9 +1061,9 @@ def _dispatch_gfx120_flash_attn(
                     f"[num_blocks, page_size, num_kv_heads, head_dim], got rank {k.dim()}"
                 )
             _hkv = int(k.shape[2])
-        _g12x_ext.reject_gqa(int(q.shape[2]), _hkv, num_kv_heads)
+        reject_gqa(int(q.shape[2]), _hkv, num_kv_heads)
     elif q.dim() == 4 and k.dim() == 4:
-        _g12x_ext.reject_gqa(int(q.shape[2]), int(k.shape[2]), num_kv_heads)
+        reject_gqa(int(q.shape[2]), int(k.shape[2]), num_kv_heads)
 
     def _gfx120x_quant_paged(kind: str):
         """Paged quant FA. The cache stays in place; the kernel gathers pages."""
@@ -1102,7 +1107,7 @@ def _dispatch_gfx120_flash_attn(
 
     def _gfx120x_call(qb, kb, vb, *, bias_b, out_b):
         """Dense gfx120x FA. Bias/ALiBi, sink, and LSE apply in one launch."""
-        _g12x_ext.reject_sink_with_alibi(sink, alibi_slopes)
+        reject_sink_with_alibi(sink, alibi_slopes)
         got = _gfx120x_fa(
             qb,
             kb,
@@ -1126,7 +1131,7 @@ def _dispatch_gfx120_flash_attn(
     if q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
         if block_table is not None:
             return _gfx120x_quant_paged("fp8")
-        _g12x_ext.reject_quant_extras(
+        reject_quant_extras(
             "fp8",
             bias=bias,
             attn_mask=attn_mask,
@@ -1195,7 +1200,7 @@ def _dispatch_gfx120_flash_attn(
     if q.dtype == torch.int8:
         if block_table is not None:
             return _gfx120x_quant_paged("int8")
-        _g12x_ext.reject_quant_extras(
+        reject_quant_extras(
             "int8",
             bias=bias,
             attn_mask=attn_mask,
@@ -1343,7 +1348,7 @@ def _dispatch_gfx120_flash_attn(
             flydsl_flash_attn_varlen_func as _gfx120x_varlen,
         )
 
-        _g12x_ext.reject_sink_with_alibi(sink, alibi_slopes)
+        reject_sink_with_alibi(sink, alibi_slopes)
         got = _gfx120x_varlen(
             q,
             k,
@@ -1371,7 +1376,7 @@ def _dispatch_gfx120_flash_attn(
         if seqlen_k is None:
             raise ValueError("flydsl_flash_attn_func: gfx120x paged KV requires seqlen_k")
         _layout = kv_cache_layout or "linear"
-        _g12x_ext.reject_paged_layout(_layout)
+        reject_paged_layout(_layout)
         from kernels.attention.flash_attn_gfx120x_host import (
             flydsl_flash_attn_paged_func as _gfx120x_paged,
         )
@@ -1387,7 +1392,7 @@ def _dispatch_gfx120_flash_attn(
                 f"flydsl_flash_attn_func: gfx120x paged seqlen_k must be 1-D int [{_B}], "
                 f"got shape={tuple(seqlen_k.shape)} dtype={seqlen_k.dtype}"
             )
-        _g12x_ext.reject_sink_with_alibi(sink, alibi_slopes)
+        reject_sink_with_alibi(sink, alibi_slopes)
         # Dense-paged + ragged seqlen_k auto-routes inside the gfx120x paged host
         # to varlen-paged (builds cu_seqlens from Sq / seqlen_k). Uniform stays dense.
         got = _gfx120x_paged(

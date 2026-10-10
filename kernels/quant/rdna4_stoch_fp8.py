@@ -21,15 +21,9 @@ import flydsl.expr as fx
 from flydsl.autotune import Config, autotune
 from flydsl.expr import math as fmath
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, kernel_signature, ptr_buf_tensor
+from flydsl.runtime.device import get_rocm_arch
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "stoch_fp8_gfx120x"
@@ -303,7 +297,10 @@ def build_stoch_fp8_module(
     block: int = BLOCK,
 ) -> Callable[..., None]:
     """Build @flyc.jit launcher. path in {"bitcast","select"}."""
-    require_gfx120x("build_stoch_fp8_module")
+    _why = "build_stoch_fp8_module"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if path not in ("bitcast", "select"):
         raise ValueError(f"unknown path {path!r}")
     if in_dtype not in ("float32", "float16", "bfloat16"):

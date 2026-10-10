@@ -22,15 +22,9 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from kernels.common.gfx120x_buf_helpers import kernel_signature
+from flydsl.runtime.device import get_rocm_arch
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "adaln_gfx120x"
@@ -43,7 +37,10 @@ def build_adaln_module(
     N: int, dtype_str: str, subtract_mean: bool, block_threads: Optional[int] = None
 ) -> Callable[..., None]:
     """Specialize fused AdaLN kernel on (N, dtype, subtract_mean)."""
-    require_gfx120x("build_adaln_module")
+    _why = "build_adaln_module"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     if block_threads is None:
         block_threads = BLOCK_THREADS

@@ -19,17 +19,8 @@ from functools import lru_cache
 
 import torch
 
+from flydsl.runtime.device import get_rocm_arch
 from kernels.gemm.rdna4_tile import TileConfig
-
-
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
-
 
 KERNEL_NAME = "rdna4_scaled_mm_fp8"
 
@@ -574,7 +565,10 @@ def scaled_mm_fp8(
     from flydsl.compiler.jit_argument import PointerJitArg
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="scaled_mm_fp8 (gfx120x)")
+    _why = "scaled_mm_fp8 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if a.ndim != 2 or b_nk.ndim != 2:
         raise ValueError("a and b_nk must be 2D [M,K] and [N,K]")
     _fp8 = (torch.float8_e4m3fn, torch.float8_e5m2)

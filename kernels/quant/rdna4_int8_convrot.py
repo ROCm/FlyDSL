@@ -30,15 +30,9 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from flydsl.runtime.device import get_rocm_arch
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 def _kernel_signature(**params: object) -> str:
@@ -852,7 +846,10 @@ def convrot_fwht(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="convrot_fwht (gfx120x)")
+    _why = "convrot_fwht (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     if weight.dtype not in (torch.float32, torch.float16, torch.bfloat16):
         raise ValueError(f"unsupported dtype {weight.dtype}")
@@ -900,7 +897,10 @@ def quantize_int8_convrot_weight(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="quantize_int8_convrot_weight (gfx120x)")
+    _why = "quantize_int8_convrot_weight (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     seed = 0 if stochastic_rounding is None else int(stochastic_rounding)
     if seed < 0:
@@ -967,7 +967,10 @@ def dequantize_int8_convrot_weight(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="dequantize_int8_convrot_weight (gfx120x)")
+    _why = "dequantize_int8_convrot_weight (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     if out_dtype is None:
         out_dtype = torch.bfloat16
@@ -1054,7 +1057,10 @@ def int8_linear_convrot(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="int8_linear_convrot (gfx120x)")
+    _why = "int8_linear_convrot (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     from kernels.gemm.rdna4_int8_linear import int8_linear
 

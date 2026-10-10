@@ -39,18 +39,12 @@ import flydsl.expr as fx
 from flydsl.autotune import Config, autotune
 from flydsl.expr import const_expr, gpu, range_constexpr
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from flydsl.runtime.device import get_rocm_arch
 
 _DEFAULT_GROUP = 64
 WARP = 32
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "awq_dequant_w4a16_gfx120x"
@@ -305,7 +299,10 @@ def dequant_awq_w4a16_weight(
 
     ``wscales`` / ``wzeros`` keep layout ``(K//G, N)`` and are indexed in the kernel.
     """
-    require_gfx120x(what="dequant_awq_w4a16_weight (gfx120x)")
+    _why = "dequant_awq_w4a16_weight (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     if qweight.dim() != 2 or qweight.dtype != torch.int8:
         raise ValueError("qweight must be 2D int8")
@@ -712,7 +709,10 @@ def gemv_awq_w4a16(
     Tile pick: :func:`pick_awq_gemv_tiles` (measured). ``force_n_tile`` overrides
     the N-tile for experiments. M>4 host-chunks in steps of 4.
     """
-    require_gfx120x(what="gemv_awq_w4a16 (gfx120x)")
+    _why = "gemv_awq_w4a16 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     if x.dim() < 1:
         raise ValueError("x must be at least 1D")

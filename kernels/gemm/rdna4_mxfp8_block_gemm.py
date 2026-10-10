@@ -17,15 +17,9 @@ from collections.abc import Callable
 from functools import lru_cache
 
 import torch
+from flydsl.runtime.device import get_rocm_arch
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "rdna4_mxfp8_block_gemm"
@@ -398,7 +392,10 @@ def mxfp8_block_gemm(
     import flydsl.expr as fx
     from kernels.common.tensor_shim import _run_compiled
 
-    require_gfx120x(what="mxfp8_block_gemm (gfx120x)")
+    _why = "mxfp8_block_gemm (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if a.dtype != torch.float8_e4m3fn or b.dtype != torch.float8_e4m3fn:
         raise ValueError(f"A/B must be float8_e4m3fn, got {a.dtype}, {b.dtype}")
     if scale_a.dtype != torch.uint8 or scale_b.dtype != torch.uint8:

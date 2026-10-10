@@ -54,6 +54,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from flydsl.runtime.device import get_rocm_arch
 
 _INT4_GROUP_SIZE = 64
 _INT4_MAX = 7  # signed emission [-7, 7]
@@ -63,13 +64,6 @@ _DEFAULT_PAD = 256
 WARP = 32
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "svdquant_dequant_w4_gfx120x"
@@ -298,7 +292,10 @@ def dequant_svdquant_w4a4_weight(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="dequant_svdquant_w4a4_weight (gfx120x)")
+    _why = "dequant_svdquant_w4a4_weight (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     if qweight.dim() != 2 or qweight.dtype != torch.int8:
         raise ValueError("qweight must be 2D int8")
@@ -638,7 +635,10 @@ def quantize_svdquant_w4a4(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="quantize_svdquant_w4a4 (gfx120x)")
+    _why = "quantize_svdquant_w4a4 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     if x.dim() != 2:
         raise ValueError(f"expected 2D input, got shape {tuple(x.shape)}")
@@ -1048,7 +1048,10 @@ def scaled_mm_svdquant_w4a4(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="scaled_mm_svdquant_w4a4 (gfx120x)")
+    _why = "scaled_mm_svdquant_w4a4 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     m, k_half = act.shape
     n = wgt.shape[0]
@@ -1153,7 +1156,10 @@ def svdquant_w4a4_linear(
     For ``act_unsigned`` (nunchaku post-GELU fc2), applies ``+0.171875`` shift
     to the main-path activation only; LoRA always sees raw ``x``.
     """
-    require_gfx120x(what="svdquant_w4a4_linear (gfx120x)")
+    _why = "svdquant_w4a4_linear (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     orig_shape = x.shape
     x2d = x.reshape(-1, orig_shape[-1])

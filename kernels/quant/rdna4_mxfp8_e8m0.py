@@ -22,6 +22,7 @@ from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from flydsl.runtime.device import get_rocm_arch
 
 _BLOCK_CHOICES = (32, 64, 128, 256, 512, 1024)
 _DEFAULT_BLOCK = 256
@@ -31,13 +32,6 @@ _TINY = 1.1754943508222875e-38
 _FP8_NAN = 0x7F
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 def _stride_blocks(n_items: int) -> tuple[int, ...]:
@@ -496,7 +490,10 @@ def quantize_mxfp8_device(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="quantize_mxfp8 (gfx120x)")
+    _why = "quantize_mxfp8 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if x.dtype not in (torch.float32, torch.bfloat16, torch.float16):
         raise ValueError(f"MXFP8 quant input must be f32/f16/bf16, got {x.dtype}")
     orig_k = int(x.shape[-1])
@@ -530,7 +527,10 @@ def dequantize_mxfp8_device(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="dequantize_mxfp8 (gfx120x)")
+    _why = "dequantize_mxfp8 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if q.dtype != torch.float8_e4m3fn:
         raise ValueError(f"MXFP8 values must be float8_e4m3fn, got {q.dtype}")
     if scale.dtype != torch.uint8:

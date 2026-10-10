@@ -32,6 +32,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
+from flydsl.runtime.device import get_rocm_arch
 
 # Reference int4 MMA group (layout contract); quantize itself is rowwise.
 _INT4_GROUP_SIZE = 64
@@ -40,13 +41,6 @@ _INV_7 = 1.0 / float(_INT4_MAX)
 _SCALE_FLOOR = 1e-10
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 def _kernel_signature(**params: object) -> str:
@@ -490,7 +484,10 @@ def quantize_convrot_w4a4_weight(
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="quantize_convrot_w4a4_weight (gfx120x)")
+    _why = "quantize_convrot_w4a4_weight (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     if quant_group_size != _INT4_GROUP_SIZE:
         raise ValueError(f"int4 MMA contract requires quant_group_size {_INT4_GROUP_SIZE}, got {quant_group_size}")
@@ -591,7 +588,10 @@ def expand_signed_i4(packed: torch.Tensor, *, stream: torch.cuda.Stream | None =
     """Device signed-nibble unpack. ``packed[..., K//2]`` → ``[..., K]`` int8."""
     from kernels.common.gfx120x_pad import ensure_contiguous
 
-    require_gfx120x(what="expand_signed_i4 (gfx120x)")
+    _why = "expand_signed_i4 (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     if packed.dtype != torch.int8:
         raise ValueError(f"packed must be int8, got {packed.dtype}")
@@ -695,7 +695,10 @@ def dequantize_convrot_w4a4_weight(
     from kernels.common.gfx120x_pad import ensure_contiguous
     from kernels.quant.rdna4_int8_convrot import convrot_fwht
 
-    require_gfx120x(what="dequantize_convrot_w4a4_weight (gfx120x)")
+    _why = "dequantize_convrot_w4a4_weight (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if output_dtype is None:
         output_dtype = torch.float32
     if quant_group_size != _INT4_GROUP_SIZE:
@@ -833,7 +836,10 @@ def convrot_w4a4_linear(
     See ``docs/prebuilt_kernels_guide.md`` for call examples.
     Requires gfx120x iu4 WMMA (and iu8 when ``linear_dtype='int8'``).
     """
-    require_gfx120x(what="convrot_w4a4_linear (gfx120x)")
+    _why = "convrot_w4a4_linear (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
 
     from kernels.quant.rdna4_int8_convrot import int8_linear_convrot
 

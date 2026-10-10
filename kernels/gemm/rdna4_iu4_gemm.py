@@ -22,15 +22,9 @@ import torch
 
 from flydsl.compiler.jit_argument import PointerJitArg
 from kernels.gemm.rdna4_tile import TileConfig
+from flydsl.runtime.device import get_rocm_arch
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "rdna4_iu4_gemm"
@@ -567,7 +561,10 @@ def iu4_gemm(
 
     See ``docs/prebuilt_kernels_guide.md`` for call examples.
     """
-    require_gfx120x(what="iu4_gemm (gfx120x)")
+    _why = "iu4_gemm (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     import torch
 
     if a_packed.dim() != 2 or b_packed.dim() != 2:

@@ -16,17 +16,11 @@ import flydsl.expr as fx
 from flydsl.expr import const_expr
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
 from kernels.common.gfx120x_pad import ensure_contiguous
+from flydsl.runtime.device import get_rocm_arch
 
 _BLOCKS = (256,)
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 @lru_cache(maxsize=8)
@@ -113,7 +107,10 @@ def fill_alibi_bias(
     stream: torch.cuda.Stream | None = None,
 ) -> torch.Tensor:
     """Fill ALiBi bias on device. slopes is contiguous fp32 [H] (or [1])."""
-    require_gfx120x(what="fill_alibi_bias (gfx120x)")
+    _why = "fill_alibi_bias (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     s = ensure_contiguous(slopes.detach().to(dtype=torch.float32), stream=stream)
     if s.dim() != 1 or s.numel() < 1:
         raise ValueError(f"fill_alibi_bias: slopes must be 1D nonempty, got {tuple(s.shape)}")

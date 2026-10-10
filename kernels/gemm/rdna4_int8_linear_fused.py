@@ -45,15 +45,9 @@ from flydsl.compiler.jit_argument import PointerJitArg
 from kernels.gemm.rdna4_scaled_mm_fp8_fused import _apply_lora_inplace, _pack_lora_adapters
 
 from .rdna4_int8_linear import TileConfig, pick_tile_config
+from flydsl.runtime.device import get_rocm_arch
 
 
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
 
 
 KERNEL_NAME = "rdna4_int8_linear_fused"
@@ -714,7 +708,10 @@ def int8_linear_fused(
     (and optional scale list) for N adapters in load order — dispatches to
     ``int8_linear_fused_multi``.
     """
-    require_gfx120x(what="int8_linear_fused (gfx120x)")
+    _why = "int8_linear_fused (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     # Device LoRA residual: any LoRA count (1..N) uses multi/device residual path (in-kernel
     # LoRA epilogue measured slower / heavy JIT on an otherwise idle gfx120x).
     if (
@@ -780,7 +777,10 @@ def int8_linear_fused_multi(
     Args accept a single tensor or a sequence of tensors for downs/ups; scales
     may be a scalar (broadcast) or a per-adapter sequence.
     """
-    require_gfx120x(what="int8_linear_fused_multi (gfx120x)")
+    _why = "int8_linear_fused_multi (gfx120x)"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     if a_f.dim() != 2 or b_nk.dim() != 2:
         raise ValueError("int8_linear_fused_multi expects 2D operands")
     if b_nk.dtype != torch.int8:

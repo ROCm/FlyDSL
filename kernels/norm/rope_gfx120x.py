@@ -20,22 +20,13 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import gpu
 from flydsl.expr.typing import T
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.gfx120x_buf_helpers import (
     buf_copy_load,
     buf_copy_store,
     kernel_signature,
     ptr_buf_tensor,
 )
-
-
-def require_gfx120x(what: str = "this gfx120x kernel") -> None:
-    """Raise unless the process arch starts with gfx120. gfx1250 does not match."""
-    from flydsl.runtime.device import get_rocm_arch
-
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{what} requires gfx120x, got arch={arch!r}")
-
 
 KERNEL_NAME = "rope_gfx120x"
 BLOCK_THREADS = 256
@@ -62,7 +53,10 @@ def build_rope_module(
     n_pairs_total: Optional[int] = None,
 ) -> Callable[..., None]:
     """Specialize the RoPE kernel. The default block is 256 threads."""
-    require_gfx120x("build_rope_module")
+    _why = "build_rope_module"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     block = _resolve_build_block(block, n_pairs_total)
     return _build_rope_module_cached(x_name, block)
 
@@ -251,7 +245,10 @@ def build_rope_split_module(
     n_pairs_total: Optional[int] = None,
 ) -> Callable[..., None]:
     """Specialize the RoPE kernel. The default block is 256 threads."""
-    require_gfx120x("build_rope_module")
+    _why = "build_rope_module"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     block = _resolve_build_block(block, n_pairs_total)
     return _build_rope_split_module_cached(x_name, block)
 
@@ -371,7 +368,10 @@ def build_rope_qk_fused_module(
     n_pairs_total: Optional[int] = None,
 ) -> Callable[..., None]:
     """Specialize the RoPE kernel. The default block is 256 threads."""
-    require_gfx120x("build_rope_module")
+    _why = "build_rope_module"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     block = _resolve_build_block(block, n_pairs_total)
     return _build_rope_qk_fused_module_cached(x_name, block)
 
@@ -509,7 +509,10 @@ def build_rope_split_half_qk_fused_module(
     n_pairs_total: Optional[int] = None,
 ) -> Callable[..., None]:
     """Specialize the RoPE kernel. The default block is 256 threads."""
-    require_gfx120x("build_rope_module")
+    _why = "build_rope_module"
+    arch = str(get_rocm_arch() or "")
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
     block = _resolve_build_block(block, n_pairs_total)
     return _build_rope_split_half_qk_fused_module_cached(x_name, block)
 
