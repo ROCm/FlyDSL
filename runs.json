@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-10T12:50:02Z",
+ "updated": "2026-10-10T13:42:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,19 +29,22 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-10T12:23:12Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38051040337/job/114212028700"
+     "completed_at": "2026-10-10T13:38:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38051040337/job/114212028700",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-10-10T12:22:33Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-10T13:10:21Z",
+     "completed_at": "2026-10-10T13:27:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38051040337/job/114212028754"
     }
    ]
@@ -63,10 +66,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-10T12:33:25Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T13:10:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38050189781/job/114211995008"
     },
     {
@@ -81,11 +84,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-10T12:23:00Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38050189781/job/114211995096"
+     "completed_at": "2026-10-10T13:36:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38050189781/job/114211995096",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     }
    ]
   },
@@ -115,11 +121,14 @@
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-10T11:41:26Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38048533871/job/114204905035"
+     "completed_at": "2026-10-10T12:54:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38048533871/job/114204905035",
+     "machine": "gbt350-odcdh1-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -182,11 +191,11 @@
    "branch": "binding_megamoe_tp",
    "event": "pull_request",
    "title": "[Kernel]add mega moe tp kernel for gfx950",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38048136481",
    "created_at": "2026-10-10T11:21:49Z",
-   "updated_at": "2026-10-10T11:41:33Z",
+   "updated_at": "2026-10-10T13:41:10Z",
    "actor": "binding7012",
    "jobs": [
     {
@@ -201,10 +210,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-10T11:41:32Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T13:41:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38048136481/job/114203636888"
     },
     {
