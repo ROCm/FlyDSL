@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-10T05:29:34Z",
+ "updated": "2026-10-10T05:48:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 38027713895,
+   "pr": 1256,
+   "commit": "bb298cf2d58d4c16d30fdb1223441af2b4c6ea90",
+   "branch": "codex/glm5-tp4-fused-indexer",
+   "event": "pull_request",
+   "title": "[Perf] Fuse GLM-5.2 TP4 indexer for MTP4 C1/C2",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38027713895",
+   "created_at": "2026-10-10T05:30:10Z",
+   "updated_at": "2026-10-10T05:38:53Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 38027537467,
    "pr": 1256,
@@ -1065,21 +1080,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37968226703",
    "created_at": "2026-10-09T17:42:59Z",
    "updated_at": "2026-10-09T17:42:59Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37967618829,
-   "pr": null,
-   "commit": "1da8f1c1e646deb989faf67c9e6af2c73107783f",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37967618829",
-   "created_at": "2026-10-09T17:37:45Z",
-   "updated_at": "2026-10-09T17:37:45Z",
    "actor": "dimitri91209",
    "jobs": []
   }
