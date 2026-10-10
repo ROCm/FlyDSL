@@ -36,6 +36,18 @@ def pack_fp8(q: torch.Tensor) -> torch.Tensor:
     return w8.permute(*order).contiguous().view(-1)
 
 
+def pack_ptpc_fp8(q: torch.Tensor) -> torch.Tensor:
+    """Pack row-major PTPC FP8 weights in AITER's 16x16 preshuffle layout."""
+
+    *lead, rows, k = q.shape
+    if rows % 16 or k % 32:
+        raise ValueError(f"PTPC FP8 matrix dimensions must be divisible by (16, 32), got {(rows, k)}")
+    values = q.view(torch.uint8).reshape(*lead, rows // 16, 16, k // 32, 2, 16)
+    nlead = len(lead)
+    order = list(range(nlead)) + [nlead + position for position in (0, 2, 3, 1, 4)]
+    return values.permute(*order).contiguous().view(-1)
+
+
 def pack_mxfp8_weight(q: torch.Tensor) -> torch.Tensor:
     """Preshuffle row-major MXFP8 weights for gfx950 scaled MFMA GEMM."""
 
