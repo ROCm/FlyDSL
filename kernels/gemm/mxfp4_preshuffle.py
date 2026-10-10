@@ -475,7 +475,7 @@ def launch_gemm(
         dma_a_to_lds(kt0, fx.Int32(0))
         rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         gpu.barrier()
-        for iv, state in range(fx.Index(0), fx.Index(k_tiles_local), fx.Index(1), init=accs_init):
+        for iv, state in range(0, k_tiles_local, 1, init=accs_init):
             accs = list(state)
             ivi = fx.Int32(iv)
             cur = ivi % 2

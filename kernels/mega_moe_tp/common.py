@@ -281,9 +281,7 @@ def scales4(e8i):
 
 
 def bf16_bits(f):
-    return fx.Int32(fx.Vector.from_elements([fx.Float32(f).to(fx.BFloat16)], fx.BFloat16).bitcast(fx.Int16)[0]) & i32(
-        0xFFFF
-    )
+    return fx.Int32(fx.Float32(f).to(fx.BFloat16).bitcast(fx.Int16)) & i32(0xFFFF)
 
 
 def pack_bf16x2(a, b):

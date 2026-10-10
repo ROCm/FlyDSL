@@ -675,10 +675,7 @@ def _build_topk_gating_softmax_module(
         # We use the (n - 1) // tpb + 1 form (valid for n >= 1) since the
         # additive (n + tpb - 1) form was producing the wrong grid count
         # under JIT specialization in this DSL.
-        c_tpb_idx = fx.Index(TOKENS_PER_BLOCK)
-        c_one_idx = fx.Index(1)
-        nt_idx = fx.Index(num_tokens_in)
-        grid_x = (nt_idx - c_one_idx) // c_tpb_idx + c_one_idx
+        grid_x = (num_tokens_in - fx.Int32(1)) // fx.Int32(TOKENS_PER_BLOCK) + fx.Int32(1)
 
         launcher = topk_gating_softmax_kernel(
             GatingOutput,

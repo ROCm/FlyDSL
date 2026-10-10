@@ -233,7 +233,7 @@ def emit_direct_fixed_slot_payload(
 
             if lane == fx.Int32(0):
                 weight = buffer_ops.buffer_load(r_wts, wk, vec_width=1, dtype=fx.Float32)
-                weight_bits = fx.Vector.from_elements([weight], fx.Float32).bitcast(fx.Int32)[0]
+                weight_bits = fx.Float32(weight).bitcast(fx.Int32)
                 source_encoding = (fx.Int32(fz_rank * fz_mtpr) + source_token) | (topk_slot << fx.Int32(24))
                 remote_weights = buffer_ops.buffer_load(crfa(p_wts), destination, vec_width=1, dtype=fx.Int64)
                 remote_srcmap = buffer_ops.buffer_load(crfa(p_sm), destination, vec_width=1, dtype=fx.Int64)
@@ -812,7 +812,7 @@ def emit_dispatch_payload(
             def _copy_route_header():
                 weight = buffer_ops.buffer_load(r_wts, wk, vec_width=1, dtype=fx.Float32)
                 source_encoding = (fx.Int32(fz_rank * fz_mtpr) + source_token) | (topk_slot << fx.Int32(24))
-                weight_bits = fx.Vector.from_elements([weight], fx.Float32).bitcast(fx.Int32)[0]
+                weight_bits = fx.Float32(weight).bitcast(fx.Int32)
                 if const_expr(hoist_remote_resources):
                     buffer_ops.buffer_store(weight_bits, wts_remote_rsrc, destination_row)
                     buffer_ops.buffer_store(source_encoding, srcmap_remote_rsrc, destination_row)
