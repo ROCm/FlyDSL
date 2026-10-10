@@ -37,6 +37,8 @@ def make_preshuffle_b_layout(
     if kpack_bytes not in (8, 16):
         raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
 
+    c_n = fx.Index(c_n)
+    c_k = fx.Index(c_k)
     c16 = fx.Index(16)
     c_kpack = fx.Index(kpack_bytes)
 
