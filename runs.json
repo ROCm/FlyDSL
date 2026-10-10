@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-10T08:20:10Z",
+ "updated": "2026-10-10T08:56:36Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 38039565451,
+   "pr": 1258,
+   "commit": "7b0b58c8d47abe07908b7a0db3ac8908882a8cc1",
+   "branch": "xudong/fix-zip2by-guide",
+   "event": "pull_request",
+   "title": "[fix] Build the zipped_divide guide from the tiler shape",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38039565451",
+   "created_at": "2026-10-10T08:55:28Z",
+   "updated_at": "2026-10-10T08:55:56Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 38039281095,
+   "pr": 1258,
+   "commit": "72906b951f8e299e03d6e3ae5fffd184b7fb5113",
+   "branch": "xudong/fix-zip2by-guide",
+   "event": "pull_request",
+   "title": "[fix] Build the zipped_divide guide from the tiler shape",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38039281095",
+   "created_at": "2026-10-10T08:50:31Z",
+   "updated_at": "2026-10-10T08:55:34Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 38035582527,
    "pr": 1069,
@@ -29,10 +59,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-10T08:05:34Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T08:35:29Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38035582527/job/114168401023"
     },
     {
@@ -1109,36 +1139,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37972204506",
    "created_at": "2026-10-09T18:17:09Z",
    "updated_at": "2026-10-09T18:17:09Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37971362336,
-   "pr": null,
-   "commit": "c25d22a20a92df915b29039393fd76f572fde148",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37971362336",
-   "created_at": "2026-10-09T18:09:54Z",
-   "updated_at": "2026-10-09T18:09:54Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37970548201,
-   "pr": null,
-   "commit": "337b1cfe3b43647448cdf06fcc13a4871002718f",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37970548201",
-   "created_at": "2026-10-09T18:02:51Z",
-   "updated_at": "2026-10-09T18:02:51Z",
    "actor": "dimitri91209",
    "jobs": []
   }
