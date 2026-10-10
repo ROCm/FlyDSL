@@ -326,7 +326,7 @@ def _build_kernel(
                     w_sq = w_sq.addf(peer_sq, fastmath=fm_fast)
                     if const_expr(sh_exp >= amax_start_step):
                         peer_am = w_am.shuffle_xor(off, BLOCK_THREADS)
-                        w_am = w_am.maximumf(peer_am)
+                        w_am = fx.max(w_am, peer_am)
                 sq_block = w_sq
                 am_group = w_am  # per-group after partial butterfly
             else:
