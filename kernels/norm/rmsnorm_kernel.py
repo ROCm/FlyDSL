@@ -35,10 +35,12 @@ from kernels.norm.rmsnorm_common import (
     VEC_WIDTH,
     WARP_SIZE,
 )
+from kernels.norm.rmsnorm_common import has_hw_cvt_pk_bf16_f32 as _has_hw_cvt_pk_bf16_f32
 from kernels.norm.rmsnorm_common import load_vec as _load_vec
 from kernels.norm.rmsnorm_common import load_weight_vec as _load_weight_vec
 from kernels.norm.rmsnorm_common import make_reduction_storage as _make_reduction_storage
 from kernels.norm.rmsnorm_common import make_single_reduction_storage as _make_single_reduction_storage
+from kernels.norm.rmsnorm_common import preload_weight_vec as _preload_weight_vec
 from kernels.norm.rmsnorm_common import resolve_rmsnorm_weight_dtype as _resolve_rmsnorm_weight_dtype
 from kernels.norm.rmsnorm_common import store_vec as _store_vec
 from kernels.norm.rmsnorm_common import to_elem_scalar as _to_elem_scalar
@@ -102,7 +104,7 @@ def build_rmsnorm_module(
 ):
     weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     arch = get_rocm_arch()
-    USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
+    USE_HW_CVT_PK_BF16_F32 = _has_hw_cvt_pk_bf16_f32(arch)
     if BLOCK_THREADS is None:
         BLOCK_THREADS = default_block_threads(N, arch)
 
@@ -128,7 +130,22 @@ def build_rmsnorm_module(
     # gfx95x the runtime dispatch below covers every row the plain kernel handles.
     use_nt_dispatch = str(arch).startswith("gfx95") and BF16_ROWS and N > SMALL_N_THRESHOLD and _force_nt is None
     USE_NT = USE_GFX942_BF16_FAST_PATH or bool(_force_nt)
-    PRELOAD_GAMMA = USE_GFX942_BF16_FAST_PATH and VEC_TILES >= BLOCK_THREADS and VEC_TILES % BLOCK_THREADS == 0
+    # The compiler cannot move a load above a store that may alias it, so a gamma load in pass 2 waits one full
+    # memory latency per tile. gfx1250 therefore loads gamma in pass 1 for every row width.
+    PRELOAD_GAMMA = (
+        USE_GFX942_BF16_FAST_PATH and VEC_TILES >= BLOCK_THREADS and VEC_TILES % BLOCK_THREADS == 0
+    ) or arch == "gfx1250"
+    # Tiles that lie wholly inside the row skip the bounds checks. On gfx1250 the checks cost VGPRs: at N = 32768
+    # they raise this kernel from 252 to 258 VGPRs, past the 256 it can use without s_set_vgpr_msb bank switches,
+    # and M = 4096 then runs 1.56x slower.
+    SKIP_FULL_TILE_CHECKS = arch == "gfx1250"
+    # Without a scheduling barrier, the scheduler sinks the gamma loads, and the x load of a partial last tile, below
+    # the first wait to save VGPRs. Each row then waits two or three memory latencies instead of one.
+    LOADS_FIRST = arch == "gfx1250"
+    # One reduction per row: every wave reads the partials after a single barrier instead of waiting for wave 0.
+    ONE_BARRIER_REDUCE = arch == "gfx1250"
+    # sum_sq / N compiles to a correctly rounded division sequence on the path of every row.
+    RCP_MEAN = arch == "gfx1250"
     INPUT_CACHE_MODIFIER = 2 if USE_NT else 0
     # Streaming the stores too costs 6-8% on gfx95x; letting them settle in LLC
     # drains them to HBM in better-scheduled bursts. gfx942 keeps its own tuning.
@@ -330,6 +347,11 @@ def build_rmsnorm_module(
                 fx.memref_store(w, s_red, wave)
             gpu.barrier()
 
+            if const_expr(ONE_BARRIER_REDUCE):
+                has_part = lane < RED_SLOTS
+                part = fx.memref_load(s_red, has_part.select(lane, 0))
+                return wave_reduce_add(has_part.select(part, 0.0))
+
             if wave == 0:
                 in_range = lane < RED_SLOTS
                 lane_safe = in_range.select(lane, 0)
@@ -341,6 +363,9 @@ def build_rmsnorm_module(
             gpu.barrier()
 
             return fx.memref_load(s_red, 0)
+
+        def mean_of(sum_sq):
+            return sum_sq * (1.0 / n_float) if const_expr(RCP_MEAN) else sum_sq / n_float
 
         # Vector path for the f16/bf16 vec8 prefix plus an optional scalar tail.
         if const_expr(USE_VEC_N):
@@ -371,19 +396,34 @@ def build_rmsnorm_module(
             gamma_local = []
 
             # Pass 1: load + cache + sumsq
-            for tile_i in range_constexpr(NUM_VEC_ITERS):
+            def load_tile(tile_i):
                 idx = tid + tile_i * BLOCK_THREADS
+                full_tile = SKIP_FULL_TILE_CHECKS and (tile_i + 1) * BLOCK_THREADS <= VEC_TILES
                 is_valid = idx < VEC_TILES
-                idx_safe = is_valid.select(idx, 0)
-                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe)
-                in_local.append(vec)
+                idx_safe = idx if full_tile else is_valid.select(idx, 0)
+                in_local.append(_load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe))
                 if const_expr(PRELOAD_GAMMA):
-                    gamma_local.append(_load_vec(gamma_copy_atom, VEC_WIDTH, weight_elem_dtype, gamma_div, idx_safe))
-                x = vec.to(fx.Float32)
+                    gamma_local.append(
+                        _preload_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx_safe)
+                    )
+                return full_tile, is_valid
 
+            def add_sumsq(acc, tile_i, full_tile, is_valid):
+                x = in_local[tile_i].to(fx.Float32)
                 x2 = x * x
                 red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
+                return acc + (red2 if full_tile else is_valid.select(red2, c_zero_f))
+
+            if const_expr(LOADS_FIRST):
+                tiles = []
+                for tile_i in range_constexpr(NUM_VEC_ITERS):
+                    tiles.append(load_tile(tile_i))
+                fx.rocdl.sched_barrier(0)
+                for tile_i in range_constexpr(NUM_VEC_ITERS):
+                    thread_sumsq = add_sumsq(thread_sumsq, tile_i, *tiles[tile_i])
+            else:
+                for tile_i in range_constexpr(NUM_VEC_ITERS):
+                    thread_sumsq = add_sumsq(thread_sumsq, tile_i, *load_tile(tile_i))
 
             if const_expr(TAIL_ELEMS > 0):
                 if tid < TAIL_ELEMS:
@@ -393,7 +433,7 @@ def build_rmsnorm_module(
                     thread_sumsq = thread_sumsq + x_tail * x_tail
 
             sum_sq = block_reduce_add(thread_sumsq)
-            mean_sq = sum_sq / n_float
+            mean_sq = mean_of(sum_sq)
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
@@ -402,18 +442,24 @@ def build_rmsnorm_module(
                     Rstd_buf[bid] = rrms
 
             # Pass 2: normalize + gamma + store (reuse cached input)
+            def normalize_store(tile_i, idx):
+                if const_expr(PRELOAD_GAMMA):
+                    g = gamma_local[tile_i].to(fx.Float32)
+                else:
+                    g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
+                x = in_local[tile_i].to(fx.Float32)
+
+                y = (x * rrms) * g
+                out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
+                _store_vec(output_copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, idx)
+
             for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
-                if idx < VEC_TILES:
-                    if const_expr(PRELOAD_GAMMA):
-                        g = gamma_local[tile_i].to(fx.Float32)
-                    else:
-                        g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
-                    x = in_local[tile_i].to(fx.Float32)
-
-                    y = (x * rrms) * g
-                    out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
-                    _store_vec(output_copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, idx)
+                if const_expr(SKIP_FULL_TILE_CHECKS and (tile_i + 1) * BLOCK_THREADS <= VEC_TILES):
+                    normalize_store(tile_i, idx)
+                else:
+                    if idx < VEC_TILES:
+                        normalize_store(tile_i, idx)
 
             if const_expr(TAIL_ELEMS > 0):
                 if tid < TAIL_ELEMS:
@@ -449,7 +495,7 @@ def build_rmsnorm_module(
                 thread_sumsq = thread_sumsq + x2_safe
 
             sum_sq = block_reduce_add(thread_sumsq)
-            mean_sq = sum_sq / n_float
+            mean_sq = mean_of(sum_sq)
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
@@ -567,7 +613,15 @@ def _build_rmsnorm_small_n_module(
     TAIL_ELEMS = N - VEC_ELEMS
     NUM_VEC_ROW_ITERS = (VEC_TILES + THREADS_PER_ROW - 1) // THREADS_PER_ROW if USE_VEC_SMALL_N else 0
     arch = get_rocm_arch()
-    USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
+    USE_HW_CVT_PK_BF16_F32 = _has_hw_cvt_pk_bf16_f32(arch)
+    # Same reason as PRELOAD_GAMMA in build_rmsnorm_module.
+    PRELOAD_GAMMA = arch == "gfx1250"
+    # On gfx1250 the multi-row kernel is faster at every M while each lane handles at most three vectors of a row
+    # (N <= 768). For wider rows it is faster only when M > N; below that one workgroup per row wins.
+    if arch == "gfx1250" and USE_VEC_SMALL_N:
+        MULTI_ROW_MIN_M = 0 if NUM_VEC_ROW_ITERS <= 3 else N
+    else:
+        MULTI_ROW_MIN_M = FWD_MULTI_ROW_THRESHOLD
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS_SPECIAL, 1, 1])
     def rmsnorm_large_m_small_n_kernel(
@@ -620,12 +674,19 @@ def _build_rmsnorm_small_n_module(
                 gamma_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), weight_elem_bits)
 
                 in_local = []
+                gamma_local = []
                 for tile_i in range_constexpr(NUM_VEC_ROW_ITERS):
                     idx = lane + tile_i * THREADS_PER_ROW
                     is_valid = idx < VEC_TILES
                     idx_safe = is_valid.select(idx, 0)
                     vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe)
                     in_local.append(vec)
+                    if const_expr(PRELOAD_GAMMA):
+                        gamma_local.append(
+                            _preload_weight_vec(
+                                gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx_safe
+                            )
+                        )
                     x = vec.to(fx.Float32)
                     x2 = x * x
                     red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
@@ -650,13 +711,16 @@ def _build_rmsnorm_small_n_module(
                 for tile_i in range_constexpr(NUM_VEC_ROW_ITERS):
                     idx = lane + tile_i * THREADS_PER_ROW
                     if idx < VEC_TILES:
-                        g = _load_weight_vec(
-                            gamma_copy_atom,
-                            weight_dtype_str,
-                            weight_elem_dtype,
-                            gamma_div,
-                            idx,
-                        )
+                        if const_expr(PRELOAD_GAMMA):
+                            g = gamma_local[tile_i].to(fx.Float32)
+                        else:
+                            g = _load_weight_vec(
+                                gamma_copy_atom,
+                                weight_dtype_str,
+                                weight_elem_dtype,
+                                gamma_div,
+                                idx,
+                            )
                         x = in_local[tile_i].to(fx.Float32)
                         y = (x * rrms) * g
                         y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
@@ -732,7 +796,7 @@ def _build_rmsnorm_small_n_module(
 
             @flyc.jit
             def dispatch():
-                if m_in > fx.Int32(FWD_MULTI_ROW_THRESHOLD):
+                if m_in > fx.Int32(MULTI_ROW_MIN_M):
                     launch_multi_row()
                 else:
                     launch_one_row()
@@ -768,7 +832,7 @@ def _build_rmsnorm_small_n_module(
 
         @flyc.jit
         def dispatch():
-            if m_in > fx.Int32(FWD_MULTI_ROW_THRESHOLD):
+            if m_in > fx.Int32(MULTI_ROW_MIN_M):
                 launch_multi_row()
             else:
                 launch_one_row()
@@ -787,7 +851,16 @@ def build_fused_add_rmsnorm_module(
 ):
     weight_dtype_str = _resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     arch = get_rocm_arch()
-    USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
+    USE_HW_CVT_PK_BF16_F32 = _has_hw_cvt_pk_bf16_f32(arch)
+    # gfx1250 issues every x, residual and gamma load before the first residual_out store, for the reason given at
+    # PRELOAD_GAMMA in build_rmsnorm_module.
+    HOIST_LOADS = arch == "gfx1250"
+    # As in build_rmsnorm_module: at N = 32768 the checks of full tiles raise this kernel from 238 to 254 VGPRs, just
+    # below the 256 it can use without bank switches.
+    SKIP_FULL_TILE_CHECKS = arch == "gfx1250"
+    # As in build_rmsnorm_module: one reduction per row after a single barrier, and no division for the mean.
+    ONE_BARRIER_REDUCE = arch == "gfx1250"
+    RCP_MEAN = arch == "gfx1250"
 
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
@@ -832,6 +905,16 @@ def build_fused_add_rmsnorm_module(
             return w
 
         def block_reduce_add(val):
+            if const_expr(ONE_BARRIER_REDUCE and RED_SLOTS > 1):
+                lane = tid % WARP_SIZE
+                wave = tid // WARP_SIZE
+                w = wave_reduce_add(val)
+                if lane == 0:
+                    fx.memref_store(w, s_red, wave)
+                gpu.barrier()
+                in_range = lane < RED_SLOTS
+                v = fx.memref_load(s_red, in_range.select(lane, 0))
+                return wave_reduce_add(in_range.select(v, 0.0))
             dummy = fx.Float32(0.0)
             r0, _ = block_reduce_add2(val, dummy)
             return r0
@@ -868,6 +951,9 @@ def build_fused_add_rmsnorm_module(
 
             return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
+        def mean_of(sum_sq):
+            return sum_sq * (1.0 / n_float) if const_expr(RCP_MEAN) else sum_sq / n_float
+
         # Vector path for every complete f16/bf16 vec8 row.
         if const_expr(USE_VEC_N):
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
@@ -894,27 +980,52 @@ def build_fused_add_rmsnorm_module(
             thread_sumsq = c_zero_f
             thread_dummy = c_zero_f
             add_local = []
+            in_local = []
+            residual_local = []
+            gamma_local = []
+
+            if const_expr(HOIST_LOADS):
+                for tile_i in range_constexpr(NUM_VEC_ITERS):
+                    idx = tid + tile_i * BLOCK_THREADS
+                    full_tile = SKIP_FULL_TILE_CHECKS and (tile_i + 1) * BLOCK_THREADS <= VEC_TILES
+                    idx_safe = idx if full_tile else (idx < VEC_TILES).select(idx, 0)
+                    in_local.append(_load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe))
+                    residual_local.append(_load_vec(copy_atom, VEC_WIDTH, elem_dtype, residual_in_div, idx_safe))
+                    gamma_local.append(
+                        _preload_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx_safe)
+                    )
 
             # Pass 1: add + cache + sumsq (also write residual_out)
             for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
+                full_tile = SKIP_FULL_TILE_CHECKS and (tile_i + 1) * BLOCK_THREADS <= VEC_TILES
                 is_valid = idx < VEC_TILES
-                idx_safe = is_valid.select(idx, 0)
-                x = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe).to(fx.Float32)
-                residual = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, residual_in_div, idx_safe).to(fx.Float32)
+                idx_safe = idx if full_tile else is_valid.select(idx, 0)
+                if const_expr(HOIST_LOADS):
+                    x = in_local[tile_i].to(fx.Float32)
+                    residual = residual_local[tile_i].to(fx.Float32)
+                else:
+                    x = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe).to(fx.Float32)
+                    residual = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, residual_in_div, idx_safe).to(fx.Float32)
                 added_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, x + residual)
                 add_local.append(added_e)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
 
                 added2 = added * added
                 red2 = added2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
+                thread_sumsq = thread_sumsq + (red2 if full_tile else is_valid.select(red2, c_zero_f))
 
-                if idx < VEC_TILES:
+                if const_expr(full_tile):
                     _store_vec(copy_atom, VEC_WIDTH, elem_dtype, added_e, residual_out_div, idx)
+                else:
+                    if idx < VEC_TILES:
+                        _store_vec(copy_atom, VEC_WIDTH, elem_dtype, added_e, residual_out_div, idx)
 
-            _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
-            mean_sq = sum_sq / n_float
+            if const_expr(ONE_BARRIER_REDUCE):
+                sum_sq = block_reduce_add(thread_sumsq)
+            else:
+                _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
+            mean_sq = mean_of(sum_sq)
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
@@ -923,14 +1034,23 @@ def build_fused_add_rmsnorm_module(
                     Rstd_buf[bid] = rrms
 
             # Pass 2: normalize + gamma + store (reuse cached added values)
+            def normalize_store(tile_i, idx):
+                if const_expr(HOIST_LOADS):
+                    g = gamma_local[tile_i].to(fx.Float32)
+                else:
+                    g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
+                added = add_local[tile_i] if dtype_str == "f32" else add_local[tile_i].to(fx.Float32)
+                y = (added * rrms) * g
+                y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
+                _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, idx)
+
             for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
-                if idx < VEC_TILES:
-                    g = _load_weight_vec(gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx)
-                    added = add_local[tile_i] if dtype_str == "f32" else add_local[tile_i].to(fx.Float32)
-                    y = (added * rrms) * g
-                    y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
-                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, idx)
+                if const_expr(SKIP_FULL_TILE_CHECKS and (tile_i + 1) * BLOCK_THREADS <= VEC_TILES):
+                    normalize_store(tile_i, idx)
+                else:
+                    if idx < VEC_TILES:
+                        normalize_store(tile_i, idx)
 
         else:
             # Scalar fallback for arbitrary N.
@@ -964,7 +1084,7 @@ def build_fused_add_rmsnorm_module(
                 thread_sumsq = thread_sumsq + is_valid.select(added2, c_zero_f)
 
             sum_sq = block_reduce_add(thread_sumsq)
-            mean_sq = sum_sq / n_float
+            mean_sq = mean_of(sum_sq)
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
@@ -1398,7 +1518,7 @@ def _build_fused_add_rmsnorm_quant_module(
     eps: float = EPS,
 ):
     arch = get_rocm_arch()
-    USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
+    USE_HW_CVT_PK_BF16_F32 = _has_hw_cvt_pk_bf16_f32(arch)
 
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
