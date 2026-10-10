@@ -293,4 +293,6 @@ def launch_gemm_bf16(
 
 launch_gemm_bf16.compile_hints["llvm_options"] = {
     "amdgpu-expert-scheduling-mode": True,
+    # Arguments preloaded into SGPRs are ready at wave start. Loading them costs each launch about 0.4 us on gfx1250.
+    "amdgpu-kernarg-preload-count": 16,
 }
