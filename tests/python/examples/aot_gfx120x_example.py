@@ -11,9 +11,10 @@ Usage:
     ARCH=gfx1201 python tests/python/examples/aot_gfx120x_example.py --out ./aot_gfx120x_out
     ARCH=gfx1201 python tests/python/examples/aot_gfx120x_example.py --all
 
-``--all`` exports every shipped family that compiles under pointer or small CUDA
-placeholder args. Families that need live ``fx.Tensor`` shapes without a CUDA
-device are skipped with a printed reason (see ``--all`` help / SKIP notes).
+``--all`` exports the gfx120x product kernels. Pointer launches compile
+without a device. Tensor launches (AdaLN, RMS+RoPE, MXFP quant, ALiBi, the
+bool mask, AWQ dequant, int8 ConvRot dequant, fused MLP, rowwise) need a
+live CUDA device and are skipped with a printed reason when it is absent.
 
 Environment:
     ARCH / FLYDSL_GPU_ARCH   Target arch (e.g. gfx1201, gfx1200). ``ARCH`` wins
@@ -405,8 +406,9 @@ def compile_and_export_adaln(out_dir: Path) -> Path:
     x = _cuda_tensor(2, 64)
     if x is None:
         raise RuntimeError("SKIP adaln: needs live CUDA for fx.Tensor launch compile")
-    scale = _cuda_tensor(64)
-    shift = _cuda_tensor(64)
+    # Scale and shift are [group, N]. The kernel indexes row bid // group.
+    scale = _cuda_tensor(2, 64)
+    shift = _cuda_tensor(2, 64)
     out = _cuda_tensor(2, 64)
     launch = build_adaln_module(64, "bfloat16", True, block_threads=32)
     stream = fx.Stream(None)
@@ -427,7 +429,8 @@ def compile_and_export_rms_rope(out_dir: Path) -> Path:
     if x is None:
         raise RuntimeError("SKIP rms_rope: needs live CUDA for fx.Tensor launch compile")
     scale = _cuda_tensor(hd)
-    freqs = _cuda_tensor(hd // 2, 2, dtype=__import__("torch").float32)
+    # Freqs are [rows, pairs, 2, 2], the layout the kernel indexes.
+    freqs = _cuda_tensor(2, hd // 2, 2, 2, dtype=__import__("torch").float32)
     out = _cuda_tensor(2, hd)
     launch = build_rms_rope_module(hd, "bfloat16", block_threads=64)
     stream = fx.Stream(None)
@@ -624,6 +627,242 @@ def compile_and_export_rowwise(out_dir: Path) -> Path:
     return _export(compiled, out_dir, "quantize_int8_rowwise_gfx120x")
 
 
+def compile_and_export_mxfp8_gemm(out_dir: Path) -> Path:
+    """Compile MXFP8 block GEMM and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.gemm.rdna4_mxfp8_block_gemm import build_mxfp8_block_gemm_module
+
+    launch = build_mxfp8_block_gemm_module("bfloat16", skip_bounds=True, k_tail=0)
+    compiled = flyc.compile(launch, _ptr(), _ptr(), _ptr(), _ptr(), _ptr(), 64, 64, 64, 2, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "mxfp8_block_gemm_gfx120x_bf16")
+
+
+def compile_and_export_mxfp4_gemm(out_dir: Path) -> Path:
+    """Compile MXFP4 block GEMM and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.gemm.rdna4_mxfp4_block_gemm import build_mxfp4_block_gemm_module
+
+    launch = build_mxfp4_block_gemm_module("bfloat16", skip_bounds=True)
+    compiled = flyc.compile(launch, _ptr(), _ptr(), _ptr(), _ptr(), _ptr(), 64, 64, 64, 2, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "mxfp4_block_gemm_gfx120x_bf16")
+
+
+def compile_and_export_silu(out_dir: Path) -> Path:
+    """Compile SiLU multiply and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.common.gfx120x_swiglu import build_silu_mul_module
+
+    launch = build_silu_mul_module("bfloat16")
+    compiled = flyc.compile(launch, _ptr(), _ptr(), _ptr(), 64, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "silu_mul_gfx120x_bf16")
+
+
+def compile_and_export_fp8_dequant(out_dir: Path) -> Path:
+    """Compile per-tensor FP8 dequant and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.quant.rdna4_fp8_quant import build_fp8_dequant_module
+
+    launch = build_fp8_dequant_module("bfloat16", e5m2=False)
+    compiled = flyc.compile(launch, _ptr(), _ptr(), _ptr(), 64, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "fp8_dequant_gfx120x_bf16")
+
+
+def compile_and_export_splitk(out_dir: Path) -> Path:
+    """Compile the bf16 split-K combine and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.attention.flash_attn_gfx120x_splitk import build_splitk_combine_module
+
+    launch = build_splitk_combine_module(4, 64, "bf16").jit_function
+    compiled = flyc.compile(
+        launch,
+        _ptr(),
+        _ptr(),
+        _ptr(),
+        _ptr(),
+        _ptr(),
+        _ptr(),
+        1,
+        64,
+        2,
+        128,
+        fx.Stream(None),
+    )
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "splitk_combine_gfx120x_bf16")
+
+
+def _need_cuda(label: str):
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(f"SKIP {label}: needs live CUDA for fx.Tensor launch compile")
+
+
+def compile_and_export_alibi(out_dir: Path) -> Path:
+    """Compile the ALiBi bias fill and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.attention.gfx120x_alibi_bias import build_alibi_bias_module
+
+    _need_cuda("alibi")
+    import torch
+
+    slopes = torch.empty(1, device="cuda", dtype=torch.float32)
+    out = torch.empty(16 * 16, device="cuda", dtype=torch.float32)
+    launch = build_alibi_bias_module(block_threads=256, per_head=False)
+    compiled = flyc.compile(launch, slopes, out, 16, 16, 1, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "alibi_bias_gfx120x")
+
+
+def compile_and_export_attn_mask(out_dir: Path) -> Path:
+    """Compile the bool-mask conversion and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.attention.gfx120x_attn_mask import build_bool_mask_to_bias_module
+
+    _need_cuda("attn_mask")
+    import torch
+
+    mask = torch.empty(64, device="cuda", dtype=torch.uint8)
+    out = torch.empty(64, device="cuda", dtype=torch.float32)
+    launch = build_bool_mask_to_bias_module(256)
+    compiled = flyc.compile(launch, mask, out, 64, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "attn_mask_gfx120x")
+
+
+def compile_and_export_mxfp8_quant(out_dir: Path) -> Path:
+    """Compile aligned MXFP8 quant and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.quant.rdna4_mxfp8_e8m0 import build_mxfp8_quant_module
+
+    _need_cuda("mxfp8_quant")
+    import torch
+
+    x = torch.empty(2, 32, device="cuda", dtype=torch.bfloat16)
+    q = torch.empty(2, 8, device="cuda", dtype=torch.int32)
+    scale = torch.empty(2, device="cuda", dtype=torch.uint8)
+    launch = build_mxfp8_quant_module("bfloat16")
+    compiled = flyc.compile(launch, x, q, scale, 2, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "mxfp8_quant_gfx120x")
+
+
+def compile_and_export_mxfp8_dequant(out_dir: Path) -> Path:
+    """Compile aligned MXFP8 dequant and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.quant.rdna4_mxfp8_e8m0 import build_mxfp8_dequant_module
+
+    _need_cuda("mxfp8_dequant")
+    import torch
+
+    q = torch.empty(2, 8, device="cuda", dtype=torch.int32)
+    scale = torch.empty(2, device="cuda", dtype=torch.uint8)
+    out = torch.empty(2, 32, device="cuda", dtype=torch.float32)
+    launch = build_mxfp8_dequant_module(False)
+    compiled = flyc.compile(launch, q, scale, out, 2, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "mxfp8_dequant_gfx120x")
+
+
+def compile_and_export_mxfp4_quant(out_dir: Path) -> Path:
+    """Compile aligned MXFP4 quant and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.quant.rdna4_mxfp4_e2m1 import build_mxfp4_quant_module
+
+    _need_cuda("mxfp4_quant")
+    import torch
+
+    x = torch.empty(2, 32, device="cuda", dtype=torch.bfloat16)
+    q = torch.empty(2, 16, device="cuda", dtype=torch.uint8)
+    scale = torch.empty(2, device="cuda", dtype=torch.uint8)
+    launch = build_mxfp4_quant_module("bfloat16")
+    compiled = flyc.compile(launch, x, q, scale, 2, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "mxfp4_quant_gfx120x")
+
+
+def compile_and_export_mxfp4_dequant(out_dir: Path) -> Path:
+    """Compile aligned MXFP4 dequant and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.quant.rdna4_mxfp4_e2m1 import build_mxfp4_dequant_module
+
+    _need_cuda("mxfp4_dequant")
+    import torch
+
+    q = torch.empty(2, 16, device="cuda", dtype=torch.uint8)
+    scale = torch.empty(2, device="cuda", dtype=torch.uint8)
+    out = torch.empty(2, 32, device="cuda", dtype=torch.float32)
+    launch = build_mxfp4_dequant_module()
+    compiled = flyc.compile(launch, q, scale, out, 2, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "mxfp4_dequant_gfx120x")
+
+
+def compile_and_export_awq_dequant(out_dir: Path) -> Path:
+    """Compile AWQ weight dequant and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.quant.rdna4_awq_w4a16 import build_awq_dequant_w4a16_module
+
+    _need_cuda("awq_dequant")
+    import torch
+
+    q = torch.empty(2, 64, device="cuda", dtype=torch.uint8)
+    scales = torch.empty(2, 2, device="cuda", dtype=torch.bfloat16)
+    zeros = torch.empty(2, 2, device="cuda", dtype=torch.bfloat16)
+    out = torch.empty(2, 128, device="cuda", dtype=torch.bfloat16)
+    launch = build_awq_dequant_w4a16_module(k=128, group_size=64, out_dtype="bfloat16")
+    compiled = flyc.compile(launch, q, scales, zeros, out, 2, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "awq_dequant_gfx120x")
+
+
+def compile_and_export_int8_convrot_dequant(out_dir: Path) -> Path:
+    """Compile int8 ConvRot dequant and export C object."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from kernels.quant.rdna4_int8_convrot import build_int8_convrot_dequant_module
+
+    _need_cuda("int8_convrot_dequant")
+    import torch
+
+    q = torch.empty(2, 64, device="cuda", dtype=torch.int8)
+    scale = torch.empty(2, 1, device="cuda", dtype=torch.float32)
+    out = torch.empty(2, 64, device="cuda", dtype=torch.bfloat16)
+    launch = build_int8_convrot_dequant_module(out_dtype="bfloat16", group_size=64, k=64)
+    compiled = flyc.compile(launch, q, scale, out, 2, fx.Stream(None))
+    if compiled is None:
+        raise RuntimeError("flyc.compile returned None")
+    return _export(compiled, out_dir, "int8_convrot_dequant_gfx120x")
+
+
 def compile_and_export_tensorwise(out_dir: Path) -> Path:
     """Compile int8 tensorwise quant (partial kernel) and export C object."""
     import flydsl.compiler as flyc
@@ -800,6 +1039,19 @@ def _run_pack_body(
             ("fp8_fused", compile_and_export_fp8_fused),
             ("rowwise", compile_and_export_rowwise),
             ("tensorwise", compile_and_export_tensorwise),
+            ("mxfp8_gemm", compile_and_export_mxfp8_gemm),
+            ("mxfp4_gemm", compile_and_export_mxfp4_gemm),
+            ("silu", compile_and_export_silu),
+            ("fp8_dequant", compile_and_export_fp8_dequant),
+            ("splitk", compile_and_export_splitk),
+            ("alibi", compile_and_export_alibi),
+            ("attn_mask", compile_and_export_attn_mask),
+            ("mxfp8_quant", compile_and_export_mxfp8_quant),
+            ("mxfp8_dequant", compile_and_export_mxfp8_dequant),
+            ("mxfp4_quant", compile_and_export_mxfp4_quant),
+            ("mxfp4_dequant", compile_and_export_mxfp4_dequant),
+            ("awq_dequant", compile_and_export_awq_dequant),
+            ("int8_convrot_dequant", compile_and_export_int8_convrot_dequant),
         ]
         for label, fn in extras:
             _try_export(label, fn, out_dir, written, skips)
@@ -814,10 +1066,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "AOT export gfx120x ship kernels (RoPE / W8A16 / FlashAttention + --all families). "
-            "SKIP notes for --all: adaln/rms_rope/fused_mlp/rowwise need live CUDA for "
-            "fx.Tensor launch compile; pointer families export without a device. "
-            "Parked / N/A (not exported): SwiGLU K>16 multi-wave, multi-path stoch/SwiGLU "
-            "block-threads, fused MLP non-16 tiles, extra FP8 large-shape variants, FP4."
+            "Tensor launches need a live CUDA device. Pointer launches do not. "
+            "Tile variants that are not a separate product (extra FP8 shapes, "
+            "SwiGLU block sizes, non-16 MLP tiles) stay on the one exported specialization."
         )
     )
     parser.add_argument(
@@ -833,8 +1084,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Also export fp8/int8 FA, iu4 GEMM, AWQ, SVD, ConvRot, plus adaln, rms_rope, "
-            "swiglu, stoch_fp8, fp8_quant, int8_linear, scaled_mm_fp8, fused_mlp, asym_w4a8, "
-            "fused int8/fp8, rowwise, tensorwise (export what compiles; print SKIP+reason)"
+            "swiglu, silu, stoch_fp8, fp8 quant/dequant, int8_linear, scaled_mm_fp8, "
+            "mxfp8/mxfp4 GEMM and quant, split-K combine, ALiBi, bool mask, fused_mlp, "
+            "asym_w4a8, fused int8/fp8, rowwise, tensorwise, AWQ dequant, and int8 ConvRot "
+            "dequant (export what compiles; print SKIP+reason)"
         ),
     )
     args = parser.parse_args(argv)
@@ -926,6 +1179,29 @@ def test_aot_gfx120x_broaden_export(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     )
     # rope + prior broaden set; extras may skip without CUDA
     assert len(objs) >= 7
+    names = {obj.name for obj in objs}
+    for required in (
+        "mxfp8_block_gemm_gfx120x_bf16.o",
+        "mxfp4_block_gemm_gfx120x_bf16.o",
+        "silu_mul_gfx120x_bf16.o",
+        "fp8_dequant_gfx120x_bf16.o",
+        "splitk_combine_gfx120x_bf16.o",
+    ):
+        assert required in names, f"missing AOT object {required}; skips={names}"
+    if torch.cuda.is_available():
+        for required in (
+            "adaln_gfx120x_bf16.o",
+            "rms_rope_gfx120x_bf16.o",
+            "alibi_bias_gfx120x.o",
+            "attn_mask_gfx120x.o",
+            "mxfp8_quant_gfx120x.o",
+            "mxfp8_dequant_gfx120x.o",
+            "mxfp4_quant_gfx120x.o",
+            "mxfp4_dequant_gfx120x.o",
+            "awq_dequant_gfx120x.o",
+            "int8_convrot_dequant_gfx120x.o",
+        ):
+            assert required in names, f"missing AOT object {required}"
     for obj in objs:
         assert obj.is_file() and obj.stat().st_size > 0
         assert obj.read_bytes()[:4] == b"\x7fELF"

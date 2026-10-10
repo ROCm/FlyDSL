@@ -286,4 +286,6 @@ def build_splitk_combine_module(
             stream,
         )
 
+    # AOT compiles the jit launcher. The host still calls this wrapper.
+    _launch.jit_function = launch_splitk_combine
     return _launch

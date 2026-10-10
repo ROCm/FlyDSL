@@ -412,6 +412,7 @@ Wave32 WMMA. These calls are for gfx120x. The sections above are unchanged.
 | SVDQuant W4A4 | `kernels/quant/rdna4_svdquant_w4a4.py` |
 | int4 pack | `kernels/quant/rdna4_int4_codec.py` |
 | SiLU / SwiGLU | `kernels/common/gfx120x_swiglu.py` |
+| Capability query | `kernels/common/gfx120x_capabilities.py` (`available_for_arch`, then `resolve`) |
 
 `rocdl.SWMMAC` is an atom. No kernel calls it. Shared helpers: `kernels/common/gfx120x_arch.py`, `gfx120x_buf_helpers.py`, `gfx120x_pad.py`, `gfx120x_row_bias.py`, `gfx120x_autotune_tables.py`, `kernels/gemm/rdna4_tile.py`.
 

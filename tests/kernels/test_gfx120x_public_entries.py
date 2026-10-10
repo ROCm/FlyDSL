@@ -69,3 +69,27 @@ def test_hosts_the_audits_found_uncalled_are_still_exported() -> None:
         quantize_and_rotate_rowwise,
     ):
         assert callable(fn)
+
+
+def test_capability_catalog_is_arch_gated_and_callable() -> None:
+    """A host can list gfx120x calls. Other arches, including gfx1250, get none."""
+    from kernels.common.gfx120x_capabilities import available_for_arch, catalog, resolve
+
+    ops = catalog()
+    names = [op.name for op in ops]
+    assert len(names) == len(set(names))
+    assert "flash_attn" in names
+    assert "scaled_mm_fp8" in names
+    assert "mxfp4_block_gemm" in names
+    assert "iu4_gemm" in names
+    assert available_for_arch("gfx950") == ()
+    assert available_for_arch("gfx942") == ()
+    assert available_for_arch("gfx1250") == ()
+    assert available_for_arch("gfx11") == ()
+    assert available_for_arch(None) == ()
+    assert available_for_arch("gfx1201") == ops
+    assert available_for_arch("gfx1200:xnack-") == ops
+    for op in ops:
+        fn = resolve(op.name)
+        if not callable(fn):
+            raise AssertionError(f"{op.name} did not resolve to a callable")
