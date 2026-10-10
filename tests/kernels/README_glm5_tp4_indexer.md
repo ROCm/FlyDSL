@@ -73,3 +73,119 @@ an `int32` block table for each request, five rows per request, and the ATOM
 logical positions to physical attention KV slots inside the persistent
 kernel. The current fused path is limited to an index window of 4,096 tokens
 and does not implement ATOM's FP8 index cache format.
+
+
+## Shared TP4/TP8 implementation
+
+The follow-up refactor uses `glm/kernel.py`, `glm/layout.py`, and `glm/op.py`
+for both TP geometries. The `tp4_*` modules preserve the PR's public entry
+points and BF16 RoPE defaults. TP8's original flat-cache entry point retains
+FP32 RoPE. The paged benchmark accepts `--npes 4` or `--npes 8`.
+
+| Compile-time dimension | TP4 | TP8 |
+| --- | ---: | ---: |
+| Local attention heads | 16 | 8 |
+| Local expert intermediate width | 512 | 256 |
+| Indexer heads × head dimension | 32 × 128 | 32 × 128 |
+| Eight-row expert task rounds | 2 | 1 |
+
+Attention formats, cache layouts, and expert storage select load paths at
+compile time. Native MXFP4 keeps the eight-row gate/up interleave and its
+matching tile-major E8M0 scales. ATOM storage keeps its original layout and
+native FP4 MFMA configuration. Sparse-attention tile sizes and down-projection
+prefetch depths retain their geometry and storage-specific tuning.
+
+The common UG schedule handles complete 256-CTA rounds. This also fixes the
+original TP4 S=1 schedule, which omitted half of its 512 expert tasks. The down stage
+retains the original routing schedule. Native weight prefetch and activation
+staging are ordered by sample count and format.
+Unreachable legacy UG schedules have been removed. This refactor does not
+add indexer context parallelism.
+
+### Validation protocol
+
+Measurements use node46's MI355X GPUs, the exact PR #1256 head `bb298cf2` as
+baseline, and alternating baseline/refactor runs. Each replay contains 16
+layer launches at one weight address and advances the step once. Reported
+latencies are in microseconds per layer and use median rank times. A latency
+increase of at most 0.5% is the regression acceptance threshold.
+
+The paged regression uses the original PR protocol: context 3000, top-2048,
+MTP4 request width 5, native MXFP4 MFMA, FP8 PTPC attention and ATOM-layout
+FP8 attention KV, BF16 index cache; 20 warmup graphs and three trials of 32
+graphs, with three outer alternating runs. Its attention/expert timing weights
+are zero-filled. Nonzero attention correctness is checked separately.
+
+The native Conc 1 matrix uses S=1/2/4/8, context 3000, top-2048, FP8 block-scaled
+attention, flat BF16 caches, and FP8 or MXFP4 expert weights. It uses seven alternating baseline/refactor rounds, each with 50 warmup
+graphs and 4096 timed layer calls. Both implementations run in one process
+per rank and consume the same input, cache and packed-weight tensors; weight
+addresses are asserted equal. Scratch, peer buffers, step storage and output
+also share addresses in the native comparison. Outputs and ordered indices
+are checked for
+exact equality before timing. This controls allocation-dependent differences
+seen when the implementations ran in separate processes. Real TP4 geometry
+can be selected in the existing native script with `--model-tp 4 --npes 4`; without
+`--model-tp`, historical smaller peer-count tests keep their TP8 shard geometry.
+
+Correctness retains the original numerical tolerances and independent
+PyTorch goldens. Nonuniform MXFP4 scales exercise the packed scale addressing.
+The original independent end-to-end check remains conditional on matching
+near-tied routing decisions; intermediate and stage checks still run. Paged
+top-2048 validation retains the PR's 99% selected-set overlap threshold.
+
+
+### Shared implementation results
+
+All 20 paired regression cases pass the 0.5% latency threshold; the largest
+increase is 0.461%. The native tests pass 27 cases: eight real TP4/TP8 MXFP4
+cases with nonuniform scales, eight real TP4/TP8 FP8 cases, and 11 original
+cases. The paged S=5/10 checks pass on both TP4 and TP8. The smallest paged
+selected-set overlap is 0.99951, above the unchanged 0.99 threshold; attention
+output matches the selected-index control exactly. Paired source comparisons
+also match output and ordered indices exactly.
+
+Native TP8, Conc 1, context 3000, microseconds per layer:
+
+| Expert weights | S | Fused indexer | PR baseline | Shared implementation | Speedup |
+| --- | ---: | --- | ---: | ---: | ---: |
+| FP8 | 1 | No | 37.869 | 37.900 | 0.999× |
+| FP8 | 1 | Yes | 54.587 | 54.443 | 1.003× |
+| FP8 | 2 | No | 44.189 | 44.020 | 1.004× |
+| FP8 | 2 | Yes | 62.202 | 61.481 | 1.012× |
+| FP8 | 4 | No | 59.269 | 59.172 | 1.002× |
+| FP8 | 4 | Yes | 82.261 | 81.622 | 1.008× |
+| FP8 | 8 | No | 98.121 | 97.967 | 1.002× |
+| FP8 | 8 | Yes | 132.137 | 130.838 | 1.010× |
+| MXFP4 | 1 | No | 37.385 | 37.372 | 1.000× |
+| MXFP4 | 1 | Yes | 54.293 | 53.683 | 1.011× |
+| MXFP4 | 2 | No | 43.363 | 43.223 | 1.003× |
+| MXFP4 | 2 | Yes | 61.446 | 60.837 | 1.010× |
+| MXFP4 | 4 | No | 55.223 | 55.046 | 1.003× |
+| MXFP4 | 4 | Yes | 77.369 | 77.085 | 1.004× |
+| MXFP4 | 8 | No | 83.338 | 83.391 | 0.999× |
+| MXFP4 | 8 | Yes | 115.279 | 114.185 | 1.010× |
+
+TP4 paged MTP4, the PR's original fixture and event timing protocol. Seven
+paired outer rounds reuse the same inputs, cache, output, and packed weights
+between source implementations; their runtime mailboxes remain separate.
+The published PR measurements are included for reference.
+
+| Conc / S | Fused indexer | Published PR | Paired PR baseline | Shared implementation | Latency change |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 / 5 | No | 91.71 | 91.340 | 91.396 | +0.062% |
+| 1 / 5 | Yes | 118.42 | 117.507 | 118.039 | +0.453% |
+| 2 / 10 | No | 187.77 | 185.386 | 186.240 | +0.461% |
+| 2 / 10 | Yes | 224.49 | 224.525 | 225.009 | +0.216% |
+
+The additional TP4 native flat-cache matrix is functional at S=1/2/4/8.
+Current latencies are below; these are coverage measurements rather than a
+claimed regression comparison against the PR's paged fixture. In particular,
+the original TP4 S=1 expert schedule did not supply a working baseline.
+
+| S | FP8, no indexer | FP8, fused indexer | MXFP4, no indexer | MXFP4, fused indexer |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 52.905 | 68.198 | 50.901 | 66.571 |
+| 2 | 61.556 | 81.276 | 56.387 | 74.003 |
+| 4 | 88.873 | 111.211 | 73.871 | 94.608 |
+| 8 | 149.437 | 185.984 | 121.086 | 155.236 |

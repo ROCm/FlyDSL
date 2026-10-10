@@ -33,16 +33,16 @@ from kernels.monokernel.config import (
     Mxfp4WeightLayout,
     glm5_tp_config,
 )
+from kernels.monokernel.glm.op import Glm5MonoKernel, prepare_glm5_weights
 from kernels.monokernel.glm.reference import indexer_golden
-from kernels.monokernel.glm.tp4_op import Glm5TP4MonoKernel, prepare_glm5_weights
 from kernels.monokernel.packing import pack_ptpc_fp8
 from kernels.monokernel.reference import attention_mats, scale_shape
 from kernels.monokernel.weights import LayerWeights
 
 
-def make_weights(rank):
+def make_weights(rank, npes=4):
     dev = torch.device("cuda", rank)
-    cfg = glm5_tp_config(4)
+    cfg = glm5_tp_config(npes)
     experts = cfg.n_experts + cfg.num_shared_experts
     fp8 = torch.float8_e4m3fnuz
     f8 = lambda *shape: torch.zeros(shape, dtype=fp8, device=dev)
@@ -79,7 +79,7 @@ def make_weights(rank):
         t,
         cfg,
         rank,
-        4,
+        npes,
         mxfp4_weight_layout=Mxfp4WeightLayout.ATOM,
         mxfp4_scale_layout=Mxfp4ScaleLayout.ATOM,
         physical_experts=experts,
@@ -98,12 +98,17 @@ def worker(
     check_golden,
     shuffled_pages,
     check_attention,
+    npes,
+    position,
+    max_seq,
+    request_pos_stride,
+    indexer_ties,
 ):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
     dev = torch.device("cuda", rank)
-    dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=4)
-    W = make_weights(rank)
+    dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=npes)
+    W = make_weights(rank, npes)
     attention_weight = AttentionWeight.FP8_BLOCK128 if split_bf16_kv else AttentionWeight.FP8_PTPC
     cache_layout = KvCacheLayout.SPLIT if split_bf16_kv else KvCacheLayout.ATOM
     cache_dtype = "bf16" if split_bf16_kv else "fp8"
@@ -146,15 +151,17 @@ def worker(
                     if name in ("q_b", "o")
                     else logical
                 )
+    if indexer_ties:
+        W.t["w_index_w"].zero_()
     prepared = prepare_glm5_weights(W, attention_weight)
     for S in samples:
         if rank == 0:
-            print(f"starting TP4 S={S} native_fp4_mfma={native} fused_indexer={fused_indexer}", flush=True)
-        op = Glm5TP4MonoKernel(
+            print(f"starting TP{npes} S={S} native_fp4_mfma={native} fused_indexer={fused_indexer}", flush=True)
+        op = Glm5MonoKernel(
             W,
             S,
             rank=rank,
-            npes=4,
+            npes=npes,
             topk=2048,
             launches_per_step=16,
             attention_weight=attention_weight,
@@ -162,6 +169,9 @@ def worker(
             kv_cache_dtype=cache_dtype,
             prepared_weights=prepared,
             native_fp4_mfma=native,
+            rope_dtype="bf16",
+            index_request_width=5 if S >= 5 else 1,
+            index_max_seq=max_seq,
             with_indexer=fused_indexer,
             timeline=debug_progress,
         )
@@ -172,31 +182,33 @@ def worker(
             generator=torch.Generator(device=dev).manual_seed(524),
         )
         x = torch.empty_like(h)
-        cur_pos = torch.tensor([3000], dtype=torch.int32, device=dev)
-        positions = torch.tensor([3000 + i % 5 for i in range(S)], dtype=torch.int64, device=dev)
+        cur_pos = torch.tensor([position], dtype=torch.int32, device=dev)
+        positions = torch.tensor(
+            [position + i % 5 + (i // 5) * request_pos_stride for i in range(S)], dtype=torch.int64, device=dev
+        )
         slots = torch.tensor(
-            [3000 + i % 5 + ((i // 5) * 4096 if fused_indexer else (500 if i >= 5 else 0)) for i in range(S)],
+            [position + i % 5 + ((i // 5) * max_seq if fused_indexer else (500 if i >= 5 else 0)) for i in range(S)],
             dtype=torch.int64,
             device=dev,
         )
         indptr = torch.arange(S + 1, dtype=torch.int32, device=dev) * 2048
         indices = torch.arange(2048, dtype=torch.int32, device=dev).repeat(S)
         kv = torch.zeros(
-            (4096 * (S // 5 if fused_indexer and S >= 5 else 1), 512 if split_bf16_kv else 576),
+            (max_seq * (S // 5 if fused_indexer and S >= 5 else 1), 512 if split_bf16_kv else 576),
             dtype=torch.bfloat16 if split_bf16_kv else torch.float8_e4m3fnuz,
             device=dev,
         )
         if check_attention:
             kv.copy_((torch.randn(kv.shape, device=dev, generator=generator) * 0.05).to(kv.dtype))
-        pe = torch.zeros((4096, 64), dtype=torch.bfloat16, device=dev) if split_bf16_kv else kv
-        angles = torch.arange(4096, device=dev, dtype=torch.float32)[:, None] * (
+        pe = torch.zeros((max_seq, 64), dtype=torch.bfloat16, device=dev) if split_bf16_kv else kv
+        angles = torch.arange(max_seq, device=dev, dtype=torch.float32)[:, None] * (
             10000.0 ** (-torch.arange(32, device=dev, dtype=torch.float32)[None, :] / 32)
         )
         cos = angles.cos().to(torch.bfloat16)
         sin = angles.sin().to(torch.bfloat16)
         index_cache = (
             torch.randn(
-                (4096 * (S // 5 if S >= 5 else 1), 128),
+                (max_seq * (S // 5 if S >= 5 else 1), 128),
                 device=dev,
                 dtype=torch.bfloat16,
                 generator=torch.Generator(device=dev).manual_seed(912),
@@ -206,12 +218,12 @@ def worker(
         )
         index_cache_before = index_cache.clone() if check_golden and fused_indexer else None
         block_tables = (
-            torch.arange(index_cache.shape[0] // 16, dtype=torch.int32, device=dev).view(-1, 4096 // 16)
+            torch.arange(index_cache.shape[0] // 16, dtype=torch.int32, device=dev).view(-1, max_seq // 16)
             if fused_indexer
             else None
         )
         if shuffled_pages and fused_indexer:
-            permutation = torch.randperm(4096 // 16, device=dev, generator=generator)
+            permutation = torch.randperm(max_seq // 16, device=dev, generator=generator)
             block_tables = block_tables[:, permutation].contiguous()
         if fused_indexer:
             request_ids = torch.arange(S, device=dev) // (5 if S >= 5 else 1)
@@ -274,19 +286,19 @@ def worker(
                     selected.max().item(),
                     flush=True,
                 )
-            if not bool(((selected >= 0) & (selected < 3000 + min(S, 5))).all().item()):
-                raise RuntimeError(f"fused indexer selected an invalid token for TP4 S={S}")
+            if not bool(((selected >= 0) & (selected <= positions[:, None])).all().item()):
+                raise RuntimeError(f"fused indexer selected an invalid token for TP{npes} S={S}")
             if check_golden:
                 overlaps = []
                 for start in range(0, S, 5 if S >= 5 else 1):
                     width = min(5, S - start)
                     physical_pages = block_tables[start // 5].to(torch.int64)
-                    logical_cache = index_cache_before.view(-1, 16, 128)[physical_pages].reshape(4096, 128).clone()
+                    logical_cache = index_cache_before.view(-1, 16, 128)[physical_pages].reshape(max_seq, 128).clone()
                     ref, _, _, _, _ = indexer_golden(
                         W,
                         h[start : start + width],
                         data["q_a"][start : start + width],
-                        3000,
+                        position + (start // 5) * request_pos_stride,
                         logical_cache,
                         cos,
                         sin,
@@ -298,21 +310,22 @@ def worker(
                         overlaps.append(torch.isin(got, expected).float().mean().item())
                 if rank == 0:
                     print(
-                        f"TP4 S={S} fused indexer golden top-2048 overlap: " f"min={min(overlaps):.5f} rows={overlaps}",
+                        f"TP{npes} S={S} fused indexer golden top-2048 overlap: "
+                        f"min={min(overlaps):.5f} rows={overlaps}",
                         flush=True,
                     )
                 if min(overlaps) < 0.99:
-                    raise RuntimeError(f"fused indexer top-k overlap below 99% for TP4 S={S}")
+                    raise RuntimeError(f"fused indexer top-k overlap below 99% for TP{npes} S={S}")
             if check_attention:
                 request_ids = torch.arange(S, device=dev) // (5 if S >= 5 else 1)
                 physical_indices = (
                     block_tables[request_ids[:, None], selected.long() // 16].to(torch.int32) * 16 + selected % 16
                 ).flatten()
-                comparison = Glm5TP4MonoKernel(
+                comparison = Glm5MonoKernel(
                     W,
                     S,
                     rank=rank,
-                    npes=4,
+                    npes=npes,
                     topk=2048,
                     launches_per_step=1,
                     attention_weight=attention_weight,
@@ -320,6 +333,9 @@ def worker(
                     kv_cache_dtype=cache_dtype,
                     prepared_weights=prepared,
                     native_fp4_mfma=native,
+                    rope_dtype="bf16",
+                    index_request_width=5 if S >= 5 else 1,
+                    index_max_seq=max_seq,
                     with_indexer=False,
                 )
                 x_comparison = comparison.forward(
@@ -339,15 +355,15 @@ def worker(
                 attention_signal = data["o"].float().abs().max().item()
                 if rank == 0:
                     print(
-                        f"TP4 S={S} fused vs selected-index unfused attention: max output diff={max_diff:.6f}, "
+                        f"TP{npes} S={S} fused vs selected-index unfused attention: max output diff={max_diff:.6f}, "
                         f"nonzero attention max={attention_signal:.6f}",
                         flush=True,
                     )
                 if max_diff > 0.05 or attention_signal < 1e-4:
-                    raise RuntimeError(f"fused attention physical-cache comparison failed for TP4 S={S}")
+                    raise RuntimeError(f"fused attention physical-cache comparison failed for TP{npes} S={S}")
                 comparison.close()
         if not torch.isfinite(x).all().item():
-            raise RuntimeError(f"nonfinite output for TP4 S={S}, native={native}")
+            raise RuntimeError(f"nonfinite output for TP{npes} S={S}, native={native}")
         elapsed = []
         for _ in range(3):
             dist.barrier()
@@ -359,11 +375,11 @@ def worker(
             stop.record()
             stop.synchronize()
             elapsed.append(start.elapsed_time(stop) * 1000 / (replays * 16))
-        gathered = [None] * 4
+        gathered = [None] * npes
         dist.all_gather_object(gathered, statistics.median(elapsed))
         if rank == 0:
             print(
-                f"TP4 S={S} native={native} fused_indexer={fused_indexer}: "
+                f"TP{npes} S={S} native={native} fused_indexer={fused_indexer}: "
                 f"median-rank={statistics.median(gathered):.3f} us/layer; "
                 f"max-rank={max(gathered):.3f} us/layer; ranks={gathered}",
                 flush=True,
@@ -374,6 +390,11 @@ def worker(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--npes", type=int, choices=(4, 8), default=4)
+    parser.add_argument("--pos", type=int, default=3000)
+    parser.add_argument("--max-seq", type=int, default=4096)
+    parser.add_argument("--request-pos-stride", type=int, default=0)
+    parser.add_argument("--indexer-ties", action="store_true")
     parser.add_argument("--samples", type=int, nargs="+", default=[5, 10])
     parser.add_argument("--native", type=int, default=1)
     parser.add_argument("--replays", type=int, default=32)
@@ -384,6 +405,12 @@ if __name__ == "__main__":
     parser.add_argument("--shuffled-pages", action="store_true")
     parser.add_argument("--check-attention", action="store_true")
     args = parser.parse_args()
+    if args.indexer_ties and not args.fused_indexer:
+        parser.error("Tie checks require --fused-indexer")
+    if args.max_seq <= 0 or args.max_seq % 64 or args.pos < 0 or args.request_pos_stride < 0:
+        parser.error("capacity must be positive and aligned to 64; positions must be nonnegative")
+    if args.pos + 5 + (max(args.samples) // 5 - 1) * args.request_pos_stride > args.max_seq:
+        parser.error("request positions must fit max-seq")
     if args.fused_indexer and any(sample not in (1, 5, 10) for sample in args.samples):
         parser.error("fused indexer supports TP4 MTP4 C1/C2: --samples 5 or 10 (or 1 for debug)")
     if args.fused_indexer and args.split_bf16_kv:
@@ -407,6 +434,11 @@ if __name__ == "__main__":
             args.check_golden,
             args.shuffled_pages,
             args.check_attention,
+            args.npes,
+            args.pos,
+            args.max_seq,
+            args.request_pos_stride,
+            args.indexer_ties,
         ),
-        nprocs=4,
+        nprocs=args.npes,
     )
