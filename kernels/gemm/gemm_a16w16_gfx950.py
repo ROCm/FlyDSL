@@ -10,7 +10,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
-from flydsl.runtime.device import get_rocm_arch
+from flydsl.runtime.device import SMEM_CAPACITY_MAP, get_rocm_arch
 
 from .gemm_a16w16_gfx950_utils import (
     GFX950_DMA_BYTES,
@@ -153,10 +153,6 @@ def make_gemm_a16w16_gfx950_param(
     smem_bytes = stages * (block_m + block_n) * block_k * in_dbytes
     smem_bytes = max(smem_bytes, k_waves * block_m * block_n * in_dbytes)
     arch = get_rocm_arch()
-    SMEM_CAPACITY_MAP = {
-        "gfx942": 65536,
-        "gfx950": 163840,
-    }
     smem_capacity = SMEM_CAPACITY_MAP[arch]
     if smem_bytes > smem_capacity:
         raise ValueError(

@@ -11,34 +11,10 @@ Tiled copies
 FlyDSL uses a hierarchical tiling model to partition data across blocks,
 warps, and threads:
 
-.. code-block:: python
-
-   import flydsl.compiler as flyc
-   import flydsl.expr as fx
-
-   @flyc.kernel
-   def copy_kernel(src: fx.Tensor, dst: fx.Tensor):
-       tid = fx.thread_idx.x
-
-       # Define thread and value layouts
-       thr_layout = fx.make_layout((4, 1), (1, 1))
-       val_layout = fx.make_layout((1, 8), (1, 1))
-
-       # Create a copy atom (for example, 128-bit buffer copy)
-       copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-
-       # Build the tiled copy descriptor via raked product
-       layout_thr_val = fx.raked_product(thr_layout, val_layout)
-       tile_mn = fx.make_tile(4, 8)
-       tiled_copy = fx.make_tiled_copy(copy_atom, layout_thr_val, tile_mn)
-
-       # Partition a tensor for this thread
-       thr_copy = tiled_copy.get_slice(tid)
-       partition_src = thr_copy.partition_S(block_tile)
-       partition_dst = thr_copy.partition_D(fragment)
-
-       # Execute copy
-       fx.copy(copy_atom, partition_src, partition_dst)
+.. literalinclude:: ../../examples/02-tiledCopy.py
+   :language: python
+   :start-at: import flydsl.compiler as flyc
+   :end-before: @flyc.jit
 
 See ``examples/02-tiledCopy.py`` for a complete working example.
 
@@ -48,27 +24,10 @@ MFMA instructions
 For matrix operations, FlyDSL supports AMD's Matrix Fused Multiply-Add (MFMA)
 instructions via ``make_mma_atom`` and ``make_tiled_mma``:
 
-.. code-block:: python
-
-   import flydsl.compiler as flyc
-   import flydsl.expr as fx
-
-   @flyc.kernel
-   def mfma_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
-       tid = fx.thread_idx.x
-
-       # Create an MFMA atom (16x16x4 FP32)
-       mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
-       tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
-
-       # Partition A, B, C for this thread
-       thr_mma = tiled_mma.thr_slice(tid)
-       frag_A = thr_mma.make_fragment_A(partition_A)
-       frag_B = thr_mma.make_fragment_B(partition_B)
-       frag_C = thr_mma.make_fragment_C(partition_C)
-
-       # Execute GEMM
-       fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
+.. literalinclude:: ../../examples/03-tiledMma.py
+   :language: python
+   :start-at: import flydsl.compiler as flyc
+   :end-before: @flyc.jit
 
 See ``examples/03-tiledMma.py`` for a complete GEMM example and
 ``kernels/gemm/preshuffle_gemm.py`` for a production GEMM implementation with
@@ -92,7 +51,8 @@ Performance optimization
 Key optimization techniques demonstrated in the pre-built kernels:
 
 - **LDS double-buffering**: Overlap compute with data movement (``preshuffle_gemm``)
-- **Buffer tensor operations**: Hardware bounds-checked memory access (``rocdl.make_buffer_tensor``)
+- **Buffer tensor operations**: Hardware bounds-checked memory access
+  (``fx.rocdl.make_buffer_tensor``)
 - **Software pipelining**: Hide memory latency with multi-stage pipelines
 - **Pre-shuffled weights**: Avoid runtime layout transformations for MFMA
 

@@ -14,12 +14,17 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/InferIntRangeInterface.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/CSE.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Support/MathExtras.h"
+
+#include <optional>
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
@@ -42,6 +47,9 @@ namespace fly {
 } // namespace mlir
 
 namespace {
+
+/// Depth limit for the narrow-value proof walk; layout index chains are short.
+constexpr unsigned kMaxNarrowProofDepth = 16;
 
 Value castPrintfArg(PatternRewriter &rewriter, Location loc, Value value, std::string &format) {
   Type type = value.getType();
@@ -2163,15 +2171,13 @@ public:
     auto *ctx = rewriter.getContext();
 
     Value copyAtomVal = op.getCopyAtom();
-    if (auto tiledCopyOp = copyAtomVal.getDefiningOp<MakeTiledCopyOp>())
-      copyAtomVal = tiledCopyOp.getCopyAtom();
+    if (isa<TiledCopyType>(copyAtomVal.getType()))
+      copyAtomVal = GetCopyAtomOp::create(rewriter, loc, copyAtomVal);
 
     Value src = op.getSrc();
     Value dst = op.getDst();
     Value pred = op.getPred();
 
-    auto srcMemRefTy = cast<fly::MemRefType>(src.getType());
-    auto dstMemRefTy = cast<fly::MemRefType>(dst.getType());
     auto predMemRefTy = pred ? cast<fly::MemRefType>(pred.getType()) : nullptr;
 
     std::function<LayoutAttr(Attribute)> getLayoutAttr = [&](Attribute attr) -> LayoutAttr {
@@ -2179,9 +2185,19 @@ public:
         return layout;
       return getLayoutAttr(cast<ComposedLayoutAttr>(attr).getOuter());
     };
+    // An operand is a memref or a coordinate tensor
+    auto tensorLikeLayout = [&](Type ty) -> LayoutAttr {
+      if (auto memref = dyn_cast<fly::MemRefType>(ty))
+        return getLayoutAttr(memref.getLayout());
+      if (auto coord = dyn_cast<fly::CoordTensorType>(ty))
+        return getLayoutAttr(coord.getLayout());
+      return nullptr;
+    };
 
-    LayoutAttr srcLayoutAttr = getLayoutAttr(srcMemRefTy.getLayout());
-    LayoutAttr dstLayoutAttr = getLayoutAttr(dstMemRefTy.getLayout());
+    LayoutAttr srcLayoutAttr = tensorLikeLayout(src.getType());
+    LayoutAttr dstLayoutAttr = tensorLikeLayout(dst.getType());
+    if (!srcLayoutAttr || !dstLayoutAttr)
+      return rewriter.notifyMatchFailure(op, "src/dst are not tensor-like");
     LayoutAttr predLayoutAttr = nullptr;
     if (pred)
       predLayoutAttr = getLayoutAttr(predMemRefTy.getLayout());
@@ -2189,21 +2205,48 @@ public:
     int32_t srcRank = srcLayoutAttr.rank();
     int32_t dstRank = dstLayoutAttr.rank();
 
-    if (srcRank != dstRank)
-      return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
-
-    // A whole-tile copy atom (e.g. the gfx1250 TDM DMA) moves the entire N-D tile
-    // in one call and reads its geometry from the operand memref layout, so emit a
-    // single call on the tile instead of decomposing it per element. The atom's own
-    // emitAtomCall verifies the operand rank matches the tile. Detected via a
-    // boundary-safe type trait rather than a concrete cross-dialect cast.
+    // tests `size(src) == NumValSrc` *before* it peels or loops: a call is
+    // issued the moment the operand holds exactly one atom's worth of values.
+    // Without that test the decomposition below keeps descending until the
+    // shape is a leaf, which is only accidentally right -- it is wrong for
+    // every atom whose values are a nested tuple.
+    // TODO: need a better solution for this.
+    LayoutBuilder<LayoutAttr> layoutBuilder(ctx);
+    auto sizeOf = [&](LayoutAttr layout) {
+      return intTupleProduct(layoutBuilder, layout.getShape()).getLeafAsInt();
+    };
+    auto numValOf = [&](Attribute thrVal) { return sizeOf(cast<LayoutAttr>(thrVal).at(1)); };
     if (auto copyAtomTy = dyn_cast<CopyAtomType>(copyAtomVal.getType())) {
-      if (copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+      IntAttr srcVals = sizeOf(srcLayoutAttr);
+      IntAttr dstVals = sizeOf(dstLayoutAttr);
+      IntAttr atomSrcVals = numValOf(copyAtomTy.getThrValLayoutSrc());
+      IntAttr atomDstVals = numValOf(copyAtomTy.getThrValLayoutDst());
+      bool singleAtomCall = srcVals.isStatic() && dstVals.isStatic() && atomSrcVals.isStatic() &&
+                            atomDstVals.isStatic() &&
+                            srcVals.getValue() == atomSrcVals.getValue() &&
+                            dstVals.getValue() == atomDstVals.getValue();
+      if (singleAtomCall || copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+        // As in the leaf case below, materialize composed-layout offsets before
+        // the atom consumes the pointer. Bypassing decomposition loses the LDS
+        // swizzle offset even when the operands hold exactly one atom's values.
+        // Whole-tile atoms instead consume the original layout themselves.
+        if (!copyAtomTy.getCopyOp().hasTrait<WholeTileCopy>()) {
+          if (isa<fly::MemRefType>(src.getType()))
+            src = DecompositionOp::create(rewriter, loc, src);
+          if (isa<fly::MemRefType>(dst.getType()))
+            dst = DecompositionOp::create(rewriter, loc, dst);
+        }
         CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
         rewriter.eraseOp(op);
         return success();
       }
     }
+
+    // A single atom may have different source/destination profiles (coordinate
+    // bases do not coalesce like contiguous LDS addresses). Only recursive
+    // decomposition requires equal outer ranks.
+    if (srcRank != dstRank)
+      return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
 
     if (pred && predLayoutAttr.rank() == srcRank - 1) {
       LayoutBuilder<LayoutValueAdaptor> builder(rewriter, loc);
@@ -2281,13 +2324,12 @@ public:
     auto *ctx = rewriter.getContext();
 
     Value mmaAtomVal = op.getMmaAtom();
-    if (auto tiledMmaOp = mmaAtomVal.getDefiningOp<MakeTiledMmaOp>()) {
-      mmaAtomVal = tiledMmaOp.getMmaAtom();
-    }
+    if (isa<TiledMmaType>(mmaAtomVal.getType()))
+      mmaAtomVal = GetMmaAtomOp::create(rewriter, loc, mmaAtomVal);
 
     Value d = op.getD();
-    Value a = op.getA();
-    Value b = op.getB();
+    Value a = op.getA().front();
+    Value b = op.getB().front();
     Value c = op.getC();
 
     LayoutAttr dLayoutAttr = cast<LayoutAttr>(cast<fly::MemRefType>(d.getType()).getLayout());
@@ -2301,7 +2343,7 @@ public:
     int32_t cRank = cLayoutAttr.rank();
 
     if (dRank == 1 && aRank == 1 && bRank == 1 && cRank == 1) {
-      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, a, b, c);
+      MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, op.getA(), op.getB(), c);
       rewriter.eraseOp(op);
       return success();
     }
@@ -2332,10 +2374,18 @@ public:
           rewriter, loc, IntTupleType::get(IntTupleAttr::get(ArrayAttr::get(ctx, coordElems))), {});
     };
 
+    auto sliceGroup = [&](ValueRange operands, ArrayRef<int32_t> idx) {
+      SmallVector<Value> slices;
+      Value coord = getSliceCoord(idx);
+      for (Value operand : operands)
+        slices.push_back(SliceOp::create(rewriter, loc, operand, coord));
+      return slices;
+    };
+
     if (aRank == 2 && bRank == 2) {
       auto emitMmaCall2D = [&](int32_t m, int32_t n) {
-        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m}));
-        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n}));
+        auto aSlice = sliceGroup(op.getA(), {m});
+        auto bSlice = sliceGroup(op.getB(), {n});
         Value cSlice = SliceOp::create(rewriter, loc, c, getSliceCoord({m, n}));
         Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
         MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
@@ -2436,8 +2486,8 @@ public:
         bool &visited = mnVisited[m * loop_n + n];
         Value cSrc = visited ? d : c;
         visited = true;
-        Value aSlice = SliceOp::create(rewriter, loc, a, getSliceCoord({m, k}));
-        Value bSlice = SliceOp::create(rewriter, loc, b, getSliceCoord({n, k}));
+        auto aSlice = sliceGroup(op.getA(), {m, k});
+        auto bSlice = sliceGroup(op.getB(), {n, k});
         Value cSlice = SliceOp::create(rewriter, loc, cSrc, getSliceCoord({m, n}));
         Value dSlice = SliceOp::create(rewriter, loc, d, getSliceCoord({m, n}));
         MmaAtomCall::create(rewriter, loc, mmaAtomVal, dSlice, aSlice, bSlice, cSlice);
@@ -2905,6 +2955,243 @@ public:
 /// moves the static offset strictly outward (swap), and the resulting
 /// `dyn -> static` form is rejected by the already-canonical check, so the
 /// pattern cannot loop.
+/// Conservative upper bound on |v|, or nullopt when it cannot be established.
+///
+/// The fold below is only sound when the value survives a trip through i32, and
+/// the type system cannot say that: an `index` is 64-bit.  Estimating a bound
+/// instead of answering a yes/no question matters, because "built from bounded
+/// roots" is not the same as "stays small": `tid * tid * tid * tid` is made
+/// entirely of launch coordinates and still reaches 2^40.
+///
+/// Roots are launch coordinates (bounded by the block/grid geometry) and
+/// constants (bounded by their own value).  Every operator combines its
+/// operands' bounds the way the operation combines values, and any step that
+/// would overflow the estimate itself gives up.  Anything unrecognised -- a
+/// kernel argument, a load, an op not on the list -- is unknown.
+///
+/// This is the value-range knowledge upstream deliberately does not assume, and
+/// the only reason FlyDSL may re-fold what `arith` no longer does.
+static std::optional<uint64_t> narrowUpperBound(Value v, unsigned depth,
+                                                llvm::SmallPtrSetImpl<Operation *> &visited) {
+  if (depth > kMaxNarrowProofDepth)
+    return std::nullopt;
+
+  // A non-negative constant bounds itself.  Negative values are rejected
+  // outright: every rule below reasons about unsigned magnitudes, and a
+  // negative operand reads as a huge unsigned value there, so an
+  // absolute-value bound would understate it.
+  APInt cst;
+  if (matchPattern(v, m_ConstantInt(&cst))) {
+    if (cst.isNegative())
+      return std::nullopt;
+    return cst.getLimitedValue();
+  }
+
+  Operation *def = v.getDefiningOp();
+  if (!def)
+    return std::nullopt; // block/function argument: unknown range
+
+  // A value reached twice on one walk (cyclic chain) cannot be bounded here.
+  if (!visited.insert(def).second)
+    return std::nullopt;
+  auto pop = llvm::make_scope_exit([&] { visited.erase(def); });
+
+  // Launch coordinates: ask the op for its own range.  Every gpu index op
+  // implements InferIntRangeInterface, and that implementation already prefers
+  // an explicit `upper_bound` attribute, then the launch geometry declared by an
+  // enclosing gpu.launch / gpu.func / `gpu.known_*_size`, and only then its own
+  // implicit maximum (kMaxDim, i.e. uint32_t::max).  Deferring to it keeps this
+  // analysis in step with upstream instead of restating the ordering here.
+  if (auto inferrable = dyn_cast<InferIntRangeInterface>(def)) {
+    if (def->getNumOperands() == 0 && def->getNumResults() == 1) {
+      std::optional<uint64_t> inferred;
+      inferrable.inferResultRanges({}, [&](Value v, const ConstantIntRanges &range) {
+        if (v == def->getResult(0))
+          inferred = range.umax().getZExtValue();
+      });
+      if (inferred)
+        return inferred;
+    }
+  }
+
+  auto operandBound = [&](unsigned i) {
+    return narrowUpperBound(def->getOperand(i), depth + 1, visited);
+  };
+
+  auto checkedAdd = [](uint64_t a, uint64_t b) -> std::optional<uint64_t> {
+    uint64_t r;
+    return __builtin_add_overflow(a, b, &r) ? std::nullopt : std::optional<uint64_t>(r);
+  };
+  auto checkedMul = [](uint64_t a, uint64_t b) -> std::optional<uint64_t> {
+    uint64_t r;
+    return __builtin_mul_overflow(a, b, &r) ? std::nullopt : std::optional<uint64_t>(r);
+  };
+
+  // Binary ops: combine the operand bounds the way the operation combines values.
+  if (def->getNumOperands() == 2) {
+    auto lhs = operandBound(0);
+    auto rhs = operandBound(1);
+
+    // `and`, `rem` and `min` are bounded by one operand alone, so an unknown
+    // other side is tolerable.
+    if (isa<arith::AndIOp, arith::RemUIOp, arith::MinUIOp>(def)) {
+      if (!lhs && !rhs)
+        return std::nullopt;
+      if (!lhs)
+        return rhs;
+      if (!rhs)
+        return lhs;
+      return std::min(*lhs, *rhs);
+    }
+    // Shifting right and dividing only shrink the left operand.  Both read
+    // their operands as unsigned, which is sound here because every value this
+    // function can bound is non-negative: the sources are non-negative
+    // constants and launch coordinates, and no rule below can turn those into a
+    // negative result.
+    if (isa<arith::ShRUIOp, arith::DivUIOp>(def))
+      return lhs;
+
+    if (!lhs || !rhs)
+      return std::nullopt;
+
+    if (isa<arith::AddIOp>(def))
+      return checkedAdd(*lhs, *rhs);
+    // Subtraction is deliberately absent: with unsigned reasoning `a - b` wraps
+    // to a huge value whenever b > a, which no bound on a and b rules out.
+    if (isa<arith::MulIOp>(def))
+      return checkedMul(*lhs, *rhs);
+    if (isa<arith::ShLIOp>(def)) {
+      if (*rhs >= 64)
+        return std::nullopt;
+      return checkedMul(*lhs, uint64_t(1) << *rhs);
+    }
+    if (isa<arith::OrIOp, arith::XOrIOp, arith::MaxUIOp>(def)) {
+      // Bit-wise or/xor cannot exceed the next power of two above either side.
+      uint64_t m = std::max(*lhs, *rhs);
+      return m == UINT64_MAX ? std::nullopt
+                             : std::optional<uint64_t>(m == 0 ? 0 : llvm::NextPowerOf2(m) - 1);
+    }
+    return std::nullopt;
+  }
+
+  // Casts narrow or widen, and for the signed form either direction can turn a
+  // small non-negative value into a negative one that reads as huge unsigned.
+  // Narrowing does it by truncating (index -> i8 keeps 128 as -128); widening
+  // does it by sign-extending whatever the narrow type already held (i8 -> index
+  // takes that -128 to 2^64-128).  Both are governed by the *narrower* of the
+  // two types, so check the bound against that one: it must fit with the sign
+  // bit clear.  An unsigned cast has no sign bit to flip and only has to fit.
+  if (isa<arith::IndexCastOp, arith::IndexCastUIOp>(def)) {
+    auto srcBound = operandBound(0);
+    if (!srcBound)
+      return std::nullopt;
+    auto intWidth = [](Type t) -> unsigned {
+      auto intTy = dyn_cast<IntegerType>(getElementTypeOrSelf(t));
+      return intTy ? intTy.getWidth() : 64; // `index` occupies its full storage
+    };
+    unsigned narrowBits =
+        std::min(intWidth(def->getOperand(0).getType()), intWidth(def->getResult(0).getType()));
+    if (narrowBits >= 64)
+      return srcBound;
+    uint64_t limit = isa<arith::IndexCastUIOp>(def) ? (uint64_t(1) << narrowBits)
+                                                    : (uint64_t(1) << (narrowBits - 1));
+    return *srcBound < limit ? srcBound : std::nullopt;
+  }
+
+  // select: either arm may be taken.
+  if (isa<arith::SelectOp>(def)) {
+    auto t = operandBound(1);
+    auto f = operandBound(2);
+    if (!t || !f)
+      return std::nullopt;
+    return std::max(*t, *f);
+  }
+
+  return std::nullopt;
+}
+
+/// Is \p v provably small enough to survive a round trip through \p bits?
+static bool isProvablyNarrow(Value v, unsigned bits) {
+  llvm::SmallPtrSet<Operation *, 16> visited;
+  std::optional<uint64_t> bound = narrowUpperBound(v, 0, visited);
+  if (!bound)
+    return false;
+  // An intermediate at least as wide as `index` cannot lose anything, and the
+  // shift below would be undefined for it.
+  if (bits >= 64)
+    return true;
+  // Signed casts, so the usable range is one bit smaller.
+  return *bound < (uint64_t(1) << (bits - 1));
+}
+
+/// Fold `cast(cast(x : index -> iN) : iN -> index)` back to `x`.
+///
+/// Only the signed form (`arith.index_cast`) is handled.  The pattern is a
+/// template so the unsigned form could be added, but nothing in tree emits
+/// `arith.index_castui`, and `isProvablyNarrow` reserves the sign bit, so
+/// instantiating it would add an untested path for no benefit.
+///
+/// Upstream MLIR used to fold this in `arith`'s canonicalizer, but the pattern
+/// was unsound in general and was removed in llvm/llvm-project@8c81064169c5: for
+/// a narrow intermediate such as i8 the inner cast truncates, so the round trip
+/// loses bits and must be preserved.  The check upstream now applies is purely
+/// type-based -- an `index` is assumed to occupy its full 64-bit internal
+/// storage -- so `index -> i32 -> index` is rejected as lossy even where it is
+/// not.
+///
+/// FlyDSL emits exactly that shape when layout arithmetic crosses between
+/// `index` and i32, and `isProvablyNarrow` supplies the value-range knowledge
+/// upstream deliberately does not assume.  Re-folding removes 42 redundant cast
+/// pairs from a MoE stage1 kernel, which after lowering would otherwise become
+/// `trunc`/`sext` pairs inside the MFMA loop (measured: vgpr_spill_count
+/// 147 -> 19).
+///
+/// Both casts must be the same op: mixing signed and unsigned changes the
+/// meaning of the round trip, and the template parameter enforces that.
+/// Scalars and vectors are both handled -- for a vector the element types carry
+/// the index/integer distinction, and requiring the outer result type to equal
+/// the innermost source type keeps the shapes in step.
+///
+/// Convergence: each rewrite replaces one op with an existing value and adds
+/// nothing, so the pattern cannot loop.
+template <typename CastOp> class RedundantIndexCastPairImpl : public OpRewritePattern<CastOp> {
+public:
+  using OpRewritePattern<CastOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(CastOp op, PatternRewriter &rewriter) const override {
+    // Outer cast must land back on `index` (element type, so vectors work too).
+    if (!isa<IndexType>(getElementTypeOrSelf(op.getType())))
+      return failure();
+
+    auto inner = op.getIn().template getDefiningOp<CastOp>();
+    if (!inner)
+      return failure();
+
+    // Innermost source must be exactly what we are returning to; for vectors
+    // this also pins the shape.
+    Value orig = inner.getIn();
+    if (orig.getType() != op.getType())
+      return failure();
+
+    // The intermediate must be wide enough to hold the value.  Anything
+    // narrower than 32 bits is genuinely lossy and is left alone.
+    auto midTy = dyn_cast<IntegerType>(getElementTypeOrSelf(inner.getType()));
+    if (!midTy || midTy.getWidth() < 32)
+      return failure();
+
+    // Type width alone does not make the round trip lossless: an `index` is
+    // 64-bit, so a value above 2^31 would not survive it.  Only fold when the
+    // value is provably narrow.
+    if (!isProvablyNarrow(orig, midTy.getWidth()))
+      return failure();
+
+    rewriter.replaceOp(op, orig);
+    return success();
+  }
+};
+
+using RedundantIndexCastPair = RedundantIndexCastPairImpl<arith::IndexCastOp>;
+
 class AddOffsetCanonicalization : public OpRewritePattern<AddOffsetOp> {
 public:
   using OpRewritePattern<AddOffsetOp>::OpRewritePattern;
@@ -3058,6 +3345,7 @@ public:
     patterns.add<MemRefLoadVecOpLowering, MemRefStoreVecOpLowering>(context);
     patterns.add<MemRefAllocaOpLowering>(context);
     patterns.add<AddOffsetCanonicalization>(context);
+    patterns.add<RedundantIndexCastPair>(context);
 
     // Utility ops
     patterns.add<PrintOpLowering>(context);

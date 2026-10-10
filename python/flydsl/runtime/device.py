@@ -80,10 +80,11 @@ def get_rocm_device_count() -> int:
 
 
 def is_rdna_arch(arch: Optional[str] = None) -> bool:
-    """Check if architecture is RDNA-based (gfx10/11/12, wave32).
+    """Check if architecture is RDNA-based (gfx10, gfx11, or gfx120).
 
     This is the single source of truth for CDNA vs RDNA classification.
     RDNA architectures use wave32 and have different buffer descriptor flags.
+    CDNA5 gfx1250 is also wave32, but is intentionally not classified as RDNA.
 
     If arch is None, the current GPU arch is auto-detected.
     """
@@ -112,3 +113,28 @@ def get_warp_size(arch: Optional[str] = None) -> int:
     if arch.startswith("gfx10") or arch.startswith("gfx11") or arch.startswith("gfx12"):
         return 32
     return 64
+
+
+# LDS bytes available per CU / WGP, keyed by architecture.
+SMEM_CAPACITY_MAP = {
+    "gfx942": 65536,
+    "gfx950": 163840,
+    "gfx1100": 65536,
+    "gfx1151": 65536,
+    "gfx1201": 65536,
+    "gfx1250": 327680,
+}
+
+
+def check_smem_capacity(allocated_bytes: int, arch: str = None):
+    """Raise if the requested shared-memory bytes exceed the device LDS capacity.
+
+    The check is skipped when ``arch`` is None or not in the capacity map.
+    """
+    if arch is None:
+        return
+    limit = SMEM_CAPACITY_MAP.get(arch)
+    if limit is not None and allocated_bytes > limit:
+        raise RuntimeError(
+            f"Shared Memory Overflow: Requested {allocated_bytes} bytes, " f"but device {arch} limit is {limit} bytes."
+        )

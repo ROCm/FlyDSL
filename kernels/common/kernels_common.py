@@ -19,6 +19,8 @@ from kernels.common.mem_ops import _create_llvm_ptr
 from kernels.common.mem_ops import atomic_add as atomic_add
 from kernels.common.mem_ops import get_llvm_ptr as get_llvm_ptr
 
+LOG2E = 1.4426950408889634
+
 _VALID_A_DTYPES = frozenset(("fp8", "fp16", "int8", "fp4"))
 _VALID_B_DTYPES = frozenset(("fp8", "fp16", "int8", "int4", "fp4"))
 

@@ -962,6 +962,13 @@ class ReplaceIfWithDispatch(Transformer):
 class InsertEmptyYieldForSCFFor(Transformer):
     _counter = 0
 
+    # Loop directive keywords accepted on ``range(...)`` and forwarded verbatim
+    # to the loop builders (``scf_for_dispatch`` / ``scf_range``). These tune how
+    # a loop is emitted; they are NOT loop-carried state (``init``) nor the
+    # positional start/stop/step. To add a new directive, add its name here and a
+    # matching keyword-only parameter on the builders -- no other change needed.
+    _LOOP_DIRECTIVE_KWARGS = ("unroll", "unroll_full")
+
     @staticmethod
     def _to_index(val):
         loc = capture_user_location()
@@ -979,7 +986,39 @@ class InsertEmptyYieldForSCFFor(Transformer):
         raise TypeError(f"_to_index expected ir.Value, object with ir_value(), or int; got {type(val).__name__}")
 
     @staticmethod
-    def scf_range(start, stop=None, step=None, *, init=None):
+    def _apply_loop_unroll(for_op, unroll, unroll_full):
+        """Attach an LLVM ``loop_annotation`` unroll hint to an ``scf.for``.
+
+        ``unroll``/``unroll_full`` are unrolling directives only and are kept
+        separate from the ``init`` loop-carried arguments. They must be pure
+        Python constants (evaluated at trace time), not traced IR values:
+
+        - ``unroll_full=True``     -> ``<full = true>``
+        - ``unroll=N`` (N >= 2)    -> ``<count = N : i32>``
+        - ``unroll=1``             -> ``<count = 1 : i32, disable = true>`` (no unrolling)
+        - default (``unroll=-1``)  -> no annotation attached
+
+        The attribute rides ``scf.for`` -> ``cf`` -> ``llvm.br`` and becomes
+        ``!llvm.loop`` metadata; the LLVM backend performs the actual unrolling.
+        """
+        if isinstance(unroll, bool) or not isinstance(unroll, int):
+            raise TypeError(f"for-loop `unroll` must be a Python int constant, got {type(unroll).__name__}")
+        if not isinstance(unroll_full, bool):
+            raise TypeError(f"for-loop `unroll_full` must be a Python bool constant, got {type(unroll_full).__name__}")
+        if unroll_full:
+            if unroll != -1:
+                raise ValueError("for-loop `unroll` and `unroll_full=True` are mutually exclusive")
+            body = "<full = true>"
+        elif unroll != -1:
+            if unroll < 1:
+                raise ValueError(f"for-loop `unroll` count must be >= 1, got {unroll}")
+            body = "<count = 1 : i32, disable = true>" if unroll == 1 else f"<count = {unroll} : i32>"
+        else:
+            return
+        for_op.attributes["loop_annotation"] = ir.Attribute.parse(f"#llvm.loop_annotation<unroll = {body}>")
+
+    @staticmethod
+    def scf_range(start, stop=None, step=None, *, init=None, unroll=-1, unroll_full=False):
         if stop is None:
             stop = start
             start = 0
@@ -992,18 +1031,22 @@ class InsertEmptyYieldForSCFFor(Transformer):
             init = [as_ir_value(v) for v in init]
             loc = capture_user_location()
             for_op = scf.ForOp(start_val, stop_val, step_val, init, loc=loc)
+            InsertEmptyYieldForSCFFor._apply_loop_unroll(for_op, unroll, unroll_full)
             _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable, list(for_op.inner_iter_args)
         else:
             loc = capture_user_location()
             for_op = scf.ForOp(start_val, stop_val, step_val, loc=loc)
+            InsertEmptyYieldForSCFFor._apply_loop_unroll(for_op, unroll, unroll_full)
             _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable
 
     @staticmethod
-    def scf_for_dispatch(start, stop, step, body_fn, *, result_names=(), result_values=()):
+    def scf_for_dispatch(
+        start, stop, step, body_fn, *, result_names=(), result_values=(), unroll=-1, unroll_full=False
+    ):
         start_val = as_ir_value(start)
         stop_val = as_ir_value(stop)
         step_val = as_ir_value(step)
@@ -1038,6 +1081,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
         if not result_names:
             loc = capture_user_location()
             for_op = scf.ForOp(start_val, stop_val, step_val, loc=loc)
+            InsertEmptyYieldForSCFFor._apply_loop_unroll(for_op, unroll, unroll_full)
             _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 iv = for_op.induction_variable
@@ -1052,6 +1096,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
         loc = capture_user_location()
         for_op = scf.ForOp(start_val, stop_val, step_val, state_raw, loc=loc)
+        InsertEmptyYieldForSCFFor._apply_loop_unroll(for_op, unroll, unroll_full)
         _locate_block_args(for_op.body, loc)
 
         with ir.InsertionPoint(for_op.body):
@@ -1106,6 +1151,21 @@ class InsertEmptyYieldForSCFFor(Transformer):
         if not isinstance(iter_node, ast.Call):
             return False
         return any(kw.arg == "init" for kw in iter_node.keywords)
+
+    @classmethod
+    def _extract_loop_directive_kwargs(cls, iter_node):
+        """Pull the loop directive keywords (see ``_LOOP_DIRECTIVE_KWARGS``) off a
+        ``range(...)`` call and forward them untouched to the loop builder.
+
+        Only allow-listed directives are forwarded; ``init`` (loop-carried args)
+        and the positional start/stop/step are left alone, so adding a directive
+        never disturbs loop-state routing.
+        """
+        if not isinstance(iter_node, ast.Call):
+            return []
+        return [
+            ast.keyword(arg=kw.arg, value=kw.value) for kw in iter_node.keywords if kw.arg in cls._LOOP_DIRECTIVE_KWARGS
+        ]
 
     @staticmethod
     def _extract_range_args(iter_node):
@@ -1197,7 +1257,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
         body_func = ast.fix_missing_locations(body_func)
 
         dispatch_args = [start, stop, step, ast.Name(body_name, ctx=ast.Load())]
-        dispatch_keywords = []
+        dispatch_keywords = self._extract_loop_directive_kwargs(node.iter)
         if result_names:
             dispatch_keywords.extend(
                 [

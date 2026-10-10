@@ -4,7 +4,7 @@
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, rocdl
+from flydsl.expr import const_expr, rocdl
 from flydsl.expr.typing import T
 
 # Pointer/global-load helpers now live in mem_ops; re-exported here for back-compat.
@@ -45,24 +45,18 @@ def rcp_f32(value):
 
 
 def exp2_amdgcn_scalar(scalar_value):
-    raw = (
-        arith.unwrap(scalar_value)
-        if hasattr(scalar_value, "ir_value") or hasattr(scalar_value, "type")
-        else scalar_value
-    )
+    raw = fx.as_ir_value(scalar_value)
     f32_ty = ir.F32Type.get()
     return llvm.call_intrinsic(f32_ty, "llvm.amdgcn.exp2.f32", [raw], [], [])
 
 
 def exp2_f32_fast(value):
-    from flydsl._mlir.dialects import vector as _vector_dialect
-
-    raw = arith.unwrap(value) if hasattr(value, "ir_value") or hasattr(value, "type") else value
+    raw = fx.as_ir_value(value)
     ty = raw.type
     if isinstance(ty, ir.VectorType):
         vec = fx.Vector(raw)
         elems = [exp2_amdgcn_scalar(vec[i]) for i in range(ty.shape[0])]
-        return _vector_dialect.from_elements(ty, elems)
+        return fx.Vector.from_elements(elems, vec.dtype)
     return exp2_amdgcn_scalar(raw)
 
 

@@ -116,7 +116,8 @@ Attribute MmaOpGFX1250_WMMAType::getThrValLayoutC() const {
 
 LogicalResult MmaOpGFX1250_WMMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
                                             int32_t n, int32_t k, Type elemTyA, Type elemTyB,
-                                            Type elemTyAcc, bool signA, bool signB, bool clamp) {
+                                            Type elemTyAcc, bool signA, bool signB, bool clamp,
+                                            int32_t modC, bool reuseA, bool reuseB) {
   if (m != 16 || n != 16)
     return emitError() << "GFX1250 WMMA requires M=N=16, got " << m << "x" << n;
 
@@ -235,19 +236,19 @@ enum class WmmaVariant { ModsAllReuse, ModsC, ModsABClamp, ModsIUClamp };
 template <typename WmmaOp, WmmaVariant Variant>
 static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType accTy, Value a,
                                     Value b, Value c, bool signA = false, bool signB = false,
-                                    bool clamp = false) {
+                                    bool clamp = false, int32_t modC = 0, bool reuseA = false,
+                                    bool reuseB = false) {
   Value res;
   if constexpr (Variant == WmmaVariant::ModsAllReuse) {
-    res = WmmaOp::create(builder, loc, accTy, a, b, ROCDL::WMMACModifier::none, c,
-                         /*reuseA=*/false, /*reuseB=*/false)
+    res = WmmaOp::create(builder, loc, accTy, a, b, static_cast<ROCDL::WMMACModifier>(modC), c,
+                         reuseA, reuseB)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsC) {
-    res = WmmaOp::create(builder, loc, accTy, a, b, ROCDL::WMMACModifier::none, c,
-                         /*reuseA=*/false, /*reuseB=*/false)
+    res = WmmaOp::create(builder, loc, accTy, a, b, static_cast<ROCDL::WMMACModifier>(modC), c,
+                         reuseA, reuseB)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsABClamp) {
-    res = WmmaOp::create(builder, loc, accTy, signA, a, signB, b, c,
-                         /*reuseA=*/false, /*reuseB=*/false, clamp)
+    res = WmmaOp::create(builder, loc, accTy, signA, a, signB, b, c, reuseA, reuseB, clamp)
               .getResult();
   } else {
     static_assert(Variant == WmmaVariant::ModsIUClamp);
@@ -258,9 +259,17 @@ static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType
 
 FailureOr<Value> MmaOpGFX1250_WMMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
                                                         Type resultTy, Type mmaAtomTyArg,
-                                                        Type dTyArg, Type aTyArg, Type bTyArg,
-                                                        Type cTyArg, Value atomVal, Value d,
-                                                        Value a, Value b, Value c) const {
+                                                        Type dTyArg, TypeRange aTyArgs,
+                                                        TypeRange bTyArgs, Type cTyArg,
+                                                        Value atomVal, Value d, ValueRange aValues,
+                                                        ValueRange bValues, Value c) const {
+  if (aValues.size() != 1 || bValues.size() != 1) {
+    emitError(loc, "this MMA atom does not support auxiliary operands");
+    return failure();
+  }
+  Value a = aValues.front();
+  Value b = bValues.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -291,11 +300,14 @@ FailureOr<Value> MmaOpGFX1250_WMMAType::emitAtomCallSSA(OpBuilder &builder, Loca
   bool signA = getSignA();
   bool signB = getSignB();
   bool clamp = getClamp();
+  int32_t modC = getModC();
+  bool reuseA = getReuseA();
+  bool reuseB = getReuseB();
 
 #define DISPATCH_WMMA_SSA(M_, K_, PRED, OP, VARIANT)                                               \
   if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
     return emitWmmaSSA<ROCDL::OP, WmmaVariant::VARIANT>(builder, loc, accTy, a, b, c, signA,       \
-                                                        signB, clamp);                             \
+                                                        signB, clamp, modC, reuseA, reuseB);       \
   }
 
 #define DISPATCH_WMMA_SSA_FP8(K_, ACC_PRED, ACC_PREFIX)                                            \
@@ -338,9 +350,17 @@ FailureOr<Value> MmaOpGFX1250_WMMAType::emitAtomCallSSA(OpBuilder &builder, Loca
 }
 
 LogicalResult MmaOpGFX1250_WMMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
-                                                  Type dMemTy, Type aMemTy, Type bMemTy,
+                                                  Type dMemTy, TypeRange aMemTys, TypeRange bMemTys,
                                                   Type cMemTy, Value atomVal, Value dPtr,
-                                                  Value aPtr, Value bPtr, Value cPtr) const {
+                                                  ValueRange aPtrs, ValueRange bPtrs,
+                                                  Value cPtr) const {
+  if (aPtrs.size() != 1 || bPtrs.size() != 1) {
+    emitError(loc, "this MMA atom does not support auxiliary operands");
+    return failure();
+  }
+  Value aPtr = aPtrs.front();
+  Value bPtr = bPtrs.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();

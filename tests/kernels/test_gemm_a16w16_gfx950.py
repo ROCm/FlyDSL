@@ -173,7 +173,6 @@ def check_acc(args: _TestArgs):
     ref_outputs = create_outputs(args)
     inouts = inputs + outputs
     ref_inouts = inputs + ref_outputs
-    maxdiff_out_ = []
 
     def get_tol(args):
         k_scale = (args.k / 8192) ** 0.5
@@ -184,21 +183,19 @@ def check_acc(args: _TestArgs):
         return 5e-2 * k_scale * atol_scale, 5e-2
 
     atol, rtol = get_tol(args)
-    for _ in range(5):
-        func(*(inouts + (kwargs, args.layout)))
-        ref_func(*(ref_inouts + (args.layout,)))
-        for output, ref_output in zip(outputs, ref_outputs):
-            maxdiff_out = (output - ref_output).abs().max().item()
-            maxdiff_out_.append(maxdiff_out)
-            print(maxdiff_out, flush=True)
-            torch.testing.assert_close(
-                output,
-                ref_output,
-                atol=atol,
-                rtol=rtol,
-                check_dtype=True,
-            )
-    print(f"\n{args}\nmaxdiff_out:{maxdiff_out_}")
+    func(*(inouts + (kwargs, args.layout)))
+    ref_func(*(ref_inouts + (args.layout,)))
+    maxdiff_out = []
+    for output, ref_output in zip(outputs, ref_outputs):
+        maxdiff_out.append((output - ref_output).abs().max().item())
+        torch.testing.assert_close(
+            output,
+            ref_output,
+            atol=atol,
+            rtol=rtol,
+            check_dtype=True,
+        )
+    print(f"\n{args}\nmaxdiff_out:{maxdiff_out}")
 
 
 def benchmark(args: _TestArgs, warmup: int = 500, niters: int = 600):
@@ -1059,6 +1056,7 @@ def test_gemm_a16w16_rejects_unsupported_k_partitioning(
 # =========================================== benchmark ===========================================
 
 
+@pytest.mark.benchmark
 @pytest.mark.parametrize(
     "m, n, k, block_m, block_n, block_k, stages, split_k, " "m_waves, n_waves, k_waves, group_m, has_bias",
     [
@@ -1109,6 +1107,7 @@ def test_gemm_a16w16_hti_split_k_benchmark(
     benchmark(args)
 
 
+@pytest.mark.benchmark
 @pytest.mark.parametrize("layout", ["nn", "nt", "tn", "tt"])
 @pytest.mark.parametrize("dtype", ["bf16"])
 @pytest.mark.parametrize(

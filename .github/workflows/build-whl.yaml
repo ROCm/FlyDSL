@@ -42,7 +42,8 @@ jobs:
           IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-cp310-cp314"
           if ! docker pull "${IMAGE}"; then
             # The Dockerfile is self-contained, so avoid sending the full repo as build context.
-            docker build \
+            # Use the runner's network for dnf/pip during the build, too.
+            docker build --network=host \
               --build-arg ROCM_VERSION="${ROCM_VERSION}" \
               -t "${IMAGE}" \
               - < flydsl/.github/workflows/Dockerfile.manylinux_2_28
@@ -165,7 +166,7 @@ jobs:
         run: |
           SUMMARY_LLVM_COMMIT="$(python3 -c "import json; print(json.load(open('flydsl/thirdparty/llvm-build-info.json'))['upstream']['llvm_hash'])")"
           export SUMMARY_LLVM_COMMIT
-          python3 flydsl/scripts/generate_summary.py build
+          python3 flydsl/.github/scripts/generate_summary.py build
 
       - name: Configure AWS credentials
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}

@@ -13,22 +13,12 @@
 //===----------------------------------------------------------------------===//
 
 #include <cassert>
-#include <cstdio>
 #include <dlfcn.h>
 #include <vector>
 
+#include "FlyRocmRuntimeError.h"
 #include "hip/hip_runtime.h"
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
-
-#define HIP_REPORT_IF_ERROR(expr)                                                                  \
-  [](hipError_t result) {                                                                          \
-    if (!result)                                                                                   \
-      return;                                                                                      \
-    const char *name = hipGetErrorName(result);                                                    \
-    if (!name)                                                                                     \
-      name = "<unknown>";                                                                          \
-    fprintf(stderr, "'%s' failed with '%s'\n", #expr, name);                                       \
-  }(expr)
 
 thread_local static int32_t defaultDevice = 0;
 
@@ -59,6 +49,9 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX, intptr_
                                  intptr_t gridZ, intptr_t blockX, intptr_t blockY, intptr_t blockZ,
                                  int32_t smem, hipStream_t stream, void **params, void **extra,
                                  size_t /*paramsCount*/) {
+  // A null function means resolving it already failed and recorded an error.
+  if (!function)
+    return;
   HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ,
                                             smem, stream, params, extra));
 }
@@ -69,6 +62,8 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
                                         intptr_t blockY, intptr_t blockZ, int32_t smem,
                                         hipStream_t stream, void **params, void **extra,
                                         size_t /*paramsCount*/) {
+  if (!function)
+    return;
   // Resolve hipDrvLaunchKernelEx at runtime via dlsym so that the same
   // shared library works across HIP versions (required for wheel builds).
   // Mirrors Triton's approach: triton/third_party/amd/backend/driver.c.

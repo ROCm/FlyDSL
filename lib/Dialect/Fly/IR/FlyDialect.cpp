@@ -38,6 +38,32 @@ void printMNKDimensionList(AsmPrinter &printer, int32_t m, int32_t n, int32_t k)
   printer.printDimensionList(ArrayRef<int64_t>{m, n, k});
 }
 
+ParseResult parseVariadicOperandGroup(OpAsmParser &parser,
+                                      SmallVectorImpl<OpAsmParser::UnresolvedOperand> &operands) {
+  if (succeeded(parser.parseOptionalLSquare())) {
+    if (parser.parseOperandList(operands) || parser.parseRSquare())
+      return failure();
+    return success();
+  }
+
+  OpAsmParser::UnresolvedOperand operand;
+  if (parser.parseOperand(operand))
+    return failure();
+  operands.push_back(operand);
+  return success();
+}
+
+void printVariadicOperandGroup(OpAsmPrinter &printer, Operation *, OperandRange operands) {
+  if (operands.size() == 1) {
+    printer << operands.front();
+    return;
+  }
+
+  printer << '[';
+  printer.printOperands(operands);
+  printer << ']';
+}
+
 } // namespace mlir::fly
 
 #define GET_TYPEDEF_CLASSES

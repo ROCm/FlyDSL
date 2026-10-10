@@ -35,6 +35,20 @@ def Fly_StatefulOpTypeInterface : TypeInterface<"StatefulOpTypeInterface"> {
       "::mlir::Value", "getDefaultState",
       (ins "::mlir::OpBuilder &":$builder, "::mlir::Location":$loc)>,
     InterfaceMethod<
+      "Build the initial state value for an atom materialized with `args`.",
+      "::mlir::Value", "getAtomState",
+      (ins "::mlir::OpBuilder &":$builder, "::mlir::Location":$loc,
+           "::mlir::ValueRange":$args),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        if (!args.empty()) {
+          ::mlir::emitError(loc) << "this atom takes no construction arguments, got "
+                                 << args.size();
+          return nullptr;
+        }
+        return $_type.getDefaultState(builder, loc);
+      }]>,
+    InterfaceMethod<
       "Insert the given value to a field of this stateful op. "
       "Returns the updated struct value after setting the field.",
       "::mlir::Value",
@@ -119,7 +133,8 @@ def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface"> {
            "::mlir::Value":$src,
            "::mlir::Value":$dst)>,
     InterfaceMethod<
-      "Emit SSA-form predicated copy: reads src under predicate, returns vector result.",
+      "Emit SSA-form predicated copy with a scalar i1 predicate (normalized by lowering); "
+      "reads src under predicate and returns a result when resultTy is present.",
       "::mlir::FailureOr<::mlir::Value>",
       "emitAtomCallSSA",
       (ins "::mlir::OpBuilder &":$builder,
@@ -156,13 +171,13 @@ def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface"> {
            "::mlir::Location":$loc,
            "::mlir::Type":$mmaAtomTy,
            "::mlir::Type":$dMemTy,
-           "::mlir::Type":$aMemTy,
-           "::mlir::Type":$bMemTy,
+           "::mlir::TypeRange":$aMemTy,
+           "::mlir::TypeRange":$bMemTy,
            "::mlir::Type":$cMemTy,
            "::mlir::Value":$atomVal,
            "::mlir::Value":$d,
-           "::mlir::Value":$a,
-           "::mlir::Value":$b,
+           "::mlir::ValueRange":$a,
+           "::mlir::ValueRange":$b,
            "::mlir::Value":$c)>,
     InterfaceMethod<"", "::mlir::FailureOr<::mlir::Value>", "emitAtomCallSSA",
       (ins "::mlir::OpBuilder &":$builder,
@@ -170,13 +185,13 @@ def Fly_MmaOpTypeInterface : TypeInterface<"MmaOpTypeInterface"> {
            "::mlir::Type":$resultTy,
            "::mlir::Type":$mmaAtomTy,
            "::mlir::Type":$dTy,
-           "::mlir::Type":$aTy,
-           "::mlir::Type":$bTy,
+           "::mlir::TypeRange":$aTy,
+           "::mlir::TypeRange":$bTy,
            "::mlir::Type":$cTy,
            "::mlir::Value":$atomVal,
            "::mlir::Value":$d,
-           "::mlir::Value":$a,
-           "::mlir::Value":$b,
+           "::mlir::ValueRange":$a,
+           "::mlir::ValueRange":$b,
            "::mlir::Value":$c)>
   ];
 }

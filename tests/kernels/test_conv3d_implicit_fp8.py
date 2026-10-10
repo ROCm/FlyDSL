@@ -90,14 +90,19 @@ def test_conv3d_fp8_wgm_configs(wgm):
 @_skip_no_fp8
 def test_conv3d_fp8_autotune_wgm(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))
-    torch.manual_seed(2700)
-    n, c, t, h, w, k = 1, 256, 3, 16, 16, 256
-    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
-    weight = torch.randn((k, c, 1, 3, 3), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+    from kernels.conv import conv3d_autotune
 
-    y = conv3d_implicit_fp8(x, weight, stride=1, padding=(0, 1, 1), autotune=True)
-    y2 = conv3d_implicit_fp8(x, weight, stride=1, padding=(0, 1, 1), autotune=True)  # cache hit
-    ref = F.conv3d(x.to(torch.bfloat16), weight.to(torch.bfloat16), stride=1, padding=(0, 1, 1))
+    conv3d_autotune._MEM_CACHE.clear()
+    torch.manual_seed(2700)
+    # Reuse the three WGM compilations from test_conv3d_fp8_wgm_configs above;
+    # this test is about the sweep and cache path, not another kernel shape.
+    n, c, t, h, w, k = 1, 256, 3, 18, 18, 256
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+    weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+
+    y = conv3d_implicit_fp8(x, weight, stride=1, padding=1, autotune=True)
+    y2 = conv3d_implicit_fp8(x, weight, stride=1, padding=1, autotune=True)  # cache hit
+    ref = F.conv3d(x.to(torch.bfloat16), weight.to(torch.bfloat16), stride=1, padding=1)
     torch.cuda.synchronize()
 
     assert y.shape == ref.shape

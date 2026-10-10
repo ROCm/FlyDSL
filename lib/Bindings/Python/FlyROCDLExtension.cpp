@@ -5,10 +5,17 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Value.h"
 
+#include "mlir/IR/Diagnostics.h"
+
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
+#include "flydsl/Dialect/FlyROCDL/Utils/TdmAtomBuilder.h"
 
 #include "BindingUtils.h"
+
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -66,17 +73,19 @@ struct PyMmaOpGFX1250_WMMAType : PyConcreteType<PyMmaOpGFX1250_WMMAType> {
     c.def_static(
         "get",
         [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
-           bool signA, bool signB, bool clamp, DefaultingPyMlirContext context) {
+           bool signA, bool signB, bool clamp, int32_t modC, DefaultingPyMlirContext context) {
           return PyMmaOpGFX1250_WMMAType(
               context->getRef(),
               wrap(MmaOpGFX1250_WMMAType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB),
-                                              unwrap(elemTyAcc), signA, signB, clamp)));
+                                              unwrap(elemTyAcc), signA, signB, clamp, modC)));
         },
         "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, "sign_a"_a = false,
-        "sign_b"_a = false, "clamp"_a = false, nb::kw_only(), "context"_a = nb::none(),
+        "sign_b"_a = false, "clamp"_a = false, "mod_c"_a = 0, nb::kw_only(),
+        "context"_a = nb::none(),
         "Create a MmaOpGFX1250_WMMAType with m, n, k dimensions and element types. "
         "sign_a / sign_b / clamp are integer-only (iu4 / iu8) controls (signed operands / "
-        "accumulator saturation); they must be false on the float paths.");
+        "accumulator saturation); they must be false on the float paths. "
+        "mod_c (I16 C-operand modifier, default 0) is forwarded to the ROCDL intrinsic.");
   }
 };
 
@@ -280,6 +289,75 @@ struct PyCopyOpCDNA4GlobalLoadAsyncLDSType : PyConcreteType<PyCopyOpCDNA4GlobalL
   }
 };
 
+struct PyCopyOpCDNA5TensorLoadType : PyConcreteType<PyCopyOpCDNA5TensorLoadType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA5TensorLoadType, "CopyOpCDNA5TensorLoadType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](std::vector<int32_t> tileShape, PyType &dataType, PyType &tensor2tdm, bool atomicBarrier,
+           int32_t cacheModifier, int32_t iterCount, int32_t padInterval, int32_t padAmount,
+           DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpCDNA5TensorLoadType(
+              context->getRef(),
+              wrap(CopyOpCDNA5TensorLoadType::get(
+                  ctx, tileShape, unwrap(dataType),
+                  ::mlir::dyn_cast<IntTupleType>(unwrap(tensor2tdm)).getAttr(), atomicBarrier,
+                  cacheModifier, iterCount, padInterval, padAmount)));
+        },
+        "tile_shape"_a, "data_type"_a, "tensor2tdm"_a, "atomic_barrier"_a = false,
+        "cache_modifier"_a = 0, "iter_count"_a = 1, "pad_interval"_a = 0, "pad_amount"_a = 0,
+        nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA5TensorLoadType (N-D TDM Global->LDS DMA) with the static per-dim tile "
+        "shape (tensor dim order, len = rank 1-5)");
+  }
+};
+
+struct PyCopyOpCDNA5TensorStoreType : PyConcreteType<PyCopyOpCDNA5TensorStoreType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA5TensorStoreType, "CopyOpCDNA5TensorStoreType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](std::vector<int32_t> tileShape, PyType &dataType, PyType &tensor2tdm, bool atomicBarrier,
+           int32_t cacheModifier, int32_t iterCount, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpCDNA5TensorStoreType(
+              context->getRef(), wrap(CopyOpCDNA5TensorStoreType::get(
+                                     ctx, tileShape, unwrap(dataType),
+                                     ::mlir::dyn_cast<IntTupleType>(unwrap(tensor2tdm)).getAttr(),
+                                     atomicBarrier, cacheModifier, iterCount)));
+        },
+        "tile_shape"_a, "data_type"_a, "tensor2tdm"_a, "atomic_barrier"_a = false,
+        "cache_modifier"_a = 0, "iter_count"_a = 1, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA5TensorStoreType (N-D TDM LDS->Global DMA). Same parameters as "
+        "the load minus the padding: the store instruction has no de-padding, it drains LDS "
+        "with the packed tile stride");
+  }
+};
+
+PyType tdm_partition_layout(PyType &atomType, PyType &stensorType, PyType &gtensorType,
+                            int32_t numWarps) {
+  ::mlir::MLIRContext *ctx = unwrap(atomType).getContext();
+  std::string error;
+  ::mlir::ScopedDiagnosticHandler handler(ctx,
+                                          [&](::mlir::Diagnostic &diag) -> ::mlir::LogicalResult {
+                                            if (!error.empty())
+                                              error += "; ";
+                                            error += diag.str();
+                                            return ::mlir::success();
+                                          });
+  auto emitError = [&]() -> ::mlir::InFlightDiagnostic {
+    return ::mlir::emitError(::mlir::UnknownLoc::get(ctx)) << "tdm_partition_layout: ";
+  };
+  ::mlir::FailureOr<LayoutType> layout = ::mlir::fly_rocdl::tdmPartitionLayout(
+      unwrap(atomType), unwrap(stensorType), unwrap(gtensorType), numWarps, emitError);
+  if (::mlir::failed(layout))
+    throw std::invalid_argument(error.empty() ? "tdm_partition_layout failed" : error);
+  return PyType(atomType.getContext(), wrap(*layout));
+}
+
 } // namespace fly_rocdl
 } // namespace MLIR_BINDINGS_PYTHON_DOMAIN
 } // namespace python
@@ -302,5 +380,13 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4LdsReadTransposeType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4BufferLoadAsyncLDSType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4GlobalLoadAsyncLDSType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA5TensorLoadType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA5TensorStoreType::bind(m);
   // clang-format on
+
+  m.def("tdm_partition_layout",
+        &::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::tdm_partition_layout,
+        "atom_type"_a, "stensor_type"_a, "gtensor_type"_a, "num_warps"_a,
+        "Create a tdm_partition_layout with the given atom type, stensor type, gtensor type, and "
+        "num warps");
 }

@@ -4,21 +4,18 @@
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 from .mxfp4_gemm_common import (
     _e8m0_from_amax,
     _e8m0_from_amax_fp8,
-    _fabs_f32,
     _gep1,
-    _gep3,
     _global_base_ptr1,
     _global_i32_at,
     _global_i32_buffer_tiles,
     _inline_dpp_quad_amax,
-    _lds_ptr3,
     _lds_swizzle_mask,
     _raw,
     _scale_mma_atoms,
@@ -26,6 +23,7 @@ from .mxfp4_gemm_common import (
     _umod,
     bq_bytes_for,
     bscale_bytes_for,
+    global_typed_ptr,
     k_half_for,
     k_tiles_total_for,
     kas_per_chunk_dw_for,
@@ -36,6 +34,8 @@ from .mxfp4_gemm_common import (
     kStages,
     kunroll_for,
     lds_acc_bytes_for,
+    lds_typed_ptr,
+    lds_vec_load,
     num_n_blocks_for,
 )
 
@@ -229,14 +229,14 @@ def compile_gemm2_a4w4_port(
 
             def _xcd(pid):
                 xc = _umod(pid, _NXCD)
-                wgid = xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + _udiv(pid, _NXCD)
+                wgid = xc * _xq + fx.min(xc, _xr) + _udiv(pid, _NXCD)
                 if const_expr(_SW <= 0):
                     return wgid
                 _ng = fx.Int32(_SW * _num_n_blocks)
                 group_id = wgid // _ng
                 first_pid_m = group_id * fx.Int32(_SW)
                 remaining_m = total_m_blocks - first_pid_m
-                group_size_m = fx.Int32(arith.minsi(_raw(remaining_m), _raw(fx.Int32(_SW))))
+                group_size_m = fx.min(remaining_m, fx.Int32(_SW))
                 wig = wgid % _ng
                 m_block = first_pid_m + (wig % group_size_m)
                 n_block = wig // group_size_m
@@ -272,14 +272,14 @@ def compile_gemm2_a4w4_port(
 
             def _xcd_np(pid):
                 xc = _umod(pid, _NXCD)
-                wgid = xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + _udiv(pid, _NXCD)
+                wgid = xc * _xq + fx.min(xc, _xr) + _udiv(pid, _NXCD)
                 if const_expr(_SW <= 0):
                     return wgid
                 _ng = fx.Int32(_SW * _num_n_blocks)
                 group_id = wgid // _ng
                 first_pid_m = group_id * fx.Int32(_SW)
                 remaining_m = total_m_blocks - first_pid_m
-                group_size_m = fx.Int32(arith.minsi(_raw(remaining_m), _raw(fx.Int32(_SW))))
+                group_size_m = fx.min(remaining_m, fx.Int32(_SW))
                 wig = wgid % _ng
                 m_block = first_pid_m + (wig % group_size_m)
                 n_block = wig // group_size_m
@@ -314,11 +314,10 @@ def compile_gemm2_a4w4_port(
     ):
         if const_expr(_persistent):
             tw = i32_max_m_blocks * fx.Int32(_num_n_blocks)
-            persist = _raw(tw > fx.Int32(NUM_CU * 4))
-            grid_i32 = arith.select(persist, _raw(fx.Int32(NUM_CU)), _raw(tw))
-            grid_x = arith.index_cast(T.index, grid_i32)
+            grid_i32 = (tw > fx.Int32(NUM_CU * 4)).select(fx.Int32(NUM_CU), tw)
+            grid_x = fx.Index(grid_i32)
         else:
-            grid_x = arith.index_cast(T.index, i32_max_m_blocks) * fx.Index(_num_n_blocks)
+            grid_x = fx.Index(i32_max_m_blocks) * fx.Index(_num_n_blocks)
         gemm2_kernel(
             arg_aq,
             arg_ascale,
@@ -661,8 +660,7 @@ def _gemm2_body(
         gpu.barrier()
 
     if epilog == "nonatomic":
-        out_base = _global_base_ptr1(arg_out)
-        _flat_bf16_epilog(accm, out_base, m_row, n_block_idx, wave, lane, N_OUT, BN, _kMChunks)
+        _flat_bf16_epilog(accm, arg_out, m_row, n_block_idx, wave, lane, N_OUT, BN, _kMChunks)
     elif epilog == "nonatomic_cshuffle":
         _cshuffle_flat_bf16_epilog(
             lds_acc_base_i32,
@@ -678,12 +676,11 @@ def _gemm2_body(
         )
     elif epilog == "nonatomic_fp8":
         out_q_base = _global_base_ptr1(arg_out)
-        out_scale_base = _global_base_ptr1(arg_out_scale)
         tid_i32 = fx.Int32(gpu.thread_id("x"))
         _flat_mxfp8_epilog(
             accm,
             out_q_base,
-            out_scale_base,
+            arg_out_scale,
             m_row,
             n_block_idx,
             wave,
@@ -696,12 +693,11 @@ def _gemm2_body(
         )
     elif epilog == "nonatomic_mxfp4":
         out_q_base = _global_base_ptr1(arg_out)
-        out_scale_base = _global_base_ptr1(arg_out_scale)
         tid_i32 = fx.Int32(gpu.thread_id("x"))
         _flat_mxfp4_epilog(
             accm,
             out_q_base,
-            out_scale_base,
+            arg_out_scale,
             m_row,
             n_block_idx,
             wave,
@@ -730,7 +726,7 @@ def _gemm2_body(
         )
 
 
-def _flat_bf16_epilog(accm, out_base, m_row, n_block_idx, wave, lane, N_OUT, BN, kMChunks):
+def _flat_bf16_epilog(accm, arg_out, m_row, n_block_idx, wave, lane, N_OUT, BN, kMChunks):
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
     row_base = m_row + lane_div_16 * fx.Int32(4)
@@ -742,7 +738,9 @@ def _flat_bf16_epilog(accm, out_base, m_row, n_block_idx, wave, lane, N_OUT, BN,
             for v in range_constexpr(4):
                 const_off = ((i * 16 + v) * N_OUT + J * 16) * 2
                 bf = Vec.from_elements([vec[v]], fx.Float32).to(fx.BFloat16)
-                llvm.StoreOp(_raw(bf), _gep1(out_base, byte_base + fx.Int64(const_off)))
+                fx.ptr_store(
+                    bf, global_typed_ptr(arg_out, T.bf16, align=2, byte_offset=byte_base + fx.Int64(const_off))
+                )
 
 
 def _cshuffle_flat_bf16_epilog(lds_acc_base_i32, accm, arg_out, m_row, n_block_idx, wave, lane, BM, N_OUT, BN):
@@ -750,12 +748,10 @@ def _cshuffle_flat_bf16_epilog(lds_acc_base_i32, accm, arg_out, m_row, n_block_i
     _REPS = BM // 8
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
-    lds_base = _lds_ptr3(lds_acc_base_i32, fx.Int32(0))
     tx_i32 = fx.Int32(gpu.thread_id("x"))
     m_lane = tx_i32 // fx.Int32(32)
     n_lane = tx_i32 % fx.Int32(32)
     col_start = n_lane * fx.Int32(2)
-    out_base = _global_base_ptr1(arg_out)
 
     for i in range_constexpr(_iC):
         row_base = fx.Int32(i * 16) + lane_div_16 * fx.Int32(4)
@@ -764,24 +760,24 @@ def _cshuffle_flat_bf16_epilog(lds_acc_base_i32, accm, arg_out, m_row, n_block_i
             bf4 = Vec(accm[i][J]).to(fx.BFloat16)
             for v in range_constexpr(4):
                 idx = (row_base + fx.Int32(v)) * fx.Int32(BN) + col
-                llvm.StoreOp(_raw(bf4[v]), _gep3(lds_base, idx * fx.Int32(2)))
+                fx.ptr_store(bf4[v], lds_typed_ptr(lds_acc_base_i32, T.bf16, align=2, byte_offset=idx * fx.Int32(2)))
     gpu.barrier()
     for mr in range_constexpr(_REPS):
         row_local = fx.Int32(mr * 8) + m_lane
         sorted_row = m_row + row_local
         for s in range_constexpr(4):
             idx0 = row_local * fx.Int32(BN) + col_start + fx.Int32(s * 64)
-            pk = Vec(llvm.load(T.vec(2, T.bf16), _gep3(lds_base, idx0 * fx.Int32(2))))
+            pk = Vec(lds_vec_load(lds_acc_base_i32, idx0 * fx.Int32(2), T.vec(2, T.bf16), T.bf16, align=4))
             n_col = n_block_idx * fx.Int32(BN) + col_start + fx.Int32(s * 64)
             elem = fx.Int64(sorted_row) * fx.Int64(N_OUT) + fx.Int64(n_col)
-            llvm.StoreOp(_raw(pk), _gep1(out_base, elem * fx.Int64(2)))
+            fx.ptr_store(pk, global_typed_ptr(arg_out, T.bf16, align=4, byte_offset=elem * fx.Int64(2)))
 
 
 @flyc.jit
 def _flat_mxfp8_epilog(
     accm,
     out_q_base,
-    out_scale_base,
+    arg_out_scale,
     m_row,
     n_block_idx,
     wave,
@@ -792,7 +788,6 @@ def _flat_mxfp8_epilog(
     lds_acc_base_i32,
     kMChunks,
 ):
-    lds_base = _lds_ptr3(lds_acc_base_i32, fx.Int32(0))
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
     NBLK = BN // 32
@@ -818,7 +813,7 @@ def _flat_mxfp8_epilog(
                 vec = Vec(accm[i][J])
                 for v in range_constexpr(4):
                     idx = (row_base + fx.Int32(v)) * fx.Int32(BN) + col
-                    llvm.StoreOp(_raw(vec[v]), _gep3(lds_base, idx * fx.Int32(4)))
+                    fx.ptr_store(vec[v], lds_typed_ptr(lds_acc_base_i32, T.f32, byte_offset=idx * fx.Int32(4)))
         gpu.barrier()
 
         for ii in range_constexpr(_MC_PER_PASS):
@@ -828,32 +823,30 @@ def _flat_mxfp8_epilog(
                 group = wave_grp + fx.Int32(half * 4)
                 col0 = group * fx.Int32(32) + kk * fx.Int32(8)
                 base_idx = row_local * fx.Int32(BN) + col0
-                v0 = Vec(llvm.load(T.vec(4, T.f32), _gep3(lds_base, base_idx * fx.Int32(4))))
+                v0 = Vec(lds_vec_load(lds_acc_base_i32, base_idx * fx.Int32(4), T.vec(4, T.f32), T.f32, align=16))
                 v1 = Vec(
-                    llvm.load(
-                        T.vec(4, T.f32),
-                        _gep3(lds_base, (base_idx + fx.Int32(4)) * fx.Int32(4)),
+                    lds_vec_load(
+                        lds_acc_base_i32, (base_idx + fx.Int32(4)) * fx.Int32(4), T.vec(4, T.f32), T.f32, align=16
                     )
                 )
                 r = [v0[0], v0[1], v0[2], v0[3], v1[0], v1[1], v1[2], v1[3]]
-                amax_f = _raw(_fabs_f32(r[0]))
+                amax_f = fx.absf(r[0])
                 for e in range_constexpr(1, 8):
-                    abs_e = _raw(_fabs_f32(r[e]))
-                    amax_f = arith.maxnumf(amax_f, abs_e)
-                amax = arith.shrui(arith.bitcast(T.i32, amax_f), _raw(fx.Int32(16)))
-                amax_dpp = _raw(_inline_dpp_quad_amax(amax))
-                f32b = arith.shli(amax_dpp, _raw(fx.Int32(16)))
-                e8m0, qscale_f = _e8m0_from_amax_fp8(fx.Float32(arith.bitcast(T.f32, f32b)))
+                    amax_f = fx.maxnumf(amax_f, fx.absf(r[e]))
+                amax = amax_f.bitcast(fx.Uint32) >> fx.Int32(16)
+                amax_dpp = _inline_dpp_quad_amax(amax)
+                f32b = amax_dpp << fx.Int32(16)
+                e8m0, qscale_f = _e8m0_from_amax_fp8(f32b.bitcast(fx.Float32))
                 e8 = _raw(e8m0)
                 qscale = _raw(qscale_f)
                 _v2i16 = T.vec(2, T.i16)
-                _zero = llvm.BitcastOp(_v2i16, _raw(fx.Int32(0))).result
+                _zero = _raw(Vec.filled(2, 0, fx.Int16))
                 p0 = rocdl.cvt_scalef32_pk_fp8_f32(_v2i16, _zero, _raw(r[0]), _raw(r[1]), qscale, False)
                 p0 = rocdl.cvt_scalef32_pk_fp8_f32(_v2i16, p0, _raw(r[2]), _raw(r[3]), qscale, True)
                 p1 = rocdl.cvt_scalef32_pk_fp8_f32(_v2i16, _zero, _raw(r[4]), _raw(r[5]), qscale, False)
                 p1 = rocdl.cvt_scalef32_pk_fp8_f32(_v2i16, p1, _raw(r[6]), _raw(r[7]), qscale, True)
-                p0 = llvm.BitcastOp(T.i32, p0).result
-                p1 = llvm.BitcastOp(T.i32, p1).result
+                p0 = Vec(p0).bitcast(fx.Int32)[0]
+                p1 = Vec(p1).bitcast(fx.Int32)[0]
                 global_col = n_block_idx * fx.Int32(BN) + col0
                 blk = n_block_idx * fx.Int32(NBLK) + group
                 q_byte = _q_row0 + fx.Int64(mr * 16 * N_OUT) + fx.Int64(global_col)
@@ -861,14 +854,14 @@ def _flat_mxfp8_epilog(
                 pk = Vec.from_elements([fx.Int32(p0), fx.Int32(p1)], fx.Int32)
                 llvm.StoreOp(_raw(pk), _gep1(out_q_base, q_byte), nontemporal=True)
                 if kk == fx.Int32(0):
-                    llvm.StoreOp(arith.trunci(T.i8, e8), _gep1(out_scale_base, s_byte))
+                    fx.ptr_store(fx.Int8(e8), global_typed_ptr(arg_out_scale, T.i8, align=1, byte_offset=s_byte))
 
 
 @flyc.jit
 def _flat_mxfp4_epilog(
     accm,
     out_q_base,
-    out_scale_base,
+    arg_out_scale,
     m_row,
     n_block_idx,
     wave,
@@ -879,7 +872,6 @@ def _flat_mxfp4_epilog(
     lds_acc_base_i32,
     kMChunks,
 ):
-    lds_base = _lds_ptr3(lds_acc_base_i32, fx.Int32(0))
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
     for i in range_constexpr(kMChunks):
@@ -889,7 +881,7 @@ def _flat_mxfp4_epilog(
             vec = Vec(accm[i][J])
             for v in range_constexpr(4):
                 idx = (row_base + fx.Int32(v)) * fx.Int32(BN) + col
-                llvm.StoreOp(_raw(vec[v]), _gep3(lds_base, idx * fx.Int32(4)))
+                fx.ptr_store(vec[v], lds_typed_ptr(lds_acc_base_i32, T.f32, byte_offset=idx * fx.Int32(4)))
     gpu.barrier()
 
     NBLK = BN // 32
@@ -907,12 +899,9 @@ def _flat_mxfp4_epilog(
         group = wave_grp + fx.Int32(half * 4)
         col0 = group * fx.Int32(32) + kk * fx.Int32(8)
         base_idx = row_local * fx.Int32(BN) + col0
-        v0 = Vec(llvm.load(T.vec(4, T.f32), _gep3(lds_base, base_idx * fx.Int32(4))))
+        v0 = Vec(lds_vec_load(lds_acc_base_i32, base_idx * fx.Int32(4), T.vec(4, T.f32), T.f32, align=16))
         v1 = Vec(
-            llvm.load(
-                T.vec(4, T.f32),
-                _gep3(lds_base, (base_idx + fx.Int32(4)) * fx.Int32(4)),
-            )
+            lds_vec_load(lds_acc_base_i32, (base_idx + fx.Int32(4)) * fx.Int32(4), T.vec(4, T.f32), T.f32, align=16)
         )
         return [v0[0], v0[1], v0[2], v0[3], v1[0], v1[1], v1[2], v1[3]], group, col0
 
@@ -943,7 +932,7 @@ def _flat_mxfp4_epilog(
             s_byte = _s_row0 + fx.Int64(mr * 16 * (N_OUT // 32)) + fx.Int64(blk)
             llvm.StoreOp(packed, _gep1(out_q_base, q_byte), nontemporal=True)
             if kk == fx.Int32(0):
-                llvm.StoreOp(arith.trunci(T.i8, e8), _gep1(out_scale_base, s_byte))
+                fx.ptr_store(fx.Int8(e8), global_typed_ptr(arg_out_scale, T.i8, align=1, byte_offset=s_byte))
 
 
 @flyc.jit
@@ -966,7 +955,6 @@ def _atomic_bf16_epilog(
     M_REPS = BM // 8
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
-    lds_base = _lds_ptr3(lds_acc_base_i32, fx.Int32(0))
 
     tx_i32 = fx.Int32(gpu.thread_id("x"))
     m_lane = tx_i32 // fx.Int32(32)
@@ -990,7 +978,7 @@ def _atomic_bf16_epilog(
             vec = Vec(accm[i][J])
             for v in range_constexpr(4):
                 idx = (row_base + fx.Int32(v)) * fx.Int32(BN) + col
-                llvm.StoreOp(_raw(vec[v]), _gep3(lds_base, idx * fx.Int32(4)))
+                fx.ptr_store(vec[v], lds_typed_ptr(lds_acc_base_i32, T.f32, byte_offset=idx * fx.Int32(4)))
 
     gpu.barrier()
 
@@ -1001,7 +989,7 @@ def _atomic_bf16_epilog(
             row_base_addr = token_id * fx.Int32(N_OUT) + n_block_idx * fx.Int32(BN) + col_start
             for s in range_constexpr(4):
                 idx0 = row_in_block * fx.Int32(BN) + col_start + fx.Int32(s * 64)
-                v2 = Vec(llvm.load(T.vec(2, T.f32), _gep3(lds_base, idx0 * fx.Int32(4))))
+                v2 = Vec(lds_vec_load(lds_acc_base_i32, idx0 * fx.Int32(4), T.vec(2, T.f32), T.f32, align=8))
                 pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
                 off = (row_base_addr + fx.Int32(s * 64)) * fx.Int32(2)
                 out_ptr = _gep1(out_base, off)

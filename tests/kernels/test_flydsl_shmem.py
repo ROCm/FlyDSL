@@ -34,12 +34,7 @@ from mori.ir.flydsl.runtime import get_bitcode_path  # noqa: E402
 
 import flydsl.compiler as flyc  # noqa: E402
 import flydsl.expr as fx  # noqa: E402
-from flydsl._mlir import ir as _ir  # noqa: E402
-from flydsl._mlir.dialects import llvm as _llvm_d  # noqa: E402
-from flydsl._mlir.ir import IntegerAttr as _IntAttr  # noqa: E402
-from flydsl._mlir.ir import IntegerType as _IntTy  # noqa: E402
 from flydsl.compiler.extern_link import link_extern  # noqa: E402
-from flydsl.expr import arith  # noqa: E402
 from flydsl.expr.extern import ffi  # noqa: E402
 
 
@@ -77,66 +72,21 @@ def _split_ptr(ptr: int):
 
 def _reconstruct_i64(lo, hi):
     """Reconstruct i64 from two i32 halves inside a kernel."""
-    _i64 = _IntTy.get_signless(64)
-    _i32 = _IntTy.get_signless(32)
-
-    def _lv(v):
-        if isinstance(v, _ir.Value):
-            return v
-        if hasattr(v, "__extract_to_ir_values__"):
-            vals = v.__extract_to_ir_values__()
-            if len(vals) == 1:
-                return vals[0]
-        if isinstance(v, int):
-            return _llvm_d.ConstantOp(_i32, _IntAttr.get(_i32, v)).result
-        raise TypeError(f"Cannot convert {type(v).__name__} to ir.Value")
-
-    lo_v = _llvm_d.ZExtOp(_i64, _lv(lo)).res
-    hi_v = _llvm_d.ZExtOp(_i64, _lv(hi)).res
-    _nuw = _ir.Attribute.parse("#llvm.overflow<none>")
-    hi_shifted = _llvm_d.ShlOp(
-        hi_v,
-        _llvm_d.ConstantOp(_i64, _IntAttr.get(_i64, 32)).result,
-        _nuw,
-    ).result
-    return _llvm_d.OrOp(hi_shifted, lo_v).result
+    lo_v = fx.Uint64(fx.Uint32(lo))
+    hi_v = fx.Uint64(fx.Uint32(hi))
+    return ((hi_v << 32) | lo_v).ir_value()
 
 
 def _store_i32_at(addr_i64, offset_i32, val_i32):
     """Store i32 *val* at addr_i64 + offset*4 (global, monotonic)."""
-    _i64 = _IntTy.get_signless(64)
-    _i32 = _IntTy.get_signless(32)
-    _nuw = _ir.Attribute.parse("#llvm.overflow<none>")
-
-    def _lv(v):
-        if isinstance(v, _ir.Value):
-            return v
-        if hasattr(v, "__extract_to_ir_values__"):
-            vals = v.__extract_to_ir_values__()
-            if len(vals) == 1:
-                return vals[0]
-        if isinstance(v, int):
-            return _llvm_d.ConstantOp(_i32, _IntAttr.get(_i32, v)).result
-        raise TypeError(f"Cannot convert {type(v).__name__}")
-
-    off = _lv(offset_i32)
-    val = _lv(val_i32)
-    off64 = _llvm_d.ZExtOp(_i64, off).res if off.type == _i32 else off
-    byte_off = _llvm_d.MulOp(
-        off64,
-        _llvm_d.ConstantOp(_i64, _IntAttr.get(_i64, 4)).result,
-        _nuw,
-    ).result
-    addr = _llvm_d.AddOp(addr_i64, byte_off, _nuw).result
-    gptr = _llvm_d.IntToPtrOp(
-        _llvm_d.PointerType.get(address_space=1),
-        addr,
-    ).result
-    _llvm_d.StoreOp(
-        val,
+    offset = fx.Uint64(fx.Uint32(offset_i32))
+    addr = fx.Uint64(addr_i64) + offset * 4
+    ptr_type = fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Global, 4)
+    gptr = fx.inttoptr(ptr_type, addr)
+    fx.generic_store(
         gptr,
-        alignment=4,
-        ordering=_llvm_d.AtomicOrdering.monotonic,
+        fx.Int32(val_i32),
+        memory_order=fx.AtomicOrdering.Monotonic,
         syncscope="one-as",
     )
 
@@ -162,8 +112,8 @@ def shmem_put_kernel(symm_lo: fx.Int32, symm_hi: fx.Int32, value: fx.Int32):
     symm_addr = _reconstruct_i64(symm_lo, symm_hi)
     pe = mori_shmem.my_pe()
     npe = mori_shmem.n_pes()
-    dest_pe = arith.remui(arith.addi(pe, arith.constant(1)), npe)
-    mori_shmem.int32_p(symm_addr, value, dest_pe, arith.constant(0))
+    dest_pe = (fx.Uint32(pe) + fx.Uint32(1)) % fx.Uint32(npe)
+    mori_shmem.int32_p(symm_addr, value, fx.Int32(dest_pe), fx.Int32(0))
     mori_shmem.quiet_thread()
 
 

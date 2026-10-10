@@ -537,7 +537,7 @@ def make_tensor_gather_descriptor(
 
     Args:
         global_ptr:    The global tensor pointer (fx.Tensor).
-        lds_memref:    The LDS memref base (SmemAllocator base).
+        lds_memref:    The LDS memref base (a ``fx.SharedAllocator`` sub-buffer).
         row_indices:   List of row index MLIR i32 Values.  Max 8 for 32-bit
                        mode, max 16 for 16-bit mode.
         row_width:     Width of each row in data_size elements (= tile_dim0).

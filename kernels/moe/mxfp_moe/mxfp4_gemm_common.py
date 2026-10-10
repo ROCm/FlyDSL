@@ -3,20 +3,16 @@
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
-from flydsl._mlir.dialects import memref as memref_dialect
-from flydsl.expr import arith, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Float4E2M1FN, Float8E4M3FN, T
 from kernels.common import buffer_ops
+from kernels.common.act import silu_mul_batch as _silu_mul_batch  # noqa: F401
 from kernels.common.layout_utils import crd2idx
 
 from . import dpp_utils
 
-_PTR3 = "!llvm.ptr<3>"
 kStages = 2
 kBS_stride_k0_dw = 64
-LOG2E = 1.4426950408889634
 
 
 def _raw(v):
@@ -26,13 +22,11 @@ def _raw(v):
 
 
 def _udiv(a, c):
-    cc = fx.Int32(c) if isinstance(c, int) else c
-    return fx.Int32(arith.divui(_raw(a), _raw(cc)))
+    return fx.Int32(fx.Uint32(a) // fx.Uint32(c))
 
 
 def _umod(a, c):
-    cc = fx.Int32(c) if isinstance(c, int) else c
-    return fx.Int32(arith.remui(_raw(a), _raw(cc)))
+    return fx.Int32(fx.Uint32(a) % fx.Uint32(c))
 
 
 # A elem selects the f8f6f4 cbsz for the scaled MFMA atom: fp4 (e2m1) -> cbsz 4,
@@ -57,8 +51,7 @@ def _global_i32_buffer_view(addr_i64, num_bytes):
     # the bytes buffer_ops.buffer_load's soffset_bytes expected.
     # make_layout's dynamic-shape leaf must be i32/i64, not fx.Index.
     num_bytes_i64 = fx.Int64(num_bytes)
-    ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
-    ptr = fx.inttoptr(ptr_ty, fx.Int64(addr_i64))
+    ptr = global_typed_ptr(addr_i64, T.i32)
     view = fx.Tensor(fx.make_view(ptr, fx.make_layout(num_bytes_i64 // fx.Int64(4), 1)))
     return fx.rocdl.make_buffer_tensor(view, max_size=False, num_records_bytes=num_bytes_i64)
 
@@ -67,36 +60,18 @@ def _global_i32_buffer_tiles(addr_i64, num_bytes, tile_elems):
     return fx.logical_divide(_global_i32_buffer_view(addr_i64, num_bytes), fx.make_layout(tile_elems, 1))
 
 
-def _lds_ptr3(base_i32, byte_off_i32):
-    addr_i64 = fx.Int64(base_i32 + byte_off_i32)
-    return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(addr_i64))
-
-
-def _lds_base_ptr3(lds_view):
-    base_i32 = fx.Int32(memref_dialect.extract_aligned_pointer_as_index(lds_view))
-    return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(fx.Int64(base_i32)))
-
-
-def _gep3(base_ptr, byte_off_i32):
-    return buffer_ops.get_element_ptr(base_ptr, byte_offset=_raw(byte_off_i32), elem_type=T.i8)
-
-
 def _global_base_ptr1(addr_i64):
-    return llvm.inttoptr(ir.Type.parse("!llvm.ptr<1>"), _raw(fx.Int64(addr_i64)))
+    ptr_ty = fx.PointerType.get(T.i8, fx.AddressSpace.Global)
+    return fx.to_llvm_ptr(fx.inttoptr(ptr_ty, fx.Int64(addr_i64)))
 
 
 def _gep1(base_ptr, byte_off_i32):
     return buffer_ops.get_element_ptr(base_ptr, byte_offset=_raw(byte_off_i32), elem_type=T.i8)
 
 
-def _global_i32_ptr(addr_i64):
-    ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
-    return fx.inttoptr(ptr_ty, fx.Int64(addr_i64))
-
-
 def _global_i32_at(addr_i64, idx):
     # Plain scalar read: fx pointer index, no tiling/register-fragment machinery.
-    return _global_i32_ptr(addr_i64)[idx]
+    return global_typed_ptr(addr_i64, T.i32)[idx]
 
 
 def _global_i32_load(tiles, idx):
@@ -152,19 +127,27 @@ def lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
     return fx.make_view(ptr, fx.make_layout(1, 1))
 
 
-def global_typed_ptr(arg, elem_ty, align=4):
+def global_typed_ptr(arg, elem_ty, align=4, *, byte_offset=None):
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
+    if byte_offset is not None:
+        byte_ty = fx.PointerType.get(T.i8, fx.AddressSpace.Global, align)
+        base = fx.inttoptr(byte_ty, fx.Int64(arg))
+        return fx.recast_iter(ptr_ty, fx.add_offset(base, byte_offset))
     return fx.inttoptr(ptr_ty, fx.Int64(arg))
 
 
-def lds_typed_ptr(base_i32, elem_ty, align=4):
+def lds_typed_ptr(base_i32, elem_ty, align=4, *, byte_offset=None):
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
+    if byte_offset is not None:
+        byte_ty = fx.PointerType.get(T.i8, fx.AddressSpace.Shared, align)
+        base = fx.inttoptr(byte_ty, fx.Int32(base_i32))
+        return fx.recast_iter(ptr_ty, fx.add_offset(base, byte_offset))
     return fx.inttoptr(ptr_ty, fx.Int32(base_i32))
 
 
 def lds_vec_load(base_i32, byte_off_i32, result_type, elem_ty, align=4):
     elem_ir_ty = elem_ty.ir_type if hasattr(elem_ty, "ir_type") else elem_ty
-    ptr = lds_typed_ptr(fx.Int32(base_i32) + byte_off_i32, elem_ir_ty, align=align)
+    ptr = lds_typed_ptr(base_i32, elem_ir_ty, align=align, byte_offset=byte_off_i32)
     return fx.ptr_load(ptr, result_type=result_type)
 
 
@@ -242,23 +225,13 @@ def _inline_e8m0(amax_u16_i32):
 
 
 def _pkmax_u16(a_i32, b_i32):
-    _v2i16 = T.vec(2, T.i16)
-    va = llvm.BitcastOp(_v2i16, _raw(a_i32)).result
-    vb = llvm.BitcastOp(_v2i16, _raw(b_i32)).result
-    vm = arith.MaxUIOp(va, vb).result
-    out = llvm.BitcastOp(T.i32, vm).result
-    return fx.Int32(out)
-
-
-def _silu_mul_batch(gs, us):
-    e = [fx.Float32(rocdl.exp2(T.f32, _raw(g * fx.Float32(-LOG2E)))) for g in gs]
-    sig = [fx.Float32(rocdl.rcp(T.f32, _raw(fx.Float32(1.0) + ei))) for ei in e]
-    return [gs[i] * sig[i] * us[i] for i in range(len(gs))]
+    va = fx.Vector.from_elements([a_i32], fx.Int32).bitcast(fx.Uint16)
+    vb = fx.Vector.from_elements([b_i32], fx.Int32).bitcast(fx.Uint16)
+    return fx.max(va, vb).bitcast(fx.Int32)[0]
 
 
 def _umax_i32(a, b):
-    is_gt = fx.as_ir_value((a) > (b))
-    return fx.Int32(arith.select(is_gt, _raw(a), _raw(b)))
+    return fx.Int32(fx.max(a, b))
 
 
 def _inline_dpp_quad_amax(a32):
