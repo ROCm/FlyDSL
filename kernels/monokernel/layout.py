@@ -34,6 +34,17 @@ POLL_MAX = 12
 TL_COLS = 8
 
 
+def atom_mxfp4_weight_index(row_group, k_chunk, lane, step, k_size):
+    row = row_group * 16 + lane % 16
+    return (row_group * (k_size // 64) + k_chunk * 2 + step // 2) * 128 + (step % 2) * 64 + (row % 16) * 4 + lane // 16
+
+
+def atom_mxfp4_scale_index(row, col, cols):
+    r32, a, b = row // 32, (row // 16) % 2, row % 16
+    c8, d, e = col // 8, (col // 4) % 2, col % 4
+    return ((((r32 * ((cols + 7) // 8) + c8) * 4 + e) * 16 + b) * 2 + d) * 2 + a
+
+
 def symmetric_allreduce_nbytes(sizes: tuple[int, ...], npes: int) -> int:
     """Return bytes for two tagged-mailbox epoch slots per reduce region."""
 
@@ -75,10 +86,16 @@ def layout(
     n_split = sparse_attention_topk // SPLIT_KEYS
     pair_bytes = 8
     items = [
-        ("input_norm", samples * config.hidden * pair_bytes if dedicated_input_norm else 0),
+        (
+            "input_norm",
+            samples * config.hidden * pair_bytes if dedicated_input_norm else 0,
+        ),
         ("q_a", samples * config.q_lora * pair_bytes),
         ("kv_a", samples * (config.kv_lora + config.pe_dim) * pair_bytes),
-        ("gate", samples * heads * config.v_dim * pair_bytes if config.attention_output_gate else 0),
+        (
+            "gate",
+            (samples * heads * config.v_dim * pair_bytes if config.attention_output_gate else 0),
+        ),
         ("kvnew", samples * config.kv_lora * pair_bytes),
         ("penew", samples * config.pe_dim * pair_bytes),
         ("q_nope", samples * heads * config.nope_dim * pair_bytes),
@@ -93,7 +110,10 @@ def layout(
     if not attention_only:
         items += [
             ("scores", samples * config.n_experts * pair_bytes),
-            ("xq", samples * config.hidden // (4 if quant_group is not None else 2) * pair_bytes),
+            (
+                "xq",
+                samples * config.hidden // (4 if quant_group is not None else 2) * pair_bytes,
+            ),
             ("xqs", samples * xq_blocks * pair_bytes),
             ("sel", samples * config.moe_slots * pair_bytes),
             ("prob", samples * config.moe_slots * pair_bytes),
@@ -139,7 +159,10 @@ def stage_tasks(
         ("cache", 1),
         ("q_b", heads * (config.nope_dim + config.pe_dim) // Q_B_TILE),
         ("uk", heads * config.kv_lora // UK_TILE),
-        ("split", samples * (sparse_attention_topk // SPLIT_KEYS) * split_ctas_per_tile),
+        (
+            "split",
+            samples * (sparse_attention_topk // SPLIT_KEYS) * split_ctas_per_tile,
+        ),
         ("uv", samples * (heads * config.v_dim // UV_TILE)),
         ("o", config.hidden // ROW_TILE),
     ]

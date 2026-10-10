@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
+from flydsl.expr import math as fmath
 from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import T, as_ir_value
 from kernels.common import buffer_ops as bo
@@ -146,6 +147,21 @@ def fp8_roundtrip(lhs, rhs):
     pair_type = fx.Vector.make_type(2, fx.Float32)
     pair = fx.Vector(rocdl.cvt_pk_f32_fp8(res=pair_type, src=word, word_sel=False))
     return pair[0], pair[1]
+
+
+def div_rn(value, divisor, reciprocal):
+    """IEEE-rounded quotient from one exact reciprocal using Markstein refinement."""
+
+    quotient = value * reciprocal
+    residual = fmath.fma(-quotient, divisor, value)
+    return fx.Float32(fmath.fma(fx.Float32(residual), reciprocal, quotient))
+
+
+def fp8_pack4(a, b, c, d):
+    """Pack four in-range FP32 values as E4M3 bytes."""
+
+    lo = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, a, b, fx.Int32(0), False))
+    return fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, c, d, lo, True))
 
 
 def f8_word(k):
