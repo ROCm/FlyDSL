@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-10T10:03:33Z",
+ "updated": "2026-10-10T10:14:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 38044132222,
+   "pr": 1217,
+   "commit": "13baf6f703c18f986d0f06bf898cf176bca2b60b",
+   "branch": "feat/conv3d-align-aiter",
+   "event": "pull_request",
+   "title": "feat(conv3d): align bf16 implicit GEMM with aiter #5370",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38044132222",
+   "created_at": "2026-10-10T10:13:04Z",
+   "updated_at": "2026-10-10T10:13:52Z",
+   "actor": "huizzhan",
+   "jobs": []
+  },
+  {
+   "run_id": 38044066744,
+   "pr": 1256,
+   "commit": "42670fb5628be474b5ab29119d20f8aa59f09076",
+   "branch": "codex/glm5-tp4-fused-indexer",
+   "event": "pull_request",
+   "title": "[Perf] Fuse GLM-5.2 TP4 indexer for MTP4 C1/C2",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38044066744",
+   "created_at": "2026-10-10T10:11:56Z",
+   "updated_at": "2026-10-10T10:14:04Z",
+   "actor": "james-huang09",
+   "jobs": []
+  },
   {
    "run_id": 38043154105,
    "pr": 1258,
@@ -25,38 +55,38 @@
    "branch": "feat/conv3d-align-aiter",
    "event": "pull_request",
    "title": "feat(conv3d): align bf16 implicit GEMM with aiter #5370",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38040903718",
    "created_at": "2026-10-10T09:18:06Z",
-   "updated_at": "2026-10-10T09:35:47Z",
+   "updated_at": "2026-10-10T10:13:36Z",
    "actor": "huizzhan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-10T09:47:59Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T10:13:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38040903718/job/114183770681"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-10T09:35:47Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T10:13:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38040903718/job/114183770727"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-10T09:36:26Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T10:13:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38040903718/job/114183770761"
     }
    ]
@@ -1165,36 +1195,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37973235432",
    "created_at": "2026-10-09T18:26:01Z",
    "updated_at": "2026-10-09T18:26:01Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37973081623,
-   "pr": null,
-   "commit": "a9403dbef5d4b9de9462635e14f4d4eedf317018",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37973081623",
-   "created_at": "2026-10-09T18:24:43Z",
-   "updated_at": "2026-10-09T18:24:43Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37972835711,
-   "pr": null,
-   "commit": "d02bde2d28a33e8903be8646e639817cd0185ba9",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37972835711",
-   "created_at": "2026-10-09T18:22:35Z",
-   "updated_at": "2026-10-09T18:22:35Z",
    "actor": "dimitri91209",
    "jobs": []
   }
