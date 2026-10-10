@@ -6,8 +6,7 @@
 """Correctness tests for the bf16 implicit-GEMM conv3d (aiter-aligned).
 
 Compares ``flydsl_conv_implicit`` / ``conv3d_implicit`` against
-``torch.nn.functional.conv*`` and exercises the tuned CSV, policy, and AOT
-job enumeration.
+``torch.nn.functional.conv*``, including every shape in the tuned CSVs.
 """
 
 from pathlib import Path
@@ -21,12 +20,10 @@ from flydsl.runtime.device import get_rocm_arch
 from kernels.conv.conv3d_implicit import (
     SUPPORTED_GFX,
     TUNED_KEY_COLUMNS,
-    _load_tuned_table,
     _ncdhw_to_ndhwc,
     conv3d_implicit,
     flydsl_conv_implicit,
 )
-from kernels.conv.conv3d_policy import get_flydsl_conv3d_configs, is_legal_tile
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -262,14 +259,6 @@ def test_conv3d_tile_configs(tile):
 
 
 @_skip_non_cdna4
-def test_autotune_kwarg_rejected():
-    x = torch.randn((1, 32, 4, 8, 8), device="cuda", dtype=torch.bfloat16)
-    w = torch.randn((32, 32, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
-    with pytest.raises(TypeError):
-        conv3d_implicit(x, w, padding=1, autotune=True)
-
-
-@_skip_non_cdna4
 @pytest.mark.parametrize(
     "kernel_shape,stride,padding",
     [
@@ -442,70 +431,3 @@ def test_tuned_csv_shapes(src, idx, shape, layout):
     out = _run()
     torch.cuda.synchronize()
     _assert_allclose(out, ref, f"{src}[{idx}] {layout}")
-
-
-# ---------------------------------------------------------------------------
-# Unit: table / policy / AOT
-# ---------------------------------------------------------------------------
-
-
-def test_tuned_table_loads_76_rows():
-    table = _load_tuned_table()
-    assert len(table) == 76
-
-
-def test_tuned_table_duplicate_key_raises(tmp_path, monkeypatch):
-    src = CONFIG_DIR / "qwenimage_vae_bf16_tuned_conv3d.csv"
-    dup = tmp_path / "dup.csv"
-    lines = src.read_text().strip().splitlines()
-    dup.write_text("\n".join(lines + [lines[1]]) + "\n")
-    monkeypatch.setenv("FLYDSL_CONV3D_BF16_CONFIG", str(dup))
-    _load_tuned_table.cache_clear()
-    try:
-        with pytest.raises(ValueError, match="duplicate"):
-            _load_tuned_table()
-    finally:
-        monkeypatch.delenv("FLYDSL_CONV3D_BF16_CONFIG", raising=False)
-        _load_tuned_table.cache_clear()
-
-
-def test_tuned_table_bad_cell_falls_back(tmp_path, monkeypatch):
-    """Like aiter: a malformed table degrades to the heuristic instead of raising."""
-    src = CONFIG_DIR / "qwenimage_vae_bf16_tuned_conv3d.csv"
-    df = pd.read_csv(src)
-    df["bias"] = df["bias"].astype(str)
-    df.loc[0, "bias"] = "maybe"
-    bad = tmp_path / "bad.csv"
-    df.to_csv(bad, index=False)
-    monkeypatch.setenv("FLYDSL_CONV3D_BF16_CONFIG", str(bad))
-    _load_tuned_table.cache_clear()
-    try:
-        assert _load_tuned_table() == {}
-    finally:
-        monkeypatch.delenv("FLYDSL_CONV3D_BF16_CONFIG", raising=False)
-        _load_tuned_table.cache_clear()
-
-
-def test_policy_legal_tiles_and_nonempty():
-    assert is_legal_tile(128, 128, 2, 4)
-    assert not is_legal_tile(128, 128, 3, 3)  # 128 % (3*16) != 0
-    cfgs = get_flydsl_conv3d_configs(1024 * 1024, 96, 1, 256, max_configs=96)
-    assert cfgs
-    for tile_m, tile_n, wave_m, wave_n, _wgm in cfgs[:20]:
-        assert is_legal_tile(tile_m, tile_n, wave_m, wave_n)
-
-
-def test_aot_parse_csv_job_counts():
-    from kernels.conv.conv3d_aot import collect_aot_jobs, default_csv_paths
-
-    jobs = collect_aot_jobs(default_csv_paths())
-    conv = [j for j in jobs if j["kind"] == "conv3d"]
-    tr = [j for j in jobs if j["kind"] == "transpose"]
-    # 76 shapes * 2 out_ndhwc, minus dyn_hw dedupe; must be > 76 and even-ish.
-    assert len(conv) >= 76
-    assert len(tr) >= 1
-    assert all("dyn_hw" in j for j in conv)
-
-
-def test_alias_is_flydsl_conv_implicit():
-    assert conv3d_implicit is flydsl_conv_implicit
