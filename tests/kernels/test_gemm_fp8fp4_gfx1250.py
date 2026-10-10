@@ -104,13 +104,17 @@ def _tflops(M: int, N: int, K: int, us: float) -> float:
 
 
 def _run_and_check(build_fn, launch_fn, M, N, K, *rest, **kwargs):
-    """Build inputs, compile+run once, and compare against the reference."""
+    """Build inputs, compile+run once, and compare against the reference; C columns past N must stay untouched."""
     c_gpu, make_args, ref, (rtol, atol) = build_fn(M, N, K, *rest, **kwargs)
+    # A signaling-NaN bit pattern that no computed output carries, so any store past N changes it.
+    pad_sentinel = 0x7FA5 if c_gpu.dtype == torch.bfloat16 else 0x7D5A
+    c_gpu[:, N:].view(torch.int16).fill_(pad_sentinel)
     compiled = flyc.compile(launch_fn, *make_args(torch.cuda.current_stream()))
     torch.cuda.synchronize()
     error = None
     try:
         torch.testing.assert_close(c_gpu[:M, :N].float(), ref.float(), rtol=rtol, atol=atol)
+        assert (c_gpu[:, N:].view(torch.int16) == pad_sentinel).all(), "the kernel wrote C columns past N"
     except AssertionError as exc:
         error = exc
     return c_gpu, make_args, compiled, error
@@ -329,6 +333,9 @@ _PTPC_CASES = [
     (128, 128, 512, 128, 128, 128, 1, 2, 2, "bf16", 1.0, 0, 0),
     (256, 256, 512, 256, 256, 128, 2, 2, 4, "f16", 0.02, 0, 0),
     (128, 256, 512, 128, 256, 128, 2, 2, 4, "bf16", 1.0, 128, 256),
+    (64, 2112, 512, 128, 256, 128, 2, 2, 4, "bf16", 1.0, 0, 0),  # N tail: 8.25 N-tiles (DeepSeek fused qkv_a N)
+    (129, 2112, 512, 128, 128, 128, 1, 2, 2, "bf16", 1.0, 0, 0),  # N tail (16.5 N-tiles) with ragged M
+    (64, 2112, 512, 128, 256, 128, 2, 2, 4, "bf16", 1.0, 0, 192),  # N tail; the pad holds every column past N
 ]
 
 
@@ -436,6 +443,8 @@ _BLOCKSCALE_CASES = [
     (256, 256, 512, 256, 256, 128, 2, 2, 4, 0, 0),
     (1024, 1024, 1024, 128, 256, 128, 2, 2, 3, 0, 0),
     (128, 256, 512, 128, 256, 128, 2, 2, 2, 128, 192),
+    (128, 1152, 512, 128, 256, 128, 2, 2, 2, 0, 0),  # N tail: 4.5 N-tiles, the last one also past the B scales
+    (128, 1152, 512, 128, 256, 128, 2, 2, 2, 0, 128),  # N tail; the pad holds every column past N
 ]
 
 
@@ -481,7 +490,7 @@ _MODES = {
         # A + B fp8 + one f32 scale per row/column + C
         bytes_moved=lambda M, N, K: M * K + N * K + (M + N) * 4 + M * N * 2,
         checks=lambda N, K, tile_n, tile_k, num_buffers: [
-            (N % tile_n != 0, f"N={N} must be divisible by tile_n={tile_n} (no silent pad)"),
+            (N % 16 != 0, f"N={N} must be divisible by 16 (B is preshuffled in 16-row blocks)"),
             (K % tile_k != 0, f"K={K} must be divisible by tile_k={tile_k} (no silent pad)"),
             (num_buffers > 1 and (K // tile_k) < num_buffers, f"{num_buffers}-buf requires more K-tiles"),
         ],
@@ -495,7 +504,6 @@ _MODES = {
         bytes_moved=lambda M, N, K: M * K + N * K + (M + N // SCALE_BLOCK_128) * (K // SCALE_BLOCK_128) + M * N * 2,
         checks=lambda N, K, tile_n, tile_k, num_buffers: [
             (K % SCALE_BLOCK_128 != 0 or N % SCALE_BLOCK_128 != 0, f"N={N}, K={K} must both be divisible by 128"),
-            (N % tile_n != 0, f"N={N} must be divisible by tile_n={tile_n}"),
             (K % tile_k != 0 or (K // tile_k) < num_buffers, f"K={K} incompatible with tile_k={tile_k}"),
         ],
         # N gives 2 tile_n-wide blocks so cluster_n=2 has a real 2nd block to span.
