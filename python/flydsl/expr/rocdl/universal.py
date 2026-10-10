@@ -7,7 +7,7 @@ from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import (
     MmaOpGFX120X_WMMAType,
     MmaOpGFX1250_WMMAType,
 )
-from ..._mlir.dialects import fly_rocdl
+from ..._mlir.dialects import fly_rocdl, llvm
 from ..._mlir.dialects import rocdl as mlir_rocdl
 from ..._mlir.dialects.fly import AtomicOp, PointerType
 from ..._mlir.dialects.fly_rocdl import (
@@ -28,6 +28,7 @@ from ..typing import (
     Int64,
     Pointer,
     Tensor,
+    Vector,
     is_generic_address_space,
     is_target_address_space,
 )
@@ -323,3 +324,54 @@ def get_buffer_rsrc(ptr: Pointer):
         raise ValueError(f"get_buffer_rsrc requires a buffer-descriptor pointer, got {ptr.address_space}")
 
     return fly_rocdl.get_buffer_rsrc(ptr)
+
+
+@dsl_loc_tracing
+def s_buffer_load(
+    ptr: Pointer,
+    offset,
+    *,
+    count: int = 1,
+    cache_modifier: int = 0,
+) -> Int32 | Vector:
+    """Load wave-uniform i32 data through an AMD buffer descriptor.
+
+    ``offset`` is measured in i32 elements; the intrinsic receives its byte
+    offset after multiplying by four. ``count`` must be 1 or 4 and selects
+    ``llvm.amdgcn.s.buffer.load.i32`` or ``.v4i32`` respectively. The address
+    must be uniform across the wave so the load can use scalar memory (SMEM).
+
+    Args:
+        ptr: Buffer-descriptor pointer from :func:`make_buffer_ptr`, or the
+            iterator of a :func:`make_buffer_tensor`.
+        offset: i32 element offset from the descriptor base.
+        count: Number of i32 words to load (1 or 4).
+        cache_modifier: AMD cache-policy operand (0 by default).
+
+    Returns:
+        ``fx.Int32`` for one word or ``fx.Vector`` of four ``fx.Int32`` words.
+
+    Raises:
+        TypeError: If ``ptr`` is not an ``fx.Pointer``.
+        ValueError: If ``ptr`` is not a buffer descriptor or ``count`` is unsupported.
+    """
+    if not isinstance(count, int) or isinstance(count, bool) or count not in (1, 4):
+        raise ValueError(f"s_buffer_load count must be 1 or 4, got {count}")
+    if not isinstance(ptr, Pointer):
+        raise TypeError(f"s_buffer_load requires a buffer-descriptor pointer, got {type(ptr).__name__}")
+
+    rsrc = get_buffer_rsrc(ptr)
+    i32 = ir.IntegerType.get_signless(32)
+    i128 = ir.IntegerType.get_signless(128)
+    v4i32 = ir.VectorType.get([4], i32)
+    rsrc_v4 = llvm.bitcast(v4i32, llvm.ptrtoint(i128, rsrc))
+    byte_offset = (Int32(offset) * Int32(4)).ir_value()
+    result_type = i32 if count == 1 else v4i32
+    result = llvm.call_intrinsic(
+        result_type,
+        f"llvm.amdgcn.s.buffer.load.{'i32' if count == 1 else 'v4i32'}",
+        [rsrc_v4, byte_offset, Int32(cache_modifier).ir_value()],
+        [],
+        [],
+    )
+    return Int32(result) if count == 1 else Vector(result, dtype=Int32)
