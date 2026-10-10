@@ -35,7 +35,58 @@ endif()
 if(NOT hip_FOUND)
   file(GLOB _rocm_paths LIST_DIRECTORIES true "/opt/rocm*")
   list(SORT _rocm_paths ORDER DESCENDING)
-  find_package(hip REQUIRED CONFIG PATHS ${_rocm_paths})
+  find_package(hip QUIET CONFIG PATHS ${_rocm_paths})
+endif()
+
+# rocm-sdk core wheels contain the headers and runtime required by FlyDSL's
+# host-side wrappers, but deliberately do not ship hip-config.cmake. Use them
+# only after all standard HIP package locations have been exhausted.
+if(NOT hip_FOUND AND Python3_EXECUTABLE)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+      "from pathlib import Path; import _rocm_sdk_core; print(Path(_rocm_sdk_core.__file__).resolve().parent)"
+    RESULT_VARIABLE _flydsl_hip_core_result
+    OUTPUT_VARIABLE _flydsl_hip_core_root
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(_flydsl_hip_core_result STREQUAL "0" AND _flydsl_hip_core_root)
+    set(_flydsl_hip_header "${_flydsl_hip_core_root}/include/hip/hip_runtime.h")
+    set(_flydsl_hip_runtime_candidates "${_flydsl_hip_core_root}/lib/libamdhip64.so")
+    file(GLOB _flydsl_hip_versioned_runtimes
+      LIST_DIRECTORIES FALSE
+      "${_flydsl_hip_core_root}/lib/libamdhip64.so.*"
+    )
+    list(APPEND _flydsl_hip_runtime_candidates ${_flydsl_hip_versioned_runtimes})
+    foreach(_flydsl_hip_candidate IN LISTS _flydsl_hip_runtime_candidates)
+      if(EXISTS "${_flydsl_hip_candidate}")
+        set(_flydsl_hip_runtime "${_flydsl_hip_candidate}")
+        break()
+      endif()
+    endforeach()
+
+    if(EXISTS "${_flydsl_hip_header}" AND _flydsl_hip_runtime)
+      add_library(hip::host INTERFACE IMPORTED)
+      set_target_properties(hip::host PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${_flydsl_hip_core_root}/include"
+        INTERFACE_COMPILE_DEFINITIONS "__HIP_PLATFORM_AMD__"
+      )
+      add_library(hip::amdhip64 SHARED IMPORTED)
+      set_target_properties(hip::amdhip64 PROPERTIES
+        IMPORTED_LOCATION "${_flydsl_hip_runtime}"
+      )
+      set(hip_FOUND TRUE)
+      message(STATUS "Using HIP headers and runtime from rocm-sdk core: ${_flydsl_hip_core_root}")
+    endif()
+  endif()
+endif()
+
+if(NOT hip_FOUND)
+  message(FATAL_ERROR
+    "Could not find HIP. Set hip_DIR or ROCM_PATH to a complete ROCm installation, "
+    "install rocm[devel], or use a Python environment containing _rocm_sdk_core "
+    "with include/hip/hip_runtime.h and lib/libamdhip64.so.*."
+  )
 endif()
 
 set(_fly_rocm_runtime_common

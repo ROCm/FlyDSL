@@ -19,6 +19,7 @@ void flydsl_register_rocdl_dialects(MlirDialectRegistry registry) {
 }
 
 void flydsl_register_rocdl_passes(void) {
+  mlir::registerFlyRocmModuleToBinaryPass();
   mlirRegisterConvertROCDLFastMathOpsPass();
   mlirRegisterFlyToROCDLConversionPass();
   mlir::fly_rocdl::registerFlyROCDLPasses();

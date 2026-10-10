@@ -696,8 +696,12 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
         di_pass = (
             "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         )
+        from .backends.rocm import get_rocm_toolchain
+
+        toolchain = get_rocm_toolchain()
+        resources = f" {toolchain.pass_options(link=False)}" if toolchain else ""
         pm = PassManager.parse(
-            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit=}})',
+            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}"{resources}}})',
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -859,7 +863,7 @@ class MlirCompiler:
                 stage_num_base = 1
                 dump_fragments = pre_binary_fragments if external_binary else fragments
                 for idx, frag in enumerate(dump_fragments):
-                    if frag.strip().startswith("gpu-module-to-binary"):
+                    if frag.strip().startswith(("gpu-module-to-binary", "fly-rocm-module-to-binary")):
                         llir = _extract_llvm_ir(module)
 
                     stage_num = stage_num_base + idx
