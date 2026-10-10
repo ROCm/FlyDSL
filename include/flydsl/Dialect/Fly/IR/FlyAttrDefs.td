@@ -260,6 +260,8 @@ def Fly_TileAttr : Fly_Attr<"Tile", "tile", []> {
   
   let builders = [
     AttrBuilderWithInferredContext<(ins "Attribute":$value), [{
+      if (auto nested = ::mlir::dyn_cast<TileAttr>(value))
+        return nested;
       return $_get(value.getContext(), value);
     }]>
   ];
