@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-10-10T11:13:41Z",
+ "updated": "2026-10-10T11:24:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 38048182783,
+   "pr": 1258,
+   "commit": "95df96f45ac054c9d07fae3c79ff5d2d8e67f67f",
+   "branch": "xudong/fix-zip2by-guide",
+   "event": "pull_request",
+   "title": "[fix] Build the zipped_divide guide from the tiler shape",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38048182783",
+   "created_at": "2026-10-10T11:22:34Z",
+   "updated_at": "2026-10-10T11:23:32Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 38048136481,
+   "pr": 1255,
+   "commit": "36bd84f84a40248bd551bf0cacfea61a5023c5fc",
+   "branch": "binding_megamoe_tp",
+   "event": "pull_request",
+   "title": "[Kernel]add mega moe tp kernel for gfx950",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38048136481",
+   "created_at": "2026-10-10T11:21:49Z",
+   "updated_at": "2026-10-10T11:23:12Z",
+   "actor": "binding7012",
+   "jobs": []
+  },
   {
    "run_id": 38044132222,
    "pr": 1217,
@@ -29,10 +59,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-10T11:01:40Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T11:17:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38044132222/job/114194705575"
     },
     {
@@ -96,29 +126,29 @@
    "branch": "xudong/fix-zip2by-guide",
    "event": "pull_request",
    "title": "[fix] Build the zipped_divide guide from the tiler shape",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38043154105",
    "created_at": "2026-10-10T09:56:21Z",
-   "updated_at": "2026-10-10T10:41:08Z",
+   "updated_at": "2026-10-10T11:23:05Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-10T10:41:07Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T11:22:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38043154105/job/114191384429"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-10T10:21:13Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T11:23:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38043154105/job/114191384458"
     },
     {
@@ -1249,36 +1279,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37973912640",
    "created_at": "2026-10-09T18:31:46Z",
    "updated_at": "2026-10-09T18:31:46Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37973355602,
-   "pr": null,
-   "commit": "cee64907e84807bdd3d07b0df993bcdb21ef80f8",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37973355602",
-   "created_at": "2026-10-09T18:27:03Z",
-   "updated_at": "2026-10-09T18:27:03Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37973235432,
-   "pr": null,
-   "commit": "083145970973eae80cb17ab068c0161faa540a9e",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37973235432",
-   "created_at": "2026-10-09T18:26:01Z",
-   "updated_at": "2026-10-09T18:26:01Z",
    "actor": "dimitri91209",
    "jobs": []
   }
