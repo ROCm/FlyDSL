@@ -20,6 +20,7 @@ TREE_ROOT="${1:?usage: ci_mlir_cache_key.sh <tree-root>}"
 INPUTS=(
   thirdparty/llvm-build-info.json
   thirdparty/llvm-rocdl-lld-argv0.patch
+  thirdparty/llvm-amdgpu-cvt-pk-f32-f8-true16.patch
   scripts/build_llvm.sh
 )
 
