@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-10T13:42:17Z",
+ "updated": "2026-10-10T14:10:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 38058436881,
+   "pr": null,
+   "commit": "7353a336f13431b56bd3f7b32a88cee468dffa6a",
+   "branch": "main",
+   "event": "push",
+   "title": "[DSL] Add a category independent cute algebra framework (#1260)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38058436881",
+   "created_at": "2026-10-10T14:08:30Z",
+   "updated_at": "2026-10-10T14:08:53Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 38051040337,
    "pr": 1260,
@@ -102,11 +117,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel]add mega moe tp kernel for gfx950 (#1255)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38048533871",
    "created_at": "2026-10-10T11:28:35Z",
-   "updated_at": "2026-10-10T12:46:56Z",
+   "updated_at": "2026-10-10T14:08:53Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -133,10 +148,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-10-10T12:46:55Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T14:08:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38048533871/job/114204905161"
     }
    ]
@@ -1391,21 +1406,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37974702627",
    "created_at": "2026-10-09T18:38:39Z",
    "updated_at": "2026-10-09T18:38:39Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37974573171,
-   "pr": null,
-   "commit": "e47aed4463914e5ba5080e1db2936888fa6b6ac3",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37974573171",
-   "created_at": "2026-10-09T18:37:30Z",
-   "updated_at": "2026-10-09T18:37:30Z",
    "actor": "dimitri91209",
    "jobs": []
   }
