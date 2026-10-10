@@ -2412,7 +2412,7 @@ class GenericFlashAttnContext:
                 (self.causal_end_raw_i32 > fx.Int32(0)).select(self.causal_end_raw_i32, fx.Int32(0))
             )
             causal_end = fx.Index(causal_end_i32)
-            self.kv_upper = fx.Index((causal_end < self.seqlen_kv_b).select(causal_end, self.seqlen_kv_b))
+            self.kv_upper = (causal_end < self.seqlen_kv_b).select(causal_end, self.seqlen_kv_b)
         else:
             self.kv_upper = self.seqlen_kv_b
 
@@ -2426,7 +2426,7 @@ class GenericFlashAttnContext:
 
     def kv_row_clamp(self, row_idx):
         last = self.seqlen_kv_b - fx.Index(1)
-        return fx.Index((row_idx < self.seqlen_kv_b).select(row_idx, last))
+        return (row_idx < self.seqlen_kv_b).select(row_idx, last)
 
     def load_global_half_vec(self, ptr, base_idx, vec_elems: int):
         gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=self.elem_type)
@@ -3357,7 +3357,7 @@ class GenericStoreHelper:
         # One writer per row: low half-wave + in-bounds q_row; else redirect to the
         # dropped OOB sentinel.
         off_row = (q_row < ctx.seqlen_q_b).select(lse_local, ctx.lse_oob_off)
-        off = fx.Index((ctx.lane_div_32 == fx.Index(0)).select(off_row, ctx.lse_oob_off))
+        off = (ctx.lane_div_32 == fx.Index(0)).select(off_row, ctx.lse_oob_off)
         buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), ctx.lse_rsrc, as_mlir_value(fx.Int32(off)))
 
     def finalize_o(self, loop_results):
@@ -3768,26 +3768,22 @@ class DualwaveKernelContext:
                 (self.causal_end_raw_i32 > fx.Int32(0)).select(self.causal_end_raw_i32, fx.Int32(0))
             )
             causal_num_tiles = (fx.Index(causal_end_i32) + self.kv_tile_size - 1) // self.kv_tile_size
-            self.max_num_tiles = fx.Index(
-                (causal_num_tiles < self.num_kv_tiles).select(causal_num_tiles, self.num_kv_tiles)
-            )
+            self.max_num_tiles = (causal_num_tiles < self.num_kv_tiles).select(causal_num_tiles, self.num_kv_tiles)
         else:
             self.causal_end_raw_i32 = None
             self.max_num_tiles = self.num_kv_tiles
 
         self.max_num_tiles = ((self.max_num_tiles + fx.Index(1)) // fx.Index(2)) * fx.Index(2)
-        self.max_num_tiles = fx.Index((self.max_num_tiles < fx.Index(4)).select(fx.Index(4), self.max_num_tiles))
+        self.max_num_tiles = (self.max_num_tiles < fx.Index(4)).select(fx.Index(4), self.max_num_tiles)
 
         if const_expr(traits.SPLITK):
             chunk = ((self.max_num_tiles + (traits.NUM_KV_SPLITS - 1)) // traits.NUM_KV_SPLITS + 1) // 2 * 2
-            chunk = fx.Index((chunk < fx.Index(6)).select(fx.Index(6), chunk))
+            chunk = (chunk < fx.Index(6)).select(fx.Index(6), chunk)
             self.split_t0 = self.split_idx * chunk
             self.split_t_end = self.split_t0 + chunk
-            self.split_t_end = fx.Index(
-                (self.split_t_end < self.max_num_tiles).select(self.split_t_end, self.max_num_tiles)
-            )
-            self.split_t_end = fx.Index(
-                (self.max_num_tiles - self.split_t_end < fx.Index(4)).select(self.max_num_tiles, self.split_t_end)
+            self.split_t_end = (self.split_t_end < self.max_num_tiles).select(self.split_t_end, self.max_num_tiles)
+            self.split_t_end = (self.max_num_tiles - self.split_t_end < fx.Index(4)).select(
+                self.max_num_tiles, self.split_t_end
             )
             self.split_nonempty = self.split_t0 + fx.Index(4) <= self.max_num_tiles
         else:
@@ -4532,7 +4528,7 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         lse_local = self.q_head_idx * self.seq_len_v + q_row
         # One writer per row: low half-wave + in-bounds q_row; else the dropped OOB sentinel.
         lse_off_row = (q_row < self.seqlen_q_v).select(lse_local, lse_per_batch_elems)
-        lse_off = fx.Index((self.lane < fx.Index(32)).select(lse_off_row, lse_per_batch_elems))
+        lse_off = (self.lane < fx.Index(32)).select(lse_off_row, lse_per_batch_elems)
         _ws_store_f32(lse_val, lse_off, lse_rsrc)
 
     def store_final_o(self, v_o, q_row, m_row=None, l_row=None):
@@ -4829,21 +4825,21 @@ class DualwaveFp8KernelContext:
             causal_end_raw_i32 = fx.Int32(self.q_start + traits.BLOCK_M) + self.delta_i32
             causal_end_i32 = fx.Int32((causal_end_raw_i32 > fx.Int32(0)).select(causal_end_raw_i32, fx.Int32(0)))
             causal_num_tiles = (fx.Index(causal_end_i32) + kv_tile_size - 1) // kv_tile_size
-            max_num_tiles = fx.Index((causal_num_tiles < num_kv_tiles).select(causal_num_tiles, num_kv_tiles))
+            max_num_tiles = (causal_num_tiles < num_kv_tiles).select(causal_num_tiles, num_kv_tiles)
         else:
             causal_end_raw_i32 = None
             max_num_tiles = num_kv_tiles
         # Pipeline needs an EVEN tile count >= 4; extra tiles read 0 (num_records) and are masked.
         max_num_tiles = ((max_num_tiles + fx.Index(1)) // fx.Index(2)) * fx.Index(2)
-        max_num_tiles = fx.Index((max_num_tiles < fx.Index(4)).select(fx.Index(4), max_num_tiles))
+        max_num_tiles = (max_num_tiles < fx.Index(4)).select(fx.Index(4), max_num_tiles)
         self.max_num_tiles = max_num_tiles
         if const_expr(traits.SPLITK):
             chunk = ((max_num_tiles + (traits.NUM_KV_SPLITS - 1)) // traits.NUM_KV_SPLITS + 1) // 2 * 2
-            chunk = fx.Index((chunk < fx.Index(6)).select(fx.Index(6), chunk))
+            chunk = (chunk < fx.Index(6)).select(fx.Index(6), chunk)
             split_t0 = self.split_idx * chunk
             split_t_end = split_t0 + chunk
-            split_t_end = fx.Index((split_t_end < max_num_tiles).select(split_t_end, max_num_tiles))
-            split_t_end = fx.Index((max_num_tiles - split_t_end < fx.Index(4)).select(max_num_tiles, split_t_end))
+            split_t_end = (split_t_end < max_num_tiles).select(split_t_end, max_num_tiles)
+            split_t_end = (max_num_tiles - split_t_end < fx.Index(4)).select(max_num_tiles, split_t_end)
             self.split_nonempty = split_t0 + fx.Index(4) <= max_num_tiles
         else:
             split_t0 = 0
@@ -4857,7 +4853,7 @@ class DualwaveFp8KernelContext:
             if const_expr(traits.CAUSAL and traits.CROSS_SEQLEN):
                 in_mask = causal_end_raw_i32 > fx.Int32(0)
                 active = in_mask if active is None else (active & in_mask)
-            split_t_end = fx.Index(active.select(split_t_end, split_t0))
+            split_t_end = active.select(split_t_end, split_t0)
 
         self.split_t0 = split_t0
         self.split_t_end = split_t_end
@@ -6408,7 +6404,7 @@ class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
         lse_rsrc = _make_ws_rsrc(lse_base_i64, self.batch_idx * lse_per_batch_bytes, lse_per_batch_bytes)
         lse_val = m_max * self.c_ln2_f + fx.log(den, fastmath=self.fm_fast)
         lse_in_range = self.row_valid.select(self.local_ml_idx, lse_per_batch_elems)
-        lse_off = fx.Index((self.col == fx.Index(0)).select(lse_in_range, lse_per_batch_elems))
+        lse_off = (self.col == fx.Index(0)).select(lse_in_range, lse_per_batch_elems)
         buffer_ops.buffer_store(as_mlir_value(fx.Float32(lse_val)), lse_rsrc, as_mlir_value(fx.Int32(lse_off)))
 
     def store_output(self, o_pack):

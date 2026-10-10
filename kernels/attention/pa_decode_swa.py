@@ -501,10 +501,10 @@ def _make_pa_phase_helpers(
         for w in range_constexpr(NUM_WARPS):
             diff_w = warp_rescale_factors[w] - partition_max
             diff_w = (partition_max > neg_inf).select(diff_w, zero_f)
-            wf = exp2_f32_fast(diff_w * fx.Float32(LOG2E).ir_value())
+            wf = fx.Float32(exp2_f32_fast(diff_w * fx.Float32(LOG2E).ir_value()))
             w_sum = sum_vec[w]
-            wf_sum = arith.mulf(fx.as_ir_value(w_sum), fx.as_ir_value(wf), fastmath=arith.FastMathFlags.contract)
-            partition_sum = arith.addf(fx.as_ir_value(partition_sum), wf_sum, fastmath=arith.FastMathFlags.contract)
+            with fx.fastmath(arith.FastMathFlags.contract):
+                partition_sum = partition_sum + w_sum * wf
             warp_rescale_factors[w] = wf
 
         my_warp_rescale = warp_rescale_factors[0]
@@ -517,13 +517,8 @@ def _make_pa_phase_helpers(
             exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value()), zero_f
         )
 
-        accum_sum = arith.mulf(fx.as_ir_value(accum_scale), fx.as_ir_value(rsum), fastmath=arith.FastMathFlags.contract)
-        partition_sum_scaled = arith.mulf(
-            fx.as_ir_value(partition_sum),
-            fx.as_ir_value(part_to_new),
-            fastmath=arith.FastMathFlags.contract,
-        )
-        rsum = arith.addf(accum_sum, partition_sum_scaled, fastmath=arith.FastMathFlags.contract)
+        with fx.fastmath(arith.FastMathFlags.contract):
+            rsum = fx.Float32(accum_scale) * fx.Float32(rsum) + partition_sum * fx.Float32(part_to_new)
         rmax = new_rmax
         for vhe in range_constexpr(vhe_loop):
             outs[vhe] = outs[vhe] * fx.Float32(accum_scale)
@@ -558,7 +553,6 @@ def _make_pa_phase_helpers(
 
     def _pv_mfma(v_ops, outs, v_correction):
         v_correction = fx.Float32(v_correction)
-        fm_contract = arith.FastMathFlags.contract
         v_correction_vec = fx.Vector.from_elements([v_correction], dtype=fx.Float32).broadcast_to(4)
         for vhe in range_constexpr(vhe_loop):
             tmp_out = fx.Vector.filled(4, 0.0, fx.Float32)
@@ -581,11 +575,8 @@ def _make_pa_phase_helpers(
                             0,
                         ],
                     )
-            outs[vhe] = arith.addf(
-                arith.mulf(tmp_out, v_correction_vec, fastmath=fm_contract),
-                outs[vhe],
-                fastmath=fm_contract,
-            )
+            with fx.fastmath(arith.FastMathFlags.contract):
+                outs[vhe] = tmp_out * v_correction_vec + outs[vhe]
         return outs
 
     return (

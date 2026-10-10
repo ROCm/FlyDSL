@@ -49,7 +49,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, ReductionOp, Stream, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops
-from kernels.common.tensor_shim import GTensor, _to_raw, ptr_rsrc
+from kernels.common.tensor_shim import GTensor, ptr_rsrc
 
 # --- shape constants (V4-Pro MVP) -------------------------------------------
 BLOCK_THREADS = 64  # 1 wave64
@@ -277,11 +277,11 @@ def _build_kernel(
         sin_div = fx.logical_divide(sin_row, rope_lay)
 
         def wave_reduce_add(x):
-            w = _to_raw(x)
+            w = fx.Float32(x)
             for sh_exp in range_constexpr(int(math.log2(BLOCK_THREADS))):
                 off = BLOCK_THREADS // (2 << sh_exp)
-                peer = _to_raw(fx.Float32(w).shuffle_xor(off, BLOCK_THREADS))
-                w = arith.AddFOp(w, peer, fastmath=fm_fast).result
+                peer = w.shuffle_xor(off, BLOCK_THREADS)
+                w = w.addf(peer, fastmath=fm_fast)
             return w
 
         def emit_body(
@@ -318,15 +318,15 @@ def _build_kernel(
                 # = group_size elements). Both can interleave in the loop's
                 # "tail" steps where shuffle offset < TPG; earlier steps do
                 # sumsq-only (amax would cross group boundaries).
-                w_sq = _to_raw(sq_local)
-                w_am = _to_raw(am_local)
+                w_sq = fx.Float32(sq_local)
+                w_am = fx.Float32(am_local)
                 for sh_exp in range_constexpr(log2_block):
                     off = BLOCK_THREADS // (2 << sh_exp)
-                    peer_sq = _to_raw(fx.Float32(w_sq).shuffle_xor(off, BLOCK_THREADS))
-                    w_sq = arith.AddFOp(w_sq, peer_sq, fastmath=fm_fast).result
+                    peer_sq = w_sq.shuffle_xor(off, BLOCK_THREADS)
+                    w_sq = w_sq.addf(peer_sq, fastmath=fm_fast)
                     if const_expr(sh_exp >= amax_start_step):
-                        peer_am = _to_raw(fx.Float32(w_am).shuffle_xor(off, BLOCK_THREADS))
-                        w_am = arith.maximumf(w_am, peer_am)
+                        peer_am = w_am.shuffle_xor(off, BLOCK_THREADS)
+                        w_am = w_am.maximumf(peer_am)
                 sq_block = w_sq
                 am_group = w_am  # per-group after partial butterfly
             else:

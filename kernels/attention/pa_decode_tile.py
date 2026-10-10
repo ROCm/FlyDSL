@@ -724,7 +724,7 @@ def compile_pa_decode_tile(
                 for m in range_constexpr(M_TILES):
                     frag_Ss = []
                     for a in range_constexpr(NCHUNK):
-                        acc = arith.constant_vector(0.0, T.f32x4)
+                        acc = fx.Vector.filled(4, 0.0, fx.Float32)
                         for s in range_constexpr(N_SUBCHUNKS):
                             acc = _mfma(
                                 k_cur[a * N_SUBCHUNKS + s],
@@ -864,7 +864,7 @@ def compile_pa_decode_tile(
                     corr_b = fx.Vector.from_elements([corr_reg], dtype=fx.Float32).broadcast_to(OP_ELEMS)
                     for vh in range_constexpr(VHE_CHUNKS):
                         v_vh = v_vh_shared[vh]
-                        acc = arith.constant_vector(0.0, T.f32x4)
+                        acc = fx.Vector.filled(4, 0.0, fx.Float32)
                         for s in range_constexpr(NVOPS):
                             # SWAPPED operands (V=A, P=B): output row =
                             # head-dim, output col = query-row=lane16.
@@ -888,7 +888,7 @@ def compile_pa_decode_tile(
                 # QK: each NCHUNK chunk accumulates N_SUBCHUNKS k_steps into an f32x4.
                 frag_Ss = []
                 for a in range_constexpr(NCHUNK):
-                    acc = arith.constant_vector(0.0, T.f32x4)
+                    acc = fx.Vector.filled(4, 0.0, fx.Float32)
                     for s in range_constexpr(N_SUBCHUNKS):
                         acc = _mfma(
                             k_cur[a * N_SUBCHUNKS + s],
@@ -1018,7 +1018,7 @@ def compile_pa_decode_tile(
                 v_vh_batch = [_v_ops(v_page_cur, vh) for vh in range_constexpr(VHE_CHUNKS)]
                 for vh in range_constexpr(VHE_CHUNKS):
                     v_vh = v_vh_batch[vh]
-                    acc = arith.constant_vector(0.0, T.f32x4)
+                    acc = fx.Vector.filled(4, 0.0, fx.Float32)
                     for s in range_constexpr(NVOPS):
                         acc = _mfma(v_vh[s], p_ops[s], acc)
                     op = fx.Vector(acc)
