@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-10T14:10:03Z",
+ "updated": "2026-10-10T14:34:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 38060041743,
+   "pr": null,
+   "commit": "43ec5da9d934057b60f06d32ff05a8e044f9020c",
+   "branch": "main",
+   "event": "push",
+   "title": "[Enh] Add CompiledFunction.max_blocks_per_cu() (#1259)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38060041743",
+   "created_at": "2026-10-10T14:32:57Z",
+   "updated_at": "2026-10-10T14:33:32Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 38058436881,
    "pr": null,
@@ -10,13 +25,41 @@
    "branch": "main",
    "event": "push",
    "title": "[DSL] Add a category independent cute algebra framework (#1260)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38058436881",
    "created_at": "2026-10-10T14:08:30Z",
-   "updated_at": "2026-10-10T14:08:53Z",
+   "updated_at": "2026-10-10T14:33:14Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-10T14:29:44Z",
+     "completed_at": "2026-10-10T14:33:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38058436881/job/114235529232"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-10T14:29:16Z",
+     "completed_at": "2026-10-10T14:32:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38058436881/job/114235529251"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-10-10T14:29:34Z",
+     "completed_at": "2026-10-10T14:33:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38058436881/job/114235529281"
+    }
+   ]
   },
   {
    "run_id": 38051040337,
@@ -25,19 +68,19 @@
    "branch": "pr/feat-core-algebra",
    "event": "pull_request",
    "title": "[DSL] Add a category independent cute algebra framework",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38051040337",
    "created_at": "2026-10-10T12:11:09Z",
-   "updated_at": "2026-10-10T12:22:33Z",
+   "updated_at": "2026-10-10T14:29:45Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-10T12:22:33Z",
+     "started_at": "2026-10-10T14:29:45Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38051040337/job/114212028684"
     },
@@ -1391,21 +1434,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37974775058",
    "created_at": "2026-10-09T18:39:17Z",
    "updated_at": "2026-10-09T18:39:17Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37974702627,
-   "pr": null,
-   "commit": "9068038173f6fa346b2260a7799b449c61e357f8",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37974702627",
-   "created_at": "2026-10-09T18:38:39Z",
-   "updated_at": "2026-10-09T18:38:39Z",
    "actor": "dimitri91209",
    "jobs": []
   }
