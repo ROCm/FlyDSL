@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-10-10T02:44:06Z",
+ "updated": "2026-10-10T03:39:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 38019091810,
+   "pr": 1255,
+   "commit": "f77f74bb362eadef4f7a1efe9586adc026491cc9",
+   "branch": "binding_megamoe_tp",
+   "event": "pull_request",
+   "title": "[Kernel]add mega moe tp kernel for gfx950",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38019091810",
+   "created_at": "2026-10-10T03:01:28Z",
+   "updated_at": "2026-10-10T03:19:41Z",
+   "actor": "binding7012",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-10T03:20:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38019091810/job/114119190353"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-10T03:19:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38019091810/job/114119190387"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-10T03:20:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38019091810/job/114119190404"
+    }
+   ]
+  },
   {
    "run_id": 38017878609,
    "pr": 1255,
@@ -130,11 +173,11 @@
    "branch": "perf/gfx1250-gemm-kernarg-preload",
    "event": "pull_request",
    "title": "[Perf][gfx1250] Preload the kernel arguments of the BF16 and A8W8 GEMMs",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38007224532",
    "created_at": "2026-10-10T00:01:46Z",
-   "updated_at": "2026-10-10T00:13:44Z",
+   "updated_at": "2026-10-10T03:20:21Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -158,9 +201,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-10T00:13:44Z",
+     "started_at": "2026-10-10T03:20:20Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38007224532/job/114081579815"
     }
@@ -1034,21 +1077,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37966732618",
    "created_at": "2026-10-09T17:30:17Z",
    "updated_at": "2026-10-09T17:30:17Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37966521876,
-   "pr": null,
-   "commit": "5f190164bf100a203c6698ab24e7ec719d2fd89c",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37966521876",
-   "created_at": "2026-10-09T17:28:30Z",
-   "updated_at": "2026-10-09T17:28:30Z",
    "actor": "dimitri91209",
    "jobs": []
   }
