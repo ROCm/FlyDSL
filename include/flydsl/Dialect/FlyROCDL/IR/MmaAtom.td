@@ -246,6 +246,7 @@ def FlyROCDL_MmaOpGFX11_WMMA : FlyROCDL_MmaOp<"MmaOpGFX11_WMMA", "gfx11.wmma", [
 // gfx1250 uses different floating-point shapes and the mods/reuse operand form,
 // so it keeps its own `gfx1250.wmma` atom. Hence `gfx120x` rather than `gfx12`
 // in the name — this atom covers gfx1200 / gfx1201 only.
+// iu8 is that same 16x16x16 shape with an i32 accumulator. iu4 is 16x16x32 only.
 
 def FlyROCDL_MmaOpGFX120X_WMMA : FlyROCDL_MmaOp<"MmaOpGFX120X_WMMA", "gfx120x.wmma", []> {
   let parameters = (ins
@@ -257,6 +258,48 @@ def FlyROCDL_MmaOpGFX120X_WMMA : FlyROCDL_MmaOp<"MmaOpGFX120X_WMMA", "gfx120x.wm
     "Type":$elemTyAcc,
     // Integer-WMMA controls, forwarded to the ROCDL iu8/iu4 intrinsic. Ignored
     // (and required to be false) on the floating-point paths. Always printed.
+    // clamp saturates the i32 accumulator instead of wrapping (default false).
+    "bool":$signA,
+    "bool":$signB,
+    "bool":$clamp
+  );
+  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `,` `signA` `=` $signA `,` `signB` `=` $signB `,` `clamp` `=` $clamp `>`";
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, false, false, false);
+    }]>,
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, signA, signB, clamp);
+    }]>
+  ];
+  let genVerifyDecl = 1;
+}
+
+
+//===----------------------------------------------------------------------===//
+// MmaOp GFX120X — SWMMAC wave32 (sparse WMMA, RDNA4: gfx1200 / gfx1201)
+//===----------------------------------------------------------------------===//
+//
+// This atom emits the f32-accum, integer, and fp8 variants:
+// f16/bf16 -> f32, iu8, iu4 K=32/K=64, and fp8/bf8 pairs -> f32.
+// Same-type sparse f16/bf16 accumulators are not emitted, mirroring the
+// dense same-type policy. Sparse indexes are the second A-group operand (i32), as
+// described for sparsity metadata on fly.gemm / mma_atom_call.
+//
+// Register ABI (wave32): A is stored at half logical K, B is dense at full K,
+// C/D is vector<8x f32|i32>. Dense iu4 is K=32 only.
+
+def FlyROCDL_MmaOpGFX120X_SWMMAC : FlyROCDL_MmaOp<"MmaOpGFX120X_SWMMAC", "gfx120x.swmmac", []> {
+  let parameters = (ins
+    "int32_t":$m,
+    "int32_t":$n,
+    "int32_t":$k,
+    "Type":$elemTyA,
+    "Type":$elemTyB,
+    "Type":$elemTyAcc,
+    // Integer-SWMMAC controls, forwarded to the ROCDL iu8/iu4 intrinsic.
+    // Required false on floating-point paths.
     "bool":$signA,
     "bool":$signB,
     "bool":$clamp

@@ -454,6 +454,73 @@ than the tile for ragged edges (HW OOB clamp) and `strides=` for a dynamic/true
 global stride that differs from the packed tile stride. Unlike the CDNA buffer copy,
 TDM needs a **raw VA** — do not wrap the global tensor in `make_buffer_tensor`.
 
+(gfx120x-wmma)=
+
+#### RDNA4 WMMA (`gfx120x`)
+
+**WMMA** — `fx.make_mma_atom(rocdl.WMMA(16, 16, k, a_type, acc, elem_ty_b=...))`
+builds `MmaOpGFX120X_WMMAType`. `a_type` is A, and B when `elem_ty_b` is
+omitted. Float atoms accumulate to `fx.Float32`. An f16 or bf16 accumulator
+is rejected, and float atoms reject `sign_a`, `sign_b`, and `clamp`.
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Float16, fx.Float32))
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.BFloat16, fx.Float32))
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Float8E4M3FN, fx.Float32))  # fp8 x fp8
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Float8E5M2, fx.Float32))    # bf8 x bf8
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Float8E4M3FN, fx.Float32, elem_ty_b=fx.Float8E5M2))  # fp8 x bf8
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Float8E5M2, fx.Float32, elem_ty_b=fx.Float8E4M3FN))  # bf8 x fp8
+```
+
+**FP8 B preshuffle.** A stays `[M, K]`. Lane `l` reads row `base + l`,
+8 contiguous K bytes for one half of the K=16 atom. B is `[K, N]`,
+with both dimensions multiples of 16. `preshuffle_b_fp8`
+(`kernels/gemm/rdna_fp8_preshuffle_gemm.py`) returns
+`[N // 16, K // 16, 2, 16, 8]`. One 8-byte `buffer_load` at that lane
+is the B operand. No LDS.
+
+```text
+N0      N//16      group of 16 columns
+K0      K//16      one K=16 atom
+KLane   2          which half of that atom
+NLane   16         lane in the column group
+KPack   8          that lane's 8 fp8 bytes
+```
+
+```python
+B_shuf = preshuffle_b_fp8(B)  # [K, N] -> [N//16, K//16, 2, 16, 8]
+```
+
+**Integer.** iu8 is K=16. iu4 is K=32. `True` sign-extends. `False`
+zero-extends. `sign_a` and `sign_b` are independent.
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 16, fx.Int8, fx.Int32, sign_a=True, sign_b=True, clamp=True))    # i8 x i8, saturate
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, fx.Int4, fx.Int32, sign_a=True, sign_b=False, clamp=False))  # i4 x u4, wrap
+```
+
+```text
+                signed (True)       unsigned (False)
+4-bit           -8 .. 7             0 .. 15
+nibble 1111     -1                  15
+8-bit           -128 .. 127         0 .. 255
+byte 0xFF       -1                  255
+
+clamp True      i32 stays at -2147483648 or 2147483647
+clamp False     i32 wraps
+```
+
+`WMMA(..., k=16, fx.Int4, ...)` is an error.
+
+**SWMMAC** — 16×16×32 for f16, bf16, any fp8/bf8 pair, and iu8. 16×16×64
+for iu4. A is `[values, sparse_index]`. Same-type f16 and bf16 accumulators
+are rejected.
+
+```python
+mma = fx.make_mma_atom(rocdl.SWMMAC(16, 16, 32, fx.Float16, fx.Float32))
+fx.gemm(mma, frag_C, [frag_A, sparse_index], frag_B, frag_C)
+```
+
 ### 4.4 GPU operations (`fx.gpu`)
 
 ```python

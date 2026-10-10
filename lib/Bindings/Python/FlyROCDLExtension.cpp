@@ -154,7 +154,32 @@ struct PyMmaOpGFX120X_WMMAType : PyConcreteType<PyMmaOpGFX120X_WMMAType> {
         "Create a MmaOpGFX120X_WMMAType with m, n, k dimensions and element types "
         "(RDNA4 gfx1200 / gfx1201 wave32 WMMA, 16x16x16 with the v8 operand ABI). "
         "sign_a/sign_b/clamp must be false: fp16, bf16, and every fp8(E4M3FN)/"
-        "bf8(E5M2) A/B combination are supported.");
+        "bf8(E5M2) A/B combination are supported. "
+        "Those combinations accumulate to f32. iu8 is the same shape to i32 "
+        "(A/B=vector<2xi32>). iu4 is K=32 only (A/B=vector<2xi32>, 16 nibbles). "
+        "Integer paths forward sign_a/sign_b/clamp.");
+  }
+};
+
+struct PyMmaOpGFX120X_SWMMACType : PyConcreteType<PyMmaOpGFX120X_SWMMACType> {
+  FLYDSL_REGISTER_TYPE_BINDING(MmaOpGFX120X_SWMMACType, "MmaOpGFX120X_SWMMACType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
+           bool signA, bool signB, bool clamp, DefaultingPyMlirContext context) {
+          return PyMmaOpGFX120X_SWMMACType(
+              context->getRef(),
+              wrap(MmaOpGFX120X_SWMMACType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB),
+                                                unwrap(elemTyAcc), signA, signB, clamp)));
+        },
+        "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, nb::kw_only(),
+        "sign_a"_a = false, "sign_b"_a = false, "clamp"_a = false, "context"_a = nb::none(),
+        "Create a MmaOpGFX120X_SWMMACType (RDNA4 sparse WMMA). "
+        "Same-type f16/bf16 sparse accumulators are not available. "
+        "Sparse index is the second A-group "
+        "operand. sign_a/sign_b/clamp apply to integer paths only.");
   }
 };
 
@@ -373,6 +398,7 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX1250_WMMAScaleType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX11_WMMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX120X_WMMAType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaOpGFX120X_SWMMACType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyLDSType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferAtomicType::bind(m);

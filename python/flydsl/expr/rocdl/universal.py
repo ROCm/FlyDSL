@@ -4,6 +4,7 @@
 from ..._mlir import ir
 from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import (
     MmaOpGFX11_WMMAType,
+    MmaOpGFX120X_SWMMACType,
     MmaOpGFX120X_WMMAType,
     MmaOpGFX1250_WMMAType,
 )
@@ -195,7 +196,9 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     #     the instruction shapes: RDNA4 has the gfx11 16x16x16 forms, gfx1250 has
     #     16x16x32 (plus fp8 K=64/128) with mods/reuse operands. They therefore
     #     get separate atoms, matched on the disjoint gfx120x / gfx1250 prefixes
-    #     rather than on a shared gfx12 one.
+    #     rather than on a shared gfx12 one. On RDNA4, iu4 is K=32
+    #     (wmma_i32_16x16x32_iu4), same-type f16 and bf16 accumulators are not
+    #     emitted, and there is no dense K=32 form for f16, bf16, fp8, bf8, or iu8.
 
     arch = get_rocm_arch() or ""
     if arch.startswith("gfx11"):
@@ -227,6 +230,41 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
         )
     raise ValueError(
         f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5), gfx120x (RDNA4), and gfx1250. "
+    )
+
+
+def SWMMAC(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
+    """Create a gfx120x SWMMAC (sparse WMMA) atom.
+
+    Emits f16/bf16 -> f32, iu8, iu4 K=32/64, and fp8/bf8 pairs -> f32.
+    Same-type sparse accumulators are not available. The sparse index is the
+    second A-group operand on
+    ``mma_atom_call`` / ``gemm`` (``[a, sparse_index]``).
+
+    Supported kwargs mirror :func:`WMMA`: ``elem_ty_b``, ``sign_a``, ``sign_b``,
+    ``clamp`` (integer paths only).
+    """
+    ty_a = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
+    elem_ty_b = kwargs.pop("elem_ty_b", None)
+    ty_b = ty_a if elem_ty_b is None else (elem_ty_b.ir_type if hasattr(elem_ty_b, "ir_type") else elem_ty_b)
+    if elem_ty_acc is None:
+        ty_acc = ir.F32Type.get()
+    else:
+        ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
+
+    arch = get_rocm_arch() or ""
+    if not arch.startswith("gfx120"):
+        raise ValueError(f"SWMMAC is only available on gfx120x (RDNA4), got arch={arch!r}")
+    return MmaOpGFX120X_SWMMACType.get(
+        m,
+        n,
+        k,
+        ty_a,
+        ty_b,
+        ty_acc,
+        sign_a=bool(kwargs.get("sign_a", False)),
+        sign_b=bool(kwargs.get("sign_b", False)),
+        clamp=bool(kwargs.get("clamp", False)),
     )
 
 
