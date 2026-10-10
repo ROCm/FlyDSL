@@ -172,7 +172,7 @@ helper code that is not part of the traced closure.
 | `gfx942` | MI300X / MI308X | 64 | MFMA | CDNA3 baseline; preshuffle GEMM, PA decode, CDNA BufferCopy |
 | `gfx950` / `gfx95*` | MI350 / MI355X | 64 | MFMA | CDNA4 path; FP4, MFMA scale, wider LDS copy paths, 160KB LDS |
 | `gfx11*` | RDNA3 / RDNA3.5 (Strix Halo, e.g. gfx1151) | 32 | WMMA | No MFMA; f16/bf16 (and i8/i4) WMMA GEMM; legacy v16-operand WMMA ABI; **no native FP8** (kernels fail-fast); `kernels/gemm/rdna3_f16_gemm.py`. `is_rdna_arch()` returns True. |
-| `gfx120*` | RDNA4 (gfx1201 = Radeon AI PRO R9700) | 32 | WMMA | RDNA path, wave32; new v8-operand WMMA ABI with the gfx11 16x16x16 shapes (`gfx120x.wmma` atom, `lib/Dialect/FlyROCDL/GFX120X/`); native FP8. `is_rdna_arch()` returns True. |
+| `gfx120*` | RDNA4 (gfx1201 = Radeon AI PRO R9700) | 32 | WMMA | RDNA path, wave32; new v8-operand WMMA ABI with the gfx11 16x16x16 shapes (`gfx120x.wmma` atom, `lib/Dialect/FlyROCDL/GFX120X/`); iu4 is K=32. Native FP8. `is_rdna_arch()` returns True. |
 | `gfx1250` | — | 32 | WMMA / TDM | FP8/FP4 GEMM, MoE, async/TDM copy helpers, 320KB LDS. |
 
 ## Kernel Entry Points

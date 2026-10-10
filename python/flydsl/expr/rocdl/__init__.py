@@ -22,6 +22,7 @@ from . import cdna5 as cdna5
 from . import rdna3 as rdna3
 from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
+from .enum import TargetAddressSpace as TargetAddressSpace
 from .universal import *
 from .utils import require_lds_dma_support
 
@@ -34,6 +35,7 @@ __all__ = [
     "rdna4",
     # Enums
     "SyncScope",
+    "TargetAddressSpace",
     # Re-exported from .universal
     "s_waitcnt",
     "asyncmark",
@@ -55,6 +57,7 @@ __all__ = [
     "BufferAtomicPkAdd",
     "MFMA",
     "WMMA",
+    "SWMMAC",
     "make_buffer_ptr",
     "make_buffer_tensor",
     "get_buffer_rsrc",
@@ -691,6 +694,26 @@ def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux=None, **kw):
 @dsl_loc_tracing
 def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
     from ..._mlir.dialects.rocdl import cvt_pk_fp8_f32 as _op
+
+    return _op(
+        res=res,
+        src_a=_to_ir(src_a),
+        src_b=_to_ir(src_b),
+        old=_to_ir(old),
+        word_sel=word_sel,
+        **kw,
+    )
+
+
+@dsl_loc_tracing
+def cvt_pk_bf8_f32(res, src_a, src_b, old, word_sel, **kw):
+    """ROCDL ``cvt_pk_bf8_f32``: pack two f32 → E5M2 (bf8) bytes into an i32 lane.
+
+    Same ABI as :func:`cvt_pk_fp8_f32` but the E5M2 / bf8 path used by
+    ``float8_e5m2`` FA / scaled_mm / quant. Wrapper applies ``_to_ir`` so
+    Float32/Int32 DSL values are accepted (raw ODS op requires bare Values).
+    """
+    from ..._mlir.dialects.rocdl import cvt_pk_bf8_f32 as _op
 
     return _op(
         res=res,

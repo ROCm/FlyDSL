@@ -34,7 +34,7 @@ MLIR-based tests organized by category, verified using the `fly-opt` tool. These
 | Directory | Tests | Description |
 |---|---|---|
 | `LayoutAlgebra/` | `coalesce.mlir`, `composition.mlir`, `construction.mlir`, `coordinate.mlir`, `divide.mlir`, `int_tuple.mlir`, `product.mlir`, `size_cosize.mlir` | Layout algebra operations |
-| `Conversion/` | `gpu_ops.mlir`, `memref_alloca.mlir`, `memref_ops.mlir`, `mma_atom.mlir`, `pointer_ops.mlir`, `type_conversion.mlir` | Dialect conversion passes |
+| `Conversion/` | `gpu_ops.mlir`, `memref_alloca.mlir`, `memref_ops.mlir`, `mma_atom.mlir`, `pointer_ops.mlir`, `type_conversion.mlir`, `wmma_gfx120x.mlir`, `swmmac_gfx120x.mlir` | Dialect conversion passes |
 | `Transforms/` | `canonicalize.mlir`, `layout_lowering.mlir` | Transformation passes |
 
 **Running individually:**
@@ -83,6 +83,7 @@ Full end-to-end tests that compile FlyDSL kernels, execute them on the GPU, and 
 | `test_pa.py` | Paged Attn | Paged attention decode |
 | `test_quant.py` | Quantization | Quantization ops |
 | `test_ref.py` | Reference | Reference implementations |
+| `test_flash_attn_gfx120x.py` | gfx120x | RDNA4 wave32. Skips unless the process arch starts with gfx120 |
 
 **Running individually:**
 ```bash

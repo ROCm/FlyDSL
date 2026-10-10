@@ -374,6 +374,16 @@ python3 tests/kernels/test_flash_attn_fwd.py --dtype fp8 --compare --warmup 10 -
 
 ---
 
+## 3c. gfx120x FlashAttention and GEMM
+
+gfx120x uses wave32 WMMA. `flydsl_flash_attn_func` returns before the gfx950 and gfx942 bodies when the device arch starts with `gfx120`. The launches live in `kernels/attention/flash_attn_gfx120x_host.py`. bf16 and fp16 are one kernel. fp8 and int8 are the other, and that output is bf16. Causal masking is bottom-right.
+
+The GEMM and quant modules are listed in :doc:`api/kernels`. Each gfx120x launch checks `get_rocm_arch()` and raises unless the name starts with `gfx120`. `kernels/gemm/rdna_f16_gemm.py` and `kernels/gemm/rdna_fp8_preshuffle_gemm.py` are the RDNA kernels already in this tree. They do not use that check.
+
+No product kernel calls `rocdl.SWMMAC`. It is an atom only.
+
+---
+
 ## 4. Shared utilities
 
 ### 4.1 Common kernel helpers (`kernels/common/kernels_common.py`)
@@ -486,6 +496,12 @@ What operation do you need?
 | `kernels/comm/custom_all_reduce.py` | Multi-GPU all-reduce |
 | `kernels/gemm/rdna_f16_gemm.py` | RDNA FP16 GEMM |
 | `kernels/gemm/rdna_fp8_preshuffle_gemm.py` | RDNA FP8 GEMM |
+| `kernels/gemm/rdna4_scaled_mm_fp8.py` | gfx120x scaled FP8 GEMM |
+| `kernels/attention/flash_attn_gfx120x_host.py` | gfx120x FlashAttention launches |
+| `kernels/norm/rope_gfx120x.py` | gfx120x RoPE |
+| `kernels/norm/rms_rope_gfx120x.py` | gfx120x RMSNorm + RoPE |
+| `kernels/norm/adaln_gfx120x.py` | gfx120x AdaLN |
+| `kernels/quant/` | gfx120x quantize and dequantize |
 | `kernels/gemm/gemm_common_gfx1250.py` | GFX1250 GEMM common |
 | `kernels/gemm/gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | `kernels/gemm/gemm_a8w8_gfx1250.py` | GFX1250 FP8 GEMM (per-token/per-channel and 128x128 blockscale) |
