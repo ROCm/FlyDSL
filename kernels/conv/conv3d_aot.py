@@ -322,41 +322,74 @@ def _conv_probe_args(splitk: int):
     return y, _probe(5), _probe(2), _probe(1, dtype_is_fp32=True)
 
 
-def _compile_conv3d_to_cache(**kwargs):
+def _compile_conv3d_to_cache(
+    *,
+    N: int,
+    C: int,
+    D: int,
+    H: int,
+    W: int,
+    K: int,
+    kT: int,
+    kH: int,
+    kW: int,
+    stride_d: int,
+    stride_h: int,
+    stride_w: int,
+    pad_d: int,
+    pad_h: int,
+    pad_w: int,
+    dil_d: int,
+    dil_h: int,
+    dil_w: int,
+    groups: int,
+    has_bias: bool,
+    splitk: int,
+    tile_m: int,
+    tile_n: int,
+    wave_m: int,
+    wave_n: int,
+    wgm: int,
+    out_ndhwc: bool = False,
+    dyn_hw: bool = False,
+):
+    # No **kwargs: a job field this does not name is a compile-time parameter
+    # being dropped, which would cache an artifact under the default and leave
+    # the runtime JITing the one it asked for. Let it raise TypeError instead.
     exe = compile_conv3d_implicit(
         _implicit_param_from_problem(
-            kwargs["N"],
-            kwargs["C"],
-            kwargs["D"],
-            kwargs["H"],
-            kwargs["W"],
-            kwargs["K"],
-            kwargs["kT"],
-            kwargs["kH"],
-            kwargs["kW"],
-            kwargs["stride_d"],
-            kwargs["stride_h"],
-            kwargs["stride_w"],
-            kwargs["pad_d"],
-            kwargs["pad_h"],
-            kwargs["pad_w"],
-            kwargs["dil_d"],
-            kwargs["dil_h"],
-            kwargs["dil_w"],
-            kwargs["groups"],
-            kwargs["has_bias"],
-            kwargs["splitk"],
-            (kwargs["tile_m"], kwargs["tile_n"], kwargs["wave_m"], kwargs["wave_n"]),
-            kwargs["wgm"],
-            kwargs["out_ndhwc"],
+            N,
+            C,
+            D,
+            H,
+            W,
+            K,
+            kT,
+            kH,
+            kW,
+            stride_d,
+            stride_h,
+            stride_w,
+            pad_d,
+            pad_h,
+            pad_w,
+            dil_d,
+            dil_h,
+            dil_w,
+            groups,
+            has_bias,
+            splitk,
+            (tile_m, tile_n, wave_m, wave_n),
+            wgm,
+            out_ndhwc,
             "zeros",
-            kwargs.get("dyn_hw", False),
+            dyn_hw,
         )
     )
     prev = os.environ.get("COMPILE_ONLY")
     os.environ["COMPILE_ONLY"] = "1"
     try:
-        _dispatch(exe, *_conv_probe_args(kwargs["splitk"]), stream=None)
+        _dispatch(exe, *_conv_probe_args(splitk), stream=None)
     finally:
         if prev is None:
             os.environ.pop("COMPILE_ONLY", None)
