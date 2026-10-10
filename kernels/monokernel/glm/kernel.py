@@ -330,7 +330,7 @@ def build_glm5_monokernel(
             return fx.Vector.from_elements([a, b], fx.Float32).to(fx.BFloat16).bitcast(fx.Float32)[0]
 
         def bf16_round(a):
-            return fx.Float32(fx.Float32(a).to(fx.BFloat16))
+            return fx.Float32(a.to(fx.BFloat16))
 
         def index_arg(i):
             """Load one uniform pointer from the compact indexer parameter table.
