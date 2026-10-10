@@ -253,7 +253,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
         kv_gmem_to_lds.load_k(t0 * BN, t0 % fx.Index(NPF))
         if const_expr(traits.QLDS):
             q_loader.stage_q_to_lds()
-            rocdl.s_waitcnt(0)
+            fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             q_row, q_wide = _load_q_regs()
@@ -266,7 +266,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
         kv_gmem_to_lds.load_v((t0 + 2) * BN, (t0 + 2) % fx.Index(NPF))
         kv_gmem_to_lds.load_v((t0 + 3) * BN, (t0 + 3) % fx.Index(NPF))
         if const_expr(traits.QLDS):
-            rocdl.s_waitcnt(0)
+            fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         else:
             _waitcnt_vm_n(DMA_PER_ITER)
         rocdl.sched_barrier(0)

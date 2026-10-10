@@ -1122,11 +1122,11 @@ def build_communication(kc: KernelCtx) -> dict:
         rid = rsrc(a["ids"])
         for i_ in range(tid, n, i32(NT)):
             i = i32(i_)
-            t = fx.Int32(fx.Vector(bld(rid, i * i32(16), 0, V4I, AUX_SYS))[1])
+            t = fx.Vector(bld(rid, i * i32(16), 0, V4I, AUX_SYS))[1]
             t0 = now()
             while (t != a["epoch"]) & alive(t0):
                 rocdl.s_sleep(1)
-                t = fx.Int32(fx.Vector(bld(rid, i * i32(16), 0, V4I, AUX_SYS))[1])
+                t = fx.Vector(bld(rid, i * i32(16), 0, V4I, AUX_SYS))[1]
             _report_if(a, t != a["epoch"], ERR_META)
 
     def _meta_pending(a, lane, epoch, own=False):

@@ -20,7 +20,7 @@ from typing import NamedTuple
 
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops
@@ -53,13 +53,11 @@ def a16wmix_resolve_arch(arch=None):
 
 
 def _udiv(a, c):
-    cc = fx.Int32(c) if isinstance(c, int) else c
-    return fx.Int32(arith.divui(_raw(a), _raw(cc)))
+    return fx.Int32(fx.Uint32(a) // fx.Uint32(c))
 
 
 def _umod(a, c):
-    cc = fx.Int32(c) if isinstance(c, int) else c
-    return fx.Int32(arith.remui(_raw(a), _raw(cc)))
+    return fx.Int32(fx.Uint32(a) % fx.Uint32(c))
 
 
 def _global_i32_at(addr_i64, idx):
@@ -92,7 +90,7 @@ def _global_base_ptr1(addr_i64):
 
 def _gep(base_ptr, byte_off_i32):
     # Byte GEP; polymorphic in the base ptr's address space (global ptr<1> / LDS ptr<3>).
-    return buffer_ops.get_element_ptr(base_ptr, byte_offset=_raw(byte_off_i32), elem_type=T.i8)
+    return buffer_ops.get_element_ptr(base_ptr, byte_offset=byte_off_i32, elem_type=T.i8)
 
 
 def _cvt_pk_bf16_f32_se(src_a_f32, src_b_f32):
@@ -132,8 +130,8 @@ def _int4_nibble_to_bf16x8(raw_i32, scale_f32, *, is_gfx942=False, old_pack=True
         los = []
         his = []
         for j in range_constexpr(4):
-            f_lo = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_even), byte_sel=j)) * eff
-            f_hi = fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_odd), byte_sel=j)) * eff
+            f_lo = fx.Float32(rocdl.cvt_off_f32_i4(raw_even, byte_sel=j)) * eff
+            f_hi = fx.Float32(rocdl.cvt_off_f32_i4(raw_odd, byte_sel=j)) * eff
             los.append(f_lo)
             his.append(f_hi)
         f32s = (los + his) if old_pack else [x for pair in zip(los, his) for x in pair]
@@ -144,25 +142,25 @@ def _int4_nibble_to_bf16x8(raw_i32, scale_f32, *, is_gfx942=False, old_pack=True
             b0 = f32s[2 * i].bitcast(fx.Int32)
             b1 = f32s[2 * i + 1].bitcast(fx.Int32)
             i32s.append(b0.shrui(c16) | (b1 & hi16))
-        v4i32 = fx.Vector.from_elements([_raw(x) for x in i32s], fx.Int32)
+        v4i32 = fx.Vector.from_elements(i32s, fx.Int32)
         return v4i32.bitcast(fx.BFloat16)  # v8bf16
     # byte_sel loads (1 shift total); side-effecting pk-convert.
     los = []
     his = []
     for j in range_constexpr(4):
-        los.append(fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_even), byte_sel=j)) * eff)
-        his.append(fx.Float32(rocdl.cvt_off_f32_i4(_raw(raw_odd), byte_sel=j)) * eff)
+        los.append(fx.Float32(rocdl.cvt_off_f32_i4(raw_even, byte_sel=j)) * eff)
+        his.append(fx.Float32(rocdl.cvt_off_f32_i4(raw_odd, byte_sel=j)) * eff)
     if old_pack:
         # v8bf16 = [K0,K1,K2,K3, K4,K5,K6,K7]; pk pairs (K0,K1),(K2,K3),(K4,K5),(K6,K7).
         i32s = [
-            fx.Int32(_cvt_pk_bf16_f32_se(_raw(los[0]), _raw(los[1]))),
-            fx.Int32(_cvt_pk_bf16_f32_se(_raw(los[2]), _raw(los[3]))),
-            fx.Int32(_cvt_pk_bf16_f32_se(_raw(his[0]), _raw(his[1]))),
-            fx.Int32(_cvt_pk_bf16_f32_se(_raw(his[2]), _raw(his[3]))),
+            fx.Int32(_cvt_pk_bf16_f32_se(los[0], los[1])),
+            fx.Int32(_cvt_pk_bf16_f32_se(los[2], los[3])),
+            fx.Int32(_cvt_pk_bf16_f32_se(his[0], his[1])),
+            fx.Int32(_cvt_pk_bf16_f32_se(his[2], his[3])),
         ]
     else:
-        i32s = [fx.Int32(_cvt_pk_bf16_f32_se(_raw(los[j]), _raw(his[j]))) for j in range_constexpr(4)]
-    v4i32 = fx.Vector.from_elements([_raw(x) for x in i32s], fx.Int32)
+        i32s = [fx.Int32(_cvt_pk_bf16_f32_se(los[j], his[j])) for j in range_constexpr(4)]
+    v4i32 = fx.Vector.from_elements(i32s, fx.Int32)
     return v4i32.bitcast(fx.BFloat16)  # v8bf16
 
 
@@ -192,7 +190,7 @@ def _bf16_frag8(v8):
 
 def _bf16_frag4(v8, half):
     t = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.BFloat16)
-    t.store(fx.Vector.from_elements([_raw(v8[half * 4 + j]) for j in range_constexpr(4)], fx.BFloat16))
+    t.store(fx.Vector.from_elements([v8[half * 4 + j] for j in range_constexpr(4)], fx.BFloat16))
     return t
 
 
@@ -405,7 +403,7 @@ def _fp4_perm(src_hi, src_lo, sel):
 
     Selector bytes 0..3 index src_lo bytes 0..3, selector bytes 4..7 index src_hi.
     """
-    return fx.Int32(rocdl.perm_b32(_raw(fx.Int32(src_hi)), _raw(fx.Int32(src_lo)), _raw(sel)))
+    return fx.Int32(rocdl.perm_b32(fx.Int32(src_hi), fx.Int32(src_lo), sel))
 
 
 def _fp4_mag_dwords(raw_i32):
@@ -455,12 +453,12 @@ def _fp4_nibble_to_bf16x8(raw_i32, scale_f32):
     scale = fx.Float32(scale_f32)
     out = []
     for d in _fp4_mag_dwords(raw_i32):
-        lo_f = fx.Float32(_raw(d << fx.Int32(16)).bitcast(T.f32))
-        hi_f = fx.Float32(_raw(d & fx.Int32(0xFFFF0000)).bitcast(T.f32))
-        lo_b = fx.Int32(_raw(lo_f * scale).bitcast(T.i32)).shrui(fx.Int32(16))
-        hi_b = fx.Int32(_raw(hi_f * scale).bitcast(T.i32)) & fx.Int32(0xFFFF0000)
+        lo_f = (d << fx.Int32(16)).bitcast(fx.Float32)
+        hi_f = (d & fx.Int32(0xFFFF0000)).bitcast(fx.Float32)
+        lo_b = (lo_f * scale).bitcast(fx.Int32).shrui(fx.Int32(16))
+        hi_b = (hi_f * scale).bitcast(fx.Int32) & fx.Int32(0xFFFF0000)
         out.append(lo_b | hi_b)
-    return fx.Vector.from_elements([_raw(x) for x in out], fx.Int32).bitcast(fx.BFloat16)
+    return fx.Vector.from_elements(out, fx.Int32).bitcast(fx.BFloat16)
 
 
 def make_b_loader(
@@ -599,7 +597,7 @@ def make_b_loader(
 
     def scale_expert_base():
         if not _scale_base:
-            _scale_base.append(rocdl.readfirstlane(T.i32, _raw(e * fx.Int32(_g_half * N_OUT))))
+            _scale_base.append(rocdl.readfirstlane(T.i32, e * fx.Int32(_g_half * N_OUT)))
         return _scale_base[0]
 
     def _sum(first, terms):
@@ -784,19 +782,18 @@ def make_b_loader(
         if const_expr(_is_bf16):
             # raw[ku] is already the v8bf16 MMA operand (no scale, no upconvert).
             return raw[ku]
-        i32_val = _raw(raw[ku // 4][ku % 4])
+        i32_val = raw[ku // 4][ku % 4]
         if const_expr(_is_int4):
             return _int4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32, is_gfx942=_is_gfx942, old_pack=True)
         if const_expr(_is_gfx942):
             # gfx942: no v_cvt_scalef32_pk_bf16_fp4; decode E2M1 via v_perm_b32.
             return _fp4_nibble_to_bf16x8(fx.Int32(i32_val), scale_f32)
         # raw[ku//4][ku%4] i32 holds 8 fp4 -> 4x cvt (v2bf16, sel 0..3) -> v8bf16.
-        s_raw = _raw(scale_f32)
         i32s = []
         for sel in range_constexpr(4):
-            p = rocdl.cvt_scalef32_pk_bf16_fp4(vec2_bf16, i32_val, s_raw, sel)
+            p = rocdl.cvt_scalef32_pk_bf16_fp4(vec2_bf16, i32_val, scale_f32, sel)
             i32s.append(fx.Int32(fx.Vector(p).bitcast(fx.Int32)[0]))
-        v4i32 = fx.Vector.from_elements([_raw(x) for x in i32s], fx.Int32)
+        v4i32 = fx.Vector.from_elements(i32s, fx.Int32)
         return v4i32.bitcast(fx.BFloat16)  # v8bf16
 
     # ---- dtype-selected surface: the stages only ever see these ----------------

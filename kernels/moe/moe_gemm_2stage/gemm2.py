@@ -184,7 +184,7 @@ def _build_moe_gemm2_fp8(
             b_raw = fx.rocdl.make_buffer_tensor(
                 fx.make_view(
                     fx.recast_iter(_w_i32_ptr, _w_i8_iter),
-                    fx.make_layout((fx.Int32(experts * N * (K // 2) // 4),), (1,)),
+                    fx.make_layout((experts * N * (K // 2) // 4,), (1,)),
                 ),
                 max_size=False,
             )
@@ -258,7 +258,7 @@ def _build_moe_gemm2_fp8(
         for iv in range(0, num_tiles, 1):
             kb = fx.Int32(iv)
             _load_gmem(kb, 0)
-            rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
+            rocdl.s_waitcnt(vmcnt=_b_loads_per_tile)
             gpu.barrier()  # WAR: all waves finished reading the prior tile's A-LDS
             _write_a_lds(0)
             gpu.barrier()  # RAW: A-LDS write visible before the read below
@@ -395,7 +395,7 @@ def _build_moe_gemm2_fp8(
             w_ptr = fx.recast_iter(in_t, fx.get_iter(arg_w))
             if const_expr(is_int4):
                 # Packed-int4: raw byte view; the ki-correct loader indexes per-expert.
-                arg_p_weight = fx.make_view(w_ptr, fx.make_layout((fx.Int32(experts * N * (K // 2)),), (1,)))
+                arg_p_weight = fx.make_view(w_ptr, fx.make_layout((experts * N * (K // 2),), (1,)))
             else:
                 arg_p_weight = fxh.make_weight_view(w_ptr, expert_id, N, K)
 

@@ -43,9 +43,6 @@ def ceildiv(numer, denom):
 
 
 def i32(v):
-    raw = v if isinstance(v, ir.Value) else getattr(v, "ir_value", lambda: None)()
-    if raw is not None and isinstance(raw.type, ir.IndexType):
-        return fx.Int32(fx.index_cast(T.i32, raw))
     return fx.Int32(v)
 
 
@@ -246,7 +243,7 @@ def fp8x4_pack(f, qs):
     zero = fx.Vector.filled(2, 0, fx.Int16)
     w = rocdl.cvt_scalef32_pk_fp8_f32(T.vec(2, T.i16), _u(zero), _u(f[0]), _u(f[1]), _u(qs), False)
     w = rocdl.cvt_scalef32_pk_fp8_f32(T.vec(2, T.i16), w, _u(f[2]), _u(f[3]), _u(qs), True)
-    return fx.Int32(fx.Vector(w).bitcast(fx.Int32)[0])
+    return fx.Vector(w).bitcast(fx.Int32)[0]
 
 
 def fp8x4_unpack(d, sc):
@@ -284,9 +281,7 @@ def scales4(e8i):
 
 
 def bf16_bits(f):
-    return fx.Int32(fx.Vector.from_elements([fx.Float32(f).to(fx.BFloat16)], fx.BFloat16).bitcast(fx.Int16)[0]) & i32(
-        0xFFFF
-    )
+    return fx.Int32(fx.Float32(f).to(fx.BFloat16).bitcast(fx.Int16)) & i32(0xFFFF)
 
 
 def pack_bf16x2(a, b):

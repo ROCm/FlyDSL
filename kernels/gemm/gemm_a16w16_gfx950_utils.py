@@ -9,7 +9,6 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import (
-    arith,
     const_expr,
     gpu,
     range_constexpr,
@@ -231,7 +230,7 @@ class SplitKProtocol:
                     ir.Type.parse("!llvm.ptr<1>"),
                 )
                 llvm.StoreOp(
-                    arith.constant(1, type=T.i32),
+                    fx.Int32(1).ir_value(),
                     signal_ptr,
                     alignment=4,
                     ordering=llvm.AtomicOrdering.monotonic,
@@ -280,7 +279,7 @@ class SplitKProtocol:
             4,
             ir.Type.parse("!llvm.ptr<1>"),
         )
-        zero = arith.constant(0, type=T.i32)
+        zero = fx.Int32(0).ir_value()
         llvm.StoreOp(
             zero,
             semaphore_ptr,
@@ -309,7 +308,7 @@ class SplitKProtocol:
             arrive_idx = llvm.AtomicRMWOp(
                 llvm.AtomicBinOp.add,
                 semaphore_ptr,
-                arith.constant(1, type=T.i32),
+                fx.Int32(1).ir_value(),
                 llvm.AtomicOrdering.monotonic,
                 syncscope="agent",
                 alignment=4,

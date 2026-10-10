@@ -350,7 +350,7 @@ def build_kimi_k3_mla_attention(
             return fx.Vector.from_elements([a, b], fx.Float32).to(fx.BFloat16).bitcast(fx.Float32)[0]
 
         def bf16_round(a):
-            return fx.Float32(fx.Float32(a).to(fx.BFloat16))
+            return fx.Float32(a.to(fx.BFloat16))
 
         # ---- tagged-pair mailboxes
         def mb(name):
