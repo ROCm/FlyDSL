@@ -46,7 +46,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr.arith import CmpFPredicate
 from flydsl.expr.typing import Int32, ReductionOp, Stream, T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common import buffer_ops
@@ -122,27 +121,23 @@ def _store_fp8_packed(vals_list, out_rsrc, row_base_bytes, idx, vec):
     0x80 (NaN) for inputs that round to negative zero, which propagates
     through downstream attention as NaN. Clamp v ∈ (-2^-8, 0) to +0 first.
     """
-    f32 = T.f32
     i32 = T.i32
-    c0 = arith.constant(0.0, type=f32)
-    c_neg_uf = arith.constant(-(2.0**-8), type=f32)
+    c0 = fx.Float32(0.0)
+    c_neg_uf = fx.Float32(-(2.0**-8))
 
     safe = []
     for v in vals_list:
-        vv = v.ir_value() if hasattr(v, "ir_value") else v
-        is_tn = arith.andi(
-            arith.cmpf(CmpFPredicate.OLT, vv, c0),
-            arith.cmpf(CmpFPredicate.OGT, vv, c_neg_uf),
-        )
-        safe.append(arith.select(is_tn, c0, vv))
+        vv = fx.Float32(v)
+        is_tn = (vv < c0) & (vv > c_neg_uf)
+        safe.append(is_tn.select(c0, vv))
 
     # Pack each pair (s[2i], s[2i+1]) into a packed-fp8 i32, then
     # combine 4 fp8 into one i32 via cvt_pk_fp8_f32 (lane 0 + lane 1).
     assert vec == 8, "fp8 store helper hardcoded for VEC=8"
-    p0 = arith.constant(0, type=i32)
+    p0 = fx.Int32(0)
     p0 = rocdl.cvt_pk_fp8_f32(i32, safe[0], safe[1], p0, 0)
     p0 = rocdl.cvt_pk_fp8_f32(i32, safe[2], safe[3], p0, 1)
-    p1 = arith.constant(0, type=i32)
+    p1 = fx.Int32(0)
     p1 = rocdl.cvt_pk_fp8_f32(i32, safe[4], safe[5], p1, 0)
     p1 = rocdl.cvt_pk_fp8_f32(i32, safe[6], safe[7], p1, 1)
 
@@ -340,14 +335,14 @@ def _build_kernel(
             rstd = fmath.rsqrt(sq_block * (1.0 / D) + 1e-6, fastmath=fm_fast)
 
             if const_expr(quant):
-                am_safe = arith.maximumf(am_group, arith.constant(1e-12, type=f32))
+                am_safe = fx.max(fx.Float32(am_group), fx.Float32(1e-12))
 
                 if const_expr(is_e8m0):
                     # silu_and_mul_fq-style e8m0 encoding. amax_post incorporates
                     # rstd (per-row) and SQRT2 (post-RoPE upper bound) so the
                     # forward factor applied to x_norm (= x_in * rstd) bounds
                     # the result by 2^_E8M0_HEADROOM ≤ FP8_MAX.
-                    c_sqrt2 = arith.constant(_SQRT2, type=f32)
+                    c_sqrt2 = fx.Float32(_SQRT2)
                     amax_post = am_safe * rstd * c_sqrt2
 
                     amax_i32 = fx.Float32(amax_post).bitcast(fx.Uint32)
@@ -374,8 +369,8 @@ def _build_kernel(
                     # x_in * factor → dequant: x_norm = scale * out = x_in * rstd.
                     rcp_am = rocdl.rcp(f32, am_safe)
                     _fc = _fp8_const()
-                    factor = arith.constant(_fc["max_over_sqrt2"], type=f32) * rcp_am
-                    scale_val = am_safe * rstd * arith.constant(_fc["inv_max_sqrt2"], type=f32)
+                    factor = fx.Float32(_fc["max_over_sqrt2"]) * rcp_am
+                    scale_val = am_safe * rstd * fx.Float32(_fc["inv_max_sqrt2"])
 
                 # Group-leader lanes (one per quant group) write the scale.
                 # Predicate: tid & (TPG-1) == 0. For TPG=64 (per-row) this is
@@ -566,7 +561,7 @@ def _build_kernel(
                     static_bytes_offset_i64=kv_tok_off_fp8,
                 )
                 kvo_rsrc = kvo_g_tmp.rsrc
-                row_base_bytes = arith.constant(0, type=i32)  # already at token base
+                row_base_bytes = fx.Int32(0)  # already at token base
                 kvs_rsrc = ptr_rsrc(kv_scale)
                 # kv_scale layout (T, NG) flat: bid_t * NG. Per-lane adds
                 # group_idx inside emit_body.
@@ -595,7 +590,7 @@ def _build_kernel(
                     x_f32_vec=x_f32,
                     w_f32_vec=w_f32,
                     bf16_out_g=kvo_g,
-                    bf16_out_row_off=arith.constant(0, type=i32),
+                    bf16_out_row_off=fx.Int32(0),
                     fp8_out_rsrc=None,
                     scale_rsrc=None,
                     scale_base_off=None,

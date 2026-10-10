@@ -126,24 +126,24 @@ def _compute_sw_mtp_group_state(
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         lane_pair = lane_pair_raw
     else:
-        lane_pair = arith.select(lane_pair_raw < c_total_pairs, lane_pair_raw, c_pair_max)
+        lane_pair = (lane_pair_raw < c_total_pairs).select(lane_pair_raw, c_pair_max)
     qi_raw = udiv_const(lane_pair, query_group_size)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_val = qi_raw
     else:
-        qi_val = arith.select(qi_raw < c_ql_m1, qi_raw, c_ql_m1)
+        qi_val = (qi_raw < c_ql_m1).select(qi_raw, c_ql_m1)
     qhi_pos = urem_const(lane_pair, query_group_size)
 
     lqh_pair_raw = local_qhead_idx + fx.Int32(g_off)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         lqh_pair = lqh_pair_raw
     else:
-        lqh_pair = arith.select(lqh_pair_raw < c_total_pairs, lqh_pair_raw, c_pair_max)
+        lqh_pair = (lqh_pair_raw < c_total_pairs).select(lqh_pair_raw, c_pair_max)
     lqi_raw = udiv_const(lqh_pair, query_group_size)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_for_q = lqi_raw
     else:
-        qi_for_q = arith.select(lqi_raw < c_ql_m1, lqi_raw, c_ql_m1)
+        qi_for_q = (lqi_raw < c_ql_m1).select(lqi_raw, c_ql_m1)
     local_qhead_idx_for_q = urem_const(lqh_pair, query_group_size)
     return qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q
 
@@ -179,13 +179,7 @@ def _finish_q_fragments(
 
     for sh in [8, 4, 2, 1]:
         local_max = local_max.maximumf(dpp_utils.dpp_xor_f32(local_max, sh))
-    query_scale_lane = fx.Float32(
-        arith.select(
-            local_max > c_zero_f,
-            local_max * fx.Float32(1.0 / FP8_MAX).ir_value(),
-            c_one_f,
-        )
-    )
+    query_scale_lane = (local_max > c_zero_f).select(local_max * fx.Float32(1.0 / FP8_MAX), c_one_f)
     inv_query_scale = rcp_f32(query_scale_lane)
     q_words = []
     for q_f32 in q_f32_chunks:
@@ -259,7 +253,7 @@ def _prefetch_sw_mtp_group_query(
 
 
 def _normalize_pa_output(running_sum, outs):
-    safe_sum = arith.select(running_sum > fx.Float32(0.0), running_sum, fx.Float32(1.0))
+    safe_sum = (running_sum > fx.Float32(0.0)).select(running_sum, fx.Float32(1.0))
     inv_sum = fx.Float32(rcp_f32(safe_sum))
     return [out * inv_sum for out in outs]
 
@@ -417,7 +411,7 @@ def _make_pa_phase_helpers(
                     vs_i = vs[i]
                     if const_expr(kv_tok_base is not None):
                         kv_tok = kv_tok_base + fx.Int32(td * MFMA_N + i)
-                        vs_i = arith.select(kv_tok < seq_end, vs_i, zero_f)
+                        vs_i = (kv_tok < seq_end).select(vs_i, zero_f)
                     masked_values.append(vs_i)
                 vs = fx.Vector.from_elements(masked_values, dtype=fx.Float32)
                 v_max_warp = v_max_warp.maximumf(vs.reduce("max"))
@@ -479,7 +473,7 @@ def _make_pa_phase_helpers(
         )
 
         exp_sum = zero_f
-        safe_qk_max = arith.select(qk_max > neg_inf, qk_max, zero_f)
+        safe_qk_max = (qk_max > neg_inf).select(qk_max, zero_f)
         for td in range_constexpr(TLOOP):
             diff_vec = fx.Vector(d_out[td]) - safe_qk_max
             p_vec = exp2_f32_fast(diff_vec * fx.Float32(LOG2E))
@@ -506,37 +500,27 @@ def _make_pa_phase_helpers(
         sum_vec = fx.ptr_load(softmax_base + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             diff_w = warp_rescale_factors[w] - partition_max
-            diff_w = arith.select(partition_max > neg_inf, diff_w, zero_f)
+            diff_w = (partition_max > neg_inf).select(diff_w, zero_f)
             wf = exp2_f32_fast(diff_w * fx.Float32(LOG2E).ir_value())
             w_sum = sum_vec[w]
-            wf_sum = arith.mulf(arith.unwrap(w_sum), arith.unwrap(wf), fastmath=arith.FastMathFlags.contract)
-            partition_sum = arith.addf(arith.unwrap(partition_sum), wf_sum, fastmath=arith.FastMathFlags.contract)
+            wf_sum = arith.mulf(fx.as_ir_value(w_sum), fx.as_ir_value(wf), fastmath=arith.FastMathFlags.contract)
+            partition_sum = arith.addf(fx.as_ir_value(partition_sum), wf_sum, fastmath=arith.FastMathFlags.contract)
             warp_rescale_factors[w] = wf
 
         my_warp_rescale = warp_rescale_factors[0]
         for w in range_constexpr(1, NUM_WARPS):
-            my_warp_rescale = arith.select(
-                warp_id == fx.Int32(w),
-                warp_rescale_factors[w],
-                my_warp_rescale,
-            )
+            my_warp_rescale = (warp_id == fx.Int32(w)).select(warp_rescale_factors[w], my_warp_rescale)
 
         new_rmax = rmax.maximumf(partition_max)
-        accum_scale = arith.select(
-            rmax > neg_inf,
-            exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value()),
-            zero_f,
-        )
-        part_to_new = arith.select(
-            partition_max > neg_inf,
-            exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value()),
-            zero_f,
+        accum_scale = (rmax > neg_inf).select(exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value()), zero_f)
+        part_to_new = (partition_max > neg_inf).select(
+            exp2_f32_fast((partition_max - new_rmax) * fx.Float32(LOG2E).ir_value()), zero_f
         )
 
-        accum_sum = arith.mulf(arith.unwrap(accum_scale), arith.unwrap(rsum), fastmath=arith.FastMathFlags.contract)
+        accum_sum = arith.mulf(fx.as_ir_value(accum_scale), fx.as_ir_value(rsum), fastmath=arith.FastMathFlags.contract)
         partition_sum_scaled = arith.mulf(
-            arith.unwrap(partition_sum),
-            arith.unwrap(part_to_new),
+            fx.as_ir_value(partition_sum),
+            fx.as_ir_value(part_to_new),
             fastmath=arith.FastMathFlags.contract,
         )
         rsum = arith.addf(accum_sum, partition_sum_scaled, fastmath=arith.FastMathFlags.contract)
@@ -749,10 +733,10 @@ def compile_pa_decode_sw_reduce(
 
             if wave == 0:
                 in_range = lane < c_red_slots
-                lane_safe = arith.select(in_range, lane, 0)
+                lane_safe = in_range.select(lane, 0)
                 lane_safe_idx = fx.Int32(lane_safe)
                 red_val = fx.memref_load(red_scratch, lane_safe_idx)
-                red_val = arith.select(in_range, red_val, neutral)
+                red_val = in_range.select(red_val, neutral)
                 red_val = (
                     _wave_reduce_max_full(red_val) if const_expr(mode == "max") else _wave_reduce_sum_full(red_val)
                 )
@@ -786,7 +770,7 @@ def compile_pa_decode_sw_reduce(
             part_sum = c_zero_f
             part_max = c_neg_inf
             if lane_in_reduce:
-                part_i32 = arith.select(lane_in_range, lane, 0)
+                part_i32 = lane_in_range.select(lane, 0)
                 es_off = (
                     batch_idx * stride_exp_sums_seq
                     + kv_head_idx * stride_exp_sums_head
@@ -795,32 +779,24 @@ def compile_pa_decode_sw_reduce(
                 )
                 part_sum_raw = _copy_load(exp_sums, es_off, copy_f32, f32_register)[0]
                 part_max_raw = _copy_load(max_logits, es_off, copy_f32, f32_register)[0]
-                part_sum = arith.select(lane_in_range, part_sum_raw, c_zero_f)
-                part_max = arith.select(lane_in_range, part_max_raw, c_neg_inf)
+                part_sum = lane_in_range.select(part_sum_raw, c_zero_f)
+                part_max = lane_in_range.select(part_max_raw, c_neg_inf)
 
             global_max = _wave_reduce_max(part_max)
-            part_scale = arith.select(
-                lane_in_range,
-                exp2_f32_fast((part_max - global_max) * c_log2e),
-                c_zero_f,
-            )
+            part_scale = lane_in_range.select(exp2_f32_fast((part_max - global_max) * c_log2e), c_zero_f)
             scaled_sum = part_sum * part_scale
             global_exp_sum = _wave_reduce_sum(scaled_sum)
-            safe_global_exp_sum = arith.select(
-                global_exp_sum > c_zero_f,
-                global_exp_sum,
-                c_one_f,
-            )
+            safe_global_exp_sum = (global_exp_sum > c_zero_f).select(global_exp_sum, c_one_f)
             inv_global_exp_sum = rcp_f32(safe_global_exp_sum)
             weight_local = scaled_sum * inv_global_exp_sum
-            weight_local_i32 = arith.bitcast(T.i32, arith.unwrap(weight_local))
+            weight_local_i32 = fx.Float32(weight_local).bitcast(fx.Int32)
 
             acc = c_zero_f
             for part_idx in range_constexpr(max_context_partition_num):
                 part_i32 = fx.Int32(part_idx)
                 bcast_addr = part_i32 * 4
-                weight_i32 = rocdl.ds_bpermute(T.i32, arith.unwrap(bcast_addr), arith.unwrap(weight_local_i32))
-                weight = arith.bitcast(T.f32, weight_i32)
+                weight_i32 = rocdl.ds_bpermute(T.i32, bcast_addr.ir_value(), weight_local_i32.ir_value())
+                weight = fx.Int32(weight_i32).bitcast(fx.Float32)
                 logits_off = (
                     batch_idx * stride_logits_seq
                     + kv_head_idx * stride_logits_head
@@ -839,7 +815,7 @@ def compile_pa_decode_sw_reduce(
                 c_chunk_size = fx.Int32(chunk_size)
                 c_chunk_base = fx.Int32(chunk_base)
                 in_chunk = tid < c_chunk_size
-                part_i32 = arith.select(in_chunk, tid + c_chunk_base, 0)
+                part_i32 = in_chunk.select(tid + c_chunk_base, 0)
                 es_off = (
                     batch_idx * stride_exp_sums_seq
                     + kv_head_idx * stride_exp_sums_head
@@ -847,7 +823,7 @@ def compile_pa_decode_sw_reduce(
                     + eqgs_idx
                 )
                 part_max_raw = _copy_load(max_logits, es_off, copy_f32, f32_register)[0]
-                part_max = arith.select(in_chunk, part_max_raw, c_neg_inf)
+                part_max = in_chunk.select(part_max_raw, c_neg_inf)
                 chunk_max = _block_reduce(part_max, "max")
                 global_max = global_max.maximumf(chunk_max)
 
@@ -857,7 +833,7 @@ def compile_pa_decode_sw_reduce(
                 c_chunk_size = fx.Int32(chunk_size)
                 c_chunk_base = fx.Int32(chunk_base)
                 in_chunk = tid < c_chunk_size
-                part_i32 = arith.select(in_chunk, tid + c_chunk_base, 0)
+                part_i32 = in_chunk.select(tid + c_chunk_base, 0)
                 es_off = (
                     batch_idx * stride_exp_sums_seq
                     + kv_head_idx * stride_exp_sums_head
@@ -866,21 +842,13 @@ def compile_pa_decode_sw_reduce(
                 )
                 part_sum_raw = _copy_load(exp_sums, es_off, copy_f32, f32_register)[0]
                 part_max_raw = _copy_load(max_logits, es_off, copy_f32, f32_register)[0]
-                part_sum = arith.select(in_chunk, part_sum_raw, c_zero_f)
-                part_max = arith.select(in_chunk, part_max_raw, c_neg_inf)
-                part_scale = arith.select(
-                    in_chunk,
-                    exp2_f32_fast((part_max - global_max) * c_log2e),
-                    c_zero_f,
-                )
+                part_sum = in_chunk.select(part_sum_raw, c_zero_f)
+                part_max = in_chunk.select(part_max_raw, c_neg_inf)
+                part_scale = in_chunk.select(exp2_f32_fast((part_max - global_max) * c_log2e), c_zero_f)
                 chunk_sum = _block_reduce(part_sum * part_scale, "sum")
                 global_exp_sum = global_exp_sum + chunk_sum
 
-            safe_global_exp_sum = arith.select(
-                global_exp_sum > c_zero_f,
-                global_exp_sum,
-                c_one_f,
-            )
+            safe_global_exp_sum = (global_exp_sum > c_zero_f).select(global_exp_sum, c_one_f)
             inv_global_exp_sum = rcp_f32(safe_global_exp_sum)
 
             for chunk_base in range(0, max_context_partition_num, block_threads):
@@ -888,7 +856,7 @@ def compile_pa_decode_sw_reduce(
                 c_chunk_size = fx.Int32(chunk_size)
                 c_chunk_base = fx.Int32(chunk_base)
                 in_chunk = tid < c_chunk_size
-                part_i32 = arith.select(in_chunk, tid + c_chunk_base, 0)
+                part_i32 = in_chunk.select(tid + c_chunk_base, 0)
                 es_off = (
                     batch_idx * stride_exp_sums_seq
                     + kv_head_idx * stride_exp_sums_head
@@ -897,8 +865,8 @@ def compile_pa_decode_sw_reduce(
                 )
                 part_sum_raw = _copy_load(exp_sums, es_off, copy_f32, f32_register)[0]
                 part_max_raw = _copy_load(max_logits, es_off, copy_f32, f32_register)[0]
-                part_sum = arith.select(in_chunk, part_sum_raw, c_zero_f)
-                part_max = arith.select(in_chunk, part_max_raw, global_max)
+                part_sum = in_chunk.select(part_sum_raw, c_zero_f)
+                part_max = in_chunk.select(part_max_raw, global_max)
                 part_scale = exp2_f32_fast((part_max - global_max) * c_log2e)
                 weight = part_sum * part_scale * inv_global_exp_sum
                 if in_chunk:
@@ -1165,7 +1133,7 @@ def compile_pa_decode_sw(
 
         num_tiles_for_seq = (context_len + c_cps - 1) >> fx.Int32(8)
         seq_start_global = context_len - query_length - sliding_window
-        seq_start_global = arith.select(seq_start_global > 0, seq_start_global, 0)
+        seq_start_global = (seq_start_global > 0).select(seq_start_global, 0)
         tail_start_tile = seq_start_global >> fx.Int32(8)
         visible_tile_count = num_tiles_for_seq - tail_start_tile
         tile_partition_idx_raw = tail_start_tile + partition_idx
@@ -1310,12 +1278,12 @@ def compile_pa_decode_sw(
         def _run_valid_partition():
             def _get_tile_metadata(tile_partition_idx_value, tile_valid):
                 safe_tile_partition_idx = (
-                    arith.select(tile_valid, tile_partition_idx_value, fx.Int32(0))
+                    tile_valid.select(tile_partition_idx_value, fx.Int32(0))
                     if const_expr(fuse_partitions)
                     else tile_partition_idx_value
                 )
                 tile_context_len = (
-                    arith.select(tile_valid, context_len, fx.Int32(0)) if const_expr(fuse_partitions) else context_len
+                    tile_valid.select(context_len, fx.Int32(0)) if const_expr(fuse_partitions) else context_len
                 )
                 tile_seq_partition_idx = safe_tile_partition_idx >> fx.Int32(2)
                 tile_block_split_idx = safe_tile_partition_idx & fx.Int32(TILES_PER_BLOCK - 1)

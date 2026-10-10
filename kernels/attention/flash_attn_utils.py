@@ -120,7 +120,8 @@ def _tree_reduce(vals, binop):
 
 
 def _mfma_acc(a, b, c, _mma_atom, mfma_acc_vec_type):
-    return fly.mma_atom_call_ssa([mfma_acc_vec_type], _mma_atom, a, b, c)
+    # The compatibility shim wraps A/B in lists; this SSA op takes scalar values.
+    return fly.MmaAtomCallSSA(results_=[mfma_acc_vec_type], mmaAtom=_mma_atom, a=a, b=b, c=c).results[0]
 
 
 def _concat_vectors(lhs, rhs):
@@ -605,8 +606,8 @@ def _make_rebased_view(base_iter, byte_off, nrec_bytes, layout, _buf_flags_i32, 
 def _make_raw_buffer_rsrc(tensor):
     base_ptr = _extract_aligned_pointer(tensor)
     base_i64 = llvm.PtrToIntOp(T.i64, base_ptr).result
-    base_lo = arith.trunci(T.i32, fx.Int64(base_i64).ir_value())
-    base_hi = arith.trunci(T.i32, fx.Int64(base_i64).shrui(fx.Int64(32)).ir_value())
+    base_lo = fx.Int32(base_i64)
+    base_hi = fx.Int32(fx.Int64(base_i64).shrui(fx.Int64(32)))
     return Vec.from_elements(
         [
             base_lo,
@@ -3048,7 +3049,7 @@ class GenericGemmHelper:
         ctx = self.ctx
         traits = ctx.traits
         if const_expr(traits.USE_K16):
-            return fly.mma_atom_call_ssa([ctx.v16f32_type], ctx.mma_atom_k16, a, b, c)
+            return _mfma_acc(a, b, c, ctx.mma_atom_k16, ctx.v16f32_type)
         if const_expr(traits.DTYPE_STR == "bf16"):
             a = Vec(a).bitcast(fx.Int16)
             b = Vec(b).bitcast(fx.Int16)
