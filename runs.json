@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-10T08:56:36Z",
+ "updated": "2026-10-10T09:32:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 38040903718,
+   "pr": 1217,
+   "commit": "9d79ceca49f1de990023e6a6b08dcc68a5ad8493",
+   "branch": "feat/conv3d-align-aiter",
+   "event": "pull_request",
+   "title": "feat(conv3d): align bf16 implicit GEMM with aiter #5370",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38040903718",
+   "created_at": "2026-10-10T09:18:06Z",
+   "updated_at": "2026-10-10T09:20:16Z",
+   "actor": "huizzhan",
+   "jobs": []
+  },
   {
    "run_id": 38039565451,
    "pr": 1258,
@@ -10,13 +25,41 @@
    "branch": "xudong/fix-zip2by-guide",
    "event": "pull_request",
    "title": "[fix] Build the zipped_divide guide from the tiler shape",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38039565451",
    "created_at": "2026-10-10T08:55:28Z",
-   "updated_at": "2026-10-10T08:55:56Z",
+   "updated_at": "2026-10-10T09:13:53Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-10T09:14:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38039565451/job/114180045594"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-10T09:13:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38039565451/job/114180045605"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-10T09:14:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38039565451/job/114180045627"
+    }
+   ]
   },
   {
    "run_id": 38039281095,
@@ -40,11 +83,11 @@
    "branch": "feature/qwenimage-vae-conv-tests",
    "event": "pull_request",
    "title": "[Flydsl] Qwen-Image conv3d 3x3 opt",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38035582527",
    "created_at": "2026-10-10T07:46:34Z",
-   "updated_at": "2026-10-10T08:05:18Z",
+   "updated_at": "2026-10-10T09:14:33Z",
    "actor": "huizzhan",
    "jobs": [
     {
@@ -68,9 +111,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-10T08:05:18Z",
+     "started_at": "2026-10-10T09:14:32Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38035582527/job/114168401037"
     }
@@ -1124,21 +1167,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37972456686",
    "created_at": "2026-10-09T18:19:22Z",
    "updated_at": "2026-10-09T18:19:22Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37972204506,
-   "pr": null,
-   "commit": "f4ad581504648460aa6f410bd7308897b04017bb",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37972204506",
-   "created_at": "2026-10-09T18:17:09Z",
-   "updated_at": "2026-10-09T18:17:09Z",
    "actor": "dimitri91209",
    "jobs": []
   }
