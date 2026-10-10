@@ -60,3 +60,19 @@ func.func @test_cosize_strided() -> !fly.int_tuple<2040> {
   %1 = fly.cosize(%layout) : (!fly.layout<(8, 128) : (1, 16)>) -> !fly.int_tuple<2040>
   return %1 : !fly.int_tuple<2040>
 }
+
+// Each dynamic extent fits in i32 but their product need not (#1176), so a
+// dynamic size is inferred as i64. A static 1 factor multiplies nothing.
+// CHECK-LABEL: @test_size_dynamic_is_i64
+func.func @test_size_dynamic_is_i64(%a: i32, %b: i32, %c: i32) {
+  %t = fly.make_int_tuple(%a, %b) : (i32, i32) -> !fly.int_tuple<(?,?)>
+  // CHECK: fly.size(%{{.*}}) : (!fly.int_tuple<(?,?)>) -> !fly.int_tuple<?{i64}>
+  %0 = fly.size(%t) : (!fly.int_tuple<(?,?)>) -> !fly.int_tuple<?{i64}>
+  %u = fly.make_int_tuple(%c) : (i32) -> !fly.int_tuple<(4,?)>
+  // CHECK: fly.size(%{{.*}}) : (!fly.int_tuple<(4,?)>) -> !fly.int_tuple<?{i64 div=4}>
+  %1 = fly.size(%u) : (!fly.int_tuple<(4,?)>) -> !fly.int_tuple<?{i64 div=4}>
+  %v = fly.make_int_tuple(%c) : (i32) -> !fly.int_tuple<(1,?)>
+  // CHECK: fly.size(%{{.*}}) : (!fly.int_tuple<(1,?)>) -> !fly.int_tuple<?>
+  %2 = fly.size(%v) : (!fly.int_tuple<(1,?)>) -> !fly.int_tuple<?>
+  return
+}

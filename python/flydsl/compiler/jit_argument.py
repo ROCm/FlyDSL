@@ -163,14 +163,48 @@ class _LayoutPlan:
     ``pack_into``.
     """
 
-    __slots__ = ("buf_ctype", "codec", "shape", "stride")
+    __slots__ = ("buf_ctype", "codec", "shape", "stride", "use_32bit_stride")
 
     def __init__(self, shape, stride, use_32bit_stride):
         self.shape = shape
         self.stride = stride
+        self.use_32bit_stride = use_32bit_stride
         struct_fmt = "<" + "i" * len(shape) + ("i" if use_32bit_stride else "q") * len(stride)
         self.codec = _struct.Struct(struct_fmt)
         self.buf_ctype = ctypes.c_byte * self.codec.size
+
+    def pack_source(self, terms):
+        """Generated-fill lines packing ``terms``.  The ``try`` costs nothing on
+        the success path; a value that does not fit gets a message naming it
+        instead of struct's bare ``'i' format requires ...``."""
+        if not terms:
+            return []
+        args = ", ".join(terms)
+        return [
+            "    try:",
+            f"        _codec.pack_into(s, 0, {args})",
+            "    except _struct.error:",
+            f"        _plan.raise_out_of_range(({args},))",
+            "        raise",
+        ]
+
+    def raise_out_of_range(self, values):
+        fields = [("shape", d, 32) for d in self.shape]
+        fields += [("stride", d, 32 if self.use_32bit_stride else 64) for d in self.stride]
+        for (kind, dim, bits), value in zip(fields, values):
+            if -(2 ** (bits - 1)) <= value < 2 ** (bits - 1):
+                continue
+            if kind == "shape":
+                hint = (
+                    "A layout-dynamic tensor passes each dynamic dimension as a signed 32-bit "
+                    "integer; keep every dimension below 2**31 (e.g. do not flatten a larger "
+                    "tensor with view(-1)), or split it into chunks."
+                )
+            else:
+                hint = "use_32bit_stride=True passes strides as signed 32-bit integers; use 64-bit strides instead."
+            raise OverflowError(
+                f"tensor {kind}[{dim}] = {value} does not fit in a signed {bits}-bit integer. {hint}"
+            ) from None
 
 
 class MemRefSpec:
@@ -503,9 +537,9 @@ class DLTensorJitArg(MemRefJitArg):
         if plan.stride:
             body.append("    st = _ad.stride")
             terms += [f"st[{d}]" for d in plan.stride]
-        body.append(f"    _codec.pack_into(s, 0, {', '.join(terms)})")
-        src = "def fill(a, s, _codec=_codec, _shared=_shared):\n" + "\n".join(body) + "\n"
-        ns = {"_codec": plan.codec, "_shared": shared}
+        body += plan.pack_source(terms)
+        src = "def fill(a, s, _codec=_codec, _shared=_shared, _plan=_plan):\n" + "\n".join(body) + "\n"
+        ns = {"_codec": plan.codec, "_shared": shared, "_plan": plan, "_struct": _struct}
         exec(compile(src, "<flydsl-cabi-fill>", "exec"), ns)
         return [(ctypes.c_void_p, ptr_fill), (plan.buf_ctype, ns["fill"])]
 
@@ -581,9 +615,9 @@ class TorchTensorJitArg(MemRefJitArg):
             if plan.stride:
                 body.append("    st = t.stride()")
                 terms += [f"st[{d}]" for d in plan.stride]
-            body.append(f"    _codec.pack_into(s, 0, {', '.join(terms)})")
-            src = "def fill(a, s, _codec=_codec):\n" + "\n".join(body) + "\n"
-            ns = {"_codec": plan.codec}
+            body += plan.pack_source(terms)
+            src = "def fill(a, s, _codec=_codec, _plan=_plan):\n" + "\n".join(body) + "\n"
+            ns = {"_codec": plan.codec, "_plan": plan, "_struct": _struct}
             exec(compile(src, "<flydsl-cabi-fill>", "exec"), ns)
             slots.append((plan.buf_ctype, ns["fill"]))
         return slots
