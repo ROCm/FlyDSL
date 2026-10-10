@@ -12,6 +12,7 @@ This guide covers the available FlyDSL kernels — normalization, softmax, GEMM,
 | **Softmax backward** | `build_softmax_bwd_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | fp32 dot reduction, native-dtype register buffering |
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
 | **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
+| **gfx120x** | section 3c | `@flyc.kernel` | bf16, f16, fp8, int8, int4, MXFP | RDNA4 wave32 WMMA. Calls are in that section. |
 
 All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
@@ -374,6 +375,47 @@ python3 tests/kernels/test_flash_attn_fwd.py --dtype fp8 --compare --warmup 10 -
 
 ---
 
+## 3c. gfx120x / RDNA4 kernels (R9700)
+
+Wave32 WMMA. These calls are for gfx120x. The sections above are unchanged.
+
+| Surface | Module |
+|---|---|
+| f16 / bf16 GEMM | `kernels/gemm/rdna_f16_gemm.py` (`create_wmma_gemm_module`) |
+| FP8 preshuffle GEMM | `kernels/gemm/rdna_fp8_preshuffle_gemm.py` (`compile_fp8_gemm`, `preshuffle_b_fp8`). e4m3, small M, no LDS |
+| Scaled FP8 GEMM | `kernels/gemm/rdna4_scaled_mm_fp8.py`. e4m3×e4m3 or e5m2×e5m2 |
+| Scaled FP8 + LoRA | `kernels/gemm/rdna4_scaled_mm_fp8_fused.py` |
+| W8A16 linear | `kernels/gemm/rdna4_w8a16_linear.py`. int8, e4m3, or e5m2 weights |
+| int8 linear | `kernels/gemm/rdna4_int8_linear.py` (`int8_linear`) |
+| int8 linear + LoRA | `kernels/gemm/rdna4_int8_linear_fused.py` |
+| int4 GEMM | `kernels/gemm/rdna4_iu4_gemm.py` |
+| MXFP8 block GEMM | `kernels/gemm/rdna4_mxfp8_block_gemm.py` |
+| MXFP4 block GEMM | `kernels/gemm/rdna4_mxfp4_block_gemm.py` |
+| SwiGLU MLP | `kernels/gemm/rdna4_fused_mlp_nmajor.py` (`fused_swiglu_mlp_nmajor`, fp16 and bf16) |
+| FlashAttention bf16 / fp16 | `kernels/attention/flash_attn_gfx120x.py` |
+| FlashAttention fp8 | `kernels/attention/flash_attn_fp8_gfx120x.py` |
+| FlashAttention int8 | `kernels/attention/flash_attn_int8_gfx120x.py` |
+| FlashAttention host | `kernels/attention/flash_attn_gfx120x_host.py`. `flydsl_flash_attn_func` enters here on gfx120x |
+| ALiBi / bool mask | `kernels/attention/gfx120x_alibi_bias.py`, `kernels/attention/gfx120x_attn_mask.py` |
+| Online softmax | `kernels/attention/flash_attn_gfx120x_host.py`. Score mask, softmax, and LSE, imported by the kernels |
+| RoPE | `kernels/norm/rope_gfx120x.py` |
+| RMS+RoPE | `kernels/norm/rms_rope_gfx120x.py` |
+| AdaLN | `kernels/norm/adaln_gfx120x.py` |
+| FP8 quant / dequant | `kernels/quant/rdna4_fp8_quant.py` |
+| Stochastic FP8 | `kernels/quant/rdna4_stoch_fp8.py` |
+| MXFP8 quant | `kernels/quant/rdna4_mxfp8_e8m0.py` |
+| MXFP4 quant | `kernels/quant/rdna4_mxfp4_e2m1.py` |
+| int8 quant / dequant | `kernels/quant/rdna4_quantize_int8_rowwise.py`, `kernels/quant/rdna4_quantize_int8_tensorwise.py` |
+| ConvRot | `kernels/quant/rdna4_convrot_w4a4.py`, `kernels/quant/rdna4_int8_convrot.py` |
+| Asym W4A8 | `kernels/quant/rdna4_asym_w4a8.py` |
+| AWQ W4A16 | `kernels/quant/rdna4_awq_w4a16.py` |
+| SVDQuant W4A4 | `kernels/quant/rdna4_svdquant_w4a4.py` |
+| int4 pack | `kernels/quant/rdna4_int4_codec.py` |
+| SiLU / SwiGLU | `kernels/common/gfx120x_swiglu.py` |
+| Capability query | `kernels/common/gfx120x_capabilities.py` (`available_for_arch`, then `resolve`) |
+
+`rocdl.SWMMAC` is an atom. No kernel calls it. Shared helpers: `kernels/common/gfx120x_arch.py`, `gfx120x_buf_helpers.py`, `gfx120x_pad.py`, `gfx120x_row_bias.py`, `gfx120x_autotune_tables.py`, `kernels/gemm/rdna4_tile.py`.
+
 ## 4. Shared utilities
 
 ### 4.1 Common kernel helpers (`kernels/common/kernels_common.py`)
@@ -486,6 +528,46 @@ What operation do you need?
 | `kernels/comm/custom_all_reduce.py` | Multi-GPU all-reduce |
 | `kernels/gemm/rdna_f16_gemm.py` | RDNA FP16 GEMM |
 | `kernels/gemm/rdna_fp8_preshuffle_gemm.py` | RDNA FP8 GEMM |
+| `kernels/gemm/rdna4_scaled_mm_fp8.py` | gfx120x FP8 scaled_mm |
+| `kernels/gemm/rdna4_scaled_mm_fp8_fused.py` | gfx120x FP8 scaled_mm fused |
+| `kernels/gemm/rdna4_w8a16_linear.py` | gfx120x W8A16 linear |
+| `kernels/gemm/rdna4_int8_linear.py` | gfx120x int8 linear |
+| `kernels/gemm/rdna4_int8_linear_fused.py` | gfx120x int8 linear fused |
+| `kernels/gemm/rdna4_iu4_gemm.py` | gfx120x int4 GEMM |
+| `kernels/gemm/rdna4_mxfp8_block_gemm.py` | gfx120x MXFP8 block GEMM |
+| `kernels/gemm/rdna4_mxfp4_block_gemm.py` | gfx120x MXFP4 block GEMM |
+| `kernels/gemm/rdna4_fused_mlp_nmajor.py` | gfx120x fp16/bf16 SwiGLU MLP |
+| `kernels/gemm/rdna4_tile.py` | gfx120x GEMM tile helper |
+| `kernels/attention/flash_attn_gfx120x.py` | gfx120x FlashAttention bf16, fp16 |
+| `kernels/attention/flash_attn_fp8_gfx120x.py` | gfx120x FlashAttention fp8 |
+| `kernels/attention/flash_attn_int8_gfx120x.py` | gfx120x FlashAttention int8 |
+| `kernels/attention/flash_attn_gfx120x_host.py` | gfx120x FlashAttention host |
+| `kernels/attention/flash_attn_gfx120x_splitk.py` | gfx120x split-K combine |
+| `kernels/attention/flash_attn_gfx120x_ext.py` | gfx120x FlashAttention host guards |
+| `kernels/attention/gfx120x_alibi_bias.py` | gfx120x ALiBi bias |
+| `kernels/attention/gfx120x_attn_mask.py` | gfx120x attention mask |
+| `kernels/attention/flash_attn_gfx120x_host.py` | gfx120x attention host, score mask, and online softmax |
+| `kernels/norm/rope_gfx120x.py` | gfx120x RoPE |
+| `kernels/norm/rms_rope_gfx120x.py` | gfx120x RMS+RoPE |
+| `kernels/norm/adaln_gfx120x.py` | gfx120x AdaLN |
+| `kernels/quant/rdna4_fp8_quant.py` | gfx120x FP8 quant and dequant |
+| `kernels/quant/rdna4_stoch_fp8.py` | gfx120x stochastic FP8 |
+| `kernels/quant/rdna4_mxfp8_e8m0.py` | gfx120x MXFP8 quant |
+| `kernels/quant/rdna4_mxfp4_e2m1.py` | gfx120x MXFP4 quant |
+| `kernels/quant/rdna4_quantize_int8_rowwise.py` | gfx120x int8 rowwise quant and dequant |
+| `kernels/quant/rdna4_quantize_int8_tensorwise.py` | gfx120x int8 tensorwise quant and dequant |
+| `kernels/quant/rdna4_int8_convrot.py` | gfx120x int8 ConvRot |
+| `kernels/quant/rdna4_convrot_w4a4.py` | gfx120x ConvRot W4A4 |
+| `kernels/quant/rdna4_asym_w4a8.py` | gfx120x asymmetric W4A8 |
+| `kernels/quant/rdna4_awq_w4a16.py` | gfx120x AWQ W4A16 |
+| `kernels/quant/rdna4_svdquant_w4a4.py` | gfx120x SVDQuant W4A4 |
+| `kernels/quant/rdna4_int4_codec.py` | gfx120x int4 pack |
+| `kernels/common/gfx120x_arch.py` | gfx120x arch check |
+| `kernels/common/gfx120x_autotune_tables.py` | gfx120x block-size tables |
+| `kernels/common/gfx120x_buf_helpers.py` | gfx120x buffer helpers |
+| `kernels/common/gfx120x_pad.py` | gfx120x pad |
+| `kernels/common/gfx120x_row_bias.py` | gfx120x row bias |
+| `kernels/common/gfx120x_swiglu.py` | gfx120x SiLU and SwiGLU |
 | `kernels/gemm/gemm_common_gfx1250.py` | GFX1250 GEMM common |
 | `kernels/gemm/gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | `kernels/gemm/gemm_a8w8_gfx1250.py` | GFX1250 FP8 GEMM (per-token/per-channel and 128x128 blockscale) |
@@ -512,6 +594,32 @@ What operation do you need?
 | `tests/kernels/test_fused_rope_cache.py` | Fused RoPE + KV cache |
 | `tests/kernels/test_allreduce.py` | Multi-GPU all-reduce |
 | `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |
+| `tests/kernels/test_flash_attn_gfx120x.py` | gfx120x FlashAttention |
+| `tests/kernels/test_rdna4_scaled_mm_fp8.py` | gfx120x FP8 scaled_mm |
+| `tests/kernels/test_rdna4_scaled_mm_fp8_fused.py` | gfx120x FP8 scaled_mm fused |
+| `tests/kernels/test_rdna4_w8a16_linear.py` | gfx120x W8A16 |
+| `tests/kernels/test_rdna4_int8_linear.py` | gfx120x int8 linear |
+| `tests/kernels/test_rdna4_int8_linear_fused.py` | gfx120x int8 linear fused |
+| `tests/kernels/test_rdna4_iu4_gemm.py` | gfx120x int4 GEMM |
+| `tests/kernels/test_rdna4_mxfp8_block_gemm.py` | gfx120x MXFP8 GEMM |
+| `tests/kernels/test_rdna4_mxfp4_block_gemm.py` | gfx120x MXFP4 GEMM |
+| `tests/kernels/test_rdna4_fused_mlp_nmajor.py` | gfx120x SwiGLU MLP |
+| `tests/kernels/test_gfx120x_norm_rope.py` | gfx120x RoPE, RMS+RoPE, AdaLN |
+| `tests/kernels/test_rdna4_fp8_quant.py` | gfx120x FP8 quant |
+| `tests/kernels/test_rdna4_stoch_fp8.py` | gfx120x stochastic FP8 |
+| `tests/kernels/test_rdna4_swiglu.py` | gfx120x SwiGLU |
+| `tests/kernels/test_rdna4_quantize_int8_rowwise.py` | gfx120x int8 rowwise quant |
+| `tests/kernels/test_rdna4_quantize_int8_tensorwise.py` | gfx120x int8 tensorwise quant |
+| `tests/kernels/test_rdna4_int8_convrot.py` | gfx120x int8 ConvRot |
+| `tests/kernels/test_rdna4_convrot_w4a4.py` | gfx120x ConvRot |
+| `tests/kernels/test_rdna4_asym_w4a8.py` | gfx120x W4A8 |
+| `tests/kernels/test_rdna4_awq_w4a16.py` | gfx120x AWQ |
+| `tests/kernels/test_rdna4_svdquant_w4a4.py` | gfx120x SVDQuant |
+| `tests/kernels/test_rdna4_integer_wmma_atom.py` | gfx120x integer WMMA atom |
+| `tests/kernels/test_rdna4_iu4_wmma_probe.py` | gfx120x int4 WMMA probe |
+| `tests/kernels/test_rdna4_swmmac_atom_probe.py` | gfx120x SWMMAC atom |
+| `tests/mlir/Conversion/wmma_gfx120x.mlir` | gfx120x WMMA FileCheck |
+| `tests/mlir/Conversion/swmmac_gfx120x.mlir` | gfx120x SWMMAC FileCheck |
 | `tests/kernels/test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
 | `tests/kernels/test_gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | `tests/kernels/test_vec_add.py` | Vector addition |

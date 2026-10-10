@@ -92,6 +92,8 @@ Prerequisites for source builds:
 
 ```bash
 # Clone ROCm LLVM and build MLIR (takes ~30min with -j64)
+# Build directory is ../llvm-project/build-flydsl.
+# Installs to ../llvm-project/mlir_install by default.
 bash scripts/build_llvm.sh -j64
 
 # Build FlyDSL C++ dialects, compiler passes, and Python bindings
@@ -105,7 +107,7 @@ If you already have an MLIR build with Python bindings enabled, point to it inst
 
 ```bash
 python -m pip install nanobind numpy pybind11  # build.sh does not install these
-export MLIR_PATH=/path/to/llvm-project/build-flydsl/mlir_install
+export MLIR_PATH=/path/to/llvm-project/mlir_install  # install dir; the build dir is build-flydsl
 MLIR_PATH=$MLIR_PATH bash scripts/build.sh -j64
 python -m pip install -e .
 ```
@@ -381,6 +383,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **Fused RoPE** | `test_fused_rope_cache.py` | Fused RoPE + KV cache |
 | **AllReduce** | `test_allreduce.py` | Multi-GPU all-reduce |
 | **RDNA GEMM** | `test_rdna_gemm.py` | RDNA FP16/FP8 GEMM |
+| **gfx120x** | `test_flash_attn_gfx120x.py` | RDNA4 wave32. See `docs/prebuilt_kernels_guide.md`. |
 | **GFX1250 GEMM** | `test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
 | **GFX1250 BF16 GEMM** | `test_gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | **VecAdd** | `test_vec_add.py` | Basic vector addition |

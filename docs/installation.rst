@@ -43,7 +43,7 @@ current source tree; consult the tests and CI results for the revision you use.
      - Architecture-gated RDNA GEMM tests exist. Test presence alone is not
        evidence of a passing wheel validation run on every RDNA device.
    * - ``gfx120*``
-     - RDNA WMMA paths, with separate dtype/shape restrictions
+     - RDNA WMMA paths, with separate dtype/shape restrictions. See :doc:`prebuilt_kernels_guide`.
      - Architecture-gated RDNA GEMM tests exist; source CI includes a Navi
        runner. The wheel CI matrix is narrower than the source target set.
    * - ``gfx1250``
@@ -135,14 +135,16 @@ If you already have an MLIR build with Python bindings enabled, point to it:
 
 .. code-block:: bash
 
-   export MLIR_PATH=/path/to/llvm-project/build-flydsl/mlir_install
+   export MLIR_PATH=/path/to/llvm-project/mlir_install
 
-Otherwise, use the helper script that clones the ROCm llvm-project and builds MLIR:
+Otherwise, use the helper script that clones the ROCm llvm-project and builds MLIR
+(commit pinned in ``thirdparty/llvm-build-info.json``, plus an in-tree patch).
+The build directory is ``build-flydsl``. The install directory is ``mlir_install``:
 
 .. code-block:: bash
 
    bash scripts/build_llvm.sh -j64
-   export MLIR_PATH=/path/to/llvm-project/build-flydsl/mlir_install
+   export MLIR_PATH=/path/to/llvm-project/mlir_install
 
 Step 2: Build FlyDSL
 ~~~~~~~~~~~~~~~~~~~~
