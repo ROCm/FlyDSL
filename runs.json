@@ -1,11 +1,115 @@
 {
  "schema": 1,
- "updated": "2026-10-09T23:01:33Z",
+ "updated": "2026-10-10T01:10:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 37998936572,
+   "run_id": 38007224532,
+   "pr": 1254,
+   "commit": "f6eeccb1f0c0af656a0e2c46dfd7f0e15b66b542",
+   "branch": "perf/gfx1250-gemm-kernarg-preload",
+   "event": "pull_request",
+   "title": "[Perf][gfx1250] Preload the kernel arguments of the BF16 and A8W8 GEMMs",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38007224532",
+   "created_at": "2026-10-10T00:01:46Z",
+   "updated_at": "2026-10-10T00:13:44Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-10-10T00:14:32Z",
+     "completed_at": "2026-10-10T00:49:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38007224532/job/114081579757"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-10T00:14:16Z",
+     "completed_at": "2026-10-10T00:30:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38007224532/job/114081579782"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-10T00:13:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38007224532/job/114081579815"
+    }
+   ]
+  },
+  {
+   "run_id": 38003061127,
+   "pr": 1253,
+   "commit": "4bf7d2dc55461368f4bb3da318ee78ed8e6a7509",
+   "branch": "fix/mxfp8-test-quant-e8m0-roundup",
+   "event": "pull_request",
+   "title": "[Bugfix][Test] Round MXFP8 E8M0 scales up in the test quantizers",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38003061127",
+   "created_at": "2026-10-09T23:10:17Z",
+   "updated_at": "2026-10-10T00:16:00Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-10T00:15:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38003061127/job/114068709123"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-09T23:22:38Z",
+     "completed_at": "2026-10-09T23:39:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38003061127/job/114068709147"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-09T23:22:54Z",
+     "completed_at": "2026-10-10T00:33:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38003061127/job/114068709200",
+     "machine": "gbt350-odcdh2-b13-1",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
+    }
+   ]
+  },
+  {
+   "run_id": 38002264506,
    "pr": 1223,
+   "commit": "7fd2b32a7199b1ee9df9125f9d6ac644caeebb72",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38002264506",
+   "created_at": "2026-10-09T23:00:55Z",
+   "updated_at": "2026-10-09T23:00:55Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
+  {
+   "run_id": 37998936572,
+   "pr": null,
    "commit": "66bf89408f8015a608a11eb635ea7d1960b45cfe",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -55,30 +159,33 @@
    "branch": "perf/gfx1250-rmsnorm-vector-tail",
    "event": "pull_request",
    "title": "[Kernel][Perf] Tune RMSNorm for gfx1250: BF16 hardware conversion, early loads, small-N kernel choice",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37998041556",
    "created_at": "2026-10-09T22:13:40Z",
-   "updated_at": "2026-10-09T22:31:53Z",
+   "updated_at": "2026-10-09T23:23:06Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-10-09T22:31:53Z",
+     "started_at": "2026-10-09T23:23:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/37998041556/job/114054550539"
     },
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-09T22:32:28Z",
-     "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37998041556/job/114054550673"
+     "completed_at": "2026-10-09T23:27:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37998041556/job/114054550673",
+     "machine": "smci350-rck-g03-f19-31",
+     "host_model": "MI350",
+     "bench_skipped": "host MI350 != MI355"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -1035,144 +1142,6 @@
      "machine": "smci350-rck-g03-d14-21",
      "host_model": "MI350",
      "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 37957311802,
-   "pr": 1249,
-   "commit": "9ead8703f23c399035053649c8d9e806a2ec9d05",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr5-optional-inputs",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Port gfx950 attention ALiBi, sink, paged KV, split-K and XCD swizzle to the new forward (5/8)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957311802",
-   "created_at": "2026-10-09T16:11:34Z",
-   "updated_at": "2026-10-09T19:27:48Z",
-   "actor": "xinyazhang",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T18:00:52Z",
-     "completed_at": "2026-10-09T18:17:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957311802/job/113922092966"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-10-09T18:22:32Z",
-     "completed_at": "2026-10-09T18:26:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957311802/job/113922092995"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T18:01:18Z",
-     "completed_at": "2026-10-09T19:27:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957311802/job/113922093045",
-     "machine": "smci350-rck-g03-f12-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 37957304219,
-   "pr": 1248,
-   "commit": "c79eac491a1f78fa80686560569a8aeb7ea7741b",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr4-forward",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Add the gfx950 attention forward kernel (dual-wave and wide bodies) (4/8)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957304219",
-   "created_at": "2026-10-09T16:11:31Z",
-   "updated_at": "2026-10-09T19:43:26Z",
-   "actor": "xinyazhang",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T18:27:17Z",
-     "completed_at": "2026-10-09T19:43:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957304219/job/113923431845"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T17:02:48Z",
-     "completed_at": "2026-10-09T17:22:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957304219/job/113923431873"
-    },
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T17:34:44Z",
-     "completed_at": "2026-10-09T18:57:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957304219/job/113923431890",
-     "machine": "smci350-rck-g03-f12-31",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    }
-   ]
-  },
-  {
-   "run_id": 37957297533,
-   "pr": 1247,
-   "commit": "7181a48a9d50d6083a91d02ef65483401c91cfc0",
-   "branch": "xinyazhang/file-aotriton-0.14.2-gfx950-port/pr3-config",
-   "event": "pull_request",
-   "title": "[Kernel][FA] Add gfx950 attention metadata, knobs and traits config (3/8)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957297533",
-   "created_at": "2026-10-09T16:11:27Z",
-   "updated_at": "2026-10-09T18:38:23Z",
-   "actor": "xinyazhang",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi35x-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T16:31:22Z",
-     "completed_at": "2026-10-09T18:38:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957297533/job/113917692268",
-     "machine": "cv350-odcdh2-a06-1",
-     "host_model": "MI350",
-     "bench_skipped": "host MI350 != MI355"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T17:21:17Z",
-     "completed_at": "2026-10-09T18:34:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957297533/job/113917692356"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-10-09T16:44:53Z",
-     "completed_at": "2026-10-09T17:02:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/37957297533/job/113917692393"
     }
    ]
   }
