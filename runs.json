@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-10T06:11:49Z",
+ "updated": "2026-10-10T06:42:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,13 +25,41 @@
    "branch": "codex/glm5-tp4-fused-indexer",
    "event": "pull_request",
    "title": "[Perf] Fuse GLM-5.2 TP4 indexer for MTP4 C1/C2",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38027713895",
    "created_at": "2026-10-10T05:30:10Z",
-   "updated_at": "2026-10-10T05:38:53Z",
+   "updated_at": "2026-10-10T06:11:57Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-10-10T06:11:56Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38027713895/job/114149034107"
+    },
+    {
+     "runner": "linux-flydsl-mi35x-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-10-10T06:13:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38027713895/job/114149034123"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-10-10T06:12:15Z",
+     "completed_at": "2026-10-10T06:32:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/38027713895/job/114149034139"
+    }
+   ]
   },
   {
    "run_id": 38027537467,
