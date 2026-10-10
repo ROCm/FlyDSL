@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-10T14:58:17Z",
+ "updated": "2026-10-10T15:12:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 38061747512,
+   "pr": 1262,
+   "commit": "84f86799f79a0629dece11218557a809523e92aa",
+   "branch": "codex/cleanup-kernel-ir-aiter-20261010",
+   "event": "pull_request",
+   "title": "[Kernel] Clean low-level IR across FlyDSL kernels",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38061747512",
+   "created_at": "2026-10-10T14:58:43Z",
+   "updated_at": "2026-10-10T15:00:10Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 38061590040,
    "pr": 1261,
@@ -14,7 +29,7 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38061590040",
    "created_at": "2026-10-10T14:56:14Z",
-   "updated_at": "2026-10-10T14:56:43Z",
+   "updated_at": "2026-10-10T15:00:50Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -172,11 +187,11 @@
    "branch": "feat/compiled-max-blocks-per-cu",
    "event": "pull_request",
    "title": "[Enh] Add CompiledFunction.max_blocks_per_cu()",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38050189781",
    "created_at": "2026-10-10T11:56:47Z",
-   "updated_at": "2026-10-10T12:49:19Z",
+   "updated_at": "2026-10-10T15:10:53Z",
    "actor": "akii96",
    "jobs": [
     {
@@ -191,10 +206,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-10T12:49:18Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T15:10:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38050189781/job/114211995010"
     },
     {
@@ -1447,21 +1462,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37975178262",
    "created_at": "2026-10-09T18:42:46Z",
    "updated_at": "2026-10-09T18:42:46Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37975030993,
-   "pr": null,
-   "commit": "afc1ddd9451ebbe91a497658de1524f480c85575",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37975030993",
-   "created_at": "2026-10-09T18:41:29Z",
-   "updated_at": "2026-10-09T18:41:29Z",
    "actor": "dimitri91209",
    "jobs": []
   }
