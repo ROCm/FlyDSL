@@ -1,0 +1,32 @@
+# FlyDSL
+
+> Note: ROCm documentation is split across multiple projects. In addition to this file, each project publishes its own `llms.txt` and `llms-full.txt` under `https://<base_url>/projects/<project_name>/en/latest/`.
+
+## Docs
+
+- [Install FlyDSL](https://rocm.github.io/FlyDSL/installation.html)
+- [Quick start](https://rocm.github.io/FlyDSL/quickstart.html)
+- [API stability](https://rocm.github.io/FlyDSL/api_stability.html)
+- [Arithmetic types](https://rocm.github.io/FlyDSL/language/arithmetic_types.html)
+- [Composite types](https://rocm.github.io/FlyDSL/language/composite_types.html)
+- [Storage and allocator](https://rocm.github.io/FlyDSL/language/storage_and_allocator.html)
+- [DSL protocols](https://rocm.github.io/FlyDSL/language/dsl_protocols.html)
+- [Random number generation](https://rocm.github.io/FlyDSL/extension/rand.html)
+- [Architecture and compilation pipeline](https://rocm.github.io/FlyDSL/architecture_guide.html)
+- [Layout algebra](https://rocm.github.io/FlyDSL/layout_system_guide.html)
+- [Kernel authoring](https://rocm.github.io/FlyDSL/kernel_authoring_guide.html)
+- [Kernel tuning](https://rocm.github.io/FlyDSL/kernel_tuning_guide.html)
+- [Offline autotune configs](https://rocm.github.io/FlyDSL/autotune_guide.html)
+- [Prebuilt kernel library](https://rocm.github.io/FlyDSL/prebuilt_kernels_guide.html)
+- [Testing and benchmarking](https://rocm.github.io/FlyDSL/testing_benchmarking_guide.html)
+- [CuTe layout algebra](https://rocm.github.io/FlyDSL/cute_layout_algebra_guide.html)
+- [External bitcode integration](https://rocm.github.io/FlyDSL/extern_integration_guide.html)
+- [API overview](https://rocm.github.io/FlyDSL/api/index.html)
+- [Expression language](https://rocm.github.io/FlyDSL/api/dsl.html)
+- [Compiler](https://rocm.github.io/FlyDSL/api/compiler.html)
+- [Extension libraries](https://rocm.github.io/FlyDSL/api/extensions.html)
+- [Stable runtime helpers](https://rocm.github.io/FlyDSL/api/runtime.html)
+- [Pre-built kernels](https://rocm.github.io/FlyDSL/api/kernels.html)
+- [Basic usage](https://rocm.github.io/FlyDSL/tutorials/basic_usage.html)
+- [Kernel development techniques](https://rocm.github.io/FlyDSL/tutorials/kernel_development.html)
+- [License](https://rocm.github.io/FlyDSL/about/license.html)
