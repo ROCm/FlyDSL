@@ -391,8 +391,8 @@ def build_communication(kc: KernelCtx) -> dict:
                     us.append(fx.Float32(ua[v]))
             xs = [fx.Float32(x).to(fx.BFloat16).to(fx.Float32) for x in act_batch(gs, us)]
             am = amax(xs)
-            am = am.maximumf(am.shuffle_xor(i32(16), i32(64)))
-            am = am.maximumf(am.shuffle_xor(i32(32), i32(64)))
+            am = fx.max(am, am.shuffle_xor(i32(16), i32(64)))
+            am = fx.max(am, am.shuffle_xor(i32(32), i32(64)))
             e8, qs = _e8m0_from_amax(am, max_norm=448.0 if a8 else 6.0)
             for t in range_constexpr(2):
                 col = nb * i32(128) + w * i32(32) + i32(t * 16) + q4 * i32(4)

@@ -360,8 +360,8 @@ def build_gemm(kc: KernelCtx) -> dict:
         for half in range_constexpr(2):
             f = [fx.Float32(fx.Vector(accs[2 * half + h])[i]) * wt for h in range(2) for i in range(4)]
             am = amax(f)
-            am = am.maximumf(am.shuffle_xor(i32(16), i32(64)))
-            am = am.maximumf(am.shuffle_xor(i32(32), i32(64)))
+            am = fx.max(am, am.shuffle_xor(i32(16), i32(64)))
+            am = fx.max(am, am.shuffle_xor(i32(32), i32(64)))
             e8, qs = _e8m0_from_amax(am, max_norm=448.0)
             d += [fp8x4_pack(f[0:4], qs), fp8x4_pack(f[4:8], qs)]
             e8s.append(fx.Int32(e8) & i32(0xFF))

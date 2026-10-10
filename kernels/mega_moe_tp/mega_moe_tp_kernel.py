@@ -209,16 +209,16 @@ def compile_mega_moe_tp(
                 )
                 for x, w in zip(f[k], wv)
             ]
-            am = am.maximumf(amax(xk))
+            am = fx.max(am, amax(xk))
             xs.append(xk)
         amx = blk_red(
             L,
             tid,
             am.bitcast(fx.Int32),
-            lambda x, y: x.bitcast(fx.Float32).maximumf(y.bitcast(fx.Float32)).bitcast(fx.Int32),
+            lambda x, y: fx.max(x.bitcast(fx.Float32), y.bitcast(fx.Float32)).bitcast(fx.Int32),
             1,
         )
-        scale = amx.bitcast(fx.Float32).maximumf(fx.Float32(1e-10)) / fx.Float32(448.0)
+        scale = fx.max(amx.bitcast(fx.Float32), fx.Float32(1e-10)) / fx.Float32(448.0)
         inv = fx.Float32(1.0) / scale
         one = fx.Float32(1.0)
         grow = a["rank"] * a["m"] + r

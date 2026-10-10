@@ -271,7 +271,7 @@ def compile_sp_rs_norm(
                 mx = wave_red(
                     mv.bitcast(fx.Int32),
                     lane,
-                    lambda p_, q_: p_.bitcast(fx.Float32).maximumf(q_.bitcast(fx.Float32)).bitcast(fx.Int32),
+                    lambda p_, q_: fx.max(p_.bitcast(fx.Float32), q_.bitcast(fx.Float32)).bitcast(fx.Int32),
                 ).bitcast(fx.Float32)
                 bal = fx.Int64(rocdl.ballot(T.i64, mv == mx))
                 win = i32(fx.ctpop(fx.Int64((bal & (fx.Int64(0) - bal)) - fx.Int64(1))))
@@ -298,7 +298,7 @@ def compile_sp_rs_norm(
                 mx = wave_red(
                     bv.bitcast(fx.Int32),
                     lane,
-                    lambda p_, q_: p_.bitcast(fx.Float32).maximumf(q_.bitcast(fx.Float32)).bitcast(fx.Int32),
+                    lambda p_, q_: fx.max(p_.bitcast(fx.Float32), q_.bitcast(fx.Float32)).bitcast(fx.Int32),
                 ).bitcast(fx.Float32)
                 bal = fx.Int64(rocdl.ballot(T.i64, bv == mx))
                 win = i32(fx.ctpop(fx.Int64((bal & (fx.Int64(0) - bal)) - fx.Int64(1))))
@@ -310,7 +310,7 @@ def compile_sp_rs_norm(
                 tot = tot + wgt
                 my_id = (lane == i32(k)).select(wid, my_id)
                 my_w = (lane == i32(k)).select(wgt, my_w)
-        f = fx.Float32(float(scale)) / tot.maximumf(fx.Float32(1e-20))
+        f = fx.Float32(float(scale)) / fx.max(tot, fx.Float32(1e-20))
         ri = rsrc(a["ids"])
         rw = rsrc(a["tw"])
         if lane < i32(topk):
@@ -359,9 +359,9 @@ def compile_sp_rs_norm(
                 p = tid + i32(k * NTH)
                 f = bf16x8_to_f32(bld(rp, (i * i32(H) + p * i32(8)) * i32(2), 0, T.vec(4, T.i32)))
                 am = amax(f)
-                am = am.maximumf(am.shuffle_xor(i32(1), i32(64)))
-                am = am.maximumf(am.shuffle_xor(i32(2), i32(64)))
-                sc = am.maximumf(fx.Float32(1e-30)) / fx.Float32(127.0)
+                am = fx.max(am, am.shuffle_xor(i32(1), i32(64)))
+                am = fx.max(am, am.shuffle_xor(i32(2), i32(64)))
+                sc = fx.max(am, fx.Float32(1e-30)) / fx.Float32(127.0)
                 inv = fx.Float32(1.0) / sc
                 dv = fx.Vector.from_elements([i8x4_pack(f[0:4], inv), i8x4_pack(f[4:8], inv)], fx.Int32)
                 bst(dv, rx, slot * i32(H) + p * i32(8), 0, AUX_SYS)

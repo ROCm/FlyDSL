@@ -233,7 +233,7 @@ def wait_lgkm0():
 def amax(vals):
     am = _fabs_f32(vals[0])
     for v in vals[1:]:
-        am = am.maximumf(_fabs_f32(v))
+        am = fx.max(am, _fabs_f32(v))
     return am
 
 
@@ -271,8 +271,8 @@ def fp8x8_decode(ld):
 
 def mxfp8x8(acc):
     am = amax(acc)
-    am = am.maximumf(am.shuffle_xor(i32(1), i32(64)))
-    am = am.maximumf(am.shuffle_xor(i32(2), i32(64)))
+    am = fx.max(am, am.shuffle_xor(i32(1), i32(64)))
+    am = fx.max(am, am.shuffle_xor(i32(2), i32(64)))
     e8, qs = _e8m0_from_amax(am, max_norm=448.0)
     return fp8x4_pack(acc[0:4], qs), fp8x4_pack(acc[4:8], qs), fx.Int32(e8) & i32(0xFF)
 
