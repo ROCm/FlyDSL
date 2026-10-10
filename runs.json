@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-10-10T05:48:02Z",
+ "updated": "2026-10-10T06:11:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 38029117501,
+   "pr": 1223,
+   "commit": "f8c290189ebec6888fab1a65a01d3855cb5669a5",
+   "branch": "gfx120x-overhaul-ops-fa-etc",
+   "event": "pull_request",
+   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/38029117501",
+   "created_at": "2026-10-10T05:54:53Z",
+   "updated_at": "2026-10-10T05:54:53Z",
+   "actor": "dimitri91209",
+   "jobs": []
+  },
   {
    "run_id": 38027713895,
    "pr": 1256,
@@ -35,7 +50,7 @@
   },
   {
    "run_id": 38027161240,
-   "pr": 1223,
+   "pr": null,
    "commit": "0c764260ba5ac82fc8ad636a86c94e049c228e97",
    "branch": "gfx120x-overhaul-ops-fa-etc",
    "event": "pull_request",
@@ -221,20 +236,20 @@
    "branch": "perf/gfx1250-gemm-kernarg-preload",
    "event": "pull_request",
    "title": "[Perf][gfx1250] Preload the kernel arguments of the BF16 and A8W8 GEMMs",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38007224532",
    "created_at": "2026-10-10T00:01:46Z",
-   "updated_at": "2026-10-10T05:08:46Z",
+   "updated_at": "2026-10-10T06:10:42Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi35x-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-10-10T05:08:45Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T06:10:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38007224532/job/114138111750"
     },
     {
@@ -1065,21 +1080,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/37968982176",
    "created_at": "2026-10-09T17:49:30Z",
    "updated_at": "2026-10-09T17:49:30Z",
-   "actor": "dimitri91209",
-   "jobs": []
-  },
-  {
-   "run_id": 37968226703,
-   "pr": null,
-   "commit": "a8c88989f2f946d8be14350d9e9f7e4ad6c575f2",
-   "branch": "gfx120x-overhaul-ops-fa-etc",
-   "event": "pull_request",
-   "title": "[Kernel][Feature][Dialect][DSL][Perf][Doc][Test] Add gfx120x RDNA4 wave32 ops",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/37968226703",
-   "created_at": "2026-10-09T17:42:59Z",
-   "updated_at": "2026-10-09T17:42:59Z",
    "actor": "dimitri91209",
    "jobs": []
   }
