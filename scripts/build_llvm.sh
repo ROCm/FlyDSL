@@ -16,8 +16,39 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 # Read LLVM commit hash from thirdparty/llvm-build-info.json (upstream entry)
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
 LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
-LLVM_REF="${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}"
-LLVM_PATCH="${REPO_ROOT}/thirdparty/llvm-rocdl-lld-argv0.patch"
+LLVM_EXT_DIR="${REPO_ROOT}/thirdparty/llvm-extensions"
+
+# FLYDSL_LLVM_REF / FLYDSL_LLVM_REMOTE build any commit, from any remote, without
+# editing the pin. The patches below still apply.
+LLVM_REF="${FLYDSL_LLVM_REF:-${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}}"
+
+# FLYDSL_LLVM_NO_EXT=1 drops LLVM_EXTENSIONS and keeps REQUIRED_PATCHES: the
+# control arm for "is this regression ours?". See CONTRIBUTING.md.
+LLVM_NO_EXT="${FLYDSL_LLVM_NO_EXT:-0}"
+
+# Applied to every build; the build is broken without them. Keep this closed.
+REQUIRED_PATCHES=(
+    # Pass the resolved lld path as argv[0] instead of the literal "ld.lld", so
+    # MLIR's ROCDL target finds the linker when it is not on PATH under that
+    # name. Case 1 (upstreamable). Upstream: not yet submitted.
+    rocdl-lld-argv0.patch
+)
+
+# Performance extensions, applied in this order after REQUIRED_PATCHES. Each is
+# a diff on top of its predecessors, needs a run-time switch, and says whether it
+# is upstream-pending or FlyDSL-only. Add one with scripts/llvm_extension.sh;
+# rules in CONTRIBUTING.md, "Add an LLVM Extension".
+LLVM_EXTENSIONS=(
+)
+
+# The only reader of the arrays above: other tools ask bash, so no second parser
+# can disagree with what the build applies.
+if [[ "${1:-}" == "--list-patches" ]]; then
+    for p in "${REQUIRED_PATCHES[@]}"; do echo "required ${p}"; done
+    for p in "${LLVM_EXTENSIONS[@]}"; do echo "extension ${p}"; done
+    exit 0
+fi
+
 LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
 
 case "${LLVM_BUILD_PROFILE}" in
@@ -50,7 +81,7 @@ echo "LLVM Targets:   $LLVM_TARGETS_TO_BUILD"
 echo "LLVM Runtimes:  ${LLVM_ENABLE_RUNTIMES:-<none>}"
 
 # 1. Clone LLVM
-LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
+LLVM_REMOTE="${FLYDSL_LLVM_REMOTE:-${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}}"
 
 # A leftover partial ("promisor") clone is unusable here: every checkout, patch
 # and rev-parse would trigger per-blob lazy fetches against github.com. Unsetting
@@ -77,6 +108,13 @@ fi
 # `--depth 1 --filter=blob:none` did not finish within 100 minutes.
 LLVM_FETCH_ARGS=(--depth 1)
 
+# The forced checkout below would silently discard an extension being authored.
+if [ -f .flydsl-extension-in-progress ]; then
+    echo "Error: an LLVM extension is being authored in ${PWD}: $(cat .flydsl-extension-in-progress)" >&2
+    echo "       Finish it (scripts/llvm_extension.sh --finish) before building." >&2
+    exit 1
+fi
+
 if [[ "$LLVM_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
     echo "Checking for local LLVM commit ${LLVM_REF} ..."
     if ! git cat-file -e "${LLVM_REF}^{commit}" 2>/dev/null; then
@@ -86,20 +124,66 @@ if [[ "$LLVM_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
         echo "LLVM commit ${LLVM_REF} is already available locally."
     fi
     echo "Checking out LLVM commit ${LLVM_REF} ..."
-    git checkout "${LLVM_REF}"
+    git checkout --force "${LLVM_REF}"
 else
     echo "Fetching ref ${LLVM_REF} ..."
     git fetch "${LLVM_FETCH_ARGS[@]}" origin "${LLVM_REF}"
-    git checkout FETCH_HEAD
+    git checkout --force FETCH_HEAD
 fi
 
-if git apply --reverse --check "${LLVM_PATCH}" >/dev/null 2>&1; then
-    echo "LLVM patch already applied: ${LLVM_PATCH}"
-else
-    echo "Applying LLVM patch: ${LLVM_PATCH}"
-    git apply --check "${LLVM_PATCH}"
-    git apply "${LLVM_PATCH}"
+# Replay the series from the pristine pin every run instead of detecting what is
+# already applied: `git apply --reverse --check` cannot tell for a series. Patches
+# go in with --index, so the forced checkout above also drops files they created.
+# Never `git clean`: build-flydsl/ and mlir_install/ live in this checkout.
+
+# Every .patch file must be listed, and every listed file must exist.
+LLVM_ALL_PATCHES=("${REQUIRED_PATCHES[@]}" "${LLVM_EXTENSIONS[@]}")
+for patch_file in "${LLVM_EXT_DIR}"/*.patch; do
+    [ -e "${patch_file}" ] || continue
+    patch_base="$(basename "${patch_file}")"
+    listed=0
+    for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
+        [ "${patch_name}" = "${patch_base}" ] && listed=1 && break
+    done
+    if [ "${listed}" -eq 0 ]; then
+        echo "Error: patch file is listed in neither array: ${patch_base}" >&2
+        echo "       Add it to LLVM_EXTENSIONS (or REQUIRED_PATCHES, if the build" >&2
+        echo "       is broken without it) in scripts/build_llvm.sh, or delete it." >&2
+        exit 1
+    fi
+done
+for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
+    if [ ! -f "${LLVM_EXT_DIR}/${patch_name}" ]; then
+        echo "Error: a patch array lists a file that does not exist: ${patch_name}" >&2
+        echo "       Expected at: ${LLVM_EXT_DIR}/${patch_name}" >&2
+        exit 1
+    fi
+done
+
+LLVM_APPLY=("${REQUIRED_PATCHES[@]}")
+if [[ "${LLVM_NO_EXT}" != "1" ]]; then
+    LLVM_APPLY+=("${LLVM_EXTENSIONS[@]}")
 fi
+
+echo "LLVM Required:   ${#REQUIRED_PATCHES[@]}"
+if [[ "${LLVM_NO_EXT}" == "1" ]]; then
+    echo "LLVM Extensions: none (FLYDSL_LLVM_NO_EXT=1)"
+else
+    echo "LLVM Extensions: ${#LLVM_EXTENSIONS[@]}"
+fi
+for ext_name in "${LLVM_APPLY[@]}"; do
+    echo "  applying ${ext_name}"
+    if ! git apply --index "${LLVM_EXT_DIR}/${ext_name}"; then
+        echo "" >&2
+        echo "Error: LLVM extension failed to apply: ${ext_name}" >&2
+        echo "       LLVM pin: ${LLVM_REF}" >&2
+        echo "" >&2
+        echo "  Either the extension is stale against this pin, or it landed upstream." >&2
+        echo "  To rebase it:   bash scripts/llvm_extension.sh --rebase ${ext_name}" >&2
+        echo "  If it landed:   delete it and drop it from its array in scripts/build_llvm.sh" >&2
+        exit 1
+    fi
+done
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd
