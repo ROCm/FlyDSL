@@ -13,7 +13,11 @@
 //===----------------------------------------------------------------------===//
 
 #include <cassert>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <vector>
 
 #include "FlyRocmRuntimeError.h"
@@ -83,8 +87,17 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
   // Mirrors Triton's approach: triton/third_party/amd/backend/driver.c.
   using LaunchKernelExFn =
       hipError_t (*)(const HIP_LAUNCH_CONFIG *, hipFunction_t, void **, void **);
-  static auto launchKernelEx =
-      reinterpret_cast<LaunchKernelExFn>(dlsym(RTLD_DEFAULT, "hipDrvLaunchKernelEx"));
+  static auto launchKernelEx = []() -> LaunchKernelExFn {
+#ifdef _WIN32
+    HMODULE hip = GetModuleHandleW(L"amdhip64_7.dll");
+    if (!hip)
+      hip = GetModuleHandleW(L"amdhip64.dll");
+    return hip ? reinterpret_cast<LaunchKernelExFn>(GetProcAddress(hip, "hipDrvLaunchKernelEx"))
+               : nullptr;
+#else
+    return reinterpret_cast<LaunchKernelExFn>(dlsym(RTLD_DEFAULT, "hipDrvLaunchKernelEx"));
+#endif
+  }();
 
   if (launchKernelEx) {
     hipLaunchAttribute attrs[1];

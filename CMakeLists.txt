@@ -28,7 +28,10 @@ include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
-string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
+
+if(UNIX)
+  string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
+endif()
 include(MLIRDetectPythonEnv)
 mlir_configure_python_dev_packages()
 
@@ -44,6 +47,10 @@ include_directories(${PROJECT_SOURCE_DIR}/thirdparty/tvm-ffi/include)
 link_directories(${LLVM_BUILD_LIBRARY_DIR})
 add_definitions(${LLVM_DEFINITIONS})
 
+if(WIN32)
+  add_compile_definitions(MLIR_USE_FALLBACK_TYPE_IDS=1)
+endif()
+
 
 set(MLIR_PYTHON_PACKAGE_PREFIX "_mlir" CACHE STRING "" FORCE)
 set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/flydsl/${MLIR_PYTHON_PACKAGE_PREFIX}" CACHE STRING "" FORCE)
@@ -55,3 +62,17 @@ add_subdirectory(lib)
 add_subdirectory(tools)
 
 add_subdirectory(python/mlir_flydsl)
+
+if(WIN32)
+  set(_fly_link_targets ${MLIR_EXPORTED_TARGETS} MLIRFlyDialect
+    MLIRFlyROCDLDialect MLIRFlyToROCDL)
+  foreach(_target IN LISTS _fly_link_targets)
+    if(TARGET ${_target})
+      get_target_property(_links ${_target} INTERFACE_LINK_LIBRARIES)
+      if(_links MATCHES "MLIRIR|MLIRSupport")
+        get_mlir_filtered_link_libraries(_links_filtered ${_links})
+        set_property(TARGET ${_target} PROPERTY INTERFACE_LINK_LIBRARIES "${_links_filtered}")
+      endif()
+    endif()
+  endforeach()
+endif()

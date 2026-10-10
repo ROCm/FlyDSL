@@ -3,6 +3,7 @@
 
 import ctypes
 import importlib
+import os
 import pickle
 import threading
 import zlib
@@ -235,6 +236,7 @@ class CompiledArtifact:
         self._engine = None
         self._jit_module = None
         self._func_exe = None
+        self._shared_lib_handles = []
         self._lock = threading.Lock()
 
     def __getstate__(self):
@@ -310,6 +312,7 @@ class CompiledArtifact:
         self._engine = None
         self._jit_module = None
         self._func_exe = None
+        self._shared_lib_handles = []
         self._lock = threading.Lock()
 
     def _ensure_engine(self):
@@ -325,10 +328,13 @@ class CompiledArtifact:
             ctx = _create_mlir_context()
             with ctx:
                 module = ir.Module.parse(self._ir_text)
+                shared_libs = _resolve_runtime_libs()
+                if os.name == "nt":
+                    self._shared_lib_handles = [ctypes.CDLL(lib) for lib in shared_libs]
                 engine = ExecutionEngine(
                     module,
                     opt_level=3,
-                    shared_libs=_resolve_runtime_libs(),
+                    shared_libs=shared_libs,
                 )
                 engine.initialize()
 

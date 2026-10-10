@@ -37,6 +37,8 @@ FlyDSL/
 ├── scripts/                   # build & test scripts
 │   ├── build_llvm.sh          # build LLVM/MLIR from source
 │   ├── build.sh               # build FlyDSL (C++ + Python bindings)
+│   ├── build_llvm.ps1         # Windows LLVM/MLIR source build
+│   ├── build.ps1              # Windows FlyDSL source build
 │   ├── run_tests.sh           # run tests
 │   └── run_benchmark.sh       # run performance benchmarks
 ├── include/flydsl/            # C++ Fly/FlyROCDL dialect headers
@@ -111,6 +113,32 @@ python -m pip install -e .
 ```
 
 > **Note**: If `MLIR_PATH` is set in your environment pointing to a wrong LLVM build, `unset MLIR_PATH` first.
+
+#### Windows ROCm JIT build
+
+Windows source builds require Visual Studio 2022 C++ tools, CMake, Ninja, and a Python environment that can see the ROCm SDK. The LLVM/MLIR build uses MSVC; the FlyDSL extension uses the Visual Studio ClangCL toolset. Create the venv from the Python installation that provides the SDK so Torch and HIP remain available:
+
+```powershell
+$repo = (Get-Location).Path
+$basePython = 'C:\path\to\python.exe'
+& $basePython -m venv --system-site-packages C:\fdsl-venv
+& .\scripts\build_llvm.ps1 -Python C:\fdsl-venv\Scripts\python.exe -Jobs 32
+& .\scripts\build.ps1 -MLIRPath C:\linstall -BuildDir C:\fbuild -Python C:\fdsl-venv\Scripts\python.exe -Jobs 32
+$env:PYTHONPATH = "C:\fbuild\python_packages;$repo\python"
+```
+
+The PowerShell LLVM script uses the revision pinned in `thirdparty/llvm-build-info.json`. Windows supports native JIT compilation; AOT export remains Linux ELF-only.
+
+To package a Windows wheel, build FlyDSL into a directory inside the checkout because `setup.py` requires the embedded MLIR package to be in-tree:
+
+```powershell
+& .\scripts\build.ps1 -MLIRPath C:\linstall -BuildDir (Join-Path $repo 'build-vs') -Python C:\fdsl-venv\Scripts\python.exe -Jobs 32
+$env:FLY_BUILD_DIR = 'build-vs'
+$python = 'C:\fdsl-venv\Scripts\python.exe'
+& $python setup.py bdist_wheel
+$wheel = Get-ChildItem .\dist\flydsl-*.whl | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+& $python -m pip install --no-deps $wheel.FullName
+```
 
 ### Run tests
 

@@ -1,0 +1,32 @@
+diff --git a/mlir/cmake/modules/AddMLIRPython.cmake b/mlir/cmake/modules/AddMLIRPython.cmake
+index 7d47fd0bca..52bbf7d64b 100644
+--- a/mlir/cmake/modules/AddMLIRPython.cmake
++++ b/mlir/cmake/modules/AddMLIRPython.cmake
+@@ -375 +375 @@ function(build_nanobind_lib)
+-     AND (LLVM_COMPILER_IS_GCC_COMPATIBLE OR CLANG_CL))
++     AND (MSVC OR LLVM_COMPILER_IS_GCC_COMPATIBLE OR CLANG_CL))
+@@ -380,11 +380,13 @@ function(build_nanobind_lib)
+-    target_compile_options(${NB_LIBRARY_TARGET_NAME}
+-      PRIVATE
+-        -Wno-c++98-compat-extra-semi
+-        -Wno-cast-qual
+-        -Wno-covered-switch-default
+-        -Wno-deprecated-literal-operator
+-        -Wno-nested-anon-types
+-        -Wno-unused-parameter
+-        -Wno-zero-length-array
+-        -Wno-missing-field-initializers
+-        ${eh_rtti_enable})
++    if(NOT MSVC)
++      target_compile_options(${NB_LIBRARY_TARGET_NAME}
++        PRIVATE
++          -Wno-c++98-compat-extra-semi
++          -Wno-cast-qual
++          -Wno-covered-switch-default
++          -Wno-deprecated-literal-operator
++          -Wno-nested-anon-types
++          -Wno-unused-parameter
++          -Wno-zero-length-array
++          -Wno-missing-field-initializers)
++    endif()
++    target_compile_options(${NB_LIBRARY_TARGET_NAME} PRIVATE ${eh_rtti_enable})
