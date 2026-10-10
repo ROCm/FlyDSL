@@ -34,6 +34,8 @@ class Glm5TP4MonoKernel(Glm5MonoKernel):
         dcp_size=1,
         native_fp4_mfma=False,
         timeline=False,
+        *,
+        indexer_cp=False,
     ):
         if npes != 4:
             raise ValueError(f"Glm5TP4MonoKernel requires TP4, got TP{npes}")
@@ -52,6 +54,7 @@ class Glm5TP4MonoKernel(Glm5MonoKernel):
             with_indexer,
             index_max_seq,
             timeline,
+            indexer_cp,
             index_request_width=index_request_width,
             index_page_size=index_page_size,
             index_block_table_stride=index_block_table_stride,

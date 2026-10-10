@@ -58,14 +58,7 @@ def fp8_pe_upper_pair_lane(lane):
     return (lane & -2) + 1
 
 
-def sparse_cache_rows(
-    sparse_kv_indices,
-    *,
-    sample: int,
-    topk: int,
-    cur_pos: int = 0,
-    sparse_kv_indptr=None,
-):
+def sparse_cache_rows(sparse_kv_indices, *, sample: int, topk: int, cur_pos: int = 0, sparse_kv_indptr=None):
     """Resolve the cache rows consumed by one flat or paged attention row."""
 
     if sparse_kv_indptr is not None:
@@ -93,6 +86,34 @@ def paged_row_contract(sparse_kv_indices, sparse_kv_indptr, sample: int, slot_ma
         "safe_row": rows[0] if active else 0,
         "write_cache": active if slot_mapping is None else slot_owned,
     }
+
+
+INDEX_CP_TILE = 4096
+INDEX_RADIX_DIGITS = 4
+INDEX_RADIX_BINS = 256
+INDEX_LOCAL_LDS_CAPACITY = 16384
+
+
+def indexer_uses_tiles(index_max_seq: int, indexer_cp: bool) -> bool:
+    """Keep the existing short selector; use bounded tiles for larger contexts."""
+    return index_max_seq > INDEX_LOCAL_LDS_CAPACITY
+
+
+def index_cp_world(npes: int, samples: int, index_max_seq: int) -> int:
+    """Use two independent CP4 groups for TP8's single-query medium contexts."""
+    if npes == 8 and samples == 1 and INDEX_LOCAL_LDS_CAPACITY < index_max_seq <= 131072:
+        return 4
+    return npes
+
+
+def index_cp_capacity(index_max_seq: int, npes: int) -> int:
+    """Maximum context shard, rounded to a complete scoring tile."""
+    unit = npes * INDEX_KEYS_PER_TASK
+    return (index_max_seq + unit - 1) // unit * INDEX_KEYS_PER_TASK
+
+
+def index_cp_partitions(index_max_seq: int, npes: int) -> int:
+    return (index_cp_capacity(index_max_seq, npes) + INDEX_CP_TILE - 1) // INDEX_CP_TILE
 
 
 N_QKV_A = QKV_A_ROWS // QKV_A_TILE
@@ -179,6 +200,7 @@ def layout(
     sparse_attention_topk: int,
     with_indexer: bool = False,
     index_max_seq: int = 4096,
+    indexer_cp: bool = False,
     inter: int = INTER,
     output_heads: int | None = None,
     dcp_size: int = 1,
@@ -188,6 +210,8 @@ def layout(
 
     split_count = sparse_attention_topk // sparse_keys_per_task(samples, heads)
     output_heads = heads if output_heads is None else output_heads
+    tiled_indexer = with_indexer and indexer_uses_tiles(index_max_seq, indexer_cp)
+    index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
     pair_bytes = 8
     items = [
         ("q_a", samples * Q_LORA * pair_bytes),
@@ -205,10 +229,7 @@ def layout(
         ("a", samples * HIDDEN * pair_bytes),
         ("scores", samples * N_EXPERTS * pair_bytes),
         ("xq", samples * HIDDEN // 4 * pair_bytes),
-        (
-            "xqs",
-            samples * (XQ_GROUPS if native_fp4_mfma else XQ_BLOCKS) * pair_bytes,
-        ),
+        ("xqs", samples * (XQ_GROUPS if native_fp4_mfma else XQ_BLOCKS) * pair_bytes),
         ("sel", samples * MOE_SLOTS * pair_bytes),
         ("prob", samples * MOE_SLOTS * pair_bytes),
         ("mid", samples * MOE_SLOTS * inter * pair_bytes),
@@ -222,10 +243,20 @@ def layout(
             ("index_ready", samples * pair_bytes),
             ("index_w", samples * INDEX_HEADS * pair_bytes),
             ("index_q", samples * INDEX_Q_ROWS // 2 * pair_bytes),
-            ("index_scores", samples * index_max_seq * pair_bytes),
+            (
+                "index_scores",
+                samples * (index_cp_capacity(index_max_seq, index_ranks) if indexer_cp else index_max_seq) * pair_bytes,
+            ),
             ("indices", samples * sparse_attention_topk * 4),
             ("indices_ready", samples * pair_bytes),
         ]
+        if tiled_indexer:
+            parts = index_cp_partitions(index_max_seq, index_ranks)
+            items += [
+                ("index_cp_hist", INDEX_RADIX_DIGITS * samples * parts * INDEX_RADIX_BINS * pair_bytes),
+                ("index_cp_counts", samples * parts * 2 * pair_bytes),
+                ("index_cp_offsets", samples * parts * 2 * pair_bytes),
+            ]
 
     offset, scratch = 0, {}
     for name, size in items:
@@ -244,6 +275,30 @@ def layout(
         "_dcp_part_stride": dcp_part,
         "_bytes": 2 * region + 2 * dcp_part,
     }
+    if tiled_indexer or (with_indexer and indexer_cp):
+        # Two launch slots, like the attention/FFN peer buffers. Distinct radix
+        # rounds must not overwrite a histogram or threshold still being read.
+        offset = symmetric["_bytes"]
+        cp_items = (
+            [
+                ("index_cp_hist", index_ranks * INDEX_RADIX_DIGITS * samples * INDEX_RADIX_BINS * pair_bytes),
+                ("index_cp_threshold", INDEX_RADIX_DIGITS * samples * 2 * pair_bytes),
+                ("index_cp_counts", index_ranks * samples * 2 * pair_bytes),
+                ("index_cp_offsets", samples * 2 * pair_bytes),
+                ("index_cp_indices", samples * sparse_attention_topk * pair_bytes),
+            ]
+            if tiled_indexer
+            else []
+        )
+        if indexer_cp:
+            cp_items += [("index_cp_scores", samples * min(index_max_seq, INDEX_LOCAL_LDS_CAPACITY) * pair_bytes)]
+        if indexer_cp and not tiled_indexer and npes > 1:
+            cp_items += [("index_cp_q", samples * INDEX_Q_ROWS // 2 * pair_bytes)]
+        for name, size in cp_items:
+            symmetric[name] = offset
+            symmetric[name + "_stride"] = _align(size)
+            offset += 2 * _align(size)
+        symmetric["_bytes"] = offset
     return scratch, symmetric
 
 
@@ -255,31 +310,28 @@ def stage_tasks(
     index_max_seq: int = 4096,
     expert_mxfp4: bool = False,
     inter: int = INTER,
+    indexer_cp: bool = False,
+    npes: int = 1,
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
-    tasks = [
-        ("qkv_a", N_QKV_A),
-        ("q_norm", samples),
-        ("cache", 1),
-        ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE),
-    ]
+    index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
+    tasks = [("qkv_a", N_QKV_A), ("q_norm", samples), ("cache", 1), ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE)]
     if with_indexer:
-        tasks += [("index_q", INDEX_Q_ROWS // INDEX_TILE)]
+        shard_q = indexer_cp and not indexer_uses_tiles(index_max_seq, indexer_cp)
+        tasks += [("index_q", INDEX_Q_ROWS // INDEX_TILE // (index_ranks if shard_q else 1))]
     tasks += [("uk", heads * KV_LORA // UK_TILE)]
     if with_indexer:
-        tasks += [
-            (
-                "index_score",
-                samples * ((index_max_seq + INDEX_KEYS_PER_TASK - 1) // INDEX_KEYS_PER_TASK),
-            ),
-            ("index_select", samples),
-        ]
+        capacity = index_cp_capacity(index_max_seq, index_ranks) if indexer_cp else index_max_seq
+        tasks += [("index_score", samples * ((capacity + INDEX_KEYS_PER_TASK - 1) // INDEX_KEYS_PER_TASK))]
+        if indexer_uses_tiles(index_max_seq, indexer_cp):
+            parts = index_cp_partitions(index_max_seq, index_ranks)
+            for digit in range(INDEX_RADIX_DIGITS):
+                tasks += [(f"index_hist_{digit}", samples * parts), (f"index_prefix_{digit}", samples)]
+            tasks += [("index_count", samples * parts), ("index_offsets", samples), ("index_emit", samples * parts)]
+        tasks += [("index_select", samples)]
     tasks += [
-        (
-            "split",
-            samples * (heads // WAVES) * (sparse_attention_topk // sparse_keys_per_task(samples, heads)),
-        ),
+        ("split", samples * (heads // WAVES) * (sparse_attention_topk // sparse_keys_per_task(samples, heads))),
         ("uv", samples * (heads * V_DIM // UV_TILE)),
         ("o", N_ROW_TILES),
         ("router", samples * N_ROUTER),
@@ -288,11 +340,7 @@ def stage_tasks(
             (
                 inter
                 if samples == 1
-                else samples
-                * max(
-                    BLOCKS,
-                    ((MOE_SLOTS * inter // UG_TILE + BLOCKS - 1) // BLOCKS) * BLOCKS,
-                )
+                else samples * max(BLOCKS, ((MOE_SLOTS * inter // UG_TILE + BLOCKS - 1) // BLOCKS) * BLOCKS)
             ),
         ),
         ("down", HIDDEN // dn_tile(samples, expert_mxfp4)),

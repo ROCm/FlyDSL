@@ -31,11 +31,7 @@ from kernels.monokernel.config import (
     validate_shard,
 )
 from kernels.monokernel.glm.kernel import build_glm5_monokernel
-from kernels.monokernel.glm.layout import (
-    INDEX_DIM,
-    layout,
-    stage_tasks,
-)
+from kernels.monokernel.glm.layout import INDEX_DIM, layout, stage_tasks
 from kernels.monokernel.layout import TL_COLS
 from kernels.monokernel.packing import (
     pack_bf16,
@@ -80,14 +76,7 @@ def prepare_glm5_weights(W: LayerWeights, attention_weight: AttentionWeight | st
     if atom_experts:
         packed = attention
         packed["w_r"] = pack_bf16(t["w_r"])
-        packed.update(
-            dict(
-                zip(
-                    ("w_ug", "s_ug", "w_dn", "s_dn"),
-                    prepare_mxfp4_expert_storage(W, canonical=False),
-                )
-            )
-        )
+        packed.update(dict(zip(("w_ug", "s_ug", "w_dn", "s_dn"), prepare_mxfp4_expert_storage(W, canonical=False))))
         return packed
     if profile.attention_weight is AttentionWeight.FP8_PTPC:
         raise ValueError("PTPC attention currently requires ATOM expert storage")
@@ -131,6 +120,9 @@ class Glm5MonoKernel:
     attention KV and physically paged BF16 index caches. Paged caches share
     ``block_tables`` to resolve logical token positions; each launch groups ``index_request_width`` consecutive rows per
     request (five rows for MTP4 C1/C2).
+    ``indexer_cp=True`` partitions index scoring across the TP ranks and uses
+    in-kernel peer mailboxes for exact global selection. Index caches remain
+    replicated; each rank must receive identical indexer weights and inputs.
     ``group`` is a torch.distributed group (None for npes=1).
 
     The symmetric buffer uses PyTorch's caching allocator and CUDA/ROCm IPC
@@ -150,6 +142,7 @@ class Glm5MonoKernel:
         with_indexer: bool = False,
         index_max_seq: int = 4096,
         timeline=False,
+        indexer_cp: bool = False,
         *,
         index_request_width: int | None = None,
         index_page_size: int = 16,
@@ -183,6 +176,8 @@ class Glm5MonoKernel:
             raise ValueError("DCP size must be 1 or the TP group size")
         if with_indexer and dcp_size != 1:
             raise ValueError("fused indexer currently requires dcp_size=1")
+        if indexer_cp and not with_indexer:
+            raise ValueError("indexer_cp=True requires with_indexer=True")
         if with_indexer and (index_max_seq <= 0 or index_max_seq % 64):
             raise ValueError("index_max_seq must be a positive multiple of 64")
         if not 1 <= launches_per_step <= 128:
@@ -214,6 +209,7 @@ class Glm5MonoKernel:
         self.kv_cache_dtype = kv_cache_dtype
         self.dcp_size = dcp_size
         self.output_heads = output_heads
+        self.indexer_cp = indexer_cp
         t = W.t
         self.expert_mxfp4 = t["w_ug"].dtype is torch.uint8
         self.atom_experts = (
@@ -228,15 +224,7 @@ class Glm5MonoKernel:
             prepare_glm5_weights(W, self.attention_weight) if prepared_weights is None else prepared_weights
         )
         if with_indexer:
-            required = (
-                "w_index_k",
-                "s_index_k",
-                "w_index_w",
-                "w_index_q",
-                "s_index_q",
-                "g_index_k",
-                "b_index_k",
-            )
+            required = ("w_index_k", "s_index_k", "w_index_w", "w_index_q", "s_index_q", "g_index_k", "b_index_k")
             missing = [name for name in required if name not in t]
             if missing:
                 raise ValueError(f"with_indexer=True requires weights: {', '.join(missing)}")
@@ -250,6 +238,7 @@ class Glm5MonoKernel:
             topk,
             with_indexer,
             index_max_seq,
+            indexer_cp=indexer_cp,
             inter=W.config.inter,
             output_heads=output_heads,
             dcp_size=dcp_size,
@@ -271,6 +260,8 @@ class Glm5MonoKernel:
             with_indexer,
             index_max_seq,
             self.expert_mxfp4,
+            indexer_cp=indexer_cp,
+            npes=npes,
             inter=W.config.inter,
         )
         n_tasks = sum(n for _, n in self.stages)
@@ -337,6 +328,7 @@ class Glm5MonoKernel:
                 else W.t["w_uv"].shape[0] // W.t["s_uv"].shape[0]
             ),
             timeline=timeline,
+            indexer_cp=indexer_cp,
         )
 
     def debug(self, name: str, shape, dtype=torch.float32, pairs=True, bf2=False) -> torch.Tensor:
@@ -344,6 +336,15 @@ class Glm5MonoKernel:
         ``bf2``: each pair's value word packs two bf16 elements)."""
         off = self.scr_layout[name]
         storage = self.scratch
+        if name == "index_q" and "index_cp_q" in self.sym_layout:
+            # Debug reads the most recently published slot; production forward
+            # never reads device epochs on the host.
+            off = self.sym_layout["index_cp_q"]
+            stride = self.sym_layout["index_cp_q_stride"]
+            storage = self.sym_storage
+            first_tag = storage[off + 4 : off + 8].view(torch.int32).item()
+            second_tag = storage[off + stride + 4 : off + stride + 8].view(torch.int32).item()
+            off += stride if second_tag > first_tag else 0
         n = 1
         for d in shape:
             n *= d
@@ -423,10 +424,7 @@ class Glm5MonoKernel:
                 )
             if self.kv_cache_layout is KvCacheLayout.ATOM:
                 block_tables = self.identity_block_tables if block_tables is None else block_tables
-                expected_blocks = (
-                    self.S // self.index_request_width,
-                    self.index_block_table_stride,
-                )
+                expected_blocks = (self.S // self.index_request_width, self.index_block_table_stride)
                 if (
                     block_tables is None
                     or block_tables.ndim != 2
@@ -440,10 +438,7 @@ class Glm5MonoKernel:
             cache_width = GLM5_CONFIG.kv_lora + GLM5_CONFIG.pe_dim
             fp8_dtypes = {
                 dtype
-                for dtype in (
-                    getattr(torch, "float8_e4m3fn", None),
-                    getattr(torch, "float8_e4m3fnuz", None),
-                )
+                for dtype in (getattr(torch, "float8_e4m3fn", None), getattr(torch, "float8_e4m3fnuz", None))
                 if dtype is not None
             }
             expected_dtype = (

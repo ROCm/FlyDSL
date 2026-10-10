@@ -99,6 +99,8 @@ def worker(
     shuffled_pages,
     check_attention,
     npes,
+    indexer_cp,
+    check_cp,
     position,
     max_seq,
     request_pos_stride,
@@ -174,6 +176,7 @@ def worker(
             index_max_seq=max_seq,
             with_indexer=fused_indexer,
             timeline=debug_progress,
+            indexer_cp=indexer_cp,
         )
         h = torch.randn(
             (S, W.config.hidden),
@@ -362,6 +365,77 @@ def worker(
                 if max_diff > 0.05 or attention_signal < 1e-4:
                     raise RuntimeError(f"fused attention physical-cache comparison failed for TP{npes} S={S}")
                 comparison.close()
+        if check_cp:
+            control = Glm5MonoKernel(
+                W,
+                S,
+                rank=rank,
+                npes=npes,
+                topk=2048,
+                launches_per_step=1,
+                attention_weight=attention_weight,
+                kv_cache_layout=cache_layout,
+                kv_cache_dtype=cache_dtype,
+                prepared_weights=prepared,
+                native_fp4_mfma=native,
+                with_indexer=True,
+                indexer_cp=not indexer_cp,
+                rope_dtype="bf16",
+                index_request_width=5 if S >= 5 else 1,
+                index_max_seq=max_seq,
+            )
+            kv_control, index_control = kv.clone(), index_cache.clone()
+            expected = control.forward(
+                h,
+                cur_pos,
+                kv_control,
+                kv_control,
+                indices,
+                cos,
+                sin,
+                positions=positions,
+                slot_mapping=slots,
+                sparse_kv_indptr=indptr,
+                index_cache=index_control,
+                block_tables=block_tables,
+            )
+            torch.cuda.synchronize()
+            chosen = op.intermediates()["indices"].clone()
+            # Compare FP8 storage bytes: the cache is consumed as E4M3FN by
+            # the kernel, while the PR fixture uses an FNUZ-typed container.
+            # FN negative zero (0x80) appears as NaN through an FNUZ view.
+            same = (
+                torch.equal(x.view(torch.uint8), expected.view(torch.uint8))
+                and torch.equal(kv.view(torch.uint8), kv_control.view(torch.uint8))
+                and torch.equal(index_cache.view(torch.uint8), index_control.view(torch.uint8))
+                and torch.equal(chosen, control.intermediates()["indices"])
+            )
+            if not same:
+                control_data = control.intermediates()
+                actual_data = op.intermediates()
+                differences = {}
+                for label, got, ref in [
+                    ("x", x, expected),
+                    ("kv_bytes", kv.view(torch.uint8), kv_control.view(torch.uint8)),
+                    ("index_cache", index_cache, index_control),
+                ] + [(name, actual_data[name], control_data[name]) for name in actual_data]:
+                    differences[label] = {
+                        "count": int((got != ref).sum()),
+                        "max": float((got.float() - ref.float()).abs().max()),
+                    }
+                print(f"TP{npes} rank={rank} S={S} CP differences: {differences}", flush=True)
+                raise RuntimeError(f"TP{npes} S={S} CP on/off bitwise mismatch")
+            # Cross the old 8-bit epoch boundary and alternate mailbox slots.
+            for _ in range(306):
+                graph.replay()
+            torch.cuda.synchronize()
+            if not torch.equal(x.view(torch.uint8), expected.view(torch.uint8)) or not torch.equal(
+                chosen, op.intermediates()["indices"]
+            ):
+                raise RuntimeError(f"TP{npes} S={S} CP graph replay mismatch")
+            if rank == 0:
+                print(f"TP{npes} S={S} CP control/replay: bitwise_equal=True (306 graphs x 16 layers)", flush=True)
+            control.close()
         if not torch.isfinite(x).all().item():
             raise RuntimeError(f"nonfinite output for TP{npes} S={S}, native={native}")
         elapsed = []
@@ -379,7 +453,7 @@ def worker(
         dist.all_gather_object(gathered, statistics.median(elapsed))
         if rank == 0:
             print(
-                f"TP{npes} S={S} native={native} fused_indexer={fused_indexer}: "
+                f"TP{npes} S={S} native={native} fused_indexer={fused_indexer} indexer_cp={indexer_cp}: "
                 f"median-rank={statistics.median(gathered):.3f} us/layer; "
                 f"max-rank={max(gathered):.3f} us/layer; ranks={gathered}",
                 flush=True,
@@ -391,6 +465,8 @@ def worker(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--npes", type=int, choices=(4, 8), default=4)
+    parser.add_argument("--indexer-cp", action="store_true")
+    parser.add_argument("--check-cp", action="store_true")
     parser.add_argument("--pos", type=int, default=3000)
     parser.add_argument("--max-seq", type=int, default=4096)
     parser.add_argument("--request-pos-stride", type=int, default=0)
@@ -405,8 +481,8 @@ if __name__ == "__main__":
     parser.add_argument("--shuffled-pages", action="store_true")
     parser.add_argument("--check-attention", action="store_true")
     args = parser.parse_args()
-    if args.indexer_ties and not args.fused_indexer:
-        parser.error("Tie checks require --fused-indexer")
+    if (args.indexer_cp or args.check_cp or args.indexer_ties) and not args.fused_indexer:
+        parser.error("CP and tie checks require --fused-indexer")
     if args.max_seq <= 0 or args.max_seq % 64 or args.pos < 0 or args.request_pos_stride < 0:
         parser.error("capacity must be positive and aligned to 64; positions must be nonnegative")
     if args.pos + 5 + (max(args.samples) // 5 - 1) * args.request_pos_stride > args.max_seq:
@@ -435,6 +511,8 @@ if __name__ == "__main__":
             args.shuffled_pages,
             args.check_attention,
             args.npes,
+            args.indexer_cp,
+            args.check_cp,
             args.pos,
             args.max_seq,
             args.request_pos_stride,

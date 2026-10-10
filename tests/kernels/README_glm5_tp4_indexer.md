@@ -71,8 +71,11 @@ The fused TP4 API takes a BF16 index cache with 128 values per physical row,
 an `int32` block table for each request, five rows per request, and the ATOM
 `positions`, `slot_mapping`, and `sparse_kv_indptr` metadata. It maps selected
 logical positions to physical attention KV slots inside the persistent
-kernel. The current fused path is limited to an index window of 4,096 tokens
-and does not implement ATOM's FP8 index cache format.
+kernel. The original PR path measured above is limited to an index window
+of 4,096 tokens and does not implement ATOM's FP8 index cache format. The
+subsequent shared CP implementation extends the BF16 indexer to longer
+contexts; see `kernels/monokernel/doc/glm-indexer-cp.md` for its contract and
+128K/1M validation results.
 
 
 ## Shared TP4/TP8 implementation

@@ -87,6 +87,7 @@ def run_rank(
     seed=1234,
     with_indexer=False,
     expert_mxfp4=False,
+    indexer_cp=False,
     max_seq=MAX_SEQ,
     indexer_ties=False,
     model_tp=None,
@@ -132,8 +133,25 @@ def run_rank(
             indices[:, -1] = torch.arange(cur_pos, cur_pos + S, device=dev, dtype=torch.int32)
         index0 = None
     op = Glm5MonoKernel(
-        W, S, rank=rank, npes=npes, group=group, topk=topk, with_indexer=with_indexer, index_max_seq=max_seq
+        W,
+        S,
+        rank=rank,
+        npes=npes,
+        group=group,
+        topk=topk,
+        with_indexer=with_indexer,
+        index_max_seq=max_seq,
+        indexer_cp=indexer_cp,
+        launches_per_step=16 if indexer_cp else 1,
     )
+    # Compare the exact output order as well as the golden's selected-set check.
+    # Long contexts use the same tiled selector with CP disabled as the control.
+    control = None
+    if indexer_cp:
+        control = Glm5MonoKernel(
+            W, S, rank=rank, npes=npes, group=group, topk=topk, with_indexer=True, index_max_seq=max_seq
+        )
+
     if npes == 1:
         allreduce = lambda x: x  # noqa: E731
     else:
@@ -199,11 +217,71 @@ def run_rank(
             report.append(("x_out_e2e", 0.0, 0.0, "skipped: golden routing flipped on a 1-ulp difference in a"))
         rows = slice(cur_pos, cur_pos + S)
         ok &= _check("kv", kv[rows], kv_ref[rows], report)
+        if indexer_cp:
+            if npes > 1:
+                import torch.distributed as dist
+
+                chosen = got["indices"].cpu()
+                peer_indices = [torch.empty_like(chosen) for _ in range(npes)]
+                dist.all_gather(peer_indices, chosen, group=group)
+                same = all(torch.equal(chosen, value) for value in peer_indices)
+                ok &= same
+                report.append(("cp_ranks", 0.0, 0.0, f"indices_equal={same}"))
+            if control is not None:
+                kv_control, pe_control, index_control = (kv0.clone(), pe0.clone(), index0.clone())
+                expected = control.forward(
+                    h, pos_t, kv_control, pe_control, indices, cos, sin, index_cache=index_control
+                )
+                torch.cuda.synchronize()
+                same = (
+                    torch.equal(got["indices"], control.intermediates()["indices"])
+                    and torch.equal(out.view(torch.uint8), expected.view(torch.uint8))
+                    and torch.equal(kv.view(torch.uint8), kv_control.view(torch.uint8))
+                    and torch.equal(pe.view(torch.uint8), pe_control.view(torch.uint8))
+                    and torch.equal(index_cache.view(torch.uint8), index_control.view(torch.uint8))
+                )
+                ok &= same
+                report.append(("cp_control", 0.0, 0.0, f"bitwise_equal={same}"))
+            replay_out = torch.empty_like(out)
+            chosen = got["indices"].clone()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for layer in range(op.launches_per_step):
+                    op.forward(
+                        h,
+                        pos_t,
+                        kv,
+                        pe,
+                        indices,
+                        cos,
+                        sin,
+                        x_out=replay_out,
+                        index_cache=index_cache,
+                        layer=layer,
+                        advance=False,
+                    )
+                op.advance_step()
+            if npes > 1 and rank == npes - 1:
+                import time
+
+                time.sleep(0.025)  # Exercise peer waits after capture, with a late rank.
+            # Match the native benchmark's 50 warmup + 256 timed graphs. A
+            # short replay check missed an S=8 peer-mailbox polling stall.
+            for _ in range(50 + 256):
+                graph.replay()
+            torch.cuda.synchronize()
+            same = torch.equal(out.view(torch.uint8), replay_out.view(torch.uint8)) and torch.equal(
+                chosen, op.intermediates()["indices"]
+            )
+            ok &= same
+            report.append(("cp_replay", 0.0, 0.0, f"bitwise_equal={same}"))
         if rank == 0 or not ok:
             lines = [f"[rank {rank} iter {it}] ok={ok} sel_ok={torch.equal(got['sel'], moe['sel'])}"]
             lines += [f"   {n:9s} max_err={e:.3e} ref_max={m:.3e} {nb}" for n, e, m, nb in report]
             print("\n".join(lines), flush=True)
     op.close()
+    if control is not None:
+        control.close()
     return ok
 
 
@@ -217,6 +295,7 @@ def bench_rank(
     seed=1234,
     with_indexer=False,
     expert_mxfp4=False,
+    indexer_cp=False,
     max_seq=MAX_SEQ,
     model_tp=None,
 ):
@@ -259,6 +338,7 @@ def bench_rank(
         launches_per_step=launches_per_step,
         with_indexer=with_indexer,
         index_max_seq=max_seq,
+        indexer_cp=indexer_cp,
     )
     h = torch.randn(S, 6144, generator=gen, device=dev).to(torch.bfloat16)
     x = torch.empty_like(h)
@@ -272,7 +352,15 @@ def bench_rank(
         dist.barrier()
     if os.environ.get("MLA_MOE_TIMELINE"):
         top = Glm5MonoKernel(
-            W, S, rank=rank, npes=npes, group=group, with_indexer=with_indexer, index_max_seq=max_seq, timeline=True
+            W,
+            S,
+            rank=rank,
+            npes=npes,
+            group=group,
+            with_indexer=with_indexer,
+            index_max_seq=max_seq,
+            indexer_cp=indexer_cp,
+            timeline=True,
         )
         for _ in range(3):
             top.forward(h, pos_t, kv, pe, indices, cos, sin, x_out=x, index_cache=index_cache)
@@ -315,6 +403,7 @@ def _worker(
     iters,
     with_indexer,
     expert_mxfp4,
+    indexer_cp,
     max_seq,
     indexer_ties,
     model_tp,
@@ -334,6 +423,7 @@ def _worker(
             iters=-iters,
             with_indexer=with_indexer,
             expert_mxfp4=expert_mxfp4,
+            indexer_cp=indexer_cp,
             max_seq=max_seq,
             model_tp=model_tp,
         )
@@ -349,6 +439,7 @@ def _worker(
             group=None,
             with_indexer=with_indexer,
             expert_mxfp4=expert_mxfp4,
+            indexer_cp=indexer_cp,
             max_seq=max_seq,
             model_tp=model_tp,
             vary_expert_scales=vary_expert_scales,
@@ -365,6 +456,7 @@ def run(
     iters,
     with_indexer=False,
     expert_mxfp4=False,
+    indexer_cp=False,
     max_seq=MAX_SEQ,
     indexer_ties=False,
     model_tp=None,
@@ -379,6 +471,7 @@ def run(
             iters,
             with_indexer=with_indexer,
             expert_mxfp4=expert_mxfp4,
+            indexer_cp=indexer_cp,
             max_seq=max_seq,
             model_tp=model_tp,
             vary_expert_scales=vary_expert_scales,
@@ -397,6 +490,7 @@ def run(
             iters,
             with_indexer,
             expert_mxfp4,
+            indexer_cp,
             max_seq,
             indexer_ties,
             model_tp,
@@ -414,7 +508,9 @@ def run(
 def test_layer_model_shards_mxfp4(npes, S):
     if torch.cuda.device_count() < npes:
         pytest.skip(f"needs {npes} GPUs")
-    assert run(npes, S, 3000, 1, with_indexer=True, expert_mxfp4=True, model_tp=npes, vary_expert_scales=True)
+    assert run(
+        npes, S, 3000, 1, with_indexer=True, expert_mxfp4=True, model_tp=npes, vary_expert_scales=True, indexer_cp=True
+    )
 
 
 @pytest.mark.multi_gpu
@@ -423,7 +519,7 @@ def test_layer_model_shards_mxfp4(npes, S):
 def test_layer_model_shards_fp8(npes, S):
     if torch.cuda.device_count() < npes:
         pytest.skip(f"needs {npes} GPUs")
-    assert run(npes, S, 3000, 1, with_indexer=True, model_tp=npes)
+    assert run(npes, S, 3000, 1, with_indexer=True, indexer_cp=True, model_tp=npes)
 
 
 @pytest.mark.parametrize("S,cur_pos", [(1, 100), (1, 3000), (2, 3000)])
@@ -442,6 +538,58 @@ def test_layer_tp8():
 )
 def test_layer_single_gpu_indexer(S, cur_pos, expert_mxfp4):
     assert run(1, S, cur_pos, 1, with_indexer=True, expert_mxfp4=expert_mxfp4)
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
+@pytest.mark.parametrize(
+    "S,cur_pos,max_seq",
+    [
+        (1, 0, 4096),
+        (2, 2047, 4096),
+        (4, 3000, 4096),
+        (8, 3000, 4096),
+        (8, 4088, 4096),
+        (8, 56, 64),
+        (8, 16376, 16384),
+        (8, 16380, 16448),
+        (1, 16383, 16448),
+        (1, 16384, 16448),
+        (1, 3000, 131072),
+        (1, 131071, 131072),
+        (1, 32768, 32832),
+    ],
+)
+def test_layer_tp8_indexer_cp(S, cur_pos, max_seq):
+    assert run(8, S, cur_pos, 2, with_indexer=True, expert_mxfp4=True, indexer_cp=True, max_seq=max_seq)
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 8, reason="needs 8 GPUs")
+@pytest.mark.parametrize("cur_pos,max_seq", [(3000, 4096), (131071, 131072)])
+def test_layer_tp8_indexer_cp_ties(cur_pos, max_seq):
+    assert run(
+        8, 1, cur_pos, 2, with_indexer=True, expert_mxfp4=True, indexer_cp=True, indexer_ties=True, max_seq=max_seq
+    )
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.parametrize(
+    "S,cur_pos,max_seq",
+    [(1, 3000, 4096), (2, 3000, 4096), (4, 3000, 4096), (8, 3000, 4096), (8, 16380, 16448), (1, 32768, 32832)],
+)
+def test_layer_tp4_indexer_cp(S, cur_pos, max_seq):
+    if torch.cuda.device_count() < 4:
+        pytest.skip("needs 4 GPUs")
+    assert run(4, S, cur_pos, 2, with_indexer=True, expert_mxfp4=True, indexer_cp=True, max_seq=max_seq, model_tp=4)
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.parametrize("npes", [2, 4])
+def test_layer_indexer_cp_peer_counts(npes):
+    if torch.cuda.device_count() < npes:
+        pytest.skip(f"needs {npes} GPUs")
+    assert run(npes, 1, 3000, 1, with_indexer=True, indexer_cp=True)
 
 
 def test_reference_default_dtype():
@@ -507,12 +655,19 @@ if __name__ == "__main__":
     ap.add_argument("--bench-iters", type=int, default=320, help="layer launches timed by --bench")
     ap.add_argument("--indexer", action="store_true", help="fuse indexer projection, scoring, and top-k")
     ap.add_argument("--mxfp4", action="store_true", help="use native MXFP4 expert weights")
+    ap.add_argument(
+        "--indexer-cp",
+        action="store_true",
+        help="partition fused indexer scoring and exact selection across TP ranks; requires --indexer",
+    )
     ap.add_argument("--max-seq", type=int, default=MAX_SEQ, help="KV/index cache capacity; multiple of 64")
     a = ap.parse_args()
+    if a.indexer_cp and not a.indexer:
+        ap.error("--indexer-cp requires --indexer")
     if a.bench:
         if a.npes == 1:
             print(
-                f"{bench_rank(0, 1, a.S, a.pos, iters=a.bench_iters, with_indexer=a.indexer, expert_mxfp4=a.mxfp4, max_seq=a.max_seq, model_tp=a.model_tp):.1f} us/layer"
+                f"{bench_rank(0, 1, a.S, a.pos, iters=a.bench_iters, with_indexer=a.indexer, expert_mxfp4=a.mxfp4, indexer_cp=a.indexer_cp, max_seq=a.max_seq, model_tp=a.model_tp):.1f} us/layer"
             )
         else:
             run(
@@ -522,6 +677,7 @@ if __name__ == "__main__":
                 -a.bench_iters,
                 with_indexer=a.indexer,
                 expert_mxfp4=a.mxfp4,
+                indexer_cp=a.indexer_cp,
                 max_seq=a.max_seq,
                 model_tp=a.model_tp,
             )
@@ -533,6 +689,7 @@ if __name__ == "__main__":
         a.iters,
         with_indexer=a.indexer,
         expert_mxfp4=a.mxfp4,
+        indexer_cp=a.indexer_cp,
         max_seq=a.max_seq,
         model_tp=a.model_tp,
     )
