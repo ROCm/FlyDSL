@@ -33,6 +33,26 @@ INDEX_DIM = 128
 INDEX_Q_ROWS = INDEX_HEADS * INDEX_DIM
 INDEX_TILE = 16
 INDEX_KEYS_PER_TASK = 64
+INDEX_CP_TILE = 4096
+INDEX_RADIX_DIGITS = 4
+INDEX_RADIX_BINS = 256
+INDEX_LOCAL_LDS_CAPACITY = 16384
+
+
+def indexer_uses_tiles(index_max_seq: int, indexer_cp: bool) -> bool:
+    """Keep the existing short selector; use bounded tiles for larger contexts."""
+    return index_max_seq > INDEX_LOCAL_LDS_CAPACITY
+
+
+def index_cp_capacity(index_max_seq: int, npes: int) -> int:
+    """Maximum context shard, rounded to a complete scoring tile."""
+    unit = npes * INDEX_KEYS_PER_TASK
+    return (index_max_seq + unit - 1) // unit * INDEX_KEYS_PER_TASK
+
+
+def index_cp_partitions(index_max_seq: int, npes: int) -> int:
+    return (index_cp_capacity(index_max_seq, npes) + INDEX_CP_TILE - 1) // INDEX_CP_TILE
+
 
 N_QKV_A = QKV_A_ROWS // QKV_A_TILE
 N_ROW_TILES = HIDDEN // ROW_TILE
@@ -78,10 +98,13 @@ def layout(
     sparse_attention_topk: int,
     with_indexer: bool = False,
     index_max_seq: int = 4096,
+    indexer_cp: bool = False,
 ):
     """Return byte offsets for per-rank scratch and symmetric peer buffers."""
 
     split_count = sparse_attention_topk // sparse_keys_per_task(samples)
+    tiled_indexer = with_indexer and indexer_uses_tiles(index_max_seq, indexer_cp)
+    index_ranks = npes if indexer_cp else 1
     pair_bytes = 8
     items = [
         ("q_a", samples * Q_LORA * pair_bytes),
@@ -113,10 +136,20 @@ def layout(
             ("index_ready", samples * pair_bytes),
             ("index_w", samples * INDEX_HEADS * pair_bytes),
             ("index_q", samples * INDEX_Q_ROWS // 2 * pair_bytes),
-            ("index_scores", samples * index_max_seq * pair_bytes),
+            (
+                "index_scores",
+                samples * (index_cp_capacity(index_max_seq, npes) if indexer_cp else index_max_seq) * pair_bytes,
+            ),
             ("indices", samples * sparse_attention_topk * 4),
             ("indices_ready", samples * pair_bytes),
         ]
+        if tiled_indexer:
+            parts = index_cp_partitions(index_max_seq, index_ranks)
+            items += [
+                ("index_cp_hist", INDEX_RADIX_DIGITS * samples * parts * INDEX_RADIX_BINS * pair_bytes),
+                ("index_cp_counts", samples * parts * 2 * pair_bytes),
+                ("index_cp_offsets", samples * parts * 2 * pair_bytes),
+            ]
 
     offset, scratch = 0, {}
     for name, size in items:
@@ -132,6 +165,30 @@ def layout(
         "_part_stride": part,
         "_bytes": 2 * region,
     }
+    if tiled_indexer or (with_indexer and indexer_cp):
+        # Two launch slots, like the attention/FFN peer buffers. Distinct radix
+        # rounds must not overwrite a histogram or threshold still being read.
+        offset = symmetric["_bytes"]
+        cp_items = (
+            [
+                ("index_cp_hist", index_ranks * INDEX_RADIX_DIGITS * samples * INDEX_RADIX_BINS * pair_bytes),
+                ("index_cp_threshold", INDEX_RADIX_DIGITS * samples * 2 * pair_bytes),
+                ("index_cp_counts", index_ranks * samples * 2 * pair_bytes),
+                ("index_cp_offsets", samples * 2 * pair_bytes),
+                ("index_cp_indices", samples * sparse_attention_topk * pair_bytes),
+            ]
+            if tiled_indexer
+            else []
+        )
+        if indexer_cp:
+            cp_items += [("index_cp_scores", samples * min(index_max_seq, INDEX_LOCAL_LDS_CAPACITY) * pair_bytes)]
+        if indexer_cp and not tiled_indexer and npes > 1:
+            cp_items += [("index_cp_q", samples * INDEX_Q_ROWS // 2 * pair_bytes)]
+        for name, size in cp_items:
+            symmetric[name] = offset
+            symmetric[name + "_stride"] = _align(size)
+            offset += 2 * _align(size)
+        symmetric["_bytes"] = offset
     return scratch, symmetric
 
 
@@ -142,6 +199,8 @@ def stage_tasks(
     with_indexer: bool = False,
     index_max_seq: int = 4096,
     expert_mxfp4: bool = False,
+    indexer_cp: bool = False,
+    npes: int = 1,
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
@@ -152,13 +211,18 @@ def stage_tasks(
         ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE),
     ]
     if with_indexer:
-        tasks += [("index_q", INDEX_Q_ROWS // INDEX_TILE)]
+        shard_q = indexer_cp and not indexer_uses_tiles(index_max_seq, indexer_cp)
+        tasks += [("index_q", INDEX_Q_ROWS // INDEX_TILE // (npes if shard_q else 1))]
     tasks += [("uk", heads * KV_LORA // UK_TILE)]
     if with_indexer:
-        tasks += [
-            ("index_score", samples * ((index_max_seq + INDEX_KEYS_PER_TASK - 1) // INDEX_KEYS_PER_TASK)),
-            ("index_select", samples),
-        ]
+        capacity = index_cp_capacity(index_max_seq, npes) if indexer_cp else index_max_seq
+        tasks += [("index_score", samples * ((capacity + INDEX_KEYS_PER_TASK - 1) // INDEX_KEYS_PER_TASK))]
+        if indexer_uses_tiles(index_max_seq, indexer_cp):
+            parts = index_cp_partitions(index_max_seq, npes if indexer_cp else 1)
+            for digit in range(INDEX_RADIX_DIGITS):
+                tasks += [(f"index_hist_{digit}", samples * parts), (f"index_prefix_{digit}", samples)]
+            tasks += [("index_count", samples * parts), ("index_offsets", samples), ("index_emit", samples * parts)]
+        tasks += [("index_select", samples)]
     tasks += [
         ("split", samples * (sparse_attention_topk // sparse_keys_per_task(samples))),
         ("uv", samples * (heads * V_DIM // UV_TILE)),

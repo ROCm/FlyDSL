@@ -44,6 +44,9 @@ class Glm5MonoKernel:
     With ``with_indexer=True``, a single persistent launch covers index K/Q/W
     projection, index K normalization/RoPE/cache update, scoring, exact sparse
     top-k selection, MLA, routing, all expert compute, and both TP reductions.
+    ``indexer_cp=True`` partitions index scoring across the TP ranks and uses
+    in-kernel peer mailboxes for exact global selection. Index caches remain
+    replicated; each rank must receive identical indexer weights and inputs.
     ``group`` is a torch.distributed group (None for npes=1).
 
     The symmetric buffer uses PyTorch's caching allocator and CUDA/ROCm IPC
@@ -63,16 +66,22 @@ class Glm5MonoKernel:
         with_indexer: bool = False,
         index_max_seq: int = 4096,
         timeline=False,
+        indexer_cp: bool = False,
     ):
         if W.config != GLM5_CONFIG:
             raise ValueError(f"Glm5MonoKernel requires GLM-5 weights, got {W.config.name!r}")
         validate_shard(samples, W.heads, rank, npes, topk, GLM5_CONFIG)
+        if indexer_cp and not with_indexer:
+            raise ValueError("indexer_cp=True requires with_indexer=True")
+        if with_indexer and (index_max_seq <= 0 or index_max_seq % 64):
+            raise ValueError("index_max_seq must be a positive multiple of 64")
         if not 1 <= launches_per_step <= 128:
             raise ValueError(f"launches_per_step must be in [1, 128], got {launches_per_step}")
         self.W, self.S, self.rank, self.npes, self.topk = W, samples, rank, npes, topk
         self.launches_per_step = launches_per_step
         self.with_indexer = with_indexer
         self.index_max_seq = index_max_seq
+        self.indexer_cp = indexer_cp
         t = W.t
         self.expert_mxfp4 = t["w_ug"].dtype is torch.uint8
         self.packed = pack_layer_weights(
@@ -109,9 +118,11 @@ class Glm5MonoKernel:
             self.packed["w_index_k"] = pack_fp8(t["w_index_k"])
             self.packed["w_index_q"] = pack_fp8(t["w_index_q"])
             self.packed["w_index_w"] = pack_bf16(t["w_index_w"])
-        self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk, with_indexer, index_max_seq)
+        self.scr_layout, self.sym_layout = layout(samples, W.heads, npes, topk, with_indexer, index_max_seq, indexer_cp)
         dev = torch.device("cuda", torch.cuda.current_device())
-        self.stages = stage_tasks(samples, W.heads, topk, with_indexer, index_max_seq, self.expert_mxfp4)
+        self.stages = stage_tasks(
+            samples, W.heads, topk, with_indexer, index_max_seq, self.expert_mxfp4, indexer_cp, npes
+        )
         n_tasks = sum(n for _, n in self.stages)
         self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
         if with_indexer:
@@ -151,6 +162,7 @@ class Glm5MonoKernel:
             expert_mxfp4=self.expert_mxfp4,
             uv_scale_rows=W.t["w_uv"].shape[0] // W.t["s_uv"].shape[0],
             timeline=timeline,
+            indexer_cp=indexer_cp,
         )
         self.step = torch.zeros(1, dtype=torch.int32, device=dev)  # decode-step counter
 
@@ -158,15 +170,25 @@ class Glm5MonoKernel:
         """Values of a scratch mailbox (``(value, tag)`` pairs unless ``pairs=False``;
         ``bf2``: each pair's value word packs two bf16 elements)."""
         off = self.scr_layout[name]
+        storage = self.scratch
+        if name == "index_q" and "index_cp_q" in self.sym_layout:
+            # Debug reads the most recently published slot; production forward
+            # never reads device epochs on the host.
+            off = self.sym_layout["index_cp_q"]
+            stride = self.sym_layout["index_cp_q_stride"]
+            storage = self.sym_storage
+            first_tag = storage[off + 4 : off + 8].view(torch.int32).item()
+            second_tag = storage[off + stride + 4 : off + stride + 8].view(torch.int32).item()
+            off += stride if second_tag > first_tag else 0
         n = 1
         for d in shape:
             n *= d
         if not pairs:
-            return self.scratch[off : off + n * 4].view(dtype).view(shape)
+            return storage[off : off + n * 4].view(dtype).view(shape)
         if bf2:
-            words = self.scratch[off : off + n * 4].view(torch.int32).view(n // 2, 2)[:, 0].contiguous()
+            words = storage[off : off + n * 4].view(torch.int32).view(n // 2, 2)[:, 0].contiguous()
             return words.view(torch.bfloat16).float().view(shape)
-        words = self.scratch[off : off + n * 8].view(torch.int32).view(n, 2)[:, 0].contiguous()
+        words = storage[off : off + n * 8].view(torch.int32).view(n, 2)[:, 0].contiguous()
         return words.view(dtype).view(shape)
 
     def forward(
