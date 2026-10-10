@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-10-10T01:18:58Z",
+ "updated": "2026-10-10T01:29:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,20 +53,20 @@
    "branch": "fix/mxfp8-test-quant-e8m0-roundup",
    "event": "pull_request",
    "title": "[Bugfix][Test] Round MXFP8 E8M0 scales up in the test quantizers",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/38003061127",
    "created_at": "2026-10-09T23:10:17Z",
-   "updated_at": "2026-10-10T00:16:00Z",
+   "updated_at": "2026-10-10T01:28:08Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-10-10T00:15:59Z",
-     "completed_at": null,
+     "completed_at": "2026-10-10T01:28:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/38003061127/job/114068709123"
     },
     {
