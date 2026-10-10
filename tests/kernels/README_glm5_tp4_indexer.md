@@ -2,8 +2,9 @@
 
 Measured on four MI355X GPUs on 2026-10-10. This branch starts from FlyDSL
 `main` at `3ad47c18` and compares against ATOM PR #2435 at `a3e2b1a25`.
-The graph has 16 GLM layers per replay. Times below are the median rank's
-microseconds per layer; all runs use native MXFP4 MFMA, FP8 PTPC attention,
+The layer graph has 16 GLM layers per replay. Layer times below are the median
+rank's microseconds per layer; indexer probes run on one GPU. The GLM layer
+uses native MXFP4 MFMA, FP8 PTPC attention,
 FP8 ATOM-layout attention KV, a 3,000-token starting context, top-2048, and
 five MTP4 rows per request. C1 has one request (S=5); C2 has two (S=10).
 The synthetic timing weights leave attention and experts zero-filled. Indexer
@@ -16,25 +17,28 @@ nonzero attention weights and KV values.
 | FlyDSL TP4 MonoKernel | 91.71 | 187.77 | Layer, external indexer excluded |
 | External AITER indexer core | 23.16 | 23.13 | Q/K RoPE, FP8 quant/cache, paged score, stable top-k |
 | ATOM layer + external core | 114.34 | 207.48 | Lower bound: excludes indexer projections and index conversion |
+| External projection + core proxy | 53.38 | 56.47 | Adds RMSNorm, duplicate QKV, index Q/K/W projections; excludes index conversion |
+| ATOM layer + projection proxy | 144.56 | 240.82 | Controlled estimate, not deployed serving |
 | FlyDSL fused TP4 | **118.42** | **224.49** | Index K/Q/W projections, BF16 index cache, score, top-k, attention and MoE |
 
-The fused kernel is 3.6% slower than the C1 lower bound and 8.2% slower than
-the C2 lower bound. ATOM's deployed path also runs RMSNorm, a duplicate QKV
-projection, index Q and K/weight projections, and selected-index conversion
-before its MonoKernel. These missing costs determine the actual comparison;
-this machine has no GLM checkpoint or serving setup to measure them. The
-FlyDSL fused index cache is BF16, whereas ATOM's external indexer uses a
-quantized FP8 cache, so the two indexer implementations also differ in
-precision and storage.
+Against the controlled projection proxy, fusion lowers C1 time by **18.1%**
+(1.22×) and C2 time by **6.8%** (1.07×). The proxy uses AITER CK for FP8
+projections and PyTorch BF16 linear for the K/weight projection because this
+installed AITER's tuned FlyDSL GEMMs are incompatible with the local FlyDSL
+runtime. It omits selected-index conversion and runs on one GPU, whereas the
+layer was measured on four ranks. The fused kernel is 3.6% slower than the
+C1 core-only lower bound and 8.2% slower than the C2 lower bound. This
+machine has no GLM checkpoint or serving setup to measure the deployed full
+path or TPOT. FlyDSL's fused index cache is BF16, whereas ATOM's external
+indexer uses a quantized FP8 cache, so their precision and storage differ.
 
 The TP8 roughly 2× indexed kernel result does not transfer directly to TP4.
 TP4 has 16 local attention heads, filling all 256 resident CTAs for the Q-B
 projection. The index Q projection therefore runs after Q-B on those CTAs;
 TP8 uses eight local heads and has spare CTAs for overlap. In the instrumented
 C2 run, the final expert-down stage alone took about 55 µs. A 2× result for
-this full TP4 layer would require the ATOM projection and conversion work
-omitted above to add another 123 µs for C1 or 241 µs for C2. No such cost has
-been measured.
+this full TP4 layer would require an external indexer cost of about 146 µs
+for C1 or 265 µs for C2, well beyond the 53/56 µs projection proxy.
 
 ## Correctness
 
@@ -60,7 +64,8 @@ python tests/kernels/bench_glm5_tp4_native.py \
 
 For correctness, add `--check-golden --check-attention --shuffled-pages`
 and use a small replay count. The external core benchmark needs
-`AITER_DISABLE_FLYDSL_TOPK_DECODE=1` with this installed AITER runtime.
+`AITER_DISABLE_FLYDSL_TOPK_DECODE=1` with this installed AITER runtime. Add
+`--projections` for the controlled projection-inclusive estimate.
 
 The fused TP4 API takes a BF16 index cache with 128 values per physical row,
 an `int32` block table for each request, five rows per request, and the ATOM
