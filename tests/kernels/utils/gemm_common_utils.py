@@ -60,6 +60,16 @@ def f32_to_e8m0(x):
     return exponent.view(fp8_e8m0)
 
 
+def f32_to_e8m0_roundup(amax, fmt_max):
+    """E8M0 scale 2^ceil(log2(amax / fmt_max)), so that amax / scale <= fmt_max and no element saturates.
+
+    The rounding matches the in-kernel quantizers (kernels/mega_moe/quant.py, kernels/moe/mxfp_moe/mxfp4_gemm_common.py).
+    """
+    u32 = (amax.float() * torch.tensor(1.0 / fmt_max, dtype=fp32, device=amax.device)).view(torch.int32)
+    exponent = ((u32 >> 23) & 0xFF) + ((u32 & 0x7FFFFF) != 0).to(torch.int32)
+    return exponent.clamp_max(254).to(torch.uint8).view(fp8_e8m0)
+
+
 def e8m0_to_f32(scale_e8m0_biased):
     scale_e8m0_biased = scale_e8m0_biased.view(torch.uint8)
     zero_case = scale_e8m0_biased == 0
@@ -782,7 +792,7 @@ def per_1x32_f8_quant(x):
     shape_original = x.shape
     x_flat = x.contiguous().view(-1, block).float()
     max_abs = torch.amax(torch.abs(x_flat), dim=-1).clamp_min(1e-30)
-    scale_e8m0 = f32_to_e8m0(max_abs / fp8_max)
+    scale_e8m0 = f32_to_e8m0_roundup(max_abs, fp8_max)
     scale_f32 = e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
     x_q = (x_flat / scale_f32.view(-1, 1)).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
     x_q = x_q.view(shape_original).contiguous()
@@ -851,7 +861,7 @@ def per_block_f8_quant(x, block_m, block_k):
     fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
     xb = x.contiguous().float().view(rows // block_m, block_m, K // block_k, block_k)
     max_abs = xb.abs().amax(dim=(1, 3)).clamp_min(1e-30)
-    scale_e8m0 = f32_to_e8m0(max_abs / fp8_max)
+    scale_e8m0 = f32_to_e8m0_roundup(max_abs, fp8_max)
     scale_f32 = e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
     x_q = (xb / scale_f32[:, None, :, None]).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
     return x_q.view(rows, K).contiguous(), scale_e8m0.view(torch.uint8).contiguous()
