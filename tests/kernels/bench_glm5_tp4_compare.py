@@ -102,7 +102,9 @@ def worker(rank, port, samples, replays, reverse, reverse_construct):
         cos = angles.cos().to(torch.bfloat16)
         sin = angles.sin().to(torch.bfloat16)
         outputs = {name: torch.empty_like(h) for name in ops}
-        caches = {name: torch.zeros((4096 * max(1, S // 5), 576), dtype=torch.float8_e4m3fnuz, device=dev) for name in ops}
+        caches = {
+            name: torch.zeros((4096 * max(1, S // 5), 576), dtype=torch.float8_e4m3fnuz, device=dev) for name in ops
+        }
         graphs = {}
         for name, op in ops.items():
 

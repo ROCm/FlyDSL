@@ -17,9 +17,8 @@ as the FlyDSL fused microbenchmark.
 import argparse
 import statistics
 
-import torch
-
 import aiter
+import torch
 from aiter import dtypes
 from aiter.ops.cache import indexer_k_quant_and_cache
 from aiter.ops.gemm_op_a8w8 import gemm_a8w8_bpreshuffle_ck
@@ -77,9 +76,7 @@ def bench(requests, replays, projections):
     norm_weight = torch.ones(dim, dtype=torch.float32, device=dev)
     norm_bias = torch.zeros(dim, dtype=torch.float32, device=dev)
     positions = torch.tensor([3000 + i % width for i in range(S)], dtype=torch.int64, device=dev)
-    slots = torch.tensor(
-        [3000 + i % width + (i // width) * max_seq for i in range(S)], dtype=torch.int64, device=dev
-    )
+    slots = torch.tensor([3000 + i % width + (i // width) * max_seq for i in range(S)], dtype=torch.int64, device=dev)
     angles = torch.arange(max_seq, device=dev, dtype=torch.float32)[:, None] * (
         10000.0 ** (-torch.arange(dim // 4, device=dev, dtype=torch.float32)[None, :] / (dim // 4))
     )
@@ -90,10 +87,24 @@ def bench(requests, replays, projections):
 
     def qk(q_input=q, k_input=k, weights_input=weights):
         aiter.indexer_qk_rope_quant_and_cache(
-            q_input, q_fp8, weights_input, weights_out, k_input, kv_cache, slots,
-            norm_weight, norm_bias, positions, cos, sin,
-            1e-6, dim, "ue8m0", dim**-0.5 * heads**-0.5,
-            preshuffle=True, is_neox=False,
+            q_input,
+            q_fp8,
+            weights_input,
+            weights_out,
+            k_input,
+            kv_cache,
+            slots,
+            norm_weight,
+            norm_bias,
+            positions,
+            cos,
+            sin,
+            1e-6,
+            dim,
+            "ue8m0",
+            dim**-0.5 * heads**-0.5,
+            preshuffle=True,
+            is_neox=False,
         )
 
     def score():
@@ -112,9 +123,7 @@ def bench(requests, replays, projections):
         )
 
     def select():
-        top_k_per_row_decode(
-            logits, width, context_lens, indices, S, max_seq, 1, k=2048, stable=True
-        )
+        top_k_per_row_decode(logits, width, context_lens, indices, S, max_seq, 1, k=2048, stable=True)
 
     stages = {"qk/cache": qk, "paged score": score, "stable topk": select}
     graphs = {name: capture(fn) for name, fn in stages.items()}
@@ -138,9 +147,7 @@ def bench(requests, replays, projections):
 
         w_qkv, s_qkv = fp8_weight(2624, 6144)
         w_index_q, s_index_q = fp8_weight(4096, 2048)
-        w_index_kw = (torch.randn((160, 6144), device=dev, generator=generator) * 0.01).to(
-            torch.bfloat16
-        )
+        w_index_kw = (torch.randn((160, 6144), device=dev, generator=generator) * 0.01).to(torch.bfloat16)
 
         def project():
             normalized = rmsnorm2d_fwd(hidden, g_hidden, 1e-6)

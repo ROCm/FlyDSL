@@ -170,8 +170,7 @@ class Glm5TP4MonoKernel:
         if with_indexer and (self.index_request_width <= 0 or index_page_size <= 0):
             raise ValueError("fused indexer requires positive request width and page size")
         self.index_block_table_stride = (
-            index_max_seq // index_page_size
-            if index_block_table_stride is None else index_block_table_stride
+            index_max_seq // index_page_size if index_block_table_stride is None else index_block_table_stride
         )
         if with_indexer and (
             samples % self.index_request_width != 0
@@ -365,7 +364,8 @@ class Glm5TP4MonoKernel:
                 raise ValueError("index_cache is required when with_indexer=True")
             cache_rows = (
                 index_cache.shape[0] * index_cache.shape[1]
-                if index_cache.ndim == 3 else index_cache.shape[0] if index_cache.ndim == 2 else 0
+                if index_cache.ndim == 3
+                else index_cache.shape[0] if index_cache.ndim == 2 else 0
             )
             if (
                 index_cache.ndim not in (2, 3)

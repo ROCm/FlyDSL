@@ -33,8 +33,8 @@ from kernels.monokernel.config import (
     Mxfp4WeightLayout,
     glm5_tp_config,
 )
-from kernels.monokernel.glm.tp4_op import Glm5TP4MonoKernel, prepare_glm5_weights
 from kernels.monokernel.glm.reference import indexer_golden
+from kernels.monokernel.glm.tp4_op import Glm5TP4MonoKernel, prepare_glm5_weights
 from kernels.monokernel.packing import pack_ptpc_fp8
 from kernels.monokernel.reference import attention_mats, scale_shape
 from kernels.monokernel.weights import LayerWeights
@@ -109,9 +109,7 @@ def worker(
     cache_dtype = "bf16" if split_bf16_kv else "fp8"
     if split_bf16_kv:
         for name, (rows, width, bk) in attention_mats(W.config.local_heads, W.config).items():
-            W.t[f"s_{name}"] = torch.ones(
-                scale_shape(rows, width, bk), device=dev
-            )
+            W.t[f"s_{name}"] = torch.ones(scale_shape(rows, width, bk), device=dev)
     if fused_indexer:
         generator = torch.Generator(device=dev).manual_seed(2435)
         logical_qkv = (torch.randn(W.t["w_qkv_a"].shape, device=dev, generator=generator) * 0.05).to(
@@ -140,12 +138,13 @@ def worker(
         )
         if check_attention:
             for name in ("q_b", "uk", "uv", "o"):
-                logical = (
-                    torch.randn(W.t[f"w_{name}"].shape, device=dev, generator=generator) * 0.02
-                ).to(torch.float8_e4m3fnuz)
+                logical = (torch.randn(W.t[f"w_{name}"].shape, device=dev, generator=generator) * 0.02).to(
+                    torch.float8_e4m3fnuz
+                )
                 W.t[f"w_{name}"].copy_(
                     pack_ptpc_fp8(logical).view(torch.float8_e4m3fnuz).view_as(W.t[f"w_{name}"])
-                    if name in ("q_b", "o") else logical
+                    if name in ("q_b", "o")
+                    else logical
                 )
     prepared = prepare_glm5_weights(W, attention_weight)
     for S in samples:
@@ -167,7 +166,9 @@ def worker(
             timeline=debug_progress,
         )
         h = torch.randn(
-            (S, W.config.hidden), dtype=torch.bfloat16, device=dev,
+            (S, W.config.hidden),
+            dtype=torch.bfloat16,
+            device=dev,
             generator=torch.Generator(device=dev).manual_seed(524),
         )
         x = torch.empty_like(h)
@@ -195,15 +196,19 @@ def worker(
         sin = angles.sin().to(torch.bfloat16)
         index_cache = (
             torch.randn(
-                (4096 * (S // 5 if S >= 5 else 1), 128), device=dev, dtype=torch.bfloat16,
+                (4096 * (S // 5 if S >= 5 else 1), 128),
+                device=dev,
+                dtype=torch.bfloat16,
                 generator=torch.Generator(device=dev).manual_seed(912),
             )
-            if fused_indexer else None
+            if fused_indexer
+            else None
         )
         index_cache_before = index_cache.clone() if check_golden and fused_indexer else None
         block_tables = (
             torch.arange(index_cache.shape[0] // 16, dtype=torch.int32, device=dev).view(-1, 4096 // 16)
-            if fused_indexer else None
+            if fused_indexer
+            else None
         )
         if shuffled_pages and fused_indexer:
             permutation = torch.randperm(4096 // 16, device=dev, generator=generator)
@@ -211,10 +216,7 @@ def worker(
         if fused_indexer:
             request_ids = torch.arange(S, device=dev) // (5 if S >= 5 else 1)
             logical_positions = positions.to(torch.int64)
-            slots = (
-                block_tables[request_ids, logical_positions // 16].to(torch.int64) * 16
-                + logical_positions % 16
-            )
+            slots = block_tables[request_ids, logical_positions // 16].to(torch.int64) * 16 + logical_positions % 16
 
         def launch(layer, advance):
             return op.forward(
@@ -265,8 +267,11 @@ def worker(
                         float(valid.abs().max()) if valid.numel() else None,
                     )
                 print(
-                    "fused diagnostics (nan, inf, max abs finite):", stats,
-                    "index range:", selected.min().item(), selected.max().item(),
+                    "fused diagnostics (nan, inf, max abs finite):",
+                    stats,
+                    "index range:",
+                    selected.min().item(),
+                    selected.max().item(),
                     flush=True,
                 )
             if not bool(((selected >= 0) & (selected < 3000 + min(S, 5))).all().item()):
@@ -293,8 +298,7 @@ def worker(
                         overlaps.append(torch.isin(got, expected).float().mean().item())
                 if rank == 0:
                     print(
-                        f"TP4 S={S} fused indexer golden top-2048 overlap: "
-                        f"min={min(overlaps):.5f} rows={overlaps}",
+                        f"TP4 S={S} fused indexer golden top-2048 overlap: " f"min={min(overlaps):.5f} rows={overlaps}",
                         flush=True,
                     )
                 if min(overlaps) < 0.99:
@@ -302,18 +306,33 @@ def worker(
             if check_attention:
                 request_ids = torch.arange(S, device=dev) // (5 if S >= 5 else 1)
                 physical_indices = (
-                    block_tables[request_ids[:, None], selected.long() // 16].to(torch.int32) * 16
-                    + selected % 16
+                    block_tables[request_ids[:, None], selected.long() // 16].to(torch.int32) * 16 + selected % 16
                 ).flatten()
                 comparison = Glm5TP4MonoKernel(
-                    W, S, rank=rank, npes=4, topk=2048, launches_per_step=1,
-                    attention_weight=attention_weight, kv_cache_layout=cache_layout,
-                    kv_cache_dtype=cache_dtype, prepared_weights=prepared,
-                    native_fp4_mfma=native, with_indexer=False,
+                    W,
+                    S,
+                    rank=rank,
+                    npes=4,
+                    topk=2048,
+                    launches_per_step=1,
+                    attention_weight=attention_weight,
+                    kv_cache_layout=cache_layout,
+                    kv_cache_dtype=cache_dtype,
+                    prepared_weights=prepared,
+                    native_fp4_mfma=native,
+                    with_indexer=False,
                 )
                 x_comparison = comparison.forward(
-                    h, cur_pos, kv, pe, physical_indices, cos, sin,
-                    positions=positions, slot_mapping=slots, sparse_kv_indptr=indptr,
+                    h,
+                    cur_pos,
+                    kv,
+                    pe,
+                    physical_indices,
+                    cos,
+                    sin,
+                    positions=positions,
+                    slot_mapping=slots,
+                    sparse_kv_indptr=indptr,
                 )
                 torch.cuda.synchronize()
                 max_diff = (x.float() - x_comparison.float()).abs().max().item()

@@ -1587,6 +1587,7 @@ def build_glm5_monokernel(
                         )
 
                     if t < INDEX_DIM // QKV_A_TILE:
+
                         def u_index_k(c):
                             kc = (wave * QA_UNITS + c) * 2
                             return unit_fp8x2(
@@ -1868,8 +1869,7 @@ def build_glm5_monokernel(
                         kc,
                         QB_NKC,
                         Q_LORA,
-                        (INDEX_Q_BF16_OFF if const_expr(attention_ptpc) else 0)
-                        + (n_sel() * Q_LORA + kc * 64) // 2,
+                        (INDEX_Q_BF16_OFF if const_expr(attention_ptpc) else 0) + (n_sel() * Q_LORA + kc * 64) // 2,
                     )
 
                 iq_acc = run_units(u_index_q, QB_UNITS, QB_UNITS)
