@@ -15,12 +15,10 @@ from kernels.norm.rmsnorm_common import (
     BLOCK_THREADS,
     VEC_WIDTH,
     WARP_SIZE,
-    load_scalar,
     load_vec,
     load_weight_vec,
     make_single_reduction_storage,
     resolve_rmsnorm_weight_dtype,
-    store_scalar,
     store_vec,
     to_elem_vec,
     weight_vec_width,
@@ -51,8 +49,6 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
     """
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    elem_bits = 32 if dtype_str == "f32" else 16
-    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
     SharedStorage = make_single_reduction_storage(RED_SLOTS)
 
     @flyc.kernel
@@ -68,7 +64,6 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
-        weight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
         fm_fast = arith.FastMathFlags.fast
         n_float = float(N)
         c_zero_f = fx.Float32(0.0)
@@ -114,23 +109,7 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
         row_dy = fx.slice(DY_buf, (bid, None))
         row_dx = fx.slice(DX_buf, (bid, None))
 
-        copy_atom_s = fx.make_copy_atom(
-            fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-            elem_bits,
-        )
-        gamma_copy_atom_s = fx.make_copy_atom(
-            fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-            weight_elem_bits,
-        )
-        copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-
-        row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
-        dy_div = fx.logical_divide(row_dy, fx.make_layout(1, 1))
-        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
-        dx_div = fx.logical_divide(row_dx, fx.make_layout(1, 1))
-        rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
-
-        rstd = load_scalar(copy_atom_f32, fx.Float32, rstd_div, bid)
+        rstd = Rstd_buf[bid]
 
         # Pass 1: c1 = mean( x_hat * wdy ) = mean( (x*rstd) * (dy*gamma) )
         thread_acc = c_zero_f
@@ -138,9 +117,9 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
             idx = tid + base
             is_valid = idx < N
             idx_safe = is_valid.select(idx, 0)
-            x_e = load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
-            dy_e = load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
-            g_e = load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx_safe)
+            x_e = row_in[idx_safe]
+            dy_e = row_dy[idx_safe]
+            g_e = Gamma_buf[idx_safe]
             x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
             dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
             g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
@@ -156,9 +135,9 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
         for base in range_constexpr(0, N, BLOCK_THREADS):
             idx = tid + base
             if idx < N:
-                x_e = load_scalar(copy_atom_s, elem_dtype, row_div, idx)
-                dy_e = load_scalar(copy_atom_s, elem_dtype, dy_div, idx)
-                g_e = load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx)
+                x_e = row_in[idx]
+                dy_e = row_dy[idx]
+                g_e = Gamma_buf[idx]
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
                 g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
@@ -166,7 +145,7 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str: str | Non
                 wdy = dy * g
                 dx = (wdy - x_hat * c1) * rstd
                 dx_e = dx if dtype_str == "f32" else dx.to(elem_dtype)
-                store_scalar(copy_atom_s, elem_dtype, dx_div, idx, dx_e)
+                row_dx[idx] = dx_e
 
                 dw = dy * x_hat
                 atomic_add(DWeight, idx, dw, dtype_bytes=4)
@@ -209,8 +188,6 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
     """
     weight_dtype_str = resolve_rmsnorm_weight_dtype(dtype_str, weight_dtype_str)
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    elem_bits = 32 if dtype_str == "f32" else 16
-    weight_elem_bits = 32 if weight_dtype_str == "f32" else 16
     SharedStorage = make_single_reduction_storage(RED_SLOTS)
 
     @flyc.kernel
@@ -227,7 +204,6 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
-        weight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
         fm_fast = arith.FastMathFlags.fast
         n_float = float(N)
         c_zero_f = fx.Float32(0.0)
@@ -275,24 +251,7 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
         row_dres_out = fx.slice(DResidualOut_buf, (bid, None))
         row_dx = fx.slice(DX_buf, (bid, None))
 
-        copy_atom_s = fx.make_copy_atom(
-            fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-            elem_bits,
-        )
-        gamma_copy_atom_s = fx.make_copy_atom(
-            fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-            weight_elem_bits,
-        )
-        copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-
-        added_div = fx.logical_divide(row_added, fx.make_layout(1, 1))
-        dy_div = fx.logical_divide(row_dy, fx.make_layout(1, 1))
-        dres_out_div = fx.logical_divide(row_dres_out, fx.make_layout(1, 1))
-        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
-        dx_div = fx.logical_divide(row_dx, fx.make_layout(1, 1))
-        rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
-
-        rstd = load_scalar(copy_atom_f32, fx.Float32, rstd_div, bid)
+        rstd = Rstd_buf[bid]
 
         # Pass 1: c1 = mean( a_hat * wdy ) = mean( (added*rstd) * (dy*gamma) )
         thread_acc = c_zero_f
@@ -300,9 +259,9 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
             idx = tid + base
             is_valid = idx < N
             idx_safe = is_valid.select(idx, 0)
-            a_e = load_scalar(copy_atom_s, elem_dtype, added_div, idx_safe)
-            dy_e = load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
-            g_e = load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx_safe)
+            a_e = row_added[idx_safe]
+            dy_e = row_dy[idx_safe]
+            g_e = Gamma_buf[idx_safe]
             a = a_e if dtype_str == "f32" else a_e.to(fx.Float32)
             dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
             g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
@@ -320,10 +279,10 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
         for base in range_constexpr(0, N, BLOCK_THREADS):
             idx = tid + base
             if idx < N:
-                a_e = load_scalar(copy_atom_s, elem_dtype, added_div, idx)
-                dy_e = load_scalar(copy_atom_s, elem_dtype, dy_div, idx)
-                g_e = load_scalar(gamma_copy_atom_s, weight_elem_dtype, gamma_div, idx)
-                dres_out_e = load_scalar(copy_atom_s, elem_dtype, dres_out_div, idx)
+                a_e = row_added[idx]
+                dy_e = row_dy[idx]
+                g_e = Gamma_buf[idx]
+                dres_out_e = row_dres_out[idx]
                 a = a_e if dtype_str == "f32" else a_e.to(fx.Float32)
                 dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
                 g = g_e if weight_dtype_str == "f32" else g_e.to(fx.Float32)
@@ -333,7 +292,7 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str, weight_dtype_str:
                 d_added = (wdy - a_hat * c1) * rstd
                 total = d_added + dres_out
                 total_e = total if dtype_str == "f32" else total.to(elem_dtype)
-                store_scalar(copy_atom_s, elem_dtype, dx_div, idx, total_e)
+                row_dx[idx] = total_e
 
                 dw = dy * a_hat
                 atomic_add(DWeight, idx, dw, dtype_bytes=4)
@@ -455,9 +414,6 @@ def _build_rmsnorm_bwd_two_stage_module(
         DX_buf = fx.rocdl.make_buffer_tensor(DX)
         DWeightPartial_buf = fx.rocdl.make_buffer_tensor(DWeightPartial)
 
-        rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
-        partial_div = fx.logical_divide(DWeightPartial_buf, fx.make_layout(1, 1))
-
         copy_atom_io = fx.make_copy_atom(
             (
                 fx.rocdl.BufferCopy128b()
@@ -474,7 +430,6 @@ def _build_rmsnorm_bwd_two_stage_module(
             ),
             weight_elem_bits,
         )
-        copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
         gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(WEIGHT_IO_WIDTH, 1))
         gamma_local = []
@@ -507,7 +462,7 @@ def _build_rmsnorm_bwd_two_stage_module(
             if const_expr(fused_add):
                 dres_out_div = fx.logical_divide(row_dres_out, fx.make_layout(IO_WIDTH, 1))
 
-            rstd = load_scalar(copy_atom_f32, fx.Float32, rstd_div, row)
+            rstd = Rstd_buf[row]
             thread_acc = c_zero_f
             source_local = []
             dy_local = []
@@ -522,9 +477,9 @@ def _build_rmsnorm_bwd_two_stage_module(
                     dy_local.append(dy_e)
                     gamma_e = gamma_local[tile_i]
                 else:
-                    source_e = load_scalar(copy_atom_io, elem_dtype, source_div, io_idx_safe)
-                    dy_e = load_scalar(copy_atom_io, elem_dtype, dy_div, io_idx_safe)
-                    gamma_e = load_scalar(gamma_copy_atom, weight_elem_dtype, gamma_div, io_idx_safe)
+                    source_e = row_source[io_idx_safe]
+                    dy_e = row_dy[io_idx_safe]
+                    gamma_e = Gamma_buf[io_idx_safe]
 
                 source = source_e if dtype_str == "f32" else source_e.to(fx.Float32)
                 dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
@@ -549,9 +504,9 @@ def _build_rmsnorm_bwd_two_stage_module(
                     dy_e = dy_local[tile_i]
                     gamma_e = gamma_local[tile_i]
                 else:
-                    source_e = load_scalar(copy_atom_io, elem_dtype, source_div, io_idx_safe)
-                    dy_e = load_scalar(copy_atom_io, elem_dtype, dy_div, io_idx_safe)
-                    gamma_e = load_scalar(gamma_copy_atom, weight_elem_dtype, gamma_div, io_idx_safe)
+                    source_e = row_source[io_idx_safe]
+                    dy_e = row_dy[io_idx_safe]
+                    gamma_e = Gamma_buf[io_idx_safe]
 
                 source = source_e if dtype_str == "f32" else source_e.to(fx.Float32)
                 dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
@@ -564,7 +519,7 @@ def _build_rmsnorm_bwd_two_stage_module(
                     if const_expr(USE_VEC):
                         dres = load_vec(copy_atom_io, IO_WIDTH, elem_dtype, dres_out_div, io_idx_safe).to(fx.Float32)
                     else:
-                        dres_e = load_scalar(copy_atom_io, elem_dtype, dres_out_div, io_idx_safe)
+                        dres_e = row_dres_out[io_idx_safe]
                         dres = dres_e if dtype_str == "f32" else dres_e.to(fx.Float32)
                     dx = dx + dres
 
@@ -574,7 +529,7 @@ def _build_rmsnorm_bwd_two_stage_module(
                         store_vec(copy_atom_io, IO_WIDTH, elem_dtype, dx_e, dx_div, io_idx)
                     else:
                         dx_e = dx if dtype_str == "f32" else dx.to(elem_dtype)
-                        store_scalar(copy_atom_io, elem_dtype, dx_div, io_idx, dx_e)
+                        row_dx[io_idx] = dx_e
 
                 dw = dy * source_hat
                 if const_expr(USE_VEC):
@@ -593,13 +548,7 @@ def _build_rmsnorm_bwd_two_stage_module(
                     idx = io_idx * IO_WIDTH + lane
                     partial_idx = bid * N + idx
                     partial_value = dweight_partial[tile_i * IO_WIDTH + lane]
-                    store_scalar(
-                        copy_atom_f32,
-                        fx.Float32,
-                        partial_div,
-                        partial_idx,
-                        partial_value,
-                    )
+                    DWeightPartial_buf[partial_idx] = partial_value
 
     @flyc.kernel
     def rmsnorm_bwd_dweight_reduce_kernel(
@@ -617,13 +566,6 @@ def _build_rmsnorm_bwd_two_stage_module(
         weight_elem_dtype = dtype_to_elem_type(weight_dtype_str)
         DWeightPartial_buf = fx.rocdl.make_buffer_tensor(DWeightPartial)
         DWeight_buf = fx.rocdl.make_buffer_tensor(DWeight)
-        partial_div = fx.logical_divide(DWeightPartial_buf, fx.make_layout(1, 1))
-        dweight_div = fx.logical_divide(DWeight_buf, fx.make_layout(1, 1))
-        copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-        weight_copy_atom_s = fx.make_copy_atom(
-            fx.rocdl.BufferCopy16b() if weight_elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-            weight_elem_bits,
-        )
 
         lds = fx.SharedAllocator().allocate(DWeightReduceStorage).peek()
         s_partial = lds.s_red.view(fx.make_layout(DWEIGHT_REDUCE_THREADS, 1))
@@ -635,7 +577,7 @@ def _build_rmsnorm_bwd_two_stage_module(
             partial_valid = partial_row < num_programs
             partial_row_safe = partial_valid.select(partial_row, 0)
             partial_idx = partial_row_safe * N + col_safe
-            value = load_scalar(copy_atom_f32, fx.Float32, partial_div, partial_idx)
+            value = DWeightPartial_buf[partial_idx]
             acc = acc + partial_valid.select(value, c_zero_f)
         fx.memref_store(acc, s_partial, tid)
         gpu.barrier()
@@ -646,13 +588,7 @@ def _build_rmsnorm_bwd_two_stage_module(
                 for lane in range_constexpr(DWEIGHT_REDUCE_ROW_LANES):
                     total = total + fx.memref_load(s_partial, lane * DWEIGHT_REDUCE_COLS + col_lane)
                 out = total if weight_dtype_str == "f32" else total.to(weight_elem_dtype)
-                store_scalar(
-                    weight_copy_atom_s,
-                    weight_elem_dtype,
-                    dweight_div,
-                    col,
-                    out,
-                )
+                DWeight_buf[col] = out
 
     reduce_grid = (N + DWEIGHT_REDUCE_COLS - 1) // DWEIGHT_REDUCE_COLS
 
