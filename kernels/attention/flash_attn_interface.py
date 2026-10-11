@@ -1004,7 +1004,7 @@ def flydsl_flash_attn_func(
     seqlen_k: Optional[torch.Tensor] = None,
     kv_cache_layout: str = "linear",
     # Split-K (gfx950 only, seq_len >= 384, D=64/128, bf16/f16).
-    # gfx120x also supports bf16/fp16 split-K. Other arches are unchanged.
+    # gfx120x also supports bf16/fp16 split-K.
     num_kv_splits: Optional[int] = None,
     fp8_block_m: Optional[int] = None,
     # Additive attention bias, folded into the scores after sm_scale and before
@@ -1026,7 +1026,7 @@ def flydsl_flash_attn_func(
     # Output tensor; allocated if None.
     out: Optional[torch.Tensor] = None,
     # Also return per-row LSE = ln(sum_j exp(sm_scale * q_i.k_j)); fp32
-    # [B, num_heads, Sq]. Needed by backward. The gfx950 fp8 path rejects it.
+    # [B, num_heads, Sq]. Needed by backward; not supported for fp8.
     # gfx120x fp8 and int8 dense return it.
     return_lse: bool = False,
     # aiter sliding window (left, right). gfx120x quant FA. None is no window.
@@ -1059,8 +1059,8 @@ def flydsl_flash_attn_func(
            ``kv_cache_layout`` values:
            - ``linear``: 4D paged K/V, ``[NumBlocks, PageSize, NumKVHeads, HeadDim]``.
            - ``linear3d``: page_size=1 special case,
-             ``[NumBlocks, NumKVHeads, HeadDim]`` (gfx950 FP8 page-1, and
-             gfx120x bf16/fp16 page-1).
+             ``[NumBlocks, NumKVHeads, HeadDim]`` (gfx950 FP8 only).
+             gfx120x bf16/fp16 also uses this layout for page-1.
            - ``vectorized``: aiter-style 5D K/V, where
              ``K = [NumBlocks, NumKVHeads, HeadDim / kVectorSize, PageSize, kVectorSize]``
              and
@@ -1073,21 +1073,18 @@ def flydsl_flash_attn_func(
             must be positive, with Q heads divisible by KV heads.
         cu_seqlens_q: Int32 ``[B+1]`` cumulative Q token counts (varlen).
         cu_seqlens_kv: Int32 ``[B+1]`` cumulative KV token counts (varlen).
-        max_seqlen_q: Maximum per-batch Q seqlen (varlen). Required in varlen mode
-            (gfx950 and gfx120x). gfx120x packed / varlen-paged do not infer it
-            from ``cu_seqlens`` (no omit→D2H bounce).
+        max_seqlen_q: Maximum per-batch Q seqlen (varlen). Required in varlen mode.
+            gfx120x packed / varlen-paged do not infer it from ``cu_seqlens``.
         max_seqlen_kv: Maximum per-batch KV seqlen (varlen cross-attn). Required when
-            seqlen_q != seqlen_kv per batch for non-paged attention; gfx120x packed
-            / varlen-paged always require it (pass ``max_seqlen_q`` for self-attn).
-            Dense/paged (incl. gfx950 FP8) can still infer it from ``seqlen_k``,
-            synchronizing the launch stream; supply it explicitly for graph
-            capture and to avoid that synchronization.
+            seqlen_q != seqlen_kv per batch for non-paged attention. Paged KV can
+            infer it from ``seqlen_k``, synchronizing the launch stream; supply
+            it explicitly for graph capture and to avoid that synchronization.
+            gfx120x packed / varlen-paged always require it, including self-attention.
         cross_seqlen: Whether seqlen_q and seqlen_kv differ. Required in varlen mode;
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
         block_table / seqlen_k: vLLM-style 2D block table metadata. Enables the
             native paged-KV path, which supports ``bias`` but not
-            ``alibi_slopes``, ``sink``, or ``return_lse`` on gfx950. gfx120x bf16/fp16 paged
-            runs bias, ALiBi, sink, and LSE. gfx950 FP8 supports
+            ``alibi_slopes``, ``sink``, or ``return_lse``. gfx950 FP8 supports
             causal packed-varlen D128/V128 and D192/V128-or-V192 paths,
             with vectorized page sizes 16/64/1024 or linear/linear3d page 1.
             FP8 cu-seqlens must be int32 on Q's device; strided views are copied
@@ -1098,36 +1095,36 @@ def flydsl_flash_attn_func(
             Active page IDs must address the cache; unused table slots and
             inactive cache tokens are ignored and need not be initialized.
             These value invariants are caller-owned to avoid device
-            synchronization. gfx950 BF16/F16 native paged paths require page
-            size 64. gfx120x uses the cache's own page size.
+            synchronization. BF16/F16 native paged paths require page size 64.
+            gfx120x bf16/fp16 paged runs bias, ALiBi, sink, and LSE, and uses
+            the cache's own page size.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
-            gfx120x also supports bf16/fp16 split-K. Other arches are unchanged.
             ``None`` lets fp8 autotune it; ``1`` keeps the kernel unsplit.
+            gfx120x also supports bf16/fp16 split-K.
         fp8_block_m: Pin the fp8 tile height to 128 or 256. Paged FP8 supports
             only its fixed 256-row tile (``None`` or ``256``).
         bias: Additive attention bias with the same dtype as q, folded in as
             ``softmax(q @ k^T * sm_scale + bias)`` -- after the scale, before the
-            causal/padding mask. That dtype rule is the gfx950 path. gfx120x casts
-            ``bias`` and ``attn_mask`` to fp32. Dense: ``[Sq, Skv]``, broadcast over batch and
+            causal/padding mask. Dense: ``[Sq, Skv]``, broadcast over batch and
             head. Varlen: ``[total_q, max_seqlen_kv]``, where the row is the
             *global* packed q token index and the column is the *per-batch-local*
-            key index, broadcast over head. On gfx950, varlen self-attention leaves
+            key index, broadcast over head. Varlen self-attention leaves
             ``max_seqlen_kv`` unset, so its column bound is ``max_seqlen_q``.
-            gfx120x packed / varlen-paged require ``max_seqlen_kv`` explicitly.
-            Routes to the gfx950 DUALWAVE_SWP kernel on that arch. gfx950 fp8 raises
+            Routes to the gfx950 DUALWAVE_SWP kernel; fp8 raises
             NotImplementedError rather than silently dropping the bias.
-            gfx120x dense, including fp8 and int8, applies the bias.
             Paged KV is supported (dense, varlen, and paged split-K) with the
             same row/column convention: rows are ``seq_len_q`` (dense) or
             ``total_q`` (varlen) q tokens, columns are batch-local key indices
-            and must number at least ``max_seqlen_kv``. On gfx950, dense paged
+            and must number at least ``max_seqlen_kv``. Dense paged
             additionally requires a uniform ``seqlen_k`` across the batch --
             the dense paged launch only receives ``max_seqlen_kv``, so ragged
             lengths would address the wrong bias columns and raise
             ``NotImplementedError``; use the varlen paged path
             (``cu_seqlens_q``/``cu_seqlens_kv``) for ragged KV.
-            On gfx120x, dense-paged with non-uniform ``seqlen_k`` auto-routes
-            to that varlen-paged path.
+            gfx120x casts ``bias`` and ``attn_mask`` to fp32. Packed and
+            varlen-paged require ``max_seqlen_kv``. Dense, including fp8 and
+            int8, applies the bias. Dense-paged with non-uniform ``seqlen_k``
+            auto-routes to the varlen-paged path.
         alibi_slopes: fp32 ALiBi slope table, ``[H]`` (broadcast over batch) or
             ``[B, H]``, values positive. Adds
             ``-slope * |i + seqlen_kv - seqlen_q - j|`` to the scores after the
@@ -1136,8 +1133,8 @@ def flydsl_flash_attn_func(
             sequence, so varlen does not offset by the packed-token base. Same
             kernel path as ``bias`` and may be combined with it, but unlike
             ``bias`` it is not supported with paged KV (raises
-            NotImplementedError), nor with fp8, on gfx950. gfx120x bf16/fp16
-            paged and dense fp8/int8 apply it.
+            NotImplementedError), nor with fp8.
+            gfx120x bf16/fp16 paged and dense fp8/int8 apply it.
         sink: fp32 ``[H]`` per-head attention-sink logit -- one extra softmax
             denominator term that has no matching V row::
 
@@ -1147,14 +1144,14 @@ def flydsl_flash_attn_func(
             post-sm_scale logit space as the scores. Applied in the epilogue, so
             it touches no score element; under split-K the per-split partials
             stay sink-free and the combine pass folds it in exactly once. Same
-            kernel path and restrictions as ``alibi_slopes``. gfx950 rejects it
-            with paged KV or fp8. gfx120x bf16/fp16 paged and dense fp8/int8
-            apply it. Freely combinable with ``bias`` and ``alibi_slopes``.
-        q_descale / k_descale / v_descale: fp32 shape-[1] descales. Required
-            on gfx950 for dense or paged fp8 e4m3fn. On gfx120x dense fp8
-            (e4m3fn or e5m2) they are optional and default to 1.0. gfx120x
-            paged fp8 rejects bias, sink, LSE, and split-K. Paged FP8 on
-            gfx950 also accepts scalar and other single-element tensors.
+            kernel path and restrictions as ``alibi_slopes`` -- not supported
+            with paged KV or fp8 -- but freely combinable with ``bias`` and
+            ``alibi_slopes``. gfx120x bf16/fp16 paged and dense fp8/int8 apply it.
+        q_descale / k_descale / v_descale: fp32 shape-[1] descales required
+            for dense or paged fp8 e4m3fn inputs. Paged FP8 also accepts scalar
+            and other single-element tensors.
+            On gfx120x dense fp8 (e4m3fn or e5m2) they are optional and default
+            to 1.0. gfx120x paged fp8 rejects bias, sink, LSE, and split-K.
         out: Optional pre-allocated output tensor. For fp8, output is bf16;
             otherwise it has the same dtype as q.
         waves_per_eu: Kernel occupancy hint.
