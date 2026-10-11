@@ -289,12 +289,8 @@ def compile_pa_decode_tile(
         # Per-tensor: a single global scale, read once. Per-token: read
         # per-token instead (see _kv_scale_ops/_stage_kv_scale_to_lds below).
         if const_expr(not per_token_kv and not is_bf16_kv):
-            key_scale = fx.Int32(
-                buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1, is_scalar=True)
-            ).bitcast(fx.Float32)
-            value_scale = fx.Int32(
-                buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1, is_scalar=True)
-            ).bitcast(fx.Float32)
+            key_scale = fx.rocdl.s_buffer_load(ks_rsrc, fx.Int32(0)).bitcast(fx.Float32)
+            value_scale = fx.rocdl.s_buffer_load(vs_rsrc, fx.Int32(0)).bitcast(fx.Float32)
 
         num_tiles = cdiv(context_len, TILE_TOK)
         tiles_per_part = cdiv(num_tiles, NP)
@@ -329,10 +325,7 @@ def compile_pa_decode_tile(
         NCHUNK = TILE_TOK // TOK_CHUNK  # 4
 
         def _load_phys_scalar(page, vec_width=1):
-            result = buffer_ops.buffer_load(
-                bt_rsrc, seq * max_blocks_per_seq + page, vec_width=vec_width, is_scalar=True
-            )
-            return fx.Int32(result) if vec_width == 1 else result
+            return fx.rocdl.s_buffer_load(bt_rsrc, seq * max_blocks_per_seq + page, count=vec_width)
 
         def _v_page_fetch_and_stage(tt_i32):
             # V's page depends on `rgroup` (shared across warps): warp w fetches
