@@ -3,9 +3,8 @@
 
 """High-level FlyDSL Flash Attention API for gfx950 / gfx942 / gfx120x.
 
-On gfx120x, ``flydsl_flash_attn_func`` returns before the gfx950 and gfx942
-paths into ``flash_attn_gfx120x_host.flydsl_flash_attn_func``. The contract is in
-``docs/prebuilt_kernels_guide.md``.
+On gfx120x, ``flydsl_flash_attn_func`` returns before the gfx950 and gfx942 paths into
+``flash_attn_gfx120x_host.flydsl_flash_attn_func``. The contract is in ``docs/prebuilt_kernels_guide.md``.
 
 Wraps ``flash_attn_generic.build_flash_attn_func_module`` (gfx942-compatible,
 dense self/cross-attention) and ``flash_attn_gfx950.build_flash_attn_dualwave_swp_module``
@@ -43,7 +42,7 @@ from kernels.attention.flash_attn_utils import (
     dualwave_splitk_workspace_elems,
 )
 
-__all__ = ["flydsl_flash_attn_func", "flydsl_flash_attn_fp8_func", "dualwave_splitk_workspace_elems"]
+__all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
 _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn: "fp8"}
 
@@ -993,8 +992,8 @@ def flydsl_flash_attn_func(
     # gfx120x included — no omit bounce.
     max_seqlen_q: Optional[int] = None,
     # Max per-batch KV seqlen (varlen cross-attn only). Used to size the KV grid
-    # when seqlen_q != seqlen_kv per batch. gfx120x packed/varlen-paged always
-    # need it, including self-attention.
+    # when seqlen_q != seqlen_kv per batch.
+    # gfx120x packed/varlen-paged always need max_seqlen_kv, including self-attention.
     max_seqlen_kv: Optional[int] = None,
     # Whether per-batch Sq and Skv can differ. Dense mode infers this from shapes;
     # varlen mode requires it explicitly to choose the correct build variant.
@@ -1096,8 +1095,7 @@ def flydsl_flash_attn_func(
             inactive cache tokens are ignored and need not be initialized.
             These value invariants are caller-owned to avoid device
             synchronization. BF16/F16 native paged paths require page size 64.
-            gfx120x bf16/fp16 paged runs bias, ALiBi, sink, and LSE, and uses
-            the cache's own page size.
+            gfx120x bf16/fp16 paged runs bias, ALiBi, sink, and LSE, and uses the cache's own page size.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
             ``None`` lets fp8 autotune it; ``1`` keeps the kernel unsplit.
             gfx120x also supports bf16/fp16 split-K.
@@ -1121,9 +1119,8 @@ def flydsl_flash_attn_func(
             lengths would address the wrong bias columns and raise
             ``NotImplementedError``; use the varlen paged path
             (``cu_seqlens_q``/``cu_seqlens_kv``) for ragged KV.
-            gfx120x casts ``bias`` and ``attn_mask`` to fp32. Packed and
-            varlen-paged require ``max_seqlen_kv``. Dense, including fp8 and
-            int8, applies the bias. Dense-paged with non-uniform ``seqlen_k``
+            gfx120x casts ``bias`` and ``attn_mask`` to fp32. Packed and varlen-paged require ``max_seqlen_kv``.
+            Dense, including fp8 and int8, applies the bias. Dense-paged with a non-uniform ``seqlen_k``
             auto-routes to the varlen-paged path.
         alibi_slopes: fp32 ALiBi slope table, ``[H]`` (broadcast over batch) or
             ``[B, H]``, values positive. Adds
@@ -1150,8 +1147,8 @@ def flydsl_flash_attn_func(
         q_descale / k_descale / v_descale: fp32 shape-[1] descales required
             for dense or paged fp8 e4m3fn inputs. Paged FP8 also accepts scalar
             and other single-element tensors.
-            On gfx120x dense fp8 (e4m3fn or e5m2) they are optional and default
-            to 1.0. gfx120x paged fp8 rejects bias, sink, LSE, and split-K.
+            On gfx120x dense fp8 (e4m3fn or e5m2) the descales are optional and default to 1.0.
+            gfx120x paged fp8 rejects bias, sink, LSE, and split-K.
         out: Optional pre-allocated output tensor. For fp8, output is bf16;
             otherwise it has the same dtype as q.
         waves_per_eu: Kernel occupancy hint.
@@ -1715,9 +1712,8 @@ def flydsl_flash_attn_func(
 def flydsl_flash_attn_fp8_func(*args, **kwargs):
     """FP8 Flash Attention.
 
-    Forwards to ``flydsl_flash_attn_func``. On gfx120x, ``sm_scale`` is
-    accepted only at ``1/sqrt(head_dim)``. Other arches still see
-    ``sm_scale`` as an unexpected keyword, same as before.
+    Forwards to ``flydsl_flash_attn_func``. On gfx120x, ``sm_scale`` is accepted only at ``1/sqrt(head_dim)``.
+    Other arches still see ``sm_scale`` as an unexpected keyword.
     """
     sm = kwargs.pop("sm_scale", None)
     q = args[0] if args else kwargs.get("q")
