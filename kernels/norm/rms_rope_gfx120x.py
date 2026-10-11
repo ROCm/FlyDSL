@@ -23,9 +23,6 @@ from flydsl.expr import math as fmath
 from kernels.common.gfx120x_buf_helpers import kernel_signature
 from flydsl.runtime.device import get_rocm_arch
 
-
-
-
 KERNEL_NAME = "rms_rope_gfx120x"
 WARP = 32
 BLOCK_THREADS = 256
@@ -35,9 +32,8 @@ BLOCK_THREADS = 256
 def build_rms_rope_module(HD: int, dtype_str: str, block_threads: Optional[int] = None) -> Callable[..., None]:
     """Build the RMSNorm-then-RoPE kernel for one tensor."""
     _why = "build_rms_rope_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if block_threads is None:
         block_threads = BLOCK_THREADS
     sig = kernel_signature(hd=HD, dtype=dtype_str, block=block_threads, op="rms_rope")
@@ -204,9 +200,8 @@ def build_rms_rope_module(HD: int, dtype_str: str, block_threads: Optional[int] 
 def build_rms_rope_split_module(HD: int, dtype_str: str, block_threads: Optional[int] = None) -> Callable[..., None]:
     """Build RMSNorm-then-RoPE with split-half rotary pairs."""
     _why = "build_rms_rope_split_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if block_threads is None:
         block_threads = BLOCK_THREADS
     sig = kernel_signature(hd=HD, dtype=dtype_str, block=block_threads, op="rms_rope_split")
@@ -399,9 +394,8 @@ def build_rms_rope_split_module(HD: int, dtype_str: str, block_threads: Optional
 def build_rms_rope_qk_fused_module(HD: int, dtype_str: str, block_threads: Optional[int] = None) -> Callable[..., None]:
     """Build RMSNorm-then-RoPE for Q and K in one launch."""
     _why = "build_rms_rope_qk_fused_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if block_threads is None:
         block_threads = BLOCK_THREADS
     sig = kernel_signature(hd=HD, dtype=dtype_str, block=block_threads, op="rms_rope_qk")
@@ -586,9 +580,8 @@ def build_rms_rope_split_qk_fused_module(
 ) -> Callable[..., None]:
     """Q then K in one block — reuse LDS norm+red, shared freqs."""
     _why = "build_rms_rope_split_qk_fused_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if block_threads is None:
         block_threads = BLOCK_THREADS

@@ -45,8 +45,6 @@ _DEFAULT_GROUP = 64
 WARP = 32
 
 
-
-
 KERNEL_NAME = "awq_dequant_w4a16_gfx120x"
 TUNING_SCHEMA = 1
 _BLOCK_CHOICES = (32, 64, 128, 256, 512, 1024)
@@ -134,6 +132,8 @@ def build_awq_dequant_w4a16_module(
     block_threads: Optional[int] = None,
 ) -> Callable[..., None]:
     """Unpack AWQ uint4 + apply group scales/zeros → bf16/fp16 weight row."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_awq_dequant_w4a16_module requires gfx120x, got {arch}"
     if k <= 0 or k % 2 != 0:
         raise ValueError(f"K={k} must be positive even")
     if group_size < 8 or group_size % 2 != 0:
@@ -300,9 +300,8 @@ def dequant_awq_w4a16_weight(
     ``wscales`` / ``wzeros`` keep layout ``(K//G, N)`` and are indexed in the kernel.
     """
     _why = "dequant_awq_w4a16_weight (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if qweight.dim() != 2 or qweight.dtype != torch.int8:
         raise ValueError("qweight must be 2D int8")
@@ -361,6 +360,8 @@ def build_awq_gemv_module(
     ``X[0:max_m, :]`` in LDS and reuse across the N-tile (cuts X traffic).
     When ``n_tile == 1``, read X from GMEM (LDS fill would be pure overhead).
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_awq_gemv_module requires gfx120x, got {arch}"
     if k <= 0 or k % 2 != 0:
         raise ValueError(f"K={k} must be positive even")
     if group_size <= 0 or group_size % 8 != 0:
@@ -710,9 +711,8 @@ def gemv_awq_w4a16(
     the N-tile for experiments. M>4 host-chunks in steps of 4.
     """
     _why = "gemv_awq_w4a16 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if x.dim() < 1:
         raise ValueError("x must be at least 1D")

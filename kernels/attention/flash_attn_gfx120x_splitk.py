@@ -19,6 +19,7 @@ from flydsl.compiler.jit_argument import PointerJitArg
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import const_expr, gpu
 from flydsl.expr.typing import Vector as Vec
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import LOG2E as _LOG2E
 from kernels.common.tensor_shim import _run_compiled
 
@@ -33,6 +34,8 @@ def build_splitk_combine_module(
     unsafe_fp_math: bool = True,
 ) -> Callable[..., None]:
     """Build the gfx120x split-K combine (block=64). It writes the merged output and LSE."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_splitk_combine_module requires gfx120x, got {arch}"
     NUM_HEADS = int(num_heads)
     HEAD_DIM = int(head_dim)
     HAS_SINK = bool(has_sink)

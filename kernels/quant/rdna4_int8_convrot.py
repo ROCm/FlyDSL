@@ -33,8 +33,6 @@ from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, pt
 from flydsl.runtime.device import get_rocm_arch
 
 
-
-
 def _kernel_signature(**params: object) -> str:
     """Specialization suffix for kernel/launch names (matches kernels.common.gfx120x_buf_helpers)."""
     return "_".join(
@@ -89,6 +87,8 @@ def build_int8_convrot_quant_module(
     caller's K. A shorter row zero-fills the group on load and still stores
     every rotated column. The tail is part of the orthogonal product.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_int8_convrot_quant_module requires gfx120x, got {arch}"
     if logical_k is None:
         logical_k = k
     if group_size not in _SUPPORTED_GROUPS:
@@ -375,6 +375,8 @@ def build_int8_convrot_dequant_module(
     logical_k: int | None = None,
 ) -> Callable[..., None]:
     """One row per block: int8 * row scale, then the same FWHT (H is its own inverse)."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_int8_convrot_dequant_module requires gfx120x, got {arch}"
     if logical_k is None:
         logical_k = k
     if group_size not in _SUPPORTED_GROUPS:
@@ -552,6 +554,8 @@ def build_convrot_fwht_module(
     logical_k: int | None = None,
 ) -> Callable[..., None]:
     """In-place-shaped ``W @ H`` for one ConvRot group size. Device FWHT, not a matmul."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_convrot_fwht_module requires gfx120x, got {arch}"
     if logical_k is None:
         logical_k = k
     if group_size not in _SUPPORTED_GROUPS:
@@ -847,9 +851,8 @@ def convrot_fwht(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "convrot_fwht (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if weight.dtype not in (torch.float32, torch.float16, torch.bfloat16):
         raise ValueError(f"unsupported dtype {weight.dtype}")
@@ -898,9 +901,8 @@ def quantize_int8_convrot_weight(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "quantize_int8_convrot_weight (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     seed = 0 if stochastic_rounding is None else int(stochastic_rounding)
     if seed < 0:
@@ -968,9 +970,8 @@ def dequantize_int8_convrot_weight(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "dequantize_int8_convrot_weight (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if out_dtype is None:
         out_dtype = torch.bfloat16
@@ -1058,9 +1059,8 @@ def int8_linear_convrot(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "int8_linear_convrot (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     from kernels.gemm.rdna4_int8_linear import int8_linear
 

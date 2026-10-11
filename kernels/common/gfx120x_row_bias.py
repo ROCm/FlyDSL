@@ -24,8 +24,6 @@ _BLOCKS = (32, 64, 128, 256, 512, 1024)
 _TUNING_SCHEMA = 1
 
 
-
-
 def _as_f32(raw, name: str):
     if const_expr(name == "float32"):
         return fx.Float32(raw)
@@ -34,6 +32,8 @@ def _as_f32(raw, name: str):
 
 @lru_cache(maxsize=64)
 def build_row_bias_module(in_name: str, bias_name: str, out_name: str, block_threads: int = 256):
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_row_bias_module requires gfx120x, got {arch}"
     in_ty, in_bytes = _TYPES[in_name]
     bias_ty, bias_bytes = _TYPES[bias_name]
     out_ty, out_bytes = _TYPES[out_name]
@@ -148,9 +148,8 @@ def add_row_bias(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "add_row_bias (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if out.dtype not in _DTYPES:
         raise ValueError(f"add_row_bias input dtype {out.dtype} is not f32/f16/bf16")
     if bias.dtype not in _DTYPES:
@@ -186,6 +185,8 @@ def add_row_bias(
 
 @lru_cache(maxsize=32)
 def build_add_same_module(name: str, block_threads: int = 256):
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_add_same_module requires gfx120x, got {arch}"
     ty, nbytes = _TYPES[name]
     block = int(block_threads)
     if block not in _BLOCKS:
@@ -258,9 +259,8 @@ def add_same(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "add_same (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if a.shape != b.shape or a.dtype != b.dtype or a.dtype not in _DTYPES:
         raise ValueError(
             f"add_same expects matching f32/f16/bf16 tensors, got {a.shape}/{a.dtype} and {b.shape}/{b.dtype}"
@@ -284,6 +284,8 @@ def add_same(
 @lru_cache(maxsize=32)
 def build_mul_by_scale1_module(name: str, block_threads: int = 256):
     """``out[i] = in[i] * scale[0]`` for bf16/fp16/fp32 (scale is 1xf32)."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_mul_by_scale1_module requires gfx120x, got {arch}"
     ty, nbytes = _TYPES[name]
     block = int(block_threads)
     if block not in _BLOCKS:
@@ -331,9 +333,8 @@ def mul_by_scale1(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "mul_by_scale1 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if x.dtype not in _DTYPES:
         raise ValueError(f"mul_by_scale1 expects f32/f16/bf16, got {x.dtype}")
     if scale.dtype != torch.float32 or scale.device != x.device or scale.numel() != 1:

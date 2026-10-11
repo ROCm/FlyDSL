@@ -54,9 +54,8 @@ def build_rope_module(
 ) -> Callable[..., None]:
     """Specialize the RoPE kernel. The default block is 256 threads."""
     _why = "build_rope_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     block = _resolve_build_block(block, n_pairs_total)
     return _build_rope_module_cached(x_name, block)
 
@@ -64,6 +63,8 @@ def build_rope_module(
 @lru_cache(maxsize=16)
 def _build_rope_module_cached(x_name: str, block: int) -> Callable[..., None]:
     """Interleaved-pair RoPE with in-kernel freqs broadcast (no host expand)."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"_build_rope_module_cached requires gfx120x, got {arch}"
 
     XTy = {"float32": fx.Float32, "float16": fx.Float16, "bfloat16": fx.BFloat16}[x_name]
     x_bytes = {"float32": 4, "float16": 2, "bfloat16": 2}[x_name]
@@ -246,9 +247,8 @@ def build_rope_split_module(
 ) -> Callable[..., None]:
     """Specialize the RoPE kernel. The default block is 256 threads."""
     _why = "build_rope_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     block = _resolve_build_block(block, n_pairs_total)
     return _build_rope_split_module_cached(x_name, block)
 
@@ -256,6 +256,8 @@ def build_rope_split_module(
 @lru_cache(maxsize=16)
 def _build_rope_split_module_cached(x_name: str, block: int) -> Callable[..., None]:
     """split_half RoPE: pair k uses elems [k] and [k + n_pairs]."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"_build_rope_split_module_cached requires gfx120x, got {arch}"
     XTy = {"float32": fx.Float32, "float16": fx.Float16, "bfloat16": fx.BFloat16}[x_name]
     x_bytes = {"float32": 4, "float16": 2, "bfloat16": 2}[x_name]
     tile = block
@@ -369,15 +371,16 @@ def build_rope_qk_fused_module(
 ) -> Callable[..., None]:
     """Specialize the RoPE kernel. The default block is 256 threads."""
     _why = "build_rope_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     block = _resolve_build_block(block, n_pairs_total)
     return _build_rope_qk_fused_module_cached(x_name, block)
 
 
 @lru_cache(maxsize=16)
 def _build_rope_qk_fused_module_cached(x_name: str, block: int) -> Callable[..., None]:
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"_build_rope_qk_fused_module_cached requires gfx120x, got {arch}"
     XTy = {"float32": fx.Float32, "float16": fx.Float16, "bfloat16": fx.BFloat16}[x_name]
     x_bytes = {"float32": 4, "float16": 2, "bfloat16": 2}[x_name]
     is_f32 = x_name == "float32"
@@ -510,15 +513,16 @@ def build_rope_split_half_qk_fused_module(
 ) -> Callable[..., None]:
     """Specialize the RoPE kernel. The default block is 256 threads."""
     _why = "build_rope_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     block = _resolve_build_block(block, n_pairs_total)
     return _build_rope_split_half_qk_fused_module_cached(x_name, block)
 
 
 @lru_cache(maxsize=16)
 def _build_rope_split_half_qk_fused_module_cached(x_name: str, block: int) -> Callable[..., None]:
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"_build_rope_split_half_qk_fused_module_cached requires gfx120x, got {arch}"
     XTy = {"float32": fx.Float32, "float16": fx.Float16, "bfloat16": fx.BFloat16}[x_name]
     x_bytes = {"float32": 4, "float16": 2, "bfloat16": 2}[x_name]
     sig = kernel_signature(block=block, dtype=x_name, op="rope_sh_qk")

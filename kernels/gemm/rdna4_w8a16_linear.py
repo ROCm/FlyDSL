@@ -23,9 +23,6 @@ from functools import lru_cache
 from flydsl.compiler.jit_argument import PointerJitArg  # noqa: E402
 from kernels.gemm.rdna4_tile import TileConfig
 
-
-
-
 KERNEL_NAME = "rdna4_w8a16_linear"
 
 WM = WN = WK = 16
@@ -86,6 +83,8 @@ def build_w8a16_linear_module(
     ``w_dtype_name`` is ``"int8"``, ``"float8_e4m3fn"``, or ``"float8_e5m2"``.
     Does NOT require iu8 WMMA patch.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_w8a16_linear_module requires gfx120x, got {arch}"
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr import const_expr, gpu, range_constexpr
@@ -565,9 +564,8 @@ def w8a16_gemm(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "w8a16_gemm (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if a.dtype not in (torch.bfloat16, torch.float16):
         raise ValueError(f"W8A16 linear requires bf16/fp16 acts, got {a.dtype}")
     if b_nk.dtype not in _W8_TORCH:
@@ -670,9 +668,8 @@ def w8a16_linear(
     Soft-pads odd K; ``stream`` is ``torch.cuda.Stream`` (host).
     """
     _why = "w8a16_linear (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     orig_shape = x.shape
     x2d = x.reshape(-1, orig_shape[-1])
     if out_dtype is None:

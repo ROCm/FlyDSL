@@ -35,9 +35,6 @@ from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, pt
 from kernels.common.gfx120x_pad import ensure_contiguous
 from flydsl.runtime.device import get_rocm_arch
 
-
-
-
 KERNEL_NAME = "rdna4_quantize_int8_tensorwise"
 WARP = 32
 BLOCK = 256
@@ -71,6 +68,8 @@ def build_quantize_int8_tensorwise_module(
     the full-vector buffer record. A non-zero tail sizes that record to the
     real element count so the last vector zero-fills past the allocation.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_quantize_int8_tensorwise_module requires gfx120x, got {arch}"
     if block_threads not in _BLOCK_CHOICES:
         raise ValueError(f"block_threads={block_threads} is not a legal wave32 block")
     elem_dtype, elem_bytes = _elem(dtype_str)
@@ -521,6 +520,8 @@ def build_quantize_int8_given_scale_module(
     dtype_str: str, block_threads: int = BLOCK, elem_tail: int = 0
 ) -> Callable[..., None]:
     """Quantize with a scalar scale already chosen by the caller."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_quantize_int8_given_scale_module requires gfx120x, got {arch}"
     if block_threads not in _BLOCK_CHOICES:
         raise ValueError(f"block_threads={block_threads} is not a legal wave32 block")
     elem_dtype, elem_bytes = _elem(dtype_str)
@@ -674,9 +675,8 @@ def quantize_int8_tensorwise(
     ``x.device`` (reference ``quantize_int8_tensorwise``).
     """
     _why = "quantize_int8_tensorwise (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if stochastic_rounding:
         raise ValueError("quantize_int8_tensorwise: stochastic_rounding not supported")
     if isinstance(scale, str):
@@ -730,9 +730,8 @@ def dequantize_int8_tensorwise(
 ) -> torch.Tensor:
     """Inverse of ``quantize_int8_tensorwise``: ``q * scale``."""
     _why = "dequantize_int8_tensorwise (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if q.dtype != torch.int8:
         raise ValueError(f"q must be int8, got {q.dtype}")
     names = {

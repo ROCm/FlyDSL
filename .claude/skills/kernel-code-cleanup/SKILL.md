@@ -30,6 +30,17 @@ Reuse `kernels/common/act.py` for shared activation components,
 common modules for specialized memory operations. Similar formulas can encode
 different rounding or scheduling contracts.
 
+## Arch check
+
+Keep the arch check on the function that contains `@flyc.jit` or calls `flyc.compile`, before that point, as `compile_mxfp8_gemm_8w` does:
+
+```python
+arch = str(get_rocm_arch())
+assert arch.startswith("gfx950"), f"... requires gfx950, got {arch}"
+```
+
+Do not add one inside `@flyc.jit`, on the returned launcher, on a helper that does not contain the kernel, or on an atom op. Do not remove an existing check from that function.
+
 ## Cautions
 
 - **Surgical, behavior-preserving.** Migration is a refactor: minimal diffs, match

@@ -170,6 +170,17 @@ fx.slice(src, coord)                       # Slice at coordinate (None = keep mo
 
 ## 3. Writing Kernels
 
+### Arch check
+
+The function that contains `@flyc.jit` or calls `flyc.compile` checks the arch before that point. `compile_mxfp8_gemm_8w` and `build_flash_attn_dualwave_swp_module` do this. Do not put the check inside `@flyc.jit`, on the returned launcher, on a helper that does not contain the kernel, or on an atom op.
+
+```python
+arch = str(get_rocm_arch())
+assert arch.startswith("gfx950"), f"... requires gfx950, got {arch}"
+```
+
+Use the prefix for that kernel (`gfx950`, `gfx120`, and so on).
+
 ### Basic Pattern
 ```python
 import flydsl.compiler as flyc

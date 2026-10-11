@@ -43,9 +43,6 @@ from flydsl.compiler.jit_argument import PointerJitArg
 from .rdna4_scaled_mm_fp8 import TileConfig, pick_tile_config
 from flydsl.runtime.device import get_rocm_arch
 
-
-
-
 KERNEL_NAME = "rdna4_scaled_mm_fp8_fused"
 
 WM = WN = WK = 16
@@ -87,6 +84,8 @@ def build_scaled_mm_fp8_fused_module(
         ``False`` → e4m3 (``cvt_pk_fp8_f32``, max 448, ``Float8E4M3FN`` WMMA).
         ``True`` → e5m2 (``cvt_pk_bf8_f32``, max 57344, ``Float8E5M2`` WMMA).
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_scaled_mm_fp8_fused_module requires gfx120x, got {arch}"
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr import const_expr, gpu, range_constexpr
@@ -653,9 +652,8 @@ def scaled_mm_fp8_fused(
     ``scaled_mm_fp8_fused_multi``.
     """
     _why = "scaled_mm_fp8_fused (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     # Device LoRA residual: any LoRA count (1..N) uses multi/device residual path (in-kernel
     # LoRA epilogue measured slower than HIP on an otherwise idle gfx120x).
     if (
@@ -895,9 +893,8 @@ def scaled_mm_fp8_fused_multi(
     may be a scalar (broadcast) or a per-adapter sequence.
     """
     _why = "scaled_mm_fp8_fused_multi (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if a_f.dim() != 2 or b_nk.dim() != 2:
         raise ValueError("scaled_mm_fp8_fused_multi expects 2D operands")
     m, k = a_f.shape

@@ -19,9 +19,6 @@ from functools import lru_cache
 import torch
 from flydsl.runtime.device import get_rocm_arch
 
-
-
-
 KERNEL_NAME = "rdna4_mxfp4_block_gemm"
 
 # E2M1 nibble -> OCP e4m3fn byte. Same order as rdna4_mxfp4_e2m1._LUT.
@@ -55,6 +52,8 @@ def build_mxfp4_block_gemm_module(out_name: str, skip_bounds: bool = False) -> C
     A/B are packed E2M1, two values per byte. ``K`` is the logical value
     count and a multiple of 32. Scales are uint8 E8M0.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_mxfp4_block_gemm_module requires gfx120x, got {arch}"
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr import const_expr, gpu, range_constexpr
@@ -385,9 +384,8 @@ def mxfp4_block_gemm(
     from kernels.common.tensor_shim import _run_compiled
 
     _why = "mxfp4_block_gemm (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if a.dtype != torch.uint8 or b.dtype != torch.uint8:
         raise ValueError(f"A/B must be uint8 packed E2M1, got {a.dtype}, {b.dtype}")
     if scale_a.dtype != torch.uint8 or scale_b.dtype != torch.uint8:

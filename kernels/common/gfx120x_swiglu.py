@@ -60,6 +60,8 @@ def build_silu_mul_module(dtype: str = "bfloat16", vec: int | None = None, elem_
     leftover element count (``n % vec``). That specialization scalar-loads
     the tail. ``elem_tail == 0`` keeps the previous kernel.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_silu_mul_module requires gfx120x, got {arch}"
     ElemTy = {"float32": fx.Float32, "float16": fx.Float16, "bfloat16": fx.BFloat16}[dtype]
     elem_bytes = {"float32": 4, "float16": 2, "bfloat16": 2}[dtype]
     if vec is None:
@@ -177,6 +179,8 @@ def build_swiglu_chunk_module(
     A nonzero tail scalar-loads every output element, so a short half-width
     does not need a padded row.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_swiglu_chunk_module requires gfx120x, got {arch}"
     ElemTy = {"float32": fx.Float32, "float16": fx.Float16, "bfloat16": fx.BFloat16}[dtype]
     elem_bytes = {"float32": 4, "float16": 2, "bfloat16": 2}[dtype]
     if vec is None:
@@ -332,9 +336,8 @@ def silu_mul(
 ) -> torch.Tensor:
     """Product silu(gate)*up. A length that is not a vector multiple stays in the kernel."""
     _why = "silu_mul (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if gate.dtype not in _DTYPE_NAME or up.dtype != gate.dtype:
         raise ValueError(f"silu_mul requires matching bf16/fp16/f32, got {gate.dtype}/{up.dtype}")
     if gate.shape != up.shape:
@@ -387,9 +390,8 @@ def swiglu_chunk(
     ``torch.cuda.Stream`` (host); the kernel launch uses ``fx.Stream``.
     """
     _why = "swiglu_chunk (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if x.dtype not in _DTYPE_NAME:
         raise ValueError(f"swiglu_chunk requires bf16/fp16/f32, got {x.dtype}")
     if x.shape[-1] % 2 != 0:

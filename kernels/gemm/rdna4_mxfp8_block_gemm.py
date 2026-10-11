@@ -19,9 +19,6 @@ from functools import lru_cache
 import torch
 from flydsl.runtime.device import get_rocm_arch
 
-
-
-
 KERNEL_NAME = "rdna4_mxfp8_block_gemm"
 
 WM = WN = WK = 16
@@ -53,6 +50,8 @@ def build_mxfp8_block_gemm_module(out_name: str, skip_bounds: bool = False, k_ta
     loads one byte and zero-fills lanes past K. ``K % 32 != 0`` with a zero
     tail still uses that 16-byte load; a chunk that starts at K is already zero.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_mxfp8_block_gemm_module requires gfx120x, got {arch}"
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr import const_expr, gpu, range_constexpr
@@ -393,9 +392,8 @@ def mxfp8_block_gemm(
     from kernels.common.tensor_shim import _run_compiled
 
     _why = "mxfp8_block_gemm (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if a.dtype != torch.float8_e4m3fn or b.dtype != torch.float8_e4m3fn:
         raise ValueError(f"A/B must be float8_e4m3fn, got {a.dtype}, {b.dtype}")
     if scale_a.dtype != torch.uint8 or scale_b.dtype != torch.uint8:

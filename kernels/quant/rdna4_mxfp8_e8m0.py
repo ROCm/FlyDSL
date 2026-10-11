@@ -32,8 +32,6 @@ _TINY = 1.1754943508222875e-38
 _FP8_NAN = 0x7F
 
 
-
-
 def _stride_blocks(n_items: int) -> tuple[int, ...]:
     """Block sizes whose grid-stride loop can cover ``n_items``.
 
@@ -70,6 +68,8 @@ def _e8m0_to_f32(exponent):
 
 @lru_cache(maxsize=16)
 def build_mxfp8_quant_module(in_name: str, block: int = _DEFAULT_BLOCK):
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_mxfp8_quant_module requires gfx120x, got {arch}"
     in_ty, in_bytes = {"float32": (fx.Float32, 4), "bfloat16": (fx.BFloat16, 2), "float16": (fx.Float16, 2)}[in_name]
     if block not in _BLOCK_CHOICES:
         raise ValueError(f"MXFP8 quant block {block} is not executable by the stride loop")
@@ -132,6 +132,8 @@ def build_mxfp8_quant_module(in_name: str, block: int = _DEFAULT_BLOCK):
 @lru_cache(maxsize=8)
 def build_mxfp8_dequant_module(clamp_tiny: bool, block: int = _DEFAULT_BLOCK):
     """One thread per 32-block. ``clamp_tiny`` matches ``quant_dequant_mxfp8``."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_mxfp8_dequant_module requires gfx120x, got {arch}"
     if block not in _BLOCK_CHOICES:
         raise ValueError(f"MXFP8 dequant block {block} is not executable by the stride loop")
     cvt = fx.rocdl.cvt_f32_fp8
@@ -182,6 +184,8 @@ def build_mxfp8_quant_tail_module(in_name: str, block: int, logical_k: int):
     not spill into the next row. The aligned builder is a separate kernel.
     ``logical_k`` is baked in so the launch arguments stay the aligned ones.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_mxfp8_quant_tail_module requires gfx120x, got {arch}"
     in_ty, in_bytes = {"float32": (fx.Float32, 4), "bfloat16": (fx.BFloat16, 2), "float16": (fx.Float16, 2)}[in_name]
     if block not in _BLOCK_CHOICES:
         raise ValueError(f"MXFP8 quant block {block} is not executable by the stride loop")
@@ -268,6 +272,8 @@ def build_mxfp8_quant_tail_module(in_name: str, block: int, logical_k: int):
 @lru_cache(maxsize=8)
 def build_mxfp8_dequant_tail_module(clamp_tiny: bool, block: int, logical_k: int):
     """Decode a short last MX group without reading past the caller's K."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_mxfp8_dequant_tail_module requires gfx120x, got {arch}"
     if block not in _BLOCK_CHOICES:
         raise ValueError(f"MXFP8 dequant block {block} is not executable by the stride loop")
     if logical_k <= 0 or logical_k % 32 == 0:
@@ -491,9 +497,8 @@ def quantize_mxfp8_device(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "quantize_mxfp8 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if x.dtype not in (torch.float32, torch.bfloat16, torch.float16):
         raise ValueError(f"MXFP8 quant input must be f32/f16/bf16, got {x.dtype}")
     orig_k = int(x.shape[-1])
@@ -528,9 +533,8 @@ def dequantize_mxfp8_device(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "dequantize_mxfp8 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if q.dtype != torch.float8_e4m3fn:
         raise ValueError(f"MXFP8 values must be float8_e4m3fn, got {q.dtype}")
     if scale.dtype != torch.uint8:

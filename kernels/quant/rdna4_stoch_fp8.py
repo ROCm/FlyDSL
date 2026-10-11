@@ -20,11 +20,8 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.autotune import Config, autotune
 from flydsl.expr import math as fmath
-from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, kernel_signature, ptr_buf_tensor
 from flydsl.runtime.device import get_rocm_arch
-
-
-
+from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, kernel_signature, ptr_buf_tensor
 
 KERNEL_NAME = "stoch_fp8_gfx120x"
 BLOCK = 256
@@ -244,6 +241,8 @@ def _stoch_one_select(value: object, rng_b: object, C: object) -> object:
 
 
 def _build_scalar(in_dtype: str, e5m2: bool, path: str, block: int) -> Callable[..., None]:
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"_build_scalar requires gfx120x, got {arch}"
     InTy = {"float32": fx.Float32, "float16": fx.Float16, "bfloat16": fx.BFloat16}[in_dtype]
     in_bytes = {"float32": 4, "float16": 2, "bfloat16": 2}[in_dtype]
     C = _fp8_consts(e5m2)
@@ -298,9 +297,8 @@ def build_stoch_fp8_module(
 ) -> Callable[..., None]:
     """Build @flyc.jit launcher. path in {"bitcast","select"}."""
     _why = "build_stoch_fp8_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if path not in ("bitcast", "select"):
         raise ValueError(f"unknown path {path!r}")
     if in_dtype not in ("float32", "float16", "bfloat16"):

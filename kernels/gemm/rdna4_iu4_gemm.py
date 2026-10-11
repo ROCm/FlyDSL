@@ -24,9 +24,6 @@ from flydsl.compiler.jit_argument import PointerJitArg
 from kernels.gemm.rdna4_tile import TileConfig
 from flydsl.runtime.device import get_rocm_arch
 
-
-
-
 KERNEL_NAME = "rdna4_iu4_gemm"
 
 WM = WN = WK = 16
@@ -102,6 +99,8 @@ def build_iu4_gemm_module(
 
     REQUIRES FlyDSL gfx120x iu4 WMMA. The inner loop is K=32.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_iu4_gemm_module requires gfx120x, got {arch}"
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr import const_expr, gpu, range_constexpr
@@ -562,9 +561,8 @@ def iu4_gemm(
     See ``docs/prebuilt_kernels_guide.md`` for call examples.
     """
     _why = "iu4_gemm (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     import torch
 
     if a_packed.dim() != 2 or b_packed.dim() != 2:

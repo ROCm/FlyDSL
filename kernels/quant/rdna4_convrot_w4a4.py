@@ -41,8 +41,6 @@ _INV_7 = 1.0 / float(_INT4_MAX)
 _SCALE_FLOOR = 1e-10
 
 
-
-
 def _kernel_signature(**params: object) -> str:
     """Specialization suffix for kernel/launch names (matches kernels.common.gfx120x_buf_helpers)."""
     return "_".join(
@@ -103,6 +101,8 @@ def build_convrot_w4a4_quant_module(
     is the caller's K. A shorter row zero-fills lanes past that K inside the
     group. Equal values keep the previous load.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_convrot_w4a4_quant_module requires gfx120x, got {arch}"
     if logical_k is None:
         logical_k = k
     if group_size not in _SUPPORTED_GROUPS:
@@ -485,9 +485,8 @@ def quantize_convrot_w4a4_weight(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "quantize_convrot_w4a4_weight (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if quant_group_size != _INT4_GROUP_SIZE:
         raise ValueError(f"int4 MMA contract requires quant_group_size {_INT4_GROUP_SIZE}, got {quant_group_size}")
@@ -530,6 +529,8 @@ def quantize_convrot_w4a4_weight(
 @lru_cache(maxsize=8)
 def build_expand_signed_i4_module(block_threads: int = 256) -> Callable[..., None]:
     """Packed signed nibbles → int8 codes, one byte per thread."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_expand_signed_i4_module requires gfx120x, got {arch}"
     if block_threads not in _BLOCK_CHOICES:
         raise ValueError(f"block_threads={block_threads} is not a legal wave32 block")
     block = block_threads
@@ -589,9 +590,8 @@ def expand_signed_i4(packed: torch.Tensor, *, stream: torch.cuda.Stream | None =
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "expand_signed_i4 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if packed.dtype != torch.int8:
         raise ValueError(f"packed must be int8, got {packed.dtype}")
@@ -606,6 +606,8 @@ def expand_signed_i4(packed: torch.Tensor, *, stream: torch.cuda.Stream | None =
 @lru_cache(maxsize=8)
 def build_i4_row_scale_module(block_threads: int = 256) -> Callable[..., None]:
     """Signed nibble × per-row scale → f32, one packed byte per thread."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_i4_row_scale_module requires gfx120x, got {arch}"
     if block_threads not in _BLOCK_CHOICES:
         raise ValueError(f"block_threads={block_threads} is not a legal wave32 block")
     block = block_threads
@@ -696,9 +698,8 @@ def dequantize_convrot_w4a4_weight(
     from kernels.quant.rdna4_int8_convrot import convrot_fwht
 
     _why = "dequantize_convrot_w4a4_weight (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if output_dtype is None:
         output_dtype = torch.float32
     if quant_group_size != _INT4_GROUP_SIZE:
@@ -837,9 +838,8 @@ def convrot_w4a4_linear(
     Requires gfx120x iu4 WMMA (and iu8 when ``linear_dtype='int8'``).
     """
     _why = "convrot_w4a4_linear (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     from kernels.quant.rdna4_int8_convrot import int8_linear_convrot
 

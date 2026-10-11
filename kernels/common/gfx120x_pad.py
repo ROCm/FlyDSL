@@ -31,8 +31,6 @@ _ELEM = {
 }
 
 
-
-
 def _elem_name(dtype: torch.dtype) -> str:
     if dtype in (torch.float8_e4m3fn, torch.float8_e5m2, torch.int8, torch.uint8):
         return "uint8"
@@ -45,6 +43,8 @@ def _elem_name(dtype: torch.dtype) -> str:
 
 @lru_cache(maxsize=64)
 def build_pad_module(elem_name: str, mode: str, block_threads: int = 256):
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_pad_module requires gfx120x, got {arch}"
     ty, nbytes = _ELEM[elem_name]
     block = int(block_threads)
     if block not in _BLOCKS:
@@ -272,9 +272,8 @@ def device_pad(
     Pass ``stream`` so soft-pad runs on the same queue as a preceding/following kernel.
     """
     _why = "device_pad (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if mode == "zeros":
         mode = "constant"
     if mode not in _MODES:

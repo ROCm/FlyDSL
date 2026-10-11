@@ -30,8 +30,6 @@ _LUT = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3
 _FP4_BOUNDS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
 
 
-
-
 def _stride_blocks(n_items: int) -> tuple[int, ...]:
     """Block sizes whose grid-stride loop can cover ``n_items``.
 
@@ -64,6 +62,8 @@ def _fp4_value(code):
 
 @lru_cache(maxsize=16)
 def build_mxfp4_quant_module(in_name: str, block: int = _DEFAULT_BLOCK):
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_mxfp4_quant_module requires gfx120x, got {arch}"
     in_ty, in_bytes = {"float32": (fx.Float32, 4), "bfloat16": (fx.BFloat16, 2), "float16": (fx.Float16, 2)}[in_name]
     if block not in _BLOCK_CHOICES:
         raise ValueError(f"MXFP4 quant block {block} is not executable by the stride loop")
@@ -117,6 +117,8 @@ def build_mxfp4_quant_module(in_name: str, block: int = _DEFAULT_BLOCK):
 
 @lru_cache(maxsize=8)
 def build_mxfp4_dequant_module(block: int = _DEFAULT_BLOCK):
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_mxfp4_dequant_module requires gfx120x, got {arch}"
     if block not in _BLOCK_CHOICES:
         raise ValueError(f"MXFP4 dequant block {block} is not executable by the stride loop")
 
@@ -307,9 +309,8 @@ _mxfp4_dequant_tuned = autotune(
 def quantize_mxfp4_device(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize ``[..., K]`` to packed MXFP4 plus per-32 E8M0 scales."""
     _why = "quantize_mxfp4 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if w.dtype not in (torch.float32, torch.bfloat16, torch.float16):
         raise ValueError(f"MXFP4 quant input must be f32/f16/bf16, got {w.dtype}")
     if w.shape[-1] % 32:
@@ -338,9 +339,8 @@ def quantize_mxfp4_device(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 def dequantize_mxfp4_device(q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     """Decode packed MXFP4 and per-32 E8M0 scales to fp32."""
     _why = "dequantize_mxfp4 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     q = q.view(torch.uint8)
     if scale.dtype != torch.uint8:
         raise ValueError(f"MXFP4 scales must be uint8, got {scale.dtype}")

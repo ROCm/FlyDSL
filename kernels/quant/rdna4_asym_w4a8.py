@@ -65,8 +65,6 @@ _ALS_ITERS = 2
 _SUPPORTED_CONVROT = (16, 64, 256)
 
 
-
-
 KERNEL_NAME = "w4a8_dequant_int4_to_int8_gfx120x"
 WARP = 32
 # Bump to invalidate dequant / pack autotune winner caches after a codegen change.
@@ -114,6 +112,8 @@ def build_w4a8_dequant_int4_to_int8_module(
     block_threads: int | None = None,
 ) -> Callable[..., None]:
     """Decode packed unsigned INT4 (+ optional codebook) × s_rel → INT8 grid."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_w4a8_dequant_int4_to_int8_module requires gfx120x, got {arch}"
     if k <= 0 or k % 2 != 0:
         raise ValueError(f"K={k} must be positive even")
     if group_size < 4 or k % group_size != 0:
@@ -313,6 +313,8 @@ def build_w4a8_pack_module(
 
     ``weight_name`` is the weight's wire dtype. Values are widened to f32 in the kernel.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_w4a8_pack_module requires gfx120x, got {arch}"
     if group_size < 4:
         raise ValueError(f"group_size={group_size} must be >= 4")
     w_ty, w_bytes = _weight_elem(weight_name)
@@ -671,9 +673,8 @@ def quantize_w4a8_int8_weight(
     import torch
 
     _why = "quantize_w4a8_int8_weight (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if scale_dtype is None:
         scale_dtype = torch.float8_e4m3fn
     if stochastic_rounding:
@@ -702,9 +703,8 @@ def dequant_int4_grouped_to_int8(
 ) -> torch.Tensor:
     """FlyDSL decode of packed W4A8 → INT8 GEMM grid."""
     _why = "dequant_int4_grouped_to_int8 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     import torch
 
     if qdata.dim() != 2 or qdata.dtype != torch.int8:
@@ -811,6 +811,8 @@ def build_w4a8_reconstruct_module(
     correction). One ConvRot group is staged in LDS as f32 for the un-rotate.
     Nothing writes an int8 matrix or an f32 matrix.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_w4a8_reconstruct_module requires gfx120x, got {arch}"
     import math
 
     _check_w4a8_reconstruct_shape(k, group_size, convrot_groupsize)
@@ -1165,9 +1167,8 @@ def dequantize_w4a8_int8_weight(
     ``group_size % 16 == 0``).
     """
     _why = "dequantize_w4a8_int8_weight (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if output_dtype is None:
         output_dtype = torch.bfloat16
@@ -1276,9 +1277,8 @@ def w4a8_int8_linear(
     original-basis weight in one kernel and ``gemm_bf16_nmajor_lds`` multiplies.
     """
     _why = "w4a8_int8_linear (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     import torch
 
     from kernels.quant.rdna4_int8_convrot import int8_linear_convrot

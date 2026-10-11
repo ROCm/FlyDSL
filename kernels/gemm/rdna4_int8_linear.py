@@ -29,9 +29,6 @@ import torch
 from kernels.gemm.rdna4_tile import TileConfig
 from flydsl.runtime.device import get_rocm_arch
 
-
-
-
 KERNEL_NAME = "rdna4_int8_linear"
 
 _DEFAULT_WGPS = 32
@@ -175,9 +172,8 @@ def int8_linear(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "int8_linear (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if a_int8.dtype != torch.int8 or b_int8.dtype != torch.int8:
         raise ValueError("iu8 int8 linear requires int8 A/B")
     a = ensure_contiguous(a_int8, stream=stream)

@@ -18,10 +18,10 @@ from flydsl.runtime.device import get_rocm_arch
 _BLOCKS = (256,)
 
 
-
-
 @lru_cache(maxsize=4)
 def build_bool_mask_to_bias_module(block_threads: int = 256):
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_bool_mask_to_bias_module requires gfx120x, got {arch}"
     block = int(block_threads)
     if block not in _BLOCKS:
         raise ValueError(f"bool mask block_threads={block} not in {_BLOCKS}")
@@ -67,9 +67,8 @@ def bool_mask_to_additive(
 ) -> torch.Tensor:
     """Convert a bool mask to fp32 additive bias (True→0, False→-inf) on device."""
     _why = "bool_mask_to_additive (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if mask.dtype != torch.bool:
         raise TypeError(f"bool_mask_to_additive expects bool, got {mask.dtype}")
     m = mask.detach().contiguous()

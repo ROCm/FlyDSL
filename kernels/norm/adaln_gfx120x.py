@@ -24,9 +24,6 @@ from flydsl.expr import math as fmath
 from kernels.common.gfx120x_buf_helpers import kernel_signature
 from flydsl.runtime.device import get_rocm_arch
 
-
-
-
 KERNEL_NAME = "adaln_gfx120x"
 WARP = 32
 BLOCK_THREADS = 256
@@ -38,9 +35,8 @@ def build_adaln_module(
 ) -> Callable[..., None]:
     """Specialize fused AdaLN kernel on (N, dtype, subtract_mean)."""
     _why = "build_adaln_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if block_threads is None:
         block_threads = BLOCK_THREADS

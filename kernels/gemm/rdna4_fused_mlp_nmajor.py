@@ -82,8 +82,6 @@ WAVE = 32
 _TILE = 16
 
 
-
-
 def _ptr(t: torch.Tensor) -> PointerJitArg:
     return flyc.from_c_void_p(fx.Uint8, t.data_ptr())
 
@@ -104,6 +102,8 @@ def _zeros8() -> list[fx.Float32]:
 @lru_cache(maxsize=8)
 def build_wmma_tile_module(dtype_name: str = "bfloat16", *, swap_ab: bool = False) -> Callable[..., None]:
     """One wave, one 16×16×16 WMMA tile. ``swap_ab`` selects GPUOpen A/B swap."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_wmma_tile_module requires gfx120x, got {arch}"
     if dtype_name not in ("bfloat16", "float16"):
         raise ValueError(f"supports bf16/fp16, got {dtype_name}")
     Elem = fx.BFloat16 if dtype_name == "bfloat16" else fx.Float16
@@ -215,6 +215,8 @@ def build_fused_gemm_tn_module(dtype_name: str = "bfloat16") -> Callable[..., No
     GEMM0: A/B swapped → D0 N-major in VGPR. Narrow to act dtype. GEMM1:
     unswapped, D0 as A. Standard M-major store. No LDS transpose of D0.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_fused_gemm_tn_module requires gfx120x, got {arch}"
     if dtype_name not in ("bfloat16", "float16"):
         raise ValueError(f"supports bf16/fp16, got {dtype_name}")
     Elem = fx.BFloat16 if dtype_name == "bfloat16" else fx.Float16
@@ -306,6 +308,8 @@ def build_fused_swiglu_mlp_module(dtype_name: str = "bfloat16") -> Callable[...,
     the mid activation. GEMM0_gate and GEMM0_up swap A/B (N-major D in VGPR);
     Sequence ABI keeps GEMM1 **unswapped** (mid already legal as A).
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_fused_swiglu_mlp_module requires gfx120x, got {arch}"
     if dtype_name not in ("bfloat16", "float16"):
         raise ValueError(f"supports bf16/fp16, got {dtype_name}")
     Elem = fx.BFloat16 if dtype_name == "bfloat16" else fx.Float16
@@ -704,9 +708,8 @@ def gemm_bf16_nmajor_lds(
     one measured ``(M, N, K)``.
     """
     _why = "gemm_bf16_nmajor_lds (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if a.ndim != 2 or b_nk.ndim != 2:
         raise ValueError("expects A[M,K], B[N,K]")
     if a.dtype not in (torch.bfloat16, torch.float16):
@@ -786,9 +789,8 @@ def fused_gemm_tn(
 ) -> torch.Tensor:
     """``C1 = (A0 @ B0.T) @ B1.T`` via zero-LDS fused WMMA (16×16 panels only)."""
     _why = "fused_gemm_tn (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     for t, name in ((a0, "a0"), (b0, "b0"), (b1, "b1")):
         if t.shape != (_TILE, _TILE):
             raise ValueError(f"{name} must be [16,16], got {tuple(t.shape)}")
@@ -872,9 +874,8 @@ def fused_swiglu_mlp_inreg(
     from kernels.common.gfx120x_pad import device_pad, ensure_contiguous
 
     _why = "fused_swiglu_mlp_inreg (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if out_dtype is None:
         out_dtype = x.dtype
     orig = x.shape
@@ -951,6 +952,8 @@ def build_fused_swiglu_mlp_lds_module(
     counts. The aligned launch tensors stay ``X[16, K]``, ``Wg[FFN, K]``,
     ``Wu[FFN, K]``, ``Wd[16, FFN]``, ``Y[16, 16]`` f32, with no extra arguments.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_fused_swiglu_mlp_lds_module requires gfx120x, got {arch}"
     if logical_k is None:
         logical_k = k
     if logical_ffn is None:
@@ -1112,6 +1115,8 @@ def _build_fused_swiglu_mlp_lds_tail(
     ``K = (lane // 16) * 8 + val``. A wide copy of a short row reads the next
     row or past the allocation, so each val is one global element, or zero.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"_build_fused_swiglu_mlp_lds_tail requires gfx120x, got {arch}"
     Elem = fx.BFloat16 if dtype_name == "bfloat16" else fx.Float16
     k_tiles = k // _TILE
     ffn_tiles = ffn // _TILE
@@ -1282,9 +1287,8 @@ def fused_swiglu_mlp_lds(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "fused_swiglu_mlp_lds (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if out_dtype is None:
         out_dtype = x.dtype
     orig = x.shape
@@ -1370,9 +1374,8 @@ def fused_swiglu_mlp_nmajor(
     reads the caller's K and FFN and zero-fills the tail. Weights are ``[N, K]``.
     """
     _why = "fused_swiglu_mlp_nmajor (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if out_dtype is None:
         out_dtype = x.dtype
     k = int(x.shape[-1])

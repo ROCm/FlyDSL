@@ -19,9 +19,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.autotune import Config, autotune
 
-
-
-
 KERNEL_NAME = "rdna4_quantize_int8_rowwise"
 WARP = 32
 BLOCK = 256
@@ -34,6 +31,8 @@ def build_quantize_int8_rowwise_module(
     K: int, dtype_str: str, block_threads: Optional[int] = None
 ) -> Callable[..., None]:
     """Build the rowwise absmax int8 quant kernel."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_quantize_int8_rowwise_module requires gfx120x, got {arch}"
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr import const_expr, gpu, range_constexpr
@@ -328,9 +327,8 @@ def quantize_int8_rowwise(
     Direct/AOT callers must pass ``OutScale`` as float32 ``[rows]`` (not ``[rows, 1]``).
     """
     _why = "quantize_int8_rowwise (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if stochastic_rounding:
         raise ValueError("quantize_int8_rowwise: stochastic_rounding not supported")
     if not _layout_ok(x):
@@ -366,15 +364,16 @@ def dequantize_int8_rowwise(
     stream: Optional[torch.cuda.Stream] = None,
 ) -> tuple:
     """Inverse of ``quantize_int8_rowwise``: ``q * scale`` per row."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"dequantize_int8_rowwise requires gfx120x, got {arch}"
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "dequantize_int8_rowwise (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if q.dtype != torch.int8:
         raise ValueError(f"q must be int8, got {q.dtype}")
     names = {

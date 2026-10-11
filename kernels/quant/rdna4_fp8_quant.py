@@ -26,9 +26,6 @@ from flydsl.expr.typing import T
 from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, kernel_signature, ptr_buf_tensor
 from flydsl.runtime.device import get_rocm_arch
 
-
-
-
 KERNEL_NAME = "fp8_quant_gfx120x"
 BLOCK = 256
 VEC_HALF = 8
@@ -48,9 +45,8 @@ def build_fp8_quant_module(
 ) -> Callable[..., None]:
     """Build the per-tensor FP8 quant kernel."""
     _why = "build_fp8_quant_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if block_threads not in _BLOCK_CHOICES:
         raise ValueError(f"block_threads={block_threads} is not a legal wave32 block")
     InTy = {"float32": fx.Float32, "float16": fx.Float16, "bfloat16": fx.BFloat16}[in_dtype]
@@ -176,9 +172,8 @@ def build_fp8_dequant_module(
 ) -> Callable[..., None]:
     """Build the per-tensor FP8 dequant kernel."""
     _why = "build_fp8_dequant_module"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if block_threads not in _BLOCK_CHOICES:
         raise ValueError(f"block_threads={block_threads} is not a legal wave32 block")
     OutTy = {"float32": fx.Float32, "float16": fx.Float16, "bfloat16": fx.BFloat16}[out_dtype]
@@ -381,9 +376,8 @@ def dequantize_fp8(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "dequantize_fp8"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if q.dtype == torch.float8_e5m2:
         e5m2 = True
     elif q.dtype == torch.float8_e4m3fn:

@@ -21,10 +21,10 @@ from flydsl.runtime.device import get_rocm_arch
 _BLOCKS = (256,)
 
 
-
-
 @lru_cache(maxsize=8)
 def build_alibi_bias_module(block_threads: int = 256, per_head: bool = False):
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_alibi_bias_module requires gfx120x, got {arch}"
     block = int(block_threads)
     if block not in _BLOCKS:
         raise ValueError(f"alibi bias block_threads={block} not in {_BLOCKS}")
@@ -108,9 +108,8 @@ def fill_alibi_bias(
 ) -> torch.Tensor:
     """Fill ALiBi bias on device. slopes is contiguous fp32 [H] (or [1])."""
     _why = "fill_alibi_bias (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     s = ensure_contiguous(slopes.detach().to(dtype=torch.float32), stream=stream)
     if s.dim() != 1 or s.numel() < 1:
         raise ValueError(f"fill_alibi_bias: slopes must be 1D nonempty, got {tuple(s.shape)}")

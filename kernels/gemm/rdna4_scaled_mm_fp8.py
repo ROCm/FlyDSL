@@ -111,6 +111,8 @@ def build_scaled_mm_fp8_module(
     ``k_tail`` is ``K % 16``. Zero keeps the 16-byte global loads and is only
     legal when ``K % 16 == 0``. A non-zero tail loads each K-chunk as bytes.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_scaled_mm_fp8_module requires gfx120x, got {arch}"
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr import const_expr, gpu, range_constexpr
@@ -566,9 +568,8 @@ def scaled_mm_fp8(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "scaled_mm_fp8 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
     if a.ndim != 2 or b_nk.ndim != 2:
         raise ValueError("a and b_nk must be 2D [M,K] and [N,K]")
     _fp8 = (torch.float8_e4m3fn, torch.float8_e5m2)

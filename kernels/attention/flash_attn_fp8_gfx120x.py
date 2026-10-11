@@ -39,6 +39,7 @@ from flydsl.compiler.kernel_function import CompilationContext  # noqa: E402
 from flydsl.expr import const_expr, gpu, range_constexpr  # noqa: E402
 from flydsl.expr.typing import T  # noqa: E402
 from flydsl.expr.typing import Vector as Vec  # noqa: E402
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention.flash_attn_gfx120x_host import (  # noqa: E402
     add_alibi_scores,
     add_score_bias,
@@ -89,6 +90,8 @@ def build_flash_attn_func_fp8_module_primary(
     alibi_per_head: bool = False,
 ) -> Callable[..., None]:
     """Build the gfx120x FP8 Flash Attention kernel (QKV=E4M3FN, O=bf16)."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_flash_attn_func_fp8_module_primary requires gfx120x, got {arch}"
 
     WARP_SIZE = 32
     WMMA_M = 16

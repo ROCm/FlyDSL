@@ -64,8 +64,6 @@ _DEFAULT_PAD = 256
 WARP = 32
 
 
-
-
 KERNEL_NAME = "svdquant_dequant_w4_gfx120x"
 KERNEL_NAME_FUSED = "svdquant_scaled_mm_fused_gfx120x"
 TUNING_SCHEMA = 1
@@ -127,6 +125,8 @@ def build_svdquant_dequant_w4_module(
     unsigned: bool = False,
 ) -> Callable[..., None]:
     """Unpack signed INT4 + apply group scales → bf16/fp16 weight row."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_svdquant_dequant_w4_module requires gfx120x, got {arch}"
     if k <= 0 or k % 2 != 0:
         raise ValueError(f"K={k} must be positive even")
     if group_size < 8 or group_size % 8 != 0:
@@ -293,9 +293,8 @@ def dequant_svdquant_w4a4_weight(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "dequant_svdquant_w4a4_weight (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if qweight.dim() != 2 or qweight.dtype != torch.int8:
         raise ValueError("qweight must be 2D int8")
@@ -333,6 +332,8 @@ def build_svdquant_act_quant_module(
     dtype: str, k: int, act_unsigned: bool, scale_dtype: str | None = None
 ) -> Callable[..., None]:
     """One row per block: smooth, group absmax, nibble pack, and LoRA-down dot."""
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_svdquant_act_quant_module requires gfx120x, got {arch}"
     if k <= 0:
         raise ValueError(f"K={k} must be positive")
     _tys = {
@@ -636,9 +637,8 @@ def quantize_svdquant_w4a4(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "quantize_svdquant_w4a4 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     if x.dim() != 2:
         raise ValueError(f"expected 2D input, got shape {tuple(x.shape)}")
@@ -719,6 +719,8 @@ def build_svdquant_scaled_mm_fused_module(
     Scales use API layout ``(groups, M)`` / ``(groups, N)`` in ActTy
     (host skips transpose + ``.float()`` — measured 2026-09-30).
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_svdquant_scaled_mm_fused_module requires gfx120x, got {arch}"
     if k <= 0 or k % 2 != 0:
         raise ValueError(f"K={k} must be positive even")
     if group_size < 8 or group_size % 8 != 0:
@@ -1049,9 +1051,8 @@ def scaled_mm_svdquant_w4a4(
     from kernels.common.gfx120x_pad import ensure_contiguous
 
     _why = "scaled_mm_svdquant_w4a4 (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     m, k_half = act.shape
     n = wgt.shape[0]
@@ -1157,9 +1158,8 @@ def svdquant_w4a4_linear(
     to the main-path activation only; LoRA always sees raw ``x``.
     """
     _why = "svdquant_w4a4_linear (gfx120x)"
-    arch = str(get_rocm_arch() or "")
-    if not arch.startswith("gfx120"):
-        raise ValueError(f"{_why} requires gfx120x, got arch={arch!r}")
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"{_why} requires gfx120x, got {arch}"
 
     orig_shape = x.shape
     x2d = x.reshape(-1, orig_shape[-1])
