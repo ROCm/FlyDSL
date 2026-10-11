@@ -616,6 +616,10 @@ def _build_rmsnorm_small_n_module(
     USE_HW_CVT_PK_BF16_F32 = _has_hw_cvt_pk_bf16_f32(arch)
     # Same reason as PRELOAD_GAMMA in build_rmsnorm_module.
     PRELOAD_GAMMA = arch == "gfx1250"
+    # Same reason as LOADS_FIRST in build_rmsnorm_module: from four vectors per lane on, each x vector is converted
+    # before the next load issues, and a lane waits one memory latency per vector. With three or fewer the loads
+    # already issue together, and the barrier only costs 3-5%.
+    LOADS_FIRST = arch == "gfx1250" and NUM_VEC_ROW_ITERS > 3
     # On gfx1250 the multi-row kernel is faster at every M while each lane handles at most three vectors of a row
     # (N <= 768). For wider rows it is faster only when M > N; below that one workgroup per row wins.
     if arch == "gfx1250" and USE_VEC_SMALL_N:
@@ -675,22 +679,36 @@ def _build_rmsnorm_small_n_module(
 
                 in_local = []
                 gamma_local = []
-                for tile_i in range_constexpr(NUM_VEC_ROW_ITERS):
+
+                def load_row_tile(tile_i):
                     idx = lane + tile_i * THREADS_PER_ROW
                     is_valid = idx < VEC_TILES
                     idx_safe = is_valid.select(idx, 0)
-                    vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe)
-                    in_local.append(vec)
+                    in_local.append(_load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe))
                     if const_expr(PRELOAD_GAMMA):
                         gamma_local.append(
                             _preload_weight_vec(
                                 gamma_copy_atom, weight_dtype_str, weight_elem_dtype, gamma_div, idx_safe
                             )
                         )
-                    x = vec.to(fx.Float32)
+                    return is_valid
+
+                def add_row_sumsq(acc, tile_i, is_valid):
+                    x = in_local[tile_i].to(fx.Float32)
                     x2 = x * x
                     red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                    thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
+                    return acc + is_valid.select(red2, c_zero_f)
+
+                if const_expr(LOADS_FIRST):
+                    row_tiles = []
+                    for tile_i in range_constexpr(NUM_VEC_ROW_ITERS):
+                        row_tiles.append(load_row_tile(tile_i))
+                    fx.rocdl.sched_barrier(0)
+                    for tile_i in range_constexpr(NUM_VEC_ROW_ITERS):
+                        thread_sumsq = add_row_sumsq(thread_sumsq, tile_i, row_tiles[tile_i])
+                else:
+                    for tile_i in range_constexpr(NUM_VEC_ROW_ITERS):
+                        thread_sumsq = add_row_sumsq(thread_sumsq, tile_i, load_row_tile(tile_i))
 
                 if const_expr(TAIL_ELEMS > 0):
                     if lane < TAIL_ELEMS:
