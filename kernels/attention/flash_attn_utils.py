@@ -120,8 +120,7 @@ def _tree_reduce(vals, binop):
 
 
 def _mfma_acc(a, b, c, _mma_atom, mfma_acc_vec_type):
-    # The compatibility shim wraps A/B in lists; this SSA op takes scalar values.
-    return fly.MmaAtomCallSSA(results_=[mfma_acc_vec_type], mmaAtom=_mma_atom, a=a, b=b, c=c).results[0]
+    return fly.mma_atom_call_ssa([mfma_acc_vec_type], _mma_atom, a, b, c)
 
 
 def _concat_vectors(lhs, rhs):
@@ -612,8 +611,8 @@ def _make_raw_buffer_rsrc(tensor):
         [
             base_lo,
             base_hi,
-            buffer_ops._create_i32_constant(0xFFFFFFFF),
-            buffer_ops._create_i32_constant(buffer_ops._get_buffer_flags()),
+            fx.Int32(0xFFFFFFFF),
+            fx.Int32(buffer_ops._get_buffer_flags()),
         ],
         fx.Int32,
     ).ir_value()
