@@ -5,8 +5,8 @@
 
 """Shared helpers for optional perf comparison in GPU operator tests.
 
-These tests are primarily correctness tests. Performance comparison (FlyDSL vs AIter)
-is opt-in via environment variables so CI remains fast/stable.
+These tests are primarily correctness tests. Performance comparison is opt-in via
+environment variables so CI remains fast/stable.
 """
 
 from __future__ import annotations
@@ -39,12 +39,17 @@ class PerfRow:
     dtype: str
     flydsl_gpu_us: Optional[float]
     aiter_gpu_us: Optional[float]
+    reference_name: str = "AIter"
 
     @property
-    def speedup_flydsl_vs_aiter(self) -> Optional[float]:
-        if self.flydsl_gpu_us is None or self.aiter_gpu_us is None:
+    def reference_gpu_us(self) -> Optional[float]:
+        return self.aiter_gpu_us
+
+    @property
+    def speedup_flydsl_vs_reference(self) -> Optional[float]:
+        if self.flydsl_gpu_us is None or self.reference_gpu_us is None:
             return None
-        return self.aiter_gpu_us / self.flydsl_gpu_us
+        return self.reference_gpu_us / self.flydsl_gpu_us
 
 
 def _fmt_us(x: Optional[float]) -> str:
@@ -52,15 +57,19 @@ def _fmt_us(x: Optional[float]) -> str:
 
 
 def print_perf_table(rows: List[PerfRow]) -> None:
+    reference_names = {r.reference_name for r in rows}
+    reference_name = reference_names.pop() if len(reference_names) == 1 else "reference"
+    reference_header = f"{reference_name}(gpu us)"
     print("\n" + "=" * 100)
-    print("Perf Compare (gpu us): FlyDSL vs AIter")
+    print(f"Perf Compare (gpu us): FlyDSL vs {reference_name}")
     print("=" * 100)
-    print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>14s} {'AIter(gpu us)':>14s} {'speedup':>10s}")
+    print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>14s} {reference_header:>14s} {'speedup':>10s}")
     for r in rows:
-        sp = r.speedup_flydsl_vs_aiter
+        sp = r.speedup_flydsl_vs_reference
         sp_s = "-" if sp is None else f"{sp:,.2f}x"
         print(
-            f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flydsl_gpu_us):>14s} {_fmt_us(r.aiter_gpu_us):>14s} {sp_s:>10s}"
+            f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flydsl_gpu_us):>14s} "
+            f"{_fmt_us(r.reference_gpu_us):>14s} {sp_s:>10s}"
         )
     print("=" * 100 + "\n")
 
@@ -406,7 +415,16 @@ def run_wmma_sweep(
             torch_us = bench_gpu_us_torch(lambda: torch.mm(A, B, out=C), warmup=warmup, iters=iters)
         except Exception:
             pass  # torch reference failure is non-fatal
-        rows.append(PerfRow(op="wmma_gemm", shape=shape, dtype=dt, flydsl_gpu_us=flydsl_us, aiter_gpu_us=torch_us))
+        rows.append(
+            PerfRow(
+                op="wmma_gemm",
+                shape=shape,
+                dtype=dt,
+                flydsl_gpu_us=flydsl_us,
+                aiter_gpu_us=torch_us,
+                reference_name="PyTorch",
+            )
+        )
 
     if is_gfx11:
         # FP8 WMMA requires gfx12* — skip on gfx11.
@@ -440,7 +458,16 @@ def run_wmma_sweep(
             )
         except Exception:
             pass  # torch reference failure is non-fatal
-        rows.append(PerfRow(op="fp8_gemm", shape=shape, dtype="fp8", flydsl_gpu_us=flydsl_us, aiter_gpu_us=torch_us))
+        rows.append(
+            PerfRow(
+                op="fp8_gemm",
+                shape=shape,
+                dtype="fp8",
+                flydsl_gpu_us=flydsl_us,
+                aiter_gpu_us=torch_us,
+                reference_name="PyTorch",
+            )
+        )
 
     if fail_count > 0:
         raise RuntimeError(f"{fail_count} RDNA WMMA benchmark(s) failed — see errors above")
@@ -618,14 +645,12 @@ def bench_print_banner(text):
 
 
 def bench_print_stage_header():
-    print(
-        f"{'Tokens':>7} {'M_eff':>7} {'Latency(us)':>12} {'TFLOPS':>9} " f"{'BW(TB/s)':>10} {'Util%':>7} {'Status':>8}"
-    )
+    print(f"{'Tokens':>7} {'M_eff':>7} {'Latency(us)':>12} {'TFLOPS':>9} {'BW(TB/s)':>10} {'Util%':>7} {'Status':>8}")
     print("-" * 110)
 
 
 def bench_print_stage_row(tokens, m_eff, us, tflops, tbps, util_pct, status):
-    print(f"{tokens:>7} {m_eff:>7} {us:>10.1f}   {tflops:>8.2f} " f"{tbps:>9.3f}  {util_pct:>6.1f}% {status:>8}")
+    print(f"{tokens:>7} {m_eff:>7} {us:>10.1f}   {tflops:>8.2f} {tbps:>9.3f}  {util_pct:>6.1f}% {status:>8}")
 
 
 # ── MOE bench sweep system ─────────────────────────────────────────────────
@@ -741,7 +766,7 @@ def moe_bench_config(
         print(f"  Peak compute reference: {peak_tflops:.0f} TFLOPS")
 
     # ── Stage 1 ──
-    print(f"\n  ── Stage 1 (gate+up: [{model_dim}] -> [{2*inter_dim}]) ──")
+    print(f"\n  ── Stage 1 (gate+up: [{model_dim}] -> [{2 * inter_dim}]) ──")
     bench_print_stage_header()
 
     s1_results = []
@@ -994,20 +1019,10 @@ def main() -> None:
     rows = run_compare_sweep(configs=configs, aiter_impl=aiter_impl, warmup=warmup, iters=iters)
     print_perf_table(rows)
 
-    # WMMA GEMM benchmarks (RDNA4 only)
+    # WMMA GEMM benchmarks (RDNA3/RDNA4; FP8 is RDNA4 only).
     wmma_rows = run_wmma_sweep(warmup=warmup, iters=iters)
     if wmma_rows:
-        print("\n" + "=" * 100)
-        print("Perf Compare (gpu us): FlyDSL WMMA vs torch (RDNA4)")
-        print("=" * 100)
-        print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>14s} {'torch(gpu us)':>14s} {'speedup':>10s}")
-        for r in wmma_rows:
-            sp = r.speedup_flydsl_vs_aiter
-            sp_s = "-" if sp is None else f"{sp:,.2f}x"
-            print(
-                f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flydsl_gpu_us):>14s} {_fmt_us(r.aiter_gpu_us):>14s} {sp_s:>10s}"
-            )
-        print("=" * 100 + "\n")
+        print_perf_table(wmma_rows)
 
 
 if __name__ == "__main__":

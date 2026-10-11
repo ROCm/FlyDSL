@@ -192,12 +192,13 @@ Usage:
   bash scripts/run_benchmark.sh softmax          # run only softmax
   bash scripts/run_benchmark.sh softmax_bwd      # run only softmax backward
   bash scripts/run_benchmark.sh rmsnorm flash_attn moe    # run only selected benchmarks
+  bash scripts/run_benchmark.sh rdna_wmma      # run only RDNA WMMA GEMM benchmarks
   bash scripts/run_benchmark.sh --only softmax,moe
   bash scripts/run_benchmark.sh --output_csv /tmp/bench.csv
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | softmax_bwd | rmsnorm | flash_attn | mla | gemm | moe
+  softmax | softmax_bwd | rmsnorm | flash_attn | mla | gemm | moe | rdna_wmma
   (gemm includes preshuffle GEMM, A16W16 GEMM, and FP8 8-wave row-scale GEMM)
 USAGE
 }
@@ -290,12 +291,14 @@ _normalize_op() {
     softmax_bwd|softmax-bwd|softmax_backward|softmax-backward) echo "softmax_bwd" ;;
     flash|flash_attn|flash-attn|flash_attn_func|fmha) echo "flash_attn" ;;
     mla|mla_decode|mla-decode) echo "mla" ;;
+    rdna|rdna_wmma|rdna-wmma|wmma) echo "rdna_wmma" ;;
     *) echo "${op}" ;;
   esac
 }
 
 # Default: run softmax, norms, attention, GEMM, and MoE unless user selected a subset.
-# Use positional args or --only to enable others: softmax, softmax_bwd, rmsnorm, flash_attn, mla, gemm, moe
+# Use positional args or --only to enable others:
+# softmax, softmax_bwd, rmsnorm, flash_attn, mla, gemm, moe, rdna_wmma
 RUN_SOFTMAX=1
 RUN_SOFTMAX_BWD=1
 RUN_RMSNORM=1
@@ -303,6 +306,7 @@ RUN_FLASH_ATTN=1
 RUN_MLA=1
 RUN_PRESHUFFLE_GEMM=1
 RUN_MOE=1
+RUN_RDNA_WMMA=1
 
 _enable_only_ops() {
   RUN_SOFTMAX=0
@@ -312,6 +316,7 @@ _enable_only_ops() {
   RUN_MLA=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
+  RUN_RDNA_WMMA=0
   for op in "$@"; do
     op="$(_normalize_op "${op}")"
     case "${op}" in
@@ -322,6 +327,7 @@ _enable_only_ops() {
       mla) RUN_MLA=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
       moe) RUN_MOE=1 ;;
+      rdna_wmma) RUN_RDNA_WMMA=1 ;;
       "" ) ;;
       *) _die "unknown op '${op}'" ;;
     esac
@@ -360,6 +366,7 @@ if [ "$#" -gt 0 ]; then
         echo "mla"
         echo "gemm"
         echo "moe"
+        echo "rdna_wmma"
         exit 0
         ;;
       --only)
@@ -1074,7 +1081,7 @@ fi
 
 # RDNA WMMA GEMM benchmarks (gfx11* or gfx12*, via benchmark_common.py).
 # FP8 WMMA is gfx12-only and is skipped inside run_wmma_sweep on gfx11*.
-if [ "${IS_RDNA_WMMA}" = "true" ]; then
+if [ "${RUN_RDNA_WMMA}" -eq 1 ] && [ "${IS_RDNA_WMMA}" = "true" ]; then
   echo ""
   echo "========================================================================"
   echo "RDNA WMMA Benchmarks (arch: ${GPU_ARCH})"
