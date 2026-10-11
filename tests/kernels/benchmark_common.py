@@ -52,6 +52,19 @@ class PerfRow:
         return self.reference_gpu_us / self.flydsl_gpu_us
 
 
+@dataclass(frozen=True)
+class FP8BenchmarkConfig:
+    M: int
+    N: int
+    K: int
+    dtype: str
+    tile_m: int
+    tile_n: int
+    tile_k: int
+    k_unroll: int
+    group_m: int
+
+
 def _fmt_us(x: Optional[float]) -> str:
     return "-" if x is None else f"{x:,.1f}"
 
@@ -154,13 +167,13 @@ def _default_wmma_configs() -> List[Tuple[int, int, str]]:
     ]
 
 
-def _default_fp8_configs() -> List[Tuple[int, int, str]]:
-    """Default FP8 GEMM benchmark configs: (M, N=K, dtype='fp8')."""
+def _default_fp8_configs() -> List[FP8BenchmarkConfig]:
+    """Default FP8 GEMM benchmark shapes and explicit kernel configurations."""
     return [
-        (32, 4096, "fp8"),
-        (32, 8192, "fp8"),
-        (128, 4096, "fp8"),
-        (4096, 4096, "fp8"),
+        FP8BenchmarkConfig(32, 4096, 4096, "fp8", 32, 128, 32, 2, 8),
+        FP8BenchmarkConfig(32, 8192, 8192, "fp8", 32, 128, 32, 2, 8),
+        FP8BenchmarkConfig(128, 4096, 4096, "fp8", 32, 128, 32, 2, 8),
+        FP8BenchmarkConfig(4096, 4096, 4096, "fp8", 64, 128, 64, 1, 4),
     ]
 
 
@@ -177,7 +190,21 @@ def _dtype_torch(dt: str):
     raise ValueError(f"unsupported dtype: {dt}")
 
 
-def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, iters: int) -> Optional[float]:
+def _bench_flydsl_torch(
+    *,
+    op: str,
+    M: int,
+    N: int,
+    dtype: str,
+    warmup: int,
+    iters: int,
+    K: Optional[int] = None,
+    tile_m: int = 32,
+    tile_n: Optional[int] = None,
+    tile_k: int = 32,
+    k_unroll: Optional[int] = None,
+    group_m: int = 8,
+) -> Optional[float]:
     """Build + compile FlyDSL kernel, then benchmark via torch CUDA events.
 
     This intentionally avoids hip-python / HIP driver calls, aligning with the
@@ -282,7 +309,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
             preshuffle_b_fp8,
         )
 
-        K = N  # square by default
+        K = N if K is None else K
         torch.manual_seed(42)
         A_f32 = torch.randn(M, K, device="cuda") * 0.1
         B_f32 = torch.randn(K, N, device="cuda") * 0.1
@@ -293,7 +320,16 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
         sa_t = sa.to(device="cuda", dtype=torch.float32).contiguous()
         sb_t = sb.to(device="cuda", dtype=torch.float32).contiguous()
-        launch = compile_fp8_gemm(M=M, N=N, K=K)
+        launch = compile_fp8_gemm(
+            M=M,
+            N=N,
+            K=K,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            k_unroll=k_unroll,
+            group_m=group_m,
+        )
         return bench_gpu_us_torch(
             lambda: launch(C, A_view, B_shuf, sa_t, sb_t, torch.cuda.current_stream()),
             warmup=warmup,
@@ -431,13 +467,26 @@ def run_wmma_sweep(
         return rows
 
     # wmma_fp8_gemm (A raw, B preshuffled)
-    for M, N, dt in _default_fp8_configs():
-        K = N
+    for config in _default_fp8_configs():
+        M, N, K, dt = config.M, config.N, config.K, config.dtype
         shape = f"{M}x{N}x{K}"
         flydsl_us = None
         torch_us = None
         try:
-            flydsl_us = _bench_flydsl_torch(op="wmma_fp8_gemm", M=M, N=N, dtype="bf16", warmup=warmup, iters=iters)
+            flydsl_us = _bench_flydsl_torch(
+                op="wmma_fp8_gemm",
+                M=M,
+                N=N,
+                K=K,
+                dtype="bf16",
+                warmup=warmup,
+                iters=iters,
+                tile_m=config.tile_m,
+                tile_n=config.tile_n,
+                tile_k=config.tile_k,
+                k_unroll=config.k_unroll,
+                group_m=config.group_m,
+            )
         except Exception as e:
             print(f"ERROR: fp8_gemm {shape} FAILED: {e}")
             fail_count += 1
