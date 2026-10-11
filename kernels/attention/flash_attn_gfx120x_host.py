@@ -1590,7 +1590,7 @@ def flydsl_flash_attn_func(
     elif q.dim() == 4 and k.dim() == 4:
         reject_gqa(int(q.shape[2]), int(k.shape[2]), num_kv_heads)
 
-    def _gfx120x_quantflydsl_flash_attn_quant_paged_func(kind: str):
+    def _gfx120x_quant_paged(kind: str):
         """Paged quant FA. The cache stays in place; the kernel gathers pages."""
         if seqlen_k is None:
             raise ValueError(f"flydsl_flash_attn_func: gfx120x {kind} paged FA requires seqlen_k")
@@ -1651,7 +1651,7 @@ def flydsl_flash_attn_func(
 
     if q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
         if block_table is not None:
-            return _gfx120x_quantflydsl_flash_attn_quant_paged_func("fp8")
+            return _gfx120x_quant_paged("fp8")
         reject_quant_extras(
             "fp8",
             bias=bias,
@@ -1713,7 +1713,7 @@ def flydsl_flash_attn_func(
         )
     if q.dtype == torch.int8:
         if block_table is not None:
-            return _gfx120x_quantflydsl_flash_attn_quant_paged_func("int8")
+            return _gfx120x_quant_paged("int8")
         reject_quant_extras(
             "int8",
             bias=bias,
