@@ -181,6 +181,16 @@ assert arch.startswith("gfx950"), f"... requires gfx950, got {arch}"
 
 Use the prefix for that kernel (`gfx950`, `gfx120`, and so on).
 
+### Numerical bar
+
+Compare a kernel to an fp32 reference of the same formula, and to a PyTorch run at the same dtype. The kernel's max absolute error must be at most `mult` times the PyTorch run's max absolute error, plus a small atol so exact zeros pass.
+
+- fp16 and bf16, and any norm or RoPE op in that compute dtype: `mult = 2`. PyTorch's default relative tolerances are about `1e-3` for fp16 and `1.6e-2` for bf16.
+- fp8 e4m3 and fp8 e5m2: `mult = 4`. After dequant, cache values use `rtol=1e-1` and `atol=1e-1`.
+- int8: `mult = 4` against the same integer quantization simulated in fp32, after dequant.
+
+A cosine floor of 0.99 is not the bar. GEMM, quant, norm, and attention each use the multiplier for their dtype.
+
 ### Basic Pattern
 ```python
 import flydsl.compiler as flyc

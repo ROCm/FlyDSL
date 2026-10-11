@@ -514,6 +514,7 @@ choosing the MMA atom for the Pattern C (GEMM) skeleton above.
 ## Checklist for New Kernels
 
 - [ ] The function that contains `@flyc.jit` or calls `flyc.compile` asserts `get_rocm_arch().startswith(...)` before that point (`compile_mxfp8_gemm_8w`). Not inside `@flyc.jit`, not on the returned launcher, not on helpers or atom ops.
+- [ ] Error is at most 2x the PyTorch dtype error for fp16/bf16 (4x for fp8 and int8, versus an fp32 reference). fp8 caches after dequant use `rtol=1e-1`, `atol=1e-1`. A cosine floor of 0.99 is not the bar.
 - [ ] Identified kernel pattern (elementwise / reduction / copy / GEMM)
 - [ ] Chose appropriate copy atom type (Universal vs Buffer, bit width)
 - [ ] Set tile sizes matching MFMA instruction shape (if GEMM)

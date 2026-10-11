@@ -41,6 +41,10 @@ assert arch.startswith("gfx950"), f"... requires gfx950, got {arch}"
 
 Do not add one inside `@flyc.jit`, on the returned launcher, on a helper that does not contain the kernel, or on an atom op. Do not remove an existing check from that function.
 
+## Numerical bar
+
+Compare to an fp32 reference of the same formula and to PyTorch at the same dtype. Max absolute error must be at most `mult` times the PyTorch error, plus a small atol. fp16/bf16 and norm/RoPE use `mult = 2`. fp8 e4m3 and e5m2 use `mult = 4`, and dequantized caches use `rtol=1e-1`, `atol=1e-1`. int8 uses `mult = 4` against the same quant simulated in fp32. A cosine floor of 0.99 is not the bar.
+
 ## Cautions
 
 - **Surgical, behavior-preserving.** Migration is a refactor: minimal diffs, match
