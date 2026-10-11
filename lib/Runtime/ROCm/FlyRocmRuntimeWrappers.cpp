@@ -181,6 +181,17 @@ extern "C" void mgpuMemset16(void *dst, int shortValue, size_t count, hipStream_
       hipMemsetD16Async(reinterpret_cast<hipDeviceptr_t>(dst), shortValue, count, stream));
 }
 
+extern "C" int mgpuTraceBufferClear(void *ptr, uint64_t sizeBytes) {
+  return hipMemset(ptr, 0, sizeBytes);
+}
+
+extern "C" int mgpuTraceBufferRead(void *dst, void *src, uint64_t sizeBytes) {
+  hipError_t err = hipDeviceSynchronize();
+  if (err != hipSuccess)
+    return err;
+  return hipMemcpy(dst, src, sizeBytes, hipMemcpyDeviceToHost);
+}
+
 extern "C" void mgpuMemHostRegister(void *ptr, uint64_t sizeBytes) {
   HIP_REPORT_IF_ERROR(hipHostRegister(ptr, sizeBytes, /*flags=*/0));
 }

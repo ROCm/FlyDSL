@@ -26,7 +26,7 @@ from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
 from ..utils.file import atomic_write
 from .ast_rewriter import ASTRewriter
-from .backends import compile_backend_name, get_backend
+from .backends import compile_backend_name, get_backend, get_ktrace_backend
 from .diagnostics import (
     DSLCompileError,
     diag_records_from_mlir_error,
@@ -140,6 +140,9 @@ _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_COMPILE_LLVM_DIR",
     "FLYDSL_DEBUG_ENABLE_DEBUG_INFO",
     "FLYDSL_EXTRA_SOURCE_DIRS",
+    "FLYDSL_KTRACE_ENABLE",
+    "FLYDSL_KTRACE_BLOCKS",
+    "FLYDSL_KTRACE_BUFFER_BYTES",
 )
 
 
@@ -1029,7 +1032,7 @@ class JitCacheManager:
             log().warning(f"Failed to save cache {cache_file}: {e}")
 
     @contextmanager
-    def compile_lock(self, cache_key: str):
+    def compile_lock(self, cache_key: str, *, accept_cached=None):
         """Acquire an exclusive compile lock, re-check disk, yield (existing_or_None, writer_or_None).
 
         If *existing* is not None, another process already wrote the artifact
@@ -1046,16 +1049,18 @@ class JitCacheManager:
                 try:
                     with open(cache_file, "rb") as f:
                         value = pickle.load(f)
-                    self.memory_cache[cache_key] = value
-                    self._hits += 1
-                    yield (value, None)
-                    return
                 except Exception:
                     # Corrupt cache — remove so writer can overwrite.
                     try:
                         cache_file.unlink()
                     except OSError:
                         pass
+                else:
+                    if accept_cached is None or accept_cached(value):
+                        self.memory_cache[cache_key] = value
+                        self._hits += 1
+                        yield (value, None)
+                        return
 
             # Cache miss — provide a writer that writes under the already-held lock.
             def _writer(value):
@@ -1146,9 +1151,23 @@ def _build_call_spec(sig, args_tuple):
     return tuple(slot_specs)
 
 
-def _build_call_state(sig, args_tuple, func_exe):
+def _call_state_from_spec(call_spec, artifact):
+    if not artifact._ktrace_traced:
+        return CallState(call_spec, artifact._get_func_exe())
+
+    from ..expr.experimental import ktrace as _ktrace
+
+    _ktrace.require_compatible_buffer(artifact)
+
+    trace_backend = get_ktrace_backend()
+    slot_specs = (*call_spec, (-1, ctypes.c_void_p, None))
+    presets = {len(call_spec): trace_backend.ensure_buffer().device_ptr}
+    return CallState(slot_specs, artifact._get_func_exe(), presets, trace_backend.require_dispatchable_buffer)
+
+
+def _build_call_state(sig, args_tuple, artifact):
     """Build a :class:`CallState` for fast repeated dispatch."""
-    return CallState(_build_call_spec(sig, args_tuple), func_exe)
+    return _call_state_from_spec(_build_call_spec(sig, args_tuple), artifact)
 
 
 def _is_compile_placeholder(value) -> bool:
@@ -1178,6 +1197,7 @@ class _TraceResult:
     param_names: List[str]
     jit_args: list
     has_user_stream: bool
+    has_ktrace_buf: bool
 
 
 class JitFunction:
@@ -1427,7 +1447,7 @@ class JitFunction:
         """Convert tuple cache key to string for disk cache."""
         return str(cache_key)
 
-    def _trace_and_compile(self, ctx, sig, bound, bound_self) -> "_TraceResult":
+    def _trace_and_compile(self, ctx, sig, bound, bound_self, *, execute: bool) -> "_TraceResult":
         """Trace and lower one specialization without executing it."""
         param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
         for pname, dsl_type in zip(param_names, dsl_types):
@@ -1435,6 +1455,7 @@ class JitFunction:
             if ann is not inspect.Parameter.empty and isinstance(ann, type) and not issubclass(dsl_type, ann):
                 warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
         has_user_stream = _ensure_stream_arg(jit_args)
+        has_ktrace_buf = _ensure_ktrace_buffer_arg(jit_args, allocate=execute and not env.compile.compile_only)
         ir_types = get_ir_types(jit_args)
         loc = func_def_location(self.func, ctx)
 
@@ -1443,6 +1464,7 @@ class JitFunction:
 
         module = ir.Module.create(loc=loc)
         module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
+        _attach_ktrace_config(module, has_ktrace_buf)
 
         with ir.InsertionPoint(module.body), loc:
             backend = get_backend()
@@ -1458,8 +1480,10 @@ class JitFunction:
 
                 with ir.InsertionPoint(entry_block):
                     ir_args = list(func_op.regions[0].blocks[0].arguments)
+                    if has_ktrace_buf:
+                        comp_ctx.ktrace_buf_arg = ir_args[-1]
                     if not has_user_stream:
-                        comp_ctx.stream_arg = ir_args[-1]
+                        comp_ctx.stream_arg = ir_args[-2] if has_ktrace_buf else ir_args[-1]
                     user_jit_args = jit_args[: len(param_names)]
                     dsl_args = construct_from_ir_values(dsl_types, user_jit_args, ir_args)
                     log().info(f"dsl_args={dsl_args}")
@@ -1505,6 +1529,7 @@ class JitFunction:
             param_names=param_names,
             jit_args=jit_args,
             has_user_stream=has_user_stream,
+            has_ktrace_buf=has_ktrace_buf,
         )
 
     def __call__(self, *args, **kwargs):
@@ -1551,6 +1576,23 @@ class JitFunction:
                 return None
             return call_state(args_tuple)
 
+        from ..expr.experimental import ktrace as _ktrace
+        from ..expr.experimental.ktrace_common import EventNameConflict, name_assignment_lock
+
+        def accept_cached(artifact):
+            try:
+                _ktrace.restore_names(artifact)
+            except EventNameConflict:
+                if env.runtime.run_only:
+                    raise RuntimeError(
+                        "ktrace: cached event IDs conflict with another live binary, but "
+                        "FLYDSL_RUNTIME_RUN_ONLY=1 prevents rebuilding. Prepare the traced "
+                        "kernels together once with run-only mode disabled."
+                    ) from None
+                log().debug("ktrace: rebuilding a cached specialization with conflicting event IDs")
+                return False
+            return True
+
         # Normal path: check in-process cache first, then optional disk cache.
         # In run_only mode the disk cache is read regardless of enable_cache, since
         # AOT-only execution treats the on-disk cache as the deployment artifact.
@@ -1568,15 +1610,10 @@ class JitFunction:
             if cached_func is not None:
                 self._mem_cache[cache_key] = cached_func
 
-        if cached_func is not None:
+        if cached_func is not None and accept_cached(cached_func):
             if not execute or env.compile.compile_only:
                 return None
-            # Build CallState via JitArgument registry (same dispatch as compile path)
-            state = _build_call_state(
-                sig,
-                args_tuple,
-                cached_func._get_func_exe(),
-            )
+            state = _build_call_state(sig, args_tuple, cached_func)
             self._call_state_cache[cache_key] = state
             return state(args_tuple)
 
@@ -1606,18 +1643,23 @@ class JitFunction:
         _use_compile_lock = use_disk_cache and self.cache_manager and not env.debug.dump_ir
         if _use_compile_lock:
             str_key = self._cache_key_to_str(cache_key)
-            _compile_lock_ctx = self.cache_manager.compile_lock(str_key)
+            _compile_lock_ctx = self.cache_manager.compile_lock(
+                str_key,
+                accept_cached=lambda artifact: not getattr(artifact, "_link_libs", None) and accept_cached(artifact),
+            )
         else:
             _compile_lock_ctx = nullcontext((None, None))
 
-        with _compile_lock_ctx as (_lock_result, _cache_writer):
-            if _lock_result is not None and not getattr(_lock_result, "_link_libs", None):
+        tracing = effective_hints.get("ktrace", env.ktrace.enable)
+        names_lock = name_assignment_lock() if tracing else nullcontext()
+        with names_lock, _compile_lock_ctx as (_lock_result, _cache_writer):
+            if _lock_result is not None:
                 # Cache hit after waiting for another process to compile.
                 compiled_func = _lock_result
                 self._mem_cache[cache_key] = compiled_func
             else:
                 with _create_mlir_context() as ctx, _hints_ctx:
-                    traced = self._trace_and_compile(ctx, sig, bound, bound_self)
+                    traced = self._trace_and_compile(ctx, sig, bound, bound_self, execute=execute)
                     if traced.extern_linked:
                         self._extern_linkage_keys.add(cache_key)
 
@@ -1629,6 +1671,9 @@ class JitFunction:
                         link_libs=traced.link_libs,
                         uses_explicit_module=traced.extern_linked,
                     )
+
+                    _capture_ktrace_names(compiled_func, traced.has_ktrace_buf, traced.compiled_module)
+                    compiled_func._ktrace_traced = traced.has_ktrace_buf
 
                     # Always keep a reference to the latest compilation result so
                     # flyc.compile() can retrieve it even when caching is disabled.
@@ -1651,11 +1696,7 @@ class JitFunction:
         # The in-process CompiledArtifact cache above owns the ExecutionEngine/
         # code object, so the function pointer remains valid even when disk
         # cache is off.
-        state = _build_call_state(
-            sig,
-            args_tuple,
-            compiled_func._get_func_exe(),
-        )
+        state = _build_call_state(sig, args_tuple, compiled_func)
         self._call_state_cache[cache_key] = state
         return state(args_tuple)
 
@@ -1668,6 +1709,61 @@ def _ensure_stream_arg(jit_args: list) -> bool:
         return True
     jit_args.append(Stream(None))
     return False
+
+
+def _attach_ktrace_config(module, traced: bool) -> None:
+    if not traced:
+        return
+    from ..expr.experimental.ktrace_common import name_table
+    from ..utils import env
+
+    hints = CompilationContext.get_compile_hints()
+    blocks = (hints.get("ktrace_blocks", env.ktrace.blocks) or "").strip()
+    get_ktrace_backend().configure_module(
+        module,
+        target_arch=get_backend().target.arch,
+        known_names=name_table(),
+        blocks=blocks,
+    )
+
+
+def _ktrace_names_from_module(module) -> dict | None:
+    try:
+        attrs = module.operation.attributes
+        if "fly_ktrace.event_names" not in attrs:
+            return None
+        return {
+            str(named.name): int(str(named.attr).split(":")[0].strip()) for named in attrs["fly_ktrace.event_names"]
+        }
+    except Exception as exc:  # noqa: BLE001
+        log().warning(f"ktrace: could not read the event-name table from the module: {exc}")
+        return None
+
+
+def _capture_ktrace_names(artifact, traced: bool, module) -> None:
+    if not traced:
+        return
+    from ..expr.experimental.ktrace_common import merge_names
+
+    artifact._ktrace_buffer_config = get_ktrace_backend().buffer_config()
+    artifact._ktrace_names = _ktrace_names_from_module(module) or {}
+    merge_names(artifact._ktrace_names)
+
+
+def _ensure_ktrace_buffer_arg(jit_args: list, *, allocate: bool = True) -> bool:
+    from ..expr.experimental import ktrace as _ktrace
+
+    if not _ktrace.tracing_enabled():
+        return False
+    from ..expr.numeric import Int8
+    from ..utils import env
+    from .jit_argument import PointerJitArg
+
+    address = None
+    if allocate and not env.compile.compile_only:
+        address = ctypes.c_void_p(get_ktrace_backend().ensure_buffer().device_ptr)
+    jit_args.append(PointerJitArg(Int8, address))
+    return True
 
 
 def jit(func: Optional[Callable] = None) -> JitFunction:
@@ -1716,7 +1812,7 @@ class CompiledFunction:
                     ensure_compile_runtime_pairing_from_env(self._backend)
                     state = self._call_state
                     if state is None:
-                        state = CallState(self._call_spec, self._keepalive._get_func_exe())
+                        state = _call_state_from_spec(self._call_spec, self._keepalive)
                         self._call_state = state
                     self._runtime_ready = True
         state = self._call_state
@@ -1744,6 +1840,8 @@ class CompiledFunction:
 
 
 def _prepare_aot_export(jf, sig, bound, artifact):
+    if getattr(artifact, "_ktrace_traced", False):
+        return None, (NotImplementedError, "ktrace-instrumented kernels cannot be exported to C")
     try:
         param_names, jit_args, _dsl_types, _constexpr_values = convert_to_jit_arguments(sig, bound)
         has_user_stream = _ensure_stream_arg(jit_args)
