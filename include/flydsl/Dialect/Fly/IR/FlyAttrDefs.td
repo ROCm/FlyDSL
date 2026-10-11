@@ -278,7 +278,7 @@ def Fly_TileAttr : Fly_Attr<"Tile", "tile", []> {
 def Fly_ExplicitModuleAttr : Fly_Attr<"ExplicitModule", "explicit_module", [
     OffloadingTranslationAttrTrait
 ]> {
-  let summary = "ROCm GPU binary offloading handler with explicit Python-side module loading";
+  let summary = "GPU binary offloading handler with explicit Python-side module loading";
   let description = [{
     Offloading handler for FlyDSL JIT.  During LLVM translation it embeds the
     selected GPU binary and emits externally lookup-able
@@ -291,14 +291,23 @@ def Fly_ExplicitModuleAttr : Fly_Attr<"ExplicitModule", "explicit_module", [
 def Fly_AotModuleAttr : Fly_Attr<"AotModule", "aot_module", [
     OffloadingTranslationAttrTrait
 ]> {
-  let summary = "ROCm GPU binary offloading handler for exported (AOT) host objects";
+  let summary = "GPU binary offloading handler for exported (AOT) host objects";
   let description = [{
-    Embeds a GPU binary with internal linkage and emits prefixed module init,
-    load, and unload functions. Kernel launches use runtime-managed per-device
-    state.
+    Selects and embeds a GPU binary with internal linkage and emits prefixed
+    module init, load, and unload functions. Kernel launches use the common
+    FlyDSL AOT runtime ABI and runtime-managed per-device state. The optional
+    target follows `gpu.select_object`: an integer selects by index, another
+    attribute selects the object with an equal target, and omission selects
+    the first object.
   }];
-  let parameters = (ins StringRefParameter<"exported symbol prefix">:$symbolPrefix);
-  let assemblyFormat = "`<` $symbolPrefix `>`";
+  let parameters = (ins
+    StringRefParameter<"exported symbol prefix">:$symbolPrefix,
+    OptionalParameter<"Attribute", "GPU object target to select">:$target
+  );
+  let assemblyFormat = [{
+    `<` $symbolPrefix (`,` $target^)? `>`
+  }];
+  let genVerifyDecl = 1;
 }
 
 #endif // FLY_ATTRDEFS

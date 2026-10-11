@@ -196,9 +196,9 @@ def golden_moe(W: LayerWeights, a, allreduce, mid=None, sel=None, prob=None, xq=
     scores = torch.sigmoid(bf(x2) @ t["w_r"].float().T)
     xq_ref = quant_dequant(x2)
     xq = xq_ref if xq is None else xq.float()
-    y = torch.zeros(S, HIDDEN, device=a.device)
+    y = torch.zeros(S, HIDDEN, device=a.device, dtype=torch.float32)
     for s in range(S):
-        idx, p = route(scores[s], t["bias"], W.config)
+        idx, p = route(scores[s], t["bias"], W.config, exact=True)
         experts = [SHARED_EXPERT] + idx.tolist()
         weights = [1.0] + p.tolist()
         mids = []
@@ -206,7 +206,7 @@ def golden_moe(W: LayerWeights, a, allreduce, mid=None, sel=None, prob=None, xq=
             ug = _dequant_expert(t["w_ug"][e], t["s_ug"][e], expert_weight) @ xq[s]
             mids.append(torch.nn.functional.silu(ug[:INTER]) * ug[INTER:])
         out["sel"].append(torch.tensor(experts, device=a.device, dtype=torch.int32))
-        out["prob"].append(torch.tensor(weights, device=a.device))
+        out["prob"].append(torch.tensor(weights, device=a.device, dtype=torch.float32))
         out["mid"].append(torch.stack(mids))
     for s in range(S):
         experts = out["sel"][s].tolist() if sel is None else sel[s].tolist()

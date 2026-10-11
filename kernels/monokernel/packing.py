@@ -98,6 +98,17 @@ def pack_mxfp4(q: torch.Tensor) -> torch.Tensor:
     return w4.permute(*order).contiguous().view(torch.uint8).view(-1)
 
 
+def pack_mxfp4_scale_tiles(scale: torch.Tensor) -> torch.Tensor:
+    """Tile E8M0 scales so each 16-row by 128-K weight tile reads 64 contiguous bytes."""
+    *lead, rows, groups = scale.shape
+    if scale.dtype is not torch.uint8 or rows % 16 or groups % 4:
+        raise ValueError("MXFP4 scale tiles require uint8 scales with N divisible by 16 and K/32 divisible by 4")
+    tiled = scale.reshape(*lead, rows // 16, 16, groups // 4, 4)
+    nlead = len(lead)
+    order = list(range(nlead)) + [nlead + position for position in (0, 2, 1, 3)]
+    return tiled.permute(*order).contiguous().view(-1)
+
+
 def pack_a16w4_weight(q: torch.Tensor) -> torch.Tensor:
     """Pack MXFP4 values in the ATOM/AITER 16-row by 16-byte tile order."""
 

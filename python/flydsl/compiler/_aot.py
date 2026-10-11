@@ -6,11 +6,12 @@
 import ctypes
 import dataclasses
 import fcntl
-import filecmp
 import json
 import os
 import re
 import shutil
+import subprocess
+import tempfile
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,19 +24,20 @@ from .._mlir.dialects import llvm
 from ..expr.numeric import BFloat16, Float16, Float32, Float64, Numeric
 from ..expr.struct import _runtime_fields, is_struct_type
 from ..expr.typing import Stream
-from ..runtime._libraries import _find_runtime_libraries, _RuntimeLibrary
-from ..utils._elf import _defined_global_symbols
+from ..runtime._libraries import _find_aot_runtime_archive
+from ..utils._elf import _defined_global_symbols, _global_symbols
 from .backends import _get_backend_class
 from .jit_argument import MemRefJitArg, PointerJitArg
 from .jit_function import _create_mlir_context
 from .protocol import c_abi_spec
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 _C_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _INT_CTYPE = re.compile(r"u?int(8|16|32|64)")
 
 _HOST_OPT_LEVEL = 2
+_AOT_TAKE_ERROR_SYMBOL = "flydslRuntimeTakeError"
 
 
 @dataclass(frozen=True)
@@ -86,7 +88,8 @@ class _ExportMetadata:
     module_load_symbol: str
     module_unload_symbol: str
     metadata_symbol: str
-    runtime_libraries: Tuple[_RuntimeLibrary, ...]
+    runtime_libraries: Tuple[str, ...]
+    linker_flags: Tuple[str, ...]
     abi: Tuple[_AbiSlot, ...]
     return_abi: _ReturnAbi
     backend: str
@@ -96,7 +99,7 @@ class _ExportMetadata:
 
     def _to_dict(self) -> Dict[str, Any]:
         d = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
-        d["runtime_libraries"] = [{"soname": lib.soname} for lib in self.runtime_libraries]
+        d["runtime_libraries"] = [{"link_name": name} for name in self.runtime_libraries]
         d["abi"] = [slot._to_dict() for slot in self.abi]
         d["return_abi"] = self.return_abi._to_dict()
         return d
@@ -391,19 +394,88 @@ def _emit_export_object(
     metadata_symbol: str,
     metadata: bytes,
     backend_cls,
+    arch: str,
 ) -> bytes:
     """Rewrite a fresh copy of the lowered module for export and emit its host object."""
     with _create_mlir_context():
         module = ir.Module.parse(ir_text)
         renamed = _namespace_symbols(module, function_name)
-        handler = ir.Attribute.parse(backend_cls._aot_offloading_handler(function_name))
+        object_index = backend_cls.aot_object_index(arch)
+        if isinstance(object_index, bool) or not isinstance(object_index, int) or object_index < 0:
+            raise ValueError(f"export_to_c: backend returned invalid GPU object index {object_index!r}")
         for op in module.body.operations:
             if op.operation.name == "gpu.binary":
+                object_count = len(ir.ArrayAttr(op.operation.attributes["objects"]))
+                if object_index >= object_count:
+                    raise ValueError(
+                        f"export_to_c: backend selected GPU object {object_index}, "
+                        f"but binary {op.operation.attributes['sym_name']} has {object_count} objects"
+                    )
+                handler = ir.Attribute.parse(f'#fly.aot_module<"{function_name}", {object_index}>')
                 op.operation.attributes["offloadingHandler"] = handler
-        _add_entry_wrapper(module, function_name, renamed[entry], abi, backend_cls._aot_take_error_symbol())
+        _add_entry_wrapper(module, function_name, renamed[entry], abi, _AOT_TAKE_ERROR_SYMBOL)
         _add_metadata_global(module, metadata_symbol, metadata)
         module.operation.verify()
         return _emit_host_object(module.operation, _HOST_OPT_LEVEL)
+
+
+def _run_link_tool(command, description: str) -> None:
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit status {result.returncode}"
+        raise RuntimeError(f"export_to_c: failed to {description}: {detail}")
+
+
+def _materialize_aot_runtime(archive: Path) -> Tuple[bytes, frozenset[str]]:
+    """Return the complete runtime object and its actual global symbol set."""
+    linker = shutil.which("ld.lld") or shutil.which("ld")
+    if linker is None:
+        raise FileNotFoundError("export_to_c: a relocatable linker is required")
+    with tempfile.TemporaryDirectory(prefix="flydsl-aot-runtime-") as tmp:
+        output_path = Path(tmp) / "runtime.o"
+        _run_link_tool(
+            [
+                linker,
+                "-r",
+                "--build-id=none",
+                "-o",
+                str(output_path),
+                "--whole-archive",
+                str(archive),
+                "--no-whole-archive",
+            ],
+            "materialize the backend AOT runtime",
+        )
+        data = output_path.read_bytes()
+    return data, frozenset(_global_symbols(data))
+
+
+def _embed_aot_runtime(host_object: bytes, runtime_object: bytes) -> bytes:
+    """Partially link the PIC AOT runtime into ``host_object``.
+
+    Runtime definitions are hidden in the runtime object and localized here, so two
+    exported objects can be linked into one shared library without collisions.
+    Backend and standard system APIs intentionally remain undefined until the
+    consumer links the final executable or shared library.
+    """
+    linker = shutil.which("ld.lld") or shutil.which("ld")
+    objcopy = shutil.which("llvm-objcopy") or shutil.which("objcopy")
+    if linker is None or objcopy is None:
+        raise FileNotFoundError("export_to_c: a relocatable linker and objcopy are required")
+    with tempfile.TemporaryDirectory(prefix="flydsl-aot-") as tmp:
+        tmp_dir = Path(tmp)
+        input_path = tmp_dir / "host.o"
+        runtime_path = tmp_dir / "runtime.o"
+        output_path = tmp_dir / "linked.o"
+        input_path.write_bytes(host_object)
+        runtime_path.write_bytes(runtime_object)
+
+        _run_link_tool(
+            [linker, "-r", "--build-id=none", "-o", str(output_path), str(input_path), str(runtime_path)],
+            "embed the backend AOT runtime",
+        )
+        _run_link_tool([objcopy, "--localize-hidden", str(output_path)], "localize the embedded AOT runtime")
+        return output_path.read_bytes()
 
 
 def _temporary_sibling(path: Path) -> Path:
@@ -423,27 +495,6 @@ def _write_atomically(path: Path, data: bytes) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-
-
-def _publish_file(source: Path, destination: Path) -> None:
-    """Publish atomically, accepting an existing byte-identical file."""
-    if destination.is_symlink():
-        raise RuntimeError(f"export_to_c: runtime library collision: {destination} is a symbolic link")
-    if destination.exists() and destination.samefile(source):
-        return
-    tmp = _temporary_sibling(destination)
-    try:
-        shutil.copy2(source, tmp)
-        try:
-            os.link(tmp, destination)
-        except FileExistsError:
-            if destination.is_symlink() or not filecmp.cmp(tmp, destination, shallow=False):
-                raise RuntimeError(
-                    f"export_to_c: runtime library collision: {destination} exists with content "
-                    f"different from {source}"
-                ) from None
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -500,8 +551,8 @@ def _path_identity(path: Path) -> str:
     return os.path.normcase(str(path.resolve(strict=False)))
 
 
-def _check_output_path_collisions(object_path: Path, header_path: Optional[Path], installed, bundled) -> None:
-    """Reject output aliases that could overwrite another artifact or runtime."""
+def _check_output_path_collisions(object_path: Path, header_path: Optional[Path]) -> None:
+    """Reject output aliases that could overwrite another artifact."""
     outputs = {"object": object_path}
     if header_path is not None:
         outputs["header"] = header_path
@@ -511,20 +562,6 @@ def _check_output_path_collisions(object_path: Path, header_path: Optional[Path]
         if identity in identities:
             raise ValueError(f"export_to_c: {kind} path aliases {identities[identity]} path: {path}")
         identities[identity] = kind
-
-    installed_paths = {_path_identity(Path(lib.path)) for lib in installed}
-    for kind, path in outputs.items():
-        if _path_identity(path) in installed_paths:
-            raise ValueError(f"export_to_c: {kind} path would overwrite an installed runtime library: {path}")
-
-    for lib in bundled:
-        identity = _path_identity(Path(lib.path))
-        if identity in identities:
-            raise ValueError(
-                f"export_to_c: bundled runtime library {lib.soname!r} would overwrite the "
-                f"{identities[identity]} path: {lib.path}"
-            )
-        identities[identity] = f"bundled runtime library {lib.soname!r}"
 
 
 def _resolve_export_paths(file_path, file_name, function_prefix):
@@ -541,9 +578,10 @@ def _render_header(metadata: _ExportMetadata) -> str:
     sym = metadata.symbol
     macro = sym.upper()
     guard = f"FLYDSL_AOT_{macro}_H"
-    types, params, arg_exprs = [], [], []
-    used = {_HEADER_ARGS_ARRAY}
+    types, params, arg_exprs, call_args = [], [], [], []
+    used = {_HEADER_ARGS_ARRAY, "flydsl_status_"}
     used_types = set()
+    link_command = " ".join(metadata.linker_flags)
 
     def param_name(base: str) -> str:
         name = base + "_" if base in _C_RESERVED else base
@@ -577,15 +615,18 @@ def _render_header(metadata: _ExportMetadata) -> str:
             name = param_name(f"{base}_layout")
             params.append(f"const {tname} *{name}")
             arg_exprs.append(f"(void *){name}")
+            call_args.append(name)
             continue
         name = param_name(f"{base}_data" if slot.kind == "tensor_data" else base)
         ctype = _HEADER_CTYPES[slot.ctype]
         params.append(f"{ctype}{'' if ctype.endswith('*') else ' '}{name}")
         arg_exprs.append(f"(void *)&{name}")
+        call_args.append(name)
 
     return "\n".join(
         [
             "/* Generated by FlyDSL export_to_c. Do not edit. */",
+            f"/* Backend/system link flags: {link_command or '(none)'}; add library search paths as needed. */",
             f"#ifndef {guard}",
             f"#define {guard}",
             "",
@@ -610,16 +651,26 @@ def _render_header(metadata: _ExportMetadata) -> str:
             "",
             *types,
             "",
-            "/* Packed entry: args[i] points to storage for ABI slot i. Returns 0 once all launches are submitted. */",
+            "/* Explicit lifecycle API. The packed entry requires init/load first and returns 0 once all launches are submitted. */",
             f"int32_t {sym}(void **args);",
             f"int32_t {metadata.module_init_symbol}(void);",
             f"int32_t {metadata.module_load_symbol}(int32_t device);",
             f"int32_t {metadata.module_unload_symbol}(void);",
             f"extern const char {metadata.metadata_symbol}[];",
             "",
+            "/* Typed call for callers using the explicit lifecycle API above. */",
             f"static inline int32_t {sym}_call({', '.join(params) or 'void'}) {{",
             f"  void *{_HEADER_ARGS_ARRAY}[{max(len(arg_exprs), 1)}] = {{{', '.join(arg_exprs) or '0'}}};",
             f"  return {sym}({_HEADER_ARGS_ARRAY});",
+            "}",
+            "",
+            "/* Convenience call: idempotently initialize and load on the current device. */",
+            f"static inline int32_t {sym}_call_auto({', '.join(params) or 'void'}) {{",
+            f"  int32_t flydsl_status_ = {metadata.module_init_symbol}();",
+            "  if (flydsl_status_ != FLYDSL_AOT_SUCCESS) return flydsl_status_;",
+            f"  flydsl_status_ = {metadata.module_load_symbol}(-1);",
+            "  if (flydsl_status_ != FLYDSL_AOT_SUCCESS) return flydsl_status_;",
+            f"  return {sym}_call({', '.join(call_args)});",
             "}",
             "",
             "#ifdef __cplusplus",
@@ -655,7 +706,6 @@ class _AOTCompiledFunction:
         import flydsl
 
         object_path, function_name, header_path = _resolve_export_paths(file_path, file_name, function_prefix)
-        _validate_export_symbol(function_name)
         if self._host_triple != _host_target_triple():
             raise NotImplementedError(
                 f"export_to_c: artifact targets host {self._host_triple}; cross-compiling from "
@@ -663,17 +713,21 @@ class _AOTCompiledFunction:
             )
 
         backend_cls = _get_backend_class(self._backend)
-        lifecycle = backend_cls._aot_module_symbols(function_name)
+        runtime = backend_cls.aot_runtime_config()
+        _validate_export_symbol(function_name)
+        lifecycle = {
+            "init": f"{function_name}__module_init",
+            "load": f"{function_name}__module_load",
+            "unload": f"{function_name}__module_unload",
+        }
         metadata_symbol = f"{function_name}__metadata"
         exported_symbols = {function_name, metadata_symbol, *lifecycle.values()}
-        installed = _find_runtime_libraries(self._backend)
-        runtime_symbols = {sym for lib in installed for sym in _defined_global_symbols(lib.path, dynamic=True)}
+        _check_output_path_collisions(object_path, header_path)
+        runtime_archive = _find_aot_runtime_archive(self._backend)
+        runtime_object, runtime_symbols = _materialize_aot_runtime(runtime_archive)
         clashes = sorted(exported_symbols & runtime_symbols)
         if clashes:
-            raise ValueError(f"export_to_c: function_name {function_name!r} collides with runtime symbols {clashes}")
-        output_directory = object_path.parent.resolve()
-        libraries = tuple(_RuntimeLibrary(str(output_directory / lib.soname), lib.soname) for lib in installed)
-        _check_output_path_collisions(object_path, header_path, installed, libraries)
+            raise ValueError(f"export_to_c: exported symbols collide with the backend AOT runtime: {clashes}")
 
         export_metadata = _ExportMetadata(
             schema_version=_SCHEMA_VERSION,
@@ -682,7 +736,8 @@ class _AOTCompiledFunction:
             module_load_symbol=lifecycle["load"],
             module_unload_symbol=lifecycle["unload"],
             metadata_symbol=metadata_symbol,
-            runtime_libraries=libraries,
+            runtime_libraries=runtime.runtime_libraries,
+            linker_flags=runtime.linker_flags,
             abi=self._abi,
             return_abi=_ReturnAbi(),
             backend=self._backend,
@@ -694,8 +749,16 @@ class _AOTCompiledFunction:
         metadata = json.dumps(embedded, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
         data = _emit_export_object(
-            self._ir_text, self._entry, self._abi, function_name, metadata_symbol, metadata, backend_cls
+            self._ir_text,
+            self._entry,
+            self._abi,
+            function_name,
+            metadata_symbol,
+            metadata,
+            backend_cls,
+            self._arch,
         )
+        data = _embed_aot_runtime(data, runtime_object)
         exported = set(_defined_global_symbols(data))
         if exported != exported_symbols:
             raise RuntimeError(
@@ -704,7 +767,5 @@ class _AOTCompiledFunction:
         header = _render_header(export_metadata).encode("utf-8")
 
         with _output_directory_lock(object_path.parent):
-            for lib, copy in zip(installed, libraries):
-                _publish_file(Path(lib.path), Path(copy.path))
             _write_atomically(object_path, data)
             _write_atomically(header_path, header)

@@ -272,3 +272,9 @@ if(TARGET FlyJitRuntime)
     LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
   add_dependencies(FlyPythonCAPI FlyJitRuntime)
 endif()
+
+if(TARGET FlyRocmAotRuntime)
+  set_target_properties(FlyRocmAotRuntime PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}")
+  add_dependencies(FlyPythonCAPI FlyRocmAotRuntime)
+endif()

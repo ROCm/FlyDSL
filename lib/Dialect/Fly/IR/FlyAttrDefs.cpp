@@ -10,6 +10,26 @@
 namespace mlir::fly {
 
 //===----------------------------------------------------------------------===//
+// AotModuleAttr
+//===----------------------------------------------------------------------===//
+
+LogicalResult AotModuleAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                                    StringRef symbolPrefix, Attribute target) {
+  if (symbolPrefix.empty())
+    return emitError() << "the exported symbol prefix must not be empty";
+  if (!target)
+    return success();
+  if (auto index = dyn_cast<IntegerAttr>(target)) {
+    if (index.getInt() < 0)
+      return emitError() << "the object index must be non-negative";
+    return success();
+  }
+  if (!target.hasPromiseOrImplementsInterface<gpu::TargetAttrInterface>())
+    return emitError() << "the target attribute must implement gpu::TargetAttrInterface";
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // AlignAttr
 //===----------------------------------------------------------------------===//
 

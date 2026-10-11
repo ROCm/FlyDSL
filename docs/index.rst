@@ -62,11 +62,17 @@ to GPU/ROCDL.
 
    .. grid-item-card:: API reference
 
-      * :doc:`FlyDSL Python DSL <api/dsl>`
+      * :doc:`API overview <api/index>`
 
-      * :doc:`Compiler and pipeline <api/compiler>`
+      * :doc:`Expression language <api/dsl>`
 
-      * :doc:`Prebuilt kernels <api/kernels>`
+      * :doc:`Compiler <api/compiler>`
+
+      * :doc:`Extension libraries <api/extensions>`
+
+      * :doc:`Stable runtime helpers <api/runtime>`
+
+      * :doc:`Pre-built kernels <api/kernels>`
 
    .. grid-item-card:: Tutorials
 

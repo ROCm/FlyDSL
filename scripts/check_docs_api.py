@@ -5,10 +5,10 @@
 
 """Check that agent-facing documentation matches the actual Python surface.
 
-CLAUDE.md and the skills under ``.claude/skills/`` are loaded by coding agents and
-are acted on directly, so a stale API name or a path that no longer resolves is a
-defect with the same blast radius as broken code -- but nothing else in CI reads
-them. ``check_typed_arithmetic_usage.py`` scans ``.py`` only.
+Check agent-facing instructions and, optionally, published/user-facing
+documentation against the repository's actual Python surface. A stale API name
+or path is executable misinformation, while ``check_typed_arithmetic_usage.py``
+scans only ``.py`` files.
 
 Four checks, all static (this script never imports FlyDSL):
 
@@ -28,8 +28,8 @@ Placeholders in prose are skipped: anything containing ``*``, ``<`` or ``>``, an
 the names in ``_PLACEHOLDERS``. A line may opt out entirely with a trailing
 ``<!-- api-check: ignore -->``.
 
-Scope is deliberately limited to the always-loaded and agent-invoked files. The
-published ``docs/`` tree is not covered yet -- see ``--include-docs``.
+The default scope is the always-loaded agent documentation. ``--include-docs``
+also covers the Sphinx tree and the repository's user-facing Markdown files.
 """
 
 from __future__ import annotations
@@ -46,7 +46,14 @@ REPO = Path(__file__).resolve().parent.parent
 
 # Files whose prose is executed by an agent rather than read by a human.
 DEFAULT_TARGETS = ["CLAUDE.md", ".claude/skills/*/SKILL.md"]
-DOCS_TARGETS = ["docs/**/*.md", "docs/**/*.rst"]
+DOCS_TARGETS = [
+    "README.md",
+    "CONTRIBUTING.md",
+    "tests/README.md",
+    "examples/notebooks/README.md",
+    "docs/**/*.md",
+    "docs/**/*.rst",
+]
 
 # Trees whose call sites vouch for a symbol that has no in-tree definition
 # (upstream MLIR dialect re-exports, generated ODS builders).
@@ -161,7 +168,10 @@ def _iter_targets(patterns: list[str]) -> list[Path]:
     seen: list[Path] = []
     for pat in patterns:
         for p in sorted(REPO.glob(pat)):
-            if p.is_file():
+            # Sphinx copies source documents into _build/html/_sources. Scan
+            # only authored inputs so a local build neither doubles the work
+            # nor reports the same problem twice through a generated copy.
+            if p.is_file() and "_build" not in p.parts:
                 seen.append(p)
     return seen
 
@@ -319,7 +329,7 @@ def _scope_targets(patterns: list[str], base: str, head: str) -> tuple[list[Path
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--include-docs", action="store_true", help="also scan docs/ (not yet clean; see PR #1027)")
+    ap.add_argument("--include-docs", action="store_true", help="also scan published and user-facing documentation")
     ap.add_argument("--base", help="base commit; defaults to BASE_SHA or merge-base with origin/main")
     ap.add_argument("--head", default=os.environ.get("HEAD_SHA", "HEAD"), help="head commit")
     ap.add_argument("--all", action="store_true", help="scan every target regardless of the diff")

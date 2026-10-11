@@ -4,9 +4,9 @@
 """Minimal read-only ELF64 little-endian parser.
 
 Covers exactly what AOT export needs -- a shared library's ``DT_SONAME`` /
-``DT_NEEDED`` entries and an object's defined global symbols -- so export does
-not depend on ``readelf``, ``ldd`` or ``nm`` being installed. Malformed input
-raises ``ValueError``.
+``DT_NEEDED`` entries and an object's global symbols -- so export does not
+depend on ``readelf``, ``ldd`` or ``nm`` being installed. Malformed input raises
+``ValueError``.
 """
 
 import struct
@@ -120,12 +120,14 @@ def _dynamic_info(source: Union[str, Path, bytes]) -> _DynamicInfo:
     return _DynamicInfo(soname, tuple(needed))
 
 
-def _defined_global_symbols(source: Union[str, Path, bytes], *, dynamic: bool = False) -> List[str]:
-    """Return the defined, externally visible symbols of an ELF file.
-
-    Reads ``.symtab`` (relocatable objects), or ``.dynsym`` -- the symbols a
-    shared library exports -- when ``dynamic`` is true.
-    """
+def _global_symbols(
+    source: Union[str, Path, bytes],
+    *,
+    dynamic: bool = False,
+    defined: Optional[bool] = None,
+    externally_visible: bool = False,
+) -> List[str]:
+    """Return selected global and weak symbols from an ELF symbol table."""
     data = _read(source)
     hdr = _header(data)
     sections = [_unpack(_SHDR, data, hdr.shoff + i * _SHDR.size) for i in range(hdr.shnum)]
@@ -139,9 +141,21 @@ def _defined_global_symbols(source: Union[str, Path, bytes], *, dynamic: bool = 
         strtab = sections[link][4]
         for off in range(offset, offset + size, _SYM.size):
             st_name, st_info, st_other, st_shndx, _value, _size = _unpack(_SYM, data, off)
-            if st_info >> 4 not in (_STB_GLOBAL, _STB_WEAK) or st_shndx == _SHN_UNDEF:
+            if st_info >> 4 not in (_STB_GLOBAL, _STB_WEAK):
                 continue
-            if st_other & 0x3 not in (_STV_DEFAULT, _STV_PROTECTED):
+            is_defined = st_shndx != _SHN_UNDEF
+            if defined is not None and is_defined != defined:
+                continue
+            if externally_visible and st_other & 0x3 not in (_STV_DEFAULT, _STV_PROTECTED):
                 continue
             names.append(_cstr(data, strtab + st_name))
     return names
+
+
+def _defined_global_symbols(source: Union[str, Path, bytes], *, dynamic: bool = False) -> List[str]:
+    """Return the defined, externally visible symbols of an ELF file.
+
+    Reads ``.symtab`` (relocatable objects), or ``.dynsym`` -- the symbols a
+    shared library exports -- when ``dynamic`` is true.
+    """
+    return _global_symbols(source, dynamic=dynamic, defined=True, externally_visible=True)

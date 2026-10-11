@@ -19,6 +19,7 @@ from functools import lru_cache
 from typing import Dict, Optional, Type
 
 from ...utils import env
+from .base import AOTRuntimeConfig as AOTRuntimeConfig
 from .base import BaseBackend, GPUTarget
 
 _registry: Dict[str, Type[BaseBackend]] = {}
