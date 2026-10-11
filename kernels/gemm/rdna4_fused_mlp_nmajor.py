@@ -652,6 +652,8 @@ def build_gemm_nmajor_lds_module(
     Wraps ``kernels.gemm.rdna_f16_gemm.create_wmma_gemm_module`` (double-buffered
     LDS, multi-wave WMMA). ``tile`` is ``(reg_m, reg_n, reg_k, waves_m, waves_n)``.
     """
+    arch = str(get_rocm_arch())
+    assert arch.startswith("gfx120"), f"build_gemm_nmajor_lds_module requires gfx120x, got {arch}"
     if dtype_name not in ("bfloat16", "float16"):
         raise ValueError(f"supports bf16/fp16, got {dtype_name}")
     if out_name not in ("bfloat16", "float16", "float32"):

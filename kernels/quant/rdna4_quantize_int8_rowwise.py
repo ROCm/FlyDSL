@@ -364,8 +364,6 @@ def dequantize_int8_rowwise(
     stream: Optional[torch.cuda.Stream] = None,
 ) -> tuple:
     """Inverse of ``quantize_int8_rowwise``: ``q * scale`` per row."""
-    arch = str(get_rocm_arch())
-    assert arch.startswith("gfx120"), f"dequantize_int8_rowwise requires gfx120x, got {arch}"
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from kernels.common.gfx120x_buf_helpers import buf_copy_load, buf_copy_store, ptr_buf_tensor
