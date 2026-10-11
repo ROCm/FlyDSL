@@ -2523,7 +2523,8 @@ def flydsl_flash_attn_paged_func(
             sink_t = sink_t.to(q.device)
 
     bias_arg = _as_contig(bias_t, stream=launch_stream) if has_bias else _dummy_bias(q.device)
-    paged_v_dim = int(v_cache.shape[-1])
+    # Linear V ends in the head. Vectorized V is [blocks, Hkv, page/vec, Dv, vec].
+    paged_v_dim = int(v_cache.shape[-2] if layout == "vectorized" else v_cache.shape[-1])
     o_shape = (batch, seq_len_q_launch, num_heads, paged_v_dim)
     if out is not None:
         if tuple(out.shape) != o_shape or out.dtype != q.dtype or out.device != q.device:

@@ -39,6 +39,7 @@ Paged attention
 ----------------
 
 - ``kernels.attention.pa_decode_fp8`` -- Paged attention decode kernel with FP8 support
+- ``kernels.attention.pa_decode_tile_gfx120x`` -- gfx120x WMMA paged decode for the vectorized KV cache
 
 FlashAttention
 --------------
