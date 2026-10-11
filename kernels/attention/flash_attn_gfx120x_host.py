@@ -29,6 +29,10 @@ int8 into the bf16 entry get a clear ValueError.
 Family name is gfx120x; hardware may report gfx1201/gfx1200/…. Native pack is
 dense BSHD plus packed-varlen and paged KV (linear, linear3d, and vectorized); dense-paged + ragged seqlen_k auto-routes to varlen-paged. gfx950 dualwave
 and gfx1250 paths stay on their own arches via ``flash_attn_interface``.
+
+``flydsl_flash_attn_func`` is the function that interface returns into on
+gfx120x. It passes ``attn_mask`` through as ``bias``. The ``@lru_cache``
+launchers below are unchanged.
 """
 
 import math
@@ -174,8 +178,6 @@ def commit_caller_out(out: torch.Tensor | None, produced: torch.Tensor) -> torch
 
 # WMMA score columns for one lane: low K-half, then the +16 half.
 _SCORE_COLUMNS = (0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23)
-
-
 
 
 def _column_killed(kc, op: str, limit):
@@ -1061,7 +1063,7 @@ def _get_splitk_combine(
     )
 
 
-def flydsl_flash_attn_func(
+def _flash_attn_bshd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -1501,6 +1503,438 @@ def _assemble_varlen_bias(
     # bottom-right ALiBi when sequence lengths differ. Shift only pure ALiBi.
     bottom_right = bool(per_head and alibi_ph and user_bias is None)
     return acc, per_head, bottom_right
+
+
+def flydsl_flash_attn_func(
+    q,
+    k,
+    v,
+    *,
+    causal=False,
+    num_kv_heads=None,
+    cu_seqlens_q=None,
+    cu_seqlens_kv=None,
+    max_seqlen_q=None,
+    max_seqlen_kv=None,
+    block_table=None,
+    seqlen_k=None,
+    kv_cache_layout=None,
+    num_kv_splits=None,
+    bias=None,
+    attn_mask=None,
+    alibi_slopes=None,
+    sink=None,
+    q_descale=None,
+    k_descale=None,
+    v_descale=None,
+    out=None,
+    return_lse=False,
+    sliding_window=None,
+    waves_per_eu=2,
+    daz=True,
+    stream=None,
+    fp8_block_m=None,
+):
+    """gfx120x flash attention.
+
+    ``flash_attn_interface.flydsl_flash_attn_func`` returns here on gfx120x
+    and passes ``attn_mask`` and ``sliding_window`` through. This function
+    stores ``attn_mask`` in ``bias`` and launches dense, varlen, paged, fp8,
+    and int8. A direct call defaults to ``causal=False``.
+    """
+    if fp8_block_m is not None and q.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
+        raise ValueError(f"flydsl_flash_attn_func: fp8_block_m applies to fp8 only, got dtype {q.dtype}")
+    if attn_mask is not None:
+        if bias is not None and bias is not attn_mask:
+            raise ValueError(
+                "flydsl_flash_attn_func: pass only one of attn_mask or bias "
+                "(attn_mask is an alias for bias); both were set to different tensors"
+            )
+        bias = attn_mask
+
+    _varlen = cu_seqlens_q is not None or cu_seqlens_kv is not None
+    _paged = block_table is not None
+    _layout_g = kv_cache_layout or "linear"
+    # Split-K on packed varlen and dense paged is in the gfx120x host.
+    # Quant varlen split still writes a packed O the combine does not.
+    if _varlen and _paged:
+        if _layout_g == "vectorized":
+            _hkv = int(k.shape[1])
+            _hq = int(q.shape[1])
+        elif _layout_g == "linear3d":
+            _hkv = int(k.shape[1])
+            _hq = int(q.shape[1])
+        else:
+            _hkv = int(k.shape[2])
+            _hq = int(q.shape[1])
+        reject_gqa(_hq, _hkv, num_kv_heads)
+    elif _varlen:
+        reject_gqa(int(q.shape[1]), int(k.shape[1]), num_kv_heads)
+    elif _paged:
+        reject_paged_layout(kv_cache_layout)
+        if _layout_g == "vectorized":
+            if k.dim() != 5:
+                raise ValueError(f"flydsl_flash_attn_func: vectorized paged K must be 5D, got {k.dim()}D")
+            _hkv = int(k.shape[1])
+        elif _layout_g == "linear3d":
+            if k.dim() != 3:
+                raise ValueError("flydsl_flash_attn_func: linear3d paged K must be 3D [NumBlocks,Hkv,D]")
+            _hkv = int(k.shape[1])
+        else:
+            if k.dim() != 4:
+                raise ValueError(
+                    "flydsl_flash_attn_func: gfx120x linear paged KV requires 4D "
+                    f"[num_blocks, page_size, num_kv_heads, head_dim], got rank {k.dim()}"
+                )
+            _hkv = int(k.shape[2])
+        reject_gqa(int(q.shape[2]), _hkv, num_kv_heads)
+    elif q.dim() == 4 and k.dim() == 4:
+        reject_gqa(int(q.shape[2]), int(k.shape[2]), num_kv_heads)
+
+    def _gfx120x_quantflydsl_flash_attn_quant_paged_func(kind: str):
+        """Paged quant FA. The cache stays in place; the kernel gathers pages."""
+        if seqlen_k is None:
+            raise ValueError(f"flydsl_flash_attn_func: gfx120x {kind} paged FA requires seqlen_k")
+        if (cu_seqlens_q is not None or cu_seqlens_kv is not None) and (cu_seqlens_q is None or max_seqlen_q is None):
+            raise ValueError(
+                f"flydsl_flash_attn_func: gfx120x {kind} varlen-paged requires cu_seqlens_q and max_seqlen_q"
+            )
+        return flydsl_flash_attn_quant_paged_func(
+            q,
+            k,
+            v,
+            block_table,
+            seqlen_k,
+            kind=kind,
+            causal=causal,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            stream=stream,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            out=out,
+            kv_cache_layout=kv_cache_layout,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            sliding_window=sliding_window,
+            bias=bias,
+            alibi_slopes=alibi_slopes,
+            attn_mask=None,
+            sink=sink,
+            return_lse=return_lse,
+            num_kv_splits=int(num_kv_splits or 1),
+            block_m=fp8_block_m,
+        )
+
+    def _gfx120x_call(qb, kb, vb, *, bias_b, out_b):
+        """Dense gfx120x FA. Bias/ALiBi, sink, and LSE apply in one launch."""
+        reject_sink_with_alibi(sink, alibi_slopes)
+        got = _flash_attn_bshd(
+            qb,
+            kb,
+            vb,
+            causal=causal,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            stream=stream,
+            bias=bias_b,
+            alibi_slopes=alibi_slopes,
+            return_lse=return_lse,
+            sink=sink,
+            out=out_b,
+            sliding_window=sliding_window,
+        )
+        lse = None
+        if return_lse:
+            got, lse = got
+        return got, lse
+
+    if q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        if block_table is not None:
+            return _gfx120x_quantflydsl_flash_attn_quant_paged_func("fp8")
+        reject_quant_extras(
+            "fp8",
+            bias=bias,
+            attn_mask=attn_mask,
+            alibi_slopes=alibi_slopes,
+            sink=sink,
+            return_lse=return_lse,
+        )
+        if cu_seqlens_q is not None or cu_seqlens_kv is not None:
+            if cu_seqlens_q is None or cu_seqlens_kv is None:
+                raise ValueError("flydsl_flash_attn_func: gfx120x fp8 varlen requires both cu_seqlens")
+            if max_seqlen_q is None or max_seqlen_kv is None:
+                raise ValueError("flydsl_flash_attn_func: gfx120x fp8 varlen requires max_seqlen_q and max_seqlen_kv")
+            return flydsl_flash_attn_fp8_varlen_func(
+                q,
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                int(max_seqlen_q),
+                int(max_seqlen_kv),
+                causal=causal,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                stream=stream,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                out=out,
+                bias=bias,
+                alibi_slopes=alibi_slopes,
+                attn_mask=None,
+                sink=sink,
+                return_lse=return_lse,
+                sliding_window=sliding_window,
+                num_kv_splits=int(num_kv_splits or 1),
+                block_m=fp8_block_m,
+            )
+        return flydsl_flash_attn_fp8_func(
+            q,
+            k,
+            v,
+            causal=causal,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            stream=stream,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            out=out,
+            bias=bias,
+            alibi_slopes=alibi_slopes,
+            sink=sink,
+            return_lse=return_lse,
+            num_kv_heads=num_kv_heads,
+            sliding_window=sliding_window,
+            num_kv_splits=int(num_kv_splits or 1),
+            block_m=fp8_block_m,
+        )
+    if q.dtype == torch.int8:
+        if block_table is not None:
+            return _gfx120x_quantflydsl_flash_attn_quant_paged_func("int8")
+        reject_quant_extras(
+            "int8",
+            bias=bias,
+            attn_mask=attn_mask,
+            alibi_slopes=alibi_slopes,
+            sink=sink,
+            return_lse=return_lse,
+        )
+        if cu_seqlens_q is not None or cu_seqlens_kv is not None:
+            if cu_seqlens_q is None or cu_seqlens_kv is None:
+                raise ValueError("flydsl_flash_attn_func: gfx120x int8 varlen requires both cu_seqlens")
+            if max_seqlen_q is None or max_seqlen_kv is None:
+                raise ValueError("flydsl_flash_attn_func: gfx120x int8 varlen requires max_seqlen_q and max_seqlen_kv")
+            return flydsl_flash_attn_int8_varlen_func(
+                q,
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                int(max_seqlen_q),
+                int(max_seqlen_kv),
+                causal=causal,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                stream=stream,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                out=out,
+                bias=bias,
+                alibi_slopes=alibi_slopes,
+                attn_mask=None,
+                sink=sink,
+                return_lse=return_lse,
+                sliding_window=sliding_window,
+                num_kv_splits=int(num_kv_splits or 1),
+            )
+        return flydsl_flash_attn_int8_func(
+            q,
+            k,
+            v,
+            causal=causal,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            stream=stream,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            out=out,
+            bias=bias,
+            alibi_slopes=alibi_slopes,
+            sink=sink,
+            return_lse=return_lse,
+            num_kv_heads=num_kv_heads,
+            sliding_window=sliding_window,
+            num_kv_splits=int(num_kv_splits or 1),
+        )
+    # Dense bf16/fp16. Varlen, paged (linear/linear3d/vectorized), varlen+paged,
+    # and split-K are in-kernel wave32 paths.
+    if (cu_seqlens_q is not None or cu_seqlens_kv is not None) and block_table is not None:
+        if cu_seqlens_q is None or cu_seqlens_kv is None:
+            raise ValueError("flydsl_flash_attn_func: gfx120x varlen paged requires both cu_seqlens")
+        if seqlen_k is None:
+            raise ValueError("flydsl_flash_attn_func: gfx120x varlen paged requires seqlen_k")
+        # Callers must pass max_seqlen_* (same as main varlen). Omit→D2H bounce
+        # left commented for debug only — do not re-enable on the hot path.
+        if max_seqlen_q is None:
+            raise ValueError("flydsl_flash_attn_func: gfx120x varlen paged requires max_seqlen_q")
+        if max_seqlen_kv is None:
+            raise ValueError("flydsl_flash_attn_func: gfx120x varlen paged requires max_seqlen_kv")
+        _max_q = int(max_seqlen_q)
+        _max_kv = int(max_seqlen_kv)
+        # if _max_q is None or _max_kv is None:
+        #     _cq = cu_seqlens_q.to(torch.int64)
+        #     _ck = cu_seqlens_kv.to(torch.int64)
+        #     if _max_q is None:
+        #         # DEBUG ONLY: omit→D2H of cu_seqlens; callers must pass max_seqlen_*.
+        #         _cq_h = _cq.detach().to(device="cpu", dtype=torch.int64).tolist()
+        #         _max_q = max((_cq_h[i + 1] - _cq_h[i]) for i in range(len(_cq_h) - 1)) if len(_cq_h) > 1 else 0
+        #     if _max_kv is None:
+        #         _ck_h = _ck.detach().to(device="cpu", dtype=torch.int64).tolist()
+        #         _max_kv = max((_ck_h[i + 1] - _ck_h[i]) for i in range(len(_ck_h) - 1)) if len(_ck_h) > 1 else 0
+        return flydsl_flash_attn_varlen_paged_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            block_table,
+            seqlen_k,
+            int(_max_q),
+            int(_max_kv),
+            causal=causal,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            stream=stream,
+            bias=bias,
+            alibi_slopes=alibi_slopes,
+            return_lse=return_lse,
+            sink=sink,
+            out=out,
+            kv_cache_layout=kv_cache_layout or "linear",
+            sliding_window=sliding_window,
+            num_kv_splits=int(num_kv_splits or 1),
+        )
+
+    if cu_seqlens_q is not None or cu_seqlens_kv is not None:
+        if cu_seqlens_q is None or cu_seqlens_kv is None:
+            raise ValueError(
+                "flydsl_flash_attn_func: gfx120x packed varlen requires both cu_seqlens_q and cu_seqlens_kv"
+            )
+        # Callers must pass max_seqlen_* (same as main varlen). Omit→D2H bounce
+        # left commented for debug only — do not re-enable on the hot path.
+        if max_seqlen_q is None:
+            raise ValueError("flydsl_flash_attn_func: gfx120x packed varlen requires max_seqlen_q")
+        if max_seqlen_kv is None:
+            raise ValueError("flydsl_flash_attn_func: gfx120x packed varlen requires max_seqlen_kv")
+        _max_q = int(max_seqlen_q)
+        _max_kv = int(max_seqlen_kv)
+        # if max_seqlen_q is None or max_seqlen_kv is None:
+        #     _cq = cu_seqlens_q.to(torch.int64)
+        #     _ck = cu_seqlens_kv.to(torch.int64)
+        #     _max_q = max_seqlen_q
+        #     _max_kv = max_seqlen_kv
+        #     if _max_q is None:
+        #         # DEBUG ONLY: omit→D2H of cu_seqlens; callers must pass max_seqlen_*.
+        #         _cq_h = _cq.detach().to(device="cpu", dtype=torch.int64).tolist()
+        #         _max_q = max((_cq_h[i + 1] - _cq_h[i]) for i in range(len(_cq_h) - 1)) if len(_cq_h) > 1 else 0
+        #     if _max_kv is None:
+        #         _ck_h = _ck.detach().to(device="cpu", dtype=torch.int64).tolist()
+        #         _max_kv = max((_ck_h[i + 1] - _ck_h[i]) for i in range(len(_ck_h) - 1)) if len(_ck_h) > 1 else 0
+        #     _max_q = int(_max_q)
+        #     _max_kv = int(_max_kv)
+        reject_sink_with_alibi(sink, alibi_slopes)
+        got = flydsl_flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            _max_q,
+            _max_kv,
+            causal=causal,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            stream=stream,
+            bias=bias,
+            attn_mask=None,  # already folded into bias above when alias
+            alibi_slopes=alibi_slopes,
+            return_lse=return_lse,
+            sink=sink,
+            out=out,
+            sliding_window=sliding_window,
+            num_kv_splits=int(num_kv_splits or 1),
+        )
+        return got
+
+    if block_table is not None:
+        if seqlen_k is None:
+            raise ValueError("flydsl_flash_attn_func: gfx120x paged KV requires seqlen_k")
+        _layout = kv_cache_layout or "linear"
+        reject_paged_layout(_layout)
+        _B = int(q.shape[0])
+        if block_table.dim() != 2 or int(block_table.shape[0]) != _B:
+            raise ValueError(
+                f"flydsl_flash_attn_func: gfx120x paged block_table must be 2D with {_B} rows, "
+                f"got shape={tuple(block_table.shape)}"
+            )
+        if seqlen_k.dim() != 1 or int(seqlen_k.numel()) != _B or seqlen_k.dtype not in (torch.int32, torch.int64):
+            raise ValueError(
+                f"flydsl_flash_attn_func: gfx120x paged seqlen_k must be 1-D int [{_B}], "
+                f"got shape={tuple(seqlen_k.shape)} dtype={seqlen_k.dtype}"
+            )
+        reject_sink_with_alibi(sink, alibi_slopes)
+        # Dense-paged + ragged seqlen_k auto-routes inside the gfx120x paged host
+        # to varlen-paged (builds cu_seqlens from Sq / seqlen_k). Uniform stays dense.
+        got = flydsl_flash_attn_paged_func(
+            q,
+            k,
+            v,
+            block_table,
+            seqlen_k,
+            page_size=None,
+            kv_cache_layout=_layout,
+            causal=causal,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            stream=stream,
+            bias=bias,
+            alibi_slopes=alibi_slopes,
+            return_lse=return_lse,
+            sink=sink,
+            out=out,
+            sliding_window=sliding_window,
+            num_kv_splits=int(num_kv_splits or 1),
+        )
+        return got
+
+    if num_kv_splits is not None and int(num_kv_splits) > 1:
+        return _flash_attn_bshd(
+            q,
+            k,
+            v,
+            causal=causal,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            stream=stream,
+            bias=bias,
+            alibi_slopes=alibi_slopes,
+            return_lse=return_lse,
+            sink=sink,
+            out=out,
+            num_kv_splits=int(num_kv_splits),
+            sliding_window=sliding_window,
+        )
+
+    out_dense, lse = _gfx120x_call(q, k, v, bias_b=bias, out_b=out)
+    if return_lse:
+        return out_dense, lse
+    return out_dense
 
 
 def flydsl_flash_attn_varlen_func(
@@ -2534,7 +2968,6 @@ def _quant_dense_launch(
             "k/v must share head count; "
             f"got q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}"
         )
-
 
     reject_gqa(int(q.shape[2]), int(k.shape[2]), num_kv_heads)
     num_kv_heads = int(k.shape[2])
