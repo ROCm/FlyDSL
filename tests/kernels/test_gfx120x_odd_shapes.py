@@ -46,7 +46,7 @@ def _pack_uint4_row_major(values: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("head_dim", [65, 80, 96, 127])
 @pytest.mark.parametrize("seq", [33, 64, 77])
 def test_fa_bf16_odd_head_dim_and_seq(head_dim: int, seq: int) -> None:
-    """Dense FA soft-pads head_dim to next %32 tile in [64, 480]; odd seq is fine."""
+    """Dense FA pads head_dim to the next multiple of 32. Odd seq is fine."""
     q = torch.randn(1, seq, 1, head_dim, device="cuda", dtype=torch.bfloat16)
     k = torch.randn(1, seq, 1, head_dim, device="cuda", dtype=torch.bfloat16)
     v = torch.randn(1, seq, 1, head_dim, device="cuda", dtype=torch.bfloat16)
@@ -55,10 +55,13 @@ def test_fa_bf16_odd_head_dim_and_seq(head_dim: int, seq: int) -> None:
     assert torch.isfinite(out.float()).all()
 
 
-def test_fa_head_dim_above_lds_still_raises() -> None:
+def test_fa_head_dim_above_lds_is_finite() -> None:
+    """A head wider than one LDS row is split into chunks and still returns that width."""
     q = torch.randn(1, 32, 1, 512, device="cuda", dtype=torch.bfloat16)
-    with pytest.raises(ValueError, match="head_dim"):
-        flydsl_flash_attn_func(q, q, q, causal=False)
+    out = flydsl_flash_attn_func(q, q, q, causal=False)
+    torch.cuda.synchronize()
+    assert out.shape == q.shape
+    assert torch.isfinite(out.float()).all()
 
 
 @pytest.mark.parametrize("k", [17, 31, 48, 63])

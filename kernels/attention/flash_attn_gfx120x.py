@@ -4,8 +4,10 @@
 """Flash Attention kernel for gfx120x (RDNA4; HW may report gfx1201).
 
 Uses 16x16x16 wave32 WMMA, online softmax, pipelined V loads, and flattened
-BSHD inputs. Requires ``head_dim >= 64``, ``head_dim % 32 == 0``, and
-``head_dim <= 480`` (bf16 LDS fits at prefetch1 ≤64 KiB; multi-batch KV loader uses ceil coverage).
+BSHD inputs. ``head_dim`` is a positive multiple of 32. The host pads a shorter
+caller head and the kernel masks that tail. A head whose KV prefetch does not fit
+in 64 KiB is split into LDS chunks. The score and the output accumulator stay in
+registers and combine the chunks. There is no second LDS buffer.
 
 Supports dense non-causal cross-attention when ``seq_len`` (Q) and
 ``seq_len_kv`` (K/V) differ. Causal self and causal×cross use in-kernel bottom-right masking
@@ -59,6 +61,23 @@ from kernels.common.kernels_common import LOG2E as _LOG2E  # noqa: E402
 from kernels.common.tensor_shim import _run_compiled  # noqa: E402
 
 KERNEL_NAME = "flash_attn_func_gfx120x_kernel"
+
+# One K row and one V row, BLOCK_N=32, plus the +4 bank pad. bf16 is 2 bytes,
+# so 480 is the widest row that fits in 64 KiB. A wider head reuses that buffer.
+_LDS_BYTES = 65536
+_LDS_BLOCK_N = 32
+
+
+def _lds_head_tile(head_dim: int, elem_bytes: int) -> int:
+    """Largest multiple of 32 that divides ``head_dim`` and fits one KV prefetch."""
+    d = int(head_dim)
+    max_d = (((_LDS_BYTES // (2 * _LDS_BLOCK_N * int(elem_bytes))) - 4) // 32) * 32
+    if d <= max_d:
+        return d
+    tile = max_d
+    while d % tile != 0:
+        tile -= 32
+    return tile
 
 
 def build_flash_attn_func_module_primary(
@@ -139,10 +158,14 @@ def build_flash_attn_func_module_primary(
     PV_K_STEPS = K_SUB_N // PV_K_STEP
 
     assert BLOCK_M % NUM_WAVES == 0
-    assert head_dim % 32 == 0
-    assert head_dim >= 64
-    assert head_dim <= 480, f"gfx120x FA head_dim ({head_dim}) must be <= 480 (LDS budget at BLOCK_N=32 prefetch1)"
+    assert head_dim % 32 == 0 and head_dim >= 32, (
+        f"gfx120x FA head_dim ({head_dim}) must be a positive multiple of 32"
+    )
     assert dtype_str in ("f16", "bf16")
+    TILE_D = _lds_head_tile(int(head_dim), 2)
+    NUM_D_TILES = int(head_dim) // TILE_D
+    K_STEPS_PER_TILE = TILE_D // K_STEP_QK
+    D_CHUNKS_PER_TILE = TILE_D // D_CHUNK
 
     if sm_scale is None:
         sm_scale = 1.0 / host_math.sqrt(head_dim)
@@ -209,13 +232,13 @@ def build_flash_attn_func_module_primary(
         raise ValueError(f"gfx120x FA: vectorized KV needs head_dim and page_size divisible by kVS={KV_VEC}")
     # LSE layout [B, H, Sq]. Compile-time head count is NUM_HEADS; seq_len is a runtime arg.
 
-    # Padding reduces LDS bank conflicts.
-    K_STRIDE = HEAD_DIM + 4
-    V_STRIDE = HEAD_DIM + 4
+    # LDS holds one chunk. TILE_D == HEAD_DIM when the whole head fits.
+    K_STRIDE = TILE_D + 4
+    V_STRIDE = TILE_D + 4
 
     ENABLE_LDS_VEC16 = os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16", "1") == "1"
     VEC_WIDTH = 16 if ENABLE_LDS_VEC16 else 8
-    THREADS_PER_ROW_LOAD = HEAD_DIM // VEC_WIDTH
+    THREADS_PER_ROW_LOAD = TILE_D // VEC_WIDTH
     ROWS_PER_BATCH_LOAD = BLOCK_SIZE // THREADS_PER_ROW_LOAD
 
     # Multi-batch KV loads: every BLOCK_N row must be covered. Floor division
@@ -600,13 +623,18 @@ def build_flash_attn_func_module_primary(
         def _bitcast_i32(value: fx.Float32 | float) -> fx.Int32:
             return fx.Float32(value).bitcast(fx.Int32)
 
+        def _round_bf16_bits(bits: fx.Int32) -> fx.Int32:
+            # Nearest-even bf16. Truncation of the softmax row misses the 2x bf16 bar.
+            lsb = bits.shrui(fx.Int32(16)) & fx.Int32(1)
+            return bits + fx.Int32(0x7FFF) + lsb
+
         def _pack_bf16_pair(lo: fx.Float32, hi: fx.Float32, shift: fx.Int32, mask: fx.Int32) -> fx.Int32:
-            lo_i32 = _bitcast_i32(lo)
-            hi_i32 = _bitcast_i32(hi)
+            lo_i32 = _round_bf16_bits(_bitcast_i32(lo))
+            hi_i32 = _round_bf16_bits(_bitcast_i32(hi))
             return (hi_i32 & mask) | lo_i32.shrui(shift)
 
         def bf16_trunc_pack_v8(f32_vals: fx.Vector) -> fx.Vector:
-            """Pack 8 f32 values into v8bf16 via bitwise truncation (upper 16 bits)."""
+            """Pack 8 f32 softmax weights into v8bf16, round to nearest even."""
             _c16 = fx.Int32(16)
             _cmask = fx.Int32(0xFFFF0000)
             pairs = []
@@ -696,7 +724,7 @@ def build_flash_attn_func_module_primary(
                 group = d0 // fx.Int64(KV_VEC)
                 base = (
                     (
-                        (fx.Int64(_pid) * fx.Int64(NUM_KV_HEADS) + fx.Int64(kv_head_idx)) * fx.Int64(HEAD_DIM // KV_VEC)
+                        (fx.Int64(_pid) * fx.Int64(NUM_KV_HEADS) + fx.Int64(kv_head_idx)) * fx.Int64(LOGICAL_D // KV_VEC)
                         + group
                     )
                     * fx.Int64(PAGE_SIZE)
@@ -730,7 +758,7 @@ def build_flash_attn_func_module_primary(
                         * fx.Int64(PAGE_SIZE // KV_VEC)
                         + fx.Int64(kg)
                     )
-                    * fx.Int64(HEAD_DIM)
+                    * fx.Int64(LOGICAL_D)
                     + fx.Int64(col)
                     + fx.Int64(_i)
                 ) * fx.Int64(KV_VEC) + fx.Int64(kr_pair)
@@ -793,6 +821,41 @@ def build_flash_attn_func_module_primary(
                     for sv in range_constexpr(V_SUBVECS):
                         _v_store_row_major(v_base, lds_row, sv * 8, vecs[batch * V_SUBVECS + sv])
 
+        def coop_load_k_slice(tile_start: fx.Int32 | fx.Int64 | int, d_base: int) -> None:
+            """Load one head chunk into the K LDS row. ``d_base`` is the global column."""
+            tile_start = fx.Int64(tile_start)
+            k_base = k_buf_base(0)
+            gcol = load_col_base + fx.Int64(d_base)
+            for batch in range_constexpr(NUM_BATCHES_KV):
+                row_offset = batch * ROWS_PER_BATCH_LOAD
+                lds_row = load_row_in_batch + row_offset
+                row_idx = tile_start + lds_row
+                if const_expr(KV_NEEDS_GUARD):
+                    row_valid = lds_row < fx.Int64(BLOCK_N)
+                    if row_valid:
+                        lds_idx = k_base + lds_row * K_STRIDE + load_col_base
+                        vec = _load_k_tile_vec(_clamp_kv_row(row_idx), gcol)
+                        lds_store(lds_idx, Vec(vec))
+                else:
+                    lds_idx = k_base + lds_row * K_STRIDE + load_col_base
+                    vec = _load_k_tile_vec(_clamp_kv_row(row_idx), gcol)
+                    lds_store(lds_idx, Vec(vec))
+
+        def coop_load_v_slice(tile_start: fx.Int32 | fx.Int64 | int, d_base: int) -> list[fx.Vector]:
+            """Load one head chunk of V. LDS columns stay local to the chunk."""
+            tile_start = fx.Int64(tile_start)
+            vecs = []
+            for batch in range_constexpr(NUM_BATCHES_KV):
+                row_offset = batch * ROWS_PER_BATCH_LOAD
+                lds_row = load_row_in_batch + row_offset
+                if const_expr(KV_NEEDS_GUARD):
+                    row_cap = fx.Int64(BLOCK_N - 1)
+                    lds_row = fx.Int64((lds_row < row_cap).select(lds_row, row_cap))
+                row_idx = _clamp_kv_row(tile_start + lds_row)
+                for sv in range_constexpr(V_SUBVECS):
+                    vecs.append(_load_v8_vec(row_idx, fx.Int64(d_base) + load_col_base + fx.Int64(sv * 8)))
+            return vecs
+
         q_row = q_start + wave_q_offset + lane16
         q_row_i32 = fx.Int32(q_row)
 
@@ -844,7 +907,8 @@ def build_flash_attn_func_module_primary(
 
         # Non-causal carries prefetched V across iterations; causal avoids the
         # extra VGPR lifetime and loads V in the current iteration.
-        PREFETCH_V_ACROSS_ITERS = not CAUSAL
+        # A split head reloads each V chunk after softmax into the same LDS buffer.
+        PREFETCH_V_ACROSS_ITERS = (not CAUSAL) and NUM_D_TILES == 1
 
         ns_i32 = fx.Int32(num_splits)
         sp_i32 = fx.Int32(split_idx)
@@ -884,41 +948,67 @@ def build_flash_attn_func_module_primary(
                 _seen_slot = 2 + D_CHUNKS + (NUM_V_VECS if PREFETCH_V_ACROSS_ITERS else 0)
                 seen = inner_iter_args[_seen_slot]
 
-            coop_load_k(kv_block_start, 0)
-            gpu.barrier()
-            k_base = k_buf_base(0)
+            if const_expr(NUM_D_TILES == 1):
+                coop_load_k(kv_block_start, 0)
+                gpu.barrier()
+                k_base = k_buf_base(0)
 
-            if const_expr(not PREFETCH_V_ACROSS_ITERS):
-                # Overlap the current V load with GEMM1 and softmax.
-                _v_vecs_tile = coop_load_v_global(kv_block_start)
+                if const_expr(not PREFETCH_V_ACROSS_ITERS):
+                    # Overlap the current V load with GEMM1 and softmax.
+                    _v_vecs_tile = coop_load_v_global(kv_block_start)
 
-            if const_expr(CAUSAL):
-                wave_needs_kv_tile = fx.Int32(kv_block_start) < wave_kv_limit_i32
+                if const_expr(CAUSAL):
+                    wave_needs_kv_tile = fx.Int32(kv_block_start) < wave_kv_limit_i32
+                else:
+                    wave_needs_kv_tile = True
+
+                # S = K @ Q^T
+                s_accs = [c_zero_v8f32 for _ in range(NUM_S_ACCS)]
+
+                if wave_needs_kv_tile:
+                    for ks in range_constexpr(K_STEPS_QK):
+                        k_col = fx.Int64(ks * K_STEP_QK) + klane * WMMA_LANE_K
+
+                        for st_idx in range_constexpr(N_SUB_TILES):
+                            st_base_row = st_idx * K_SUB_N
+
+                            k_row_a = lane16 + fx.Int64(st_base_row)
+                            k_lds_a = k_base + k_row_a * K_STRIDE + k_col
+                            k_pack_a = Vec(lds_load(k_lds_a, 8))
+
+                            k_row_b = lane16 + fx.Int64(st_base_row + 16)
+                            k_lds_b = k_base + k_row_b * K_STRIDE + k_col
+                            k_pack_b = Vec(lds_load(k_lds_b, 8))
+
+                            acc_idx_a = st_idx * 2
+                            acc_idx_b = st_idx * 2 + 1
+                            s_accs[acc_idx_a] = wmma_acc(k_pack_a, q_b_packs[ks], s_accs[acc_idx_a])
+                            s_accs[acc_idx_b] = wmma_acc(k_pack_b, q_b_packs[ks], s_accs[acc_idx_b])
             else:
-                wave_needs_kv_tile = True
-
-            # S = K @ Q^T
-            s_accs = [c_zero_v8f32 for _ in range(NUM_S_ACCS)]
-
-            if wave_needs_kv_tile:
-                for ks in range_constexpr(K_STEPS_QK):
-                    k_col = fx.Int64(ks * K_STEP_QK) + klane * WMMA_LANE_K
-
-                    for st_idx in range_constexpr(N_SUB_TILES):
-                        st_base_row = st_idx * K_SUB_N
-
-                        k_row_a = lane16 + fx.Int64(st_base_row)
-                        k_lds_a = k_base + k_row_a * K_STRIDE + k_col
-                        k_pack_a = Vec(lds_load(k_lds_a, 8))
-
-                        k_row_b = lane16 + fx.Int64(st_base_row + 16)
-                        k_lds_b = k_base + k_row_b * K_STRIDE + k_col
-                        k_pack_b = Vec(lds_load(k_lds_b, 8))
-
-                        acc_idx_a = st_idx * 2
-                        acc_idx_b = st_idx * 2 + 1
-                        s_accs[acc_idx_a] = wmma_acc(k_pack_a, q_b_packs[ks], s_accs[acc_idx_a])
-                        s_accs[acc_idx_b] = wmma_acc(k_pack_b, q_b_packs[ks], s_accs[acc_idx_b])
+                if const_expr(CAUSAL):
+                    wave_needs_kv_tile = fx.Int32(kv_block_start) < wave_kv_limit_i32
+                else:
+                    wave_needs_kv_tile = True
+                s_accs = [c_zero_v8f32 for _ in range(NUM_S_ACCS)]
+                for d_tile in range_constexpr(NUM_D_TILES):
+                    coop_load_k_slice(kv_block_start, d_tile * TILE_D)
+                    gpu.barrier()
+                    k_base = k_buf_base(0)
+                    if wave_needs_kv_tile:
+                        for ks in range_constexpr(K_STEPS_PER_TILE):
+                            ks_abs = d_tile * K_STEPS_PER_TILE + ks
+                            k_col = fx.Int64(ks * K_STEP_QK) + klane * WMMA_LANE_K
+                            for st_idx in range_constexpr(N_SUB_TILES):
+                                st_base_row = st_idx * K_SUB_N
+                                k_row_a = lane16 + fx.Int64(st_base_row)
+                                k_pack_a = Vec(lds_load(k_base + k_row_a * K_STRIDE + k_col, 8))
+                                k_row_b = lane16 + fx.Int64(st_base_row + 16)
+                                k_pack_b = Vec(lds_load(k_base + k_row_b * K_STRIDE + k_col, 8))
+                                acc_idx_a = st_idx * 2
+                                acc_idx_b = st_idx * 2 + 1
+                                s_accs[acc_idx_a] = wmma_acc(k_pack_a, q_b_packs[ks_abs], s_accs[acc_idx_a])
+                                s_accs[acc_idx_b] = wmma_acc(k_pack_b, q_b_packs[ks_abs], s_accs[acc_idx_b])
+                    gpu.barrier()
 
             s_raw = []
             for st in range_constexpr(NUM_S_ACCS):
@@ -1086,8 +1176,9 @@ def build_flash_attn_func_module_primary(
                 window=_window,
             )
 
-            coop_store_v_lds(_v_vecs_tile, 0)
-            gpu.barrier()
+            if const_expr(NUM_D_TILES == 1):
+                coop_store_v_lds(_v_vecs_tile, 0)
+                gpu.barrier()
 
             p_packs_all = []
             for st_idx in range_constexpr(N_SUB_TILES):
@@ -1123,38 +1214,59 @@ def build_flash_attn_func_module_primary(
                     v_elems.append(fx.ptr_load(lds_kv + fx.Int32(v_lds_idx)))
                 return Vec.from_elements(v_elems, elem_dtype)
 
-            if wave_needs_kv_tile:
-                o_tmp = list(o_accs)
+            if const_expr(NUM_D_TILES == 1):
+                if wave_needs_kv_tile:
+                    o_tmp = list(o_accs)
 
-                cur_v_packs = []
-                for st_idx in range_constexpr(N_SUB_TILES):
-                    cur_v_packs.append(_load_v_rowmajor(st_idx * K_SUB_N, 0, 0))
+                    cur_v_packs = []
+                    for st_idx in range_constexpr(N_SUB_TILES):
+                        cur_v_packs.append(_load_v_rowmajor(st_idx * K_SUB_N, 0, 0))
 
-                for pks in range_constexpr(PV_K_STEPS):
-                    for dc in range_constexpr(D_CHUNKS):
-                        next_dc = dc + 1
-                        next_pks = pks
-                        if const_expr(next_dc >= D_CHUNKS):
-                            next_dc = 0
-                            next_pks = pks + 1
-                        has_next = const_expr(next_pks < PV_K_STEPS)
+                    for pks in range_constexpr(PV_K_STEPS):
+                        for dc in range_constexpr(D_CHUNKS):
+                            next_dc = dc + 1
+                            next_pks = pks
+                            if const_expr(next_dc >= D_CHUNKS):
+                                next_dc = 0
+                                next_pks = pks + 1
+                            has_next = const_expr(next_pks < PV_K_STEPS)
 
-                        next_v_packs = []
-                        if const_expr(has_next):
+                            next_v_packs = []
+                            if const_expr(has_next):
+                                for st_idx in range_constexpr(N_SUB_TILES):
+                                    next_v_packs.append(_load_v_rowmajor(st_idx * K_SUB_N, next_pks, next_dc))
+
                             for st_idx in range_constexpr(N_SUB_TILES):
-                                next_v_packs.append(_load_v_rowmajor(st_idx * K_SUB_N, next_pks, next_dc))
+                                o_tmp[dc] = wmma_acc(
+                                    cur_v_packs[st_idx],
+                                    p_packs_all[st_idx][pks],
+                                    o_tmp[dc],
+                                )
 
-                        for st_idx in range_constexpr(N_SUB_TILES):
-                            o_tmp[dc] = wmma_acc(
-                                cur_v_packs[st_idx],
-                                p_packs_all[st_idx][pks],
-                                o_tmp[dc],
-                            )
+                            if const_expr(has_next):
+                                cur_v_packs = next_v_packs
 
-                        if const_expr(has_next):
-                            cur_v_packs = next_v_packs
-
-                o_accs = o_tmp
+                    o_accs = o_tmp
+            else:
+                for d_tile in range_constexpr(NUM_D_TILES):
+                    _v_slice = coop_load_v_slice(kv_block_start, d_tile * TILE_D)
+                    coop_store_v_lds(_v_slice, 0)
+                    gpu.barrier()
+                    if wave_needs_kv_tile:
+                        o_tmp = list(o_accs)
+                        dc0 = d_tile * D_CHUNKS_PER_TILE
+                        for dc in range_constexpr(D_CHUNKS_PER_TILE):
+                            dc_abs = dc0 + dc
+                            for pks in range_constexpr(PV_K_STEPS):
+                                for st_idx in range_constexpr(N_SUB_TILES):
+                                    v_pack = _load_v_rowmajor(st_idx * K_SUB_N, pks, dc)
+                                    o_tmp[dc_abs] = wmma_acc(
+                                        v_pack,
+                                        p_packs_all[st_idx][pks],
+                                        o_tmp[dc_abs],
+                                    )
+                        o_accs = o_tmp
+                    gpu.barrier()
 
             m_running = row_alive.select(m_new_raw, m_running)
             l_running = row_alive.select(l_new, l_running)

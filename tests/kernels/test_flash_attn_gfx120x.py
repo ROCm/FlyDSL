@@ -118,11 +118,206 @@ def test_bf16_d_gt_128(dim: int) -> None:
     assert _min_cos(out, ref) > 0.997
 
 
-def test_d_over_max_rejects() -> None:
-    # Dense FA soft-pads head_dim up to LDS-safe 480; above that still raises.
-    q = torch.randn(1, 32, 2, 512, device="cuda", dtype=torch.bfloat16)
-    with pytest.raises(ValueError, match="head_dim=512"):
-        flydsl_flash_attn_func(q, q, q, causal=False)
+def _max_abs(a: torch.Tensor, b: torch.Tensor) -> float:
+    return (a.float() - b.float()).abs().max().item()
+
+
+def _sdpa_fp32(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool = False) -> torch.Tensor:
+    out = F.scaled_dot_product_attention(
+        q.float().transpose(1, 2),
+        k.float().transpose(1, 2),
+        v.float().transpose(1, 2),
+        is_causal=causal,
+    )
+    return out.transpose(1, 2)
+
+
+def _within_dtype_bar(
+    out: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    causal: bool = False,
+    mult: float = 2.0,
+) -> None:
+    """Kernel abs error is at most ``mult`` times PyTorch's same-dtype error, plus a small atol."""
+    ref32 = _sdpa_fp32(q, k, v, causal=causal)
+    ref_dt = _sdpa_ref(q, k, v, causal=causal)
+    assert _max_abs(out, ref32) <= mult * _max_abs(ref_dt, ref32) + 1e-4
+
+
+@pytest.mark.parametrize("dim", [1, 24, 40, 512])
+def test_bf16_head_pad_and_lds_split(dim: int) -> None:
+    """Small heads pad to the WMMA step. A head above one LDS row is split, not rejected."""
+    torch.manual_seed(0)
+    q = torch.randn(1, 32, 2, dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(1, 31, 2, dim, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(1, 31, 2, dim, device="cuda", dtype=torch.bfloat16)
+    out = flydsl_flash_attn_func(q, k, v, causal=False)
+    torch.cuda.synchronize()
+    assert out.shape == q.shape
+    _within_dtype_bar(out, q, k, v, causal=False)
+
+
+def _window_bias(sq: int, sk: int, left: int, right: int, causal: bool, device: torch.device) -> torch.Tensor:
+    q_idx = torch.arange(sq, device=device)[:, None]
+    k_idx = torch.arange(sk, device=device)[None, :]
+    origin = q_idx + (sk - sq) if causal else q_idx
+    shifted = k_idx - origin + left
+    allow = (shifted >= 0) & (shifted <= left + right)
+    if causal:
+        allow = allow & (k_idx <= q_idx + (sk - sq))
+    bias = torch.zeros(sq, sk, dtype=torch.float32, device=device)
+    return bias.masked_fill(~allow, float("-inf"))
+
+
+def test_bf16_shape_grid() -> None:
+    """Lengths, heads, causal, and one cross pair. Head 512 is the LDS split."""
+    torch.manual_seed(1)
+    lengths = (1, 31, 32, 63, 64, 65, 127, 128, 129)
+    for dim in (1, 24, 40, 64, 80, 128, 256, 512):
+        for sq in lengths:
+            for causal, sk in ((False, sq), (False, lengths[(lengths.index(sq) + 3) % len(lengths)]), (True, sq)):
+                q = torch.randn(1, sq, 2, dim, device="cuda", dtype=torch.bfloat16)
+                k = torch.randn(1, sk, 2, dim, device="cuda", dtype=torch.bfloat16)
+                v = torch.randn(1, sk, 2, dim, device="cuda", dtype=torch.bfloat16)
+                out = flydsl_flash_attn_func(q, k, v, causal=causal)
+                assert out.shape == q.shape, (dim, sq, sk, causal)
+                if causal:
+                    _within_dtype_bar(out, q, k, v, causal=True)
+                else:
+                    _within_dtype_bar(out, q, k, v, causal=False)
+
+
+def test_bf16_mechanisms_on_grid_shapes() -> None:
+    """GQA, sliding window, split-K, and paged decode on grid lengths."""
+    torch.manual_seed(2)
+    # GQA: 4 query heads, 2 KV heads.
+    for sq, sk, causal, dim in ((1, 128, False, 64), (65, 65, True, 64), (32, 129, False, 512)):
+        q = torch.randn(1, sq, 4, dim, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(1, sk, 2, dim, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(1, sk, 2, dim, device="cuda", dtype=torch.bfloat16)
+        out = flydsl_flash_attn_func(q, k, v, causal=causal)
+        k_ref = k.repeat_interleave(2, dim=2)
+        v_ref = v.repeat_interleave(2, dim=2)
+        assert out.shape == q.shape
+        _within_dtype_bar(out, q, k_ref, v_ref, causal=causal)
+
+    for sq, left, right, causal in ((63, 8, 0, True), (128, 4, 4, False), (31, 16, 0, True)):
+        q = torch.randn(1, sq, 2, 64, device="cuda", dtype=torch.bfloat16)
+        out = flydsl_flash_attn_func(q, q, q, causal=causal, sliding_window=(left, right))
+        bias = _window_bias(sq, sq, left, right, causal, q.device)
+        qq, kk, vv = (t.float().transpose(1, 2) for t in (q, q, q))
+        ref32 = F.scaled_dot_product_attention(qq, kk, vv, attn_mask=bias).transpose(1, 2)
+        ref_dt = _sdpa_ref(q, q, q, causal=False, attn_mask=bias)
+        assert _max_abs(out, ref32) <= 2 * _max_abs(ref_dt, ref32) + 1e-4
+
+    q = torch.randn(1, 64, 2, 80, device="cuda", dtype=torch.bfloat16)
+    out = flydsl_flash_attn_func(q, q, q, causal=False, num_kv_splits=2)
+    _within_dtype_bar(out, q, q, q, causal=False)
+
+    # Paged decode: Sq=1 against a long cache.
+    page, sk, dim = 16, 128, 64
+    n_pages = sk // page
+    k_cache = torch.randn(n_pages, page, 2, dim, device="cuda", dtype=torch.bfloat16)
+    v_cache = torch.randn(n_pages, page, 2, dim, device="cuda", dtype=torch.bfloat16)
+    bt = torch.arange(n_pages, device="cuda", dtype=torch.int32).view(1, n_pages)
+    q = torch.randn(1, 1, 2, dim, device="cuda", dtype=torch.bfloat16)
+    out = flydsl_flash_attn_func(
+        q, k_cache, v_cache, causal=False, block_table=bt, seqlen_k=torch.tensor([sk], device="cuda", dtype=torch.int32)
+    )
+    k_d = k_cache.reshape(1, sk, 2, dim)
+    v_d = v_cache.reshape(1, sk, 2, dim)
+    assert out.shape == q.shape
+    _within_dtype_bar(out, q, k_d, v_d, causal=False)
+
+
+def _dequant_bar(out: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mult: float) -> None:
+    """``q/k/v`` are the dequantized formula in fp32. Output is bf16."""
+    ref32 = _sdpa_fp32(q, k, v, causal=False)
+    ref_dt = _sdpa_ref(q.bfloat16(), k.bfloat16(), v.bfloat16(), causal=False)
+    assert _max_abs(out, ref32) <= mult * _max_abs(ref_dt, ref32) + 1e-3
+
+
+def test_step2_rest_of_grid() -> None:
+    """fp16, bias, ALiBi, sink, LSE, ragged varlen, fp8, and int8 on the shape grid."""
+    torch.manual_seed(3)
+    for dim, sq, causal in ((1, 1, False), (64, 31, True), (512, 65, False), (40, 129, False)):
+        q = torch.randn(1, sq, 2, dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(1, sq, 2, dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(1, sq, 2, dim, device="cuda", dtype=torch.float16)
+        out = flydsl_flash_attn_func(q, k, v, causal=causal)
+        assert out.shape == q.shape and out.dtype == torch.float16
+        _within_dtype_bar(out, q, k, v, causal=causal)
+
+    q = torch.randn(1, 31, 2, 64, device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn(31, 31, device="cuda", dtype=torch.float32)
+    out = flydsl_flash_attn_func(q, q, q, causal=False, attn_mask=bias)
+    ref32 = F.scaled_dot_product_attention(
+        q.float().transpose(1, 2), q.float().transpose(1, 2), q.float().transpose(1, 2), attn_mask=bias
+    ).transpose(1, 2)
+    ref_dt = _sdpa_ref(q, q, q, causal=False, attn_mask=bias)
+    assert _max_abs(out, ref32) <= 2 * _max_abs(ref_dt, ref32) + 1e-4
+
+    slopes = torch.tensor([0.05, 0.2], device="cuda", dtype=torch.float32)
+    q = torch.randn(1, 65, 2, 80, device="cuda", dtype=torch.bfloat16)
+    out = flydsl_flash_attn_func(q, q, q, causal=False, alibi_slopes=slopes)
+    ab = fold_alibi_to_bias(slopes, 65, 65, q.device)
+    ref32 = F.scaled_dot_product_attention(
+        q.float().transpose(1, 2), q.float().transpose(1, 2), q.float().transpose(1, 2), attn_mask=ab
+    ).transpose(1, 2)
+    ref_dt = _sdpa_ref(q, q, q, causal=False, attn_mask=ab)
+    assert _max_abs(out, ref32) <= 2 * _max_abs(ref_dt, ref32) + 1e-4
+
+    q = torch.randn(1, 32, 2, 64, device="cuda", dtype=torch.bfloat16)
+    sink = torch.tensor([0.4, -0.2], device="cuda", dtype=torch.float32)
+    out, lse = flydsl_flash_attn_func(q, q, q, causal=False, sink=sink, return_lse=True)
+    qf = q.float().transpose(1, 2)
+    scores = torch.matmul(qf, qf.transpose(-1, -2)) / math.sqrt(64)
+    scores = torch.cat([scores, sink.view(1, 2, 1, 1).expand(1, 2, 32, 1)], dim=-1)
+    prob = torch.softmax(scores, dim=-1)
+    ref = torch.matmul(prob[..., :-1], qf).transpose(1, 2)
+    ref_dt = torch.matmul(prob.to(torch.bfloat16).float()[..., :-1], qf).transpose(1, 2)
+    ref_lse = torch.logsumexp(scores, dim=-1)
+    assert _max_abs(out, ref) <= 2 * _max_abs(ref_dt, ref) + 1e-3
+    assert _max_abs(lse, ref_lse) <= 2e-2
+
+    # Ragged varlen: lengths 1, 31, 64.
+    lens = (1, 31, 64)
+    parts = [torch.randn(n, 2, 64, device="cuda", dtype=torch.bfloat16) for n in lens]
+    packed = torch.cat(parts, dim=0)
+    cu = torch.tensor([0, 1, 32, 96], device="cuda", dtype=torch.int32)
+    out = flydsl_flash_attn_func(
+        packed, packed, packed, causal=False, cu_seqlens_q=cu, cu_seqlens_kv=cu, max_seqlen_q=64, max_seqlen_kv=64
+    )
+    off = 0
+    for part in parts:
+        n = part.shape[0]
+        ref = flydsl_flash_attn_func(part.unsqueeze(0), part.unsqueeze(0), part.unsqueeze(0), causal=False)[0]
+        assert _max_abs(out[off : off + n], ref) < 2e-2
+        off += n
+
+    for dtype, finfo_max, dim, sq in (
+        (torch.float8_e4m3fn, 448.0, 64, 32),
+        (torch.float8_e4m3fn, 448.0, 128, 65),
+        (torch.float8_e5m2, 57344.0, 64, 31),
+    ):
+        qf = torch.randn(1, sq, 2, dim, device="cuda", dtype=torch.float32)
+        scale = float(qf.abs().amax().clamp(min=1e-6) / finfo_max)
+        q8 = (qf / scale).to(dtype)
+        deq = q8.float() * scale
+        out = flydsl_flash_attn_fp8_func(q8, q8, q8, causal=False, q_descale=scale, k_descale=scale, v_descale=scale)
+        assert out.shape == (1, sq, 2, dim) and out.dtype == torch.bfloat16
+        _dequant_bar(out, deq, deq, deq, 4.0)
+
+    qf = torch.randn(1, 31, 2, 40, device="cuda", dtype=torch.float32)
+    scale = float(qf.abs().amax().clamp(min=1e-6) / 127.0)
+    q8 = (qf / scale).round().clamp(-128, 127).to(torch.int8)
+    deq = q8.float() * scale
+    out = flydsl_flash_attn_int8_func(q8, q8, q8, causal=False, q_descale=scale, k_descale=scale, v_descale=scale)
+    assert out.shape == qf.shape and out.dtype == torch.bfloat16
+    _dequant_bar(out, deq, deq, deq, 4.0)
 
 
 def test_noop_mask_hits() -> None:

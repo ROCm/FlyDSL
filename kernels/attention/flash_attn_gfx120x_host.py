@@ -8,9 +8,9 @@ FlyDSL FlashAttention for the gfx120x family:
   - FP8 e4m3fn (+ e5m2) with per-tensor descales; self + cross (+ causal×cross)
   - KV tile pad + in-kernel ``seq_len_kv_valid`` mask
   - adaptive BLOCK_M / waves_per_eu
-  - head_dim in [64, 480], ``% 32 == 0`` after pad-to-tile (hosts zero-pad D and
-    keep ``sm_scale=1/sqrt(orig_D)`` when safe; D>480 raises — bf16 LDS budget
-    at prefetch1; paged keeps a hard gate unless layout-safe)
+  - any positive head_dim. The host pads to a multiple of 32 and keeps
+    ``sm_scale=1/sqrt(orig_D)``. A wider head is split across LDS chunks in the
+    kernel. Paged vectorized storage still needs a multiple of 32.
   - optional dense additive attn bias / general mask (fp32 [Sq, Skv]);
     multi-rank masks reduced only when leading dims are broadcast-singleton (1);
     identical-across-B/H slices are not probed on host
@@ -472,31 +472,17 @@ __all__ = [
 
 _KERNEL_BLOCK_M = 128
 _KERNEL_BLOCK_N = 32
-_RDNA4_LDS_BYTES = 65536
-_FA_BLOCK_N = 32
-_FA_PREFETCH_KV = 1  # NUM_PREFETCH_K == NUM_PREFETCH_V == 1 in the kernel
-# LDS = 2 * prefetch * BLOCK_N * (D+4) * sizeof(bf16) <= 64 KiB
-# => D+4 <= 512 => D <= 508 => align down to %32 == 0 => 480 (≈60.5 KiB)
-_MAX_HEAD_DIM = (((_RDNA4_LDS_BYTES // (2 * _FA_PREFETCH_KV * _FA_BLOCK_N * 2)) - 4) // 32) * 32
-_MIN_HEAD_DIM = 64
+_MIN_HEAD_DIM = 32
 _DUMMY_BIAS_CACHE: dict = {}
 _DUMMY_I32_CACHE: dict = {}
 
 
 def _head_dim_tile_target(head_dim: int, *, what: str) -> int:
-    """Next legal FA head_dim tile (>=64, %32==0, <=LDS max), or raise if too large."""
+    """Next multiple of 32, at least 32. The kernel splits a head that exceeds one LDS row."""
     d = int(head_dim)
-    if d > _MAX_HEAD_DIM:
-        raise ValueError(
-            f"{what}: head_dim={d} > {_MAX_HEAD_DIM} is not "
-            "supported on gfx120x FlyDSL FA (LDS / register tile budget)."
-        )
-    target = max(_MIN_HEAD_DIM, ((d + 31) // 32) * 32)
-    if target > _MAX_HEAD_DIM:
-        raise ValueError(
-            f"{what}: head_dim={d} pads to {target} > {_MAX_HEAD_DIM} (cannot pad-to-tile within LDS budget)."
-        )
-    return target
+    if d < 1:
+        raise ValueError(f"{what}: head_dim={d} must be positive")
+    return max(_MIN_HEAD_DIM, ((d + 31) // 32) * 32)
 
 
 def _crop_head_dim(out: torch.Tensor, orig_d: int) -> torch.Tensor:
@@ -1095,7 +1081,7 @@ def _flash_attn_bshd(
         sink: optional attention-sink logits ``[H]`` or ``[B,H]`` folded into
             online softmax in-kernel. Combinable with ALiBi (bias) in one launch.
         num_kv_splits: >1 runs split-K partials in this kernel plus a wave32 combine.
-        head_dim: padded to ``[64, 480]`` with ``% 32 == 0`` when safe; ``>480`` raises (LDS).
+        head_dim: any positive size. Padded to a multiple of 32. Wider than one LDS row is split in the kernel.
     """
     from kernels.common.gfx120x_pad import ensure_contiguous
 
@@ -1142,9 +1128,8 @@ def _flash_attn_bshd(
     sm_scale_pad = None
     logical_head_dim = None
     if launch_head_dim != orig_head_dim:
-        # Tail lanes are zeroed in the kernel. Scale stays on the caller D.
+        # Real zero tail, then the aligned kernel. Scale stays on the caller D.
         sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
-        logical_head_dim = orig_head_dim
         head_dim = launch_head_dim
 
     # Merge attn_mask / bias (normalize each, then add) + optional ALiBi fold.
@@ -1209,11 +1194,16 @@ def _flash_attn_bshd(
     q_p = _as_contig(q, stream=launch_stream)
     k_p = _as_contig(k, stream=launch_stream)
     v_p = _as_contig(v, stream=launch_stream)
+    if int(head_dim) != int(orig_head_dim):
+        pad_d = int(head_dim) - int(orig_head_dim)
+        q_p = torch.nn.functional.pad(q_p, (0, pad_d))
+        k_p = torch.nn.functional.pad(k_p, (0, pad_d))
+        v_p = torch.nn.functional.pad(v_p, (0, pad_d))
 
     bias_arg = _as_contig(bias_t, stream=launch_stream) if has_bias else _dummy_bias(q.device)
 
-    o_shape = (batch, seq_len_q_launch, num_heads, orig_head_dim)
-    caller_out_shape = o_shape
+    o_shape = (batch, seq_len_q_launch, num_heads, int(head_dim))
+    caller_out_shape = (batch, seq_len_q_launch, num_heads, orig_head_dim)
     if out is not None:
         if tuple(out.shape) != caller_out_shape or out.dtype != q.dtype or out.device != q.device:
             raise ValueError(
@@ -1223,7 +1213,7 @@ def _flash_attn_bshd(
             )
         if not out.is_contiguous():
             raise ValueError("flydsl_flash_attn_func: out must be contiguous")
-        o_p = out
+        o_p = out if int(head_dim) == int(orig_head_dim) else torch.empty(o_shape, dtype=q.dtype, device=q.device)
     else:
         o_p = torch.empty(o_shape, dtype=q.dtype, device=q.device)
 
@@ -1321,7 +1311,7 @@ def _flash_attn_bshd(
             )
             if comb_o.data_ptr() != o_p.data_ptr():
                 with torch.cuda.stream(launch_stream):
-                    o_p.copy_(comb_o[..., : int(orig_head_dim)])
+                    o_p.copy_(comb_o)
 
     o_p = _crop_head_dim(o_p, orig_head_dim)
     if out is not None and o_p.data_ptr() != out.data_ptr():
@@ -2280,11 +2270,10 @@ def flydsl_flash_attn_paged_func(
             raise ValueError(f"paged cache D {int(k_cache.shape[3])} != Q D {head_dim}")
         if num_heads % num_kv_heads != 0:
             raise ValueError(f"paged GQA: Hq {num_heads} not divisible by Hkv {num_kv_heads}")
-    # Paged KV cache is caller-owned (page layout / shared blocks). Padding D
-    # would require reallocating the cache; vectorized also needs D % kVS.
-    # Leave hard-gated — not layout-safe to soft-pad in place.
-    if head_dim < _MIN_HEAD_DIM or head_dim % 32 != 0 or head_dim > _MAX_HEAD_DIM:
-        raise ValueError(f"paged head_dim={head_dim} out of gfx120x FA range")
+    # The cache keeps the caller's D. A non-multiple of 32 is masked in the kernel
+    # for linear layouts. Vectorized groups are a multiple of 32.
+    if int(head_dim) < 1 or (layout == "vectorized" and int(head_dim) % 32 != 0):
+        raise ValueError(f"paged head_dim={head_dim} must be a positive multiple of 32")
 
     bt = _as_contig(block_table.to(torch.int32), stream=launch_stream)
     sk = _as_contig(seqlen_k.to(torch.int32), stream=launch_stream)
@@ -2426,9 +2415,16 @@ def flydsl_flash_attn_paged_func(
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
+        orig_head_dim = int(head_dim)
+        launch_head_dim = _head_dim_tile_target(orig_head_dim, what="flydsl_flash_attn_paged_func")
+        logical_head_dim = None
+        sm_scale_pad = None
+        if launch_head_dim != orig_head_dim:
+            logical_head_dim = orig_head_dim
+            sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
         exe = _get_kernel(
             num_heads=num_heads,
-            head_dim=head_dim,
+            head_dim=launch_head_dim,
             causal=bool(causal),
             dtype_str=dtype_str,
             waves_per_eu=waves_per_eu,
@@ -2443,12 +2439,16 @@ def flydsl_flash_attn_paged_func(
             page_size=page_size,
             num_kv_heads=num_kv_heads,
             kv_cache_layout=("vectorized" if (kv_cache_layout or "linear") == "vectorized" else "linear"),
+            sm_scale=sm_scale_pad,
+            logical_head_dim=logical_head_dim,
             sliding_window=sliding_window,
             has_alibi=has_alibi,
             alibi_per_head=alibi_per_head,
         )
         nsplits = int(num_kv_splits)
-        split_tail, split_ws = _float_split_tail(q.device, nsplits, batch, seq_len_q_launch, num_heads, head_dim)
+        split_tail, split_ws = _float_split_tail(
+            q.device, nsplits, batch, seq_len_q_launch, num_heads, launch_head_dim
+        )
         exe(
             _flat(_as_contig(q, stream=launch_stream)),
             _flat(_as_contig(k_cache, stream=launch_stream)),
@@ -2471,13 +2471,20 @@ def flydsl_flash_attn_paged_func(
             stream=launch_stream,
         )
         if split_ws is not None:
+            comb_o = o_p
+            if launch_head_dim != orig_head_dim:
+                comb_o = torch.empty(
+                    (batch, seq_len_q_launch, num_heads, launch_head_dim),
+                    dtype=o_p.dtype,
+                    device=o_p.device,
+                )
             _combine_float_splits(
                 split_ws,
-                o_p,
+                comb_o,
                 batch=batch,
                 seq_q=seq_len_q_launch,
                 num_heads=num_heads,
-                head_dim=head_dim,
+                head_dim=launch_head_dim,
                 dtype_str=dtype_str,
                 has_sink=sink_t is not None,
                 return_lse=return_lse,
@@ -2486,6 +2493,9 @@ def flydsl_flash_attn_paged_func(
                 daz=daz,
                 stream=launch_stream,
             )
+            if comb_o.data_ptr() != o_p.data_ptr():
+                with torch.cuda.stream(launch_stream):
+                    o_p.copy_(comb_o[..., :orig_head_dim])
 
     if return_lse:
         return o_p, lse_p
@@ -2544,9 +2554,8 @@ def flydsl_flash_attn_varlen_paged_func(
     layout = kv_cache_layout or "linear"
     num_heads = int(q.shape[1])
     head_dim = int(q.shape[2])
-    # Paged KV cache is caller-owned — same hard gate as dense-Q paged (no soft-pad).
-    if head_dim < _MIN_HEAD_DIM or head_dim % 32 != 0 or head_dim > _MAX_HEAD_DIM:
-        raise ValueError(f"varlen paged head_dim={head_dim} out of gfx120x FA range")
+    if int(head_dim) < 1 or ((kv_cache_layout or "linear") == "vectorized" and int(head_dim) % 32 != 0):
+        raise ValueError(f"varlen paged head_dim={head_dim} must be a positive multiple of 32")
     cu_q = _as_contig(cu_seqlens_q.to(torch.int32), stream=launch_stream)
     cu_kv = _as_contig(cu_seqlens_kv.to(torch.int32), stream=launch_stream)
     if cu_q.device != q.device:
@@ -2675,9 +2684,16 @@ def flydsl_flash_attn_varlen_paged_func(
     sink_arg = _flat(sink_t) if sink_t is not None else _flat(_dummy_bias(q.device))
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
+        orig_head_dim = int(head_dim)
+        launch_head_dim = _head_dim_tile_target(orig_head_dim, what="flydsl_flash_attn_varlen_paged_func")
+        logical_head_dim = None
+        sm_scale_pad = None
+        if launch_head_dim != orig_head_dim:
+            logical_head_dim = orig_head_dim
+            sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
         exe = _get_kernel(
             num_heads=num_heads,
-            head_dim=head_dim,
+            head_dim=launch_head_dim,
             causal=bool(causal),
             dtype_str=dtype_str,
             waves_per_eu=waves_per_eu,
@@ -2692,6 +2708,8 @@ def flydsl_flash_attn_varlen_paged_func(
             page_size=page_size,
             num_kv_heads=int(num_kv_heads),
             kv_cache_layout=layout_kernel,
+            sm_scale=sm_scale_pad,
+            logical_head_dim=logical_head_dim,
             sliding_window=sliding_window,
             bias_bottom_right=bias_bottom_right,
             has_alibi=has_alibi,
@@ -2700,8 +2718,12 @@ def flydsl_flash_attn_varlen_paged_func(
         nsplits = int(num_kv_splits)
         comb_o = o_p
         if nsplits > 1:
-            comb_o = torch.empty((batch, max_seqlen_q, num_heads, head_dim), dtype=q.dtype, device=q.device)
-        split_tail, split_ws = _float_split_tail(q.device, nsplits, batch, max_seqlen_q, num_heads, head_dim)
+            comb_o = torch.empty(
+                (batch, max_seqlen_q, num_heads, launch_head_dim), dtype=q.dtype, device=q.device
+            )
+        split_tail, split_ws = _float_split_tail(
+            q.device, nsplits, batch, max_seqlen_q, num_heads, launch_head_dim
+        )
         exe(
             _flat(_as_contig(q, stream=launch_stream)),
             _flat(_as_contig(k_cache, stream=launch_stream)),
@@ -2730,7 +2752,7 @@ def flydsl_flash_attn_varlen_paged_func(
                 batch=batch,
                 seq_q=max_seqlen_q,
                 num_heads=num_heads,
-                head_dim=head_dim,
+                head_dim=launch_head_dim,
                 dtype_str=dtype_str,
                 has_sink=sink_t is not None,
                 return_lse=return_lse,
@@ -2744,7 +2766,7 @@ def flydsl_flash_attn_varlen_paged_func(
                 qs, qe = int(cq_host[bi]), int(cq_host[bi + 1])
                 n = qe - qs
                 if n > 0:
-                    o_p[qs:qe].copy_(comb_o[bi, :n], non_blocking=True)
+                    o_p[qs:qe].copy_(comb_o[bi, :n, :, :orig_head_dim], non_blocking=True)
     if return_lse:
         return o_p, lse_p
     return o_p
