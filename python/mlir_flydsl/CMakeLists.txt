@@ -27,6 +27,17 @@ if(FLYDSL_HAS_ROCDL)
   )
 endif()
 
+# Trace annotations are target independent. Each enabled backend supplies its own
+# lowering pass; the frontend and dialect bindings are available in every build.
+declare_mlir_dialect_python_bindings(
+  ADD_TO_PARENT FlyPythonSources
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/"
+  TD_FILE dialects/FlyKtrace.td
+  SOURCES
+    dialects/fly_ktrace.py
+  DIALECT_NAME fly_ktrace
+)
+
 # NOTE: Do NOT link MLIRFlyDialect/MLIRFlyROCDLDialect here via PRIVATE_LINK_LIBS.
 # These symbols are already provided by FlyPythonCAPI.so (via MLIRCPIFly's transitive
 # dependencies in EMBED_CAPI_LINK_LIBS). Statically linking them here creates DUPLICATE
@@ -249,6 +260,9 @@ add_custom_target(CopyFlyPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_enum_gen.py"
     "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_enum_gen.py"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_ktrace_ops_gen.py"
+    "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_ktrace_ops_gen.py"
   ${_FLY_COPY_ROCDL_TABLEGEN}
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "$<TARGET_FILE:mlir_c_runner_utils>"

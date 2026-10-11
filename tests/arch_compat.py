@@ -33,6 +33,8 @@ EXAMPLE_ARCHITECTURES = {
     "04-preshuffle_gemm.py": ("gfx9*",),
     "05-gather_scatter.py": ("*",),
     "06-cdna5_tensor_copy.py": ("gfx1250",),
+    # ktrace reads s_memrealtime and s_getreg_hw_id, which RDNA does not have.
+    "07-ktrace_wave_timeline.py": ("gfx942", "gfx95*"),
     "extension/coop/01-warp_collectives.py": ("*",),
     "extension/coop/02-block_scan.py": ("*",),
 }

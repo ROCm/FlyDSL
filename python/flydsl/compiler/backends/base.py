@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+from __future__ import annotations
+
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import TYPE_CHECKING, List, Tuple
+
+if TYPE_CHECKING:
+    from .ktrace import KtraceBackend
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,8 @@ class BaseBackend(metaclass=ABCMeta):
     * gpu.module target attributes,
     * native-library patterns for toolchain fingerprinting (cache key),
     * runtime artifacts for JIT and AOT export.
+
+    A backend that supports in-kernel tracing also supplies ``ktrace_backend``.
     """
 
     def __init__(self, target: GPUTarget) -> None:
@@ -93,6 +100,11 @@ class BaseBackend(metaclass=ABCMeta):
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Optionally materialize backend-specific hints before the pipeline."""
         return None
+
+    @classmethod
+    def ktrace_backend(cls) -> KtraceBackend:
+        """Return this target's trace provider, or reject unsupported tracing."""
+        raise NotImplementedError(f"ktrace is not supported by {cls.__name__}")
 
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         """Split the pipeline for external device binary code generation.

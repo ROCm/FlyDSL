@@ -21,6 +21,7 @@ from typing import Dict, Optional, Type
 from ...utils import env
 from .base import AOTRuntimeConfig as AOTRuntimeConfig
 from .base import BaseBackend, GPUTarget
+from .ktrace import KtraceBackend
 
 _registry: Dict[str, Type[BaseBackend]] = {}
 
@@ -117,6 +118,11 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
     return _make_backend(name, arch)
 
 
+def get_ktrace_backend(name: Optional[str] = None) -> KtraceBackend:
+    """Resolve trace support without detecting a GPU or initializing its runtime."""
+    return _get_backend_class(name).ktrace_backend()
+
+
 def current_target() -> GPUTarget:
     """The :class:`GPUTarget` being compiled for right now."""
     return get_backend().target
@@ -194,9 +200,11 @@ _discover_entry_point_backends()
 __all__ = [
     "BaseBackend",
     "GPUTarget",
+    "KtraceBackend",
     "compile_backend_name",
     "current_target",
     "get_backend",
+    "get_ktrace_backend",
     "register_backend",
     "resolve_llvm_address_space",
 ]

@@ -300,14 +300,40 @@ class RuntimeEnvManager(EnvManager):
     )
 
 
+class KtraceEnvManager(EnvManager):
+    """In-kernel wave tracing options (``FLYDSL_KTRACE_*`` environment variables)."""
+
+    env_prefix = "KTRACE"
+
+    enable = OptBool(False, description="Emit in-kernel wave tracing instrumentation (gfx942/gfx950)")
+    buffer_bytes = OptInt(
+        64 << 20,
+        min_value=1 << 12,
+        # 2 GiB, because the expansion computes a record's byte offset as an i32
+        # (slot * 32) and the GEP sign-extends it. At 2 GiB the largest offset is
+        # 2147483616, still positive; past that it wraps negative and the store
+        # lands in front of the buffer while the slot bounds check still passes.
+        # Lifting this needs 64-bit offsets for both the counter and the record.
+        max_value=1 << 31,
+        description="Device trace buffer size in bytes; a run that needs more is rejected, not truncated",
+    )
+    blocks = OptStr(
+        "",
+        description="Restrict recording to 'x,y,z' or 'xcc:N'; empty records every workgroup",
+    )
+    dump_dir = OptStr("", description="Directory for trace output; empty writes to the working directory")
+
+
 autotune = AutotuneEnvManager()
 compile = CompileEnvManager()
 debug = DebugEnvManager()
+ktrace = KtraceEnvManager()
 runtime = RuntimeEnvManager()
 
 __all__ = [
     "autotune",
     "compile",
     "debug",
+    "ktrace",
     "runtime",
 ]
