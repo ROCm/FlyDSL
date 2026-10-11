@@ -376,7 +376,6 @@ def buffer_load(
     mask: ir.Value | None = None,
     cache_modifier: int = 0,
     soffset_bytes: int | ir.Value | None = None,
-    is_scalar: bool = False,
 ) -> ir.Value:
     """AMD buffer load operation.
 
@@ -393,12 +392,6 @@ def buffer_load(
         soffset_bytes: Optional scalar offset (in BYTES) added by the buffer instruction (soffset).
                       Use this to fold small constant deltas into the instruction instead of emitting
                       extra VGPR address arithmetic.
-        is_scalar: Use :func:`fx.rocdl.s_buffer_load` to emit a uniform/SGPR scalar load instead of the
-                      vector buffer load. Use only for wave-uniform addresses to route through the
-                      SMEM cache and land the result directly in SGPRs. Restricted to vec_width 1 or 4;
-                      dtype is forced to i32 (the result is raw i32 dwords). mask and soffset_bytes
-                      are not supported in this mode and raise ValueError if provided.
-
     Returns:
         Loaded data (scalar or vector depending on vec_width)
 
@@ -409,14 +402,6 @@ def buffer_load(
         >>> # Load with mask
         >>> data = buffer_load(rsrc, offset, vec_width=4, mask=valid)
     """
-    if is_scalar:
-        if vec_width not in (1, 4):
-            raise ValueError(f"buffer_load(is_scalar=True): unsupported vec_width={vec_width}")
-        if mask is not None or soffset_bytes is not None:
-            raise ValueError("buffer_load(is_scalar=True) does not support mask or soffset_bytes")
-        return _unwrap_value(
-            fx.rocdl.s_buffer_load(rsrc, _unwrap_value(offset), count=vec_width, cache_modifier=cache_modifier)
-        )
     if dtype is None:
         dtype = T.f32()
     # Accept DSL Numeric class (e.g. fx.Int32) as dtype: unwrap to ir.Type
