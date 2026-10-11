@@ -49,6 +49,7 @@ from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.attention.flash_attn_gfx120x_host import (  # noqa: E402
     add_alibi_scores,
     add_score_bias,
+    apply_score_dropout,
     apply_sliding_window,
     attention_inv_l,
     attention_lse,
@@ -111,6 +112,7 @@ def build_flash_attn_func_module_primary(
     has_alibi: bool = False,
     alibi_per_head: bool = False,
     softcap: float | None = None,
+    dropout_p: float | None = None,
 ) -> Callable[..., None]:
     """Build the gfx120x Flash Attention kernel."""
     arch = str(get_rocm_arch())
@@ -205,6 +207,10 @@ def build_flash_attn_func_module_primary(
     HAS_SINK = bool(has_sink)
     HAS_SOFTCAP = softcap is not None and float(softcap) != 0.0
     SOFTCAP = float(softcap) if HAS_SOFTCAP else 0.0
+    HAS_DROPOUT = dropout_p is not None and float(dropout_p) > 0.0
+    DROPOUT_P = float(dropout_p) if HAS_DROPOUT else 0.0
+    if HAS_DROPOUT and not 0.0 < DROPOUT_P < 1.0:
+        raise ValueError(f"gfx120x FA dropout_p must be in (0, 1), got {DROPOUT_P}")
     if sliding_window is None:
         HAS_WINDOW = False
         SWA_LEFT = 0
@@ -339,6 +345,7 @@ def build_flash_attn_func_module_primary(
         WsL: fx.Pointer,
         WsO: fx.Pointer,
         ws_rows: fx.Int32,
+        dropout_seed: fx.Uint64,
     ) -> None:
         elem_dtype = elem_numeric_cls
 
@@ -1251,13 +1258,17 @@ def build_flash_attn_func_module_primary(
                 _two_log2e = fx.Float32(2.0 * _LOG2E)
                 _lim = fx.Float32(8.0)
                 _nlim = fx.Float32(-8.0)
+                _neg_bits = fx.Float32(c_neg_inf).bitcast(fx.Int32)
                 s_capped = []
                 for _s in s_raw:
                     z = fx.Float32(_s) * _inv
                     z = _fsub(c_zero_f, _fmax(_fsub(c_zero_f, z), _nlim))
                     z = _fmax(z, _nlim)
                     ez = fx.Float32(fx.rocdl.exp2(fx.Float32.ir_type, fx.Float32(z * _two_log2e).ir_value()))
-                    s_capped.append(((ez - c_one_f) / (ez + c_one_f)) * _cap)
+                    capped = ((ez - c_one_f) / (ez + c_one_f)) * _cap
+                    # no-nans makes a float compare with -inf unreliable. The mask stores those bits.
+                    masked = fx.Float32(_s).bitcast(fx.Int32) == _neg_bits
+                    s_capped.append(masked.select(c_neg_inf, capped))
                 s_raw = s_capped
                 softmax_log2e = fx.Float32(_LOG2E)
             p_vals, m_new_raw, l_new, o_accs, row_alive = online_softmax_tile(
@@ -1277,6 +1288,19 @@ def build_flash_attn_func_module_primary(
                 guard_prev_dead=False,
                 window=_window,
             )
+            if const_expr(HAS_DROPOUT):
+                # Dropout hits P after the softmax mass is recorded, then PV.
+                p_vals = apply_score_dropout(
+                    p_vals,
+                    fx.Int32(kv_block_start),
+                    fx.Int32(klane),
+                    q_row_i32,
+                    fx.Int32(batch_idx),
+                    fx.Int32(head_idx),
+                    dropout_seed,
+                    DROPOUT_P,
+                    c_zero_f,
+                )
 
             if const_expr(NUM_DV_TILES == 1):
                 coop_store_v_lds(_v_vecs_tile, 0)
@@ -1507,6 +1531,7 @@ def build_flash_attn_func_module_primary(
         WsL: fx.Pointer,
         WsO: fx.Pointer,
         ws_rows: fx.Int32,
+        dropout_seed: fx.Uint64,
         stream: fx.Stream = fx.Stream(  # noqa: B008  framework idiom: default is evaluated once at import on purpose
             None
         ),
@@ -1540,6 +1565,7 @@ def build_flash_attn_func_module_primary(
             WsL,
             WsO,
             ws_rows,
+            dropout_seed,
         )
 
         if const_expr(waves_per_eu is not None):
@@ -1655,16 +1681,17 @@ def build_flash_attn_func_module_primary(
         args, kwargs = _wrap_qkvo_fast(args, kwargs)
         # Prefer torch current_stream — NEVER fx.Stream(None).
         stream = kwargs.pop("stream", None)
+        dropout_seed = int(kwargs.pop("dropout_seed", 0))
         if stream is None:
             stream = torch.cuda.current_stream()
         cf = _cached_cf or getattr(launch_flash_attn_func, "_cf", None)
         if cf is not None:
             _cached_cf = cf
             _stack_opt_cf_hits += 1
-            cf(*args, stream)
+            cf(*args, dropout_seed, stream)
             return
         _stack_opt_run_compiled += 1
-        _run_compiled(launch_flash_attn_func, *args, stream)
+        _run_compiled(launch_flash_attn_func, *args, dropout_seed, stream)
         # Prefer CF attached to closed-over handle; else scan common stash.
         _cached_cf = getattr(launch_flash_attn_func, "_cf", None) or getattr(
             launch_flash_attn_func, "_last_compiled", None
@@ -1693,6 +1720,7 @@ def build_flash_attn_func_module_primary(
         WsL: torch.Tensor | None = None,
         WsO: torch.Tensor | None = None,
         ws_rows: int = 0,
+        dropout_seed: int = 0,
         stream: torch.cuda.Stream | None = None,
     ) -> CompiledFunction | None:  # noqa: E741
         if seq_len_kv is None:
@@ -1748,6 +1776,7 @@ def build_flash_attn_func_module_primary(
             _ptr_arg(WsL),
             _ptr_arg(WsO),
             int(ws_rows),
+            int(dropout_seed),
             stream,
         )
 

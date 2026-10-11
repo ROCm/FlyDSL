@@ -231,6 +231,217 @@ def test_softcap_and_caller_scale() -> None:
     assert _max_abs(out, ref32) <= 2 * _max_abs(ref_dt, ref32) + 1e-4
 
 
+def _philox_word0(seed: int, col, row, batch, head):
+    """First Philox 4x32 word. Counters are column, row, batch, head."""
+    import numpy as np
+
+    c0 = np.asarray(col, dtype=np.uint32)
+    c1 = np.asarray(row, dtype=np.uint32)
+    c2 = np.asarray(batch, dtype=np.uint32)
+    c3 = np.asarray(head, dtype=np.uint32)
+    seed64 = np.uint64(seed & 0xFFFFFFFFFFFFFFFF)
+    k0 = np.uint32(seed64)
+    k1 = np.uint32(seed64 >> np.uint64(32))
+    for _ in range(10):
+        prod_b = c2.astype(np.uint64) * np.uint64(0xCD9E8D57)
+        prod_a = c0.astype(np.uint64) * np.uint64(0xD2511F53)
+        next_c0 = (prod_b >> np.uint64(32)).astype(np.uint32) ^ c1 ^ k0
+        next_c2 = (prod_a >> np.uint64(32)).astype(np.uint32) ^ c3 ^ k1
+        c0, c1 = next_c0, prod_b.astype(np.uint32)
+        c2, c3 = next_c2, prod_a.astype(np.uint32)
+        k0 = np.uint32(np.uint64(k0) + np.uint64(0x9E3779B9))
+        k1 = np.uint32(np.uint64(k1) + np.uint64(0xBB67AE85))
+    return c0
+
+
+def _uniform_from_word(word):
+    import numpy as np
+
+    signed = word.view(np.int32)
+    folded = np.where(signed < 0, np.bitwise_not(signed), signed).astype(np.int32)
+    return folded.astype(np.float32) * np.float32(4.6566127342e-10)
+
+
+def _apply_dropout(probs: torch.Tensor, seed: int, p: float) -> torch.Tensor:
+    """``probs`` is [B, H, Sq, Sk]. The mask is Philox(seed, col, row, batch, head)."""
+    import numpy as np
+
+    b, h, sq, sk = probs.shape
+    cols = np.broadcast_to(np.arange(sk, dtype=np.uint32), (b, h, sq, sk))
+    rows = np.broadcast_to(np.arange(sq, dtype=np.uint32).reshape(1, 1, sq, 1), (b, h, sq, sk))
+    batches = np.broadcast_to(np.arange(b, dtype=np.uint32).reshape(b, 1, 1, 1), (b, h, sq, sk))
+    heads = np.broadcast_to(np.arange(h, dtype=np.uint32).reshape(1, h, 1, 1), (b, h, sq, sk))
+    word = _philox_word0(seed, cols, rows, batches, heads)
+    keep = _uniform_from_word(word) >= np.float32(p)
+    scale = np.float32(1.0 / (1.0 - p))
+    out = probs.detach().float().cpu().numpy() * keep.astype(np.float32) * scale
+    return torch.tensor(out, device=probs.device, dtype=torch.float32)
+
+
+def _formula_attn(q, k, v, *, scale, softcap=None, bias=None, dropout_p=0.0, dropout_seed=0, pack=None):
+    """fp32 attention. Softcap and dropout follow the gfx120x kernel order."""
+    qf = q.float().transpose(1, 2)
+    kf = k.float().transpose(1, 2)
+    vf = v.float().transpose(1, 2)
+    scores = torch.matmul(qf, kf.transpose(-1, -2)) * scale
+    if bias is not None:
+        scores = scores + bias
+    if softcap is not None and float(softcap) != 0.0:
+        capped = torch.tanh(scores / float(softcap)) * float(softcap)
+        scores = torch.where(torch.isfinite(scores), capped, scores)
+    probs = torch.softmax(scores, dim=-1)
+    if dropout_p and float(dropout_p) > 0.0:
+        probs = _apply_dropout(probs, int(dropout_seed), float(dropout_p))
+    if pack == "e4m3":
+        probs = probs.to(torch.float8_e4m3fn).float()
+    elif pack == "e5m2":
+        probs = probs.to(torch.float8_e5m2).float()
+    elif pack == "i8":
+        probs = (probs * 127).round().clamp(-128, 127).float() / 127
+    return torch.matmul(probs, vf).transpose(1, 2)
+
+
+def test_softcap_layouts_and_document_mask() -> None:
+    """Softcap on fp8 and on a varlen launch. Window plus softcap. A document mask is a bias."""
+    torch.manual_seed(7)
+    q = torch.randn(1, 32, 2, 64, device="cuda", dtype=torch.bfloat16)
+    cap = 10.0
+    win = _window_bias(32, 32, 4, 0, True, q.device)
+    out = flydsl_flash_attn_func(q, q, q, causal=True, sliding_window=(4, 0), softcap=cap)
+    ref = _formula_attn(q, q, q, scale=64**-0.5, softcap=cap, bias=win)
+    ref_dt = _formula_attn(q, q, q, scale=64**-0.5, softcap=cap, bias=win).to(torch.bfloat16)
+    assert _max_abs(out, ref) <= 2 * _max_abs(ref_dt, ref) + 1e-3
+
+    cu = torch.tensor([0, 32], device="cuda", dtype=torch.int32)
+    out = flydsl_flash_attn_func(
+        q.reshape(32, 2, 64),
+        q.reshape(32, 2, 64),
+        q.reshape(32, 2, 64),
+        causal=False,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        max_seqlen_q=32,
+        max_seqlen_kv=32,
+        softcap=cap,
+    )
+    ref = _formula_attn(q, q, q, scale=64**-0.5, softcap=cap)
+    assert _max_abs(out.unsqueeze(0), ref) <= 2 * _max_abs(ref.to(torch.bfloat16), ref) + 1e-3
+
+    q_idx = torch.arange(32, device="cuda")[:, None]
+    k_idx = torch.arange(32, device="cuda")[None, :]
+    doc = torch.zeros(32, 32, device="cuda", dtype=torch.float32)
+    allow = ((q_idx < 16) & (k_idx < 16)) | ((q_idx >= 16) & (k_idx >= 16))
+    doc = doc.masked_fill(~allow, float("-inf"))
+    out = flydsl_flash_attn_func(q, q, q, causal=False, attn_mask=doc)
+    ref32 = F.scaled_dot_product_attention(
+        q.float().transpose(1, 2), q.float().transpose(1, 2), q.float().transpose(1, 2), attn_mask=doc
+    ).transpose(1, 2)
+    ref_dt = _sdpa_ref(q, q, q, causal=False, attn_mask=doc)
+    assert _max_abs(out, ref32) <= 2 * _max_abs(ref_dt, ref32) + 1e-4
+
+    qf = torch.randn(1, 32, 2, 64, device="cuda", dtype=torch.float32)
+    scale = float(max(qf.abs().amax().item(), 1e-6) / 448.0)
+    q8 = (qf / scale).to(torch.float8_e4m3fn)
+    out = flydsl_flash_attn_fp8_func(
+        q8, q8, q8, causal=False, softcap=cap, q_descale=scale, k_descale=scale, v_descale=scale
+    )
+    deq = q8.float() * scale
+    ref = _formula_attn(deq, deq, deq, scale=64**-0.5, softcap=cap)
+    base = _max_abs(_sdpa_ref(deq.bfloat16(), deq.bfloat16(), deq.bfloat16()), _sdpa_fp32(deq, deq, deq))
+    assert _max_abs(out, ref) <= 4 * base + 1e-2
+
+
+def test_dropout_matches_seeded_reference() -> None:
+    """p=0 matches the plain kernel. p>0 matches Philox on the softmax weights."""
+    torch.manual_seed(8)
+    q = torch.randn(1, 32, 2, 64, device="cuda", dtype=torch.bfloat16)
+    plain = flydsl_flash_attn_func(q, q, q, causal=False)
+    held = flydsl_flash_attn_func(q, q, q, causal=False, dropout_p=0.0, dropout_seed=99)
+    assert _max_abs(plain, held) == 0.0
+
+    p, seed = 0.35, 123456789
+    out = flydsl_flash_attn_func(q, q, q, causal=False, dropout_p=p, dropout_seed=seed)
+    ref = _formula_attn(q, q, q, scale=64**-0.5, dropout_p=p, dropout_seed=seed)
+    ref_dt = ref.to(torch.bfloat16)
+    assert _max_abs(out, ref) <= 2 * _max_abs(ref_dt, ref) + 1e-3
+    ref_bf, ref_dt_bf = ref, ref_dt
+
+    q16 = q.to(torch.float16)
+    out = flydsl_flash_attn_func(q16, q16, q16, causal=False, dropout_p=p, dropout_seed=seed)
+    ref = _formula_attn(q16, q16, q16, scale=64**-0.5, dropout_p=p, dropout_seed=seed)
+    ref_dt = ref.to(torch.float16)
+    assert _max_abs(out, ref) <= 2 * _max_abs(ref_dt, ref) + 1e-3
+
+    cu = torch.tensor([0, 32], device="cuda", dtype=torch.int32)
+    packed = q.reshape(32, 2, 64)
+    out = flydsl_flash_attn_func(
+        packed,
+        packed,
+        packed,
+        causal=False,
+        cu_seqlens_q=cu,
+        cu_seqlens_kv=cu,
+        max_seqlen_q=32,
+        max_seqlen_kv=32,
+        dropout_p=p,
+        dropout_seed=seed,
+    )
+    assert _max_abs(out.unsqueeze(0), ref_bf) <= 2 * _max_abs(ref_dt_bf, ref_bf) + 1e-3
+
+    k_cache = q.reshape(2, 16, 2, 64)
+    bt = torch.arange(2, device="cuda", dtype=torch.int32).view(1, 2)
+    out = flydsl_flash_attn_func(
+        q,
+        k_cache,
+        k_cache,
+        causal=False,
+        block_table=bt,
+        seqlen_k=torch.tensor([32], device="cuda", dtype=torch.int32),
+        dropout_p=p,
+        dropout_seed=seed,
+    )
+    assert _max_abs(out, ref_bf) <= 2 * _max_abs(ref_dt_bf, ref_bf) + 1e-3
+
+    qf = torch.randn(1, 32, 2, 64, device="cuda", dtype=torch.float32)
+    scale = float(max(qf.abs().amax().item(), 1e-6) / 448.0)
+    q8 = (qf / scale).to(torch.float8_e4m3fn)
+    out = flydsl_flash_attn_fp8_func(
+        q8, q8, q8, causal=False, dropout_p=p, dropout_seed=seed, q_descale=scale, k_descale=scale, v_descale=scale
+    )
+    deq = q8.float() * scale
+    ref = _formula_attn(deq, deq, deq, scale=64**-0.5, dropout_p=p, dropout_seed=seed)
+    packed = _formula_attn(deq, deq, deq, scale=64**-0.5, dropout_p=p, dropout_seed=seed, pack="e4m3")
+    assert _max_abs(out, ref) <= 4 * _max_abs(packed, ref) + 1e-2
+
+    scale5 = float(max(qf.abs().amax().item(), 1e-6) / 57344.0)
+    q5 = (qf / scale5).to(torch.float8_e5m2)
+    out = flydsl_flash_attn_fp8_func(
+        q5, q5, q5, causal=False, dropout_p=p, dropout_seed=seed, q_descale=scale5, k_descale=scale5, v_descale=scale5
+    )
+    deq = q5.float() * scale5
+    ref = _formula_attn(deq, deq, deq, scale=64**-0.5, dropout_p=p, dropout_seed=seed)
+    packed = _formula_attn(deq, deq, deq, scale=64**-0.5, dropout_p=p, dropout_seed=seed, pack="e5m2")
+    assert _max_abs(out, ref) <= 4 * _max_abs(packed, ref) + 1e-2
+
+    scale_i = float(max(qf.abs().amax().item(), 1e-6) / 127.0)
+    qi = (qf / scale_i).round().clamp(-128, 127).to(torch.int8)
+    out = flydsl_flash_attn_int8_func(
+        qi,
+        qi,
+        qi,
+        causal=False,
+        dropout_p=p,
+        dropout_seed=seed,
+        q_descale=scale_i,
+        k_descale=scale_i,
+        v_descale=scale_i,
+    )
+    deq = qi.float() * scale_i
+    ref = _formula_attn(deq, deq, deq, scale=64**-0.5, dropout_p=p, dropout_seed=seed)
+    packed = _formula_attn(deq, deq, deq, scale=64**-0.5, dropout_p=p, dropout_seed=seed, pack="i8")
+    assert _max_abs(out, ref) <= 4 * _max_abs(packed, ref) + 1e-2
+
+
 def test_bf16_value_head_differs() -> None:
     """Q/K use the query head. V and the output use the value head."""
     torch.manual_seed(4)

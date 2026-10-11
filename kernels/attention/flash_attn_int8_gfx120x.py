@@ -37,6 +37,8 @@ def build_flash_attn_func_int8_module_primary(
     bias_bottom_right: bool = False,
     has_alibi: bool = False,
     alibi_per_head: bool = False,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
 ) -> Callable[..., None]:
     """Build iu8 FlashAttention through the shared fp8/int8 quant kernel."""
     from kernels.attention.flash_attn_fp8_gfx120x import build_flash_attn_func_fp8_module_primary
@@ -75,6 +77,8 @@ def build_flash_attn_func_int8_module_primary(
         bias_bottom_right=bias_bottom_right,
         has_alibi=has_alibi,
         alibi_per_head=alibi_per_head,
+        softcap=softcap,
+        dropout_p=dropout_p,
     )
 
 

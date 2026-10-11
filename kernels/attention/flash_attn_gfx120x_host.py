@@ -31,8 +31,8 @@ dense BSHD plus packed-varlen and paged KV (linear, linear3d, and vectorized); d
 and gfx1250 paths stay on their own arches via ``flash_attn_interface``.
 
 ``flydsl_flash_attn_func`` is the function that interface returns into on
-gfx120x. It passes ``attn_mask`` through as ``bias``. The ``@lru_cache``
-launchers below are unchanged.
+gfx120x. It passes ``attn_mask`` through as ``bias``. The value head, softcap,
+and dropout probability are cache keys. The dropout seed is a launch argument.
 """
 
 import math
@@ -421,6 +421,53 @@ def online_softmax_tile(
     return p_vals, m_new_raw, l_new, o_accs, row_alive
 
 
+def _dropout_specialization(dropout_p: float | None) -> float | None:
+    """None keeps the no-dropout kernel. A probability in (0, 1) is its own build."""
+    if dropout_p is None:
+        return None
+    p = float(dropout_p)
+    if p == 0.0:
+        return None
+    if not 0.0 < p < 1.0:
+        raise ValueError(f"gfx120x FA dropout_p must be in [0, 1), got {p}")
+    return p
+
+
+def apply_score_dropout(
+    p_vals,
+    kv_start_i32,
+    klane_i32,
+    q_row_i32,
+    batch_i32,
+    head_i32,
+    seed,
+    dropout_p: float,
+    c_zero_f,
+):
+    """Scale kept softmax weights by ``1/(1-p)``. Dropped weights become 0.
+
+    Philox is keyed by the logical column, query row, batch, and head, so a
+    split and a dense launch draw the same mask. The softmax mass is unchanged.
+    """
+    from flydsl.extension.random.universal import philox, uint_to_uniform_float
+
+    scale = fx.Float32(1.0 / (1.0 - float(dropout_p)))
+    thresh = fx.Float32(float(dropout_p))
+    out = []
+    for i in range_constexpr(len(_SCORE_COLUMNS)):
+        col = kv_start_i32 + fx.Int32(_SCORE_COLUMNS[i]) + klane_i32 * fx.Int32(8)
+        word0, _, _, _ = philox(
+            seed,
+            fx.Uint32(col),
+            fx.Uint32(q_row_i32),
+            fx.Uint32(batch_i32),
+            fx.Uint32(head_i32),
+        )
+        keep = uint_to_uniform_float(word0) >= thresh
+        out.append(keep.select(p_vals[i] * scale, c_zero_f))
+    return out
+
+
 def fold_attention_sink(
     o_finals,
     l_final,
@@ -577,6 +624,7 @@ def _quant_run_exe(
     sink_t: torch.Tensor | None,
     lse_p: torch.Tensor | None,
     daz: bool,
+    dropout_seed: int = 0,
 ) -> torch.Tensor:
     """Launch a quant FA kernel. Split-K writes partials, then the combine kernel.
 
@@ -612,7 +660,7 @@ def _quant_run_exe(
             ws_rows,
         )
         ws = (ws_m, ws_l, ws_o, ws_rows)
-    exe(*parts, *tail, stream=launch_stream)
+    exe(*parts, *tail, dropout_seed=int(dropout_seed), stream=launch_stream)
     if ws is not None:
         ws_m, ws_l, ws_o, ws_rows = ws
         lse_c = lse_p if return_lse and lse_p is not None else _dummy_bias(device)
@@ -939,6 +987,7 @@ def _get_kernel(
     has_alibi: bool = False,
     alibi_per_head: bool = False,
     softcap: float | None = None,
+    dropout_p: float | None = None,
 ) -> Callable[..., None]:
     from kernels.attention.flash_attn_gfx120x import build_flash_attn_func_module
 
@@ -970,6 +1019,7 @@ def _get_kernel(
         has_alibi=has_alibi,
         alibi_per_head=alibi_per_head,
         softcap=softcap,
+        dropout_p=dropout_p,
     )
 
 
@@ -1071,6 +1121,8 @@ def _flash_attn_bshd(
     sliding_window: tuple[int, int] | None = None,
     sm_scale: float | None = None,
     softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Run FlyDSL Flash Attention on RDNA4 (gfx120x family).
 
@@ -1260,8 +1312,10 @@ def _flash_attn_bshd(
             has_alibi=has_alibi,
             alibi_per_head=alibi_per_head,
             softcap=softcap,
+            dropout_p=_dropout_specialization(dropout_p),
         )
         _di = _dummy_i32(q.device)
+        _seed = int(dropout_seed)
         nsplits = int(num_kv_splits)
         if nsplits < 1:
             raise ValueError(f"gfx120x FA: num_kv_splits must be >= 1, got {nsplits}")
@@ -1290,6 +1344,7 @@ def _flash_attn_bshd(
             _flat(_di),  # SeqlenK dummy
             0,  # block_table_stride
             *split_args,
+            dropout_seed=_seed,
             stream=launch_stream,
         )
         if nsplits > 1:
@@ -1529,6 +1584,8 @@ def flydsl_flash_attn_func(
     fp8_block_m=None,
     sm_scale=None,
     softcap=None,
+    dropout_p=0.0,
+    dropout_seed=0,
 ):
     """gfx120x flash attention.
 
@@ -1620,6 +1677,10 @@ def flydsl_flash_attn_func(
             return_lse=return_lse,
             num_kv_splits=int(num_kv_splits or 1),
             block_m=fp8_block_m,
+            sm_scale=sm_scale,
+            softcap=softcap,
+            dropout_p=dropout_p,
+            dropout_seed=dropout_seed,
         )
 
     def _gfx120x_call(qb, kb, vb, *, bias_b, out_b):
@@ -1641,6 +1702,8 @@ def flydsl_flash_attn_func(
             sliding_window=sliding_window,
             sm_scale=sm_scale,
             softcap=softcap,
+            dropout_p=dropout_p,
+            dropout_seed=dropout_seed,
         )
         lse = None
         if return_lse:
@@ -1687,6 +1750,10 @@ def flydsl_flash_attn_func(
                 sliding_window=sliding_window,
                 num_kv_splits=int(num_kv_splits or 1),
                 block_m=fp8_block_m,
+                sm_scale=sm_scale,
+                softcap=softcap,
+                dropout_p=dropout_p,
+                dropout_seed=dropout_seed,
             )
         return flydsl_flash_attn_fp8_func(
             q,
@@ -1708,6 +1775,10 @@ def flydsl_flash_attn_func(
             sliding_window=sliding_window,
             num_kv_splits=int(num_kv_splits or 1),
             block_m=fp8_block_m,
+            sm_scale=sm_scale,
+            softcap=softcap,
+            dropout_p=dropout_p,
+            dropout_seed=dropout_seed,
         )
     if q.dtype == torch.int8:
         if block_table is not None:
@@ -1748,6 +1819,10 @@ def flydsl_flash_attn_func(
                 return_lse=return_lse,
                 sliding_window=sliding_window,
                 num_kv_splits=int(num_kv_splits or 1),
+                sm_scale=sm_scale,
+                softcap=softcap,
+                dropout_p=dropout_p,
+                dropout_seed=dropout_seed,
             )
         return flydsl_flash_attn_int8_func(
             q,
@@ -1768,6 +1843,10 @@ def flydsl_flash_attn_func(
             num_kv_heads=num_kv_heads,
             sliding_window=sliding_window,
             num_kv_splits=int(num_kv_splits or 1),
+            sm_scale=sm_scale,
+            softcap=softcap,
+            dropout_p=dropout_p,
+            dropout_seed=dropout_seed,
         )
     # Dense bf16/fp16. Varlen, paged (linear/linear3d/vectorized), varlen+paged,
     # and split-K are in-kernel wave32 paths.
@@ -1816,6 +1895,10 @@ def flydsl_flash_attn_func(
             kv_cache_layout=kv_cache_layout or "linear",
             sliding_window=sliding_window,
             num_kv_splits=int(num_kv_splits or 1),
+            sm_scale=sm_scale,
+            softcap=softcap,
+            dropout_p=dropout_p,
+            dropout_seed=dropout_seed,
         )
 
     if cu_seqlens_q is not None or cu_seqlens_kv is not None:
@@ -1866,6 +1949,10 @@ def flydsl_flash_attn_func(
             out=out,
             sliding_window=sliding_window,
             num_kv_splits=int(num_kv_splits or 1),
+            sm_scale=sm_scale,
+            softcap=softcap,
+            dropout_p=dropout_p,
+            dropout_seed=dropout_seed,
         )
         return got
 
@@ -1907,6 +1994,10 @@ def flydsl_flash_attn_func(
             out=out,
             sliding_window=sliding_window,
             num_kv_splits=int(num_kv_splits or 1),
+            sm_scale=sm_scale,
+            softcap=softcap,
+            dropout_p=dropout_p,
+            dropout_seed=dropout_seed,
         )
         return got
 
@@ -1927,6 +2018,8 @@ def flydsl_flash_attn_func(
             num_kv_splits=int(num_kv_splits),
             sm_scale=sm_scale,
             softcap=softcap,
+            dropout_p=dropout_p,
+            dropout_seed=dropout_seed,
             sliding_window=sliding_window,
         )
 
@@ -1956,6 +2049,10 @@ def flydsl_flash_attn_varlen_func(
     sink: torch.Tensor | None = None,
     sliding_window: tuple[int, int] | None = None,
     num_kv_splits: int = 1,
+    sm_scale: float | None = None,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Packed-varlen FA: Q/K/V/O as [total, H, D] with cu_seqlens int32 [B+1]."""
     from kernels.common.gfx120x_pad import ensure_contiguous
@@ -1984,10 +2081,11 @@ def flydsl_flash_attn_varlen_func(
     orig_v_dim = int(v.shape[2])
     launch_head_dim = _head_dim_tile_target(orig_head_dim, what="flydsl_flash_attn_varlen_func")
     launch_v_dim = _head_dim_tile_target(orig_v_dim, what="flydsl_flash_attn_varlen_func")
-    sm_scale_pad = None
+    sm_scale_pad = None if sm_scale is None else float(sm_scale)
     logical_head_dim = None
     if launch_head_dim != orig_head_dim:
-        sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
+        if sm_scale_pad is None:
+            sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
         logical_head_dim = orig_head_dim
         head_dim = launch_head_dim
 
@@ -2127,8 +2225,11 @@ def flydsl_flash_attn_varlen_func(
             bias_bottom_right=bias_bottom_right,
             has_alibi=has_alibi,
             alibi_per_head=alibi_per_head,
+            softcap=softcap,
+            dropout_p=_dropout_specialization(dropout_p),
         )
         nsplits = int(num_kv_splits)
+        _seed = int(dropout_seed)
         comb_o = o_p
         if nsplits > 1:
             comb_o = torch.empty(
@@ -2159,6 +2260,7 @@ def flydsl_flash_attn_varlen_func(
             _flat(_di),
             0,
             *split_tail,
+            dropout_seed=_seed,
             stream=launch_stream,
         )
         if split_ws is not None:
@@ -2218,6 +2320,10 @@ def flydsl_flash_attn_paged_func(
     kv_cache_layout: str = "linear",
     sliding_window: tuple[int, int] | None = None,
     num_kv_splits: int = 1,
+    sm_scale: float | None = None,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Paged FA. linear 4D, linear3d page-1 (same bytes), or vectorized 5D."""
     from kernels.common.gfx120x_pad import ensure_contiguous
@@ -2357,6 +2463,10 @@ def flydsl_flash_attn_paged_func(
             kv_cache_layout=layout,
             sliding_window=sliding_window,
             num_kv_splits=num_kv_splits,
+            sm_scale=sm_scale,
+            softcap=softcap,
+            dropout_p=dropout_p,
+            dropout_seed=dropout_seed,
         )
         if return_lse:
             o_p, lse_p = got
@@ -2438,10 +2548,11 @@ def flydsl_flash_attn_paged_func(
         orig_head_dim = int(head_dim)
         launch_head_dim = _head_dim_tile_target(orig_head_dim, what="flydsl_flash_attn_paged_func")
         logical_head_dim = None
-        sm_scale_pad = None
+        sm_scale_pad = None if sm_scale is None else float(sm_scale)
         if launch_head_dim != orig_head_dim:
             logical_head_dim = orig_head_dim
-            sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
+            if sm_scale_pad is None:
+                sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
         exe = _get_kernel(
             num_heads=num_heads,
             head_dim=launch_head_dim,
@@ -2465,8 +2576,11 @@ def flydsl_flash_attn_paged_func(
             sliding_window=sliding_window,
             has_alibi=has_alibi,
             alibi_per_head=alibi_per_head,
+            softcap=softcap,
+            dropout_p=_dropout_specialization(dropout_p),
         )
         nsplits = int(num_kv_splits)
+        _seed = int(dropout_seed)
         paged_v_launch = int(paged_v_dim) if int(paged_v_dim) % 32 == 0 else int(launch_head_dim)
         split_tail, split_ws = _float_split_tail(
             q.device, nsplits, batch, seq_len_q_launch, num_heads, paged_v_launch
@@ -2490,6 +2604,7 @@ def flydsl_flash_attn_paged_func(
             _flat(sk),
             block_table_stride,
             *split_tail,
+            dropout_seed=_seed,
             stream=launch_stream,
         )
         if split_ws is not None:
@@ -2548,6 +2663,10 @@ def flydsl_flash_attn_varlen_paged_func(
     kv_cache_layout: str = "linear",
     sliding_window: tuple[int, int] | None = None,
     num_kv_splits: int = 1,
+    sm_scale: float | None = None,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Packed Q with paged K/V. cu_seqlens_q selects Q rows; block_table/seqlen_k select KV.
 
@@ -2709,10 +2828,11 @@ def flydsl_flash_attn_varlen_paged_func(
         orig_head_dim = int(head_dim)
         launch_head_dim = _head_dim_tile_target(orig_head_dim, what="flydsl_flash_attn_varlen_paged_func")
         logical_head_dim = None
-        sm_scale_pad = None
+        sm_scale_pad = None if sm_scale is None else float(sm_scale)
         if launch_head_dim != orig_head_dim:
             logical_head_dim = orig_head_dim
-            sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
+            if sm_scale_pad is None:
+                sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
         exe = _get_kernel(
             num_heads=num_heads,
             head_dim=launch_head_dim,
@@ -2736,8 +2856,11 @@ def flydsl_flash_attn_varlen_paged_func(
             bias_bottom_right=bias_bottom_right,
             has_alibi=has_alibi,
             alibi_per_head=alibi_per_head,
+            softcap=softcap,
+            dropout_p=_dropout_specialization(dropout_p),
         )
         nsplits = int(num_kv_splits)
+        _seed = int(dropout_seed)
         comb_o = o_p
         if nsplits > 1:
             comb_o = torch.empty(
@@ -2765,6 +2888,7 @@ def flydsl_flash_attn_varlen_paged_func(
             _flat(sk),
             int(bt.shape[1]),
             *split_tail,
+            dropout_seed=_seed,
             stream=launch_stream,
         )
         if split_ws is not None:
@@ -2873,6 +2997,8 @@ def _get_fp8_kernel(
     bias_bottom_right: bool = False,
     has_alibi: bool = False,
     alibi_per_head: bool = False,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
 ) -> Callable[..., None]:
     from kernels.attention.flash_attn_fp8_gfx120x import (
         build_flash_attn_func_fp8_module,
@@ -2903,6 +3029,8 @@ def _get_fp8_kernel(
         bias_bottom_right=bias_bottom_right,
         has_alibi=has_alibi,
         alibi_per_head=alibi_per_head,
+        softcap=softcap,
+        dropout_p=dropout_p,
     )
 
 
@@ -2974,6 +3102,9 @@ def _quant_dense_launch(
     sliding_window: tuple[int, int] | None = None,
     num_kv_splits: int = 1,
     block_m: int | None = None,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
     *,
     kind: str,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -3098,6 +3229,8 @@ def _quant_dense_launch(
             split_k=_ns > 1,
             has_alibi=has_alibi,
             alibi_per_head=alibi_per_head,
+            softcap=softcap,
+            dropout_p=_dropout_specialization(dropout_p),
             **extra,
         )
         _quant_run_exe(
@@ -3133,6 +3266,7 @@ def _quant_dense_launch(
             sink_t=sink_t if has_sink_b else None,
             lse_p=lse_p,
             daz=daz,
+            dropout_seed=int(dropout_seed),
         )
 
     o_p = _crop_head_dim(o_p, orig_v_dim)
@@ -3169,6 +3303,9 @@ def flydsl_flash_attn_fp8_func(
     sliding_window: tuple[int, int] | None = None,
     num_kv_splits: int = 1,
     block_m: int | None = None,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """fp8 e4m3 or e5m2 flash attention. Output is bf16."""
     return _quant_dense_launch(
@@ -3192,6 +3329,9 @@ def flydsl_flash_attn_fp8_func(
         sliding_window=sliding_window,
         num_kv_splits=num_kv_splits,
         block_m=block_m,
+        softcap=softcap,
+        dropout_p=dropout_p,
+        dropout_seed=dropout_seed,
         kind="fp8",
     )
 
@@ -3216,6 +3356,9 @@ def flydsl_flash_attn_int8_func(
     num_kv_heads: int | None = None,
     sliding_window: tuple[int, int] | None = None,
     num_kv_splits: int = 1,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """int8 flash attention. Same launch as fp8, iu8 WMMA. Output is bf16."""
     return _quant_dense_launch(
@@ -3238,6 +3381,9 @@ def flydsl_flash_attn_int8_func(
         num_kv_heads=num_kv_heads,
         sliding_window=sliding_window,
         num_kv_splits=num_kv_splits,
+        softcap=softcap,
+        dropout_p=dropout_p,
+        dropout_seed=dropout_seed,
         kind="int8",
     )
 
@@ -3272,6 +3418,8 @@ def _get_int8_kernel(
     bias_bottom_right: bool = False,
     has_alibi: bool = False,
     alibi_per_head: bool = False,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
 ) -> Callable[..., None]:
     from kernels.attention.flash_attn_int8_gfx120x import (
         build_flash_attn_func_int8_module,
@@ -3302,6 +3450,8 @@ def _get_int8_kernel(
         bias_bottom_right=bias_bottom_right,
         has_alibi=has_alibi,
         alibi_per_head=alibi_per_head,
+        softcap=softcap,
+        dropout_p=dropout_p,
     )
 
 
@@ -3332,6 +3482,9 @@ def _quant_varlen_launch(
     sliding_window: tuple[int, int] | None = None,
     num_kv_splits: int = 1,
     block_m: int | None = None,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Packed quant FA. Q/K/V are [total, H, D]. Output is bf16 [total, H, D]."""
 
@@ -3453,8 +3606,11 @@ def _quant_varlen_launch(
             bias_bottom_right=bias_bottom_right,
             has_alibi=has_alibi,
             alibi_per_head=alibi_per_head,
+            softcap=softcap,
+            dropout_p=_dropout_specialization(dropout_p),
             **({} if kind == "int8" else {"dtype_str": dtype_str}),
         )
+        _seed = int(dropout_seed)
         comb_o = o_p
         if nsplits > 1:
             comb_o = torch.empty(
@@ -3497,6 +3653,7 @@ def _quant_varlen_launch(
             z,
             0,
             *split_tail,
+            dropout_seed=_seed,
             stream=launch_stream,
         )
         if nsplits > 1:
@@ -3551,6 +3708,9 @@ def flydsl_flash_attn_fp8_varlen_func(
     sliding_window: tuple[int, int] | None = None,
     num_kv_splits: int = 1,
     block_m: int | None = None,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     return _quant_varlen_launch(
         q,
@@ -3578,6 +3738,9 @@ def flydsl_flash_attn_fp8_varlen_func(
         sliding_window=sliding_window,
         num_kv_splits=num_kv_splits,
         block_m=block_m,
+        softcap=softcap,
+        dropout_p=dropout_p,
+        dropout_seed=dropout_seed,
     )
 
 
@@ -3609,6 +3772,9 @@ def flydsl_flash_attn_quant_paged_func(
     return_lse: bool = False,
     num_kv_splits: int = 1,
     block_m: int | None = None,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Quant paged KV. The cache and block table are passed through. No gather copy."""
 
@@ -3808,8 +3974,11 @@ def flydsl_flash_attn_quant_paged_func(
         return_lse=return_lse,
         has_sink=sink_t is not None,
         split_k=nsplits > 1,
+        softcap=softcap,
+        dropout_p=_dropout_specialization(dropout_p),
         **({} if kind == "int8" else {"dtype_str": dtype_str}),
     )
+    _seed = int(dropout_seed)
     comb_o = o_p
     if nsplits > 1:
         if varlen or tile != orig_d:
@@ -3843,6 +4012,7 @@ def flydsl_flash_attn_quant_paged_func(
         _flat(sk),
         n_pages,
         *split_tail,
+        dropout_seed=_seed,
         stream=launch_stream,
     )
     if nsplits > 1:
@@ -3900,6 +4070,9 @@ def flydsl_flash_attn_int8_varlen_func(
     return_lse: bool = False,
     sliding_window: tuple[int, int] | None = None,
     num_kv_splits: int = 1,
+    softcap: float | None = None,
+    dropout_p: float | None = None,
+    dropout_seed: int = 0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     return _quant_varlen_launch(
         q,
@@ -3926,4 +4099,7 @@ def flydsl_flash_attn_int8_varlen_func(
         return_lse=return_lse,
         sliding_window=sliding_window,
         num_kv_splits=num_kv_splits,
+        softcap=softcap,
+        dropout_p=dropout_p,
+        dropout_seed=dropout_seed,
     )
