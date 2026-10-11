@@ -932,11 +932,13 @@ def _get_kernel(
     kv_cache_layout: str = "linear",
     sm_scale: float | None = None,
     logical_head_dim: int | None = None,
+    head_dim_v: int | None = None,
     kv_oob: bool = False,
     sliding_window: tuple[int, int] | None = None,
     bias_bottom_right: bool = False,
     has_alibi: bool = False,
     alibi_per_head: bool = False,
+    softcap: float | None = None,
 ) -> Callable[..., None]:
     from kernels.attention.flash_attn_gfx120x import build_flash_attn_func_module
 
@@ -945,6 +947,7 @@ def _get_kernel(
     return build_flash_attn_func_module(
         num_heads=num_heads,
         head_dim=head_dim,
+        head_dim_v=head_dim if head_dim_v is None else head_dim_v,
         causal=causal,
         dtype_str=dtype_str,
         waves_per_eu=waves_per_eu,
@@ -966,6 +969,7 @@ def _get_kernel(
         bias_bottom_right=bias_bottom_right,
         has_alibi=has_alibi,
         alibi_per_head=alibi_per_head,
+        softcap=softcap,
     )
 
 
@@ -1065,6 +1069,8 @@ def _flash_attn_bshd(
     sink: torch.Tensor | None = None,
     num_kv_splits: int = 1,
     sliding_window: tuple[int, int] | None = None,
+    sm_scale: float | None = None,
+    softcap: float | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Run FlyDSL Flash Attention on RDNA4 (gfx120x family).
 
@@ -1105,11 +1111,9 @@ def _flash_attn_bshd(
         raise ValueError(f"expected 4D BSHD tensors, got q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}")
     if not (q.dtype == k.dtype == v.dtype):
         raise ValueError(f"q/k/v dtype must match: {q.dtype}/{k.dtype}/{v.dtype}")
-    if not (
-        q.shape[0] == k.shape[0] == v.shape[0] and q.shape[3] == k.shape[3] == v.shape[3] and k.shape[2] == v.shape[2]
-    ):
+    if not (q.shape[0] == k.shape[0] == v.shape[0] and q.shape[3] == k.shape[3] and k.shape[2] == v.shape[2]):
         raise ValueError(
-            "flydsl_flash_attn_func: q/k/v must share batch and head_dim; "
+            "flydsl_flash_attn_func: q/k share head_dim and k/v share the KV head count; "
             f"got q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}"
         )
     num_kv_heads = int(k.shape[2])
@@ -1124,12 +1128,15 @@ def _flash_attn_bshd(
     # Causal self + causal×cross: in-kernel bottom-right masking.
     kernel_causal = bool(causal)
     orig_head_dim = int(head_dim)
+    orig_v_dim = int(v.shape[-1])
     launch_head_dim = _head_dim_tile_target(orig_head_dim, what="flydsl_flash_attn_func")
-    sm_scale_pad = None
+    launch_v_dim = _head_dim_tile_target(orig_v_dim, what="flydsl_flash_attn_func")
+    sm_scale_pad = None if sm_scale is None else float(sm_scale)
     logical_head_dim = None
     if launch_head_dim != orig_head_dim:
-        # Real zero tail, then the aligned kernel. Scale stays on the caller D.
-        sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
+        # Real zero tail, then the aligned kernel. Scale stays on the query head.
+        if sm_scale_pad is None:
+            sm_scale_pad = 1.0 / math.sqrt(float(orig_head_dim))
         head_dim = launch_head_dim
 
     # Merge attn_mask / bias (normalize each, then add) + optional ALiBi fold.
@@ -1198,12 +1205,13 @@ def _flash_attn_bshd(
         pad_d = int(head_dim) - int(orig_head_dim)
         q_p = torch.nn.functional.pad(q_p, (0, pad_d))
         k_p = torch.nn.functional.pad(k_p, (0, pad_d))
-        v_p = torch.nn.functional.pad(v_p, (0, pad_d))
+    if int(launch_v_dim) != int(orig_v_dim):
+        v_p = torch.nn.functional.pad(v_p, (0, int(launch_v_dim) - int(orig_v_dim)))
 
     bias_arg = _as_contig(bias_t, stream=launch_stream) if has_bias else _dummy_bias(q.device)
 
-    o_shape = (batch, seq_len_q_launch, num_heads, int(head_dim))
-    caller_out_shape = (batch, seq_len_q_launch, num_heads, orig_head_dim)
+    o_shape = (batch, seq_len_q_launch, num_heads, int(launch_v_dim))
+    caller_out_shape = (batch, seq_len_q_launch, num_heads, orig_v_dim)
     if out is not None:
         if tuple(out.shape) != caller_out_shape or out.dtype != q.dtype or out.device != q.device:
             raise ValueError(
@@ -1213,7 +1221,7 @@ def _flash_attn_bshd(
             )
         if not out.is_contiguous():
             raise ValueError("flydsl_flash_attn_func: out must be contiguous")
-        o_p = out if int(head_dim) == int(orig_head_dim) else torch.empty(o_shape, dtype=q.dtype, device=q.device)
+        o_p = out if int(launch_v_dim) == int(orig_v_dim) else torch.empty(o_shape, dtype=q.dtype, device=q.device)
     else:
         o_p = torch.empty(o_shape, dtype=q.dtype, device=q.device)
 
@@ -1246,10 +1254,12 @@ def _flash_attn_bshd(
             num_kv_heads=num_kv_heads,
             sm_scale=sm_scale_pad,
             logical_head_dim=logical_head_dim,
+            head_dim_v=launch_v_dim,
             kv_oob=kv_oob,
             sliding_window=sliding_window,
             has_alibi=has_alibi,
             alibi_per_head=alibi_per_head,
+            softcap=softcap,
         )
         _di = _dummy_i32(q.device)
         nsplits = int(num_kv_splits)
@@ -1257,7 +1267,7 @@ def _flash_attn_bshd(
             raise ValueError(f"gfx120x FA: num_kv_splits must be >= 1, got {nsplits}")
         if nsplits > 1:
             ws_rows = int(batch) * int(num_heads) * int(seq_len_q_launch)
-            ws_m, ws_l, ws_o = _new_split_workspace(q.device, nsplits, ws_rows, head_dim)
+            ws_m, ws_l, ws_o = _new_split_workspace(q.device, nsplits, ws_rows, launch_v_dim)
             split_args = (nsplits, _flat(ws_m), _flat(ws_l), _flat(ws_o), ws_rows)
         else:
             split_args = _nosplit_args(q.device)
@@ -1287,15 +1297,9 @@ def _flash_attn_bshd(
                 raise RuntimeError("split-K return_lse missing lse buffer")
             lse_c = lse_p if return_lse else _dummy_bias(q.device)
             sink_c = sink_t if has_sink else _dummy_bias(q.device)
-            comb = _get_splitk_combine(num_heads, head_dim, dtype_str, bool(has_sink), bool(return_lse), bool(daz))
-            # The combine strides by the WMMA tile. A shorter head needs its own buffer.
+            comb = _get_splitk_combine(num_heads, launch_v_dim, dtype_str, bool(has_sink), bool(return_lse), bool(daz))
+            # o_p is already the value-head tile. The caller buffer is filled after the crop.
             comb_o = o_p
-            if int(head_dim) != int(orig_head_dim):
-                comb_o = torch.empty(
-                    (batch, seq_len_q_launch, num_heads, head_dim),
-                    dtype=o_p.dtype,
-                    device=o_p.device,
-                )
             comb(
                 ws_m,
                 ws_l,
@@ -1313,7 +1317,7 @@ def _flash_attn_bshd(
                 with torch.cuda.stream(launch_stream):
                     o_p.copy_(comb_o)
 
-    o_p = _crop_head_dim(o_p, orig_head_dim)
+    o_p = _crop_head_dim(o_p, orig_v_dim)
     if out is not None and o_p.data_ptr() != out.data_ptr():
         if launch_stream is None:
             out.copy_(o_p)
@@ -1523,6 +1527,8 @@ def flydsl_flash_attn_func(
     daz=True,
     stream=None,
     fp8_block_m=None,
+    sm_scale=None,
+    softcap=None,
 ):
     """gfx120x flash attention.
 
@@ -1633,6 +1639,8 @@ def flydsl_flash_attn_func(
             sink=sink,
             out=out_b,
             sliding_window=sliding_window,
+            sm_scale=sm_scale,
+            softcap=softcap,
         )
         lse = None
         if return_lse:
@@ -1917,6 +1925,8 @@ def flydsl_flash_attn_func(
             sink=sink,
             out=out,
             num_kv_splits=int(num_kv_splits),
+            sm_scale=sm_scale,
+            softcap=softcap,
             sliding_window=sliding_window,
         )
 
@@ -1964,14 +1974,16 @@ def flydsl_flash_attn_varlen_func(
         )
     if q.dtype != k.dtype or q.dtype != v.dtype:
         raise ValueError(f"q/k/v dtype must match: {q.dtype}/{k.dtype}/{v.dtype}")
-    if q.shape[2] != k.shape[2] or q.shape[2] != v.shape[2] or k.shape[1] != v.shape[1]:
+    if q.shape[2] != k.shape[2] or k.shape[1] != v.shape[1]:
         raise ValueError(f"varlen D/Hkv mismatch: q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}")
     if int(q.shape[1]) % int(k.shape[1]) != 0:
         raise ValueError(f"varlen GQA: q heads {int(q.shape[1])} not divisible by kv heads {int(k.shape[1])}")
 
     num_heads, head_dim = int(q.shape[1]), int(q.shape[2])
     orig_head_dim = int(head_dim)
+    orig_v_dim = int(v.shape[2])
     launch_head_dim = _head_dim_tile_target(orig_head_dim, what="flydsl_flash_attn_varlen_func")
+    launch_v_dim = _head_dim_tile_target(orig_v_dim, what="flydsl_flash_attn_varlen_func")
     sm_scale_pad = None
     logical_head_dim = None
     if launch_head_dim != orig_head_dim:
@@ -2064,8 +2076,9 @@ def flydsl_flash_attn_varlen_func(
     bias_arg = _as_contig(bias_t, stream=launch_stream) if has_bias else _dummy_bias(q.device)
 
     total_q = int(q.shape[0])
-    o_shape = (total_q, num_heads, head_dim)
-    caller_out_shape = (total_q, num_heads, orig_head_dim)
+    store_d = head_dim if int(launch_v_dim) == int(head_dim) else int(launch_v_dim)
+    o_shape = (total_q, num_heads, store_d)
+    caller_out_shape = (total_q, num_heads, orig_v_dim)
     if out is not None:
         if tuple(out.shape) != caller_out_shape or out.dtype != q.dtype or out.device != q.device:
             raise ValueError(
@@ -2073,7 +2086,7 @@ def flydsl_flash_attn_varlen_func(
                 f"got {tuple(out.shape)}/{out.dtype}/{out.device}, "
                 f"want {caller_out_shape}/{q.dtype}/{q.device}"
             )
-        o_p = out if orig_head_dim == head_dim else torch.empty(o_shape, dtype=q.dtype, device=q.device)
+        o_p = out if orig_v_dim == store_d else torch.empty(o_shape, dtype=q.dtype, device=q.device)
     else:
         o_p = torch.empty(o_shape, dtype=q.dtype, device=q.device)
 
@@ -2109,6 +2122,7 @@ def flydsl_flash_attn_varlen_func(
             num_kv_heads=int(k.shape[1]),
             sm_scale=sm_scale_pad,
             logical_head_dim=logical_head_dim,
+            head_dim_v=launch_v_dim,
             sliding_window=sliding_window,
             bias_bottom_right=bias_bottom_right,
             has_alibi=has_alibi,
@@ -2118,15 +2132,18 @@ def flydsl_flash_attn_varlen_func(
         comb_o = o_p
         if nsplits > 1:
             comb_o = torch.empty(
-                (batch, seq_len_q_launch, num_heads, head_dim),
+                (batch, seq_len_q_launch, num_heads, store_d),
                 dtype=q.dtype,
                 device=q.device,
             )
-        split_tail, split_ws = _float_split_tail(q.device, nsplits, batch, seq_len_q_launch, num_heads, head_dim)
+        split_tail, split_ws = _float_split_tail(q.device, nsplits, batch, seq_len_q_launch, num_heads, store_d)
+        v_run = _as_contig(v, stream=launch_stream)
+        if int(launch_v_dim) != int(head_dim) and int(orig_v_dim) != int(launch_v_dim):
+            v_run = torch.nn.functional.pad(v_run, (0, int(launch_v_dim) - int(orig_v_dim)))
         exe(
             _flat(_as_contig(q, stream=launch_stream)),
             _flat(_as_contig(k, stream=launch_stream)),
-            _flat(_as_contig(v, stream=launch_stream)),
+            _flat(v_run),
             _flat(comb_o),
             batch,
             seq_len_q_launch,
@@ -2151,7 +2168,7 @@ def flydsl_flash_attn_varlen_func(
                 batch=batch,
                 seq_q=seq_len_q_launch,
                 num_heads=num_heads,
-                head_dim=head_dim,
+                head_dim=store_d,
                 dtype_str=dtype_str,
                 has_sink=sink_t is not None,
                 return_lse=return_lse,
@@ -2165,9 +2182,9 @@ def flydsl_flash_attn_varlen_func(
                 qs, qe = int(cq_host[bi]), int(cq_host[bi + 1])
                 n = qe - qs
                 if n > 0:
-                    o_p[qs:qe].copy_(comb_o[bi, :n], non_blocking=True)
+                    o_p[qs:qe].copy_(comb_o[bi, :n, :, : o_p.shape[-1]], non_blocking=True)
 
-    o_p = _crop_head_dim(o_p, orig_head_dim)
+    o_p = _crop_head_dim(o_p, orig_v_dim)
     if out is not None and o_p.data_ptr() != out.data_ptr():
         if launch_stream is None:
             out.copy_(o_p)
@@ -2257,8 +2274,10 @@ def flydsl_flash_attn_paged_func(
                 "paged K/V must be 4D [num_blocks,page_size,H,D], "
                 f"got k={tuple(k_cache.shape)} v={tuple(v_cache.shape)}"
             )
-        if tuple(k_cache.shape[1:]) != tuple(v_cache.shape[1:]):
-            raise ValueError(f"paged K/V page/H/D mismatch: {tuple(k_cache.shape)} vs {tuple(v_cache.shape)}")
+        if k_cache.shape[1] != v_cache.shape[1] or k_cache.shape[2] != v_cache.shape[2]:
+            raise ValueError(f"paged K/V page/H mismatch: {tuple(k_cache.shape)} vs {tuple(v_cache.shape)}")
+        if int(v_cache.shape[3]) != int(k_cache.shape[3]) and int(v_cache.shape[3]) % 32 != 0:
+            raise ValueError(f"paged value head {int(v_cache.shape[3])} must be a multiple of 32")
         cache_page_size = int(k_cache.shape[1])
         if page_size is None:
             page_size = cache_page_size
@@ -2394,7 +2413,8 @@ def flydsl_flash_attn_paged_func(
             sink_t = sink_t.to(q.device)
 
     bias_arg = _as_contig(bias_t, stream=launch_stream) if has_bias else _dummy_bias(q.device)
-    o_shape = (batch, seq_len_q_launch, num_heads, head_dim)
+    paged_v_dim = int(v_cache.shape[-1])
+    o_shape = (batch, seq_len_q_launch, num_heads, paged_v_dim)
     if out is not None:
         if tuple(out.shape) != o_shape or out.dtype != q.dtype or out.device != q.device:
             raise ValueError(
@@ -2425,6 +2445,7 @@ def flydsl_flash_attn_paged_func(
         exe = _get_kernel(
             num_heads=num_heads,
             head_dim=launch_head_dim,
+            head_dim_v=(int(paged_v_dim) if int(paged_v_dim) % 32 == 0 else int(launch_head_dim)),
             causal=bool(causal),
             dtype_str=dtype_str,
             waves_per_eu=waves_per_eu,
@@ -2446,8 +2467,9 @@ def flydsl_flash_attn_paged_func(
             alibi_per_head=alibi_per_head,
         )
         nsplits = int(num_kv_splits)
+        paged_v_launch = int(paged_v_dim) if int(paged_v_dim) % 32 == 0 else int(launch_head_dim)
         split_tail, split_ws = _float_split_tail(
-            q.device, nsplits, batch, seq_len_q_launch, num_heads, launch_head_dim
+            q.device, nsplits, batch, seq_len_q_launch, num_heads, paged_v_launch
         )
         exe(
             _flat(_as_contig(q, stream=launch_stream)),
@@ -2472,9 +2494,9 @@ def flydsl_flash_attn_paged_func(
         )
         if split_ws is not None:
             comb_o = o_p
-            if launch_head_dim != orig_head_dim:
+            if int(o_p.shape[-1]) != int(paged_v_launch):
                 comb_o = torch.empty(
-                    (batch, seq_len_q_launch, num_heads, launch_head_dim),
+                    (batch, seq_len_q_launch, num_heads, paged_v_launch),
                     dtype=o_p.dtype,
                     device=o_p.device,
                 )
@@ -2484,7 +2506,7 @@ def flydsl_flash_attn_paged_func(
                 batch=batch,
                 seq_q=seq_len_q_launch,
                 num_heads=num_heads,
-                head_dim=launch_head_dim,
+                head_dim=paged_v_launch,
                 dtype_str=dtype_str,
                 has_sink=sink_t is not None,
                 return_lse=return_lse,
@@ -2495,7 +2517,7 @@ def flydsl_flash_attn_paged_func(
             )
             if comb_o.data_ptr() != o_p.data_ptr():
                 with torch.cuda.stream(launch_stream):
-                    o_p.copy_(comb_o[..., :orig_head_dim])
+                    o_p.copy_(comb_o[..., : o_p.shape[-1]])
 
     if return_lse:
         return o_p, lse_p
@@ -2841,6 +2863,7 @@ def _get_fp8_kernel(
     num_kv_heads: int | None = None,
     sm_scale: float | None = None,
     logical_head_dim: int | None = None,
+    head_dim_v: int | None = None,
     varlen: bool = False,
     paged: bool = False,
     page_size: int = 16,
@@ -2858,6 +2881,7 @@ def _get_fp8_kernel(
     return build_flash_attn_func_fp8_module(
         num_heads=num_heads,
         head_dim=head_dim,
+        head_dim_v=head_dim_v,
         causal=causal,
         dtype_str=dtype_str,
         waves_per_eu=waves_per_eu,
@@ -2977,12 +3001,9 @@ def _quant_dense_launch(
         raise ValueError(
             f"{what}: expected 4D BSHD tensors, got q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}"
         )
-    if not (
-        q.shape[0] == k.shape[0] == v.shape[0] and q.shape[3] == k.shape[3] == v.shape[3] and k.shape[2] == v.shape[2]
-    ):
+    if not (q.shape[0] == k.shape[0] == v.shape[0] and q.shape[3] == k.shape[3] and k.shape[2] == v.shape[2]):
         raise ValueError(
-            f"{what}: q/k/v must share batch and head_dim; "
-            "k/v must share head count; "
+            f"{what}: q and k share head_dim; k and v share the KV head count; "
             f"got q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}"
         )
 
@@ -2996,11 +3017,14 @@ def _quant_dense_launch(
     cross = seq_len_q_real != seq_len_kv_real
     # Causal×cross: in-kernel bottom-right (no dequant→bf16 FALLBACK).
     orig_head_dim = int(head_dim)
+    orig_v_dim = int(v.shape[-1])
     launch_head_dim = _head_dim_tile_target(orig_head_dim, what=what)
+    launch_v_dim = _head_dim_tile_target(orig_v_dim, what=what)
     sm_scale_pad = float(sm_scale) if sm_scale is not None else 1.0 / math.sqrt(float(orig_head_dim))
     # Head-dim tail is masked in the kernel, including a partial last dword.
     kernel_logical_d = orig_head_dim
     head_dim = launch_head_dim
+    kernel_v = head_dim if orig_v_dim == orig_head_dim else launch_v_dim
 
     qd = _fp8_descale_to_device("q_descale", q_descale, q.device)
     kd = _fp8_descale_to_device("k_descale", k_descale, q.device)
@@ -3017,9 +3041,11 @@ def _quant_dense_launch(
     q_p = _as_contig(q, stream=launch_stream)
     k_p = _as_contig(k, stream=launch_stream)
     v_p = _as_contig(v, stream=launch_stream)
+    if orig_v_dim != orig_head_dim and orig_v_dim != launch_v_dim:
+        v_p = torch.nn.functional.pad(v_p, (0, int(launch_v_dim) - int(orig_v_dim)))
 
-    caller_out_shape = (batch, seq_len_q_launch, num_heads, orig_head_dim)
-    store_d = kernel_logical_d
+    caller_out_shape = (batch, seq_len_q_launch, num_heads, orig_v_dim)
+    store_d = kernel_logical_d if orig_v_dim == orig_head_dim else int(launch_v_dim)
     if out is not None and store_d == orig_head_dim:
         if tuple(out.shape) != caller_out_shape or out.dtype != torch.bfloat16 or out.device != q.device:
             raise ValueError(f"{what}: out must be bf16 {caller_out_shape} on {q.device}")
@@ -3067,6 +3093,7 @@ def _quant_dense_launch(
             num_kv_heads=num_kv_heads,
             sm_scale=sm_scale_pad,
             logical_head_dim=kernel_logical_d,
+            head_dim_v=kernel_v,
             sliding_window=sliding_window,
             split_k=_ns > 1,
             has_alibi=has_alibi,
@@ -3098,8 +3125,8 @@ def _quant_dense_launch(
             batch=batch,
             seq_q=seq_len_q_launch,
             num_heads=num_heads,
-            tile_d=head_dim,
-            logical_d=kernel_logical_d,
+            tile_d=kernel_v,
+            logical_d=orig_v_dim if orig_v_dim != orig_head_dim else kernel_logical_d,
             num_kv_splits=_ns,
             has_sink=has_sink_b,
             return_lse=return_lse,
@@ -3108,7 +3135,7 @@ def _quant_dense_launch(
             daz=daz,
         )
 
-    o_p = _crop_head_dim(o_p, orig_head_dim)
+    o_p = _crop_head_dim(o_p, orig_v_dim)
     if out is not None and o_p.data_ptr() != out.data_ptr():
         if launch_stream is None:
             out.copy_(o_p)
@@ -3235,6 +3262,7 @@ def _get_int8_kernel(
     num_kv_heads: int | None = None,
     sm_scale: float | None = None,
     logical_head_dim: int | None = None,
+    head_dim_v: int | None = None,
     varlen: bool = False,
     paged: bool = False,
     page_size: int = 16,
@@ -3252,6 +3280,7 @@ def _get_int8_kernel(
     return build_flash_attn_func_int8_module(
         num_heads=num_heads,
         head_dim=head_dim,
+        head_dim_v=head_dim_v,
         causal=causal,
         dtype_str="int8",
         waves_per_eu=waves_per_eu,

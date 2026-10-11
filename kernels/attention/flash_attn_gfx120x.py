@@ -83,6 +83,7 @@ def _lds_head_tile(head_dim: int, elem_bytes: int) -> int:
 def build_flash_attn_func_module_primary(
     num_heads: int,
     head_dim: int,
+    head_dim_v: int | None = None,
     causal: bool = True,
     dtype_str: str = "bf16",
     sm_scale: float | None = None,
@@ -109,6 +110,7 @@ def build_flash_attn_func_module_primary(
     bias_bottom_right: bool = False,
     has_alibi: bool = False,
     alibi_per_head: bool = False,
+    softcap: float | None = None,
 ) -> Callable[..., None]:
     """Build the gfx120x Flash Attention kernel."""
     arch = str(get_rocm_arch())
@@ -147,12 +149,16 @@ def build_flash_attn_func_module_primary(
     NUM_PREFETCH_K = 1
     NUM_PREFETCH_V = 1
 
+    if head_dim_v is None:
+        head_dim_v = int(head_dim)
+    head_dim_v = int(head_dim_v)
     K_STEP_QK = WMMA_K
     K_STEPS_QK = head_dim // K_STEP_QK
     WMMA_LANE_K = 8
 
     D_CHUNK = WMMA_N
-    D_CHUNKS = head_dim // D_CHUNK
+    # Output chunks follow the value head. Query head stays on K_STEPS_QK.
+    D_CHUNKS = head_dim_v // D_CHUNK
 
     PV_K_STEP = WMMA_K
     PV_K_STEPS = K_SUB_N // PV_K_STEP
@@ -161,17 +167,23 @@ def build_flash_attn_func_module_primary(
     assert head_dim % 32 == 0 and head_dim >= 32, (
         f"gfx120x FA head_dim ({head_dim}) must be a positive multiple of 32"
     )
+    assert head_dim_v % 32 == 0 and head_dim_v >= 32, (
+        f"gfx120x FA head_dim_v ({head_dim_v}) must be a positive multiple of 32"
+    )
     assert dtype_str in ("f16", "bf16")
     TILE_D = _lds_head_tile(int(head_dim), 2)
+    TILE_DV = _lds_head_tile(int(head_dim_v), 2)
     NUM_D_TILES = int(head_dim) // TILE_D
+    NUM_DV_TILES = int(head_dim_v) // TILE_DV
     K_STEPS_PER_TILE = TILE_D // K_STEP_QK
-    D_CHUNKS_PER_TILE = TILE_D // D_CHUNK
+    D_CHUNKS_PER_TILE = TILE_DV // D_CHUNK
 
     if sm_scale is None:
         sm_scale = 1.0 / host_math.sqrt(head_dim)
 
     NUM_HEADS = num_heads
     HEAD_DIM = head_dim
+    HEAD_DIM_V = head_dim_v
     # Aligned D keeps the historical stride (HEAD_DIM). A shorter logical D is a
     # separate specialization so the aligned kernel does not trace the tail.
     if logical_head_dim is None or int(logical_head_dim) == int(head_dim):
@@ -191,6 +203,8 @@ def build_flash_attn_func_module_primary(
     ALIBI_PER_HEAD = bool(alibi_per_head)
     RETURN_LSE = bool(return_lse)
     HAS_SINK = bool(has_sink)
+    HAS_SOFTCAP = softcap is not None and float(softcap) != 0.0
+    SOFTCAP = float(softcap) if HAS_SOFTCAP else 0.0
     if sliding_window is None:
         HAS_WINDOW = False
         SWA_LEFT = 0
@@ -219,6 +233,17 @@ def build_flash_attn_func_module_primary(
     else:
         Q_STRIDE = int(num_heads) * LOGICAL_D
         KV_STRIDE = NUM_KV_HEADS * LOGICAL_D
+    # Value head matches the query head unless the caller passed a different V width.
+    if int(head_dim_v) == int(head_dim):
+        LOGICAL_DV = LOGICAL_D
+        ALIGNED_DV = ALIGNED_D
+        KV_STRIDE_V = KV_STRIDE
+        STRIDE_O = Q_STRIDE
+    else:
+        LOGICAL_DV = int(head_dim_v)
+        ALIGNED_DV = True
+        KV_STRIDE_V = NUM_KV_HEADS * int(head_dim_v)
+        STRIDE_O = int(num_heads) * int(head_dim_v)
     STRIDE_TOKEN = Q_STRIDE
     _kv_layout = kv_cache_layout or "linear"
     if _kv_layout not in ("linear", "linear3d", "vectorized"):
@@ -232,14 +257,16 @@ def build_flash_attn_func_module_primary(
         raise ValueError(f"gfx120x FA: vectorized KV needs head_dim and page_size divisible by kVS={KV_VEC}")
     # LSE layout [B, H, Sq]. Compile-time head count is NUM_HEADS; seq_len is a runtime arg.
 
-    # LDS holds one chunk. TILE_D == HEAD_DIM when the whole head fits.
+    # LDS holds one chunk of K and one chunk of V. Each tile is the head that fits.
     K_STRIDE = TILE_D + 4
-    V_STRIDE = TILE_D + 4
+    V_STRIDE = TILE_DV + 4
 
     ENABLE_LDS_VEC16 = os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16", "1") == "1"
     VEC_WIDTH = 16 if ENABLE_LDS_VEC16 else 8
     THREADS_PER_ROW_LOAD = TILE_D // VEC_WIDTH
+    THREADS_PER_ROW_V = TILE_DV // VEC_WIDTH
     ROWS_PER_BATCH_LOAD = BLOCK_SIZE // THREADS_PER_ROW_LOAD
+    ROWS_PER_BATCH_V = BLOCK_SIZE // THREADS_PER_ROW_V
 
     # Multi-batch KV loads: every BLOCK_N row must be covered. Floor division
     # silently dropped the tail when ROWS_PER_BATCH_LOAD did not divide BLOCK_N
@@ -258,10 +285,18 @@ def build_flash_attn_func_module_primary(
         NUM_BATCHES_KV = (BLOCK_N + ROWS_PER_BATCH_LOAD - 1) // ROWS_PER_BATCH_LOAD
         # Always guard when multi-batch: last ceil batch may be partial.
         KV_NEEDS_GUARD = True
+    if ROWS_PER_BATCH_V <= 0:
+        raise ValueError(f"ROWS_PER_BATCH_V must be > 0 (head_dim_v={head_dim_v})")
+    if ROWS_PER_BATCH_V >= BLOCK_N:
+        NUM_BATCHES_V = 1
+        V_NEEDS_GUARD = ROWS_PER_BATCH_V > BLOCK_N
+    else:
+        NUM_BATCHES_V = (BLOCK_N + ROWS_PER_BATCH_V - 1) // ROWS_PER_BATCH_V
+        V_NEEDS_GUARD = True
 
     # Buffer loads cap at dwordx4, so V rows are fetched in 8-element pieces.
     V_SUBVECS = VEC_WIDTH // 8
-    NUM_V_VECS = NUM_BATCHES_KV * V_SUBVECS
+    NUM_V_VECS = NUM_BATCHES_V * V_SUBVECS
 
     LDS_K_TILE_SIZE = BLOCK_N * K_STRIDE
     LDS_V_TILE_SIZE = BLOCK_N * V_STRIDE
@@ -461,6 +496,8 @@ def build_flash_attn_func_module_primary(
         load_row_in_batch = tid // THREADS_PER_ROW_LOAD
         load_lane_in_row = tid % THREADS_PER_ROW_LOAD
         load_col_base = load_lane_in_row * VEC_WIDTH
+        load_row_v = tid // THREADS_PER_ROW_V
+        load_col_v = (tid % THREADS_PER_ROW_V) * VEC_WIDTH
 
         # --- per-batch lengths / packed offsets (VARLEN) or SeqlenK (PAGED) ---
         # Dense: seq_len_kv_valid from launch arg; q uses seq_len (max = real).
@@ -559,6 +596,53 @@ def build_flash_attn_func_module_primary(
             token = batch_idx * seq_len_kv_v + token_idx
             return token * KV_STRIDE + kv_head_idx * HEAD_DIM + col
 
+        def global_idx_v(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
+            """V index. Uses the value-head stride. Equal heads match ``global_idx_kv``."""
+            if const_expr(PAGED):
+                _tok = fx.Int32(token_idx)
+                _page_idx = _tok // fx.Int32(PAGE_SIZE)
+                _page_off = _tok % fx.Int32(PAGE_SIZE)
+                _bt_idx = fx.Int32(batch_idx) * _bt_stride_i32 + _page_idx
+                _pid = fx.Int32(fx.ptr_load(_bt_ptr + _bt_idx))
+                if const_expr(not ALIGNED_DV):
+                    return (
+                        fx.Int64(_pid) * fx.Int64(PAGE_SIZE * KV_STRIDE_V)
+                        + fx.Int64(_page_off) * fx.Int64(KV_STRIDE_V)
+                        + kv_head_idx * LOGICAL_DV
+                        + col
+                    )
+                return (
+                    fx.Int64(_pid) * fx.Int64(PAGE_SIZE * KV_STRIDE_V)
+                    + fx.Int64(_page_off) * fx.Int64(KV_STRIDE_V)
+                    + kv_head_idx * HEAD_DIM_V
+                    + col
+                )
+            if const_expr(not ALIGNED_DV):
+                if const_expr(VARLEN):
+                    token = k_off_i64 + fx.Int64(token_idx)
+                    return token * KV_STRIDE_V + kv_head_idx * LOGICAL_DV + col
+                token = batch_idx * seq_len_kv_v + token_idx
+                return token * KV_STRIDE_V + kv_head_idx * LOGICAL_DV + col
+            if const_expr(VARLEN):
+                token = k_off_i64 + fx.Int64(token_idx)
+                return token * KV_STRIDE_V + kv_head_idx * HEAD_DIM_V + col
+            token = batch_idx * seq_len_kv_v + token_idx
+            return token * KV_STRIDE_V + kv_head_idx * HEAD_DIM_V + col
+
+        def q_row_off_o(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
+            """Output index. The value head sets the row stride."""
+            if const_expr(not ALIGNED_DV):
+                if const_expr(VARLEN):
+                    token = q_off_i64 + fx.Int64(token_idx)
+                else:
+                    token = batch_idx * seq_len_q_v + token_idx
+                return token * STRIDE_O + head_idx * LOGICAL_DV + col
+            if const_expr(VARLEN):
+                token = q_off_i64 + fx.Int64(token_idx)
+            else:
+                token = batch_idx * seq_len_q_v + token_idx
+            return token * STRIDE_O + head_idx * HEAD_DIM_V + col
+
         # Back-compat alias: historical call sites meant Q indexing.
         def global_idx(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
             return global_idx_q(token_idx, col)
@@ -575,10 +659,10 @@ def build_flash_attn_func_module_primary(
             )
 
             def v_idx(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
-                return global_idx_kv(token_idx, col)
+                return global_idx_v(token_idx, col)
 
         else:
-            v_batch_elems = seq_len_kv_v * fx.Uint64(KV_STRIDE)
+            v_batch_elems = seq_len_kv_v * fx.Uint64(KV_STRIDE_V)
             if const_expr(VARLEN):
                 # Packed KV: index from buffer base via global_idx_kv (k_off+tok).
                 v_buf_ptr = _bounds_checked_buf_ptr(
@@ -587,7 +671,7 @@ def build_flash_attn_func_module_primary(
                 )
 
                 def v_idx(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
-                    return global_idx_kv(token_idx, col)
+                    return global_idx_v(token_idx, col)
 
             else:
                 v_buf_ptr = _bounds_checked_buf_ptr(
@@ -596,9 +680,9 @@ def build_flash_attn_func_module_primary(
                 )
 
                 def v_idx(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
-                    if const_expr(not ALIGNED_D):
-                        return token_idx * KV_STRIDE + kv_head_idx * LOGICAL_D + col
-                    return token_idx * KV_STRIDE + kv_head_idx * HEAD_DIM + col
+                    if const_expr(not ALIGNED_DV):
+                        return token_idx * KV_STRIDE_V + kv_head_idx * LOGICAL_DV + col
+                    return token_idx * KV_STRIDE_V + kv_head_idx * HEAD_DIM_V + col
 
         def _load_global_half_vec(elem_ptr: fx.Pointer, base_idx: fx.Int32 | fx.Int64 | int, width: int) -> fx.Vector:
             view = fx.make_view(
@@ -737,11 +821,11 @@ def build_flash_attn_func_module_primary(
 
         def _load_v8_vec(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Vector:
             if const_expr(not KV_VECTORIZED):
-                if const_expr(not ALIGNED_D):
+                if const_expr(not ALIGNED_DV):
                     row_ok = fx.Uint64(token_idx) < fx.Uint64(seq_len_kv_valid_i32)
                     vec = Vec.from_elements([elem_dtype(0) for _ in range_constexpr(8)], elem_dtype)
                     if row_ok:
-                        vec = _load_tail(v_elem_ptr, global_idx_kv(token_idx, col), col, 8)
+                        vec = _load_tail(v_elem_ptr, global_idx_v(token_idx, col), col, 8)
                     return vec
                 return _load_global_half_vec(v_buf_ptr, v_idx(token_idx, col), 8)
             _pid, _poff = _paged_pid_off(token_idx)
@@ -758,7 +842,7 @@ def build_flash_attn_func_module_primary(
                         * fx.Int64(PAGE_SIZE // KV_VEC)
                         + fx.Int64(kg)
                     )
-                    * fx.Int64(LOGICAL_D)
+                    * fx.Int64(LOGICAL_DV)
                     + fx.Int64(col)
                     + fx.Int64(_i)
                 ) * fx.Int64(KV_VEC) + fx.Int64(kr_pair)
@@ -787,7 +871,7 @@ def build_flash_attn_func_module_primary(
         def _v_store_row_major(
             v_base: fx.Int64, lds_row: fx.Int32 | fx.Int64 | int, col_extra: int, vec: fx.Vector
         ) -> None:
-            lds_idx = v_base + lds_row * V_STRIDE + load_col_base + col_extra
+            lds_idx = v_base + lds_row * V_STRIDE + load_col_v + col_extra
             fx.ptr_store(Vec(vec), lds_kv + fx.Int32(lds_idx))
 
         def coop_load_v_global(tile_start: fx.Int32 | fx.Int64 | int) -> list[fx.Vector]:
@@ -796,23 +880,23 @@ def build_flash_attn_func_module_primary(
             # V descriptor (zero-fill) and stores are skipped in coop_store_v_lds.
             # VARLEN/PAGED: clamp row via _clamp_kv_row (no runtime list-carry if).
             vecs = []
-            for batch in range_constexpr(NUM_BATCHES_KV):
-                row_offset = batch * ROWS_PER_BATCH_LOAD
-                lds_row = load_row_in_batch + row_offset
-                if const_expr(KV_NEEDS_GUARD):
+            for batch in range_constexpr(NUM_BATCHES_V):
+                row_offset = batch * ROWS_PER_BATCH_V
+                lds_row = load_row_v + row_offset
+                if const_expr(V_NEEDS_GUARD):
                     row_cap = fx.Int64(BLOCK_N - 1)
                     lds_row = fx.Int64((lds_row < row_cap).select(lds_row, row_cap))
                 row_idx = _clamp_kv_row(tile_start + lds_row)
                 for sv in range_constexpr(V_SUBVECS):
-                    vecs.append(_load_v8_vec(row_idx, load_col_base + fx.Int64(sv * 8)))
+                    vecs.append(_load_v8_vec(row_idx, load_col_v + fx.Int64(sv * 8)))
             return vecs
 
         def coop_store_v_lds(vecs: list[fx.Vector], buf_id: fx.Int32 | int = 0) -> None:
             v_base = v_buf_base(buf_id)
-            for batch in range_constexpr(NUM_BATCHES_KV):
-                row_offset = batch * ROWS_PER_BATCH_LOAD
-                lds_row = load_row_in_batch + row_offset
-                if const_expr(KV_NEEDS_GUARD):
+            for batch in range_constexpr(NUM_BATCHES_V):
+                row_offset = batch * ROWS_PER_BATCH_V
+                lds_row = load_row_v + row_offset
+                if const_expr(V_NEEDS_GUARD):
                     row_valid = lds_row < fx.Int64(BLOCK_N)
                     if row_valid:
                         for sv in range_constexpr(V_SUBVECS):
@@ -845,15 +929,15 @@ def build_flash_attn_func_module_primary(
             """Load one head chunk of V. LDS columns stay local to the chunk."""
             tile_start = fx.Int64(tile_start)
             vecs = []
-            for batch in range_constexpr(NUM_BATCHES_KV):
-                row_offset = batch * ROWS_PER_BATCH_LOAD
-                lds_row = load_row_in_batch + row_offset
-                if const_expr(KV_NEEDS_GUARD):
+            for batch in range_constexpr(NUM_BATCHES_V):
+                row_offset = batch * ROWS_PER_BATCH_V
+                lds_row = load_row_v + row_offset
+                if const_expr(V_NEEDS_GUARD):
                     row_cap = fx.Int64(BLOCK_N - 1)
                     lds_row = fx.Int64((lds_row < row_cap).select(lds_row, row_cap))
                 row_idx = _clamp_kv_row(tile_start + lds_row)
                 for sv in range_constexpr(V_SUBVECS):
-                    vecs.append(_load_v8_vec(row_idx, fx.Int64(d_base) + load_col_base + fx.Int64(sv * 8)))
+                    vecs.append(_load_v8_vec(row_idx, fx.Int64(d_base) + load_col_v + fx.Int64(sv * 8)))
             return vecs
 
         q_row = q_start + wave_q_offset + lane16
@@ -908,7 +992,7 @@ def build_flash_attn_func_module_primary(
         # Non-causal carries prefetched V across iterations; causal avoids the
         # extra VGPR lifetime and loads V in the current iteration.
         # A split head reloads each V chunk after softmax into the same LDS buffer.
-        PREFETCH_V_ACROSS_ITERS = (not CAUSAL) and NUM_D_TILES == 1
+        PREFETCH_V_ACROSS_ITERS = (not CAUSAL) and NUM_D_TILES == 1 and NUM_DV_TILES == 1
 
         ns_i32 = fx.Int32(num_splits)
         sp_i32 = fx.Int32(split_idx)
@@ -1158,12 +1242,30 @@ def build_flash_attn_func_module_primary(
                 _window = (seen, row_live)
             else:
                 _window = None
+            softmax_log2e = c_sm_scale_log2e
+            if const_expr(HAS_SOFTCAP):
+                # tanh(score * sm_scale / softcap) * softcap, then softmax with scale 1.
+                # Device lib has no ftanh. tanh(x) = (e^{2x} - 1) / (e^{2x} + 1), via exp2.
+                _cap = fx.Float32(SOFTCAP)
+                _inv = fx.Float32(sm_scale / SOFTCAP)
+                _two_log2e = fx.Float32(2.0 * _LOG2E)
+                _lim = fx.Float32(8.0)
+                _nlim = fx.Float32(-8.0)
+                s_capped = []
+                for _s in s_raw:
+                    z = fx.Float32(_s) * _inv
+                    z = _fsub(c_zero_f, _fmax(_fsub(c_zero_f, z), _nlim))
+                    z = _fmax(z, _nlim)
+                    ez = fx.Float32(fx.rocdl.exp2(fx.Float32.ir_type, fx.Float32(z * _two_log2e).ir_value()))
+                    s_capped.append(((ez - c_one_f) / (ez + c_one_f)) * _cap)
+                s_raw = s_capped
+                softmax_log2e = fx.Float32(_LOG2E)
             p_vals, m_new_raw, l_new, o_accs, row_alive = online_softmax_tile(
                 s_raw,
                 m_running,
                 l_running,
                 o_accs,
-                c_sm_scale_log2e,
+                softmax_log2e,
                 reduction_peer=reduction_peer,
                 fmax=_fmax,
                 fadd=_fadd,
@@ -1176,7 +1278,7 @@ def build_flash_attn_func_module_primary(
                 window=_window,
             )
 
-            if const_expr(NUM_D_TILES == 1):
+            if const_expr(NUM_DV_TILES == 1):
                 coop_store_v_lds(_v_vecs_tile, 0)
                 gpu.barrier()
 
@@ -1214,7 +1316,7 @@ def build_flash_attn_func_module_primary(
                     v_elems.append(fx.ptr_load(lds_kv + fx.Int32(v_lds_idx)))
                 return Vec.from_elements(v_elems, elem_dtype)
 
-            if const_expr(NUM_D_TILES == 1):
+            if const_expr(NUM_DV_TILES == 1):
                 if wave_needs_kv_tile:
                     o_tmp = list(o_accs)
 
@@ -1248,8 +1350,8 @@ def build_flash_attn_func_module_primary(
 
                     o_accs = o_tmp
             else:
-                for d_tile in range_constexpr(NUM_D_TILES):
-                    _v_slice = coop_load_v_slice(kv_block_start, d_tile * TILE_D)
+                for d_tile in range_constexpr(NUM_DV_TILES):
+                    _v_slice = coop_load_v_slice(kv_block_start, d_tile * TILE_DV)
                     coop_store_v_lds(_v_slice, 0)
                     gpu.barrier()
                     if wave_needs_kv_tile:
@@ -1312,7 +1414,7 @@ def build_flash_attn_func_module_primary(
                 for dc in range_constexpr(D_CHUNKS):
                     _ovec = has_mass_pre.select(o_finals[dc], zero_vec)
                     _dcol = fx.Int64(dc * D_CHUNK) + klane * fx.Uint64(8)
-                    _obase = _ws_row * fx.Int64(HEAD_DIM) + _dcol
+                    _obase = _ws_row * fx.Int64(HEAD_DIM_V) + _dcol
                     for _j in range_constexpr(8):
                         fx.ptr_store(
                             Vec(_ovec)[_j],
@@ -1369,12 +1471,12 @@ def build_flash_attn_func_module_primary(
                     o_norm_vec = _fmul(o_finals[dc], inv_l_vec)
                     o_trunc = Vec(o_norm_vec).to(elem_dtype)
                     d_col = fx.Int64(dc * D_CHUNK) + klane * 8
-                    o_global = global_idx_q(q_row, d_col)
-                    if const_expr(ALIGNED_D):
+                    o_global = q_row_off_o(q_row, d_col)
+                    if const_expr(ALIGNED_DV):
                         _store_global_half(o_elem_ptr, o_global, o_trunc)
                     else:
                         for ei in range_constexpr(8):
-                            if d_col + fx.Int64(ei) < fx.Int64(LOGICAL_D):
+                            if d_col + fx.Int64(ei) < fx.Int64(LOGICAL_DV):
                                 _store_global_half(
                                     o_elem_ptr,
                                     o_global + fx.Int64(ei),

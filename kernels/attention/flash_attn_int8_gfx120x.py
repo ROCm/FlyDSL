@@ -8,6 +8,7 @@ from collections.abc import Callable
 def build_flash_attn_func_int8_module_primary(
     num_heads: int,
     head_dim: int,
+    head_dim_v: int | None = None,
     causal: bool = True,
     dtype_str: str = "int8",
     sm_scale: float | None = None,
@@ -45,6 +46,7 @@ def build_flash_attn_func_int8_module_primary(
     return build_flash_attn_func_fp8_module_primary(
         num_heads=num_heads,
         head_dim=head_dim,
+        head_dim_v=head_dim_v,
         causal=causal,
         dtype_str="int8",
         sm_scale=sm_scale,

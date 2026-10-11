@@ -172,6 +172,104 @@ def _window_bias(sq: int, sk: int, left: int, right: int, causal: bool, device: 
     return bias.masked_fill(~allow, float("-inf"))
 
 
+def test_quant_value_head() -> None:
+    """fp8 and int8 use the value head for V and the output."""
+    torch.manual_seed(6)
+    qf = torch.randn(1, 32, 2, 64, device="cuda", dtype=torch.float32)
+    vf = torch.randn(1, 32, 2, 32, device="cuda", dtype=torch.float32)
+    scale = float(max(qf.abs().amax().item(), vf.abs().amax().item(), 1e-6) / 448.0)
+    q8 = (qf / scale).to(torch.float8_e4m3fn)
+    v8 = (vf / scale).to(torch.float8_e4m3fn)
+    out = flydsl_flash_attn_fp8_func(q8, q8, v8, causal=False, q_descale=scale, k_descale=scale, v_descale=scale)
+    assert out.shape == (1, 32, 2, 32)
+    _dequant_bar(out, q8.float() * scale, q8.float() * scale, v8.float() * scale, 4.0)
+
+    scale_i = float(max(qf.abs().amax().item(), vf.abs().amax().item(), 1e-6) / 127.0)
+    qi = (qf / scale_i).round().clamp(-128, 127).to(torch.int8)
+    vi = (vf / scale_i).round().clamp(-128, 127).to(torch.int8)
+    out = flydsl_flash_attn_int8_func(qi, qi, vi, causal=False, q_descale=scale_i, k_descale=scale_i, v_descale=scale_i)
+    assert out.shape == (1, 32, 2, 32)
+    _dequant_bar(out, qi.float() * scale_i, qi.float() * scale_i, vi.float() * scale_i, 4.0)
+
+
+def test_softcap_and_caller_scale() -> None:
+    """Softcap is tanh(score * scale / cap) * cap. A caller scale replaces 1/sqrt(D)."""
+    torch.manual_seed(5)
+    q = torch.randn(1, 32, 2, 64, device="cuda", dtype=torch.bfloat16)
+    scale = 0.25
+    out = flydsl_flash_attn_func(q, q, q, causal=False, sm_scale=scale)
+    ref32 = F.scaled_dot_product_attention(
+        q.float().transpose(1, 2), q.float().transpose(1, 2), q.float().transpose(1, 2), scale=scale
+    ).transpose(1, 2)
+    ref_dt = F.scaled_dot_product_attention(
+        q.transpose(1, 2), q.transpose(1, 2), q.transpose(1, 2), scale=scale
+    ).transpose(1, 2)
+    assert _max_abs(out, ref32) <= 2 * _max_abs(ref_dt, ref32) + 1e-4
+
+    cap = 10.0
+    out = flydsl_flash_attn_func(q, q, q, causal=False, softcap=cap)
+    qf = q.float().transpose(1, 2)
+    sm = 64**-0.5
+    scores = torch.matmul(qf, qf.transpose(-1, -2)) * sm
+    scores = torch.tanh(scores / cap) * cap
+    ref = torch.matmul(torch.softmax(scores, dim=-1), qf).transpose(1, 2)
+    ref_dt = torch.matmul(torch.softmax(scores, dim=-1).to(torch.bfloat16).float(), qf).transpose(1, 2)
+    assert _max_abs(out, ref) <= 2 * _max_abs(ref_dt, ref) + 1e-3
+
+    # Prefix-LM is an additive bias: full attention on the prefix, causal after it.
+    prefix = 8
+    bias = torch.zeros(32, 32, device="cuda", dtype=torch.float32)
+    q_idx = torch.arange(32, device="cuda")[:, None]
+    k_idx = torch.arange(32, device="cuda")[None, :]
+    allow = (k_idx < prefix) | (k_idx <= q_idx)
+    bias = bias.masked_fill(~allow, float("-inf"))
+    out = flydsl_flash_attn_func(q, q, q, causal=False, attn_mask=bias)
+    ref32 = F.scaled_dot_product_attention(
+        q.float().transpose(1, 2), q.float().transpose(1, 2), q.float().transpose(1, 2), attn_mask=bias
+    ).transpose(1, 2)
+    ref_dt = _sdpa_ref(q, q, q, causal=False, attn_mask=bias)
+    assert _max_abs(out, ref32) <= 2 * _max_abs(ref_dt, ref32) + 1e-4
+
+
+def test_bf16_value_head_differs() -> None:
+    """Q/K use the query head. V and the output use the value head."""
+    torch.manual_seed(4)
+    for dq, dv, sq in ((64, 32, 32), (128, 64, 31), (40, 24, 16), (32, 96, 8)):
+        q = torch.randn(1, sq, 2, dq, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(1, sq, 2, dq, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(1, sq, 2, dv, device="cuda", dtype=torch.bfloat16)
+        out = flydsl_flash_attn_func(q, k, v, causal=False)
+        assert out.shape == (1, sq, 2, dv)
+        _within_dtype_bar(out, q, k, v, causal=False)
+    q = torch.randn(1, 32, 2, 64, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(1, 32, 2, 64, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(1, 32, 2, 32, device="cuda", dtype=torch.bfloat16)
+    out = flydsl_flash_attn_func(q, k, v, causal=False, num_kv_splits=2)
+    _within_dtype_bar(out, q, k, v, causal=False)
+
+    # Packed varlen.
+    q1 = torch.randn(16, 2, 64, device="cuda", dtype=torch.bfloat16)
+    v1 = torch.randn(16, 2, 32, device="cuda", dtype=torch.bfloat16)
+    cu = torch.tensor([0, 16], device="cuda", dtype=torch.int32)
+    out = flydsl_flash_attn_func(
+        q1, q1, v1, causal=False, cu_seqlens_q=cu, cu_seqlens_kv=cu, max_seqlen_q=16, max_seqlen_kv=16
+    )
+    assert out.shape == v1.shape
+    _within_dtype_bar(out.unsqueeze(0), q1.unsqueeze(0), q1.unsqueeze(0), v1.unsqueeze(0), causal=False)
+
+    # Paged linear cache, value head 32, query head 64.
+    page, sk = 16, 32
+    k_cache = torch.randn(2, page, 2, 64, device="cuda", dtype=torch.bfloat16)
+    v_cache = torch.randn(2, page, 2, 32, device="cuda", dtype=torch.bfloat16)
+    bt = torch.arange(2, device="cuda", dtype=torch.int32).view(1, 2)
+    q = torch.randn(1, 8, 2, 64, device="cuda", dtype=torch.bfloat16)
+    out = flydsl_flash_attn_func(
+        q, k_cache, v_cache, causal=False, block_table=bt, seqlen_k=torch.tensor([sk], device="cuda", dtype=torch.int32)
+    )
+    assert out.shape == (1, 8, 2, 32)
+    _within_dtype_bar(out, q, k_cache.reshape(1, sk, 2, 64), v_cache.reshape(1, sk, 2, 32), causal=False)
+
+
 def test_bf16_shape_grid() -> None:
     """Lengths, heads, causal, and one cross pair. Head 512 is the LDS split."""
     torch.manual_seed(1)

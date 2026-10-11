@@ -75,6 +75,7 @@ def _lds_head_tile(head_dim: int, elem_bytes: int) -> int:
 def build_flash_attn_func_fp8_module_primary(
     num_heads: int,
     head_dim: int,
+    head_dim_v: int | None = None,
     causal: bool = True,
     dtype_str: str = "fp8_e4m3fn",
     sm_scale: float | None = None,
@@ -145,8 +146,11 @@ def build_flash_attn_func_fp8_module_primary(
     K_STEPS_QK = head_dim // K_STEP_QK
     WMMA_LANE_K = 8
 
+    if head_dim_v is None:
+        head_dim_v = int(head_dim)
+    head_dim_v = int(head_dim_v)
     D_CHUNK = WMMA_N
-    D_CHUNKS = head_dim // D_CHUNK
+    D_CHUNKS = head_dim_v // D_CHUNK
 
     PV_K_STEP = WMMA_K
     PV_K_STEPS = K_SUB_N // PV_K_STEP
@@ -156,10 +160,15 @@ def build_flash_attn_func_fp8_module_primary(
         f"gfx120x quant FA head_dim ({head_dim}) must be a positive multiple of 32"
     )
     # fp8 and int8 are 1 byte. 992 is the widest row that fits in 64 KiB.
+    assert head_dim_v % 32 == 0 and head_dim_v >= 32, (
+        f"gfx120x quant FA head_dim_v ({head_dim_v}) must be a positive multiple of 32"
+    )
     TILE_D = _lds_head_tile(int(head_dim), 1)
+    TILE_DV = _lds_head_tile(int(head_dim_v), 1)
     NUM_D_TILES = int(head_dim) // TILE_D
+    NUM_DV_TILES = int(head_dim_v) // TILE_DV
     K_STEPS_PER_TILE = TILE_D // K_STEP_QK
-    D_CHUNKS_PER_TILE = TILE_D // D_CHUNK
+    D_CHUNKS_PER_TILE = TILE_DV // D_CHUNK
     # Bind cvt / clip / AB type at *build* scope (Python). Inside @flyc.kernel the
     # AST rewriter turns `a if cond else b` into scf_ifexp and breaks bf8 cvt.
     _IS_INT8 = dtype_str in ("int8", "i8")
@@ -231,10 +240,20 @@ def build_flash_attn_func_fp8_module_primary(
         raise ValueError(f"gfx120x quant FA: vectorized KV needs head_dim and page_size divisible by {KV_VEC}")
     STRIDE_TOKEN = NUM_HEADS * LOGICAL_D
     KV_STRIDE = NUM_KV_HEADS * int(LOGICAL_D)
+    if int(head_dim_v) == int(head_dim):
+        HEAD_DIM_V = HEAD_DIM
+        LOGICAL_DV = LOGICAL_D
+        KV_STRIDE_V = KV_STRIDE
+        STRIDE_O = STRIDE_TOKEN
+    else:
+        HEAD_DIM_V = int(head_dim_v)
+        LOGICAL_DV = int(head_dim_v)
+        KV_STRIDE_V = NUM_KV_HEADS * int(head_dim_v)
+        STRIDE_O = NUM_HEADS * int(head_dim_v)
 
-    # LDS holds one chunk. TILE_D == HEAD_DIM when the whole head fits.
+    # LDS holds one chunk of K and one chunk of V.
     K_STRIDE = TILE_D + 4
-    V_STRIDE = TILE_D + 4
+    V_STRIDE = TILE_DV + 4
 
     # FP8: buffer dwordx4 = 16 bytes = 16 E4M3FN elems. Keep VEC_WIDTH=16.
     # V rows still fetch in 8-element pieces to match WMMA lane K packing.
@@ -242,7 +261,9 @@ def build_flash_attn_func_fp8_module_primary(
     VEC_WIDTH = 16 if ENABLE_LDS_VEC16 else 8
     V_LOAD_WIDTH = 8  # elements per V global load (8 bytes)
     THREADS_PER_ROW_LOAD = TILE_D // VEC_WIDTH
+    THREADS_PER_ROW_V = TILE_DV // VEC_WIDTH
     ROWS_PER_BATCH_LOAD = BLOCK_SIZE // THREADS_PER_ROW_LOAD
+    ROWS_PER_BATCH_V = BLOCK_SIZE // THREADS_PER_ROW_V
 
     # Multi-batch KV loads: every BLOCK_N row must be covered. Floor division
     # silently dropped the tail when ROWS_PER_BATCH_LOAD did not divide BLOCK_N
@@ -260,10 +281,18 @@ def build_flash_attn_func_fp8_module_primary(
         NUM_BATCHES_KV = (BLOCK_N + ROWS_PER_BATCH_LOAD - 1) // ROWS_PER_BATCH_LOAD
         # Always guard when multi-batch: last ceil batch may be partial.
         KV_NEEDS_GUARD = True
+    if ROWS_PER_BATCH_V <= 0:
+        raise ValueError(f"ROWS_PER_BATCH_V must be > 0 (head_dim_v={head_dim_v})")
+    if ROWS_PER_BATCH_V >= BLOCK_N:
+        NUM_BATCHES_V = 1
+        V_NEEDS_GUARD = ROWS_PER_BATCH_V > BLOCK_N
+    else:
+        NUM_BATCHES_V = (BLOCK_N + ROWS_PER_BATCH_V - 1) // ROWS_PER_BATCH_V
+        V_NEEDS_GUARD = True
 
     # Buffer loads cap at dwordx4 (16B); V pieces are V_LOAD_WIDTH elems.
     V_SUBVECS = VEC_WIDTH // V_LOAD_WIDTH
-    NUM_V_VECS = NUM_BATCHES_KV * V_SUBVECS
+    NUM_V_VECS = NUM_BATCHES_V * V_SUBVECS
 
     LDS_K_TILE_SIZE = BLOCK_N * K_STRIDE
     LDS_V_TILE_SIZE = BLOCK_N * V_STRIDE
@@ -545,6 +574,8 @@ def build_flash_attn_func_fp8_module_primary(
         load_row_in_batch = tid // THREADS_PER_ROW_LOAD
         load_lane_in_row = tid % THREADS_PER_ROW_LOAD
         load_col_base = load_lane_in_row * VEC_WIDTH
+        load_row_v = tid // THREADS_PER_ROW_V
+        load_col_v = (tid % THREADS_PER_ROW_V) * VEC_WIDTH
 
         def global_idx_q(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
             if const_expr(VARLEN):
@@ -597,9 +628,10 @@ def build_flash_attn_func_fp8_module_primary(
 
         else:
             kv_batch_elems = seq_len_kv_v * fx.Uint64(KV_STRIDE)
+            v_batch_elems = seq_len_kv_v * fx.Uint64(KV_STRIDE_V)
             v_buf_ptr = _bounds_checked_buf_ptr(
-                fx.add_offset(v_elem_ptr, fx.Int64(batch_idx * kv_batch_elems)),
-                fx.Int64(kv_batch_elems) * fx.Int64(ELEM_BYTES),
+                fx.add_offset(v_elem_ptr, fx.Int64(batch_idx * v_batch_elems)),
+                fx.Int64(v_batch_elems) * fx.Int64(ELEM_BYTES),
             )
             # Mirror V: bounds-checked K descriptor so last-tile overhang rows
             # zero-fill instead of raw OOB global reads (host may pad, but the
@@ -610,7 +642,7 @@ def build_flash_attn_func_fp8_module_primary(
             )
 
             def v_idx(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
-                return token_idx * KV_STRIDE + kv_head_idx * LOGICAL_D + col
+                return token_idx * KV_STRIDE_V + kv_head_idx * LOGICAL_DV + col
 
             def k_idx(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
                 return token_idx * KV_STRIDE + kv_head_idx * LOGICAL_D + col
@@ -923,7 +955,7 @@ def build_flash_attn_func_fp8_module_primary(
         def _v_store_row_major(
             v_base: fx.Int64, lds_row: fx.Int32 | fx.Int64 | int, col_extra: int, vec: fx.Vector
         ) -> None:
-            lds_idx = v_base + lds_row * V_STRIDE + load_col_base + col_extra
+            lds_idx = v_base + lds_row * V_STRIDE + load_col_v + col_extra
             lds_store_i8(lds_idx, Vec(vec))
 
         def coop_load_v_global(tile_start: fx.Int32 | fx.Int64 | int) -> list[fx.Vector]:
@@ -931,24 +963,24 @@ def build_flash_attn_func_fp8_module_primary(
             # Clamp surplus LDS rows; OOB global loads hit the bounds-checked
             # V descriptor (zero-fill) and stores are skipped in coop_store_v_lds.
             vecs = []
-            for batch in range_constexpr(NUM_BATCHES_KV):
-                row_offset = batch * ROWS_PER_BATCH_LOAD
-                lds_row = load_row_in_batch + row_offset
-                if const_expr(KV_NEEDS_GUARD):
+            for batch in range_constexpr(NUM_BATCHES_V):
+                row_offset = batch * ROWS_PER_BATCH_V
+                lds_row = load_row_v + row_offset
+                if const_expr(V_NEEDS_GUARD):
                     row_cap = fx.Int64(BLOCK_N - 1)
                     lds_row = fx.Int64((lds_row < row_cap).select(lds_row, row_cap))
                 row_idx = tile_start + lds_row
                 for sv in range_constexpr(V_SUBVECS):
-                    v_col = load_col_base + fx.Int64(sv * V_LOAD_WIDTH)
+                    v_col = load_col_v + fx.Int64(sv * V_LOAD_WIDTH)
                     vecs.append(load_v_global(row_idx, v_col, V_LOAD_WIDTH))
             return vecs
 
         def coop_store_v_lds(vecs: list[fx.Vector], buf_id: fx.Int32 | int = 0) -> None:
             v_base = v_buf_base(buf_id)
-            for batch in range_constexpr(NUM_BATCHES_KV):
-                row_offset = batch * ROWS_PER_BATCH_LOAD
-                lds_row = load_row_in_batch + row_offset
-                if const_expr(KV_NEEDS_GUARD):
+            for batch in range_constexpr(NUM_BATCHES_V):
+                row_offset = batch * ROWS_PER_BATCH_V
+                lds_row = load_row_v + row_offset
+                if const_expr(V_NEEDS_GUARD):
                     row_valid = lds_row < fx.Int64(BLOCK_N)
                     if row_valid:
                         for sv in range_constexpr(V_SUBVECS):
@@ -991,15 +1023,15 @@ def build_flash_attn_func_fp8_module_primary(
             """Load one head chunk of V. LDS columns stay local to the chunk."""
             tile_start = fx.Int64(tile_start)
             vecs = []
-            for batch in range_constexpr(NUM_BATCHES_KV):
-                row_offset = batch * ROWS_PER_BATCH_LOAD
-                lds_row = load_row_in_batch + row_offset
-                if const_expr(KV_NEEDS_GUARD):
+            for batch in range_constexpr(NUM_BATCHES_V):
+                row_offset = batch * ROWS_PER_BATCH_V
+                lds_row = load_row_v + row_offset
+                if const_expr(V_NEEDS_GUARD):
                     row_cap = fx.Int64(BLOCK_N - 1)
                     lds_row = fx.Int64((lds_row < row_cap).select(lds_row, row_cap))
                 row_idx = tile_start + lds_row
                 for sv in range_constexpr(V_SUBVECS):
-                    v_col = fx.Int64(d_base) + load_col_base + fx.Int64(sv * V_LOAD_WIDTH)
+                    v_col = fx.Int64(d_base) + load_col_v + fx.Int64(sv * V_LOAD_WIDTH)
                     vecs.append(load_v_global(row_idx, v_col, V_LOAD_WIDTH))
             return vecs
 
@@ -1070,7 +1102,7 @@ def build_flash_attn_func_fp8_module_primary(
         # Non-causal carries prefetched V across iterations; causal avoids the
         # extra VGPR lifetime and loads V in the current iteration.
         # A split head reloads each V chunk after softmax into the same LDS buffer.
-        PREFETCH_V_ACROSS_ITERS = (not CAUSAL) and NUM_D_TILES == 1
+        PREFETCH_V_ACROSS_ITERS = (not CAUSAL) and NUM_D_TILES == 1 and NUM_DV_TILES == 1
 
         if const_expr(PREFETCH_V_ACROSS_ITERS):
             _v_vecs_init = coop_load_v_global(range_lo)
@@ -1327,7 +1359,7 @@ def build_flash_attn_func_fp8_module_primary(
                 window=_window,
             )
 
-            if const_expr(NUM_D_TILES == 1):
+            if const_expr(NUM_DV_TILES == 1):
                 coop_store_v_lds(_v_vecs_tile, 0)
                 gpu.barrier()
 
@@ -1361,7 +1393,7 @@ def build_flash_attn_func_fp8_module_primary(
                     v_elems.append(fx.ptr_load(lds_kv + fx.Int32(v_lds_idx)))
                 return Vec.from_elements(v_elems, elem_dtype)
 
-            if const_expr(NUM_D_TILES == 1):
+            if const_expr(NUM_DV_TILES == 1):
                 if wave_needs_kv_tile:
                     o_tmp = list(o_accs)
 
@@ -1395,8 +1427,8 @@ def build_flash_attn_func_fp8_module_primary(
 
                     o_accs = o_tmp
             else:
-                for d_tile in range_constexpr(NUM_D_TILES):
-                    _v_slice = coop_load_v_slice(kv_block_start, d_tile * TILE_D)
+                for d_tile in range_constexpr(NUM_DV_TILES):
+                    _v_slice = coop_load_v_slice(kv_block_start, d_tile * TILE_DV)
                     coop_store_v_lds(_v_slice, 0)
                     gpu.barrier()
                     if wave_needs_kv_tile:
@@ -1527,12 +1559,16 @@ def build_flash_attn_func_fp8_module_primary(
                     o_norm_vec = _fmul(o_finals[dc], inv_l_vec)
                     o_trunc = Vec(o_norm_vec).to(out_dtype)
                     d_col = fx.Int64(dc * D_CHUNK) + klane * 8
-                    o_global = global_idx(q_row, d_col)
-                    if const_expr(LOGICAL_D == HEAD_DIM):
+                    if const_expr(VARLEN):
+                        o_tok = q_off_i64 + fx.Int64(q_row)
+                    else:
+                        o_tok = batch_idx * seq_len_q_v + fx.Int64(q_row)
+                    o_global = o_tok * fx.Int64(STRIDE_O) + head_idx * fx.Int64(LOGICAL_DV) + d_col
+                    if const_expr(LOGICAL_DV == HEAD_DIM_V):
                         _store_global_half(o_elem_ptr, o_global, o_trunc)
                     else:
                         for ei in range_constexpr(8):
-                            if d_col + fx.Int64(ei) < fx.Int64(LOGICAL_D):
+                            if d_col + fx.Int64(ei) < fx.Int64(LOGICAL_DV):
                                 _store_global_half(
                                     o_elem_ptr,
                                     o_global + fx.Int64(ei),
