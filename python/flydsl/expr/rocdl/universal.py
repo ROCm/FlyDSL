@@ -175,11 +175,12 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
         clamp   (bool, default False): saturate integer accumulator (iu8/iu4 only).
         mod_c   (int,  default 0):     I16 C-operand modifier (gfx1250 only).
     Forwarded to the arch-specific WMMA atom (MmaOpGFX11_WMMAType on gfx11,
-    MmaOpGFX120X_WMMAType on gfx120x, MmaOpGFX1250_WMMAType on gfx1250); the
-    atom's verify() rejects sign_a/sign_b/clamp on the float (fp16/bf16/fp8)
-    paths, where the intrinsic has no such operands. Future WMMA ops for new
-    architectures should extend kwargs here rather than growing the positional
-    signature.
+    MmaOpGFX120X_WMMAType on gfx120x, MmaOpGFX1250_WMMAType on gfx1250).
+    ``verify()`` still rejects sign_a/sign_b/clamp on floating-point paths
+    (fp16/bf16/fp8), where the intrinsic has no such operands. On gfx120,
+    integer forms are IU4 16x16x16 and 16x16x32, and IU8 16x16x16, all with
+    i32 accumulator. Future WMMA ops for new architectures should extend
+    kwargs here rather than growing the positional signature.
     """
     ty_a = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
     elem_ty_b = kwargs.pop("elem_ty_b", None)
