@@ -15,18 +15,18 @@ module attributes {gpu.container_module} {
       // CHECK-NOT: unrealized_conversion_cast
 
       // CHECK: %[[SEED:.*]] = llvm.mlir.constant(-1 : i32)
-      %init = fly_ktrace.sentinel_token -> !fly_ktrace.token
+      %init = fly_ktrace.inactive_token -> !fly_ktrace.token
 
       // CHECK: scf.for {{.*}} iter_args(%[[TOK:.*]] = %[[SEED]]) -> (i32)
       %out = scf.for %i = %c0 to %c4 step %c1
              iter_args(%tok = %init) -> (!fly_ktrace.token) {
         // CHECK: llvm.mlir.constant(28 : i32)
         // CHECK: llvm.store %[[TOK]]
-        fly_ktrace.range_end %tok, "phase" : !fly_ktrace.token
+        fly_ktrace.range_stop %tok, "phase" : !fly_ktrace.token
         %next = fly_ktrace.range_start "phase" -> !fly_ktrace.token
         scf.yield %next : !fly_ktrace.token
       }
-      fly_ktrace.range_end %out, "phase" : !fly_ktrace.token
+      fly_ktrace.range_stop %out, "phase" : !fly_ktrace.token
       gpu.return
     }
   }

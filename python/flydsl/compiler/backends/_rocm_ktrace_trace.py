@@ -5,20 +5,15 @@
 from __future__ import annotations
 
 import gzip
-import json
 import math
 import os
 import struct
 from collections import defaultdict
 
-from ...expr.experimental import ktrace as _ktrace
+from ...expr import ktrace as _ktrace
 from ...expr.rocdl import ktrace_format as _format
 
 NS_PER_TICK = 10.0
-
-
-def _json_payload(value):
-    return str(value) if isinstance(value, float) and not math.isfinite(value) else value
 
 
 def _wave_key(rec: dict) -> tuple:
@@ -47,12 +42,8 @@ def group_launches(records: list[dict]) -> list[tuple[tuple[int, int], list[dict
     return sorted(grouped.items(), key=lambda item: min(rec["ts"] for rec in item[1]))
 
 
-def _event_name(name: str, payload) -> str:
-    return name if payload is None else f"{name}(payload={_json_payload(payload)})"
-
-
 def build_timeline(records: list[dict], names: dict[str, int], *, kernel: str = "kernel") -> dict:
-    """Nest records as kernel -> launch -> CU -> CTA -> wave tracks holding slices and instants.
+    """Nest records as kernel -> launch -> CU -> workgroup -> wave tracks holding slices and instants.
 
     Timestamps are nanoseconds from the earliest record."""
     by_id = {v: k for k, v in names.items()}
@@ -72,16 +63,16 @@ def build_timeline(records: list[dict], names: dict[str, int], *, kernel: str = 
         for rec in group:
             waves[_wave_key(rec)].append(rec)
         cus: dict[str, int] = {}
-        ctas: dict[tuple, int] = {}
+        wgs: dict[tuple, int] = {}
         for key, wave_records in sorted(waves.items()):
             wave_records.sort(key=lambda r: (r["ts"], r["slot"]))
             cu = _cu_label(wave_records[0])
             if cu not in cus:
                 cus[cu] = track(cu, launch, len(cus))
             block = key[2]
-            if (cu, block) not in ctas:
-                ctas[cu, block] = track("CTA(%d, %d, %d)" % block, cus[cu], len(ctas))
-            wave = track(f"Wave{key[3]}", ctas[cu, block], key[3])
+            if (cu, block) not in wgs:
+                wgs[cu, block] = track("WG(%d, %d, %d)" % block, cus[cu], len(wgs))
+            wave = track(f"Wave{key[3]}", wgs[cu, block], key[3])
             _wave_events(wave_records, by_id, wave, t0, timeline, track)
     return timeline
 
@@ -95,47 +86,63 @@ def _wave_events(group: list[dict], by_id: dict[int, str], wave: int, t0: int, t
     def label(rec):
         return by_id.get(rec["event_id"], f"event{rec['event_id']}")
 
-    def add_slice(track_uuid, start, end, seq, name, payload):
+    def add_slice(track_uuid, start, end, seq, name, closed=True, annotated=True):
         timeline["slices"].append(
-            {"track": track_uuid, "start": ns(start), "end": ns(end), "seq": seq, "name": name, "payload": payload}
+            {
+                "track": track_uuid,
+                "start": ns(start),
+                "end": ns(end),
+                "seq": seq,
+                "name": name if closed else f"{name} (unclosed)",
+                "payload": start["payload"] if annotated else None,
+                "payload_type": start.get("payload_type"),
+            }
         )
 
     n = len(group)
     first, last = group[0], group[-1]
     stack: list[tuple[int, dict]] = []
     open_tokens: dict[int, tuple[int, dict]] = {}
-    token_ranges: list[tuple[dict, dict, tuple[int, int]]] = []
+    token_ranges: list[tuple[dict, dict, tuple[int, int], bool]] = []
     for i, rec in enumerate(group):
         kind = rec["kind"]
         if kind == _ktrace.KIND_MARK:
             timeline["instants"].append(
-                {"track": wave, "ts": ns(rec), "seq": i, "name": label(rec), "payload": rec["payload"]}
+                {
+                    "track": wave,
+                    "ts": ns(rec),
+                    "seq": i,
+                    "name": label(rec),
+                    "payload": rec["payload"],
+                    "payload_type": rec.get("payload_type"),
+                }
             )
         elif kind == _ktrace.KIND_RANGE_PUSH:
             stack.append((i, rec))
         elif kind == _ktrace.KIND_RANGE_POP and stack:
             j, start = stack.pop()
-            add_slice(wave, start, rec, (j, i), label(start), start["payload"])
+            add_slice(wave, start, rec, (j, i), label(start))
         elif kind == _ktrace.KIND_RANGE_START:
             open_tokens[rec["slot"]] = (i, rec)
-        elif kind == _ktrace.KIND_RANGE_END and rec["start_slot"] in open_tokens:
+        elif kind == _ktrace.KIND_RANGE_STOP and rec["start_slot"] in open_tokens:
             j, start = open_tokens.pop(rec["start_slot"])
-            token_ranges.append((start, rec, (j, i)))
+            token_ranges.append((start, rec, (j, i), True))
     while stack:
         j, start = stack.pop()
-        add_slice(wave, start, last, (j, 2 * n - 1 - len(stack)), label(start), start["payload"])
-    token_ranges.extend((start, last, (j, n)) for j, start in open_tokens.values())
-    add_slice(wave, first, last, (-1, 2 * n), "Wave Span", None)
+        add_slice(wave, start, last, (j, 2 * n - 1 - len(stack)), label(start), closed=False)
+    token_ranges.extend((start, last, (j, n), False) for j, start in open_tokens.values())
+    add_slice(wave, first, last, (-1, 2 * n), "Wave Span", annotated=False)
 
-    # Token ranges may overlap without nesting: give each the first lane free at its start.
+    # Token ranges may overlap without nesting: give each the first lane whose previous range
+    # stopped at an earlier record. Comparing timestamps would let equal-tick overlaps share a lane.
     lanes: list[list[int]] = []
-    for start, end, seq in sorted(token_ranges, key=lambda r: r[2]):
-        lane = next((lane for lane in lanes if lane[1] <= start["ts"]), None)
+    for start, end, seq, closed in sorted(token_ranges, key=lambda r: r[2]):
+        lane = next((lane for lane in lanes if lane[1] < seq[0]), None)
         if lane is None:
-            lane = [track(f"ranges {len(lanes)}", wave, len(lanes)), 0]
+            lane = [track(f"ranges {len(lanes)}", wave, len(lanes)), -1]
             lanes.append(lane)
-        lane[1] = end["ts"]
-        add_slice(lane[0], start, end, seq, label(start), start["payload"])
+        lane[1] = seq[1]
+        add_slice(lane[0], start, end, seq, label(start), closed)
 
 
 # Perfetto TracePacket / TrackDescriptor / TrackEvent / DebugAnnotation field numbers.
@@ -172,25 +179,27 @@ def _blob(field: int, value: bytes | str) -> bytes:
     return _varint(field << 3 | 2) + _varint(len(value)) + value
 
 
-def _payload_annotation(payload) -> bytes:
+def _payload_annotation(payload, payload_type=None) -> bytes:
     annotation = _blob(10, "payload")
     if isinstance(payload, bool):
         annotation += _uint(2, int(payload))
+    elif isinstance(payload, float) and not math.isfinite(payload):
+        annotation += _blob(6, str(payload))
     elif isinstance(payload, float):
         annotation += _varint(5 << 3 | 1) + struct.pack("<d", payload)
-    elif payload >= 1 << 63:
+    elif payload_type == "uint64" or payload >= 1 << 63:
         annotation += _uint(3, payload)
     else:
         annotation += _uint(4, payload)
     return _blob(_EVENT_ANNOTATION, annotation)
 
 
-def _track_event(ts: int, track: int, kind: int, name: str | None = None, payload=None) -> bytes:
+def _track_event(ts: int, track: int, kind: int, name: str | None = None, payload=None, payload_type=None) -> bytes:
     event = _uint(_EVENT_TYPE, kind) + _uint(_EVENT_TRACK, track) + _blob(_EVENT_CATEGORY, "ktrace")
     if name is not None:
-        event += _blob(_EVENT_NAME, _event_name(name, payload))
+        event += _blob(_EVENT_NAME, name)
     if payload is not None:
-        event += _payload_annotation(payload)
+        event += _payload_annotation(payload, payload_type)
     packet = _uint(_PACKET_TIMESTAMP, ts) + _uint(_PACKET_SEQUENCE_ID, 1) + _blob(_PACKET_TRACK_EVENT, event)
     return _blob(_PACKET, packet)
 
@@ -206,12 +215,22 @@ def encode_pftrace(timeline: dict) -> bytes:
     events = []
     for sl in timeline["slices"]:
         events.append(
-            (sl["start"], sl["seq"][0], _track_event(sl["start"], sl["track"], _SLICE_BEGIN, sl["name"], sl["payload"]))
+            (
+                sl["start"],
+                sl["seq"][0],
+                _track_event(sl["start"], sl["track"], _SLICE_BEGIN, sl["name"], sl["payload"], sl.get("payload_type")),
+            )
         )
         events.append((sl["end"], sl["seq"][1], _track_event(sl["end"], sl["track"], _SLICE_END)))
     for inst in timeline["instants"]:
         events.append(
-            (inst["ts"], inst["seq"], _track_event(inst["ts"], inst["track"], _INSTANT, inst["name"], inst["payload"]))
+            (
+                inst["ts"],
+                inst["seq"],
+                _track_event(
+                    inst["ts"], inst["track"], _INSTANT, inst["name"], inst["payload"], inst.get("payload_type")
+                ),
+            )
         )
     events.sort(key=lambda e: e[:2])
     for event in events:
@@ -239,7 +258,7 @@ def summarize(records: list[dict], names: dict[str, int]) -> dict:
                 _accumulate(totals, by_id.get(start["event_id"]), rec["ts"] - start["ts"])
             elif kind == _ktrace.KIND_RANGE_START:
                 open_tokens[rec["slot"]] = rec
-            elif kind == _ktrace.KIND_RANGE_END:
+            elif kind == _ktrace.KIND_RANGE_STOP:
                 if rec["start_slot"] == _format.UNPAIRED_SLOT:
                     continue
                 start = open_tokens.pop(rec["start_slot"], None)
@@ -270,20 +289,6 @@ def write_trace(records: list[dict], names: dict[str, int], *, kernel: str = "ke
     path = _unique(os.path.join(out_dir, f"{kernel}_ktrace.pftrace.gz"))
     with open(path, "wb") as fh:
         fh.write(gzip.compress(encode_pftrace(build_timeline(records, names, kernel=kernel)), mtime=0))
-
-    raw = _unique(os.path.join(out_dir, f"{kernel}_ktrace.json"))
-    with open(raw, "w") as fh:
-        json.dump(
-            {
-                "kernel": kernel,
-                "ns_per_tick": NS_PER_TICK,
-                "names": names,
-                "records": [{**record, "payload": _json_payload(record["payload"])} for record in records],
-            },
-            fh,
-            indent=2,
-            allow_nan=False,
-        )
     return path
 
 

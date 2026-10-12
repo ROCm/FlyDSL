@@ -23,7 +23,7 @@ module attributes {gpu.container_module} {
       // CHECK: %[[OFF:.*]] = llvm.mlir.constant(28 : i32)
       // CHECK: %[[GEP:.*]] = llvm.getelementptr {{.*}}[%[[OFF]]]
       // CHECK: llvm.store %[[SLOT]], %[[GEP]] : i32, !llvm.ptr<1>
-      fly_ktrace.range_end %t, "phase" : !fly_ktrace.token
+      fly_ktrace.range_stop %t, "phase" : !fly_ktrace.token
       gpu.return
     }
   }

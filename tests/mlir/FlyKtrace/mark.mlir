@@ -15,6 +15,9 @@ module attributes {gpu.container_module} {
       // CHECK: llvm.call_intrinsic "llvm.amdgcn.s.getreg"
       // CHECK: rocdl.ballot
       // CHECK: scf.if
+      // CHECK: llvm.load {{.*}} atomic monotonic
+      // CHECK: arith.cmpi ule
+      // CHECK: scf.if
       // CHECK: llvm.atomicrmw add
       // CHECK: gpu.subgroup_id
       // CHECK: rocdl.readfirstlane
@@ -23,12 +26,14 @@ module attributes {gpu.container_module} {
       // CHECK: llvm.intr.cttz
       // CHECK: arith.cmpi eq
       // CHECK: scf.if
+      // CHECK: arith.cmpi ult
+      // CHECK: scf.if
+      // CHECK: llvm.call_intrinsic "llvm.amdgcn.s.memrealtime"
+      // CHECK: llvm.atomicrmw add
 
       // CHECK: arith.cmpi ult
       // CHECK: arith.cmpi ult
       // CHECK: scf.if
-
-      // CHECK: llvm.call_intrinsic "llvm.amdgcn.s.memrealtime"
       // CHECK-COUNT-6: llvm.store
       fly_ktrace.mark "tick"
       gpu.return

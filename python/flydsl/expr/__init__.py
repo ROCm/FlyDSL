@@ -23,7 +23,7 @@ from . import math as math
 _BACKEND_MODULES = {
     "rocdl": ".rocdl",
     "tdm_ops": ".rocdl.tdm_ops",  # deprecated, use .rocdl.tdm_ops instead
-    "experimental": ".experimental",
+    "ktrace": ".ktrace",
 }
 
 _EXTENSION_MODULES = {
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from ..extension import coop as coop
     from ..extension import random as random
 
-    from . import experimental as experimental
+    from . import ktrace as ktrace
 
 
 # lazy load backend subpackages and extension libraries

@@ -76,13 +76,13 @@ def FlyKtrace_RangePopOp : FlyKtrace_Op<"range_pop"> {
 }
 
 def FlyKtrace_RangeStartOp : FlyKtrace_Op<"range_start"> {
-  let summary = "Open a token range, closed by range_end with the returned token.";
+  let summary = "Open a token range, closed by range_stop with the returned token.";
   let description = [{
-    Returns the slot its own record occupies, so `range_end` can pair on it.
+    Returns the slot its own record occupies, so `range_stop` can pair on it.
     Preferred over push/pop when the close site is not lexically nested -- notably
     across loop iterations, where the token rides an `scf.for` iter_arg.
 
-    The paired `range_end` must execute under the same guard. Only the first active
+    The paired `range_stop` must execute under the same guard. Only the first active
     lane holds a real slot; the rest carry UNPAIRED_SLOT, so if the two endpoints run
     with different lanes active the end has nothing to pair on and the range is
     dropped.
@@ -97,14 +97,14 @@ def FlyKtrace_RangeStartOp : FlyKtrace_Op<"range_start"> {
   }];
 }
 
-def FlyKtrace_RangeEndOp : FlyKtrace_Op<"range_end"> {
+def FlyKtrace_RangeStopOp : FlyKtrace_Op<"range_stop"> {
   let summary = "Close the range opened by a token.";
   let description = [{
     The token operand becomes the record's start_slot field, which is what the
     host pairs on. It must execute under the same guard as its `range_start` --
     see that op.
 
-    A sentinel token must not record, but this op does not express that: the
+    An inactive token must not record, but this op does not express that: the
     frontend has already wrapped it in an `scf.if` on the token's companion `i1`
     before the op is built. See FlyKtrace_TokenType for why that flag is not part
     of the type.
@@ -121,22 +121,22 @@ def FlyKtrace_RangeEndOp : FlyKtrace_Op<"range_end"> {
   }];
 }
 
-def FlyKtrace_SentinelTokenOp : FlyKtrace_Op<"sentinel_token", [Pure]> {
+def FlyKtrace_InactiveTokenOp : FlyKtrace_Op<"inactive_token", [Pure]> {
   let summary = "A token that records nothing, for seeding a loop-carried range.";
   let description = [{
-    Produces a token whose `range_end` must not write a record, for the idiom
+    Produces a token whose `range_stop` must not write a record, for the idiom
     where the close precedes the open in source order:
 
     ```
-    stage = sentinel_token("k_tile")
+    stage = inactive_token("k_tile")
     for i in ...:
-      range_end(stage)
+      range_stop(stage)
       stage = range_start("k_tile")
-    range_end(stage)
+    range_stop(stage)
     ```
 
     Recording nothing is expressed by the companion `i1` the frontend keeps
-    beside the token, not by this op -- `range_end` is already wrapped in an
+    beside the token, not by this op -- `range_stop` is already wrapped in an
     `scf.if` on that flag before it is built. See FlyKtrace_TokenType. This op
     therefore only has to supply a value of the right type for the iter_arg;
     the lowering gives it UNPAIRED_SLOT so that a token which somehow did reach

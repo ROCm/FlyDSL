@@ -97,7 +97,7 @@ class TraceBuffer:
             raise RuntimeError(
                 f"trace overflowed: waves claimed {claimed} slots, buffer holds "
                 f"{self.capacity_slots}. Re-run with FLYDSL_KTRACE_BUFFER_BYTES>={needed}, "
-                f"a block filter (FLYDSL_KTRACE_BLOCKS), or fewer launches between reads."
+                f"a block filter (capture(blocks=...) or FLYDSL_KTRACE_BLOCKS), or fewer launches between reads."
             )
 
         nbytes = claimed * _format.RECORD_BYTES

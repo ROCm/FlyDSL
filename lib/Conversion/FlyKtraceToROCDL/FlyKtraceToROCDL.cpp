@@ -39,7 +39,7 @@ constexpr uint32_t kKindMark = 0;
 constexpr uint32_t kKindRangePush = 1;
 constexpr uint32_t kKindRangePop = 2;
 constexpr uint32_t kKindRangeStart = 3;
-constexpr uint32_t kKindRangeEnd = 4;
+constexpr uint32_t kKindRangeStop = 4;
 
 constexpr int64_t kUnpairedSlot = 0xFFFFFFFF;
 
@@ -185,8 +185,24 @@ FailureOr<KernelTraceState> emitPrologue(gpu::GPUFuncOp kernel, int64_t eventsPe
         b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, lane, firstActiveLane(b, loc));
     auto claimIf = b.create<scf::IfOp>(loc, TypeRange{i32Ty}, isLeader, true);
     b.setInsertionPointToStart(claimIf.thenBlock());
-    Value claimed = b.create<LLVM::AtomicRMWOp>(loc, LLVM::AtomicBinOp::add, st.bufPtr, perWave,
+    // Stop claiming once the cursor is past the buffer so the 32-bit cursor cannot wrap back
+    // into range on long captures. A claim at exactly capacity still goes through, so the host
+    // sees the cursor exceed capacity and reports the overflow.
+    Value cursor = b.create<LLVM::LoadOp>(loc, i32Ty, st.bufPtr, /*alignment=*/4,
+                                          /*isVolatile=*/false, /*isNonTemporal=*/false,
+                                          /*isInvariant=*/false, /*isInvariantGroup=*/false,
+                                          LLVM::AtomicOrdering::monotonic);
+    Value hasRoom = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ule, cursor,
+                                            i32Const(b, loc, capacitySlots));
+    auto roomIf = b.create<scf::IfOp>(loc, TypeRange{i32Ty}, hasRoom, true);
+    b.setInsertionPointToStart(roomIf.thenBlock());
+    Value fetched = b.create<LLVM::AtomicRMWOp>(loc, LLVM::AtomicBinOp::add, st.bufPtr, perWave,
                                                 LLVM::AtomicOrdering::monotonic);
+    b.create<scf::YieldOp>(loc, ValueRange{fetched});
+    b.setInsertionPointToStart(roomIf.elseBlock());
+    b.create<scf::YieldOp>(loc, ValueRange{cursor});
+    b.setInsertionPointAfter(roomIf);
+    Value claimed = roomIf.getResult(0);
     Value base = b.create<arith::AddIOp>(loc, claimed, i32Const(b, loc, 1));
     Value inBounds = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, base,
                                              i32Const(b, loc, capacitySlots));
@@ -269,6 +285,8 @@ Value expandEvent(Operation *op, const EventShape &shape, const KernelTraceState
   auto baseIf = b.create<scf::IfOp>(loc, guardResults, baseInBounds, shape.producesSlot);
   b.setInsertionPointToStart(baseIf.thenBlock());
 
+  // Read the clock before the slot atomic so its latency does not skew the timestamp.
+  Value ts = callIntrinsic(b, loc, "llvm.amdgcn.s.memrealtime", b.getI64Type());
   Value ctrPtr = gepBytes(b, loc, st.bufPtr,
                           b.create<arith::MulIOp>(loc, st.base, i32Const(b, loc, kRecordBytes)));
   Value local = b.create<LLVM::AtomicRMWOp>(loc, LLVM::AtomicBinOp::add, ctrPtr,
@@ -288,7 +306,6 @@ Value expandEvent(Operation *op, const EventShape &shape, const KernelTraceState
   Value byteOff = b.create<arith::MulIOp>(loc, slot1, i32Const(b, loc, kRecordBytes));
   Value recPtr = gepBytes(b, loc, st.bufPtr, byteOff);
 
-  Value ts = callIntrinsic(b, loc, "llvm.amdgcn.s.memrealtime", b.getI64Type());
   Value payload =
       shape.payload
           ? shape.payload
@@ -296,7 +313,7 @@ Value expandEvent(Operation *op, const EventShape &shape, const KernelTraceState
   Value startSlot = i32Const(b, loc, 0);
   if (shape.startSlot) {
     assert(shape.startSlot.getType() == i32 &&
-           "range_end's token must already be lowered to its i32 slot");
+           "range_stop's token must already be lowered to its i32 slot");
     startSlot = shape.startSlot;
   }
   uint32_t packed = (shape.eventId & 0xFFFFFF) | ((shape.kind & 0x7) << 24) |
@@ -368,16 +385,19 @@ LogicalResult checkTargetArch(gpu::GPUModuleOp mod, StringRef chipHint) {
     return rejectChip(chipHint);
   }
 
+  bool sawRocdl = false;
   for (Attribute t : targets) {
     auto rocdlTarget = dyn_cast<ROCDL::ROCDLTargetAttr>(t);
     if (!rocdlTarget)
       continue;
     StringRef chip = rocdlTarget.getChip();
-    if (chip.starts_with("gfx942") || chip.starts_with("gfx950"))
-      return success();
-    return rejectChip(chip);
+    if (!chip.starts_with("gfx942") && !chip.starts_with("gfx950"))
+      return rejectChip(chip);
+    sawRocdl = true;
   }
-  return mod.emitError("ktrace: gpu.module has no ROCDL target");
+  if (!sawRocdl)
+    return mod.emitError("ktrace: gpu.module has no ROCDL target");
+  return success();
 }
 
 struct SelectTokenConversion : public OpConversionPattern<arith::SelectOp> {
@@ -473,7 +493,7 @@ struct FlyKtraceToROCDLConversionPass
     WalkResult result = root->walk([&](gpu::GPUFuncOp kernel) {
       SmallVector<Operation *> events;
       kernel.walk([&](Operation *op) {
-        if (isa<MarkOp, RangePushOp, RangePopOp, RangeStartOp, RangeEndOp, SentinelTokenOp>(op))
+        if (isa<MarkOp, RangePushOp, RangePopOp, RangeStartOp, RangeStopOp, InactiveTokenOp>(op))
           events.push_back(op);
       });
       if (events.empty())
@@ -502,7 +522,7 @@ struct FlyKtraceToROCDLConversionPass
         return WalkResult::interrupt();
 
       for (Operation *op : events) {
-        if (isa<SentinelTokenOp>(op)) {
+        if (isa<InactiveTokenOp>(op)) {
           OpBuilder b(op);
           Value seed = i32Const(b, op->getLoc(), kUnpairedSlot);
           op->getResult(0).replaceAllUsesWith(seed);
@@ -520,9 +540,13 @@ struct FlyKtraceToROCDLConversionPass
         } else if (auto start = dyn_cast<RangeStartOp>(op)) {
           shape = {kKindRangeStart, idFor(start.getEventName()), start.getPayload(), Value(), true};
         } else {
-          auto end = cast<RangeEndOp>(op);
-          shape = {kKindRangeEnd, idFor(end.getEventName()), end.getPayload(), end.getToken(),
+          auto end = cast<RangeStopOp>(op);
+          shape = {kKindRangeStop, idFor(end.getEventName()), end.getPayload(), end.getToken(),
                    false};
+        }
+        if (shape.eventId > 0xFFFFFF) {
+          op->emitError("ktrace: more than 2^24 - 1 distinct event names");
+          return WalkResult::interrupt();
         }
         if (auto type = op->getAttrOfType<StringAttr>("payload_type")) {
           int encoding = llvm::StringSwitch<int>(type.getValue())

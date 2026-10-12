@@ -2,7 +2,6 @@
 # Copyright (c) 2026 FlyDSL Project Contributors
 
 
-import json
 from pathlib import Path
 
 import pytest
@@ -11,7 +10,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.backends import _rocm_ktrace_trace as ktrace_trace
-from flydsl.expr.experimental import ktrace
+from flydsl.expr import ktrace
 from flydsl.runtime.device import get_rocm_arch
 
 pytestmark = [
@@ -102,17 +101,17 @@ def _attention_kernel(q: fx.Tensor, k: fx.Tensor, v: fx.Tensor, out: fx.Tensor, 
         query = q[row]
         numer = fx.Float32(0)
         denom = fx.Float32(0)
-        key_range = ktrace.sentinel_token("attn.key")
+        key_range = ktrace.inactive_token("attn.key")
     with ktrace.range("attn.mainloop"):
         for key in fx.range(0, 8, 1):
-            ktrace.range_end(key_range)
+            ktrace.range_stop(key_range)
             key_range = ktrace.range_start("attn.key", key)
             weight = fx.exp(query * k[key])
             if causal != 0 and key > row:
                 weight = fx.Float32(0)
             numer = numer + weight * v[key, col]
             denom = denom + weight
-        ktrace.range_end(key_range)
+        ktrace.range_stop(key_range)
     with ktrace.range("attn.epilogue"):
         out[row, col] = numer / denom
 
@@ -196,7 +195,7 @@ def test_moe_and_attention_control_flow(causal):
     assert phases["attn.key"]["count"] == 8
 
 
-def test_graph_replay_produces_fresh_snapshot():
+def test_graph_replay_snapshots_accumulate_until_read():
     a = torch.randn(64, device="cuda")
     b = torch.randn(64, device="cuda")
     out = torch.empty_like(a)
@@ -216,7 +215,7 @@ def test_graph_replay_produces_fresh_snapshot():
         graph.replay()
 
     second = trace.summary()
-    assert second is not None and second["phases"]["add"]["count"] == 1
+    assert second is not None and second["phases"]["add"]["count"] == 2, "a mid-capture summary dropped records"
     graph.replay()
     trace.read()
     third = trace.summary()
@@ -295,8 +294,7 @@ def test_multiple_eager_layers_export_separate_traces(tmp_path):
     assert len(paths) == 3
     assert all(path.startswith(str(tmp_path)) for path in paths)
     assert [Path(path).name for path in paths] == [f"layer_{i}_ktrace.pftrace.gz" for i in range(3)]
-    raw = json.loads((tmp_path / "layer_0_ktrace.json").read_text())
-    assert all(record["payload"] is None for record in raw["records"])
+    assert all(record["payload"] is None for record in trace._snapshot())
     with pytest.raises(ValueError, match="one string per recorded launch"):
         trace.export_launches(names=["only_one"])
 
@@ -328,8 +326,7 @@ def test_graph_replay_of_multiple_layers_keeps_each_launch(tmp_path):
     assert all(launch["phases"]["add"]["count"] == 1 for launch in launches)
     assert len(trace.export_launches()) == 6
     assert trace.export().endswith(".pftrace.gz")
-    raw = json.loads((tmp_path / "graph_layers_ktrace.json").read_text())
-    timeline = ktrace_trace.build_timeline(raw["records"], raw["names"])
+    timeline = ktrace_trace.build_timeline(trace._snapshot(), trace._names)
     assert len([track for track in timeline["tracks"] if track["name"].startswith("launch ")]) == 6
 
 

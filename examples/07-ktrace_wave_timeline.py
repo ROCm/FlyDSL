@@ -9,7 +9,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr.experimental import ktrace
+from flydsl.expr import ktrace
 
 M, N = 256, 256
 TILE = 64
@@ -24,14 +24,14 @@ def scaled_accumulate_kernel(src: fx.Tensor, dst: fx.Tensor, scale: fx.Float32):
     with ktrace.range("prologue"):
         acc = fx.Float32(0.0)
 
-    tile = ktrace.sentinel_token("tile")
+    tile = ktrace.inactive_token("tile")
     for t in fx.range(0, N_TILES, 1):
-        ktrace.range_end(tile)
+        ktrace.range_stop(tile)
         tile = ktrace.range_start("tile", t)
 
         col = t * TILE + tid
         acc = acc + src[row, col] * scale
-    ktrace.range_end(tile)
+    ktrace.range_stop(tile)
 
     ktrace.mark("store", row)
     dst[row, tid] = acc

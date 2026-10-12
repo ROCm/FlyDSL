@@ -7,7 +7,7 @@ import pytest
 from flydsl._mlir import ir
 from flydsl.compiler import backends, jit_function
 from flydsl.compiler.backends.base import BaseBackend, GPUTarget
-from flydsl.expr.experimental import ktrace
+from flydsl.expr import ktrace
 
 pytestmark = pytest.mark.l1a_compile_no_target_dialect
 
@@ -24,7 +24,7 @@ def test_target_provider_owns_trace_config_buffer_and_records(monkeypatch):
             pass
 
         def launch_count(self):
-            return 0
+            return int(bool(self.records))
 
         def read_records(self):
             return list(self.records)
@@ -126,9 +126,13 @@ def test_target_provider_owns_trace_config_buffer_and_records(monkeypatch):
 
         with ktrace.capture("model") as trace:
             provider.buffer.records.append({"event": "recorded"})
+            assert trace.summary()["records"] == 1
+            with pytest.raises(RuntimeError, match="drain the active capture"):
+                ktrace.summary()
+            provider.buffer.records.append({"event": "after a mid-capture read"})
 
-        assert trace.summary()["records"] == 1
-        assert trace.launches() == [{"launch_id": 1, "device_launch": 7, "records": 1, "phases": {}}]
+        assert trace.summary()["records"] == 2
+        assert trace.launches() == [{"launch_id": 1, "device_launch": 7, "records": 2, "phases": {}}]
         assert trace.export() == "/tmp/model.json"
         assert trace.export_launches(names=["layer_0"]) == ["/tmp/layer_0.json"]
     finally:

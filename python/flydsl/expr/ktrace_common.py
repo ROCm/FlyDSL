@@ -57,16 +57,16 @@ def _merge_names(names: dict[str, int]) -> None:
 
 
 def _const(value: int, ty_str: str):
-    from ..._mlir import ir
-    from ..._mlir.dialects import llvm as _llvm
+    from .._mlir import ir
+    from .._mlir.dialects import llvm as _llvm
 
     ty = ir.Type.parse(ty_str)
     return _llvm.ConstantOp(ty, ir.IntegerAttr.get(ty, value)).result
 
 
 def payload_operand(payload: Any):
-    from ..._mlir import ir
-    from ..._mlir.dialects import arith as _arith
+    from .._mlir import ir
+    from .._mlir.dialects import arith as _arith
 
     signed = getattr(payload, "signed", True)
     if isinstance(payload, bool):
@@ -78,7 +78,7 @@ def payload_operand(payload: Any):
     if hasattr(payload, "ir_value"):
         value = payload.ir_value()
     elif isinstance(payload, float):
-        from ..numeric import Float64
+        from .numeric import Float64
 
         value = Float64(payload).ir_value()
     else:

@@ -13,7 +13,7 @@ for its wave.
 Add coarse ranges to the kernel:
 
 ```python
-from flydsl.expr.experimental import ktrace
+from flydsl.expr import ktrace
 
 @flyc.kernel
 def gemm(...):
@@ -36,12 +36,13 @@ print(trace.summary())
 path = trace.export()
 ```
 
-The trace nests tracks as kernel → launch → CU (`XCD/SE/SH/CU`) → `CTA(x, y, z)` →
+The trace nests tracks as kernel → launch → CU (`XCD/SE/SH/CU`) → `WG(x, y, z)` →
 `WaveN`. Each wave track starts with a `Wave Span` slice from its first to its last
 event; `range_push` ranges nest inside it and marks appear as instants. Token ranges
-(`range_start`/`range_end`) may overlap, so they go on `ranges N` child tracks. Event
-names include the payload, e.g. `tile(payload=3)`. The block coordinates and wave
-index come from each wave's buffer header; no annotation is needed.
+(`range_start`/`range_stop`) may overlap, so they go on `ranges N` child tracks. An event's
+payload appears as its `payload` argument. A range still open at the wave's last event
+ends there and is labelled `(unclosed)`. The block coordinates and wave index come
+from each wave's buffer header; no annotation is needed.
 
 `blocks=(x, y, z)` selects one workgroup without changing the launched grid.
 Start with one workgroup and a few phases. Each wave can record **255 events per
@@ -50,7 +51,10 @@ to avoid filling the buffer.
 
 The capture enables tracing for JIT specializations compiled inside it and reads
 the buffer on exit. `summary()` and `export()` use the same snapshot and return
-`None` when it contains no events. The snapshot remains available after exit.
+`None` when it contains no events. Calling them inside the capture keeps the
+records read so far. The snapshot remains available after exit. A
+`CompiledFunction` compiled before the capture runs untraced; the capture logs a
+warning when it records nothing.
 
 Tracing is disabled by default. Disabled annotations emit no trace instructions.
 The first traced and untraced calls compile separate specializations; later calls
@@ -72,8 +76,8 @@ python examples/07-ktrace_wave_timeline.py --layers 3
 | `range_push(name, payload=None)` | Open a stack range |
 | `range_pop()` | Close the innermost stack range |
 | `range_start(name, payload=None)` | Open a range and return its `RangeToken` |
-| `range_end(token, payload=None)` | Close a token range |
-| `sentinel_token(name)` | Inactive token for a loop-carried range |
+| `range_stop(token, payload=None)` | Close a token range |
+| `inactive_token(name)` | Inactive token for a loop-carried range |
 
 Use `with ktrace.range(...)` when both endpoints fit in one source block.
 `range_push` and `range_pop` pair in LIFO order along the executed path. Both
@@ -84,13 +88,13 @@ leader between endpoints can leave the range unpaired.
 Use tokens when the range crosses loop iterations:
 
 ```python
-stage = ktrace.sentinel_token("k_tile")
+stage = ktrace.inactive_token("k_tile")
 for i in fx.range(0, k_tiles, 1):
     ab_full = ab_consumer.wait_and_advance()
-    ktrace.range_end(stage)
+    ktrace.range_stop(stage)
     stage = ktrace.range_start("k_tile")
     ...
-ktrace.range_end(stage)
+ktrace.range_stop(stage)
 ```
 
 This records intervals between wait boundaries. Sample iterations or use a
@@ -103,10 +107,9 @@ and `Float16`, `BFloat16`, `Float32`, and `Float64`. Python integers must fit in
 signed or unsigned 64 bits. Python floats use 64 bits; half-precision values are
 promoted to `float32`.
 
-Signedness and numeric values are preserved in the output. Raw records include
-`payload_type`. Non-finite floats are exported as `"nan"`, `"inf"`, or `"-inf"`
-for valid JSON. An omitted payload is `null` in raw JSON; an explicit `0` remains
-`0`. Use wave-uniform payloads: under divergence, the first active lane supplies
+Signedness and numeric values are preserved in the output. Non-finite floats are
+shown as `nan`, `inf`, or `-inf`. An omitted payload adds no argument; an explicit
+`0` remains `0`. Use wave-uniform payloads: under divergence, the first active lane supplies
 the recorded value.
 
 ## Captures and repeated launches
@@ -120,8 +123,8 @@ same kernel appear on separate timeline tracks.
 | `read()` | Synchronize, save a fresh snapshot, and reset the device buffer |
 | `summary()` | Return per-phase totals for the snapshot |
 | `launches()` | Return separate totals and metadata for each recorded launch |
-| `export()` | Write a combined Perfetto trace and raw-record companion |
-| `export_launches(names=None)` | Write one trace and companion per recorded launch |
+| `export()` | Write a combined gzipped Perfetto trace |
+| `export_launches(names=None)` | Write one gzipped Perfetto trace per recorded launch |
 
 ```python
 with ktrace.capture("model", blocks=(0, 0, 0), out_dir="traces") as trace:
@@ -142,7 +145,8 @@ have no per-launch output. Capture windows cannot be nested.
 For tracing enabled outside a capture, `ktrace.summary()` and
 `ktrace.collect("kernel", out_dir=None)` read and reset the device buffer. They
 share a cached snapshot until another traced launch or graph replay occurs.
-Untraced calls leave that snapshot available.
+Untraced calls leave that snapshot available. Inside a capture they raise; use the
+capture's methods.
 
 ## Graph replay
 

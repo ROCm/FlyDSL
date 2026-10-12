@@ -8,13 +8,13 @@ import threading
 from contextlib import contextmanager
 from typing import Any
 
-from ..meta import dsl_loc_tracing
+from .meta import dsl_loc_tracing
 
 KIND_MARK = 0
 KIND_RANGE_PUSH = 1
 KIND_RANGE_POP = 2
 KIND_RANGE_START = 3
-KIND_RANGE_END = 4
+KIND_RANGE_STOP = 4
 
 _CACHED_RECORDS: list | None = None
 _ACTIVE_CAPTURE = None
@@ -27,14 +27,14 @@ def collection_lock():
 
 
 def _trace_backend():
-    from ...compiler.backends import get_ktrace_backend
+    from ..compiler.backends import get_ktrace_backend
 
     return get_ktrace_backend()
 
 
 def tracing_enabled() -> bool:
-    from ...compiler.kernel_function import CompilationContext
-    from ...utils import env
+    from ..compiler.kernel_function import CompilationContext
+    from ..utils import env
 
     hints = CompilationContext.get_compile_hints() or {}
     if "ktrace" in hints:
@@ -63,16 +63,16 @@ class RangeToken:
 
 
 def _i1_const(value: bool):
-    from ..._mlir import ir
-    from ..._mlir.dialects import arith
+    from .._mlir import ir
+    from .._mlir.dialects import arith
 
     i1 = ir.IntegerType.get_signless(1)
     return arith.ConstantOp(i1, ir.IntegerAttr.get(i1, int(value))).result
 
 
 def _disabled_token(event_name: str | None) -> RangeToken:
-    from ..._mlir import ir
-    from ..._mlir.dialects import arith
+    from .._mlir import ir
+    from .._mlir.dialects import arith
 
     i32 = ir.IntegerType.get_signless(32)
     slot = arith.ConstantOp(i32, ir.IntegerAttr.get(i32, 0)).result
@@ -133,42 +133,42 @@ def _range_start_impl(event_name, payload) -> RangeToken:
     return RangeToken(slot, _i1_const(False), event_name)
 
 
-def range_end(token: RangeToken, payload: Any = None) -> None:
+def range_stop(token: RangeToken, payload: Any = None) -> None:
     if not tracing_enabled():
         return
-    _range_end_impl(token, payload)
+    _range_stop_impl(token, payload)
 
 
 @dsl_loc_tracing
-def _range_end_impl(token, payload) -> None:
-    from ..._mlir import ir
-    from ..._mlir.dialects import scf
-    from ..numeric import Boolean
+def _range_stop_impl(token, payload) -> None:
+    from .._mlir import ir
+    from .._mlir.dialects import scf
+    from .numeric import Boolean
 
     cond = Boolean(token._is_none) == Boolean(False)
     if_op = scf.IfOp(cond.ir_value(), [], has_else=False)
     with ir.InsertionPoint(if_op.then_block):
-        _build_annotation(token._event_name, KIND_RANGE_END, payload=payload, start_slot=token)
+        _build_annotation(token._event_name, KIND_RANGE_STOP, payload=payload, start_slot=token)
         scf.YieldOp([])
 
 
 @dsl_loc_tracing
-def sentinel_token(event_name: str) -> RangeToken:
+def inactive_token(event_name: str) -> RangeToken:
     if not tracing_enabled():
         return _disabled_token(event_name)
-    from ..._mlir.dialects import fly_ktrace
+    from .._mlir.dialects import fly_ktrace
 
-    return RangeToken(fly_ktrace.sentinel_token(_token_type()), _i1_const(True), event_name)
+    return RangeToken(fly_ktrace.inactive_token(_token_type()), _i1_const(True), event_name)
 
 
 def _token_type():
-    from ..._mlir import ir
+    from .._mlir import ir
 
     return ir.Type.parse("!fly_ktrace.token")
 
 
 def _build_annotation(event_name, kind, *, payload=None, start_slot=None):
-    from ..._mlir.dialects import fly_ktrace
+    from .._mlir.dialects import fly_ktrace
     from .ktrace_common import payload_operand
 
     operand, payload_type = (None, "uint64") if payload is None else payload_operand(payload)
@@ -185,8 +185,8 @@ def _build_annotation(event_name, kind, *, payload=None, start_slot=None):
         return None
     if kind == KIND_RANGE_START:
         return fly_ktrace.range_start(_token_type(), event_name, **kwargs)
-    if kind == KIND_RANGE_END:
-        fly_ktrace.range_end(start_slot._slot, event_name, **kwargs)
+    if kind == KIND_RANGE_STOP:
+        fly_ktrace.range_stop(start_slot._slot, event_name, **kwargs)
         return None
     raise AssertionError(f"unknown ktrace event kind {kind}")
 
@@ -211,7 +211,7 @@ def _take_records(backend=None) -> list | None:
             try:
                 buf.reset()
             except Exception as exc:  # noqa: BLE001
-                from ...utils import log
+                from ..utils import log
 
                 log().warning(f"ktrace: failed to re-arm the trace buffer: {exc}")
 
@@ -240,9 +240,15 @@ def require_compatible_buffer(artifact) -> None:
     _trace_backend().require_compatible_buffer(compiled)
 
 
+def _require_no_capture(name: str, method: str) -> None:
+    if _ACTIVE_CAPTURE is not None:
+        raise RuntimeError(f"ktrace: {name}() would drain the active capture's records; use its {method}() instead")
+
+
 def collect(kernel: str = "kernel", out_dir=None) -> str | None:
     from .ktrace_common import name_table
 
+    _require_no_capture("collect", "export")
     backend = _trace_backend()
     records = _take_records(backend)
     if not records:
@@ -258,6 +264,7 @@ def collect(kernel: str = "kernel", out_dir=None) -> str | None:
 def summary() -> dict | None:
     from .ktrace_common import name_table
 
+    _require_no_capture("summary", "summary")
     backend = _trace_backend()
     records = _take_records(backend)
     if not records:
@@ -291,7 +298,7 @@ class Capture:
 
     def __enter__(self):
         global _ACTIVE_CAPTURE
-        from ...compiler.kernel_function import CompilationContext
+        from ..compiler.kernel_function import CompilationContext
 
         self._backend = _trace_backend()
         self._backend.check_outside_capture()
@@ -314,8 +321,13 @@ class Capture:
     def __exit__(self, exc_type, exc_value, traceback):
         global _ACTIVE_CAPTURE
         try:
-            if exc_type is None:
-                self._snapshot()
+            if exc_type is None and not self._snapshot():
+                from ..utils import log
+
+                log().warning(
+                    "ktrace: the capture recorded no events. Only kernels compiled inside the capture are "
+                    "instrumented; a CompiledFunction built before it runs untraced."
+                )
         finally:
             try:
                 self._scope.__exit__(exc_type, exc_value, traceback)
@@ -342,6 +354,9 @@ class Capture:
             self._names = None
 
     def read(self):
+        return self._read(keep=False)
+
+    def _read(self, *, keep: bool):
         global _CACHED_RECORDS
         from .ktrace_common import name_table
 
@@ -351,7 +366,8 @@ class Capture:
             if _ACTIVE_CAPTURE is not None and _ACTIVE_CAPTURE is not self:
                 raise RuntimeError("ktrace: cannot read another capture's active trace buffer")
             _CACHED_RECORDS = None
-            self._records = list(_take_records(backend) or [])
+            records = list(_take_records(backend) or [])
+            self._records = (self._records or []) + records if keep else records
             self._names = name_table()
         return self
 
@@ -364,7 +380,8 @@ class Capture:
         elif _ACTIVE_CAPTURE is self:
             buf = backend.current_buffer()
             if buf is not None and buf.launch_count():
-                self.read()
+                # Reading re-arms the buffer: keep what an earlier summary() or export() took.
+                self._read(keep=True)
         return self._records
 
     def summary(self) -> dict | None:

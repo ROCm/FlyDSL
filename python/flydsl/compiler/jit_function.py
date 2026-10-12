@@ -1155,7 +1155,7 @@ def _call_state_from_spec(call_spec, artifact):
     if not artifact._ktrace_traced:
         return CallState(call_spec, artifact._get_func_exe())
 
-    from ..expr.experimental import ktrace as _ktrace
+    from ..expr import ktrace as _ktrace
 
     _ktrace.require_compatible_buffer(artifact)
 
@@ -1576,8 +1576,8 @@ class JitFunction:
                 return None
             return call_state(args_tuple)
 
-        from ..expr.experimental import ktrace as _ktrace
-        from ..expr.experimental.ktrace_common import EventNameConflict, name_assignment_lock
+        from ..expr import ktrace as _ktrace
+        from ..expr.ktrace_common import EventNameConflict, name_assignment_lock
 
         def accept_cached(artifact):
             try:
@@ -1714,7 +1714,7 @@ def _ensure_stream_arg(jit_args: list) -> bool:
 def _attach_ktrace_config(module, traced: bool) -> None:
     if not traced:
         return
-    from ..expr.experimental.ktrace_common import name_table
+    from ..expr.ktrace_common import name_table
     from ..utils import env
 
     hints = CompilationContext.get_compile_hints()
@@ -1743,7 +1743,7 @@ def _ktrace_names_from_module(module) -> dict | None:
 def _capture_ktrace_names(artifact, traced: bool, module) -> None:
     if not traced:
         return
-    from ..expr.experimental.ktrace_common import merge_names
+    from ..expr.ktrace_common import merge_names
 
     artifact._ktrace_buffer_config = get_ktrace_backend().buffer_config()
     artifact._ktrace_names = _ktrace_names_from_module(module) or {}
@@ -1751,7 +1751,7 @@ def _capture_ktrace_names(artifact, traced: bool, module) -> None:
 
 
 def _ensure_ktrace_buffer_arg(jit_args: list, *, allocate: bool = True) -> bool:
-    from ..expr.experimental import ktrace as _ktrace
+    from ..expr import ktrace as _ktrace
 
     if not _ktrace.tracing_enabled():
         return False

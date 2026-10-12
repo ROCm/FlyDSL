@@ -219,7 +219,7 @@ class CallState:
         if self._predispatch is None:
             return dispatch(args_tuple)
 
-        from ..expr.experimental import ktrace as _ktrace
+        from ..expr import ktrace as _ktrace
 
         with _ktrace.collection_lock():
             _ktrace.invalidate_records()

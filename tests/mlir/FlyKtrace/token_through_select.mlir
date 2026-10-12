@@ -17,7 +17,7 @@ module attributes {gpu.container_module} {
 
       // CHECK: llvm.mlir.constant(28 : i32)
       // CHECK: llvm.store
-      fly_ktrace.range_end %sel, "a" : !fly_ktrace.token
+      fly_ktrace.range_stop %sel, "a" : !fly_ktrace.token
       gpu.return
     }
   }

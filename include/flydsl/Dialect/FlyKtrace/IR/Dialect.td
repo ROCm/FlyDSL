@@ -13,7 +13,7 @@ def FlyKtrace_Dialect : Dialect {
 
   let summary = "In-kernel wave tracing annotations, before they are expanded.";
   let description = [{
-    Holds one op per `fx.experimental.ktrace` entry point so a trace event survives
+    Holds one op per `fx.ktrace` entry point so a trace event survives
     as a single operation until `convert-fly-ktrace-to-rocdl` expands it into the slot claim,
     leader guard, timestamp read and record stores.
 

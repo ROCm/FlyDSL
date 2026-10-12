@@ -17,7 +17,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.passmanager import PassManager
 from flydsl.compiler import jit_function
 from flydsl.compiler.backends import _rocm_ktrace_trace as ktrace_trace
-from flydsl.expr.experimental import ktrace, ktrace_common
+from flydsl.expr import ktrace, ktrace_common
 from flydsl.expr.rocdl import ktrace_format
 from flydsl.runtime.device import get_rocm_arch
 
@@ -110,8 +110,8 @@ def test_disabled_build_is_identical_to_uninstrumented(monkeypatch):
         ktrace.range_push("body")
         ktrace.range_pop()
         token = ktrace.range_start("tok")
-        ktrace.range_end(token)
-        ktrace.range_end(ktrace.sentinel_token("seed"))
+        ktrace.range_stop(token)
+        ktrace.range_stop(ktrace.inactive_token("seed"))
 
     @flyc.kernel
     def plain():
@@ -133,16 +133,16 @@ def test_disabled_build_is_identical_to_uninstrumented(monkeypatch):
 
 
 @pytest.mark.parametrize("enable", [True, False], ids=["on", "off"])
-def test_sentinel_token_survives_scf_for(monkeypatch, enable):
+def test_inactive_token_survives_scf_for(monkeypatch, enable):
     _frontend_only(monkeypatch, enable=enable)
 
     @flyc.kernel
     def annotated():
-        token = ktrace.sentinel_token("k_tile")
+        token = ktrace.inactive_token("k_tile")
         for _ in fx.range(0, 8, 1):
-            ktrace.range_end(token)
+            ktrace.range_stop(token)
             token = ktrace.range_start("k_tile")
-        ktrace.range_end(token)
+        ktrace.range_stop(token)
 
     @flyc.jit
     def launch():
@@ -193,7 +193,7 @@ def test_payload_rejects_a_token(monkeypatch):
     def annotated():
         token = ktrace.range_start("r")
         ktrace.mark("bad", token)
-        ktrace.range_end(token)
+        ktrace.range_stop(token)
 
     @flyc.jit
     def launch():
@@ -209,9 +209,9 @@ def test_ranges_pair_by_start_slot_not_by_name():
     wave = {"hw_id": 0x1234, "xcc_id": 0, "wave": 4, "simd": 3, "cu": 2, "sh": 0, "se": 1, "payload": 0}
     records = [
         {**wave, "ts": 100, "event_id": 1, "kind": ktrace.KIND_RANGE_START, "slot": 0, "start_slot": 0},
-        {**wave, "ts": 150, "event_id": 1, "kind": ktrace.KIND_RANGE_END, "slot": 1, "start_slot": 0},
+        {**wave, "ts": 150, "event_id": 1, "kind": ktrace.KIND_RANGE_STOP, "slot": 1, "start_slot": 0},
         {**wave, "ts": 200, "event_id": 1, "kind": ktrace.KIND_RANGE_START, "slot": 2, "start_slot": 0},
-        {**wave, "ts": 260, "event_id": 1, "kind": ktrace.KIND_RANGE_END, "slot": 3, "start_slot": 2},
+        {**wave, "ts": 260, "event_id": 1, "kind": ktrace.KIND_RANGE_STOP, "slot": 3, "start_slot": 2},
     ]
 
     summary = ktrace_trace.summarize(records, names)
@@ -272,7 +272,7 @@ def test_records_are_grouped_by_wave_before_ordering():
 
 
 @pytest.mark.l0_backend_agnostic
-def test_timeline_nests_each_wave_under_its_cu_and_cta():
+def test_timeline_nests_each_wave_under_its_cu_and_workgroup():
     names = {"phase": 1}
     records = [
         {
@@ -301,8 +301,60 @@ def test_timeline_nests_each_wave_under_its_cu_and_cta():
         path.insert(0, tracks[wave]["name"])
         wave = tracks[wave]["parent"]
     assert path[0] == "gemm" and path[1].startswith("launch 1")
-    assert path[2:] == ["XCD3/SE2/SH1/CU9", "CTA(4, 1, 0)", "Wave3"]
+    assert path[2:] == ["XCD3/SE2/SH1/CU9", "WG(4, 1, 0)", "Wave3"]
     assert timeline["instants"][0]["name"] == "phase" and timeline["instants"][0]["payload"] == 7
+
+
+def _wave_record(ts, kind, slot, start_slot=0, payload=None, payload_type=None):
+    return {
+        **dict.fromkeys(("hw_id", "xcc_id", "wave", "simd", "cu", "sh", "se", "wave_id"), 0),
+        "ts": ts,
+        "payload": payload,
+        "payload_type": payload_type,
+        "event_id": 1,
+        "kind": kind,
+        "slot": slot,
+        "start_slot": start_slot,
+        "block": (0, 0, 0),
+    }
+
+
+@pytest.mark.l0_backend_agnostic
+def test_overlapping_token_ranges_never_share_a_lane():
+    # B starts in the same tick A stops, but before A's stop record: they overlap.
+    records = [
+        _wave_record(100, ktrace.KIND_RANGE_START, 1),
+        _wave_record(110, ktrace.KIND_RANGE_START, 2),
+        _wave_record(110, ktrace.KIND_RANGE_STOP, 3, start_slot=1),
+        _wave_record(200, ktrace.KIND_RANGE_STOP, 4, start_slot=2),
+        _wave_record(300, ktrace.KIND_RANGE_START, 5),
+        _wave_record(310, ktrace.KIND_RANGE_STOP, 6, start_slot=5),
+    ]
+    timeline = ktrace_trace.build_timeline(records, {"r": 1})
+    lanes = {t["uuid"]: t["name"] for t in timeline["tracks"] if t["name"].startswith("ranges")}
+    ranges = [(lanes[sl["track"]], sl["start"], sl["end"]) for sl in timeline["slices"] if sl["track"] in lanes]
+    assert sorted(ranges) == [("ranges 0", 0, 100), ("ranges 0", 2000, 2100), ("ranges 1", 100, 1000)]
+
+
+@pytest.mark.l0_backend_agnostic
+def test_unclosed_ranges_are_labelled():
+    records = [
+        _wave_record(100, ktrace.KIND_RANGE_PUSH, 1),
+        _wave_record(110, ktrace.KIND_RANGE_START, 2),
+        _wave_record(120, ktrace.KIND_MARK, 3),
+    ]
+    timeline = ktrace_trace.build_timeline(records, {"r": 1})
+    names = sorted(sl["name"] for sl in timeline["slices"])
+    assert names == ["Wave Span", "r (unclosed)", "r (unclosed)"]
+
+
+@pytest.mark.l0_backend_agnostic
+def test_payload_annotation_keeps_non_finite_and_unsigned_values():
+    assert b"nan" in ktrace_trace._payload_annotation(float("nan"))
+    assert b"-inf" in ktrace_trace._payload_annotation(float("-inf"))
+    # uint64 payloads use the unsigned field even below 2^63 (field 3, varint wire type).
+    assert ktrace_trace._payload_annotation(5, "uint64").endswith(bytes([3 << 3, 5]))
+    assert ktrace_trace._payload_annotation(5, "int64").endswith(bytes([4 << 3, 5]))
 
 
 @pytest.mark.l0_backend_agnostic
@@ -320,6 +372,7 @@ def test_write_trace_emits_gzipped_perfetto_without_overwriting(tmp_path):
     first = ktrace_trace.write_trace(records, {"a": 1}, kernel="k", out_dir=str(tmp_path))
     second = ktrace_trace.write_trace(records, {"a": 1}, kernel="k", out_dir=str(tmp_path))
     assert [os.path.basename(p) for p in (first, second)] == ["k_ktrace.pftrace.gz", "k_ktrace.1.pftrace.gz"]
+    assert sorted(os.listdir(tmp_path)) == ["k_ktrace.1.pftrace.gz", "k_ktrace.pftrace.gz"]
     timeline = ktrace_trace.build_timeline(records, {"a": 1}, kernel="k")
     with gzip.open(first, "rb") as fh:
         assert fh.read() == ktrace_trace.encode_pftrace(timeline)
@@ -468,7 +521,7 @@ def test_range_start_yields_the_slot_its_record_occupies(monkeypatch):
     @flyc.kernel
     def annotated():
         tok = ktrace.range_start("span")
-        ktrace.range_end(tok)
+        ktrace.range_stop(tok)
 
     @flyc.jit
     def launch():
@@ -562,7 +615,7 @@ os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = "1"
 os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = sys.argv[1]
 
 import flydsl.compiler as flyc
-from flydsl.expr.experimental import ktrace, ktrace_common
+from flydsl.expr import ktrace, ktrace_common
 
 @flyc.kernel
 def annotated():
@@ -620,7 +673,7 @@ os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = sys.argv[1]
 os.environ["FLYDSL_RUNTIME_ENABLE_CACHE"] = "0"
 
 import flydsl.compiler as flyc
-from flydsl.expr.experimental import ktrace
+from flydsl.expr import ktrace
 
 @flyc.kernel
 def annotated():
@@ -734,7 +787,7 @@ def test_suppressed_store_yields_an_unpairable_slot(monkeypatch):
     @flyc.kernel
     def annotated():
         token = ktrace.range_start("r")
-        ktrace.range_end(token)
+        ktrace.range_stop(token)
 
     @flyc.jit
     def launch():
@@ -760,12 +813,12 @@ def test_store_bounds_use_unsigned_compares(monkeypatch):
     assert not re.search(r"arith\.cmpi\s+slt", text), "a signed bounds compare survived"
 
 
-def test_range_end_without_a_start_is_dropped():
+def test_range_stop_without_a_start_is_dropped():
     import struct
 
     from flydsl.runtime.device_runtime import rocm_ktrace_buffer as ktrace_buffer
 
-    packed = (ktrace.KIND_RANGE_END << 24) | 1
+    packed = (ktrace.KIND_RANGE_STOP << 24) | 1
     raw = bytes(ktrace_format.RECORD_BYTES) + struct.pack("<QQIIII", 100, 0, 0, 0, packed, ktrace_format.UNPAIRED_SLOT)
     records, _ = ktrace_buffer.decode_records(raw)
     assert len(records) == 1, f"expected one decoded record, got {records}"
@@ -775,7 +828,7 @@ def test_range_end_without_a_start_is_dropped():
     assert ktrace_trace.summarize(records, names)["phases"] == {}, "an unpairable end was accumulated"
 
     slices = ktrace_trace.build_timeline(records, names, kernel="k")["slices"]
-    assert [s["name"] for s in slices] == ["Wave Span"], "a dangling range-end reached the trace"
+    assert [s["name"] for s in slices] == ["Wave Span"], "a dangling range-stop reached the trace"
 
 
 def test_buffer_bytes_invalidates_the_cache(monkeypatch):
@@ -818,7 +871,7 @@ def test_payload_zero_is_recorded(monkeypatch):
         "se": 0,
     }
     slices = ktrace_trace.build_timeline([rec], {"k_tile": 1}, kernel="k")["slices"]
-    ranges = [s for s in slices if s["name"] == "k_tile"]
+    ranges = [s for s in slices if s["name"] == "k_tile (unclosed)"]
     assert ranges and ranges[0]["payload"] == 0, "a zero payload was dropped from the trace"
 
 
@@ -1125,7 +1178,7 @@ def test_perfetto_range_closes_when_the_token_was_rebound():
 
     records = [
         record(ktrace.KIND_RANGE_START, 1, slot=5, start_slot=0, ts=100),
-        record(ktrace.KIND_RANGE_END, 2, slot=6, start_slot=5, ts=200),
+        record(ktrace.KIND_RANGE_STOP, 2, slot=6, start_slot=5, ts=200),
     ]
     slices = ktrace_trace.build_timeline(records, {"a": 1, "seed": 2})["slices"]
     ranges = [(s["name"], s["end"] - s["start"]) for s in slices if s["name"] != "Wave Span"]
@@ -1244,15 +1297,13 @@ def test_concurrent_first_launches_allocate_one_buffer(monkeypatch):
     assert len({id(b) for b in handed_out}) == 1, "threads were handed different buffers"
 
 
-def test_experimental_package_exposes_ktrace_lazily():
+def test_expr_exposes_ktrace_lazily():
     import flydsl.expr as fx
 
-    module = fx.experimental.ktrace
-    assert module.__name__ == "flydsl.expr.experimental.ktrace"
+    module = fx.ktrace
+    assert module.__name__ == "flydsl.expr.ktrace"
     assert callable(module.range_push)
-    assert "ktrace" in dir(fx.experimental)
-    with pytest.raises(AttributeError):
-        fx.experimental.definitely_not_a_module
+    assert not hasattr(module, "__all__"), "an __all__ would make ktrace a stable API"
 
 
 def test_importing_the_runtime_does_not_pull_in_expr():
@@ -1311,7 +1362,7 @@ def test_a_traced_launch_cannot_land_inside_a_trace_read():
     import threading
 
     from flydsl.compiler.jit_executor import CallState
-    from flydsl.expr.experimental import ktrace as _kt
+    from flydsl.expr import ktrace as _kt
     from flydsl.expr.rocdl import ktrace_emit
 
     device = {"records": [{"ev": 1}]}
@@ -1372,7 +1423,7 @@ def test_a_trace_read_cannot_land_inside_a_traced_launch():
     import threading
 
     from flydsl.compiler.jit_executor import CallState
-    from flydsl.expr.experimental import ktrace as _kt
+    from flydsl.expr import ktrace as _kt
     from flydsl.expr.rocdl import ktrace_emit
 
     device = {"records": []}

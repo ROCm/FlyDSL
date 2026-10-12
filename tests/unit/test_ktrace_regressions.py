@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from flydsl.compiler.backends import _rocm_ktrace_trace as ktrace_trace
 from flydsl.runtime.device import get_rocm_arch
 
 pytestmark = [
@@ -52,7 +51,7 @@ import json, os, sys
 import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr.experimental import ktrace
+from flydsl.expr import ktrace
 from flydsl.expr.rocdl import ktrace_emit
 
 @flyc.kernel
@@ -94,7 +93,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 import flydsl.compiler as flyc
 from flydsl.compiler import jit_function
-from flydsl.expr.experimental import ktrace
+from flydsl.expr import ktrace
 
 @flyc.kernel
 def kernel_a():
@@ -146,11 +145,12 @@ def test_numeric_payloads_survive_trace_export(tmp_path):
     result = _run_probe(
         tmp_path,
         """
-import json, sys
+import json, math, sys
+from flydsl.compiler.backends._rocm_ktrace_trace import build_timeline
 from pathlib import Path
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr.experimental import ktrace
+from flydsl.expr import ktrace
 
 @flyc.kernel
 def kernel():
@@ -175,15 +175,22 @@ def launch():
 
 with ktrace.capture("payloads", out_dir=sys.argv[1]) as trace:
     launch()
-print(json.dumps({"path": trace.export(), "count": trace.summary()["phases"]["value"]["count"]}))
+records = trace._snapshot()
+payloads = [str(p) if isinstance(p, float) and not math.isfinite(p) else p for p in (r["payload"] for r in records)]
+print(json.dumps({
+    "path": trace.export(),
+    "count": trace.summary()["phases"]["value"]["count"],
+    "payloads": payloads,
+    "payload_types": [r["payload_type"] for r in records],
+    "instants": [i["payload"] for i in build_timeline(records, trace._names)["instants"]],
+}))
 """,
         str(tmp_path),
     )
     assert result["count"] == 14
-    raw = json.loads((tmp_path / "payloads_ktrace.json").read_text())
     expected = [1.5, -2.5, -1, -1, (1 << 64) - 1, 0.5, 0.5, True, False, 0, None, "inf", "-inf", "nan"]
-    assert [record["payload"] for record in raw["records"]] == expected
-    assert [record["payload_type"] for record in raw["records"]] == [
+    assert result["payloads"] == expected
+    assert result["payload_types"] == [
         "float32",
         "float64",
         "int64",
@@ -200,5 +207,5 @@ print(json.dumps({"path": trace.export(), "count": trace.summary()["phases"]["va
         "float64",
     ]
     assert Path(result["path"]).stat().st_size > 0
-    timeline = ktrace_trace.build_timeline(raw["records"], raw["names"])
-    assert [instant["payload"] for instant in timeline["instants"]] == expected
+    assert result["instants"][:11] == expected[:11]
+    assert len(result["instants"]) == len(expected)

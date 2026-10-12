@@ -16,14 +16,14 @@ class FlyKtrace_TypeDef<string name, string mnemonic_, list<Trait> traits = []>
 def FlyKtrace_TokenType : FlyKtrace_TypeDef<"Token", "token"> {
   let summary = "Buffer slot of a range's START record, for its END to pair on.";
   let description = [{
-    Produced by `range_start`, consumed by `range_end`. It stands for the absolute
+    Produced by `range_start`, consumed by `range_stop`. It stands for the absolute
     slot the START record occupies -- ranges pair by slot rather than by name,
     because N iterations of one loop share a name but must not share a pairing.
 
-    The sentinel half of the pair is NOT carried here. A token that records
-    nothing also has an `i1` beside it, and `range_end` is already wrapped in an
+    The inactive half of the pair is NOT carried here. A token that records
+    nothing also has an `i1` beside it, and `range_stop` is already wrapped in an
     `scf.if` on that flag by the frontend, before the op exists. The flag cannot
-    be folded into this type: across an `scf.for` that merges a sentinel
+    be folded into this type: across an `scf.for` that merges an inactive token
     initialiser with an in-body `range_start` it is a genuine loop-carried block
     argument, not a compile-time constant.
 
