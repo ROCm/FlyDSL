@@ -10,6 +10,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.compiler.backends import _rocm_ktrace_trace as ktrace_trace
 from flydsl.expr.experimental import ktrace
 from flydsl.runtime.device import get_rocm_arch
 
@@ -293,11 +294,7 @@ def test_multiple_eager_layers_export_separate_traces(tmp_path):
     paths = trace.export_launches(names=["layer_0", "layer_1", "layer_2"])
     assert len(paths) == 3
     assert all(path.startswith(str(tmp_path)) for path in paths)
-    assert [json.loads(Path(path).read_text())["otherData"]["kernel"] for path in paths] == [
-        "layer_0",
-        "layer_1",
-        "layer_2",
-    ]
+    assert [Path(path).name for path in paths] == [f"layer_{i}_ktrace.pftrace.gz" for i in range(3)]
     raw = json.loads((tmp_path / "layer_0_ktrace.json").read_text())
     assert all(record["payload"] is None for record in raw["records"])
     with pytest.raises(ValueError, match="one string per recorded launch"):
@@ -330,8 +327,10 @@ def test_graph_replay_of_multiple_layers_keeps_each_launch(tmp_path):
     assert len({launch["dispatch_id"] for launch in launches}) == 6
     assert all(launch["phases"]["add"]["count"] == 1 for launch in launches)
     assert len(trace.export_launches()) == 6
-    combined = json.loads(Path(trace.export()).read_text())
-    assert len([event for event in combined["traceEvents"] if event.get("name") == "process_name"]) == 6
+    assert trace.export().endswith(".pftrace.gz")
+    raw = json.loads((tmp_path / "graph_layers_ktrace.json").read_text())
+    timeline = ktrace_trace.build_timeline(raw["records"], raw["names"])
+    assert len([track for track in timeline["tracks"] if track["name"].startswith("launch ")]) == 6
 
 
 def test_graph_replay_with_gemm_moe_and_attention():

@@ -16,6 +16,7 @@ module attributes {gpu.container_module} {
       // CHECK: rocdl.ballot
       // CHECK: scf.if
       // CHECK: llvm.atomicrmw add
+      // CHECK: gpu.subgroup_id
       // CHECK: rocdl.readfirstlane
 
       // CHECK: rocdl.ballot

@@ -198,6 +198,23 @@ FailureOr<KernelTraceState> emitPrologue(gpu::GPUFuncOp kernel, int64_t eventsPe
     b.create<LLVM::StoreOp>(loc, dispatchId, gepBytes(b, loc, st.bufPtr, byteOff));
     Value queueByteOff = b.create<arith::AddIOp>(loc, byteOff, i32Const(b, loc, 8));
     b.create<LLVM::StoreOp>(loc, queueId, gepBytes(b, loc, st.bufPtr, queueByteOff));
+    // Remaining header words: (block.z << 8 | wave in block) at +4, block.x at +24, block.y
+    // at +28.
+    auto blockId = [&](gpu::Dimension dim) -> Value {
+      return b.create<arith::IndexCastOp>(loc, i32Ty, b.create<gpu::BlockIdOp>(loc, dim));
+    };
+    Value wave =
+        b.create<arith::IndexCastOp>(loc, i32Ty, b.create<gpu::SubgroupIdOp>(loc, nullptr));
+    Value waveWord = b.create<arith::OrIOp>(
+        loc, b.create<arith::ShLIOp>(loc, blockId(gpu::Dimension::z), i32Const(b, loc, 8)), wave);
+    Value headerOff = b.create<arith::SubIOp>(loc, byteOff, i32Const(b, loc, 4));
+    b.create<LLVM::StoreOp>(loc, waveWord, gepBytes(b, loc, st.bufPtr, headerOff));
+    Value blockXOff = b.create<arith::AddIOp>(loc, queueByteOff, i32Const(b, loc, 8));
+    b.create<LLVM::StoreOp>(loc, blockId(gpu::Dimension::x),
+                            gepBytes(b, loc, st.bufPtr, blockXOff));
+    Value blockYOff = b.create<arith::AddIOp>(loc, blockXOff, i32Const(b, loc, 4));
+    b.create<LLVM::StoreOp>(loc, blockId(gpu::Dimension::y),
+                            gepBytes(b, loc, st.bufPtr, blockYOff));
     b.setInsertionPointAfter(metadataIf);
     b.create<scf::YieldOp>(loc, ValueRange{base});
     b.setInsertionPointToStart(claimIf.elseBlock());

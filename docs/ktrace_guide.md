@@ -26,7 +26,7 @@ def gemm(...):
 ```
 
 Enable tracing around the host launch, then open the exported
-`gemm_ktrace.trace.json` at [ui.perfetto.dev](https://ui.perfetto.dev):
+`gemm_ktrace.pftrace.gz` at [ui.perfetto.dev](https://ui.perfetto.dev):
 
 ```python
 with ktrace.capture("gemm", blocks=(0, 0, 0)) as trace:
@@ -35,6 +35,13 @@ with ktrace.capture("gemm", blocks=(0, 0, 0)) as trace:
 print(trace.summary())
 path = trace.export()
 ```
+
+The trace nests tracks as kernel → launch → CU (`XCD/SE/SH/CU`) → `CTA(x, y, z)` →
+`WaveN`. Each wave track starts with a `Wave Span` slice from its first to its last
+event; `range_push` ranges nest inside it and marks appear as instants. Token ranges
+(`range_start`/`range_end`) may overlap, so they go on `ranges N` child tracks. Event
+names include the payload, e.g. `tile(payload=3)`. The block coordinates and wave
+index come from each wave's buffer header; no annotation is needed.
 
 `blocks=(x, y, z)` selects one workgroup without changing the launched grid.
 Start with one workgroup and a few phases. Each wave can record **255 events per

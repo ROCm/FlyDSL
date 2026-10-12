@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from flydsl.compiler.backends import _rocm_ktrace_trace as ktrace_trace
 from flydsl.runtime.device import get_rocm_arch
 
 pytestmark = [
@@ -198,6 +199,6 @@ print(json.dumps({"path": trace.export(), "count": trace.summary()["phases"]["va
         "float64",
         "float64",
     ]
-    timeline = json.loads(Path(result["path"]).read_text())
-    marks = [event for event in timeline["traceEvents"] if event["ph"] == "i"]
-    assert [event["args"].get("payload") for event in marks] == expected
+    assert Path(result["path"]).stat().st_size > 0
+    timeline = ktrace_trace.build_timeline(raw["records"], raw["names"])
+    assert [instant["payload"] for instant in timeline["instants"]] == expected

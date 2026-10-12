@@ -146,12 +146,14 @@ def decode_records(raw: bytes) -> tuple[list[dict], list[tuple[int, int]]]:
     overflowed = []
     dispatch_id = 0
     queue_id = 0
+    block = (0, 0, 0)
+    wave_id = 0
     for off in range(0, len(raw) - _format.RECORD_BYTES + 1, _format.RECORD_BYTES):
         abs_slot = off // _format.RECORD_BYTES + 1
         if per_wave > 0 and (abs_slot - 1) % per_wave == 0:
-            attempted = struct.unpack_from("<I", raw, off)[0]
-            dispatch_id = struct.unpack_from("<Q", raw, off + 8)[0]
-            queue_id = struct.unpack_from("<Q", raw, off + 16)[0]
+            attempted, wave_word, dispatch_id, queue_id, block_x, block_y = struct.unpack_from("<IIQQII", raw, off)
+            block = (block_x, block_y, wave_word >> 8)
+            wave_id = wave_word & 0xFF
             if attempted > per_wave - 1:
                 overflowed.append((abs_slot // per_wave, attempted))
             continue
@@ -167,6 +169,8 @@ def decode_records(raw: bytes) -> tuple[list[dict], list[tuple[int, int]]]:
                 "xcc_id": xcc_id,
                 "dispatch_id": dispatch_id,
                 "queue_id": queue_id,
+                "block": block,
+                "wave_id": wave_id,
                 "event_id": packed & 0xFFFFFF,
                 "kind": (packed >> 24) & 0x7,
                 "start_slot": start_slot,

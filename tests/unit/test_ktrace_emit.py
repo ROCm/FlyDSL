@@ -2,6 +2,8 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 
+import gzip
+import os
 import re
 import sys
 import time
@@ -270,7 +272,7 @@ def test_records_are_grouped_by_wave_before_ordering():
 
 
 @pytest.mark.l0_backend_agnostic
-def test_chrome_trace_names_each_wave_by_hardware_location():
+def test_timeline_nests_each_wave_under_its_cu_and_cta():
     names = {"phase": 1}
     records = [
         {
@@ -287,13 +289,40 @@ def test_chrome_trace_names_each_wave_by_hardware_location():
             "cu": 9,
             "sh": 1,
             "se": 2,
+            "block": (4, 1, 0),
+            "wave_id": 3,
         }
     ]
-    doc = ktrace_trace.build_chrome_trace(records, names, kernel="gemm")
-    labels = [e["args"]["name"] for e in doc["traceEvents"] if e.get("name") == "thread_name"]
-    assert labels == ["XCD3/SE2/SH1/CU9/SIMD2/wave5"]
-    instant = [e for e in doc["traceEvents"] if e.get("ph") == "i"]
-    assert instant and instant[0]["name"] == "phase" and instant[0]["args"]["payload"] == 7
+    timeline = ktrace_trace.build_timeline(records, names, kernel="gemm")
+    tracks = {track["uuid"]: track for track in timeline["tracks"]}
+    wave = timeline["instants"][0]["track"]
+    path = []
+    while wave is not None:
+        path.insert(0, tracks[wave]["name"])
+        wave = tracks[wave]["parent"]
+    assert path[0] == "gemm" and path[1].startswith("launch 1")
+    assert path[2:] == ["XCD3/SE2/SH1/CU9", "CTA(4, 1, 0)", "Wave3"]
+    assert timeline["instants"][0]["name"] == "phase" and timeline["instants"][0]["payload"] == 7
+
+
+@pytest.mark.l0_backend_agnostic
+def test_write_trace_emits_gzipped_perfetto_without_overwriting(tmp_path):
+    records = [
+        {
+            **dict.fromkeys(("hw_id", "xcc_id", "slot", "start_slot", "wave", "simd", "cu", "sh", "se", "wave_id"), 0),
+            "ts": 100,
+            "payload": None,
+            "event_id": 1,
+            "kind": ktrace.KIND_MARK,
+            "block": (0, 0, 0),
+        }
+    ]
+    first = ktrace_trace.write_trace(records, {"a": 1}, kernel="k", out_dir=str(tmp_path))
+    second = ktrace_trace.write_trace(records, {"a": 1}, kernel="k", out_dir=str(tmp_path))
+    assert [os.path.basename(p) for p in (first, second)] == ["k_ktrace.pftrace.gz", "k_ktrace.1.pftrace.gz"]
+    timeline = ktrace_trace.build_timeline(records, {"a": 1}, kernel="k")
+    with gzip.open(first, "rb") as fh:
+        assert fh.read() == ktrace_trace.encode_pftrace(timeline)
 
 
 def test_traced_kernel_stays_disk_cacheable(monkeypatch):
@@ -400,8 +429,8 @@ def test_optional_payload_preserves_absent_and_explicit_zero():
     raw += struct.pack("<QQIIII", 110, 0, 0, 0, (1 << 31) | 1, 0)
     records, _ = ktrace_buffer.decode_records(raw)
     assert [record["payload"] for record in records] == [None, 0]
-    events = ktrace_trace.build_chrome_trace(records, {"mark": 1})["traceEvents"]
-    assert [event["args"] for event in events if event.get("ph") == "i"] == [{}, {"payload": 0}]
+    instants = ktrace_trace.build_timeline(records, {"mark": 1})["instants"]
+    assert [instant["payload"] for instant in instants] == [None, 0]
 
 
 def test_dispatch_ids_separate_repeated_kernel_launches():
@@ -410,7 +439,7 @@ def test_dispatch_ids_separate_repeated_kernel_launches():
     from flydsl.runtime.device_runtime import rocm_ktrace_buffer as ktrace_buffer
 
     def counter(queue_id, dispatch_id):
-        return struct.pack("<IIQQ", 2, 0, dispatch_id, queue_id) + bytes(8)
+        return struct.pack("<IIQQII", 2, (5 << 8) | 3, dispatch_id, queue_id, 7, 6)
 
     def event(ts, kind):
         return struct.pack("<QQIIII", ts, 0, 0, 0, (kind << 24) | 1, 0)
@@ -422,14 +451,15 @@ def test_dispatch_ids_separate_repeated_kernel_launches():
 
     assert not overflowed
     assert [(r["queue_id"], r["dispatch_id"]) for r in records] == [(11, 101)] * 2 + [(12, 101)] * 2
+    assert all(r["block"] == (7, 6, 5) and r["wave_id"] == 3 for r in records)
     groups = ktrace_trace.group_launches(records)
     assert [identity for identity, _ in groups] == [(11, 101), (12, 101)]
     assert [ktrace_trace.summarize(group, {"phase": 1})["phases"]["phase"]["total_ns"] for _, group in groups] == [
         400.0,
         700.0,
     ]
-    doc = ktrace_trace.build_chrome_trace(records, {"phase": 1})
-    assert len({event["pid"] for event in doc["traceEvents"] if event["ph"] == "B"}) == 2
+    tracks = ktrace_trace.build_timeline(records, {"phase": 1})["tracks"]
+    assert len([track for track in tracks if track["name"].startswith("launch ")]) == 2
 
 
 def test_range_start_yields_the_slot_its_record_occupies(monkeypatch):
@@ -744,8 +774,8 @@ def test_range_end_without_a_start_is_dropped():
 
     assert ktrace_trace.summarize(records, names)["phases"] == {}, "an unpairable end was accumulated"
 
-    events = ktrace_trace.build_chrome_trace(records, names, kernel="k")["traceEvents"]
-    assert not [e for e in events if e.get("ph") == "e"], "a dangling range-end reached the trace"
+    slices = ktrace_trace.build_timeline(records, names, kernel="k")["slices"]
+    assert [s["name"] for s in slices] == ["Wave Span"], "a dangling range-end reached the trace"
 
 
 def test_buffer_bytes_invalidates_the_cache(monkeypatch):
@@ -787,9 +817,9 @@ def test_payload_zero_is_recorded(monkeypatch):
         "sh": 0,
         "se": 0,
     }
-    events = ktrace_trace.build_chrome_trace([rec], {"k_tile": 1}, kernel="k")["traceEvents"]
-    begins = [e for e in events if e.get("ph") == "B"]
-    assert begins and begins[0]["args"] == {"payload": 0}, "a zero payload was dropped from the trace"
+    slices = ktrace_trace.build_timeline([rec], {"k_tile": 1}, kernel="k")["slices"]
+    ranges = [s for s in slices if s["name"] == "k_tile"]
+    assert ranges and ranges[0]["payload"] == 0, "a zero payload was dropped from the trace"
 
 
 def test_collect_and_summary_agree_on_an_empty_trace(monkeypatch):
@@ -1097,12 +1127,9 @@ def test_perfetto_range_closes_when_the_token_was_rebound():
         record(ktrace.KIND_RANGE_START, 1, slot=5, start_slot=0, ts=100),
         record(ktrace.KIND_RANGE_END, 2, slot=6, start_slot=5, ts=200),
     ]
-    doc = ktrace_trace.build_chrome_trace(records, {"a": 1, "seed": 2})
-    async_events = [e for e in doc["traceEvents"] if e["ph"] in ("b", "e")]
-
-    assert len(async_events) == 2, "the range should emit exactly one begin and one end"
-    names = {e["name"] for e in async_events}
-    assert names == {"a"}, f"begin/end names disagree ({names}); Perfetto leaves the range open"
+    slices = ktrace_trace.build_timeline(records, {"a": 1, "seed": 2})["slices"]
+    ranges = [(s["name"], s["end"] - s["start"]) for s in slices if s["name"] != "Wave Span"]
+    assert ranges == [("a", 1000)], f"the rebound token did not close its range: {ranges}"
 
 
 def test_reading_a_buffer_from_another_device_is_refused(monkeypatch):
