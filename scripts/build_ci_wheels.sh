@@ -36,6 +36,13 @@ OUTPUT_DIR="${CI_WHEEL_OUTPUT_DIR:-/tmp/flydsl-ci-wheels}"
 VENV_ROOT="${CI_WHEEL_VENV_ROOT:-/tmp/flydsl-ci-wheel-venvs}"
 BASE_WORKTREE="${CI_BASE_WORKTREE:-/tmp/flydsl-ci-base}"
 
+# Derive build-fly prefix: build-fly-<suffix> for custom LLVM, build-fly otherwise
+_fly_build_prefix="build-fly"
+if [[ "${LLVM_SOURCE:-upstream}" == "custom" ]]; then
+  _ci_branch=$(python3 -c "import json; print(json.load(open('${REPO_ROOT}/thirdparty/llvm-build-info.json'))['custom']['branch'])")
+  _fly_build_prefix="build-fly-$(echo "${_ci_branch}" | sed 's|.*/||; s/_/-/g')"
+fi
+
 echo "Building CI wheels with Python ${PYTHON_VERSION} (${PYTHON_BIN})"
 rm -rf "${OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}"
@@ -83,7 +90,7 @@ build_wheel() {
   local mlir_path="${3:-${MLIR_PATH}}"
   local destination="${OUTPUT_DIR}/${label}"
   local wheels=()
-  local fly_opt="${source_dir}/build-fly/build_py${PYTHON_SUFFIX}/bin/fly-opt"
+  local fly_opt="${source_dir}/${_fly_build_prefix}/build_py${PYTHON_SUFFIX}/bin/fly-opt"
 
   echo "Building ${label} wheel from ${source_dir} (MLIR: ${mlir_path})"
   if ! (
@@ -94,6 +101,7 @@ build_wheel() {
       VENV_ROOT="${VENV_ROOT}" \
       ALLOW_ANY_GLIBC=1 \
       MLIR_PATH="${mlir_path}" \
+      LLVM_SOURCE="${LLVM_SOURCE:-upstream}" \
       bash scripts/build_wheels.sh
   ); then
     return 1

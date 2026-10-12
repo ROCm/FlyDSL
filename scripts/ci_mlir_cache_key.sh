@@ -34,9 +34,12 @@ for input in "${INPUTS[@]}"; do
 done
 digest="$(printf '%s' "${digests}" | sha256sum | cut -c1-40)"
 
-printf 'mlir-install-%s-%s-%s-%s-%s\n' \
+_llvm_source="${LLVM_SOURCE:-upstream}"
+
+printf 'mlir-install-%s-%s-%s-%s-%s-%s\n' \
   "${RUNNER_OS:?RUNNER_OS must be set}" \
   "${RUNNER_ARCH:?RUNNER_ARCH must be set}" \
   "${MLIR_CACHE_VERSION:?MLIR_CACHE_VERSION must be set}" \
   "${LLVM_BUILD_PROFILE:?LLVM_BUILD_PROFILE must be set}" \
+  "${_llvm_source}" \
   "${digest}"
