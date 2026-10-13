@@ -336,6 +336,7 @@ def build_glm5_monokernel(
         and not attention_bf16
     )
     GLOBAL_UV40 = GLOBAL_QA40 and D == 1 and L == H
+    O_PAD4 = GLOBAL_UV40
     GLOBAL_QB40 = COHORT_ROW_TILES and npes == 4 and native_fp4_mfma and H == 16
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
@@ -449,6 +450,8 @@ def build_glm5_monokernel(
         assert (MIDQ_WORDS + MID_SCALE_WORDS) * 8 <= BLOCKS * S * 2 * UG_TILE * 8
 
     WORK_WORDS = OUT_OFF + OUT_WORDS
+    if O_PAD4:
+        assert S * (O_K // 2 + 4) <= X_WORDS
     if GLOBAL_QA40:
         assert INPUT_NORM_ONCE and 16 * 1028 <= X_WORDS
         assert 16 * QKV_A_TILE <= OUT_WORDS
@@ -4499,7 +4502,11 @@ def build_glm5_monokernel(
                         O_NKC,
                         O_K,
                         128,
-                        attention_b_word(n_sel() * O_K + kc * 64),
+                        (
+                            (n_sel() * (O_K // 2 + 4) + kc * 32)
+                            if const_expr(O_PAD4)
+                            else attention_b_word(n_sel() * O_K + kc * 64)
+                        ),
                     )
 
                 pre = [u_o(c) for c in range(O_UNITS)]
@@ -4514,7 +4521,7 @@ def build_glm5_monokernel(
                 if const_expr(attention_ptpc):
                     o_scales = stage_x_pairs_ptpc("o", S, O_K, lambda k: k)
                 else:
-                    stage_x_pairs("o", S * O_K, lambda k: k)
+                    stage_x_pairs("o", S * O_K, lambda k: k, padded_row=(O_K if O_PAD4 else 0))
                 stamp("o", t, 2)
                 gpu.barrier()
                 acc = run_units(u_o, O_UNITS, O_UNITS, pre)
