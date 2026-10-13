@@ -298,7 +298,7 @@ def build_glm5_monokernel(
             indexer_cp=indexer_cp,
             npes=W,
             native_fp4_mfma=native_fp4_mfma,
-            cohort_rows=COHORT_ROW_TILES and with_indexer,
+            cohort_rows=COHORT_ROW_TILES and (with_indexer or npes == 4),
         )
     )
     CP_RANKS = index_cp_world(W, S, index_max_seq) if indexer_cp else 1
@@ -308,9 +308,11 @@ def build_glm5_monokernel(
     SHARD_INDEX_Q = indexer_cp and not TILED_INDEXER and W > 1
     CP_PARTS = index_cp_partitions(index_max_seq, CP_RANKS) if TILED_INDEXER else 0
     N_SPLIT = topk // SPLIT_KEYS
-    SPLIT_ALL_HEADS = sparse_heads_per_task(S, H, W, native_fp4_mfma) == 16
+    SPLIT_ALL_HEADS = (
+        sparse_heads_per_task(S, H, W, native_fp4_mfma, COHORT_ROW_TILES and (with_indexer or npes == 4)) == 16
+    )
     if DEFER_OFF_CACHE:
-        assert not SPLIT_ALL_HEADS and ROW_TILES >= 3
+        assert ROW_TILES >= 3
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
     # The index-Q row space is fixed at 256 tiles.  TP8 produces half from
@@ -344,7 +346,16 @@ def build_glm5_monokernel(
     UG_UNION_WORDS = 2 * UG_UNION_MAX + N_EXPERTS // 64 + 1 if GROUPED_UG else 0
     DN_TILE = dn_tile(S, expert_mxfp4)
     N_DN_TILES = HIDDEN // DN_TILE
-    GROUPED_DN = GROUPED_UG and S in (8, 12)
+    DN_UNION_ROWS40 = (
+        COHORT_ROW_TILES
+        and not with_indexer
+        and native_fp4_mfma
+        and atom_experts
+        and npes == 4
+        and S == 10
+        and expert_inter == 512
+    )
+    GROUPED_DN = GROUPED_UG and (S in (8, 12) or DN_UNION_ROWS40)
     DN_X_ROW = expert_inter // 4 + (4 if GROUPED_DN else 0)
     DN_SCALE_ROW = expert_inter // 32 + (4 if GROUPED_DN else 0)
 
@@ -402,14 +413,18 @@ def build_glm5_monokernel(
     DN_UNION_CANDIDATE = (
         native_fp4_mfma and atom_experts and npes == 4 and S == 12 and expert_inter == 512 and not with_indexer
     )
-    DU_SLOTS, DU_XROW, DU_SCROW, DU_UMAX = 9, 132, 20, 97
-    DU_MSOFF = 12 * 9 * 132
-    DU_KEYOFF = DU_MSOFF + 12 * 9 * 20
-    DU_DWOFF = DU_KEYOFF + 12 * 9 + 2 * 97 + 5
-    DU_CROFF = DU_DWOFF + 12 * 9
-    DU_CWORDS = 12 * 9 * 4 * 32
-    if DN_UNION_CANDIDATE:
-        assert WORK_WORDS * 4 >= (DU_CROFF + DU_CWORDS) * 4 + 257 * 12
+    DU_ROWS = 10 if DN_UNION_ROWS40 else 12
+    DU_SLOTS, DU_XROW, DU_SCROW, DU_UMAX = 9, 132, 20, DU_ROWS * 8 + 1
+    DU_ROUTE_WORDS = DU_ROWS * DU_SLOTS
+    DU_KEY_WORDS = DU_ROUTE_WORDS + 2 * DU_UMAX + 5
+    DU_MSOFF = DU_ROUTE_WORDS * DU_XROW
+    DU_KEYOFF = DU_MSOFF + DU_ROUTE_WORDS * DU_SCROW
+    DU_DWOFF = DU_KEYOFF + DU_KEY_WORDS
+    DU_CROFF = DU_DWOFF + DU_ROUTE_WORDS
+    DU_CWORDS = DU_ROUTE_WORDS * 4 * 32
+    if DN_UNION_CANDIDATE or DN_UNION_ROWS40:
+        assert GROUPED_DN
+        assert WORK_WORDS * 4 >= (DU_CROFF + DU_CWORDS) * 4 + 257 * DU_ROWS
 
     base, first, acc = {}, {}, 0
     for name, n in stage_tasks(
@@ -423,7 +438,7 @@ def build_glm5_monokernel(
         npes=W,
         inter=expert_inter,
         native_fp4_mfma=native_fp4_mfma,
-        cohort_rows=COHORT_ROW_TILES and with_indexer,
+        cohort_rows=COHORT_ROW_TILES and (with_indexer or npes == 4),
     ):
         first[name] = acc
         acc += n
@@ -441,7 +456,7 @@ def build_glm5_monokernel(
             npes=W,
             inter=expert_inter,
             native_fp4_mfma=native_fp4_mfma,
-            cohort_rows=COHORT_ROW_TILES and with_indexer,
+            cohort_rows=COHORT_ROW_TILES and (with_indexer or npes == 4),
         )
     )
     acc = 0
@@ -3351,32 +3366,65 @@ def build_glm5_monokernel(
                                 lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row))
 
                 def patch_new_kv():
-                    """Rows appended by this launch come from the cache task's kvnew / penew pairs."""
-                    if const_expr(use_atom_kv_cache):
-                        new_active = [row_writes_cache(new_s) for new_s in range(S)]
-                        new_slots = [row_slot(new_s) for new_s in range(S)]
-                    for jj in range_constexpr(KPW):
-                        j = wave * KPW + jj
-                        kr = lds_ld(attn_keys, j)
-                        if const_expr(use_atom_kv_cache):
-                            sn = fx.Int32(-1)
-                            for new_s in range_constexpr(S):
-                                match = new_active[new_s] & (kr == new_slots[new_s])
-                                sn = match.select(fx.Int32(new_s), sn)
-                            is_new = sn >= 0
-                        else:
-                            is_new = kr >= pos0
-                            sn = kr - pos0
-                        if is_new:
-                            kvp = get2_many([(mb("kvnew"), sn * KV_LORA + lane * 8 + m * 2) for m in range(4)])
-                            w = [bf16_pair(a0, a1) for a0, a1 in kvp]
-                            fx.ptr_store(
-                                fx.Vector.from_elements(w, fx.Float32),
-                                ktile + (j * KS + lane * 4),
+                    """Patch the cache version visible at this tile's serial boundary."""
+                    if const_expr(DEFER_OFF_CACHE):
+                        # One coalesced incoming-slot load per lane, then one ballot
+                        # per key replaces a serial forty-slot search in wave zero.
+                        incoming_slot = fx.Int32(
+                            bo.buffer_load(
+                                _rsrc(full_slots), fx.min(lane, total_samples - 1) * 2, vec_width=1, dtype=T.i32
                             )
-                            if lane < PE_DIM // 2:
-                                a0, a1 = get2(mb("penew"), sn * PE_DIM + lane * 2)
-                                lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
+                        )
+                        visible_row = (lane < row_offset + S) & (lane < total_samples) & (incoming_slot >= 0)
+                        for jj in range_constexpr(KPW):
+                            j = wave * KPW + jj
+                            physical_key = _uniform(lds_ld(attn_keys, j))
+                            version_mask = fx.Int64(rocdl.ballot(T.i64, visible_row & (incoming_slot == physical_key)))
+                            if version_mask != 0:
+                                incoming_row = fx.Int32(63) - fx.Int32(fmath.ctlz(version_mask))
+                                source_tile = incoming_row // S
+                                source_row = incoming_row % S
+                                source_scratch = full_scratch + fx.Int64(source_tile) * TILE_SCRATCH_BYTES
+                                kvp = get2_many(
+                                    [
+                                        (source_scratch + SC["kvnew"], source_row * KV_LORA + lane * 8 + m * 2)
+                                        for m in range(4)
+                                    ]
+                                )
+                                words = [bf16_pair(a0, a1) for a0, a1 in kvp]
+                                fx.ptr_store(
+                                    fx.Vector.from_elements(words, fx.Float32),
+                                    ktile + (j * KS + lane * 4),
+                                )
+                                if lane < PE_DIM // 2:
+                                    a0, a1 = get2(source_scratch + SC["penew"], source_row * PE_DIM + lane * 2)
+                                    lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
+                    else:
+                        if const_expr(use_atom_kv_cache):
+                            new_active = [row_writes_cache(new_s) for new_s in range(S)]
+                            new_slots = [row_slot(new_s) for new_s in range(S)]
+                        for jj in range_constexpr(KPW):
+                            j = wave * KPW + jj
+                            kr = lds_ld(attn_keys, j)
+                            if const_expr(use_atom_kv_cache):
+                                sn = fx.Int32(-1)
+                                for new_s in range_constexpr(S):
+                                    match = new_active[new_s] & (kr == new_slots[new_s])
+                                    sn = match.select(fx.Int32(new_s), sn)
+                                is_new = sn >= 0
+                            else:
+                                is_new = kr >= pos0
+                                sn = kr - pos0
+                            if is_new:
+                                kvp = get2_many([(mb("kvnew"), sn * KV_LORA + lane * 8 + m * 2) for m in range(4)])
+                                w = [bf16_pair(a0, a1) for a0, a1 in kvp]
+                                fx.ptr_store(
+                                    fx.Vector.from_elements(w, fx.Float32),
+                                    ktile + (j * KS + lane * 4),
+                                )
+                                if lane < PE_DIM // 2:
+                                    a0, a1 = get2(mb("penew"), sn * PE_DIM + lane * 2)
+                                    lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
 
                 N_HEAD_GROUPS = 1
                 for tt in range(start("split"), S * N_HEAD_GROUPS * N_SPLIT, G):
@@ -3968,7 +4016,7 @@ def build_glm5_monokernel(
                     if const_expr(attention_ptpc):
                         reduce_rows(UV_R, acc, emit_ptpc_scalar(UV_TILE, ld_f32(r_suv, 0)))
                     else:
-                        reduce_rows(UV_R, acc, emit_out(UV_TILE))
+                        reduce_rows(UV_R, acc, emit_out(UV_TILE), count=1 if COHORT_ROW_TILES else S)
                     stamp("uv", tt, 3)
                     gpu.barrier()
                     if tid < UV_TILE // 4:
@@ -4871,8 +4919,8 @@ def build_glm5_monokernel(
                 arena = lds.work.ptr
                 old_keys = fx.recast_iter(fx.Int32, arena + KEYS_OFF)
                 old_dnw = arena + DNW_OFF
-                incoming_key = lds_ld(old_keys, fx.min(tid, 306))
-                incoming_prob = lds_ld(old_dnw, fx.min(tid, 107))
+                incoming_key = lds_ld(old_keys, fx.min(tid, DU_KEY_WORDS - 1))
+                incoming_prob = lds_ld(old_dnw, fx.min(tid, DU_ROUTE_WORDS - 1))
                 gpu.barrier()
                 xs, misc = arena, arena + MSOFF
                 keys = fx.recast_iter(fx.Int32, arena + KEYOFF)
@@ -4938,9 +4986,9 @@ def build_glm5_monokernel(
                         rocdl.mfma_scale_f32_16x16x128_f8f6f4(T.vec(4, T.f32), [raw, b, zero, 4, 0, 0, scale, 0, asc])
                     )
 
-                if tid < 307:
+                if tid < DU_KEY_WORDS:
                     st(keys, tid, incoming_key)
-                if tid < 108:
+                if tid < DU_ROUTE_WORDS:
                     st(dnw, tid, incoming_prob)
                 gpu.barrier()
 
@@ -5041,21 +5089,40 @@ def build_glm5_monokernel(
 
                 acc = fx.Vector.filled(4, 0.0, fx.Float32)
 
-                if (lane % 16 < S) & (sn // 3 == gw):
-                    for slot in range_constexpr(SLOTS):
-                        coefficient = ld(dnw, sn * SLOTS + slot)
-                        for kc in range_constexpr(4):
-                            vals = [
-                                ld(
-                                    contributions,
-                                    contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4 + e),
+                if const_expr(DN_UNION_ROWS40):
+                    # S10 assigns 90 contiguous slot/K units to each wave.
+                    # Tokens2/7 cross a wave boundary at slot4, K chunk2.
+                    if lane % 16 < S:
+                        for slot in range_constexpr(SLOTS):
+                            coefficient = ld(dnw, sn * SLOTS + slot)
+                            for kc in range_constexpr(4):
+                                if ((sn * SLOTS + slot) * 4 + kc) // 90 == gw:
+                                    vals = [
+                                        ld(
+                                            contributions,
+                                            contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4 + e),
+                                        )
+                                        for e in range(4)
+                                    ]
+                                    acc = fx.Vector.from_elements(
+                                        [acc[e] + vals[e] * coefficient for e in range(4)], fx.Float32
+                                    )
+                else:
+                    if (lane % 16 < S) & (sn // 3 == gw):
+                        for slot in range_constexpr(SLOTS):
+                            coefficient = ld(dnw, sn * SLOTS + slot)
+                            for kc in range_constexpr(4):
+                                vals = [
+                                    ld(
+                                        contributions,
+                                        contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4 + e),
+                                    )
+                                    for e in range(4)
+                                ]
+                                acc = fx.Vector.from_elements(
+                                    [acc[e] + vals[e] * coefficient for e in range(4)],
+                                    fx.Float32,
                                 )
-                                for e in range(4)
-                            ]
-                            acc = fx.Vector.from_elements(
-                                [acc[e] + vals[e] * coefficient for e in range(4)],
-                                fx.Float32,
-                            )
 
                 gpu.barrier()
 
@@ -5074,10 +5141,23 @@ def build_glm5_monokernel(
                         )
                     lds_st(outs, output_token * 32 + output_row, tot)
 
+                if const_expr(DN_UNION_ROWS40):
+                    # Cohorts execute three down tasks per CTA. The union arena
+                    # overlaps the original keys, so restore them after the
+                    # last contribution read and before the next task round.
+                    restore_key = ld(keys, fx.min(tid, DU_KEY_WORDS - 1))
+                    restore_prob = ld(dnw, fx.min(tid, DU_ROUTE_WORDS - 1))
+                    gpu.barrier()
+                    if tid < DU_KEY_WORDS:
+                        st(old_keys, tid, restore_key)
+                    if tid < DU_ROUTE_WORDS:
+                        st(old_dnw, tid, restore_prob)
+                    gpu.barrier()
+
             for t in range(start("down"), N_DN_TILES, G):
                 t = fx.Int32(t)
                 stamp("down", t, 0)
-                if const_expr(DN_UNION_CANDIDATE):
+                if const_expr(DN_UNION_CANDIDATE or DN_UNION_ROWS40):
                     dn_union_tile(t)
                 else:
                     if const_expr(ug_split(S, expert_inter) is None):  # retain the tuned down-stage route schedule

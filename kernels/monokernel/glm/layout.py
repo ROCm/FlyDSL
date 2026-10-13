@@ -38,9 +38,15 @@ INDEX_KEYS_PER_TASK = 64
 DCP_SUMMARY_PAIRS = KV_LORA // 2 + 2
 
 
-def sparse_heads_per_task(samples: int, heads: int, npes: int, native_fp4_mfma: bool = False) -> int:
-    """Use both MFMA head halves for the validated TP4 C2/S6 shape."""
-    return 16 if native_fp4_mfma and npes == 4 and samples == 12 and heads == 16 else WAVES
+def sparse_heads_per_task(
+    samples: int, heads: int, npes: int, native_fp4_mfma: bool = False, cohort_rows: bool = False
+) -> int:
+    """Use both MFMA head halves for TP4 S12 and scoped forty-row cohorts."""
+    return (
+        16
+        if native_fp4_mfma and npes == 4 and (samples == 12 or (samples == 10 and cohort_rows)) and heads == 16
+        else WAVES
+    )
 
 
 def split_acc_head(head_group, lane_group: int, element: int):
@@ -411,7 +417,7 @@ def stage_tasks(
         (
             "split",
             samples
-            * (heads // sparse_heads_per_task(samples, heads, npes, native_fp4_mfma))
+            * (heads // sparse_heads_per_task(samples, heads, npes, native_fp4_mfma, cohort_rows))
             * (sparse_attention_topk // sparse_keys_per_task(samples, heads)),
         ),
         ("uv", samples * (heads * V_DIM // UV_TILE)),

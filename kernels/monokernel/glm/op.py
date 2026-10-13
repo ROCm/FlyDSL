@@ -279,8 +279,8 @@ class Glm5MonoKernel:
                 and self.kv_cache_layout is KvCacheLayout.ATOM
                 and kv_cache_dtype == "bf16"
                 and rope_dtype == "fp32"
-                and with_indexer
-                and index_max_seq == 4096
+                and (with_indexer or npes == 4)
+                and (not with_indexer or index_max_seq == 4096)
             ),
         )
         n_tasks = sum(n for _, n in self.stages)
