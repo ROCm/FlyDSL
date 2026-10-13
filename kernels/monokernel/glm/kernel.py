@@ -335,6 +335,7 @@ def build_glm5_monokernel(
         and not attention_ptpc
         and not attention_bf16
     )
+    GLOBAL_UV40 = GLOBAL_QA40 and D == 1 and L == H
     GLOBAL_QB40 = COHORT_ROW_TILES and npes == 4 and native_fp4_mfma and H == 16
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
@@ -435,6 +436,11 @@ def build_glm5_monokernel(
     MID_SCALE_WORDS = S * MOE_SLOTS * expert_inter // 32
     INPUT_NORM_OFF = BLOCKS * S * 2 * UG_TILE - S * HIDDEN // 2
     INDEX_ROT_OFF = MIDQ_WORDS + MID_SCALE_WORDS
+    UV_MERGE_OFF = MIDQ_WORDS + MID_SCALE_WORDS
+    if GLOBAL_UV40:
+        assert GLOBAL_UG40 and not with_indexer
+        assert UV_MERGE_OFF + S * H * KV_LORA // 2 <= BLOCKS * S * 2 * UG_TILE
+        assert 16 * 260 <= X_WORDS and UV_TILE == 64
     if INDEX_PRE_ROPE:
         assert INDEX_ROT_OFF + S * INDEX_Q_ROWS // 2 <= INPUT_NORM_OFF
     if INPUT_NORM_ONCE:
@@ -1940,7 +1946,7 @@ def build_glm5_monokernel(
 
             if const_expr(INPUT_NORM_ONCE):
                 # One resident CTA per token publishes the exact normalized BF16 input.
-                # The suffix does not overlap mid quantization payloads later in this launch.
+                # The suffix is retired at the front-stage barrier; global UV may then reuse it.
                 if bid < S:
 
                     def input_norm_load(sks):
@@ -4246,6 +4252,23 @@ def build_glm5_monokernel(
             UV_R = UV_TILE // 16
             UV_WPR = WAVES // UV_R
             UV_UNITS = UV_NKC // (attention_k_chunks_per_unit * UV_WPR)
+            if const_expr(GLOBAL_UV40):
+                # Retired input-norm payloads already have the ordinary epoch.
+                # A separate phase bit prevents UV from accepting them as ready.
+                uv_tag = tag ^ fx.Int32(-2147483648)
+
+            def uv_merged_pair(base_addr, i):
+                def load_pair():
+                    return fx.Vector(
+                        bo.buffer_load(_rsrc(base_addr), i * 2, vec_width=4, dtype=T.i32, cache_modifier=CM_DEV)
+                    )
+
+                words = load_pair()
+                while (words[1] != uv_tag) | (words[3] != uv_tag):
+                    spin_pause()
+                    words = load_pair()
+                return words[0], words[2]
+
             for tt in range(start("uv"), S * N_UV // UV_REUSE, G):
                 tt = fx.Int32(tt)
                 stamp("uv", tt, 0)
@@ -4269,7 +4292,8 @@ def build_glm5_monokernel(
                         coef=((lambda: lds_ld(misc, N_SPLIT + 2 + kc // 2)) if const_expr(attention_ptpc) else None),
                     )
 
-                pre = [u_uv_at(c, local_t) for c in range(UV_UNITS)]
+                if const_expr(not GLOBAL_UV40):
+                    pre = [u_uv_at(c, local_t) for c in range(UV_UNITS)]
                 hint_wait(
                     N_SPLIT,
                     lambda k: (mb("sp_l"), (s * N_SPLIT + k) * H + head),
@@ -4356,30 +4380,103 @@ def build_glm5_monokernel(
                             div_rn(uv1, uv_scale, uv_rcp),
                         )
                     gpu.barrier()
-                owner = dcp_merge_latent(s, t)
-                if owner:
-                    for uv_pass in range_constexpr(UV_REUSE):
-                        local_t = dcp_local_uv_tile(t + uv_pass, L)
-                        if const_expr(uv_pass > 0):
-                            pre = [u_uv_at(c, local_t) for c in range(UV_UNITS)]
-                        acc = run_units(lambda c: u_uv_at(c, local_t), UV_UNITS, UV_UNITS, pre)
-                        if const_expr(attention_ptpc):
-                            reduce_rows(UV_R, acc, emit_ptpc_scalar(UV_TILE, ld_f32(r_suv, 0)), count=1)
-                        else:
-                            reduce_rows(UV_R, acc, emit_out(UV_TILE), count=1)
-                        stamp("uv", tt, 3)
-                        gpu.barrier()
-                        if tid < UV_TILE // 4:
-                            r = tid * 4
-                            put_bf(
-                                mb("o"),
-                                s * O_K + local_t * UV_TILE + r,
-                                [lds_ld(outs, r + j) for j in range(4)],
-                            )
-                        # All output readers finish before the next pass reuses outs.
-                        if const_expr(UV_REUSE > 1):
+                if const_expr(GLOBAL_UV40):
+                    # This range is disjoint from packed mid values/scales.
+                    # Input-norm readers retire at the global front-stage
+                    # barrier. The distinct UV phase tag prevents consumers from
+                    # accepting those old payloads before these stores complete.
+                    if uv_valid:
+                        uv_packed = bf16_pair(uv0, uv1).bitcast(fx.Int32)
+                        bo.buffer_store(
+                            fx.Vector.from_elements([uv_packed, uv_tag], fx.Int32),
+                            _rsrc(mb("ugp")),
+                            (UV_MERGE_OFF + (s * H + head) * (KV_LORA // 2) + tid) * 2,
+                            cache_modifier=CM_DEV,
+                        )
+                    gpu.barrier()
+                    stamp("uv", tt, 3)
+                else:
+                    owner = dcp_merge_latent(s, t)
+                    if owner:
+                        for uv_pass in range_constexpr(UV_REUSE):
+                            local_t = dcp_local_uv_tile(t + uv_pass, L)
+                            if const_expr(uv_pass > 0):
+                                pre = [u_uv_at(c, local_t) for c in range(UV_UNITS)]
+                            acc = run_units(lambda c: u_uv_at(c, local_t), UV_UNITS, UV_UNITS, pre)
+                            if const_expr(attention_ptpc):
+                                reduce_rows(UV_R, acc, emit_ptpc_scalar(UV_TILE, ld_f32(r_suv, 0)), count=1)
+                            else:
+                                reduce_rows(UV_R, acc, emit_out(UV_TILE), count=1)
+                            stamp("uv", tt, 3)
                             gpu.barrier()
+                            if tid < UV_TILE // 4:
+                                r = tid * 4
+                                put_bf(
+                                    mb("o"),
+                                    s * O_K + local_t * UV_TILE + r,
+                                    [lds_ld(outs, r + j) for j in range(4)],
+                                )
+                            # All output readers finish before the next pass reuses outs.
+                            if const_expr(UV_REUSE > 1):
+                                gpu.barrier()
                 stamp("uv", tt, 4)
+
+            if const_expr(GLOBAL_UV40):
+                # Every CTA has finished its merge producers before waiting here.
+                # Timeline columns 6/7 use the first 64 slots/cohort for 192 global
+                # projector tasks; columns0..5 remain the original merge tasks.
+                if full_bid < ((total_samples + 15) // 16) * N_UV:
+                    uv_task = full_bid
+                    uv_first = uv_task // N_UV * 16
+                    uv_count = fx.min(fx.Int32(16), total_samples - uv_first)
+                    uv_t = uv_task % N_UV
+                    uv_head = uv_t // (V_DIM // UV_TILE)
+                    stamp("uv", bid, 6)
+
+                    def global_uv_unit(c):
+                        kc = ((wave % UV_WPR) * UV_UNITS + c) * attention_k_chunks_per_unit
+                        return unit_attention(
+                            r_wuv,
+                            r_suv,
+                            uv_t * UV_R + wave // UV_WPR,
+                            kc,
+                            UV_NKC,
+                            KV_LORA,
+                            128,
+                            fx.min(lane % 16, uv_count - 1) * 260 + kc * 32,
+                            scale_rows=uv_scale_rows,
+                        )
+
+                    uv_pre = [global_uv_unit(c) for c in range(UV_UNITS)]
+                    for uv_batch in range_constexpr(0, 16, 4):
+                        if uv_batch < uv_count:
+                            uv_local = uv_batch + tid // 128
+                            uv_row = uv_first + uv_local
+                            uv_src = full_scratch + fx.Int64(uv_row // S) * TILE_SCRATCH_BYTES
+                            uv_words = uv_merged_pair(
+                                uv_src + SC["ugp"],
+                                UV_MERGE_OFF + ((uv_row % S) * H + uv_head) * (KV_LORA // 2) + (tid % 128) * 2,
+                            )
+                            lds_st(xs, uv_local * 260 + (tid % 128) * 2, uv_words[0].bitcast(fx.Float32))
+                            lds_st(xs, uv_local * 260 + (tid % 128) * 2 + 1, uv_words[1].bitcast(fx.Float32))
+                    gpu.barrier()
+                    uv_acc = run_units(global_uv_unit, UV_UNITS, UV_UNITS, uv_pre)
+                    fx.ptr_store(fx.Vector.from_elements(uv_acc, fx.Float32), red + (wave * 64 + lane) * 4)
+                    gpu.barrier()
+                    if tid < uv_count * UV_TILE // 2:
+                        uv_local = tid // (UV_TILE // 2)
+                        uv_r = (tid % (UV_TILE // 2)) * 2
+                        uv_v0, uv_v1 = fx.Float32(0.0), fx.Float32(0.0)
+                        for uv_w in range_constexpr(UV_WPR):
+                            uv_ww = (uv_r // 16) * UV_WPR + uv_w
+                            uv_address = (uv_ww * 64 + uv_local + 16 * ((uv_r % 16) // 4)) * 4 + uv_r % 4
+                            uv_v0 = uv_v0 + lds_ld(red, uv_address)
+                            uv_v1 = uv_v1 + lds_ld(red, uv_address + 1)
+                        uv_row = uv_first + uv_local
+                        uv_dst = full_scratch + fx.Int64(uv_row // S) * TILE_SCRATCH_BYTES
+                        put_bf(uv_dst + SC["o"], (uv_row % S) * O_K + uv_t * UV_TILE + uv_r, [uv_v0, uv_v1])
+                    gpu.barrier()
+                    stamp("uv", bid, 7)
 
             # ====================== 7. W_o + attention TP peer reduce + residual -> a
             # 2 row groups x 32 chunks: 4 waves per row group, 8 chunks each
