@@ -924,28 +924,28 @@ def left_inverse(layout):
 @dsl_loc_tracing
 def logical_divide(layout, divisor):
     if not isinstance(divisor, ir.Value):
-        divisor = make_tile(divisor)
+        divisor = make_tile(*divisor)
     return fly.logical_divide(layout, divisor)
 
 
 @dsl_loc_tracing
 def zipped_divide(layout, divisor):
     if not isinstance(divisor, ir.Value):
-        divisor = make_tile(divisor)
+        divisor = make_tile(*divisor)
     return fly.zipped_divide(layout, divisor)
 
 
 @dsl_loc_tracing
 def tiled_divide(layout, divisor):
     if not isinstance(divisor, ir.Value):
-        divisor = make_tile(divisor)
+        divisor = make_tile(*divisor)
     return fly.tiled_divide(layout, divisor)
 
 
 @dsl_loc_tracing
 def flat_divide(layout, divisor):
     if not isinstance(divisor, ir.Value):
-        divisor = make_tile(divisor)
+        divisor = make_tile(*divisor)
     return fly.flat_divide(layout, divisor)
 
 
