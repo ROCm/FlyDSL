@@ -326,7 +326,7 @@ def build_glm5_monokernel(
     )
     if DEFER_OFF_CACHE:
         assert ROW_TILES >= 3
-    GLOBAL_QB40 = COHORT_ROW_TILES and npes == 4 and native_fp4_mfma and not with_indexer and H == 16
+    GLOBAL_QB40 = COHORT_ROW_TILES and npes == 4 and native_fp4_mfma and H == 16
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
     # The index-Q row space is fixed at 256 tiles.  TP8 produces half from
@@ -2506,6 +2506,62 @@ def build_glm5_monokernel(
                                 [q0 * qcos - q1 * qsin, q0 * qsin + q1 * qcos],
                             )
                     stamp("q_b", qb_stamp, 4)
+
+                    if const_expr(with_indexer):
+                        # Raw and precomputed rotated index queries retain their
+                        # BF16 rounding and ten-row cohort mailbox addresses.
+                        gpu.barrier()
+                        stamp("index_q", qb_stamp, 0)
+
+                        def u_global_index_q(c):
+                            kc = (wave * QB_UNITS + c) * 2
+                            return unit_fp8x2(
+                                r_wiq,
+                                r_siq,
+                                t,
+                                kc,
+                                QB_NKC,
+                                Q_LORA,
+                                fx.min(lane % 16, qb_count - 1) * (Q_LORA // 2 + 4) + kc * 32,
+                            )
+
+                        index_acc = run_units(u_global_index_q, QB_UNITS, QB_UNITS)
+                        reduce_rows(1, index_acc, emit_out(INDEX_TILE), count=16)
+                        stamp("index_q", qb_stamp, 3)
+                        gpu.barrier()
+                        if tid < qb_count * INDEX_TILE // 4:
+                            index_local = tid // (INDEX_TILE // 4)
+                            index_row = qb_first + index_local
+                            index_r = tid % (INDEX_TILE // 4) * 4
+                            index_dst = full_scratch + fx.Int64(index_row // S) * TILE_SCRATCH_BYTES
+                            index_offset = (index_row % S) * INDEX_Q_ROWS + t * INDEX_TILE + index_r
+                            index_values = [lds_ld(outs, index_local * INDEX_TILE + index_r + j) for j in range(4)]
+                            put_bf(index_dst + SC["index_q"], index_offset, index_values)
+                            rounded = [bf16_round(v) for v in index_values]
+                            rotated = []
+                            for pair in range_constexpr(2):
+                                q0, q1 = rounded[pair * 2], rounded[pair * 2 + 1]
+                                qk = (t * INDEX_TILE + index_r + pair * 2) % INDEX_DIM
+                                if qk < PE_DIM:
+                                    qp = fx.Int32(
+                                        bo.buffer_load(_rsrc(full_positions), index_row * 2, vec_width=1, dtype=T.i32)
+                                    )
+                                    qb = fx.Int32(
+                                        bo.buffer_load(_rsrc(full_indptr), index_row, vec_width=1, dtype=T.i32)
+                                    )
+                                    qe = fx.Int32(
+                                        bo.buffer_load(_rsrc(full_indptr), index_row + 1, vec_width=1, dtype=T.i32)
+                                    )
+                                    qs = fx.Int32(
+                                        bo.buffer_load(_rsrc(full_slots), index_row * 2, vec_width=1, dtype=T.i32)
+                                    )
+                                    qp = ((qe > qb) | (qs >= 0)).select(qp, fx.Int32(0))
+                                    qc = ld_rope(_rsrc(rope_cos), qp * (PE_DIM // 2) + qk // 2)
+                                    qsn = ld_rope(_rsrc(rope_sin), qp * (PE_DIM // 2) + qk // 2)
+                                    q0, q1 = q0 * qc - q1 * qsn, q0 * qsn + q1 * qc
+                                rotated += [q0, q1]
+                            put_bf(index_dst + SC["ugp"], 2 * INDEX_ROT_OFF + index_offset, rotated)
+                        stamp("index_q", qb_stamp, 4)
             else:
                 for t in range(start("q_b"), N_QB, G):
                     t = fx.Int32(t)
