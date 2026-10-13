@@ -90,9 +90,9 @@ def test_conv3d_fp8_wgm_configs(wgm):
 @_skip_no_fp8
 def test_conv3d_fp8_autotune_wgm(tmp_path, monkeypatch):
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))
-    from kernels.conv import conv3d_autotune
+    from kernels.conv import conv3d_fp8_autotune
 
-    conv3d_autotune._MEM_CACHE.clear()
+    conv3d_fp8_autotune._MEM_CACHE.clear()
     torch.manual_seed(2700)
     # Reuse the three WGM compilations from test_conv3d_fp8_wgm_configs above;
     # this test is about the sweep and cache path, not another kernel shape.

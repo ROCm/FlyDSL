@@ -755,7 +755,7 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, stream=None, wgm
     if wgm is not None:
         return _run(int(wgm))
     if autotune or (autotune is None and _autotune_enabled()):
-        from kernels.conv.conv3d_autotune import WGM_VALUES, autotune_conv3d
+        from kernels.conv.conv3d_fp8_autotune import WGM_VALUES, autotune_conv3d
 
         # Fixed 256x256x128 tile; only WGM varies. The tile marker keeps the shared
         # (candidate, wgm) autotune cache key well-formed.
