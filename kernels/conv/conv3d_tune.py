@@ -24,6 +24,7 @@ import argparse
 import logging
 import multiprocessing
 import os
+import queue
 import sys
 import time
 from pathlib import Path
@@ -435,10 +436,21 @@ def main(argv=None):
             p.start()
             procs.append(p)
         winners, profiles = [], []
-        for _ in procs:
-            w, p = q.get()
+        pending = len(procs)
+        while pending:
+            try:
+                w, p = q.get(timeout=10)
+            except queue.Empty:
+                # A worker that died before reporting never puts; don't wait on it forever.
+                dead = [proc.exitcode for proc in procs if proc.exitcode not in (None, 0)]
+                if dead:
+                    for proc in procs:
+                        proc.terminate()
+                    raise RuntimeError(f"tuner worker exited with {dead[0]}") from None
+                continue
             winners.extend(w)
             profiles.extend(p)
+            pending -= 1
         for p in procs:
             p.join()
             if p.exitcode:
