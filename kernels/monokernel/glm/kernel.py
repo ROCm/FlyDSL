@@ -326,6 +326,15 @@ def build_glm5_monokernel(
     )
     if DEFER_OFF_CACHE:
         assert ROW_TILES >= 3
+    GLOBAL_QA40 = (
+        COHORT_ROW_TILES
+        and npes == 4
+        and native_fp4_mfma
+        and H == 16
+        and not with_indexer
+        and not attention_ptpc
+        and not attention_bf16
+    )
     GLOBAL_QB40 = COHORT_ROW_TILES and npes == 4 and native_fp4_mfma and H == 16
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
@@ -434,6 +443,10 @@ def build_glm5_monokernel(
         assert (MIDQ_WORDS + MID_SCALE_WORDS) * 8 <= BLOCKS * S * 2 * UG_TILE * 8
 
     WORK_WORDS = OUT_OFF + OUT_WORDS
+    if GLOBAL_QA40:
+        assert INPUT_NORM_ONCE and 16 * 1028 <= X_WORDS
+        assert 16 * QKV_A_TILE <= OUT_WORDS
+        assert HIDDEN // 128 // WAVES == 6 and THREADS == 512
     if GLOBAL_QB40:
         assert 16 * (Q_LORA // 2 + 4) <= X_WORDS
         assert 16 * Q_B_TILE <= OUT_WORDS
@@ -1965,7 +1978,75 @@ def build_glm5_monokernel(
             if const_expr(with_indexer):
                 r_wik, r_sik = _rsrc(index_arg(0)), _rsrc(index_arg(1))
                 r_wiw = _rsrc(index_arg(2))
-            if const_expr(INPUT_NORM_ONCE):
+            if const_expr(GLOBAL_QA40):
+                # Reuse weights across 16 global tokens while preserving each
+                # original per-wave K accumulator and the eight-wave reduction.
+                for qa_task in range(full_bid, ((total_samples + 15) // 16) * N_QKV_A, BLOCKS):
+                    qa_task = fx.Int32(qa_task)
+                    qa_first = qa_task // N_QKV_A * 16
+                    qa_count = fx.min(fx.Int32(16), total_samples - qa_first)
+                    t = qa_task % N_QKV_A
+                    # Two task rounds fit in the existing per-cohort timeline slots.
+                    qa_stamp = bid + qa_task // BLOCKS * G
+                    stamp("qkv_a", qa_stamp, 0)
+                    qa_acc = fx.Vector.filled(4, 0.0, fx.Float32)
+                    for qa_base in range_constexpr(0, QA_UNITS, 2):
+
+                        def qa_unit(c):
+                            kc = (wave * QA_UNITS + qa_base + c) * 2
+                            return unit_fp8x2(
+                                r_wqa,
+                                r_sqa,
+                                t,
+                                kc,
+                                QA_NKC,
+                                HIDDEN,
+                                fx.min(lane % 16, qa_count - 1) * 1028 + (wave * 2 + c) * 64,
+                            )
+
+                        qa_pre = [qa_unit(c) for c in range(2)]
+                        for qa_batch in range_constexpr(0, 16, 4):
+                            if qa_batch < qa_count:
+                                qa_specs = []
+                                for qa_part in range_constexpr(4):
+                                    qa_row = qa_first + qa_batch + qa_part
+                                    qa_src = full_scratch + fx.Int64(qa_row // S) * TILE_SCRATCH_BYTES
+                                    qa_k = (tid // 64) * QA_UNITS * 128 + qa_base * 128 + (tid % 64) * 4
+                                    qa_specs.append(
+                                        (qa_src + SC["ugp"], INPUT_NORM_OFF + ((qa_row % S) * HIDDEN + qa_k) // 2, 2)
+                                    )
+                                qa_values = poll(qa_specs)
+                                for qa_part in range_constexpr(4):
+                                    for qa_pair in range_constexpr(2):
+                                        lds_st(
+                                            xs,
+                                            (qa_batch + qa_part) * 1028 + tid * 2 + qa_pair,
+                                            qa_values[qa_part][qa_pair].bitcast(fx.Float32),
+                                        )
+                        gpu.barrier()
+                        if const_expr(qa_base == 0):
+                            stamp("qkv_a", qa_stamp, 2)
+                        qa_acc = fx.Vector.from_elements(mma_units([qa_acc[e] for e in range(4)], qa_pre), fx.Float32)
+                        gpu.barrier()
+                    reduce_rows(1, [qa_acc[e] for e in range(4)], emit_out(QKV_A_TILE), count=16)
+                    stamp("qkv_a", qa_stamp, 3)
+                    gpu.barrier()
+                    if tid < qa_count * QKV_A_TILE:
+                        qa_local = tid // QKV_A_TILE
+                        qa_row = qa_first + qa_local
+                        qa_dst = full_scratch + fx.Int64(qa_row // S) * TILE_SCRATCH_BYTES
+                        qa_output_row = t * QKV_A_TILE + tid % QKV_A_TILE
+                        qa_value = lds_ld(outs, tid)
+                        if qa_output_row < Q_LORA:
+                            put(qa_dst + SC["q_a"], (qa_row % S) * Q_LORA + qa_output_row, qa_value)
+                        else:
+                            put(
+                                qa_dst + SC["kv_a"],
+                                (qa_row % S) * (KV_LORA + PE_DIM) + qa_output_row - Q_LORA,
+                                qa_value,
+                            )
+                    stamp("qkv_a", qa_stamp, 4)
+            elif const_expr(INPUT_NORM_ONCE):
                 for t in range(start("qkv_a"), N_QKV_A, G):
                     t = fx.Int32(t)
                     stamp("qkv_a", t, 0)
