@@ -122,7 +122,11 @@ report still read "no problems").
 
 **B6 — A guard, zero-init or contiguity requirement removed without a reason** ⚠️
 A deleted `raise`, `assert`, mask, `torch.zeros`, `max_size=False` or `.contiguous()`, where the
-PR does not say what now enforces the invariant. Counter-rule: maintainers reject redundant
+PR does not say what now enforces the invariant. The other recurring shapes here: a removed
+`s_waitcnt` or barrier, a NaN or divide-by-zero guard dropped in a refactor, a narrowed dtype or
+arch validation, a FileCheck `CHECK` line deleted instead of updated, and a test deleted because it
+started failing. For every deleted line, name the invariant it enforced and find where head
+re-establishes it; `$WORK/scan.txt` lists them under `guard_removed`. Counter-rule: maintainers reject redundant
 validation on both sides of the Python/C++ boundary (PRs #644, #506, #297), so removing a
 duplicate is correct when the other side still enforces it.
 FP self-check (do this before firing): find where the invariant is still enforced on head. If you
@@ -449,7 +453,9 @@ _A suite that cannot fail is worse than no suite, because it reports green._
 **T1 — A test that cannot fail** 🔴
 Shapes seen here: a decorator inserted mid-function that truncates the previous test; a timing stub
 returning a constant; a parametrize matrix whose values never satisfy the fast-path predicate; a
-reference built from the same objects as the kernel output; a result returned instead of asserted.
+reference built from the same objects as the kernel output; a result returned instead of asserted;
+a loop, graph replay or repeated launch that writes one buffer and asserts only its final state,
+which is one observation, not one per launch.
 Real examples: PR #1056 review (a new test inserted mid-function ended the previous one, so four
 XCD cases passed without launching a kernel); PR #899 (a stub returning `1.0` made the first config
 "win"); PR #643 (the test returned timings instead of asserting).
@@ -560,3 +566,4 @@ Report at most one or two, and only when the diff makes them concrete.
 | HK12 | `TODO`, `FIXME`, `raise NotImplementedError` or a lone `pass` in a new branch | `⚠️ HK12: [location] — incomplete implementation in a new code path` |
 | HK13 | a new public kernel or launcher | `📝 HK13: add it to docs/prebuilt_kernels_guide.md` |
 | HK14 | `sys.path.insert` / `sys.path.append` at module level | `⚠️ HK14: sys.path mutation leaks global state — use package imports` |
+| HK15 | `buffer_ops.*` or `make_ptr(` on a `+` line in kernel code outside `kernels/common/buffer_ops.py` | `📝 HK15: raw buffer_ops / manual byte offsets are legacy — prefer fx.rocdl.make_buffer_tensor with layout ops (CLAUDE.md); for make_ptr, check the retyping` |

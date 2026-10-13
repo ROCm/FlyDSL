@@ -44,6 +44,7 @@ between this file and the deriver is caught.
 | `scan:scf_control` | HK2 | explicit scf control flow in a kernel |
 | `scan:inline_asm` | HK3 | inline assembly |
 | `scan:smem_legacy` | HK4 | legacy SmemAllocator / SmemPtr |
+| `scan:legacy_buffer` | HK15 | raw buffer_ops.* or make_ptr in kernel code |
 | `scan:stream` | H1 H4 | explicit stream or cross-stream launch |
 | `scan:skip` | T8 C5 | module-level skip or importorskip |
 | `scan:ref_dtype` | T4 | dtype conversion in a test reference |
@@ -57,7 +58,7 @@ between this file and the deriver is caught.
 | `scan:copy_width` | E2 | copy atom vs register vector width |
 | `scan:rounding` | F5 | hand-written float conversion |
 | `scan:online_softmax` | F3 F4 | online-softmax or wave-uniform numerics |
-| `scan:guard_removed` | B6 | guard, zero-init or contiguity requirement deleted and not re-added |
+| `scan:guard_removed` | B6 | guard, barrier, NaN check, FileCheck line or test deleted and not re-added |
 | `scan:env_var` | A1 HK11 | environment variable read outside tests |
 | `scan:stub` | HK12 | TODO / FIXME / NotImplementedError / pass in a new path |
 | `scan:config_table` | HK6 | tuned config table in a kernel file |
@@ -66,4 +67,4 @@ between this file and the deriver is caught.
 | `scan:assert_guard` | H3 | assert guarding a kernel precondition |
 | `scan:codegen_knob` | P4 | compile hint, LLVM option or function attribute |
 
-76 rules in rules.md; unreachable from every family: none.
+77 rules in rules.md; unreachable from every family: none.

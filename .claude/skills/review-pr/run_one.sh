@@ -3,7 +3,8 @@
 # Copyright (c) 2026 FlyDSL Project Contributors
 #
 # Headless review of one PR: fetch -> worker agent -> independent refuter agent -> gates.
-# Nothing is posted; the card and the gate report are left in $WORK.
+# Nothing is posted; the card, the gate report and usage.txt (each agent's wall time and token
+# use) are left in $WORK.
 #
 # usage: run_one.sh <PR | owner/repo#N> [owner/repo]
 #
@@ -49,7 +50,7 @@ PY
 }
 
 run_agent() {  # <label> <cli> <prompt-file> <expected-output>
-  local label="$1" cli="$2" prompt="$3" out="$4" rc=0
+  local label="$1" cli="$2" prompt="$3" out="$4" rc=0 started=$SECONDS
   say "$label..."
   if [ -n "${FLYDSL_REVIEW_SANDBOX_IMAGE:-}" ]; then
     local bin env_args=()
@@ -64,14 +65,38 @@ run_agent() {  # <label> <cli> <prompt-file> <expected-output>
       -e HOME="$W/.home" -e ANTHROPIC_API_KEY=sandbox-has-no-credential "${env_args[@]}" \
       -v "$PROJ:$PROJ:ro" -v "$W:$W" -v "$bin:/usr/local/bin/review-agent:ro" -w "$PROJ" \
       --entrypoint /usr/local/bin/review-agent "$FLYDSL_REVIEW_SANDBOX_IMAGE" \
-      -p --dangerously-skip-permissions "$(cat "$prompt")" > "$W/$label.log" 2>&1 || rc=$?
+      -p --dangerously-skip-permissions --output-format json "$(cat "$prompt")" \
+      > "$W/$label.json" 2> "$W/$label.log" || rc=$?
   else
-    (cd "$PROJ" && timeout "$TIMEOUT" "$cli" -p --dangerously-skip-permissions "$(cat "$prompt")") \
-      > "$W/$label.log" 2>&1 || rc=$?
+    (cd "$PROJ" && timeout "$TIMEOUT" "$cli" -p --dangerously-skip-permissions --output-format json "$(cat "$prompt")") \
+      > "$W/$label.json" 2> "$W/$label.log" || rc=$?
   fi
+  usage "$label" "$((SECONDS - started))" >> "$W/usage.txt"
   [ "$rc" -eq 124 ] && say "$label hit the ${TIMEOUT}s timeout"
   [ -s "$out" ] || { say "$label wrote no $(basename "$out") (exit $rc); see $W/$label.log"; return 1; }
-  say "$label done (exit $rc)"
+  say "$label done (exit $rc): $(tail -1 "$W/usage.txt")"
+}
+
+usage() {  # <label> <seconds> -> one line from the CLI's JSON result
+  python3 - "$W/$1.json" "$1" "$2" <<'PY'
+import json, sys
+path, label, secs = sys.argv[1:4]
+try:
+    data = json.loads(open(path).read() or "null")
+except (OSError, ValueError):
+    data = None
+if isinstance(data, list):  # `verbose: true` in the CLI settings prints the whole transcript
+    data = next((x for x in reversed(data) if isinstance(x, dict) and x.get("type") == "result"), None)
+data = data if isinstance(data, dict) else {}
+u = data.get("usage") or {}
+inp = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+cost = data.get("total_cost_usd")
+print(", ".join([
+    f"{label}: {secs}s wall, {data.get('num_turns', '?')} turns",
+    f"{inp} input + {int(u.get('output_tokens') or 0)} output tokens" if u else "no usage record",
+    f"${cost:.2f} as priced by the CLI" if isinstance(cost, (int, float)) else "cost not reported",
+]))
+PY
 }
 
 render "$SKILL/prompts/worker.md" > "$W/.prompt_worker"
@@ -92,5 +117,6 @@ fi
 say "gates..."
 GATES_RC=0
 python3 "$SKILL/triage.py" gates "$W" "$PROJ" || GATES_RC=$?
+[ -f "$W/usage.txt" ] && sed 's/^/  /' "$W/usage.txt"
 say "card: $W/card.md  gates: $W/GATES.txt (exit $GATES_RC)"
 exit "$GATES_RC"

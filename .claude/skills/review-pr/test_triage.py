@@ -117,6 +117,21 @@ def test_stream_context_manager_is_a_stream_candidate():
     assert hits(diff_for("tests/kernels/test_a.py", ["    with torch.cuda.stream(s):"]), "stream")
 
 
+def test_legacy_buffer_and_raw_ir_skip_imports_and_the_sanctioned_module():
+    assert hits(diff_for("kernels/g.py", ["    r = buffer_ops.create_buffer_resource(x)"]), "legacy_buffer")
+    assert not hits(diff_for("kernels/common/buffer_ops.py", ["    r = buffer_ops.helper(x)"]), "legacy_buffer")
+    assert not hits(diff_for("kernels/g.py", ["from flydsl._mlir import ir"]), "raw_mlir")
+    assert hits(diff_for("kernels/g.py", ["    t = ir.IntegerType.get_signless(32)"]), "raw_mlir")
+
+
+def test_deleted_checks_barriers_and_tests_are_removed_guards():
+    mlir = diff_for("tests/mlir/Conversion/x.mlir", ["// CHECK: arith.addi"], deleted=["// CHECK: arith.muli"])
+    test = diff_for("tests/kernels/test_a.py", ["    pass"], deleted=["def test_tail_tile():"])
+    barrier = diff_for("kernels/a.py", ["    y = x"], deleted=["    gpu.barrier()"])
+    for diff in (mlir, test, barrier):
+        assert hits(diff, "guard_removed")
+
+
 def test_skill_files_are_not_scanned():
     diff = diff_for(".claude/skills/review-pr/triage.py", ["    off = row * row_stride", "    k = num_x // tile_k"])
     assert all(not c.hits for c in triage.scan(diff).values())

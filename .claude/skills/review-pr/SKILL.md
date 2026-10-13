@@ -42,7 +42,7 @@ answers one question:
 
 | file | what it answers | the trap it exists for |
 |---|---|---|
-| `rules_expanded.txt` | the full text of exactly the rules this diff derives | reading all 76 rules means attending to none |
+| `rules_expanded.txt` | the full text of exactly the rules this diff derives | reading every rule means attending to none |
 | `scan.txt` | candidate sites per category, with line numbers | a category with no candidates still has to be said out loud |
 | `merge_target.txt` | where the base tree is checked out — **read base files there** | grepping your own checkout answers about the wrong branch |
 | `applies.txt` | whether the diff still applies to its merge target | a stale PR's CI result describes a tree that moved |
@@ -100,7 +100,7 @@ Answer from the diff, not from the description, and **write one line per answer 
 
 `$WORK/rules.txt` lists the families this diff triggers and their rule ids; `$WORK/rules_expanded.txt`
 holds exactly their text. **Work only those rules.** Do not classify the PR by hand: a reviewer
-asked to tick types against 76 rules attends to none of them. The derivation comes from paths,
+asked to tick types against every rule attends to none of them. The derivation comes from paths,
 added and deleted lines, and `scan.txt`; it is conservative, so a family it cannot decide is
 included, never dropped. `MAPPING.md` shows which family emits which rule.
 
@@ -211,13 +211,23 @@ Read the diff as a domain expert:
   tile constants named rather than scattered literals? Is fp8 fn vs fnuz decided by dtype, not by
   arch name?
 
+When a candidate needs a deeper procedure, use the skill that owns it instead of re-deriving it:
+the **oob-detection** skill for interval analysis of an access, the **flydsl-kernel-authoring**
+skill for trace-time versus runtime control flow, the **kernel-code-cleanup** skill for legacy APIs
+and their replacements, the **lds-optimization** skill for LDS and cross-wave ordering, the
+**add-target-atom-op** skill for atom and lowering changes, and the **api-stability** skill for a
+public-surface change.
+
 ---
 
 ## Step 8.5 — Blind-spot check
 
 Answer in full: **"Is there any correctness risk, resource hazard or behavioral edge case in this
-diff that none of Steps 1–8 caught?"** Append it to `$WORK/answers.txt` as a `BLIND:` line; a bare
-"no" is rejected, so say what you looked for. If yes, add it to the findings.
+diff that none of Steps 1–8 caught?"** Look where a first pass misses: unchanged lines of a touched
+function; code moved between files that lost a guard; setup/teardown asymmetry in a test; a default
+flipped; a constant changed in one place but not its mirror; two hunks that are each correct and
+wrong together. Append the answer to `$WORK/answers.txt` as a `BLIND:` line; a bare "no" is
+rejected, so say what you looked for. If yes, add it to the findings.
 
 ## Step 8.6 — Refute your own findings
 
@@ -268,8 +278,9 @@ is not checked; that is what a human reads the card for.
 - Output **only** the card below — nothing before it, nothing after it.
 - If there are no findings, omit the findings section.
 - "What it does" is one sentence for a reviewer who has not read the diff.
-- **At most 5 findings, most severe first** (severity, then blast radius); drop the rest. This is a
-  readability limit, not a recall claim.
+- **At most 5 findings, most severe first** (severity, then blast radius); when the cap forces a
+  cut, correctness findings outrank convention and housekeeping ones. This is a readability limit,
+  not a recall claim.
 - **The CI line** states what the checks at this head actually ran, using `ci_checks.txt`, and
   classifies any red check as PR, baseline or infra.
 - **The Perf line** comes from `bench_compare.txt`. CI rows are one run on a shared runner with no
@@ -302,7 +313,13 @@ Each finding has **three parts** and a tag:
 3. **Action** — ends with "**Author must** …" or "**Reviewer should ask** …". No action, no finding.
 
 Tag every finding `[verified]` (traced through the actual code) or `[inferred]` (plausible but
-unconfirmed: frame it as a question, never as a root cause).
+unconfirmed: frame it as a question, never as a root cause). Two things keep a finding `[inferred]`
+however carefully it reads. **Arithmetic that was narrated, not run:** if the claim rests on index,
+offset, stride, shape or bitfield arithmetic, run a short script over the real loop and lane ranges
+and quote its output; watch element vs byte and tile vs super-row units. **A chain that stops before
+an observable:** name the stored element or returned value that carries the error and show nothing
+downstream drops it — masks, the buffer descriptor's `num_records`, grid tails. Kernels here often
+compute garbage past the edge and let the descriptor drop the stores; that is the design, not a bug.
 
 Good findings:
 
@@ -324,8 +341,8 @@ Bad findings — do not produce these:
 (it needs `gh` auth), then a worker agent for Steps 1b–9 and a separate refuter agent for Step 8.7,
 then the gates. With `FLYDSL_REVIEW_SANDBOX_IMAGE` set, both agents run in a Docker container that
 mounts the checkout read-only and `$WORK` read-write and holds no GitHub credentials, so a review of
-untrusted PR text cannot write to GitHub or read the host's tokens. The card is left in `$WORK`;
-nothing is posted.
+untrusted PR text cannot write to GitHub or read the host's tokens. The card, the gate report and
+`usage.txt` (each agent's wall time and token use) are left in `$WORK`; nothing is posted.
 
 ---
 

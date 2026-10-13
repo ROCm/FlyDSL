@@ -35,7 +35,11 @@ BASE_REF=$(meta 'd["baseRefName"]')
 echo "== $REPO#$PR: $TITLE"
 echo "   state=$STATE draft=$(meta 'd["isDraft"]') author=$(meta 'd["author"]["login"]') head=$HEAD_SHA"
 
-git -C "$PROJECT_ROOT" fetch -q "$REPO_URL" "refs/pull/$PR/head"
+# Pin the head once. Every artifact below is computed from HEAD_SHA and BASE_SHA, never from the
+# PR's moving refs or `gh pr diff`, so a push during the review cannot mix two revisions.
+git -C "$PROJECT_ROOT" fetch -q "$REPO_URL" "$HEAD_SHA" 2>/dev/null || git -C "$PROJECT_ROOT" fetch -q "$REPO_URL" "refs/pull/$PR/head"
+git -C "$PROJECT_ROOT" cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null \
+  || { echo "head $HEAD_SHA could not be fetched; the PR moved while fetching -- rerun" >&2; exit 1; }
 
 # The merge target. An open PR merges into the base branch tip, which can be far ahead of the
 # recorded baseRefOid. A merged or closed PR is reviewed as it was: against its recorded base.
@@ -53,19 +57,12 @@ git -C "$PROJECT_ROOT" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git -C "$
 echo "$BASE_SHA" > "$WORK/base_head.txt"
 echo "   base=$BASE_SHA ($BASE_NOTE)"
 
-# The diff. gh refuses diffs over GitHub's 20000-line cap with an error that names the wrong
-# cause; large FlyDSL kernel PRs exceed it, so compute the same three-dot diff from the fetched
-# objects rather than review nothing.
-if gh pr diff "$PR" --repo "$REPO" > "$WORK/pr.diff" 2> "$WORK/.diff_err" && [ -s "$WORK/pr.diff" ]; then
-  echo "gh pr diff" > "$WORK/diff_source.txt"
-else
-  git -C "$PROJECT_ROOT" diff --no-color "$BASE_SHA...$HEAD_SHA" > "$WORK/pr.diff"
-  { echo "git diff $BASE_SHA...$HEAD_SHA, because gh pr diff failed:"; sed 's/^/  /' "$WORK/.diff_err"; } \
-    > "$WORK/diff_source.txt"
-fi
-rm -f "$WORK/.diff_err"
+# The diff: the same three-dot diff GitHub shows, computed from the pinned commits. It also has
+# no 20000-line cap, which large FlyDSL kernel PRs exceed.
+git -C "$PROJECT_ROOT" diff --no-color --no-ext-diff "$BASE_SHA...$HEAD_SHA" > "$WORK/pr.diff"
 [ -s "$WORK/pr.diff" ] || { echo "empty diff for $REPO#$PR; reviewing it would report nothing" >&2; exit 1; }
-echo "   diff: $(grep -c '^diff --git' "$WORK/pr.diff") files, from $(head -1 "$WORK/diff_source.txt")"
+echo "git diff $BASE_SHA...$HEAD_SHA sha256=$(sha256sum < "$WORK/pr.diff" | cut -d' ' -f1)" > "$WORK/diff_source.txt"
+echo "   diff: $(grep -c '^diff --git' "$WORK/pr.diff") files, $(cut -d' ' -f4 "$WORK/diff_source.txt")"
 
 # Linked issue, and the human discussion so far. Copilot authors most inline comments here and
 # its findings are not maintainer evidence, so bot accounts are filtered out.

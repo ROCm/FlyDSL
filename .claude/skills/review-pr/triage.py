@@ -144,6 +144,7 @@ CATEGORIES = (
     ("scf_control", "HK2", "explicit scf control flow in a kernel"),
     ("inline_asm", "HK3", "inline assembly"),
     ("smem_legacy", "HK4", "legacy SmemAllocator / SmemPtr"),
+    ("legacy_buffer", "HK15", "raw buffer_ops.* or make_ptr in kernel code"),
     ("stream", "H1 H4", "explicit stream or cross-stream launch"),
     ("skip", "T8 C5", "module-level skip or importorskip"),
     ("ref_dtype", "T4", "dtype conversion in a test reference"),
@@ -157,7 +158,7 @@ CATEGORIES = (
     ("copy_width", "E2", "copy atom vs register vector width"),
     ("rounding", "F5", "hand-written float conversion"),
     ("online_softmax", "F3 F4", "online-softmax or wave-uniform numerics"),
-    ("guard_removed", "B6", "guard, zero-init or contiguity requirement deleted and not re-added"),
+    ("guard_removed", "B6", "guard, barrier, NaN check, FileCheck line or test deleted and not re-added"),
     ("env_var", "A1 HK11", "environment variable read outside tests"),
     ("stub", "HK12", "TODO / FIXME / NotImplementedError / pass in a new path"),
     ("config_table", "HK6", "tuned config table in a kernel file"),
@@ -270,14 +271,17 @@ def scan(diff_text: str) -> "OrderedDict[str, Category]":
             add("fastmath", path, lineno, s, "non-enum fastmath value")
         if py and path.startswith("python/flydsl/expr/") and re.match(r"^\s*def\s+\w+", s):
             add("fastmath", path, lineno, s, "expr wrapper added or edited")
-        if py and (kernel or path.startswith("examples/")):
+        if py and (kernel or path.startswith("examples/")) and not re.match(r"(from|import)\s", s):
             if re.search(
-                r"\bir\.(?:IntegerType|F32Type|Type)\b|ArithValue|_to_raw|\b(?:arith|vector|memref|llvm)\.[a-z_]+\(",
+                r"(?<![\w.])ir\.[A-Za-z_]|\b_mlir\.|ArithValue|_to_raw|\barith\.unwrap\b|\bas_ir_value\b"
+                r"|\b(?:arith|vector|memref|llvm)\.[a-z_]+\(",
                 text,
             ):
                 add("raw_mlir", path, lineno, s)
-            if re.search(r"\bscf\.(?:IfOp|ForOp|WhileOp)\b|\b_if_then\(", text):
+            if re.search(r"(?<![\w.])scf\.(?:If|For|While|Yield)(?:Op)?\b|\b_if_then\(", text):
                 add("scf_control", path, lineno, s)
+            if path != "kernels/common/buffer_ops.py" and re.search(r"(?<![\w.])buffer_ops\.|\bmake_ptr\s*\(", text):
+                add("legacy_buffer", path, lineno, s, "make_ptr: check the retyping" if "make_ptr" in text else "")
             if re.search(r"\bflyc\.compile\(", text):
                 add("direct_compile", path, lineno, s)
             if re.match(r"^\s*_?[A-Z][A-Z0-9_]*(?:CONFIG|CONFIGS|TABLE|TUNED)[A-Z0-9_]*\s*(?::[^=]+)?=\s*[\[{(]", s):
@@ -335,16 +339,25 @@ def scan(diff_text: str) -> "OrderedDict[str, Category]":
             add("codegen_knob", path, lineno, s)
 
     # A guard that comes straight back elsewhere in the diff was moved, not removed.
-    readded = {re.sub(r"\s+", "", t) for p, _, t in added_lines(diff_text) if _scanned(p)}
+    readded = {re.sub(r"\s+", "", t) for p, _, t in added_lines(diff_text)}
     for path, line in deleted_lines(diff_text):
-        if not _scanned(path) or _is_comment(line) or re.sub(r"\s+", "", line) in readded:
+        if path.startswith(".claude/") or re.sub(r"\s+", "", line) in readded:
+            continue
+        if path.startswith("tests/mlir/") and path.endswith(".mlir"):
+            if re.match(r"\s*//\s*CHECK", line):
+                add("guard_removed", path, 0, line, "FileCheck line deleted, not updated")
+            continue
+        if not _scanned(path) or _is_comment(line):
             continue
         if re.search(
             r"^\s*assert\b|\braise\s+(?:ValueError|RuntimeError|NotImplementedError|TypeError)|torch\.zeros|"
-            r"\.contiguous\(\)|max_size\s*=\s*False|num_records_bytes|\bmask\s*=",
+            r"\.contiguous\(\)|max_size\s*=\s*False|num_records_bytes|\bmask\s*=|s_waitcnt|\bbarrier\(|"
+            r"sched_barrier|isnan|isinf|nan_to_num",
             line,
         ):
             add("guard_removed", path, 0, line, "deleted, not re-added anywhere in the diff")
+        elif _is_test(path) and re.match(r"\s*def test_\w+", line):
+            add("guard_removed", path, 0, line, "test deleted")
 
     for path, lineno, text, note in new_traits[:16]:
         if not path.startswith("kernels/"):

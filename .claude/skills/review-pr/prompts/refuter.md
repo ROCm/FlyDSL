@@ -21,6 +21,14 @@ SURVIVED -- <what you opened and what it showed>
 KILLED -- <what you opened and what refutes it>
 ```
 
+Kill a finding only when the code shows it is wrong: the claim misreads a line (quote it), the
+trigger is impossible by a type, constant or invariant (show it), something already handles it
+(cite the guard), or it is pure style with no observable effect. Do not kill it for depending on
+runtime state that is realistic on these GPUs — a race between waves, an access past a boundary tile
+the code does not exclude, a NaN on a fully masked partition, a wave32 target the kernel was never
+run on, an int32 product at a production shape. If arithmetic decides it, run the arithmetic instead
+of estimating it.
+
 Use only these two verdicts. `KILLED` takes the finding off the card, so use it only when you
 refuted it. A finding that is true but overstated, or right with a wrong detail such as a line
 number, is `SURVIVED`: end its line with `Correction: <what to change>`, which is listed under the
