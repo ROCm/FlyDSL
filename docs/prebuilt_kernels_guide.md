@@ -589,7 +589,7 @@ What operation do you need?
 | `tests/kernels/test_softmax_bwd.py` | Softmax backward |
 | `tests/kernels/test_softmax_autotune.py` | Softmax autotune selection and candidate correctness |
 | `tests/kernels/test_fused_rope_cache.py` | Fused RoPE + KV cache |
-| `tests/kernels/test_conv3d_implicit.py` | bf16 conv1d/2d/3d, including every tuned-table shape |
+| `tests/kernels/test_conv3d_implicit.py` | bf16 conv1d/2d/3d |
 | `tests/kernels/test_conv3d_implicit_fp8.py` | FP8 conv |
 | `tests/kernels/test_allreduce.py` | Multi-GPU all-reduce |
 | `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |
