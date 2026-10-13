@@ -372,6 +372,7 @@ def build_glm5_monokernel(
         and expert_inter == 512
     )
     GROUPED_DN = GROUPED_UG and (S in (8, 12) or DN_UNION_ROWS40)
+    DN_INPUT_REUSE40 = COHORT_ROW_TILES and npes == 4 and with_indexer and native_fp4_mfma and H == 16
     DN_X_ROW = expert_inter // 4 + (4 if GROUPED_DN else 0)
     DN_SCALE_ROW = expert_inter // 32 + (4 if GROUPED_DN else 0)
 
@@ -5674,14 +5675,20 @@ def build_glm5_monokernel(
                         st(old_dnw, tid, restore_prob)
                     gpu.barrier()
 
+            def down_inputs_needed(t):
+                if const_expr(DN_INPUT_REUSE40):
+                    return t == start("down")
+                return fx.Boolean(True)
+
             for t in range(start("down"), N_DN_TILES, G):
                 t = fx.Int32(t)
                 stamp("down", t, 0)
                 if const_expr(DN_UNION_CANDIDATE or DN_UNION_ROWS40):
                     dn_union_tile(t)
                 else:
-                    if const_expr(ug_split(S, expert_inter) is None):  # retain the tuned down-stage route schedule
-                        dn_route(load_bias())
+                    if down_inputs_needed(t):
+                        if const_expr(ug_split(S, expert_inter) is None):  # retain the tuned down-stage route schedule
+                            dn_route(load_bias())
                     gpu.barrier()
                     gu = wave // DN_WPR
                     dn_rg = t * DN_TILE // 16
@@ -5818,119 +5825,124 @@ def build_glm5_monokernel(
                         gpu.barrier()
                     if const_expr(S <= 4):
                         pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]
-                    hint_wait(
-                        N_UG,
-                        lambda k: (
-                            mb("mid"),
-                            (k // (MOE_SLOTS * I_PER_SLOT) * MOE_SLOTS + (k // I_PER_SLOT) % MOE_SLOTS) * expert_inter
-                            + (k % I_PER_SLOT) * UG_TILE
-                            + UG_TILE
-                            - 1,
-                        ),
-                        mark=("down", t),
-                    )
-                    if const_expr(GROUPED_UG):
-                        # Poll each tagged payload directly: no new global completion
-                        # flag or relaxed data-publication assumption is introduced.
-                        MID_PAIR_ROUNDS = (MIDQ_WORDS + 2 * THREADS - 1) // (2 * THREADS)
-                        for pack_base in range_constexpr(0, MID_PAIR_ROUNDS, 4):
-                            packed = poll(
-                                [
-                                    (
-                                        mb("ugp"),
-                                        fx.min((tid + j * THREADS) * 2, MIDQ_WORDS - 2),
-                                        2,
-                                    )
-                                    for j in range(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS))
-                                ]
-                            )
-                            if const_expr(pack_base == 0):
-                                stamp("down", t, 2)
-                            for j in range_constexpr(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS)):
-                                word = (tid + j * THREADS) * 2
-                                if word < MIDQ_WORDS:
-                                    target_word = word
-                                    if const_expr(GROUPED_DN):
-                                        target_word = (word // (expert_inter // 4)) * DN_X_ROW + word % (
-                                            expert_inter // 4
+                    # Later output tasks read the same route, packed mid values,
+                    # and exponents. Their compute/reduction/TP bodies only read
+                    # xs/misc/keys/dnw, so keep those LDS inputs until down ends.
+                    if down_inputs_needed(t):
+                        hint_wait(
+                            N_UG,
+                            lambda k: (
+                                mb("mid"),
+                                (k // (MOE_SLOTS * I_PER_SLOT) * MOE_SLOTS + (k // I_PER_SLOT) % MOE_SLOTS)
+                                * expert_inter
+                                + (k % I_PER_SLOT) * UG_TILE
+                                + UG_TILE
+                                - 1,
+                            ),
+                            mark=("down", t),
+                        )
+                        if const_expr(GROUPED_UG):
+                            # Poll each tagged payload directly: no new global completion
+                            # flag or relaxed data-publication assumption is introduced.
+                            MID_PAIR_ROUNDS = (MIDQ_WORDS + 2 * THREADS - 1) // (2 * THREADS)
+                            for pack_base in range_constexpr(0, MID_PAIR_ROUNDS, 4):
+                                packed = poll(
+                                    [
+                                        (
+                                            mb("ugp"),
+                                            fx.min((tid + j * THREADS) * 2, MIDQ_WORDS - 2),
+                                            2,
                                         )
-                                    lds_st(
-                                        xs,
-                                        target_word,
-                                        packed[j - pack_base][0].bitcast(fx.Float32),
-                                    )
-                                    lds_st(
-                                        xs,
-                                        target_word + 1,
-                                        packed[j - pack_base][1].bitcast(fx.Float32),
-                                    )
-                        for j in range_constexpr((MID_SCALE_WORDS + THREADS - 1) // THREADS):
-                            index = tid + j * THREADS
-                            mid_exponent = get(
-                                mb("ugp"),
-                                MIDQ_WORDS + fx.min(index, MID_SCALE_WORDS - 1),
-                            )
-                            if index < MID_SCALE_WORDS:
-                                target_scale = index
-                                if const_expr(GROUPED_DN):
-                                    target_scale = (index // (expert_inter // 32)) * DN_SCALE_ROW + index % (
-                                        expert_inter // 32
-                                    )
-                                lds_st(misc, target_scale, mid_exponent.bitcast(fx.Float32))
-                    else:
-                        # TP4 with 12 rows has 54 wave-local groups. Quantize bounded batches
-                        # so the full set of mid values does not stay live in registers.
-                        N_MID_BLOCKS = (DN_BLK + WAVES - 1) // WAVES
-                        MID_BATCH = 8 if native_fp4_mfma and expert_inter > INTER and S == 12 else N_MID_BLOCKS
-                        for mid_base in range_constexpr(0, N_MID_BLOCKS, MID_BATCH):
-                            mids = get2_many(
-                                [
-                                    (
-                                        mb("mid"),
-                                        fx.min(wave + b * WAVES, DN_BLK - 1) * 128 + lane * 2,
-                                    )
-                                    for b in range(
-                                        mid_base,
-                                        min(mid_base + MID_BATCH, N_MID_BLOCKS),
-                                    )
-                                ]
-                            )
-                            if const_expr(mid_base == 0):
-                                stamp("down", t, 2)
-                            for b in range_constexpr(mid_base, min(mid_base + MID_BATCH, N_MID_BLOCKS)):
-                                blk = wave + b * WAVES
-                                if blk < DN_BLK:
-                                    if const_expr(expert_mxfp4):
-                                        if const_expr(native_fp4_mfma):
-                                            q0, q1, qs = quant_mxfp8(
-                                                mids[b - mid_base][0],
-                                                mids[b - mid_base][1],
+                                        for j in range(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS))
+                                    ]
+                                )
+                                if const_expr(pack_base == 0):
+                                    stamp("down", t, 2)
+                                for j in range_constexpr(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS)):
+                                    word = (tid + j * THREADS) * 2
+                                    if word < MIDQ_WORDS:
+                                        target_word = word
+                                        if const_expr(GROUPED_DN):
+                                            target_word = (word // (expert_inter // 4)) * DN_X_ROW + word % (
+                                                expert_inter // 4
                                             )
-                                            st_mxfp8(blk * 128 + lane * 2, q0, q1)
-                                            if lane % 16 == 0:
-                                                lds_st(
-                                                    misc,
-                                                    blk * 4 + lane // 16,
-                                                    qs.bitcast(fx.Float32),
-                                                )
-                                        else:
-                                            lds_st(
-                                                xs,
-                                                blk * 64 + lane,
-                                                bf16_pair(
+                                        lds_st(
+                                            xs,
+                                            target_word,
+                                            packed[j - pack_base][0].bitcast(fx.Float32),
+                                        )
+                                        lds_st(
+                                            xs,
+                                            target_word + 1,
+                                            packed[j - pack_base][1].bitcast(fx.Float32),
+                                        )
+                            for j in range_constexpr((MID_SCALE_WORDS + THREADS - 1) // THREADS):
+                                index = tid + j * THREADS
+                                mid_exponent = get(
+                                    mb("ugp"),
+                                    MIDQ_WORDS + fx.min(index, MID_SCALE_WORDS - 1),
+                                )
+                                if index < MID_SCALE_WORDS:
+                                    target_scale = index
+                                    if const_expr(GROUPED_DN):
+                                        target_scale = (index // (expert_inter // 32)) * DN_SCALE_ROW + index % (
+                                            expert_inter // 32
+                                        )
+                                    lds_st(misc, target_scale, mid_exponent.bitcast(fx.Float32))
+                        else:
+                            # TP4 with 12 rows has 54 wave-local groups. Quantize bounded batches
+                            # so the full set of mid values does not stay live in registers.
+                            N_MID_BLOCKS = (DN_BLK + WAVES - 1) // WAVES
+                            MID_BATCH = 8 if native_fp4_mfma and expert_inter > INTER and S == 12 else N_MID_BLOCKS
+                            for mid_base in range_constexpr(0, N_MID_BLOCKS, MID_BATCH):
+                                mids = get2_many(
+                                    [
+                                        (
+                                            mb("mid"),
+                                            fx.min(wave + b * WAVES, DN_BLK - 1) * 128 + lane * 2,
+                                        )
+                                        for b in range(
+                                            mid_base,
+                                            min(mid_base + MID_BATCH, N_MID_BLOCKS),
+                                        )
+                                    ]
+                                )
+                                if const_expr(mid_base == 0):
+                                    stamp("down", t, 2)
+                                for b in range_constexpr(mid_base, min(mid_base + MID_BATCH, N_MID_BLOCKS)):
+                                    blk = wave + b * WAVES
+                                    if blk < DN_BLK:
+                                        if const_expr(expert_mxfp4):
+                                            if const_expr(native_fp4_mfma):
+                                                q0, q1, qs = quant_mxfp8(
                                                     mids[b - mid_base][0],
                                                     mids[b - mid_base][1],
-                                                ),
-                                            )
-                                    else:
-                                        q0, q1, qs = quant_scaled(mids[b - mid_base][0], mids[b - mid_base][1])
-                                        st_f8(blk * 128 + lane * 2, q0, q1)
-                                        if lane == 0:
-                                            lds_st(
-                                                misc,
-                                                blk,
-                                                qs * lds_ld(dnw, blk // (expert_inter // 128)),
-                                            )
+                                                )
+                                                st_mxfp8(blk * 128 + lane * 2, q0, q1)
+                                                if lane % 16 == 0:
+                                                    lds_st(
+                                                        misc,
+                                                        blk * 4 + lane // 16,
+                                                        qs.bitcast(fx.Float32),
+                                                    )
+                                            else:
+                                                lds_st(
+                                                    xs,
+                                                    blk * 64 + lane,
+                                                    bf16_pair(
+                                                        mids[b - mid_base][0],
+                                                        mids[b - mid_base][1],
+                                                    ),
+                                                )
+                                        else:
+                                            q0, q1, qs = quant_scaled(mids[b - mid_base][0], mids[b - mid_base][1])
+                                            st_f8(blk * 128 + lane * 2, q0, q1)
+                                            if lane == 0:
+                                                lds_st(
+                                                    misc,
+                                                    blk,
+                                                    qs * lds_ld(dnw, blk // (expert_inter // 128)),
+                                                )
                     gpu.barrier()
                     if const_expr(GROUPED_DN):
                         if const_expr(S != 12):
