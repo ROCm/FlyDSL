@@ -24,14 +24,23 @@ assigned tasks in stage order. Native launches above twelve rows use separate
 scratch and peer arenas per tile. The general path executes tiles sequentially;
 a tagged grid barrier completes each tile's cache writes before the next tile.
 
-The native forty-row TP4/TP8 indexed path at 4K capacity assigns one ten-row
-tile to each of four cohorts of 64 CTAs. Task ``t`` belongs to cohort-local CTA
-``(stage_base + t) % 64``. All 256 CTAs finish their front-stage tasks and join
-one tagged grid barrier before index scoring, making current cache rows visible
-to every cohort. Later dependencies stay within the cohort or its TP peers.
-Causal index selection permits this cache publication order; external sparse
-indices retain the sequential schedule. Both schedules require all 256 CTAs
-to be co-resident and preserve each task's original arithmetic.
+The native forty-row TP4/TP8 path assigns one ten-row tile to each of four
+cohorts of 64 CTAs. Task ``t`` belongs to cohort-local CTA ``(stage_base + t) % 64``.
+All 256 CTAs finish their front-stage tasks and join one tagged grid barrier.
+The indexed path at 4K capacity publishes current cache rows at this boundary;
+causal index selection then permits every cohort to read the cache.
+
+External sparse indices can reference slots belonging to later tiles. Their
+path preserves the persistent cache until every reader finishes, selecting the
+latest incoming cache row visible at each original ten-row tile boundary from
+tagged scratch. A second grid barrier precedes final cache stores; the last
+incoming writer owns each physical slot, including duplicate slots. This keeps
+the sequential cache semantics while the four tiles compute concurrently.
+
+Indexed forty-row cohorts normalize input once per row. TP8 also uses the
+existing expert-union gate/up body and publishes quantized mid values once.
+Other tile shapes retain their original schedules. Both schedules require all
+256 CTAs to be co-resident and preserve each task's original arithmetic.
 
 Mailboxes are *tagged pairs*: every 32-bit value a task hands to another CTA
 (or GPU) is stored next to this launch's epoch tag, ``(value, tag)``, with
@@ -255,9 +264,10 @@ def build_glm5_monokernel(
     paired_ug_rows = expert_mxfp4 and not atom_experts
     assert D == 1 or (D == W and H == L * D)
     I_PER_SLOT = expert_inter // UG_TILE
-    # Causal index selection permits publishing all four tiles' cache rows
-    # before attention. External sparse indices retain their serial semantics.
-    COHORT_ROW_TILES = STATIC_ROW_TILES and with_indexer and index_max_seq == 4096
+    # Indexed queries permit early cache publication. External indices require
+    # deferred stores and the cache version at each original tile boundary.
+    DEFER_OFF_CACHE = STATIC_ROW_TILES and not with_indexer
+    COHORT_ROW_TILES = STATIC_ROW_TILES and (not with_indexer or index_max_seq == 4096)
     G = BLOCKS // ROW_TILES if COHORT_ROW_TILES else BLOCKS
     UG_TASK_ROUNDS = (expert_inter + G - 1) // G
     SC, SY = layout(
@@ -288,6 +298,7 @@ def build_glm5_monokernel(
             indexer_cp=indexer_cp,
             npes=W,
             native_fp4_mfma=native_fp4_mfma,
+            cohort_rows=COHORT_ROW_TILES and with_indexer,
         )
     )
     CP_RANKS = index_cp_world(W, S, index_max_seq) if indexer_cp else 1
@@ -298,6 +309,8 @@ def build_glm5_monokernel(
     CP_PARTS = index_cp_partitions(index_max_seq, CP_RANKS) if TILED_INDEXER else 0
     N_SPLIT = topk // SPLIT_KEYS
     SPLIT_ALL_HEADS = sparse_heads_per_task(S, H, W, native_fp4_mfma) == 16
+    if DEFER_OFF_CACHE:
+        assert not SPLIT_ALL_HEADS and ROW_TILES >= 3
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
     # The index-Q row space is fixed at 256 tiles.  TP8 produces half from
@@ -324,7 +337,7 @@ def build_glm5_monokernel(
     INDEX_BF16_OFF = SAMPLE_TILE * HIDDEN // 4
     INDEX_Q_BF16_OFF = S * Q_LORA // 4
     CACHE_TILE = cache_samples_per_task(S, npes, with_indexer, native_fp4_mfma)
-    GROUPED_UG = grouped_ug_enabled(S, npes, native_fp4_mfma)
+    GROUPED_UG = grouped_ug_enabled(S, npes, native_fp4_mfma, COHORT_ROW_TILES and with_indexer)
     UG_X_ROW = HIDDEN // 4 + (4 if GROUPED_UG else 0)
     UG_SCALE_ROW = XQ_GROUPS + (4 if GROUPED_UG else 0)
     UG_UNION_MAX = S * TOP_K + 1
@@ -345,7 +358,12 @@ def build_glm5_monokernel(
     # after that common X region because they are simultaneously live in GEMVs.
     SPLIT_X_WORDS = PT_OFF + SPLIT_KEYS * PS
     index_lds_words = LOCAL_INDEX_CAPACITY if with_indexer and (not TILED_INDEXER or indexer_cp) else 0
-    INPUT_NORM_ONCE = native_fp4_mfma and npes == 4 and S == 12 and not attention_ptpc and not attention_bf16
+    INPUT_NORM_ONCE = (
+        native_fp4_mfma
+        and ((npes == 4 and S == 12) or (COHORT_ROW_TILES and with_indexer))
+        and not attention_ptpc
+        and not attention_bf16
+    )
     INPUT_QA_BATCH = 4
     X_WORDS = max(
         S * (INPUT_QA_BATCH * WAVES * 128 // 2 + 4) if INPUT_NORM_ONCE else 0,
@@ -405,6 +423,7 @@ def build_glm5_monokernel(
         npes=W,
         inter=expert_inter,
         native_fp4_mfma=native_fp4_mfma,
+        cohort_rows=COHORT_ROW_TILES and with_indexer,
     ):
         first[name] = acc
         acc += n
@@ -422,6 +441,7 @@ def build_glm5_monokernel(
             npes=W,
             inter=expert_inter,
             native_fp4_mfma=native_fp4_mfma,
+            cohort_rows=COHORT_ROW_TILES and with_indexer,
         )
     )
     acc = 0
@@ -2226,7 +2246,7 @@ def build_glm5_monokernel(
                     s = sample_base + local_s
                     pos = row_position(s)
                     slot = row_slot(s)
-                    active = row_writes_cache(s)
+                    active = row_writes_cache(s) & (not DEFER_OFF_CACHE)
                     value = vs[local_s] * _rsq(ssq[local_s] * (1.0 / KV_LORA) + EPS) * g
                     if const_expr(cache_fp8):
                         value = bf16_round(value)
@@ -2567,9 +2587,9 @@ def build_glm5_monokernel(
                 stamp("uk", t, 4)
 
             if const_expr(COHORT_ROW_TILES):
-                # All cohorts publish current cache rows before any cohort reads
-                # another tile's history. Every physical CTA participates, after
-                # finishing its complete local front-stage task loops.
+                # Every cohort finishes its front tasks before cross-tile reads.
+                # Indexed mode publishes cache stores; external-index mode keeps
+                # persistent cache intact and reads current versions from scratch.
                 fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
                 gpu.barrier()
                 cohort_arrivals = full_scratch + fx.Int64(ROW_TILES * TILE_SCRATCH_BYTES)
@@ -3287,9 +3307,7 @@ def build_glm5_monokernel(
                     return nkeys, sparse
 
                 def gather_old_kv():
-                    """Each wave copies its 8 keys' KV latent (1 KB) + k_pe (128 B) cache rows
-                    into the LDS tiles (rows of this launch are patched in by patch_new_kv).
-                    """
+                    """Copy persistent KV/PE rows to LDS before patching incoming cache versions."""
                     krows = [lds_ld(attn_keys, wave * KPW + jj) for jj in range(KPW)]
                     for jj in range_constexpr(KPW):
                         j = wave * KPW + jj
@@ -3582,9 +3600,7 @@ def build_glm5_monokernel(
                     return nkeys, sparse
 
                 def gather_old_kv():
-                    """Each wave copies its 8 keys' KV latent (1 KB) + k_pe (128 B) cache rows
-                    into the LDS tiles (rows of this launch are patched in by patch_new_kv).
-                    """
+                    """Copy persistent KV/PE rows to LDS before patching incoming cache versions."""
                     krows = [lds_ld(attn_keys, wave * KPW + jj) for jj in range(KPW)]
                     for jj in range_constexpr(KPW):
                         j = wave * KPW + jj
@@ -3628,32 +3644,65 @@ def build_glm5_monokernel(
                                 lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row))
 
                 def patch_new_kv():
-                    """Rows appended by this launch come from the cache task's kvnew / penew pairs."""
-                    if const_expr(use_atom_kv_cache):
-                        new_active = [row_writes_cache(new_s) for new_s in range(S)]
-                        new_slots = [row_slot(new_s) for new_s in range(S)]
-                    for jj in range_constexpr(KPW):
-                        j = wave * KPW + jj
-                        kr = lds_ld(attn_keys, j)
-                        if const_expr(use_atom_kv_cache):
-                            sn = fx.Int32(-1)
-                            for new_s in range_constexpr(S):
-                                match = new_active[new_s] & (kr == new_slots[new_s])
-                                sn = match.select(fx.Int32(new_s), sn)
-                            is_new = sn >= 0
-                        else:
-                            is_new = kr >= pos0
-                            sn = kr - pos0
-                        if is_new:
-                            kvp = get2_many([(mb("kvnew"), sn * KV_LORA + lane * 8 + m * 2) for m in range(4)])
-                            w = [bf16_pair(a0, a1) for a0, a1 in kvp]
-                            fx.ptr_store(
-                                fx.Vector.from_elements(w, fx.Float32),
-                                ktile + (j * KS + lane * 4),
+                    """Patch the cache version visible at this tile's serial boundary."""
+                    if const_expr(DEFER_OFF_CACHE):
+                        # One coalesced incoming-slot load per lane, then one ballot
+                        # per key replaces a serial forty-slot search in wave zero.
+                        incoming_slot = fx.Int32(
+                            bo.buffer_load(
+                                _rsrc(full_slots), fx.min(lane, total_samples - 1) * 2, vec_width=1, dtype=T.i32
                             )
-                            if lane < PE_DIM // 2:
-                                a0, a1 = get2(mb("penew"), sn * PE_DIM + lane * 2)
-                                lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
+                        )
+                        visible_row = (lane < row_offset + S) & (lane < total_samples) & (incoming_slot >= 0)
+                        for jj in range_constexpr(KPW):
+                            j = wave * KPW + jj
+                            physical_key = _uniform(lds_ld(attn_keys, j))
+                            version_mask = fx.Int64(rocdl.ballot(T.i64, visible_row & (incoming_slot == physical_key)))
+                            if version_mask != 0:
+                                incoming_row = fx.Int32(63) - fx.Int32(fmath.ctlz(version_mask))
+                                source_tile = incoming_row // S
+                                source_row = incoming_row % S
+                                source_scratch = full_scratch + fx.Int64(source_tile) * TILE_SCRATCH_BYTES
+                                kvp = get2_many(
+                                    [
+                                        (source_scratch + SC["kvnew"], source_row * KV_LORA + lane * 8 + m * 2)
+                                        for m in range(4)
+                                    ]
+                                )
+                                words = [bf16_pair(a0, a1) for a0, a1 in kvp]
+                                fx.ptr_store(
+                                    fx.Vector.from_elements(words, fx.Float32),
+                                    ktile + (j * KS + lane * 4),
+                                )
+                                if lane < PE_DIM // 2:
+                                    a0, a1 = get2(source_scratch + SC["penew"], source_row * PE_DIM + lane * 2)
+                                    lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
+                    else:
+                        if const_expr(use_atom_kv_cache):
+                            new_active = [row_writes_cache(new_s) for new_s in range(S)]
+                            new_slots = [row_slot(new_s) for new_s in range(S)]
+                        for jj in range_constexpr(KPW):
+                            j = wave * KPW + jj
+                            kr = lds_ld(attn_keys, j)
+                            if const_expr(use_atom_kv_cache):
+                                sn = fx.Int32(-1)
+                                for new_s in range_constexpr(S):
+                                    match = new_active[new_s] & (kr == new_slots[new_s])
+                                    sn = match.select(fx.Int32(new_s), sn)
+                                is_new = sn >= 0
+                            else:
+                                is_new = kr >= pos0
+                                sn = kr - pos0
+                            if is_new:
+                                kvp = get2_many([(mb("kvnew"), sn * KV_LORA + lane * 8 + m * 2) for m in range(4)])
+                                w = [bf16_pair(a0, a1) for a0, a1 in kvp]
+                                fx.ptr_store(
+                                    fx.Vector.from_elements(w, fx.Float32),
+                                    ktile + (j * KS + lane * 4),
+                                )
+                                if lane < PE_DIM // 2:
+                                    a0, a1 = get2(mb("penew"), sn * PE_DIM + lane * 2)
+                                    lds_st(petile, j * PS + lane, bf16_pair(a0, a1))
 
                 N_HEAD_GROUPS = H // WAVES
                 for tt in range(start("split"), S * N_HEAD_GROUPS * N_SPLIT, G):
@@ -5458,6 +5507,44 @@ def build_glm5_monokernel(
                     peer_reduce("ffn", t, residual_a, store_x, tile=DN_TILE)
                 gpu.barrier()
                 stamp("down", t, 4)
+
+            if const_expr(DEFER_OFF_CACHE):
+                # Every reader finishes before persistent cache storage is overwritten.
+                # This second barrier has a distinct slot at the same invocation tag.
+                fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
+                gpu.barrier()
+                commit_arrivals = full_scratch + fx.Int64(ROW_TILES * TILE_SCRATCH_BYTES + (BLOCKS + 1) * 8)
+                if tid == 0:
+                    put(commit_arrivals, full_bid, fx.Int32(1))
+                if full_bid == 0:
+                    if tid < BLOCKS:
+                        get(commit_arrivals, tid)
+                        fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
+                    gpu.barrier()
+                    if tid == 0:
+                        put(commit_arrivals, BLOCKS, fx.Int32(1))
+                if tid == 0:
+                    get(commit_arrivals, BLOCKS)
+                gpu.barrier()
+                fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
+                if bid < S:
+                    commit_slot = row_slot(bid)
+                    later_slot = fx.Int32(
+                        bo.buffer_load(_rsrc(full_slots), fx.min(lane, total_samples - 1) * 2, vec_width=1, dtype=T.i32)
+                    )
+                    overwritten = (lane > row_offset + bid) & (lane < total_samples) & (later_slot == commit_slot)
+                    overwritten_mask = fx.Int64(rocdl.ballot(T.i64, overwritten))
+                    commit_owner = (commit_slot >= 0) & (overwritten_mask == 0)
+                    if commit_owner:
+                        committed_kv = getf(mb("kvnew"), bid * KV_LORA + tid)
+                        bo.buffer_store(committed_kv.to(fx.BFloat16), _rsrc(kv_cache), commit_slot * QK_DIM + tid)
+                        if tid < PE_DIM // 2:
+                            committed_pe0, committed_pe1 = get2(mb("penew"), bid * PE_DIM + tid * 2)
+                            bo.buffer_store(
+                                fx.Vector.from_elements([committed_pe0, committed_pe1], fx.Float32).to(fx.BFloat16),
+                                _rsrc(pe_cache),
+                                commit_slot * QK_DIM + KV_LORA + tid * 2,
+                            )
 
             if const_expr(ROW_TILES > 1 and not COHORT_ROW_TILES):
                 if row_tile + 1 < ROW_TILES:

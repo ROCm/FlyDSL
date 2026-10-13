@@ -157,8 +157,8 @@ def sample_wave_batches(samples: int) -> int:
 NATIVE_UG_TILE = 8
 
 
-def grouped_ug_enabled(samples: int, npes: int, native_fp4_mfma: bool) -> bool:
-    return native_fp4_mfma and npes == 4 and samples in (8, 10, 12)
+def grouped_ug_enabled(samples: int, npes: int, native_fp4_mfma: bool, cohort_rows: bool = False) -> bool:
+    return native_fp4_mfma and ((npes == 4 and samples in (8, 10, 12)) or (cohort_rows and npes == 8 and samples == 10))
 
 
 def ug_task_rounds(inter: int) -> int:
@@ -367,6 +367,7 @@ def stage_tasks(
     indexer_cp: bool = False,
     npes: int = 1,
     native_fp4_mfma: bool = False,
+    cohort_rows: bool = False,
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
@@ -383,6 +384,7 @@ def stage_tasks(
             indexer_cp,
             npes,
             native_fp4_mfma,
+            cohort_rows,
         )
         return [(f"tile{part}/{name}", count) for part in range(samples // tile) for name, count in stages]
     index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
@@ -425,7 +427,7 @@ def stage_tasks(
         ),
         ("down", HIDDEN // dn_tile(samples, expert_mxfp4)),
     ]
-    if grouped_ug_enabled(samples, npes, native_fp4_mfma):
+    if grouped_ug_enabled(samples, npes, native_fp4_mfma, cohort_rows):
         # Include the shared expert even when every routed slot is distinct.
         # Full-CTA rounding keeps the subsequent stage's tuned CTA placement.
         maximum = (samples * TOP_K + 1) * (inter // NATIVE_UG_TILE)

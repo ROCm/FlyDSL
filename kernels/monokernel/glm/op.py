@@ -270,6 +270,18 @@ class Glm5MonoKernel:
             npes=npes,
             inter=W.config.inter,
             native_fp4_mfma=native_fp4_mfma,
+            cohort_rows=(
+                samples == 40
+                and npes in (4, 8)
+                and dcp_size == 1
+                and not indexer_cp
+                and self.attention_weight is AttentionWeight.FP8_BLOCK128
+                and self.kv_cache_layout is KvCacheLayout.ATOM
+                and kv_cache_dtype == "bf16"
+                and rope_dtype == "fp32"
+                and with_indexer
+                and index_max_seq == 4096
+            ),
         )
         n_tasks = sum(n for _, n in self.stages)
         self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
