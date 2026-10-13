@@ -648,6 +648,11 @@ def _evict_weight(key, _ref):
         del _WEIGHT_CACHE[key]
 
 
+def clear_weight_cache():
+    """Drop every packed weight; call after writing a weight through ``.data``."""
+    _WEIGHT_CACHE.clear()
+
+
 def _prep_weight(w, k, kt, kh, kw, c):
     """Pack (K, C, T, R, S) -> (K, T*R*S*Cpad), memoized on the source weight."""
     anchor = w._base if w._base is not None else w
@@ -1046,6 +1051,11 @@ def flydsl_conv_implicit(x, weight, bias=None, stride=1, padding=0, dilation=1, 
     ``padding``: int, per-axis tuple, ``"valid"``, or ``"same"`` (stride 1).
     ``groups``: C and K must divide; depthwise (C/groups==1) is the slow case.
     Raises ``RuntimeError`` outside ``SUPPORTED_GFX``.
+
+    The packed weight is cached per weight tensor and rebuilt when its
+    ``_version`` changes. A write through ``.data`` (``w.data.copy_(...)``,
+    ``w.data += ...``) does not bump ``_version``, so later calls would reuse
+    the old weight: call ``clear_weight_cache()`` after one.
     """
     _check_supported_arch()
     spatial_rank = weight.dim() - 2

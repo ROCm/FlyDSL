@@ -402,6 +402,7 @@ y = flydsl_conv_implicit(
 | Layouts | Input and output layouts are independent. NDHWC input skips the NCDHW→NDHWC transpose kernel; weight is always `(K, C/groups, kT, kH, kW)` |
 | `padding` | int, per-axis tuple, `"valid"`, or `"same"` (stride 1) |
 | Pointwise | 1×1×1, unit stride, no padding, `groups=1` is answered by `torch.matmul` without a FlyDSL kernel |
+| Weight cache | The packed weight is cached per weight tensor and rebuilt when its `_version` changes. A write through `.data` (`w.data.copy_(...)`) does not bump it: call `clear_weight_cache()` from the same module afterwards |
 
 **Pipeline:** the A operand is gathered im2col-style straight into LDS with
 `buffer_load ... lds` DMA, B is the weight read as a `(K, CRS)` matrix, and the
