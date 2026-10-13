@@ -38,6 +38,11 @@ INDEX_KEYS_PER_TASK = 64
 DCP_SUMMARY_PAIRS = KV_LORA // 2 + 2
 
 
+def sparse_heads_per_task(samples: int, heads: int, npes: int, native_fp4_mfma: bool = False) -> int:
+    """Use both MFMA head halves for the validated TP4 C2/S6 shape."""
+    return 16 if native_fp4_mfma and npes == 4 and samples == 12 and heads == 16 else WAVES
+
+
 def split_acc_head(head_group, lane_group: int, element: int):
     """Map one split-PV MFMA row to its local attention head."""
 
@@ -142,15 +147,28 @@ def sample_wave_batches(samples: int) -> int:
     return (samples + WAVES - 1) // WAVES
 
 
+NATIVE_UG_TILE = 8
+
+
+def grouped_ug_enabled(samples: int, npes: int, native_fp4_mfma: bool) -> bool:
+    return native_fp4_mfma and npes == 4 and samples in (8, 10, 12)
+
+
 def ug_task_rounds(inter: int) -> int:
     return (inter + BLOCKS - 1) // BLOCKS
 
 
-def down_prefetch_batch(samples: int, native_fp4_mfma: bool = False, atom_experts: bool = False) -> int:
+def down_prefetch_batch(
+    samples: int, native_fp4_mfma: bool = False, atom_experts: bool = False, inter: int = INTER
+) -> int:
     if samples <= 4:
         return 9
     if native_fp4_mfma:
-        return 4 if samples <= 6 else 3
+        if samples <= 6:
+            return 4
+        # Wider expert shards have more K units in flight; a shallower pipeline
+        # reduces register pressure for large query groups without changing TP8.
+        return 2 if inter > INTER and samples in (8, 10, 12) else 3
     return 8 if atom_experts else 4
 
 
@@ -302,6 +320,12 @@ def layout(
     return scratch, symmetric
 
 
+def cache_samples_per_task(samples: int, npes: int, with_indexer: bool, native_fp4_mfma: bool = False) -> int:
+    """Bound the cache task's serial query work on wider TP4 decode groups."""
+    per_query = (with_indexer and samples in (8, 10, 12)) or (native_fp4_mfma and samples == 12)
+    return 1 if npes == 4 and per_query else samples
+
+
 def stage_tasks(
     samples: int,
     heads: int,
@@ -312,11 +336,17 @@ def stage_tasks(
     inter: int = INTER,
     indexer_cp: bool = False,
     npes: int = 1,
+    native_fp4_mfma: bool = False,
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
     index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
-    tasks = [("qkv_a", N_QKV_A), ("q_norm", samples), ("cache", 1), ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE)]
+    tasks = [
+        ("qkv_a", N_QKV_A),
+        ("q_norm", samples),
+        ("cache", samples // cache_samples_per_task(samples, npes, with_indexer, native_fp4_mfma)),
+        ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE),
+    ]
     if with_indexer:
         shard_q = indexer_cp and not indexer_uses_tiles(index_max_seq, indexer_cp)
         tasks += [("index_q", INDEX_Q_ROWS // INDEX_TILE // (index_ranks if shard_q else 1))]
@@ -331,7 +361,12 @@ def stage_tasks(
             tasks += [("index_count", samples * parts), ("index_offsets", samples), ("index_emit", samples * parts)]
         tasks += [("index_select", samples)]
     tasks += [
-        ("split", samples * (heads // WAVES) * (sparse_attention_topk // sparse_keys_per_task(samples, heads))),
+        (
+            "split",
+            samples
+            * (heads // sparse_heads_per_task(samples, heads, npes, native_fp4_mfma))
+            * (sparse_attention_topk // sparse_keys_per_task(samples, heads)),
+        ),
         ("uv", samples * (heads * V_DIM // UV_TILE)),
         ("o", N_ROW_TILES),
         ("router", samples * N_ROUTER),
@@ -345,4 +380,10 @@ def stage_tasks(
         ),
         ("down", HIDDEN // dn_tile(samples, expert_mxfp4)),
     ]
+    if grouped_ug_enabled(samples, npes, native_fp4_mfma):
+        # Include the shared expert even when every routed slot is distinct.
+        # Full-CTA rounding keeps the subsequent stage's tuned CTA placement.
+        maximum = (samples * TOP_K + 1) * (inter // NATIVE_UG_TILE)
+        capacity = ((maximum + BLOCKS - 1) // BLOCKS) * BLOCKS
+        tasks = [(name, max(count, capacity) if name == "ug" else count) for name, count in tasks]
     return tasks

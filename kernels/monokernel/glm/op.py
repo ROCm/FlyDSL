@@ -169,7 +169,9 @@ class Glm5MonoKernel:
             npes,
             topk,
             W.config,
-            supported_samples=GLM5_KERNEL_SAMPLES,
+            # The native path also accepts the odd query counts covered by the
+            # sequence regression; retain the legacy path's existing buckets.
+            supported_samples=(*GLM5_KERNEL_SAMPLES, 3, 7, 9) if native_fp4_mfma else GLM5_KERNEL_SAMPLES,
             expected_heads=attention_heads,
         )
         if dcp_size not in (1, npes):
@@ -263,6 +265,7 @@ class Glm5MonoKernel:
             indexer_cp=indexer_cp,
             npes=npes,
             inter=W.config.inter,
+            native_fp4_mfma=native_fp4_mfma,
         )
         n_tasks = sum(n for _, n in self.stages)
         self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
