@@ -3398,46 +3398,78 @@ def build_glm5_monokernel(
                 def gather_old_kv():
                     """Copy persistent KV/PE rows to LDS before patching incoming cache versions."""
                     krows = [lds_ld(attn_keys, wave * KPW + jj) for jj in range(KPW)]
-                    for jj in range_constexpr(KPW):
-                        j = wave * KPW + jj
-                        if const_expr(cache_fp8):
-                            row = krows[jj] * (QK_DIM // 4)
-                            raw = fx.Vector(bo.buffer_load(r_kv, row + lane * 2, vec_width=2, dtype=T.i32))
-                            fx.ptr_store(
-                                _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
-                                ktile + (j * KS + lane * 4),
-                            )
-                            if lane < PE_DIM // 8:
-                                pe_raw = fx.Vector(
+                    if const_expr(COHORT_ROW_TILES and not with_indexer and native_fp4_mfma and npes == 4):
+                        # Two independent persistent-cache rows outstanding per wave.
+                        # Complete the original gather before any q/patch dependency.
+                        for gather_base in range_constexpr(0, KPW, 2):
+                            gather_kv = [
+                                fx.Vector(
                                     bo.buffer_load(
-                                        r_pe,
-                                        row + KV_LORA // 4 + lane * 2,
-                                        vec_width=2,
+                                        r_kv,
+                                        krows[gather_base + part] * (QK_DIM // 2) + lane * 4,
+                                        vec_width=4,
                                         dtype=T.i32,
                                     )
                                 )
+                                for part in range(2)
+                            ]
+                            for gather_part in range_constexpr(2):
                                 fx.ptr_store(
-                                    _fp8_to_bf16x8(pe_raw[0], pe_raw[1]).bitcast(fx.Float32),
-                                    petile + (j * PS + lane * 4),
+                                    gather_kv[gather_part].bitcast(fx.Float32),
+                                    ktile + ((wave * KPW + gather_base + gather_part) * KS + lane * 4),
                                 )
-                        else:
-                            kv_row_words = QK_DIM // 2 if const_expr(use_atom_kv_cache) else KV_LORA // 2
-                            kv8 = fx.Vector(
-                                bo.buffer_load(
-                                    r_kv,
-                                    krows[jj] * kv_row_words + lane * 4,
-                                    vec_width=4,
-                                    dtype=T.i32,
-                                )
-                            )
-                            fx.ptr_store(kv8.bitcast(fx.Float32), ktile + (j * KS + lane * 4))
                             if lane < PE_DIM // 2:
-                                pe_row = (
-                                    krows[jj] * (QK_DIM // 2) + KV_LORA // 2 + lane
-                                    if const_expr(use_atom_kv_cache)
-                                    else krows[jj] * (PE_DIM // 2) + lane
+                                gather_pe = [
+                                    ld_f32(r_pe, krows[gather_base + part] * (QK_DIM // 2) + KV_LORA // 2 + lane)
+                                    for part in range(2)
+                                ]
+                                for gather_part in range_constexpr(2):
+                                    lds_st(
+                                        petile,
+                                        (wave * KPW + gather_base + gather_part) * PS + lane,
+                                        gather_pe[gather_part],
+                                    )
+                    else:
+                        for jj in range_constexpr(KPW):
+                            j = wave * KPW + jj
+                            if const_expr(cache_fp8):
+                                row = krows[jj] * (QK_DIM // 4)
+                                raw = fx.Vector(bo.buffer_load(r_kv, row + lane * 2, vec_width=2, dtype=T.i32))
+                                fx.ptr_store(
+                                    _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
+                                    ktile + (j * KS + lane * 4),
                                 )
-                                lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row))
+                                if lane < PE_DIM // 8:
+                                    pe_raw = fx.Vector(
+                                        bo.buffer_load(
+                                            r_pe,
+                                            row + KV_LORA // 4 + lane * 2,
+                                            vec_width=2,
+                                            dtype=T.i32,
+                                        )
+                                    )
+                                    fx.ptr_store(
+                                        _fp8_to_bf16x8(pe_raw[0], pe_raw[1]).bitcast(fx.Float32),
+                                        petile + (j * PS + lane * 4),
+                                    )
+                            else:
+                                kv_row_words = QK_DIM // 2 if const_expr(use_atom_kv_cache) else KV_LORA // 2
+                                kv8 = fx.Vector(
+                                    bo.buffer_load(
+                                        r_kv,
+                                        krows[jj] * kv_row_words + lane * 4,
+                                        vec_width=4,
+                                        dtype=T.i32,
+                                    )
+                                )
+                                fx.ptr_store(kv8.bitcast(fx.Float32), ktile + (j * KS + lane * 4))
+                                if lane < PE_DIM // 2:
+                                    pe_row = (
+                                        krows[jj] * (QK_DIM // 2) + KV_LORA // 2 + lane
+                                        if const_expr(use_atom_kv_cache)
+                                        else krows[jj] * (PE_DIM // 2) + lane
+                                    )
+                                    lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row))
 
                 def patch_new_kv():
                     """Patch the cache version visible at this tile's serial boundary."""
