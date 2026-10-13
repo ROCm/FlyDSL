@@ -4448,9 +4448,30 @@ def build_glm5_monokernel(
                     # reuses red for per-wave accumulator stores.
                     gpu.barrier()
                 else:
-                    if const_expr(S > 4):
-                        pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]
-                    acc = run_units(u_dn, DN_UPW, DN_BATCH, pre)
+                    if const_expr(native_fp4_mfma and npes == 4 and S == 10 and expert_inter == 512):
+                        # Bound the unrolled body while preserving every wave's
+                        # slot/K order and two-batch software pipeline.
+                        DN_LOOP_UNITS = 10
+                        assert DN_UPW % DN_LOOP_UNITS == 0 and DN_LOOP_UNITS % DN_BATCH == 0
+                        dn_loop_acc = fx.Vector.filled(4, 0.0, fx.Float32)
+                        for dn_loop in range(DN_UPW // DN_LOOP_UNITS):
+                            dn_base = dn_loop * DN_LOOP_UNITS
+                            dn_cur = [u_dn(dn_base + cc) for cc in range(DN_BATCH)]
+                            for dn_begin in range_constexpr(0, DN_LOOP_UNITS, DN_BATCH):
+                                dn_next = None
+                                if const_expr(dn_begin + DN_BATCH < DN_LOOP_UNITS):
+                                    dn_next = [
+                                        u_dn(dn_base + cc) for cc in range(dn_begin + DN_BATCH, dn_begin + 2 * DN_BATCH)
+                                    ]
+                                dn_loop_acc = fx.Vector.from_elements(
+                                    mma_units([dn_loop_acc[e] for e in range(4)], dn_cur), fx.Float32
+                                )
+                                dn_cur = dn_next
+                        acc = [dn_loop_acc[e] for e in range(4)]
+                    else:
+                        if const_expr(S > 4):
+                            pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]
+                        acc = run_units(u_dn, DN_UPW, DN_BATCH, pre)
 
                 def emit_dn(rl, n, v):
                     if (rl >= dn_off) & (rl < dn_off + DN_TILE):
