@@ -8,8 +8,10 @@
 Reads an untuned CSV, sweeps ``conv3d_policy`` configs, writes winners to a
 tuned CSV. Same candidate set, CSV columns, err=0 bar, splitK pinning, and
 NDHWC timing as aiter ``csrc/flydsl_conv3d/conv3d_tune.py``; ``us`` comes from
-the same ``run_perftest`` protocol (see ``conv3d_perftest``), so it includes
-the weight repack and any channel pad, not just the conv kernel.
+the same ``run_perftest`` protocol (``tests.test_common``, run with aiter's
+defaults), so it includes the weight repack and any channel pad, not just the
+conv kernel. Leave ``FLYDSL_PERFTEST_USE_EVENTS`` unset: it switches
+``run_perftest`` to HIP-event timing, which aiter's ``us`` does not use.
 
     python -m kernels.conv.conv3d_tune \\
         -i kernels/conv/configs/qwenimage_vae_bf16_untuned_conv3d.csv \\
@@ -30,6 +32,8 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
+from tests.test_common import run_perftest
+
 from .conv3d_gfx950_utils import out_extent
 from .conv3d_implicit import (
     LIBTYPE_FLYDSL,
@@ -49,7 +53,6 @@ from .conv3d_implicit import (
     _tuned_rows_by_layer,
     flydsl_conv_implicit,
 )
-from .conv3d_perftest import run_perftest
 from .conv3d_policy import get_flydsl_conv3d_configs, tile_kernel_name
 
 log = logging.getLogger("conv3d_tune")
@@ -69,6 +72,9 @@ RESULT_COLS = [
 COLUMNS = [*KEYS, *RESULT_COLS]
 
 RUN_CONFIG_REPS = 3
+# aiter run_perftest defaults; tests.test_common.run_perftest defaults differ (20 / 3).
+PERFTEST_ITERS = 101
+PERFTEST_WARMUP = 2
 RTOL = ATOL = 2e-2
 LAYOUT = "NDHWC"
 INVALID_TIME = -1.0
@@ -191,7 +197,18 @@ def _shape_data(kv):
 def _bench_one(data, params, ref, tile, wgm, splitk):
     """``(us, err_ratio)`` the way aiter's ``mp_tuner`` worker measures a candidate."""
     try:
-        out, us = run_perftest(run_flydsl_conv3d, data["x"], data["weight"], data["bias"], params, tile, wgm, splitk)
+        out, us = run_perftest(
+            run_flydsl_conv3d,
+            data["x"],
+            data["weight"],
+            data["bias"],
+            params,
+            tile,
+            wgm,
+            splitk,
+            num_iters=PERFTEST_ITERS,
+            num_warmup=PERFTEST_WARMUP,
+        )
         torch.cuda.synchronize()
         return round(us, 4), round(_err_ratio(out, ref), 4)
     except Exception as exc:  # noqa: BLE001
@@ -333,6 +350,8 @@ def _run_config(untunedf, err_ratio_bar):
                     bias=data["bias"],
                     input_layout=LAYOUT,
                     output_layout=LAYOUT,
+                    num_iters=PERFTEST_ITERS,
+                    num_warmup=PERFTEST_WARMUP,
                     **params,
                 )
                 if us_i < us:
