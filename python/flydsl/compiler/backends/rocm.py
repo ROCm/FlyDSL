@@ -8,12 +8,24 @@ from ...utils import env
 from .base import AOTRuntimeConfig, BaseBackend, GPUTarget
 
 
+def _ktrace_tracing_enabled(compile_hints: dict) -> bool:
+    if "ktrace" in compile_hints:
+        return bool(compile_hints["ktrace"])
+    return bool(env.ktrace.enable)
+
+
 class RocmBackend(BaseBackend):
     """ROCm / AMDGPU compile backend (HIP runtime, ROCDL lowering)."""
 
     @staticmethod
     def supports_target(target: GPUTarget) -> bool:
         return target.backend == "rocm"
+
+    @classmethod
+    def ktrace_backend(cls):
+        from ._rocm_ktrace import ROCM_KTRACE_BACKEND
+
+        return ROCM_KTRACE_BACKEND
 
     @staticmethod
     def detect_target() -> GPUTarget:
@@ -69,6 +81,10 @@ class RocmBackend(BaseBackend):
             "wave64": "true" if get_warp_size(chip) == 64 else "false",
         }
 
+        ktrace_fragments = []
+        if _ktrace_tracing_enabled(compile_hints):
+            ktrace_fragments = ["convert-fly-ktrace-to-rocdl"]
+
         pre_binary_fragments = [
             "fly-rewrite-func-signature",
             "fly-canonicalize",
@@ -78,6 +94,7 @@ class RocmBackend(BaseBackend):
             "canonicalize",
             "fly-convert-atom-call-to-ssa-form",
             "fly-promote-regmem-to-vectorssa",
+            *ktrace_fragments,
             "convert-fly-to-rocdl",
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
