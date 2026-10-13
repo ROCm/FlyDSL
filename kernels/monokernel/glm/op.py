@@ -279,7 +279,17 @@ class Glm5MonoKernel:
                 and self.kv_cache_layout is KvCacheLayout.ATOM
                 and kv_cache_dtype == "bf16"
                 and rope_dtype == "fp32"
-                and (with_indexer or npes == 4)
+                and (not with_indexer or index_max_seq == 4096)
+            ),
+            uv_reuse=(
+                samples == 40
+                and npes in (4, 8)
+                and dcp_size == 1
+                and not indexer_cp
+                and self.attention_weight is AttentionWeight.FP8_BLOCK128
+                and self.kv_cache_layout is KvCacheLayout.ATOM
+                and kv_cache_dtype == "bf16"
+                and rope_dtype == "fp32"
                 and (not with_indexer or index_max_seq == 4096)
             ),
         )

@@ -298,7 +298,8 @@ def build_glm5_monokernel(
             indexer_cp=indexer_cp,
             npes=W,
             native_fp4_mfma=native_fp4_mfma,
-            cohort_rows=COHORT_ROW_TILES and (with_indexer or npes == 4),
+            cohort_rows=COHORT_ROW_TILES,
+            uv_reuse=COHORT_ROW_TILES,
         )
     )
     CP_RANKS = index_cp_world(W, S, index_max_seq) if indexer_cp else 1
@@ -322,6 +323,8 @@ def build_glm5_monokernel(
     N_UK = H * KV_LORA // UK_TILE
     UK_PER_HEAD = KV_LORA // UK_TILE
     N_UV = H * V_DIM // UV_TILE
+    UV_REUSE = 4 if COHORT_ROW_TILES else 1
+    assert UV_REUSE == 1 or V_DIM // UV_TILE == UV_REUSE
     O_K = L * V_DIM
     N_UG = S * MOE_SLOTS * I_PER_SLOT
     QK_DIM = KV_LORA + PE_DIM
@@ -339,7 +342,7 @@ def build_glm5_monokernel(
     INDEX_BF16_OFF = SAMPLE_TILE * HIDDEN // 4
     INDEX_Q_BF16_OFF = S * Q_LORA // 4
     CACHE_TILE = cache_samples_per_task(S, npes, with_indexer, native_fp4_mfma)
-    GROUPED_UG = grouped_ug_enabled(S, npes, native_fp4_mfma, COHORT_ROW_TILES and with_indexer)
+    GROUPED_UG = grouped_ug_enabled(S, npes, native_fp4_mfma, COHORT_ROW_TILES)
     UG_X_ROW = HIDDEN // 4 + (4 if GROUPED_UG else 0)
     UG_SCALE_ROW = XQ_GROUPS + (4 if GROUPED_UG else 0)
     UG_UNION_MAX = S * TOP_K + 1
@@ -359,7 +362,7 @@ def build_glm5_monokernel(
     DN_X_ROW = expert_inter // 4 + (4 if GROUPED_DN else 0)
     DN_SCALE_ROW = expert_inter // 32 + (4 if GROUPED_DN else 0)
 
-    RED_WORDS = WAVES * 64 * 4 * (2 if GROUPED_UG and S == 12 else 1)
+    RED_WORDS = WAVES * 64 * 4 * (2 if GROUPED_UG and (S == 12 or COHORT_ROW_TILES) else 1)
     LDS_KEYS = max(264 if with_indexer else 0, SPLIT_KEYS, S * MOE_SLOTS + UG_UNION_WORDS)
 
     # TileRT lineage: use one phase-overlaid arena instead of summing every
@@ -370,12 +373,9 @@ def build_glm5_monokernel(
     SPLIT_X_WORDS = PT_OFF + SPLIT_KEYS * PS
     index_lds_words = LOCAL_INDEX_CAPACITY if with_indexer and (not TILED_INDEXER or indexer_cp) else 0
     INPUT_NORM_ONCE = (
-        native_fp4_mfma
-        and ((npes == 4 and S == 12) or (COHORT_ROW_TILES and with_indexer))
-        and not attention_ptpc
-        and not attention_bf16
+        native_fp4_mfma and ((npes == 4 and S == 12) or COHORT_ROW_TILES) and not attention_ptpc and not attention_bf16
     )
-    INPUT_QA_BATCH = 4
+    INPUT_QA_BATCH = 2 if COHORT_ROW_TILES and not with_indexer else 4
     X_WORDS = max(
         S * (INPUT_QA_BATCH * WAVES * 128 // 2 + 4) if INPUT_NORM_ONCE else 0,
         SAMPLE_TILE * HIDDEN // 2,
@@ -398,7 +398,7 @@ def build_glm5_monokernel(
     OUT_OFF = RED_OFF + RED_WORDS
     # UK writes its 128-row result straight from the reduction tile to q_lat;
     # all remaining stages need at most these compact output tiles.
-    OUT_WORDS = max(S * ROW_TILE, S * 2 * UG_TILE)
+    OUT_WORDS = max(S * ROW_TILE, S * 2 * UG_TILE, UV_TILE)
     MIDQ_WORDS = S * MOE_SLOTS * expert_inter // 4
     MID_SCALE_WORDS = S * MOE_SLOTS * expert_inter // 32
     INPUT_NORM_OFF = BLOCKS * S * 2 * UG_TILE - S * HIDDEN // 2
@@ -438,7 +438,8 @@ def build_glm5_monokernel(
         npes=W,
         inter=expert_inter,
         native_fp4_mfma=native_fp4_mfma,
-        cohort_rows=COHORT_ROW_TILES and (with_indexer or npes == 4),
+        cohort_rows=COHORT_ROW_TILES,
+        uv_reuse=COHORT_ROW_TILES,
     ):
         first[name] = acc
         acc += n
@@ -456,7 +457,8 @@ def build_glm5_monokernel(
             npes=W,
             inter=expert_inter,
             native_fp4_mfma=native_fp4_mfma,
-            cohort_rows=COHORT_ROW_TILES and (with_indexer or npes == 4),
+            cohort_rows=COHORT_ROW_TILES,
+            uv_reuse=COHORT_ROW_TILES,
         )
     )
     acc = 0
@@ -3900,20 +3902,20 @@ def build_glm5_monokernel(
             UV_R = UV_TILE // 16
             UV_WPR = WAVES // UV_R
             UV_UNITS = UV_NKC // (attention_k_chunks_per_unit * UV_WPR)
-            for tt in range(start("uv"), S * N_UV, G):
+            for tt in range(start("uv"), S * N_UV // UV_REUSE, G):
                 tt = fx.Int32(tt)
                 stamp("uv", tt, 0)
-                s = tt // N_UV  # sample
-                t = tt % N_UV  # global 64-row tile
+                s = tt // (N_UV // UV_REUSE)
+                t = (tt % (N_UV // UV_REUSE)) * UV_REUSE
                 local_t = dcp_local_uv_tile(t, L)
                 head = t // (V_DIM // UV_TILE)
 
-                def u_uv(c):
+                def u_uv_at(c, uv_local_t):
                     kc = ((wave % UV_WPR) * UV_UNITS + c) * attention_k_chunks_per_unit
                     return unit_attention(
                         r_wuv,
                         r_suv,
-                        local_t * UV_R + wave // UV_WPR,
+                        uv_local_t * UV_R + wave // UV_WPR,
                         kc,
                         UV_NKC,
                         KV_LORA,
@@ -3923,7 +3925,7 @@ def build_glm5_monokernel(
                         coef=((lambda: lds_ld(misc, N_SPLIT + 2 + kc // 2)) if const_expr(attention_ptpc) else None),
                     )
 
-                pre = [u_uv(c) for c in range(UV_UNITS)]
+                pre = [u_uv_at(c, local_t) for c in range(UV_UNITS)]
                 hint_wait(
                     N_SPLIT,
                     lambda k: (mb("sp_l"), (s * N_SPLIT + k) * H + head),
@@ -4012,20 +4014,27 @@ def build_glm5_monokernel(
                     gpu.barrier()
                 owner = dcp_merge_latent(s, t)
                 if owner:
-                    acc = run_units(u_uv, UV_UNITS, UV_UNITS, pre)
-                    if const_expr(attention_ptpc):
-                        reduce_rows(UV_R, acc, emit_ptpc_scalar(UV_TILE, ld_f32(r_suv, 0)))
-                    else:
-                        reduce_rows(UV_R, acc, emit_out(UV_TILE), count=1 if COHORT_ROW_TILES else S)
-                    stamp("uv", tt, 3)
-                    gpu.barrier()
-                    if tid < UV_TILE // 4:
-                        r = tid * 4
-                        put_bf(
-                            mb("o"),
-                            s * O_K + local_t * UV_TILE + r,
-                            [lds_ld(outs, r + j) for j in range(4)],
-                        )
+                    for uv_pass in range_constexpr(UV_REUSE):
+                        local_t = dcp_local_uv_tile(t + uv_pass, L)
+                        if const_expr(uv_pass > 0):
+                            pre = [u_uv_at(c, local_t) for c in range(UV_UNITS)]
+                        acc = run_units(lambda c: u_uv_at(c, local_t), UV_UNITS, UV_UNITS, pre)
+                        if const_expr(attention_ptpc):
+                            reduce_rows(UV_R, acc, emit_ptpc_scalar(UV_TILE, ld_f32(r_suv, 0)), count=1)
+                        else:
+                            reduce_rows(UV_R, acc, emit_out(UV_TILE), count=1)
+                        stamp("uv", tt, 3)
+                        gpu.barrier()
+                        if tid < UV_TILE // 4:
+                            r = tid * 4
+                            put_bf(
+                                mb("o"),
+                                s * O_K + local_t * UV_TILE + r,
+                                [lds_ld(outs, r + j) for j in range(4)],
+                            )
+                        # All output readers finish before the next pass reuses outs.
+                        if const_expr(UV_REUSE > 1):
+                            gpu.barrier()
                 stamp("uv", tt, 4)
 
             # ====================== 7. W_o + attention TP peer reduce + residual -> a
@@ -4663,7 +4672,7 @@ def build_glm5_monokernel(
                     # Cover the complete intermediate row so every down mailbox gets published.
                     grouped_tiles = expert_inter // UG8
                     # Only populated union entries execute MFMA; preserve per-expert K order.
-                    if const_expr(S == 12):
+                    if const_expr(S == 12 or COHORT_ROW_TILES):
                         assert grouped_tiles % 2 == 0
                         ugpair_tiles = grouped_tiles // 2
                         for ugpair_task in range(start("ug"), n_union * ugpair_tiles, G):
