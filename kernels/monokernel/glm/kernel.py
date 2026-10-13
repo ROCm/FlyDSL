@@ -383,6 +383,7 @@ def build_glm5_monokernel(
         and expert_inter == 512
     )
     GROUPED_DN = GROUPED_UG and (S in (8, 12) or DN_UNION_ROWS40)
+    DN_UNION_INPUT_REUSE40 = DN_UNION_ROWS40 and H == 16
     DN_INPUT_REUSE40 = COHORT_ROW_TILES and npes == 4 and with_indexer and native_fp4_mfma and H == 16
     DN_X_ROW = expert_inter // 4 + (4 if GROUPED_DN else 0)
     DN_SCALE_ROW = expert_inter // 32 + (4 if GROUPED_DN else 0)
@@ -5613,6 +5614,11 @@ def build_glm5_monokernel(
                 HIDDEN * (expert_inter // 32) if expert_mxfp4 else HIDDEN // SCALE_BM * (expert_inter // 128) * 4
             )
 
+            def union_inputs_needed(t):
+                if const_expr(DN_UNION_INPUT_REUSE40):
+                    return t == start("down")
+                return fx.Boolean(True)
+
             def dn_union_tile(t):
 
                 mode = "union_lut4"
@@ -5698,44 +5704,49 @@ def build_glm5_monokernel(
                     st(dnw, tid, incoming_prob)
                 gpu.barrier()
 
-                MID_PAIR_ROUNDS = (MIDQ_WORDS + 2 * THREADS - 1) // (2 * THREADS)
-                for pack_base in range_constexpr(0, MID_PAIR_ROUNDS, 4):
-                    packed = poll(
-                        [
-                            (
-                                mb("ugp"),
-                                fx.min((tid + j * THREADS) * 2, MIDQ_WORDS - 2),
-                                2,
-                            )
-                            for j in range(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS))
-                        ]
-                    )
-                    if const_expr(pack_base == 0):
-                        stamp("down", t, 2)
-                    for j in range_constexpr(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS)):
-                        word = (tid + j * THREADS) * 2
-                        if word < MIDQ_WORDS:
-                            target_word = word
+                # Contributions, metadata restores, LUT rebuilds and TP do not
+                # write this input prefix. Retain it across output task rounds.
+                if union_inputs_needed(t):
+                    MID_PAIR_ROUNDS = (MIDQ_WORDS + 2 * THREADS - 1) // (2 * THREADS)
+                    for pack_base in range_constexpr(0, MID_PAIR_ROUNDS, 4):
+                        packed = poll(
+                            [
+                                (
+                                    mb("ugp"),
+                                    fx.min((tid + j * THREADS) * 2, MIDQ_WORDS - 2),
+                                    2,
+                                )
+                                for j in range(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS))
+                            ]
+                        )
+                        if const_expr(pack_base == 0):
+                            stamp("down", t, 2)
+                        for j in range_constexpr(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS)):
+                            word = (tid + j * THREADS) * 2
+                            if word < MIDQ_WORDS:
+                                target_word = word
+                                if const_expr(GROUPED_DN):
+                                    target_word = (word // (expert_inter // 4)) * DN_X_ROW + word % (expert_inter // 4)
+                                st(
+                                    xs,
+                                    target_word,
+                                    packed[j - pack_base][0].bitcast(fx.Float32),
+                                )
+                                st(
+                                    xs,
+                                    target_word + 1,
+                                    packed[j - pack_base][1].bitcast(fx.Float32),
+                                )
+                    for j in range_constexpr((MID_SCALE_WORDS + THREADS - 1) // THREADS):
+                        index = tid + j * THREADS
+                        mid_exponent = get(mb("ugp"), MIDQ_WORDS + fx.min(index, MID_SCALE_WORDS - 1))
+                        if index < MID_SCALE_WORDS:
+                            target_scale = index
                             if const_expr(GROUPED_DN):
-                                target_word = (word // (expert_inter // 4)) * DN_X_ROW + word % (expert_inter // 4)
-                            st(
-                                xs,
-                                target_word,
-                                packed[j - pack_base][0].bitcast(fx.Float32),
-                            )
-                            st(
-                                xs,
-                                target_word + 1,
-                                packed[j - pack_base][1].bitcast(fx.Float32),
-                            )
-                for j in range_constexpr((MID_SCALE_WORDS + THREADS - 1) // THREADS):
-                    index = tid + j * THREADS
-                    mid_exponent = get(mb("ugp"), MIDQ_WORDS + fx.min(index, MID_SCALE_WORDS - 1))
-                    if index < MID_SCALE_WORDS:
-                        target_scale = index
-                        if const_expr(GROUPED_DN):
-                            target_scale = (index // (expert_inter // 32)) * DN_SCALE_ROW + index % (expert_inter // 32)
-                        st(misc, target_scale, mid_exponent.bitcast(fx.Float32))
+                                target_scale = (index // (expert_inter // 32)) * DN_SCALE_ROW + index % (
+                                    expert_inter // 32
+                                )
+                            st(misc, target_scale, mid_exponent.bitcast(fx.Float32))
 
                 gpu.barrier()
 
