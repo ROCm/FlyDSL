@@ -5631,9 +5631,6 @@ def build_glm5_monokernel(
                 arena = lds.work.ptr
                 old_keys = fx.recast_iter(fx.Int32, arena + KEYS_OFF)
                 old_dnw = arena + DNW_OFF
-                incoming_key = lds_ld(old_keys, fx.min(tid, DU_KEY_WORDS - 1))
-                incoming_prob = lds_ld(old_dnw, fx.min(tid, DU_ROUTE_WORDS - 1))
-                gpu.barrier()
                 xs, misc = arena, arena + MSOFF
                 keys = fx.recast_iter(fx.Int32, arena + KEYOFF)
                 dnw, contributions = arena + DWOFF, arena + CROFF
@@ -5698,11 +5695,17 @@ def build_glm5_monokernel(
                         rocdl.mfma_scale_f32_16x16x128_f8f6f4(T.vec(4, T.f32), [raw, b, zero, 4, 0, 0, scale, 0, asc])
                     )
 
-                if tid < DU_KEY_WORDS:
-                    st(keys, tid, incoming_key)
-                if tid < DU_ROUTE_WORDS:
-                    st(dnw, tid, incoming_prob)
-                gpu.barrier()
+                # Keep union metadata through every output task. Original keys
+                # overlap the LUT and are read only before its first construction.
+                if union_inputs_needed(t):
+                    incoming_key = lds_ld(old_keys, fx.min(tid, DU_KEY_WORDS - 1))
+                    incoming_prob = lds_ld(old_dnw, fx.min(tid, DU_ROUTE_WORDS - 1))
+                    gpu.barrier()
+                    if tid < DU_KEY_WORDS:
+                        st(keys, tid, incoming_key)
+                    if tid < DU_ROUTE_WORDS:
+                        st(dnw, tid, incoming_prob)
+                    gpu.barrier()
 
                 # Contributions, metadata restores, LUT rebuilds and TP do not
                 # write this input prefix. Retain it across output task rounds.
@@ -5756,19 +5759,20 @@ def build_glm5_monokernel(
 
                 if const_expr(mode == "union_lut4"):
                     slot_lut = fx.recast_iter(fx.Int8, arena + CROFF + CWORDS)
-                    for j in range_constexpr((257 * S + THREADS - 1) // THREADS):
-                        address = tid + j * THREADS
-                        if address < 257 * S:
-                            st(slot_lut, address, fx.Int8(0))
-                    gpu.barrier()
-                    if tid < S * SLOTS:
-                        lut_expert = ld(keys, tid)
-                        st(
-                            slot_lut,
-                            lut_expert * S + tid // SLOTS,
-                            fx.Int8(tid % SLOTS),
-                        )
-                    gpu.barrier()
+                    if union_inputs_needed(t):
+                        for j in range_constexpr((257 * S + THREADS - 1) // THREADS):
+                            address = tid + j * THREADS
+                            if address < 257 * S:
+                                st(slot_lut, address, fx.Int8(0))
+                        gpu.barrier()
+                        if tid < S * SLOTS:
+                            lut_expert = ld(keys, tid)
+                            st(
+                                slot_lut,
+                                lut_expert * S + tid // SLOTS,
+                                fx.Int8(tid % SLOTS),
+                            )
+                        gpu.barrier()
 
                 n_union = _uniform(ld(uc, 4))
 
@@ -5858,7 +5862,7 @@ def build_glm5_monokernel(
                         )
                     lds_st(outs, output_token * 32 + output_row, tot)
 
-                if const_expr(DN_UNION_ROWS40):
+                if const_expr(DN_UNION_ROWS40 and not DN_UNION_INPUT_REUSE40):
                     # Cohorts execute three down tasks per CTA. The union arena
                     # overlaps the original keys, so restore them after the
                     # last contribution read and before the next task round.
