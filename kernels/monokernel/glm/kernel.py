@@ -19,13 +19,19 @@ prepared sparse indices::
       -> mid FP8 quant -> expert down + route weighting
       -> MoE TP peer reduce + residual -> x_out                   (sym_ffn)
 
-Scheduling: every stage is a list of tasks; task ``t`` of a stage runs on CTA
-``(stage_base + t) % 256`` and every CTA walks the stages in order.  There is
-no grid-wide barrier within a row tile: dependencies only point to earlier
-stages and all CTAs are co-resident, so every spin wait makes progress. Native
-launches above twelve rows use separate scratch and peer arenas for each tile.
-A tagged local grid barrier completes cache writes before the next tile reads
-the preceding queries as history.
+Scheduling: every stage is a list of tasks, and each resident CTA walks its
+assigned tasks in stage order. Native launches above twelve rows use separate
+scratch and peer arenas per tile. The general path executes tiles sequentially;
+a tagged grid barrier completes each tile's cache writes before the next tile.
+
+The native forty-row TP4/TP8 indexed path at 4K capacity assigns one ten-row
+tile to each of four cohorts of 64 CTAs. Task ``t`` belongs to cohort-local CTA
+``(stage_base + t) % 64``. All 256 CTAs finish their front-stage tasks and join
+one tagged grid barrier before index scoring, making current cache rows visible
+to every cohort. Later dependencies stay within the cohort or its TP peers.
+Causal index selection permits this cache publication order; external sparse
+indices retain the sequential schedule. Both schedules require all 256 CTAs
+to be co-resident and preserve each task's original arithmetic.
 
 Mailboxes are *tagged pairs*: every 32-bit value a task hands to another CTA
 (or GPU) is stored next to this launch's epoch tag, ``(value, tag)``, with
@@ -128,7 +134,6 @@ from kernels.monokernel.glm.layout import (
     split_score_column,
     stage_tasks,
     ug_split,
-    ug_task_rounds,
 )
 from kernels.monokernel.layout import (
     CM_DEV,
@@ -250,7 +255,11 @@ def build_glm5_monokernel(
     paired_ug_rows = expert_mxfp4 and not atom_experts
     assert D == 1 or (D == W and H == L * D)
     I_PER_SLOT = expert_inter // UG_TILE
-    G = BLOCKS
+    # Causal index selection permits publishing all four tiles' cache rows
+    # before attention. External sparse indices retain their serial semantics.
+    COHORT_ROW_TILES = STATIC_ROW_TILES and with_indexer and index_max_seq == 4096
+    G = BLOCKS // ROW_TILES if COHORT_ROW_TILES else BLOCKS
+    UG_TASK_ROUNDS = (expert_inter + G - 1) // G
     SC, SY = layout(
         S,
         H,
@@ -510,7 +519,8 @@ def build_glm5_monokernel(
         layer: Int32,
     ):
         tid = fx.thread_idx.x
-        bid = fx.block_idx.x
+        full_bid = fx.block_idx.x
+        bid = full_bid % G if const_expr(COHORT_ROW_TILES) else full_bid
         lane = tid % 64
         wave = tid // 64
         allocator = fx.SharedAllocator()
@@ -2555,6 +2565,27 @@ def build_glm5_monokernel(
                         vals,
                     )
                 stamp("uk", t, 4)
+
+            if const_expr(COHORT_ROW_TILES):
+                # All cohorts publish current cache rows before any cohort reads
+                # another tile's history. Every physical CTA participates, after
+                # finishing its complete local front-stage task loops.
+                fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
+                gpu.barrier()
+                cohort_arrivals = full_scratch + fx.Int64(ROW_TILES * TILE_SCRATCH_BYTES)
+                if tid == 0:
+                    put(cohort_arrivals, full_bid, fx.Int32(1))
+                if full_bid == 0:
+                    if tid < BLOCKS:
+                        get(cohort_arrivals, tid)
+                        fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
+                    gpu.barrier()
+                    if tid == 0:
+                        put(cohort_arrivals, BLOCKS, fx.Int32(1))
+                if tid == 0:
+                    get(cohort_arrivals, BLOCKS)
+                gpu.barrier()
+                fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
 
             # ====================== 4b. fused sparse index score + exact top-2048
             if const_expr(with_indexer):
@@ -4669,7 +4700,7 @@ def build_glm5_monokernel(
                             gpu.barrier()
                 else:
                     u0 = start("ug")
-                    for task_round in range_constexpr(ug_task_rounds(expert_inter)):
+                    for task_round in range_constexpr(UG_TASK_ROUNDS):
                         u = fx.Int32(u0 + task_round * G)
                         c = u % (expert_inter // UG8)
                         has_sh = u < expert_inter // UG8
@@ -4739,7 +4770,7 @@ def build_glm5_monokernel(
                             gpu.barrier()
                             ug8_emit(sample, False)
                             stamp("ug", sample * expert_inter + u, 4)
-                        if const_expr(task_round + 1 < ug_task_rounds(expert_inter)):
+                        if const_expr(task_round + 1 < UG_TASK_ROUNDS):
                             gpu.barrier()
 
             if const_expr(GROUPED_UG):
@@ -5428,7 +5459,7 @@ def build_glm5_monokernel(
                 gpu.barrier()
                 stamp("down", t, 4)
 
-            if const_expr(ROW_TILES > 1):
+            if const_expr(ROW_TILES > 1 and not COHORT_ROW_TILES):
                 if row_tile + 1 < ROW_TILES:
                     # Every wave publishes its cache/output stores before its CTA arrives.
                     # Separate tile payloads and barrier slots avoid overwriting readers.
@@ -5450,7 +5481,9 @@ def build_glm5_monokernel(
                     gpu.barrier()
                     fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
 
-        if const_expr(ROW_TILES == 1):
+        if const_expr(COHORT_ROW_TILES):
+            run_row_tile(full_bid // G)
+        elif const_expr(ROW_TILES == 1):
             run_row_tile(0)
         elif const_expr(STATIC_ROW_TILES):
             for row_tile in range_constexpr(ROW_TILES):
@@ -5540,6 +5573,6 @@ def build_glm5_monokernel(
             step,
             rank,
             layer,
-        ).launch(grid=(G,), block=(THREADS,), stream=stream)
+        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
     return launch
