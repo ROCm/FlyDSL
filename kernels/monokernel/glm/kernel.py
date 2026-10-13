@@ -39,7 +39,11 @@ the sequential cache semantics while the four tiles compute concurrently.
 
 Indexed forty-row cohorts normalize input once per row. TP8 also uses the
 existing expert-union gate/up body and publishes quantized mid values once.
-Other tile shapes retain their original schedules. Both schedules require all
+TP4 indexed forty-row gate/up compacts selected tokens across all cohorts and
+distributes expert/token-chunk/output tasks over the resident grid. Each task
+reuses one activation tile for64 intermediate outputs, preserving every original
+eight-output MFMA and reduction. Other tile shapes retain their schedules. Both
+schedules require all
 256 CTAs to be co-resident and preserve each task's original arithmetic.
 
 Mailboxes are *tagged pairs*: every 32-bit value a task hands to another CTA
@@ -268,6 +272,7 @@ def build_glm5_monokernel(
     # deferred stores and the cache version at each original tile boundary.
     DEFER_OFF_CACHE = STATIC_ROW_TILES and not with_indexer
     COHORT_ROW_TILES = STATIC_ROW_TILES and (not with_indexer or index_max_seq == 4096)
+    GLOBAL_UG40 = COHORT_ROW_TILES and with_indexer and npes == 4 and native_fp4_mfma
     INDEX_PRE_ROPE = COHORT_ROW_TILES and with_indexer
     INDEX_SCORE_REUSE = 2 if COHORT_ROW_TILES else 1
     SPLIT_TASK_PAIR = 2 if COHORT_ROW_TILES and npes == 8 and heads == 8 else 1
@@ -399,8 +404,17 @@ def build_glm5_monokernel(
         N_SPLIT + 2 + (4 if attention_ptpc else 0),
     )
     KEYS_OFF = MISC_OFF + MISC_WORDS
+    if GLOBAL_UG40:
+        LDS_KEYS = (
+            total_samples * MOE_SLOTS
+            + 3 * (N_EXPERTS + 1)
+            + N_EXPERTS // 64
+            + 1
+            + total_samples
+            + total_samples * MOE_SLOTS
+        )
     DNW_OFF = KEYS_OFF + LDS_KEYS
-    RED_OFF = DNW_OFF + S * MOE_SLOTS
+    RED_OFF = DNW_OFF + (total_samples if GLOBAL_UG40 else S) * MOE_SLOTS
     OUT_OFF = RED_OFF + RED_WORDS
     # UK writes its 128-row result straight from the reduction tile to q_lat;
     # all remaining stages need at most these compact output tiles.
@@ -472,6 +486,13 @@ def build_glm5_monokernel(
             split_task_pair=SPLIT_TASK_PAIR,
         )
     )
+    if GLOBAL_UG40:
+        # Each routed expert contributes its first chunk, then at most one extra
+        # chunk per S additional routes. Include the shared expert's four chunks.
+        global_chunks_max = N_EXPERTS + (total_samples * TOP_K - N_EXPERTS) // S + ROW_TILES
+        global_rounds_max = (global_chunks_max * (expert_inter // 64) + BLOCKS - 1) // BLOCKS
+        assert global_chunks_max <= total_samples * MOE_SLOTS
+        assert global_rounds_max * G * 8 <= tasks["ug"]
     acc = 0
     for name in (
         "qkv_a",
@@ -4681,10 +4702,217 @@ def build_glm5_monokernel(
                 dn_route(load_bias())
                 gpu.barrier()
                 stage_ug_first = atom_experts or (expert_mxfp4 and S > 4)
-                if const_expr(stage_ug_first):
+                if const_expr(stage_ug_first and not GLOBAL_UG40):
                     stage_xq(list(range(S)))
                     gpu.barrier()
-                if const_expr(GROUPED_UG):
+                if const_expr(GLOBAL_UG40):
+                    # Publish the original route once per cohort before global work.
+                    if (bid == 0) & (tid < S * MOE_SLOTS):
+                        put(mb("sel"), tid, lds_ld(keys, tid))
+                        put(mb("prob"), tid, lds_ld(dnw, tid))
+                    gpu.barrier()
+                    if tid < total_samples * MOE_SLOTS:
+                        gu_row = tid // MOE_SLOTS
+                        gu_local = (gu_row % S) * MOE_SLOTS + tid % MOE_SLOTS
+                        gu_scratch = full_scratch + fx.Int64(gu_row // S) * TILE_SCRATCH_BYTES
+                        gu_route = get(gu_scratch + fx.Int64(SC["sel"]), gu_local)
+                        gu_prob = get(gu_scratch + fx.Int64(SC["prob"]), gu_local)
+                        lds_st(keys, tid, gu_route)
+                        lds_st(dnw, tid, gu_prob.bitcast(fx.Float32))
+                    gpu.barrier()
+                    gu_experts = keys + total_samples * MOE_SLOTS
+                    gu_lo = gu_experts + N_EXPERTS + 1
+                    gu_hi = gu_lo + N_EXPERTS + 1
+                    gu_counts = gu_hi + N_EXPERTS + 1
+                    gu_selected = gu_counts + N_EXPERTS // 64 + 1
+                    gu_red = fx.recast_iter(fx.Int32, red)
+                    for gu_i in range_constexpr(2 * WAVES * N_EXPERTS // THREADS):
+                        lds_st(gu_red, tid + gu_i * THREADS, fx.Int32(0))
+                    gpu.barrier()
+                    for gu_batch in range_constexpr((total_samples + WAVES - 1) // WAVES):
+                        gu_sample = wave + gu_batch * WAVES
+                        if (gu_sample < total_samples) & (lane < TOP_K):
+                            gu_expert = fx.Int32(lds_ld(keys, gu_sample * MOE_SLOTS + lane + 1))
+                            gu_address = (gu_sample // 32) * WAVES * N_EXPERTS + wave * N_EXPERTS + gu_expert
+                            lds_st(gu_red, gu_address, lds_ld(gu_red, gu_address) | (fx.Int32(1) << (gu_sample % 32)))
+                        gpu.barrier()
+                    gu_mask_lo, gu_mask_hi = fx.Int32(0), fx.Int32(0)
+                    if tid < N_EXPERTS:
+                        for gu_w in range_constexpr(WAVES):
+                            gu_mask_lo = gu_mask_lo | lds_ld(gu_red, gu_w * N_EXPERTS + tid)
+                            gu_mask_hi = gu_mask_hi | lds_ld(gu_red, (WAVES + gu_w) * N_EXPERTS + tid)
+                    gu_ballot = fx.Int64(rocdl.ballot(T.i64, (gu_mask_lo | gu_mask_hi) != 0))
+                    gu_below = fx.Int32(fmath.ctpop(gu_ballot & ((fx.Int64(1) << fx.Int64(lane)) - 1)))
+                    gu_count = fx.Int32(fmath.ctpop(gu_ballot))
+                    if (tid < N_EXPERTS) & (lane == 0):
+                        lds_st(gu_counts, wave, gu_count)
+                    gpu.barrier()
+                    gu_offset = fx.Int32(0)
+                    for gu_w in range_constexpr(N_EXPERTS // 64):
+                        gu_offset = gu_offset + (wave > gu_w).select(fx.Int32(lds_ld(gu_counts, gu_w)), fx.Int32(0))
+                    if (tid < N_EXPERTS) & ((gu_mask_lo | gu_mask_hi) != 0):
+                        lds_st(gu_experts, gu_offset + gu_below, tid)
+                        lds_st(gu_lo, gu_offset + gu_below, gu_mask_lo)
+                        lds_st(gu_hi, gu_offset + gu_below, gu_mask_hi)
+                    if tid == N_EXPERTS - 1:
+                        gu_total = gu_offset + gu_count
+                        lds_st(gu_experts, gu_total, fx.Int32(SHARED_EXPERT))
+                        lds_st(gu_lo, gu_total, fx.Int32(-1))
+                        lds_st(gu_hi, gu_total, fx.Int32((1 << (total_samples - 32)) - 1))
+                        lds_st(gu_counts, N_EXPERTS // 64, gu_total + 1)
+                    gpu.barrier()
+                    gu_nunion = _uniform(lds_ld(gu_counts, N_EXPERTS // 64))
+                    # One global task contains one <=S-token chunk, including shared.
+                    # The retired reduction arena holds only prefix-scan totals here.
+                    gu_chunk_map = gu_selected + total_samples
+                    gu_prefix_index = fx.min(tid, gu_nunion - 1)
+                    gu_prefix_bits = fx.Int64(fx.Uint32(lds_ld(gu_lo, gu_prefix_index))) | (
+                        fx.Int64(fx.Uint32(lds_ld(gu_hi, gu_prefix_index))) << 32
+                    )
+                    gu_chunk_count = (tid < gu_nunion).select(
+                        (fx.Int32(fmath.ctpop(gu_prefix_bits)) + S - 1) // S, fx.Int32(0)
+                    )
+                    gu_chunk_scan = gu_chunk_count
+                    for gu_shift in range_constexpr(6):
+                        gu_distance = 1 << gu_shift
+                        gu_previous = bpermute_i32(fx.max(lane - gu_distance, fx.Int32(0)) * 4, gu_chunk_scan)
+                        gu_chunk_scan = gu_chunk_scan + (lane >= gu_distance).select(gu_previous, fx.Int32(0))
+                    if lane == 63:
+                        lds_st(gu_red, wave, gu_chunk_scan)
+                    gpu.barrier()
+                    gu_chunk_offset = gu_chunk_scan - gu_chunk_count
+                    for gu_scan_wave in range_constexpr(WAVES):
+                        gu_chunk_offset = gu_chunk_offset + (wave > gu_scan_wave).select(
+                            lds_ld(gu_red, gu_scan_wave), fx.Int32(0)
+                        )
+                    if tid == THREADS - 1:
+                        lds_st(gu_red, WAVES, gu_chunk_offset + gu_chunk_count)
+                    for gu_chunk_id in range_constexpr((total_samples + S - 1) // S):
+                        if gu_chunk_id < gu_chunk_count:
+                            lds_st(gu_chunk_map, gu_chunk_offset + gu_chunk_id, tid * ROW_TILES + gu_chunk_id)
+                    gpu.barrier()
+                    gu_nchunks = _uniform(lds_ld(gu_red, WAVES))
+                    gu_tiles = expert_inter // UG8
+                    for gu_task in range(full_bid, gu_nchunks * (gu_tiles // 8), BLOCKS):
+                        gu_task = fx.Int32(gu_task)
+                        gu_chunk_record = _uniform(lds_ld(gu_chunk_map, gu_task // (gu_tiles // 8)))
+                        gu_union = gu_chunk_record // ROW_TILES
+                        gu_segment = gu_chunk_record % ROW_TILES
+                        gu_cbase = (gu_task % (gu_tiles // 8)) * 8
+                        gu_stamp_base = (gu_task // BLOCKS * G + bid) * 8
+                        gu_expert = _uniform(lds_ld(gu_experts, gu_union))
+                        gu_bits = fx.Int64(fx.Uint32(_uniform(lds_ld(gu_lo, gu_union)))) | (
+                            fx.Int64(fx.Uint32(_uniform(lds_ld(gu_hi, gu_union)))) << 32
+                        )
+                        gu_nselected = fx.Int32(fmath.ctpop(gu_bits))
+                        if tid < total_samples:
+                            gu_bit = fx.Int64(1) << fx.Int64(tid)
+                            if (gu_bits & gu_bit) != 0:
+                                gu_index = fx.Int32(fmath.ctpop(gu_bits & (gu_bit - 1)))
+                                lds_st(gu_selected, gu_index, tid)
+                        gpu.barrier()
+                        gu_valid = fx.min(fx.Int32(S), gu_nselected - gu_segment * S)
+                        gu_tokens = [
+                            _uniform(lds_ld(gu_selected, gu_segment * S + fx.min(fx.Int32(gu_col_j), gu_valid - 1)))
+                            for gu_col_j in range(S)
+                        ]
+                        gu_bases = [
+                            full_scratch + fx.Int64(gu_xtoken // S) * TILE_SCRATCH_BYTES for gu_xtoken in gu_tokens
+                        ]
+                        gu_nxw = HIDDEN // 4 // THREADS
+                        gu_got = poll(
+                            [
+                                (
+                                    gu_xbase + fx.Int64(SC["xq"]),
+                                    (gu_xtoken % S) * (HIDDEN // 4) + tid + gu_load_i * THREADS,
+                                    1,
+                                )
+                                for gu_xtoken, gu_xbase in zip(gu_tokens, gu_bases)
+                                for gu_load_i in range(gu_nxw)
+                            ]
+                            + [
+                                (
+                                    gu_xbase + fx.Int64(SC["xqs"]),
+                                    (gu_xtoken % S) * XQ_GROUPS + fx.min(tid, XQ_GROUPS - 1),
+                                    1,
+                                )
+                                for gu_xtoken, gu_xbase in zip(gu_tokens, gu_bases)
+                            ]
+                        )
+                        for gu_j in range_constexpr(S):
+                            for gu_i in range_constexpr(gu_nxw):
+                                lds_st(
+                                    xs,
+                                    gu_j * UG_X_ROW + tid + gu_i * THREADS,
+                                    gu_got[gu_j * gu_nxw + gu_i][0].bitcast(fx.Float32),
+                                )
+                            if tid < XQ_GROUPS:
+                                lds_st(
+                                    misc,
+                                    8 + gu_j * UG_SCALE_ROW + tid,
+                                    gu_got[S * gu_nxw + gu_j][0].bitcast(fx.Float32),
+                                )
+                        gpu.barrier()
+                        # Reuse this selected activation tile across four output pairs.
+                        for gu_pair in range_constexpr(4):
+                            gu_units = [
+                                ug8_units(gu_expert, None, gu_cbase + gu_pair * 2 + gu_part) for gu_part in range(2)
+                            ]
+                            for gu_part in range_constexpr(2):
+                                stamp("ug", gu_stamp_base + gu_pair * 2 + gu_part, 0)
+                                gu_acc = mma_units([fx.Float32(0.0) for _ in range(4)], gu_units[gu_part])
+                                fx.ptr_store(
+                                    fx.Vector.from_elements(gu_acc, fx.Float32),
+                                    red + ((gu_part * WAVES + wave) * 64 + lane) * 4,
+                                )
+                            gpu.barrier()
+                            if tid < S * 32:
+                                gu_part = tid // (S * 16)
+                                gu_row = tid % (S * 16)
+                                gu_n, gu_r = gu_row // 16, gu_row % 16
+                                gu_sum = fx.Float32(0.0)
+                                for gu_w in range_constexpr(WAVES):
+                                    gu_sum = gu_sum + lds_ld(
+                                        red, ((gu_part * WAVES + gu_w) * 64 + gu_n + 16 * (gu_r // 4)) * 4 + gu_r % 4
+                                    )
+                                lds_st(outs, tid, gu_sum)
+                            gpu.barrier()
+                            if tid < gu_valid * UG8:
+                                gu_sample = tid // UG8
+                                gu_element = (tid % UG8) * 2
+                                gu_part, gu_r = gu_element // UG8, gu_element % UG8
+                                gu_token = fx.Int32(lds_ld(gu_selected, gu_segment * S + gu_sample))
+                                gu_slot = fx.Int32(0)
+                                for gu_j in range_constexpr(1, MOE_SLOTS):
+                                    gu_slot = (fx.Int32(lds_ld(keys, gu_token * MOE_SLOTS + gu_j)) == gu_expert).select(
+                                        fx.Int32(gu_j), gu_slot
+                                    )
+                                gu_o = gu_part * (S * 16) + gu_sample * 16 + gu_r
+                                gu_g0, gu_g1 = lds_ld(outs, gu_o), lds_ld(outs, gu_o + 1)
+                                gu_v0, gu_v1 = lds_ld(outs, gu_o + UG8), lds_ld(outs, gu_o + UG8 + 1)
+                                gu_dst = (
+                                    full_scratch + fx.Int64(gu_token // S) * TILE_SCRATCH_BYTES + fx.Int64(SC["mid"])
+                                )
+                                put2(
+                                    gu_dst,
+                                    ((gu_token % S) * MOE_SLOTS + gu_slot) * expert_inter
+                                    + (gu_cbase + gu_pair * 2 + gu_part) * UG8
+                                    + gu_r,
+                                    gu_g0 * _rcp(1.0 + _exp(-gu_g0)) * gu_v0,
+                                    gu_g1 * _rcp(1.0 + _exp(-gu_g1)) * gu_v1,
+                                )
+                            gpu.barrier()
+                            for gu_part in range_constexpr(2):
+                                stamp("ug", gu_stamp_base + gu_pair * 2 + gu_part, 4)
+                    # Restore this CTA's original cohort-local route layout for down.
+                    gu_my_key = lds_ld(keys, fx.min(tid, S * MOE_SLOTS - 1) + row_tile * S * MOE_SLOTS)
+                    gu_my_prob = lds_ld(dnw, fx.min(tid, S * MOE_SLOTS - 1) + row_tile * S * MOE_SLOTS)
+                    gpu.barrier()
+                    if tid < S * MOE_SLOTS:
+                        lds_st(keys, tid, gu_my_key)
+                        lds_st(dnw, tid, gu_my_prob)
+                    gpu.barrier()
+                elif const_expr(GROUPED_UG):
                     # Reuse the indexer's retired key arena for the compact union and masks;
                     # wave-local masks only occupy the otherwise-idle reduction workspace.
                     union_experts = keys + S * MOE_SLOTS
