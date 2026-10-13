@@ -241,9 +241,10 @@ committed to. **Hand `$WORK/card.md`, `$WORK/pr.diff` and `$WORK/merge_target.tx
 has not seen your reasoning**: spawn a subagent whose whole prompt is
 `.claude/skills/review-pr/prompts/refuter.md` with `{{WORK}}` filled in, or ask a person. It writes
 `$WORK/independent.txt`, one `SURVIVED|KILLED -- what they opened` line per finding, in card order;
-remove the killed findings from the card. With no such reader, write
-`NONE AVAILABLE -- <reason>` and put `not independently refuted` on the review line. Under
-`run_one.sh` the runner does this step.
+remove the killed findings from the card and fix what any `Correction:` on a surviving line says.
+With no such reader, write `NONE AVAILABLE -- <reason>` and put `not independently refuted` on the
+review line. Under `run_one.sh` the runner does this step, and `triage.py apply-refutation` drops
+the killed findings and lists the corrections under the card.
 
 ---
 

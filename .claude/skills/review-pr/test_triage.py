@@ -315,3 +315,25 @@ def test_apply_refutation_drops_killed_findings_in_card_order(tmp_path):
     indep.write_text("SURVIVED -- only one line for two findings here\n")
     card.write_text("🔴 [verified] a a.py:1\n⚠️ [verified] b a.py:2\n")
     assert triage.apply_refutation(card, indep).startswith("no-op")
+
+
+def test_apply_refutation_lists_corrections_by_surviving_order_once(tmp_path):
+    card = tmp_path / "card.md"
+    card.write_text(
+        "Review (advisory): x\n🔴 [verified] first a.py:1\n⚠️ [inferred] second a.py:2\n📝 [verified] third a.py:3\n"
+    )
+    indep = tmp_path / "independent.txt"
+    indep.write_text(
+        "KILLED -- opened a.py:1, guarded above\n"
+        "SURVIVED -- opened a.py:2 and it holds. Correction: the guard it cites is at a.py:20\n"
+        "SURVIVED -- opened a.py:3 and it holds\n"
+    )
+    assert "listed 1 correction" in triage.apply_refutation(card, indep)
+    text = card.read_text()
+    assert "first" not in text and "- Finding 1: the guard it cites is at a.py:20" in text
+    assert len(triage.card_findings(text)) == 2
+    card.write_text("🔴 [verified] only a.py:1\n")
+    indep.write_text("SURVIVED -- opened a.py:1. Correction: it is line 10\n")
+    triage.apply_refutation(card, indep)
+    triage.apply_refutation(card, indep)
+    assert card.read_text().count(triage.CORRECTIONS_HEAD) == 1

@@ -1170,9 +1170,13 @@ def run_gates(work: Path, root: Path) -> int:
     return 1 if red else 0
 
 
+CORRECTIONS_HEAD = "Independent reader's corrections (not yet applied to the findings above):"
+CORRECTION = re.compile(r"\bCorrection:\s*(.+)$", re.I)
+
+
 def apply_refutation(card_path: Path, indep_path: Path) -> str:
-    """Drop the findings the independent reader KILLED, matched by order."""
-    card = _read(card_path) or ""
+    """Drop the findings the independent reader KILLED and list its corrections to the rest, in card order."""
+    card = (_read(card_path) or "").split("\n" + CORRECTIONS_HEAD)[0].rstrip() + "\n"
     text = _read(indep_path) or ""
     findings = card_findings(card)
     rows = [INDEP.match(x) for x in text.splitlines() if x.strip()]
@@ -1181,11 +1185,13 @@ def apply_refutation(card_path: Path, indep_path: Path) -> str:
     if not all(rows) or len(rows) != len(findings):
         return f"no-op: {len(rows)} verdict lines for {len(findings)} findings; fix independent.txt by hand"
     killed = {t for (_, t), m in zip(findings, rows) if m.group(1) == "KILLED"}
-    if not killed:
-        return "no finding was killed"
     kept = [ln for ln in card.splitlines() if not ((m := FINDING.match(ln)) and m.group(2).strip() in killed)]
+    survivors = [m.group(2) for m in rows if m.group(1) == "SURVIVED"]
+    notes = [f"- Finding {i}: {c.group(1).strip()}" for i, s in enumerate(survivors, 1) if (c := CORRECTION.search(s))]
+    if notes:
+        kept += ["", CORRECTIONS_HEAD] + notes
     card_path.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
-    return f"removed {len(killed)} killed finding(s) from the card"
+    return f"removed {len(killed)} killed finding(s); listed {len(notes)} correction(s)"
 
 
 # --------------------------------------------------------------------------- main

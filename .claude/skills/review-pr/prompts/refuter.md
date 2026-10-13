@@ -22,8 +22,9 @@ KILLED -- <what you opened and what refutes it>
 ```
 
 Use only these two verdicts. `KILLED` takes the finding off the card, so use it only when you
-refuted it. A finding that is true but overstated is `SURVIVED`; put the correction on its line.
-Severity is not yours to change.
+refuted it. A finding that is true but overstated, or right with a wrong detail such as a line
+number, is `SURVIVED`: end its line with `Correction: <what to change>`, which is listed under the
+card. Severity is not yours to change.
 
 `merge-target/` and `head/` are read-only. Never run `git checkout`, `switch`, `reset` or `stash`
 in the project root. Do not post anything to GitHub. Confirm the file with `wc -l`, then report how
