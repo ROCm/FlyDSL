@@ -4,7 +4,7 @@
 
 """Double-buffered implicit-GEMM conv3d (BF16).
 
-Dispatch lives in ``conv_kernels.py``; pre-transpose in ``conv3d_transpose.py``.
+Dispatch lives in ``conv3d_implicit.py``; pre-transpose in ``conv3d_transpose.py``.
 """
 
 import functools
@@ -468,7 +468,7 @@ def compile_conv3d_implicit(param: Conv3dImplicitParam):
 
     _launch.compile = _compile
     # The compiled function is called directly on the steady-state path (see
-    # ``conv_kernels._dispatch``), which bypasses this closure, so the extents
+    # ``conv3d_implicit._dispatch``), which bypasses this closure, so the extents
     # have to be reachable from the object rather than captured here alone.
     _launch.extra_args = extra_args
     return _launch

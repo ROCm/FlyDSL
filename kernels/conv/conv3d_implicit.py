@@ -83,7 +83,7 @@ def _check_supported_arch():
         )
 
 
-# Tuned launch configs from csrc/flydsl_conv3d/conv3d_tune.py, which times
+# Tuned launch configs from conv3d_tune.py, which times
 # NDHWC in and out. Layout is not in the key: an NCDHW call gets the same row.
 
 # Lookup key = untuned CSV header. Shared with the tuner and AOT.

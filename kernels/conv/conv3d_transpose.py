@@ -156,6 +156,6 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
 
     _launch.compile = _compile
     # Reachable from the object because the steady-state path calls the
-    # compiled function directly; see ``conv_kernels._dispatch``.
+    # compiled function directly; see ``conv3d_implicit._dispatch``.
     _launch.extra_args = (s,)
     return _launch

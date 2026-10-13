@@ -66,7 +66,7 @@ WAVE_N_VALUES = (1, 2, 3, 4, 6)
 WGM_VALUES = (1, 4, 8)
 
 # Kernel table + heuristic ladder, unioned so the tuned pick cannot lose to default.
-# Keep in step with conv_kernels.TILE_LADDER by hand (order is the tuner's measure order).
+# Keep in step with conv3d_implicit.TILE_LADDER by hand (order is the tuner's measure order).
 BASELINE_TILES = (
     (128, 128, 2, 4),
     (128, 256, 2, 4),
