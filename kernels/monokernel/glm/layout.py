@@ -375,6 +375,7 @@ def stage_tasks(
     native_fp4_mfma: bool = False,
     cohort_rows: bool = False,
     uv_reuse: bool = False,
+    split_task_pair: int = 1,
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
@@ -393,6 +394,7 @@ def stage_tasks(
             native_fp4_mfma,
             cohort_rows,
             uv_reuse,
+            split_task_pair,
         )
         return [(f"tile{part}/{name}", count) for part in range(samples // tile) for name, count in stages]
     index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
@@ -420,7 +422,8 @@ def stage_tasks(
             "split",
             samples
             * (heads // sparse_heads_per_task(samples, heads, npes, native_fp4_mfma, cohort_rows))
-            * (sparse_attention_topk // sparse_keys_per_task(samples, heads)),
+            * (sparse_attention_topk // sparse_keys_per_task(samples, heads))
+            // split_task_pair,
         ),
         ("uv", samples * (heads * V_DIM // UV_TILE) // (4 if uv_reuse else 1)),
         ("o", N_ROW_TILES),

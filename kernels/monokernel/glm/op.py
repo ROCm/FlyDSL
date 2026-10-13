@@ -292,6 +292,23 @@ class Glm5MonoKernel:
                 and rope_dtype == "fp32"
                 and (not with_indexer or index_max_seq == 4096)
             ),
+            split_task_pair=(
+                2
+                if (
+                    samples == 40
+                    and npes == 8
+                    and W.heads == 8
+                    and native_fp4_mfma
+                    and dcp_size == 1
+                    and not indexer_cp
+                    and self.attention_weight is AttentionWeight.FP8_BLOCK128
+                    and self.kv_cache_layout is KvCacheLayout.ATOM
+                    and kv_cache_dtype == "bf16"
+                    and rope_dtype == "fp32"
+                    and (not with_indexer or index_max_seq == 4096)
+                )
+                else 1
+            ),
         )
         n_tasks = sum(n for _, n in self.stages)
         self.timeline = torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev) if timeline else None
