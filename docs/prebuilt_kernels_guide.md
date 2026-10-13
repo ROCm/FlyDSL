@@ -1,6 +1,6 @@
 # Pre-built kernel library guide
 
-This guide covers the available FlyDSL kernels — normalization, softmax, GEMM, and attention — along with their configuration options, supported data types, pipeline designs, and shared utilities.
+This guide covers the available FlyDSL kernels — normalization, softmax, GEMM, attention, and convolution — along with their configuration options, supported data types, pipeline designs, and shared utilities.
 
 ## Quick reference
 
@@ -12,6 +12,7 @@ This guide covers the available FlyDSL kernels — normalization, softmax, GEMM,
 | **Softmax backward** | `build_softmax_bwd_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | fp32 dot reduction, native-dtype register buffering |
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
 | **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
+| **Convolution** | `flydsl_conv_implicit(x, weight, ...)` | Layout API (`@flyc.kernel`) | bf16 (gfx950) | Implicit GEMM, 1D/2D/3D, tuned tile tables, runtime resolution |
 
 All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
@@ -374,6 +375,74 @@ python3 tests/kernels/test_flash_attn_fwd.py --dtype fp8 --compare --warmup 10 -
 
 ---
 
+## 3c. Implicit-GEMM convolution (`kernels/conv/conv3d_implicit.py`)
+
+bf16 convolution as an implicit GEMM: `M = N·Do·Ho·Wo`, `N = K/groups`,
+`K = (C/groups)·kT·kH·kW`. The spatial rank comes from `weight.dim() - 2`, so the
+same entry point serves conv1d/2d/3d; an unbatched input is accepted.
+
+**Entry point:**
+```python
+from kernels.conv.conv3d_implicit import flydsl_conv_implicit
+
+y = flydsl_conv_implicit(
+    x, weight, bias=None, stride=1, padding=0, dilation=1, groups=1,
+    padding_mode="zeros",                        # zeros / reflect / replicate / circular
+    input_layout="NCDHW", output_layout="NCDHW", # or NDHWC; NCHW/NHWC, NCW/NWC below 3D
+    tile=None, wgm=None, splitk=None,            # None = tuned table, then heuristic
+    stream=None,
+)
+```
+`conv3d_implicit` is a back-compat alias.
+
+| Property | Value |
+|---|---|
+| Arch | gfx950 only (`SUPPORTED_GFX`); any other arch raises `RuntimeError` before compiling |
+| Dtypes | `x` and `weight` bf16; `bias` 1-D with `K` elements, added in fp32; output bf16 |
+| Layouts | Input and output layouts are independent. NDHWC input skips the NCDHW→NDHWC transpose kernel; weight is always `(K, C/groups, kT, kH, kW)` |
+| `padding` | int, per-axis tuple, `"valid"`, or `"same"` (stride 1) |
+| Pointwise | 1×1×1, unit stride, no padding, `groups=1` is answered by `torch.matmul` without a FlyDSL kernel |
+
+**Pipeline:** the A operand is gathered im2col-style straight into LDS with
+`buffer_load ... lds` DMA, B is the weight read as a `(K, CRS)` matrix, and the
+MMA is `mfma_f32_16x16x32_bf16` (`TILE_K = 32`) issued through `fx.gemm`. LDS holds
+4 stages of `(tile_m + tile_n) × 32` bf16. The epilogue adds bias and scatters to
+either layout; split-K accumulates fp32 partials with buffer atomics.
+
+**Tile selection.** Launch configs `(tile_m, tile_n, wave_m, wave_n, wgm, splitK)`
+come from the tuned tables `kernels/conv/configs/*_bf16_tuned_conv3d.csv`, keyed by
+`(gfx, cu_num, shape)` and aligned with aiter's conv3d tables. A shape with no row
+borrows a tile from another resolution of the same layer, else falls back to a
+heuristic ladder. Explicit `tile` / `wgm` / `splitk` arguments override both.
+
+| Environment variable | Effect |
+|---|---|
+| `FLYDSL_CONV3D_BF16_CONFIG` | Colon-separated tuned CSV paths instead of the shipped tables |
+| `FLYDSL_CONV3D_DYN_HW` | `1` (default): D/H/W are runtime values, so one artifact serves every resolution. `0`: compile per size |
+| `FLYDSL_LOG_TUNED_CONFIG` | `1`: log tuned-table hits as well as misses (misses are always logged once per shape) |
+
+**Tuning and AOT:**
+```bash
+# Sweep conv3d_policy candidates for an untuned CSV and write the winners.
+python -m kernels.conv.conv3d_tune \
+    -i kernels/conv/configs/wan21_vae_bf16_untuned_conv3d.csv \
+    -o kernels/conv/configs/wan21_vae_bf16_tuned_conv3d.csv
+# Time the production entry on every untuned row, looking tiles up in <tuned.csv>
+# (omit the path to use the shipped tables); exits non-zero on a mismatch.
+python -m kernels.conv.conv3d_tune -i <untuned.csv> --run_config <tuned.csv>
+# Pre-compile every tuned row (both output layouts + the transpose) into the JIT cache.
+python -m kernels.conv.conv3d_aot --csv kernels/conv/configs/wan21_vae_bf16_tuned_conv3d.csv
+```
+The tuner times candidates with aiter's `run_perftest` protocol
+(`tests/test_common.py`, 101 iterations, 2 warm-up, rotated argument copies), so
+its `us` column is end-to-end and includes the weight repack and any channel pad.
+
+**FP8 variant:** `conv3d_implicit_fp8(x, weight, ...)` in
+`kernels/conv/conv3d_implicit_fp8.py` takes fp8 e4m3fn inputs with `C % 16 == 0`
+and returns bf16, on the gfx95x 16x16x128 fp8 MFMA.
+
+---
+
 ## 4. Shared utilities
 
 ### 4.1 Common kernel helpers (`kernels/common/kernels_common.py`)
@@ -459,6 +528,10 @@ What operation do you need?
 │   └── Standard MoE (fp8/f16/bf16/int8/int4)
 │       └── → kernels/moe/moe_gemm_2stage/
 │
+├── Convolution (1D/2D/3D)
+│   ├── bf16, gfx950          → flydsl_conv_implicit() (kernels/conv/conv3d_implicit.py)
+│   └── fp8 e4m3fn, gfx95x    → conv3d_implicit_fp8() (kernels/conv/conv3d_implicit_fp8.py)
+│
 └── Building blocks
     ├── Common kernel helpers → kernels/common/kernels_common.py
     └── Preshuffle layout     → kernels/common/mma/mfma_preshuffle_pipeline.py
@@ -483,6 +556,11 @@ What operation do you need?
 | `kernels/norm/softmax_bwd_kernel.py` | Softmax backward (layout API) |
 | `kernels/norm/softmax_autotune.py` | Softmax opt-in autotune adopter |
 | `kernels/attention/fused_rope_cache_kernel.py` | Fused RoPE + KV cache |
+| `kernels/conv/conv3d_implicit.py` | bf16 implicit-GEMM convolution host entry (dispatch, tuned-table lookup) |
+| `kernels/conv/conv3d_implicit_gfx950.py` | bf16 implicit-GEMM conv kernel (gfx950) |
+| `kernels/conv/conv3d_tune.py` | Conv tile tuner (writes `kernels/conv/configs/*_tuned_conv3d.csv`) |
+| `kernels/conv/conv3d_aot.py` | Conv AOT pre-compilation from the tuned tables |
+| `kernels/conv/conv3d_implicit_fp8.py` | FP8 implicit-GEMM convolution (gfx95x) |
 | `kernels/comm/custom_all_reduce.py` | Multi-GPU all-reduce |
 | `kernels/gemm/rdna_f16_gemm.py` | RDNA FP16 GEMM |
 | `kernels/gemm/rdna_fp8_preshuffle_gemm.py` | RDNA FP8 GEMM |
@@ -510,6 +588,8 @@ What operation do you need?
 | `tests/kernels/test_softmax_bwd.py` | Softmax backward |
 | `tests/kernels/test_softmax_autotune.py` | Softmax autotune selection and candidate correctness |
 | `tests/kernels/test_fused_rope_cache.py` | Fused RoPE + KV cache |
+| `tests/kernels/test_conv3d_implicit.py` | bf16 conv1d/2d/3d, including every tuned-table shape |
+| `tests/kernels/test_conv3d_implicit_fp8.py` | FP8 conv |
 | `tests/kernels/test_allreduce.py` | Multi-GPU all-reduce |
 | `tests/kernels/test_rdna_gemm.py` | RDNA GEMM |
 | `tests/kernels/test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
