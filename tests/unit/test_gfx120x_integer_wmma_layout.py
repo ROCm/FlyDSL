@@ -23,24 +23,12 @@ from flydsl.compiler import jit_function
 
 pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
-_IU4_K16 = (
-    "!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> i32, signA = true, signB = true, clamp = false>"
-)
-_IU8_K16 = (
-    "!fly_rocdl.gfx120x.wmma<16x16x16, (i8, i8) -> i32, signA = false, signB = false, clamp = false>"
-)
-_IU4_K32 = (
-    "!fly_rocdl.gfx120x.wmma<16x16x32, (i4, i4) -> i32, signA = true, signB = true, clamp = false>"
-)
-_FP_K16 = (
-    "!fly_rocdl.gfx120x.wmma<16x16x16, (f16, f16) -> f32, signA = false, signB = false, clamp = false>"
-)
-_FP_K32 = (
-    "!fly_rocdl.gfx120x.wmma<16x16x32, (bf16, bf16) -> f32, signA = false, signB = false, clamp = false>"
-)
-_FP_SIGN = (
-    "!fly_rocdl.gfx120x.wmma<16x16x16, (bf16, bf16) -> f32, signA = true, signB = false, clamp = false>"
-)
+_IU4_K16 = "!fly_rocdl.gfx120x.wmma<16x16x16, (i4, i4) -> i32, signA = true, signB = true, clamp = false>"
+_IU8_K16 = "!fly_rocdl.gfx120x.wmma<16x16x16, (i8, i8) -> i32, signA = false, signB = false, clamp = false>"
+_IU4_K32 = "!fly_rocdl.gfx120x.wmma<16x16x32, (i4, i4) -> i32, signA = true, signB = true, clamp = false>"
+_FP_K16 = "!fly_rocdl.gfx120x.wmma<16x16x16, (f16, f16) -> f32, signA = false, signB = false, clamp = false>"
+_FP_K32 = "!fly_rocdl.gfx120x.wmma<16x16x32, (bf16, bf16) -> f32, signA = false, signB = false, clamp = false>"
+_FP_SIGN = "!fly_rocdl.gfx120x.wmma<16x16x16, (bf16, bf16) -> f32, signA = true, signB = false, clamp = false>"
 
 
 def _parse(src: str):
@@ -139,9 +127,7 @@ def test_iu4_k16_printed_and_coords(gfx120_frontend):
 
     @flyc.jit
     def pin():
-        atom = fx.make_mma_atom(
-            fx.rocdl.WMMA(16, 16, 16, fx.Int4, fx.Int32, sign_a=True, sign_b=True)
-        )
+        atom = fx.make_mma_atom(fx.rocdl.WMMA(16, 16, 16, fx.Int4, fx.Int32, sign_a=True, sign_b=True))
         layout_a = atom.layout_A_tv
         layout_b = atom.layout_B_tv
         layout_c = atom.layout_C_tv
@@ -171,9 +157,7 @@ def test_iu4_k32_rdna4_not_gfx1250(gfx120_frontend):
 
     @flyc.jit
     def pin():
-        atom = fx.make_mma_atom(
-            fx.rocdl.WMMA(16, 16, 32, fx.Int4, fx.Int32, sign_a=True, sign_b=True)
-        )
+        atom = fx.make_mma_atom(fx.rocdl.WMMA(16, 16, 32, fx.Int4, fx.Int32, sign_a=True, sign_b=True))
         layout_a = atom.layout_A_tv
         k_g0_v8 = layout_a((0, 0), 8).get_static_leaf_int // 16
         k_g1_v0 = layout_a((0, 1), 0).get_static_leaf_int // 16
