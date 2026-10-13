@@ -39,9 +39,9 @@ the sequential cache semantics while the four tiles compute concurrently.
 
 Indexed forty-row cohorts normalize input once per row. TP8 also uses the
 existing expert-union gate/up body and publishes quantized mid values once.
-TP4 indexed forty-row gate/up compacts selected tokens across all cohorts and
+TP4 forty-row gate/up compacts selected tokens across all cohorts and
 distributes expert/token-chunk/output tasks over the resident grid. Each task
-reuses one activation tile for64 intermediate outputs, preserving every original
+reuses one activation tile for64 indexed or128 external-index outputs, preserving every original
 eight-output MFMA and reduction. Other tile shapes retain their schedules. Both
 schedules require all
 256 CTAs to be co-resident and preserve each task's original arithmetic.
@@ -272,7 +272,8 @@ def build_glm5_monokernel(
     # deferred stores and the cache version at each original tile boundary.
     DEFER_OFF_CACHE = STATIC_ROW_TILES and not with_indexer
     COHORT_ROW_TILES = STATIC_ROW_TILES and (not with_indexer or index_max_seq == 4096)
-    GLOBAL_UG40 = COHORT_ROW_TILES and with_indexer and npes == 4 and native_fp4_mfma
+    GLOBAL_UG40 = COHORT_ROW_TILES and npes == 4 and native_fp4_mfma
+    GLOBAL_UG_WIDTH = 64 if with_indexer else 128
     INDEX_PRE_ROPE = COHORT_ROW_TILES and with_indexer
     INDEX_SCORE_REUSE = 2 if COHORT_ROW_TILES else 1
     SPLIT_TASK_PAIR = 2 if COHORT_ROW_TILES and npes == 8 and heads == 8 else 1
@@ -490,9 +491,9 @@ def build_glm5_monokernel(
         # Each routed expert contributes its first chunk, then at most one extra
         # chunk per S additional routes. Include the shared expert's four chunks.
         global_chunks_max = N_EXPERTS + (total_samples * TOP_K - N_EXPERTS) // S + ROW_TILES
-        global_rounds_max = (global_chunks_max * (expert_inter // 64) + BLOCKS - 1) // BLOCKS
+        global_rounds_max = (global_chunks_max * (expert_inter // GLOBAL_UG_WIDTH) + BLOCKS - 1) // BLOCKS
         assert global_chunks_max <= total_samples * MOE_SLOTS
-        assert global_rounds_max * G * 8 <= tasks["ug"]
+        assert global_rounds_max * G * (GLOBAL_UG_WIDTH // 8) <= tasks["ug"]
     acc = 0
     for name in (
         "qkv_a",
@@ -4793,13 +4794,15 @@ def build_glm5_monokernel(
                     gpu.barrier()
                     gu_nchunks = _uniform(lds_ld(gu_red, WAVES))
                     gu_tiles = expert_inter // UG8
-                    for gu_task in range(full_bid, gu_nchunks * (gu_tiles // 8), BLOCKS):
+                    for gu_task in range(full_bid, gu_nchunks * (gu_tiles // (GLOBAL_UG_WIDTH // 8)), BLOCKS):
                         gu_task = fx.Int32(gu_task)
-                        gu_chunk_record = _uniform(lds_ld(gu_chunk_map, gu_task // (gu_tiles // 8)))
+                        gu_chunk_record = _uniform(
+                            lds_ld(gu_chunk_map, gu_task // (gu_tiles // (GLOBAL_UG_WIDTH // 8)))
+                        )
                         gu_union = gu_chunk_record // ROW_TILES
                         gu_segment = gu_chunk_record % ROW_TILES
-                        gu_cbase = (gu_task % (gu_tiles // 8)) * 8
-                        gu_stamp_base = (gu_task // BLOCKS * G + bid) * 8
+                        gu_cbase = (gu_task % (gu_tiles // (GLOBAL_UG_WIDTH // 8))) * (GLOBAL_UG_WIDTH // 8)
+                        gu_stamp_base = (gu_task // BLOCKS * G + bid) * (GLOBAL_UG_WIDTH // 8)
                         gu_expert = _uniform(lds_ld(gu_experts, gu_union))
                         gu_bits = fx.Int64(fx.Uint32(_uniform(lds_ld(gu_lo, gu_union)))) | (
                             fx.Int64(fx.Uint32(_uniform(lds_ld(gu_hi, gu_union)))) << 32
@@ -4853,8 +4856,8 @@ def build_glm5_monokernel(
                                     gu_got[S * gu_nxw + gu_j][0].bitcast(fx.Float32),
                                 )
                         gpu.barrier()
-                        # Reuse this selected activation tile across four output pairs.
-                        for gu_pair in range_constexpr(4):
+                        # Reuse selected activations across the configured output tile.
+                        for gu_pair in range_constexpr(GLOBAL_UG_WIDTH // 16):
                             gu_units = [
                                 ug8_units(gu_expert, None, gu_cbase + gu_pair * 2 + gu_part) for gu_part in range(2)
                             ]
@@ -4912,6 +4915,46 @@ def build_glm5_monokernel(
                         lds_st(keys, tid, gu_my_key)
                         lds_st(dnw, tid, gu_my_prob)
                     gpu.barrier()
+                    if const_expr(DN_UNION_ROWS40):
+                        # Rebuild cohort-local expert metadata expected by ordered down union;
+                        # wave-local masks only occupy the otherwise-idle reduction workspace.
+                        union_experts = keys + S * MOE_SLOTS
+                        union_masks = union_experts + UG_UNION_MAX
+                        union_counts = union_masks + UG_UNION_MAX
+                        mask_red = fx.recast_iter(fx.Int32, red)
+                        for i in range_constexpr(WAVES * N_EXPERTS // THREADS):
+                            lds_st(mask_red, tid + i * THREADS, fx.Int32(0))
+                        gpu.barrier()
+                        for batch in range_constexpr(sample_wave_batches(S)):
+                            sample = wave + batch * WAVES
+                            if (sample < S) & (lane < TOP_K):
+                                expert = fx.Int32(lds_ld(keys, sample * MOE_SLOTS + lane + 1))
+                                address = wave * N_EXPERTS + expert
+                                previous = lds_ld(mask_red, address)
+                                lds_st(mask_red, address, previous | (fx.Int32(1) << sample))
+                            gpu.barrier()
+                        mask = fx.Int32(0)
+                        if tid < N_EXPERTS:
+                            for w in range_constexpr(WAVES):
+                                mask = mask | lds_ld(mask_red, w * N_EXPERTS + tid)
+                        ballot = fx.Int64(rocdl.ballot(T.i64, mask != 0))
+                        below = fx.Int32(fmath.ctpop(ballot & ((fx.Int64(1) << fx.Int64(lane)) - 1)))
+                        count = fx.Int32(fmath.ctpop(ballot))
+                        if (tid < N_EXPERTS) & (lane == 0):
+                            lds_st(union_counts, wave, count)
+                        gpu.barrier()
+                        offset = fx.Int32(0)
+                        for w in range_constexpr(N_EXPERTS // 64):
+                            offset = offset + (wave > w).select(fx.Int32(lds_ld(union_counts, w)), fx.Int32(0))
+                        if (tid < N_EXPERTS) & (mask != 0):
+                            lds_st(union_experts, offset + below, tid)
+                            lds_st(union_masks, offset + below, mask)
+                        if tid == N_EXPERTS - 1:
+                            total = offset + count
+                            lds_st(union_experts, total, fx.Int32(SHARED_EXPERT))
+                            lds_st(union_masks, total, fx.Int32((1 << S) - 1))
+                            lds_st(union_counts, N_EXPERTS // 64, total + 1)
+                        gpu.barrier()
                 elif const_expr(GROUPED_UG):
                     # Reuse the indexer's retired key arena for the compact union and masks;
                     # wave-local masks only occupy the otherwise-idle reduction workspace.
