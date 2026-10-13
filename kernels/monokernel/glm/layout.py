@@ -131,6 +131,13 @@ XQ_WAVES = (XQ_BLOCKS + N_ROUTER - 1) // N_ROUTER
 assert XQ_WAVES * 4 <= WAVES
 
 
+def row_tile_size(samples: int, native_fp4_mfma: bool = False) -> int:
+    """Bound each resident row tile; preserve released shapes up to twelve."""
+    if not native_fp4_mfma or samples <= 12:
+        return samples
+    return next(tile for tile in range(12, 0, -1) if samples % tile == 0)
+
+
 def dn_tile(samples: int, expert_mxfp4: bool = False) -> int:
     """Return rows per expert-down/FFN-reduce task for the tuned schedule."""
 
@@ -225,6 +232,29 @@ def layout(
     native_fp4_mfma: bool = False,
 ):
     """Return byte offsets for per-rank scratch and symmetric peer buffers."""
+
+    tile = row_tile_size(samples, native_fp4_mfma)
+    if tile != samples:
+        scratch, symmetric = layout(
+            tile,
+            heads,
+            npes,
+            sparse_attention_topk,
+            with_indexer,
+            index_max_seq,
+            indexer_cp=indexer_cp,
+            inter=inter,
+            output_heads=output_heads,
+            dcp_size=dcp_size,
+            native_fp4_mfma=native_fp4_mfma,
+        )
+        count = samples // tile
+        scratch = dict(scratch, _tile_rows=tile, _tile_count=count, _tile_stride=scratch["_bytes"])
+        scratch["_tile_barriers"] = count * scratch["_tile_stride"]
+        scratch["_bytes"] = scratch["_tile_barriers"] + _align((count - 1) * (BLOCKS + 1) * 8)
+        symmetric = dict(symmetric, _tile_stride=symmetric["_bytes"])
+        symmetric["_bytes"] *= count
+        return scratch, symmetric
 
     split_count = sparse_attention_topk // sparse_keys_per_task(samples, heads)
     output_heads = heads if output_heads is None else output_heads
@@ -340,6 +370,21 @@ def stage_tasks(
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
+    tile = row_tile_size(samples, native_fp4_mfma)
+    if tile != samples:
+        stages = stage_tasks(
+            tile,
+            heads,
+            sparse_attention_topk,
+            with_indexer,
+            index_max_seq,
+            expert_mxfp4,
+            inter,
+            indexer_cp,
+            npes,
+            native_fp4_mfma,
+        )
+        return [(f"tile{part}/{name}", count) for part in range(samples // tile) for name, count in stages]
     index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
     tasks = [
         ("qkv_a", N_QKV_A),

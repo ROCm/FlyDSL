@@ -123,6 +123,8 @@ class Glm5MonoKernel:
     ``indexer_cp=True`` partitions index scoring across the TP ranks and uses
     in-kernel peer mailboxes for exact global selection. Index caches remain
     replicated; each rank must receive identical indexer weights and inputs.
+    Native ATOM MXFP4 weights support one through forty rows per launch. Above
+    twelve rows, a full 256-CU device executes bounded row tiles in one kernel.
     ``group`` is a torch.distributed group (None for npes=1).
 
     The symmetric buffer uses PyTorch's caching allocator and CUDA/ROCm IPC
@@ -169,9 +171,9 @@ class Glm5MonoKernel:
             npes,
             topk,
             W.config,
-            # The native path also accepts the odd query counts covered by the
-            # sequence regression; retain the legacy path's existing buckets.
-            supported_samples=(*GLM5_KERNEL_SAMPLES, 3, 7, 9) if native_fp4_mfma else GLM5_KERNEL_SAMPLES,
+            # Native row tiles bound the device geometry through forty rows;
+            # retain the legacy path's existing buckets.
+            supported_samples=tuple(range(1, 41)) if native_fp4_mfma else GLM5_KERNEL_SAMPLES,
             expected_heads=attention_heads,
         )
         if dcp_size not in (1, npes):
@@ -247,6 +249,8 @@ class Glm5MonoKernel:
             native_fp4_mfma=native_fp4_mfma,
         )
         dev = torch.device("cuda", torch.cuda.current_device())
+        if samples > 12 and torch.cuda.get_device_properties(dev).multi_processor_count != 256:
+            raise ValueError("tiled GLM execution requires a full 256-CU MI355X device")
         self.identity_block_tables = (
             torch.arange(self.index_block_table_stride, dtype=torch.int32, device=dev).unsqueeze(0)
             if with_indexer
@@ -334,15 +338,26 @@ class Glm5MonoKernel:
             indexer_cp=indexer_cp,
         )
 
-    def debug(self, name: str, shape, dtype=torch.float32, pairs=True, bf2=False) -> torch.Tensor:
+    def debug(self, name: str, shape, dtype=torch.float32, pairs=True, bf2=False, _tile=None) -> torch.Tensor:
         """Values of a scratch mailbox (``(value, tag)`` pairs unless ``pairs=False``;
         ``bf2``: each pair's value word packs two bf16 elements)."""
-        off = self.scr_layout[name]
+        if "_tile_rows" in self.scr_layout and _tile is None:
+            tile = self.scr_layout["_tile_rows"]
+            if shape[0] != self.S:
+                raise ValueError("tiled debug expects a leading sample dimension")
+            return torch.cat(
+                [
+                    self.debug(name, (tile, *shape[1:]), dtype, pairs, bf2, _tile=part)
+                    for part in range(self.scr_layout["_tile_count"])
+                ]
+            )
+        part = 0 if _tile is None else _tile
+        off = self.scr_layout[name] + part * self.scr_layout.get("_tile_stride", 0)
         storage = self.scratch
         if name == "index_q" and "index_cp_q" in self.sym_layout:
             # Debug reads the most recently published slot; production forward
             # never reads device epochs on the host.
-            off = self.sym_layout["index_cp_q"]
+            off = self.sym_layout["index_cp_q"] + part * self.sym_layout.get("_tile_stride", 0)
             stride = self.sym_layout["index_cp_q_stride"]
             storage = self.sym_storage
             first_tag = storage[off + 4 : off + 8].view(torch.int32).item()
@@ -578,6 +593,5 @@ class Glm5MonoKernel:
         if self.with_indexer:
             result["index_q"] = self.debug("index_q", (S, 32, INDEX_DIM), bf2=True)
             result["index_w"] = self.debug("index_w", (S, 32))
-            off = self.scr_layout["indices"]
-            result["indices"] = self.scratch[off : off + S * self.topk * 4].view(torch.int32).view(S, self.topk)
+            result["indices"] = self.debug("indices", (S, self.topk), torch.int32, pairs=False)
         return result
