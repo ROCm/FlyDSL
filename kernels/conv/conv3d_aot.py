@@ -24,6 +24,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from unittest import mock
 
 from .conv3d_gfx950_utils import (
     LDG_VEC,
@@ -386,28 +387,14 @@ def _compile_conv3d_to_cache(
             dyn_hw,
         )
     )
-    prev = os.environ.get("COMPILE_ONLY")
-    os.environ["COMPILE_ONLY"] = "1"
-    try:
+    with mock.patch.dict(os.environ, {"COMPILE_ONLY": "1"}):
         _dispatch(exe, *_conv_probe_args(splitk), stream=None)
-    finally:
-        if prev is None:
-            os.environ.pop("COMPILE_ONLY", None)
-        else:
-            os.environ["COMPILE_ONLY"] = prev
 
 
 def _compile_transpose_to_cache(*, N: int, c_padded: int, s: int):
     exe = compile_transpose_ncdhw_ndhwc(N, c_padded, s)
-    prev = os.environ.get("COMPILE_ONLY")
-    os.environ["COMPILE_ONLY"] = "1"
-    try:
+    with mock.patch.dict(os.environ, {"COMPILE_ONLY": "1"}):
         _dispatch(exe, _probe(5), _probe(5), stream=None)
-    finally:
-        if prev is None:
-            os.environ.pop("COMPILE_ONLY", None)
-        else:
-            os.environ["COMPILE_ONLY"] = prev
 
 
 def compile_one_config(
@@ -437,23 +424,17 @@ def compile_one_config(
     }
 
     t0 = time.time()
-    prev_arch = os.environ.get("FLYDSL_GPU_ARCH")
-    os.environ["FLYDSL_GPU_ARCH"] = aot_arch
     try:
-        if kind == "conv3d":
-            _compile_conv3d_to_cache(**kwargs)
-        elif kind == "transpose":
-            _compile_transpose_to_cache(**kwargs)
-        else:
-            raise ValueError(f"Unknown conv AOT kind: {kind}")
+        with mock.patch.dict(os.environ, {"FLYDSL_GPU_ARCH": aot_arch}):
+            if kind == "conv3d":
+                _compile_conv3d_to_cache(**kwargs)
+            elif kind == "transpose":
+                _compile_transpose_to_cache(**kwargs)
+            else:
+                raise ValueError(f"Unknown conv AOT kind: {kind}")
         result["compile_time"] = time.time() - t0
     except Exception as e:  # noqa: BLE001
         print(f"  [FAIL] compile  {shape_str}  arch={aot_arch}: {e}")
-    finally:
-        if prev_arch is None:
-            os.environ.pop("FLYDSL_GPU_ARCH", None)
-        else:
-            os.environ["FLYDSL_GPU_ARCH"] = prev_arch
     return result
 
 

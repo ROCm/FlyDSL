@@ -11,6 +11,8 @@ from typing import NamedTuple
 import flydsl.expr as fx
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
+from kernels.common.kernels_common import get_warp_size
+from kernels.common.mem_ops import buffer_atomic_add
 
 # One MFMA instruction's output tile, and how many accumulator values of it a
 # lane holds. gfx950's bf16 MFMA is 16x16x16 with 4 values per lane.
@@ -18,7 +20,8 @@ MFMA_M = 16
 MFMA_N = 16
 MFMA_C_VALUES = 4
 
-WARP_SIZE = 64
+# The kernel's only target, not the host: AOT parses tiles before it sets the compile arch.
+WARP_SIZE = get_warp_size("gfx950")
 
 BF16_BYTES = 2
 
@@ -37,11 +40,6 @@ CONV_COMPILE_HINTS = {}
 
 def _as_stream(stream):
     return stream if hasattr(stream, "_is_stream_param") else fx.Stream(stream)
-
-
-def buffer_atomic_add(vdata, rsrc, offset, soffset, aux):
-    """Buffer-resource atomic fadd (``raw.ptr.buffer.atomic.fadd``)."""
-    return fx.rocdl.raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux)
 
 
 def barrier(vmcnt=0, lgkmcnt=None):

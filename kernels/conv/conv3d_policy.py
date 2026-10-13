@@ -10,6 +10,7 @@ so VAE Cout 96/192/384 can fill TILE_N, unlike the runtime power-of-two ladder.
 import itertools
 
 from flydsl.runtime.device import get_rocm_arch
+from kernels.common.utils import cdiv
 
 from .conv3d_gfx950_utils import (
     BF16_BYTES,
@@ -130,17 +131,13 @@ def max_lds_bytes():
     return get_lds_capacity_bytes() // 2
 
 
-def _ceil_div(value, divisor):
-    return (value + divisor - 1) // divisor
-
-
 def _n_fill(tile_n, kg):
     """Fraction of the N tile columns that carry real output channels.
 
     Masked columns are zero-filled on the B load but still go through MFMA, so
     this is a direct multiplier on achievable throughput, not just on traffic.
     """
-    return kg / (_ceil_div(kg, tile_n) * tile_n)
+    return kg / (cdiv(kg, tile_n) * tile_n)
 
 
 def _sweep(npq, kg, groups, num_cu, min_n_fill, min_waves, check_waste, check_grid):
@@ -167,10 +164,10 @@ def _sweep(npq, kg, groups, num_cu, min_n_fill, min_waves, check_waste, check_gr
             continue
 
         # An N tile wider than the whole of kg past the first tile is all mask.
-        if check_waste and tile_n > kg and _ceil_div(kg, tile_n) * tile_n - kg >= tile_n // 2:
+        if check_waste and tile_n > kg and cdiv(kg, tile_n) * tile_n - kg >= tile_n // 2:
             continue
 
-        blocks = _ceil_div(npq, tile_m) * groups * _ceil_div(kg, tile_n)
+        blocks = cdiv(npq, tile_m) * groups * cdiv(kg, tile_n)
         # Below one wave per CU the launch cannot fill the device no matter how
         # good the tile is. Split-K is resolved separately and may rescue some
         # of these, so the floor is deliberately loose.
@@ -180,7 +177,7 @@ def _sweep(npq, kg, groups, num_cu, min_n_fill, min_waves, check_waste, check_gr
         for wgm in WGM_VALUES:
             # The grouped-M swizzle regroups the N grid; with a single N tile it
             # is a no-op that still costs index math.
-            if wgm > 1 and _ceil_div(kg, tile_n) < 2:
+            if wgm > 1 and cdiv(kg, tile_n) < 2:
                 continue
             # Rank: exact N fit first, then larger tiles (more reuse per byte),
             # then fewer blocks. Only decides which survive ``max_configs``.

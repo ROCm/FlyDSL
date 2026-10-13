@@ -32,7 +32,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from tests.test_common import run_perftest
+from tests.test_common import checkAllclose, run_perftest
 
 from .conv3d_gfx950_utils import out_extent
 from .conv3d_implicit import (
@@ -137,8 +137,7 @@ def conv3d_ref(x, weight, bias, params):
 def _err_ratio(out, ref):
     if out.shape != ref.shape:
         return 1.0
-    close = torch.isclose(out, ref, rtol=RTOL, atol=ATOL)
-    return float((~close).sum().item()) / max(out.numel(), 1)
+    return float(checkAllclose(out, ref, rtol=RTOL, atol=ATOL, printLog=False))
 
 
 def _calculate(kv, us):
