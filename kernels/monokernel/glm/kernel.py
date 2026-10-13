@@ -326,6 +326,7 @@ def build_glm5_monokernel(
     )
     if DEFER_OFF_CACHE:
         assert ROW_TILES >= 3
+    GLOBAL_QB40 = COHORT_ROW_TILES and npes == 4 and native_fp4_mfma and not with_indexer and H == 16
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
     # The index-Q row space is fixed at 256 tiles.  TP8 produces half from
@@ -432,6 +433,10 @@ def build_glm5_monokernel(
         assert (MIDQ_WORDS + MID_SCALE_WORDS) * 8 <= BLOCKS * S * 2 * UG_TILE * 8
 
     WORK_WORDS = OUT_OFF + OUT_WORDS
+    if GLOBAL_QB40:
+        assert 16 * (Q_LORA // 2 + 4) <= X_WORDS
+        assert 16 * Q_B_TILE <= OUT_WORDS
+        assert N_QB == BLOCKS
     assert WORK_WORDS <= 32768, "keep static LDS below the MI355X per-workgroup budget"
 
     DN_UNION_CANDIDATE = (
@@ -2414,97 +2419,186 @@ def build_glm5_monokernel(
             if const_expr(with_indexer):
                 r_wiq, r_siq = _rsrc(index_arg(3)), _rsrc(index_arg(4))
 
-            for t in range(start("q_b"), N_QB, G):
-                t = fx.Int32(t)
-                stamp("q_b", t, 0)
+            if const_expr(GLOBAL_QB40):
+                # All output tiles cover the same global 16-row chunk. Each
+                # output element retains its original eight-wave K reduction.
+                for qb_chunk in range((total_samples + 15) // 16):
+                    qb_chunk = fx.Int32(qb_chunk)
+                    qb_first = qb_chunk * 16
+                    qb_count = fx.min(fx.Int32(16), total_samples - qb_first)
+                    t = full_bid
+                    # Reuse the original per-cohort timeline allocation. Three
+                    # task rounds occupy its first192 Q_B slots;64 stay unused.
+                    qb_stamp = bid + qb_chunk * G
+                    stamp("q_b", qb_stamp, 0)
 
-                def u_qb(c):
-                    kc = (wave * QB_UNITS + c) * attention_k_chunks_per_unit
-                    return unit_attention(
-                        r_wqb,
-                        r_sqb,
-                        t,
-                        kc,
-                        QB_NKC,
-                        Q_LORA,
-                        128,
-                        attention_b_word(n_sel() * Q_LORA + kc * 64),
-                    )
-
-                pre = [u_qb(c) for c in range(QB_UNITS)]
-                hint_wait(
-                    S,
-                    lambda s: (mb("q_an"), (s * Q_LORA + Q_LORA - 2) // 2),
-                    mark=("q_b", t),
-                )
-                if const_expr(attention_ptpc):
-                    qb_scales = stage_x_pairs_ptpc("q_an", S, Q_LORA, lambda k: k, retain_bf16=with_indexer)
-                else:
-                    stage_x_pairs("q_an", S * Q_LORA, lambda k: k)
-                stamp("q_b", t, 2)
-                gpu.barrier()
-                acc = run_units(u_qb, QB_UNITS, QB_UNITS, pre)
-                if const_expr(attention_ptpc):
-                    reduce_rows(1, acc, emit_ptpc(Q_B_TILE, t * Q_B_TILE, r_sqb, qb_scales))
-                else:
-                    reduce_rows(1, acc, emit_out(Q_B_TILE))
-                stamp("q_b", t, 3)
-                gpu.barrier()
-                head = t // QB_PER_HEAD
-                hoff = (t % QB_PER_HEAD) * Q_B_TILE
-                if hoff < NOPE_DIM:
-                    if tid < S * Q_B_TILE // 4:
-                        s = tid // (Q_B_TILE // 4)
-                        r = (tid % (Q_B_TILE // 4)) * 4
-                        put_bf(
-                            mb("q_nope"),
-                            (s * H + head) * NOPE_DIM + hoff + r,
-                            [lds_ld(outs, s * Q_B_TILE + r + j) for j in range(4)],
-                        )
-                else:
-                    if tid < S * Q_B_TILE // 2:
-                        s = tid // (Q_B_TILE // 2)
-                        pr = tid % (Q_B_TILE // 2)
-                        i = hoff - NOPE_DIM + pr * 2
-                        x0 = lds_ld(outs, s * Q_B_TILE + pr * 2)
-                        x1 = lds_ld(outs, s * Q_B_TILE + pr * 2 + 1)
-                        c = ld_rope(_rsrc(rope_cos), row_position(s) * (PE_DIM // 2) + i // 2)
-                        sn = ld_rope(_rsrc(rope_sin), row_position(s) * (PE_DIM // 2) + i // 2)
-                        put_bf(
-                            mb("q_pe"),
-                            (s * H + head) * PE_DIM + i,
-                            [x0 * c - x1 * sn, x0 * sn + x1 * c],
-                        )
-                stamp("q_b", t, 4)
-
-                if const_expr(with_indexer and not SHARD_INDEX_Q):
-                    # Reuse this CTA's normalized q_lora tile for one index-query
-                    # row tile.  Complementary CTAs compute the remaining half below.
-                    gpu.barrier()
-                    iq_t = t
-                    stamp("index_q", iq_t, 0)
-
-                    def u_index_q(c):
+                    def u_global_qb(c):
                         kc = (wave * QB_UNITS + c) * 2
                         return unit_fp8x2(
-                            r_wiq,
-                            r_siq,
-                            iq_t,
+                            r_wqb,
+                            r_sqb,
+                            t,
                             kc,
                             QB_NKC,
                             Q_LORA,
-                            (INDEX_Q_BF16_OFF if const_expr(attention_ptpc) else 0) + (n_sel() * Q_LORA + kc * 64) // 2,
+                            fx.min(lane % 16, qb_count - 1) * (Q_LORA // 2 + 4) + kc * 32,
                         )
 
-                    iq_acc = run_units(u_index_q, QB_UNITS, QB_UNITS)
-                    reduce_rows(1, iq_acc, emit_out(INDEX_TILE))
-                    stamp("index_q", iq_t, 3)
+                    pre = [u_global_qb(c) for c in range(QB_UNITS)]
                     gpu.barrier()
-                    if tid < S * INDEX_TILE // 4:
-                        s = tid // (INDEX_TILE // 4)
-                        r = (tid % (INDEX_TILE // 4)) * 4
-                        emit_index_query(s, iq_t, r)
-                    stamp("index_q", iq_t, 4)
+                    stamp("q_b", qb_stamp, 1)
+                    # Four whole rows per batch bounds live mailbox values.
+                    # The last chunk stages eight rows; MFMA padding duplicates
+                    # row seven and publishes no padded output.
+                    for qb_batch in range_constexpr(0, 16, 4):
+                        if qb_batch < qb_count:
+                            qb_specs = []
+                            for qb_part in range_constexpr(4):
+                                qb_row = qb_first + qb_batch + qb_part
+                                qb_src = full_scratch + fx.Int64(qb_row // S) * TILE_SCRATCH_BYTES
+                                qb_specs.append((qb_src + SC["q_an"], ((qb_row % S) * Q_LORA + tid * 4) // 2, 2))
+                            qb_values = poll(qb_specs)
+                            for qb_part in range_constexpr(4):
+                                for qb_pair in range_constexpr(2):
+                                    lds_st(
+                                        xs,
+                                        (qb_batch + qb_part) * (Q_LORA // 2 + 4) + tid * 2 + qb_pair,
+                                        qb_values[qb_part][qb_pair].bitcast(fx.Float32),
+                                    )
+                    gpu.barrier()
+                    stamp("q_b", qb_stamp, 2)
+                    acc = run_units(u_global_qb, QB_UNITS, QB_UNITS, pre)
+                    reduce_rows(1, acc, emit_out(Q_B_TILE), count=16)
+                    stamp("q_b", qb_stamp, 3)
+                    gpu.barrier()
+                    head = t // QB_PER_HEAD
+                    hoff = (t % QB_PER_HEAD) * Q_B_TILE
+                    if hoff < NOPE_DIM:
+                        if tid < qb_count * Q_B_TILE // 4:
+                            qb_local = tid // (Q_B_TILE // 4)
+                            qb_row = qb_first + qb_local
+                            qr = tid % (Q_B_TILE // 4) * 4
+                            qb_dst = full_scratch + fx.Int64(qb_row // S) * TILE_SCRATCH_BYTES
+                            put_bf(
+                                qb_dst + SC["q_nope"],
+                                ((qb_row % S) * H + head) * NOPE_DIM + hoff + qr,
+                                [lds_ld(outs, qb_local * Q_B_TILE + qr + j) for j in range(4)],
+                            )
+                    else:
+                        if tid < qb_count * Q_B_TILE // 2:
+                            qb_local = tid // (Q_B_TILE // 2)
+                            qb_row = qb_first + qb_local
+                            qr = tid % (Q_B_TILE // 2) * 2
+                            qk = hoff - NOPE_DIM + qr
+                            qb_dst = full_scratch + fx.Int64(qb_row // S) * TILE_SCRATCH_BYTES
+                            qpos = fx.Int32(bo.buffer_load(_rsrc(full_positions), qb_row * 2, vec_width=1, dtype=T.i32))
+                            qb_begin = fx.Int32(bo.buffer_load(_rsrc(full_indptr), qb_row, vec_width=1, dtype=T.i32))
+                            qb_end = fx.Int32(bo.buffer_load(_rsrc(full_indptr), qb_row + 1, vec_width=1, dtype=T.i32))
+                            qb_slot = fx.Int32(bo.buffer_load(_rsrc(full_slots), qb_row * 2, vec_width=1, dtype=T.i32))
+                            qpos = ((qb_end > qb_begin) | (qb_slot >= 0)).select(qpos, fx.Int32(0))
+                            qcos = ld_rope(_rsrc(rope_cos), qpos * (PE_DIM // 2) + qk // 2)
+                            qsin = ld_rope(_rsrc(rope_sin), qpos * (PE_DIM // 2) + qk // 2)
+                            q0 = lds_ld(outs, qb_local * Q_B_TILE + qr)
+                            q1 = lds_ld(outs, qb_local * Q_B_TILE + qr + 1)
+                            put_bf(
+                                qb_dst + SC["q_pe"],
+                                ((qb_row % S) * H + head) * PE_DIM + qk,
+                                [q0 * qcos - q1 * qsin, q0 * qsin + q1 * qcos],
+                            )
+                    stamp("q_b", qb_stamp, 4)
+            else:
+                for t in range(start("q_b"), N_QB, G):
+                    t = fx.Int32(t)
+                    stamp("q_b", t, 0)
+
+                    def u_qb(c):
+                        kc = (wave * QB_UNITS + c) * attention_k_chunks_per_unit
+                        return unit_attention(
+                            r_wqb,
+                            r_sqb,
+                            t,
+                            kc,
+                            QB_NKC,
+                            Q_LORA,
+                            128,
+                            attention_b_word(n_sel() * Q_LORA + kc * 64),
+                        )
+
+                    pre = [u_qb(c) for c in range(QB_UNITS)]
+                    hint_wait(
+                        S,
+                        lambda s: (mb("q_an"), (s * Q_LORA + Q_LORA - 2) // 2),
+                        mark=("q_b", t),
+                    )
+                    if const_expr(attention_ptpc):
+                        qb_scales = stage_x_pairs_ptpc("q_an", S, Q_LORA, lambda k: k, retain_bf16=with_indexer)
+                    else:
+                        stage_x_pairs("q_an", S * Q_LORA, lambda k: k)
+                    stamp("q_b", t, 2)
+                    gpu.barrier()
+                    acc = run_units(u_qb, QB_UNITS, QB_UNITS, pre)
+                    if const_expr(attention_ptpc):
+                        reduce_rows(1, acc, emit_ptpc(Q_B_TILE, t * Q_B_TILE, r_sqb, qb_scales))
+                    else:
+                        reduce_rows(1, acc, emit_out(Q_B_TILE))
+                    stamp("q_b", t, 3)
+                    gpu.barrier()
+                    head = t // QB_PER_HEAD
+                    hoff = (t % QB_PER_HEAD) * Q_B_TILE
+                    if hoff < NOPE_DIM:
+                        if tid < S * Q_B_TILE // 4:
+                            s = tid // (Q_B_TILE // 4)
+                            r = (tid % (Q_B_TILE // 4)) * 4
+                            put_bf(
+                                mb("q_nope"),
+                                (s * H + head) * NOPE_DIM + hoff + r,
+                                [lds_ld(outs, s * Q_B_TILE + r + j) for j in range(4)],
+                            )
+                    else:
+                        if tid < S * Q_B_TILE // 2:
+                            s = tid // (Q_B_TILE // 2)
+                            pr = tid % (Q_B_TILE // 2)
+                            i = hoff - NOPE_DIM + pr * 2
+                            x0 = lds_ld(outs, s * Q_B_TILE + pr * 2)
+                            x1 = lds_ld(outs, s * Q_B_TILE + pr * 2 + 1)
+                            c = ld_rope(_rsrc(rope_cos), row_position(s) * (PE_DIM // 2) + i // 2)
+                            sn = ld_rope(_rsrc(rope_sin), row_position(s) * (PE_DIM // 2) + i // 2)
+                            put_bf(
+                                mb("q_pe"),
+                                (s * H + head) * PE_DIM + i,
+                                [x0 * c - x1 * sn, x0 * sn + x1 * c],
+                            )
+                    stamp("q_b", t, 4)
+
+                    if const_expr(with_indexer and not SHARD_INDEX_Q):
+                        # Reuse this CTA's normalized q_lora tile for one index-query
+                        # row tile.  Complementary CTAs compute the remaining half below.
+                        gpu.barrier()
+                        iq_t = t
+                        stamp("index_q", iq_t, 0)
+
+                        def u_index_q(c):
+                            kc = (wave * QB_UNITS + c) * 2
+                            return unit_fp8x2(
+                                r_wiq,
+                                r_siq,
+                                iq_t,
+                                kc,
+                                QB_NKC,
+                                Q_LORA,
+                                (INDEX_Q_BF16_OFF if const_expr(attention_ptpc) else 0)
+                                + (n_sel() * Q_LORA + kc * 64) // 2,
+                            )
+
+                        iq_acc = run_units(u_index_q, QB_UNITS, QB_UNITS)
+                        reduce_rows(1, iq_acc, emit_out(INDEX_TILE))
+                        stamp("index_q", iq_t, 3)
+                        gpu.barrier()
+                        if tid < S * INDEX_TILE // 4:
+                            s = tid // (INDEX_TILE // 4)
+                            r = (tid % (INDEX_TILE // 4)) * 4
+                            emit_index_query(s, iq_t, r)
+                        stamp("index_q", iq_t, 4)
 
             if const_expr(with_indexer):
                 # The 128 CTAs without q_b work produce the other 128 index-query
