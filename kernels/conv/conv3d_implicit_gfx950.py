@@ -284,7 +284,7 @@ def compile_conv3d_implicit(param: Conv3dImplicitParam):
         # here with the others; the store itself happens at the end.
         scatter = OutputScatter(scatter_plan, y, bias, elem_ty, ext)
 
-        lds = fx.SharedAllocator(static=False).allocate(SharedStorage).peek()
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
 
         tid = fx.Int32(gpu.thread_id("x"))
         # Which (M, N, K) tile this block owns: WGM swizzle or M chunking,

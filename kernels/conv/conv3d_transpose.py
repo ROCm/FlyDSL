@@ -48,7 +48,7 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
 
     @flyc.kernel(known_block_size=[TR_THREADS, 1, 1])
     def transpose_kernel(out: fx.Tensor, inp: fx.Tensor, s: fx.Int32):
-        lds = fx.SharedAllocator(static=False).allocate(SharedStorage).peek().tile
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek().tile
 
         tid = fx.Int32(gpu.thread_id("x"))
         s0 = fx.Int32(gpu.block_id("x")) * TR_TILE
