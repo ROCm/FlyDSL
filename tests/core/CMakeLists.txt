@@ -13,7 +13,7 @@ function(fly_apply_fast_test_compile_options target)
     -fno-exceptions
     -fno-rtti
     -O0
-    -gline-tables-only
+    -g1
     -Wall
     -Wextra
     -Wno-unused-parameter

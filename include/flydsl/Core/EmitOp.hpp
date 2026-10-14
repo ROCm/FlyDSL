@@ -183,8 +183,9 @@ auto bind(const TraitValue &profile, const EmitBindings &bindings, EmitContext &
           ++scalarIndex;
         }
       },
-      [&](const Pointer<Trait> &) {
-        if (pointerIndex >= bindings.pointers.size() || !bindings.pointers[pointerIndex])
+      [&](const Pointer<Trait> &pointer) {
+        if (pointerIndex >= bindings.pointers.size() ||
+            !Pointer<EmitOp>(pointer, bindings.pointers[pointerIndex], ctx).isValid())
           valid = false;
         ++pointerIndex;
       });
@@ -262,9 +263,10 @@ mlir::Value makeFastDivModF64(EmitContext &ctx, mlir::Value divisor);
 /// get_llvm_type :: Value<Trait> -> mlir::LLVMStructType
 ///
 /// A fully static value has no LLVM type (null). Pointer engines and atoms are converted by the
-/// dialect.
+/// dialect. The value is an aggregate; a leaf lowers as a tuple of it.
 template <class TraitValue>
 mlir::LLVM::LLVMStructType get_llvm_type(const TraitValue &profile, mlir::MLIRContext &context) {
+  static_assert(!std::is_same_v<TraitValue, Leaf<Trait>>, "lower a leaf as a tuple of it");
   auto type = reduce_value<mlir::Type>(
       profile,
       [&](Leaf<Trait> leaf) -> mlir::Type {
@@ -328,6 +330,7 @@ collect_llvm_scalars(const TraitValue &profile, mlir::Value aggregate, EmitConte
 /// `value` as a value of its LLVM type; null when it is fully static.
 template <class EmitValue>
 mlir::FailureOr<mlir::Value> build_llvm_value(const EmitValue &value, EmitContext &ctx) {
+  static_assert(!std::is_same_v<EmitValue, Leaf<EmitOp>>, "lower a leaf as a tuple of it");
   if (mlir::failed(get_bindings(value, ctx)))
     return mlir::failure();
   return reduce_value<mlir::Value>(

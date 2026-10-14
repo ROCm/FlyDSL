@@ -566,6 +566,16 @@ TEST_F(EmitOpCategory, PointerArithmeticAndTensorBindingKeepOpaqueAddressSpace) 
   auto values = get_bindings(*bound, ctx);
   ASSERT_TRUE(mlir::succeeded(values));
   EXPECT_EQ(values->pointers.front(), pointer.value());
+  // A pointer of another context is rejected, as a scalar of another type is.
+  auto foreignContext = mlir::MLIRContext();
+  foreignContext.loadDialect<mlir::LLVM::LLVMDialect>();
+  foreignContext.allowUnregisteredDialects();
+  auto foreignState = mlir::OperationState(mlir::UnknownLoc::get(&foreignContext), "test.ptr");
+  foreignState.addTypes(mlir::LLVM::LLVMPointerType::get(&foreignContext, 3));
+  auto *foreign = mlir::Operation::create(foreignState);
+  EXPECT_TRUE(
+      mlir::failed(bind(profile, EmitBindings{{arg(2).value()}, {foreign->getResult(0)}}, ctx)));
+  foreign->destroy();
 }
 
 TEST_F(EmitOpCategory, PointerByteBoolStorageSurvivesBindingAndOffset) {

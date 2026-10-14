@@ -203,18 +203,22 @@ int precedence(SymbolOp op) {
   switch (op) {
   case SymbolOp::Neg:
   case SymbolOp::Not:
-    return 3;
+    return 4;
   case SymbolOp::Mul:
   case SymbolOp::Div:
   case SymbolOp::Mod:
   case SymbolOp::Shl:
   case SymbolOp::Shr:
-    return 2;
+    return 3;
   case SymbolOp::Add:
   case SymbolOp::Sub:
   case SymbolOp::BitAnd:
   case SymbolOp::BitOr:
   case SymbolOp::BitXor:
+    return 2;
+  case SymbolOp::Lt:
+  case SymbolOp::Eq:
+  case SymbolOp::Ne:
     return 1;
   default:
     return 0;
@@ -254,11 +258,11 @@ void printExpr(const SymbolNode *node, llvm::raw_ostream &os, int parentPrec) {
     break;
   case SymbolOp::Neg:
     os << '-';
-    printExpr(lhs, os, 3);
+    printExpr(lhs, os, prec);
     break;
   case SymbolOp::Not:
     os << '~';
-    printExpr(lhs, os, 3);
+    printExpr(lhs, os, prec);
     break;
   case SymbolOp::Abs:
     os << "abs(";
@@ -321,19 +325,19 @@ void printExpr(const SymbolNode *node, llvm::raw_ostream &os, int parentPrec) {
     printExpr(rhs, os, prec + 1);
     break;
   case SymbolOp::Lt:
-    printExpr(lhs, os, 0);
+    printExpr(lhs, os, prec + 1);
     os << '<';
-    printExpr(rhs, os, 0);
+    printExpr(rhs, os, prec + 1);
     break;
   case SymbolOp::Eq:
-    printExpr(lhs, os, 0);
+    printExpr(lhs, os, prec + 1);
     os << "==";
-    printExpr(rhs, os, 0);
+    printExpr(rhs, os, prec + 1);
     break;
   case SymbolOp::Ne:
-    printExpr(lhs, os, 0);
+    printExpr(lhs, os, prec + 1);
     os << "!=";
-    printExpr(rhs, os, 0);
+    printExpr(rhs, os, prec + 1);
     break;
   case SymbolOp::Ceil:
     printCall("ceil_div", node, os);
@@ -452,6 +456,8 @@ private:
   }
 
   SymbolExprRef parseUnary() {
+    if (text_.size() > 1 && text_[0] == '-' && llvm::isDigit(text_[1]))
+      return parsePrimary();
     if (consume('-')) {
       auto value = parseUnary();
       return value ? apply(SymbolOp::Neg, value) : nullptr;

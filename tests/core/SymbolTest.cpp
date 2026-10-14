@@ -438,8 +438,13 @@ TEST(SymbolCategory, SharedSymbolExpressionsSurviveConcurrentUse) {
 // A leaf prints to text that parses back to the same leaf.
 TEST(SymbolCategory, TextRoundTrip) {
   auto sum = (n("N") + n("M") * i(3)).withRange(0, 128);
+  // A comparison inside arithmetic keeps its parentheses, and a negative
+  // constant stays one literal.
+  auto cmp = eq(n("N"), n("M"));
+  EXPECT_EQ(toString(cmp + i(4)), "(N==M)+4");
   for (auto leaf :
-       {Sy::getRatio(3, 7), Sy::getBasis(sum, {1}), ceil_div(n("N"), i(4)), lshr(n("N"), i(2))}) {
+       {Sy::getRatio(3, 7), Sy::getBasis(sum, {1}), ceil_div(n("N"), i(4)), lshr(n("N"), i(2)),
+        cmp + i(4), lt(cmp, n("K")), n("N") + i(-4), n("N") * i(-3)}) {
     auto parsed = Sy::fromString(toString(leaf));
     ASSERT_TRUE(parsed.has_value()) << toString(leaf);
     EXPECT_EQ(*parsed, leaf) << toString(leaf);
