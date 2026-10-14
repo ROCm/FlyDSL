@@ -208,6 +208,7 @@ class CompilationContext:
         # Callables invoked on each GPU hipModule_t after ExecutionEngine
         # loads it.  Populated by ExternFunction when module_init_fn is set.
         self.post_load_processors: list = []
+        self.ktrace_buf_arg = None
 
     @classmethod
     def get_current(cls) -> Optional["CompilationContext"]:
@@ -387,6 +388,9 @@ class KernelLauncher:
         kernel_operands = []
         for arg in kernel_args:
             kernel_operands.extend(extract_to_ir_values(arg))
+        _ktrace_ctx = CompilationContext.get_current()
+        if _ktrace_ctx is not None and _ktrace_ctx.ktrace_buf_arg is not None:
+            kernel_operands.append(_ktrace_ctx.ktrace_buf_arg)
 
         with launch_loc:
             grid_x = Index(grid_dims[0]).ir_value()
@@ -553,6 +557,10 @@ class KernelFunction:
         kernel_arg_types = []
         for value in param_values:
             kernel_arg_types.extend(get_ir_types(value))
+
+        ktrace_traced = ctx.ktrace_buf_arg is not None
+        if ktrace_traced:
+            kernel_arg_types.append(ctx.ktrace_buf_arg.type)
 
         kernel_id = ctx.next_kernel_id()
         if self._name is not None:

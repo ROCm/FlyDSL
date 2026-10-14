@@ -611,8 +611,8 @@ def _make_raw_buffer_rsrc(tensor):
         [
             base_lo,
             base_hi,
-            buffer_ops._create_i32_constant(0xFFFFFFFF),
-            buffer_ops._create_i32_constant(buffer_ops._get_buffer_flags()),
+            fx.Int32(0xFFFFFFFF),
+            fx.Int32(buffer_ops._get_buffer_flags()),
         ],
         fx.Int32,
     ).ir_value()

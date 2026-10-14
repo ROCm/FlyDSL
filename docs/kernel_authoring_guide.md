@@ -19,6 +19,7 @@ This guide covers writing GPU kernels with FlyDSL: the `@flyc.jit` and `@flyc.ke
 | **Constants** | `fx.Int32` / `fx.Int64` / `fx.Float32` | Create typed DSL constants (`fx.Int64` for index/offset values; `fx.Index` is deprecated) |
 | **Range loop** | `range_constexpr(n)` | Compile-time unrolled loop |
 | **Buffer load** | `buffer_ops.buffer_load(rsrc, off)` | AMD buffer load intrinsic |
+| **Scalar buffer load** | `fx.rocdl.s_buffer_load(rsrc, off, count=1)` | Wave-uniform AMD buffer load; `off` is in i32 elements and the result is `fx.Int32` (or a four-word `fx.Vector` with `count=4`) |
 
 ---
 
