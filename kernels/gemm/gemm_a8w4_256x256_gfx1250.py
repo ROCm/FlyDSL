@@ -111,8 +111,7 @@ def launch_gemm_a8w4_256x256(
     kernel_name = format_kernel_name(
         f"gemm_a8w4_mx32_compute_t{tile_m}x{tile_n}x{tile_k}"
         f"_mw{m_warp}_nw{n_warp}_nb{num_buffers}_sk{split_k}"
-        f"_cm{cluster_m}_cn{cluster_n}"
-        + ("_apre" if a_preshuffle else "")
+        f"_cm{cluster_m}_cn{cluster_n}" + ("_apre" if a_preshuffle else "")
     )
 
     @flyc.kernel(name=kernel_name, known_block_size=[block, 1, 1])

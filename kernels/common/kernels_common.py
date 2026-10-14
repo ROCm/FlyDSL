@@ -19,6 +19,7 @@ from kernels.common.mem_ops import _create_llvm_ptr
 from kernels.common.mem_ops import atomic_add as atomic_add
 from kernels.common.mem_ops import get_llvm_ptr as get_llvm_ptr
 
+
 def format_kernel_name(name: str) -> str:
     """Sanitize a kernel symbol name for the amdhsa assembler.
 
