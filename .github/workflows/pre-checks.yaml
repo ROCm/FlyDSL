@@ -28,7 +28,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install style tools
-        run: python3 -m pip install black ruff pyyaml
+        run: |
+          python3 -m pip install --upgrade "pip>=25.1"
+          python3 -m pip install pyyaml --group style
 
       - name: Install reviewdog
         if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}

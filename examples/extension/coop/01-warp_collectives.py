@@ -12,8 +12,8 @@ warp compacted its positive elements, and how many the warp keeps in total.
      the group to one size on either, which is what lets this one source run on
      both. On a wave64 target the block is then half a wave, and the named width
      is also what keeps the fold off the lanes that were never launched.
-  2. **Every lane gets the answer.** Both collectives are all-to-all, so the
-     result needs no follow-up broadcast.
+  2. **Every lane gets the total.** Reduction returns the group aggregate to
+     every lane, so no follow-up broadcast is needed.
 """
 
 import torch

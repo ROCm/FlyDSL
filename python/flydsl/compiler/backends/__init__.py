@@ -19,7 +19,9 @@ from functools import lru_cache
 from typing import Dict, Optional, Type
 
 from ...utils import env
+from .base import AOTRuntimeConfig as AOTRuntimeConfig
 from .base import BaseBackend, GPUTarget
+from .ktrace import KtraceBackend
 
 _registry: Dict[str, Type[BaseBackend]] = {}
 
@@ -43,6 +45,21 @@ def register_backend(name: str, backend_cls: type, *, force: bool = False) -> No
 def compile_backend_name() -> str:
     """Return the active backend id from env (default ``'rocm'``)."""
     return (env.compile.backend or "rocm").lower()
+
+
+def _get_backend_class(name: Optional[str] = None) -> Type[BaseBackend]:
+    """Resolve a registered backend class without detecting a GPU target.
+
+    *name* defaults to ``FLYDSL_COMPILE_BACKEND`` (or ``'rocm'``).
+    """
+    name = (name or compile_backend_name()).lower()
+    backend_cls = _registry.get(name)
+    if backend_cls is None:
+        if name in _import_errors:
+            raise ImportError(f"Compile backend '{name}' failed to import") from _import_errors[name]
+        available = ", ".join(sorted(_registry)) or "(none)"
+        raise ValueError(f"Unknown compile backend '{name}'. Registered backends: {available}")
+    return backend_cls
 
 
 def resolve_llvm_address_space(address_space) -> int:
@@ -99,6 +116,10 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
             raise ValueError(f"Unknown compile backend '{name}'. Registered backends: {available}")
         arch = backend_cls.detect_target().arch
     return _make_backend(name, arch)
+
+
+def get_ktrace_backend(name: Optional[str] = None) -> KtraceBackend:
+    return _get_backend_class(name).ktrace_backend()
 
 
 def current_target() -> GPUTarget:
@@ -178,9 +199,11 @@ _discover_entry_point_backends()
 __all__ = [
     "BaseBackend",
     "GPUTarget",
+    "KtraceBackend",
     "compile_backend_name",
     "current_target",
     "get_backend",
+    "get_ktrace_backend",
     "register_backend",
     "resolve_llvm_address_space",
 ]

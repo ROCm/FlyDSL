@@ -3,29 +3,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""List non-deprecated stable API paths under ``docs/api_stability.md``.
+"""List or compare stable API paths under ``docs/api_stability.md``.
 
 The collector is deliberately static: it reads export manifests and the
 documentation instead of importing ``flydsl``.  This keeps it usable before
 the optional target bindings have been built.  §3 deprecated APIs remain
-compatible, but are intentionally excluded because that table is maintained as
-a separate retirement-debt list.  The catalog lists declared namespaces and
-exports; stable type entries carry their member contracts without expanding
-every Python member path.  Equivalent top-level ``flydsl.expr.<name>`` aliases
-are omitted in favor of their defining direct-child module paths.
+compatible, but are excluded by default because that table is maintained as
+a separate retirement-debt list; use --include-deprecated for release review.
+The catalog lists declared namespaces and exports; stable type entries carry
+their member contracts without expanding every Python member path.
+Equivalent top-level ``flydsl.expr.<name>`` aliases
+are omitted in favor of their defining direct-child module paths. Extension
+library aliases use their canonical ``flydsl.extension`` paths.
+
+Comparison reads two committed Git snapshots and checks old_paths <= new_paths.
+It includes deprecated exports and equivalent public aliases. It does not
+check signatures or semantics. Exit codes: 0 for inclusion, 1 for missing old
+paths, and 2 for invalid arguments or unreadable source.
 
 Usage:
     python3 scripts/list_stable_apis.py
     python3 scripts/list_stable_apis.py --format json
+    python3 scripts/list_stable_apis.py --include-deprecated --format json
+    python3 scripts/list_stable_apis.py --old v0.3.3 --new HEAD --format json
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import io
 import json
 import re
+import subprocess
 import sys
+import tarfile
+import tempfile
 from pathlib import Path
 
 
@@ -59,7 +72,47 @@ def _assignment_value(tree: ast.Module, name: str, path: Path) -> ast.expr:
     return value
 
 
-def _string_list(tree: ast.Module, name: str, path: Path) -> list[str]:
+def _export_list_value(tree: ast.Module, value: ast.expr, path: Path, active: frozenset[Path]) -> list[str]:
+    """Read literal exports and compositions of relative modules' __all__ lists."""
+    if isinstance(value, (ast.List, ast.Tuple)):
+        result = []
+        for item in value.elts:
+            if isinstance(item, ast.Starred):
+                result.extend(_export_list_value(tree, item.value, path, active))
+            elif isinstance(item, ast.Constant) and isinstance(item.value, str):
+                result.append(item.value)
+            else:
+                break
+        else:
+            return result
+    elif isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        return _export_list_value(tree, value.left, path, active) + _export_list_value(tree, value.right, path, active)
+    elif (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in {"list", "tuple"}
+        and len(value.args) == 1
+        and not value.keywords
+    ):
+        return _export_list_value(tree, value.args[0], path, active)
+    elif isinstance(value, ast.Attribute) and value.attr == "__all__" and isinstance(value.value, ast.Name):
+        for node in tree.body:
+            if not isinstance(node, ast.ImportFrom) or not node.level:
+                continue
+            for alias in node.names:
+                if (alias.asname or alias.name) != value.value.id:
+                    continue
+                target = "." * node.level + ".".join(filter(None, (node.module, alias.name)))
+                module_file = _module_file(path.parent, target)
+                if module_file is not None:
+                    return _string_list(_parse_python(module_file), "__all__", module_file, active)
+    raise StableApiCollectionError(f"{path}:{value.lineno}: unsupported static export list: {ast.unparse(value)}")
+
+
+def _string_list(tree: ast.Module, name: str, path: Path, active: frozenset[Path] = frozenset()) -> list[str]:
+    if path.resolve() in active:
+        raise StableApiCollectionError(f"{path}: cyclic {name} reference")
+    active = active | {path.resolve()}
     result = None
     top_level_nodes = set(tree.body)
     for node in ast.walk(tree):
@@ -92,10 +145,15 @@ def _string_list(tree: ast.Module, name: str, path: Path) -> list[str]:
             raise StableApiCollectionError(f"{path}:{node.lineno}: {name} only supports += with a literal string list")
 
         value = node.value
-        try:
-            values = ast.literal_eval(value)
-        except (TypeError, ValueError) as exc:
-            raise StableApiCollectionError(f"{path}:{node.lineno}: {name} must use a literal list of strings") from exc
+        if name == "__all__":
+            values = _export_list_value(tree, value, path, active)
+        else:
+            try:
+                values = ast.literal_eval(value)
+            except (TypeError, ValueError) as exc:
+                raise StableApiCollectionError(
+                    f"{path}:{node.lineno}: {name} must use a literal list of strings"
+                ) from exc
         if not isinstance(values, (list, tuple)) or not all(isinstance(item, str) for item in values):
             raise StableApiCollectionError(f"{path}:{node.lineno}: {name} must be a list of strings")
 
@@ -132,6 +190,9 @@ def _string_mapping(tree: ast.Module, name: str, path: Path) -> dict[str, str]:
 
 
 def _module_file(package_dir: Path, dotted_name: str) -> Path | None:
+    level = len(dotted_name) - len(dotted_name.lstrip("."))
+    for _ in range(max(0, level - 1)):
+        package_dir = package_dir.parent
     path = package_dir.joinpath(*dotted_name.lstrip(".").split("."))
     module = path.with_suffix(".py")
     package = path / "__init__.py"
@@ -146,12 +207,13 @@ def _public_name(name: str) -> bool:
     return bool(name) and not name.startswith("_")
 
 
-def _public_path(path: str) -> bool:
-    return all(_public_name(part) for part in path.split("."))
+def _public_path(path: str, *, exclude_experimental: bool = True) -> bool:
+    return all(_public_name(part) and (not exclude_experimental or part != "experimental") for part in path.split("."))
 
 
 def _add_path(paths: set[str], path: str) -> None:
-    if _public_path(path):
+    # Experimental exclusion depends on the policy in the inspected revision.
+    if _public_path(path, exclude_experimental=False):
         paths.add(path)
 
 
@@ -165,12 +227,15 @@ def _star_imported_modules(expr_init: Path) -> list[str]:
     return modules
 
 
-def _collect_backend_exports(
+def _collect_namespace_exports(
     module_file: Path,
     public_path: str,
     paths: set[str],
     seen: set[tuple[Path, str]],
+    exclude_experimental: bool = True,
 ) -> None:
+    if not _public_path(public_path, exclude_experimental=exclude_experimental):
+        return
     key = (module_file.resolve(), public_path)
     if key in seen:
         return
@@ -186,21 +251,23 @@ def _collect_backend_exports(
 
         child_module = _module_file(module_dir, name)
         if child_module is not None:
-            _collect_backend_exports(child_module, child_public_path, paths, seen)
+            _collect_namespace_exports(child_module, child_public_path, paths, seen, exclude_experimental)
 
 
-def _collect_expr_paths(repo_root: Path, paths: set[str]) -> None:
+def _collect_expr_paths(repo_root: Path, paths: set[str], exclude_experimental: bool) -> None:
     expr_dir = repo_root / "python" / "flydsl" / "expr"
     expr_init = expr_dir / "__init__.py"
     expr_tree = _parse_python(expr_init)
 
     _add_path(paths, "flydsl.expr")
     for module_name in _star_imported_modules(expr_init):
+        module_path = f"flydsl.expr.{module_name}"
+        if not _public_path(module_path, exclude_experimental=exclude_experimental):
+            continue
         module_file = _module_file(expr_dir, module_name)
         if module_file is None:
             raise StableApiCollectionError(f"{expr_init}: cannot resolve direct child module {module_name!r}")
 
-        module_path = f"flydsl.expr.{module_name}"
         _add_path(paths, module_path)
         for name in _string_list(_parse_python(module_file), "__all__", module_file):
             if not _public_name(name):
@@ -208,12 +275,42 @@ def _collect_expr_paths(repo_root: Path, paths: set[str]) -> None:
             _add_path(paths, f"{module_path}.{name}")
 
     for public_name, target in _string_mapping(expr_tree, "_BACKEND_MODULES", expr_init).items():
-        if not _public_name(public_name):
+        if not _public_path(f"flydsl.expr.{public_name}", exclude_experimental=exclude_experimental):
             continue
         module_file = _module_file(expr_dir, target)
         if module_file is None:
             raise StableApiCollectionError(f"{expr_init}: cannot resolve lazy backend {target!r}")
-        _collect_backend_exports(module_file, f"flydsl.expr.{public_name}", paths, set())
+        _collect_namespace_exports(module_file, f"flydsl.expr.{public_name}", paths, set(), exclude_experimental)
+
+
+def _library_modules(repo_root: Path) -> dict[str, tuple[Path, str]]:
+    document = (repo_root / "docs" / "api_stability.md").read_text()
+    if not re.search(r"^### \d+\.\d+ `flydsl\.extension`\s*$", document, re.MULTILINE):
+        return {}  # Releases before the extension stability commitment.
+    expr_init = repo_root / "python" / "flydsl" / "expr" / "__init__.py"
+    tree = _parse_python(expr_init)
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    manifest = "_EXTENSION_MODULES" if "_EXTENSION_MODULES" in names else "_LIBRARY_MODULES"
+    libraries = {}
+    for alias, target in _string_mapping(tree, manifest, expr_init).items():
+        module_file = _module_file(expr_init.parent, target)
+        if module_file is None:
+            raise StableApiCollectionError(f"{expr_init}: cannot resolve extension library {target!r}")
+        module_path = module_file.relative_to(repo_root / "python").with_suffix("")
+        if module_path.name == "__init__":
+            module_path = module_path.parent
+        public_path = ".".join(module_path.parts)
+        if not public_path.startswith("flydsl.extension."):
+            raise StableApiCollectionError(f"{expr_init}: library {target!r} must be under flydsl.extension")
+        libraries[alias] = (module_file, public_path)
+    return libraries
+
+
+def _collect_extension_paths(repo_root: Path, paths: set[str], exclude_experimental: bool) -> None:
+    libraries = _library_modules(repo_root)
+    _add_path(paths, "flydsl.extension")
+    for module_file, public_path in libraries.values():
+        _collect_namespace_exports(module_file, public_path, paths, set(), exclude_experimental)
 
 
 def _collect_compiler_paths(repo_root: Path, paths: set[str]) -> None:
@@ -262,17 +359,22 @@ def _table_api_paths(
 def _collect_documented_paths(repo_root: Path, paths: set[str]) -> None:
     document = (repo_root / "docs" / "api_stability.md").read_text()
 
-    for path in _table_api_paths(_markdown_section(document, "### 2.3")):
+    heading = re.search(r"^### \d+\.\d+ Other explicitly stable APIs\s*$", document, re.MULTILINE)
+    if heading is None:
+        raise StableApiCollectionError("docs/api_stability.md has no supported explicit stable API table")
+    for path in _table_api_paths(_markdown_section(document, heading.group())):
         _add_path(paths, path)
 
 
-def _deprecated_exclusions(repo_root: Path) -> tuple[set[str], set[str]]:
+def _deprecated_exclusions(repo_root: Path, exclude_experimental: bool) -> tuple[set[str], set[str]]:
     expr_dir = repo_root / "python" / "flydsl" / "expr"
     expr_init = expr_dir / "__init__.py"
     expr_tree = _parse_python(expr_init)
 
     direct_export_aliases: dict[str, set[str]] = {}
     for module_name in _star_imported_modules(expr_init):
+        if not _public_path(f"flydsl.expr.{module_name}", exclude_experimental=exclude_experimental):
+            continue
         module_file = _module_file(expr_dir, module_name)
         if module_file is None:
             raise StableApiCollectionError(f"{expr_init}: cannot resolve direct child module {module_name!r}")
@@ -286,22 +388,31 @@ def _deprecated_exclusions(repo_root: Path) -> tuple[set[str], set[str]]:
                 )
 
     lazy_backends = set(_string_mapping(expr_tree, "_BACKEND_MODULES", expr_init))
+    libraries = _library_modules(repo_root)
     document = (repo_root / "docs" / "api_stability.md").read_text()
+    deprecated_section = _markdown_section(document, "## 3.")
     deprecated_paths = _table_api_paths(
-        _markdown_section(document, "## 3."),
+        deprecated_section,
         source_prefix="fx.",
         target_prefix="flydsl.expr.",
     )
+    deprecated_paths.extend(_table_api_paths(deprecated_section))
 
     exact: set[str] = set()
     prefixes: set[str] = set()
     for path in deprecated_paths:
+        if path.startswith("flydsl.extension."):
+            prefixes.add(path)
+            continue
         parts = path.split(".")
         if parts[:2] != ["flydsl", "expr"] or len(parts) == 2:
             exact.add(path)
             continue
 
         name, *member_path = parts[2:]
+        if name in libraries:
+            prefixes.add(".".join((libraries[name][1], *member_path)))
+            continue
         if not member_path and name in lazy_backends:
             prefixes.add(path)
             continue
@@ -312,27 +423,102 @@ def _deprecated_exclusions(repo_root: Path) -> tuple[set[str], set[str]]:
     return exact, prefixes
 
 
-def collect_stable_api_paths(repo_root: Path) -> list[str]:
-    """Return sorted, non-deprecated stable API paths from the current source.
+def collect_stable_api_paths(
+    repo_root: Path, *, include_deprecated: bool = False, include_aliases: bool = False
+) -> list[str]:
+    """Return sorted stable API paths from the current source.
 
     Direct-child exports use ``flydsl.expr.<module>.<name>`` as their canonical
     path; their equivalent top-level ``flydsl.expr.<name>`` aliases are omitted.
-    §3 paths are deliberately omitted: they remain stable for compatibility but
-    belong to the separate deprecated API list.
+    Extension aliases use canonical ``flydsl.extension`` paths. §3 paths are
+    omitted by default; include_deprecated retains exported deprecated APIs,
+    but does not add documented names absent from the source manifests.
+    include_aliases expands equivalent public access paths for comparison.
     """
 
+    document = (repo_root / "docs" / "api_stability.md").read_text()
+    exclude_experimental = "`experimental`" in _markdown_section(document, "## 2.")
     paths: set[str] = set()
-    _collect_expr_paths(repo_root, paths)
+    _collect_expr_paths(repo_root, paths, exclude_experimental)
     _collect_compiler_paths(repo_root, paths)
+    if re.search(r"^### \d+\.\d+ `flydsl\.extension`\s*$", document, re.MULTILINE):
+        _collect_extension_paths(repo_root, paths, exclude_experimental)
     _collect_documented_paths(repo_root, paths)
-    exact_exclusions, prefix_exclusions = _deprecated_exclusions(repo_root)
-    paths.difference_update(exact_exclusions)
-    paths = {
-        path
-        for path in paths
-        if not any(path == prefix or path.startswith(f"{prefix}.") for prefix in prefix_exclusions)
-    }
+    if not include_deprecated:
+        exact_exclusions, prefix_exclusions = _deprecated_exclusions(repo_root, exclude_experimental)
+        paths.difference_update(exact_exclusions)
+        paths = {
+            path
+            for path in paths
+            if not any(path == prefix or path.startswith(f"{prefix}.") for prefix in prefix_exclusions)
+        }
+    if include_aliases:
+        aliases = {
+            f"flydsl.expr.{module}": "flydsl.expr"
+            for module in _star_imported_modules(repo_root / "python/flydsl/expr/__init__.py")
+        }
+        for prefix, alias in aliases.items():
+            paths.update(alias + path[len(prefix) :] for path in tuple(paths) if path.startswith(prefix + "."))
+        for alias, (_, prefix) in _library_modules(repo_root).items():
+            paths.update(
+                f"flydsl.expr.{alias}" + path[len(prefix) :]
+                for path in tuple(paths)
+                if path == prefix or path.startswith(prefix + ".")
+            )
+    paths = {path for path in paths if _public_path(path, exclude_experimental=exclude_experimental)}
     return sorted(paths)
+
+
+def _git(repo_root: Path, *arguments: str) -> bytes:
+    try:
+        return subprocess.run(["git", "-C", str(repo_root), *arguments], check=True, capture_output=True).stdout
+    except subprocess.CalledProcessError as exc:
+        raise StableApiCollectionError(exc.stderr.decode(errors="replace").strip()) from exc
+    except OSError as exc:
+        raise StableApiCollectionError(f"cannot run git: {exc}") from exc
+
+
+def _revision_paths(repo_root: Path, commit: str) -> set[str]:
+    archive = _git(repo_root, "archive", "--format=tar", commit, "python/flydsl", "docs/api_stability.md")
+    # Plain source snapshots, not worktrees: no checkout or Git metadata is changed.
+    with tempfile.TemporaryDirectory(prefix="flydsl-api-") as directory:
+        root = Path(directory)
+        with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+            for entry in source:
+                if entry.isdir():
+                    continue
+                path = Path(entry.name)
+                if not entry.isfile() or path.is_absolute() or ".." in path.parts:
+                    raise StableApiCollectionError(f"unsupported source archive entry: {entry.name}")
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source.extractfile(entry) as contents:
+                    target.write_bytes(contents.read())
+        return set(collect_stable_api_paths(root, include_deprecated=True, include_aliases=True))
+
+
+def compare_stable_api_paths(repo_root: Path, old: str, new: str) -> dict:
+    """Check exact old/new revisions in the caller's direction, including aliases."""
+    endpoints = []
+    inventories = []
+    for label, revision in (("old", old), ("new", new)):
+        try:
+            commit = _git(repo_root, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}")
+            sha = commit.decode().strip()
+            paths = _revision_paths(repo_root, sha)
+        except (StableApiCollectionError, OSError, tarfile.TarError) as exc:
+            raise StableApiCollectionError(f"{label} revision {revision!r}: {exc}") from exc
+        endpoints.append({"ref": revision, "commit": sha, "count": len(paths)})
+        inventories.append(paths)
+    old_paths, new_paths = inventories
+    return {
+        "old": endpoints[0],
+        "new": endpoints[1],
+        "is_superset": old_paths <= new_paths,
+        "added": sorted(new_paths - old_paths),
+        "removed": sorted(old_paths - new_paths),
+        "retained": sorted(old_paths & new_paths),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -344,11 +530,38 @@ def main(argv: list[str] | None = None) -> int:
         help="FlyDSL repository root (default: inferred from this script)",
     )
     parser.add_argument("--format", choices=("lines", "json"), default="lines", help="Output format (default: lines)")
+    parser.add_argument(
+        "--include-deprecated",
+        action="store_true",
+        help="Include deprecated APIs when listing (always on for comparison)",
+    )
+    parser.add_argument("--old", help="Old version: commit SHA, tag, or other commit reference")
+    parser.add_argument("--new", help="New version: commit SHA, tag, or other commit reference; checked against --old")
     args = parser.parse_args(argv)
+    if (args.old is None) != (args.new is None):
+        parser.error("--old and --new must be specified together")
 
     try:
-        paths = collect_stable_api_paths(args.repo_root.resolve())
-    except StableApiCollectionError as exc:
+        if args.old is not None:
+            result = compare_stable_api_paths(args.repo_root.resolve(), args.old, args.new)
+            if args.format == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                for label in ("old", "new"):
+                    endpoint = result[label]
+                    print(f"{label}: {endpoint['ref']} ({endpoint['commit']}), {endpoint['count']} paths")
+                status = "PASS" if result["is_superset"] else "FAIL"
+                print(f"{status}: new stable API paths contain all old paths = {result['is_superset']}")
+                print(
+                    f"Retained: {len(result['retained'])}; added: {len(result['added'])}; removed: {len(result['removed'])}"
+                )
+                for key, marker in (("removed", "-"), ("added", "+")):
+                    for path in result[key]:
+                        print(f"{marker} {path}")
+                print("Path inclusion only; signatures, semantics, and retirement windows require review.")
+            return 0 if result["is_superset"] else 1
+        paths = collect_stable_api_paths(args.repo_root.resolve(), include_deprecated=args.include_deprecated)
+    except (StableApiCollectionError, OSError) as exc:
         parser.error(str(exc))
 
     if args.format == "json":

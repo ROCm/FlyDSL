@@ -142,8 +142,17 @@ def test_a_policy_that_is_not_implemented_is_refused_by_name():
     Only a caller who went looking past the default can reach this — the
     default is always a policy that is implemented.
     """
-    with pytest.raises(NotImplementedError, match="BlockScanAlgorithm.RAKING_MEMOIZE is not implemented"):
-        fx.coop.BlockScan[fx.Float32, 64, fx.coop.BlockScanAlgorithm.RAKING_MEMOIZE]
+
+    class _MissingMeta(_PinnedMeta):
+        _shared_storage = {_Policy.ALPHA: _storage}
+
+    class Missing(metaclass=_MissingMeta):
+        block_threads = None
+
+    with pytest.raises(NotImplementedError, match="_Policy.BETA is not implemented"):
+        Missing[fx.Float32, 64, _Policy.BETA]
+    for policy in fx.coop.BlockScanAlgorithm:
+        assert fx.coop.BlockScan[fx.Float32, 64, policy].SharedStorage is not None
 
 
 # ── the cache keeps the answers apart ─────────────────────────────────────
@@ -178,8 +187,7 @@ def test_the_shipped_defaults_are_target_independent(target):
     """Neither collective overrides the hook yet, and this is what says so.
 
     ``BlockReduce`` measured ``WARP_REDUCTIONS`` ahead of ``RAKING`` on both a
-    wave64 and a wave32 target, and ``BlockScan`` has only one policy
-    implemented. A target that inverts either is what would make an override
+    wave64 and a wave32 target, and ``BlockScan`` defaults to WARP_SCANS. A target that inverts either is what would make an override
     the right change — and would land here first.
     """
     assert (
@@ -208,3 +216,26 @@ def test_the_portable_collectives_inherit_the_same_hook(target):
         assert type(portable)._default_algorithm_for(portable, target) is type(dispatched)._default_algorithm_for(
             dispatched, target
         )
+
+
+@pytest.mark.l1a_compile_no_target_dialect
+@pytest.mark.parametrize("target", (CDNA, RDNA), ids=lambda t: t.arch)
+def test_subwarp_support_is_explicit(monkeypatch, target):
+    from flydsl.extension.coop.block import _spec
+
+    monkeypatch.setattr(_spec, "current_target", lambda: target)
+    monkeypatch.setattr(_spec, "num_warp_threads", lambda: target.warp_size)
+    # A future block primitive must opt in before using narrower warp widths.
+    with pytest.raises(ValueError, match="multiple of the target warp size"):
+        Pinned[fx.Int32, target.warp_size // 2]
+    for namespace in (fx.coop, fx.coop.universal):
+        for primitive in (namespace.BlockReduce, namespace.BlockScan):
+            for threads in (1, 2, target.warp_size // 2):
+                specialized = primitive[fx.Int32, threads]
+                assert specialized.warp_threads == threads
+                assert specialized.num_warps == 1
+            for threads in (3, target.warp_size - 1):
+                with pytest.raises(ValueError, match="power of two"):
+                    primitive[fx.Int32, threads]
+            with pytest.raises(ValueError, match="multiple of the target warp size"):
+                primitive[fx.Int32, target.warp_size + 1]

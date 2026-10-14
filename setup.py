@@ -424,6 +424,7 @@ setup(
             "_mlir_libs/libMLIRPythonSupport-*.so",
             "_mlir_libs/lib*.so",
             "_mlir_libs/lib*.so.*",
+            "_mlir_libs/libfly_*_aot_runtime.a",
             "*.pyi",
         ],
     },

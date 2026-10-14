@@ -83,6 +83,10 @@ def MFMA_Scale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, *, opsel_a=
     Current atom state:
     - `scale_a` (`i32`), default zero
     - `scale_b` (`i32`), default zero
+
+    An extra scale operand in an atom-call group (``[data, scale]``) overrides
+    the corresponding ``scale_a`` or ``scale_b`` state for that call. If a
+    group omits the scale operand, its scale is read from atom state.
     """
     ty_a = elem_ty_a.ir_type if hasattr(elem_ty_a, "ir_type") else elem_ty_a
     if elem_ty_b is None:

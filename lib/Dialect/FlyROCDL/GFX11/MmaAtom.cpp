@@ -202,12 +202,17 @@ static Value buildWmmaOp(OpBuilder &builder, Location loc, StringRef opName, Typ
   return op->getResult(0);
 }
 
-FailureOr<Value> MmaOpGFX11_WMMAType::emitAtomCallSSA(OpBuilder &builder, Location loc,
-                                                      Type /*resultTy*/, Type /*mmaAtomTyArg*/,
-                                                      Type /*dTyArg*/, Type /*aTyArg*/,
-                                                      Type /*bTyArg*/, Type /*cTyArg*/,
-                                                      Value /*atomVal*/, Value /*d*/, Value a,
-                                                      Value b, Value c) const {
+FailureOr<Value> MmaOpGFX11_WMMAType::emitAtomCallSSA(
+    OpBuilder &builder, Location loc, Type /*resultTy*/, Type /*mmaAtomTyArg*/, Type /*dTyArg*/,
+    TypeRange /*aTyArg*/, TypeRange /*bTyArg*/, Type /*cTyArg*/, Value /*atomVal*/, Value /*d*/,
+    ValueRange aValues, ValueRange bValues, Value c) const {
+  if (aValues.size() != 1 || bValues.size() != 1) {
+    emitError(loc, "this MMA atom does not support auxiliary operands");
+    return failure();
+  }
+  Value a = aValues.front();
+  Value b = bValues.front();
+
   int32_t m = getM();
   int32_t n = getN();
   int32_t k = getK();
@@ -264,9 +269,17 @@ FailureOr<Value> MmaOpGFX11_WMMAType::emitAtomCallSSA(OpBuilder &builder, Locati
 }
 
 LogicalResult MmaOpGFX11_WMMAType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
-                                                Type /*dMemTy*/, Type /*aMemTy*/, Type /*bMemTy*/,
-                                                Type /*cMemTy*/, Value atomVal, Value dPtr,
-                                                Value aPtr, Value bPtr, Value cPtr) const {
+                                                Type /*dMemTy*/, TypeRange /*aMemTy*/,
+                                                TypeRange /*bMemTy*/, Type /*cMemTy*/,
+                                                Value atomVal, Value dPtr, ValueRange aPtrs,
+                                                ValueRange bPtrs, Value cPtr) const {
+  if (aPtrs.size() != 1 || bPtrs.size() != 1) {
+    emitError(loc, "this MMA atom does not support auxiliary operands");
+    return failure();
+  }
+  Value aPtr = aPtrs.front();
+  Value bPtr = bPtrs.front();
+
   Type elemTyA = getElemTyA();
   Type elemTyB = getElemTyB();
   Type elemTyAcc = getElemTyAcc();

@@ -133,7 +133,7 @@ thumb: **M ≤ 512 → likely memory/latency-bound; M > 512 → likely compute-b
 GEMM tiles the output `C[M, N]` and the reduction `K` into blocks. With a 256-thread
 block (4 waves × 64 lanes) the typical mapping is:
 
-```
+```text
 block_x → M tiles (tile_m rows)      wave_id  = tid // 64  → N partitioning
 block_y → N tiles (tile_n cols)      lane_id  = tid % 64   → M + N within wave
 ```
@@ -166,7 +166,7 @@ num_acc_n  = n_per_wave // 16        # N-direction accumulators per wave
 
 A quick MFMA count sanity check (FP8, K64 micro-step = 2× K32 MFMA):
 
-```
+```text
 MFMA_per_tile = k_unroll × m_repeat × num_acc_n × 2      # k_unroll = tile_k_bytes // pack // 64
 # tile 64×256×128, FP8: (128/64) × (64/16) × (256/4/16) × 2 = 2×4×4×2 = 64
 ```
@@ -181,7 +181,7 @@ With `lds_stage=2`, allocate **two** LDS buffers for the A tile. While one buffe
 feeds the MFMAs, the next K-tile's A is loaded into the other, hiding the
 global→LDS latency:
 
-```
+```text
 Buffer PONG: [compute k=0] [  load k=2  ] [compute k=2] ...
 Buffer PING: [  load k=1  ] [compute k=1] [  load k=3  ] ...
 ```
@@ -253,7 +253,7 @@ Global loads (`buffer_load`) are **asynchronous**: the instruction returns
 immediately and data arrives later. Issue the *next* iteration's loads before
 consuming the *current* iteration's data, so load latency overlaps compute:
 
-```
+```text
 without: |load|stall|compute|load|stall|compute|
 with:    |load0|compute0+load1|compute1+load2|compute2|
 ```
@@ -266,6 +266,8 @@ load as loop-invariant). Use FlyDSL's **runtime** loop with loop-carried values
 to create genuine SSA phi nodes:
 
 ```python
+from flydsl.expr.typing import T
+
 # Prologue: load iteration 0 before the loop
 next_a = buffer_ops.buffer_load(rsrc_a, offsets_0, vec_width=4)
 init_state = [_unwrap(v) for v in [next_a, acc]]
@@ -274,12 +276,12 @@ init_state = [_unwrap(v) for v in [next_a, acc]]
 for iv, state in range(fx.Int64(0), fx.Int64(N - 1), fx.Int64(1), init=init_state):
     a, acc = state[0], state[1]
     next_a = buffer_ops.buffer_load(rsrc_a, compute_offsets(iv + 1), vec_width=4)  # async
-    acc = rocdl.mfma_f32_16x16x16_f16(transform(a), b, acc)   # overlaps next load
+    acc = rocdl.mfma_f32_16x16x16f16(T.f32, [transform(a), b, acc])  # overlaps next load
     results = yield [_unwrap(v) for v in [next_a, acc]]
 
 # Epilogue: process the last iteration from `results`
 a, acc = results[0], results[1]
-acc = rocdl.mfma_f32_16x16x16_f16(transform(a), b, acc)
+acc = rocdl.mfma_f32_16x16x16f16(T.f32, [transform(a), b, acc])
 ```
 
 Three pitfalls (all covered in `/prefetch-data-load`):
@@ -289,8 +291,8 @@ Three pitfalls (all covered in `/prefetch-data-load`):
 2. **Unwrap init values at hard boundaries only.** Most carried values stay
    `fx.Int32`/`fx.Float32`/`Vector`; unwrap to raw `ir.Value` only where a
    low-level helper demands it.
-3. **Clear `SmemPtr._view_cache = None` before the epilogue** when a shared view
-   was created inside the loop, or the epilogue use hits an SSA dominance error.
+3. **Build shared-memory views at the top of the kernel**, not inside the loop
+   body, or the epilogue use hits an SSA dominance error.
 
 ### Async copy (global → LDS DMA)
 
@@ -368,7 +370,7 @@ preshuffle GEMM also exposes fused epilogues via the `epilogue=` argument of
 scheduler draws from to hide latency (§0). It is the **minimum across three
 resource limiters**, capped by a hardware maximum:
 
-```
+```text
 occupancy (waves/SIMD) = min(vgpr_limit, lds_limit, sgpr_limit, HW_MAX)
 ```
 
@@ -424,7 +426,7 @@ back from the profiler rather than estimating.
 
 Rough VGPR estimate for a wave64 FP8 tile:
 
-```
+```text
 accumulators = m_repeat × num_acc_n × 4     # → accum_vgpr
 B tile       = k_unroll × 2 × num_acc_n × 2 # → arch_vgpr
 A prefetch   ≈ 4 ; A tile regs = num_a_loads × 4 ; addressing ≈ 10–20
@@ -445,8 +447,9 @@ WHERE ks.KernelName LIKE '%target_kernel%' LIMIT 5;
 the binding limiter, so you know whether to cut VGPR, shrink LDS per block, or
 reduce SGPR pressure.
 
-**Do not** use `maxnreg` to force `accum_vgpr=0` — it spills MFMA results through
-arch_vgpr via `v_accvgpr_read` (measured ~4.5× regression).
+The `maxnreg` hint has been removed — it never reached LLVM, and forcing
+`accum_vgpr=0` with it spilled MFMA results through arch_vgpr via
+`v_accvgpr_read` (measured ~4.5× regression). Use `waves_per_eu` instead.
 
 ---
 
@@ -514,7 +517,7 @@ inspection alone routinely mis-diagnoses memory bottlenecks.**
 When a kernel got slower and you don't know which commit did it, binary-search
 with `/bisect-perf-regression`:
 
-```
+```text
 /bisect-perf-regression <good_commit> [bad_commit] -- <bench_cmd>
 ```
 

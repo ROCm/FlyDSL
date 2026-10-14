@@ -95,15 +95,10 @@ def _asm_void(operands, asm_string, constraints, clobbers=""):
 
 def _cvt_pk_bf16(a, b):
     """same as rocdl.cvt_pk_bf16_f32, but no inline asm to give compiler more freedom"""
-    v2f32 = _ir.VectorType.get([2], fx.Float32.ir_type)
-    vec = Vec.from_elements([fx.Float32(a), fx.Float32(b)], fx.Float32)
-    src = fx.as_ir_value(vec)
-    if src.type != v2f32:
-        src = fx.arith.bitcast(v2f32, src)
-    v2bf16 = _ir.VectorType.get([2], fx.BFloat16.ir_type)
+    vec = Vec.from_elements([a, b], fx.Float32)
     # llvm.bitcast, not arith.bitcast: the latter requires operand and result to
     # have the same shape, and this one is <2xbf16> -> i32.
-    return _llvm.BitcastOp(fx.Int32.ir_type, fx.arith.trunc_f(v2bf16, src)).result
+    return _llvm.BitcastOp(fx.Int32.ir_type, vec.to(fx.BFloat16).ir_value()).result
 
 
 # for FP4_DMA_INTRINSIC=1 path, don't let compiler reorder the m0 set
@@ -322,7 +317,7 @@ def _s2r_thunks(s2r, src, holder, n, pre):
 
 
 def _min(a, b):
-    return fx.arith.select(a < b, a, b)
+    return (a < b).select(a, b)
 
 
 def _divmod_nonneg(a, b):
@@ -358,7 +353,7 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
     if const_expr(isinstance(use_simple, bool)):
         return (simple_m, simple_n) if use_simple else (pid_m, pid_n)
-    return (fx.arith.select(use_simple, simple_m, pid_m), fx.arith.select(use_simple, simple_n, pid_n))
+    return (use_simple.select(simple_m, pid_m), use_simple.select(simple_n, pid_n))
 
 
 # ── FP4 scaled MFMA ──────────────────────────────────────────────────────────
@@ -495,10 +490,14 @@ class ScaleGatherLDS:
         # elements, i.e. K//32 bytes per row.
         row_bytes = K // 32
         self.a_rsrc = fx.as_ir_value(
-            _buffer_ops.create_buffer_resource(a_scale, max_size=False, num_records_bytes=a_rows * row_bytes)
+            fx.rocdl.get_buffer_rsrc(
+                _buffer_ops.create_buffer_resource(a_scale, max_size=False, num_records_bytes=a_rows * row_bytes)
+            )
         )
         self.b_rsrc = fx.as_ir_value(
-            _buffer_ops.create_buffer_resource(b_scale, max_size=False, num_records_bytes=b_rows * row_bytes)
+            fx.rocdl.get_buffer_rsrc(
+                _buffer_ops.create_buffer_resource(b_scale, max_size=False, num_records_bytes=b_rows * row_bytes)
+            )
         )
         # Per-lane block / within-block index (loop-invariant).
         self._blk = lane_id // 16  # 0..3 -> which of the 4 blocks
@@ -513,7 +512,7 @@ class ScaleGatherLDS:
 
         is_a = wid < fx.Int32(2)
         q = wid % fx.Int32(2)
-        base_tile = fx.arith.select(is_a, a_base_tile + q * fx.Int32(64), b_base_tile + q * fx.Int32(64))
+        base_tile = is_a.select(a_base_tile + q * fx.Int32(64), b_base_tile + q * fx.Int32(64))
         self._G = _uniform_i32(base_tile // fx.Int32(32))
         self._rsrc = fx.arith.select(is_a, self.a_rsrc, self.b_rsrc)
         # soffset=0 as a wave-uniform SGPR (readfirstlane'd once, reused every gather).
@@ -612,9 +611,7 @@ class StoreCFp4:
         g = self.lane_id // 16
         row = base_row + ti * 16 + self.lane_id % 16
         col = base_col + (tj + g % 2) * 16 + (g // 2) * 8
-        pack = Vec.from_elements([fx.Int32(a0), fx.Int32(a1), fx.Int32(b0), fx.Int32(b1)], fx.Int32).bitcast(
-            fx.BFloat16
-        )
+        pack = Vec.from_elements([a0, a1, b0, b1], fx.Int32).bitcast(fx.BFloat16)
         fx.memref_store_vec(pack, self.reg_bf16_8)
         c_index = row * self.c_cols + col
         fx.copy(self.out_atom_8, self.reg_bf16_8, fx.slice(self.c_div, (None, fx.Int32(c_index))))
@@ -751,8 +748,12 @@ def compile_fp4_gemm_4w(
         gl_off_a = _global_swizzle(lane_id, wave_id, K_BYTES, N_LDS_ROUNDS, False)
         gl_off_b = _global_swizzle(lane_id, wave_id, K_BYTES, N_LDS_ROUNDS, True)
 
-        a_rsrc = _buffer_ops.create_buffer_resource(A, max_size=False, num_records_bytes=c_m * K_BYTES)
-        b_rsrc = _buffer_ops.create_buffer_resource(B_T, max_size=False, num_records_bytes=c_n * K_BYTES)
+        a_rsrc = fx.rocdl.get_buffer_rsrc(
+            _buffer_ops.create_buffer_resource(A, max_size=False, num_records_bytes=c_m * K_BYTES)
+        )
+        b_rsrc = fx.rocdl.get_buffer_rsrc(
+            _buffer_ops.create_buffer_resource(B_T, max_size=False, num_records_bytes=c_n * K_BYTES)
+        )
         a_g2s = G2SLoaderAsm(a_rsrc, gl_off_a, N_TILES_A, wave_id, scopes=_sc, base_ptr=_base_ptr)
         b_g2s = G2SLoaderAsm(b_rsrc, gl_off_b, N_TILES_B, wave_id, scopes=_sc, base_ptr=_base_ptr)
         # Precompute the g2s wave-uniform LDS base into SGPR once (all 8 buffers share

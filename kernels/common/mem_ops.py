@@ -15,7 +15,6 @@ Two distinct atomic mechanisms live here and are NOT interchangeable:
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import arith as _std_arith
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import as_ir_value, const_expr, rocdl
@@ -74,8 +73,7 @@ element_ptr = get_llvm_ptr
 def _create_llvm_ptr(value, address_space: int = 1):
     value = buffer_ops._unwrap_value(value)
     if isinstance(value.type, ir.IndexType):
-        i64_type = T.i64
-        value = buffer_ops._unwrap_value(_std_arith.IndexCastOp(i64_type, value).result)
+        value = fx.Int64(value).ir_value()
     ptr_type = ir.Type.parse(f"!llvm.ptr<{address_space}>")
     return _llvm.IntToPtrOp(ptr_type, value).result
 

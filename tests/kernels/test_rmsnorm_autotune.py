@@ -69,13 +69,16 @@ def test_rmsnorm_direct_specializes_known_block_size(weight_dtype, weight_dtype_
     compiled = flyc.compile(rmsnorm_direct, *compile_args)
     stream.synchronize()
     artifact = compiled._keepalive
+    # Pre-lowering IR is process-local, so a cache-loaded artifact carries none.
+    source_ir = artifact.source_ir
 
-    assert "known_block_size = array<i32: 512, 1, 1>" in artifact.source_ir
+    if source_ir is not None:
+        assert "known_block_size = array<i32: 512, 1, 1>" in source_ir
     match = re.search(r"max_flat_workgroup_size\\CD\\([0-9A-Fa-f]{2})\\([0-9A-Fa-f]{2})", artifact.ir)
     assert match is not None and int("".join(match.groups()), 16) == 512
-    if weight_dtype == torch.float32:
+    if weight_dtype == torch.float32 and source_ir is not None:
         weight_copy_type = "!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<128>, 32>"
-        assert artifact.source_ir.count(weight_copy_type) >= 3
+        assert source_ir.count(weight_copy_type) >= 3
     _assert_close(out, ref)
 
 

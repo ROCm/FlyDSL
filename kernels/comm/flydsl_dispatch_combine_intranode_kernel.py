@@ -290,8 +290,7 @@ def make_dispatch_kernel(
             if tid == 0:
                 _bn_i64 = fx.Uint64(block_num)
                 _one_i64 = fx.Uint64(1)
-                _ticket_raw = atomic_add_global_at(addr_disp_grid_bar, _one_i64)
-                _ticket = fx.Uint64(_ticket_raw)
+                _ticket = atomic_add_global_at(addr_disp_grid_bar, _one_i64)
                 _target = (_ticket // _bn_i64 + _one_i64) * _bn_i64  # (epoch+1)*block_num
                 mori_shmem.int64_wait_until_equals(addr_disp_grid_bar, _target)
                 # Acquire fence pairs with the release atomic_add tickets; makes

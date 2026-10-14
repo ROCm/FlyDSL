@@ -23,6 +23,7 @@ from . import rdna3 as rdna3
 from . import rdna4 as rdna4
 from .enum import SyncScope as SyncScope
 from .universal import *
+from .utils import require_lds_dma_support
 
 __all__ = [
     # Targets
@@ -57,6 +58,7 @@ __all__ = [
     "make_buffer_ptr",
     "make_buffer_tensor",
     "get_buffer_rsrc",
+    "s_buffer_load",
     # Operations
     "sched_mfma",
     "sched_vmem",
@@ -582,8 +584,8 @@ def disable_xdl_arb_stall():
     from .. import arith as _arith
     from ..typing import T
 
-    # hwreg encoding: ID=26(SCHED_MODE), Offset=4, Size=1 -> 282
-    imm_val = _arith.unwrap(_arith.constant(282, type=T.i32))
+    # hwreg encoding: ID=26(SCHED_MODE), Offset=2, Size=1 -> 154.
+    imm_val = _arith.unwrap(_arith.constant(154, type=T.i32))
     val_val = _arith.unwrap(_arith.constant(1, type=T.i32))
 
     _llvm.call_intrinsic(None, "llvm.amdgcn.s.setreg", [imm_val, val_val], [], [])
@@ -601,8 +603,8 @@ def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
 
     Args:
         result_type: Vector result type, e.g. ``VectorType.get([8], f16)``.
-        lds_memref:  LDS memref value (address-space 3), typically from
-                     ``SmemPtr.get()`` or ``get_op_result_or_value(...)``.
+        lds_memref:  LDS memref value (address-space 3), typically a
+                     ``fx.SharedAllocator()`` sub-buffer's ``.view(...)``.
         elem_offset: Per-lane linearized element offset into the memref
                      (ArithValue / ir.Value of index type / Python int).
         elem_bytes:  Element size in bytes (Python int, e.g. 2 for f16).
@@ -812,6 +814,7 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux=N
     from ..._mlir import ir as _ir
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
+    require_lds_dma_support("raw_ptr_buffer_load_lds")
     if aux is not None and not isinstance(aux, _ir.Attribute):
         if isinstance(aux, int):
             aux = _ir.IntegerAttr.get(_ir.IntegerType.get_signless(32), aux)

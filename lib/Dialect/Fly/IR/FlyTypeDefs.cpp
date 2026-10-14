@@ -529,15 +529,16 @@ Attribute MmaAtomType::getThrValLayoutC() const {
 }
 
 LogicalResult MmaAtomType::emitAtomCall(OpBuilder &builder, Location loc, Type mmaAtomTy,
-                                        Type dMemTy, Type aMemTy, Type bMemTy, Type cMemTy,
-                                        Value atomVal, Value d, Value a, Value b, Value c) const {
+                                        Type dMemTy, TypeRange aMemTy, TypeRange bMemTy,
+                                        Type cMemTy, Value atomVal, Value d, ValueRange a,
+                                        ValueRange b, Value c) const {
   return cast<MmaOpTypeInterface>(getMmaOp())
       .emitAtomCall(builder, loc, mmaAtomTy, dMemTy, aMemTy, bMemTy, cMemTy, atomVal, d, a, b, c);
 }
 FailureOr<Value> MmaAtomType::emitAtomCallSSA(OpBuilder &builder, Location loc, Type resultTy,
-                                              Type mmaAtomTy, Type dTy, Type aTy, Type bTy,
-                                              Type cTy, Value atomVal, Value d, Value a, Value b,
-                                              Value c) const {
+                                              Type mmaAtomTy, Type dTy, TypeRange aTy,
+                                              TypeRange bTy, Type cTy, Value atomVal, Value d,
+                                              ValueRange a, ValueRange b, Value c) const {
   return cast<MmaOpTypeInterface>(getMmaOp())
       .emitAtomCallSSA(builder, loc, resultTy, mmaAtomTy, dTy, aTy, bTy, cTy, atomVal, d, a, b, c);
 }

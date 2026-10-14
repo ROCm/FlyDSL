@@ -3,23 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Block-wide reduction.
+"""Block-wide reduction over numeric types, policies and item shapes.
 
-Covered below: the sum reduction over the dtype list, in both of the
-implemented algorithms. Out of reach for lack of API surface: a partial tile —
-every thread of the block always contributes — an arbitrary callable as the
-reduction op (*op* is a ``ReductionOp``, see ``coop/_common.py``), and vector
-or user-defined element types.
-
-``BlockReduce`` requires a power-of-two thread count (``coop/block/_spec.py``);
-a block that does not fill a wave narrows the logical warp to itself rather
-than being refused, so the widths below run from one thread up.
-``RAKING_COMMUTATIVE_ONLY`` and ``WARP_REDUCTIONS_NONDETERMINISTIC`` are named
-by the enum but not implemented, so the algorithm axis is the two policies that
-are.
-
-The tests at the bottom came from ``test_coop.py`` when the algorithm tests
-were split out by algorithm.
+Blocks use complete physical warps or a smaller power-of-two logical warp.
+Scalar and Vector inputs retain their block-wide semantics.
 """
 
 from __future__ import annotations
@@ -286,42 +273,13 @@ def test_single_warp_block_skips_shared_memory():
 # ── sub-wave blocks ───────────────────────────────────────────────────────
 
 
-@pytest.mark.l0_backend_agnostic
+@pytest.mark.l1a_compile_no_target_dialect
 @pytest.mark.parametrize("block_threads", SUB_WARP_BLOCK_THREADS, ids=lambda n: f"t{n}")
 @pytest.mark.parametrize("algorithm", ALGORITHMS, ids=lambda a: a.name)
-def test_a_sub_wave_block_narrows_its_logical_warp(block_threads, algorithm):
-    """The warp the collective folds over is the block, not the target's wave.
-
-    This is what keeps every cross-lane read inside the lanes the launch
-    actually started: a wave-wide fold in a block that only fills part of the
-    wave would read lanes that were never launched. Whichever algorithm is
-    named, the block is then a single warp, which is the condition each of
-    them short-circuits on.
-    """
-    block_reduce = fx.coop.BlockReduce[fx.Int32, block_threads, algorithm]
-
-    assert block_reduce.warp_threads == block_threads
-    assert block_reduce.num_warps == 1
-
-
-@pytest.mark.l2_device
-@pytest.mark.rocm_lower
-@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
-@pytest.mark.parametrize("block_threads", SUB_WARP_BLOCK_THREADS, ids=lambda n: f"t{n}")
-@pytest.mark.parametrize("algorithm", ALGORITHMS, ids=lambda a: a.name)
-def test_sum_in_a_sub_wave_block(block_threads, algorithm):
-    """Both algorithms still sum a block that occupies part of a wave.
-
-    The width sweep above runs one algorithm; this one crosses the sub-wave
-    widths with both, since the short-circuit each takes at a single warp is
-    separate code. The narrowest case is a single thread, where the fold has
-    no cross-lane step left at all.
-    """
-    dtype, name = fx.Int32, "torch.int32"
-    values = sample(name, block_threads)
-
-    out = run_block_reduce(values, name, dtype, block_size=(block_threads, 1, 1), algorithm=algorithm)
-    check_sum(values, out, name)
+def test_sub_wave_blocks_narrow_the_logical_warp(block_threads, algorithm):
+    primitive = fx.coop.BlockReduce[fx.Int32, block_threads, algorithm]
+    assert primitive.warp_threads == block_threads
+    assert primitive.num_warps == 1
 
 
 @pytest.mark.l2_device

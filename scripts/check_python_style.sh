@@ -92,12 +92,13 @@ ensure_style_tools() {
   fi
 
   if [ "${INSTALL_TOOLS}" = true ]; then
-    python3 -m pip install --upgrade black ruff
+    python3 -m pip install --upgrade "pip>=25.1"
+    python3 -m pip install --upgrade --group style
     return
   fi
 
   echo "Missing Python style tool(s): ${missing[*]}" >&2
-  echo "Install them with: python3 -m pip install black ruff" >&2
+  echo "Install them with: python3 -m pip install --group style" >&2
   echo "Or rerun this script with --install." >&2
   exit 1
 }

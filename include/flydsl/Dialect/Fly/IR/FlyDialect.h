@@ -55,6 +55,10 @@ class WholeTileCopy : public TypeTrait::TraitBase<ConcreteType, WholeTileCopy> {
 ParseResult parseMNKDimensionList(AsmParser &parser, int32_t &m, int32_t &n, int32_t &k);
 void printMNKDimensionList(AsmPrinter &printer, int32_t m, int32_t n, int32_t k);
 
+ParseResult parseVariadicOperandGroup(OpAsmParser &parser,
+                                      SmallVectorImpl<OpAsmParser::UnresolvedOperand> &operands);
+void printVariadicOperandGroup(OpAsmPrinter &printer, Operation *op, OperandRange operands);
+
 } // namespace mlir::fly
 
 #endif // FLYDSL_DIALECT_FLY_IR_DIALECT_H

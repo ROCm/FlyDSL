@@ -2,4 +2,5 @@
 FlyDSL license
 **************
 
-.. include:: ../../LICENSE
+.. literalinclude:: ../../LICENSE
+   :language: text

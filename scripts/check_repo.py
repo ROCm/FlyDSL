@@ -55,7 +55,16 @@ CHECKS: list[Check] = [
     Check(
         name="agent-docs",
         script="scripts/check_docs_api.py",
-        summary="CLAUDE.md and .claude/skills/ still match the Python surface",
+        summary="agent and user documentation still match the Python surface",
+        extra_args=["--include-docs"],
+    ),
+    Check(
+        name="llvm-extension-switches",
+        script="scripts/check_llvm_extensions.py",
+        summary="every LLVM extension is disablable at run time",
+        # Scans the whole extension set; a revision range would miss an
+        # extension whose switch was removed by an unrelated commit.
+        takes_revisions=False,
     ),
 ]
 

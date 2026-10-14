@@ -13,6 +13,7 @@ from .derived import *
 from .struct import *
 from .arith import *
 from .math import *
+from .llvm import *
 
 from . import utils as utils
 from . import arith as arith
@@ -22,9 +23,10 @@ from . import math as math
 _BACKEND_MODULES = {
     "rocdl": ".rocdl",
     "tdm_ops": ".rocdl.tdm_ops",  # deprecated, use .rocdl.tdm_ops instead
+    "ktrace": ".ktrace",
 }
 
-_LIBRARY_MODULES = {
+_EXTENSION_MODULES = {
     "coop": "..extension.coop",
     "random": "..extension.random",
 }
@@ -33,10 +35,12 @@ if TYPE_CHECKING:
     from ..extension import coop as coop
     from ..extension import random as random
 
+    from . import ktrace as ktrace
+
 
 # lazy load backend subpackages and extension libraries
 def __getattr__(name: str):
-    module_name = _BACKEND_MODULES.get(name) or _LIBRARY_MODULES.get(name)
+    module_name = _BACKEND_MODULES.get(name) or _EXTENSION_MODULES.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

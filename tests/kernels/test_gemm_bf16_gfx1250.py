@@ -23,6 +23,7 @@ import flydsl.expr as fx  # noqa: E402
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.gemm_bf16_gfx1250 import launch_gemm_bf16  # noqa: E402
+from tests.test_common import run_perftest  # noqa: E402
 
 _DT = {"bf16": torch.bfloat16, "f16": torch.float16}
 
@@ -63,18 +64,24 @@ def _build_case(
     *,
     cluster_m=1,
     cluster_n=1,
+    const_val=None,
+    tdm_balance=0,
+    wmma_b2b=0,
 ):
     """Inputs, a make_args(stream) thunk, the f32 reference, and tolerances."""
     if (N // tile_n) % cluster_n:
         raise ValueError(f"cluster_n={cluster_n} needs N/tile_n={N // tile_n} to be a multiple of it")
-    torch.manual_seed(0)
     dt = _DT[dtype]
-    a = torch.randn(M, K, dtype=torch.float32, device="cuda").to(dt)
-    b = torch.randn(N, K, dtype=torch.float32, device="cuda").to(dt)
+    if const_val is None:
+        a = torch.randn(M, K, dtype=torch.float32, device="cuda").to(dt)
+        b = torch.randn(N, K, dtype=torch.float32, device="cuda").to(dt)
+    else:
+        a = torch.full((M, K), const_val, dtype=dt, device="cuda")
+        b = torch.full((N, K), const_val, dtype=dt, device="cuda")
     c = torch.zeros(M, N, dtype=dt, device="cuda")
     ref = torch.matmul(a.float(), b.float().T)
 
-    def make_args(stream):
+    def make_args(stream, c=c, a=a, b=b):
         return (
             flyc.from_c_void_p(fx.Uint8, c.data_ptr()),
             flyc.from_c_void_p(fx.Uint8, a.data_ptr()),
@@ -95,11 +102,13 @@ def _build_case(
             1 if dtype == "f16" else 0,
             cluster_m,
             cluster_n,
+            tdm_balance,
+            wmma_b2b,
         )
 
     # bf16/f16 inputs with f32 accumulation: error grows with sqrt(K).
     tol = (2e-2, 2e-2 * math.sqrt(K))
-    return c, make_args, ref, tol
+    return c, a, b, make_args, ref, tol
 
 
 def _bench_us(launch, *, warmup=10, iters=100):
@@ -122,7 +131,7 @@ def _bench_us(launch, *, warmup=10, iters=100):
 
 def _run_case(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, dtype="bf16", **kw):
     _require_gfx1250()
-    c, make_args, ref, (rtol, atol) = _build_case(
+    c, _a, _b, make_args, ref, (rtol, atol) = _build_case(
         M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, dtype, **kw
     )
     compiled = flyc.compile(launch_gemm_bf16, *make_args(torch.cuda.current_stream()))
@@ -172,6 +181,20 @@ def _parse_csv_ints(value, n, name):
     return parts
 
 
+def _parse_init_mode(value):
+    """'random' -> None; 'zero' -> 0.0; 'const' or 'const,<float>' -> constant A/B fill (default 0.1)."""
+    if value == "random":
+        return None
+    if value == "zero":
+        return 0.0
+    if value == "const":
+        return 0.1
+    kind, _, num = value.partition(",")
+    if kind == "const" and num:
+        return float(num)
+    raise SystemExit(f"--init-mode expects 'random', 'zero', 'const', or 'const,<float>', got {value!r}")
+
+
 def _print_table(headers, rows):
     widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
 
@@ -196,6 +219,39 @@ def _main():
     parser.add_argument("-dtype", default="bf16", choices=["bf16", "f16"], nargs="+")
     parser.add_argument("-cluster", default="1,1", help="cluster_m,cluster_n (1,1 disables clustering)")
     parser.add_argument("-bench", action="store_true", help="also measure perf (warmup=10, iters=100)")
+    parser.add_argument(
+        "--init-mode",
+        nargs="+",
+        default=["random", "const"],
+        metavar="MODE",
+        help="A/B fill(s): 'random', 'zero', 'const' (0.1) or 'const,<float>' (default: random+const)",
+    )
+    parser.add_argument(
+        "-rotate_buf",
+        action="store_true",
+        help="benchmark via run_perftest with rotating buffers: cycle through deep-copied A/B/C "
+        "sets (auto-sized from L2 cache) to defeat caching; default reuses one set (needs -bench)",
+    )
+    parser.add_argument(
+        "--tdm-balance",
+        nargs="+",
+        type=int,
+        default=[0],
+        choices=[0, 1],
+        metavar="0|1",
+        help="TDM staging: 0 = one fat descriptor per operand, 1 = each operand halved "
+        "over two waves. Pass both to sweep (default: 0)",
+    )
+    parser.add_argument(
+        "--wmma-b2b",
+        nargs="+",
+        type=int,
+        default=[0],
+        choices=[0, 1],
+        metavar="0|1",
+        help="1 sets SCHED_MODE.DISABLE_XDL_ARB_STALL so a wave can issue back-to-back "
+        "WMMAs. Pass both to sweep (default: 0)",
+    )
     args = parser.parse_args()
 
     shapes = [_parse_csv_ints(v, 3, "mnk") for v in args.mnk]
@@ -205,8 +261,9 @@ def _main():
     dtypes = args.dtype if isinstance(args.dtype, list) else [args.dtype]
 
     rows = []
-    for (M, N, K), dtype in itertools.product(shapes, dtypes):
-        c, make_args, ref, (rtol, atol) = _build_case(
+    sweep = itertools.product(shapes, dtypes, args.init_mode, args.tdm_balance, args.wmma_b2b)
+    for (M, N, K), dtype, init, tdm_bal, b2b in sweep:
+        c, a, b, make_args, ref, (rtol, atol) = _build_case(
             M,
             N,
             K,
@@ -216,6 +273,9 @@ def _main():
             dtype,
             cluster_m=cluster[0],
             cluster_n=cluster[1],
+            const_val=_parse_init_mode(init),
+            tdm_balance=tdm_bal,
+            wmma_b2b=b2b,
         )
         compiled = flyc.compile(launch_gemm_bf16, *make_args(torch.cuda.current_stream()))
         torch.cuda.synchronize()
@@ -223,18 +283,55 @@ def _main():
         ok = torch.allclose(c.float(), ref, rtol=rtol, atol=atol)
         perf = ["-", "-", "-"]
         if args.bench:
-            us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())))
+            if args.rotate_buf:
+
+                def _launch(c_t, a_t, b_t):
+                    compiled(*make_args(torch.cuda.current_stream(), c_t, a_t, b_t))
+
+                # num_rotate_args=0 lets run_perftest auto-size the rotating buffer set.
+                _, us = run_perftest(_launch, c, a, b, num_iters=100, num_warmup=10, num_rotate_args=0)
+            else:
+                us = _bench_us(lambda: compiled(*make_args(torch.cuda.current_stream())))
             moved = _bytes_moved(M, N, K)
             perf = [f"{us:.3f}", f"{_tflops(M, N, K, us):.2f}", f"{moved / (us * 1e-6) / 1e12:.3f}"]
         rows.append(
-            [str(M), str(N), str(K), dtype, *perf, f"{max_err:.4g}", f"{rel_err:.3g}", "PASS" if ok else "FAIL"]
+            [
+                str(M),
+                str(N),
+                str(K),
+                dtype,
+                init,
+                str(tdm_bal),
+                str(b2b),
+                *perf,
+                f"{max_err:.4g}",
+                f"{rel_err:.3g}",
+                "PASS" if ok else "FAIL",
+            ]
         )
 
     print(
         f"\ntiles={tiles[0]},{tiles[1]},{tiles[2]} warps={warps[0]},{warps[1]} "
         f"nb={args.nb} cluster={cluster[0]},{cluster[1]}"
     )
-    _print_table(["M", "N", "K", "dtype", "latency us", "TFLOPS", "BW TB/s", "max_err", "rel_err", "result"], rows)
+    _print_table(
+        [
+            "M",
+            "N",
+            "K",
+            "dtype",
+            "init_mode",
+            "tdm_bal",
+            "wmma_b2b",
+            "latency us",
+            "TFLOPS",
+            "BW TB/s",
+            "max_err",
+            "rel_err",
+            "result",
+        ],
+        rows,
+    )
     if any(r[-1] == "FAIL" for r in rows):
         raise SystemExit(1)
 

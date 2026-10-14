@@ -125,8 +125,9 @@ def kernel_gemm(...):
     lds_a_ping = lds.a1.view(fx.make_layout((tile_m, tile_k), (tile_k, 1)))
 ```
 
-The legacy `flydsl.utils.smem_allocator.SmemAllocator` path remains for un-migrated
-kernels but is not recommended for new code.
+`fx.SharedAllocator` is the allocator for new kernels; the legacy
+`flydsl.utils.smem_allocator` path is kept for backward compatibility, but it is
+not recommended and warns when used.
 
 ### 2.3 Main Loop Structure (2-Stage)
 
@@ -605,6 +606,12 @@ gfx908/CDNA1. In LLVM this is `getTotalNumVGPRs(has90AInsts, NumAGPR, NumVGPR)`
 (`llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp`), which returns
 `alignTo(NumVGPR, 4) + NumAGPR` when the target has GFX90AInsts — gfx90a, gfx942
 and gfx950 all do — and `max(NumVGPR, NumAGPR)` otherwise.
+
+To *change* these numbers rather than only model them — `waves_per_eu`,
+`flat_work_group_size`, `agpr-alloc`, scheduler flags — and to prove the knob
+reached codegen, use `/llvm`. ⚠ Note especially that `amdgpu-num-vgpr` is
+silently doubled on gfx942/gfx950, so it does **not** cap arch VGPRs the way it
+reads.
 
 Measured on gfx950 (MI355X) with `hipcc -Rpass-analysis=kernel-resource-usage`:
 an MFMA kernel at arch=36/accum=32 reports 7 waves (combined model predicts 7;

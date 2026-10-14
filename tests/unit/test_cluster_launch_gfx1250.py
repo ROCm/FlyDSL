@@ -12,7 +12,8 @@ Tests:
   1. Smoke: vec_add launched with cluster dims — proves the runtime launch path works.
   2. Barrier: vec_add with cluster_barrier() — validates cluster sync intrinsics.
 
-See also: test_cluster_mcast_gemm_gfx1250.py for TDM multicast GEMM tests (deferred).
+Cluster TDM-multicast GEMMs are covered by ``test_gemm_cluster`` in
+tests/kernels/test_gemm_bf16_gfx1250.py and tests/kernels/test_gemm_fp8fp4_gfx1250.py.
 """
 
 import pytest

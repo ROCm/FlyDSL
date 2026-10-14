@@ -20,9 +20,10 @@ import operator
 import pytest
 from lang_utils import dtype_of, dynamic_binop, dynamic_literal_binop, run, source_ir, vec
 
+import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import arith
+from flydsl.compiler.protocol import construct_from_ir_values, extract_to_ir_values
 from flydsl.expr import math as fmath
 from flydsl.expr.numeric import (
     BFloat16,
@@ -41,6 +42,7 @@ from flydsl.expr.typing import (
     Float32x4,
     ReductionOp,
     Vector,
+    VectorAlias,
     full,
     full_like,
     zeros_like,
@@ -1024,7 +1026,7 @@ class TestReduction:
 
     def test_reduce_with_fastmath(self):
         def body():
-            _ = vec(Float32).reduce(ReductionOp.ADD, fastmath=arith.FastMathFlags.fast)
+            _ = vec(Float32).reduce(ReductionOp.ADD, fastmath=fx.FastMathFlags.fast)
 
         ir_text = source_ir(body)
         assert "fastmath" in ir_text.lower() or "fast" in ir_text
@@ -1102,7 +1104,7 @@ class TestReduction:
 
     def test_reduce_combining_kind_direct(self):
         """reduce() accepts raw CombiningKind."""
-        from flydsl._mlir.dialects.vector import CombiningKind
+        from flydsl._mlir.dialects._vector_enum_gen import CombiningKind
 
         def body():
             assert isinstance(vec(Float32).reduce(CombiningKind.ADD), Float32)
@@ -1485,6 +1487,131 @@ class TestConstruction:
 
 
 class TestVectorAliases:
+    """Specialized construction, shape normalization, names, and type identity."""
+
+    def test_subscription_and_factory_share_type_identity(self):
+        assert Vector[Float32, 4] is VectorAlias(Float32, 4) is Float32x4
+        assert Vector[Float32, 3] is VectorAlias(Float32, 3)
+        assert Vector[Float32, 4] is not Vector[Uint32, 4]
+
+    @pytest.mark.parametrize("params", [Float32, (), (Float32,), (Float32, 4, 16)])
+    def test_subscription_requires_dtype_and_lanes(self, params):
+        with pytest.raises(TypeError, match="Vector\\[dtype, lanes\\]"):
+            Vector[params]
+
+    @pytest.mark.parametrize("dtype", [None, float, Numeric, Vector, [Float32]])
+    def test_specialization_rejects_invalid_dtype(self, dtype):
+        with pytest.raises(TypeError, match="concrete Numeric"):
+            Vector[dtype, 4]
+
+    @pytest.mark.parametrize("lanes", [0, -1, True, 4.0, (4, 0), [4, True], ((2, 3.0),)])
+    def test_specialization_rejects_invalid_lanes(self, lanes):
+        # Check validation even after a colliding cache key has been populated.
+        Vector[Float32, 1]
+        Vector[Float32, 4]
+        with pytest.raises(TypeError, match="positive integer"):
+            VectorAlias(Float32, lanes)
+
+    def test_specialized_type_cannot_be_respecialized(self):
+        with pytest.raises(TypeError, match="already specialized"):
+            Float32x4[Int32, 8]
+
+    @pytest.mark.parametrize("shape", [4, (2, 2), ((2, 2),)])
+    def test_cached_class_does_not_cache_mlir_context(self, shape):
+        alias = Vector[Float32, shape]
+        with ir.Context() as first, ir.Location.unknown():
+            first_type = alias.ir_type
+            assert first_type.context is first
+        with ir.Context() as second, ir.Location.unknown():
+            assert Vector[Float32, shape] is alias
+            assert alias.ir_type.context is second
+            assert alias.ir_type != first_type
+
+    def test_specialization_preserves_instance_indexing_and_ir_reconstruction(self):
+        def body():
+            alias = Vector[Uint32, 4]
+            value = alias([0, 1, 2, 0xFFFFFFFF])
+            assert len(list(value)) == 4
+            assert isinstance(value[-1], Uint32)
+            with pytest.raises(IndexError):
+                value[4]
+            rebuilt = construct_from_ir_values(alias, alias, extract_to_ir_values(value))
+            assert type(rebuilt) is alias
+            assert rebuilt.dtype is Uint32 and rebuilt.shape == (4,)
+
+        run(body)
+
+    @pytest.mark.parametrize(
+        "shape, canonical, name, numel",
+        [
+            (4, (4,), "Float32x4", 4),
+            ((4,), (4,), "Float32x4", 4),
+            ([4], (4,), "Float32x4", 4),
+            ((2, 2), (2, 2), "Vector[Float32, (2, 2)]", 4),
+            (((2, 2),), ((2, 2),), "Vector[Float32, ((2, 2),)]", 4),
+            ((2, (1, 2)), (2, (1, 2)), "Vector[Float32, (2, (1, 2))]", 4),
+            ([2, [1, 2]], (2, (1, 2)), "Vector[Float32, (2, (1, 2))]", 4),
+        ],
+    )
+    def test_shape_specialization_name_construction_and_ir_round_trip(self, shape, canonical, name, numel):
+        target = fx.Vector[fx.Float32, shape]
+        assert target is fx.VectorAlias(fx.Float32, canonical)
+        assert target.__name__ == name
+
+        def body():
+            assert target.ir_type == fx.Vector.make_type(shape, fx.Float32)
+            assert tuple(ir.VectorType(target.ir_type).shape) == (numel,)
+            values = (
+                target(1.0),
+                target([1.0] * numel),
+                target.from_elements([1.0] * numel),
+                target.filled(shape, 1.0, fx.Float32),
+                target(fx.Vector.filled(numel, 1.0, fx.Float32)),
+            )
+            for value in values:
+                assert type(value) is target
+                assert value.shape == canonical and value.numel == numel
+                rebuilt = construct_from_ir_values(target, value, extract_to_ir_values(value))
+                assert type(rebuilt) is target and rebuilt.shape == canonical
+                rebuilt = construct_from_ir_values(target, target, extract_to_ir_values(value))
+                assert type(rebuilt) is target and rebuilt.shape == canonical
+
+        run(body)
+
+    def test_shape_cache_preserves_structure_and_copies_lists(self):
+        assert fx.Vector[fx.Float32, 4] is fx.Vector[fx.Float32, (4,)] is Float32x4
+        types = (Float32x4, fx.Vector[fx.Float32, (2, 2)], fx.Vector[fx.Float32, ((2, 2),)])
+        assert len(set(types)) == len({t.__name__ for t in types}) == 3
+        shape = [2, [1, 2]]
+        target = fx.Vector[fx.Float32, shape]
+        shape[1][1] = 3
+        assert target is fx.Vector[fx.Float32, (2, (1, 2))]
+        assert target is not fx.Vector[fx.Float32, shape]
+
+    @pytest.mark.parametrize("shape", [(), [], ((),), ((), 2), (2, []), [2, [1, []]]])
+    def test_specialization_rejects_empty_shape_nodes(self, shape):
+        with pytest.raises(TypeError, match="non-empty at every level"):
+            fx.Vector[fx.Float32, shape]
+        with pytest.raises(TypeError, match="non-empty at every level"):
+            fx.VectorAlias(fx.Float32, shape)
+
+    def test_nested_shape_indexing_and_constructor_checks(self):
+        target = fx.Vector[fx.Float32, (2, (1, 2))]
+
+        def body():
+            value = target([1.0, 2.0, 3.0, 4.0])
+            assert type(value[1, (0, 1)]) is fx.Float32
+            assert value[None, (0, None)].shape == (2, (2,))
+            assert target.zeros_like(value).shape == value.shape
+            with pytest.raises(ValueError, match="expects shape"):
+                target(value, shape=(4,))
+            with pytest.raises(ValueError, match="expects dtype"):
+                target(value, dtype=fx.Int32)
+            with pytest.raises(ValueError, match="elements"):
+                target([1.0, 2.0])
+
+        run(body)
+
     def test_alias_is_specialized_subclass(self):
         from flydsl.expr.typing import Float32x4
 
@@ -1598,6 +1725,205 @@ class TestVectorAliases:
             assert v.shape == (8,)
 
         run(body)
+
+
+class TestVectorSpecialization:
+    """When a specialized Vector becomes plain, and how reconstruction restores it."""
+
+    @pytest.mark.parametrize(
+        "operation",
+        [
+            pytest.param(lambda v: v + 1.0, id="add"),
+            pytest.param(lambda v: -v, id="negate"),
+            pytest.param(abs, id="abs"),
+            pytest.param(lambda v: v.reshape(v.shape), id="same-shape-reshape"),
+            pytest.param(lambda v: v.bitcast(v.dtype), id="same-dtype-bitcast"),
+            pytest.param(lambda v: v[None,], id="tuple-slice"),
+            pytest.param(lambda v: v.shuffle(v, [0, 1, 2, 3]), id="shuffle"),
+            pytest.param(lambda v: (v > 0.0).select(v, v), id="vector-select"),
+            pytest.param(fmath.sqrt, id="sqrt"),
+            pytest.param(lambda v: fx.min(v, v), id="min"),
+            pytest.param(lambda v: fx.full_like(v, 0.0), id="full-like"),
+            pytest.param(fx.zeros_like, id="zeros-like"),
+            pytest.param(lambda v: fx.Vector(v, v.shape, v.dtype), id="base-constructor"),
+        ],
+    )
+    def test_same_shape_and_dtype_do_not_imply_specialized_result(self, operation):
+        def body():
+            value = Float32x4(1.0)
+            result = operation(value)
+            assert type(value) is Float32x4
+            assert type(result) is fx.Vector
+            assert result.dtype is fx.Float32 and result.shape == (4,)
+            assert type(Float32x4(result)) is Float32x4
+
+        run(body)
+
+    @pytest.mark.parametrize(
+        "operation",
+        [
+            pytest.param(lambda v: +v, id="unary-plus"),
+            pytest.param(lambda v: v.ir_value(), id="ir-value"),
+            pytest.param(lambda v: v.to(v.dtype), id="same-dtype-to"),
+            pytest.param(lambda v: v.to(ir.Value), id="to-ir-value"),
+            pytest.param(lambda v: v.broadcast_to(v.shape), id="same-shape-broadcast"),
+            pytest.param(lambda v: v[None], id="none-index"),
+            pytest.param(lambda v: fx.Vector.__coerce__(v), id="base-coercion"),
+            pytest.param(lambda v: fx.min(v), id="single-operand-min"),
+        ],
+    )
+    def test_identity_operations_preserve_specialization(self, operation):
+        def body():
+            value = Float32x4(1.0)
+            assert operation(value) is value
+
+        run(body)
+
+    def test_type_and_shape_changing_operations_return_plain_vectors(self):
+        def body():
+            value = Float32x4(1.0)
+            for result, dtype, shape in (
+                (value.to(fx.Float16), fx.Float16, (4,)),
+                (value > 0.0, fx.Boolean, (4,)),
+                (value.reshape((2, 2)), fx.Float32, (2, 2)),
+                (value.broadcast_to((2, 4)), fx.Float32, (2, 4)),
+                (value.bitcast(fx.Int8), fx.Int8, (16,)),
+            ):
+                assert type(result) is fx.Vector
+                assert result.dtype is dtype and result.shape == shape
+            assert type(value[0]) is fx.Float32
+            assert type(value.reduce("add")) is fx.Float32
+            assert type(Float32x4.filled_like(value, 0.0)) is Float32x4
+            assert type(Float32x4.from_elements([1.0] * 4, fx.Float32)) is Float32x4
+
+        run(body)
+
+    def test_python_and_inline_jit_annotations_do_not_coerce_vectors(self):
+        def identity(value: fx.Vector) -> fx.Vector:
+            return value
+
+        @flyc.jit
+        def jit_identity(value: fx.Vector) -> fx.Vector:
+            return value
+
+        @flyc.jit
+        def annotated_add(value: Float32x4) -> Float32x4:
+            return value + 1.0
+
+        @flyc.jit
+        def annotated_identity(value: Float32x4) -> Float32x4:
+            return value
+
+        def body():
+            value = Float32x4(1.0)
+            assert identity(value) is value
+            assert jit_identity(value) is value
+            result = annotated_add(value)
+            assert type(result) is fx.Vector
+            assert annotated_identity(result) is result
+            assert type(annotated_identity(fx.Vector[fx.Float32, 2](0.0))) is fx.Vector[fx.Float32, 2]
+
+        run(body)
+
+    def test_kernel_boundary_preserves_actual_vector_class_but_struct_uses_field_type(self):
+        Generic = fx.Struct["value" : fx.Vector]
+        Specialized = fx.Struct["value":Float32x4]
+
+        @flyc.kernel
+        def kernel(value: fx.Vector, generic: Generic, specialized: Specialized):
+            assert type(value) is Float32x4
+            assert type(generic.value) is fx.Vector
+            assert type(specialized.value) is Float32x4
+
+        def body():
+            value = Float32x4(1.0)
+            assert Generic(value).value is value
+            kernel(value, Generic(value), Specialized(value)).launch(grid=1, block=1)
+
+        text = source_ir(body)
+        assert "gpu.func" in text and "vector<4xf32>" in text
+
+    def test_ir_metadata_cannot_recover_alias_signedness_or_logical_shape(self):
+        def body():
+            value = fx.Vector[fx.Uint32, 4](1)
+            result = operator.add(value, value)
+            assert type(result) is fx.Vector and result.dtype is fx.Uint32
+            # Fetch the raw result to exercise reconstruction without wrapper metadata.
+            raw = result.owner.results[0]
+            assert type(raw) is fx.Vector
+            assert raw.dtype is fx.Int32
+            assert type(fx.as_dsl_value(raw)) is fx.Vector
+            recovered = fx.as_dsl_value(raw, value)
+            assert type(recovered) is type(value) and recovered.dtype is fx.Uint32
+
+            shaped = value.reshape((2, 2))
+            result = operator.add(shaped, shaped)
+            assert result.shape == (2, 2) and result.dtype is fx.Uint32
+            raw = result.owner.results[0]
+            assert raw.shape == (4,)
+            recovered = construct_from_ir_values(type(shaped), shaped, [raw])
+            assert recovered.shape == (2, 2) and recovered.dtype is fx.Uint32
+            assert extract_to_ir_values(value)[0] is value
+            packed = fx.Vector[fx.Float16, 2](1.0)
+            assert type(fx.shuffle_xor(packed, 1, 64)) is fx.Vector
+
+        run(body)
+
+    def test_dynamic_regions_restore_entry_class_while_static_loop_keeps_body_result(self):
+        def body(n: fx.Int32):
+            value = Float32x4(1.0)
+            for _ in range(n):
+                assert type(value) is Float32x4
+                value = value + 1.0
+                assert type(value) is fx.Vector
+            assert type(value) is Float32x4
+
+            if n > 0:
+                value = value + 1.0
+                assert type(value) is fx.Vector
+            assert type(value) is Float32x4
+
+            count = fx.Int32(0)
+            while count < n:
+                value = value + 1.0
+                assert type(value) is fx.Vector
+                count = count + 1
+            assert type(value) is Float32x4
+
+            for _ in fx.range_constexpr(1):
+                value = value + 1.0
+            assert type(value) is fx.Vector
+
+        text = source_ir(body, 2)
+        assert all(op in text for op in ("scf.for", "scf.if", "scf.while"))
+
+    def test_scalar_selection_and_dynamic_conditional_use_true_branch_template(self):
+        def body(cond: fx.Boolean):
+            specialized = Float32x4(1.0)
+            generic = specialized + 1.0
+            assert type(cond.select(specialized, generic)) is Float32x4
+            assert type(cond.select(generic, specialized)) is fx.Vector
+            picked = specialized if cond else generic
+            assert type(picked) is Float32x4
+            picked = generic if cond else specialized
+            assert type(picked) is fx.Vector
+
+        run(body, True)
+
+    def test_nested_shape_survives_kernel_and_loop_reconstruction(self):
+        target = fx.Vector[fx.Float32, (2, (1, 2))]
+
+        @flyc.kernel
+        def kernel(value: fx.Vector, count: fx.Int32):
+            assert type(value) is target and value.shape == (2, (1, 2))
+            for _ in range(count):
+                value = value + 1.0
+            assert type(value) is target and value.shape == (2, (1, 2))
+
+        def body():
+            kernel(target(1.0), fx.Int32(2)).launch(grid=1, block=1)
+
+        source_ir(body)
 
 
 class TestProtocol:

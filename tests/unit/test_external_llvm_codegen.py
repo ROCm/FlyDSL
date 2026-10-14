@@ -62,7 +62,7 @@ output_path.write_text(
 
 def test_rocm_external_pipeline_split_matches_full_pipeline():
     backend = RocmBackend(RocmBackend.make_target("gfx942"))
-    hints = {"waves_per_eu": 2, "maxnreg": 128}
+    hints = {"waves_per_eu": 2}
 
     full = backend.pipeline_fragments(compile_hints=hints)
     pre_binary, binary = backend.external_binary_pipeline_fragments(compile_hints=hints)
@@ -72,8 +72,17 @@ def test_rocm_external_pipeline_split_matches_full_pipeline():
     gpu_pipeline = next(fragment for fragment in pre_binary if fragment.startswith("gpu.module("))
     assert "convert-rocdl-fastmath-ops,convert-gpu-to-rocdl{" in gpu_pipeline
     assert binary.startswith("gpu-module-to-binary")
-    assert "--amdgpu-waves-per-eu=2" in binary
-    assert "--amdgpu-num-vgpr=128" in binary
+    # ROCDL never reads opts=; waves_per_eu goes through the attribute instead.
+    assert 'opts=""' in binary
+
+
+def test_rocm_maxnreg_hint_is_rejected():
+    """maxnreg only ever reached the dead opts= lane, so it must not be accepted."""
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        module = ir.Module.create()
+        with pytest.raises(ValueError, match="maxnreg"):
+            backend.lower_compile_hints(module, compile_hints={"maxnreg": 128})
 
 
 def test_rocm_lower_wpe_preserves_source_default_and_overrides_kernel_entries():
@@ -232,7 +241,7 @@ def test_llvm_options_forwarded_to_external_mlir_opt(tmp_path, monkeypatch):
         run_external_binary_codegen(
             module,
             'gpu-module-to-binary{format=fatbin opts=""}',
-            llvm_options={"enable-post-misched": False, "lsr-drop-solution": 4},
+            llvm_options={"enable-post-misched": False, "amdgpu-schedule-metric-bias": 25},
             work_dir=tmp_path / "work",
             stage_prefix="opts_test",
         )
@@ -241,7 +250,7 @@ def test_llvm_options_forwarded_to_external_mlir_opt(tmp_path, monkeypatch):
     assert sidecar.is_file(), "fake mlir-opt should write argv sidecar"
     argv = json.loads(sidecar.read_text(encoding="utf-8"))
     assert "--enable-post-misched=false" in argv
-    assert "--lsr-drop-solution=4" in argv
+    assert "--amdgpu-schedule-metric-bias=25" in argv
 
 
 def test_input_mlir_contains_only_gpu_module(tmp_path, monkeypatch):
@@ -268,5 +277,7 @@ def test_input_mlir_contains_only_gpu_module(tmp_path, monkeypatch):
 def test_format_llvm_cli_options():
     assert _format_llvm_cli_options({"enable-post-misched": False}) == ["--enable-post-misched=false"]
     assert _format_llvm_cli_options({"enable-post-misched": True}) == ["--enable-post-misched=true"]
-    assert _format_llvm_cli_options({"lsr-drop-solution": 4}) == ["--lsr-drop-solution=4"]
+    # Integer pass-through. Use a genuinely uint-valued option: lsr-drop-solution
+    # is cl::opt<cl::boolOrDefault>, so `=4` is rejected by LLVM itself.
+    assert _format_llvm_cli_options({"amdgpu-schedule-metric-bias": 25}) == ["--amdgpu-schedule-metric-bias=25"]
     assert _format_llvm_cli_options({}) == []

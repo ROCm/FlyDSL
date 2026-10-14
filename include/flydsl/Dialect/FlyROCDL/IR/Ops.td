@@ -29,4 +29,35 @@ def FlyROCDL_GetBufferRsrcOp : FlyROCDL_Op<"get_buffer_rsrc",
   let assemblyFormat = "`(` $ptr `)` attr-dict `:` functional-type($ptr, $result)";
 }
 
+class FlyROCDL_MakeTiledTdmAtomOp<string mnemonic>
+    : FlyROCDL_Op<mnemonic, [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  dag tdmArgs = (ins
+    AnyType:$tensor,
+    AnyType:$smemLayout,
+    AnyType:$tiler,
+    DefaultValuedOptionalAttr<I32Attr, "1">:$numWarps,
+    DefaultValuedOptionalAttr<BoolAttr, "true">:$initBoundaryCheck,
+    DefaultValuedOptionalAttr<I32Attr, "0">:$cacheModifier,
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$atomicBarrier,
+    OptionalAttr<TypeAttr>:$internalType
+  );
+  let results = (outs AnyType:$atom, AnyType:$coordTensor);
+
+  let assemblyFormat = [{
+    $tensor `,` $smemLayout `,` $tiler attr-dict `:` type(operands)
+  }];
+}
+
+def FlyROCDL_MakeTiledTdmLoadAtomOp
+    : FlyROCDL_MakeTiledTdmAtomOp<"make_tiled_tdm_load_atom"> {
+  let summary = "Build a CDNA5 TDM load atom and the coordinate tensor that addresses it.";
+  let arguments = tdmArgs;
+}
+
+def FlyROCDL_MakeTiledTdmStoreAtomOp
+    : FlyROCDL_MakeTiledTdmAtomOp<"make_tiled_tdm_store_atom"> {
+  let summary = "Build a CDNA5 TDM store atom and the coordinate tensor that addresses it.";
+  let arguments = tdmArgs;
+}
+
 #endif // FLYROCDL_OPS

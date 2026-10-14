@@ -23,6 +23,7 @@ _RAW_REPLACEMENTS = {
     "minsi": "fx.min",
     "minui": "fx.min",
     "maxnumf": "fx.maxnumf",
+    "minnumf": "fx.minnumf",
     "ceildivsi": "fx.ceildiv",
     "ceildivui": "fx.ceildiv",
 }
