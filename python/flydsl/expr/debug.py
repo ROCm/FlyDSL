@@ -31,16 +31,13 @@ def device_assert(condition, message="", mask=None):
 
         fx.device_assert(index < length, "index exceeds input length", mask=active)
     """
-    if not isinstance(message, str):
-        raise TypeError("device_assert message must be a compile-time string")
-    if "\0" in message:
-        raise ValueError("device_assert message must not contain NUL characters")
     if not env.debug.device_assert:
         return
     _device_assert(condition, message, mask)
 
 
 def _boolean_value(value, name):
+    # Unwraps a FlyDSL value and accepts Scalar i1 or fixed-size Vector<i1>. Raises TypeError otherwise.
     value = as_ir_value(value)
     if not isinstance(value, ir.Value):
         raise TypeError(f"device_assert {name} must be a boolean scalar or vector")
@@ -55,37 +52,34 @@ def _boolean_value(value, name):
 
 @dsl_loc_tracing
 def _device_assert(condition, message, mask):
-    # Device intrinsics and traps must not accidentally be emitted in a launcher.
+    from ..compiler.diagnostics import location_chain
+
     parent = ir.InsertionPoint.current.block.owner
+    # Find the nearest enclosing gpu.func so we don't emit device intrinsics in a host launcher.
     while parent is not None and parent.operation.name != "gpu.func":
         parent = parent.parent
     if parent is None:
         raise ValueError("device_assert must be called inside a GPU kernel")
 
     cond = _boolean_value(condition, "condition")
+    bool_type = ir.IntegerType.get_signless(1)
+    true = arith.ConstantOp(bool_type, ir.IntegerAttr.get(bool_type, 1)).result
+    if isinstance(cond.type, ir.VectorType):
+        true = vector.BroadcastOp(cond.type, true).result
+    failed = arith.XOrIOp(cond, true).result
     if mask is not None:
         active = _boolean_value(mask, "mask")
         if active.type != cond.type:
-            if isinstance(cond.type, ir.VectorType) and active.type == ir.IntegerType.get_signless(1):
+            if isinstance(cond.type, ir.VectorType) and active.type == bool_type:
                 active = vector.BroadcastOp(cond.type, active).result
             else:
                 raise TypeError("device_assert mask must be scalar or match the condition's vector shape")
-        # Inactive elements satisfy the assertion, including an entirely inactive thread.
-        one = arith.ConstantOp(
-            ir.IntegerType.get_signless(1), ir.IntegerAttr.get(ir.IntegerType.get_signless(1), 1)
-        ).result
-        if isinstance(cond.type, ir.VectorType):
-            one = vector.BroadcastOp(cond.type, one).result
-        cond = arith.OrIOp(cond, arith.XOrIOp(active, one)).result
+        failed = arith.AndIOp(failed, active).result
     if isinstance(cond.type, ir.VectorType):
-        cond = vector.ReductionOp(ir.IntegerType.get_signless(1), vector.CombiningKind.AND, cond).result
+        failed = vector.ReductionOp(bool_type, vector.CombiningKind.OR, failed).result
 
-    one = arith.ConstantOp(ir.IntegerType.get_signless(1), ir.IntegerAttr.get(ir.IntegerType.get_signless(1), 1)).result
-    failed = arith.XOrIOp(cond, one).result
-    location = ir.Location.current
-    while isinstance(location, (ir.CallSiteLoc, ir.NameLoc)):
-        location = location.callee if isinstance(location, ir.CallSiteLoc) else location.child_loc
-    source = f"{location.filename}:{location.start_line}" if isinstance(location, ir.FileLineColLoc) else "<unknown>"
+    frames = location_chain(ir.Location.current)
+    source = f"{frames[0].filename}:{frames[0].line}" if frames else "<unknown>"
     # Escape user text for printf; it must never be interpreted as a format string.
     prefix = f"FlyDSL device assertion failed at {source}: {message}".replace("%", "%%")
     fail_op = scf.IfOp(failed, [], has_else=False)
