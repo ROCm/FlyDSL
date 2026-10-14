@@ -235,7 +235,7 @@ def _normalize_waves_per_eu(waves_per_eu) -> "str | None":
             raise ValueError(f"waves_per_eu values must be >= 0, got {waves_per_eu!r}")
         if len(vals) == 2 and vals[0] > vals[1]:
             raise ValueError(f"waves_per_eu min ({vals[0]}) must be <= max ({vals[1]})")
-        return None if vals == [0] else waves_per_eu
+        return None if vals == [0] else ",".join(str(v) for v in vals)
 
     raise TypeError(f"waves_per_eu must be an int, tuple(int, int), or str, got {type(waves_per_eu).__name__}")
 

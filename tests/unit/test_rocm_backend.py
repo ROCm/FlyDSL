@@ -7,7 +7,7 @@ execution or the external LLVM toolchain."""
 import pytest
 
 from flydsl._mlir import ir
-from flydsl.compiler.backends.rocm import RocmBackend
+from flydsl.compiler.backends.rocm import RocmBackend, _normalize_waves_per_eu
 
 pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
@@ -51,6 +51,22 @@ def test_rocm_lower_wpe_preserves_source_default_and_overrides_kernel_entries():
         assert 'rocdl.waves_per_eu = "2"' in funcs[name]
     assert '"keep", "yes"' in funcs["a"]
     assert "rocdl.waves_per_eu" not in funcs["helper"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0, None),
+        (2, "2"),
+        ((1, 1), "1,1"),
+        ((0, 3), "0,3"),
+        ("1,1", "1,1"),
+        ("3", "3"),
+        (" 1 , 2 ", "1,2"),
+    ],
+)
+def test_normalize_waves_per_eu_valid(value, expected):
+    assert _normalize_waves_per_eu(value) == expected
 
 
 @pytest.mark.parametrize(
