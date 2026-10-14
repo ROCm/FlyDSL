@@ -486,7 +486,32 @@ def build_glm5_monokernel(
     DN_UNION_CANDIDATE = (
         native_fp4_mfma and atom_experts and npes == 4 and S == 12 and expert_inter == 512 and not with_indexer
     )
-    DU_ROWS = 10 if DN_UNION_ROWS40 else 12
+    # The original down partition gives each wave complete token columns when
+    # its row tile divides the four K-partition waves. The existing union
+    # contribution arena can then replay each token's slot/K additions exactly.
+    aligned_union_words = S * MOE_SLOTS * (132 + 20 + 1 + 1 + 4 * 32) + 2 * (S * TOP_K + 1) + 5 + (257 * S + 3) // 4
+    DN_UNION_ALIGNED = (
+        COHORT_ROW_TILES
+        and GROUPED_DN
+        and not with_indexer
+        and native_fp4_mfma
+        and atom_experts
+        and npes == 4
+        and H == 16
+        and expert_inter == 512
+        and DN_TILE == 32
+        and S % (WAVES // 2) == 0
+        and aligned_union_words <= WORK_WORDS
+    )
+    # Redistribute a partial final round using complete 16-row MFMA groups.
+    # Both subtiles fit one worker round; full rounds retain their 32-row tile.
+    DN_TAIL_TASKS = N_DN_TILES % G
+    DN_FULL_TASKS = N_DN_TILES - DN_TAIL_TASKS
+    DN_SPLIT_UNION_TAIL = (
+        DN_UNION_ALIGNED and N_DN_TILES > G and DN_TILE == 32 and 0 < DN_TAIL_TASKS and 2 * DN_TAIL_TASKS <= G
+    )
+    DN_WORK_ITEMS = N_DN_TILES + (DN_TAIL_TASKS if DN_SPLIT_UNION_TAIL else 0)
+    DU_ROWS = S if DN_UNION_ALIGNED else (10 if DN_UNION_ROWS40 else 12)
     DU_SLOTS, DU_XROW, DU_SCROW, DU_UMAX = 9, 132, 20, DU_ROWS * 8 + 1
     DU_ROUTE_WORDS = DU_ROWS * DU_SLOTS
     DU_KEY_WORDS = DU_ROUTE_WORDS + 2 * DU_UMAX + 5
@@ -495,7 +520,7 @@ def build_glm5_monokernel(
     DU_DWOFF = DU_KEYOFF + DU_KEY_WORDS
     DU_CROFF = DU_DWOFF + DU_ROUTE_WORDS
     DU_CWORDS = DU_ROUTE_WORDS * 4 * 32
-    if DN_UNION_CANDIDATE or DN_UNION_ROWS40:
+    if DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED:
         assert GROUPED_DN
         assert WORK_WORDS * 4 >= (DU_CROFF + DU_CWORDS) * 4 + 257 * DU_ROWS
 
@@ -1953,7 +1978,7 @@ def build_glm5_monokernel(
                 return (bid + (G - base[name])) & (G - 1)
 
             def stamp(name, t, which, lead=0):
-                if const_expr(timeline):
+                def write_record(task, column):
                     if tid == lead:
                         now = mem_realtime()
                         tl_addr = index_arg(7) if const_expr(with_indexer) else timeline_buf
@@ -1961,10 +1986,24 @@ def build_glm5_monokernel(
                             fx.inttoptr(
                                 fx.PointerType.get(fx.Int64.ir_type, fx.AddressSpace.Global, 8),
                                 tl_addr
-                                + fx.Int64((row_tile * TILE_TIMELINE_TASKS + first[name] + t) * TL_COLS + which) * 8,
+                                + fx.Int64((row_tile * TILE_TIMELINE_TASKS + first[name] + task) * TL_COLS + column)
+                                * 8,
                             ),
                             now,
                         )
+
+                if const_expr(timeline):
+                    if const_expr(DN_SPLIT_UNION_TAIL and name == "down"):
+                        if t < DN_FULL_TASKS:
+                            write_record(t, which)
+                        else:
+                            logical_tile = DN_FULL_TASKS + (t - DN_FULL_TASKS) // 2
+                            if (t - DN_FULL_TASKS) % 2 == 0:
+                                write_record(logical_tile, which)
+                            elif const_expr(which in (0, 3, 4)):
+                                write_record(logical_tile, {0: 5, 3: 6, 4: 7}[which])
+                    else:
+                        write_record(t, which)
 
             def n_sel(count=S):
                 """This lane's local MFMA B column; inactive columns duplicate the last one."""
@@ -5310,7 +5349,7 @@ def build_glm5_monokernel(
                         lds_st(keys, tid, gu_my_key)
                         lds_st(dnw, tid, gu_my_prob)
                     gpu.barrier()
-                    if const_expr(DN_UNION_ROWS40 or DN_UNION_CANDIDATE):
+                    if const_expr(DN_UNION_ROWS40 or DN_UNION_CANDIDATE or DN_UNION_ALIGNED):
                         # Rebuild cohort-local expert metadata expected by ordered down union;
                         # wave-local masks only occupy the otherwise-idle reduction workspace.
                         union_experts = keys + S * MOE_SLOTS
@@ -5645,7 +5684,7 @@ def build_glm5_monokernel(
                     return t == start("down")
                 return fx.Boolean(True)
 
-            def dn_union_tile(t):
+            def dn_union_tile(t, output_rows=32):
 
                 mode = "union_lut4"
                 hidden, INTER, SLOTS = HIDDEN, 512, DU_SLOTS
@@ -5678,7 +5717,7 @@ def build_glm5_monokernel(
                     row = sn * SLOTS + slot
                     wb = _rsrc(w_dn + fx.Int64(expert) * fx.Int64(hidden * INTER // 2))
                     sb = _rsrc(s_dn + fx.Int64(expert) * fx.Int64(hidden * INTER // 32))
-                    rg = tile * 2 + gu
+                    rg = tile * (output_rows // 16) + gu + (DN_FULL_TASKS if output_rows == 16 else 0)
                     raw = fx.Vector(
                         bo.buffer_load(
                             wb,
@@ -5806,31 +5845,32 @@ def build_glm5_monokernel(
 
                 BATCH = 4 if mode in ("union_batch4", "union_lut4") else 1
 
-                for batch in range((n_union + BATCH - 1) // BATCH):
-                    units, slots, active_columns = [], [], []
-                    for part in range_constexpr(BATCH):
-                        index = fx.min(batch * BATCH + part, n_union - 1)
-                        expert = _uniform(ld(ue, index))
-                        if const_expr(mode == "union_lut4"):
-                            slot = fx.Int32(ld(slot_lut, expert * S + sn))
-                        else:
-                            slot = fx.Int32(0)
-                            for j in range_constexpr(SLOTS):
-                                slot = (ld(keys, sn * SLOTS + j) == expert).select(fx.Int32(j), slot)
-                        slots.append(slot)
-                        active_columns.append((lane % 16 < S) & (ld(keys, sn * SLOTS + slot) == expert))
-                        units.append(unit(expert, slot, gw, fx.Float32(1.0)))
-                    for part in range_constexpr(BATCH):
-                        if (batch * BATCH + part < n_union) | (part == 0 and index_request_width == 6):
-                            c = partial(units[part])
-                            if active_columns[part]:
-                                # Adjacent rows use a fixed layout stride.
-                                # Share their base so the LDS writes can pair.
-                                row = gu * 16 + lane // 16 * 4
-                                target = contribution_index(sn, slots[part], gw, row)
-                                stride = S if mode in ("union_transpose", "union_batch4", "union_lut4") else 1
-                                for e in range_constexpr(4):
-                                    st(contributions, target + e * stride, c[e])
+                if wave < (output_rows // 16) * 4:
+                    for batch in range((n_union + BATCH - 1) // BATCH):
+                        units, slots, active_columns = [], [], []
+                        for part in range_constexpr(BATCH):
+                            index = fx.min(batch * BATCH + part, n_union - 1)
+                            expert = _uniform(ld(ue, index))
+                            if const_expr(mode == "union_lut4"):
+                                slot = fx.Int32(ld(slot_lut, expert * S + sn))
+                            else:
+                                slot = fx.Int32(0)
+                                for j in range_constexpr(SLOTS):
+                                    slot = (ld(keys, sn * SLOTS + j) == expert).select(fx.Int32(j), slot)
+                            slots.append(slot)
+                            active_columns.append((lane % 16 < S) & (ld(keys, sn * SLOTS + slot) == expert))
+                            units.append(unit(expert, slot, gw, fx.Float32(1.0)))
+                        for part in range_constexpr(BATCH):
+                            if (batch * BATCH + part < n_union) | (part == 0 and index_request_width == 6):
+                                c = partial(units[part])
+                                if active_columns[part]:
+                                    # Adjacent rows use a fixed layout stride.
+                                    # Share their base so the LDS writes can pair.
+                                    row = gu * 16 + lane // 16 * 4
+                                    target = contribution_index(sn, slots[part], gw, row)
+                                    stride = S if mode in ("union_transpose", "union_batch4", "union_lut4") else 1
+                                    for e in range_constexpr(4):
+                                        st(contributions, target + e * stride, c[e])
 
                 gpu.barrier()
 
@@ -5855,7 +5895,9 @@ def build_glm5_monokernel(
                                         [acc[e] + vals[e] * coefficient for e in range(4)], fx.Float32
                                     )
                 else:
-                    if (lane % 16 < S) & (sn // 3 == gw):
+                    # Keep the original wave and every slot/K addition order.
+                    samples_per_wave = S // 4 if DN_UNION_ALIGNED else 3
+                    if (lane % 16 < S) & (sn // samples_per_wave == gw) & (gu < output_rows // 16):
                         for slot in range_constexpr(SLOTS):
                             coefficient = ld(dnw, sn * SLOTS + slot)
                             for kc in range_constexpr(4):
@@ -5877,8 +5919,8 @@ def build_glm5_monokernel(
 
                 gpu.barrier()
 
-                if tid < S * 32:
-                    output_row, output_token = tid % 32, tid // 32
+                if tid < S * output_rows:
+                    output_row, output_token = tid % output_rows, tid // output_rows
                     tot = fx.Float32(0.0)
                     for w in range_constexpr(4):
                         ww = output_row // 16 * 4 + w
@@ -5886,7 +5928,7 @@ def build_glm5_monokernel(
                             red,
                             (ww * 64 + output_token + 16 * ((output_row % 16) // 4)) * 4 + output_row % 4,
                         )
-                    lds_st(outs, output_token * 32 + output_row, tot)
+                    lds_st(outs, output_token * output_rows + output_row, tot)
 
                 if const_expr(N_DN_TILES > G and not DN_UNION_INPUT_REUSE40):
                     # Multiple output tasks reuse this CTA's original route data.
@@ -5906,11 +5948,17 @@ def build_glm5_monokernel(
                     return t == start("down")
                 return fx.Boolean(True)
 
-            for t in range(start("down"), N_DN_TILES, G):
+            for t in range(start("down"), DN_WORK_ITEMS, G):
                 t = fx.Int32(t)
                 stamp("down", t, 0)
-                if const_expr(DN_UNION_CANDIDATE or DN_UNION_ROWS40):
-                    dn_union_tile(t)
+                if const_expr(DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED):
+                    if const_expr(DN_SPLIT_UNION_TAIL):
+                        if t >= DN_FULL_TASKS:
+                            dn_union_tile(t, output_rows=16)
+                        else:
+                            dn_union_tile(t)
+                    else:
+                        dn_union_tile(t)
                 else:
                     if down_inputs_needed(t):
                         if const_expr(ug_split(S, expert_inter) is None):  # retain the tuned down-stage route schedule
@@ -6342,7 +6390,13 @@ def build_glm5_monokernel(
                 ):
                     ffn_owner_reduce(t, residual_a, store_x)
                 else:
-                    peer_reduce("ffn", t, residual_a, store_x, tile=DN_TILE)
+                    if const_expr(DN_SPLIT_UNION_TAIL):
+                        if t >= DN_FULL_TASKS:
+                            peer_reduce("ffn", t + DN_FULL_TASKS, residual_a, store_x, tile=16)
+                        else:
+                            peer_reduce("ffn", t, residual_a, store_x, tile=DN_TILE)
+                    else:
+                        peer_reduce("ffn", t, residual_a, store_x, tile=DN_TILE)
                 gpu.barrier()
                 stamp("down", t, 4)
 
