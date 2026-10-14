@@ -139,7 +139,7 @@ def _dyn_hw_closure_key(grid, im2col_plan, scatter_plan, unit):
 
     ``grid`` as the kernel holds it (x/z/m blanked). Every boolean here, and
     every ``unit`` flag, may follow the resolution and selects a different
-    artifact, so AOT dedupe must key on this, not ``_shape_agnostic_key``.
+    artifact, so a cache of dyn_hw artifacts must key on this, not ``_shape_agnostic_key``.
     """
     return (*grid, *im2col_plan, *scatter_plan, *unit)
 

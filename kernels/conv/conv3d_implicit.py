@@ -9,11 +9,8 @@ Returns (N, K, Do, Ho, Wo) bf16. Layouts NCDHW/NDHWC are independent.
 """
 
 import functools
-import logging
-import math
 import os
 import weakref
-from pathlib import Path
 
 import torch
 
@@ -50,7 +47,7 @@ SUPPORTED_GFX = ("gfx950",)
 
 @functools.lru_cache(maxsize=1)
 def _get_gfx():
-    """GPU arch string matching tuned CSV stamps; strip feature suffixes."""
+    """GPU arch string with feature suffixes stripped."""
     from flydsl.runtime.device import get_rocm_arch
 
     return get_rocm_arch().split(":", 1)[0]
@@ -58,7 +55,7 @@ def _get_gfx():
 
 @functools.lru_cache(maxsize=1)
 def _get_cu_num():
-    """CU count for tile/split-K heuristics and tuned-table lookup.
+    """CU count for tile/split-K heuristics.
 
     Prefer ``CU_NUM`` (same override aiter uses), then torch's
     ``multi_processor_count`` (256 on MI355X / gfx950).
@@ -83,91 +80,9 @@ def _check_supported_arch():
         )
 
 
-# Tuned launch configs from conv3d_tune.py, which times
-# NDHWC in and out. Layout is not in the key: an NCDHW call gets the same row.
-
-# Lookup key = untuned CSV header. Shared with the tuner and AOT.
-TUNED_KEY_COLUMNS = (
-    "N",
-    "C",
-    "D",
-    "H",
-    "W",
-    "K",
-    "kT",
-    "kH",
-    "kW",
-    "stride_d",
-    "stride_h",
-    "stride_w",
-    "pad_d",
-    "pad_h",
-    "pad_w",
-    "dil_d",
-    "dil_h",
-    "dil_w",
-    "groups",
-    "bias",
-)
-TUNED_RESULT_COLUMNS = ("tile_m", "tile_n", "wave_m", "wave_n", "wgm")
-TUNED_DEVICE_COLUMNS = ("gfx", "cu_num")
-
-# Result column, not part of the key. Empty cell means FlyDSL; other backends skipped.
-TUNED_LIBTYPE_COLUMN = "libtype"
-LIBTYPE_FLYDSL = "flydsl"
-
-_MATMUL_FAST_PATH_INT_COLS = (
-    "groups",
-    "kT",
-    "kH",
-    "kW",
-    "stride_d",
-    "stride_h",
-    "stride_w",
-    "pad_d",
-    "pad_h",
-    "pad_w",
-)
-
-
-def _parse_tuned_bool(value) -> bool:
-    """Parse a tuned-CSV bias cell. Do not use ``bool("False")``."""
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, float) and math.isnan(value):  # an empty cell
-        return False
-    if isinstance(value, (int, float)):
-        return bool(int(value))
-    normalized = str(value).strip().lower()
-    if normalized in {"", "0", "false", "no", "nan", "<na>", "none"}:
-        return False
-    if normalized in {"1", "true", "yes"}:
-        return True
-    raise ValueError(f"Expected True/False, got {value!r}")
-
-
 def _is_matmul_shape(*, groups, kt, kh, kw, st, sh, sw, pt, ph, pw) -> bool:
     """1x1x1, unit stride, no pad: answered with ``torch.matmul``, no kernel."""
     return groups == 1 and kt == kh == kw == 1 and st == sh == sw == 1 and pt == ph == pw == 0
-
-
-def _is_matmul_fast_path(shape) -> bool:
-    """``_is_matmul_shape`` for a tuned/untuned CSV row, keyed by column name."""
-    vals = {c: int(shape[c]) for c in _MATMUL_FAST_PATH_INT_COLS}
-    return _is_matmul_shape(
-        groups=vals["groups"],
-        kt=vals["kT"],
-        kh=vals["kH"],
-        kw=vals["kW"],
-        st=vals["stride_d"],
-        sh=vals["stride_h"],
-        sw=vals["stride_w"],
-        pt=vals["pad_d"],
-        ph=vals["pad_h"],
-        pw=vals["pad_w"],
-    )
 
 
 def _implicit_param_from_problem(
@@ -232,8 +147,6 @@ def _implicit_param_from_problem(
 # Runtime D/H/W so one artifact serves every resolution. Set 0 to compile per
 # size (tiny fixed-shape workloads). BIG_IN/BIG_OUT/M-chunking stay static.
 FLYDSL_CONV3D_DYN_HW = int(os.environ.get("FLYDSL_CONV3D_DYN_HW", "1"))
-# Back-compat alias used by aiter AOT scripts that import this name.
-AITER_CONV3D_DYN_HW = FLYDSL_CONV3D_DYN_HW
 
 
 def _dyn_hw_ok(n, c_padded, d, h, w, k, npq, tile):
@@ -258,239 +171,7 @@ def _dyn_hw_ok(n, c_padded, d, h, w, k, npq, tile):
     return grid_m <= 0xFFFFFFFF // block_threads
 
 
-# (device, shape) pairs already reported by _log_tuned_lookup, so the report
-# costs one line per shape rather than one per conv call.
-_TUNED_LOOKUP_LOGGED = set()
-
-
-class DuplicateTunedKeyError(ValueError):
-    """Two tuned rows claim one (gfx, cu_num, shape); the only table error that raises."""
-
-
-def _default_tuned_csv_paths():
-    """Shipped per-model tuned tables under kernels/conv/configs/."""
-    cfg_dir = Path(__file__).resolve().parent / "configs"
-    return sorted(cfg_dir.glob("*_bf16_tuned_conv3d.csv"))
-
-
-def _resolve_tuned_csv_paths():
-    """Paths from ``FLYDSL_CONV3D_BF16_CONFIG`` (colon-separated) or the defaults."""
-    override = os.environ.get("FLYDSL_CONV3D_BF16_CONFIG", "").strip()
-    if override:
-        return [Path(p).expanduser() for p in override.split(":") if p.strip()]
-    return _default_tuned_csv_paths()
-
-
-def _logger():
-    return logging.getLogger(__name__)
-
-
-@functools.lru_cache(maxsize=1)
-def _load_tuned_table():
-    """``{(gfx, cu_num, *shape): (tile, wgm, splitk)}``. Empty dict on any failure."""
-    try:
-        import pandas as pd
-
-        paths = _resolve_tuned_csv_paths()
-        existing = [p for p in paths if p.is_file()]
-        if not existing:
-            return {}
-
-        frames = []
-        for path in existing:
-            df = pd.read_csv(path)
-            df.columns = df.columns.str.strip()
-            frames.append(df)
-        df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-
-        missing = [
-            c
-            for c in (
-                *TUNED_DEVICE_COLUMNS,
-                *TUNED_KEY_COLUMNS,
-                *TUNED_RESULT_COLUMNS,
-            )
-            if c not in df.columns
-        ]
-        if missing:
-            _logger().warning(
-                f"conv3d_implicit: tuned config missing column(s) "
-                f"{missing}; every conv falls back to the heuristic tile."
-            )
-            return {}
-
-        has_libtype = TUNED_LIBTYPE_COLUMN in df.columns
-        skipped_libtypes = {}
-
-        table = {}
-        for row in df.itertuples(index=False):
-            if has_libtype:
-                raw_libtype = getattr(row, TUNED_LIBTYPE_COLUMN, None)
-                libtype = "" if pd.isna(raw_libtype) else str(raw_libtype).strip()
-                if libtype and libtype != LIBTYPE_FLYDSL:
-                    skipped_libtypes[libtype] = skipped_libtypes.get(libtype, 0) + 1
-                    continue
-            key = (str(row.gfx).strip(), int(row.cu_num)) + tuple(
-                (_parse_tuned_bool(getattr(row, c)) if c == "bias" else int(getattr(row, c))) for c in TUNED_KEY_COLUMNS
-            )
-            if key in table:
-                raise DuplicateTunedKeyError(
-                    f"duplicate tuned conv3d shape key {key}; "
-                    f"check FLYDSL_CONV3D_BF16_CONFIG / kernels/conv/configs/"
-                )
-            raw_sk = getattr(row, "splitK", None)
-            if raw_sk is None:
-                raw_sk = getattr(row, "splitk", None)
-            try:
-                splitk = int(raw_sk) if raw_sk is not None and str(raw_sk) != "" else None
-            except (TypeError, ValueError):
-                splitk = None
-            if splitk is not None:
-                splitk = splitk or 1
-            table[key] = (
-                (
-                    int(row.tile_m),
-                    int(row.tile_n),
-                    int(row.wave_m),
-                    int(row.wave_n),
-                ),
-                int(row.wgm),
-                splitk,
-            )
-        if skipped_libtypes:
-            _logger().info(
-                "conv3d_implicit: tuned config holds rows for backends this "
-                "dispatch does not serve, skipped: "
-                + ", ".join(f"{n} x {TUNED_LIBTYPE_COLUMN}={lt}" for lt, n in sorted(skipped_libtypes.items()))
-            )
-        return table
-    except DuplicateTunedKeyError:
-        raise
-    except Exception as exc:  # noqa: BLE001  a bad config table must never break a conv
-        _logger().warning(
-            f"conv3d_implicit: could not read the tuned config table "
-            f"({type(exc).__name__}: {exc}); every conv falls back to the "
-            f"heuristic tile."
-        )
-        return {}
-
-
-def _log_tuned_lookup(table, dev, key, hit, borrowed=False):
-    """Log once per (device, shape): hits need FLYDSL_LOG_TUNED_CONFIG; misses always."""
-    if not table or (dev, key) in _TUNED_LOOKUP_LOGGED:
-        return
-    _TUNED_LOOKUP_LOGGED.add((dev, key))
-    if hit is not None:
-        if not int(os.environ.get("FLYDSL_LOG_TUNED_CONFIG", "0")):
-            return
-
-    log = _logger()
-    shape = ",".join(f"{c}={v}" for c, v in zip(TUNED_KEY_COLUMNS, key))
-    if hit is not None:
-        splitk = hit[2]
-        sk_s = f", splitK={splitk}" if splitk is not None else ""
-        if borrowed:
-            log.info(
-                f"conv3d_implicit: {shape} has no tuned row of its own on "
-                f"gfx={dev[0]}, cu_num={dev[1]}; borrowing this layer's nearest "
-                f"tuned resolution, tile={hit[0]}, wgm={hit[1]}. Tune this shape "
-                f"for the exact config."
-            )
-            return
-        log.info(
-            f"conv3d_implicit: {shape} is tuned on gfx={dev[0]}, "
-            f"cu_num={dev[1]}; running tile={hit[0]}, wgm={hit[1]}{sk_s}."
-        )
-        return
-
-    elsewhere = sorted({k[:2] for k in table if k[2:] == key})
-    if elsewhere:
-        log.warning(
-            f"conv3d_implicit: {shape} is tuned for {elsewhere} but not for this "
-            f"device (gfx={dev[0]}, cu_num={dev[1]}); using the heuristic tile. "
-            f"Re-run python -m kernels.conv.conv3d_tune on this device."
-        )
-    else:
-        log.info(
-            f"conv3d_implicit: {shape} has no tuned row for gfx={dev[0]}, "
-            f"cu_num={dev[1]}; using the heuristic tile."
-        )
-
-
-# Resolution fields of a lookup key vs layer identity.
-_RESOLUTION_KEY_IDX = frozenset(TUNED_KEY_COLUMNS.index(c) for c in ("N", "D", "H", "W"))
-
-# Borrow only within this npq ratio of the nearest tuned row of the same layer.
-_BORROW_NPQ_RATIO = 4.0
-
-
-def _layer_key(key):
-    """The part of a lookup key that identifies the layer, not the resolution."""
-    return tuple(v for i, v in enumerate(key) if i not in _RESOLUTION_KEY_IDX)
-
-
-def _key_npq(key):
-    """The implicit GEMM's row count for one lookup key."""
-    f = dict(zip(TUNED_KEY_COLUMNS, key))
-    return (
-        f["N"]
-        * out_extent(f["D"], f["pad_d"], f["dil_d"], f["kT"], f["stride_d"])
-        * out_extent(f["H"], f["pad_h"], f["dil_h"], f["kH"], f["stride_h"])
-        * out_extent(f["W"], f["pad_w"], f["dil_w"], f["kW"], f["stride_w"])
-    )
-
-
-@functools.lru_cache(maxsize=1)
-def _tuned_rows_by_layer():
-    """The tuned table regrouped as ``{(gfx, cu_num, *layer): [(npq, hit), ...]}``."""
-    by_layer = {}
-    for key, hit in _load_tuned_table().items():
-        dev, shape = key[:2], key[2:]
-        by_layer.setdefault(dev + _layer_key(shape), []).append((_key_npq(shape), hit))
-    return by_layer
-
-
-def _borrow_tuned_tile(dev, key):
-    """Nearest same-layer tuned tile by npq, or None. Does not borrow splitK.
-
-    Two bars, both of which drop back to ``_pick_tile``: the row has to be
-    within ``_BORROW_NPQ_RATIO`` of the npq being served, and its tile has to
-    still fill the device there (``_tile_fills_device``).
-    """
-    rows = _tuned_rows_by_layer().get(dev + _layer_key(key))
-    if not rows:
-        return None
-    want = _key_npq(key)
-    if want <= 0:
-        return None
-    npq, hit = min(rows, key=lambda row: abs(row[0] - want))
-    if not npq or not 1 / _BORROW_NPQ_RATIO <= want / npq <= _BORROW_NPQ_RATIO:
-        return None
-    f = dict(zip(TUNED_KEY_COLUMNS, key))
-    if not _tile_fills_device(want, f["K"], f["groups"], hit[0], dev[1]):
-        return None
-    return (hit[0], hit[1], None)
-
-
-def _lookup_tuned_tile(key, device):
-    """Tuned (tile, wgm, splitk) for this device, or a borrowed same-layer row."""
-    del device
-    if key is None:
-        return None
-    try:
-        dev = (_get_gfx(), _get_cu_num())
-    except Exception:  # noqa: BLE001  same: degrade to the heuristic
-        return None
-    table = _load_tuned_table()
-    hit = table.get((*dev, *key))
-    borrowed = hit is None
-    if borrowed:
-        hit = _borrow_tuned_tile(dev, key)
-    _log_tuned_lookup(table, dev, key, hit, borrowed=borrowed)
-    return hit
-
-
-# Fallback tile / WGM when the table has no row.
+# Heuristic tile / WGM when neither ``tile`` nor autotune picks one.
 TILE_LADDER = ((128, 128, 2, 4), (64, 64, 2, 2), (32, 32, 1, 2))
 
 TILE_MIN_WAVES_PER_CU = 6
@@ -526,14 +207,7 @@ def _blocks(npq, kg, groups, tile):
 
 
 def _tile_fills_device(npq, k, groups, tile, num_cu):
-    """Whether ``tile`` still has the waves to fill ``num_cu`` CUs at this npq.
-
-    The bar ``_pick_tile`` holds its own ladder to, factored out so a borrowed
-    tile is held to it as well: a tuned tile transfers to another resolution of
-    its layer only while M stays large enough that the tile shape is not what
-    decides occupancy. Below the bar it measured up to 2.0x slower than the
-    heuristic's own pick, which is why ``_borrow_tuned_tile`` drops it there.
-    """
+    """Whether ``tile`` still has the waves to fill ``num_cu`` CUs at this npq."""
     kg = k // groups
     return _blocks(npq, kg, groups, tile) * tile[2] * tile[3] >= (TILE_MIN_WAVES_PER_CU * num_cu)
 
@@ -580,6 +254,10 @@ def _dispatch(exe, *args, stream=None):
         exe._cf = exe.compile(*args, stream=stream)
         return
     cf(*args, *getattr(exe, "extra_args", ()), _as_stream(stream))
+
+
+def _autotune_enabled():
+    return os.environ.get("FLYDSL_CONV3D_AUTOTUNE", "0").lower() in ("1", "true", "yes")
 
 
 def _ncdhw_to_ndhwc(x, stream):
@@ -672,8 +350,8 @@ def _prep_weight(w, k, kt, kh, kw, c):
     return wk
 
 
-def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE, groups=1, num_cu=None):
-    """K splits to launch. ``num_cu`` is for AOT (row's CU count, no GPU)."""
+def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE, groups=1):
+    """K splits to launch."""
     k_tiles = (crs + TILE_K - 1) // TILE_K
     if npq * k * 4 > SPLITK_MAX_STAGING_BYTES:
         return 1
@@ -694,7 +372,7 @@ def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE, groups=1, nu
         ):
             sk = 1
         else:
-            num_cu = _num_cu(device) if num_cu is None else int(num_cu)
+            num_cu = _num_cu(device)
             if base >= (3 * num_cu) // 4:
                 sk = 1
             else:
@@ -746,6 +424,7 @@ def _conv3d_impl(
     stream=None,
     tile=None,
     wgm=None,
+    autotune=None,
     input_layout="NCDHW",
     output_layout="NCDHW",
 ):
@@ -785,34 +464,6 @@ def _conv3d_impl(
             else:
                 assert p <= ext, f"circular padding {p} must be <= input extent {ext} on spatial axis {ax}"
 
-    # Tuned-table key: caller shape, before pad/channel rewrite. Asymmetric pad → None.
-    tuned_key = (
-        (
-            n,
-            c,
-            d,
-            h,
-            w,
-            k,
-            kt,
-            kh,
-            kw,
-            st,
-            sh,
-            sw,
-            pt,
-            ph,
-            pw,
-            dt,
-            dh,
-            dw,
-            groups,
-            bias is not None,
-        )
-        if padding_mode == "zeros" and pad_lo == pad_hi
-        else None
-    )
-
     if pad_lo != pad_hi:
         if padding_mode == "zeros":
             x, in_ndhwc = _pad_spatial(x, in_ndhwc, (0, pad_hi[2] - pw, 0, pad_hi[1] - ph, 0, pad_hi[0] - pt))
@@ -834,7 +485,7 @@ def _conv3d_impl(
         inline_pad = False
     pad_mode = padding_mode if inline_pad else "zeros"
 
-    # Same predicate the tuner/AOT skip. Post-normalisation pads, so "same"→0 lands here.
+    # Post-normalisation pads, so "same"→0 lands here.
     if _is_matmul_shape(groups=groups, kt=kt, kh=kh, kw=kw, st=st, sh=sh, sw=sw, pt=pt, ph=ph, pw=pw):
         wm = weight.reshape(k, c)
         if in_ndhwc:
@@ -880,10 +531,10 @@ def _conv3d_impl(
     x_ndhwc = x.contiguous() if in_ndhwc else _ncdhw_to_ndhwc(x, stream)
     w_packed = _prep_weight(weight, k, kt, kh, kw, wc)
 
-    def _run(the_tile, the_wgm=1, tuned_splitk=None):
-        # Caller splitk= wins; else freeze the CSV value so AOT and runtime share a key.
-        sk_arg = splitk if splitk is not None else tuned_splitk
-        sk = _resolve_splitk(sk_arg, npq, crs, k, x.device, the_tile, groups)
+    shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, dt, dh, dw, pad_mode, has_bias, groups, out_ndhwc)
+
+    def _run(the_tile, the_wgm=1):
+        sk = _resolve_splitk(splitk, npq, crs, k, x.device, the_tile, groups)
         if sk > 1:
             y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
         else:
@@ -924,21 +575,20 @@ def _conv3d_impl(
         return y, sk
 
     forced_wgm = None if wgm is None else max(1, int(wgm))
-    tuned_splitk = None
     if tile is not None:
         chosen_tile = tuple(tile)
         chosen_wgm = 1 if forced_wgm is None else forced_wgm
-    else:
-        hit = _lookup_tuned_tile(tuned_key, x.device)
-        if hit is not None:
-            chosen_tile, chosen_wgm, tuned_splitk = hit
-            if forced_wgm is not None:
-                chosen_wgm = forced_wgm
-        else:
-            chosen_tile = _pick_tile(npq, k, groups, x.device)
-            chosen_wgm = _pick_wgm(npq, k, groups, chosen_tile, x.device) if forced_wgm is None else forced_wgm
+    elif autotune or (autotune is None and _autotune_enabled()):
+        from kernels.conv.conv3d_autotune import BF16_CANDIDATES, WGM_VALUES, autotune_conv3d
 
-    y, sk = _run(chosen_tile, chosen_wgm, tuned_splitk=tuned_splitk)
+        candidates = [(t, w) for t in BF16_CANDIDATES for w in WGM_VALUES]
+        best = autotune_conv3d("bf16", shape, "bf16", candidates, x.device, lambda tw: _run(tw[0], tw[1])[0])
+        chosen_tile, chosen_wgm = best
+    else:
+        chosen_tile = _pick_tile(npq, k, groups, x.device)
+        chosen_wgm = _pick_wgm(npq, k, groups, chosen_tile, x.device) if forced_wgm is None else forced_wgm
+
+    y, sk = _run(chosen_tile, chosen_wgm)
     if sk > 1:
         if has_bias:
             y = y + bias_arg.view(1, k)

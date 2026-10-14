@@ -129,6 +129,48 @@ def test_conv3d_tile_configs(tile):
     assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
 
 
+@_skip_non_cdna4
+def test_conv3d_autotune(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "at"))
+    from kernels.conv import conv3d_autotune
+
+    conv3d_autotune._MEM_CACHE.clear()
+    # Every BF16 tile is checked immediately above.  The autotune integration
+    # only needs representative tile extremes while retaining every WGM value;
+    # sweeping the full 8 x 3 product recompiles already-covered kernels.
+    monkeypatch.setattr(
+        conv3d_autotune,
+        "BF16_CANDIDATES",
+        [(128, 128, 2, 4), (64, 64, 2, 2)],
+    )
+
+    torch.manual_seed(4242)
+    # Match test_conv3d_tile_configs so its WGM=1 compilations are reusable.
+    n, c, t, h, w, k = 2, 64, 6, 18, 18, 192
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
+
+    y = conv3d_implicit(x, weight, stride=1, padding=1, autotune=True)
+    y_ref = F.conv3d(x, weight, stride=1, padding=1)
+    torch.cuda.synchronize()
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+    # A tile was chosen and persisted; the second call must hit the cache.
+    assert len(conv3d_autotune._MEM_CACHE) == 1
+    calls = {"n": 0}
+    orig = conv3d_autotune.do_bench
+
+    def _counting(*a, **kw):
+        calls["n"] += 1
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(conv3d_autotune, "do_bench", _counting)
+    y2 = conv3d_implicit(x, weight, stride=1, padding=1, autotune=True)
+    torch.cuda.synchronize()
+    assert torch.allclose(y2, y_ref, rtol=2e-2, atol=2e-2)
+    assert calls["n"] == 0  # cached, no re-benchmark
+
+
 # 2D conv via the depth-1 degenerate path through the 3D kernel.
 @_skip_non_cdna4
 @pytest.mark.parametrize(

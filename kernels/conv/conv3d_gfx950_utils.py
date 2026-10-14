@@ -20,7 +20,7 @@ MFMA_M = 16
 MFMA_N = 16
 MFMA_C_VALUES = 4
 
-# The kernel's only target, not the host: AOT parses tiles before it sets the compile arch.
+# The kernel's only target, not the host.
 WARP_SIZE = get_warp_size("gfx950")
 
 BF16_BYTES = 2
@@ -856,7 +856,7 @@ def block_coords(grid, grid_m=None):
 # Split-K staging must fit a 32-bit buffer num_records (unsigned voffset).
 SPLITK_MAX_STAGING_BYTES = 0xFFFFFFFF
 
-# Heuristic cap: auto splitK stays under 2**31; explicit/CSV splitK may use the rest.
+# Heuristic cap: auto splitK stays under 2**31; explicit splitK may use the rest.
 SPLITK_AUTO_MAX_STAGING_BYTES = 0x7FFFFFFF
 
 
@@ -915,7 +915,7 @@ def make_output_scatter_plan(param, geom, cfg, grid):
     # would have to branch on a runtime predicate it cannot evaluate at trace
     # time. ``_resolve_splitk`` never auto-splits a shape with a tail (it wants
     # npq % tile_m == 0 and kg % tile_n == 0 first), so this is only reachable
-    # through an explicit ``splitk=`` or a hand-written tuned row -- named here
+    # through an explicit ``splitk=`` -- named here
     # rather than left to fail inside the trace with no shape to point at.
     assert not need_chk or not (use_splitk or big_out), (
         f"{'split-K' if use_splitk else 'BIG_OUT'} cannot mask a tile tail, and this "
