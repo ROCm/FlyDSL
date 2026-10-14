@@ -520,10 +520,16 @@ def build_glm5_monokernel(
     DU_KEYOFF = DU_MSOFF + DU_ROUTE_WORDS * DU_SCROW
     DU_DWOFF = DU_KEYOFF + DU_KEY_WORDS
     DU_CROFF = DU_DWOFF + DU_ROUTE_WORDS
-    if DN_UNION_ALIGNED:
+    DU_CWORDS = DU_ROUTE_WORDS * 4 * 32
+    # Contribution storage does not change slot/K ownership or task geometry.
+    # Vectorize any selected union body whose padded arena and LUT fit.
+    DU_FRAGMENT_WORDS = (DU_CROFF + 3) // 4 * 4 + DU_CWORDS + (257 * DU_ROWS + 3) // 4
+    DN_CONTIG_CONTRIBUTIONS = (
+        DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED
+    ) and DU_FRAGMENT_WORDS <= WORK_WORDS
+    if DN_CONTIG_CONTRIBUTIONS:
         # The work array is 16-byte aligned; each fragment starts at a float4.
         DU_CROFF = (DU_CROFF + 3) // 4 * 4
-    DU_CWORDS = DU_ROUTE_WORDS * 4 * 32
     if DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED:
         assert GROUPED_DN
         assert WORK_WORDS * 4 >= (DU_CROFF + DU_CWORDS) * 4 + 257 * DU_ROWS
@@ -5720,7 +5726,7 @@ def build_glm5_monokernel(
                     fx.ptr_store(v, p + i)
 
                 def contribution_index(token, slot, kc, row):
-                    if const_expr(DN_UNION_ALIGNED):
+                    if const_expr(DN_CONTIG_CONTRIBUTIONS):
                         # Preserve the logical (slot, K, row, token) contribution;
                         # keep each lane's four adjacent rows together for float4 I/O.
                         return (((slot * 4 + kc) * 8 + row // 4) * S + token) * 4 + row % 4
@@ -5884,7 +5890,7 @@ def build_glm5_monokernel(
                                     # Share their base so the LDS writes can pair.
                                     row = gu * 16 + lane // 16 * 4
                                     target = contribution_index(sn, slots[part], gw, row)
-                                    if const_expr(DN_UNION_ALIGNED):
+                                    if const_expr(DN_CONTIG_CONTRIBUTIONS):
                                         fx.ptr_store(c, contributions + target)
                                     else:
                                         stride = S if mode in ("union_transpose", "union_batch4", "union_lut4") else 1
@@ -5903,13 +5909,22 @@ def build_glm5_monokernel(
                             coefficient = ld(dnw, sn * SLOTS + slot)
                             for kc in range_constexpr(4):
                                 if ((sn * SLOTS + slot) * 4 + kc) // 90 == gw:
-                                    vals = [
-                                        ld(
-                                            contributions,
-                                            contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4 + e),
+                                    if const_expr(DN_CONTIG_CONTRIBUTIONS):
+                                        vals = fx.Vector(
+                                            fx.ptr_load(
+                                                contributions
+                                                + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
+                                                result_type=v4f,
+                                            )
                                         )
-                                        for e in range(4)
-                                    ]
+                                    else:
+                                        vals = [
+                                            ld(
+                                                contributions,
+                                                contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4 + e),
+                                            )
+                                            for e in range(4)
+                                        ]
                                     acc = fx.Vector.from_elements(
                                         [acc[e] + vals[e] * coefficient for e in range(4)], fx.Float32
                                     )
@@ -5920,7 +5935,7 @@ def build_glm5_monokernel(
                         for slot in range_constexpr(SLOTS):
                             coefficient = ld(dnw, sn * SLOTS + slot)
                             for kc in range_constexpr(4):
-                                if const_expr(DN_UNION_ALIGNED):
+                                if const_expr(DN_CONTIG_CONTRIBUTIONS):
                                     vals = fx.Vector(
                                         fx.ptr_load(
                                             contributions + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
