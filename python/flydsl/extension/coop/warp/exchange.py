@@ -315,18 +315,6 @@ class WarpExchange(WarpPrimitive):
             fx.barrier()  # Finish reading scratch before reusing it.
             shared_y = fx.coop.WarpExchange[fx.Int32, 4, 2, fx.coop.WarpExchangeAlgorithm.Shared].scatter_to_striped(x, ranks, storage=storage)
             fx.barrier()  # Finish reading scratch before it is reused.
-
-            # MFMA 16x16 output: C[4*(lane//16)+item, lane%16]. Give each output
-            # lane four consecutive columns instead. Both layouts describe
-            # row-major logical matrix indices, not scatter ranks.
-            # This example launches one 64-thread block on a wave64 target.
-            P = fx.coop.WarpExchange[fx.Float32, 64, 4]
-            storage = fx.SharedAllocator().allocate(P.SharedStorage).peek()
-            src = fx.make_layout(((16, 4), 4), ((1, 64), 16))
-            dst = fx.make_layout((64, 4), (4, 1))
-            y = P.scatter_to_striped(x, src_layout=src, dst_layout=dst, storage=storage)
-            # Output lane l holds C[l//4, 4*(l%4):4*(l%4)+4]. This remains an
-            # LDS exchange within each logical warp; synchronize before reuse.
         """
         cls._check()
         algorithm = cls.algorithm

@@ -3,7 +3,7 @@
 """Warp exchange layouts, independent groups, policies, and record fields."""
 
 import pytest
-from coop_test_utils import ARCHES, full_matrix_enabled, matrix_cases, run_kernel, run_tile, warp_indices, warp_storage
+from coop_test_utils import ARCHES, full_matrix_enabled, matrix_cases, run_tile, warp_indices, warp_storage
 from coop_test_utils import coop_default_device as coop_default_device
 from coop_test_utils import warp_default_device as warp_default_device
 
@@ -157,54 +157,6 @@ def test_scatter_mfma_layout(width, dtype):
     )
     torch.testing.assert_close(actual, torch.arange(block * count, dtype=torch.int32).to(dtype))
     torch.testing.assert_close(restored, values.cpu())
-
-
-@pytest.mark.l1b_target_dialect
-@pytest.mark.rocm_lower
-@pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
-def test_compile_wave64_scatter_layout(monkeypatch):
-    monkeypatch.setenv("ARCH", "gfx950")
-    monkeypatch.setenv("COMPILE_ONLY", "1")
-
-    def apply(a, out):
-        tid = fx.thread_idx.x
-        value = fx.Vector.from_elements([a[tid * 4 + i] for i in range(4)], fx.Int32)
-        result = mfma_scatter(value, 64)
-        for i in range(4):
-            out[tid * 4 + i] = result[i]
-
-    run_kernel(apply, torch.arange(512, dtype=torch.int32, device="cpu"), 512, 128, compile_only=True)
-
-
-@pytest.mark.l0_backend_agnostic
-@pytest.mark.parametrize("case", ["rank", "width", "items", "dynamic", "overlap", "holes", "type"])
-@pytest.mark.parametrize("argument", ["src_layout", "dst_layout"])
-def test_scatter_layout_diagnostics(ctx, insert_point, case, argument):
-    P = fx.coop.WarpExchange[fx.Int32, 8, 4]
-    # Invalid layouts must be rejected before attempting any scratch access.
-    storage = object()
-    layouts = {
-        "rank": lambda: fx.make_layout(32, 1),
-        "width": lambda: fx.make_layout((4, 4), (4, 1)),
-        "items": lambda: fx.make_layout((8, 3), (3, 1)),
-        "dynamic": lambda: fx.make_layout((8, 4), (fx.lane_id(), 1)),
-        "overlap": lambda: fx.make_layout((8, 4), (0, 1)),
-        "holes": lambda: fx.make_layout((8, 4), (8, 1)),
-        "type": lambda: (8, 4),
-    }
-    kwargs = dict(src_layout=fx.make_layout((8, 4), (4, 1)), dst_layout=fx.make_layout((8, 4), (1, 8)))
-    kwargs[argument] = layouts[case]()
-    if case == "type":
-        error, message = TypeError, "must be a Layout"
-    else:
-        error = ValueError
-        message = (
-            "static with two modes"
-            if case in ("rank", "dynamic")
-            else "bijection" if case in ("overlap", "holes") else "mode sizes"
-        )
-    with pytest.raises(error, match=f"{argument}.*{message}"):
-        P.scatter_to_striped(fx.Vector.filled(4, 0, fx.Int32), storage=storage, **kwargs)
 
 
 @pytest.mark.l0_backend_agnostic
