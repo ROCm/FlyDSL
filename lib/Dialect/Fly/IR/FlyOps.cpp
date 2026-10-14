@@ -2029,4 +2029,23 @@ FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
   return success();
 }
 
+LogicalResult PinRegisterOp::verify() {
+  if (getIndexAttr().getInt() < 0)
+    return emitOpError("index must be nonnegative");
+  Type type = getValue().getType();
+  int64_t count = 1;
+  if (auto vector = dyn_cast<VectorType>(type)) {
+    if (vector.isScalable())
+      return emitOpError("requires a fixed-size scalar or vector");
+    count = vector.getNumElements();
+    type = vector.getElementType();
+  }
+  if (!type.isIntOrFloat())
+    return emitOpError("requires an integer or floating-point element type");
+  int64_t bits = count * type.getIntOrFloatBitWidth();
+  if (bits % 32)
+    return emitOpError("total bit width must be a multiple of 32");
+  return success();
+}
+
 #undef FLY_INFER_RETURN_TYPES

@@ -32,6 +32,7 @@
 
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
+#define GEN_PASS_DEF_FLYPINREGISTERRESERVEPASS
 #include "flydsl/Conversion/FlyToROCDL/Passes.h.inc"
 } // namespace mlir
 
@@ -914,6 +915,73 @@ public:
   }
 };
 
+class PinRegisterLowering : public OpConversionPattern<PinRegisterOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(PinRegisterOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto regClass = op.getRegClass();
+    if (regClass.getTarget() != "amdgcn")
+      return op.emitError("pin_register requires amdgcn target");
+
+    StringRef className = regClass.getName();
+    StringRef prefix;
+    if (className == "VGPR_32")
+      prefix = "v";
+    else if (className == "SGPR_32")
+      prefix = "s";
+    else if (className == "AGPR_32")
+      prefix = "a";
+    else
+      return op.emitError("unsupported register class: ") << className;
+
+    Type type = typeConverter->convertType(op.getType());
+    if (!type)
+      return failure();
+
+    int64_t index = op.getIndex();
+    int64_t bits;
+    if (auto vecTy = dyn_cast<VectorType>(type))
+      bits = vecTy.getNumElements() * vecTy.getElementType().getIntOrFloatBitWidth();
+    else
+      bits = type.getIntOrFloatBitWidth();
+    int64_t numRegs = bits / 32;
+
+    // Build constraint string: "={v68},{v68}" or "={v[68:71]},{v[68:71]}"
+    std::string reg;
+    if (numRegs == 1)
+      reg = ("{" + prefix + Twine(index) + "}").str();
+    else
+      reg = ("{" + prefix + "[" + Twine(index) + ":" + Twine(index + numRegs - 1) + "]}").str();
+    std::string constraints = ("=" + Twine(reg) + "," + Twine(reg)).str();
+
+    auto asmDialectAttr =
+        LLVM::AsmDialectAttr::get(rewriter.getContext(), LLVM::AsmDialect::AD_ATT);
+    auto asmOp = LLVM::InlineAsmOp::create(
+        rewriter, op.getLoc(), type, /*operands=*/ValueRange{adaptor.getValue()},
+        /*asm_string=*/StringRef(""), /*constraints=*/StringRef(constraints),
+        /*has_side_effects=*/true, /*is_align_stack=*/false, LLVM::tailcallkind::TailCallKind::None,
+        /*asm_dialect=*/asmDialectAttr,
+        /*operand_attrs=*/ArrayAttr());
+
+    // Accumulate pinned register indices on parent gpu.func so a later pass
+    // can emit amdgpu-reserved-{v,s,a}gprs passthrough attributes.
+    if (auto gpuFunc = op->getParentOfType<gpu::GPUFuncOp>()) {
+      std::string attrName = ("fly.pinned_" + prefix + "gprs").str();
+      SmallVector<int64_t> indices;
+      if (auto existing = gpuFunc->getAttrOfType<DenseI64ArrayAttr>(attrName))
+        indices.append(existing.asArrayRef().begin(), existing.asArrayRef().end());
+      for (int64_t i = 0; i < numRegs; ++i)
+        indices.push_back(index + i);
+      gpuFunc->setAttr(attrName, rewriter.getDenseI64ArrayAttr(indices));
+    }
+
+    rewriter.replaceOp(op, asmOp.getResult(0));
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -935,6 +1003,7 @@ public:
     target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeComposedLayoutOp>();
 
     FlyTypeConverter typeConverter;
+    patterns.add<PinRegisterLowering>(typeConverter, context);
 
     // Convert every control-flow boundary along with its users.
     scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
@@ -1010,6 +1079,53 @@ public:
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
       signalPassFailure();
+  }
+};
+
+// ---------------------------------------------------------------------------
+// FlyPinRegisterReservePass — convert fly.pinned_{v,s,a}gprs discardable
+// attributes into amdgpu-reserved-{v,s,a}gprs LLVM passthrough entries.
+// ---------------------------------------------------------------------------
+class FlyPinRegisterReservePass
+    : public mlir::impl::FlyPinRegisterReservePassBase<FlyPinRegisterReservePass> {
+public:
+  using FlyPinRegisterReservePassBase::FlyPinRegisterReservePassBase;
+
+  void runOnOperation() override {
+    getOperation()->walk([&](LLVM::LLVMFuncOp func) {
+      MLIRContext *ctx = func.getContext();
+      SmallVector<Attribute, 4> passthroughAttrs;
+      if (auto existing = func.getPassthroughAttr())
+        passthroughAttrs.append(existing.begin(), existing.end());
+
+      size_t origSize = passthroughAttrs.size();
+
+      auto emitReserved = [&](StringRef discardable, StringRef llvmAttr) {
+        auto pinned = func->getAttrOfType<DenseI64ArrayAttr>(discardable);
+        if (!pinned || pinned.empty())
+          return;
+        SmallVector<int64_t> indices(pinned.asArrayRef());
+        llvm::sort(indices);
+        indices.erase(llvm::unique(indices), indices.end());
+        std::string value;
+        for (size_t i = 0; i < indices.size(); ++i) {
+          if (i > 0)
+            value += ',';
+          value += std::to_string(indices[i]);
+        }
+        auto key = StringAttr::get(ctx, llvmAttr);
+        auto val = StringAttr::get(ctx, value);
+        passthroughAttrs.push_back(ArrayAttr::get(ctx, {key, val}));
+        func->removeAttr(discardable);
+      };
+
+      emitReserved("fly.pinned_vgprs", "amdgpu-reserved-vgprs");
+      emitReserved("fly.pinned_sgprs", "amdgpu-reserved-sgprs");
+      emitReserved("fly.pinned_agprs", "amdgpu-reserved-agprs");
+
+      if (passthroughAttrs.size() != origSize)
+        func.setPassthroughAttr(ArrayAttr::get(ctx, passthroughAttrs));
+    });
   }
 };
 

@@ -16,6 +16,7 @@ This module provides access to ROCm-specific GPU operations including:
 
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 from ..meta import dsl_loc_tracing
+from ..register import RegisterClass as _RegisterClass
 from . import cdna3 as cdna3
 from . import cdna4 as cdna4
 from . import cdna5 as cdna5
@@ -59,6 +60,13 @@ __all__ = [
     "make_buffer_tensor",
     "get_buffer_rsrc",
     "s_buffer_load",
+    # Register pinning
+    "AGPR",
+    "VGPR",
+    "SGPR",
+    "pin_vgpr",
+    "pin_sgpr",
+    "pin_agpr",
     # Operations
     "sched_mfma",
     "sched_vmem",
@@ -901,3 +909,35 @@ def ballot(res, pred, **kw):
 def readlane(res, src, lane, **kw):
     """Wrap ROCDL ``readlane`` with ``_to_ir`` coercion (Python ``int`` ok for ``lane``)."""
     return _ods_readlane(res=res, src0=_to_ir(src), src1=_to_ir(lane), **kw)
+
+
+# LLVM symbolic class references; all backends share the Fly descriptor type.
+
+AGPR = _RegisterClass("amdgcn", "AGPR_32")
+VGPR = _RegisterClass("amdgcn", "VGPR_32")
+SGPR = _RegisterClass("amdgcn", "SGPR_32")
+
+
+@dsl_loc_tracing
+def pin_vgpr(value, *, reg: int):
+    """Pin a value to a specific VGPR (e.g. reg=68 -> v68)."""
+    return _pin_register(value, VGPR, reg)
+
+
+@dsl_loc_tracing
+def pin_sgpr(value, *, reg: int):
+    """Pin a value to a specific SGPR (e.g. reg=16 -> s16)."""
+    return _pin_register(value, SGPR, reg)
+
+
+@dsl_loc_tracing
+def pin_agpr(value, *, reg: int):
+    """Pin a value to a specific AGPR (e.g. reg=0 -> a0)."""
+    return _pin_register(value, AGPR, reg)
+
+
+def _pin_register(value, register_class, index):
+    from ..._mlir.dialects import fly as _fly
+
+    ir_val = _to_ir(value)
+    return _fly.pin_register(ir_val, reg_class=register_class._to_mlir(), index=index)

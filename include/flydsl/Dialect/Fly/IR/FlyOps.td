@@ -567,4 +567,20 @@ def Fly_ExtractAlignedPointerAsIndexOp : Fly_Op<"extract_aligned_pointer_as_inde
   let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
 }
 
+def Fly_PinRegisterOp : Fly_Op<"pin_register", [SameOperandsAndResultType]> {
+  let summary = "Pin an SSA value to a specific physical register";
+  let description = [{
+    Identity op constraining input to a specific physical register.
+    regClass names the LLVM target register class. index is the zero-based
+    member position (e.g. index=68 → v68 for VGPR_32). Multi-register values
+    use contiguous indices starting from index.
+  }];
+  let arguments = (ins AnyType:$value,
+                       Fly_RegisterClassAttr:$regClass,
+                       I64Attr:$index);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$value attr-dict `:` type($result)";
+  let hasVerifier = 1;
+}
+
 #endif // FLY_OPS

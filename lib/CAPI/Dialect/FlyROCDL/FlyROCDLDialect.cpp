@@ -16,6 +16,7 @@ void mlirRegisterFlyToROCDLConversionPass(void) { mlir::registerFlyToROCDLConver
 void mlirRegisterFlyKtraceToROCDLConversionPass(void) {
   mlir::registerFlyKtraceToROCDLConversionPass();
 }
+void mlirRegisterFlyPinRegisterReservePass(void) { mlir::registerFlyPinRegisterReservePass(); }
 
 void flydsl_register_rocdl_dialects(MlirDialectRegistry registry) {
   unwrap(registry)->insert<mlir::fly_rocdl::FlyROCDLDialect>();
@@ -24,6 +25,7 @@ void flydsl_register_rocdl_dialects(MlirDialectRegistry registry) {
 void flydsl_register_rocdl_passes(void) {
   mlirRegisterConvertROCDLFastMathOpsPass();
   mlirRegisterFlyToROCDLConversionPass();
+  mlirRegisterFlyPinRegisterReservePass();
   mlir::fly_rocdl::registerFlyROCDLPasses();
   mlirRegisterFlyKtraceToROCDLConversionPass();
 }

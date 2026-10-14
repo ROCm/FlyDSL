@@ -27,3 +27,16 @@ def FlyToROCDLConversionPass : Pass<"convert-fly-to-rocdl"> {
     "ROCDL::ROCDLDialect"
   ];
 }
+
+def FlyPinRegisterReservePass : Pass<"fly-pin-register-reserve"> {
+  let summary = "Emit amdgpu-reserved-{v,s,a}gprs passthrough from pinned register markers";
+  let description = [{
+    Reads the `fly.pinned_vgprs` / `fly.pinned_sgprs` / `fly.pinned_agprs`
+    discardable attributes set by `PinRegisterLowering` and converts them
+    into `amdgpu-reserved-{v,s,a}gprs` LLVM passthrough entries on `llvm.func`.
+    Run inside `gpu.module(...)` after `convert-gpu-to-rocdl`.
+  }];
+  let dependentDialects = [
+    "LLVM::LLVMDialect"
+  ];
+}

@@ -1,0 +1,30 @@
+diff --git a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp b/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp
+index bf5c821611dd..315b787c83a0 100644
+--- a/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp
++++ b/llvm/lib/Target/AMDGPU/SIRegisterInfo.cpp
+@@ -771,6 +771,25 @@ BitVector SIRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
+   for (MCPhysReg Reg : MFI->getVGPRSpillAGPRs())
+     reserveRegisterTuples(Reserved, Reg);
+ 
++  // Reserve explicitly pinned registers from function attributes.
++  auto reservePinnedRegs = [&](StringRef attrName,
++                               const TargetRegisterClass &RC) {
++    Attribute A = MF.getFunction().getFnAttribute(attrName);
++    if (!A.isStringAttribute())
++      return;
++    StringRef Val = A.getValueAsString();
++    SmallVector<StringRef, 8> Parts;
++    Val.split(Parts, ',', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
++    for (StringRef Part : Parts) {
++      unsigned Idx;
++      if (!Part.trim().getAsInteger(10, Idx) && Idx < RC.getNumRegs())
++        reserveRegisterTuples(Reserved, RC.getRegister(Idx));
++    }
++  };
++  reservePinnedRegs("amdgpu-reserved-vgprs", AMDGPU::VGPR_32RegClass);
++  reservePinnedRegs("amdgpu-reserved-sgprs", AMDGPU::SGPR_32RegClass);
++  reservePinnedRegs("amdgpu-reserved-agprs", AMDGPU::AGPR_32RegClass);
++
+   return Reserved;
+ }
+ 
