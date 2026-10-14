@@ -245,6 +245,7 @@ def make_tensor_descriptor_2d(
     atomic_barrier_enable: bool = False,
     early_timeout: bool = False,
     oob_outer_bound=None,
+    oob_inner_bound=None,
 ) -> TDMDescriptor2D:
     """Build a 2D TDM descriptor for tensor_load_to_lds_d2.
 
@@ -309,6 +310,10 @@ def make_tensor_descriptor_2d(
                        Python int or an i32/index ir.Value. None (default) keeps
                        tensor_dim1 == tile_dim1 (OOB off) — byte-identical to the
                        original path.
+        oob_inner_bound: Optional tile-start-relative runtime inner extent.
+                       Rewrites tensor_dim0 while keeping tile_dim0 unchanged,
+                       so an M tail in a transposed scale tensor is zero-filled.
+                       Supported with one descriptor warp and inner offset zero.
 
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.
@@ -507,6 +512,24 @@ def make_tensor_descriptor_2d(
         g1_s3 = arith.ori(
             arith.andi(arith.shrui(tdim1_rt, c16), c_mask16),
             arith.constant(tile_d0 << 16, type=T.i32),
+        )
+
+    if oob_inner_bound is not None:
+        assert num_warps == 1, "oob_inner_bound does not subtract a per-warp inner offset"
+        assert inner_off == 0, "oob_inner_bound is relative to the descriptor start"
+        if isinstance(oob_inner_bound, int):
+            inner_i32 = arith.constant(oob_inner_bound, type=T.i32)
+        else:
+            inner_i32 = as_ir_value(oob_inner_bound)
+            if isinstance(inner_i32.type, ir.IndexType):
+                inner_i32 = arith.index_cast(T.i32, inner_i32)
+        inner_rt = arith.maxsi(inner_i32, arith.constant(0, type=T.i32))
+        low16 = arith.constant(0xFFFF, type=T.i32)
+        shift16 = arith.constant(16, type=T.i32)
+        g1_s1 = arith.shli(arith.andi(inner_rt, low16), shift16)
+        g1_s2 = arith.ori(
+            arith.shli(arith.shrui(g1_s2, shift16), shift16),
+            arith.shrui(inner_rt, shift16),
         )
 
     # sgpr4: tile_dim1[15:0] | tile_dim2[31:16]=0  (always the full per-warp tile)

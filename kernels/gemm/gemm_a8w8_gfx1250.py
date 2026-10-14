@@ -174,7 +174,7 @@ def launch_gemm_a8w8(
 
         gA_base = fx.recast_iter(fx.Int8, arg_a)
         gB_base = fx.recast_iter(fx.Int8, arg_b)
-        gC_base = fx.recast_iter(fx.PointerType.get(out_cls.ir_type, arg_c.address_space), arg_c)
+        gC_base = fx.recast_iter(out_cls, arg_c)
         a_off0 = blk_m64 * lda64
         b_off0 = blk_n64 // 16 * (k64 * 16)
 
@@ -485,14 +485,8 @@ def launch_gemm_a8w8(
                 compute_ktile_row(buf, pbuf, prefetch_kt)
 
         def issue_ptpc_scale_loads():
-            gSA_base = fx.recast_iter(
-                fx.PointerType.get(fx.Float32.ir_type, arg_scale_a.address_space),
-                arg_scale_a,
-            )
-            gSB_base = fx.recast_iter(
-                fx.PointerType.get(fx.Float32.ir_type, arg_scale_b.address_space),
-                arg_scale_b,
-            )
+            gSA_base = fx.recast_iter(fx.Float32, arg_scale_a)
+            gSB_base = fx.recast_iter(fx.Float32, arg_scale_b)
             sa_view = fx.Tensor(fx.make_view(gSA_base, fx.make_layout(i32_m, 1)))
             sb_view = fx.Tensor(fx.make_view(gSB_base, fx.make_layout(i32_n, 1)))
             sa_buf = fx.rocdl.make_buffer_tensor(sa_view, max_size=False, num_records_bytes=i32_m * fx.Int32(4))
