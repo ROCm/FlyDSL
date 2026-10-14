@@ -262,8 +262,7 @@ class WarpExchange(WarpPrimitive):
             src_layout: Static Layout mapping (source_lane, source_item) to a logical
                 tile index. Requires dst_layout. Both layouts must be bijections over
                 [0, width * items_per_thread), with two top-level modes of sizes
-                (width, items_per_thread). Either mode may be nested; scalar lane/item
-                coordinates are flattened within each mode. Lanes are group-relative.
+                (width, items_per_thread).
             dst_layout: Static Layout mapping (destination_lane, destination_item) to
                 the same logical tile indices. Ranks are computed by composing its
                 inverse with src_layout, so callers do not encode scatter ranks.
