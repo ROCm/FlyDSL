@@ -31,7 +31,7 @@ from kernels.monokernel.config import (
     validate_shard,
 )
 from kernels.monokernel.glm.kernel import build_glm5_monokernel
-from kernels.monokernel.glm.layout import INDEX_DIM, layout, stage_tasks
+from kernels.monokernel.glm.layout import INDEX_DIM, cohort_eligible, layout, stage_tasks
 from kernels.monokernel.layout import TL_COLS
 from kernels.monokernel.packing import (
     pack_bf16,
@@ -271,7 +271,7 @@ class Glm5MonoKernel:
             inter=W.config.inter,
             native_fp4_mfma=native_fp4_mfma,
             cohort_rows=(
-                samples == 40
+                (samples == 40 or (npes == 4 and cohort_eligible(samples, npes, with_indexer, native_fp4_mfma)))
                 and npes in (4, 8)
                 and dcp_size == 1
                 and not indexer_cp
@@ -282,7 +282,7 @@ class Glm5MonoKernel:
                 and (not with_indexer or index_max_seq == 4096)
             ),
             uv_reuse=(
-                samples == 40
+                (samples == 40 or (npes == 4 and cohort_eligible(samples, npes, with_indexer, native_fp4_mfma)))
                 and npes in (4, 8)
                 and dcp_size == 1
                 and not indexer_cp
@@ -295,7 +295,7 @@ class Glm5MonoKernel:
             split_task_pair=(
                 2
                 if (
-                    samples == 40
+                    (samples == 40 or (npes == 4 and cohort_eligible(samples, npes, with_indexer, native_fp4_mfma)))
                     and npes == 8
                     and W.heads == 8
                     and native_fp4_mfma

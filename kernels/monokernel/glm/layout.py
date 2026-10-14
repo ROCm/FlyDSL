@@ -144,6 +144,31 @@ def row_tile_size(samples: int, native_fp4_mfma: bool = False) -> int:
     return next(tile for tile in range(12, 0, -1) if samples % tile == 0)
 
 
+def cohort_geometry(samples: int, native_fp4_mfma: bool) -> bool:
+    """The CTA mask needs a power-of-two cohort; slot masks hold one wave."""
+    tile = row_tile_size(samples, native_fp4_mfma)
+    count = samples // tile
+    if count < 2 or BLOCKS % count or samples > 64:
+        return False
+    width = BLOCKS // count
+    return width > 0 and width & (width - 1) == 0
+
+
+def cohort_eligible(samples: int, npes: int, with_indexer: bool, native_fp4_mfma: bool) -> bool:
+    """Deferred external-cache commits need one ordered publisher per row tile."""
+    tile = row_tile_size(samples, native_fp4_mfma)
+    return cohort_geometry(samples, native_fp4_mfma) and (
+        with_indexer or cache_samples_per_task(tile, npes, False, native_fp4_mfma) == tile
+    )
+
+
+def global_ug_chunks(samples: int, tile: int) -> int:
+    """Bound all routed chunks plus the shared expert without negative routes."""
+    routes = samples * TOP_K
+    experts = min(N_EXPERTS, routes)
+    return experts + (routes - experts) // tile + samples // tile
+
+
 def dn_tile(samples: int, expert_mxfp4: bool = False) -> int:
     """Return rows per expert-down/FFN-reduce task for the tuned schedule."""
 
@@ -257,7 +282,9 @@ def layout(
         count = samples // tile
         scratch = dict(scratch, _tile_rows=tile, _tile_count=count, _tile_stride=scratch["_bytes"])
         scratch["_tile_barriers"] = count * scratch["_tile_stride"]
-        scratch["_bytes"] = scratch["_tile_barriers"] + _align((count - 1) * (BLOCKS + 1) * 8)
+        scratch["_bytes"] = scratch["_tile_barriers"] + _align(
+            (max(2, count - 1) if npes == 4 else count - 1) * (BLOCKS + 1) * 8
+        )
         symmetric = dict(symmetric, _tile_stride=symmetric["_bytes"])
         symmetric["_bytes"] *= count
         return scratch, symmetric
@@ -376,6 +403,7 @@ def stage_tasks(
     cohort_rows: bool = False,
     uv_reuse: bool = False,
     split_task_pair: int = 1,
+    cohort_samples: int | None = None,
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
@@ -395,6 +423,7 @@ def stage_tasks(
             cohort_rows,
             uv_reuse,
             split_task_pair,
+            samples if cohort_samples is None else cohort_samples,
         )
         return [(f"tile{part}/{name}", count) for part in range(samples // tile) for name, count in stages]
     index_ranks = index_cp_world(npes, samples, index_max_seq) if indexer_cp else 1
@@ -443,5 +472,11 @@ def stage_tasks(
         # Full-CTA rounding keeps the subsequent stage's tuned CTA placement.
         maximum = (samples * TOP_K + 1) * (inter // NATIVE_UG_TILE)
         capacity = ((maximum + BLOCKS - 1) // BLOCKS) * BLOCKS
+        if cohort_rows and npes == 4 and cohort_samples is not None:
+            width = 64 if with_indexer else 128
+            chunks = global_ug_chunks(cohort_samples, samples)
+            rounds = (chunks * (inter // width) + BLOCKS - 1) // BLOCKS
+            cohort_width = BLOCKS // (cohort_samples // samples)
+            capacity = max(capacity, rounds * cohort_width * (width // NATIVE_UG_TILE))
         tasks = [(name, max(count, capacity) if name == "ug" else count) for name, count in tasks]
     return tasks

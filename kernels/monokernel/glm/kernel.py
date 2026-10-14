@@ -24,27 +24,29 @@ assigned tasks in stage order. Native launches above twelve rows use separate
 scratch and peer arenas per tile. The general path executes tiles sequentially;
 a tagged grid barrier completes each tile's cache writes before the next tile.
 
-The native forty-row TP4/TP8 path assigns one ten-row tile to each of four
-cohorts of 64 CTAs. Task ``t`` belongs to cohort-local CTA ``(stage_base + t) % 64``.
-All 256 CTAs finish their front-stage tasks and join one tagged grid barrier.
-The indexed path at 4K capacity publishes current cache rows at this boundary;
-causal index selection then permits every cohort to read the cache.
+Eligible native TP4 launches assign one row tile to each power-of-two CTA
+cohort derived from the row-tile count and the 256-CTA grid. The released
+forty-row TP8 path retains four cohorts of 64 CTAs. Task ownership uses each
+cohort's local CTA index. All CTAs finish their front-stage tasks and join one
+tagged grid barrier. At 4K capacity, the indexed path publishes current cache
+rows at this boundary before causal index selection.
 
-External sparse indices can reference slots belonging to later tiles. Their
-path preserves the persistent cache until every reader finishes, selecting the
-latest incoming cache row visible at each original ten-row tile boundary from
-tagged scratch. A second grid barrier precedes final cache stores; the last
-incoming writer owns each physical slot, including duplicate slots. This keeps
-the sequential cache semantics while the four tiles compute concurrently.
+External sparse indices can reference slots belonging to later tiles. Where
+the original row tile has one ordered cache publisher, cohorts preserve the
+persistent cache until every reader finishes. They select the latest incoming
+row visible at each original tile boundary from tagged scratch. A second grid
+barrier precedes final cache stores; the last incoming row owns each slot.
+External paths with multiple cache publishers per tile retain their released
+schedule, including its existing duplicate-slot behavior.
 
-Indexed forty-row cohorts normalize input once per row. TP8 also uses the
-existing expert-union gate/up body and publishes quantized mid values once.
-TP4 forty-row gate/up compacts selected tokens across all cohorts and
-distributes expert/token-chunk/output tasks over the resident grid. Each task
-reuses one activation tile for64 indexed or128 external-index outputs, preserving every original
-eight-output MFMA and reduction. Other tile shapes retain their schedules. Both
-schedules require all
-256 CTAs to be co-resident and preserve each task's original arithmetic.
+Indexed cohorts normalize input once per row. Eligible TP4 gate/up compacts
+selected tokens across cohorts and distributes expert/token-chunk/output tasks
+over the grid. Each task reuses one activation tile for 64 indexed or 128
+external-index outputs, preserving the original eight-output MFMA and reduction.
+Staging and live LDS capacity determine whether global projections and gate/up
+can run; otherwise their per-cohort bodies remain. TP8 retains its existing
+expert-union gate/up path. Every schedule preserves each task's arithmetic and
+requires all 256 CTAs to be co-resident.
 
 Mailboxes are *tagged pairs*: every 32-bit value a task hands to another CTA
 (or GPU) is stored next to this launch's epoch tag, ``(value, tag)``, with
@@ -125,6 +127,7 @@ from kernels.monokernel.glm.layout import (
     XQ_GROUPS,
     XQ_WAVES,
     cache_samples_per_task,
+    cohort_eligible,
     dcp_local_uv_tile,
     dcp_summary_index,
     dcp_uv_owner,
@@ -133,6 +136,7 @@ from kernels.monokernel.glm.layout import (
     down_x_words,
     fp8_kv_upper_pair_lane,
     fp8_pe_upper_pair_lane,
+    global_ug_chunks,
     grouped_ug_enabled,
     index_cp_capacity,
     index_cp_partitions,
@@ -229,11 +233,12 @@ def build_glm5_monokernel(
     attention_ptpc = attention_weight is AttentionWeight.FP8_PTPC
     use_atom_kv_cache = cache_layout is KvCacheLayout.ATOM
     cache_fp8 = kv_cache_dtype == "fp8"
+    # Extend cohorts by geometry for TP4; retain the released TP8 dispatch.
     # Cohort scheduling and deferred cache publication require the ownership
     # and layout contracts below. Bounded row unrolling is selected separately
     # at dispatch and also applies to the other supported tiled paths.
     STATIC_ROW_TILES = (
-        total_samples == 40
+        (total_samples == 40 or (npes == 4 and cohort_eligible(total_samples, npes, with_indexer, native_fp4_mfma)))
         and npes in (4, 8)
         and dcp_size == 1
         and not indexer_cp
@@ -272,7 +277,7 @@ def build_glm5_monokernel(
     # deferred stores and the cache version at each original tile boundary.
     DEFER_OFF_CACHE = STATIC_ROW_TILES and not with_indexer
     COHORT_ROW_TILES = STATIC_ROW_TILES and (not with_indexer or index_max_seq == 4096)
-    GLOBAL_UG40 = COHORT_ROW_TILES and npes == 4 and native_fp4_mfma
+    GLOBAL_UG40 = COHORT_ROW_TILES and npes == 4 and grouped_ug_enabled(S, npes, native_fp4_mfma, True)
     GLOBAL_UG_WIDTH = 64 if with_indexer else 128
     INDEX_PRE_ROPE = COHORT_ROW_TILES and with_indexer
     INDEX_SCORE_REUSE = 2 if COHORT_ROW_TILES else 1
@@ -311,6 +316,7 @@ def build_glm5_monokernel(
             cohort_rows=COHORT_ROW_TILES,
             uv_reuse=COHORT_ROW_TILES,
             split_task_pair=SPLIT_TASK_PAIR,
+            cohort_samples=total_samples,
         )
     )
     CP_RANKS = index_cp_world(W, S, index_max_seq) if indexer_cp else 1
@@ -325,9 +331,10 @@ def build_glm5_monokernel(
         sparse_heads_per_task(S, H, W, native_fp4_mfma, COHORT_ROW_TILES and (with_indexer or npes == 4)) == 16
     )
     if DEFER_OFF_CACHE:
-        assert ROW_TILES >= 3
+        assert ROW_TILES >= 2
     GLOBAL_QA40 = (
         COHORT_ROW_TILES
+        and total_samples % 4 == 0
         and npes == 4
         and native_fp4_mfma
         and H == 16
@@ -335,9 +342,9 @@ def build_glm5_monokernel(
         and not attention_ptpc
         and not attention_bf16
     )
-    GLOBAL_UV40 = GLOBAL_QA40 and D == 1 and L == H
+    GLOBAL_UV40 = GLOBAL_QA40 and GLOBAL_UG40 and D == 1 and L == H
     O_PAD4 = GLOBAL_UV40
-    GLOBAL_QB40 = COHORT_ROW_TILES and npes == 4 and native_fp4_mfma and H == 16
+    GLOBAL_QB40 = COHORT_ROW_TILES and total_samples % 4 == 0 and npes == 4 and native_fp4_mfma and H == 16
     QB_ROWS = H * (NOPE_DIM + PE_DIM)
     N_QB = QB_ROWS // Q_B_TILE
     # The index-Q row space is fixed at 256 tiles.  TP8 produces half from
@@ -419,21 +426,34 @@ def build_glm5_monokernel(
         N_SPLIT + 2 + (4 if attention_ptpc else 0),
     )
     KEYS_OFF = MISC_OFF + MISC_WORDS
+    global_ug_keys = (
+        total_samples * MOE_SLOTS
+        + 3 * (N_EXPERTS + 1)
+        + N_EXPERTS // 64
+        + 1
+        + total_samples
+        + total_samples * MOE_SLOTS
+    )
+    global_ug_words = (
+        KEYS_OFF + global_ug_keys + total_samples * MOE_SLOTS + RED_WORDS + max(S * ROW_TILE, S * 2 * UG_TILE, UV_TILE)
+    )
+    # Global route metadata shares the same finite LDS allocation as staging.
+    # Retain the cohort-local UG body whenever that live arena would exceed it.
+    GLOBAL_UG40 = GLOBAL_UG40 and global_ug_words <= 32768
     if GLOBAL_UG40:
-        LDS_KEYS = (
-            total_samples * MOE_SLOTS
-            + 3 * (N_EXPERTS + 1)
-            + N_EXPERTS // 64
-            + 1
-            + total_samples
-            + total_samples * MOE_SLOTS
-        )
+        LDS_KEYS = global_ug_keys
     DNW_OFF = KEYS_OFF + LDS_KEYS
     RED_OFF = DNW_OFF + (total_samples if GLOBAL_UG40 else S) * MOE_SLOTS
     OUT_OFF = RED_OFF + RED_WORDS
     # UK writes its 128-row result straight from the reduction tile to q_lat;
     # all remaining stages need at most these compact output tiles.
     OUT_WORDS = max(S * ROW_TILE, S * 2 * UG_TILE, UV_TILE)
+    # Each globally projected batch must fit its actual staging/output arena.
+    # Cohorts without this capacity keep the per-cohort projection bodies.
+    GLOBAL_QA40 = GLOBAL_QA40 and 16 * 1028 <= X_WORDS and 16 * QKV_A_TILE <= OUT_WORDS
+    GLOBAL_QB40 = GLOBAL_QB40 and 16 * (Q_LORA // 2 + 4) <= X_WORDS and 16 * Q_B_TILE <= OUT_WORDS
+    GLOBAL_UV40 = GLOBAL_UV40 and GLOBAL_UG40 and GLOBAL_QA40 and S * (O_K // 2 + 4) <= X_WORDS
+    O_PAD4 = GLOBAL_UV40
     MIDQ_WORDS = S * MOE_SLOTS * expert_inter // 4
     MID_SCALE_WORDS = S * MOE_SLOTS * expert_inter // 32
     INPUT_NORM_OFF = BLOCKS * S * 2 * UG_TILE - S * HIDDEN // 2
@@ -494,6 +514,7 @@ def build_glm5_monokernel(
         cohort_rows=COHORT_ROW_TILES,
         uv_reuse=COHORT_ROW_TILES,
         split_task_pair=SPLIT_TASK_PAIR,
+        cohort_samples=total_samples,
     ):
         first[name] = acc
         acc += n
@@ -514,12 +535,13 @@ def build_glm5_monokernel(
             cohort_rows=COHORT_ROW_TILES,
             uv_reuse=COHORT_ROW_TILES,
             split_task_pair=SPLIT_TASK_PAIR,
+            cohort_samples=total_samples,
         )
     )
     if GLOBAL_UG40:
         # Each routed expert contributes its first chunk, then at most one extra
-        # chunk per S additional routes. Include the shared expert's four chunks.
-        global_chunks_max = N_EXPERTS + (total_samples * TOP_K - N_EXPERTS) // S + ROW_TILES
+        # chunk per S additional routes. Include every shared-expert row chunk.
+        global_chunks_max = global_ug_chunks(total_samples, S)
         global_rounds_max = (global_chunks_max * (expert_inter // GLOBAL_UG_WIDTH) + BLOCKS - 1) // BLOCKS
         assert global_chunks_max <= total_samples * MOE_SLOTS
         assert global_rounds_max * G * (GLOBAL_UG_WIDTH // 8) <= tasks["ug"]
@@ -5127,8 +5149,12 @@ def build_glm5_monokernel(
                     if tid == N_EXPERTS - 1:
                         gu_total = gu_offset + gu_count
                         lds_st(gu_experts, gu_total, fx.Int32(SHARED_EXPERT))
-                        lds_st(gu_lo, gu_total, fx.Int32(-1))
-                        lds_st(gu_hi, gu_total, fx.Int32((1 << (total_samples - 32)) - 1))
+                        lds_st(gu_lo, gu_total, fx.Int32(-1 if total_samples >= 32 else (1 << total_samples) - 1))
+                        lds_st(
+                            gu_hi,
+                            gu_total,
+                            fx.Int32(-1 if total_samples >= 64 else (1 << max(0, total_samples - 32)) - 1),
+                        )
                         lds_st(gu_counts, N_EXPERTS // 64, gu_total + 1)
                     gpu.barrier()
                     gu_nunion = _uniform(lds_ld(gu_counts, N_EXPERTS // 64))
@@ -5284,7 +5310,7 @@ def build_glm5_monokernel(
                         lds_st(keys, tid, gu_my_key)
                         lds_st(dnw, tid, gu_my_prob)
                     gpu.barrier()
-                    if const_expr(DN_UNION_ROWS40):
+                    if const_expr(DN_UNION_ROWS40 or DN_UNION_CANDIDATE):
                         # Rebuild cohort-local expert metadata expected by ordered down union;
                         # wave-local masks only occupy the otherwise-idle reduction workspace.
                         union_experts = keys + S * MOE_SLOTS
@@ -5862,10 +5888,10 @@ def build_glm5_monokernel(
                         )
                     lds_st(outs, output_token * 32 + output_row, tot)
 
-                if const_expr(DN_UNION_ROWS40 and not DN_UNION_INPUT_REUSE40):
-                    # Cohorts execute three down tasks per CTA. The union arena
-                    # overlaps the original keys, so restore them after the
-                    # last contribution read and before the next task round.
+                if const_expr(N_DN_TILES > G and not DN_UNION_INPUT_REUSE40):
+                    # Multiple output tasks reuse this CTA's original route data.
+                    # The union arena overlaps it, so restore metadata after all
+                    # contribution reads and before any later task reconstructs it.
                     restore_key = ld(keys, fx.min(tid, DU_KEY_WORDS - 1))
                     restore_prob = ld(dnw, fx.min(tid, DU_ROUTE_WORDS - 1))
                     gpu.barrier()
