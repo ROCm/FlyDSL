@@ -36,8 +36,8 @@ the original row tile has one ordered cache publisher, cohorts preserve the
 persistent cache until every reader finishes. They select the latest incoming
 row visible at each original tile boundary from tagged scratch. A second grid
 barrier precedes final cache stores; the last incoming row owns each slot.
-External paths with multiple cache publishers per tile retain their released
-schedule, including its existing duplicate-slot behavior.
+ATOM external-index paths with multiple cache publishers keep the serial-tile
+schedule and select the final row as the publisher for each physical slot.
 
 Indexed cohorts normalize input once per row. Eligible TP4 gate/up compacts
 selected tokens across cohorts and distributes expert/token-chunk/output tasks
@@ -2459,6 +2459,14 @@ def build_glm5_monokernel(
                     pos = row_position(s)
                     slot = row_slot(s)
                     active = row_writes_cache(s) & (not DEFER_OFF_CACHE)
+                    if const_expr(use_atom_kv_cache and not with_indexer and not DEFER_OFF_CACHE and CACHE_TILE < S):
+                        # Separate cache tasks can target the same physical slot.
+                        # Publish only the final row of this serial tile; all
+                        # rows still produce their own kvnew/penew mailboxes.
+                        later_slot = row_slot(fx.min(lane, S - 1))
+                        overwritten = (lane > s) & (lane < S) & (later_slot == slot)
+                        overwritten_mask = fx.Int64(rocdl.ballot(T.i64, overwritten))
+                        active = active & (overwritten_mask == 0)
                     value = vs[local_s] * _rsq(ssq[local_s] * (1.0 / KV_LORA) + EPS) * g
                     if const_expr(cache_fp8):
                         value = bf16_round(value)
