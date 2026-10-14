@@ -3,7 +3,7 @@
 """Warp exchange layouts, independent groups, policies, and record fields."""
 
 import pytest
-from coop_test_utils import ARCHES, full_matrix_enabled, matrix_cases, run_tile, warp_indices, warp_storage
+from coop_test_utils import ARCHES, full_matrix_enabled, matrix_cases, run_kernel, run_tile, warp_indices, warp_storage
 from coop_test_utils import coop_default_device as coop_default_device
 from coop_test_utils import warp_default_device as warp_default_device
 
@@ -95,6 +95,133 @@ def test_warp_exchange_policies(algorithm, width, method):
         host = host.reshape(-1, width * count).flip(1).reshape(-1)
     indices = warp_indices(block, count, width, inverse=method == "striped_to_blocked")
     torch.testing.assert_close(actual, host[indices])
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("width,count,universal", matrix_cases([1, 8, WARP_SIZE], [1, 3, 4], [False, True]))
+def test_scatter_layout_matches_explicit_ranks(width, count, universal):
+    block = 128
+    values = torch.arange(block * count, device="cuda", dtype=torch.int32)
+
+    def transform(value):
+        namespace = fx.coop.universal if universal else fx.coop
+        P = namespace.WarpExchange[fx.Int32, width, count]
+        storage = warp_storage(P)
+        # Nested item mode also accepts a flattened item coordinate.
+        src = fx.make_layout((width, (1, count)), (count, (0, 1)))
+        dst = fx.make_layout((width, count), (1, width))
+        from_layout = P.scatter_to_striped(value, src_layout=src, dst_layout=dst, storage=storage)
+        fx.barrier()
+        ranks = value % (width * count)
+        from_ranks = P.scatter_to_striped(value, ranks=ranks, storage=storage)
+        return from_layout, from_ranks
+
+    actual, explicit = run_tile(transform, values, block, count, outputs=2)
+    expected = values.cpu()[warp_indices(block, count, width)]
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual, explicit)
+
+
+def mfma_scatter(value, width, round_trip=False):
+    P = fx.coop.WarpExchange[value.dtype, width, 4]
+    # Both layouts map (lane, item) to row-major logical matrix indices.
+    src = fx.make_layout(((16, width // 16), 4), ((1, 64), 16))
+    dst = fx.make_layout((width, 4), (4, 1))
+    storage = warp_storage(P)
+    output = P.scatter_to_striped(value, src_layout=src, dst_layout=dst, storage=storage)
+    if round_trip:
+        fx.barrier()
+        restored = P.scatter_to_striped(output, src_layout=dst, dst_layout=src, storage=storage)
+        return output, restored
+    return output
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None or not torch.cuda.is_available(), reason="requires GPU")
+@pytest.mark.parametrize("width", [width for width in (16, 32, 64) if width <= WARP_SIZE])
+@pytest.mark.parametrize("dtype", [torch.int32, torch.bfloat16] if torch is not None else [])
+def test_scatter_mfma_layout(width, dtype):
+    block, count = 128, 4
+    # Independent logical groups own matrices with distinct values. Each lane
+    # initially holds four rows of one column; output must be row-major chunks.
+    lane = torch.arange(block, device="cpu") % width
+    row = 4 * (lane // 16)
+    group = torch.arange(block, device="cpu") // width
+    logical = group[:, None] * width * count + (row[:, None] + torch.arange(count)) * 16 + lane[:, None] % 16
+    values = logical.flatten().to(device="cuda", dtype=dtype)
+    actual, restored = run_tile(
+        lambda value: mfma_scatter(value, width, round_trip=True), values, block, count, outputs=2
+    )
+    torch.testing.assert_close(actual, torch.arange(block * count, dtype=torch.int32).to(dtype))
+    torch.testing.assert_close(restored, values.cpu())
+
+
+@pytest.mark.l1b_target_dialect
+@pytest.mark.rocm_lower
+@pytest.mark.skipif(torch is None, reason="requires torch for tensor signatures")
+def test_compile_wave64_scatter_layout(monkeypatch):
+    monkeypatch.setenv("ARCH", "gfx950")
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+
+    def apply(a, out):
+        tid = fx.thread_idx.x
+        value = fx.Vector.from_elements([a[tid * 4 + i] for i in range(4)], fx.Int32)
+        result = mfma_scatter(value, 64)
+        for i in range(4):
+            out[tid * 4 + i] = result[i]
+
+    run_kernel(apply, torch.arange(512, dtype=torch.int32, device="cpu"), 512, 128, compile_only=True)
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize("case", ["rank", "width", "items", "dynamic", "overlap", "holes", "type"])
+@pytest.mark.parametrize("argument", ["src_layout", "dst_layout"])
+def test_scatter_layout_diagnostics(ctx, insert_point, case, argument):
+    P = fx.coop.WarpExchange[fx.Int32, 8, 4]
+    # Invalid layouts must be rejected before attempting any scratch access.
+    storage = object()
+    layouts = {
+        "rank": lambda: fx.make_layout(32, 1),
+        "width": lambda: fx.make_layout((4, 4), (4, 1)),
+        "items": lambda: fx.make_layout((8, 3), (3, 1)),
+        "dynamic": lambda: fx.make_layout((8, 4), (fx.lane_id(), 1)),
+        "overlap": lambda: fx.make_layout((8, 4), (0, 1)),
+        "holes": lambda: fx.make_layout((8, 4), (8, 1)),
+        "type": lambda: (8, 4),
+    }
+    kwargs = dict(src_layout=fx.make_layout((8, 4), (4, 1)), dst_layout=fx.make_layout((8, 4), (1, 8)))
+    kwargs[argument] = layouts[case]()
+    if case == "type":
+        error, message = TypeError, "must be a Layout"
+    else:
+        error = ValueError
+        message = (
+            "static with two modes"
+            if case in ("rank", "dynamic")
+            else "bijection" if case in ("overlap", "holes") else "mode sizes"
+        )
+    with pytest.raises(error, match=f"{argument}.*{message}"):
+        P.scatter_to_striped(fx.Vector.filled(4, 0, fx.Int32), storage=storage, **kwargs)
+
+
+@pytest.mark.l0_backend_agnostic
+@pytest.mark.parametrize("case", ["source_only", "destination_only", "ranks_and_layouts"])
+def test_scatter_layout_argument_conflicts(ctx, insert_point, case):
+    P = fx.coop.WarpExchange[fx.Int32, 8, 4]
+    value = fx.Vector.filled(4, 0, fx.Int32)
+    layout = fx.make_layout((8, 4), (4, 1))
+    kwargs = dict(src_layout=layout, dst_layout=layout)
+    if case == "source_only":
+        del kwargs["dst_layout"]
+    elif case == "destination_only":
+        del kwargs["src_layout"]
+    else:
+        kwargs["ranks"] = value
+    with pytest.raises(ValueError, match="not both" if case == "ranks_and_layouts" else "provided together"):
+        P.scatter_to_striped(value, storage=object(), **kwargs)
 
 
 @pytest.mark.l2_device
