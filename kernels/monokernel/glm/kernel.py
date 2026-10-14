@@ -489,7 +489,8 @@ def build_glm5_monokernel(
     # The original down partition gives each wave complete token columns when
     # its row tile divides the four K-partition waves. The existing union
     # contribution arena can then replay each token's slot/K additions exactly.
-    aligned_union_words = S * MOE_SLOTS * (132 + 20 + 1 + 1 + 4 * 32) + 2 * (S * TOP_K + 1) + 5 + (257 * S + 3) // 4
+    aligned_union_prefix = S * MOE_SLOTS * (132 + 20 + 1 + 1) + 2 * (S * TOP_K + 1) + 5
+    aligned_union_words = ((aligned_union_prefix + 3) // 4 * 4) + S * MOE_SLOTS * 4 * 32 + (257 * S + 3) // 4
     DN_UNION_ALIGNED = (
         COHORT_ROW_TILES
         and GROUPED_DN
@@ -519,6 +520,9 @@ def build_glm5_monokernel(
     DU_KEYOFF = DU_MSOFF + DU_ROUTE_WORDS * DU_SCROW
     DU_DWOFF = DU_KEYOFF + DU_KEY_WORDS
     DU_CROFF = DU_DWOFF + DU_ROUTE_WORDS
+    if DN_UNION_ALIGNED:
+        # The work array is 16-byte aligned; each fragment starts at a float4.
+        DU_CROFF = (DU_CROFF + 3) // 4 * 4
     DU_CWORDS = DU_ROUTE_WORDS * 4 * 32
     if DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED:
         assert GROUPED_DN
@@ -5708,6 +5712,10 @@ def build_glm5_monokernel(
                     fx.ptr_store(v, p + i)
 
                 def contribution_index(token, slot, kc, row):
+                    if const_expr(DN_UNION_ALIGNED):
+                        # Preserve the logical (slot, K, row, token) contribution;
+                        # keep each lane's four adjacent rows together for float4 I/O.
+                        return (((slot * 4 + kc) * 8 + row // 4) * S + token) * 4 + row % 4
                     if const_expr(mode in ("union_transpose", "union_batch4", "union_lut4")):
                         return ((slot * 4 + kc) * 32 + row) * S + token
                     return ((token * SLOTS + slot) * 4 + kc) * 32 + row
@@ -5868,9 +5876,12 @@ def build_glm5_monokernel(
                                     # Share their base so the LDS writes can pair.
                                     row = gu * 16 + lane // 16 * 4
                                     target = contribution_index(sn, slots[part], gw, row)
-                                    stride = S if mode in ("union_transpose", "union_batch4", "union_lut4") else 1
-                                    for e in range_constexpr(4):
-                                        st(contributions, target + e * stride, c[e])
+                                    if const_expr(DN_UNION_ALIGNED):
+                                        fx.ptr_store(c, contributions + target)
+                                    else:
+                                        stride = S if mode in ("union_transpose", "union_batch4", "union_lut4") else 1
+                                        for e in range_constexpr(4):
+                                            st(contributions, target + e * stride, c[e])
 
                 gpu.barrier()
 
@@ -5901,13 +5912,21 @@ def build_glm5_monokernel(
                         for slot in range_constexpr(SLOTS):
                             coefficient = ld(dnw, sn * SLOTS + slot)
                             for kc in range_constexpr(4):
-                                vals = [
-                                    ld(
-                                        contributions,
-                                        contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4 + e),
+                                if const_expr(DN_UNION_ALIGNED):
+                                    vals = fx.Vector(
+                                        fx.ptr_load(
+                                            contributions + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
+                                            result_type=v4f,
+                                        )
                                     )
-                                    for e in range(4)
-                                ]
+                                else:
+                                    vals = [
+                                        ld(
+                                            contributions,
+                                            contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4 + e),
+                                        )
+                                        for e in range(4)
+                                    ]
                                 acc = fx.Vector.from_elements(
                                     [acc[e] + vals[e] * coefficient for e in range(4)],
                                     fx.Float32,
