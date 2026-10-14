@@ -446,6 +446,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `FLYDSL_DEBUG_PRINT_ORIGIN_IR` | `false` | Print origin IR before compilation. |
 | `FLYDSL_DEBUG_PRINT_AFTER_ALL` | `false` | Print IR after each MLIR pass. |
 | `FLYDSL_DEBUG_ENABLE_DEBUG_INFO` | `false` | Generate debug info in compiled code. |
+| `FLYDSL_DEBUG_DEVICE_ASSERT` | `false` | Enable runtime device assertions (print a diagnostic and trap on failure). |
 | `FLYDSL_DEBUG_ENABLE_VERIFIER` | `true` | Verify IR module. |
 | `FLYDSL_DEBUG_LOG_LEVEL` | `WARNING` | Logging level (DEBUG, INFO, WARNING, ERROR). |
 
