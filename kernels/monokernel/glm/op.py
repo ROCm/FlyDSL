@@ -31,7 +31,7 @@ from kernels.monokernel.glm.layout import (
     stage_tasks,
 )
 from kernels.monokernel.layout import TL_COLS
-from kernels.monokernel.packing import pack_bf16, pack_fp8, pack_layer_weights
+from kernels.monokernel.packing import pack_bf16, pack_fp8, pack_layer_weights, pack_mxfp4, pack_mxfp4_scale_tiles
 from kernels.monokernel.runtime import SymmetricPeerBuffer
 from kernels.monokernel.weights import LayerWeights
 
@@ -82,7 +82,25 @@ class Glm5MonoKernel:
             mxfp4_weight_layout=Mxfp4WeightLayout.NATIVE,
             mxfp4_scale_layout=Mxfp4ScaleLayout.NATIVE,
             router_weight_layout=RouterWeightLayout.NATIVE,
+            attention_only=self.expert_mxfp4,
         )
+        if self.expert_mxfp4:
+            self.packed["w_r"] = pack_bf16(t["w_r"])
+            for weight, scale in (("w_ug", "s_ug"), ("w_dn", "s_dn")):
+                q, scales = t[weight], t[scale]
+                if weight == "w_ug":
+                    # Keep eight gate/up row pairs and their scales in one MFMA tile.
+                    def pair_rows(value):
+                        experts, rows, cols = value.shape
+                        return (
+                            value.reshape(experts, 2, INTER // 8, 8, cols)
+                            .permute(0, 2, 1, 3, 4)
+                            .reshape(experts, rows, cols)
+                        )
+
+                    q, scales = pair_rows(q), pair_rows(scales)
+                self.packed[weight] = pack_mxfp4(q)
+                self.packed[scale] = pack_mxfp4_scale_tiles(scales)
         if with_indexer:
             required = ("w_index_k", "s_index_k", "w_index_w", "w_index_q", "s_index_q", "g_index_k", "b_index_k")
             missing = [name for name in required if name not in t]

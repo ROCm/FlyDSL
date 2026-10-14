@@ -257,10 +257,11 @@ class TestAtomicDevice:
     def test_atomic_add(self, syncscope):
         block_dim = 64
         n = block_dim * 4
-        values = torch.ones(n, device="cuda", dtype=torch.float32)
-        result = torch.zeros(1, device="cuda", dtype=torch.float32)
-
         stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            values = torch.ones(n, device="cuda", dtype=torch.float32)
+            result = torch.zeros(1, device="cuda", dtype=torch.float32)
+
         bare_atomic_add(
             flyc.from_c_void_p(fx.Float32, values.data_ptr()),
             flyc.from_c_void_p(fx.Float32, result.data_ptr()),
@@ -275,10 +276,11 @@ class TestAtomicDevice:
     def test_atomic_add_return(self):
         block_dim = 64
         n = block_dim * 4
-        counter = torch.zeros(1, device="cuda", dtype=torch.int32)
-        tickets = torch.zeros(n, device="cuda", dtype=torch.int32)
-
         stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            counter = torch.zeros(1, device="cuda", dtype=torch.int32)
+            tickets = torch.zeros(n, device="cuda", dtype=torch.int32)
+
         bare_atomic_ticket(
             flyc.from_c_void_p(fx.Int32, counter.data_ptr()),
             flyc.from_c_void_p(fx.Int32, tickets.data_ptr()),
@@ -293,10 +295,11 @@ class TestAtomicDevice:
         assert torch.equal(tickets, expected)
 
     def test_atomic_unsigned_min(self):
-        values = torch.tensor([-1, -(2**31), 7, 23], device="cuda", dtype=torch.int32)
-        result = torch.full((1,), -1, device="cuda", dtype=torch.int32)
-
         stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            values = torch.tensor([-1, -(2**31), 7, 23], device="cuda", dtype=torch.int32)
+            result = torch.full((1,), -1, device="cuda", dtype=torch.int32)
+
         bare_atomic_unsigned_min(
             flyc.from_c_void_p(fx.Uint32, values.data_ptr()),
             flyc.from_c_void_p(fx.Uint32, result.data_ptr()),
@@ -318,10 +321,12 @@ class TestAtomicDevice:
         elif sign == "negative":
             values = -(values.abs() + 1.0)
 
-        device_values = values.cuda()
-        initial = float("-inf") if take_max else float("inf")
-        result = torch.full((1,), initial, device="cuda", dtype=torch.float32)
         stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            device_values = values.cuda()
+            initial = float("-inf") if take_max else float("inf")
+            result = torch.full((1,), initial, device="cuda", dtype=torch.float32)
+
         bare_atomic_fminmax(
             flyc.from_c_void_p(fx.Float32, device_values.data_ptr()),
             flyc.from_c_void_p(fx.Float32, result.data_ptr()),
