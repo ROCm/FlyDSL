@@ -12,28 +12,27 @@ from .typing import as_ir_value
 __all__ = ["device_assert"]
 
 
-def device_assert(condition, message="", mask=None):
+def device_assert(condition, message=""):
     """Assert a boolean condition on the device when debug assertions are enabled.
 
     Set ``FLYDSL_DEBUG_DEVICE_ASSERT=1`` before compiling or invoking the JIT.
     Disabled assertions emit no IR. Arguments are still evaluated by Python.
 
     ``condition`` must be a scalar bool/i1 or a fixed-size vector of i1 values.
-    ``mask`` may be a scalar boolean or a boolean vector matching the condition;
-    masked-off elements are ignored. Any failing element triggers one diagnostic
-    per calling thread, with source and block/thread coordinates, followed by a
-    device trap. The diagnostic is best effort and execution cannot be resumed.
+    Any failing element triggers one diagnostic per calling thread, with source
+    and block/thread coordinates, followed by a device trap. The diagnostic is
+    best effort and execution cannot be resumed.
 
     This checks values owned by one thread; it does not synchronize threads or
     reduce across a wave. Python ``assert`` retains its existing semantics.
 
     Example::
 
-        fx.device_assert(index < length, "index exceeds input length", mask=active)
+        fx.device_assert(index < length, "index exceeds input length")
     """
     if not env.debug.device_assert:
         return
-    _device_assert(condition, message, mask)
+    _device_assert(condition, message)
 
 
 def _boolean_value(value, name):
@@ -51,7 +50,7 @@ def _boolean_value(value, name):
 
 
 @dsl_loc_tracing
-def _device_assert(condition, message, mask):
+def _device_assert(condition, message):
     from ..compiler.diagnostics import location_chain
 
     parent = ir.InsertionPoint.current.block.owner
@@ -67,14 +66,6 @@ def _device_assert(condition, message, mask):
     if isinstance(cond.type, ir.VectorType):
         true = vector.BroadcastOp(cond.type, true).result
     failed = arith.XOrIOp(cond, true).result
-    if mask is not None:
-        active = _boolean_value(mask, "mask")
-        if active.type != cond.type:
-            if isinstance(cond.type, ir.VectorType) and active.type == bool_type:
-                active = vector.BroadcastOp(cond.type, active).result
-            else:
-                raise TypeError("device_assert mask must be scalar or match the condition's vector shape")
-        failed = arith.AndIOp(failed, active).result
     if isinstance(cond.type, ir.VectorType):
         failed = vector.ReductionOp(bool_type, vector.CombiningKind.OR, failed).result
 

@@ -40,23 +40,22 @@ def test_debug_gating_and_diagnostic(monkeypatch):
     assert "gpu.block_id" in text and "gpu.thread_id" in text
 
 
-@pytest.mark.parametrize("mask_type", ["i1", "vector<4xi1>"])
-def test_vector_condition_and_mask(monkeypatch, mask_type):
+def test_vector_condition(monkeypatch):
     monkeypatch.setenv("FLYDSL_DEBUG_DEVICE_ASSERT", "true")
-    text = _module(lambda cond, mask: fx.device_assert(cond, "vector", mask=mask), f"vector<4xi1>;{mask_type}")
+    text = _module(lambda cond: fx.device_assert(cond, "vector"), "vector<4xi1>")
     assert "vector.reduction <or>" in text
-    assert "arith.andi" in text and "arith.xori" in text
+    assert "arith.xori" in text
 
 
 def test_failure_branch_semantics(monkeypatch):
     monkeypatch.setenv("FLYDSL_DEBUG_DEVICE_ASSERT", "1")
-    for condition, mask, fails in ((True, True, False), (False, True, True), (False, False, False)):
-        text = _module(lambda _: fx.device_assert(condition, mask=mask))
+    for condition in (True, False):
+        text = _module(lambda _: fx.device_assert(condition))
         with ir.Context() as ctx:
             ctx.load_all_available_dialects()
             module = ir.Module.parse(text)
             PassManager.parse("builtin.module(canonicalize)").run(module.operation)
-            assert ("llvm.intr.trap" in str(module)) == fails
+            assert ("llvm.intr.trap" in str(module)) == (not condition)
 
 
 @pytest.mark.l1b_target_dialect

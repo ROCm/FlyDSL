@@ -667,12 +667,12 @@ Shows the diff between original and rewritten AST for debugging control flow tra
 Enable runtime assertions with `FLYDSL_DEBUG_DEVICE_ASSERT=1` before invoking a JIT kernel. For example, inside a kernel:
 
 ```python
-fx.device_assert(index < length, "index exceeds input length", mask=active)
+fx.device_assert(index < length, "index exceeds input length")
 ```
 
-`condition` must be a boolean scalar or a fixed-size boolean vector. An optional
-scalar mask applies to every element; a vector mask must match the condition's
-shape. Masked-off elements are ignored. Any failing element prints the assertion
+`condition` must be a boolean scalar or a fixed-size boolean vector. Every
+element owned by the calling thread must be true. For DSL boolean values, use
+`(~active) | condition` to check only active elements. Any failing element prints the assertion
 message, source file and line, and block/thread coordinates, then executes a
 device trap. These assertions are for debugging, not recoverable input
 validation, and do not introduce synchronization between threads.
