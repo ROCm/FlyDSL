@@ -6430,7 +6430,13 @@ def build_glm5_monokernel(
                     and not indexer_cp
                     and dcp_size == 1
                 ):
-                    ffn_owner_reduce(t, residual_a, store_x)
+                    if const_expr(DN_SPLIT_UNION_TAIL):
+                        if t >= DN_FULL_TASKS:
+                            ffn_owner_reduce(t + DN_FULL_TASKS, residual_a, store_x, tile=16)
+                        else:
+                            ffn_owner_reduce(t, residual_a, store_x)
+                    else:
+                        ffn_owner_reduce(t, residual_a, store_x)
                 else:
                     if const_expr(DN_SPLIT_UNION_TAIL):
                         if t >= DN_FULL_TASKS:

@@ -157,10 +157,22 @@ def cohort_geometry(samples: int, native_fp4_mfma: bool) -> bool:
 
 
 def cohort_eligible(samples: int, npes: int, with_indexer: bool, native_fp4_mfma: bool) -> bool:
-    """Deferred external-cache commits need one ordered publisher per row tile."""
+    """Bound scratch publishers and one deferred commit owner per row."""
     tile = row_tile_size(samples, native_fp4_mfma)
-    return cohort_geometry(samples, native_fp4_mfma) and (
-        with_indexer or cache_samples_per_task(tile, npes, False, native_fp4_mfma) == tile
+    if not cohort_geometry(samples, native_fp4_mfma):
+        return False
+    publisher_rows = cache_samples_per_task(tile, npes, False, native_fp4_mfma)
+    if with_indexer or publisher_rows == tile:
+        return True
+    width = BLOCKS // (samples // tile)
+    # Each producer publishes disjoint row mailboxes before the front barrier.
+    # The final barrier drains readers; the last matching row owns each slot.
+    return (
+        npes == 4
+        and native_fp4_mfma
+        and tile % publisher_rows == 0
+        and tile // publisher_rows <= width
+        and tile <= width
     )
 
 
