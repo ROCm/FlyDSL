@@ -5798,13 +5798,21 @@ def build_glm5_monokernel(
                         if (batch * BATCH + part < n_union) | (part == 0 and index_request_width == 6):
                             c = partial(units[part])
                             if active_columns[part]:
-                                for e in range_constexpr(4):
-                                    row = gu * 16 + lane // 16 * 4 + e
-                                    st(
-                                        contributions,
-                                        contribution_index(sn, slots[part], gw, row),
-                                        c[e],
-                                    )
+                                if const_expr(DN_UNION_INPUT_REUSE40):
+                                    # Four rows have a fixed token-count stride.
+                                    # Expose one base so LDS stores can pair them.
+                                    row = gu * 16 + lane // 16 * 4
+                                    target = contribution_index(sn, slots[part], gw, row)
+                                    for e in range_constexpr(4):
+                                        st(contributions, target + e * S, c[e])
+                                else:
+                                    for e in range_constexpr(4):
+                                        row = gu * 16 + lane // 16 * 4 + e
+                                        st(
+                                            contributions,
+                                            contribution_index(sn, slots[part], gw, row),
+                                            c[e],
+                                        )
 
                 gpu.barrier()
 
