@@ -41,11 +41,13 @@ DCP_SUMMARY_PAIRS = KV_LORA // 2 + 2
 def sparse_heads_per_task(
     samples: int, heads: int, npes: int, native_fp4_mfma: bool = False, cohort_rows: bool = False
 ) -> int:
-    """Use both MFMA head halves for TP4 S12 and scoped forty-row cohorts."""
+    """Share the staged KV tile across both MFMA head halves in TP4 cohorts.
+
+    Cohort eligibility already enforces bounded storage and cache ownership.
+    Retain the existing standalone S12 path.
+    """
     return (
-        16
-        if native_fp4_mfma and npes == 4 and (samples == 12 or (samples == 10 and cohort_rows)) and heads == 16
-        else WAVES
+        2 * WAVES if native_fp4_mfma and npes == 4 and (samples == 12 or cohort_rows) and heads == 2 * WAVES else WAVES
     )
 
 
