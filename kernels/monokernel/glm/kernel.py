@@ -229,9 +229,9 @@ def build_glm5_monokernel(
     attention_ptpc = attention_weight is AttentionWeight.FP8_PTPC
     use_atom_kv_cache = cache_layout is KvCacheLayout.ATOM
     cache_fp8 = kv_cache_dtype == "fp8"
-    # The measured forty-row native path benefits from static address and
-    # lifetime specialization. Keep other precision and parallel paths tiled
-    # with the original dynamic loop.
+    # Cohort scheduling and deferred cache publication require the ownership
+    # and layout contracts below. Bounded row unrolling is selected separately
+    # at dispatch and also applies to the other supported tiled paths.
     STATIC_ROW_TILES = (
         total_samples == 40
         and npes in (4, 8)
@@ -5798,21 +5798,13 @@ def build_glm5_monokernel(
                         if (batch * BATCH + part < n_union) | (part == 0 and index_request_width == 6):
                             c = partial(units[part])
                             if active_columns[part]:
-                                if const_expr(DN_UNION_INPUT_REUSE40):
-                                    # Four rows have a fixed token-count stride.
-                                    # Expose one base so LDS stores can pair them.
-                                    row = gu * 16 + lane // 16 * 4
-                                    target = contribution_index(sn, slots[part], gw, row)
-                                    for e in range_constexpr(4):
-                                        st(contributions, target + e * S, c[e])
-                                else:
-                                    for e in range_constexpr(4):
-                                        row = gu * 16 + lane // 16 * 4 + e
-                                        st(
-                                            contributions,
-                                            contribution_index(sn, slots[part], gw, row),
-                                            c[e],
-                                        )
+                                # Adjacent rows use a fixed layout stride.
+                                # Share their base so the LDS writes can pair.
+                                row = gu * 16 + lane // 16 * 4
+                                target = contribution_index(sn, slots[part], gw, row)
+                                stride = S if mode in ("union_transpose", "union_batch4", "union_lut4") else 1
+                                for e in range_constexpr(4):
+                                    st(contributions, target + e * stride, c[e])
 
                 gpu.barrier()
 
@@ -6392,7 +6384,8 @@ def build_glm5_monokernel(
             run_row_tile(full_bid // G)
         elif const_expr(ROW_TILES == 1):
             run_row_tile(0)
-        elif const_expr(STATIC_ROW_TILES):
+        elif const_expr(ROW_TILES <= 4):
+            # Bound code growth while exposing constant row offsets/lifetimes.
             for row_tile in range_constexpr(ROW_TILES):
                 run_row_tile(row_tile)
         else:
