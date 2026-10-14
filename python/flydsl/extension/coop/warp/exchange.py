@@ -7,8 +7,9 @@ import enum
 
 from ...._mlir.dialects import gpu
 from ....expr.gpu import barrier, lane_id
+from ....expr.primitive import composition, cosize, get_scalar, right_inverse, size
 from ....expr.struct import Struct
-from ....expr.typing import Int32, Vector
+from ....expr.typing import Int32, Layout, Vector
 from .._common import _resolve_warp_width
 from .._values import (
     _as_items,
@@ -49,6 +50,19 @@ def _check_algorithm(algorithm, storage):
         raise TypeError("algorithm must be a WarpExchangeAlgorithm")
     if algorithm is WarpExchangeAlgorithm.Shared and storage is None:
         raise TypeError("Shared requires storage allocated from WarpExchange.SharedStorage")
+
+
+def _scatter_layout_inverse(layout, width, count, name):
+    if not isinstance(layout, Layout):
+        raise TypeError(f"{name} must be a Layout")
+    if not layout.is_static or layout.rank != 2:
+        raise ValueError(f"{name} must be static with two modes (lane, item)")
+    if (get_scalar(size(layout.shape[0])), get_scalar(size(layout.shape[1]))) != (width, count):
+        raise ValueError(f"{name} mode sizes must match (width, items_per_thread)")
+    inverse = right_inverse(layout)
+    if get_scalar(cosize(layout)) != width * count or get_scalar(size(inverse.shape)) != width * count:
+        raise ValueError(f"{name} must be a bijection over [0, width * items_per_thread)")
+    return inverse
 
 
 def _warp_gather(
@@ -227,24 +241,39 @@ class WarpExchange(WarpPrimitive):
     def scatter_to_striped(
         cls,
         value,
-        ranks,
+        ranks: Vector | None = None,
         *,
+        src_layout: Layout | None = None,
+        dst_layout: Layout | None = None,
         storage=None,
     ):
         """Scatter a permutation of logical-warp tile ranks into striped ownership.
 
         Ranks over the entire group must be a permutation of the tile indices, without
         duplicates or out-of-range destinations. All logical-warp lanes participate.
+        Alternatively, supply source and destination ownership layouts to derive the
+        ranks automatically. The layout form returns values in destination ownership.
 
         Args:
             value: Input value containing nonempty items of the same type.
-            ranks: Integer Vector with one destination rank per item, in [0, width *
-                items_per_thread).
-            storage: View of this specialization's SharedStorage for the calling logical warp. Required for Shared; unused for SHUFFLE. Synchronize the logical group
-                before reusing it.
+            ranks: Integer Vector with one destination rank per input item. Mutually
+                exclusive with src_layout/dst_layout. The caller must ensure ranks
+                form a permutation of [0, width * items_per_thread).
+            src_layout: Static Layout mapping (source_lane, source_item) to a logical
+                tile index. Requires dst_layout. Both layouts must be bijections over
+                [0, width * items_per_thread), with two top-level modes of sizes
+                (width, items_per_thread). Either mode may be nested; scalar lane/item
+                coordinates are flattened within each mode. Lanes are group-relative.
+            dst_layout: Static Layout mapping (destination_lane, destination_item) to
+                the same logical tile indices. Ranks are computed by composing its
+                inverse with src_layout, so callers do not encode scatter ranks.
+            storage: View of this specialization's SharedStorage for the calling logical
+                warp. Required; scatter supports only Shared. Synchronize the logical
+                group before reusing it.
 
         Returns:
             A result value whose slot i in lane l contains the input with rank i * width + l.
+            With layouts, this is the input element at logical index dst_layout(l, i).
 
         Examples:
             # Each input item supplies its destination rank in the group's logical sequence.
@@ -266,6 +295,18 @@ class WarpExchange(WarpPrimitive):
             fx.barrier()  # Finish reading scratch before reusing it.
             shared_y = fx.coop.WarpExchange[fx.Int32, 4, 2, fx.coop.WarpExchangeAlgorithm.Shared].scatter_to_striped(x, ranks, storage=storage)
             fx.barrier()  # Finish reading scratch before it is reused.
+
+            # MFMA 16x16 output: C[4*(lane//16)+item, lane%16]. Give each output
+            # lane four consecutive columns instead. Both layouts describe
+            # row-major logical matrix indices, not scatter ranks.
+            # This example launches one 64-thread block on a wave64 target.
+            P = fx.coop.WarpExchange[fx.Float32, 64, 4]
+            storage = fx.SharedAllocator().allocate(P.SharedStorage).peek()
+            src = fx.make_layout(((16, 4), 4), ((1, 64), 16))
+            dst = fx.make_layout((64, 4), (4, 1))
+            y = P.scatter_to_striped(x, src_layout=src, dst_layout=dst, storage=storage)
+            # Output lane l holds C[l//4, 4*(l%4):4*(l%4)+4]. This remains an
+            # LDS exchange within each logical warp; synchronize before reuse.
         """
         cls._check()
         algorithm = cls.algorithm
@@ -275,9 +316,20 @@ class WarpExchange(WarpPrimitive):
             raise ValueError("Scatter to striped supports only Shared")
         value = cls._prepare(value)
         items = _as_items(value)
+        lane = lane_id() % width
+        if src_layout is not None or dst_layout is not None:
+            if ranks is not None:
+                raise ValueError("provide either ranks or src_layout/dst_layout, not both")
+            if src_layout is None or dst_layout is None:
+                raise ValueError("src_layout and dst_layout must be provided together")
+            _scatter_layout_inverse(src_layout, width, len(items), "src_layout")
+            inverse = _scatter_layout_inverse(dst_layout, width, len(items), "dst_layout")
+            # Inverse returns flattened (lane, item) coordinates: lane + width*item,
+            # exactly the ranks read by the existing striped shared-memory gather.
+            rank_layout = composition(inverse, src_layout)
+            ranks = Vector.from_elements([Int32(get_scalar(rank_layout(lane, i))) for i in range(len(items))], Int32)
         if not isinstance(ranks, Vector) or ranks.numel != len(items) or ranks.dtype.is_float:
             raise TypeError("ranks must be an integer Vector with one rank per input item")
-        lane = lane_id() % width
         for i, item in enumerate(items):
             _shared_store(storage.slots, ranks[i], item)
         barrier(scope=gpu.BarrierScope.Subgroup)
