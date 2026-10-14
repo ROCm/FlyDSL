@@ -517,7 +517,8 @@ auto inner_partition(const Tensor<Cat, Engine> &tensor, const Tiler &tiler, cons
   if (tiled.isError())
     return detail::tagError(tiled, AlgebraOp::InnerPartition);
   FLYDSL_CORE_ASSERT(tiled.shape().rank() == 2);
-  auto tileCoord = repeat(IntTuple<Cat>::getNone(), tiled.shape().at(0).rank());
+  // a rank-1 tile group is unpacked too, where CuTe C++ keeps it whole.
+  auto tileCoord = detail::unpackGroup(tiled.shape().at(0));
   auto restCoord = [&]() -> IntTuple<Cat> {
     auto value = coord.asRef();
     if (value.isLeaf())
@@ -539,7 +540,8 @@ auto outer_partition(const Tensor<Cat, Engine> &tensor, const Tiler &tiler, cons
       return value;
     return append(value, IntTuple<Cat>::getNone(), tiled.shape().at(0).rank());
   }();
-  auto restCoord = repeat(IntTuple<Cat>::getNone(), tiled.shape().at(1).rank());
+  // a rank-1 rest group is unpacked too, where CuTe C++ keeps it whole.
+  auto restCoord = detail::unpackGroup(tiled.shape().at(1));
   return slice(make_tuple(tileCoord, restCoord), tiled);
 }
 

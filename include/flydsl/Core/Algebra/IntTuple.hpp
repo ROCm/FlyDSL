@@ -716,18 +716,18 @@ template <class Cat> auto neg_tuple(IntTupleRef<Cat> tuple) -> IntTuple<Cat> {
 }
 
 template <AlgebraOp Op, class Cat> bool is_tuple_arith_left_identity(IntTupleRef<Cat> scalar) {
-  if constexpr (Op == AlgebraOp::Add || Op == AlgebraOp::Sub)
+  if constexpr (Op == AlgebraOp::TupleAdd || Op == AlgebraOp::TupleSub)
     return scalar.isZero();
-  else if constexpr (Op == AlgebraOp::Mul)
+  else if constexpr (Op == AlgebraOp::TupleMul)
     return scalar.isOne();
   else
     return false;
 }
 
 template <AlgebraOp Op, class Cat> bool is_tuple_arith_right_identity(IntTupleRef<Cat> scalar) {
-  if constexpr (Op == AlgebraOp::Add || Op == AlgebraOp::Sub)
+  if constexpr (Op == AlgebraOp::TupleAdd || Op == AlgebraOp::TupleSub)
     return scalar.isZero();
-  else if constexpr (Op == AlgebraOp::Mul || Op == AlgebraOp::Floor)
+  else if constexpr (Op == AlgebraOp::TupleMul || Op == AlgebraOp::TupleFloor)
     return scalar.isOne();
   else
     return false;
@@ -736,7 +736,7 @@ template <AlgebraOp Op, class Cat> bool is_tuple_arith_right_identity(IntTupleRe
 /// `lhs op e` for the operator's right identity `e`.
 template <AlgebraOp Op, class Cat>
 auto tuple_arith_missing_rhs(IntTupleRef<Cat> lhs, IntTupleRef<Cat> rhs) -> IntTuple<Cat> {
-  if constexpr (Op == AlgebraOp::Mod)
+  if constexpr (Op == AlgebraOp::TupleMod)
     return operandError<Cat>({lhs, rhs}, ErrorCode::IncompatibleProfile, Op);
   else
     return lhs;
@@ -745,9 +745,9 @@ auto tuple_arith_missing_rhs(IntTupleRef<Cat> lhs, IntTupleRef<Cat> rhs) -> IntT
 /// `e op rhs` for the operator's left identity `e`; `0 - rhs` for Sub.
 template <AlgebraOp Op, class Cat>
 auto tuple_arith_missing_lhs(IntTupleRef<Cat> lhs, IntTupleRef<Cat> rhs) -> IntTuple<Cat> {
-  if constexpr (Op == AlgebraOp::Add || Op == AlgebraOp::Mul)
+  if constexpr (Op == AlgebraOp::TupleAdd || Op == AlgebraOp::TupleMul)
     return rhs;
-  else if constexpr (Op == AlgebraOp::Sub)
+  else if constexpr (Op == AlgebraOp::TupleSub)
     return neg_tuple(rhs);
   else
     return operandError<Cat>({lhs, rhs}, ErrorCode::IncompatibleProfile, Op);
@@ -755,7 +755,7 @@ auto tuple_arith_missing_lhs(IntTupleRef<Cat> lhs, IntTupleRef<Cat> rhs) -> IntT
 
 template <AlgebraOp Op, class Cat, class LeafFn>
 IntTuple<Cat> arith_tuple_binary(IntTupleRef<Cat> lhs, IntTupleRef<Cat> rhs, LeafFn &leafFn) {
-  if constexpr (Op == AlgebraOp::Add) {
+  if constexpr (Op == AlgebraOp::TupleAdd) {
     if (lhs.isBasis()) {
       if (!rhs.isLeaf()) {
         auto expanded = basis2tuple(lhs.getLeaf());
@@ -930,12 +930,13 @@ FLYDSL_CORE_LEAF_FUNCTION(leaf_safe_div, safe_div)
 FLYDSL_CORE_LEAF_FUNCTION(leaf_ceil_div, ceil_div)
 FLYDSL_CORE_LEAF_FUNCTION(leaf_shape_div, shape_div)
 FLYDSL_CORE_LEAF_FUNCTION(leaf_exact_div, exact_div)
+FLYDSL_CORE_LEAF_FUNCTION(leaf_lshr, lshr)
 
-FLYDSL_CORE_ARITH_TUPLE_OPERATOR(+, AlgebraOp::Add)
-FLYDSL_CORE_ARITH_TUPLE_OPERATOR(-, AlgebraOp::Sub)
-FLYDSL_CORE_ARITH_TUPLE_OPERATOR(*, AlgebraOp::Mul)
-FLYDSL_CORE_ARITH_TUPLE_OPERATOR(/, AlgebraOp::Floor)
-FLYDSL_CORE_ARITH_TUPLE_OPERATOR(%, AlgebraOp::Mod)
+FLYDSL_CORE_ARITH_TUPLE_OPERATOR(+, AlgebraOp::TupleAdd)
+FLYDSL_CORE_ARITH_TUPLE_OPERATOR(-, AlgebraOp::TupleSub)
+FLYDSL_CORE_ARITH_TUPLE_OPERATOR(*, AlgebraOp::TupleMul)
+FLYDSL_CORE_ARITH_TUPLE_OPERATOR(/, AlgebraOp::TupleFloor)
+FLYDSL_CORE_ARITH_TUPLE_OPERATOR(%, AlgebraOp::TupleMod)
 
 #undef FLYDSL_CORE_LEAF_OPERATOR
 #undef FLYDSL_CORE_LEAF_FUNCTION

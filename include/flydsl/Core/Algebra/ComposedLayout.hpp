@@ -61,11 +61,22 @@ public:
 
   bool isStatic() const;
 
+  /// Always slices, just like Layout::operator(): Core stores wildcard markers
+  /// as values, so their presence cannot select the C++ return type.
+  /// Use layout.crd2idx(coord) explicitly for coordinate-to-index mapping.
   template <class Coord, std::enable_if_t<is_int_tuple_v<Coord>, int> = 0>
   auto operator()(const Coord &coord) const;
   template <class Coord0, class Coord1, class... Coords,
             std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int> = 0>
   auto operator()(const Coord0 &c0, const Coord1 &c1, const Coords &...coords) const;
+
+  /// Map a coordinate through outer, offset, then inner, equivalent to
+  /// core::crd2idx(coord, *this).
+  template <class Coord, std::enable_if_t<is_int_tuple_v<Coord>, int> = 0>
+  auto crd2idx(const Coord &coord) const;
+  template <class Coord0, class Coord1, class... Coords,
+            std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int> = 0>
+  auto crd2idx(const Coord0 &c0, const Coord1 &c1, const Coords &...coords) const;
 
   template <class Other> auto compose(const Other &other) const;
   template <class Other0, class Other1, class... Others>
@@ -431,6 +442,20 @@ IntTuple<Cat> crd2idx(const Coord &coord, const ComposedLayout<Cat> &layout) {
         }
       },
       layout.inner());
+}
+
+template <class Cat>
+template <class Coord, std::enable_if_t<is_int_tuple_v<Coord>, int>>
+auto ComposedLayout<Cat>::crd2idx(const Coord &coord) const {
+  return core::crd2idx(coord, *this);
+}
+
+template <class Cat>
+template <class Coord0, class Coord1, class... Coords,
+          std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int>>
+auto ComposedLayout<Cat>::crd2idx(const Coord0 &c0, const Coord1 &c1,
+                                  const Coords &...coords) const {
+  return crd2idx(make_tuple(c0, c1, coords...));
 }
 
 template <class Cat>

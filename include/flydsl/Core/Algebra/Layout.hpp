@@ -56,12 +56,17 @@ public:
 
   bool isLeaf() const;
   bool isStatic() const;
+
   /// The constructor collapses an invalid shape or stride into both.
   bool isError() const { return shape().isError(); }
   /// The first error, in shape then stride order.
   ErrorInfo errorInfo() const { return shape().errorInfo(); }
   ErrorCode errorCode() const { return errorInfo().reason(); }
 
+  /// Always equivalent to slice(coord, *this), including for coordinates without wildcards.
+  /// Core stores None markers as values in Leaf/IntTuple. The same coordinate type can therefore
+  /// describe either case, so its values cannot select between a layout and an index as the C++
+  /// return type. Use layout.crd2idx(coord) explicitly for coordinate-to-index mapping.
   template <class Coord> auto operator()(const Coord &coord) const;
 
   /// Constrained so that is_invocable-style probes (e.g. raw_ostream's
@@ -69,6 +74,13 @@ public:
   template <class Coord0, class Coord1, class... Coords,
             std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int> = 0>
   auto operator()(const Coord0 &c0, const Coord1 &c1, const Coords &...coords) const;
+
+  /// Map a coordinate to an index, equivalent to core::crd2idx(coord, *this).
+  template <class Coord, std::enable_if_t<is_int_tuple_v<Coord>, int> = 0>
+  auto crd2idx(const Coord &coord) const;
+  template <class Coord0, class Coord1, class... Coords,
+            std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int> = 0>
+  auto crd2idx(const Coord0 &c0, const Coord1 &c1, const Coords &...coords) const;
 
   template <class OtherLayout> auto compose(const OtherLayout &other) const;
   template <class Shape> auto with_shape(const Shape &shape) const;
@@ -461,7 +473,7 @@ auto Layout<Cat>::get_flat_coord(const Index &index) const {
 template <class Cat>
 template <class Index>
 auto Layout<Cat>::get_1d_coord(const Index &index) const {
-  return crd2idx(get_hier_coord(index), shape());
+  return core::crd2idx(get_hier_coord(index), shape());
 }
 
 template <class Cat>
@@ -1122,6 +1134,19 @@ template <class Coord, class Cat = category_of<Coord>,
           std::enable_if_t<is_int_tuple_v<Coord>, int> = 0>
 auto crd2idx(const Coord &coord, const Layout<Cat> &layout) {
   return crd2idx(coord, layout.shape(), layout.stride());
+}
+
+template <class Cat>
+template <class Coord, std::enable_if_t<is_int_tuple_v<Coord>, int>>
+auto Layout<Cat>::crd2idx(const Coord &coord) const {
+  return core::crd2idx(coord, *this);
+}
+
+template <class Cat>
+template <class Coord0, class Coord1, class... Coords,
+          std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int>>
+auto Layout<Cat>::crd2idx(const Coord0 &c0, const Coord1 &c1, const Coords &...coords) const {
+  return crd2idx(make_tuple(c0, c1, coords...));
 }
 
 template <class Coord, class Cat = category_of<Coord>>
@@ -2097,13 +2122,24 @@ Layout<Cat> zipped_divide(const Layout<Cat> &layout, const Tiler &tiler) {
   return zipped_divide(layout, shape_to_tile(tiler));
 }
 
+namespace detail {
+
+// The slice coordinate that unpacks a group: a leaf group stays whole and a tuple group is unpacked
+// by its rank, a rank-1 group too.
+template <class Cat> IntTuple<Cat> unpackGroup(IntTupleRef<Cat> group) {
+  auto none = IntTuple<Cat>::getNone();
+  return group.isLeaf() ? none : tuple_repeat(none, group.rank());
+}
+
+} // namespace detail
+
 template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int>>
 Layout<Cat> tiled_divide(const Layout<Cat> &layout, const Tiler &tiler) {
   auto result = zipped_divide(layout, tiler);
   if (result.isError())
     return detail::tagError(result, AlgebraOp::TiledDivide);
-  auto R1 = rank<1>(result);
-  return slice(make_tuple(IntTuple<Cat>::getNone(), repeat(IntTuple<Cat>::getNone(), R1)), result);
+  return slice(make_tuple(IntTuple<Cat>::getNone(), detail::unpackGroup(get<1>(result.shape()))),
+               result);
 }
 
 template <class Tiler, class Cat = category_of<Tiler>,
@@ -2118,11 +2154,9 @@ Layout<Cat> flat_divide(const Layout<Cat> &layout, const Tiler &tiler) {
   auto result = zipped_divide(layout, tiler);
   if (result.isError())
     return detail::tagError(result, AlgebraOp::FlatDivide);
-  auto R0 = rank<0>(result);
-  auto R1 = rank<1>(result);
-  return slice(
-      make_tuple(repeat(IntTuple<Cat>::getNone(), R0), repeat(IntTuple<Cat>::getNone(), R1)),
-      result);
+  auto shape = result.shape();
+  return slice(make_tuple(detail::unpackGroup(get<0>(shape)), detail::unpackGroup(get<1>(shape))),
+               result);
 }
 
 template <class Tiler, class Cat = category_of<Tiler>,
@@ -2183,9 +2217,8 @@ Layout<Cat> tiled_product(const Layout<Cat> &block, const Tiler &tiler) {
   auto result = zipped_product(block, tiler);
   if (result.isError())
     return detail::tagError(result, AlgebraOp::TiledProduct);
-  return slice(
-      make_tuple(IntTuple<Cat>::getNone(), repeat(IntTuple<Cat>::getNone(), rank<1>(result))),
-      result);
+  return slice(make_tuple(IntTuple<Cat>::getNone(), detail::unpackGroup(get<1>(result.shape()))),
+               result);
 }
 
 template <class Tiler, class Cat = category_of<Tiler>,
@@ -2199,8 +2232,8 @@ Layout<Cat> flat_product(const Layout<Cat> &block, const Tiler &tiler) {
   auto result = zipped_product(block, tiler);
   if (result.isError())
     return detail::tagError(result, AlgebraOp::FlatProduct);
-  return slice(make_tuple(repeat(IntTuple<Cat>::getNone(), rank<0>(result)),
-                          repeat(IntTuple<Cat>::getNone(), rank<1>(result))),
+  auto shape = result.shape();
+  return slice(make_tuple(detail::unpackGroup(get<0>(shape)), detail::unpackGroup(get<1>(shape))),
                result);
 }
 
@@ -2228,7 +2261,10 @@ template <class Cat> Layout<Cat> raked_product(const Layout<Cat> &block, const L
   auto result = logical_product(append(block, R), append(tiler, R));
   if (result.isError())
     return detail::tagError(result, AlgebraOp::RakedProduct);
-  return detail::tagError(zip(get(result, 1), get(result, 0)), AlgebraOp::RakedProduct);
+  // each mode is coalesced, where CuTe C++ keeps the zipped modes.
+  return detail::tagError(
+      coalesce(zip(get(result, 1), get(result, 0)), tuple_repeat(IntTuple<Cat>::getOne(), R)),
+      AlgebraOp::RakedProduct);
 }
 
 template <class TargetShape, class Order = LayoutLeft, class Cat = category_of<TargetShape>>
