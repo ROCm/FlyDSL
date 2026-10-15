@@ -468,6 +468,21 @@ def build_glm5_monokernel(
         and 0 < N_SPLIT <= 64
         and N_SPLIT % 4 == 0
     )
+    # Explicit QKV completion polls retire every normalized-input reader
+    # before global UV reuses that storage. Other paths retain the grid join.
+    FRONT_PAYLOAD_RETIRE = (
+        COHORT_ROW_TILES
+        and DEFER_OFF_CACHE
+        and GLOBAL_QA40
+        and GLOBAL_UV40
+        and INPUT_NORM_ONCE
+        and not with_indexer
+        and S <= 16
+        and N_QKV_A <= THREADS
+        and Q_LORA % QKV_A_TILE == 0
+        and (KV_LORA + PE_DIM) % QKV_A_TILE == 0
+        and N_QKV_A * QKV_A_TILE == Q_LORA + KV_LORA + PE_DIM
+    )
     MIDQ_WORDS = S * MOE_SLOTS * expert_inter // 4
     MID_SCALE_WORDS = S * MOE_SLOTS * expert_inter // 32
     INPUT_NORM_OFF = BLOCKS * S * 2 * UG_TILE - S * HIDDEN // 2
@@ -2035,7 +2050,7 @@ def build_glm5_monokernel(
 
             if const_expr(INPUT_NORM_ONCE):
                 # One resident CTA per token publishes the exact normalized BF16 input.
-                # The suffix is retired at the front-stage barrier; global UV may then reuse it.
+                # Reader retirement precedes UV reuse through the grid join or QKV completion polls.
                 if bid < S:
 
                     def input_norm_load(sks):
@@ -2983,7 +2998,7 @@ def build_glm5_monokernel(
                     )
                 stamp("uk", t, 4)
 
-            if const_expr(COHORT_ROW_TILES):
+            if const_expr(COHORT_ROW_TILES and not FRONT_PAYLOAD_RETIRE):
                 # Every cohort finishes its front tasks before cross-tile reads.
                 # Indexed mode publishes cache stores; external-index mode keeps
                 # persistent cache intact and reads current versions from scratch.
@@ -4342,6 +4357,32 @@ def build_glm5_monokernel(
                             gpu.barrier()
                     stamp("split", tt, 4)
 
+            if const_expr(FRONT_PAYLOAD_RETIRE):
+                # Each global QKV task reads all rows of one 16-row group.
+                # Its q_a/kv_a stores follow the last operand read, MFMA and
+                # a CTA barrier. One current-epoch pair per task therefore
+                # certifies that task has retired all input-norm readers.
+                # A cohort can intersect two groups; cover both explicitly.
+                def retire_input_group(representative):
+                    if tid < N_QKV_A:
+                        retire_scratch = full_scratch + fx.Int64(representative // S) * TILE_SCRATCH_BYTES
+                        retire_element = tid * QKV_A_TILE
+                        if retire_element < Q_LORA:
+                            get(retire_scratch + SC["q_a"], (representative % S) * Q_LORA + retire_element)
+                        else:
+                            get(
+                                retire_scratch + SC["kv_a"],
+                                (representative % S) * (KV_LORA + PE_DIM) + retire_element - Q_LORA,
+                            )
+                    # All retirement-poll waves finish before any UV writer.
+                    gpu.barrier()
+
+                retire_first = (row_offset // 16) * 16
+                retire_last = ((row_offset + S - 1) // 16) * 16
+                retire_input_group(retire_first)
+                if retire_last != retire_first:
+                    retire_input_group(retire_last)
+
             # ========================== 6. split merge + W_UV: o = W_UV (softmax . KV)
             # 4 row groups x 8 chunks: 2 waves per row group, 4 chunks each
             r_wuv, r_suv = _rsrc(w_uv), _rsrc(s_uv)
@@ -4479,8 +4520,8 @@ def build_glm5_monokernel(
                     gpu.barrier()
                 if const_expr(GLOBAL_UV40):
                     # This range is disjoint from packed mid values/scales.
-                    # Input-norm readers retire at the global front-stage
-                    # barrier. The distinct UV phase tag prevents consumers from
+                    # Input-norm readers retire before merge through the grid join
+                    # or QKV completion polls. The distinct UV phase tag prevents consumers from
                     # accepting those old payloads before these stores complete.
                     if uv_valid:
                         uv_packed = bf16_pair(uv0, uv1).bitcast(fx.Int32)
