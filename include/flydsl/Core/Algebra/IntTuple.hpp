@@ -341,17 +341,18 @@ constexpr bool is_make_tuple_arg_v = ((is_int_tuple_v<Ts> || is_leaf_v<Ts>) && .
 
 template <class Cat> auto make_tuple();
 
-template <class T0, class... Ts, std::enable_if_t<is_make_tuple_arg_v<T0, Ts...>, int>>
+template <class T0, class... Ts, std::enable_if_t<is_make_tuple_arg_v<T0, Ts...>, int> = 0>
 auto make_tuple(const T0 &t0, const Ts &...ts);
 
-template <int I, int... Is, class T, std::enable_if_t<is_int_tuple_v<T>, int>>
+template <int I, int... Is, class T, std::enable_if_t<is_int_tuple_v<T>, int> = 0>
 auto get(const T &tuple);
 
 template <class T0, class... Ts,
-          std::enable_if_t<is_int_tuple_v<T0> && (is_int_tuple_v<Ts> && ...), int>>
+          std::enable_if_t<is_int_tuple_v<T0> && (is_int_tuple_v<Ts> && ...), int> = 0>
 auto concat(const T0 &t0, const Ts &...ts);
 
-template <class Children, class Child, std::enable_if_t<is_int_tuple_v<Child>, int>>
+template <class Children, class Child = typename std::decay_t<Children>::value_type,
+          std::enable_if_t<is_int_tuple_v<Child>, int> = 0>
 auto concat(const Children &children);
 
 template <class A, class B, class Cat = category_of<A>> auto eq(const A &a, const B &b);
@@ -363,13 +364,23 @@ IntTuple<Cat> basis_get(const Basis &basis, const T &tuple);
 
 template <class T, class Cat = category_of<T>> IntTuple<Cat> basis_value(const T &value);
 
-template <class T, std::enable_if_t<is_int_tuple_v<T>, int>> llvm::hash_code hash_value(const T &t);
+template <class T, std::enable_if_t<is_int_tuple_v<T>, int> = 0>
+llvm::hash_code hash_value(const T &t);
 
-template <class A, class B, std::enable_if_t<is_int_tuple_v<A> && is_int_tuple_v<B>, int>>
+template <class A, class B, std::enable_if_t<is_int_tuple_v<A> && is_int_tuple_v<B>, int> = 0>
 auto operator+(const A &left, const B &right);
 
-template <class A, class B, std::enable_if_t<is_int_tuple_v<A> && is_int_tuple_v<B>, int>>
+template <class A, class B, std::enable_if_t<is_int_tuple_v<A> && is_int_tuple_v<B>, int> = 0>
 auto operator-(const A &left, const B &right);
+
+template <class A, class B, std::enable_if_t<is_int_tuple_v<A> && is_int_tuple_v<B>, int> = 0>
+auto operator*(const A &left, const B &right);
+
+template <class A, class B, std::enable_if_t<is_int_tuple_v<A> && is_int_tuple_v<B>, int> = 0>
+auto operator/(const A &left, const B &right);
+
+template <class A, class B, std::enable_if_t<is_int_tuple_v<A> && is_int_tuple_v<B>, int> = 0>
+auto operator%(const A &left, const B &right);
 
 //===----------------------------------------------------------------------===//
 // Definitions
@@ -589,7 +600,7 @@ IntTuple<Cat> operandError(std::initializer_list<IntTupleRef<Cat>> operands, Err
 
 template <class Cat> auto make_tuple() { return IntTuple<Cat>::getEmpty(); }
 
-template <class T0, class... Ts, std::enable_if_t<is_make_tuple_arg_v<T0, Ts...>, int> = 0>
+template <class T0, class... Ts, std::enable_if_t<is_make_tuple_arg_v<T0, Ts...>, int>>
 auto make_tuple(const T0 &t0, const Ts &...ts) {
   using Cat = category_of<T0>;
   auto children = std::array<IntTuple<Cat>, 1 + sizeof...(Ts)>{detail::as_tuple_child(t0),
@@ -603,7 +614,7 @@ auto make_tuple(const Children &children) {
   return IntTuple<category_of<Child>>::fromChildren(children);
 }
 
-template <int I, int... Is, class T, std::enable_if_t<is_int_tuple_v<T>, int> = 0>
+template <int I, int... Is, class T, std::enable_if_t<is_int_tuple_v<T>, int>>
 auto get(const T &tuple) {
   static_assert(I >= 0);
   auto child = tuple.at(I);
@@ -629,7 +640,7 @@ void append_modes(llvm::SmallVectorImpl<IntTupleRef<Cat>> &parts, IntTupleRef<Ca
 } // namespace detail
 
 template <class T0, class... Ts,
-          std::enable_if_t<is_int_tuple_v<T0> && (is_int_tuple_v<Ts> && ...), int> = 0>
+          std::enable_if_t<is_int_tuple_v<T0> && (is_int_tuple_v<Ts> && ...), int>>
 auto concat(const T0 &t0, const Ts &...ts) {
   using Cat = category_of<T0>;
   static_assert((std::is_same_v<Cat, category_of<Ts>> && ...),
@@ -640,8 +651,7 @@ auto concat(const T0 &t0, const Ts &...ts) {
   return make_tuple(parts);
 }
 
-template <class Children, class Child = typename std::decay_t<Children>::value_type,
-          std::enable_if_t<is_int_tuple_v<Child>, int> = 0>
+template <class Children, class Child, std::enable_if_t<is_int_tuple_v<Child>, int>>
 auto concat(const Children &children) {
   using Cat = category_of<Child>;
   auto parts = llvm::SmallVector<IntTupleRef<Cat>, 8>{};
@@ -899,7 +909,7 @@ auto make_basis_like(const Shape &shape) {
     return detail::leaf_unary(value, [](Leaf<Cat> operand) { return fn(operand); });               \
   }
 #define FLYDSL_CORE_ARITH_TUPLE_OPERATOR(op, algebraOp)                                            \
-  template <class A, class B, std::enable_if_t<is_int_tuple_v<A> && is_int_tuple_v<B>, int> = 0>   \
+  template <class A, class B, std::enable_if_t<is_int_tuple_v<A> && is_int_tuple_v<B>, int>>       \
   auto operator op(const A &left, const B &right) {                                                \
     using Cat = category_of<A>;                                                                    \
     return detail::arith_tuple<algebraOp>(                                                         \
@@ -943,7 +953,7 @@ FLYDSL_CORE_ARITH_TUPLE_OPERATOR(%, AlgebraOp::TupleMod)
 #undef FLYDSL_CORE_LEAF_UNARY
 #undef FLYDSL_CORE_ARITH_TUPLE_OPERATOR
 
-template <class T, std::enable_if_t<is_int_tuple_v<T>, int> = 0>
+template <class T, std::enable_if_t<is_int_tuple_v<T>, int>>
 llvm::hash_code hash_value(const T &t) {
   auto tuple = t.asRef();
   auto shapeHash = llvm::hash_value(0);
