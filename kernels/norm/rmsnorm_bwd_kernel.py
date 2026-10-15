@@ -15,6 +15,7 @@ from kernels.norm.rmsnorm_common import (
     BLOCK_THREADS,
     VEC_WIDTH,
     WARP_SIZE,
+    has_hw_cvt_pk_bf16_f32,
     load_vec,
     load_weight_vec,
     make_single_reduction_storage,
@@ -351,7 +352,7 @@ def _build_rmsnorm_bwd_two_stage_module(
     NUM_IO_ITERS = (NUM_IO_TILES + TWO_STAGE_PARTIAL_THREADS - 1) // TWO_STAGE_PARTIAL_THREADS
     PARTIAL_ACC_SIZE = NUM_IO_ITERS * IO_WIDTH
     arch = get_rocm_arch() if USE_VEC else ""
-    USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
+    USE_HW_CVT_PK_BF16_F32 = has_hw_cvt_pk_bf16_f32(arch)
     SharedStorage = make_single_reduction_storage(RED_SLOTS)
     DWeightReduceStorage = make_single_reduction_storage(DWEIGHT_REDUCE_THREADS)
 

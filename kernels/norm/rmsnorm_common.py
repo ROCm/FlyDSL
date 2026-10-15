@@ -93,6 +93,16 @@ def load_weight_vec(copy_atom, weight_dtype_str, weight_elem_dtype, div_tensor, 
     return load_vec(copy_atom, VEC_WIDTH, weight_elem_dtype, div_tensor, idx).to(fx.Float32)
 
 
+def preload_weight_vec(copy_atom, weight_dtype_str, weight_elem_dtype, div_tensor, idx):
+    """Load eight weights for a later pass, which converts them with ``.to(fx.Float32)``.
+
+    Unlike load_weight_vec, 16-bit weights stay 16-bit, so the cached vector holds half the VGPRs.
+    """
+    if const_expr(weight_dtype_str == "f32"):
+        return load_weight_vec(copy_atom, weight_dtype_str, weight_elem_dtype, div_tensor, idx)
+    return load_vec(copy_atom, VEC_WIDTH, weight_elem_dtype, div_tensor, idx)
+
+
 def store_vec(copy_atom, vec_width, elem_dtype, val, div_tensor, idx):
     r = fx.make_rmem_tensor(vec_width, elem_dtype)
     fx.memref_store_vec(val, r)
@@ -103,6 +113,16 @@ def to_elem_scalar(dtype_str: str, elem_dtype, y):
     if const_expr(dtype_str == "f32"):
         return y
     return y.to(elem_dtype)
+
+
+def has_hw_cvt_pk_bf16_f32(arch: str) -> bool:
+    """Whether to_elem_vec can use v_cvt_pk_bf16_f32 on `arch`.
+
+    The instruction rounds to nearest even and keeps NaNs. The integer rounding that to_elem_vec falls back to turns
+    NaN payloads >= 0x7FFF8000 into +-0.
+    """
+    arch = str(arch)
+    return arch.startswith("gfx95") or arch == "gfx1250"
 
 
 def to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, y):
