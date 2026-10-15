@@ -1883,7 +1883,7 @@ class DualwaveSwpFp8Traits:
             self.HEAD_DIM_V,
             self.QLDS,
             self.K_BAND_CHUNK,
-            "fp8_wide_qk_hiprec_pv",
+            "fp8_wide_qk_hiprec_pv_prefetch_wait_narrow_i32_v4",
             self.ELEM_BYTES,
             self.OUT_ELEM_BYTES,
             self.LANE_SPLIT_KV,
