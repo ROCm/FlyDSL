@@ -19,6 +19,9 @@ import torch.nn.functional as F  # noqa: E402
 from kernels.attention.flash_attn_gfx120x_host import flydsl_flash_attn_func  # noqa: E402
 from kernels.attention.linear_attn_gfx120x import linear_attn  # noqa: E402
 from kernels.attention.mla_fwd_decode_gfx120x import flydsl_mla_fwd_decode  # noqa: E402
+from kernels.attention.mla_fwd_decode_m16x8_fp8_fp8_gfx120x import (  # noqa: E402
+    launch_mla_fwd_decode_m16x8_fp8_fp8,
+)
 from kernels.attention.pa_decode_fp8_gfx120x import pa_decode_ps_launch  # noqa: E402
 from kernels.attention.pa_decode_swa_gfx120x import compile_pa_decode_sw  # noqa: E402
 from kernels.norm.qk_norm_rope_quant_gfx120x import qk_norm_rope_quant  # noqa: E402
@@ -350,3 +353,57 @@ def test_window_plus_sink() -> None:
     ref = torch.matmul(prob, qf).transpose(1, 2)
     ref_dt = torch.matmul(prob.to(torch.bfloat16).float(), qf).transpose(1, 2)
     assert _max_abs(out, ref) <= 2 * _max_abs(ref_dt, ref) + 1e-3
+
+
+def test_m16x8_latent_uses_wmma() -> None:
+    """Flat m16x8 arguments run on the WMMA kernel, including a 576/512 latent."""
+    torch.manual_seed(8)
+    heads, pages = 2, 2
+    indptr = torch.tensor([0, 2], dtype=torch.int32)
+    indices = torch.tensor([1, 0], dtype=torch.int32)
+
+    def _check(dtype, qk, dv, mult) -> None:
+        kv = torch.randn(pages, qk, device="cuda")
+        q = torch.randn(heads, qk, device="cuda")
+        if dtype is torch.int8:
+            kv = (kv * 20).round().clamp(-128, 127).to(dtype)
+            q = (q * 20).round().clamp(-128, 127).to(dtype)
+            out_dtype = torch.bfloat16
+        elif dtype.is_floating_point and dtype.itemsize == 1:
+            kv = kv.to(dtype)
+            q = q.to(dtype)
+            out_dtype = torch.bfloat16
+        else:
+            kv = kv.to(dtype)
+            q = q.to(dtype)
+            out_dtype = dtype
+        out = torch.empty(heads, dv, device="cuda", dtype=out_dtype)
+        launch_mla_fwd_decode_m16x8_fp8_fp8(
+            q,
+            kv,
+            indices,
+            indptr,
+            torch.empty(1, dtype=torch.int32, device="cuda"),
+            out,
+            torch.empty(1, device="cuda", dtype=out_dtype),
+            torch.empty(1, device="cuda", dtype=out_dtype),
+            qk**-0.5,
+            num_cus=1,
+            lds_size=0,
+        )
+        k = kv.float()[indices].reshape(1, pages, 1, qk).expand(1, pages, heads, qk)
+        v = kv.float()[indices, :dv].reshape(1, pages, 1, dv).expand(1, pages, heads, dv)
+        ref = F.scaled_dot_product_attention(
+            q.float().view(1, heads, 1, qk),
+            k.permute(0, 2, 1, 3),
+            v.permute(0, 2, 1, 3),
+            scale=qk**-0.5,
+        )
+        ref_dt = ref.to(out_dtype)
+        assert _max_abs(out, ref[0, :, 0, :]) <= mult * _max_abs(ref_dt[0, :, 0, :], ref[0, :, 0, :]) + 1e-2
+
+    _check(torch.bfloat16, 64, 32, 2)
+    _check(torch.float16, 64, 32, 2)
+    _check(torch.float8_e4m3fn, 64, 32, 4)
+    _check(torch.bfloat16, 576, 512, 2)
+    _check(torch.float8_e4m3fn, 576, 512, 4)

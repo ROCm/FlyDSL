@@ -25,6 +25,7 @@ def flydsl_mla_fwd_decode(
     split_output: torch.Tensor,
     split_lse: torch.Tensor,
     softmax_scale: float,
+    stream=None,
 ) -> None:
     """Write MLA decode into ``final_output``."""
     del work_info_set, split_output, split_lse
@@ -78,5 +79,6 @@ def flydsl_mla_fwd_decode(
         seqlen_k=seqlen,
         kv_cache_layout="linear",
         sm_scale=float(softmax_scale),
+        stream=stream,
     )
     final_output.copy_(got.reshape(final_output.shape))

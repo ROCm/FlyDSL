@@ -43,6 +43,7 @@ Paged attention
 - ``kernels.attention.pa_decode_fp8_gfx120x`` -- gfx120x paged decode launch
 - ``kernels.attention.pa_decode_swa_gfx120x`` -- gfx120x sliding-window decode record
 - ``kernels.attention.mla_fwd_decode_gfx120x`` -- gfx120x WMMA latent decode
+- ``kernels.attention.mla_fwd_decode_m16x8_fp8_fp8_gfx120x`` -- gfx120x WMMA latent decode for the wide cache
 - ``kernels.attention.linear_attn_gfx120x`` -- gfx120x linear attention recurrence
 
 FlashAttention

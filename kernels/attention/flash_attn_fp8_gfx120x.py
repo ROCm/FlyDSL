@@ -121,6 +121,16 @@ def build_flash_attn_func_fp8_module_primary(
 
     BLOCK_M = block_m if block_m is not None else 128
     BLOCK_N = block_n if block_n is not None else 32
+    # A wide fp8 row is 16-byte loads. A short sequence picks a 32-thread
+    # block, which cannot cover that row. Grow the block by whole waves.
+    _vec = 16 if os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16", "1") == "1" else 8
+    _hv = int(head_dim) if head_dim_v is None else int(head_dim_v)
+    _row_threads = max(_lds_head_tile(int(head_dim), 1), _lds_head_tile(_hv, 1)) // _vec
+    _min_waves = max(1, (_row_threads + WARP_SIZE - 1) // WARP_SIZE)
+    if BLOCK_M < _min_waves * ROWS_PER_WAVE:
+        BLOCK_M = _min_waves * ROWS_PER_WAVE
+    if flat_work_group_size is not None and flat_work_group_size < _min_waves * WARP_SIZE:
+        flat_work_group_size = None
 
     assert BLOCK_N == 32, (
         f"gfx120x FA score-lane masks assume BLOCK_N==32 (got {BLOCK_N}); "
