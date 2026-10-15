@@ -5322,46 +5322,86 @@ def build_glm5_monokernel(
                                 lds_st(gu_selected, gu_index, tid)
                         gpu.barrier()
                         gu_valid = fx.min(fx.Int32(S), gu_nselected - gu_segment * S)
-                        gu_tokens = [
-                            _uniform(lds_ld(gu_selected, gu_segment * S + fx.min(fx.Int32(gu_col_j), gu_valid - 1)))
-                            for gu_col_j in range(S)
-                        ]
-                        gu_bases = [
-                            full_scratch + fx.Int64(gu_xtoken // S) * TILE_SCRATCH_BYTES for gu_xtoken in gu_tokens
-                        ]
-                        gu_nxw = HIDDEN // 4 // THREADS
-                        gu_got = poll(
-                            [
-                                (
-                                    gu_xbase + fx.Int64(SC["xq"]),
-                                    (gu_xtoken % S) * (HIDDEN // 4) + tid + gu_load_i * THREADS,
-                                    1,
+                        if gu_valid < S:
+                            # Every valid MFMA B column has its own token payload.
+                            # Unused columns never publish mid values. Give them
+                            # FP8 zero and neutral E8M0 scales, without rereading
+                            # the last valid token for every unused column.
+                            for gu_j in range(gu_valid):
+                                gu_j = fx.Int32(gu_j)
+                                gu_xtoken = _uniform(lds_ld(gu_selected, gu_segment * S + gu_j))
+                                gu_xbase = full_scratch + fx.Int64(gu_xtoken // S) * TILE_SCRATCH_BYTES
+                                gu_live_got = poll(
+                                    [
+                                        (
+                                            gu_xbase + fx.Int64(SC["xq"]),
+                                            (gu_xtoken % S) * (HIDDEN // 4) + tid + gu_i * THREADS,
+                                            1,
+                                        )
+                                        for gu_i in range(HIDDEN // 4 // THREADS)
+                                    ]
+                                    + [
+                                        (
+                                            gu_xbase + fx.Int64(SC["xqs"]),
+                                            (gu_xtoken % S) * XQ_GROUPS + fx.min(tid, XQ_GROUPS - 1),
+                                            1,
+                                        )
+                                    ]
                                 )
-                                for gu_xtoken, gu_xbase in zip(gu_tokens, gu_bases)
-                                for gu_load_i in range(gu_nxw)
+                                for gu_i in range_constexpr(HIDDEN // 4 // THREADS):
+                                    lds_st(xs, gu_j * UG_X_ROW + tid + gu_i * THREADS,
+                                           gu_live_got[gu_i][0].bitcast(fx.Float32))
+                                if tid < XQ_GROUPS:
+                                    lds_st(misc, 8 + gu_j * UG_SCALE_ROW + tid,
+                                           gu_live_got[HIDDEN // 4 // THREADS][0].bitcast(fx.Float32))
+                            for gu_j in range_constexpr(S):
+                                if gu_j >= gu_valid:
+                                    for gu_i in range_constexpr(HIDDEN // 4 // THREADS):
+                                        lds_st(xs, gu_j * UG_X_ROW + tid + gu_i * THREADS, fx.Float32(0.0))
+                                    if tid < XQ_GROUPS:
+                                        lds_st(misc, 8 + gu_j * UG_SCALE_ROW + tid, fx.Int32(127).bitcast(fx.Float32))
+                        else:
+                            gu_tokens = [
+                                _uniform(lds_ld(gu_selected, gu_segment * S + fx.min(fx.Int32(gu_col_j), gu_valid - 1)))
+                                for gu_col_j in range(S)
                             ]
-                            + [
-                                (
-                                    gu_xbase + fx.Int64(SC["xqs"]),
-                                    (gu_xtoken % S) * XQ_GROUPS + fx.min(tid, XQ_GROUPS - 1),
-                                    1,
-                                )
-                                for gu_xtoken, gu_xbase in zip(gu_tokens, gu_bases)
+                            gu_bases = [
+                                full_scratch + fx.Int64(gu_xtoken // S) * TILE_SCRATCH_BYTES for gu_xtoken in gu_tokens
                             ]
-                        )
-                        for gu_j in range_constexpr(S):
-                            for gu_i in range_constexpr(gu_nxw):
-                                lds_st(
-                                    xs,
-                                    gu_j * UG_X_ROW + tid + gu_i * THREADS,
-                                    gu_got[gu_j * gu_nxw + gu_i][0].bitcast(fx.Float32),
-                                )
-                            if tid < XQ_GROUPS:
-                                lds_st(
-                                    misc,
-                                    8 + gu_j * UG_SCALE_ROW + tid,
-                                    gu_got[S * gu_nxw + gu_j][0].bitcast(fx.Float32),
-                                )
+                            gu_nxw = HIDDEN // 4 // THREADS
+                            gu_got = poll(
+                                [
+                                    (
+                                        gu_xbase + fx.Int64(SC["xq"]),
+                                        (gu_xtoken % S) * (HIDDEN // 4) + tid + gu_load_i * THREADS,
+                                        1,
+                                    )
+                                    for gu_xtoken, gu_xbase in zip(gu_tokens, gu_bases)
+                                    for gu_load_i in range(gu_nxw)
+                                ]
+                                + [
+                                    (
+                                        gu_xbase + fx.Int64(SC["xqs"]),
+                                        (gu_xtoken % S) * XQ_GROUPS + fx.min(tid, XQ_GROUPS - 1),
+                                        1,
+                                    )
+                                    for gu_xtoken, gu_xbase in zip(gu_tokens, gu_bases)
+                                ]
+                            )
+                            for gu_j in range_constexpr(S):
+                                for gu_i in range_constexpr(gu_nxw):
+                                    lds_st(
+                                        xs,
+                                        gu_j * UG_X_ROW + tid + gu_i * THREADS,
+                                        gu_got[gu_j * gu_nxw + gu_i][0].bitcast(fx.Float32),
+                                    )
+                                if tid < XQ_GROUPS:
+                                    lds_st(
+                                        misc,
+                                        8 + gu_j * UG_SCALE_ROW + tid,
+                                        gu_got[S * gu_nxw + gu_j][0].bitcast(fx.Float32),
+                                    )
+                        # All valid operands and defined padding are ready before MFMA.
                         gpu.barrier()
                         # Reuse selected activations across the configured output tile.
                         for gu_pair in range_constexpr(GLOBAL_UG_WIDTH // 16):
