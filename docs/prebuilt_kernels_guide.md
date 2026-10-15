@@ -308,8 +308,8 @@ Returns a `@flyc.jit`-decorated function that auto-compiles on first call.
 E8M0 scales, selecting the A element type via `a_dtype` (`"fp4"`, `"fp6"`, or
 `"fp8"`; B is always MXFP4). This unified `launch_gemm` is the current gfx950
 entry point (it replaced the earlier standalone `compile_mxfp6_gemm` from #780);
-the separate `launch_gemm_a8w4_mxscale` entry point in
-`kernels/gemm/gemm_a8w4_mxscale_gfx1250.py` is the distinct gfx1250 kernel.
+the separate `launch_gemm_a8w4` entry point in
+`kernels/gemm/gemm_a8w4_gfx1250.py` is the distinct gfx1250 kernel.
 `batch>1` runs a strided-batched GEMM over `grid.z`.
 Covered by `tests/kernels/test_preshuffle_gemm.py`.
 
@@ -489,7 +489,8 @@ What operation do you need?
 | `kernels/gemm/gemm_common_gfx1250.py` | GFX1250 GEMM common |
 | `kernels/gemm/gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | `kernels/gemm/gemm_a8w8_gfx1250.py` | GFX1250 FP8 GEMM (per-token/per-channel and 128x128 blockscale) |
-| `kernels/gemm/gemm_a8w4_mxscale_gfx1250.py` | GFX1250 FP8 x MXFP4 GEMM |
+| `kernels/gemm/gemm_a4w4_gfx1250.py` | GFX1250 standalone MXFP4 x MXFP4 GEMM, 16x16 shuffled B / 32x4 shuffled scales, fused split-K |
+| `kernels/gemm/gemm_a8w4_gfx1250.py` | GFX1250 FP8 x MXFP4 GEMM |
 | `kernels/common/mma/mfma_preshuffle_pipeline.py` | Preshuffle layout and block remapping |
 | `kernels/gemm/fp8_gemm_utils.py` | FP8 GEMM helper utilities |
 | `kernels/common/kernels_common.py` | Common kernel utilities |

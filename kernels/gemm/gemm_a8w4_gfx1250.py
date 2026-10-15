@@ -21,7 +21,7 @@ from .gemm_common_gfx1250 import (
 
 
 @flyc.jit
-def launch_gemm_a8w4_mxscale(
+def launch_gemm_a8w4(
     arg_c: fx.Tensor,
     arg_a: fx.Pointer,
     arg_b: fx.Pointer,
@@ -86,7 +86,7 @@ def launch_gemm_a8w4_mxscale(
     check_smem_capacity(ARENA_B, str(get_hip_arch()))
 
     @flyc.kernel(known_block_size=[block, 1, 1])
-    def kernel_gemm_a8w4_mxscale(
+    def kernel_gemm_a8w4(
         arg_c: fx.Tensor,
         arg_a: fx.Pointer,
         arg_b: fx.Pointer,
@@ -405,7 +405,7 @@ def launch_gemm_a8w4_mxscale(
     if use_cluster:
         gx = ((gx + (cluster_m - 1)) // cluster_m) * cluster_m
     cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None
-    kernel_gemm_a8w4_mxscale(
+    kernel_gemm_a8w4(
         arg_c,
         arg_a,
         arg_b,
@@ -420,6 +420,6 @@ def launch_gemm_a8w4_mxscale(
     ).launch(grid=(gx, gy, split_k), block=(block, 1, 1), stream=stream, cluster=cluster_arg)
 
 
-launch_gemm_a8w4_mxscale.compile_hints["llvm_options"] = {
+launch_gemm_a8w4.compile_hints["llvm_options"] = {
     "amdgpu-expert-scheduling-mode": True,
 }

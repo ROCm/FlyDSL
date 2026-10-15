@@ -25,8 +25,9 @@ import flydsl.compiler as flyc  # noqa: E402,I001
 import flydsl.expr as fx  # noqa: E402
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.gemm_a4w4_256x256_gfx1250 import launch_gemm_a4w4_256x256  # noqa: E402
+from kernels.gemm.gemm_a4w4_gfx1250 import launch_gemm_a4w4  # noqa: E402
 from kernels.gemm.gemm_a8w4_256x256_gfx1250 import KPAIR_BY_BUFFERS, launch_gemm_a8w4_256x256  # noqa: E402
-from kernels.gemm.gemm_a8w4_mxscale_gfx1250 import launch_gemm_a8w4_mxscale  # noqa: E402
+from kernels.gemm.gemm_a8w4_gfx1250 import launch_gemm_a8w4  # noqa: E402
 from kernels.gemm.gemm_a8w8_256x256_gfx1250 import a8w8_kpair, launch_gemm_a8w8_256x256  # noqa: E402
 from kernels.gemm.gemm_a8w8_gfx1250 import launch_gemm_a8w8  # noqa: E402
 from kernels.gemm.gemm_a8w8_splitk_reduce_gfx1250 import compile_gemm_a8w8_splitk_reduce  # noqa: E402
@@ -70,8 +71,15 @@ _A8W4_TILES = tuple((m, n, 128, 2, 2, nb) for m in (256, 128) for n in (256, 128
 _A4W4_TILES = tuple((m, n, k, 2, 2, 4) for m in (256, 128) for n in (256, 128) for k in (256, 128))
 _MX_TILES = ((128, 256, 128, 2, 2, 2), (256, 256, 128, 2, 2, 4), (128, 256, 128, 2, 2, 3))
 _MODES = {
+    "a4w4": _Mode(
+        launch_gemm_a4w4,
+        ((32, 128, 256, 1, 4, 3), (16, 128, 128, 1, 4, 2), (128, 256, 256, 2, 2, 3), (128, 512, 256, 2, 2, 3)),
+        (65, 137, 800),
+        fp4_act=True,
+        fp4_w=True,
+    ),
     "mxscale_a8w4": _Mode(
-        launch_gemm_a8w4_mxscale,
+        launch_gemm_a8w4,
         (_MX_TILES[0], (128, 256, 256, 2, 2, 2), (256, 256, 256, 2, 2, 2), _MX_TILES[2]),
         (1024, 512, 512),
         fp4_w=True,
@@ -167,22 +175,30 @@ def _scales_and_reference(cfg, a, b, out_dtype, const_val, scale_scale):
         (127, 127) if out_dtype == "f16" and block == 32 else ((127, 132) if cfg.fp4_w and block == 32 else (126, 129))
     )
 
+    if cfg.launch is launch_gemm_a4w4:
+        low, high = 124, 129
+
     def scale(rows):
+        groups = max(1, (K + block - 1) // block) if cfg.launch is launch_gemm_a4w4 else K // block
         if const_val is None:
-            return utils.random_e8m0(rows, K // block, low_exp=low, high_exp=high, device="cuda")
-        return torch.full((rows, K // block), min(max(127, low), high), dtype=torch.uint8, device="cuda")
+            return utils.random_e8m0(rows, groups, low_exp=low, high_exp=high, device="cuda")
+        return torch.full((rows, groups), min(max(127, low), high), dtype=torch.uint8, device="cuda")
 
     sa, sb = scale(M), scale(N if block == 32 else N // block)
-    a_scale = utils.e8m0_to_f32(sa).repeat_interleave(block, dim=1)
-    b_scale = utils.e8m0_to_f32(sb).repeat_interleave(block, dim=1)
+    a_scale = utils.e8m0_to_f32(sa).repeat_interleave(block, dim=1)[:, :K]
+    b_scale = utils.e8m0_to_f32(sb).repeat_interleave(block, dim=1)[:, :K]
     if block == 128:
         b_scale = b_scale.repeat_interleave(block, dim=0)
     ref = (a * a_scale) @ (b * b_scale).T
     tol = (1e-2, 5e-2)
-    if cfg.fp4_w and out_dtype != "f16":
+    if cfg.launch is launch_gemm_a4w4:
+        ref, tol = ref.to(_DT[out_dtype]).float(), (0, 0)
+    if cfg.fp4_w and out_dtype != "f16" and cfg.launch is not launch_gemm_a4w4:
         peak_exp = max(0, int(sa.max()) - 127) + max(0, int(sb.max()) - 127)
         tol = (min(5e-2, 1e-2 + 3e-3 * peak_exp), max(5e-2, K * (0.6 + 1.5 * peak_exp)))
     if block == 32:
+        sa = torch.nn.functional.pad(sa, (0, (-sa.shape[1]) % 4), value=127)
+        sb = torch.nn.functional.pad(sb, (0, (-sb.shape[1]) % 4), value=127)
         return _preshuffle_scale(sa), _preshuffle_scale(sb), ref, tol, 0
     return sa.T.contiguous(), sb, ref, tol, M
 
@@ -235,33 +251,52 @@ def _execute(
     """Prepare operands and reference, then compile GEMM and its optional FP32 reducer once."""
     M, N, K = shape
     tm, tn, tk, mw, nw, nb = tile
+    general_a4w4 = cfg.launch is launch_gemm_a4w4
+    if general_a4w4:
+        if not b_preshuffle:
+            raise ValueError("general A4W4 requires 16x16-byte B preshuffle")
+        fused_splitk = split_k > 1
     torch.manual_seed(0)
-    a, a_f32 = _operand(M, K, cfg.fp4_act, const_val, out_dtype, signed)
-    b, b_f32 = _operand(N, K, cfg.fp4_w, const_val, out_dtype, signed)
+    packed_k = max(32, (K + 31) // 32 * 32) if cfg.launch is launch_gemm_a4w4 else K
+    a, a_f32 = _operand(M, packed_k, cfg.fp4_act, const_val, out_dtype, signed)
+    b, b_f32 = _operand(N, packed_k, cfg.fp4_w, const_val, out_dtype, signed)
+    if cfg.launch is launch_gemm_a4w4:
+        for operand in (a, b):
+            operand[:, (K + 1) // 2 :] = 0
+            if K % 2:
+                operand[:, K // 2] &= 0x0F
+        a_f32, b_f32 = a_f32[:, :K], b_f32[:, :K]
     sa, sb, ref, tol, stride_sa = _scales_and_reference(cfg, a_f32, b_f32, out_dtype, const_val, scale_scale)
-    if split_k > 1 and not cfg.scheduled:
+    if split_k > 1 and not cfg.scheduled and cfg.launch is not launch_gemm_a4w4:
         tol = (tol[0], tol[1] + split_k * float(ref.abs().max()) * 2**-8)
-    lda, ldc = K + lda_extra, N + ldc_extra
+    lda, ldc = packed_k + lda_extra, N + ldc_extra
     a = torch.nn.functional.pad(a, (0, lda_extra // (2 if cfg.fp4_act else 1)))
     if a_preshuffle:
         a = utils.preshuffle_a_2x128(a)
-    if b_preshuffle or cfg.launch is not launch_gemm_a8w4_mxscale:
-        b = utils.preshuffle_b_16x16(b, N, K // (2 if cfg.fp4_w else 1))
+    if b_preshuffle or cfg.launch not in (launch_gemm_a8w4, launch_gemm_a4w4):
+        if cfg.launch is launch_gemm_a4w4:
+            b = torch.nn.functional.pad(b, (0, 0, 0, (-N) % 16))
+        b = utils.preshuffle_b_16x16(b, b.shape[0], packed_k // (2 if cfg.fp4_w else 1))
     out = torch.full((M + c_guard_rows, ldc), float("nan"), dtype=_DT[out_dtype], device="cuda")
     m_tiles = (M + tm - 1) // tm
     if fused_splitk:
         padded_m = ((m_tiles + cluster_m - 1) // cluster_m) * cluster_m
         scratch_rows = tm // 2 if split_k == 2 else tm
-        partials = torch.empty(padded_m * (N // tn) * split_k * scratch_rows * tn, dtype=torch.float32, device="cuda")
+        padded_n = ((N + tn * cluster_n - 1) // (tn * cluster_n)) * cluster_n
+        partials = torch.empty(padded_m * padded_n * split_k * scratch_rows * tn, dtype=torch.float32, device="cuda")
     elif split_k > 1:
-        partials = torch.empty((split_k, M, ldc), dtype=torch.float32 if cfg.scheduled else out.dtype, device="cuda")
+        partials = torch.empty(
+            (split_k, M, ldc),
+            dtype=torch.float32 if cfg.scheduled or cfg.launch is launch_gemm_a4w4 else out.dtype,
+            device="cuda",
+        )
     else:
         partials = out
     ptr = functools.partial(_pointer, unsigned=cfg.scale == "ptpc")
-    tensor_args = cfg.launch is launch_gemm_a8w4_mxscale
+    tensor_args = cfg.launch is launch_gemm_a8w4
     buffers = (partials, ptr(a), ptr(b), sa, sb) if tensor_args else tuple(ptr(t) for t in (partials, a, b, sa, sb))
     bounded_m = (M % tm != 0 or m_tiles % cluster_m != 0) if bounded_m is None else bounded_m
-    tail = (b_preshuffle,) if tensor_args else (a_preshuffle,)
+    tail = () if general_a4w4 else (b_preshuffle,) if tensor_args else (a_preshuffle,)
     if cfg.compute:
         tail += (() if cfg.fp4_act else (persistent_n_tiles,)) + (fused_splitk, bounded_m)
     args = (
@@ -273,7 +308,7 @@ def _execute(
         *((stride_sa,) if not cfg.fp4_w else ()),
         lda,
         ldc,
-        *((ptr(out),) if cfg.compute else ()),
+        *((ptr(out),) if cfg.compute or general_a4w4 else ()),
         tm,
         tn,
         tk,
@@ -319,9 +354,10 @@ def _unsupported(cfg, shape, tile, options):
     tm, tn, tk, _, _, nb = tile
     cm, cn = options.get("cluster_m", 1), options.get("cluster_n", 1)
     sk, ps = options.get("split_k", 1), options.get("persistent_n_tiles", 1)
-    if min(M, N, K, *tile, cm, cn, sk, ps) <= 0:
+    general_a4w4 = cfg.launch is launch_gemm_a4w4
+    if min(M, N, *tile, cm, cn, sk, ps) <= 0 or (K < 0 if general_a4w4 else K <= 0):
         return "shape, tiles, cluster and split counts must be positive"
-    step, minimum = tk, tk * nb
+    step, minimum = (32, 32) if cfg.launch is launch_gemm_a4w4 else (tk, tk * nb)
     if cfg.scheduled:
         if cfg.launch is launch_gemm_a8w4_256x256:
             step = tk * KPAIR_BY_BUFFERS.get(nb, 1)
@@ -330,21 +366,44 @@ def _unsupported(cfg, shape, tile, options):
             step, minimum = tk * a8w8_kpair(tn, nb), 512
         else:
             minimum = tk
-    lda_bytes = (K + options.get("lda_extra", 0)) // (2 if cfg.fp4_act else 1)
+    packed_k = max(32, (K + 31) // 32 * 32) if general_a4w4 else K
+    lda_bytes = (packed_k + options.get("lda_extra", 0)) // (2 if cfg.fp4_act else 1)
     checks = [
         (not (cm < 16 and cn < 16 and cm * cn <= 16), "cluster dimensions must be below 16 with at most 16 workgroups"),
         (cfg.scheduled and tile not in cfg.tiles, f"unsupported tile profile {tile}"),
         (cfg.scheduled and cm * cn == 1, "hand-scheduled kernels require a cluster of 2..16 workgroups"),
-        (N % (tn * cn) != 0, f"N={N} must cover whole clusters of {tn}-wide tiles"),
+        (general_a4w4 and not options.get("b_preshuffle", True), "general A4W4 requires 16x16-byte B preshuffle"),
         (
-            K % (step * sk) != 0 or K // sk < minimum,
+            general_a4w4
+            and (
+                sk not in (1, 2, 4, 8)
+                or cm * cn * sk > 16
+                or tm % sk
+                or (sk > 1 and tm // sk < tile[3] * tile[4] * 128 // tn)
+            ),
+            "general A4W4 split-K uses 2/4/8 splits in one cluster with complete epilogue row stripes",
+        ),
+        (
+            cfg.launch is not launch_gemm_a4w4 and N % (tn * cn) != 0,
+            f"N={N} must cover whole clusters of {tn}-wide tiles",
+        ),
+        (
+            not general_a4w4 and (K % (step * sk) != 0 or K // sk < minimum),
             f"K={K} needs multiples of {step} and at least {minimum} per split",
         ),
-        (cfg.scale != "ptpc" and K % cfg.scale != 0, f"K must be divisible by the scale block size {cfg.scale}"),
+        (
+            not general_a4w4 and cfg.scale != "ptpc" and K % cfg.scale != 0,
+            f"K must be divisible by the scale block size {cfg.scale}",
+        ),
         (cfg.scale == 128 and N % 128 != 0, "blockscale N must be divisible by 128"),
         (
             options.get("a_preshuffle")
-            and (cfg.launch is launch_gemm_a8w4_mxscale or tm % 2 or lda_bytes % 128 or (cfg.fp4_act and tk != 256)),
+            and (
+                cfg.launch in (launch_gemm_a8w4, launch_gemm_a4w4)
+                or tm % 2
+                or lda_bytes % 128
+                or (cfg.fp4_act and tk != 256)
+            ),
             "A preshuffle needs a supported launcher, even tile_m, whole 128-byte rows and FP4 tile_k=256",
         ),
         (
@@ -352,7 +411,8 @@ def _unsupported(cfg, shape, tile, options):
             "persistent N tiles need the A8W8 compute kernel, split_k=1 and whole clusters",
         ),
         (
-            options.get("fused_splitk") and (not cfg.compute or sk not in (2, 4, 8) or tm % sk or cm * cn * sk > 16),
+            options.get("fused_splitk")
+            and (not (cfg.compute or general_a4w4) or sk not in (2, 4, 8) or tm % sk or cm * cn * sk > 16),
             "fused split-K needs 2/4/8 splits dividing tile_m in one cluster of at most 16 workgroups",
         ),
     ]
@@ -368,6 +428,32 @@ def _cases():
     for mode, cfg in _MODES.items():
         _, N, K = cfg.shape
         # WMMA rows, 32-row scale blocks, tile edges and partially populated clusters.
+        if cfg.launch is launch_gemm_a4w4:
+            for shape in ((1, 1, 1), (17, 33, 31), (33, 129, 257), (65, 257, 544)):
+                yield _case(mode, f"bounds-{shape}", shape, repeats=16)
+            for tile in cfg.tiles:
+                yield _case(mode, f"layout-{tile}", (65, 137, 800), tile, repeats=16)
+            for k in (0, 1, 128, 224, 256, 288, 512, 768, 1024, 1536):
+                yield _case(mode, f"drain-{k}", (33, 65, k))
+            for sk in (2, 4, 8):
+                yield _case(mode, f"fused-split-{sk}", (33, 129, 1057), split_k=sk, repeats=32)
+                yield _case(mode, f"fused-f16-{sk}", (17, 65, 257), split_k=sk, out_dtype="f16", ldc_extra=32)
+            yield _case(mode, "fused-padded-cluster", (65, 137, 1057), split_k=4, cluster_m=2, cluster_n=2)
+            yield _case(mode, "fused-zero-k", (17, 65, 0), split_k=8)
+            yield _case(mode, "fused-short-k-nb2", (17, 65, 1), (16, 128, 128, 1, 4, 2), split_k=4)
+            yield _case(mode, "stride-f16", out_dtype="f16", lda_extra=64, ldc_extra=96)
+            yield _case(mode, "constant", const_val=0.5)
+            yield _case(mode, "cluster-padded", (65, 137, 1057), cluster_m=2, cluster_n=2, repeats=32)
+            yield _case(
+                mode,
+                "large-tile-general",
+                (512, 512, 1536),
+                (256, 256, 256, 2, 2, 4),
+                cluster_m=2,
+                cluster_n=2,
+                repeats=32,
+            )
+            continue
         for M in (1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 513, 769, 1025, 2048):
             yield _case(mode, f"m-tail-{M}", (M, N, K))
         for M in (1, 129, 384):
@@ -375,8 +461,8 @@ def _cases():
                 yield _case(mode, f"cluster-{cm}x{cn}-m{M}", (M, N, K), cluster_m=cm, cluster_n=cn)
         for tile in cfg.tiles:
             # Odd M also exercises row-pair padding in the A preshuffle.
-            supports_apre = cfg.launch is not launch_gemm_a8w4_mxscale and (not cfg.fp4_act or tile[2] == 256)
-            for apre in ((False, True) if supports_apre else (False,)):
+            supports_apre = cfg.launch is not launch_gemm_a8w4 and (not cfg.fp4_act or tile[2] == 256)
+            for apre in (False, True) if supports_apre else (False,):
                 shape = (777, tile[1] * 4, max(K, tile[2] * tile[5]))
                 yield _case(
                     mode,
@@ -396,7 +482,7 @@ def _cases():
         if not cfg.fp4_act:  # FP4 random inputs already include both signs.
             yield _case(mode, "signed-operands", signed=True)
         if not cfg.scheduled:
-            if cfg.launch is launch_gemm_a8w4_mxscale:
+            if cfg.launch is launch_gemm_a8w4:
                 yield _case(mode, "b-row-major", b_preshuffle=False)
             continue
         # Every split has enough K work; no collected case silently skips.
@@ -679,7 +765,7 @@ def _main():
             config += f" ps{ps}"
         if split_k > 1:
             config += f" sk{split_k}" + (" fused" if args.fused_splitk else "")
-        if mode == "mxscale_a8w4":
+        if mode in ("mxscale_a8w4", "a4w4"):
             config += f" b={'preshuffle' if args.b_preshuffle else 'row-major+pad'}"
         for apre in args.apre:
             kwargs = {
@@ -690,7 +776,7 @@ def _main():
                 "split_k": split_k,
                 "fused_splitk": args.fused_splitk,
             }
-            if mode == "mxscale_a8w4":
+            if mode in ("mxscale_a8w4", "a4w4"):
                 kwargs["b_preshuffle"] = args.b_preshuffle
             if cfg.supports_out_dtype:
                 kwargs["out_dtype"] = args.out_dtype
