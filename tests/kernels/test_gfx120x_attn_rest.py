@@ -432,4 +432,7 @@ def test_m16x8_latent_uses_wmma() -> None:
     _check(torch.float8_e5m2, 64, 32, 4)
     _check(torch.int8, 64, 32, 4)
     _check(torch.bfloat16, 576, 512, 2)
+    _check(torch.float16, 576, 512, 2)
     _check(torch.float8_e4m3fn, 576, 512, 4)
+    _check(torch.float8_e5m2, 576, 512, 4)
+    _check(torch.int8, 576, 512, 4)
