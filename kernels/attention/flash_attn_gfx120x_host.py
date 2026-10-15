@@ -2425,6 +2425,7 @@ def flydsl_flash_attn_paged_func(
     if sk_host and any(int(x) != int(sk_host[0]) for x in sk_host):
 
         total_q = int(batch * seq_len_q_real)
+        v_dim = int(v_cache.shape[-2] if layout == "vectorized" else v_cache.shape[-1])
         q_pack = q.reshape(total_q, num_heads, head_dim)
         # Multiply form stays valid when Sq==0 (arange step cannot be 0).
         cu_q = torch.arange(batch + 1, device=q.device, dtype=torch.int32) * int(seq_len_q_real)
@@ -2439,7 +2440,7 @@ def flydsl_flash_attn_paged_func(
                     _as_score_bias(route_bias, seq_len_q_real, max_sk, num_heads, q.device, stream=stream),
                     _as_score_bias(attn_mask, seq_len_q_real, max_sk, num_heads, q.device, stream=stream),
                 )
-        out_pack = None if out is None else out.reshape(total_q, num_heads, head_dim)
+        out_pack = None if out is None else out.reshape(total_q, num_heads, v_dim)
         got = flydsl_flash_attn_varlen_paged_func(
             q_pack,
             k_cache,
@@ -2470,8 +2471,8 @@ def flydsl_flash_attn_paged_func(
         )
         if return_lse:
             o_p, lse_p = got
-            return o_p.reshape(batch, seq_len_q_real, num_heads, head_dim), lse_p
-        return got.reshape(batch, seq_len_q_real, num_heads, head_dim)
+            return o_p.reshape(batch, seq_len_q_real, num_heads, v_dim), lse_p
+        return got.reshape(batch, seq_len_q_real, num_heads, v_dim)
     cross = seq_len_q_real != max_sk
     dtype_str = _torch_dtype_to_str(q.dtype)
     block_m = _pick_block_m(seq_len_q_real, cross, max_sk)
@@ -2751,6 +2752,7 @@ def flydsl_flash_attn_varlen_paged_func(
         num_kv_heads = int(k_cache.shape[2])
         if int(k_cache.shape[3]) != head_dim or int(k_cache.shape[1]) != int(page_size):
             raise ValueError("varlen paged linear cache H/D/page mismatch")
+    v_dim = int(v_cache.shape[-2] if layout_kernel == "vectorized" else v_cache.shape[-1])
     if num_heads % int(num_kv_heads) != 0:
         raise ValueError("varlen paged GQA group invalid")
     page_size = int(page_size)
@@ -2811,7 +2813,7 @@ def flydsl_flash_attn_varlen_paged_func(
         if sink_t.device != q.device:
             sink_t = sink_t.to(q.device)
     total_q = int(q.shape[0])
-    o_shape = (total_q, num_heads, head_dim)
+    o_shape = (total_q, num_heads, v_dim)
     if out is None:
         o_p = torch.empty(o_shape, dtype=q.dtype, device=q.device)
     else:
@@ -2828,6 +2830,7 @@ def flydsl_flash_attn_varlen_paged_func(
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
         orig_head_dim = int(head_dim)
         launch_head_dim = _head_dim_tile_target(orig_head_dim, what="flydsl_flash_attn_varlen_paged_func")
+        v_launch = int(v_dim) if int(v_dim) % 32 == 0 else int(launch_head_dim)
         logical_head_dim = None
         sm_scale_pad = None if sm_scale is None else float(sm_scale)
         if launch_head_dim != orig_head_dim:
@@ -2837,6 +2840,7 @@ def flydsl_flash_attn_varlen_paged_func(
         exe = _get_kernel(
             num_heads=num_heads,
             head_dim=launch_head_dim,
+            head_dim_v=v_launch,
             causal=bool(causal),
             dtype_str=dtype_str,
             waves_per_eu=waves_per_eu,
@@ -2865,10 +2869,10 @@ def flydsl_flash_attn_varlen_paged_func(
         comb_o = o_p
         if nsplits > 1:
             comb_o = torch.empty(
-                (batch, max_seqlen_q, num_heads, launch_head_dim), dtype=q.dtype, device=q.device
+                (batch, max_seqlen_q, num_heads, v_launch), dtype=q.dtype, device=q.device
             )
         split_tail, split_ws = _float_split_tail(
-            q.device, nsplits, batch, max_seqlen_q, num_heads, launch_head_dim
+            q.device, nsplits, batch, max_seqlen_q, num_heads, v_launch
         )
         exe(
             _flat(_as_contig(q, stream=launch_stream)),
@@ -2899,7 +2903,7 @@ def flydsl_flash_attn_varlen_paged_func(
                 batch=batch,
                 seq_q=max_seqlen_q,
                 num_heads=num_heads,
-                head_dim=launch_head_dim,
+                head_dim=v_launch,
                 dtype_str=dtype_str,
                 has_sink=sink_t is not None,
                 return_lse=return_lse,
@@ -2913,7 +2917,7 @@ def flydsl_flash_attn_varlen_paged_func(
                 qs, qe = int(cq_host[bi]), int(cq_host[bi + 1])
                 n = qe - qs
                 if n > 0:
-                    o_p[qs:qe].copy_(comb_o[bi, :n, :, :orig_head_dim], non_blocking=True)
+                    o_p[qs:qe].copy_(comb_o[bi, :n, :, :v_dim], non_blocking=True)
     if return_lse:
         return o_p, lse_p
     return o_p

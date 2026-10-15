@@ -184,3 +184,28 @@ def test_qk_norm_rope_quant_then_attention() -> None:
     attn = flydsl_flash_attn_func(q, q, q, causal=False)
     assert attn.shape == q.shape
     assert torch.isfinite(attn.float()).all()
+
+
+def test_ragged_paged_value_head() -> None:
+    torch.manual_seed(5)
+    page, hq, dq, dv = 16, 4, 64, 32
+    k = torch.randn(3, page, 1, dq, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(3, page, 1, dv, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(2, 1, hq, dq, device="cuda", dtype=torch.bfloat16)
+    bt = torch.tensor([[0, 0], [1, 2]], device="cuda", dtype=torch.int32)
+    sk = torch.tensor([page, page * 2], device="cuda", dtype=torch.int32)
+    out = flydsl_flash_attn_func(q, k, v, block_table=bt, seqlen_k=sk, causal=False)
+    assert out.shape == (2, 1, hq, dv)
+    lengths = [page, page * 2]
+    pages = [bt[0, :1], bt[1]]
+    for seq, n_pages in enumerate((1, 2)):
+        kk = k[pages[seq], :, 0].reshape(1, lengths[seq], 1, dq).expand(1, lengths[seq], hq, dq)
+        vv = v[pages[seq], :, 0].reshape(1, lengths[seq], 1, dv).expand(1, lengths[seq], hq, dv)
+        ref = F.scaled_dot_product_attention(
+            q[seq : seq + 1].float().permute(0, 2, 1, 3),
+            kk.float().permute(0, 2, 1, 3),
+            vv.float().permute(0, 2, 1, 3),
+            scale=dq**-0.5,
+        )
+        err = (out[seq].float() - ref.permute(0, 2, 1, 3)).abs().max().item()
+        assert err < 2e-2, err
