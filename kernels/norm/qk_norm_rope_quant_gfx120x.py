@@ -4,14 +4,15 @@
 
 bf16 and fp16 stay on ``rms_rope_gfx120x``. This kernel is the quant path.
 One scale covers each row: ``max(amax, 1e-12) / qmax``. One wave reduces the
-sum of squares, then reloads each pair from global memory to apply the inverse
-RMS, rotate the tail, and quantize. The first ``head_dim - rope_head_dim``
-elements are not rotated.
+sum of squares. The normalized pairs stay in registers for the tail rotation
+and the quantize store. The first ``head_dim - rope_head_dim`` elements are
+not rotated.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import lru_cache
 
 import torch
 
@@ -23,6 +24,7 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 
 
+@lru_cache(maxsize=64)
 def build_qk_norm_rope_quant_module(
     head_dim: int,
     rope_head_dim: int,
@@ -38,7 +40,7 @@ def build_qk_norm_rope_quant_module(
         raise ValueError(f"head_dim {head_dim} must be positive")
     if rope_head_dim < 0 or rope_head_dim > head_dim:
         raise ValueError(f"rope_head_dim {rope_head_dim} must be in 0..{head_dim}")
-    # One wave. Pairs are strided across the lanes and reloaded after each reduction.
+    # One wave. Pairs are strided across the lanes and kept in registers.
     wave = 32
     n_pairs = (int(head_dim) + 1) // 2
     pairs_per = (n_pairs + wave - 1) // wave
@@ -70,7 +72,7 @@ def build_qk_norm_rope_quant_module(
         pos = fx.Int32(fx.ptr_load(pos_ptr + row))
 
         def _loaded_pair(p, inv_rms):
-            # Global reload of one pair. The row is not staged in LDS.
+            # Load one pair, apply the inverse RMS and the weight, rotate the tail.
             pair = fx.Int32(p) * fx.Int32(wave) + tid
             e0 = pair * fx.Int32(2)
             e1 = e0 + fx.Int32(1)
@@ -119,8 +121,10 @@ def build_qk_norm_rope_quant_module(
         mean_sq = sumsq * fx.Float32(1.0 / float(head_dim)) + fx.Float32(eps)
         inv = fmath.rsqrt(mean_sq, fastmath="fast")
         amax = fx.Float32(0.0)
+        kept = []
         for p in range_constexpr(pairs_per):
-            y0, y1, _, _, _, _ = _loaded_pair(p, inv)
+            y0, y1, e0, e1, valid0, valid1 = _loaded_pair(p, inv)
+            kept.append((y0, y1, e0, e1, valid0, valid1))
             amax = fx.max(amax, fx.max(fx.absf(y0), fx.absf(y1)))
         for step in range_constexpr(5):
             amax = fx.max(amax, gpu.shuffle_xor(amax, fx.Int32(1 << step), fx.Int32(wave)))
@@ -128,11 +132,11 @@ def build_qk_norm_rope_quant_module(
         if tid == fx.Int32(0):
             fx.ptr_store(scale, sc_ptr + row)
         # One hardware reciprocal. Two software divides share vcc and corrupt
-        # the second quotient.
+        # the second quotient. The normalized pairs stay in registers, so the
+        # quantize store does not reload the row.
         inv_s = fx.Float32(fx.rocdl.rcp(T.f32, scale))
         o8 = fx.recast_iter(fx.PointerType.get(fx.Int8.ir_type, Out.address_space), Out)
-        for p in range_constexpr(pairs_per):
-            y0, y1, e0, e1, valid0, valid1 = _loaded_pair(p, inv)
+        for y0, y1, e0, e1, valid0, valid1 in kept:
             s0 = y0 * inv_s
             s1 = y1 * inv_s
             if const_expr(is_int8):
@@ -201,6 +205,8 @@ def qk_norm_rope_quant(
     out_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e5m2": torch.float8_e5m2, "int8": torch.int8}[quant]
     out = torch.empty(rows, head_dim, device=x.device, dtype=out_dtype)
     scale = torch.empty(rows, device=x.device, dtype=torch.float32)
+    if rows == 0:
+        return out, scale
     launch = build_qk_norm_rope_quant_module(head_dim, rope_dim, quant, eps)
     launch_stream = torch.cuda.current_stream(x.device) if stream is None else stream
     out_ty = {"fp8_e4m3fn": fx.Float8E4M3FN, "fp8_e5m2": fx.Float8E5M2, "int8": fx.Int8}[quant]
