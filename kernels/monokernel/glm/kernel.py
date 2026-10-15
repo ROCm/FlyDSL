@@ -454,6 +454,20 @@ def build_glm5_monokernel(
     GLOBAL_QB40 = GLOBAL_QB40 and 16 * (Q_LORA // 2 + 4) <= X_WORDS and 16 * Q_B_TILE <= OUT_WORDS
     GLOBAL_UV40 = GLOBAL_UV40 and GLOBAL_UG40 and GLOBAL_QA40 and S * (O_K // 2 + 4) <= X_WORDS
     O_PAD4 = GLOBAL_UV40
+    # The all-row global route gather already joins every persistent
+    # cache reader through split -> UV -> O -> router data dependencies.
+    CACHE_READERS_JOINED = (
+        DEFER_OFF_CACHE
+        and npes == 4
+        and GLOBAL_UG40
+        and GROUPED_UG
+        and S > 1
+        and D == 1
+        and L == H
+        and total_samples * MOE_SLOTS <= THREADS
+        and 0 < N_SPLIT <= 64
+        and N_SPLIT % 4 == 0
+    )
     MIDQ_WORDS = S * MOE_SLOTS * expert_inter // 4
     MID_SCALE_WORDS = S * MOE_SLOTS * expert_inter // 32
     INPUT_NORM_OFF = BLOCKS * S * 2 * UG_TILE - S * HIDDEN // 2
@@ -6449,24 +6463,25 @@ def build_glm5_monokernel(
                 stamp("down", t, 4)
 
             if const_expr(DEFER_OFF_CACHE):
-                # Every reader finishes before persistent cache storage is overwritten.
-                # This second barrier has a distinct slot at the same invocation tag.
-                fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
-                gpu.barrier()
-                commit_arrivals = full_scratch + fx.Int64(ROW_TILES * TILE_SCRATCH_BYTES + (BLOCKS + 1) * 8)
-                if tid == 0:
-                    put(commit_arrivals, full_bid, fx.Int32(1))
-                if full_bid == 0:
-                    if tid < BLOCKS:
-                        get(commit_arrivals, tid)
-                        fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
+                if const_expr(not CACHE_READERS_JOINED):
+                    # Every reader finishes before persistent cache storage is overwritten.
+                    # This second barrier has a distinct slot at the same invocation tag.
+                    fx.memory_fence(ordering=fx.AtomicOrdering.Release, syncscope="agent")
                     gpu.barrier()
+                    commit_arrivals = full_scratch + fx.Int64(ROW_TILES * TILE_SCRATCH_BYTES + (BLOCKS + 1) * 8)
                     if tid == 0:
-                        put(commit_arrivals, BLOCKS, fx.Int32(1))
-                if tid == 0:
-                    get(commit_arrivals, BLOCKS)
-                gpu.barrier()
-                fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
+                        put(commit_arrivals, full_bid, fx.Int32(1))
+                    if full_bid == 0:
+                        if tid < BLOCKS:
+                            get(commit_arrivals, tid)
+                            fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
+                        gpu.barrier()
+                        if tid == 0:
+                            put(commit_arrivals, BLOCKS, fx.Int32(1))
+                    if tid == 0:
+                        get(commit_arrivals, BLOCKS)
+                    gpu.barrier()
+                    fx.memory_fence(ordering=fx.AtomicOrdering.Acquire, syncscope="agent")
                 if bid < S:
                     commit_slot = row_slot(bid)
                     later_slot = fx.Int32(
