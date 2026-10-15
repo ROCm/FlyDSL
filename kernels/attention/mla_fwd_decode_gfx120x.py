@@ -5,7 +5,9 @@
 ``work_indptr`` is the page CSR and ``kv_page_indices`` lists the pages.
 ``work_info_set`` is accepted for the call shape. The latent row's first
 ``value`` width is V. The query width is K. A width past one LDS row is split
-by the WMMA kernel.
+by the WMMA kernel. One launch writes ``final_output``. ``split_output``
+receives that result when it has the same number of elements. ``split_lse``
+receives the fp32 LSE when it can hold those elements.
 """
 
 from __future__ import annotations
@@ -13,6 +15,32 @@ from __future__ import annotations
 import torch
 
 from flydsl.runtime.device import get_rocm_arch
+
+
+def _write_partition(dst: torch.Tensor, src: torch.Tensor, *, prefix: bool) -> None:
+    """Copy one partition into ``dst`` without allocating a split workspace.
+
+    Equal element counts copy in logical order. A larger ``dst`` receives the
+    leading logical elements only when ``prefix`` is set and a leading slice
+    fits. A smaller buffer is left untouched.
+    """
+    flat = src.reshape(-1)
+    n = int(flat.numel())
+    size = int(dst.numel())
+    if size < n or (not prefix and size != n):
+        return
+    if size == n:
+        dst.copy_(flat.reshape(dst.shape))
+        return
+    if dst.is_contiguous():
+        dst.view(-1)[:n].copy_(flat)
+        return
+    tail = 1
+    for dim in dst.shape[1:]:
+        tail *= int(dim)
+    slots = n // tail if tail else 0
+    if tail and n % tail == 0 and dst.dim() > 0 and slots <= int(dst.shape[0]):
+        dst[:slots].copy_(flat.reshape((slots, *tuple(dst.shape[1:]))))
 
 
 def flydsl_mla_fwd_decode(
@@ -26,9 +54,12 @@ def flydsl_mla_fwd_decode(
     split_lse: torch.Tensor,
     softmax_scale: float,
     stream=None,
+    *,
+    num_cus: int = 1,
+    lds_size: int = 0,
 ) -> None:
-    """Write MLA decode into ``final_output``."""
-    del work_info_set, split_output, split_lse
+    """Write one MLA partition into ``final_output`` and matching split buffers."""
+    del work_info_set
     arch = str(get_rocm_arch())
     assert arch.startswith("gfx120"), f"flydsl_mla_fwd_decode requires gfx120x, got {arch}"
     if query.dtype != kv_buffer.dtype:
@@ -70,7 +101,9 @@ def flydsl_mla_fwd_decode(
     v_cache = kv_buffer[..., :value_dim].contiguous()
     from kernels.attention.flash_attn_gfx120x_host import flydsl_flash_attn_func
 
-    got = flydsl_flash_attn_func(
+    # The WMMA launch owns the grid.
+    del num_cus, lds_size
+    got, lse = flydsl_flash_attn_func(
         q,
         k_cache,
         v_cache,
@@ -79,6 +112,9 @@ def flydsl_mla_fwd_decode(
         seqlen_k=seqlen,
         kv_cache_layout="linear",
         sm_scale=float(softmax_scale),
+        return_lse=True,
         stream=stream,
     )
     final_output.copy_(got.reshape(final_output.shape))
+    _write_partition(split_output, final_output, prefix=False)
+    _write_partition(split_lse, lse, prefix=True)

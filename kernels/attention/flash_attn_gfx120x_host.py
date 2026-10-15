@@ -2374,6 +2374,8 @@ def flydsl_flash_attn_paged_func(
     else:
         raise ValueError(f"gfx120x paged layout {layout!r} is not linear/linear3d/vectorized")
 
+    # None: the cache's value head is the width the caller sees.
+    v_public = None
     if layout != "vectorized":
         if k_cache.dim() != 4 or v_cache.dim() != 4:
             raise ValueError(
@@ -2382,8 +2384,25 @@ def flydsl_flash_attn_paged_func(
             )
         if k_cache.shape[1] != v_cache.shape[1] or k_cache.shape[2] != v_cache.shape[2]:
             raise ValueError(f"paged K/V page/H mismatch: {tuple(k_cache.shape)} vs {tuple(v_cache.shape)}")
-        if int(v_cache.shape[3]) != int(k_cache.shape[3]) and int(v_cache.shape[3]) % 32 != 0:
-            raise ValueError(f"paged value head {int(v_cache.shape[3])} must be a multiple of 32")
+        v_head = int(v_cache.shape[3])
+        # Shared logical mask covers V only when it uses the query head. A different
+        # unaligned V is zero-extended to the kernel stride. K is not gathered.
+        if v_head != int(k_cache.shape[3]) and v_head % 32 != 0:
+            v_public = v_head
+            q_tile = _head_dim_tile_target(int(head_dim), what="flydsl_flash_attn_paged_func")
+            v_tile = _head_dim_tile_target(v_head, what="flydsl_flash_attn_paged_func")
+            q_logical = int(head_dim) if int(head_dim) != q_tile else None
+            if v_tile == q_tile and q_logical is not None and q_logical < v_head:
+                v_stride = v_tile + 32
+            elif v_tile == q_tile and q_logical is not None:
+                v_stride = q_logical
+            else:
+                v_stride = v_tile
+            v_cache = device_pad(
+                _as_contig(v_cache, stream=launch_stream),
+                (0, v_stride - v_head),
+                stream=launch_stream,
+            )
         cache_page_size = int(k_cache.shape[1])
         if page_size is None:
             page_size = cache_page_size
@@ -2440,7 +2459,8 @@ def flydsl_flash_attn_paged_func(
                     _as_score_bias(route_bias, seq_len_q_real, max_sk, num_heads, q.device, stream=stream),
                     _as_score_bias(attn_mask, seq_len_q_real, max_sk, num_heads, q.device, stream=stream),
                 )
-        out_pack = None if out is None else out.reshape(total_q, num_heads, v_dim)
+        # Padded V is the kernel width. The caller out stays the logical head.
+        out_pack = None if out is None or v_public is not None else out.reshape(total_q, num_heads, v_dim)
         got = flydsl_flash_attn_varlen_paged_func(
             q_pack,
             k_cache,
@@ -2471,8 +2491,22 @@ def flydsl_flash_attn_paged_func(
         )
         if return_lse:
             o_p, lse_p = got
-            return o_p.reshape(batch, seq_len_q_real, num_heads, v_dim), lse_p
-        return got.reshape(batch, seq_len_q_real, num_heads, v_dim)
+            o_p = o_p.reshape(batch, seq_len_q_real, num_heads, v_dim)
+            if v_public is not None:
+                o_p = _crop_head_dim(o_p, int(v_public))
+                if out is not None:
+                    with torch.cuda.stream(launch_stream):
+                        out.copy_(o_p)
+                    o_p = out
+            return o_p, lse_p
+        o_p = got.reshape(batch, seq_len_q_real, num_heads, v_dim)
+        if v_public is not None:
+            o_p = _crop_head_dim(o_p, int(v_public))
+            if out is not None:
+                with torch.cuda.stream(launch_stream):
+                    out.copy_(o_p)
+                o_p = out
+        return o_p
     cross = seq_len_q_real != max_sk
     dtype_str = _torch_dtype_to_str(q.dtype)
     block_m = _pick_block_m(seq_len_q_real, cross, max_sk)
@@ -2526,7 +2560,8 @@ def flydsl_flash_attn_paged_func(
     bias_arg = _as_contig(bias_t, stream=launch_stream) if has_bias else _dummy_bias(q.device)
     # Linear V ends in the head. Vectorized V is [blocks, Hkv, page/vec, Dv, vec].
     paged_v_dim = int(v_cache.shape[-2] if layout == "vectorized" else v_cache.shape[-1])
-    o_shape = (batch, seq_len_q_launch, num_heads, paged_v_dim)
+    public_v = int(paged_v_dim if v_public is None else v_public)
+    o_shape = (batch, seq_len_q_launch, num_heads, public_v)
     if out is not None:
         if tuple(out.shape) != o_shape or out.dtype != q.dtype or out.device != q.device:
             raise ValueError(
@@ -2534,9 +2569,15 @@ def flydsl_flash_attn_paged_func(
                 f"got {tuple(out.shape)}/{out.dtype}/{out.device}, "
                 f"want {o_shape}/{q.dtype}/{q.device}"
             )
-        o_p = out
+    if public_v == int(paged_v_dim):
+        o_p = out if out is not None else torch.empty(o_shape, dtype=q.dtype, device=q.device)
     else:
-        o_p = torch.empty(o_shape, dtype=q.dtype, device=q.device)
+        # Kernel store follows the padded tile. The caller buffer stays logical.
+        o_p = torch.empty(
+            (batch, seq_len_q_launch, num_heads, int(paged_v_dim)),
+            dtype=q.dtype,
+            device=q.device,
+        )
 
     lse_p = None
     if return_lse:
@@ -2558,7 +2599,11 @@ def flydsl_flash_attn_paged_func(
         exe = _get_kernel(
             num_heads=num_heads,
             head_dim=launch_head_dim,
-            head_dim_v=(int(paged_v_dim) if int(paged_v_dim) % 32 == 0 else int(launch_head_dim)),
+            head_dim_v=(
+                int(paged_v_dim)
+                if int(paged_v_dim) % 32 == 0
+                else _head_dim_tile_target(int(paged_v_dim), what="flydsl_flash_attn_paged_func")
+            ),
             causal=bool(causal),
             dtype_str=dtype_str,
             waves_per_eu=waves_per_eu,
@@ -2583,7 +2628,11 @@ def flydsl_flash_attn_paged_func(
         )
         nsplits = int(num_kv_splits)
         _seed = int(dropout_seed)
-        paged_v_launch = int(paged_v_dim) if int(paged_v_dim) % 32 == 0 else int(launch_head_dim)
+        paged_v_launch = (
+            int(paged_v_dim)
+            if int(paged_v_dim) % 32 == 0
+            else _head_dim_tile_target(int(paged_v_dim), what="flydsl_flash_attn_paged_func")
+        )
         split_tail, split_ws = _float_split_tail(
             q.device, nsplits, batch, seq_len_q_launch, num_heads, paged_v_launch
         )
@@ -2635,6 +2684,15 @@ def flydsl_flash_attn_paged_func(
             if comb_o.data_ptr() != o_p.data_ptr():
                 with torch.cuda.stream(launch_stream):
                     o_p.copy_(comb_o[..., : o_p.shape[-1]])
+
+    if int(o_p.shape[-1]) != public_v:
+        cropped = _crop_head_dim(o_p, public_v)
+        if out is not None:
+            with torch.cuda.stream(launch_stream):
+                out.copy_(cropped)
+            o_p = out
+        else:
+            o_p = cropped
 
     if return_lse:
         return o_p, lse_p

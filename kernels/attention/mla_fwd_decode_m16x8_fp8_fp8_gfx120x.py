@@ -36,9 +36,8 @@ def launch_mla_fwd_decode_m16x8_fp8_fp8(
 
     A 2D query is ``[sequences * heads, qk]`` and a 2D cache is ``[pages, qk]``,
     the same flat layout main passes to its launcher. ``num_cus`` and
-    ``lds_size`` are accepted from that launcher and are not a WMMA grid.
+    ``lds_size`` are accepted from that launcher. The WMMA launch owns the grid.
     """
-    del num_cus, lds_size
     arch = str(get_rocm_arch())
     assert arch.startswith("gfx120"), f"launch_mla_fwd_decode_m16x8_fp8_fp8 requires gfx120x, got {arch}"
     if query.dtype != kv_buffer.dtype:
@@ -82,4 +81,6 @@ def launch_mla_fwd_decode_m16x8_fp8_fp8(
         split_lse,
         float(softmax_scale),
         stream=stream,
+        num_cus=num_cus,
+        lds_size=lds_size,
     )

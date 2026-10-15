@@ -16,7 +16,8 @@ LDS chunks. FP8 is one byte, so that row is wider than the bf16 row.
 Per-tensor Q/K/V descales are one-element fp32 device buffers (gfx950-style;
 host passes a pointer, kernel loads the scalar). Softmax uses ``sm_scale * q_descale * k_descale`` on the
 raw QK logits (gfx950-compatible); ``v_descale`` multiplies the final
-``inv_l`` normalization. Softmax P is cast f32->E4M3FN for the PV WMMA.
+``inv_l`` normalization. E4M3FN softmax P is cast for the PV WMMA. E5M2
+keeps P in f32 and dequantizes V with ``cvt_f32_bf8`` into the same C layout.
 """
 
 import math as host_math
@@ -1445,6 +1446,9 @@ def build_flash_attn_func_fp8_module_primary(
                     p_slice = [p_vals[p_base + j] for j in range(8)]
                     if const_expr(_IS_INT8):
                         p_packs_st.append(int8_pack_v8(p_slice))
+                    elif const_expr(_FP8_E5M2):
+                        # Already the f32 weights. Packing them to bf8 is the coarse PV error.
+                        p_packs_st.append(p_slice)
                     else:
                         p_packs_st.append(fp8_pack_v8(p_slice))
                 p_packs_all.append(p_packs_st)
@@ -1465,6 +1469,48 @@ def build_flash_attn_func_fp8_module_primary(
                     v_lds_idx = v_base + kv_row * V_STRIDE + d_pos
                     v_elems.append(fx.ptr_load(lds_kv + fx.Int32(v_lds_idx)))
                 return Vec.from_elements(v_elems, elem_dtype)
+
+            def _bf8_byte_f32(byte) -> fx.Float32:
+                # i8 sign-extends. Selector 0 reads the zero-extended low byte.
+                bits = fx.Int32(byte) & fx.Int32(255)
+                return fx.Float32(fx.rocdl.cvt_f32_bf8(T.f32, bits.ir_value(), 0))
+
+            def _bperm_f32(bits, src_lane) -> fx.Float32:
+                # Wave-local VGPR permute (lane * 4). Not a shared-memory tile copy.
+                idx = fx.Int32(src_lane) * fx.Int32(4)
+                return fx.Int32(fx.rocdl.ds_bpermute(T.i32, idx, bits)).bitcast(fx.Float32)
+
+            def _pv_acc_e5m2(v_bytes, p_lane, c_vec) -> fx.Vector:
+                # gfx120x v8, this 16-wide D chunk. Lane q+16*g holds
+                # P[q, 8*g+e] and V[8*g+e, q], and owns O[q, 8*g+i].
+                # O needs every K of one column, so the other K half is xor-16
+                # (same pairing as the score reduction) and V is gathered from
+                # lanes 8*g+i and 16+8*g+i.
+                v_bits = []
+                for e in range_constexpr(8):
+                    v_bits.append(_bf8_byte_f32(Vec(v_bytes)[e]).bitcast(fx.Int32))
+                p_local = [fx.Float32(p_lane[e]) for e in range_constexpr(8)]
+                p_peer = [
+                    fx.Float32(fx.gpu.shuffle_xor(p_local[e], shuf_16_i32, width_i32)) for e in range_constexpr(8)
+                ]
+                hi = fx.Int32(klane) > fx.Int32(0)
+                p_lo = [fx.Float32(hi.select(p_peer[e], p_local[e])) for e in range_constexpr(8)]
+                p_hi = [fx.Float32(hi.select(p_local[e], p_peer[e])) for e in range_constexpr(8)]
+                out = []
+                for i in range_constexpr(8):
+                    acc = fx.Float32(Vec(c_vec)[i])
+                    src_lo = fx.Int32(klane) * fx.Int32(8) + fx.Int32(i)
+                    src_hi = src_lo + fx.Int32(16)
+                    for e in range_constexpr(8):
+                        acc = acc + p_lo[e] * _bperm_f32(v_bits[e], src_lo)
+                        acc = acc + p_hi[e] * _bperm_f32(v_bits[e], src_hi)
+                    out.append(acc)
+                return Vec.from_elements(out, fx.Float32)
+
+            def _pv_acc(v_pack, p_pack, c_pack) -> fx.Vector:
+                if const_expr(_FP8_E5M2):
+                    return _pv_acc_e5m2(v_pack, p_pack, c_pack)
+                return wmma_acc(v_pack, p_pack, c_pack)
 
             if const_expr(NUM_DV_TILES == 1):
                 if wave_needs_kv_tile:
@@ -1489,7 +1535,7 @@ def build_flash_attn_func_fp8_module_primary(
                                     next_v_packs.append(_load_v_rowmajor(st_idx * K_SUB_N, next_pks, next_dc))
 
                             for st_idx in range_constexpr(N_SUB_TILES):
-                                o_tmp[dc] = wmma_acc(
+                                o_tmp[dc] = _pv_acc(
                                     cur_v_packs[st_idx],
                                     p_packs_all[st_idx][pks],
                                     o_tmp[dc],
@@ -1512,7 +1558,7 @@ def build_flash_attn_func_fp8_module_primary(
                             for pks in range_constexpr(PV_K_STEPS):
                                 for st_idx in range_constexpr(N_SUB_TILES):
                                     v_pack = _load_v_rowmajor(st_idx * K_SUB_N, pks, dc)
-                                    o_tmp[dc_abs] = wmma_acc(
+                                    o_tmp[dc_abs] = _pv_acc(
                                         v_pack,
                                         p_packs_all[st_idx][pks],
                                         o_tmp[dc_abs],

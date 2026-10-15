@@ -6,7 +6,9 @@ The KV cache is the vectorized layout that kernel uses: K is
 ``[blocks, Hkv, D / vec, page, vec]`` and V is ``[blocks, Hkv, page / vec, Dv, vec]``.
 Query is packed ``[batch * query_length, Hq, D]``. This launch reshapes the query
 and runs the gfx120x WMMA paged kernel. ``query_length == 1`` attends the valid
-cache. A longer query uses bottom-right causal.
+cache. A longer query uses bottom-right causal. One partition copies that output
+into ``pout`` when the partial buffers are provided. The partial max and sum stay
+unused.
 """
 
 from __future__ import annotations
@@ -14,6 +16,46 @@ from __future__ import annotations
 import torch
 
 from flydsl.runtime.device import get_rocm_arch
+
+
+def _copy_single_partition_output(
+    output: torch.Tensor,
+    pout: torch.Tensor,
+    *,
+    batch: int,
+    num_kv_heads: int,
+) -> None:
+    """Copy the final output into partition 0 of the partial workspace.
+
+    Query heads are kv-major: head ``kv * group + g`` lands at eqgs
+    ``token * group + g``.
+    """
+    if tuple(pout.shape) == tuple(output.shape):
+        pout.copy_(output)
+        return
+    if output.dim() != 3 or pout.dim() != 5:
+        raise ValueError(
+            f"temporary_output shape {tuple(pout.shape)} does not match output {tuple(output.shape)} "
+            "or [batch, kv_heads, partitions, query_group, head]"
+        )
+    rows, num_q_heads, dv = (int(x) for x in output.shape)
+    if batch < 1 or rows % batch != 0:
+        raise ValueError(f"output rows {rows} are not divisible by batch {batch}")
+    if num_kv_heads < 1 or num_q_heads % num_kv_heads != 0:
+        raise ValueError(f"cannot map {num_q_heads} query heads onto {num_kv_heads} kv heads")
+    query_length = rows // batch
+    group = num_q_heads // num_kv_heads
+    packed = (
+        output.reshape(batch, query_length, num_kv_heads, group, dv)
+        .permute(0, 2, 1, 3, 4)
+        .reshape(batch, num_kv_heads, query_length * group, dv)
+    )
+    if int(pout.shape[2]) < 1:
+        raise ValueError("temporary_output has no partition slot")
+    slot = pout[:, :, 0, :, :]
+    if tuple(slot.shape) != tuple(packed.shape):
+        raise ValueError(f"temporary_output partition slot {tuple(slot.shape)} != {tuple(packed.shape)}")
+    slot.copy_(packed)
 
 
 def pa_decode_tile(
@@ -36,10 +78,12 @@ def pa_decode_tile(
 ) -> None:
     """Write decode attention into ``output``. Q and the cache share a dtype.
 
-    Partials are unused. One WMMA launch writes the combined output, so a caller
-    that allocated split workspace can keep those tensors.
+    One WMMA launch writes the combined output. When ``num_partitions`` is 1 and
+    ``pmax``, ``psum``, and ``pout`` are all set, ``pout`` receives that output
+    at partition 0. ``pmax`` and ``psum`` stay unused: ``flydsl_flash_attn_func``
+    returns the attention output, not the online softmax max and sum, and those
+    two values are not invented.
     """
-    del num_partitions, pmax, psum, pout
     arch = str(get_rocm_arch())
     assert arch.startswith("gfx120"), f"pa_decode_tile requires gfx120x, got {arch}"
     if query.dtype != key_cache.dtype or query.dtype != value_cache.dtype:
@@ -83,3 +127,7 @@ def pa_decode_tile(
         stream=stream,
     )
     output.copy_(got.reshape(output.shape))
+    if num_partitions == 1 and pmax is not None and psum is not None and pout is not None:
+        # No online max or sum comes back from the flash launch. Leave both buffers alone.
+        kv_heads = int(key_cache.shape[1] if layout == "vectorized" else key_cache.shape[2])
+        _copy_single_partition_output(output, pout, batch=num_seqs, num_kv_heads=kv_heads)

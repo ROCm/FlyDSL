@@ -3,7 +3,12 @@
 """gfx120x linear attention. The state is the prefix of outer products.
 
 ``h_t = h_{t-1} + k_t v_t^T`` and ``o_t = q_t h_t``, with ``h_{-1} = 0``.
-Quant inputs are scaled into that recurrence. The output of a quant launch is bf16.
+No matrix atom. Quant inputs are scaled into that recurrence; a quant launch
+stores bf16. ``linear_attn`` accepts bf16, f16, fp8_e4m3fn, fp8_e5m2, and int8.
+
+One block per (batch, head). Thread ``j`` keeps column ``j`` of ``h`` in registers
+and updates it as the sequence advances. Head sizes must be positive. ``q`` and
+``k`` share a shape; ``v`` shares the leading three dimensions.
 """
 
 from __future__ import annotations
@@ -34,7 +39,10 @@ def build_linear_attn_module(
     head_dim_v: int,
     dtype_str: str,
 ) -> Callable[..., None]:
-    """Build the recurrence. ``head_dim_v`` is the block size."""
+    """Build the recurrence. ``head_dim_v`` is the block size.
+
+    One block per (batch, head) walks the sequence. Thread ``j`` owns value channel ``j``.
+    """
     arch = str(get_rocm_arch())
     assert arch.startswith("gfx120"), f"build_linear_attn_module requires gfx120x, got {arch}"
     if dtype_str not in ("bf16", "f16", "fp8_e4m3fn", "fp8_e5m2", "int8"):
@@ -76,34 +84,36 @@ def build_linear_attn_module(
             if const_expr(dtype_str == "fp8_e5m2"):
                 return fx.Float32(fx.rocdl.cvt_f32_bf8(T.f32, bits.ir_value(), 0))
             return fx.Float32(fx.rocdl.cvt_f32_fp8(T.f32, bits.ir_value(), 0))
+
         seq_i = fx.Int32(seq_len)
         heads_i = fx.Int32(num_heads)
-        linear = fx.Int32(gpu.block_idx.x)
-        t = linear % seq_i
-        bh = linear // seq_i
+        bh = fx.Int32(gpu.block_idx.x)
         head = bh % heads_i
         batch = bh // heads_i
         j = fx.Int32(gpu.thread_idx.x)
-        acc = fx.Float32(0.0)
-        s = fx.Int32(0)
-        for s in range(fx.Int32(0), t + fx.Int32(1), fx.Int32(1)):
-            dot = fx.Float32(0.0)
-            q_base = ((batch * seq_i + t) * heads_i + head) * fx.Int32(d_q)
-            k_base = ((batch * seq_i + s) * heads_i + head) * fx.Int32(d_q)
+        # Column j of h. h[-1] = 0, and token t adds k_t[i] * v_t[j] in place.
+        init = [fx.Float32(0.0) for _ in range_constexpr(d_q)]
+        for t, carried in range(fx.Int32(0), seq_i, fx.Int32(1), init=init):
+            sc = [fx.Float32(carried[i]) for i in range_constexpr(d_q)]
+            row = (batch * seq_i + fx.Int32(t)) * heads_i + head
+            qk_base = row * fx.Int32(d_q)
+            chan = row * fx.Int32(block) + j
+            vv = _as_f32(v_ptr, chan)
+            if const_expr(quant):
+                vv = vv * v_scale
+            acc = fx.Float32(0.0)
+            nxt = []
             for i in range_constexpr(d_q):
-                qv = _as_f32(q_ptr, q_base + fx.Int32(i))
-                kv = _as_f32(k_ptr, k_base + fx.Int32(i))
+                qv = _as_f32(q_ptr, qk_base + fx.Int32(i))
+                kv = _as_f32(k_ptr, qk_base + fx.Int32(i))
                 if const_expr(quant):
                     qv = qv * q_scale
                     kv = kv * k_scale
-                dot = dot + qv * kv
-            v_base = ((batch * seq_i + s) * heads_i + head) * fx.Int32(block)
-            vv = _as_f32(v_ptr, v_base + j)
-            if const_expr(quant):
-                vv = vv * v_scale
-            acc = acc + dot * vv
-        o_base = ((batch * seq_i + t) * heads_i + head) * fx.Int32(block)
-        fx.ptr_store(acc.to(out_elem), o_ptr + o_base + j)
+                si = sc[i] + kv * vv
+                nxt.append(si)
+                acc = acc + qv * si
+            fx.ptr_store(acc.to(out_elem), o_ptr + chan)
+            yield nxt
 
     @flyc.jit
     def launch(
@@ -119,7 +129,7 @@ def build_linear_attn_module(
         v_scale: fx.Float32,
         stream: fx.Stream = fx.Stream(None),
     ) -> None:
-        grid = fx.Uint64(batch) * fx.Uint64(num_heads) * fx.Uint64(seq_len)
+        grid = fx.Uint64(batch) * fx.Uint64(num_heads)
         linear_attn_kernel(Q, K, V, O, seq_len, num_heads, q_scale, k_scale, v_scale).launch(
             grid=(grid, 1, 1),
             block=(block, 1, 1),
