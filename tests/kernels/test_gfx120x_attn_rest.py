@@ -189,6 +189,41 @@ def test_qk_norm_rope_quant_then_attention() -> None:
     assert torch.isfinite(attn.float()).all()
 
 
+def test_qk_norm_rope_quant_widths() -> None:
+    """Odd, non-power-of-two, and wider-than-one-wave heads stay on one wave."""
+    torch.manual_seed(9)
+
+    def _check(head: int, rope: int, quant: str, qmax: float, dtype: torch.dtype) -> None:
+        rows = 3
+        x = torch.randn(rows, head, device="cuda", dtype=torch.bfloat16)
+        weight = torch.rand(head, device="cuda", dtype=torch.bfloat16) + 0.25
+        pos = torch.arange(rows, device="cuda")
+        pairs = (rope + 1) // 2
+        cos = torch.randn(rows, pairs, device="cuda") if rope else torch.empty(rows, 0, device="cuda")
+        sin = torch.randn(rows, pairs, device="cuda") if rope else torch.empty(rows, 0, device="cuda")
+        packed, scale = qk_norm_rope_quant(x, weight, cos, sin, pos, quant=quant)
+        y = x.float() * torch.rsqrt((x.float() * x.float()).mean(-1, keepdim=True) + 1e-6) * weight.float()
+        if rope:
+            tail = y[:, head - rope :].clone()
+            t0, t1 = tail[:, 0::2].clone(), tail[:, 1::2].clone()
+            n0, n1 = t0.shape[-1], t1.shape[-1]
+            tail[:, 0::2] = t0 * cos[:, :n0] - t1[:, :n0] * sin[:, :n0]
+            if n1:
+                tail[:, 1::2] = t0[:, :n1] * sin[:, :n1] + t1 * cos[:, :n1]
+            y = torch.cat([y[:, : head - rope], tail], dim=-1)
+        expect = y.abs().amax(-1).clamp_min(1e-12) / qmax
+        assert _max_abs(scale, expect) < 1e-3, (head, quant)
+        got = packed.float() * scale[:, None]
+        codes = (y / expect[:, None]).to(dtype)
+        ref_q = codes.float() * expect[:, None]
+        assert _max_abs(got, y) <= 4 * _max_abs(ref_q, y) + 1e-3, (head, quant)
+
+    _check(1, 0, "fp8_e4m3fn", 448.0, torch.float8_e4m3fn)
+    _check(40, 16, "fp8_e4m3fn", 448.0, torch.float8_e4m3fn)
+    _check(40, 16, "int8", 127.0, torch.int8)
+    _check(128, 64, "fp8_e5m2", 57344.0, torch.float8_e5m2)
+
+
 def test_ragged_paged_value_head() -> None:
     torch.manual_seed(5)
     page, hq, dq, dv = 16, 4, 64, 32
