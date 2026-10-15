@@ -209,3 +209,144 @@ def test_ragged_paged_value_head() -> None:
         )
         err = (out[seq].float() - ref.permute(0, 2, 1, 3)).abs().max().item()
         assert err < 2e-2, err
+
+    for quant, qmax in (
+        (torch.float8_e4m3fn, 448.0),
+        (torch.float8_e5m2, 57344.0),
+        (torch.int8, 127.0),
+    ):
+        qf = q.float()
+        kf = k.float()
+        vf = v.float()
+        scale = float(max(qf.abs().amax().item(), kf.abs().amax().item(), vf.abs().amax().item(), 1e-6) / qmax)
+        if quant is torch.int8:
+            q8 = (qf / scale).round().clamp(-128, 127).to(quant)
+            k8 = (kf / scale).round().clamp(-128, 127).to(quant)
+            v8 = (vf / scale).round().clamp(-128, 127).to(quant)
+        else:
+            q8 = (qf / scale).to(quant)
+            k8 = (kf / scale).to(quant)
+            v8 = (vf / scale).to(quant)
+        out_q = flydsl_flash_attn_func(
+            q8,
+            k8,
+            v8,
+            block_table=bt,
+            seqlen_k=sk,
+            causal=False,
+            q_descale=scale,
+            k_descale=scale,
+            v_descale=scale,
+        )
+        assert out_q.shape == (2, 1, hq, dv), quant
+        for seq in range(2):
+            qq = q8[seq : seq + 1]
+            kk = k8[pages[seq]].reshape(1, lengths[seq], 1, dq).expand(1, lengths[seq], hq, dq)
+            vv = v8[pages[seq]].reshape(1, lengths[seq], 1, dv).expand(1, lengths[seq], hq, dv)
+            dense = flydsl_flash_attn_func(
+                qq,
+                kk,
+                vv,
+                causal=False,
+                q_descale=scale,
+                k_descale=scale,
+                v_descale=scale,
+            )
+            assert _max_abs(out_q[seq], dense) < 1e-5, quant
+
+
+def test_decode_and_mla_dtypes() -> None:
+    """fp16, both fp8 types, and int8 on the decode launch and on MLA."""
+    torch.manual_seed(6)
+    page, h, d = 16, 2, 64
+    bt = torch.tensor([[0, 1]], device="cuda", dtype=torch.int32)
+    sk = torch.tensor([32], device="cuda", dtype=torch.int32)
+    for dtype, qmax in (
+        (torch.float16, None),
+        (torch.float8_e4m3fn, 448.0),
+        (torch.float8_e5m2, 57344.0),
+        (torch.int8, 127.0),
+    ):
+        qf = torch.randn(1, 1, h, d, device="cuda")
+        kf = torch.randn(2, page, h, d, device="cuda")
+        vf = torch.randn(2, page, h, d, device="cuda")
+        scale = 1.0
+        if qmax is None:
+            q, k, v = qf.to(dtype), kf.to(dtype), vf.to(dtype)
+            key_scale = value_scale = None
+        else:
+            scale = float(max(qf.abs().amax().item(), kf.abs().amax().item(), vf.abs().amax().item(), 1e-6) / qmax)
+            cast = (lambda t: (t / scale).round().clamp(-128, 127).to(dtype)) if dtype is torch.int8 else (lambda t: (t / scale).to(dtype))
+            q, k, v = cast(qf), cast(kf), cast(vf)
+            key_scale = value_scale = scale
+        out = torch.empty(1, h, d, device="cuda", dtype=torch.bfloat16 if qmax else dtype)
+        pa_decode_ps_launch(
+            out,
+            q.reshape(1, h, d),
+            k,
+            v,
+            sk,
+            torch.zeros(1, dtype=torch.int32, device="cuda"),
+            torch.zeros(2, dtype=torch.int32, device="cuda"),
+            d**-0.5,
+            key_scale,
+            value_scale,
+            block_tables=bt,
+            max_context_partition_num=1,
+        )
+        ref = flydsl_flash_attn_func(
+            q,
+            k.reshape(1, 32, h, d),
+            v.reshape(1, 32, h, d),
+            causal=False,
+            sm_scale=d**-0.5,
+            q_descale=key_scale,
+            k_descale=key_scale,
+            v_descale=value_scale,
+        )
+        assert _max_abs(out, ref.reshape(1, h, d)) < 1e-2, dtype
+
+    for dtype in (torch.float16, torch.float8_e4m3fn, torch.int8):
+        kv_f = torch.randn(4, 1, 1, 64, device="cuda")
+        q_f = torch.randn(2, 4, 64, device="cuda")
+        if dtype is torch.float16:
+            kv, qq = kv_f.to(dtype), q_f.to(dtype)
+            out_dtype = dtype
+        else:
+            qmax = 127.0 if dtype is torch.int8 else 448.0
+            scale = float(max(kv_f.abs().amax().item(), q_f.abs().amax().item(), 1e-6) / qmax)
+            cast = (lambda t: (t / scale).round().clamp(-128, 127).to(dtype)) if dtype is torch.int8 else (lambda t: (t / scale).to(dtype))
+            kv, qq = cast(kv_f), cast(q_f)
+            out_dtype = torch.bfloat16
+        out = torch.empty(2, 4, 32, device="cuda", dtype=out_dtype)
+        flydsl_mla_fwd_decode(
+            qq,
+            kv,
+            torch.tensor([3, 1, 0, 2], dtype=torch.int32),
+            torch.tensor([0, 2, 4], dtype=torch.int32),
+            torch.empty(1, dtype=torch.int32, device="cuda"),
+            out,
+            torch.empty(1, device="cuda", dtype=out_dtype),
+            torch.empty(1, device="cuda", dtype=out_dtype),
+            64**-0.5,
+        )
+        assert out.shape[-1] == 32
+        assert torch.isfinite(out.float()).all(), dtype
+
+
+def test_window_plus_sink() -> None:
+    torch.manual_seed(7)
+    q = torch.randn(1, 32, 2, 64, device="cuda", dtype=torch.bfloat16)
+    sink = torch.tensor([0.3, -0.2], device="cuda")
+    out = flydsl_flash_attn_func(q, q, q, causal=True, sliding_window=(4, 0), sink=sink)
+    qf = q.float().transpose(1, 2)
+    scores = torch.matmul(qf, qf.transpose(-1, -2)) * (64**-0.5)
+    i = torch.arange(32, device="cuda")
+    shifted = i[None, :] - i[:, None] + 4
+    allow = (shifted >= 0) & (shifted <= 4) & (i[None, :] <= i[:, None])
+    scores = scores.masked_fill(~allow.view(1, 1, 32, 32), float("-inf"))
+    scores = torch.cat([scores, sink.view(1, 2, 1, 1).expand(1, 2, 32, 1)], dim=-1)
+    prob = torch.softmax(scores, dim=-1)[..., :-1]
+    ref = torch.matmul(prob, qf).transpose(1, 2)
+    ref_dt = torch.matmul(prob.to(torch.bfloat16).float(), qf).transpose(1, 2)
+    assert _max_abs(out, ref) <= 2 * _max_abs(ref_dt, ref) + 1e-3

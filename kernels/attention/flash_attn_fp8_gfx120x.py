@@ -613,6 +613,26 @@ def build_flash_attn_func_fp8_module_primary(
             token = batch_idx * seq_len_kv_v + token_idx
             return token * KV_STRIDE + kv_head_idx * LOGICAL_D + col
 
+        def global_idx_v(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
+            """V index. Equal heads match ``global_idx_kv``."""
+            if const_expr(PAGED):
+                _tok = fx.Int32(token_idx)
+                _page_idx = _tok // fx.Int32(PAGE_SIZE)
+                _page_off = _tok % fx.Int32(PAGE_SIZE)
+                _bt_idx = fx.Int32(batch_idx) * _bt_stride_i32 + _page_idx
+                _pid = fx.Int32(fx.ptr_load(_bt_ptr + _bt_idx))
+                return (
+                    fx.Int64(_pid) * fx.Int64(PAGE_SIZE * KV_STRIDE_V)
+                    + fx.Int64(_page_off) * fx.Int64(KV_STRIDE_V)
+                    + kv_head_idx * LOGICAL_DV
+                    + col
+                )
+            if const_expr(VARLEN):
+                token = k_off_i64 + fx.Int64(token_idx)
+                return token * KV_STRIDE_V + kv_head_idx * LOGICAL_DV + col
+            token = batch_idx * seq_len_kv_v + token_idx
+            return token * KV_STRIDE_V + kv_head_idx * LOGICAL_DV + col
+
         # Back-compat: historical call sites meant Q indexing.
         def global_idx(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
             return global_idx_q(token_idx, col)
@@ -631,7 +651,7 @@ def build_flash_attn_func_fp8_module_primary(
                 return (fx.Int64(token_idx) < _sk_i64).select(fx.Int64(token_idx), _last)
 
             def v_idx(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
-                return global_idx_kv(_clamp_tok(token_idx), col)
+                return global_idx_v(_clamp_tok(token_idx), col)
 
             def k_idx(token_idx: fx.Int32 | fx.Int64 | int, col: fx.Int32 | fx.Int64 | int) -> fx.Int64:
                 return global_idx_kv(_clamp_tok(token_idx), col)
@@ -786,7 +806,7 @@ def build_flash_attn_func_fp8_module_primary(
                     (fx.Int64(_pid) * fx.Int64(NUM_KV_HEADS) + fx.Int64(kv_head_idx)) * fx.Int64(PAGE_SIZE // KV_VEC)
                     + fx.Int64(kg)
                 )
-                * fx.Int64(LOGICAL_D)
+                * fx.Int64(LOGICAL_DV)
                 + fx.Int64(col)
             ) * fx.Int64(KV_VEC) + fx.Int64(kr)
 
@@ -841,7 +861,7 @@ def build_flash_attn_func_fp8_module_primary(
             vec = _zero_i8(width)
             if seq_len_kv_v > fx.Uint64(0):
                 vec = _load_global_i8_vec_via_i32(
-                    v_elem_ptr, global_idx_kv(row_idx, col), width, _col_in_alloc(row_idx, col)
+                    v_elem_ptr, global_idx_v(row_idx, col), width, _col_in_alloc(row_idx, col)
                 )
             return vec
 

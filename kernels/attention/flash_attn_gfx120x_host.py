@@ -3799,6 +3799,7 @@ def flydsl_flash_attn_quant_paged_func(
         page_size = 1
         num_kv_heads = int(k_cache.shape[1])
         cache_d = int(k_cache.shape[2])
+        v_dim = int(v_cache.shape[2])
     elif layout == "vectorized":
         if k_cache.dim() != 5 or v_cache.dim() != 5:
             raise ValueError(
@@ -3806,7 +3807,8 @@ def flydsl_flash_attn_quant_paged_func(
             )
         num_kv_heads = int(k_cache.shape[1])
         page_size = int(k_cache.shape[3])
-        cache_d = int(v_cache.shape[3])
+        cache_d = int(k_cache.shape[2]) * (16 // k_cache.element_size())
+        v_dim = int(v_cache.shape[-2])
     else:
         if k_cache.dim() != 4 or v_cache.dim() != 4:
             raise ValueError(
@@ -3815,6 +3817,7 @@ def flydsl_flash_attn_quant_paged_func(
         page_size = int(k_cache.shape[1])
         num_kv_heads = int(k_cache.shape[2])
         cache_d = int(k_cache.shape[3])
+        v_dim = int(v_cache.shape[3])
     if varlen:
         if q.dim() != 3 or max_seqlen_q is None:
             raise ValueError("quant varlen-paged expects packed Q [total,H,D] and max_seqlen_q")
@@ -3822,12 +3825,12 @@ def flydsl_flash_attn_quant_paged_func(
         orig_d = int(q.shape[2])
         batch = int(cu_seqlens_q.numel()) - 1
         seq_q = int(max_seqlen_q)
-        out_shape = (int(q.shape[0]), num_heads, orig_d)
+        out_shape = (int(q.shape[0]), num_heads, v_dim)
     else:
         if q.dim() != 4:
             raise ValueError(f"quant paged Q must be [B,Sq,H,D], got {tuple(q.shape)}")
         batch, seq_q, num_heads, orig_d = (int(x) for x in q.shape)
-        out_shape = (batch, seq_q, num_heads, orig_d)
+        out_shape = (batch, seq_q, num_heads, v_dim)
     if orig_d != cache_d:
         raise ValueError(f"quant paged head_dim mismatch q={orig_d} cache={cache_d}")
     if num_heads % num_kv_heads != 0:
@@ -3842,7 +3845,7 @@ def flydsl_flash_attn_quant_paged_func(
             total_q = int(batch) * int(seq_q)
             q_pack = q.reshape(total_q, num_heads, orig_d)
             cu_pack = torch.arange(int(batch) + 1, device=q.device, dtype=torch.int32) * int(seq_q)
-            out_pack = None if out is None else out.reshape(total_q, num_heads, orig_d)
+            out_pack = None if out is None else out.reshape(total_q, num_heads, v_dim)
             got = flydsl_flash_attn_quant_paged_func(
                 q_pack,
                 k_cache,
@@ -3873,8 +3876,8 @@ def flydsl_flash_attn_quant_paged_func(
             )
             if return_lse:
                 o_got, lse_got = got
-                return o_got.reshape(int(batch), int(seq_q), num_heads, orig_d), lse_got
-            return got.reshape(int(batch), int(seq_q), num_heads, orig_d)
+                return o_got.reshape(int(batch), int(seq_q), num_heads, v_dim), lse_got
+            return got.reshape(int(batch), int(seq_q), num_heads, v_dim)
     n_pages = int(block_table.shape[1])
     seq_kv = n_pages * page_size
     what = f"flydsl_flash_attn_{kind}_paged"
@@ -3956,9 +3959,11 @@ def flydsl_flash_attn_quant_paged_func(
     z = _flat(_dummy_i32(q.device))
     zb = _flat(_dummy_bias(q.device))
     nsplits = int(num_kv_splits)
+    v_launch = int(v_dim) if int(v_dim) % 32 == 0 else int(tile)
     exe = getter(
         num_heads=num_heads,
         head_dim=tile,
+        head_dim_v=v_launch,
         causal=causal,
         waves_per_eu=waves,
         daz=daz,
@@ -3986,10 +3991,10 @@ def flydsl_flash_attn_quant_paged_func(
     _seed = int(dropout_seed)
     comb_o = o_p
     if nsplits > 1:
-        if varlen or tile != orig_d:
-            comb_o = torch.empty((batch, seq_q, num_heads, tile), dtype=torch.bfloat16, device=q.device)
+        if varlen or tile != orig_d or v_launch != v_dim:
+            comb_o = torch.empty((batch, seq_q, num_heads, v_launch), dtype=torch.bfloat16, device=q.device)
         ws_rows = batch * num_heads * seq_q
-        ws_m, ws_l, ws_o = _new_split_workspace(q.device, nsplits, ws_rows, tile)
+        ws_m, ws_l, ws_o = _new_split_workspace(q.device, nsplits, ws_rows, v_launch)
         split_tail = (nsplits, _flat(ws_m), _flat(ws_l), _flat(ws_o), ws_rows)
     else:
         ws_m = ws_l = ws_o = None
@@ -4027,7 +4032,7 @@ def flydsl_flash_attn_quant_paged_func(
             batch=batch,
             seq_q=seq_q,
             num_heads=num_heads,
-            head_dim=tile,
+            head_dim=v_launch,
             dtype_str="bf16",
             has_sink=sink_t is not None,
             return_lse=return_lse,
@@ -4042,10 +4047,10 @@ def flydsl_flash_attn_quant_paged_func(
                 qs, qe = int(cq_host[bi]), int(cq_host[bi + 1])
                 n = qe - qs
                 if n > 0:
-                    o_p[qs:qe].copy_(comb_o[bi, :n, :, :orig_d], non_blocking=True)
+                    o_p[qs:qe].copy_(comb_o[bi, :n, :, :v_dim], non_blocking=True)
         elif comb_o.data_ptr() != o_p.data_ptr():
-            o_p.copy_(comb_o[..., :orig_d])
-    o_p = _crop_head_dim(o_p, orig_d) if not varlen else o_p
+            o_p.copy_(comb_o[..., :v_dim])
+    o_p = _crop_head_dim(o_p, v_dim) if not varlen else o_p
     if return_lse:
         return o_p, lse_p
     return o_p
