@@ -40,6 +40,10 @@ Paged attention
 
 - ``kernels.attention.pa_decode_fp8`` -- Paged attention decode kernel with FP8 support
 - ``kernels.attention.pa_decode_tile_gfx120x`` -- gfx120x WMMA paged decode for the vectorized KV cache
+- ``kernels.attention.pa_decode_fp8_gfx120x`` -- gfx120x paged decode launch
+- ``kernels.attention.pa_decode_swa_gfx120x`` -- gfx120x sliding-window decode record
+- ``kernels.attention.mla_fwd_decode_gfx120x`` -- gfx120x WMMA latent decode
+- ``kernels.attention.linear_attn_gfx120x`` -- gfx120x linear attention recurrence
 
 FlashAttention
 --------------
@@ -60,6 +64,7 @@ Normalization
 - ``kernels.norm.rope_gfx120x`` -- gfx120x RoPE
 - ``kernels.norm.rms_rope_gfx120x`` -- gfx120x RMSNorm and RoPE
 - ``kernels.norm.adaln_gfx120x`` -- gfx120x AdaLN
+- ``kernels.norm.qk_norm_rope_quant_gfx120x`` -- gfx120x RMSNorm, tail RoPE, and quant
 
 Softmax
 -------

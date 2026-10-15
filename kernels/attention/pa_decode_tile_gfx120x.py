@@ -32,14 +32,16 @@ def pa_decode_tile(
     pmax: torch.Tensor | None = None,
     psum: torch.Tensor | None = None,
     pout: torch.Tensor | None = None,
+    sliding_window: tuple[int, int] | int | None = None,
 ) -> None:
-    """Write decode attention into ``output``. Q and the cache share a dtype."""
+    """Write decode attention into ``output``. Q and the cache share a dtype.
+
+    Partials are unused. One WMMA launch writes the combined output, so a caller
+    that allocated split workspace can keep those tensors.
+    """
+    del num_partitions, pmax, psum, pout
     arch = str(get_rocm_arch())
     assert arch.startswith("gfx120"), f"pa_decode_tile requires gfx120x, got {arch}"
-    if pmax is not None or psum is not None or pout is not None:
-        raise ValueError("gfx120x pa_decode_tile writes the combined output and does not take partial buffers")
-    if num_partitions not in (None, 1):
-        raise ValueError(f"gfx120x pa_decode_tile launches one split, got num_partitions={num_partitions}")
     if query.dtype != key_cache.dtype or query.dtype != value_cache.dtype:
         raise ValueError(
             "gfx120x pa_decode_tile keeps Q and KV in one dtype, "
@@ -53,16 +55,27 @@ def pa_decode_tile(
     if int(output.shape[0]) != total_q or int(output.shape[1]) != num_q_heads:
         raise ValueError(f"output {tuple(output.shape)} does not match query {tuple(query.shape)}")
     q = query.view(num_seqs, query_length, num_q_heads, head_dim)
+    if key_cache.dim() == 5:
+        layout = "vectorized"
+    elif key_cache.dim() == 4:
+        layout = "linear"
+    else:
+        raise ValueError(f"gfx120x pa_decode_tile cache rank {key_cache.dim()} is not 4 or 5")
+    if isinstance(sliding_window, int):
+        window = (int(sliding_window), 0) if sliding_window > 0 else None
+    else:
+        window = sliding_window
     from kernels.attention.flash_attn_gfx120x_host import flydsl_flash_attn_func
 
     got = flydsl_flash_attn_func(
         q,
         key_cache,
         value_cache,
-        causal=query_length > 1,
+        causal=query_length > 1 or window is not None,
         block_table=block_tables,
         seqlen_k=context_lengths,
-        kv_cache_layout="vectorized",
+        kv_cache_layout=layout,
+        sliding_window=window,
         sm_scale=softmax_scale,
         q_descale=key_scale,
         k_descale=key_scale,
