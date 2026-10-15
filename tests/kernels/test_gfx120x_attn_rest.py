@@ -400,10 +400,36 @@ def test_m16x8_latent_uses_wmma() -> None:
             scale=qk**-0.5,
         )
         ref_dt = ref.to(out_dtype)
-        assert _max_abs(out, ref[0, :, 0, :]) <= mult * _max_abs(ref_dt[0, :, 0, :], ref[0, :, 0, :]) + 1e-2
+        kerr = _max_abs(out, ref[0, :, 0, :])
+        if dtype is torch.float8_e5m2:
+            # PyTorch has no e5m2 matmul. The same-dtype error is a K=16 product
+            # rounded to e5m2, which is the WMMA product rounding.
+            qf, kf = q.float(), kv.float()
+            kk = kf[indices]
+            vv = kf[indices, :dv]
+            scale = qk**-0.5
+
+            def _dot(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+                acc = torch.zeros((), device=a.device)
+                for i in range(0, int(a.numel()), 16):
+                    acc = acc + (a[i : i + 16] * b[i : i + 16]).to(torch.float8_e5m2).float().sum()
+                return acc
+
+            same_err = 0.0
+            for h in range(heads):
+                s_fp = torch.stack([(qf[h] * kk[n]).sum() * scale for n in range(pages)])
+                s_e5 = torch.stack([_dot(qf[h], kk[n]) * scale for n in range(pages)])
+                base = torch.softmax(s_fp, 0) @ vv
+                same = torch.softmax(s_e5, 0) @ vv
+                same_err = max(same_err, (same - base).abs().max().item())
+            assert kerr <= mult * same_err + 1e-2, (dtype, kerr, same_err)
+        else:
+            assert kerr <= mult * _max_abs(ref_dt[0, :, 0, :], ref[0, :, 0, :]) + 1e-2, dtype
 
     _check(torch.bfloat16, 64, 32, 2)
     _check(torch.float16, 64, 32, 2)
     _check(torch.float8_e4m3fn, 64, 32, 4)
+    _check(torch.float8_e5m2, 64, 32, 4)
+    _check(torch.int8, 64, 32, 4)
     _check(torch.bfloat16, 576, 512, 2)
     _check(torch.float8_e4m3fn, 576, 512, 4)
