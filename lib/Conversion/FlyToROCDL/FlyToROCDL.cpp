@@ -848,6 +848,22 @@ public:
         return std::nullopt;
       return VectorType::get(vecTy.getShape(), convertedElem, vecTy.getScalableDims());
     });
+    // Small floats become same-width integers, but ops that stay legal keep the float type. Bridge
+    // exactly those pairs with a bitcast; any other mismatch is still a conversion error.
+    auto bitcastMaterialization = [&](OpBuilder &builder, Type resultType, ValueRange inputs,
+                                      Location loc) -> Value {
+      if (inputs.size() != 1)
+        return Value();
+      Type inputType = inputs.front().getType();
+      bool isConvertedPair =
+          convertType(inputType) == resultType || convertType(resultType) == inputType;
+      if (!isConvertedPair ||
+          !arith::BitcastOp::areCastCompatible(TypeRange{inputType}, TypeRange{resultType}))
+        return Value();
+      return arith::BitcastOp::create(builder, loc, resultType, inputs.front());
+    };
+    addSourceMaterialization(bitcastMaterialization);
+    addTargetMaterialization(bitcastMaterialization);
     addConversion([&](fly::MemRefType flyMemRefTy) -> Type {
       if (isTargetAddressSpace<BufferDescAddressAttr>(flyMemRefTy.getAddressSpace()))
         return BufferFatPtr::getType(flyMemRefTy.getContext());
