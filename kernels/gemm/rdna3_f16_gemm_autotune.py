@@ -24,7 +24,7 @@ from kernels.gemm.rdna3_f16_gemm import K_PAD, WAVE_SIZE, WMMA_K, WMMA_M, WMMA_N
 # gfx1100 CU count; thresholds shift one ladder step if this is off.
 NUM_CU = 96
 
-# Per-workgroup LDS budget (K_PAD comes from the kernel).
+# Per-workgroup LDS budget.
 LDS_BYTES = 64 * 1024
 
 # Named by the block tile they produce: (reg_m, reg_n, reg_k, waves_m, waves_n).
@@ -34,6 +34,14 @@ TILE_128x64x32 = (4, 2, 2, 2, 2)
 TILE_64x64x64 = (2, 2, 4, 2, 2)
 TILE_32x64x64 = (2, 2, 4, 1, 2)
 TILE_32x32x64 = (2, 2, 4, 1, 1)
+TILE_32x16x64 = (2, 1, 4, 1, 1)
+TILE_16x32x64 = (1, 2, 4, 1, 1)
+TILE_16x16x64 = (1, 1, 4, 1, 1)
+# Shallower k-tiles, for a K that is not a multiple of 64. One wave holding a
+# single 16x16x16 WMMA atom is the narrowest tile this kernel can express.
+TILE_32x32x32 = (2, 2, 2, 1, 1)
+TILE_16x16x32 = (1, 1, 2, 1, 1)
+TILE_16x16x16 = (1, 1, 1, 1, 1)
 
 # Per-tile options kept separate so Config stays the five tile fields.
 # 256x256x32 uses kblock layout (unpadded) to fit in 64 KB LDS.
@@ -48,19 +56,40 @@ def tile_opts(tile):
     return _TILE_OPTS.get(tuple(tile), _DEFAULT_OPTS)
 
 
-# Tile ladder, widest first. Small-K ladder adds 128x64x32 for short problems.
-_LADDER_LARGE_K = [TILE_256x256x32, TILE_128x128x32, TILE_64x64x64, TILE_32x64x64, TILE_32x32x64]
-_LADDER_SMALL_K = [TILE_128x128x32, TILE_128x64x32, TILE_64x64x64, TILE_32x64x64, TILE_32x32x64]
+# Tile ladder, widest first.
+_NARROW = [
+    TILE_32x32x32,
+    TILE_32x16x64,
+    TILE_16x32x64,
+    TILE_16x16x64,
+    TILE_16x16x32,
+    TILE_16x16x16,
+]
+_LADDER_LARGE_K = [TILE_256x256x32, TILE_128x128x32, TILE_64x64x64, TILE_32x64x64, TILE_32x32x64, *_NARROW]
+_LADDER_SMALL_K = [TILE_128x128x32, TILE_128x64x32, TILE_64x64x64, TILE_32x64x64, TILE_32x32x64, *_NARROW]
+
+
+def block_shape(cfg):
+    reg_m, reg_n, reg_k, waves_m, waves_n = cfg
+    return WMMA_M * reg_m * waves_m, WMMA_N * reg_n * waves_n, WMMA_K * reg_k
+
+
+def pad_to(extent, block):
+    """``extent`` rounded up to the tile; the kernel supplies what is in between."""
+    return -(-extent // block) * block
 
 
 def _tile_workgroups(M, N, K, cfg):
-    """Workgroup count for this tile, or None if the shape cannot use it."""
+    """Workgroup count for this tile, or None if the shape cannot use it.
+
+    Only K has to divide: the kernel pads M and N to the tile. K has no edge
+    to pad -- a k past the end of a row is a valid offset into the next one,
+    on both A and B_T -- and it sits in the loop where masking costs the most.
+    """
     reg_m, reg_n, reg_k, waves_m, waves_n = cfg
-    block_m = WMMA_M * reg_m * waves_m
-    block_n = WMMA_N * reg_n * waves_n
-    block_k = WMMA_K * reg_k
+    block_m, block_n, block_k = block_shape(cfg)
     threads = waves_m * waves_n * WAVE_SIZE
-    if M % block_m or N % block_n or K % block_k:
+    if K % block_k:
         return None
     if K // block_k < 2:  # the prefetch pipeline needs at least two k-tiles
         return None
@@ -70,29 +99,74 @@ def _tile_workgroups(M, N, K, cfg):
     pad = 0 if tile_opts(cfg)["lds_layout"] == "kblock" else K_PAD
     if 2 * (block_m + block_n) * (block_k + pad) * 2 > LDS_BYTES:  # 2 buffers, 2 bytes/elem
         return None
-    return (M // block_m) * (N // block_n)
+    return (pad_to(M, block_m) // block_m) * (pad_to(N, block_n) // block_n)
 
 
 def _ladder_for(K):
     return _LADDER_SMALL_K if K <= 1024 else _LADDER_LARGE_K
 
 
+# Padding costs full WMMA issue while contributing nothing, so a wider tile has
+# to earn its padding back. A quarter is where that stops being true on this
+# card: at M=48 the sweep keeps 16x16 and rejects 32x32.
+_MAX_PAD = 1.25
+
+
+def _padded_area(M, N, cfg):
+    block_m, block_n, _ = block_shape(cfg)
+    return pad_to(M, block_m) * pad_to(N, block_n)
+
+
 def feasible_tiles(M, N, K):
     """``(tile, workgroup count)`` for every ladder tile this shape can run, widest first.
 
-    Also the search space the autotuner sweeps: anything excluded here does not
-    divide the shape, cannot fill the prefetch pipeline, or does not fit in LDS,
-    so benchmarking it would only measure a build failure.
+    Also the search space the autotuner sweeps, so it screens out tiles that
+    would only measure a build failure or wasted padding.
     """
-    return [(cfg, wgs) for cfg in _ladder_for(K) if (wgs := _tile_workgroups(M, N, K, cfg)) is not None]
+    tiles = [(cfg, wgs) for cfg in _ladder_for(K) if (wgs := _tile_workgroups(M, N, K, cfg)) is not None]
+    if not tiles:
+        return tiles
+    within = [(cfg, wgs) for cfg, wgs in tiles if _padded_area(M, N, cfg) <= M * N * _MAX_PAD]
+    if within:
+        return within
+    # An extent below one block tile pads however much it has to; keep whatever
+    # wastes the least, which for M < 16 is every 16-row tile.
+    least = min(_padded_area(M, N, cfg) for cfg, _ in tiles)
+    return [(cfg, wgs) for cfg, wgs in tiles if _padded_area(M, N, cfg) == least]
+
+
+# Workgroups reach the CUs in rounds, and the last round is as long as a full
+# one however few are in it. A grid of 128 on 96 CUs runs two rounds at 67%
+# fill and loses to the narrower tile whose 256 run three at 89%.
+_MIN_ROUND_FILL = 0.85
+
+
+def _round_fill(wgs):
+    """Fraction of the CUs with work in the last scheduling round."""
+    return wgs / (-(-wgs // NUM_CU) * NUM_CU)
+
+
+def _fallback_tile(feasible):
+    """Choose among what is left when no wide tile suits the shape.
+
+    Widest-first, because below 32x32 every halving of the block tile also
+    halves the work done per byte read from LDS. A shape that fills the machine
+    on no tile is parallelism-starved, so take the most parallel one and break
+    the tie toward the deeper k-tile.
+    """
+    for cfg, wgs in feasible.items():
+        if wgs >= NUM_CU and _round_fill(wgs) >= _MIN_ROUND_FILL:
+            return cfg
+    return max(feasible, key=lambda cfg: (feasible[cfg], cfg[2]))
 
 
 def pick_tile(M, N, K):
     """Return a tile for this shape.
 
     Prefer 64x64x64 when no wide tile is justified; escalate to 128x128x32,
-    256x256x32, 128x64x32 (small K), or 32x32x64 (CU-starved long-K) based on
-    workgroup count and ``NUM_CU``.
+    256x256x32 or 128x64x32 (small K) based on workgroup count and ``NUM_CU``.
+    A shape that cannot keep the machine busy even on a 64-wide tile falls
+    through to ``_fallback_tile``.
     """
     feasible = dict(feasible_tiles(M, N, K))
     if not feasible:
@@ -104,12 +178,11 @@ def pick_tile(M, N, K):
         return TILE_128x128x32
     if NUM_CU <= feasible.get(TILE_128x64x32, 0) <= 1.5 * NUM_CU:
         return TILE_128x64x32
-    if TILE_64x64x64 in feasible:
-        starved = feasible[TILE_64x64x64] < NUM_CU / 4 and K >= 2048
-        if starved and TILE_32x32x64 in feasible:
-            return TILE_32x32x64
+    # A 64x64 tile that leaves three quarters of the machine idle loses to a
+    # narrower one that does not, whatever K is.
+    if feasible.get(TILE_64x64x64, 0) >= NUM_CU / 4:
         return TILE_64x64x64
-    return list(feasible)[-1]
+    return _fallback_tile(feasible)
 
 
 _GRAPH_LAUNCHES = 20
@@ -121,10 +194,9 @@ _TILE_FIELDS = ("reg_m", "reg_n", "reg_k", "waves_m", "waves_n")
 _resolved = {}
 
 
-# The row strides belong in the key because they are compile-time arguments of
-# the built module: a padded slice and a tight one of the same M, N, K resolve to
-# different kernels, and serving one from the other's entry reads the operands at
-# the wrong pitch.
+# The row strides belong in the key because they are compile-time arguments:
+# serving a tight operand from a padded slice's entry would read it at the
+# wrong pitch.
 def _signature(M, N, K, in_dtype, out_dtype, rounding, lda, ldb, ldc):
     return (M, N, K, in_dtype, out_dtype, rounding, lda, ldb, ldc)
 
@@ -144,14 +216,21 @@ def persistent_wgs(M, N, K, tile):
 
 @functools.lru_cache(maxsize=None)
 def _build(M, N, K, in_dtype, out_dtype, rounding, reg_m, reg_n, reg_k, waves_m, waves_n, lda, ldb, ldc):
-    opts = dict(tile_opts((reg_m, reg_n, reg_k, waves_m, waves_n)))
+    tile = (reg_m, reg_n, reg_k, waves_m, waves_n)
+    opts = dict(tile_opts(tile))
     # Padded strides and stagger both break L2 set camping; do not combine them.
     if lda > K or ldb > K:
         opts["stagger"] = 0
+    # Built over whole tiles, with the real extents riding along so the kernel
+    # can drop what the tiles reach past.
+    block_m, block_n, _ = block_shape(tile)
+    m_tiled, n_tiled = pad_to(M, block_m), pad_to(N, block_n)
     launch_fn, _, _, _ = create_wmma_gemm_module(
-        M,
-        N,
+        m_tiled,
+        n_tiled,
         K,
+        m_valid=M if m_tiled != M else None,
+        n_valid=N if n_tiled != N else None,
         in_dtype=in_dtype,
         out_dtype=out_dtype,
         rounding=rounding,
@@ -264,7 +343,6 @@ def _graph_bench(fn, warmup=5, rep=25):
         graph.replay()
     torch.cuda.synchronize()
 
-    # Time a batch of replays per round and keep the fastest round.
     rounds = max(3, rep // _REPLAYS_PER_ROUND)
     best = float("inf")
     for _ in range(rounds):
