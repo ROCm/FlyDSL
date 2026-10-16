@@ -139,6 +139,60 @@ def xred(value, offset, op):
     return op(type(value)(lhs), type(value)(rhs))
 
 
+def wave_sum(v):
+    """Sum over the wave; every lane gets the total."""
+
+    for sh in range_constexpr(6):
+        v = xred(v, 32 >> sh, lambda a, b: a + b)
+    return v
+
+
+def wave_max(v):
+    """Maximum over the wave; every lane gets it."""
+
+    for sh in range_constexpr(6):
+        v = xred(v, 32 >> sh, fx.max)
+    return v
+
+
+def ld_f32(r, i):
+    """One f32 from buffer resource ``r`` at element ``i``."""
+
+    return fx.Float32(bo.buffer_load(r, i, vec_width=1, dtype=T.f32))
+
+
+def ld_bf16(r, i):
+    """One bf16 from buffer resource ``r`` at element ``i``, widened to f32."""
+
+    return fx.Float32(fx.BFloat16(bo.buffer_load(r, i, vec_width=1, dtype=T.bf16)))
+
+
+def lds_ld(ptr, i):
+    return fx.ptr_load(ptr + i)
+
+
+def lds_st(ptr, i, v):
+    fx.ptr_store(v, ptr + i)
+
+
+def bf16_pair(a, b):
+    """Two f32 -> one f32-typed word holding (bf16(a), bf16(b))."""
+
+    return fx.Vector.from_elements([a, b], fx.Float32).to(fx.BFloat16).bitcast(fx.Float32)[0]
+
+
+def bf16_round(a):
+    """``a`` rounded to bf16 and back to f32."""
+
+    return fx.Float32(fx.Float32(a).to(fx.BFloat16))
+
+
+def bf2_f32(w):
+    """Packed bf16 pair word -> (f32 low, f32 high)."""
+
+    return (w << 16).bitcast(fx.Float32), (w & fx.Int32(-65536)).bitcast(fx.Float32)
+
+
 def fp8_roundtrip(lhs, rhs):
     """Round an f32 pair through E4M3FN and return the f32 pair."""
 
