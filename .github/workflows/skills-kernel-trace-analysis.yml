@@ -1,0 +1,33 @@
+name: skills-kernel-trace-analysis
+
+on:
+  push:
+    paths:
+      - 'skills/flydsl-kernel-trace-analysis/**'
+      - '.claude/skills/kernel-trace-analysis/**'
+      - '.github/workflows/skills-kernel-trace-analysis.yml'
+  pull_request:
+    paths:
+      - 'skills/flydsl-kernel-trace-analysis/**'
+      - '.claude/skills/kernel-trace-analysis/**'
+      - '.github/workflows/skills-kernel-trace-analysis.yml'
+  workflow_dispatch:
+    inputs:
+      run_agent_evals:
+        description: Run routing and behavioral graders (requires ANTHROPIC_API_KEY)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.3
+    with:
+      skills: skills/flydsl-kernel-trace-analysis
+      structural: required
+      routing: ${{ inputs.run_agent_evals && 'required' || 'off' }}
+      behavioral: ${{ inputs.run_agent_evals && 'required' || 'off' }}
+    secrets:
+      api_key: ${{ secrets.ANTHROPIC_API_KEY }}
