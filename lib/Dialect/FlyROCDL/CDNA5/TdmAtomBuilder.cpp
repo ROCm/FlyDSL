@@ -67,12 +67,6 @@ FailureOr<tdm::Geometry> deriveTdmAtom(AdaptorT adaptor, tdm::Request &request, 
   auto geometry = tdm::derive(request, emitError);
   if (failed(geometry))
     return failure();
-  // The ISA constrains tile_dim0 only when padding is on. `pad_amount` and
-  // `pad_interval` step the LDS pointer in whole DWORDs while `bytesStored`
-  // accumulates across rows, so a row whose span is not a multiple of 4 bytes
-  // lands the pad inside the next row. Without padding the inner loop advances
-  // by `data_size` (1-8 B) and any span the box can express is legal; a wider
-  // one coalesces better but is not required.
   if (geometry->padAmount) {
     int64_t innerBits =
         static_cast<int64_t>(geometry->descriptorShape.back()) * dataType.getIntOrFloatBitWidth();
