@@ -3,7 +3,7 @@ Pre-built kernels
 
 The FlyDSL repository includes a collection of pre-built GPU kernels in the
 ``kernels/`` directory, organized into subpackages (``gemm/``, ``norm/``,
-``attention/``, ``moe/``, ``mma/``, ``common/``, ``comm/``, ``conv/``).
+``attention/``, ``moe/``, ``mma/``, ``common/``, ``comm/``, ``conv/``, ``quant/``).
 These serve as both ready-to-use components and reference implementations for
 kernel development.
 
@@ -17,6 +17,15 @@ GEMM kernels
 - ``kernels.gemm.preshuffle_gemm`` -- MFMA-based GEMM with LDS pipeline and pre-shuffled weights (FP8, INT8, FP16, BF16)
 - ``kernels.gemm.mxfp4_preshuffle`` -- MXFP4 / FP4 (and f8f4) preshuffle GEMM
 - ``kernels.gemm.fp4_gemm_4wave`` -- 4-wave FP4 GEMM (gfx950)
+- ``kernels.gemm.rdna4_scaled_mm_fp8`` -- gfx120x FP8 scaled GEMM
+- ``kernels.gemm.rdna4_scaled_mm_fp8_fused`` -- gfx120x fused FP8 GEMM with LoRA
+- ``kernels.gemm.rdna4_w8a16_linear`` -- gfx120x wide activation, narrow weight
+- ``kernels.gemm.rdna4_int8_linear`` -- gfx120x int8 linear
+- ``kernels.gemm.rdna4_int8_linear_fused`` -- gfx120x fused int8 linear with LoRA
+- ``kernels.gemm.rdna4_iu4_gemm`` -- gfx120x packed int4 GEMM
+- ``kernels.gemm.rdna4_mxfp8_block_gemm`` -- gfx120x MXFP8 block GEMM
+- ``kernels.gemm.rdna4_mxfp4_block_gemm`` -- gfx120x MXFP4 block GEMM
+- ``kernels.gemm.rdna4_fused_mlp_nmajor`` -- gfx120x bf16/fp16 GEMM and SwiGLU MLP
 
 MoE (Mixture-of-Experts) kernels
 ----------------------------------
@@ -30,17 +39,54 @@ Paged attention
 ----------------
 
 - ``kernels.attention.pa_decode_fp8`` -- Paged attention decode kernel with FP8 support
+- ``kernels.attention.pa_decode_tile_gfx120x`` -- gfx120x WMMA paged decode for the vectorized KV cache
+- ``kernels.attention.pa_decode_fp8_gfx120x`` -- gfx120x paged decode launch
+- ``kernels.attention.pa_decode_swa_gfx120x`` -- gfx120x sliding-window decode record
+- ``kernels.attention.mla_fwd_decode_gfx120x`` -- gfx120x WMMA latent decode
+- ``kernels.attention.mla_fwd_decode_m16x8_fp8_fp8_gfx120x`` -- gfx120x WMMA latent decode for the wide cache
+- ``kernels.attention.linear_attn_gfx120x`` -- gfx120x linear attention recurrence
+
+FlashAttention
+--------------
+
+- ``kernels.attention.flash_attn_gfx120x`` -- gfx120x bf16/fp16 FlashAttention
+- ``kernels.attention.flash_attn_fp8_gfx120x`` -- gfx120x fp8 FlashAttention
+- ``kernels.attention.flash_attn_int8_gfx120x`` -- gfx120x int8 FlashAttention
+- ``kernels.attention.flash_attn_gfx120x_splitk`` -- gfx120x split-K combine
+- ``kernels.attention.flash_attn_gfx120x_host`` -- gfx120x FlashAttention launches. The shared entry returns here when the arch starts with ``gfx120``
+- ``kernels.attention.gfx120x_attn_mask`` -- gfx120x score mask
+- ``kernels.attention.gfx120x_alibi_bias`` -- gfx120x ALiBi bias
 
 Normalization
 -------------
 
 - ``kernels.norm.layernorm_kernel`` -- Layer normalization
 - ``kernels.norm.rmsnorm_kernel`` -- RMS normalization
+- ``kernels.norm.rope_gfx120x`` -- gfx120x RoPE
+- ``kernels.norm.rms_rope_gfx120x`` -- gfx120x RMSNorm and RoPE
+- ``kernels.norm.adaln_gfx120x`` -- gfx120x AdaLN
+- ``kernels.norm.qk_norm_rope_quant_gfx120x`` -- gfx120x RMSNorm, tail RoPE, and quant
 
 Softmax
 -------
 
 - ``kernels.norm.softmax_kernel`` -- Numerically stable softmax
+
+Quantization (gfx120x)
+----------------------
+
+- ``kernels.quant.rdna4_fp8_quant`` -- gfx120x per-tensor FP8 quant and dequant
+- ``kernels.quant.rdna4_stoch_fp8`` -- gfx120x stochastic FP8 cast
+- ``kernels.quant.rdna4_mxfp8_e8m0`` -- gfx120x MXFP8 quant and dequant
+- ``kernels.quant.rdna4_mxfp4_e2m1`` -- gfx120x MXFP4 quant and dequant
+- ``kernels.quant.rdna4_quantize_int8_rowwise`` -- gfx120x per-row int8 quant and dequant
+- ``kernels.quant.rdna4_quantize_int8_tensorwise`` -- gfx120x per-tensor int8 quant and dequant
+- ``kernels.quant.rdna4_int8_convrot`` -- gfx120x int8 ConvRot quant, dequant, and linear
+- ``kernels.quant.rdna4_convrot_w4a4`` -- gfx120x ConvRot W4A4 quant, dequant, and linear
+- ``kernels.quant.rdna4_asym_w4a8`` -- gfx120x asymmetric W4A8 quant, dequant, and linear
+- ``kernels.quant.rdna4_awq_w4a16`` -- gfx120x AWQ W4A16 dequant and GEMV
+- ``kernels.quant.rdna4_svdquant_w4a4`` -- gfx120x SVDQuant W4A4 quant, dequant, and linear
+- ``kernels.quant.rdna4_int4_codec`` -- gfx120x int4 pack and groupwise dequant
 
 Utilities
 ---------
@@ -48,5 +94,8 @@ Utilities
 - ``kernels.common.kernels_common`` -- Shared constants and helper functions
 - ``kernels.common.layout_utils`` -- Layout utility functions
 - ``kernels.common.mma.mfma_preshuffle_pipeline`` -- B layout builder and XCD block remapping used by preshuffle GEMM and MoE kernels
+- ``kernels.common.gfx120x_swiglu`` -- gfx120x SiLU and SwiGLU
+- ``kernels.common.gfx120x_pad`` -- gfx120x pad
+- ``kernels.common.gfx120x_row_bias`` -- gfx120x row bias
 
 .. seealso:: :doc:`../prebuilt_kernels_guide` for detailed usage and configuration of each kernel.

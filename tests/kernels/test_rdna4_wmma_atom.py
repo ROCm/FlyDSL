@@ -11,6 +11,7 @@ register ABI, so it gets its own ``gfx120x.wmma`` atom
 layouts by running a single-wave 16x16x16 GEMM through
 ``fx.make_mma_atom`` / ``fx.make_tiled_copy_{A,B,C}`` / ``fx.gemm`` and
 comparing against torch.
+Int4 is K=32 only and is covered by ``test_rdna4_integer_wmma_atom.py``.
 """
 
 import os

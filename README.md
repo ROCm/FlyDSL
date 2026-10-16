@@ -382,6 +382,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **Fused RoPE** | `test_fused_rope_cache.py` | Fused RoPE + KV cache |
 | **AllReduce** | `test_allreduce.py` | Multi-GPU all-reduce |
 | **RDNA GEMM** | `test_rdna_gemm.py` | RDNA FP16/FP8 GEMM |
+| **gfx120x** | `test_flash_attn_gfx120x.py` | RDNA4 wave32. See `docs/prebuilt_kernels_guide.md` |
 | **GFX1250 GEMM** | `test_gemm_fp8fp4_gfx1250.py` | GFX1250 FP8/FP4 GEMM |
 | **GFX1250 BF16 GEMM** | `test_gemm_bf16_gfx1250.py` | GFX1250 BF16/FP16 GEMM |
 | **VecAdd** | `test_vec_add.py` | Basic vector addition |
