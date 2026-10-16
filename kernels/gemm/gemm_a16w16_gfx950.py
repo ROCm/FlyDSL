@@ -1027,6 +1027,8 @@ def gemm_a16w16_hti_gfx950_kernel(
     rocdl.sched_barrier(0)
     if wid // n_waves == 1:
         rocdl.s_barrier()
+        # One barrier ahead, this group's next barrier releases the first group to read stage 0: retire its copies.
+        rocdl.s_waitcnt(vmcnt=0)
     rocdl.sched_barrier(0)
     rocdl.s_barrier()
     rocdl.sched_barrier(0)
@@ -1035,9 +1037,6 @@ def gemm_a16w16_hti_gfx950_kernel(
     async_load_b_to_lds(1, 1, 1)
     rocdl.sched_barrier(0)
     wait_vmcnt_and_barrier(half_ldg_b_iters + half_ldg_a_iters)
-    # The second wave group runs one barrier ahead (see above), so the barrier in the wait completes before
-    # that group's own vmcnt wait. This one orders its LDS DMA writes before the first group reads them.
-    rocdl.s_barrier()
 
     main_loop_end = k_tiles - 2
     for k_tile in range(0, main_loop_end, 2):
@@ -1104,11 +1103,13 @@ def gemm_a16w16_hti_gfx950_kernel(
     consume(c10, a1, b0, True)
     rocdl.s_barrier()
     b0 = load_b_fragment(0, 1)
+    if wid // n_waves == 1:
+        # As in the prologue: the next barrier releases the first group to read the stage 1 A half 0. The newer
+        # B half 1 and A half 1 copies may stay in flight.
+        rocdl.s_waitcnt(vmcnt=half_ldg_b_iters + half_ldg_a_iters)
     rocdl.s_barrier()
     consume(c11, a1, b1, True)
     wait_vmcnt_and_barrier(0)
-    # As after the prologue: order the second wave group's LDS DMA writes before the first group reads them.
-    rocdl.s_barrier()
     # 1
     a0 = load_a_fragment(0, 1)
     rocdl.s_barrier()
