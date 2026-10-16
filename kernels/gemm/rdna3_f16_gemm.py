@@ -428,6 +428,15 @@ def create_wmma_gemm_module(
             _barrier()
             return s_accs
 
+        def _carry_list(state):
+            """The k-loop carry as a list.
+
+            scf.for hands back the bare accumulator rather than a one-element
+            sequence when the loop carries a single value, which is what a
+            16x16 tile (reg_m == reg_n == 1) does.
+            """
+            return list(state) if isinstance(state, (list, tuple)) else [state]
+
         def _accumulate(pA_g, pB_g, rot=None):
             """Run the double-buffered pipeline over all k-tiles of one output tile."""
             if const_expr(persist_wgs):
@@ -439,7 +448,7 @@ def create_wmma_gemm_module(
             init_state = [zero_acc for _ in range_constexpr(n_acc)]
 
             for iv, state in range(0, num_k_tiles - 1, 1, init=init_state):
-                s_accs = list(state[:n_acc])
+                s_accs = _carry_list(state)[:n_acc]
                 s_accs = _one_k_tile(
                     pA_g,
                     pB_g,
@@ -450,7 +459,7 @@ def create_wmma_gemm_module(
                 )
                 results = yield list(s_accs)
 
-            return _compute_k_tile(list(results[:n_acc]), ((num_k_tiles - 1) % 2) * c_lds_buf_stride)
+            return _compute_k_tile(_carry_list(results)[:n_acc], ((num_k_tiles - 1) % 2) * c_lds_buf_stride)
 
         # ============================================================
         # Store results to GMEM through the tiled copy

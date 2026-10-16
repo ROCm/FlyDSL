@@ -34,6 +34,14 @@ TILE_128x64x32 = (4, 2, 2, 2, 2)
 TILE_64x64x64 = (2, 2, 4, 2, 2)
 TILE_32x64x64 = (2, 2, 4, 1, 2)
 TILE_32x32x64 = (2, 2, 4, 1, 1)
+TILE_32x16x64 = (2, 1, 4, 1, 1)
+TILE_16x32x64 = (1, 2, 4, 1, 1)
+TILE_16x16x64 = (1, 1, 4, 1, 1)
+# Shallower k-tiles for shapes whose K is not a multiple of 64. A single wave
+# owning one 16x16 WMMA atom is the narrowest tile this kernel can express.
+TILE_32x32x32 = (2, 2, 2, 1, 1)
+TILE_16x16x32 = (1, 1, 2, 1, 1)
+TILE_16x16x16 = (1, 1, 1, 1, 1)
 
 # Per-tile options kept separate so Config stays the five tile fields.
 # 256x256x32 uses kblock layout (unpadded) to fit in 64 KB LDS.
@@ -49,8 +57,18 @@ def tile_opts(tile):
 
 
 # Tile ladder, widest first. Small-K ladder adds 128x64x32 for short problems.
-_LADDER_LARGE_K = [TILE_256x256x32, TILE_128x128x32, TILE_64x64x64, TILE_32x64x64, TILE_32x32x64]
-_LADDER_SMALL_K = [TILE_128x128x32, TILE_128x64x32, TILE_64x64x64, TILE_32x64x64, TILE_32x32x64]
+# The sub-32 rungs exist for shapes a model actually produces -- a few tokens
+# against a wide weight matrix, or any M/N that is a multiple of 16 but not 32.
+_NARROW = [
+    TILE_32x32x32,
+    TILE_32x16x64,
+    TILE_16x32x64,
+    TILE_16x16x64,
+    TILE_16x16x32,
+    TILE_16x16x16,
+]
+_LADDER_LARGE_K = [TILE_256x256x32, TILE_128x128x32, TILE_64x64x64, TILE_32x64x64, TILE_32x32x64, *_NARROW]
+_LADDER_SMALL_K = [TILE_128x128x32, TILE_128x64x32, TILE_64x64x64, TILE_32x64x64, TILE_32x32x64, *_NARROW]
 
 
 def _tile_workgroups(M, N, K, cfg):
@@ -87,12 +105,41 @@ def feasible_tiles(M, N, K):
     return [(cfg, wgs) for cfg in _ladder_for(K) if (wgs := _tile_workgroups(M, N, K, cfg)) is not None]
 
 
+# Workgroups reach the CUs in rounds, and the last round is as long as a full
+# one however few workgroups are in it. A grid of 128 on 96 CUs runs two rounds
+# at 67% fill and loses to the narrower tile whose 256 workgroups run three at
+# 89%, even though the narrower tile does less work per byte of LDS traffic.
+_MIN_ROUND_FILL = 0.85
+
+
+def _round_fill(wgs):
+    """Fraction of the CUs with work in the last scheduling round."""
+    return wgs / (-(-wgs // NUM_CU) * NUM_CU)
+
+
+def _fallback_tile(feasible):
+    """Choose among what is left when no wide tile suits the shape.
+
+    Walk the ladder widest-first and take the first tile that both fills the
+    machine and does not waste most of its last round, because below 32x32 every
+    halving of the block tile also halves the work done per byte read from LDS.
+    A shape that cannot fill the machine on any tile is parallelism-starved, so
+    take the most parallel one and break the tie toward the deeper k-tile.
+    """
+    for cfg, wgs in feasible.items():
+        if wgs >= NUM_CU and _round_fill(wgs) >= _MIN_ROUND_FILL:
+            return cfg
+    return max(feasible, key=lambda cfg: (feasible[cfg], cfg[2]))
+
+
 def pick_tile(M, N, K):
     """Return a tile for this shape.
 
     Prefer 64x64x64 when no wide tile is justified; escalate to 128x128x32,
-    256x256x32, 128x64x32 (small K), or 32x32x64 (CU-starved long-K) based on
-    workgroup count and ``NUM_CU``.
+    256x256x32 or 128x64x32 (small K) based on workgroup count and ``NUM_CU``.
+    Shapes that cannot keep the machine busy on a 64-wide tile -- an M or N
+    that is a multiple of 16 but not 32, a K too short for a 64-deep k-tile, or
+    simply too few tiles to go round -- fall through to ``_fallback_tile``.
     """
     feasible = dict(feasible_tiles(M, N, K))
     if not feasible:
@@ -104,12 +151,12 @@ def pick_tile(M, N, K):
         return TILE_128x128x32
     if NUM_CU <= feasible.get(TILE_128x64x32, 0) <= 1.5 * NUM_CU:
         return TILE_128x64x32
-    if TILE_64x64x64 in feasible:
-        starved = feasible[TILE_64x64x64] < NUM_CU / 4 and K >= 2048
-        if starved and TILE_32x32x64 in feasible:
-            return TILE_32x32x64
+    # A 64x64 tile that leaves three quarters of the machine idle loses to a
+    # narrower one that does not, whatever K is. The old K >= 2048 guard on this
+    # escape was there because 32x32x64 was the only rung below to escape to.
+    if feasible.get(TILE_64x64x64, 0) >= NUM_CU / 4:
         return TILE_64x64x64
-    return list(feasible)[-1]
+    return _fallback_tile(feasible)
 
 
 _GRAPH_LAUNCHES = 20

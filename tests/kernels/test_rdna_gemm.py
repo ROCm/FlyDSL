@@ -24,7 +24,12 @@ from kernels.gemm.rdna3_f16_gemm import create_wmma_gemm_module as _create_wmma_
 from kernels.gemm.rdna3_f16_gemm_autotune import (  # noqa: E402
     _TILE_FIELDS,
     NUM_CU,
-    TILE_32x32x64,
+    TILE_16x16x16,
+    TILE_16x16x32,
+    TILE_16x16x64,
+    TILE_16x32x64,
+    TILE_32x32x32,
+    TILE_32x64x64,
     TILE_64x64x64,
     TILE_128x64x32,
     TILE_128x128x32,
@@ -404,8 +409,10 @@ def test_fp8_quantize():
 # Every shape the heuristic was timed against the whole ladder on, with the tile
 # it is expected to pick, so a heuristic edit has to state which shapes it moves.
 MEASURED_TILES = [
-    pytest.param((256, 256, 4096), TILE_32x32x64, id="256x256x4096"),
-    pytest.param((256, 256, 1024), TILE_64x64x64, id="256x256x1024"),
+    # Moved by the sub-32 rungs: both shapes leave 64x64 (or 32x32) mostly idle
+    # on 96 CUs, and the 16x16 tile that fills them is 1.10x and 1.31x faster.
+    pytest.param((256, 256, 4096), TILE_16x16x64, id="256x256x4096"),
+    pytest.param((256, 256, 1024), TILE_16x16x64, id="256x256x1024"),
     pytest.param((384, 384, 2048), TILE_64x64x64, id="384x384x2048"),
     pytest.param((512, 512, 1024), TILE_64x64x64, id="512x512x1024"),
     pytest.param((512, 512, 4096), TILE_64x64x64, id="512x512x4096"),
@@ -422,6 +429,17 @@ MEASURED_TILES = [
     pytest.param((2048, 2048, 2048), TILE_128x128x32, id="2048x2048x2048"),
     pytest.param((3072, 3072, 1024), TILE_128x128x32, id="3072x3072x1024"),
     pytest.param((4096, 4096, 4096), TILE_128x128x32, id="4096x4096x4096"),
+    # Shapes no tile could express before the sub-32 rungs: a handful of tokens
+    # against a weight matrix, and M/N that are multiples of 16 but not 32.
+    pytest.param((16, 4096, 4096), TILE_16x16x64, id="16x4096x4096"),
+    pytest.param((16, 11008, 4096), TILE_16x32x64, id="16x11008x4096"),
+    pytest.param((32, 11008, 4096), TILE_32x64x64, id="32x11008x4096"),
+    pytest.param((48, 4096, 4096), TILE_16x32x64, id="48x4096x4096"),
+    pytest.param((144, 144, 128), TILE_16x16x64, id="144x144x128"),
+    pytest.param((528, 528, 1024), TILE_16x16x64, id="528x528x1024"),
+    # K that no 64-deep k-tile divides.
+    pytest.param((512, 512, 160), TILE_32x32x32, id="512x512x160"),
+    pytest.param((1024, 1024, 48), TILE_16x16x16, id="1024x1024x48"),
 ]
 
 # Square and skewed both ways, K on both sides of the ladder split, sizes from
@@ -453,6 +471,77 @@ _shape_id = lambda shape: "x".join(map(str, shape))  # noqa: E731
 def test_pick_tile_matches_the_measured_shapes(shape, expected):
     _requires_rdna3()
     assert pick_tile(*shape) == expected
+
+
+# Block tiles narrower than 32x32, with a shape that divides each. 16x16 is the
+# floor: one wave holding a single 16x16x16 WMMA atom.
+NARROW_TILES = [
+    pytest.param(TILE_32x32x32, (64, 64, 128), id="32x32x32"),
+    pytest.param(TILE_16x32x64, (48, 64, 256), id="16x32x64"),
+    pytest.param(TILE_16x16x64, (48, 48, 256), id="16x16x64"),
+    pytest.param(TILE_16x16x32, (80, 112, 96), id="16x16x32"),
+    pytest.param(TILE_16x16x16, (16, 16, 48), id="16x16x16"),
+]
+
+
+@pytest.mark.parametrize("tile, shape", NARROW_TILES)
+def test_narrow_tile_gemm_correctness(tile, shape):
+    """Sub-32 block tiles compute the same product as the wide ones.
+
+    A 16x16 tile makes reg_m * reg_n == 1, so the k-loop carries a single
+    accumulator; scf.for hands that back as a bare value rather than a
+    one-element sequence, which the kernel has to accept.
+    """
+    _requires_rdna3()
+    M, N, K = shape
+    torch.manual_seed(42)
+
+    launch_fn, block_m, block_n, block_k = create_wmma_gemm_module(
+        M, N, K, in_dtype="bf16", out_dtype="bf16", **dict(zip(_TILE_FIELDS, tile))
+    )
+    reg_m, reg_n, reg_k, waves_m, waves_n = tile
+    assert (block_m, block_n, block_k) == (16 * reg_m * waves_m, 16 * reg_n * waves_n, 16 * reg_k)
+
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+
+    launch_fn(C, A, B_T, torch.cuda.current_stream())
+    torch.cuda.synchronize()
+
+    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
+
+
+# Shapes a model produces that no tile could express before the sub-32 rungs:
+# M or N a multiple of 16 but not 32, and K too short for a 64-deep k-tile.
+IRREGULAR_SHAPES = [
+    (16, 4096, 1024),
+    (48, 2048, 2048),
+    (80, 112, 256),
+    (144, 144, 128),
+    (240, 240, 512),
+    (64, 64, 64),
+    (128, 128, 96),
+    (1024, 1024, 48),
+]
+
+
+@pytest.mark.parametrize("shape", IRREGULAR_SHAPES, ids=_shape_id)
+def test_autotuned_gemm_runs_on_irregular_shapes(shape):
+    """The dispatcher resolves and runs a tile for shapes 32x32 cannot divide."""
+    _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
+    M, N, K = shape
+    torch.manual_seed(42)
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+
+    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
+    torch.cuda.synchronize()
+
+    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
 
 
 @pytest.mark.parametrize("shape", SELECTION_SHAPES, ids=_shape_id)
