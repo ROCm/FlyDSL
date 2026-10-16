@@ -2,7 +2,7 @@
 
 import flydsl.expr as fx
 from flydsl.expr import gpu, rocdl
-from flydsl.expr.rocdl import cluster, tdm_ops
+from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
 from kernels.common.kernels_common import LOG2E
 
@@ -56,7 +56,7 @@ def pipeline_fence(outstanding=0, use_cluster=False):
 
     Issues ``s_wait_tensorcnt`` followed by the appropriate barrier.
     """
-    tdm_ops.tensor_wait(outstanding)
+    rocdl.s_wait_tensorcnt(outstanding)
     workgroup_barrier(use_cluster=use_cluster)
 
 
@@ -74,7 +74,7 @@ def pipeline_fence_signal(outstanding=0, use_cluster=False):
     so that all waves' TDM loads are visible before any wave reads LDS.
     The cluster barrier is layered on top for inter-WG synchronisation.
     """
-    tdm_ops.tensor_wait(outstanding)
+    rocdl.s_wait_tensorcnt(outstanding)
     rocdl.s_barrier_signal(WGP_BARRIER_ID)
     if use_cluster:
         cluster.cluster_signal_once_per_wg()

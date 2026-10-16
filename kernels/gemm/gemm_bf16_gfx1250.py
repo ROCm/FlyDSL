@@ -6,7 +6,7 @@
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr, rocdl
-from flydsl.expr.rocdl import cluster, tdm_ops
+from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import Constexpr, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import check_smem_capacity
@@ -86,6 +86,7 @@ def launch_gemm_bf16(
         arg_a: fx.Pointer,
         arg_b: fx.Pointer,
         i32_m: fx.Int32,
+        i32_n: fx.Int32,
         i32_k: fx.Int32,
         i32_lda: fx.Int32,
         i32_ldb: fx.Int32,
@@ -114,7 +115,7 @@ def launch_gemm_bf16(
             a_mask, b_mask = 0, 0
         blk_m = bid_x * tile_m
         blk_n = bid_y * tile_n
-        mn_oob = i32_m - blk_m  # valid M rows (A / C)
+        mn_oob = i32_m - blk_m  # valid M rows (A; C clamps via the tensor extent)
 
         arena = fx.SharedAllocator(static=False)
         arena.allocate(ARENA_B)
@@ -265,16 +266,24 @@ def launch_gemm_bf16(
                 h = accs[wm * wmma_n_rep + wn].to(elem_cls)
                 fx.ptr_store(h.bitcast(fx.Int8), base_ptr + (row_rel * tile_n + col_rel) * EB)
         workgroup_barrier(use_cluster=False)
-        gtC = _gv(gC_base, fx.Int64(blk_m) * ldc64 + fx.Int64(blk_n), (tile_m, tile_n), (tile_n, 1))
-        atomC = fx.rocdl.make_tdm_atom(
-            gtC,
-            [mn_oob, None],
-            strides=[ldc64, None],
-            num_warps=num_waves,
-            early_timeout=False,
+        gC_full = fx.Tensor(fx.make_view(gC_base, fx.make_layout((i32_m, i32_n), (ldc64, 1))))
+        sC_box = fx.make_layout((tile_m, tile_n), (tile_n, 1))
+        atomC, coordC = fx.rocdl.cdna5.make_tiled_tdm_atom(
+            fx.rocdl.TensorStore(), gC_full, sC_box, (tile_m, tile_n), num_warps=num_waves
         )
-        fx.copy(atomC, _lv(fx.recast_iter(elem_cls, base_ptr), (tile_m, tile_n), (tile_n, 1)), gtC)
-        tdm_ops.tensor_wait(0)
+        # Keep the N-tile axis as a rest so mode-0 stays the nested box; it is selected
+        # at the copy below. Consuming both rest modes here collapses mode-0 and
+        # tdm_partition then rejects the operand.
+        blkC = fx.zipped_divide(coordC, (tile_m, tile_n))[None, (bid_x, None)]
+        sC_lds = fx.Tensor(
+            fx.make_view(
+                fx.recast_iter(elem_cls, base_ptr),
+                fx.make_layout(((tile_m, tile_n), 1), ((tile_n, 1), tile_m * tile_n)),
+            )
+        )
+        tCs, tCg = fx.rocdl.cdna5.tdm_partition(atomC, wave, fx.make_layout(num_waves, 1), sC_lds, blkC)
+        fx.copy(atomC, tCs[None, 0], tCg[None, bid_y])
+        rocdl.s_wait_tensorcnt(0)
 
     gx = (i32_m + (tile_m - 1)) // tile_m
     gy = N // tile_n
@@ -286,6 +295,7 @@ def launch_gemm_bf16(
         arg_a,
         arg_b,
         i32_m,
+        N,
         K,
         i32_lda,
         i32_ldb,
