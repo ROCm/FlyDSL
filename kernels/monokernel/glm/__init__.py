@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kernels.monokernel.glm.op import Glm5MonoKernel
+    from kernels.monokernel.glm.tp4_op import Glm5TP4MonoKernel
     from kernels.monokernel.weights import LayerWeights
 
-__all__ = ["Glm5MonoKernel", "LayerWeights"]
+__all__ = ["Glm5MonoKernel", "Glm5TP4MonoKernel", "LayerWeights"]
 
 
 def __getattr__(name: str):
@@ -21,6 +22,10 @@ def __getattr__(name: str):
         from kernels.monokernel.glm.op import Glm5MonoKernel
 
         return Glm5MonoKernel
+    if name == "Glm5TP4MonoKernel":
+        from kernels.monokernel.glm.tp4_op import Glm5TP4MonoKernel
+
+        return Glm5TP4MonoKernel
     if name == "LayerWeights":
         from kernels.monokernel.weights import LayerWeights
 
