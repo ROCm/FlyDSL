@@ -11,7 +11,8 @@ This guide covers the available FlyDSL kernels — normalization, softmax, GEMM,
 | **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Register-buffered softmax, opt-in autotuning |
 | **Softmax backward** | `build_softmax_bwd_module(N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | fp32 dot reduction, native-dtype register buffering |
 | **GEMM** | `compile_preshuffle_gemm(...)` | `@flyc.kernel` | fp8, int8, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
-| **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
+| **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (CDNA only: gfx942 / gfx95*); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
+| **SageAttention2** | `sageattn2(q, k, v, ...)` | host API over `@flyc.kernel` quant + prefill kernels | f16/bf16 in and out; INT4 QK + FP8 e4m3 PV internally (gfx120x, D=64/128) | Dense prefill; HND/NHD, Smooth-K, causal, GQA. Cosine ≥ 0.999 vs a 16-key reference. Short sequences (one 64-key stage) can show about 1–3% relative L2; long sequences are about 0.1%. Long KV may split into several head-group launches so the working set fits in LLC. |
 
 All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
