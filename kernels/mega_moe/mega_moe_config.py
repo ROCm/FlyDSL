@@ -46,6 +46,7 @@ MAX_MTPR_CLASS = 32768
 FIXED_LARGE_CAPACITY_MTPR = 8192
 
 REFERENCE_EXPERTS_PER_RANK = 48
+R1_EXPERTS_PER_RANK = 32
 EXPERT_CONFIG_GRANULARITY = 64
 GPU_WAVE_SIZE = 64
 MAX_DISPATCH_CU = 224
@@ -162,6 +163,7 @@ class TuningContext:
     capacity_mode: CapacityMode
     a_dtype: str
     p2p_quant: str
+    experts_per_rank: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -743,6 +745,18 @@ def _apply_config_patch(config: MegaMoEConfig, patch: ConfigPatch) -> MegaMoECon
     )
 
 
+# DeepSeek-R1 (experts_per_rank=32) small-bs tuning: the fp4 base forces async
+# A-copy, whose safety patch bumps SBM to 64 and regresses stage2. Turning async
+# off with SBM32 + 8 waves is measured faster and beats the a8w4 baseline.
+_R1_SMALL_BS_SYNC_PATCH = _patch(
+    stage1={
+        "async_a_copy": False,
+        "num_waves": ASYNC_NUM_WAVES,
+        "sort_block_m": BLOCK_M_SMALL,
+    },
+)
+
+
 def _select_tuning_patches(
     config: MegaMoEConfig,
     context: TuningContext,
@@ -767,6 +781,17 @@ def _select_tuning_patches(
 
     if context.tokens >= WIDE_BATCH_MIN_TOKENS:
         patches.append(_A4_WIDE_BATCH_OCCUPANCY_PATCH)
+
+    if context.experts_per_rank != REFERENCE_EXPERTS_PER_RANK:
+        # V4-Pro-specific a4 tuning below (experts_per_rank=48). Other networks keep
+        # the fp4 correctness/occupancy patches above plus their own tuning here.
+        is_r1 = context.experts_per_rank == R1_EXPERTS_PER_RANK
+        # R1 bs32 falls through to the shared fixed8192 tuning (faster: DCU 64->128);
+        # other R1 small buckets use the sync patch.
+        if not (is_r1 and context.bucket == TokenBucket.BS32):
+            if is_r1 and context.bucket <= TokenBucket.BS128:
+                patches.append(_R1_SMALL_BS_SYNC_PATCH)
+            return tuple(patches)
 
     if patch := _A4_BUCKET_PATCHES.get(context.bucket):
         patches.append(patch)
@@ -815,6 +840,7 @@ def _resolve_tuned_config(
     token_key: int,
     mtpr: int,
     a_dtype: str,
+    experts_per_rank: int,
 ) -> MegaMoEConfig:
     context = TuningContext(
         tokens=token_key,
@@ -823,6 +849,7 @@ def _resolve_tuned_config(
         capacity_mode=capacity_mode_for_mtpr(mtpr),
         a_dtype=a_dtype,
         p2p_quant=config.p2p_quant,
+        experts_per_rank=experts_per_rank,
     )
     return _apply_tuning_context(config, context)
 
@@ -867,4 +894,5 @@ def resolve_mega_moe_config(
         _tuning_token_key(tokens),
         mtpr,
         a_dtype,
+        experts_per_rank,
     )
