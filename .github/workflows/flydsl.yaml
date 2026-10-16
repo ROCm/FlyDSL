@@ -655,6 +655,27 @@ jobs:
           # step would silently drop the whole stage and still report green.
           docker exec -e ROCM_PATH flydsl_test bash -c 'export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 FLYDSL_REQUIRE_FILECHECK=1 bash scripts/run_tests.sh'
 
+      # Downstream gate. The gated-delta-rule (GDN) prefill kernels that vLLM
+      # selects with --gdn-prefill-backend aiter_flydsl are authored in aiter, not
+      # here, so no test in this repository fails when an expr/ or compiler/ change
+      # breaks them -- the breakage first shows up downstream. aiter's own suite is
+      # the gate that exists: 185 pytest cases with real asserts (183 passed, 2
+      # skipped, ~2 min on gfx950 against a local build of this tree).
+      #
+      # aiter is already cloned and on PYTHONPATH by 'Prepare aiter' above, which
+      # carries the same navi exclusion (GDN needs CDNA3+).
+      #
+      # continue-on-error on purpose: aiter main advances independently of this
+      # repo, so a red step here can mean "aiter changed", not "this PR broke
+      # something". Surface it without blocking merges until it has a week of
+      # signal, then decide whether to make it fatal.
+      - name: Run aiter FlyDSL downstream op_tests
+        if: ${{ !contains(matrix.runners, 'navi') }}
+        timeout-minutes: 20
+        continue-on-error: true
+        run: |
+          docker exec -e ROCM_PATH flydsl_test bash -c 'export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /tmp/aiter && python3 -m pytest op_tests/test_gated_delta_rule.py -q --no-header --tb=short'
+
       - name: Show tests logs
         if: failure()
         run: |
