@@ -28,6 +28,7 @@ from kernels.gemm.rdna3_f16_gemm_autotune import (  # noqa: E402
     TILE_16x16x32,
     TILE_16x16x64,
     TILE_16x32x64,
+    TILE_32x16x64,
     TILE_32x32x32,
     TILE_32x64x64,
     TILE_64x64x64,
@@ -436,7 +437,16 @@ MEASURED_TILES = [
     pytest.param((32, 11008, 4096), TILE_32x64x64, id="32x11008x4096"),
     pytest.param((48, 4096, 4096), TILE_16x32x64, id="48x4096x4096"),
     pytest.param((144, 144, 128), TILE_16x16x64, id="144x144x128"),
-    pytest.param((528, 528, 1024), TILE_16x16x64, id="528x528x1024"),
+    # 528 divides neither 32 nor 64 in N, but padding M to 544 costs 3% and
+    # buys the 32-row tile, which is 1.05x the 16-row one here.
+    pytest.param((528, 528, 1024), TILE_32x16x64, id="528x528x1024"),
+    # M below the WMMA atom, and an M that divides nothing. Padding M is free,
+    # so these reach the same tiles a well-aligned M of the same size would.
+    pytest.param((1, 4096, 4096), TILE_16x16x64, id="1x4096x4096"),
+    pytest.param((8, 11008, 4096), TILE_16x32x64, id="8x11008x4096"),
+    pytest.param((100, 4096, 4096), TILE_16x32x64, id="100x4096x4096"),
+    pytest.param((3402, 4096, 1024), TILE_128x128x32, id="3402x4096x1024"),
+    pytest.param((1000, 1024, 1024), TILE_128x64x32, id="1000x1024x1024"),
     # K that no 64-deep k-tile divides.
     pytest.param((512, 512, 160), TILE_32x32x32, id="512x512x160"),
     pytest.param((1024, 1024, 48), TILE_16x16x16, id="1024x1024x48"),
@@ -524,6 +534,37 @@ IRREGULAR_SHAPES = [
     (128, 128, 96),
     (1024, 1024, 48),
 ]
+
+
+# An M that no block tile divides, including M below the 16-row WMMA atom.
+RAGGED_M = [1, 3, 8, 15, 17, 100, 333, 3402]
+
+
+@pytest.mark.parametrize("M", RAGGED_M)
+def test_gemm_pads_m_without_touching_memory_past_it(M):
+    """A ragged M is served by padding the tile, not by masking the loop.
+
+    The kernel bounds the A and C buffer descriptors at the real row count, so
+    the rows a partial tile reaches past read as zero and their stores are
+    dropped. The guard rows after C catch a store that escaped the bound.
+    """
+    _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
+    N = K = 256
+    torch.manual_seed(42)
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+
+    guard = 256  # wider than the widest block tile
+    backing = torch.full((M + guard, N), 7.0, dtype=torch.bfloat16, device="cuda")
+    C = backing[:M]
+
+    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
+    torch.cuda.synchronize()
+
+    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
+    assert (backing[M:] == 7.0).all(), "a store ran past the last real row of C"
 
 
 @pytest.mark.parametrize("shape", IRREGULAR_SHAPES, ids=_shape_id)

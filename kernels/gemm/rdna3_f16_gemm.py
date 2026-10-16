@@ -45,6 +45,8 @@ WAVE_SIZE = 32
 # K-padding for the "pad" LDS layout; "kblock" needs none.
 K_PAD = 8
 
+DTYPE_BYTES = {"bf16": 2, "f16": 2, "f32": 4}
+
 
 def _sched_plan(reg_m, reg_n, reg_k, g2s_chunks):
     """Issue-order hints for the k-tile body as (group, count) pairs."""
@@ -118,6 +120,7 @@ def create_wmma_gemm_module(
     lda=None,
     ldb=None,
     ldc=None,
+    m_valid=None,
 ):
     ld_a = K if lda is None else int(lda)
     ld_b = K if ldb is None else int(ldb)
@@ -178,6 +181,18 @@ def create_wmma_gemm_module(
     assert M % BLOCK_M == 0
     assert N % BLOCK_N == 0
     assert K % BLOCK_K == 0
+
+    # M may be a rounded-up tile extent covering ``m_rows`` real rows of A and
+    # C. The rows past the end are not masked in the loop: the A and C buffer
+    # descriptors are sized to the real rows, so the hardware returns zero for
+    # the loads (a zero row contributes nothing to the product) and drops the
+    # stores. Nothing is masked in N or K, which have no such free edge -- a
+    # column past the end of a row is a valid offset into the next one.
+    m_rows = M if m_valid is None else int(m_valid)
+    if not M - BLOCK_M < m_rows <= M:
+        raise ValueError(f"m_valid={m_rows} must round up to M={M} with BLOCK_M={BLOCK_M}")
+    a_bound_bytes = m_rows * ld_a * DTYPE_BYTES[in_dtype] if m_rows < M else None
+    c_bound_bytes = m_rows * ld_c * DTYPE_BYTES[out_dtype] if m_rows < M else None
 
     if lds_layout == "pad" and (BLOCK_K + k_pad) % LOAD_VEC:
         raise ValueError(
@@ -287,9 +302,20 @@ def create_wmma_gemm_module(
         copy_out = fx.make_copy_atom(fx.rocdl.BufferCopy(out_elem_cls.width), out_elem_cls)
         thr_r2g_C = fx.make_tiled_copy_C(copy_out, tiled_mma).get_slice(tid)
 
+        def _bounded(tensor, bound_bytes):
+            """Buffer view whose descriptor stops at the last real row.
+
+            Past that the hardware suppresses the access, which is what makes
+            the rows between ``m_valid`` and ``M`` free: zero on load, dropped
+            on store, with no predicate in the loop.
+            """
+            if const_expr(bound_bytes is None):
+                return fx.rocdl.make_buffer_tensor(tensor)
+            return fx.rocdl.make_buffer_tensor(tensor, max_size=False, num_records_bytes=bound_bytes)
+
         def _tile_operands(bid_m, bid_n):
             """The A and B row bands this tile reads, partitioned per thread."""
-            tA = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_a), fx.make_tile(BLOCK_M, BLOCK_K))[
+            tA = fx.flat_divide(_bounded(arg_a, a_bound_bytes), fx.make_tile(BLOCK_M, BLOCK_K))[
                 None, None, bid_m, None
             ]
             tB = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_bt), fx.make_tile(BLOCK_N, BLOCK_K))[
@@ -473,7 +499,7 @@ def create_wmma_gemm_module(
             # frag_C flattens as si + 8*(rm + reg_m*rn), so each run of 8 elements
             # is exactly one atom's accumulator, and one Philox draw still covers
             # one run.
-            tC = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_c), fx.make_tile(BLOCK_M, BLOCK_N))[
+            tC = fx.flat_divide(_bounded(arg_c, c_bound_bytes), fx.make_tile(BLOCK_M, BLOCK_N))[
                 None, None, bid_m, bid_n
             ]
             frag_C = thr_mma.make_fragment_C(tC)
