@@ -102,8 +102,16 @@ jobs:
     permissions:
       contents: read
 
-  publish:
+  coop-full:
     needs: [validate_tag, build]
+    uses: ./.github/workflows/test-coop-full.yaml
+    with:
+      docker_image: rocm/pytorch:rocm7.14_ubuntu24.04_py3.11_pytorch_release_2.12.0@sha256:05743468394cc8f9cce06822635836a31ddfd5956bac36976666d7057713441d
+    permissions:
+      contents: read
+
+  publish:
+    needs: [validate_tag, build, coop-full]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
