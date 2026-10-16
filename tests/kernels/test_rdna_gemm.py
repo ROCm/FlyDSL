@@ -25,10 +25,8 @@ from kernels.gemm.rdna3_f16_gemm_autotune import (  # noqa: E402
     _TILE_FIELDS,
     NUM_CU,
     TILE_16x16x16,
-    TILE_16x16x32,
     TILE_16x16x64,
     TILE_16x32x64,
-    TILE_32x16x64,
     TILE_32x32x32,
     TILE_32x64x64,
     TILE_64x64x64,
@@ -37,7 +35,10 @@ from kernels.gemm.rdna3_f16_gemm_autotune import (  # noqa: E402
     _default_config,
     _ladder_for,
     _tile_workgroups,
+    block_shape,
+    pad_to,
     pick_tile,
+    tile_opts,
 )
 from kernels.gemm.rdna_f16_gemm import create_wmma_gemm_module as _create_wmma_gemm_module_gfx12  # noqa: E402
 from kernels.gemm.rdna_fp8_preshuffle_gemm import (  # noqa: E402
@@ -107,7 +108,6 @@ def create_wmma_gemm_module(*args, **kwargs):
     ],
 )
 def test_f16_gemm_correctness(M, N, K, in_dtype, out_dtype):
-    """Test BF16/F16 GEMM correctness for various shapes and dtypes."""
     _requires_rdna_wmma()
 
     in_torch = torch.bfloat16 if in_dtype == "bf16" else torch.float16
@@ -170,7 +170,6 @@ def test_f16_gemm_stochastic_rounding():
     ],
 )
 def test_f16_gemm_f32_output(M, N, K):
-    """Test BF16 GEMM with f32 output accumulation."""
     _requires_rdna_wmma()
 
     torch.manual_seed(42)
@@ -205,9 +204,6 @@ def test_f16_gemm_grid_m_not_a_multiple_of_the_group_width(M, N, K):
     wrong by roughly 400x the bf16 rounding floor, while 1536 and 2560 square
     faulted the GPU. Which of the two you get depends on whether the address past
     the grid happens to be mapped, so the silent wrong answer is the common case.
-
-    At the default 128x128 tile these give grid_m of 3, 9 and 20, none of them a
-    multiple of the group width of 8.
     """
     _requires_rdna3()
     torch.manual_seed(42)
@@ -307,7 +303,6 @@ def test_f16_gemm_autotuned_keys_the_cache_on_the_row_strides():
     ],
 )
 def test_f16_gemm_benchmark(M, N, K):
-    """Benchmark BF16 GEMM throughput."""
     _requires_rdna_wmma()
 
     torch.manual_seed(42)
@@ -334,7 +329,6 @@ def test_f16_gemm_benchmark(M, N, K):
 
 
 def _run_fp8_gemm(M, N, K, tile_m=32, tile_n=None, tile_k=32):
-    """Helper: quantize (per-token/per-channel), preshuffle B, compile, launch."""
     launch_fn = compile_fp8_gemm(M=M, N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k)
 
     A_f32 = torch.randn(M, K, device="cuda") * 0.1
@@ -368,7 +362,6 @@ def _run_fp8_gemm(M, N, K, tile_m=32, tile_n=None, tile_k=32):
     ],
 )
 def test_fp8_gemm_correctness(M, N, K):
-    """Test FP8 preshuffle GEMM correctness."""
     _requires_rdna4()
     torch.manual_seed(42)
 
@@ -377,7 +370,6 @@ def test_fp8_gemm_correctness(M, N, K):
 
 
 def test_fp8_preshuffle_b():
-    """Test preshuffle_b_fp8 produces correct layout."""
     _requires_rdna4()
 
     K, N = 64, 32
@@ -387,7 +379,6 @@ def test_fp8_preshuffle_b():
 
 
 def test_fp8_quantize():
-    """Test fp8_quantize_per_token roundtrip."""
     _requires_rdna4()
 
     x = torch.randn(64, 64, device="cuda")
@@ -404,14 +395,12 @@ def test_fp8_quantize():
 
 # ── RDNA3 host-side tile selection ───────────────────────────────────────────
 # pick_tile runs before any kernel is built, so these are plain integer checks.
-# They cover the two properties that make selection safe to leave on by default
-# and the measured expectations behind it.
 
 # Every shape the heuristic was timed against the whole ladder on, with the tile
 # it is expected to pick, so a heuristic edit has to state which shapes it moves.
 MEASURED_TILES = [
-    # Moved by the sub-32 rungs: both shapes leave 64x64 (or 32x32) mostly idle
-    # on 96 CUs, and the 16x16 tile that fills them is 1.10x and 1.31x faster.
+    # Both leave a 64x64 tile mostly idle on 96 CUs; the 16x16 tile that fills
+    # them is 1.10x and 1.31x faster.
     pytest.param((256, 256, 4096), TILE_16x16x64, id="256x256x4096"),
     pytest.param((256, 256, 1024), TILE_16x16x64, id="256x256x1024"),
     pytest.param((384, 384, 2048), TILE_64x64x64, id="384x384x2048"),
@@ -430,21 +419,17 @@ MEASURED_TILES = [
     pytest.param((2048, 2048, 2048), TILE_128x128x32, id="2048x2048x2048"),
     pytest.param((3072, 3072, 1024), TILE_128x128x32, id="3072x3072x1024"),
     pytest.param((4096, 4096, 4096), TILE_128x128x32, id="4096x4096x4096"),
-    # Shapes no tile could express before the sub-32 rungs: a handful of tokens
-    # against a weight matrix, and M/N that are multiples of 16 but not 32.
+    # A handful of tokens against a weight matrix, and M/N that are multiples
+    # of 16 but not 32.
     pytest.param((16, 4096, 4096), TILE_16x16x64, id="16x4096x4096"),
     pytest.param((16, 11008, 4096), TILE_16x32x64, id="16x11008x4096"),
     pytest.param((32, 11008, 4096), TILE_32x64x64, id="32x11008x4096"),
-    pytest.param((48, 4096, 4096), TILE_16x32x64, id="48x4096x4096"),
-    pytest.param((144, 144, 128), TILE_16x16x64, id="144x144x128"),
-    # 528 divides neither 32 nor 64 in either dimension. Padding both to 576
-    # wastes 19% of the output and still wins big: 16.7 us on the 64-wide tile
-    # against 23.0 us on the widest tile that divides 528 exactly.
+    # Padding 528 to 576 in both dimensions wastes 19% of the output and still
+    # wins: 16.7 us, against 23.0 us on the widest tile that divides 528.
     pytest.param((528, 528, 1024), TILE_64x64x64, id="528x528x1024"),
     # M below the WMMA atom, and an M that divides nothing. Padding M is free,
     # so these reach the same tiles a well-aligned M of the same size would.
     pytest.param((1, 4096, 4096), TILE_16x16x64, id="1x4096x4096"),
-    pytest.param((8, 11008, 4096), TILE_16x32x64, id="8x11008x4096"),
     pytest.param((100, 4096, 4096), TILE_16x32x64, id="100x4096x4096"),
     pytest.param((3402, 4096, 1024), TILE_128x128x32, id="3402x4096x1024"),
     pytest.param((1000, 1024, 1024), TILE_128x64x32, id="1000x1024x1024"),
@@ -476,6 +461,24 @@ SELECTION_SHAPES = [
 ]
 
 _shape_id = lambda shape: "x".join(map(str, shape))  # noqa: E731
+_tile_id = lambda cfg: "x".join(map(str, block_shape(cfg)))  # noqa: E731
+
+
+def _assert_matches_product(C, A, B_T):
+    """Elementwise check, for the tests where a bug clobbers a few elements.
+
+    ``verify_output`` falls back to a cosine similarity over the whole tensor,
+    which twenty wrong elements out of a hundred thousand do not move: an
+    unmasked edge column passes it at a 0.4 max difference. Padding and
+    masking are either exact or broken, so check them that way.
+    """
+    ref = A.float() @ B_T.float().T
+    bad = ~torch.isclose(C.float(), ref, atol=0.05, rtol=0.05)
+    count = int(bad.sum())
+    assert not count, (
+        f"{count} of {bad.numel()} elements wrong, first at "
+        f"{tuple(int(i) for i in bad.nonzero()[0])}, max diff {(C.float() - ref).abs().max().item():.4f}"
+    )
 
 
 @pytest.mark.parametrize("shape, expected", MEASURED_TILES)
@@ -484,145 +487,135 @@ def test_pick_tile_matches_the_measured_shapes(shape, expected):
     assert pick_tile(*shape) == expected
 
 
-# Block tiles narrower than 32x32, with a shape that divides each. 16x16 is the
-# floor: one wave holding a single 16x16x16 WMMA atom.
-NARROW_TILES = [
-    pytest.param(TILE_32x32x32, (64, 64, 128), id="32x32x32"),
-    pytest.param(TILE_32x16x64, (64, 48, 256), id="32x16x64"),
-    pytest.param(TILE_16x32x64, (48, 64, 256), id="16x32x64"),
-    pytest.param(TILE_16x16x64, (48, 48, 256), id="16x16x64"),
-    pytest.param(TILE_16x16x32, (80, 112, 96), id="16x16x32"),
-    pytest.param(TILE_16x16x16, (16, 16, 48), id="16x16x16"),
+def _case(M, N, K, ldc=None, out_dtype="bf16"):
+    tag = f"-ldc{ldc}" if ldc else ""
+    tag += f"-{out_dtype}" if out_dtype != "bf16" else ""
+    return pytest.param(M, N, K, ldc, out_dtype, id=f"{M}x{N}x{K}{tag}")
+
+
+# M is padded to the tile and the rows past it fall off the C descriptor; N is
+# padded too, but its columns need a store predicate because past the end of a
+# row is a valid offset into the next one. 256 divides every block tile, so an
+# extent pinned to it stays out of the way of the one under test.
+RAGGED_SHAPES = [
+    # M alone: below one WMMA atom, straddling a tile, and large
+    _case(1, 256, 256),
+    _case(15, 256, 256),
+    _case(17, 256, 256),
+    _case(3402, 256, 256),
+    # N alone, on the edge that needs the predicate
+    _case(256, 1, 256),
+    _case(256, 15, 256),
+    _case(256, 17, 256),
+    _case(256, 3402, 256),
+    # both, so the corner tile is past the bound and the predicate at once
+    _case(15, 17, 256),
+    _case(333, 513, 256),
+    # a padded output stride, where a missed column hides in the row's own pad
+    # rather than corrupting the next row
+    _case(100, 1001, 256, ldc=1024),
+    _case(333, 255, 256, ldc=256),
+    # the f32 store is a different retile
+    _case(17, 17, 256, out_dtype="f32"),
+    # shapes a model produces, and a K that no 64-deep k-tile divides
+    _case(80, 112, 256),
+    _case(144, 144, 128),
+    _case(1024, 1024, 48),
+    _case(512, 512, 160),
+    _case(3, 11007, 4096),
+    _case(100, 50257, 512),
 ]
 
 
-@pytest.mark.parametrize("tile, shape", NARROW_TILES)
-def test_narrow_tile_gemm_correctness(tile, shape):
-    """Sub-32 block tiles compute the same product as the wide ones.
+@pytest.mark.parametrize("M, N, K, ldc, out_dtype", RAGGED_SHAPES)
+def test_gemm_pads_and_masks_a_ragged_shape(M, N, K, ldc, out_dtype):
+    """Any M and any N, with nothing written past the real extents.
 
-    A 16x16 tile makes reg_m * reg_n == 1, so the k-loop carries a single
-    accumulator; scf.for hands that back as a bare value rather than a
-    one-element sequence, which the kernel has to accept.
+    C is a view into a sentinel-filled buffer, so a store the kernel failed to
+    drop lands either on the next row, which the product check catches, or in
+    the guard past the row or past the last tile.
     """
     _requires_rdna3()
-    M, N, K = shape
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
     torch.manual_seed(42)
-
-    launch_fn, block_m, block_n, block_k = create_wmma_gemm_module(
-        M, N, K, in_dtype="bf16", out_dtype="bf16", **dict(zip(_TILE_FIELDS, tile))
-    )
-    reg_m, reg_n, reg_k, waves_m, waves_n = tile
-    assert (block_m, block_n, block_k) == (16 * reg_m * waves_m, 16 * reg_n * waves_n, 16 * reg_k)
-
     A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
     B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
-    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+
+    guard = 256  # wider than the widest block tile
+    dtype = torch.float32 if out_dtype == "f32" else torch.bfloat16
+    backing = torch.full((M + guard, ldc or N), 7.0, dtype=dtype, device="cuda")
+    C = backing[:M, :N]
+
+    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T, out_dtype=out_dtype)
+    torch.cuda.synchronize()
+
+    _assert_matches_product(C, A, B_T)
+    assert (backing[:M, N:] == 7.0).all(), "a store ran past the last real column of a row"
+    assert (backing[M:] == 7.0).all(), "a store ran past the last real row of C"
+
+
+# Every ladder tile against a shape that divides none of them. The predicate
+# comes from the tile's own thread partitioning, so a tile whose wave layout it
+# gets wrong surfaces only if that tile is tested; pick_tile never chooses one
+# 2.5x wider than the shape.
+_MASKED_SHAPES = [(100, 1001, 256), (100, 1001, 4096)]
+
+
+def _masking_tiles():
+    """Each ladder tile once, at the first K whose ladder offers it.
+
+    The two ladders share all but one tile each, and the mask sits in the C
+    store rather than the k-loop, so a second K would rebuild the same store.
+    """
+    seen, params = set(), []
+    for shape in _MASKED_SHAPES:
+        for cfg in _ladder_for(shape[2]):
+            if cfg not in seen and _tile_workgroups(*shape, cfg) is not None:
+                seen.add(cfg)
+                params.append(pytest.param(shape, cfg, id=f"{_shape_id(shape)}-{_tile_id(cfg)}"))
+    return params
+
+
+MASKING_TILES = _masking_tiles()
+
+
+@pytest.mark.parametrize("shape, tile", MASKING_TILES)
+def test_every_tile_serves_a_shape_that_divides_none_of_them(shape, tile):
+    """Padding and masking hold for every tile, not just the chosen one."""
+    _requires_rdna3()
+    M, N, K = shape
+    block_m, block_n, _ = block_shape(tile)
+    m_pad, n_pad = pad_to(M, block_m), pad_to(N, block_n)
+
+    launch_fn, got_m, got_n, _ = create_wmma_gemm_module(
+        m_pad,
+        n_pad,
+        K,
+        in_dtype="bf16",
+        out_dtype="bf16",
+        m_valid=M if m_pad != M else None,
+        n_valid=N if n_pad != N else None,
+        # The options are part of the tile: 256x256x32 only fits in 64 KB of
+        # LDS on the k-major layout the feasibility check assumes.
+        **dict(zip(_TILE_FIELDS, tile)),
+        **tile_opts(tile),
+    )
+    assert (got_m, got_n) == (block_m, block_n)
+
+    torch.manual_seed(42)
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+
+    guard = 256
+    backing = torch.full((M * N + guard,), 7.0, dtype=torch.bfloat16, device="cuda")
+    C = backing[: M * N].view(M, N)
 
     launch_fn(C, A, B_T, torch.cuda.current_stream())
     torch.cuda.synchronize()
 
-    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
-
-
-# Shapes a model produces that no tile could express before the sub-32 rungs:
-# M or N a multiple of 16 but not 32, and K too short for a 64-deep k-tile.
-IRREGULAR_SHAPES = [
-    (16, 4096, 1024),
-    (48, 2048, 2048),
-    (80, 112, 256),
-    (144, 144, 128),
-    (240, 240, 512),
-    (64, 64, 64),
-    (128, 128, 96),
-    (1024, 1024, 48),
-    # neither extent a multiple of anything
-    (17, 4097, 1024),
-    (1000, 1001, 1024),
-    (3402, 3402, 1024),
-    (100, 50257, 512),  # the gpt2 lm_head of one short sequence
-]
-
-
-# An M that no block tile divides, including M below the 16-row WMMA atom.
-RAGGED_M = [1, 3, 8, 15, 17, 100, 333, 3402]
-
-
-@pytest.mark.parametrize("M", RAGGED_M)
-def test_gemm_pads_m_without_touching_memory_past_it(M):
-    """A ragged M is served by padding the tile, not by masking the loop.
-
-    The kernel bounds the A and C buffer descriptors at the real row count, so
-    the rows a partial tile reaches past read as zero and their stores are
-    dropped. The guard rows after C catch a store that escaped the bound.
-    """
-    _requires_rdna3()
-    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
-
-    N = K = 256
-    torch.manual_seed(42)
-    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
-    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
-
-    guard = 256  # wider than the widest block tile
-    backing = torch.full((M + guard, N), 7.0, dtype=torch.bfloat16, device="cuda")
-    C = backing[:M]
-
-    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
-    torch.cuda.synchronize()
-
-    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
-    assert (backing[M:] == 7.0).all(), "a store ran past the last real row of C"
-
-
-# An N that no block tile divides, including N below the 16-column WMMA atom.
-RAGGED_N = [1, 3, 8, 15, 17, 100, 1001, 3402]
-
-
-@pytest.mark.parametrize("N", RAGGED_N)
-def test_gemm_masks_n_without_touching_the_next_row(N):
-    """A ragged N is the one edge that needs a predicate rather than a bound.
-
-    A column past the end of a row is a valid offset into the next one, so the
-    padded columns would race with that row's own stores instead of falling off
-    the descriptor. C is a tight view -- ``ldc == N`` -- so a column the mask
-    missed lands on a real element that the reference check then catches, and
-    the final tile's overhang lands in the guard after it.
-    """
-    _requires_rdna3()
-    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
-
-    M = K = 256
-    torch.manual_seed(42)
-    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
-    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
-
-    guard = 256  # wider than the widest block tile
-    backing = torch.full((M * N + guard,), 7.0, dtype=torch.bfloat16, device="cuda")
-    C = backing[: M * N].view(M, N)
-
-    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
-    torch.cuda.synchronize()
-
-    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
-    assert (backing[M * N :] == 7.0).all(), "a store ran past the last real column of C"
-
-
-@pytest.mark.parametrize("shape", IRREGULAR_SHAPES, ids=_shape_id)
-def test_autotuned_gemm_runs_on_irregular_shapes(shape):
-    """The dispatcher resolves and runs a tile for shapes 32x32 cannot divide."""
-    _requires_rdna3()
-    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
-
-    M, N, K = shape
-    torch.manual_seed(42)
-    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
-    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
-    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
-
-    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
-    torch.cuda.synchronize()
-
-    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
+    _assert_matches_product(C, A, B_T)
+    assert (backing[M * N :] == 7.0).all(), "a store ran past the end of C"
 
 
 @pytest.mark.parametrize("shape", SELECTION_SHAPES, ids=_shape_id)
