@@ -7,30 +7,45 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
-LLVM_SRC_DIR="$BASE_DIR/llvm-project"
-LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-flydsl"
-LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
-LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
-
-# Read LLVM commit hash from thirdparty/llvm-build-info.json (upstream entry)
 LLVM_BUILD_INFO="${REPO_ROOT}/thirdparty/llvm-build-info.json"
-LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
 LLVM_EXT_DIR="${REPO_ROOT}/thirdparty/llvm-extensions"
 
-# FLYDSL_LLVM_REF / FLYDSL_LLVM_REMOTE build any commit, from any remote, without
-# editing the pin. The patches below still apply.
-LLVM_REF="${FLYDSL_LLVM_REF:-${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}}"
+# ---------------------------------------------------------------------------
+# Source selection: --source <entry>   (default: custom-upstream-old-vavdst-schedule-gpr)
+#   "upstream"  → uses llvm_hash from the "upstream" entry + patches/extensions
+#   any other   → looks up "repository" + "branch" from that entry name
+# The entry name must exist as a top-level key in llvm-build-info.json.
+# ---------------------------------------------------------------------------
+LLVM_SOURCE="${LLVM_SOURCE:-custom-upstream-old-vavdst-schedule-gpr}"
+for arg in "$@"; do
+    if [[ "$arg" == "--source" ]]; then
+        _next_is_source=1
+    elif [[ "${_next_is_source:-}" == "1" ]]; then
+        LLVM_SOURCE="$arg"
+        unset _next_is_source
+    fi
+done
 
-# FLYDSL_LLVM_NO_EXT=1 drops LLVM_EXTENSIONS and keeps REQUIRED_PATCHES: the
-# control arm for "is this regression ours?". See CONTRIBUTING.md.
-LLVM_NO_EXT="${FLYDSL_LLVM_NO_EXT:-0}"
+# Validate that the entry exists in the JSON.
+if ! python3 -c "import json,sys; d=json.load(open('${LLVM_BUILD_INFO}')); sys.exit(0 if '${LLVM_SOURCE}' in d else 1)"; then
+    _valid_keys=$(python3 -c "import json; print(', '.join(json.load(open('${LLVM_BUILD_INFO}')).keys()))")
+    echo "Unknown --source value: ${LLVM_SOURCE}. Valid entries: ${_valid_keys}" >&2
+    exit 2
+fi
 
-# The patch series lives next to the pin it applies to, in llvm-build-info.json:
-# upstream.required_patches go into every build (LLVM is broken for FlyDSL
-# without them), then upstream.extensions, in order. See CONTRIBUTING.md,
-# "Add an LLVM Extension".
-LLVM_PATCH_LIST="$(python3 - "${LLVM_BUILD_INFO}" <<'PY_EOF'
+if [[ "${LLVM_SOURCE}" == "upstream" ]]; then
+    LLVM_SRC_DIR="${LLVM_SRC_DIR:-$BASE_DIR/llvm-project}"
+    LLVM_COMMIT_DEFAULT=$(python3 -c "import json; print(json.load(open('${LLVM_BUILD_INFO}'))['upstream']['llvm_hash'])")
+    LLVM_REF="${FLYDSL_LLVM_REF:-${LLVM_REF:-${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}}}"
+    LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-$LLVM_SRC_DIR/build-flydsl}"
+    LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
+    LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
+
+    # FLYDSL_LLVM_NO_EXT=1 drops LLVM_EXTENSIONS and keeps REQUIRED_PATCHES.
+    LLVM_NO_EXT="${FLYDSL_LLVM_NO_EXT:-0}"
+
+    LLVM_PATCH_LIST="$(python3 - "${LLVM_BUILD_INFO}" <<'PY_EOF'
 import json, sys
 pin = json.load(open(sys.argv[1]))["upstream"]
 for kind in ("required_patches", "extensions"):
@@ -38,14 +53,36 @@ for kind in ("required_patches", "extensions"):
         print(kind, entry["file"])
 PY_EOF
 )"
-REQUIRED_PATCHES=()
-LLVM_EXTENSIONS=()
-while read -r kind file; do
-    case "${kind}" in
-      required_patches) REQUIRED_PATCHES+=("${file}") ;;
-      extensions)       LLVM_EXTENSIONS+=("${file}") ;;
-    esac
-done <<< "${LLVM_PATCH_LIST}"
+    REQUIRED_PATCHES=()
+    LLVM_EXTENSIONS=()
+    while read -r kind file; do
+        case "${kind}" in
+          required_patches) REQUIRED_PATCHES+=("${file}") ;;
+          extensions)       LLVM_EXTENSIONS+=("${file}") ;;
+        esac
+    done <<< "${LLVM_PATCH_LIST}"
+else
+    # Custom entry: use the same directory layout as upstream so CI paths stay
+    # consistent (llvm-project/, build-flydsl/, mlir_install/, mlir_install.tgz).
+    LLVM_SRC_DIR="${LLVM_SRC_DIR:-$BASE_DIR/llvm-project}"
+    _custom_json=$(python3 -c "import json; c=json.load(open('${LLVM_BUILD_INFO}'))['${LLVM_SOURCE}']; print(c['repository']); print(c['branch'])")
+    LLVM_REMOTE="${LLVM_REMOTE:-$(echo "$_custom_json" | sed -n '1p')}"
+    LLVM_REF="${LLVM_REF:-$(echo "$_custom_json" | sed -n '2p')}"
+    LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-$LLVM_SRC_DIR/build-flydsl}"
+    LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
+    LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
+
+    REQUIRED_PATCHES=()
+    _custom_patches=$(python3 -c "
+import json, sys
+entry = json.load(open('${LLVM_BUILD_INFO}'))['${LLVM_SOURCE}']
+for p in entry.get('required_patches', []):
+    print(p['file'])
+" 2>/dev/null || true)
+    while IFS= read -r pf; do
+        [ -n "${pf}" ] && REQUIRED_PATCHES+=("${pf}")
+    done <<< "${_custom_patches}"
+fi
 
 
 LLVM_BUILD_PROFILE="${LLVM_BUILD_PROFILE:-full}"
@@ -69,7 +106,8 @@ case "${LLVM_BUILD_PROFILE}" in
 esac
 
 echo "Base directory: $BASE_DIR"
-echo "LLVM Source:    $LLVM_SRC_DIR"
+echo "LLVM Source:    $LLVM_SOURCE"
+echo "LLVM Src Dir:   $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
@@ -82,6 +120,7 @@ echo "LLVM Patches:   ${LLVM_PATCHES[*]:-(none)}"
 
 # 1. Clone LLVM
 LLVM_REMOTE="${FLYDSL_LLVM_REMOTE:-${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}}"
+echo "LLVM Remote:    $LLVM_REMOTE"
 
 # A leftover partial ("promisor") clone is unusable here: every checkout, patch
 # and rev-parse would trigger per-blob lazy fetches against github.com. Unsetting
@@ -99,6 +138,8 @@ if [ ! -d "$LLVM_SRC_DIR" ]; then
     git remote add origin "$LLVM_REMOTE"
 else
     pushd "$LLVM_SRC_DIR"
+    # Update remote URL in case credentials or repo changed.
+    git remote set-url origin "$LLVM_REMOTE"
 fi
 
 # Plain shallow fetch. Do NOT add --filter=blob:none here: a blob-filtered fetch
@@ -131,59 +172,84 @@ else
     git checkout --force FETCH_HEAD
 fi
 
-# Replay the series from the pristine pin every run instead of detecting what is
-# already applied: `git apply --reverse --check` cannot tell for a series. Patches
-# go in with --index, so the forced checkout above also drops files they created.
-# Never `git clean`: build-flydsl/ and mlir_install/ live in this checkout.
+# Upstream builds: apply required_patches and extensions from llvm-build-info.json.
+# Custom branch builds: apply required_patches only (the branch carries its own changes,
+# but required_patches fix MLIR/ROCDL bugs that the branch may not include yet).
+if [[ "${LLVM_SOURCE}" == "upstream" ]]; then
+    # Replay the series from the pristine pin every run instead of detecting what is
+    # already applied: `git apply --reverse --check` cannot tell for a series. Patches
+    # go in with --index, so the forced checkout above also drops files they created.
+    # Never `git clean`: build-flydsl/ and mlir_install/ live in this checkout.
 
-# Every .patch file must be listed, and every listed file must exist.
-LLVM_ALL_PATCHES=("${REQUIRED_PATCHES[@]}" "${LLVM_EXTENSIONS[@]}")
-for patch_file in "${LLVM_EXT_DIR}"/*.patch; do
-    [ -e "${patch_file}" ] || continue
-    patch_base="$(basename "${patch_file}")"
-    listed=0
-    for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
-        [ "${patch_name}" = "${patch_base}" ] && listed=1 && break
+    # Every .patch file must be listed, and every listed file must exist.
+    LLVM_ALL_PATCHES=("${REQUIRED_PATCHES[@]}" "${LLVM_EXTENSIONS[@]}")
+    for patch_file in "${LLVM_EXT_DIR}"/*.patch; do
+        [ -e "${patch_file}" ] || continue
+        patch_base="$(basename "${patch_file}")"
+        listed=0
+        for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
+            [ "${patch_name}" = "${patch_base}" ] && listed=1 && break
+        done
+        if [ "${listed}" -eq 0 ]; then
+            echo "Error: patch file is not listed in thirdparty/llvm-build-info.json: ${patch_base}" >&2
+            echo "       Add it to upstream.extensions (or upstream.required_patches, if" >&2
+            echo "       the build is broken without it), or delete it." >&2
+            exit 1
+        fi
     done
-    if [ "${listed}" -eq 0 ]; then
-        echo "Error: patch file is not listed in thirdparty/llvm-build-info.json: ${patch_base}" >&2
-        echo "       Add it to upstream.extensions (or upstream.required_patches, if" >&2
-        echo "       the build is broken without it), or delete it." >&2
-        exit 1
-    fi
-done
-for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
-    if [ ! -f "${LLVM_EXT_DIR}/${patch_name}" ]; then
-        echo "Error: llvm-build-info.json lists a file that does not exist: ${patch_name}" >&2
-        echo "       Expected at: ${LLVM_EXT_DIR}/${patch_name}" >&2
-        exit 1
-    fi
-done
+    for patch_name in "${LLVM_ALL_PATCHES[@]}"; do
+        if [ ! -f "${LLVM_EXT_DIR}/${patch_name}" ]; then
+            echo "Error: llvm-build-info.json lists a file that does not exist: ${patch_name}" >&2
+            echo "       Expected at: ${LLVM_EXT_DIR}/${patch_name}" >&2
+            exit 1
+        fi
+    done
 
-LLVM_APPLY=("${REQUIRED_PATCHES[@]}")
-if [[ "${LLVM_NO_EXT}" != "1" ]]; then
-    LLVM_APPLY+=("${LLVM_EXTENSIONS[@]}")
-fi
+    LLVM_APPLY=("${REQUIRED_PATCHES[@]}")
+    if [[ "${LLVM_NO_EXT}" != "1" ]]; then
+        LLVM_APPLY+=("${LLVM_EXTENSIONS[@]}")
+    fi
 
-echo "LLVM Required:   ${#REQUIRED_PATCHES[@]}"
-if [[ "${LLVM_NO_EXT}" == "1" ]]; then
-    echo "LLVM Extensions: none (FLYDSL_LLVM_NO_EXT=1)"
+    echo "LLVM Required:   ${#REQUIRED_PATCHES[@]}"
+    if [[ "${LLVM_NO_EXT}" == "1" ]]; then
+        echo "LLVM Extensions: none (FLYDSL_LLVM_NO_EXT=1)"
+    else
+        echo "LLVM Extensions: ${#LLVM_EXTENSIONS[@]}"
+    fi
+    for ext_name in "${LLVM_APPLY[@]}"; do
+        echo "  applying ${ext_name}"
+        if ! git apply --index "${LLVM_EXT_DIR}/${ext_name}"; then
+            echo "" >&2
+            echo "Error: LLVM extension failed to apply: ${ext_name}" >&2
+            echo "       LLVM pin: ${LLVM_REF}" >&2
+            echo "" >&2
+            echo "  Either the extension is stale against this pin, or it landed upstream." >&2
+            echo "  To rebase it:   bash scripts/llvm_extension.sh --rebase ${ext_name}" >&2
+            echo "  If it landed:   delete it and drop its entry from thirdparty/llvm-build-info.json" >&2
+            exit 1
+        fi
+    done
 else
-    echo "LLVM Extensions: ${#LLVM_EXTENSIONS[@]}"
-fi
-for ext_name in "${LLVM_APPLY[@]}"; do
-    echo "  applying ${ext_name}"
-    if ! git apply --index "${LLVM_EXT_DIR}/${ext_name}"; then
-        echo "" >&2
-        echo "Error: LLVM extension failed to apply: ${ext_name}" >&2
-        echo "       LLVM pin: ${LLVM_REF}" >&2
-        echo "" >&2
-        echo "  Either the extension is stale against this pin, or it landed upstream." >&2
-        echo "  To rebase it:   bash scripts/llvm_extension.sh --rebase ${ext_name}" >&2
-        echo "  If it landed:   delete it and drop its entry from thirdparty/llvm-build-info.json" >&2
-        exit 1
+    # Custom branch: apply required_patches (skip already-applied ones).
+    if [[ ${#REQUIRED_PATCHES[@]} -gt 0 ]]; then
+        echo "LLVM Required:   ${#REQUIRED_PATCHES[@]}"
+        for patch_name in "${REQUIRED_PATCHES[@]}"; do
+            if [ ! -f "${LLVM_EXT_DIR}/${patch_name}" ]; then
+                echo "Error: llvm-build-info.json lists a file that does not exist: ${patch_name}" >&2
+                echo "       Expected at: ${LLVM_EXT_DIR}/${patch_name}" >&2
+                exit 1
+            fi
+            if git apply --check "${LLVM_EXT_DIR}/${patch_name}" 2>/dev/null; then
+                echo "  applying ${patch_name}"
+                git apply --index "${LLVM_EXT_DIR}/${patch_name}"
+            else
+                echo "  skipping ${patch_name} (already applied or conflicts)"
+            fi
+        done
+    else
+        echo "No required patches for --source ${LLVM_SOURCE}"
     fi
-done
+fi
 
 LLVM_COMMIT_RESOLVED=$(git rev-parse HEAD)
 popd

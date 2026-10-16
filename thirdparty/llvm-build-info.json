@@ -15,5 +15,22 @@
       }
     ],
     "extensions": []
+  },
+
+  "custom-upstream-old-vavdst-schedule-gpr": {
+    "repository": "https://github.com/jli-melchior/llvm-project.git",
+    "branch": "jli/gfx1250/schedule-bank-upstream-oldllvm-waitalu-schedule-gpr",
+    "base": "jli/gfx1250/schedule-bank-upstream-oldllvm-waitalu",
+    "description": "upstream-old + schedule_bank + va_vdst relaxation + schedule vgpr/sgpr/agpr",
+    "required_patches": [
+      {
+        "file": "rocdl-lld-argv0.patch",
+        "description": "Pass the resolved lld path as argv[0] instead of the literal \"ld.lld\", so MLIR's ROCDL target finds the linker when it is not on PATH under that name."
+      },
+      {
+        "file": "rocdl-waves-per-eu-range.patch",
+        "description": "Support waves_per_eu min,max range attribute for full VGPR utilization."
+      }
+    ]
   }
 }
