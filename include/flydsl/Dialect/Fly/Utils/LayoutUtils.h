@@ -904,9 +904,7 @@ Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout, Lay
   auto [retShape, retStride] =
       detail::compositionImpl(builder, coalShape, coalStride, builder.getShape(innerLayout),
                               builder.getStride(innerLayout));
-  auto [canonicalShape, canonicalStride] =
-      detail::canonicalizeStridePair(builder, retShape, retStride);
-  return builder.makeLayout(canonicalShape, canonicalStride);
+  return builder.makeLayout(retShape, retStride);
 }
 template <class Layout>
 Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout,
@@ -916,42 +914,31 @@ Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout,
   auto lhsShape = builder.getShape(outerLayout);
   auto lhsStride = builder.getStride(outerLayout);
 
+  if (innerTileAttr.isLeaf()) {
+    if (innerTileAttr.isNoneMode())
+      return outerLayout;
+    Attribute leafValue = innerTileAttr.getValue();
+    if (auto nestedTile = dyn_cast<TileAttr>(leafValue))
+      return layoutComposition(builder, outerLayout, nestedTile);
+    if (auto attr = dyn_cast<LayoutAttr>(leafValue))
+      return layoutComposition(builder, outerLayout, builder.materializeConstantLayout(attr));
+    auto intAttr = cast<IntAttr>(leafValue);
+    Layout rhsLayout = builder.makeLayout(builder.materializeConstantLeaf(intAttr),
+                                          builder.materializeConstantLeaf(1));
+    return layoutComposition(builder, outerLayout, rhsLayout);
+  }
+
   typename LayoutBuilder<Layout>::ElemCollector retShape;
   typename LayoutBuilder<Layout>::ElemCollector retStride;
 
   int32_t tileRank = innerTileAttr.rank();
-  for (int i = 0; i < lhsShape.rank(); ++i) {
-    if (i < tileRank && !innerTileAttr.isNoneMode(i)) {
-      Layout subLayout = builder.makeLayout(builder.at(lhsShape, i), builder.at(lhsStride, i));
-
-      auto tileElem = innerTileAttr.at(i);
-      if (auto nestedTile = dyn_cast<TileAttr>(tileElem)) {
-        Layout composed = layoutComposition(builder, subLayout, nestedTile);
-        retShape.push_back(builder.getShape(composed));
-        retStride.push_back(builder.getStride(composed));
-      } else {
-        auto makeRhsPair = [&]() -> std::pair<IntTuple, IntTuple> {
-          if (auto attr = dyn_cast<LayoutAttr>(tileElem)) {
-            return {builder.materializeConstantTuple(attr.getShape()),
-                    builder.materializeConstantTuple(attr.getStride())};
-          }
-          return {builder.materializeConstantLeaf(cast<IntAttr>(tileElem)),
-                  builder.materializeConstantLeaf(1)};
-        };
-        auto [rhsShape, rhsStride] = makeRhsPair();
-        Layout rhsLayout = builder.makeLayout(rhsShape, rhsStride);
-        Layout composed = layoutComposition(builder, subLayout, rhsLayout);
-        retShape.push_back(builder.getShape(composed));
-        retStride.push_back(builder.getStride(composed));
-      }
-    } else {
-      retShape.push_back(builder.at(lhsShape, i));
-      retStride.push_back(builder.at(lhsStride, i));
-    }
+  for (int i = 0; i < tileRank; ++i) {
+    Layout subLayout = builder.makeLayout(builder.at(lhsShape, i), builder.at(lhsStride, i));
+    Layout composed = layoutComposition(builder, subLayout, TileAttr::get(innerTileAttr.at(i)));
+    retShape.push_back(builder.getShape(composed));
+    retStride.push_back(builder.getStride(composed));
   }
-  auto [canonicalShape, canonicalStride] = detail::canonicalizeStridePair(
-      builder, builder.makeTuple(retShape), builder.makeTuple(retStride));
-  return builder.makeLayout(canonicalShape, canonicalStride);
+  return builder.makeLayout(builder.makeTuple(retShape), builder.makeTuple(retStride));
 }
 
 template <class Layout>
