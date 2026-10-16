@@ -146,6 +146,11 @@ public:
 
   IntTupleAttr min(IntTupleAttr lhs, IntTupleAttr rhs) const;
   IntTupleAttr max(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  // Used by intTupleSize and by composition. A min of non-negative extents is
+  // bounded by each operand, so minExtent keeps the narrower width and
+  // coordinate decomposition by it stays in i32.
+  IntTupleAttr mulExtent(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr minExtent(IntTupleAttr lhs, IntTupleAttr rhs) const;
   IntTupleAttr safeDiv(IntTupleAttr lhs, IntTupleAttr rhs) const;
   IntTupleAttr ceilDiv(IntTupleAttr lhs, IntTupleAttr rhs) const;
   IntTupleAttr shapeDiv(IntTupleAttr lhs, IntTupleAttr rhs) const;
@@ -255,6 +260,8 @@ public:
 
   IntTupleValueAdaptor min(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
   IntTupleValueAdaptor max(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor mulExtent(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor minExtent(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
   IntTupleValueAdaptor safeDiv(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
   IntTupleValueAdaptor ceilDiv(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
   IntTupleValueAdaptor shapeDiv(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
@@ -497,6 +504,20 @@ template <class IntTuple> IntTuple intTupleProduct(IntTupleBuilder<IntTuple> &bu
   IntTuple result = intTupleProduct(builder, builder.at(t, 0));
   for (int i = 1; i < t.rank(); ++i) {
     result = builder.mul(result, intTupleProduct(builder, builder.at(t, i)));
+  }
+  return result;
+}
+
+// Total element count. Unlike intTupleProduct, which also forms the divisors of
+// coordinate decomposition and keeps their width, a size can exceed INT32_MAX
+// even when every extent fits, so its dynamic products are computed in i64.
+template <class IntTuple> IntTuple intTupleSize(IntTupleBuilder<IntTuple> &builder, IntTuple t) {
+  if (t.isLeaf()) {
+    return t;
+  }
+  IntTuple result = intTupleSize(builder, builder.at(t, 0));
+  for (int i = 1; i < t.rank(); ++i) {
+    result = builder.mulExtent(result, intTupleSize(builder, builder.at(t, i)));
   }
   return result;
 }

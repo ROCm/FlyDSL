@@ -206,6 +206,36 @@ IntTupleAttr IntTupleBuilder<IntTupleAttr>::max(IntTupleAttr lhs, IntTupleAttr r
   assert(lhs.isLeafInt() && rhs.isLeafInt());
   return IntTupleAttr::get(intMax(lhs.getLeafAsInt(), rhs.getLeafAsInt()));
 }
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::mulExtent(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  if (!lhs.isLeafInt() || !rhs.isLeafInt()) {
+    return mul(lhs, rhs);
+  }
+  if (lhs.isLeafStaticValue(1)) {
+    return rhs;
+  }
+  if (rhs.isLeafStaticValue(1)) {
+    return lhs;
+  }
+  IntAttr prod = lhs.getLeafAsInt() * rhs.getLeafAsInt();
+  if (prod.isStatic()) {
+    return IntTupleAttr::get(prod);
+  }
+  return IntTupleAttr::get(IntAttr::getDynamic(ctx, 64, prod.getDivisibility()));
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::minExtent(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  IntTupleAttr ret = min(lhs, rhs);
+  if (ret.isStatic()) {
+    return ret;
+  }
+  // A static operand is an int32_t, so it bounds the result to 32 bits too.
+  auto boundWidth = [](IntAttr v) { return v.isStatic() ? 32 : v.getWidth(); };
+  int32_t width = std::min(boundWidth(lhs.getLeafAsInt()), boundWidth(rhs.getLeafAsInt()));
+  IntAttr retInt = ret.getLeafAsInt();
+  if (width == retInt.getWidth()) {
+    return ret;
+  }
+  return IntTupleAttr::get(IntAttr::getDynamic(ctx, width, retInt.getDivisibility()));
+}
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::safeDiv(IntTupleAttr lhs, IntTupleAttr rhs) const {
   assert(lhs.isLeaf() && rhs.isLeafInt());
   if (lhs.isLeafInt()) {
@@ -532,6 +562,48 @@ IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::max(IntTupleValueAda
                                                      extendToIntType(rhs.getValue(), cmpType))
                                   .getResult(),
                               retAttr};
+}
+
+IntTupleValueAdaptor
+IntTupleBuilder<IntTupleValueAdaptor>::mulExtent(IntTupleValueAdaptor lhs,
+                                                 IntTupleValueAdaptor rhs) const {
+  if (!lhs.isLeafInt() || !rhs.isLeafInt()) {
+    return mul(lhs, rhs);
+  }
+  if (lhs.isLeafStaticValue(1)) {
+    return rhs;
+  }
+  if (rhs.isLeafStaticValue(1)) {
+    return lhs;
+  }
+  auto retAttr = attrBuilder.mulExtent(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
+  auto retType = getIntType(retAttr);
+  return IntTupleValueAdaptor{arith::MulIOp::create(builder, loc,
+                                                    extendToIntType(lhs.getValue(), retType),
+                                                    extendToIntType(rhs.getValue(), retType))
+                                  .getResult(),
+                              retAttr};
+}
+
+IntTupleValueAdaptor
+IntTupleBuilder<IntTupleValueAdaptor>::minExtent(IntTupleValueAdaptor lhs,
+                                                 IntTupleValueAdaptor rhs) const {
+  auto retAttr = attrBuilder.minExtent(lhs.attr, rhs.attr);
+  if (retAttr.isStatic()) {
+    return materializeConstantTuple(retAttr);
+  }
+  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
+  Value result = arith::MinSIOp::create(builder, loc, extendToIntType(lhs.getValue(), cmpType),
+                                        extendToIntType(rhs.getValue(), cmpType))
+                     .getResult();
+  auto retType = getIntType(retAttr);
+  if (retType != cmpType) {
+    result = arith::TruncIOp::create(builder, loc, retType, result).getResult();
+  }
+  return IntTupleValueAdaptor{result, retAttr};
 }
 
 IntTupleValueAdaptor

@@ -706,7 +706,7 @@ struct IntTupleModFn {
 struct IntTupleProductFn {
   IntTupleValueAdaptor operator()(IntTupleBuilder<IntTupleValueAdaptor> &builder,
                                   IntTupleValueAdaptor input) const {
-    return intTupleProduct(builder, input);
+    return intTupleSize(builder, input);
   }
 };
 struct IntTupleProductEachFn {

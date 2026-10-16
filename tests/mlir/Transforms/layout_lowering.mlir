@@ -663,3 +663,53 @@ func.func @test_add_offset_multi_use_inner_still_fuses(%ptr: !fly.ptr<f32, share
   %s = arith.addf %x, %y : f32
   return %s : f32
 }
+
+// -----
+
+// logical_divide of a dynamic 2-D layout takes its size as a product of the
+// two extents. That product is computed in i64 (it can exceed INT32_MAX even
+// though each extent fits, #1176); the min feeding coordinate decomposition
+// is bounded by the i32 extent, so the divide/rem stay i32.
+// CHECK-LABEL: @test_logical_divide_dynamic_size_i64
+// CHECK-SAME: (%[[S0:.*]]: i32, %[[S1:.*]]: i32, %{{.*}}: i64, %[[I:.*]]: i32)
+func.func @test_logical_divide_dynamic_size_i64(%a: i32, %b: i32, %d: i64, %i: i32) -> i64 {
+  %s = fly.make_int_tuple(%a, %b) : (i32, i32) -> !fly.int_tuple<(?,?)>
+  %st = fly.make_int_tuple(%d) : (i64) -> !fly.int_tuple<(?{i64},1)>
+  %l = fly.make_layout(%s, %st) : (!fly.int_tuple<(?,?)>, !fly.int_tuple<(?{i64},1)>) -> !fly.layout<(?,?):(?{i64},1)>
+  %one = fly.make_int_tuple() : () -> !fly.int_tuple<1>
+  %t = fly.make_layout(%one, %one) : (!fly.int_tuple<1>, !fly.int_tuple<1>) -> !fly.layout<1:1>
+  // CHECK-DAG: %[[W1:.*]] = arith.extsi %[[S1]] : i32 to i64
+  // CHECK-DAG: %[[W0:.*]] = arith.extsi %[[S0]] : i32 to i64
+  // CHECK: %[[SIZE:.*]] = arith.muli %[[W0]], %[[W1]] : i64
+  // CHECK: %[[MIN:.*]] = arith.minsi %[[W0]], %[[SIZE]] : i64
+  // CHECK: %[[E0:.*]] = arith.trunci %[[MIN]] : i64 to i32
+  // CHECK: arith.remsi %[[I]], %[[E0]] : i32
+  // CHECK: arith.divsi %[[I]], %[[E0]] : i32
+  %q = fly.logical_divide(%l, %t) : (!fly.layout<(?,?):(?{i64},1)>, !fly.layout<1:1>) -> !fly.layout<(1,(?,?{i64})):(0,(?{i64},1))>
+  %c = fly.make_int_tuple(%i) : (i32) -> !fly.int_tuple<(0,?)>
+  %x = fly.crd2idx(%c, %q) : (!fly.int_tuple<(0,?)>, !fly.layout<(1,(?,?{i64})):(0,(?{i64},1))>) -> !fly.int_tuple<?{i64}>
+  %v = fly.get_scalar(%x) : (!fly.int_tuple<?{i64}>) -> i64
+  return %v : i64
+}
+
+// -----
+
+// Only sizes are widened. Decomposing an i32 coordinate over a nested dynamic
+// mode divides by the product of its extents, and that stays i32: an i64
+// divisor would turn per-thread index math into 64-bit divide/rem. This guards
+// the width only. A nested mode whose extents multiply past INT32_MAX still
+// wraps and decomposes coordinates wrongly.
+// CHECK-LABEL: @test_crd2idx_nested_dynamic_divisor_i32
+// CHECK-NOT: arith.{{(div|rem)}}si {{.*}} : i64
+// CHECK: arith.remsi {{.*}} : i32
+// CHECK-NOT: arith.{{(div|rem)}}si {{.*}} : i64
+// CHECK: return
+func.func @test_crd2idx_nested_dynamic_divisor_i32(%a: i32, %b: i32, %c: i32, %s1: i64, %s2: i64, %i: i32) -> i64 {
+  %sh = fly.make_int_tuple(%a, %b, %c) : (i32, i32, i32) -> !fly.int_tuple<((?,?),?)>
+  %st = fly.make_int_tuple(%s1, %s2) : (i64, i64) -> !fly.int_tuple<((1,?{i64}),?{i64})>
+  %l = fly.make_layout(%sh, %st) : (!fly.int_tuple<((?,?),?)>, !fly.int_tuple<((1,?{i64}),?{i64})>) -> !fly.layout<((?,?),?):((1,?{i64}),?{i64})>
+  %c0 = fly.make_int_tuple(%i) : (i32) -> !fly.int_tuple<?>
+  %x = fly.crd2idx(%c0, %l) : (!fly.int_tuple<?>, !fly.layout<((?,?),?):((1,?{i64}),?{i64})>) -> !fly.int_tuple<?{i64}>
+  %v = fly.get_scalar(%x) : (!fly.int_tuple<?{i64}>) -> i64
+  return %v : i64
+}
