@@ -1525,7 +1525,19 @@ def flydsl_flash_attn_func(
             if debug_lazy or has_bias or has_alibi or has_sink or (can_dualwave and _dense_routes_to_dualwave(B, Sq)):
                 num_q_blocks = -(-int(Sq) // DUALWAVE_SWP_BLOCK_M)
                 if dualwave_swp_xcd_swizzle is None:
-                    xcd_swizzle = not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= MIN_Q_BLOCKS_XCD_SWIZZLE
+                    # Large BF16 MHA batches benefit from head-local KV reuse
+                    # already at 8K queries. Small batches, GQA and cross-attention
+                    # retain the longer-sequence threshold.
+                    early_mha_swizzle = (
+                        dtype_str == "bf16"
+                        and D == 128
+                        and H == num_kv_heads
+                        and H >= 64
+                        and B >= 4
+                        and not (cross or has_bias or has_alibi or has_sink)
+                    )
+                    min_q_blocks = 32 if early_mha_swizzle else MIN_Q_BLOCKS_XCD_SWIZZLE
+                    xcd_swizzle = not causal and H % NUM_XCD_GFX950 == 0 and num_q_blocks >= min_q_blocks
                 else:
                     xcd_swizzle = dualwave_swp_xcd_swizzle
                 exe = _build_dense_dualwave(
