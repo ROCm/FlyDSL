@@ -245,7 +245,14 @@ class DebugEnvManager(EnvManager):
 
     env_prefix = "DEBUG"
 
-    dump_asm = OptBool(False, description="Dump ASM to file")
+    dump_asm = OptBool(
+        False,
+        description=(
+            "Write only the final ISA (.s) to FLYDSL_DUMP_DIR. Unlike FLYDSL_DUMP_IR the JIT cache "
+            "stays on: each specialization is compiled once per process and dump directory, and the "
+            "cache entry it writes matches the dumped ISA"
+        ),
+    )
     dump_ir = OptBool(False, env_var="FLYDSL_DUMP_IR", description="Dump IR to file")
     dump_dir = OptStr(
         str(Path.home() / ".flydsl" / "debug"), env_var="FLYDSL_DUMP_DIR", description="Directory for dumping IR"
