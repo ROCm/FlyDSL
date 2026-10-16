@@ -1,0 +1,4 @@
+interface:
+  display_name: "MI355X Mono-Kernel Validation"
+  short_description: "Validate kernel numerics, forward progress, and latency"
+  default_prompt: "Use $mi355-mono-kernel-test to validate the modified stage and complete target subgraph, then measure paired kernel latency."

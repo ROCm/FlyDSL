@@ -1,0 +1,4 @@
+interface:
+  display_name: "MI355X Mono-Kernel Development"
+  short_description: "Develop MI355X kernels with incremental persistent fusion"
+  default_prompt: "Use $mi355-mono-kernel-dev to define the operator contract and implement the next validated fused partition."
