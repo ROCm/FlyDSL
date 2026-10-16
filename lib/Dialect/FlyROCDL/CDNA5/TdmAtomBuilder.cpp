@@ -67,14 +67,20 @@ FailureOr<tdm::Geometry> deriveTdmAtom(AdaptorT adaptor, tdm::Request &request, 
   auto geometry = tdm::derive(request, emitError);
   if (failed(geometry))
     return failure();
-  // Check the actual per-issue dimension after coalescing and warp splitting:
-  // a sufficiently wide collective tile can still leave each warp below 16 B.
-  int64_t innerBits =
-      static_cast<int64_t>(geometry->descriptorShape.back()) * dataType.getIntOrFloatBitWidth();
-  if (innerBits < 16 * 8)
-    return emitError() << "physical TDM tile_dim0 must span at least 16 bytes, got "
-                       << geometry->descriptorShape.back() << " elements at "
-                       << dataType.getIntOrFloatBitWidth() << " bits";
+  // The ISA constrains tile_dim0 only when padding is on. `pad_amount` and
+  // `pad_interval` step the LDS pointer in whole DWORDs while `bytesStored`
+  // accumulates across rows, so a row whose span is not a multiple of 4 bytes
+  // lands the pad inside the next row. Without padding the inner loop advances
+  // by `data_size` (1-8 B) and any span the box can express is legal; a wider
+  // one coalesces better but is not required.
+  if (geometry->padAmount) {
+    int64_t innerBits =
+        static_cast<int64_t>(geometry->descriptorShape.back()) * dataType.getIntOrFloatBitWidth();
+    if (innerBits % (4 * 8))
+      return emitError() << "a padded TDM tile_dim0 must span a whole multiple of 4 bytes, got "
+                         << geometry->descriptorShape.back() << " elements at "
+                         << dataType.getIntOrFloatBitWidth() << " bits";
+  }
   return geometry;
 }
 
