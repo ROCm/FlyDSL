@@ -104,13 +104,17 @@ def _tflops(M: int, N: int, K: int, us: float) -> float:
 
 
 def _run_and_check(build_fn, launch_fn, M, N, K, *rest, **kwargs):
-    """Build inputs, compile+run once, and compare against the reference."""
+    """Build inputs, compile+run once, and compare against the reference; C columns past N must stay untouched."""
     c_gpu, make_args, ref, (rtol, atol) = build_fn(M, N, K, *rest, **kwargs)
+    # A signaling-NaN bit pattern that no computed output carries, so any store past N changes it.
+    pad_sentinel = 0x7FA5 if c_gpu.dtype == torch.bfloat16 else 0x7D5A
+    c_gpu[:, N:].view(torch.int16).fill_(pad_sentinel)
     compiled = flyc.compile(launch_fn, *make_args(torch.cuda.current_stream()))
     torch.cuda.synchronize()
     error = None
     try:
         torch.testing.assert_close(c_gpu[:M, :N].float(), ref.float(), rtol=rtol, atol=atol)
+        assert (c_gpu[:, N:].view(torch.int16) == pad_sentinel).all(), "the kernel wrote C columns past N"
     except AssertionError as exc:
         error = exc
     return c_gpu, make_args, compiled, error
@@ -521,6 +525,17 @@ def _run_smoke(mode, M, **kwargs):
     """Run `mode`'s fixed small tile/warp/buffer config at a given M (ragged-M / cluster sweeps)."""
     smoke = _MODES[mode]["smoke"]
     _run_case(mode, M, smoke["N"], smoke["K"], *smoke["tile"], *smoke["warps"], smoke["num_buffers"], **kwargs)
+
+
+@pytest.mark.parametrize("tile_m, tile_n, tile_k, m_warp, n_warp", [(128, 128, 64, 2, 2), (128, 128, 128, 16, 1)])
+@pytest.mark.parametrize("mode", sorted(_MODES))
+def test_gemm_rejects_tiles_off_the_wmma_shape(mode, tile_m, tile_n, tile_k, m_warp, n_warp):
+    """tile_k below the 128-deep WMMA, or 8 rows per warp, used to compile to a kernel that stores zeros."""
+    _require_gpu()
+    cfg = _MODES[mode]
+    _c, make_args, _ref, _tol = cfg["build"](128, 256, 512, tile_m, tile_n, tile_k, m_warp, n_warp, 2)
+    with pytest.raises(ValueError, match="not WMMA-aligned"):
+        flyc.compile(cfg["launch"], *make_args(torch.cuda.current_stream()))
 
 
 _RAGGED_M_VALUES = [1, 2, 5, 15, 16, 17, 33, 63, 65, 100, 127, 128, 129, 191, 200, 255, 256, 257, 384, 500, 1000, 2048]

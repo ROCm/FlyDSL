@@ -47,11 +47,16 @@ def launch_gemm_a8w8(
     cluster_n: Constexpr[int],
     is_bsc: Constexpr[bool],
 ):
+    """Requires N % tile_n == 0, K % tile_k == 0 and K // tile_k >= num_buffers - 1 (blockscale also N % 128 == 0).
+    A partial last M tile is clamped; the caller pads N to a multiple of tile_n."""
     use_cluster = cluster_m > 1 or cluster_n > 1
     WMMA_M = WMMA_N = 16
     WMMA_K = 128
     WAVE = 32
     K_WS = tile_k // WMMA_K
+    # A tile below one WMMA would issue no WMMA at all and store zeros.
+    if tile_k % WMMA_K or tile_m % (m_warp * WMMA_M) or tile_n % (n_warp * WMMA_N):
+        raise ValueError(f"tile ({tile_m},{tile_n},{tile_k}) / warps ({m_warp},{n_warp}) not WMMA-aligned")
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
     wmma_m_rep = warp_tile_m // WMMA_M
