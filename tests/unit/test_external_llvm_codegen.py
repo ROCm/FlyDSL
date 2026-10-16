@@ -67,11 +67,13 @@ def test_rocm_external_pipeline_split_matches_full_pipeline():
     full = backend.pipeline_fragments(compile_hints=hints)
     pre_binary, binary = backend.external_binary_pipeline_fragments(compile_hints=hints)
 
-    assert full == [*pre_binary, binary]
+    assert full[:-1] == pre_binary
+    assert full[-1].startswith("fly-rocm-module-to-binary{format=fatbin")
     assert pre_binary[-1] == "reconcile-unrealized-casts"
     gpu_pipeline = next(fragment for fragment in pre_binary if fragment.startswith("gpu.module("))
     assert "convert-rocdl-fastmath-ops,convert-gpu-to-rocdl{" in gpu_pipeline
     assert binary.startswith("gpu-module-to-binary")
+    assert "format=isa" in binary
     # ROCDL never reads opts=; waves_per_eu goes through the attribute instead.
     assert 'opts=""' in binary
 
