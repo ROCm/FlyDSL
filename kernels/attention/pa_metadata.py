@@ -426,7 +426,7 @@ def _make_pa_phase_helpers(
             kv_tok_base = partition_start + kv_tok_thread_base if const_expr(seq_end is not None) else None
             v_max_warp = zero_f
             for td in range_constexpr(TLOOP):
-                vs = fx.Vector(v_scale_vecs[td])
+                vs = v_scale_vecs[td]
                 if const_expr(kv_tok_base is not None):
                     vs = (_token_vec_i32(kv_tok_base, td) < seq_end).select(vs, zero_f)
                 v_max_warp = fx.maxnumf(v_max_warp, vs.reduce("max"))
@@ -470,9 +470,9 @@ def _make_pa_phase_helpers(
         kv_tok_base = partition_start + kv_tok_thread_base
         qk_max = neg_inf
         for td in range_constexpr(TLOOP):
-            logits_vec = (_token_vec_i32(kv_tok_base, td) < causal_bound).select(fx.Vector(d_out[td]), neg_inf)
+            logits_vec = (_token_vec_i32(kv_tok_base, td) < causal_bound).select(d_out[td], neg_inf)
             d_out[td] = logits_vec
-            qk_max = fx.maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
+            qk_max = fx.maxnumf(qk_max, logits_vec.reduce("max"))
         for sh in [32, 16]:
             qk_max = fx.maxnumf(qk_max, qk_max.shuffle_xor(sh, WARP_SIZE))
         fx.ptr_store(
@@ -493,9 +493,9 @@ def _make_pa_phase_helpers(
         safe_eff_max = (partition_max > neg_inf).select(new_rmax, zero_f)
         local_exp_sum = zero_f
         for td in range_constexpr(TLOOP):
-            diff_vec = fx.Vector(d_out[td]) - safe_eff_max
+            diff_vec = d_out[td] - safe_eff_max
             p_vec = exp2_f32_fast(diff_vec * LOG2E)
-            local_exp_sum = local_exp_sum + fx.Vector(p_vec).reduce("add")
+            local_exp_sum = local_exp_sum + p_vec.reduce("add")
             d_out[td] = p_vec
         for sh in [32, 16]:
             local_exp_sum = local_exp_sum + local_exp_sum.shuffle_xor(sh, WARP_SIZE)
@@ -521,9 +521,7 @@ def _make_pa_phase_helpers(
                     v_max_global = fx.maxnumf(v_max_global, w_vmax)
                 v_correction = v_max_global * (1.0 / FP8_MAX)
                 norm_factor = rcp_f32(v_correction + 1e-8 / FP8_MAX)
-                normalized_v_scales = [
-                    fx.Vector(v_scale_vecs[td]) * fx.Float32(norm_factor) for td in range_constexpr(TLOOP)
-                ]
+                normalized_v_scales = [v_scale_vecs[td] * fx.Float32(norm_factor) for td in range_constexpr(TLOOP)]
             else:
                 v_correction, normalized_v_scales = v_normalization
             for td in range_constexpr(TLOOP):
@@ -533,7 +531,7 @@ def _make_pa_phase_helpers(
             normalized_v_scales = []
 
         for td in range_constexpr(TLOOP):
-            pv = fx.Vector(d_out[td])
+            pv = d_out[td]
             lo = rocdl.cvt_pk_fp8_f32(T.i32, pv[0], pv[1], fx.Int32(0), False)
             pk = rocdl.cvt_pk_fp8_f32(T.i32, pv[2], pv[3], lo, True)
             elem_base = prob_wr_thread_base + td * MFMA_N * (PROB_ROW_STRIDE_BYTES // 4)
@@ -564,7 +562,7 @@ def _make_pa_phase_helpers(
         for vhe in range_constexpr(vhe_loop):
             tmp_out = fx.Vector.filled(4, 0.0, fx.Float32)
             for vt in range_constexpr(VTLOOP):
-                v_i64x2 = fx.Vector(v_ops[vt][vhe])
+                v_i64x2 = v_ops[vt][vhe]
                 for j in range_constexpr(2):
                     tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
                         T.f32x4,
@@ -1498,7 +1496,7 @@ def compile_pa_metadata_reduce(
                 scale_old = exp2_f32_fast((m - m_new) * LOG2E)
                 w = exp2_f32_fast((lse - m_new) * LOG2E)
                 denom_new = denom * scale_old + w
-                acc_new = acc * fx.Float32(scale_old) + fx.Vector(v) * fx.Float32(w)
+                acc_new = acc * fx.Float32(scale_old) + v * fx.Float32(w)
                 results = yield [m_new, denom_new, acc_new]
 
             denom_f = fx.Float32(results[1])
@@ -1507,7 +1505,7 @@ def compile_pa_metadata_reduce(
             out_acc = acc_f * rcp_f32(safe_denom)
 
             out_off = out_row * stride_out_seq + qhead * stride_out_head + tid * vec_width
-            output_val = fx.Vector(out_acc).to(output_dtype)
+            output_val = out_acc.to(output_dtype)
             fx.memref_store_vec(output_val, reg_output)
             fx.copy(copy_output, reg_output, fx.slice(final_output, (None, out_off)))
 

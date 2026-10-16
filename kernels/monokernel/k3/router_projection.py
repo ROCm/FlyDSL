@@ -10,7 +10,6 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import gpu, range_constexpr, rocdl
-from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.common import buffer_ops as bo
 from kernels.monokernel.layout import CM_DEV, LAYER_SLOTS
@@ -445,7 +444,7 @@ def build_router_projection(
                         candidate_score = corrected_scores[value_index]
                         candidate_id = fx.Int32(lane + value_index * _WAVE_SIZE)
                         take = (candidate_score > best_score) | (
-                            (ArithValue(candidate_score) == ArithValue(best_score)) & (candidate_id < best_id)
+                            (candidate_score == best_score) & (candidate_id < best_id)
                         )
                         best_score = take.select(candidate_score, best_score)
                         best_id = take.select(candidate_id, best_id)
@@ -453,9 +452,7 @@ def build_router_projection(
                     for shuffle_offset in (32, 16, 8, 4, 2, 1):
                         peer_score = xshfl(best_score, shuffle_offset)
                         peer_id = xshfl(best_id, shuffle_offset)
-                        take = (peer_score > best_score) | (
-                            (ArithValue(peer_score) == ArithValue(best_score)) & (peer_id < best_id)
-                        )
+                        take = (peer_score > best_score) | ((peer_score == best_score) & (peer_id < best_id))
                         best_score = take.select(peer_score, best_score)
                         best_id = take.select(peer_id, best_id)
 

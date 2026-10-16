@@ -296,7 +296,7 @@ def compile_pa_decode_tile(
         tiles_per_part = cdiv(num_tiles, NP)
         part_start = part * tiles_per_part
         part_end_raw = part_start + tiles_per_part
-        part_end = arith.select(part_end_raw < num_tiles, part_end_raw, num_tiles)
+        part_end = (part_end_raw < num_tiles).select(part_end_raw, num_tiles)
 
         # One i8 blob carved into typed byte-offset pointers. `lds_base` is an
         # ir.Value pointer (safe inside scf control flow); the Python `lds`
@@ -433,7 +433,7 @@ def compile_pa_decode_tile(
 
         # ── prologue: prefetch the first tile's K ──
         num_tiles_m1 = num_tiles - 1
-        start_safe = arith.select(part_start < num_tiles, part_start, num_tiles_m1)
+        start_safe = (part_start < num_tiles).select(part_start, num_tiles_m1)
         k_pf0, phys_vec0 = _k_ops_flat(start_safe)
         # V page-index prefetch, issued here too for the same overlap; the
         # LDS write is visible after the barrier below.
@@ -717,7 +717,7 @@ def compile_pa_decode_tile(
                 for m in range_constexpr(M_TILES):
                     frag_Ss = []
                     for a in range_constexpr(NCHUNK):
-                        acc = arith.constant_vector(0.0, T.f32x4)
+                        acc = fx.Vector.filled(4, 0.0, fx.Float32)
                         for s in range_constexpr(N_SUBCHUNKS):
                             acc = _mfma(
                                 k_cur[a * N_SUBCHUNKS + s],
@@ -799,7 +799,7 @@ def compile_pa_decode_tile(
                     )
                     # Fully-invalid row: use 0 as the effective max so masked lanes
                     # give exp2(-inf-0)==0 (avoids the -inf-(-inf) cancellation).
-                    safe_max = arith.select(m_new > NEG_INF, m_new, ZERO_F)
+                    safe_max = (m_new > NEG_INF).select(m_new, ZERO_F)
                     m_new_b = fx.Vector.from_elements([safe_max], dtype=fx.Float32).broadcast_to(4)
                     ls = fx.Float32(0.0)
                     p_chunks = []
@@ -840,7 +840,7 @@ def compile_pa_decode_tile(
                         ls = ls + ls.shuffle_xor(sh, WAVE)
                     # PV output is [head-dim, query-row=lane16] after the operand
                     # swap, so correction/denominator are per-lane scalars (no sCorr).
-                    safe_prev = arith.select(m_prev > NEG_INF, m_prev, ZERO_F)
+                    safe_prev = (m_prev > NEG_INF).select(m_prev, ZERO_F)
                     corr_reg = fx.Float32(exp2_amdgcn_scalar(safe_prev - safe_max))
                     if rgroup == 0:
                         _st_lw(sLsum_off, lane16, warp, ls)
@@ -857,7 +857,7 @@ def compile_pa_decode_tile(
                     corr_b = fx.Vector.from_elements([corr_reg], dtype=fx.Float32).broadcast_to(OP_ELEMS)
                     for vh in range_constexpr(VHE_CHUNKS):
                         v_vh = v_vh_shared[vh]
-                        acc = arith.constant_vector(0.0, T.f32x4)
+                        acc = fx.Vector.filled(4, 0.0, fx.Float32)
                         for s in range_constexpr(NVOPS):
                             # SWAPPED operands (V=A, P=B): output row =
                             # head-dim, output col = query-row=lane16.
@@ -881,7 +881,7 @@ def compile_pa_decode_tile(
                 # QK: each NCHUNK chunk accumulates N_SUBCHUNKS k_steps into an f32x4.
                 frag_Ss = []
                 for a in range_constexpr(NCHUNK):
-                    acc = arith.constant_vector(0.0, T.f32x4)
+                    acc = fx.Vector.filled(4, 0.0, fx.Float32)
                     for s in range_constexpr(N_SUBCHUNKS):
                         acc = _mfma(
                             k_cur[a * N_SUBCHUNKS + s],
@@ -1011,7 +1011,7 @@ def compile_pa_decode_tile(
                 v_vh_batch = [_v_ops(v_page_cur, vh) for vh in range_constexpr(VHE_CHUNKS)]
                 for vh in range_constexpr(VHE_CHUNKS):
                     v_vh = v_vh_batch[vh]
-                    acc = arith.constant_vector(0.0, T.f32x4)
+                    acc = fx.Vector.filled(4, 0.0, fx.Float32)
                     for s in range_constexpr(NVOPS):
                         acc = _mfma(v_vh[s], p_ops[s], acc)
                     op = fx.Vector(acc)
@@ -1028,7 +1028,7 @@ def compile_pa_decode_tile(
         for m in range_constexpr(M_TILES):
             row = m * MFMA_MNK + lane16  # flat (mtp, gqa) query-row for this lane
             l_row = o_final[_l_slot(m)]
-            safe_l = arith.select(l_row > ZERO_F, l_row, fx.Float32(1.0))
+            safe_l = (l_row > ZERO_F).select(l_row, fx.Float32(1.0))
             inv_l = fx.Float32(rcp_f32(safe_l))
             if const_expr(per_token_kv or is_bf16_kv):
                 o_scale = inv_l

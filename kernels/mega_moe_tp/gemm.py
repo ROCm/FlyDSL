@@ -358,7 +358,7 @@ def build_gemm(kc: KernelCtx) -> dict:
     def store_route_fp8(rs, accs, wt, rix, n0, q4, ok, oob, a):
         d, e8s = [], []
         for half in range_constexpr(2):
-            f = [fx.Float32(fx.Vector(accs[2 * half + h])[i]) * wt for h in range(2) for i in range(4)]
+            f = [fx.Vector(accs[2 * half + h])[i] * wt for h in range(2) for i in range(4)]
             am = amax(f)
             am = fx.max(am, am.shuffle_xor(i32(16), i32(64)))
             am = fx.max(am, am.shuffle_xor(i32(32), i32(64)))

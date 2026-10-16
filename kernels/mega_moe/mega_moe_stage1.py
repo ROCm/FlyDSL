@@ -256,13 +256,13 @@ def compile_mega_moe_stage1(
                         _buffer_store(group_done_rsrc, fx.Int32(destination), fx.Int32(0), fx.Int32)
             fx.barrier()
             if tid == fx.Int32(0):
-                fx.rocdl.s_waitcnt(0)
+                fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
                 comm_ops.fence_agent_release()
                 _buffer_store(parity_rsrc, fx.Int32(0), next_parity, fx.Int32)
-                fx.rocdl.s_waitcnt(0)
+                fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
                 comm_ops.fence_agent_release()
                 comm_ops.store_i32_system(gate_addr, fx.Int32(0), gate_epoch)
-            fx.rocdl.s_waitcnt(0)
+            fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
             fx.barrier()
         else:
             if tid == fx.Int32(0):

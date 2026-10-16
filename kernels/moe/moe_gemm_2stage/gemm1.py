@@ -179,7 +179,7 @@ def _build_moe_gemm1_fp8_gateup(
             b_raw = fx.rocdl.make_buffer_tensor(
                 fx.make_view(
                     fx.recast_iter(_w_i32_ptr, _w_i8_iter),
-                    fx.make_layout((fx.Int32(experts * N_e * (K // 2) // 4),), (1,)),
+                    fx.make_layout((experts * N_e * (K // 2) // 4,), (1,)),
                 ),
                 max_size=False,
             )
@@ -264,7 +264,7 @@ def _build_moe_gemm1_fp8_gateup(
         # Prologue: stage-0 loads + LDS write for K-tile 0. Wait only on the A-gather
         # (B stays in flight for the first MFMA); pre-read tile-0 A from LDS.
         _load_gmem(0, 0)
-        rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
+        rocdl.s_waitcnt(vmcnt=_b_loads_per_tile)
         _write_a_lds(0)
         gpu.barrier()
         _read_a_lds(0)
@@ -276,7 +276,7 @@ def _build_moe_gemm1_fp8_gateup(
             if kt + 1 < num_tiles:
                 nxt = (kt + 1) % 2
                 _load_gmem(kt + 1, nxt)
-                rocdl.s_waitcnt(fxh._encode_waitcnt(vmcnt=_b_loads_per_tile))
+                rocdl.s_waitcnt(vmcnt=_b_loads_per_tile)
                 _write_a_lds(nxt)
                 if const_expr(is_int4):
                     _load_weight_i4(kt)
@@ -387,7 +387,7 @@ def _build_moe_gemm1_fp8_gateup(
 
         # Pointers / views.
         in_ptr = fx.recast_iter(in_t, fx.get_iter(arg_x))
-        arg_p_input = fx.make_view(in_ptr, fx.make_layout((M, fx.Int32(K)), (fx.Int32(K), 1)))
+        arg_p_input = fx.make_view(in_ptr, fx.make_layout((M, K), (K, 1)))
 
         max_valid_id = fxh.view_as_torch_tensor(fx.get_iter(arg_max_token_ids), (1,), fx.Int32)[0]
 
@@ -405,7 +405,7 @@ def _build_moe_gemm1_fp8_gateup(
             w_ptr = fx.recast_iter(in_t, fx.get_iter(arg_w))
             if const_expr(is_int4):
                 # Packed-int4: raw byte view; the ki-correct loader indexes per-expert.
-                arg_p_weight = fx.make_view(w_ptr, fx.make_layout((fx.Int32(experts * N_e * (K // 2)),), (1,)))
+                arg_p_weight = fx.make_view(w_ptr, fx.make_layout((experts * N_e * (K // 2),), (1,)))
             else:
                 arg_p_weight = fxh.make_gateup_weight_view(w_ptr, expert_id, contiguous_n, N_e, K)
 

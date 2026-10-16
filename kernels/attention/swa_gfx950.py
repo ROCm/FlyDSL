@@ -8,7 +8,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as _raw
@@ -1039,7 +1039,7 @@ def build_gqa_attn(
         inv = rocdl.rcp(T.f32, norm_vec)
         # Guard against a fully-masked row (norm == 0 -> rcp == inf).
         if const_expr(NT_BAND is not None):
-            inv = arith.select(f32(norm_vec) > 0.0, inv, 0.0)
+            inv = (f32(norm_vec) > 0.0).select(inv, 0.0)
         inv_b = bcast16(f32(inv))
 
         o_base = _store_o_base()

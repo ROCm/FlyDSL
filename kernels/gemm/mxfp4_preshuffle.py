@@ -473,9 +473,9 @@ def launch_gemm(
         accs_init = [Vec.filled(4, 0.0, Float32).ir_value() for _ in range_constexpr(n_acc)]
 
         dma_a_to_lds(kt0, fx.Int32(0))
-        rocdl.s_waitcnt(0)
+        rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)
         gpu.barrier()
-        for iv, state in range(fx.Index(0), fx.Index(k_tiles_local), fx.Index(1), init=accs_init):
+        for iv, state in range(0, k_tiles_local, 1, init=accs_init):
             accs = list(state)
             ivi = fx.Int32(iv)
             cur = ivi % 2
@@ -492,7 +492,7 @@ def launch_gemm(
             dma_a_to_lds(pf_kt, nxt)  # A DMA after B/scale loads -> overlaps the MFMAs
             accs = compute(accs, av, bv, sa_v, sb_v, scale_shift)
             hot_loop_scheduler()
-            rocdl.s_waitcnt(0)  # drain the A DMA before the barrier
+            rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)  # drain the A DMA before the barrier
             gpu.barrier()
             results = yield accs
         accs = results

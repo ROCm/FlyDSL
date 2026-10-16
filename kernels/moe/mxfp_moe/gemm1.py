@@ -381,7 +381,7 @@ def _gemm1_body(
 
     def _inline_quant_core_batch(specs, slot, scale_accum):
         n = len(specs)
-        h_dw = [[fx.Int32(_raw(h_v[j])) for j in range_constexpr(4)] for (_b, _s, h_v) in specs]
+        h_dw = [[h_v[j] for j in range_constexpr(4)] for (_b, _s, h_v) in specs]
         a = [_iq_block_amax(h_dw[i]) for i in range_constexpr(n)]
         s1 = [
             fx.Int32(dpp_utils.update_dpp_i32(_raw(a[i]), _raw(a[i]), 0xB1, 0xF, 0xF, True)) for i in range_constexpr(n)
@@ -394,7 +394,7 @@ def _gemm1_body(
         e8 = [_inline_e8m0(a[i]) for i in range_constexpr(n)]
         for i in range_constexpr(n):
             B128_IDX, SUB, _hv = specs[i]
-            qs_raw = _raw(fx.Float32(_raw(e8[i] << fx.Int32(23)).bitcast(T.f32)))
+            qs_raw = _raw((e8[i] << fx.Int32(23)).bitcast(fx.Float32))
             _iq_pack_store(h_dw[i], qs_raw, B128_IDX, SUB, slot)
             pack_byte = B128_IDX * 2 + SUB
             scale_accum = scale_accum | (e8[i] << fx.Int32(pack_byte * 8))
@@ -604,8 +604,8 @@ def _gemm1_body(
         local_max = fx.absf(result[0])
         for ee in range_constexpr(1, 8):
             local_max = fx.maxnumf(local_max, fx.absf(result[ee]))
-        lm_i = _inline_dpp_quad_amax(fx.Int32(_raw(local_max).bitcast(T.i32)))
-        local_max = fx.Float32(_raw(lm_i).bitcast(T.f32))
+        lm_i = _inline_dpp_quad_amax(local_max.bitcast(fx.Int32))
+        local_max = lm_i.bitcast(fx.Float32)
 
         e8m0, qscale = _e8m0_from_amax(local_max)
         scales_per_mr[mr] = e8m0
