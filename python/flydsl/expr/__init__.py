@@ -14,6 +14,7 @@ from .struct import *
 from .arith import *
 from .math import *
 from .llvm import *
+from .debug import *
 
 from . import utils as utils
 from . import arith as arith

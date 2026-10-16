@@ -13,9 +13,23 @@ import sys
 import pytest
 
 import flydsl.compiler.diagnostics as diagnostics
+from flydsl._mlir import ir
 from flydsl.compiler.diagnostics import DiagRecord, DSLCompileError, SourceFrame, install_excepthook
 
 pytestmark = [pytest.mark.l0_backend_agnostic]
+
+
+def test_location_chain_unwraps_nested_locations():
+    with ir.Context():
+        inner = ir.Location.file("kernel.py", 17, 4)
+        outer = ir.Location.file("launcher.py", 31, 2)
+        named = ir.Location.name("assertion", ir.Location.callsite(inner, [outer]))
+        fused = ir.Location.fused([named, ir.Location.unknown()])
+        frames = diagnostics.location_chain(fused)
+        assert [(frame.filename, frame.line, frame.col) for frame in frames] == [
+            ("kernel.py", 17, 4),
+            ("launcher.py", 31, 2),
+        ]
 
 
 # --------------------------------------------------------------------------- #

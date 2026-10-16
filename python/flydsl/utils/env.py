@@ -246,6 +246,7 @@ class DebugEnvManager(EnvManager):
     env_prefix = "DEBUG"
 
     dump_asm = OptBool(False, description="Dump ASM to file")
+    device_assert = OptBool(False, description="Enable device assertions (diagnostic followed by a trap)")
     dump_ir = OptBool(False, env_var="FLYDSL_DUMP_IR", description="Dump IR to file")
     dump_dir = OptStr(
         str(Path.home() / ".flydsl" / "debug"), env_var="FLYDSL_DUMP_DIR", description="Directory for dumping IR"

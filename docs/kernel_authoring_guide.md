@@ -662,6 +662,27 @@ FLYDSL_DEBUG_AST_DIFF=1 python my_script.py
 
 Shows the diff between original and rewritten AST for debugging control flow transformations.
 
+### 10.4 Device assertions
+
+Enable runtime assertions with `FLYDSL_DEBUG_DEVICE_ASSERT=1` before invoking a JIT kernel. For example, inside a kernel:
+
+```python
+fx.device_assert(index < length, "index exceeds input length")
+```
+
+`condition` must be a boolean scalar or a fixed-size boolean vector. Every
+element owned by the calling thread must be true. For DSL boolean values, use
+`(~active) | condition` to check only active elements. Any failing element prints the assertion
+message, source file and line, and block/thread coordinates, then executes a
+device trap. These assertions are for debugging, not recoverable input
+validation, and do not introduce synchronization between threads.
+
+Assertions are disabled by default and emit no IR when disabled. Python still
+evaluates their arguments. The environment setting participates in the JIT cache
+key, so toggling it selects the corresponding compiled specialization. Python
+`assert` statements retain their existing semantics; use `fx.device_assert` for
+runtime device conditions.
+
 ---
 
 ## 11. Complete example: Preshuffle GEMM
