@@ -84,7 +84,6 @@ private:
   int32_t swizzleShift_ = 0;
 };
 
-llvm::hash_code hash_value(const PointerProperty &pointer);
 /// Debug text only: opaque element type and address space are not printed, so
 /// pointers have no fromString.
 void print(const PointerProperty &pointer, llvm::raw_ostream &os);
@@ -153,13 +152,6 @@ inline int64_t PointerProperty::bitAlignment() const {
   return std::gcd(bitAlignment_, swizzleBits);
 }
 
-inline llvm::hash_code hash_value(const PointerProperty &pointer) {
-  return llvm::hash_combine(
-      pointer.elementType(), pointer.addressSpace(), pointer.elementBitWidth(),
-      pointer.storageElementBitWidth(), pointer.byteAlignment(), pointer.storageBitAlignment(),
-      llvm::hash_combine(pointer.swizzleMask(), pointer.swizzleBase(), pointer.swizzleShift()));
-}
-
 inline void print(const PointerProperty &pointer, llvm::raw_ostream &os) {
   os << "ptr<opaque:" << pointer.elementBitWidth() << ", alignment=" << pointer.byteAlignment();
   if (pointer.storageElementBitWidth() != pointer.elementBitWidth())
@@ -199,6 +191,20 @@ int64_t offsetBitAlignment(const Pointer<Cat> &pointer, const Offset &offset) {
 }
 
 } // namespace detail
+
+template <class Cat> bool operator!=(const Pointer<Cat> &lhs, const Pointer<Cat> &rhs) {
+  return !(lhs == rhs);
+}
+
+template <class Cat, class Offset, std::enable_if_t<is_int_tuple_v<Offset>, int> = 0>
+Pointer<Cat> add_offset(const Pointer<Cat> &pointer, const Offset &offset) {
+  static_assert(std::is_same_v<Cat, category_of<Offset>>);
+  return add_offset(pointer, offset.asRef());
+}
+
+template <class Cat> Pointer<Cat> add_offset(const Pointer<Cat> &pointer, Leaf<Cat> offset) {
+  return add_offset(pointer, IntTuple<Cat>::fromLeaf(offset));
+}
 
 } // namespace mlir::fly::core
 

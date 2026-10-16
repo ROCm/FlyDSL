@@ -55,3 +55,8 @@ add_subdirectory(lib)
 add_subdirectory(tools)
 
 add_subdirectory(python/mlir_flydsl)
+
+if(FLY_UNITTEST)
+  enable_testing()
+  add_subdirectory(tests/core)
+endif()

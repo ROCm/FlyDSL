@@ -56,12 +56,17 @@ public:
 
   bool isLeaf() const;
   bool isStatic() const;
+
   /// The constructor collapses an invalid shape or stride into both.
   bool isError() const { return shape().isError(); }
   /// The first error, in shape then stride order.
   ErrorInfo errorInfo() const { return shape().errorInfo(); }
   ErrorCode errorCode() const { return errorInfo().reason(); }
 
+  /// Always equivalent to slice(coord, *this), including for coordinates without wildcards.
+  /// Core stores None markers as values in Leaf/IntTuple. The same coordinate type can therefore
+  /// describe either case, so its values cannot select between a layout and an index as the C++
+  /// return type. Use layout.crd2idx(coord) explicitly for coordinate-to-index mapping.
   template <class Coord> auto operator()(const Coord &coord) const;
 
   /// Constrained so that is_invocable-style probes (e.g. raw_ostream's
@@ -69,6 +74,13 @@ public:
   template <class Coord0, class Coord1, class... Coords,
             std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int> = 0>
   auto operator()(const Coord0 &c0, const Coord1 &c1, const Coords &...coords) const;
+
+  /// Map a coordinate to an index, equivalent to core::crd2idx(coord, *this).
+  template <class Coord, std::enable_if_t<is_int_tuple_v<Coord>, int> = 0>
+  auto crd2idx(const Coord &coord) const;
+  template <class Coord0, class Coord1, class... Coords,
+            std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int> = 0>
+  auto crd2idx(const Coord0 &c0, const Coord1 &c1, const Coords &...coords) const;
 
   template <class OtherLayout> auto compose(const OtherLayout &other) const;
   template <class Shape> auto with_shape(const Shape &shape) const;
@@ -219,7 +231,8 @@ Tile<Cat> make_tile(const Layout<Cat> &value, const Ts &...values);
 
 template <class Cat, class... Ts> Tile<Cat> make_tile(const Tile<Cat> &value, const Ts &...values);
 
-template <class T, class... Ts, class Cat, std::enable_if_t<is_int_tuple_v<T>, int>>
+template <class T, class... Ts, class Cat = category_of<T>,
+          std::enable_if_t<is_int_tuple_v<T>, int> = 0>
 Tile<Cat> make_tile(const T &value, const Ts &...values);
 
 template <class Cat, class... Ts> Tile<Cat> make_tile(Leaf<Cat> value, const Ts &...values);
@@ -230,12 +243,12 @@ template <class Cat> Tile<Cat> append(const Tile<Cat> &tile, const Tile<Cat> &su
 
 template <int N, class Cat> Tile<Cat> append(const Tile<Cat> &tile, const Tile<Cat> &sub);
 
-template <class T, class Cat> Tile<Cat> shape_to_tile(const T &shape);
+template <class T, class Cat = category_of<T>> Tile<Cat> shape_to_tile(const T &shape);
 
 template <class Cat> auto size(const Tile<Cat> &tile);
 
-template <class Shape, class Stride, class Cat,
-          std::enable_if_t<is_int_tuple_v<Shape> && is_int_tuple_v<Stride>, int>>
+template <class Shape, class Stride, class Cat = category_of<Shape>,
+          std::enable_if_t<is_int_tuple_v<Shape> && is_int_tuple_v<Stride>, int> = 0>
 Layout<Cat> make_layout(Shape &&shape, Stride &&stride);
 
 template <class Shape, class Cat = category_of<Shape>,
@@ -277,15 +290,15 @@ template <class Cat> IntTuple<Cat> coshape(const Layout<Cat> &value, llvm::Array
 
 template <class Cat> Layout<Cat> coalesce_x(const Layout<Cat> &layout);
 
-template <class Profile, class Cat>
+template <class Profile, class Cat = category_of<Profile>>
 Layout<Cat> coalesce_x(const Layout<Cat> &layout, const Profile &targetProfile);
 
-template <class Profile, class Cat>
+template <class Profile, class Cat = category_of<Profile>>
 Layout<Cat> coalesce(const Layout<Cat> &layout, const Profile &targetProfile);
 
-template <class T, class Cat> IntTuple<Cat> coalesce(const T &shape);
+template <class T, class Cat = category_of<T>> IntTuple<Cat> coalesce(const T &shape);
 
-template <class Profile, class Cat>
+template <class Profile, class Cat = category_of<Profile>>
 Layout<Cat> filter(const Layout<Cat> &layout, const Profile &targetProfile);
 
 template <class Cat> Layout<Cat> composition(const Layout<Cat> &lhs, const Layout<Cat> &rhs);
@@ -294,7 +307,8 @@ template <class Cat> Layout<Cat> composition(const Layout<Cat> &lhs, const Tile<
 
 template <class Cat> Layout<Cat> complement(const Layout<Cat> &layout);
 
-template <class Cotarget, class Cat, std::enable_if_t<is_int_tuple_v<Cotarget>, int>>
+template <class Cotarget, class Cat = category_of<Cotarget>,
+          std::enable_if_t<is_int_tuple_v<Cotarget>, int> = 0>
 Layout<Cat> complement(const Layout<Cat> &layout, const Cotarget &cotarget);
 
 template <class Cat> Layout<Cat> right_inverse(const Layout<Cat> &layout);
@@ -305,7 +319,8 @@ template <class Cat> Layout<Cat> max_common_layout(const Layout<Cat> &a, const L
 
 template <class Cat> IntTuple<Cat> max_common_vector(const Layout<Cat> &a, const Layout<Cat> &b);
 
-template <class A, class B, class Cat> Layout<Cat> domain_distribute(const A &a, const B &b);
+template <class A, class B, class Cat = category_of<A>>
+Layout<Cat> domain_distribute(const A &a, const B &b);
 
 template <class Cat> Layout<Cat> nullspace(const Layout<Cat> &layout);
 
@@ -318,15 +333,16 @@ template <class Cat> Layout<Cat> logical_divide(const Layout<Cat> &layout, const
 template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int> = 0>
 Layout<Cat> tiled_divide(const Layout<Cat> &layout, const Tiler &tiler);
 
-template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int>>
+template <class Tiler, class Cat = category_of<Tiler>,
+          std::enable_if_t<!is_int_tuple_v<Tiler>, int> = 0>
 Layout<Cat> flat_divide(const Layout<Cat> &layout, const Tiler &tiler);
 
 template <class Cat> Layout<Cat> logical_product(const Layout<Cat> &block, const Tile<Cat> &tiler);
 
-template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int>>
+template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int> = 0>
 Layout<Cat> tiled_product(const Layout<Cat> &block, const Tiler &tiler);
 
-template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int>>
+template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int> = 0>
 Layout<Cat> flat_product(const Layout<Cat> &block, const Tiler &tiler);
 
 template <class Cat>
@@ -334,7 +350,7 @@ Layout<Cat> blocked_product(const Layout<Cat> &block, const Layout<Cat> &tiler);
 
 template <class Cat> Layout<Cat> raked_product(const Layout<Cat> &block, const Layout<Cat> &tiler);
 
-template <class TargetShape, class Order, class Cat>
+template <class TargetShape, class Order = LayoutLeft, class Cat = category_of<TargetShape>>
 Layout<Cat> tile_to_shape(const Layout<Cat> &block, const TargetShape &targetShape,
                           const Order &order = {});
 
@@ -461,7 +477,7 @@ auto Layout<Cat>::get_flat_coord(const Index &index) const {
 template <class Cat>
 template <class Index>
 auto Layout<Cat>::get_1d_coord(const Index &index) const {
-  return crd2idx(get_hier_coord(index), shape());
+  return core::crd2idx(get_hier_coord(index), shape());
 }
 
 template <class Cat>
@@ -767,8 +783,7 @@ template <class Cat, class... Ts> Tile<Cat> make_tile(const Tile<Cat> &value, co
   return Tile<Cat>::getTuple(children);
 }
 
-template <class T, class... Ts, class Cat = category_of<T>,
-          std::enable_if_t<is_int_tuple_v<T>, int> = 0>
+template <class T, class... Ts, class Cat, std::enable_if_t<is_int_tuple_v<T>, int>>
 Tile<Cat> make_tile(const T &value, const Ts &...values) {
   auto children =
       std::array<Tile<Cat>, 1 + sizeof...(Ts)>{detail::toTile(value), detail::toTile(values)...};
@@ -806,7 +821,7 @@ template <int N, class Cat> Tile<Cat> append(const Tile<Cat> &tile, const Tile<C
   return append(tile, sub, N);
 }
 
-template <class T, class Cat = category_of<T>> Tile<Cat> shape_to_tile(const T &shape) {
+template <class T, class Cat> Tile<Cat> shape_to_tile(const T &shape) {
   auto value = shape.asRef();
   if (value.isLeaf())
     return detail::toTile(value);
@@ -831,15 +846,15 @@ template <class Cat> auto size(const Tile<Cat> &tile) {
   return result;
 }
 
-template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int> = 0>
+template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int>>
 Layout<Cat> tiled_product(const Layout<Cat> &block, const Tiler &tiler);
 
 //===----------------------------------------------------------------------===//
 // Layout Constructors
 //===----------------------------------------------------------------------===//
 
-template <class Shape, class Stride, class Cat = category_of<Shape>,
-          std::enable_if_t<is_int_tuple_v<Shape> && is_int_tuple_v<Stride>, int> = 0>
+template <class Shape, class Stride, class Cat,
+          std::enable_if_t<is_int_tuple_v<Shape> && is_int_tuple_v<Stride>, int>>
 Layout<Cat> make_layout(Shape &&shape, Stride &&stride) {
   static_assert(std::is_same_v<Cat, category_of<Stride>>);
   return Layout<Cat>(std::forward<Shape>(shape), std::forward<Stride>(stride));
@@ -1124,6 +1139,19 @@ auto crd2idx(const Coord &coord, const Layout<Cat> &layout) {
   return crd2idx(coord, layout.shape(), layout.stride());
 }
 
+template <class Cat>
+template <class Coord, std::enable_if_t<is_int_tuple_v<Coord>, int>>
+auto Layout<Cat>::crd2idx(const Coord &coord) const {
+  return core::crd2idx(coord, *this);
+}
+
+template <class Cat>
+template <class Coord0, class Coord1, class... Coords,
+          std::enable_if_t<is_make_tuple_arg_v<Coord0, Coord1, Coords...>, int>>
+auto Layout<Cat>::crd2idx(const Coord0 &c0, const Coord1 &c1, const Coords &...coords) const {
+  return crd2idx(make_tuple(c0, c1, coords...));
+}
+
 template <class Coord, class Cat = category_of<Coord>>
 auto slice(const Coord &coord, const Layout<Cat> &layout) {
   return make_layout(slice(coord, layout.shape()), slice(coord, layout.stride()));
@@ -1251,7 +1279,7 @@ template <class Cat> Layout<Cat> coalesce_x(const Layout<Cat> &layout) {
   return make_layout(detail::tupleFromLeaves<Cat>(shapes), detail::tupleFromLeaves<Cat>(strides));
 }
 
-template <class Profile, class Cat = category_of<Profile>>
+template <class Profile, class Cat>
 Layout<Cat> coalesce_x(const Layout<Cat> &layout, const Profile &targetProfile) {
   if (targetProfile.isLeaf())
     return coalesce_x(layout);
@@ -1266,7 +1294,7 @@ Layout<Cat> coalesce_x(const Layout<Cat> &layout, const Profile &targetProfile) 
       AlgebraOp::CoalesceX);
 }
 
-template <class Profile, class Cat = category_of<Profile>>
+template <class Profile, class Cat>
 Layout<Cat> coalesce(const Layout<Cat> &layout, const Profile &targetProfile) {
   if (targetProfile.isLeaf())
     return coalesce(layout);
@@ -1282,7 +1310,7 @@ Layout<Cat> coalesce(const Layout<Cat> &layout, const Profile &targetProfile) {
       AlgebraOp::Coalesce);
 }
 
-template <class T, class Cat = category_of<T>> IntTuple<Cat> coalesce(const T &shape) {
+template <class T, class Cat> IntTuple<Cat> coalesce(const T &shape) {
   auto flat = flatten(shape);
 
   llvm::SmallVector<IntTuple<Cat>, 8> result;
@@ -1298,7 +1326,7 @@ template <class T, class Cat = category_of<T>> IntTuple<Cat> coalesce(const T &s
   return detail::tupleFromLeaves<Cat>(result);
 }
 
-template <class Profile, class Cat = category_of<Profile>>
+template <class Profile, class Cat>
 Layout<Cat> filter(const Layout<Cat> &layout, const Profile &targetProfile) {
   if (targetProfile.isLeaf())
     return filter(layout);
@@ -1707,8 +1735,7 @@ template <class Cat> Layout<Cat> complement(const Layout<Cat> &layout) {
   }
 }
 
-template <class Cotarget, class Cat = category_of<Cotarget>,
-          std::enable_if_t<is_int_tuple_v<Cotarget>, int> = 0>
+template <class Cotarget, class Cat, std::enable_if_t<is_int_tuple_v<Cotarget>, int>>
 Layout<Cat> complement(const Layout<Cat> &layout, const Cotarget &cotarget) {
   if (auto error = detail::firstError(layout, cotarget))
     return Layout<Cat>::getError(error->withFrame(AlgebraOp::Complement));
@@ -1988,8 +2015,7 @@ template <class Cat> IntTuple<Cat> max_common_vector(const Layout<Cat> &a, const
     return IntTuple<Cat>::getOne();
 }
 
-template <class A, class B, class Cat = category_of<A>>
-Layout<Cat> domain_distribute(const A &a, const B &b) {
+template <class A, class B, class Cat> Layout<Cat> domain_distribute(const A &a, const B &b) {
   auto flatA = flatten(shape(a));
   if (flatA.isError())
     return Layout<Cat>::getError(flatA.errorInfo().withFrame(AlgebraOp::DomainDistribute));
@@ -2097,13 +2123,24 @@ Layout<Cat> zipped_divide(const Layout<Cat> &layout, const Tiler &tiler) {
   return zipped_divide(layout, shape_to_tile(tiler));
 }
 
+namespace detail {
+
+// The slice coordinate that unpacks a group: a leaf group stays whole and a tuple group is unpacked
+// by its rank, a rank-1 group too.
+template <class Cat> IntTuple<Cat> unpackGroup(IntTupleRef<Cat> group) {
+  auto none = IntTuple<Cat>::getNone();
+  return group.isLeaf() ? none : tuple_repeat(none, group.rank());
+}
+
+} // namespace detail
+
 template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int>>
 Layout<Cat> tiled_divide(const Layout<Cat> &layout, const Tiler &tiler) {
   auto result = zipped_divide(layout, tiler);
   if (result.isError())
     return detail::tagError(result, AlgebraOp::TiledDivide);
-  auto R1 = rank<1>(result);
-  return slice(make_tuple(IntTuple<Cat>::getNone(), repeat(IntTuple<Cat>::getNone(), R1)), result);
+  return slice(make_tuple(IntTuple<Cat>::getNone(), detail::unpackGroup(get<1>(result.shape()))),
+               result);
 }
 
 template <class Tiler, class Cat = category_of<Tiler>,
@@ -2112,17 +2149,14 @@ Layout<Cat> tiled_divide(const Layout<Cat> &layout, const Tiler &tiler) {
   return tiled_divide(layout, shape_to_tile(tiler));
 }
 
-template <class Tiler, class Cat = category_of<Tiler>,
-          std::enable_if_t<!is_int_tuple_v<Tiler>, int> = 0>
+template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int>>
 Layout<Cat> flat_divide(const Layout<Cat> &layout, const Tiler &tiler) {
   auto result = zipped_divide(layout, tiler);
   if (result.isError())
     return detail::tagError(result, AlgebraOp::FlatDivide);
-  auto R0 = rank<0>(result);
-  auto R1 = rank<1>(result);
-  return slice(
-      make_tuple(repeat(IntTuple<Cat>::getNone(), R0), repeat(IntTuple<Cat>::getNone(), R1)),
-      result);
+  auto shape = result.shape();
+  return slice(make_tuple(detail::unpackGroup(get<0>(shape)), detail::unpackGroup(get<1>(shape))),
+               result);
 }
 
 template <class Tiler, class Cat = category_of<Tiler>,
@@ -2183,9 +2217,8 @@ Layout<Cat> tiled_product(const Layout<Cat> &block, const Tiler &tiler) {
   auto result = zipped_product(block, tiler);
   if (result.isError())
     return detail::tagError(result, AlgebraOp::TiledProduct);
-  return slice(
-      make_tuple(IntTuple<Cat>::getNone(), repeat(IntTuple<Cat>::getNone(), rank<1>(result))),
-      result);
+  return slice(make_tuple(IntTuple<Cat>::getNone(), detail::unpackGroup(get<1>(result.shape()))),
+               result);
 }
 
 template <class Tiler, class Cat = category_of<Tiler>,
@@ -2194,13 +2227,13 @@ Layout<Cat> tiled_product(const Layout<Cat> &block, const Tiler &tiler) {
   return tiled_product(block, shape_to_tile(tiler));
 }
 
-template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int> = 0>
+template <class Tiler, class Cat, std::enable_if_t<!is_int_tuple_v<Tiler>, int>>
 Layout<Cat> flat_product(const Layout<Cat> &block, const Tiler &tiler) {
   auto result = zipped_product(block, tiler);
   if (result.isError())
     return detail::tagError(result, AlgebraOp::FlatProduct);
-  return slice(make_tuple(repeat(IntTuple<Cat>::getNone(), rank<0>(result)),
-                          repeat(IntTuple<Cat>::getNone(), rank<1>(result))),
+  auto shape = result.shape();
+  return slice(make_tuple(detail::unpackGroup(get<0>(shape)), detail::unpackGroup(get<1>(shape))),
                result);
 }
 
@@ -2228,10 +2261,13 @@ template <class Cat> Layout<Cat> raked_product(const Layout<Cat> &block, const L
   auto result = logical_product(append(block, R), append(tiler, R));
   if (result.isError())
     return detail::tagError(result, AlgebraOp::RakedProduct);
-  return detail::tagError(zip(get(result, 1), get(result, 0)), AlgebraOp::RakedProduct);
+  // each mode is coalesced, where CuTe C++ keeps the zipped modes.
+  return detail::tagError(
+      coalesce(zip(get(result, 1), get(result, 0)), tuple_repeat(IntTuple<Cat>::getOne(), R)),
+      AlgebraOp::RakedProduct);
 }
 
-template <class TargetShape, class Order = LayoutLeft, class Cat = category_of<TargetShape>>
+template <class TargetShape, class Order, class Cat>
 Layout<Cat> tile_to_shape(const Layout<Cat> &block, const TargetShape &targetShape,
                           const Order &order) {
   auto padded_block = append(block, targetShape.rank());
