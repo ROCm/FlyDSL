@@ -63,17 +63,6 @@ def _per_1x32_fp4_quant(x):
     return quantized.view(*shape[:-1], -1), scale_e8m0.view(*shape[:-1], shape[-1] // 32).view(torch.uint8)
 
 
-def _per_1x32_mxfp8_quant(x):
-    fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
-    shape = x.shape
-    rows = x.contiguous().view(-1, 32).float()
-    scale_e8m0 = gemm_common_utils.f32_to_e8m0(rows.abs().amax(dim=1).clamp_min(1e-30) / fp8_max)
-    scale_f32 = gemm_common_utils.e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
-    quantized = (rows / scale_f32[:, None]).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
-    scales = scale_e8m0.view(*shape[:-1], shape[-1] // 32).view(torch.uint8)
-    return quantized.view(shape).contiguous(), scales.contiguous()
-
-
 # Chained A8W4 accuracy gate for 61 residual layers.
 _CHAIN_TOL = 0.10
 
@@ -258,7 +247,7 @@ def _dequant_mx_to_f32(t_f32, quant_mode):
     orig = tuple(t_f32.shape)
     t2d = t_f32.reshape(-1, orig[-1])
     if quant_mode == "fp8":
-        q, s = _per_1x32_mxfp8_quant(t2d)  # q: fp8_e4m3fn [., K]; s: e8m0 u8 [., K//32]
+        q, s = gemm_common_utils.per_1x32_f8_quant(t2d)  # q: fp8_e4m3fn [., K]; s: e8m0 u8 [., K//32]
         vf = q.float()
     else:
         q, s = _chunked_fp4_quant(t2d)  # q: fp4x2 [., K//2]; s: e8m0 u8 [., K//32]
