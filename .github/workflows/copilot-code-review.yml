@@ -1,0 +1,26 @@
+name: Copilot Code Review Setup
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/copilot-code-review.yml
+  workflow_dispatch:
+
+jobs:
+  # Copilot code review only runs a job with this exact name, before its firewall starts.
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The evidence block in .github/skills/code-review needs the full history and the base
+      # branches, and cannot fetch them once the firewall is up; Copilot may override fetch-depth.
+      - name: Fetch full history and branches
+        run: |
+          [ "$(git rev-parse --is-shallow-repository)" = false ] || git fetch -q --unshallow origin
+          git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
