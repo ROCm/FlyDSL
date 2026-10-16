@@ -299,11 +299,13 @@ struct PyCopyOpCDNA5TensorLoadType : PyConcreteType<PyCopyOpCDNA5TensorLoadType>
            int32_t cacheModifier, int32_t iterCount, int32_t padInterval, int32_t padAmount,
            DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
+          auto tensor2tdmTy = ::mlir::dyn_cast<IntTupleType>(unwrap(tensor2tdm));
+          if (!tensor2tdmTy)
+            throw std::invalid_argument("tensor2tdm must be !fly.int_tuple (IntTupleType)");
           return PyCopyOpCDNA5TensorLoadType(
               context->getRef(),
               wrap(CopyOpCDNA5TensorLoadType::get(
-                  ctx, tileShape, unwrap(dataType),
-                  ::mlir::dyn_cast<IntTupleType>(unwrap(tensor2tdm)).getAttr(), atomicBarrier,
+                  ctx, tileShape, unwrap(dataType), tensor2tdmTy.getAttr(), atomicBarrier,
                   cacheModifier, iterCount, padInterval, padAmount)));
         },
         "tile_shape"_a, "data_type"_a, "tensor2tdm"_a, "atomic_barrier"_a = false,
@@ -323,10 +325,12 @@ struct PyCopyOpCDNA5TensorStoreType : PyConcreteType<PyCopyOpCDNA5TensorStoreTyp
         [](std::vector<int32_t> tileShape, PyType &dataType, PyType &tensor2tdm, bool atomicBarrier,
            int32_t cacheModifier, int32_t iterCount, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
+          auto tensor2tdmTy = ::mlir::dyn_cast<IntTupleType>(unwrap(tensor2tdm));
+          if (!tensor2tdmTy)
+            throw std::invalid_argument("tensor2tdm must be !fly.int_tuple (IntTupleType)");
           return PyCopyOpCDNA5TensorStoreType(
               context->getRef(), wrap(CopyOpCDNA5TensorStoreType::get(
-                                     ctx, tileShape, unwrap(dataType),
-                                     ::mlir::dyn_cast<IntTupleType>(unwrap(tensor2tdm)).getAttr(),
+                                     ctx, tileShape, unwrap(dataType), tensor2tdmTy.getAttr(),
                                      atomicBarrier, cacheModifier, iterCount)));
         },
         "tile_shape"_a, "data_type"_a, "tensor2tdm"_a, "atomic_barrier"_a = false,
