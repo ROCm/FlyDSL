@@ -23,10 +23,10 @@ def _shuffle(value, distance, width):
     return _shuffle_value(value, distance, width, mode="xor")
 
 
-def _network(keys, values, width, compare_op, valid_items):
+def _network(keys, values, width, compare_op, valid_items, _dtype=None, _value_dtype=None):
     descending = False
     width = _resolve_warp_width(width, "warp_bitonic_sort width")
-    items, payload, vector = _unpack(keys, values)
+    items, payload, vector = _unpack(keys, values, _value_dtype, _dtype)
     count = len(items)
     _validate_valid_items(valid_items, width * count)
     lane = lane_id() % width
@@ -86,6 +86,8 @@ def warp_bitonic_sort(
     width: int | None = None,
     compare_op,
     valid_items: int | Integer | None = None,
+    _dtype=None,
+    _value_dtype=None,
 ):
     """Sort a striped logical-warp tile with a bitonic network.
 
@@ -94,9 +96,13 @@ def warp_bitonic_sort(
     Equal keys may be reordered; this operation does not guarantee stability.
 
     Args:
-        keys: This lane's fixed-size Vector or tuple/list of keys in striped order, with a nonempty item count. Supply compare_op when keys
-            require a custom ordering.
-        values: Optional payloads with the same item count and shape as keys.
+        keys: Nonempty outer tuple/list of complete keys in striped order.
+            For one key, pass ``[key]`` or ``(key,)``, including Vector or Struct
+            keys. A Vector can represent a sequence of Numeric scalar keys.
+            Supply compare_op when keys require a custom ordering.
+        values: Optional outer sequence of payloads with the same item count
+            as keys. Payload element types and component shapes are independent
+            of key element types and component shapes.
         width: Compile-time power-of-two logical width, at most the native warp width. None
             uses the native width.
         compare_op: Required strict weak ordering predicate (a, b). Use a < b for
@@ -146,21 +152,46 @@ def warp_bitonic_sort(
     """
     if not callable(compare_op):
         raise TypeError("compare_op must be a strict ordering callable")
-    if not _is_items(keys):
-        raise TypeError("keys must be a nonempty Vector/tuple/list")
-    return _network(keys, values, width, compare_op, valid_items)
+    if not _is_items(keys, _dtype):
+        raise TypeError(
+            "keys must be a nonempty outer item sequence; wrap one complete key in [key] or (key,). "
+            "A Vector represents an item sequence only for a Numeric key dtype"
+        )
+    return _network(keys, values, width, compare_op, valid_items, _dtype, _value_dtype)
 
 
 class WarpBitonicSort(WarpPrimitive):
     """Sort striped logical-warp keys and optional payloads.
 
-    Specialize with ``[dtype, width, items_per_thread]``. ``None`` selects the target's
-    physical warp width. Every lane in each logical warp must participate.
+    Specialize with ``WarpBitonicSort[dtype, width, items_per_thread]``. The parameters
+    below are compile-time positional arguments to ``WarpBitonicSort[...]``, in bracket
+    order.
+
+    Args:
+        dtype: Required key element type for keys only, or (key_dtype, value_dtype) for
+            key/value pairs. Each type describes one complete element, including Vector or
+            Struct elements; payload types are independent of key types. Supply a strict
+            ordering compare_op when invoking the sort.
+        width: Required positional slot: a positive power-of-two Python int no larger than
+            the target physical warp width, or None to use that physical width. This is the
+            number of participating lanes in each logical warp, not the block thread count.
+            Pass None explicitly to use the physical width while specifying
+            items_per_thread.
+        items_per_thread: Required positive Python int giving the number of complete items
+            owned by each lane; the logical-warp tile has width * items_per_thread items.
+            Element components/fields do not increase this count. Pair payloads have the
+            same count as keys. The count need not be a power of two.
+
+    Every lane in each logical warp must participate.
     SharedStorage is Empty: explicit storage has a zero-byte layout.
     There is no algorithm parameter.
     The corresponding ``warp_*`` functions infer dtype and tile extent.
-    Use ``(key_dtype, value_dtype)`` as dtype when carrying payloads.
     Key-only specializations reject payloads; pair specializations require them.
+
+    Sort keys are an outer item sequence, even when items_per_thread is one:
+    pass ``[key]`` or ``(key,)`` for a complete Vector or Struct key.
+    A bare Vector is an item sequence only for a Numeric key dtype.
+    Pair payloads also use an outer sequence with one payload per key.
 
     Examples:
         P = fx.coop.WarpBitonicSort[fx.Int32, 8, 2]
@@ -192,9 +223,13 @@ class WarpBitonicSort(WarpPrimitive):
             storage: Optional instance of this specialization's empty SharedStorage.
                 Allocate Array[SharedStorage, num_warps] with SharedAllocator,
                 peek the array and pass this warp's element. None is also allowed.
-            keys: This lane's fixed-size Vector or tuple/list of keys in striped order, with a nonempty item count. Supply compare_op when keys
-                require a custom ordering.
-            values: Optional payloads with the same item count and shape as keys.
+            keys: Nonempty outer tuple/list of complete keys in striped order.
+                For one key, pass ``[key]`` or ``(key,)``, including Vector or Struct
+                keys. A Vector can represent a sequence of Numeric scalar keys.
+                Supply compare_op when keys require a custom ordering.
+            values: Optional outer sequence of payloads with the same item count
+                as keys. Payload element types and component shapes are independent
+                of key element types and component shapes.
             compare_op: Required strict weak ordering predicate (a, b). Use a < b for
                 ascending order or a > b for descending order.
                 When NaNs participate, supply a comparator defining a consistent NaN order.
@@ -212,5 +247,12 @@ class WarpBitonicSort(WarpPrimitive):
         if values is not None:
             values = cls._prepare(values, dtype=cls.value_dtype)
         return cls._invoke(
-            warp_bitonic_sort, keys, values, compare_op=compare_op, valid_items=valid_items, storage=storage
+            warp_bitonic_sort,
+            keys,
+            values,
+            compare_op=compare_op,
+            valid_items=valid_items,
+            storage=storage,
+            _dtype=cls.dtype,
+            _value_dtype=cls.value_dtype,
         )

@@ -18,7 +18,6 @@ from ._values import (
     _as_items,
     _from_items,
     _is_items,
-    _is_struct_items,
     _item_dtype,
     _items_dtype,
     _normalize_value,
@@ -33,6 +32,8 @@ def _cast_value(dtype, value):
     """Convert a scalar seed, preserving an already constructed record."""
     if isinstance(value, dtype):
         return value
+    if isinstance(value, Vector) and issubclass(dtype, Vector):
+        return _record_cast(value, dtype)
     if issubclass(dtype, Numeric):
         return dtype(value)
     return dtype(**value) if isinstance(value, dict) else _record_default(dtype, value)
@@ -41,13 +42,21 @@ def _cast_value(dtype, value):
 def _convert_value(value, dtype):
     """Apply a specialization's element type to a scalar or blocked item range."""
     value = _normalize_value(value)
-    if isinstance(value, (Numeric, Vector)):
-        return value.to(dtype)
-    if isinstance(value, (tuple, list)):
-        return _from_items([_cast_value(dtype, item) for item in value], dtype=dtype)
-    if _is_struct_items(value):
-        return _from_items([_cast_value(dtype, item) for item in _as_items(value)], dtype=dtype, like=value)
-    return value if isinstance(value, dtype) else _record_cast(value, dtype)
+    if _is_items(value, dtype):
+        return _from_items([_convert_item(value[i], dtype) for i in range(len(value))], dtype=dtype, like=value)
+    return _convert_item(value, dtype)
+
+
+def _convert_item(value, dtype):
+    """Convert one declared element without splatting or reshaping its data."""
+    value = _normalize_value(value)
+    if issubclass(dtype, Numeric):
+        if isinstance(value, (int, float, bool, Numeric)):
+            return dtype(value)
+        raise TypeError(f"expected a scalar {dtype.__name__} item, got {type(value).__name__}")
+    if issubclass(dtype, Vector) and not isinstance(value, Vector):
+        raise TypeError(f"expected one complete {dtype.__name__} Vector item, got {type(value).__name__}")
+    return _record_cast(value, dtype)
 
 
 def _normalize_columns(value):
@@ -57,7 +66,7 @@ def _normalize_columns(value):
 
 def _cast_seed(value, init):
     """Convert a scalar or per-column seed to the input item type."""
-    if isinstance(value, (tuple, list)) or _is_struct_items(value):
+    if isinstance(value, (tuple, list)):
         dtype = _items_dtype(value)
         if _is_items(init):
             seeds = _as_items(init)
@@ -107,12 +116,7 @@ def _resolve_warp_width(width, what):
 
 
 def _combine(op, lhs, rhs):
-    if (
-        isinstance(lhs, (tuple, list))
-        or isinstance(rhs, (tuple, list))
-        or _is_struct_items(lhs)
-        or _is_struct_items(rhs)
-    ):
+    if isinstance(lhs, (tuple, list)) or isinstance(rhs, (tuple, list)):
         template = lhs if _is_items(lhs) else rhs
         left = _as_items(lhs) if _is_items(lhs) else (lhs,) * len(template)
         right = _as_items(rhs) if _is_items(rhs) else (rhs,) * len(template)
@@ -135,7 +139,10 @@ def _combine(op, lhs, rhs):
     if op is ReductionOp.MIN:
         return _min(lhs, rhs)
     if callable(op):
-        return op(lhs, rhs)
+        result = _normalize_value(op(lhs, rhs))
+        if _item_dtype(result) is not _item_dtype(lhs):
+            raise TypeError("a reduction/scan operator must return the complete input element type")
+        return result
     raise TypeError(f"expected ReductionOp or a binary callable, got {op!r}")
 
 
@@ -157,6 +164,8 @@ def _representable_extreme(dtype, lowest):
     from an empty one, and an infinity is exactly what ``fx.max`` / ``fx.min``
     leave unchanged against anything else.
     """
+    if issubclass(dtype, Vector):
+        return dtype(_representable_extreme(dtype(0).dtype, lowest))
     if dtype.is_float:
         return dtype(float("-inf") if lowest else float("inf"))
     if dtype.width == 1:
@@ -201,9 +210,9 @@ def _validate_valid_items(valid_items, size):
         raise ValueError(f"valid_items must be between 0 and {size}, got {valid_items}")
 
 
-def _validate_scalar_valid_items(value, valid_items, size):
+def _validate_scalar_valid_items(value, valid_items, size, dtype=None):
     """Reduce/scan guarded overloads accept one element per thread."""
-    if valid_items is not None and _is_items(value):
+    if valid_items is not None and _is_items(value, dtype):
         raise TypeError("valid_items is supported only for a single item per thread; omit it for an item range")
     _validate_valid_items(valid_items, size)
 
@@ -218,12 +227,14 @@ def _seed(value, op, init):
     return value if init is None else _combine(op, _cast_seed(value, init), value)
 
 
-def _thread_partial(value, op):
+def _thread_partial(value, op, dtype=None):
     """Fold a per-thread Numeric/record item range, preserving item order."""
+    if not _is_items(value, dtype):
+        return _normalize_value(value)
     if isinstance(value, Vector) and value.dtype is not Boolean and isinstance(op, ReductionOp):
         # Preserve the native vector reduction tree for existing numeric tiles.
         return value.reduce(op)
-    items = _as_items(value)
+    items = _as_items(value, dtype)
     partial = items[0]
     for item in items[1:]:
         partial = _combine(op, partial, item)
