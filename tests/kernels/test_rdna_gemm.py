@@ -437,9 +437,10 @@ MEASURED_TILES = [
     pytest.param((32, 11008, 4096), TILE_32x64x64, id="32x11008x4096"),
     pytest.param((48, 4096, 4096), TILE_16x32x64, id="48x4096x4096"),
     pytest.param((144, 144, 128), TILE_16x16x64, id="144x144x128"),
-    # 528 divides neither 32 nor 64 in N, but padding M to 544 costs 3% and
-    # buys the 32-row tile, which is 1.05x the 16-row one here.
-    pytest.param((528, 528, 1024), TILE_32x16x64, id="528x528x1024"),
+    # 528 divides neither 32 nor 64 in either dimension. Padding both to 576
+    # wastes 19% of the output and still wins big: 16.7 us on the 64-wide tile
+    # against 23.0 us on the widest tile that divides 528 exactly.
+    pytest.param((528, 528, 1024), TILE_64x64x64, id="528x528x1024"),
     # M below the WMMA atom, and an M that divides nothing. Padding M is free,
     # so these reach the same tiles a well-aligned M of the same size would.
     pytest.param((1, 4096, 4096), TILE_16x16x64, id="1x4096x4096"),
@@ -487,6 +488,7 @@ def test_pick_tile_matches_the_measured_shapes(shape, expected):
 # floor: one wave holding a single 16x16x16 WMMA atom.
 NARROW_TILES = [
     pytest.param(TILE_32x32x32, (64, 64, 128), id="32x32x32"),
+    pytest.param(TILE_32x16x64, (64, 48, 256), id="32x16x64"),
     pytest.param(TILE_16x32x64, (48, 64, 256), id="16x32x64"),
     pytest.param(TILE_16x16x64, (48, 48, 256), id="16x16x64"),
     pytest.param(TILE_16x16x32, (80, 112, 96), id="16x16x32"),
@@ -533,6 +535,11 @@ IRREGULAR_SHAPES = [
     (64, 64, 64),
     (128, 128, 96),
     (1024, 1024, 48),
+    # neither extent a multiple of anything
+    (17, 4097, 1024),
+    (1000, 1001, 1024),
+    (3402, 3402, 1024),
+    (100, 50257, 512),  # the gpt2 lm_head of one short sequence
 ]
 
 
@@ -565,6 +572,39 @@ def test_gemm_pads_m_without_touching_memory_past_it(M):
 
     assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
     assert (backing[M:] == 7.0).all(), "a store ran past the last real row of C"
+
+
+# An N that no block tile divides, including N below the 16-column WMMA atom.
+RAGGED_N = [1, 3, 8, 15, 17, 100, 1001, 3402]
+
+
+@pytest.mark.parametrize("N", RAGGED_N)
+def test_gemm_masks_n_without_touching_the_next_row(N):
+    """A ragged N is the one edge that needs a predicate rather than a bound.
+
+    A column past the end of a row is a valid offset into the next one, so the
+    padded columns would race with that row's own stores instead of falling off
+    the descriptor. C is a tight view -- ``ldc == N`` -- so a column the mask
+    missed lands on a real element that the reference check then catches, and
+    the final tile's overhang lands in the guard after it.
+    """
+    _requires_rdna3()
+    from kernels.gemm import rdna3_f16_gemm_autotune as gemm_autotune
+
+    M = K = 256
+    torch.manual_seed(42)
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 0.1
+    B_T = torch.randn(N, K, dtype=torch.bfloat16, device="cuda") * 0.1
+
+    guard = 256  # wider than the widest block tile
+    backing = torch.full((M * N + guard,), 7.0, dtype=torch.bfloat16, device="cuda")
+    C = backing[: M * N].view(M, N)
+
+    gemm_autotune.rdna3_gemm_autotuned(C, A, B_T)
+    torch.cuda.synchronize()
+
+    assert verify_output(C.float(), A.float() @ B_T.float().T, atol=0.05, rtol=0.05)
+    assert (backing[M * N :] == 7.0).all(), "a store ran past the last real column of C"
 
 
 @pytest.mark.parametrize("shape", IRREGULAR_SHAPES, ids=_shape_id)

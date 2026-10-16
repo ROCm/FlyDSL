@@ -121,13 +121,20 @@ def create_wmma_gemm_module(
     ldb=None,
     ldc=None,
     m_valid=None,
+    n_valid=None,
 ):
+    # M and N may be rounded-up tile extents over ``m_valid`` real rows of A/C
+    # and ``n_valid`` real rows of B_T (columns of C). The strides describe the
+    # real operands, so they are checked against the real extents.
+    m_rows = M if m_valid is None else int(m_valid)
+    n_cols = N if n_valid is None else int(n_valid)
     ld_a = K if lda is None else int(lda)
     ld_b = K if ldb is None else int(ldb)
-    ld_c = N if ldc is None else int(ldc)
-    if ld_a < K or ld_b < K or ld_c < N:
+    ld_c = n_cols if ldc is None else int(ldc)
+    if ld_a < K or ld_b < K or ld_c < n_cols:
         raise ValueError(
-            f"leading dimensions must cover the operands: lda={ld_a}, ldb={ld_b} " f"need K={K}, ldc={ld_c} needs N={N}"
+            f"leading dimensions must cover the operands: lda={ld_a}, ldb={ld_b} "
+            f"need K={K}, ldc={ld_c} needs N={n_cols}"
         )
     vec_elems = 16 // (2 if in_dtype in ("bf16", "f16") else 4)
     if ld_a % vec_elems or ld_b % vec_elems:
@@ -182,16 +189,21 @@ def create_wmma_gemm_module(
     assert N % BLOCK_N == 0
     assert K % BLOCK_K == 0
 
-    # M may be a rounded-up tile extent covering ``m_rows`` real rows of A and
-    # C. The rows past the end are not masked in the loop: the A and C buffer
-    # descriptors are sized to the real rows, so the hardware returns zero for
-    # the loads (a zero row contributes nothing to the product) and drops the
-    # stores. Nothing is masked in N or K, which have no such free edge -- a
-    # column past the end of a row is a valid offset into the next one.
-    m_rows = M if m_valid is None else int(m_valid)
+    # Rows past ``m_rows`` of A and of B_T are not masked in the loop: those
+    # descriptors stop at the real row count, so the hardware returns zero for
+    # the loads -- a zero row contributes nothing to the product -- at no cost
+    # in the k-pipeline. The same holds for the C rows past ``m_rows``, whose
+    # stores land past the descriptor and are dropped.
+    #
+    # The C columns past ``n_cols`` get no such free edge: within a row they
+    # are a valid offset into the next one, and would race with that row's own
+    # stores. They are the one thing here that needs a real predicate.
     if not M - BLOCK_M < m_rows <= M:
         raise ValueError(f"m_valid={m_rows} must round up to M={M} with BLOCK_M={BLOCK_M}")
+    if not N - BLOCK_N < n_cols <= N:
+        raise ValueError(f"n_valid={n_cols} must round up to N={N} with BLOCK_N={BLOCK_N}")
     a_bound_bytes = m_rows * ld_a * DTYPE_BYTES[in_dtype] if m_rows < M else None
+    b_bound_bytes = n_cols * ld_b * DTYPE_BYTES[in_dtype] if n_cols < N else None
     c_bound_bytes = m_rows * ld_c * DTYPE_BYTES[out_dtype] if m_rows < M else None
 
     if lds_layout == "pad" and (BLOCK_K + k_pad) % LOAD_VEC:
@@ -318,7 +330,7 @@ def create_wmma_gemm_module(
             tA = fx.flat_divide(_bounded(arg_a, a_bound_bytes), fx.make_tile(BLOCK_M, BLOCK_K))[
                 None, None, bid_m, None
             ]
-            tB = fx.flat_divide(fx.rocdl.make_buffer_tensor(arg_bt), fx.make_tile(BLOCK_N, BLOCK_K))[
+            tB = fx.flat_divide(_bounded(arg_bt, b_bound_bytes), fx.make_tile(BLOCK_N, BLOCK_K))[
                 None, None, bid_n, None
             ]
             return thr_g2s.partition_S(tA), thr_g2s.partition_S(tB)
@@ -504,6 +516,20 @@ def create_wmma_gemm_module(
             ]
             frag_C = thr_mma.make_fragment_C(tC)
             pC_g = thr_r2g_C.partition_S(tC)
+            # Only the N edge needs a predicate; the M edge is already cut off
+            # by the C descriptor, so the column test is the whole cost of
+            # serving an N the block tile does not divide.
+            if const_expr(n_cols < N):
+                cC = fx.flat_divide(
+                    fx.make_view((0, 0), fx.make_identity_layout((M, N))),
+                    fx.make_tile(BLOCK_M, BLOCK_N),
+                )[None, None, bid_m, bid_n]
+                thr_cC = thr_r2g_C.partition_S(cC)
+                pred_C = fx.make_fragment_like(thr_cC, dtype=fx.Boolean)
+                for a in range_constexpr(fx.size(thr_cC.shape).unpack()):
+                    pred_C[a] = fx.elem_less(thr_cC[a], (M, n_cols))
+            else:
+                pred_C = None
             if const_expr(out_elem_cls is fx.Float32):
                 frag_C_out = frag_C
             else:
@@ -531,7 +557,7 @@ def create_wmma_gemm_module(
                 out_elems = [acc[si].to(out_elem_cls) for acc in ordered_accs for si in range_constexpr(8)]
 
             frag_C_out.store(fx.Vector.from_elements(out_elems, out_elem_cls))
-            fx.copy(copy_out, frag_C_retile, pC_g)
+            fx.copy(copy_out, frag_C_retile, pC_g, pred=pred_C)
 
         if const_expr(not persist_wgs):
             bid_m, bid_n = _swizzle_tile_id(pid, grid_n, group_width)

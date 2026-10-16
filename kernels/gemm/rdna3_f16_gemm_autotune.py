@@ -76,23 +76,24 @@ def block_shape(cfg):
     return WMMA_M * reg_m * waves_m, WMMA_N * reg_n * waves_n, WMMA_K * reg_k
 
 
-def padded_m(M, block_m):
-    """M rounded up to the tile; the kernel supplies the rows in between."""
-    return -(-M // block_m) * block_m
+def pad_to(extent, block):
+    """``extent`` rounded up to the tile; the kernel supplies what is in between."""
+    return -(-extent // block) * block
 
 
 def _tile_workgroups(M, N, K, cfg):
     """Workgroup count for this tile, or None if the shape cannot use it.
 
-    Only N and K have to divide. M does not: the kernel bounds the A and C
-    buffer descriptors at the real row count, so the rows a partial tile reaches
-    past are read as zero and their stores are dropped. A column past the end of
-    a row is a valid offset into the next one, so N and K get no such edge.
+    Only K has to divide. M and N do not: the kernel reads the rows a partial
+    tile reaches past as zero and masks the columns, so any M and any N run on
+    any tile. K has no edge to mask -- a k past the end of a row is a valid
+    offset into the next one, on both A and B_T, and it is inside the main
+    loop where a predicate would cost the most.
     """
     reg_m, reg_n, reg_k, waves_m, waves_n = cfg
     block_m, block_n, block_k = block_shape(cfg)
     threads = waves_m * waves_n * WAVE_SIZE
-    if N % block_n or K % block_k:
+    if K % block_k:
         return None
     if K // block_k < 2:  # the prefetch pipeline needs at least two k-tiles
         return None
@@ -102,38 +103,43 @@ def _tile_workgroups(M, N, K, cfg):
     pad = 0 if tile_opts(cfg)["lds_layout"] == "kblock" else K_PAD
     if 2 * (block_m + block_n) * (block_k + pad) * 2 > LDS_BYTES:  # 2 buffers, 2 bytes/elem
         return None
-    return (padded_m(M, block_m) // block_m) * (N // block_n)
+    return (pad_to(M, block_m) // block_m) * (pad_to(N, block_n) // block_n)
 
 
 def _ladder_for(K):
     return _LADDER_SMALL_K if K <= 1024 else _LADDER_LARGE_K
 
 
-# Padded rows cost full WMMA issue and full A traffic while contributing
-# nothing, so a wider tile has to earn its padding back. A quarter is about
-# where that stops being true on this card; M=48 keeps 16x16 and rejects 32x32,
-# which is what the tile sweep measured.
-_MAX_M_PAD = 1.25
+# Padding costs full WMMA issue while contributing nothing, so a wider tile has
+# to earn its padding back. A quarter is about where that stops being true on
+# this card; M=48 keeps 16x16 and rejects 32x32, which is what the tile sweep
+# measured. For an N the tile divides this is exactly the old rows-only rule.
+_MAX_PAD = 1.25
+
+
+def _padded_area(M, N, cfg):
+    block_m, block_n, _ = block_shape(cfg)
+    return pad_to(M, block_m) * pad_to(N, block_n)
 
 
 def feasible_tiles(M, N, K):
     """``(tile, workgroup count)`` for every ladder tile this shape can run, widest first.
 
     Also the search space the autotuner sweeps: anything excluded here does not
-    divide N or K, cannot fill the prefetch pipeline, does not fit in LDS, or
-    would spend more than ``_MAX_M_PAD`` of its rows on padding -- so
-    benchmarking it would only measure a build failure or wasted rows.
+    divide K, cannot fill the prefetch pipeline, does not fit in LDS, or would
+    spend more than ``_MAX_PAD`` of its output on padding -- so benchmarking it
+    would only measure a build failure or wasted work.
     """
     tiles = [(cfg, wgs) for cfg in _ladder_for(K) if (wgs := _tile_workgroups(M, N, K, cfg)) is not None]
     if not tiles:
         return tiles
-    within = [(cfg, wgs) for cfg, wgs in tiles if padded_m(M, block_shape(cfg)[0]) <= M * _MAX_M_PAD]
+    within = [(cfg, wgs) for cfg, wgs in tiles if _padded_area(M, N, cfg) <= M * N * _MAX_PAD]
     if within:
         return within
-    # An M below one block tile pads however much it has to; keep the tiles
+    # An extent below one block tile pads however much it has to; keep the tiles
     # that waste the least, which for M < 16 is every 16-row tile.
-    least = min(padded_m(M, block_shape(cfg)[0]) for cfg, _ in tiles)
-    return [(cfg, wgs) for cfg, wgs in tiles if padded_m(M, block_shape(cfg)[0]) == least]
+    least = min(_padded_area(M, N, cfg) for cfg, _ in tiles)
+    return [(cfg, wgs) for cfg, wgs in tiles if _padded_area(M, N, cfg) == least]
 
 
 # Workgroups reach the CUs in rounds, and the last round is as long as a full
@@ -227,14 +233,16 @@ def _build(M, N, K, in_dtype, out_dtype, rounding, reg_m, reg_n, reg_k, waves_m,
     # Padded strides and stagger both break L2 set camping; do not combine them.
     if lda > K or ldb > K:
         opts["stagger"] = 0
-    # The module is built over whole tiles; the real row count rides along so
-    # the kernel can bound the A and C descriptors and drop the rows past it.
-    m_tiled = padded_m(M, block_shape(tile)[0])
+    # The module is built over whole tiles; the real extents ride along so the
+    # kernel can bound the descriptors and mask off what the tiles reach past.
+    block_m, block_n, _ = block_shape(tile)
+    m_tiled, n_tiled = pad_to(M, block_m), pad_to(N, block_n)
     launch_fn, _, _, _ = create_wmma_gemm_module(
         m_tiled,
-        N,
+        n_tiled,
         K,
         m_valid=M if m_tiled != M else None,
+        n_valid=N if n_tiled != N else None,
         in_dtype=in_dtype,
         out_dtype=out_dtype,
         rounding=rounding,
