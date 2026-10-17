@@ -3,7 +3,7 @@
 // RUN: %fly-opt %s --fly-promote-regmem-to-vectorssa | FileCheck %s
 
 // CHECK-LABEL: gpu.func @skip_register_recast_iter
-// CHECK: fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<f32, register>
+// CHECK: fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<f32, <register>>
 // CHECK: fly.recast_iter
 // CHECK: fly.ptr.load
 // CHECK: fly.ptr.store
@@ -17,10 +17,10 @@ gpu.module @promote_regmem_to_ssa_recast_skip {
   }
 
 // CHECK-LABEL: gpu.func @mixed_recast_and_normal
-// CHECK: fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<f32, register>
+// CHECK: fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<f32, <register>>
 // CHECK: fly.recast_iter
-// CHECK: fly.ptr.load(%{{.*}}) : (!fly.ptr<i32, register>) -> i32
-// CHECK-NOT: !fly.ptr<i32, register, 1 : i64>
+// CHECK: fly.ptr.load(%{{.*}}) : (!fly.ptr<i32, <register>>) -> i32
+// CHECK-NOT: !fly.ptr<i32, <register>, 1 : i64>
 // CHECK: ub.poison : vector<1xi32>
 // CHECK: %[[STATE:.*]] = vector.insert %{{.*}}, %{{.*}} [0] : i32 into vector<1xi32>
 // CHECK: %[[FINAL:.*]] = vector.extract %[[STATE]][0] : i32 from vector<1xi32>

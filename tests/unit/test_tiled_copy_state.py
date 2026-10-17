@@ -20,7 +20,7 @@ def test_tiled_copy_set_value_preserves_type_and_copy_state(setter, runtime):
             atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
             tiled = fx.make_tiled_copy(atom, fx.make_layout((64, 1), (1, 64)), (64, 1))
             src_type = ir.Type.parse("!fly.memref<f32, #fly_rocdl.buffer_desc, (1,2):(1,1)>")
-            dst_type = ir.Type.parse("!fly.memref<f32, register, (1,2):(1,1)>")
+            dst_type = ir.Type.parse("!fly.memref<f32, <register>, (1,2):(1,1)>")
             function = func.FuncOp("copy_with_state", ([tiled.type, fx.Int32.ir_type, src_type, dst_type], []))
             with ir.InsertionPoint(function.add_entry_block()):
                 original, offset, src, dst = function.arguments
@@ -65,7 +65,7 @@ def test_tiled_copy_tdm_boundary_check_with_coord_tensor(direction, runtime):
             "<shape = [128, 64], elem = f16, tensor2tdm = (1E0,1E1)>, 16>"
         )
         coord_type = ir.Type.parse("!fly.coord_tensor<(128,384), (128,64):(1E1,1E0)>")
-        lds_type = ir.Type.parse("!fly.memref<f16, shared, (128,64):(64,1)>")
+        lds_type = ir.Type.parse("!fly.memref<f16, <shared>, (128,64):(64,1)>")
         with ir.InsertionPoint(module.body):
             function = func.FuncOp("tdm_with_state", ([atom_type, coord_type, lds_type, fx.Int32.ir_type], []))
             with ir.InsertionPoint(function.add_entry_block()):

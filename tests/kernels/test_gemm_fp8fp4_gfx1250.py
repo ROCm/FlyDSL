@@ -35,7 +35,7 @@ SCALE_BLOCK_128 = 128
 
 def _require_gpu():
     arch = str(get_rocm_arch())
-    if arch != "gfx1250":
+    if not arch.startswith("gfx1250"):
         pytest.skip(f"requires gfx1250, got {arch}")
 
 

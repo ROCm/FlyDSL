@@ -387,7 +387,7 @@ def main():
     args = parser.parse_args()
 
     arch = str(get_rocm_arch())
-    if arch != "gfx1250":
+    if not arch.startswith("gfx1250"):
         print(f"ERROR: TDM benchmark requires gfx1250, got {arch}", file=sys.stderr)
         sys.exit(1)
 

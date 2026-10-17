@@ -407,7 +407,7 @@ def test_trace_buffer_is_a_trailing_kernel_argument(monkeypatch):
         annotated().launch(grid=(1, 1, 1), block=(64, 1, 1))
 
     text = _ir(launch)
-    assert "fly.ptr<i8, global>" in text, "trace buffer parameter is missing"
+    assert "fly.ptr<i8, <global>>" in text, "trace buffer parameter is missing"
     launch_line = next(ln for ln in text.splitlines() if "gpu.launch_func" in ln)
     assert "fly.ptr" in launch_line, "buffer is not passed as a launch operand"
 

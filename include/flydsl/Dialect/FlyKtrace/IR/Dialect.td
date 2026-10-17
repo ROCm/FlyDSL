@@ -27,6 +27,7 @@ def FlyKtrace_Dialect : Dialect {
   ];
 
   let useDefaultTypePrinterParser = 1;
+  let useStrictPropertiesInAssemblyFormat = 0;
 }
 
 #endif
