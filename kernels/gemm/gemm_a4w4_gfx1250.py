@@ -41,6 +41,7 @@ def launch_gemm_a4w4(
     cluster_m: Constexpr[int] = 1,
     cluster_n: Constexpr[int] = 1,
     split_k: Constexpr[int] = 1,
+    b_preshuffle: Constexpr[bool] = True,
 ):
     """C = (A * SA) @ (B * SB), with FP32 accumulation and fused split-K."""
     assert tile_m % (16 * m_warp) == 0 and tile_n % (32 * n_warp) == 0
@@ -55,9 +56,12 @@ def launch_gemm_a4w4(
     wm_rep, wn_rep = tile_m // (16 * m_warp), tile_n // (32 * n_warp)
     ks_count, pack_k = tile_k // 128, tile_k // 2
     b_group = 16
-    a_row, b_row = pack_k + 16, pack_k * b_group
+    b_nblock = b_group if b_preshuffle else 1
+    b_pad = 0 if b_preshuffle else 16
+    b_inner, b_outer = pack_k * b_nblock, tile_n // b_nblock
+    a_row, b_row = pack_k + 16, b_inner + b_pad
     sa_rows, sb_rows = max(1, tile_m // 32), tile_n // 32
-    a_bytes, b_bytes = tile_m * a_row, (tile_n // b_group) * b_row
+    a_bytes, b_bytes = tile_m * a_row, b_outer * b_row
     sa_off, sb_off = a_bytes + b_bytes, a_bytes + b_bytes + sa_rows * tile_k
     pitch = ((sb_off + sb_rows * tile_k + 1023) // 1024) * 1024
     c_lds_row = tile_n + 8
@@ -65,7 +69,7 @@ def launch_gemm_a4w4(
     check_smem_capacity(arena_bytes, str(get_rocm_arch()))
     name = format_kernel_name(
         f"gemm_a4w4_t{tile_m}x{tile_n}x{tile_k}_w{m_warp}x{n_warp}"
-        f"_nb{num_buffers}_c{cluster_m}x{cluster_n}_sk{split_k}"
+        f"_nb{num_buffers}_c{cluster_m}x{cluster_n}_sk{split_k}" + ("_brow" if not b_preshuffle else "")
     )
 
     @flyc.kernel(name=name, known_block_size=[block, 1, 1])
@@ -113,15 +117,16 @@ def launch_gemm_a4w4(
         def stage(s):
             return fx.add_offset(base, s * pitch)
 
-        # Skipped TDM rows have unspecified LDS contents. Clear before the
-        # prologue and before reusing a slot for a partial final K tile.
+        # Skipped TDM rows have unspecified LDS contents. Partial tiles need
+        # zero fill; full tiles overwrite every input element consumed by WMMA.
         def clear(ptr, size):
             for i in range_constexpr((size + block * 16 - 1) // (block * 16)):
                 off = (i * block + tid) * 16
                 if off < size:
                     fx.ptr_store(Vec.filled(16, 0, fx.Int8), ptr + off)
 
-        clear(base, arena_bytes)
+        if (bm + tile_m > m) | (bn + tile_n > n) | (k % tile_k != 0):
+            clear(base, arena_bytes)
         workgroup_barrier()
         if const_expr(use_cluster):
             cluster.cluster_barrier()
@@ -169,13 +174,18 @@ def launch_gemm_a4w4(
             )
             copy(
                 1,
-                b + fx.Int64(bn // b_group) * fx.Int64(kp * b_group) + fx.Int64(ke // 2 * b_group),
+                b
+                + (
+                    fx.Int64(bn // b_group) * fx.Int64(kp * b_group) + fx.Int64(ke // 2 * b_group)
+                    if const_expr(b_preshuffle)
+                    else fx.Int64(bn) * fx.Int64(kp) + fx.Int64(ke // 2)
+                ),
                 a_bytes,
-                (tile_n // b_group, pack_k * b_group),
-                kp * b_group,
-                fx.max(0, fx.ceildiv(n, b_group) - bn // b_group),
-                fx.ceildiv(remaining, 32) * 16 * b_group,
-                0,
+                (b_outer, b_inner),
+                kp * b_nblock,
+                fx.max(0, fx.ceildiv(n, b_group) - bn // b_group) if const_expr(b_preshuffle) else fx.max(0, n - bn),
+                fx.ceildiv(remaining, 32) * 16 * b_nblock,
+                b_pad,
                 bmask,
             )
             copy(
@@ -231,7 +241,9 @@ def launch_gemm_a4w4(
 
         # Per-lane LDS bases are computed once, so every fragment offset in the loop is a DS immediate.
         a_lane = fx.Int32((wm_base + lane16) * a_row + kh * 16)
-        b_lane = fx.Int32(a_bytes + (wn_base // 16) * b_row + kh * 16 * b_group + lane16 * 16)
+        b_lane = fx.Int32(
+            a_bytes + (wn_base // b_nblock + lane16 // b_nblock) * b_row + kh * 16 * b_nblock + (lane16 % b_nblock) * 16
+        )
         sa_lane = fx.Int32(sa_off + ((wm_base // 32) * (tile_k // 4) + lane) * 4)
         sb_lane = fx.Int32(sb_off + ((wn_base // 32) * (tile_k // 4) + lane) * 4)
 
@@ -246,8 +258,12 @@ def launch_gemm_a4w4(
             for wn in range_constexpr(wn_rep):
                 vs = []
                 for half in range_constexpr(2):
-                    off = (wn * 2 + half) * b_row + ks * 64 * b_group
-                    lo, hi = ld128(b_ptr, off), ld128(b_ptr, off + 32 * b_group)
+                    if const_expr(b_preshuffle):
+                        off = (wn * 2 + half) * b_row + ks * 64 * b_group
+                        lo, hi = ld128(b_ptr, off), ld128(b_ptr, off + 32 * b_group)
+                    else:
+                        off = (wn * 32 + half * 16) * b_row + ks * 64
+                        lo, hi = ld128(b_ptr, off), ld128(b_ptr, off + 32)
                     vs.append(lo.shuffle(hi, list(range(8))))
                 weights[wn].store(vs[0].shuffle(vs[1], list(range(16))))
                 bscales[wn].store(ld32(sb_ptr, (wn * (tile_k // 4) + ks * 32) * 4))

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""FP8xFP8 preshuffle GEMM kernels for gfx1250."""
+"""FP8xFP8 GEMM for gfx1250 with preshuffled or row-major [N, K] B."""
 
 import math
 
@@ -50,7 +50,12 @@ def launch_gemm_a8w8(
     block_size: Constexpr[int],
     split_k: Constexpr[int] = 1,
     a_preshuffle: Constexpr[bool] = False,
+    b_preshuffle: Constexpr[bool] = True,
 ):
+    # The 128-wide row-major B path exhibits intermittent numerical failures.
+    # Keep it unavailable until its correctness issue has been resolved.
+    if not b_preshuffle and tile_k < 256:
+        raise ValueError("[FlyDSL gfx1250] row-major FP8 B requires tile_k >= 256")
     mx32 = is_mxscale and block_size == 32
     mx128 = is_mxscale and block_size == 128
     A_PAIR = 2 if a_preshuffle else 1
@@ -61,6 +66,11 @@ def launch_gemm_a8w8(
     WMMA_K = 128
     WAVE = fx.num_warp_threads()
     K_WS = tile_k // WMMA_K
+    # Pair updates as q = -A0*B0-C; C = A1*B1-q. The exact sum is unchanged,
+    # while alternating signs reduces long-K cancellation rounding bias.
+    balanced_accum = mx32 and K_WS % 2 == 0
+    B_NBLOCK = 16 if b_preshuffle else 1
+    B_PAD = 0 if b_preshuffle else 16
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
     wmma_m_rep = warp_tile_m // WMMA_M
@@ -73,9 +83,11 @@ def launch_gemm_a8w8(
     A_LDS_ROWS = tile_m // A_PAIR
     A_TDM_ROW = A_PAIR * tile_k
     A_LDS_ROW = A_TDM_ROW + LDS_PAD_A
-    B_LDS_ROW = tile_k * 16
+    B_INNER = tile_k * B_NBLOCK
+    B_OUTER = tile_n // B_NBLOCK
+    B_LDS_ROW = B_INNER + B_PAD
     STAGE_A = ((A_LDS_ROWS * A_LDS_ROW + 15) // 16) * 16
-    STAGE_B = (((tile_n // 16) * B_LDS_ROW + 15) // 16) * 16
+    STAGE_B = ((B_OUTER * B_LDS_ROW + 15) // 16) * 16
     ALIGNED_N = tile_n % 128 == 0 or 128 % tile_n == 0
     _period = math.lcm(tile_n, 128)
     N_BLOCKS = (
@@ -104,7 +116,7 @@ def launch_gemm_a8w8(
     kernel_name = format_kernel_name(
         f"gemm_a8w8_{scale_tag}_t{tile_m}x{tile_n}x{tile_k}"
         f"_mw{m_warp}_nw{n_warp}_nb{num_buffers}_sk{split_k}"
-        f"_cm{cluster_m}_cn{cluster_n}" + ("_apre" if a_preshuffle else "")
+        f"_cm{cluster_m}_cn{cluster_n}" + ("_apre" if a_preshuffle else "") + ("_brow" if not b_preshuffle else "")
     )
 
     @flyc.kernel(name=kernel_name, known_block_size=[block, 1, 1])
@@ -146,6 +158,7 @@ def launch_gemm_a8w8(
         blk_n64 = fx.Int64(blk_n)
         mn_oob = i32_m - blk_m  # valid M rows (A / C, and mx128's per-row A-scale)
         a_oob = (mn_oob + 1) >> 1 if const_expr(a_preshuffle) else mn_oob
+        b_block_stride = k64 * B_NBLOCK
         nb_oob = stride_ask64 = sa_oob = None
         if const_expr(mx32):
             sa_oob = (i32_m + 31) // 32 - blk_m // 32  # valid M super-rows (scale-A)
@@ -176,7 +189,7 @@ def launch_gemm_a8w8(
         gB_base = fx.recast_iter(fx.Int8, arg_b)
         gC_base = fx.recast_iter(out_cls, arg_c)
         a_off0 = blk_m64 * lda64
-        b_off0 = blk_n64 // 16 * (k64 * 16)
+        b_off0 = blk_n64 // B_NBLOCK * b_block_stride
 
         W_A, W_B = 0, 1
         gA = _gv(gA_base, a_off0, (A_LDS_ROWS, A_TDM_ROW), (A_TDM_ROW, 1))
@@ -193,9 +206,17 @@ def launch_gemm_a8w8(
             "workgroup_mask",
             a_mask,
         )
-        gB = _gv(gB_base, b_off0, (tile_n // 16, tile_k * 16), (tile_k * 16, 1))
+        gB = _gv(gB_base, b_off0, (B_OUTER, B_INNER), (B_INNER, 1))
         atomB = fx.atom_set_value(
-            fx.rocdl.make_tdm_atom(gB, [None, None], strides=[k64 * 16, None], num_warps=1, early_timeout=True),
+            fx.rocdl.make_tdm_atom(
+                gB,
+                [None, None],
+                strides=[b_block_stride, None],
+                num_warps=1,
+                pad_interval=B_INNER if B_PAD else 0,
+                pad_amount=B_PAD,
+                early_timeout=True,
+            ),
             "workgroup_mask",
             b_mask,
         )
@@ -251,8 +272,8 @@ def launch_gemm_a8w8(
                 W_B,
                 atomB,
                 gB,
-                _lv(fx.add_offset(pa, STAGE_A), (tile_n // 16, tile_k * 16), (B_LDS_ROW, 1)),
-                ktg * (tile_k * 16),
+                _lv(fx.add_offset(pa, STAGE_A), (B_OUTER, B_INNER), (B_LDS_ROW, 1)),
+                ktg * B_INNER,
             )
             if const_expr(is_mxscale):
                 _wcopy(
@@ -290,12 +311,20 @@ def launch_gemm_a8w8(
             v = [lds_load_b128(buf, b0 + (off0 + 32 * j)) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
-            return v01.shuffle(v23, list(range(16)))
+            packed = v01.shuffle(v23, list(range(16)))
+            if const_expr(balanced_accum and ks % 2 == 0):
+                packed = packed ^ Vec.filled(16, -2139062144, fx.Int32)  # 0x80808080: negate each FP8 byte
+            return packed
 
         def load_b(buf, wn, ks):
-            nbl = wnb // 16 + wn
-            b0 = fx.Int64(STAGE_A + nbl * B_LDS_ROW + ks * 2048 + kgrp * 256 + lane16 * 16)
-            v = [lds_load_b128(buf, b0 + 512 * j) for j in range_constexpr(4)]
+            if const_expr(b_preshuffle):
+                nbl = wnb // 16 + wn
+                b0 = fx.Int64(STAGE_A + nbl * B_LDS_ROW + ks * 2048 + kgrp * 256 + lane16 * 16)
+                v = [lds_load_b128(buf, b0 + 512 * j) for j in range_constexpr(4)]
+            else:
+                n = wnb + wn * 16 + lane16
+                b0 = fx.Int64(STAGE_A + n * B_LDS_ROW + ks * WMMA_K + kgrp * 16)
+                v = [lds_load_b128(buf, b0 + 32 * j) for j in range_constexpr(4)]
             v01 = v[0].shuffle(v[1], list(range(8)))
             v23 = v[2].shuffle(v[3], list(range(8)))
             return v01.shuffle(v23, list(range(16)))
@@ -329,7 +358,15 @@ def launch_gemm_a8w8(
         wmma_atom = None
         if const_expr(is_mxscale):
             wmma_atom = fx.make_mma_atom(
-                fx.rocdl.WMMAScale(WMMA_M, WMMA_N, WMMA_K, fx.Float8E4M3FN, fx.Float8E4M3FN, fx.Float32)
+                fx.rocdl.WMMAScale(
+                    WMMA_M,
+                    WMMA_N,
+                    WMMA_K,
+                    fx.Float8E4M3FN,
+                    fx.Float8E4M3FN,
+                    fx.Float32,
+                    mod_c=1 if balanced_accum else 0,
+                )
             )
         else:
             wmma_atom = fx.make_mma_atom(fx.rocdl.WMMA(WMMA_M, WMMA_N, WMMA_K, fx.Float8E4M3FN, fx.Float32))
