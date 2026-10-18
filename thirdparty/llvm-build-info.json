@@ -1,6 +1,19 @@
 {
   "upstream": {
     "repository": "https://github.com/llvm/llvm-project.git",
-    "llvm_hash": "e2a39f504fee836e4def9581bed817ecc327b9dc"
+    "llvm_hash": "e2a39f504fee836e4def9581bed817ecc327b9dc",
+    "required_patches": [
+      {
+        "file": "rocdl-lld-argv0.patch",
+        "description": "Pass the resolved lld path as argv[0] instead of the literal \"ld.lld\", so MLIR's ROCDL target finds the linker when it is not on PATH under that name.",
+        "upstream_status": "not yet submitted"
+      },
+      {
+        "file": "rocdl-waves-per-eu-range.patch",
+        "description": "Support waves_per_eu min,max range attribute for full VGPR utilization.",
+        "upstream_status": "merged into upstream: 4d5db577f969519703c348b8c7b02ee22987bd94"
+      }
+    ],
+    "extensions": []
   }
 }

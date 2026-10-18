@@ -323,7 +323,7 @@ struct PyTileType : PyConcreteType<PyTileType> {
             return PyTileType(context->getRef(), wrap(TileType::get(tileAttr)));
           }
         },
-        "modes"_a, nb::kw_only(), "context"_a = nb::none(),
+        "modes"_a.none(), nb::kw_only(), "context"_a = nb::none(),
         "Create a TileType from a list of modes or a single mode (leaf tile)");
 
     c.def_prop_ro("rank", [](PyTileType &self) { return self.toCppType().rank(); });

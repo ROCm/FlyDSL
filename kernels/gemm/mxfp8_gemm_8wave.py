@@ -71,10 +71,65 @@ class ScalePreshuffledS2R:
         return words
 
 
+class ScaleRawLds:
+    """Row-major ``[rows, K // 32]`` E8M0 (no host shuffle), staged through LDS."""
+
+    CHUNK = 4
+    BYTES = 2 * 256 * 16
+
+    def __init__(self, A_scale, B_scale, K, block_m, block_n, wave_id, a_row, b_row, lds, fp8_ir_t):
+        """``a_row`` / ``b_row``: block-local first row of this wave's tiles; ``lds``: two chunk slots."""
+        self.row_bytes = K // 32
+        lane = fx.thread_idx.x % 64
+        self.wave_id = wave_id
+        self.lds = lds
+        self.atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS32b(), 32)
+        self.LdsPtr_t = fx.PointerType.get(fp8_ir_t, 2, 512)
+        self.srcs = []
+        for arg, block in ((A_scale, block_m), (B_scale, block_n)):
+            src = fx.logical_divide(make_fp8_buffer_tensor(arg, fp8_ir_t), fx.make_layout(1, 1))
+            offs = []
+            for step in range_constexpr(2):
+                word = step * 512 + wave_id * 64 + lane  # 4 words per row
+                offs.append((block * 256 + word // 4) * self.row_bytes + (word % 4) * 4)
+            self.srcs.append((src, offs))
+        # One per-lane base per operand; every read adds only a constant, which
+        # folds into the ds_read offset as long as the buffer sits below 64 KB.
+        lane_off = (lane % 16) * 16 + lane // 16
+        self.bases = [
+            fx.add_offset(lds.ptr, fx.make_int_tuple(op * 4096 + row * 16 + lane_off))
+            for op, row in ((0, a_row), (1, b_row))
+        ]
+
+    def dma(self, chunk):
+        """Stage chunk ``chunk``; the last chunk may run past K (those bytes are never read)."""
+        base_i32 = fx.Int32(fx.ptrtoint(self.lds.ptr))
+        for op in range_constexpr(2):
+            src, offs = self.srcs[op]
+            for step in range_constexpr(2):
+                dst_off = chunk % 2 * self.BYTES + op * 4096 + step * 2048 + self.wave_id * 256
+                dst = fx.make_view(fx.inttoptr(self.LdsPtr_t, base_i32 + fx.Int32(dst_off)), fx.make_layout(1, 1))
+                fx.copy(self.atom, fx.slice(src, (None, fx.Int32(offs[step]))), dst, soffset=fx.Int32(chunk * 16))
+
+    def read(self, op, half_row, n_tiles, k):
+        """MFMA scale operands of ``n_tiles`` tiles, ``half_row`` rows past this wave's first row."""
+        words = []
+        for t in range_constexpr(n_tiles):
+            off = k // self.CHUNK % 2 * self.BYTES + (half_row + t * 16) * 16 + (k % self.CHUNK) * 4
+            v = fx.make_view(
+                fx.recast_iter(fx.Uint8, fx.add_offset(self.bases[op], fx.make_int_tuple(off))), fx.make_layout(1, 1)
+            )
+            words.append(fx.Int32(v.load()[0]))
+        return words
+
+
 class MxMfma:
     """One statically expanded tiled GEMM with per-atom MX scale words."""
 
-    def __init__(self, n_tiles_a, n_tiles_b):
+    def __init__(self, n_tiles_a, n_tiles_b, paired_tiles=True):
+        # paired_tiles: shuffle_scale_w4 words, byte = k_pack * 2 + tile parity;
+        # otherwise ScaleRawLds words, byte 0.
+        self.paired_tiles = paired_tiles
         self.mma = fx.make_tiled_mma(
             fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN)),
             fx.make_layout((1, 1, 1), (1, 1, 1)),
@@ -125,8 +180,8 @@ class MxMfma:
                     16,
                     128,
                     fx.Float8E4M3FN,
-                    opsel_a=k_pack * 2 + mnk[0] % 2,
-                    opsel_b=k_pack * 2 + mnk[1] % 2,
+                    opsel_a=k_pack * 2 + mnk[0] % 2 if self.paired_tiles else 0,
+                    opsel_b=k_pack * 2 + mnk[1] % 2 if self.paired_tiles else 0,
                 )
             ),
         )
@@ -145,9 +200,14 @@ def compile_mxfp8_gemm_8w(
     BLOCK_M: int = 256,
     BLOCK_N: int = 256,
     b_preshuffled: bool = False,
+    scale_preshuffled: bool = True,
     xcd_swizzle: int = 0,
 ):
-    """Build the MXFP8 launcher."""
+    """Build the MXFP8 launcher.
+
+    ``scale_preshuffled=True`` takes ``shuffle_scale_w4``-permuted A/B scales;
+    ``False`` takes them row-major ``[rows, K // 32]`` as the quantizer emits them.
+    """
     arch = str(get_rocm_arch())
     assert arch.startswith("gfx950"), f"MXFP8 8-wave GEMM requires gfx950 (CDNA4), got {arch}"
     assert get_warp_size() == 64, f"MXFP8 8-wave GEMM assumes wave64, got {get_warp_size()}"
@@ -179,11 +239,13 @@ def compile_mxfp8_gemm_8w(
     A_GRP_ROWS = N_TILES_A * 16  # rows one wave_m owns inside one LDS half
     B_GRP_ROWS = N_TILES_B * 16
 
-    lds_bytes = 4 * (a_lds_size + b_lds_size)
+    lds_bytes = 4 * (a_lds_size + b_lds_size) + (0 if scale_preshuffled else 2 * ScaleRawLds.BYTES)
     assert lds_bytes <= LDS_LIMIT_BYTES, f"LDS {lds_bytes} B exceeds {LDS_LIMIT_BYTES} B"
 
     @fx.struct
     class SharedStorage:
+        if not scale_preshuffled:
+            S_lds: fx.Array[fx.Float8E4M3FN, 2 * ScaleRawLds.BYTES, 16]
         A_lds_cur_0: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
         A_lds_cur_1: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
         A_lds_next_0: fx.Array[fx.Float8E4M3FN, a_lds_size, 16]
@@ -240,7 +302,7 @@ def compile_mxfp8_gemm_8w(
         gl_off_a = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=False)
         gl_off_b = compute_global_swizzle(lane_id, wave_id, K, N_LDS_ROUNDS, preshuffled=b_preshuffled)
 
-        mfma = MxMfma(N_TILES_A, N_TILES_B)
+        mfma = MxMfma(N_TILES_A, N_TILES_B, paired_tiles=scale_preshuffled)
 
         a_g2s = G2SLoader(a_div, gl_off_a, N_LDS_STEPS_A, F8_IR_t, wave_id)
         b_g2s = G2SLoader(b_div, gl_off_b, N_LDS_STEPS_B, F8_IR_t, wave_id)
@@ -248,8 +310,23 @@ def compile_mxfp8_gemm_8w(
         b_s2r = S2RLoader(wave_n, N_TILES_B)
         store_c = StoreC(None, None, C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B)
 
-        a_sc = ScalePreshuffledS2R(A_scale, c_m, K, N_TILES_A)
-        b_sc = ScalePreshuffledS2R(B_scale, c_n, K, N_TILES_B)
+        if const_expr(scale_preshuffled):
+            a_sc = ScalePreshuffledS2R(A_scale, c_m, K, N_TILES_A)
+            b_sc = ScalePreshuffledS2R(B_scale, c_n, K, N_TILES_B)
+        else:
+            raw_sc = ScaleRawLds(
+                A_scale,
+                B_scale,
+                K,
+                block_m,
+                block_n,
+                wave_id,
+                wave_m * A_GRP_ROWS,
+                wave_n * B_GRP_ROWS,
+                lds.S_lds,
+                F8_IR_t,
+            )
+            n_chunks = (K_ITERS + ScaleRawLds.CHUNK - 1) // ScaleRawLds.CHUNK
         # 16-row tile index of each wave's first row, per LDS half.
         a_base16 = [(block_m * BLOCK_M + h * LDS_BLOCK_M + wave_m * A_GRP_ROWS) // 16 for h in range_constexpr(2)]
         b_base16 = [(block_n * BLOCK_N + h * LDS_BLOCK_N + wave_n * B_GRP_ROWS) // 16 for h in range_constexpr(2)]
@@ -260,7 +337,7 @@ def compile_mxfp8_gemm_8w(
         )
 
         def scale_prefetch(sc, k0):
-            if const_expr(k0 >= K_ITERS or k0 // 2 in sc):
+            if const_expr(not scale_preshuffled or k0 >= K_ITERS or k0 // 2 in sc):
                 return sc
             words = {
                 w: (a_sc if w[0] == "a" else b_sc).read((a_base16 if w[0] == "a" else b_base16)[int(w[1])], k0)
@@ -270,7 +347,21 @@ def compile_mxfp8_gemm_8w(
 
         def scale_read(sc, k, which):
             """The prefetched E8M0 operands for K-step ``k``."""
-            return sc[k // 2][which]
+            if const_expr(scale_preshuffled):
+                words = sc[k // 2][which]
+            else:
+                op, h = int(which[0] == "b"), int(which[1])
+                half_row = h * (LDS_BLOCK_N if op else LDS_BLOCK_M)
+                words = raw_sc.read(op, half_row, N_TILES_B if op else N_TILES_A, k)
+            return words
+
+        def scale_chunk_dma(k):
+            # Issued after step k's first barrier: chunk k // CHUNK - 1 (same slot)
+            # is then finished by both wave_m groups, and the step's closing
+            # wait_barrier drains this DMA long before chunk k // CHUNK + 1 is read.
+            chunk = k // ScaleRawLds.CHUNK + 1
+            if const_expr(not scale_preshuffled and k % ScaleRawLds.CHUNK == 0 and k > 0 and chunk < n_chunks):
+                raw_sc.dma(chunk)
 
         c00_frag = [mfma.zero_value] * N_ACCUMS
         c01_frag = [mfma.zero_value] * N_ACCUMS
@@ -278,6 +369,9 @@ def compile_mxfp8_gemm_8w(
         c11_frag = [mfma.zero_value] * N_ACCUMS
 
         sc_pf = scale_prefetch({}, 0)
+        if const_expr(not scale_preshuffled):
+            for chunk in range_constexpr(min(2, n_chunks)):
+                raw_sc.dma(chunk)
 
         b_g2s.load(b_cur0, B0_gl_offset + 0 * B_K_STEP)
         a_g2s.load(a_cur0, A0_gl_offset + 0 * BLOCK_K)
@@ -304,6 +398,7 @@ def compile_mxfp8_gemm_8w(
             a0_frag = a_s2r.load(a_cur0)
             a_g2s.load(a_next1, A1_gl_offset + (k + 1) * BLOCK_K)
             rocdl.s_barrier()
+            scale_chunk_dma(k)
 
             c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, sa0, sb0, k_pack=k % 2)
 
