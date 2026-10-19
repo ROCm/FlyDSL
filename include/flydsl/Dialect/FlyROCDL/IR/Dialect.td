@@ -20,6 +20,7 @@ def FlyROCDL_Dialect : Dialect {
 
   let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
+  let useStrictPropertiesInAssemblyFormat = 0;
 }
 
 // Marks a copy-atom op type that moves a whole N-D tile in one copy_atom_call

@@ -306,9 +306,9 @@ def test_gfx1250_scale_operand_types(block_size, representation):
     scale_type = "i64" if block_size == 16 else "i32"
     atom = f"!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false, blockSize = {block_size}>>"
     if representation == "memref":
-        data = "!fly.memref<i32, register, 16:1>"
-        acc = "!fly.memref<f32, register, 8:1>"
-        scale = f"!fly.memref<{scale_type}, register, 1:1>"
+        data = "!fly.memref<i32, <register>, 16:1>"
+        acc = "!fly.memref<f32, <register>, 8:1>"
+        scale = f"!fly.memref<{scale_type}, <register>, 1:1>"
         call = f"fly.mma_atom_call(%atom, %c, [%a, %sa], [%b, %sb], %c) : ({atom}, {acc}, {data}, {scale}, {data}, {scale}, {acc}) -> ()"
     else:
         data, acc = "vector<16xi32>", "vector<8xf32>"

@@ -32,7 +32,7 @@ def _require_gfx1250():
     if not torch.cuda.is_available():
         pytest.skip("CUDA/ROCm not available")
     arch = str(get_rocm_arch())
-    if arch != "gfx1250":
+    if not arch.startswith("gfx1250"):
         pytest.skip(f"requires gfx1250, got {arch}")
 
 

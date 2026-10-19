@@ -74,36 +74,28 @@ def _read_exec_i64():
     return rocdl.ballot(T.i64, true_i1)
 
 
-def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
-    """gfx950 ds_read_b64_tr_b16 with DUALWAVE_SWP immediate byte offset."""
+def _lds_transpose_ptr(addr_i32, imm_offset):
+    """LDS pointer: variable byte address in the VGPR, constant in the GEP."""
+    ptr = buffer_ops.create_llvm_ptr(fx.Int64(addr_i32), address_space=3)
     imm = int(imm_offset)
-    raw_type = T.vec(2, T.i32)
-    raw = llvm.inline_asm(
-        raw_type,
-        [as_mlir_value(addr_i32)],
-        f"ds_read_b64_tr_b16 $0, $1 offset:{imm}\n",
-        "=v,v,~{memory}",
-        has_side_effects=True,
-    )
-    return fx.Vector(raw).bitcast(fx.Numeric.from_ir_type(ir.VectorType(result_type).element_type)).ir_value()
+    if imm == 0:
+        return ptr
+    return buffer_ops.get_element_ptr(ptr, static_byte_offset=imm, elem_type=T.i8)
+
+
+def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
+    """gfx950 ds_read_b64_tr_b16 with a constant byte offset.
+
+    Inline asm hides the DS opcode, so LLVM copies the dest VGPR into an AGPR
+    before ``s_waitcnt lgkmcnt`` drains the load. The ROCDL intrinsic is a real
+    LDS read and the waitcnt inserter orders the use after the data is valid.
+    """
+    return rocdl.ds_read_tr16_b64(result_type, _lds_transpose_ptr(addr_i32, imm_offset)).result
 
 
 def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0):
-    """gfx950 ds_read_b64_tr_b8 (8-bit transpose) with immediate byte offset.
-
-    Returns 64 bits = 8 fp8 (the fp8 analog of ds_read_b64_tr_b16's 4 bf16),
-    used for the fp8 V transpose load.
-    """
-    imm = int(imm_offset)
-    raw_type = T.vec(2, T.i32)
-    raw = llvm.inline_asm(
-        raw_type,
-        [as_mlir_value(addr_i32)],
-        f"ds_read_b64_tr_b8 $0, $1 offset:{imm}\n",
-        "=v,v,~{memory}",
-        has_side_effects=True,
-    )
-    return fx.Vector(raw).bitcast(fx.Numeric.from_ir_type(ir.VectorType(result_type).element_type)).ir_value()
+    """gfx950 ds_read_b64_tr_b8 (fp8 V transpose). Same waitcnt contract as tr16."""
+    return rocdl.ds_read_tr8_b64(result_type, _lds_transpose_ptr(addr_i32, imm_offset)).result
 
 
 # Arithmetic and inline-asm primitives

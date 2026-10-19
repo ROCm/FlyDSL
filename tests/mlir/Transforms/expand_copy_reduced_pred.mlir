@@ -4,7 +4,7 @@
 
 // CHECK-LABEL: gpu.func @reduced_pred_copy
 // CHECK: fly.copy_atom_call
-// CHECK-SAME: !fly.memref<f32, #fly_rocdl.buffer_desc, 4:1>, !fly.memref<f32, register, 4:1>, !fly.memref<i1, register, 1:0>) -> ()
+// CHECK-SAME: !fly.memref<f32, #fly_rocdl.buffer_desc, 4:1>, !fly.memref<f32, <register>, 4:1>, !fly.memref<i1, <register>, 1:0>) -> ()
 gpu.module @expand_copy_reduced_pred {
   gpu.func @reduced_pred_copy(%src: !fly.ptr<f32, global>, %dst_ptr: !fly.ptr<f32, register>,
                               %pred_ptr: !fly.ptr<i1, register>) kernel {

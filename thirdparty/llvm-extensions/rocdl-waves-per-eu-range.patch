@@ -1,21 +1,21 @@
 diff --git a/mlir/include/mlir/Dialect/LLVMIR/ROCDLDialect.td b/mlir/include/mlir/Dialect/LLVMIR/ROCDLDialect.td
-index 0807cf8cf04a..eca64b9a3455 100644
+index 5e6cefd977f3..d0102b190896 100644
 --- a/mlir/include/mlir/Dialect/LLVMIR/ROCDLDialect.td
 +++ b/mlir/include/mlir/Dialect/LLVMIR/ROCDLDialect.td
-@@ -149,7 +149,7 @@ def ROCDL_Dialect : Dialect {
+@@ -159,7 +159,7 @@ def ROCDL_Dialect : Dialect {
       "::mlir::DenseI32ArrayAttr":$reqd_work_group_size,
       "::mlir::StringAttr":$flat_work_group_size,
       "::mlir::IntegerAttr":$max_flat_work_group_size,
 -     "::mlir::IntegerAttr":$waves_per_eu,
 +     "::mlir::StringAttr":$waves_per_eu,
       "::mlir::BoolAttr":$unsafe_fp_atomics,
-      // Correspond to LLVM metadata of the same name
-      "::mlir::UnitAttr":$last_use,
+      // Boolean attributes for explicitly enabling/disabling xnack or sramecc.
+      // Not setting these is a third "default"/"any" state, and not the same as
 diff --git a/mlir/lib/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.cpp b/mlir/lib/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.cpp
-index 42393218f870..4ecf70895442 100644
+index 895d81dffa27..5f3c086d7471 100644
 --- a/mlir/lib/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.cpp
 +++ b/mlir/lib/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.cpp
-@@ -103,16 +103,19 @@ public:
+@@ -104,16 +104,19 @@ public:
        if (!func)
          return op->emitOpError(Twine(attribute.getName()) +
                                 " is only supported on `llvm.func` operations");
@@ -42,7 +42,7 @@ index 42393218f870..4ecf70895442 100644
      }
      if (dialect->getFlatWorkGroupSizeAttrHelper().getName() ==
 diff --git a/mlir/test/Target/LLVMIR/rocdl.mlir b/mlir/test/Target/LLVMIR/rocdl.mlir
-index 9b767d857447..20a4900e1985 100644
+index b4a94cef770f..2f067b8ba98f 100644
 --- a/mlir/test/Target/LLVMIR/rocdl.mlir
 +++ b/mlir/test/Target/LLVMIR/rocdl.mlir
 @@ -150,6 +150,13 @@ llvm.func @kernel_func_waves_per_eu()
@@ -59,7 +59,7 @@ index 9b767d857447..20a4900e1985 100644
  llvm.func @kernel_func_unsafe_fp_atomics()
      attributes {rocdl.kernel, rocdl.unsafe_fp_atomics = true} {
    // CHECK-LABEL: amdgpu_kernel void @kernel_func_unsafe_fp_atomics()
-@@ -2241,4 +2248,5 @@ llvm.func @rocdl_dot_fp8_family(%i32: i32, %f32: f32) -> f32 {
+@@ -2252,4 +2259,5 @@ llvm.func @rocdl_dot_fp8_family(%i32: i32, %f32: f32) -> f32 {
  // CHECK-DAG: ![[$REQD_WORK_GROUP_SIZE]] = !{i32 16, i32 4, i32 2}
  // CHECK-DAG: ![[$REQD_BLOCK_SIZE]] = !{i32 8, i32 4, i32 2}
  // CHECK-DAG: attributes #[[$KERNEL_WAVES_PER_EU_ATTR]] = { "amdgpu-flat-work-group-size"="1,256" "amdgpu-waves-per-eu"="2" "uniform-work-group-size" }
