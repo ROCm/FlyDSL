@@ -46,6 +46,8 @@ from kernels.monokernel.weights import LayerWeights, prepare_mxfp4_expert_storag
 
 __all__ = ["Glm5MonoKernel"]
 
+MAX_TOTAL_TOKENS = 16
+
 
 def prepare_glm5_weights(W: LayerWeights, attention_weight: AttentionWeight | str) -> dict[str, torch.Tensor]:
     """Pack one layer once for every graph bucket using it."""
@@ -123,8 +125,10 @@ class Glm5MonoKernel:
     ``indexer_cp=True`` partitions index scoring across the TP ranks and uses
     in-kernel peer mailboxes for exact global selection. Index caches remain
     replicated; each rank must receive identical indexer weights and inputs.
-    Native ATOM MXFP4 weights support one through forty rows per launch. Above
-    twelve rows, a full 256-CU device executes bounded row tiles in one kernel.
+    The public API accepts at most sixteen total query tokens across requests,
+    including chunked calls. Native ATOM MXFP4 weights support every row count
+    through sixteen; the legacy path retains its existing buckets. Above twelve
+    rows, a full 256-CU device executes bounded row tiles in one kernel.
     ``group`` is a torch.distributed group (None for npes=1).
 
     The symmetric buffer uses PyTorch's caching allocator and CUDA/ROCm IPC
@@ -156,8 +160,11 @@ class Glm5MonoKernel:
         runtime: "Glm5MonoKernel | None" = None,
         dcp_size: int = 1,
         native_fp4_mfma: bool = False,
+        moe_activation_dtype: str = "fp8",
         rope_dtype: str = "fp32",
     ):
+        if not 1 <= samples <= MAX_TOTAL_TOKENS:
+            raise ValueError(f"total query tokens must be in [1, {MAX_TOTAL_TOKENS}], got {samples}")
         if W.config not in (GLM5_CONFIG, glm5_tp_config(4)):
             raise ValueError(f"unsupported GLM-5 shard configuration: {W.config}")
         if W.config == glm5_tp_config(4) and npes != 4:
@@ -171,9 +178,7 @@ class Glm5MonoKernel:
             npes,
             topk,
             W.config,
-            # Native row tiles bound the device geometry through forty rows;
-            # retain the legacy path's existing buckets.
-            supported_samples=tuple(range(1, 41)) if native_fp4_mfma else GLM5_KERNEL_SAMPLES,
+            supported_samples=tuple(range(1, MAX_TOTAL_TOKENS + 1)) if native_fp4_mfma else GLM5_KERNEL_SAMPLES,
             expected_heads=attention_heads,
         )
         if dcp_size not in (1, npes):
@@ -223,6 +228,11 @@ class Glm5MonoKernel:
         )
         if native_fp4_mfma and not self.atom_experts:
             raise ValueError("native FP4 MFMA requires ATOM MXFP4 expert storage")
+        if moe_activation_dtype not in ("fp8", "fp4"):
+            raise ValueError("moe_activation_dtype must be fp8 or fp4")
+        if moe_activation_dtype == "fp4" and not native_fp4_mfma:
+            raise ValueError("A4 requires native scaled MFMA")
+        self.moe_activation_dtype = moe_activation_dtype
         self.native_fp4_mfma = native_fp4_mfma
         self.packed = dict(
             prepare_glm5_weights(W, self.attention_weight) if prepared_weights is None else prepared_weights
@@ -259,6 +269,17 @@ class Glm5MonoKernel:
             and self.index_block_table_stride == index_max_seq // index_page_size
             else None
         )
+        self.cohort_rows = (
+            (samples == 40 or (npes == 4 and cohort_eligible(samples, npes, with_indexer, native_fp4_mfma)))
+            and npes in (4, 8)
+            and dcp_size == 1
+            and (not indexer_cp or npes == 4)
+            and self.attention_weight is AttentionWeight.FP8_BLOCK128
+            and self.kv_cache_layout is KvCacheLayout.ATOM
+            and (kv_cache_dtype == "bf16" or npes == 4)
+            and rope_dtype == "fp32"
+            and (not with_indexer or npes == 4 or index_max_seq == 4096)
+        )
         self.stages = stage_tasks(
             samples,
             W.heads,
@@ -270,28 +291,8 @@ class Glm5MonoKernel:
             npes=npes,
             inter=W.config.inter,
             native_fp4_mfma=native_fp4_mfma,
-            cohort_rows=(
-                (samples == 40 or (npes == 4 and cohort_eligible(samples, npes, with_indexer, native_fp4_mfma)))
-                and npes in (4, 8)
-                and dcp_size == 1
-                and not indexer_cp
-                and self.attention_weight is AttentionWeight.FP8_BLOCK128
-                and self.kv_cache_layout is KvCacheLayout.ATOM
-                and kv_cache_dtype == "bf16"
-                and rope_dtype == "fp32"
-                and (not with_indexer or index_max_seq == 4096)
-            ),
-            uv_reuse=(
-                (samples == 40 or (npes == 4 and cohort_eligible(samples, npes, with_indexer, native_fp4_mfma)))
-                and npes in (4, 8)
-                and dcp_size == 1
-                and not indexer_cp
-                and self.attention_weight is AttentionWeight.FP8_BLOCK128
-                and self.kv_cache_layout is KvCacheLayout.ATOM
-                and kv_cache_dtype == "bf16"
-                and rope_dtype == "fp32"
-                and (not with_indexer or index_max_seq == 4096)
-            ),
+            cohort_rows=self.cohort_rows,
+            uv_reuse=self.cohort_rows,
             split_task_pair=(
                 2
                 if (
@@ -303,7 +304,7 @@ class Glm5MonoKernel:
                     and not indexer_cp
                     and self.attention_weight is AttentionWeight.FP8_BLOCK128
                     and self.kv_cache_layout is KvCacheLayout.ATOM
-                    and kv_cache_dtype == "bf16"
+                    and (kv_cache_dtype == "bf16" or npes == 4)
                     and rope_dtype == "fp32"
                     and (not with_indexer or index_max_seq == 4096)
                 )
@@ -367,6 +368,7 @@ class Glm5MonoKernel:
             output_heads=output_heads,
             dcp_size=dcp_size,
             native_fp4_mfma=native_fp4_mfma,
+            moe_activation_dtype=moe_activation_dtype,
             rope_dtype=rope_dtype,
             uv_scale_rows=(
                 128
@@ -441,6 +443,8 @@ class Glm5MonoKernel:
             raise ValueError(f"layer must be in [0, {self.launches_per_step}), got {layer}")
         if h.ndim != 2 or h.shape[1] != HIDDEN:
             raise ValueError(f"hidden must have {HIDDEN} columns")
+        if not 1 <= h.shape[0] <= MAX_TOTAL_TOKENS:
+            raise ValueError(f"total query tokens must be in [1, {MAX_TOTAL_TOKENS}], got {h.shape[0]}")
         if cur_pos.shape != (1,) or cur_pos.dtype is not torch.int32:
             raise ValueError("cur_pos must be int32[1]")
         expected_rope_dtype = torch.bfloat16 if self.rope_dtype == "bf16" else torch.float32

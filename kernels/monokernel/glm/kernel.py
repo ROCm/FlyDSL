@@ -208,6 +208,7 @@ def build_glm5_monokernel(
     scale: float = SOFTMAX_SCALE,
     uv_scale_rows: int = 128,
     native_fp4_mfma: bool = False,
+    moe_activation_dtype: str = "fp8",
     rope_dtype: str = "fp32",
     timeline: bool = False,
     indexer_cp: bool = False,
@@ -233,6 +234,9 @@ def build_glm5_monokernel(
     attention_ptpc = attention_weight is AttentionWeight.FP8_PTPC
     use_atom_kv_cache = cache_layout is KvCacheLayout.ATOM
     cache_fp8 = kv_cache_dtype == "fp8"
+    assert moe_activation_dtype in ("fp8", "fp4")
+    activation_fp4 = moe_activation_dtype == "fp4"
+    assert not activation_fp4 or native_fp4_mfma
     # Extend cohorts by geometry for TP4; retain the released TP8 dispatch.
     # Cohort scheduling and deferred cache publication require the ownership
     # and layout contracts below. Bounded row unrolling is selected separately
@@ -241,10 +245,10 @@ def build_glm5_monokernel(
         (total_samples == 40 or (npes == 4 and cohort_eligible(total_samples, npes, with_indexer, native_fp4_mfma)))
         and npes in (4, 8)
         and dcp_size == 1
-        and not indexer_cp
+        and (not indexer_cp or npes == 4)
         and attention_weight is AttentionWeight.FP8_BLOCK128
         and use_atom_kv_cache
-        and not cache_fp8
+        and (not cache_fp8 or npes == 4)
         and rope_dtype == "fp32"
     )
     assert not cache_fp8 or use_atom_kv_cache
@@ -276,10 +280,14 @@ def build_glm5_monokernel(
     # Indexed queries permit early cache publication. External indices require
     # deferred stores and the cache version at each original tile boundary.
     DEFER_OFF_CACHE = STATIC_ROW_TILES and not with_indexer
-    COHORT_ROW_TILES = STATIC_ROW_TILES and (not with_indexer or index_max_seq == 4096)
+    # TP4 uses bounded radix tasks at long capacities. The cache join and
+    # per-tile scratch/peer epochs do not depend on context capacity.
+    COHORT_ROW_TILES = STATIC_ROW_TILES and (not with_indexer or npes == 4 or index_max_seq == 4096)
     GLOBAL_UG40 = COHORT_ROW_TILES and npes == 4 and grouped_ug_enabled(S, npes, native_fp4_mfma, True)
     GLOBAL_UG_WIDTH = 64 if with_indexer else 128
-    INDEX_PRE_ROPE = COHORT_ROW_TILES and with_indexer
+    INDEX_PRE_ROPE = (
+        COHORT_ROW_TILES and with_indexer and (not indexer_cp or indexer_uses_tiles(index_max_seq, indexer_cp))
+    )
     INDEX_SCORE_REUSE = 2 if COHORT_ROW_TILES else 1
     SPLIT_TASK_PAIR = 2 if COHORT_ROW_TILES and npes == 8 and heads == 8 else 1
     SPLIT_GATHER_KEYS = SPLIT_KEYS * SPLIT_TASK_PAIR
@@ -562,6 +570,39 @@ def build_glm5_monokernel(
     if DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED:
         assert GROUPED_DN
         assert WORK_WORDS * 4 >= (DU_CROFF + DU_CWORDS) * 4 + 257 * DU_ROWS
+
+    # A pair of existing cohorts shares expert weights across up to16 tokens.
+    # Keep all partials in LDS and preserve each original token's slot/K/wave
+    # accumulation. The compact FP4 input makes this live set fit128KiB.
+    DN_PAIR_ROWS = 2 * S
+    DN_PAIR_G = 2 * G
+    DP_ROUTE_WORDS = DN_PAIR_ROWS * MOE_SLOTS
+    DP_UMAX = DN_PAIR_ROWS * TOP_K + 1
+    DP_XROW, DP_SCROW, DP_SLOTS = 68, 20, 9
+    DP_KEY_WORDS = DP_ROUTE_WORDS + 2 * DP_UMAX + 5
+    DP_MSOFF = DP_ROUTE_WORDS * DP_XROW
+    DP_KEYOFF = DP_MSOFF + DP_ROUTE_WORDS * DP_SCROW
+    DP_DWOFF = DP_KEYOFF + DP_KEY_WORDS
+    DP_CROFF = (DP_DWOFF + DP_ROUTE_WORDS + 3) // 4 * 4
+    DP_CWORDS = DP_ROUTE_WORDS * 4 * 32
+    DP_WORDS = DP_CROFF + DP_CWORDS + ((N_EXPERTS + 1) * DN_PAIR_ROWS + 3) // 4
+    DN_COHORT_PAIR = (
+        DN_UNION_ALIGNED
+        and activation_fp4
+        and GLOBAL_UG40
+        and CACHE_READERS_JOINED
+        and ROW_TILES % 2 == 0
+        and DN_PAIR_ROWS <= 16
+        and DP_WORDS <= 32768
+        and OUT_OFF + DN_PAIR_ROWS * DN_TILE <= 32768
+    )
+    DN_PAIR_TAIL = N_DN_TILES % DN_PAIR_G
+    DN_PAIR_FULL = N_DN_TILES - DN_PAIR_TAIL
+    DN_PAIR_SPLIT = N_DN_TILES > DN_PAIR_G and 0 < DN_PAIR_TAIL and 2 * DN_PAIR_TAIL <= DN_PAIR_G
+    DN_PAIR_WORK = N_DN_TILES + (DN_PAIR_TAIL if DN_PAIR_SPLIT else 0)
+    if DN_COHORT_PAIR:
+        WORK_WORDS = max(WORK_WORDS, DP_WORDS, OUT_OFF + DN_PAIR_ROWS * DN_TILE)
+        assert WORK_WORDS <= 32768
 
     base, first, acc = {}, {}, 0
     for name, n in stage_tasks(
@@ -1235,6 +1276,9 @@ def build_glm5_monokernel(
 
             def lds_mxfp8(chunk_word):
                 """One scaled-MFMA B operand from a row-major 128-value MXFP8 tile."""
+                if const_expr(activation_fp4):
+                    # FP4 uses contiguous K[32*g:32*g+32] for lane group g.
+                    return fx.Vector(fx.ptr_load(xs + chunk_word + 4 * (lane // 16), result_type=v4f)).bitcast(fx.Int32)
                 words = [
                     fx.Vector(
                         fx.ptr_load(
@@ -1323,7 +1367,7 @@ def build_glm5_monokernel(
                                     lds_mxfp8(bw),
                                     c,
                                     4,
-                                    0,
+                                    4 if activation_fp4 else 0,
                                     0,
                                     weight_scale,
                                     0,
@@ -1650,17 +1694,52 @@ def build_glm5_monokernel(
 
             def quant_mxfp8(a0, a1):
                 """Per-32 E4M3 values and E8M0 scale used by ATOM/AITER W4A8."""
+                if const_expr(activation_fp4):
+                    # Match the BF16 input boundary of the native A4 quantizer.
+                    a0, a1 = bf16_round(a0), bf16_round(a1)
                 amax = fx.max(fmath.absf(a0), fmath.absf(a1))
+                if const_expr(activation_fp4):
+                    amax = fx.max(amax, fx.Float32(1e-10))
                 for offset in (1, 2, 4, 8):
                     amax = _xred(amax, offset, fx.max)
-                bits = (amax * fx.Float32(1.0 / FP8_MAX)).bitcast(fx.Int32)
+                bits = (amax * fx.Float32(1.0 / (6.0 if activation_fp4 else FP8_MAX))).bitcast(fx.Int32)
                 exponent = (bits >> 23) & fx.Int32(0xFF)
                 exponent = exponent + ((bits & fx.Int32(0x7FFFFF)) != 0).select(fx.Int32(1), fx.Int32(0))
                 exponent = fx.max(fx.min(exponent, fx.Int32(254)), fx.Int32(1))
                 inverse = _rcp((exponent << 23).bitcast(fx.Float32))
-                q0 = fx.min(fx.max(a0 * inverse, -FP8_MAX), FP8_MAX)
-                q1 = fx.min(fx.max(a1 * inverse, -FP8_MAX), FP8_MAX)
+                mx = 6.0 if activation_fp4 else FP8_MAX
+                q0 = fx.min(fx.max(a0 * inverse, -mx), mx)
+                q1 = fx.min(fx.max(a1 * inverse, -mx), mx)
                 return q0, q1, exponent
+
+            def pack_moe4(q0, q1):
+                pair4 = fx.Int32(
+                    rocdl.cvt_scalef32_pk_fp4_f32(T.i32, fx.Int32(0), q0, q1, fx.Float32(1.0), 0)
+                ) & fx.Int32(255)
+                word4 = pair4 | (_xshfl(pair4, 1) << 8) | (_xshfl(pair4, 2) << 16) | (_xshfl(_xshfl(pair4, 1), 2) << 24)
+                return word4
+
+            def publish_moe_quant(ptr, k, q0, q1):
+                if const_expr(activation_fp4):
+                    word4 = pack_moe4(q0, q1)
+                    if lane % 4 == 0:
+                        address4 = (k // 128) * 32 + (k % 128) // 8
+                        put(ptr, address4, word4)
+                        put(ptr, address4 + 16, fx.Int32(0))
+                else:
+                    word8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
+                    neighbor8 = _xshfl(word8, 1)
+                    if lane % 2 == 0:
+                        put(ptr, k // 4, word8 | (neighbor8 << 16))
+
+            def moe_roundtrip(q0, q1):
+                if const_expr(activation_fp4):
+                    p4 = fx.Int32(rocdl.cvt_scalef32_pk_fp4_f32(T.i32, fx.Int32(0), q0, q1, fx.Float32(1.0), 0))
+                    out4 = fx.Vector(rocdl.cvt_scalef32_pk_bf16_fp4(T.vec(2, T.bf16), p4, fx.Float32(1.0), 0)).to(
+                        fx.Float32
+                    )
+                    return out4[0], out4[1]
+                return _fp8_roundtrip(q0, q1)
 
             def quant_block(a0, a1):
                 """quant_scaled, values returned as the FP8-rounded f32s."""
@@ -1702,11 +1781,18 @@ def build_glm5_monokernel(
                     lds_st(xs, f8_word(k), (w | (nb << 16)).bitcast(fx.Float32))
 
             def st_mxfp8(k, q0, q1):
-                """Store one row-major MXFP8 pair for the scaled MFMA."""
-                w = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
-                nb = _xshfl(w, 1)
-                if lane % 2 == 0:
-                    lds_st(xs, k // 4, (w | (nb << 16)).bitcast(fx.Float32))
+                if const_expr(activation_fp4):
+                    packed4 = pack_moe4(q0, q1)
+                    if lane % 4 == 0:
+                        address4 = (k // 128) * 32 + (k % 128) // 8
+                        lds_st(xs, address4, packed4.bitcast(fx.Float32))
+                        lds_st(xs, address4 + 16, fx.Float32(0.0))
+                else:
+                    """Store one row-major MXFP8 pair for the scaled MFMA."""
+                    w = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
+                    nb = _xshfl(w, 1)
+                    if lane % 2 == 0:
+                        lds_st(xs, k // 4, (w | (nb << 16)).bitcast(fx.Float32))
 
             def st_ptpc(k, q0, q1):
                 """Store one wave's PTPC FP8 pairs in the AITER GEMM's linear K order."""
@@ -2032,7 +2118,9 @@ def build_glm5_monokernel(
                         )
 
                 if const_expr(timeline):
-                    if const_expr(DN_SPLIT_UNION_TAIL and name == "down"):
+                    if const_expr(DN_COHORT_PAIR and name == "down"):
+                        write_record((t // DN_PAIR_G) * G + bid, which)
+                    elif const_expr(DN_SPLIT_UNION_TAIL and name == "down"):
                         if t < DN_FULL_TASKS:
                             write_record(t, which)
                         else:
@@ -2493,13 +2581,30 @@ def build_glm5_monokernel(
                     s = sample_base + local_s
                     pos = row_position(s)
                     slot = row_slot(s)
+                    # Buffer offsets are 32-bit bytes. Long paged caches can
+                    # exceed 4 GiB; rebase the descriptor at this uniform row.
+                    store_slot = slot
+                    if const_expr(TILED_INDEXER and use_atom_kv_cache):
+                        cache_row_bytes = QK_DIM * (1 if cache_fp8 else 2)
+                        r_kv = _rsrc(kv_cache + fx.Int64(_uniform(slot)) * cache_row_bytes)
+                        r_pe = _rsrc(pe_cache + fx.Int64(_uniform(slot)) * cache_row_bytes)
+                        store_slot = fx.Int32(0)
                     active = row_writes_cache(s) & (not DEFER_OFF_CACHE)
-                    if const_expr(use_atom_kv_cache and not with_indexer and not DEFER_OFF_CACHE and CACHE_TILE < S):
-                        # Separate cache tasks can target the same physical slot.
-                        # Publish only the final row of this serial tile; all
-                        # rows still produce their own kvnew/penew mailboxes.
-                        later_slot = row_slot(fx.min(lane, S - 1))
-                        overwritten = (lane > s) & (lane < S) & (later_slot == slot)
+                    if const_expr(use_atom_kv_cache and not DEFER_OFF_CACHE and CACHE_TILE < S):
+                        # Indexed cache CTAs can also collide on an output slot.
+                        # Concurrent cohorts elect the last writer over all rows;
+                        # serial tiles retain their original per-tile commit order.
+                        # Every row still publishes kvnew/penew for its consumers.
+                        if const_expr(COHORT_ROW_TILES):
+                            later_slot = fx.Int32(
+                                bo.buffer_load(
+                                    _rsrc(full_slots), fx.min(lane, total_samples - 1) * 2, vec_width=1, dtype=T.i32
+                                )
+                            )
+                            overwritten = (lane > row_offset + s) & (lane < total_samples) & (later_slot == slot)
+                        else:
+                            later_slot = row_slot(fx.min(lane, S - 1))
+                            overwritten = (lane > s) & (lane < S) & (later_slot == slot)
                         overwritten_mask = fx.Int64(rocdl.ballot(T.i64, overwritten))
                         active = active & (overwritten_mask == 0)
                     value = vs[local_s] * _rsq(ssq[local_s] * (1.0 / KV_LORA) + EPS) * g
@@ -2519,10 +2624,10 @@ def build_glm5_monokernel(
                                     bo.buffer_store(
                                         pair | (upper_pair << 16),
                                         r_kv,
-                                        slot * (QK_DIM // 4) + tid // 4,
+                                        store_slot * (QK_DIM // 4) + tid // 4,
                                     )
                             else:
-                                bo.buffer_store(kvn.to(fx.BFloat16), r_kv, slot * QK_DIM + tid)
+                                bo.buffer_store(kvn.to(fx.BFloat16), r_kv, store_slot * QK_DIM + tid)
                     else:
                         bo.buffer_store(kvn.to(fx.BFloat16), r_kv, pos * KV_LORA + tid)
                     put(mb("kvnew"), s * KV_LORA + tid, kvn)
@@ -2546,10 +2651,10 @@ def build_glm5_monokernel(
                                         bo.buffer_store(
                                             pair | (upper_pair << 16),
                                             r_pe,
-                                            slot * (QK_DIM // 4) + KV_LORA // 4 + tid // 2,
+                                            store_slot * (QK_DIM // 4) + KV_LORA // 4 + tid // 2,
                                         )
                                 else:
-                                    pe_offset = slot * QK_DIM + KV_LORA + tid * 2
+                                    pe_offset = store_slot * QK_DIM + KV_LORA + tid * 2
                                     bo.buffer_store(p0.to(fx.BFloat16), r_pe, pe_offset)
                                     bo.buffer_store(p1.to(fx.BFloat16), r_pe, pe_offset + 1)
                         else:
@@ -2581,11 +2686,20 @@ def build_glm5_monokernel(
                             if tid < PE_DIM // 2:
                                 c, sn = cs[local_s], sns[local_s]
                                 v0, v1 = v0 * c - v1 * sn, v0 * sn + v1 * c
-                            bo.buffer_store(
-                                fx.Vector.from_elements([v0, v1], fx.Float32).to(fx.BFloat16),
-                                r_index_cache,
-                                index_page_slot(s, row_position(s)) * INDEX_DIM + i0,
-                            )
+                            if const_expr(TILED_INDEXER):
+                                # Uniform current-key row base, full 64-bit physical address.
+                                key_base = indices + fx.Int64(index_page_slot(s, row_position(s))) * (INDEX_DIM * 2)
+                                bo.buffer_store(
+                                    fx.Vector.from_elements([v0, v1], fx.Float32).to(fx.BFloat16),
+                                    _rsrc(key_base),
+                                    i0,
+                                )
+                            else:
+                                bo.buffer_store(
+                                    fx.Vector.from_elements([v0, v1], fx.Float32).to(fx.BFloat16),
+                                    r_index_cache,
+                                    index_page_slot(s, row_position(s)) * INDEX_DIM + i0,
+                                )
                             put_bf(mb("index_k_new"), s * INDEX_DIM + i0, [v0, v1])
                         gpu.barrier()
                         if tid == 0:
@@ -2707,7 +2821,7 @@ def build_glm5_monokernel(
                             )
                     stamp("q_b", qb_stamp, 4)
 
-                    if const_expr(with_indexer):
+                    if const_expr(with_indexer and not SHARD_INDEX_Q):
                         # Raw and precomputed rotated index queries retain their
                         # BF16 rounding and ten-row cohort mailbox addresses.
                         gpu.barrier()
@@ -3053,10 +3167,14 @@ def build_glm5_monokernel(
                     )
                     return words.bitcast(fx.BFloat16)
 
-                for index_group in range(start("index_score"), S * (N_INDEX_SPLIT // INDEX_SCORE_REUSE), G):
+                # The aligned CP capacity can contain an odd count of key tiles.
+                # Keep the final partial reuse group; its padded part has no
+                # payload or timeline slot. Live-shard bounds guard the math.
+                N_INDEX_GROUPS = (N_INDEX_SPLIT + INDEX_SCORE_REUSE - 1) // INDEX_SCORE_REUSE
+                for index_group in range(start("index_score"), S * N_INDEX_GROUPS, G):
                     index_group = fx.Int32(index_group)
-                    s = index_group // (N_INDEX_SPLIT // INDEX_SCORE_REUSE)
-                    index_tile_base = (index_group % (N_INDEX_SPLIT // INDEX_SCORE_REUSE)) * INDEX_SCORE_REUSE
+                    s = index_group // N_INDEX_GROUPS
+                    index_tile_base = (index_group % N_INDEX_GROUPS) * INDEX_SCORE_REUSE
                     tile = index_tile_base
                     tt = s * N_INDEX_SPLIT + tile
                     stamp("index_score", tt, 0)
@@ -3109,7 +3227,11 @@ def build_glm5_monokernel(
                             tile = index_tile_base + index_part
                             tt = s * N_INDEX_SPLIT + tile
                             if const_expr(index_part > 0):
-                                stamp("index_score", tt, 0)
+                                if const_expr(N_INDEX_SPLIT % INDEX_SCORE_REUSE):
+                                    if index_tile_base + index_part < N_INDEX_SPLIT:
+                                        stamp("index_score", tt, 0)
+                                else:
+                                    stamp("index_score", tt, 0)
                             if tile * INDEX_KEYS_PER_TASK < shard_size:
                                 key_group = wave // 2
                                 head_group = wave % 2
@@ -3121,14 +3243,28 @@ def build_glm5_monokernel(
                                 for k32 in range_constexpr(INDEX_DIM // 32):
                                     k = k32 * 32 + (lane // 16) * 8
                                     qv = load_index_q8(head, k)
-                                    kv = fx.Vector(
-                                        bo.buffer_load(
-                                            r_index_cache,
-                                            (index_page_slot(s, safe_key) * INDEX_DIM + k) // 2,
-                                            vec_width=4,
-                                            dtype=T.i32,
+                                    if const_expr(TILED_INDEXER):
+                                        # Lanes may refer to different physical pages. A global
+                                        # pointer preserves the full address without assuming
+                                        # contiguous pages or narrowing to a buffer byte offset.
+                                        key_addr = (
+                                            indices
+                                            + fx.Int64(index_page_slot(s, safe_key)) * (INDEX_DIM * 2)
+                                            + fx.Int64(k * 2)
                                         )
-                                    ).bitcast(fx.BFloat16)
+                                        key_ptr = fx.inttoptr(
+                                            fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Global, 16), key_addr
+                                        )
+                                        kv = fx.generic_load(key_ptr, count=4).bitcast(fx.BFloat16)
+                                    else:
+                                        kv = fx.Vector(
+                                            bo.buffer_load(
+                                                r_index_cache,
+                                                (index_page_slot(s, safe_key) * INDEX_DIM + k) // 2,
+                                                vec_width=4,
+                                                dtype=T.i32,
+                                            )
+                                        ).bitcast(fx.BFloat16)
                                     if safe_key >= first_position:
                                         sn = request_start + safe_key - first_position
                                         kv_pairs = get_bf2_many(
@@ -3183,7 +3319,11 @@ def build_glm5_monokernel(
                                                 lds_ld(red, 128 + lane),
                                                 CM_SYS,
                                             )
-                            stamp("index_score", tt, 4)
+                            if const_expr(N_INDEX_SPLIT % INDEX_SCORE_REUSE):
+                                if index_tile_base + index_part < N_INDEX_SPLIT:
+                                    stamp("index_score", tt, 4)
+                            else:
+                                stamp("index_score", tt, 4)
                             if const_expr(index_part + 1 < INDEX_SCORE_REUSE):
                                 # All readers finish before another key tile reuses red.
                                 gpu.barrier()
@@ -3191,8 +3331,16 @@ def build_glm5_monokernel(
                         for index_part in range_constexpr(INDEX_SCORE_REUSE):
                             tt = s * N_INDEX_SPLIT + index_tile_base + index_part
                             if const_expr(index_part > 0):
-                                stamp("index_score", tt, 0)
-                            stamp("index_score", tt, 4)
+                                if const_expr(N_INDEX_SPLIT % INDEX_SCORE_REUSE):
+                                    if index_tile_base + index_part < N_INDEX_SPLIT:
+                                        stamp("index_score", tt, 0)
+                                else:
+                                    stamp("index_score", tt, 0)
+                            if const_expr(N_INDEX_SPLIT % INDEX_SCORE_REUSE):
+                                if index_tile_base + index_part < N_INDEX_SPLIT:
+                                    stamp("index_score", tt, 4)
+                            else:
+                                stamp("index_score", tt, 4)
 
                 if const_expr(TILED_INDEXER):
                     # Context-parallel exact radix selection. Scoring owns a
@@ -3748,7 +3896,100 @@ def build_glm5_monokernel(
                 def gather_old_kv():
                     """Copy persistent KV/PE rows to LDS before patching incoming cache versions."""
                     krows = [lds_ld(attn_keys, wave * KPW + jj) for jj in range(KPW)]
-                    if const_expr(COHORT_ROW_TILES and not with_indexer and native_fp4_mfma and npes == 4):
+                    if const_expr(TILED_INDEXER and use_atom_kv_cache):
+                        # Each gathered row is wave-uniform; retain two independent
+                        # row loads while putting its full byte address in the base.
+                        cache_row_bytes = QK_DIM * (1 if cache_fp8 else 2)
+                        for gather_base in range_constexpr(0, KPW, 2):
+                            descriptors = [
+                                _rsrc(kv_cache + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes)
+                                for part in range(min(2, KPW - gather_base))
+                            ]
+                            raw_values = [
+                                fx.Vector(
+                                    bo.buffer_load(
+                                        descriptors[part],
+                                        lane * (2 if cache_fp8 else 4),
+                                        vec_width=2 if cache_fp8 else 4,
+                                        dtype=T.i32,
+                                    )
+                                )
+                                for part in range(min(2, KPW - gather_base))
+                            ]
+                            for part in range_constexpr(min(2, KPW - gather_base)):
+                                raw = raw_values[part]
+                                value = _fp8_to_bf16x8(raw[0], raw[1]) if const_expr(cache_fp8) else raw
+                                fx.ptr_store(
+                                    value.bitcast(fx.Float32),
+                                    ktile + ((wave * KPW + gather_base + part) * KS + lane * 4),
+                                )
+                            if lane < (PE_DIM // 8 if const_expr(cache_fp8) else PE_DIM // 2):
+                                pe_values = [
+                                    bo.buffer_load(
+                                        _rsrc(
+                                            pe_cache + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes
+                                        ),
+                                        KV_LORA // (4 if cache_fp8 else 2) + lane * (2 if cache_fp8 else 1),
+                                        vec_width=2 if cache_fp8 else 1,
+                                        dtype=T.i32,
+                                    )
+                                    for part in range(min(2, KPW - gather_base))
+                                ]
+                                for part in range_constexpr(min(2, KPW - gather_base)):
+                                    if const_expr(cache_fp8):
+                                        raw = fx.Vector(pe_values[part])
+                                        fx.ptr_store(
+                                            _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
+                                            petile + ((wave * KPW + gather_base + part) * PS + lane * 4),
+                                        )
+                                    else:
+                                        lds_st(
+                                            petile,
+                                            (wave * KPW + gather_base + part) * PS + lane,
+                                            fx.Int32(pe_values[part]).bitcast(fx.Float32),
+                                        )
+                    elif const_expr(cache_fp8 and KPW % 2 == 0):
+                        # Keep two independent rows outstanding before conversion.
+                        # The complete gather still precedes q/patch dependencies.
+                        for gather_base in range_constexpr(0, KPW, 2):
+                            gather_kv = [
+                                fx.Vector(
+                                    bo.buffer_load(
+                                        r_kv,
+                                        krows[gather_base + part] * (QK_DIM // 4) + lane * 2,
+                                        vec_width=2,
+                                        dtype=T.i32,
+                                    )
+                                )
+                                for part in range(2)
+                            ]
+                            for part in range_constexpr(2):
+                                raw = gather_kv[part]
+                                fx.ptr_store(
+                                    _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
+                                    ktile + ((wave * KPW + gather_base + part) * KS + lane * 4),
+                                )
+                            if lane < PE_DIM // 8:
+                                gather_pe = [
+                                    fx.Vector(
+                                        bo.buffer_load(
+                                            r_pe,
+                                            krows[gather_base + part] * (QK_DIM // 4) + KV_LORA // 4 + lane * 2,
+                                            vec_width=2,
+                                            dtype=T.i32,
+                                        )
+                                    )
+                                    for part in range(2)
+                                ]
+                                for part in range_constexpr(2):
+                                    raw = gather_pe[part]
+                                    fx.ptr_store(
+                                        _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
+                                        petile + ((wave * KPW + gather_base + part) * PS + lane * 4),
+                                    )
+                    elif const_expr(
+                        COHORT_ROW_TILES and not with_indexer and native_fp4_mfma and npes == 4 and not cache_fp8
+                    ):
                         # Two independent persistent-cache rows outstanding per wave.
                         # Complete the original gather before any q/patch dependency.
                         for gather_base in range_constexpr(0, KPW, 2):
@@ -4106,46 +4347,138 @@ def build_glm5_monokernel(
                 def gather_old_kv():
                     """Copy persistent KV/PE rows to LDS before patching incoming cache versions."""
                     krows = [lds_ld(attn_keys, wave * KPW + jj) for jj in range(KPW)]
-                    for jj in range_constexpr(KPW):
-                        j = wave * KPW + jj
-                        if const_expr(cache_fp8):
-                            row = krows[jj] * (QK_DIM // 4)
-                            raw = fx.Vector(bo.buffer_load(r_kv, row + lane * 2, vec_width=2, dtype=T.i32))
-                            fx.ptr_store(
-                                _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
-                                ktile + (j * KS + lane * 4),
-                            )
-                            if lane < PE_DIM // 8:
-                                pe_raw = fx.Vector(
+                    if const_expr(TILED_INDEXER and use_atom_kv_cache):
+                        # Each gathered row is wave-uniform; retain two independent
+                        # row loads while putting its full byte address in the base.
+                        cache_row_bytes = QK_DIM * (1 if cache_fp8 else 2)
+                        for gather_base in range_constexpr(0, KPW, 2):
+                            descriptors = [
+                                _rsrc(kv_cache + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes)
+                                for part in range(min(2, KPW - gather_base))
+                            ]
+                            raw_values = [
+                                fx.Vector(
                                     bo.buffer_load(
-                                        r_pe,
-                                        row + KV_LORA // 4 + lane * 2,
+                                        descriptors[part],
+                                        lane * (2 if cache_fp8 else 4),
+                                        vec_width=2 if cache_fp8 else 4,
+                                        dtype=T.i32,
+                                    )
+                                )
+                                for part in range(min(2, KPW - gather_base))
+                            ]
+                            for part in range_constexpr(min(2, KPW - gather_base)):
+                                raw = raw_values[part]
+                                value = _fp8_to_bf16x8(raw[0], raw[1]) if const_expr(cache_fp8) else raw
+                                fx.ptr_store(
+                                    value.bitcast(fx.Float32),
+                                    ktile + ((wave * KPW + gather_base + part) * KS + lane * 4),
+                                )
+                            if lane < (PE_DIM // 8 if const_expr(cache_fp8) else PE_DIM // 2):
+                                pe_values = [
+                                    bo.buffer_load(
+                                        _rsrc(
+                                            pe_cache + fx.Int64(_uniform(krows[gather_base + part])) * cache_row_bytes
+                                        ),
+                                        KV_LORA // (4 if cache_fp8 else 2) + lane * (2 if cache_fp8 else 1),
+                                        vec_width=2 if cache_fp8 else 1,
+                                        dtype=T.i32,
+                                    )
+                                    for part in range(min(2, KPW - gather_base))
+                                ]
+                                for part in range_constexpr(min(2, KPW - gather_base)):
+                                    if const_expr(cache_fp8):
+                                        raw = fx.Vector(pe_values[part])
+                                        fx.ptr_store(
+                                            _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
+                                            petile + ((wave * KPW + gather_base + part) * PS + lane * 4),
+                                        )
+                                    else:
+                                        lds_st(
+                                            petile,
+                                            (wave * KPW + gather_base + part) * PS + lane,
+                                            fx.Int32(pe_values[part]).bitcast(fx.Float32),
+                                        )
+                    elif const_expr(cache_fp8 and KPW % 2 == 0):
+                        # Keep two independent rows outstanding before conversion.
+                        # The complete gather still precedes q/patch dependencies.
+                        for gather_base in range_constexpr(0, KPW, 2):
+                            gather_kv = [
+                                fx.Vector(
+                                    bo.buffer_load(
+                                        r_kv,
+                                        krows[gather_base + part] * (QK_DIM // 4) + lane * 2,
                                         vec_width=2,
                                         dtype=T.i32,
                                     )
                                 )
+                                for part in range(2)
+                            ]
+                            for part in range_constexpr(2):
+                                raw = gather_kv[part]
                                 fx.ptr_store(
-                                    _fp8_to_bf16x8(pe_raw[0], pe_raw[1]).bitcast(fx.Float32),
-                                    petile + (j * PS + lane * 4),
+                                    _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
+                                    ktile + ((wave * KPW + gather_base + part) * KS + lane * 4),
                                 )
-                        else:
-                            kv_row_words = QK_DIM // 2 if const_expr(use_atom_kv_cache) else KV_LORA // 2
-                            kv8 = fx.Vector(
-                                bo.buffer_load(
-                                    r_kv,
-                                    krows[jj] * kv_row_words + lane * 4,
-                                    vec_width=4,
-                                    dtype=T.i32,
+                            if lane < PE_DIM // 8:
+                                gather_pe = [
+                                    fx.Vector(
+                                        bo.buffer_load(
+                                            r_pe,
+                                            krows[gather_base + part] * (QK_DIM // 4) + KV_LORA // 4 + lane * 2,
+                                            vec_width=2,
+                                            dtype=T.i32,
+                                        )
+                                    )
+                                    for part in range(2)
+                                ]
+                                for part in range_constexpr(2):
+                                    raw = gather_pe[part]
+                                    fx.ptr_store(
+                                        _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
+                                        petile + ((wave * KPW + gather_base + part) * PS + lane * 4),
+                                    )
+                    else:
+                        for jj in range_constexpr(KPW):
+                            j = wave * KPW + jj
+                            if const_expr(cache_fp8):
+                                row = krows[jj] * (QK_DIM // 4)
+                                raw = fx.Vector(bo.buffer_load(r_kv, row + lane * 2, vec_width=2, dtype=T.i32))
+                                fx.ptr_store(
+                                    _fp8_to_bf16x8(raw[0], raw[1]).bitcast(fx.Float32),
+                                    ktile + (j * KS + lane * 4),
                                 )
-                            )
-                            fx.ptr_store(kv8.bitcast(fx.Float32), ktile + (j * KS + lane * 4))
-                            if lane < PE_DIM // 2:
-                                pe_row = (
-                                    krows[jj] * (QK_DIM // 2) + KV_LORA // 2 + lane
-                                    if const_expr(use_atom_kv_cache)
-                                    else krows[jj] * (PE_DIM // 2) + lane
+                                if lane < PE_DIM // 8:
+                                    pe_raw = fx.Vector(
+                                        bo.buffer_load(
+                                            r_pe,
+                                            row + KV_LORA // 4 + lane * 2,
+                                            vec_width=2,
+                                            dtype=T.i32,
+                                        )
+                                    )
+                                    fx.ptr_store(
+                                        _fp8_to_bf16x8(pe_raw[0], pe_raw[1]).bitcast(fx.Float32),
+                                        petile + (j * PS + lane * 4),
+                                    )
+                            else:
+                                kv_row_words = QK_DIM // 2 if const_expr(use_atom_kv_cache) else KV_LORA // 2
+                                kv8 = fx.Vector(
+                                    bo.buffer_load(
+                                        r_kv,
+                                        krows[jj] * kv_row_words + lane * 4,
+                                        vec_width=4,
+                                        dtype=T.i32,
+                                    )
                                 )
-                                lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row))
+                                fx.ptr_store(kv8.bitcast(fx.Float32), ktile + (j * KS + lane * 4))
+                                if lane < PE_DIM // 2:
+                                    pe_row = (
+                                        krows[jj] * (QK_DIM // 2) + KV_LORA // 2 + lane
+                                        if const_expr(use_atom_kv_cache)
+                                        else krows[jj] * (PE_DIM // 2) + lane
+                                    )
+                                    lds_st(petile, j * PS + lane, ld_f32(r_pe, pe_row))
 
                 def patch_new_kv():
                     """Patch the cache version visible at this tile's serial boundary."""
@@ -4769,11 +5102,8 @@ def build_glm5_monokernel(
                             q0, q1, qs = quant_mxfp8(a0 * x_rstd * xg[0], a1 * x_rstd * xg[1])
                         else:
                             q0, q1, qs = quant_scaled(a0 * x_rstd * xg[0], a1 * x_rstd * xg[1])
-                        w8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
-                        w8n = _xshfl(w8, 1)
-                        if lane % 2 == 0:  # FP8 bytes k .. k + 3 in one tagged word
-                            put(mb("xq"), (x_s * HIDDEN + xk) // 4, w8 | (w8n << 16))
-                        d0, d1 = _fp8_roundtrip(q0, q1)
+                        publish_moe_quant(mb("xq"), x_s * HIDDEN + xk, q0, q1)
+                        d0, d1 = moe_roundtrip(q0, q1)
                         qscale = (qs << 23).bitcast(fx.Float32) if const_expr(native_fp4_mfma) else qs
                         bo.buffer_store(
                             fx.Vector.from_elements([d0 * qscale, d1 * qscale], fx.Float32),
@@ -4886,11 +5216,8 @@ def build_glm5_monokernel(
                             q0, q1, qs = quant_mxfp8(a0 * x_rstd * xg[0], a1 * x_rstd * xg[1])
                         else:
                             q0, q1, qs = quant_scaled(a0 * x_rstd * xg[0], a1 * x_rstd * xg[1])
-                        w8 = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
-                        w8n = _xshfl(w8, 1)
-                        if lane % 2 == 0:  # FP8 bytes k .. k + 3 in one tagged word
-                            put(mb("xq"), (x_s * HIDDEN + xk) // 4, w8 | (w8n << 16))
-                        d0, d1 = _fp8_roundtrip(q0, q1)
+                        publish_moe_quant(mb("xq"), x_s * HIDDEN + xk, q0, q1)
+                        d0, d1 = moe_roundtrip(q0, q1)
                         qscale = (qs << 23).bitcast(fx.Float32) if const_expr(native_fp4_mfma) else qs
                         bo.buffer_store(
                             fx.Vector.from_elements([d0 * qscale, d1 * qscale], fx.Float32),
@@ -5349,11 +5676,17 @@ def build_glm5_monokernel(
                                     ]
                                 )
                                 for gu_i in range_constexpr(HIDDEN // 4 // THREADS):
-                                    lds_st(xs, gu_j * UG_X_ROW + tid + gu_i * THREADS,
-                                           gu_live_got[gu_i][0].bitcast(fx.Float32))
+                                    lds_st(
+                                        xs,
+                                        gu_j * UG_X_ROW + tid + gu_i * THREADS,
+                                        gu_live_got[gu_i][0].bitcast(fx.Float32),
+                                    )
                                 if tid < XQ_GROUPS:
-                                    lds_st(misc, 8 + gu_j * UG_SCALE_ROW + tid,
-                                           gu_live_got[HIDDEN // 4 // THREADS][0].bitcast(fx.Float32))
+                                    lds_st(
+                                        misc,
+                                        8 + gu_j * UG_SCALE_ROW + tid,
+                                        gu_live_got[HIDDEN // 4 // THREADS][0].bitcast(fx.Float32),
+                                    )
                             for gu_j in range_constexpr(S):
                                 if gu_j >= gu_valid:
                                     for gu_i in range_constexpr(HIDDEN // 4 // THREADS):
@@ -5763,14 +6096,7 @@ def build_glm5_monokernel(
                     mid_chunk = fx.Int32(mid_chunk)
                     a0, a1 = get2(mb("mid"), mid_chunk * 128 + lane * 2)
                     q0, q1, mid_exponent = quant_mxfp8(a0, a1)
-                    packed_word = fx.Int32(rocdl.cvt_pk_fp8_f32(T.i32, q0, q1, fx.Int32(0), False)) & 0xFFFF
-                    packed_neighbor = _xshfl(packed_word, 1)
-                    if lane % 2 == 0:
-                        put(
-                            mb("ugp"),
-                            mid_chunk * 32 + lane // 2,
-                            packed_word | (packed_neighbor << 16),
-                        )
+                    publish_moe_quant(mb("ugp"), mid_chunk * 128 + lane * 2, q0, q1)
                     if lane % 16 == 0:
                         put(
                             mb("ugp"),
@@ -5871,10 +6197,14 @@ def build_glm5_monokernel(
                         [words[half][e] for half in range(2) for e in range(4)],
                         fx.Int32,
                     )
+                    if const_expr(activation_fp4):
+                        b = fx.Vector(fx.ptr_load(xs + bw + 4 * (lane // 16), result_type=v4f)).bitcast(fx.Int32)
                     asc = ld(misc, sw).bitcast(fx.Int32)
                     zero = fx.Vector.filled(4, 0.0, fx.Float32)
                     return fx.Vector(
-                        rocdl.mfma_scale_f32_16x16x128_f8f6f4(T.vec(4, T.f32), [raw, b, zero, 4, 0, 0, scale, 0, asc])
+                        rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                            T.vec(4, T.f32), [raw, b, zero, 4, 4 if activation_fp4 else 0, 0, scale, 0, asc]
+                        )
                     )
 
                 # Keep union metadata through every output task. Original keys
@@ -6085,278 +6415,508 @@ def build_glm5_monokernel(
                     return t == start("down")
                 return fx.Boolean(True)
 
-            for t in range(start("down"), DN_WORK_ITEMS, G):
-                t = fx.Int32(t)
-                stamp("down", t, 0)
-                if const_expr(DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED):
-                    if const_expr(DN_SPLIT_UNION_TAIL):
-                        if t >= DN_FULL_TASKS:
-                            dn_union_tile(t, output_rows=16)
+            pair_row_tile = (row_tile // 2) * 2
+
+            def pair_mid_spec(wire_word):
+                source_cohort = pair_row_tile + wire_word // MIDQ_WORDS
+                ptr = full_scratch + fx.Int64(source_cohort) * TILE_SCRATCH_BYTES + fx.Int64(SC["ugp"])
+                return (ptr, wire_word % MIDQ_WORDS, 2)
+
+            def pair_peer_reduce(t, tile):
+                # Original BF16 partial rounding and rank-order FP32 sum, with
+                # the unchanged per-cohort symmetric addresses for each token.
+                region_base = fx.Int64(SY["ffn"]) + fx.Int64(peer_slot) * fx.Int64(SY["_part_stride"])
+                if wave < W:
+                    pair_count = DN_PAIR_ROWS * tile // 2
+                    for batch in range_constexpr((pair_count + 63) // 64):
+                        pair = lane + batch * 64
+                        if pair < pair_count:
+                            si = pair // (tile // 2)
+                            ri = (pair % (tile // 2)) * 2
+                            destination = peer_dst + fx.Int64(pair_row_tile + si // S - row_tile) * TILE_PEER_BYTES
+                            put_bf(
+                                destination + region_base,
+                                (rank * S + si % S) * HIDDEN + t * tile + ri,
+                                [lds_ld(outs, si * tile + ri), lds_ld(outs, si * tile + ri + 1)],
+                                CM_SYS,
+                            )
+                gpu.barrier()
+                if tid < DN_PAIR_ROWS * tile // 2:
+                    si = tid // (tile // 2)
+                    ri = (tid % (tile // 2)) * 2
+                    output_row = t * tile + ri
+                    cohort = pair_row_tile + si // S
+                    own = full_sym + fx.Int64(cohort) * TILE_PEER_BYTES + region_base
+                    got = poll(
+                        [(own, ((src * S + si % S) * HIDDEN + output_row) // 2, 1) for src in range(W)], "one-as"
+                    )
+                    parts = [bf2_f32(value[0]) for value in got]
+                    t0, t1 = fx.Float32(0.0), fx.Float32(0.0)
+                    for src in range_constexpr(W):
+                        t0 = t0 + parts[src][0]
+                        t1 = t1 + parts[src][1]
+                    residual_ptr = full_scratch + fx.Int64(cohort) * TILE_SCRATCH_BYTES + fx.Int64(SC["a"])
+                    r0, r1 = bf2_f32(get(residual_ptr, ((si % S) * HIDDEN + output_row) // 2))
+                    token = pair_row_tile * S + si
+                    bo.buffer_store(
+                        fx.Vector.from_elements([r0 + t0, r1 + t1], fx.Float32).to(fx.BFloat16),
+                        _rsrc(full_out),
+                        token * HIDDEN + output_row,
+                    )
+
+            def dn_pair_tile(t, output_rows=32):
+
+                mode = "union_lut4"
+                hidden, INTER, SLOTS = HIDDEN, 512, DP_SLOTS
+                XROW, SCROW, UNION_MAX = DP_XROW, DP_SCROW, DP_UMAX
+                MSOFF, KEYOFF, DWOFF = DP_MSOFF, DP_KEYOFF, DP_DWOFF
+                CROFF, CWORDS = DP_CROFF, DP_CWORDS
+                gu, gw = wave // 4, wave % 4
+                tile = t
+                arena = lds.work.ptr
+                xs, misc = arena, arena + MSOFF
+                keys = fx.recast_iter(fx.Int32, arena + KEYOFF)
+                dnw, contributions = arena + DWOFF, arena + CROFF
+                red = contributions
+
+                def ld(p, i):
+                    return fx.ptr_load(p + i)
+
+                def st(p, i, v):
+                    fx.ptr_store(v, p + i)
+
+                def contribution_index(token, slot, kc, row):
+                    if const_expr(DN_CONTIG_CONTRIBUTIONS):
+                        # Preserve the logical (slot, K, row, token) contribution;
+                        # keep each lane's four adjacent rows together for float4 I/O.
+                        return (((slot * 4 + kc) * 8 + row // 4) * DN_PAIR_ROWS + token) * 4 + row % 4
+                    if const_expr(mode in ("union_transpose", "union_batch4", "union_lut4")):
+                        return ((slot * 4 + kc) * 32 + row) * DN_PAIR_ROWS + token
+                    return ((token * SLOTS + slot) * 4 + kc) * 32 + row
+
+                def unit(expert, slot, kc, coefficient):
+                    sn = fx.min(lane % 16, DN_PAIR_ROWS - 1)
+                    row = sn * SLOTS + slot
+                    wb = _rsrc(w_dn + fx.Int64(expert) * fx.Int64(hidden * INTER // 2))
+                    sb = _rsrc(s_dn + fx.Int64(expert) * fx.Int64(hidden * INTER // 32))
+                    rg = tile * (output_rows // 16) + gu + (DN_PAIR_FULL if output_rows == 16 else 0)
+                    raw = fx.Vector(
+                        bo.buffer_load(
+                            wb,
+                            (rg * 8 + kc * 2) * 128 + lane * 4,
+                            vec_width=4,
+                            dtype=T.i32,
+                        )
+                    )
+                    scale = fx.Int32(
+                        bo.buffer_load(
+                            sb,
+                            atom_mxfp4_scale_index(rg * 16 + lane % 16, kc * 4 + lane // 16, 16),
+                            vec_width=1,
+                            dtype=T.i8,
+                        )
+                    )
+                    return (
+                        raw,
+                        scale,
+                        row * XROW + kc * (16 if True else 32),
+                        row * SCROW + kc * 4 + lane // 16,
+                        coefficient,
+                    )
+
+                def partial(u):
+                    raw, scale, bw, sw, coefficient = u
+                    words = [
+                        fx.Vector(fx.ptr_load(xs + bw + 16 * half + 4 * (lane // 16), result_type=v4f)).bitcast(
+                            fx.Int32
+                        )
+                        for half in range(2)
+                    ]
+                    b = fx.Vector.from_elements(
+                        [words[half][e] for half in range(2) for e in range(4)],
+                        fx.Int32,
+                    )
+                    if const_expr(activation_fp4):
+                        b = fx.Vector(fx.ptr_load(xs + bw + 4 * (lane // 16), result_type=v4f)).bitcast(fx.Int32)
+                    asc = ld(misc, sw).bitcast(fx.Int32)
+                    zero = fx.Vector.filled(4, 0.0, fx.Float32)
+                    return fx.Vector(
+                        rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                            T.vec(4, T.f32), [raw, b, zero, 4, 4 if activation_fp4 else 0, 0, scale, 0, asc]
+                        )
+                    )
+
+                # Contributions, metadata restores, LUT rebuilds and TP do not
+                # write this input prefix. Retain it across output task rounds.
+                if const_expr(True):
+                    mid_read_words = (
+                        (DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 4) // 2
+                        if True
+                        else (DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 4)
+                    )
+                    MID_PAIR_ROUNDS = (mid_read_words + 2 * THREADS - 1) // (2 * THREADS)
+
+                    def mid_wire_word(compact_word):
+                        word = fx.min(compact_word, mid_read_words - 2)
+                        if const_expr(True):
+                            return (word // 16) * 32 + word % 16
+                        return word
+
+                    for pack_base in range_constexpr(0, MID_PAIR_ROUNDS, 4):
+                        packed = poll(
+                            [
+                                pair_mid_spec(mid_wire_word((tid + j * THREADS) * 2))
+                                for j in range(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS))
+                            ]
+                        )
+                        if const_expr(pack_base == 0):
+                            stamp("down", t, 2)
+                        for j in range_constexpr(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS)):
+                            word = (tid + j * THREADS) * 2
+                            if word < mid_read_words:
+                                target_word = word
+                                if const_expr(GROUPED_DN):
+                                    row_words = expert_inter // (8 if True else 4)
+                                    target_word = (word // row_words) * XROW + word % row_words
+                                st(
+                                    xs,
+                                    target_word,
+                                    packed[j - pack_base][0].bitcast(fx.Float32),
+                                )
+                                st(
+                                    xs,
+                                    target_word + 1,
+                                    packed[j - pack_base][1].bitcast(fx.Float32),
+                                )
+                    for j in range_constexpr(
+                        ((DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 32) + THREADS - 1) // THREADS
+                    ):
+                        index = tid + j * THREADS
+                        scale_index = fx.min(index, DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 32 - 1)
+                        scale_cohort = pair_row_tile + scale_index // MID_SCALE_WORDS
+                        scale_ptr = full_scratch + fx.Int64(scale_cohort) * TILE_SCRATCH_BYTES + fx.Int64(SC["ugp"])
+                        mid_exponent = get(scale_ptr, MIDQ_WORDS + scale_index % MID_SCALE_WORDS)
+                        if index < (DN_PAIR_ROWS * MOE_SLOTS * expert_inter // 32):
+                            target_scale = index
+                            if const_expr(GROUPED_DN):
+                                target_scale = (index // (expert_inter // 32)) * DN_SCALE_ROW + index % (
+                                    expert_inter // 32
+                                )
+                            st(misc, target_scale, mid_exponent.bitcast(fx.Float32))
+
+                gpu.barrier()
+
+                ue = keys + DN_PAIR_ROWS * SLOTS
+                um = ue + UNION_MAX
+                uc = um + UNION_MAX
+
+                if const_expr(mode == "union_lut4"):
+                    slot_lut = fx.recast_iter(fx.Int8, arena + CROFF + CWORDS)
+                    if const_expr(True):
+                        for j in range_constexpr((257 * DN_PAIR_ROWS + THREADS - 1) // THREADS):
+                            address = tid + j * THREADS
+                            if address < 257 * DN_PAIR_ROWS:
+                                st(slot_lut, address, fx.Int8(0))
+                        gpu.barrier()
+                        if tid < DN_PAIR_ROWS * SLOTS:
+                            lut_expert = ld(keys, tid)
+                            st(
+                                slot_lut,
+                                lut_expert * DN_PAIR_ROWS + tid // SLOTS,
+                                fx.Int8(tid % SLOTS),
+                            )
+                        gpu.barrier()
+
+                n_union = _uniform(ld(uc, 4))
+
+                sn = fx.min(lane % 16, DN_PAIR_ROWS - 1)
+
+                BATCH = 4 if mode in ("union_batch4", "union_lut4") else 1
+
+                if wave < (output_rows // 16) * 4:
+                    for batch in range((n_union + BATCH - 1) // BATCH):
+                        units, slots, active_columns = [], [], []
+                        for part in range_constexpr(BATCH):
+                            index = fx.min(batch * BATCH + part, n_union - 1)
+                            expert = _uniform(ld(ue, index))
+                            if const_expr(mode == "union_lut4"):
+                                slot = fx.Int32(ld(slot_lut, expert * DN_PAIR_ROWS + sn))
+                            else:
+                                slot = fx.Int32(0)
+                                for j in range_constexpr(SLOTS):
+                                    slot = (ld(keys, sn * SLOTS + j) == expert).select(fx.Int32(j), slot)
+                            slots.append(slot)
+                            active_columns.append((lane % 16 < DN_PAIR_ROWS) & (ld(keys, sn * SLOTS + slot) == expert))
+                            units.append(unit(expert, slot, gw, fx.Float32(1.0)))
+                        for part in range_constexpr(BATCH):
+                            if (batch * BATCH + part < n_union) | (part == 0 and index_request_width == 6):
+                                c = partial(units[part])
+                                if active_columns[part]:
+                                    # Adjacent rows use a fixed layout stride.
+                                    # Share their base so the LDS writes can pair.
+                                    row = gu * 16 + lane // 16 * 4
+                                    target = contribution_index(sn, slots[part], gw, row)
+                                    if const_expr(DN_CONTIG_CONTRIBUTIONS):
+                                        fx.ptr_store(c, contributions + target)
+                                    else:
+                                        stride = (
+                                            DN_PAIR_ROWS
+                                            if mode in ("union_transpose", "union_batch4", "union_lut4")
+                                            else 1
+                                        )
+                                        for e in range_constexpr(4):
+                                            st(contributions, target + e * stride, c[e])
+
+                gpu.barrier()
+
+                acc = fx.Vector.filled(4, 0.0, fx.Float32)
+
+                if const_expr(DN_UNION_ROWS40):
+                    # S10 assigns 90 contiguous slot/K units to each wave.
+                    # Tokens2/7 cross a wave boundary at slot4, K chunk2.
+                    if lane % 16 < DN_PAIR_ROWS:
+                        for slot in range_constexpr(SLOTS):
+                            coefficient = ld(dnw, sn * SLOTS + slot)
+                            for kc in range_constexpr(4):
+                                if ((sn * SLOTS + slot) * 4 + kc) // 90 == gw:
+                                    if const_expr(DN_CONTIG_CONTRIBUTIONS):
+                                        vals = fx.Vector(
+                                            fx.ptr_load(
+                                                contributions
+                                                + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
+                                                result_type=v4f,
+                                            )
+                                        )
+                                    else:
+                                        vals = [
+                                            ld(
+                                                contributions,
+                                                contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4 + e),
+                                            )
+                                            for e in range(4)
+                                        ]
+                                    acc = fx.Vector.from_elements(
+                                        [acc[e] + vals[e] * coefficient for e in range(4)], fx.Float32
+                                    )
+                else:
+                    # Keep the original wave and every slot/K addition order.
+                    samples_per_wave = S // 4
+                    if (lane % 16 < DN_PAIR_ROWS) & ((sn % S) // samples_per_wave == gw) & (gu < output_rows // 16):
+                        for slot in range_constexpr(SLOTS):
+                            coefficient = ld(dnw, sn * SLOTS + slot)
+                            for kc in range_constexpr(4):
+                                if const_expr(DN_CONTIG_CONTRIBUTIONS):
+                                    vals = fx.Vector(
+                                        fx.ptr_load(
+                                            contributions + contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4),
+                                            result_type=v4f,
+                                        )
+                                    )
+                                else:
+                                    vals = [
+                                        ld(
+                                            contributions,
+                                            contribution_index(sn, slot, kc, gu * 16 + lane // 16 * 4 + e),
+                                        )
+                                        for e in range(4)
+                                    ]
+                                acc = fx.Vector.from_elements(
+                                    [acc[e] + vals[e] * coefficient for e in range(4)],
+                                    fx.Float32,
+                                )
+
+                gpu.barrier()
+
+                fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
+
+                gpu.barrier()
+
+                if tid < DN_PAIR_ROWS * output_rows:
+                    output_row, output_token = tid % output_rows, tid // output_rows
+                    tot = fx.Float32(0.0)
+                    for w in range_constexpr(4):
+                        ww = output_row // 16 * 4 + w
+                        tot = tot + ld(
+                            red,
+                            (ww * 64 + output_token + 16 * ((output_row % 16) // 4)) * 4 + output_row % 4,
+                        )
+                    lds_st(outs, output_token * output_rows + output_row, tot)
+
+            if const_expr(DN_COHORT_PAIR):
+                pair_keys = fx.recast_iter(fx.Int32, lds.work.ptr + DP_KEYOFF)
+                pair_probs = lds.work.ptr + DP_DWOFF
+                if tid < DP_ROUTE_WORDS:
+                    token = tid // MOE_SLOTS
+                    cohort = pair_row_tile + token // S
+                    ptr = full_scratch + fx.Int64(cohort) * TILE_SCRATCH_BYTES
+                    item = (token % S) * MOE_SLOTS + tid % MOE_SLOTS
+                    lds_st(pair_keys, tid, get(ptr + fx.Int64(SC["sel"]), item))
+                    lds_st(pair_probs, tid, get(ptr + fx.Int64(SC["prob"]), item).bitcast(fx.Float32))
+                gpu.barrier()
+                # Rebuild cohort-local expert metadata expected by ordered down union;
+                # wave-local masks only occupy the otherwise-idle reduction workspace.
+                union_experts = pair_keys + DN_PAIR_ROWS * MOE_SLOTS
+                union_masks = union_experts + DP_UMAX
+                union_counts = union_masks + DP_UMAX
+                mask_red = fx.recast_iter(fx.Int32, lds.work.ptr + DP_CROFF)
+                for i in range_constexpr(WAVES * N_EXPERTS // THREADS):
+                    lds_st(mask_red, tid + i * THREADS, fx.Int32(0))
+                gpu.barrier()
+                for batch in range_constexpr(sample_wave_batches(DN_PAIR_ROWS)):
+                    sample = wave + batch * WAVES
+                    if (sample < DN_PAIR_ROWS) & (lane < TOP_K):
+                        expert = fx.Int32(lds_ld(pair_keys, sample * MOE_SLOTS + lane + 1))
+                        address = wave * N_EXPERTS + expert
+                        previous = lds_ld(mask_red, address)
+                        lds_st(mask_red, address, previous | (fx.Int32(1) << sample))
+                    gpu.barrier()
+                mask = fx.Int32(0)
+                if tid < N_EXPERTS:
+                    for w in range_constexpr(WAVES):
+                        mask = mask | lds_ld(mask_red, w * N_EXPERTS + tid)
+                ballot = fx.Int64(rocdl.ballot(T.i64, mask != 0))
+                below = fx.Int32(fmath.ctpop(ballot & ((fx.Int64(1) << fx.Int64(lane)) - 1)))
+                count = fx.Int32(fmath.ctpop(ballot))
+                if (tid < N_EXPERTS) & (lane == 0):
+                    lds_st(union_counts, wave, count)
+                gpu.barrier()
+                offset = fx.Int32(0)
+                for w in range_constexpr(N_EXPERTS // 64):
+                    offset = offset + (wave > w).select(fx.Int32(lds_ld(union_counts, w)), fx.Int32(0))
+                if (tid < N_EXPERTS) & (mask != 0):
+                    lds_st(union_experts, offset + below, tid)
+                    lds_st(union_masks, offset + below, mask)
+                if tid == N_EXPERTS - 1:
+                    total = offset + count
+                    lds_st(union_experts, total, fx.Int32(SHARED_EXPERT))
+                    lds_st(union_masks, total, fx.Int32((1 << DN_PAIR_ROWS) - 1))
+                    lds_st(union_counts, N_EXPERTS // 64, total + 1)
+                gpu.barrier()
+
+                pair_bid = full_bid % DN_PAIR_G
+                pair_first = (pair_bid + DN_PAIR_G - base["down"]) & (DN_PAIR_G - 1)
+                for pair_task in range(pair_first, DN_PAIR_WORK, DN_PAIR_G):
+                    pair_task = fx.Int32(pair_task)
+                    stamp("down", pair_task, 0)
+                    if const_expr(DN_PAIR_SPLIT):
+                        if pair_task >= DN_PAIR_FULL:
+                            dn_pair_tile(pair_task, output_rows=16)
+                        else:
+                            dn_pair_tile(pair_task)
+                    else:
+                        dn_pair_tile(pair_task)
+                    stamp("down", pair_task, 3)
+                    gpu.barrier()
+                    if const_expr(DN_PAIR_SPLIT):
+                        if pair_task >= DN_PAIR_FULL:
+                            pair_peer_reduce(pair_task + DN_PAIR_FULL, 16)
+                        else:
+                            pair_peer_reduce(pair_task, 32)
+                    else:
+                        pair_peer_reduce(pair_task, 32)
+                    gpu.barrier()
+                    stamp("down", pair_task, 4)
+            else:
+                for t in range(start("down"), DN_WORK_ITEMS, G):
+                    t = fx.Int32(t)
+                    stamp("down", t, 0)
+                    if const_expr(DN_UNION_CANDIDATE or DN_UNION_ROWS40 or DN_UNION_ALIGNED):
+                        if const_expr(DN_SPLIT_UNION_TAIL):
+                            if t >= DN_FULL_TASKS:
+                                dn_union_tile(t, output_rows=16)
+                            else:
+                                dn_union_tile(t)
                         else:
                             dn_union_tile(t)
                     else:
-                        dn_union_tile(t)
-                else:
-                    if down_inputs_needed(t):
-                        if const_expr(ug_split(S, expert_inter) is None):  # retain the tuned down-stage route schedule
-                            dn_route(load_bias())
-                    gpu.barrier()
-                    gu = wave // DN_WPR
-                    dn_rg = t * DN_TILE // 16
-                    dn_off = t * DN_TILE % 16
-                    # this lane's row, as a tile row; rows outside the tile load their lane ^ 8 twin
-                    # (same cache lines) and are dropped in the output
-                    dn_lr = gu * 16 + lane % 16 - dn_off
-                    dn_ln = ((dn_lr >= 0) & (dn_lr < DN_TILE)).select(lane, lane ^ 8)
+                        if down_inputs_needed(t):
+                            if const_expr(
+                                ug_split(S, expert_inter) is None
+                            ):  # retain the tuned down-stage route schedule
+                                dn_route(load_bias())
+                        gpu.barrier()
+                        gu = wave // DN_WPR
+                        dn_rg = t * DN_TILE // 16
+                        dn_off = t * DN_TILE % 16
+                        # this lane's row, as a tile row; rows outside the tile load their lane ^ 8 twin
+                        # (same cache lines) and are dropped in the output
+                        dn_lr = gu * 16 + lane % 16 - dn_off
+                        dn_ln = ((dn_lr >= 0) & (dn_lr < DN_TILE)).select(lane, lane ^ 8)
 
-                    DN_NU = S * MOE_SLOTS * DN_NKC // 2
-                    DN_UPW = (DN_NU + DN_WPR - 1) // DN_WPR
-                    DN_BLK = S * MOE_SLOTS * expert_inter // 128
+                        DN_NU = S * MOE_SLOTS * DN_NKC // 2
+                        DN_UPW = (DN_NU + DN_WPR - 1) // DN_WPR
+                        DN_BLK = S * MOE_SLOTS * expert_inter // 128
 
-                    def u_dn(cc):  # cc: 128-k chunk of this wave
-                        qu = (wave % DN_WPR) * DN_UPW + cc
-                        live = qu < DN_NU
-                        unit = fx.min(qu, DN_NU - 1)
-                        q = unit * 2  # 64-k chunk index over (s, slot, kc)
-                        s_q = q // (MOE_SLOTS * DN_NKC)
-                        slot_q = (q // DN_NKC) % MOE_SLOTS
-                        kc = q % DN_NKC
-                        e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
-                        wb = bo.create_buffer_resource_from_addr(
-                            w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
-                            num_records_bytes=(
-                                None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0))
-                            ),
-                        )
-                        sb = bo.create_buffer_resource_from_addr(
-                            s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
-                            num_records_bytes=(
-                                None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0))
-                            ),
-                        )
+                        def u_dn(cc):  # cc: 128-k chunk of this wave
+                            qu = (wave % DN_WPR) * DN_UPW + cc
+                            live = qu < DN_NU
+                            unit = fx.min(qu, DN_NU - 1)
+                            q = unit * 2  # 64-k chunk index over (s, slot, kc)
+                            s_q = q // (MOE_SLOTS * DN_NKC)
+                            slot_q = (q // DN_NKC) % MOE_SLOTS
+                            kc = q % DN_NKC
+                            e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
+                            wb = bo.create_buffer_resource_from_addr(
+                                w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
+                                num_records_bytes=(
+                                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0))
+                                ),
+                            )
+                            sb = bo.create_buffer_resource_from_addr(
+                                s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
+                                num_records_bytes=(
+                                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0))
+                                ),
+                            )
 
-                        def coef():  # mid block scale * route weight, only in this sample's column
-                            return (lane % 16 == s_q).select(_uniform_f32(lds_ld(misc, q // 2)), fx.Float32(0.0))
+                            def coef():  # mid block scale * route weight, only in this sample's column
+                                return (lane % 16 == s_q).select(_uniform_f32(lds_ld(misc, q // 2)), fx.Float32(0.0))
 
-                        if const_expr(expert_mxfp4):
+                            if const_expr(expert_mxfp4):
 
-                            def bf16_coef():
-                                return (lane % 16 == s_q).select(
-                                    _uniform_f32(lds_ld(dnw, s_q * MOE_SLOTS + slot_q)),
-                                    fx.Float32(0.0),
-                                )
+                                def bf16_coef():
+                                    return (lane % 16 == s_q).select(
+                                        _uniform_f32(lds_ld(dnw, s_q * MOE_SLOTS + slot_q)),
+                                        fx.Float32(0.0),
+                                    )
 
-                            if const_expr(native_fp4_mfma):
-                                return unit_native_mxfp4(
+                                if const_expr(native_fp4_mfma):
+                                    return unit_native_mxfp4(
+                                        wb,
+                                        sb,
+                                        dn_rg + gu,
+                                        unit % (expert_inter // 128),
+                                        expert_inter,
+                                        unit * 32,
+                                        unit * 4 + lane // 16,
+                                        bf16_coef,
+                                        dn_ln,
+                                    )
+                                return unit_mxfp4_bf16(
                                     wb,
                                     sb,
                                     dn_rg + gu,
                                     unit % (expert_inter // 128),
                                     expert_inter,
-                                    unit * 32,
-                                    unit * 4 + lane // 16,
+                                    unit * 64,
                                     bf16_coef,
                                     dn_ln,
                                 )
-                            return unit_mxfp4_bf16(
+                            return unit_f8f8(
                                 wb,
                                 sb,
                                 dn_rg + gu,
-                                unit % (expert_inter // 128),
+                                kc,
+                                DN_NKC,
                                 expert_inter,
-                                unit * 64,
-                                bf16_coef,
+                                q * 16,
+                                coef,
                                 dn_ln,
                             )
-                        return unit_f8f8(
-                            wb,
-                            sb,
-                            dn_rg + gu,
-                            kc,
-                            DN_NKC,
-                            expert_inter,
-                            q * 16,
-                            coef,
-                            dn_ln,
-                        )
 
-                    if const_expr(GROUPED_DN and S == 12):
-                        # keys/dnw are ready before mid payloads. Build in the disjoint red
-                        # arena now, so producer progress can overlap this scheduling work.
-                        # Preserve the old contiguous sample partition of each row-group
-                        # wave. Reorder only independent token columns, never one token's
-                        # nonzero slot/K additions or its final wave-reduction position.
-                        assert S % DN_WPR == 0
-                        DN_GROUP_SAMPLES = S // DN_WPR
-                        DN_GROUP_MAX = DN_GROUP_SAMPLES * MOE_SLOTS
-                        DN_COUNT_OFF = DN_WPR * DN_GROUP_MAX * 3
-                        assert DN_COUNT_OFF + DN_WPR <= RED_WORDS
-                        dsg_dn_table = fx.recast_iter(fx.Int32, red)
-                        dsg_count = fx.Int32(0)
-                        dsg_mask = fx.Int32(0)
-                        if wave < DN_WPR:
-                            dsg_first_sample = wave * DN_GROUP_SAMPLES
-                            for dsg_build_slot in range_constexpr(MOE_SLOTS):
-                                dsg_experts = [
-                                    _uniform(
-                                        lds_ld(
-                                            keys,
-                                            (dsg_first_sample + j) * MOE_SLOTS + dsg_build_slot,
-                                        )
-                                    )
-                                    for j in range(DN_GROUP_SAMPLES)
-                                ]
-                                for j in range_constexpr(DN_GROUP_SAMPLES):
-                                    dsg_distinct = fx.Int32(1) == 1
-                                    for dsg_previous in range_constexpr(j):
-                                        dsg_distinct = dsg_distinct & (dsg_experts[j] != dsg_experts[dsg_previous])
-                                    if dsg_distinct:
-                                        dsg_mask = fx.Int32(0)
-                                        for dsg_member in range_constexpr(DN_GROUP_SAMPLES):
-                                            dsg_mask = dsg_mask | (dsg_experts[j] == dsg_experts[dsg_member]).select(
-                                                fx.Int32(1) << (dsg_first_sample + dsg_member),
-                                                fx.Int32(0),
-                                            )
-                                        if lane == 0:
-                                            dsg_address = (wave * DN_GROUP_MAX + dsg_count) * 3
-                                            lds_st(
-                                                dsg_dn_table,
-                                                dsg_address,
-                                                dsg_experts[j],
-                                            )
-                                            lds_st(
-                                                dsg_dn_table,
-                                                dsg_address + 1,
-                                                fx.Int32(dsg_build_slot),
-                                            )
-                                            lds_st(dsg_dn_table, dsg_address + 2, dsg_mask)
-                                        dsg_count = dsg_count + 1
-                            if lane == 0:
-                                lds_st(dsg_dn_table, DN_COUNT_OFF + wave, dsg_count)
-                        gpu.barrier()
-                    if const_expr(S <= 4):
-                        pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]
-                    # Later output tasks read the same route, packed mid values,
-                    # and exponents. Their compute/reduction/TP bodies only read
-                    # xs/misc/keys/dnw, so keep those LDS inputs until down ends.
-                    if down_inputs_needed(t):
-                        hint_wait(
-                            N_UG,
-                            lambda k: (
-                                mb("mid"),
-                                (k // (MOE_SLOTS * I_PER_SLOT) * MOE_SLOTS + (k // I_PER_SLOT) % MOE_SLOTS)
-                                * expert_inter
-                                + (k % I_PER_SLOT) * UG_TILE
-                                + UG_TILE
-                                - 1,
-                            ),
-                            mark=("down", t),
-                        )
-                        if const_expr(GROUPED_UG):
-                            # Poll each tagged payload directly: no new global completion
-                            # flag or relaxed data-publication assumption is introduced.
-                            MID_PAIR_ROUNDS = (MIDQ_WORDS + 2 * THREADS - 1) // (2 * THREADS)
-                            for pack_base in range_constexpr(0, MID_PAIR_ROUNDS, 4):
-                                packed = poll(
-                                    [
-                                        (
-                                            mb("ugp"),
-                                            fx.min((tid + j * THREADS) * 2, MIDQ_WORDS - 2),
-                                            2,
-                                        )
-                                        for j in range(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS))
-                                    ]
-                                )
-                                if const_expr(pack_base == 0):
-                                    stamp("down", t, 2)
-                                for j in range_constexpr(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS)):
-                                    word = (tid + j * THREADS) * 2
-                                    if word < MIDQ_WORDS:
-                                        target_word = word
-                                        if const_expr(GROUPED_DN):
-                                            target_word = (word // (expert_inter // 4)) * DN_X_ROW + word % (
-                                                expert_inter // 4
-                                            )
-                                        lds_st(
-                                            xs,
-                                            target_word,
-                                            packed[j - pack_base][0].bitcast(fx.Float32),
-                                        )
-                                        lds_st(
-                                            xs,
-                                            target_word + 1,
-                                            packed[j - pack_base][1].bitcast(fx.Float32),
-                                        )
-                            for j in range_constexpr((MID_SCALE_WORDS + THREADS - 1) // THREADS):
-                                index = tid + j * THREADS
-                                mid_exponent = get(
-                                    mb("ugp"),
-                                    MIDQ_WORDS + fx.min(index, MID_SCALE_WORDS - 1),
-                                )
-                                if index < MID_SCALE_WORDS:
-                                    target_scale = index
-                                    if const_expr(GROUPED_DN):
-                                        target_scale = (index // (expert_inter // 32)) * DN_SCALE_ROW + index % (
-                                            expert_inter // 32
-                                        )
-                                    lds_st(misc, target_scale, mid_exponent.bitcast(fx.Float32))
-                        else:
-                            # TP4 with 12 rows has 54 wave-local groups. Quantize bounded batches
-                            # so the full set of mid values does not stay live in registers.
-                            N_MID_BLOCKS = (DN_BLK + WAVES - 1) // WAVES
-                            MID_BATCH = 8 if native_fp4_mfma and expert_inter > INTER and S == 12 else N_MID_BLOCKS
-                            for mid_base in range_constexpr(0, N_MID_BLOCKS, MID_BATCH):
-                                mids = get2_many(
-                                    [
-                                        (
-                                            mb("mid"),
-                                            fx.min(wave + b * WAVES, DN_BLK - 1) * 128 + lane * 2,
-                                        )
-                                        for b in range(
-                                            mid_base,
-                                            min(mid_base + MID_BATCH, N_MID_BLOCKS),
-                                        )
-                                    ]
-                                )
-                                if const_expr(mid_base == 0):
-                                    stamp("down", t, 2)
-                                for b in range_constexpr(mid_base, min(mid_base + MID_BATCH, N_MID_BLOCKS)):
-                                    blk = wave + b * WAVES
-                                    if blk < DN_BLK:
-                                        if const_expr(expert_mxfp4):
-                                            if const_expr(native_fp4_mfma):
-                                                q0, q1, qs = quant_mxfp8(
-                                                    mids[b - mid_base][0],
-                                                    mids[b - mid_base][1],
-                                                )
-                                                st_mxfp8(blk * 128 + lane * 2, q0, q1)
-                                                if lane % 16 == 0:
-                                                    lds_st(
-                                                        misc,
-                                                        blk * 4 + lane // 16,
-                                                        qs.bitcast(fx.Float32),
-                                                    )
-                                            else:
-                                                lds_st(
-                                                    xs,
-                                                    blk * 64 + lane,
-                                                    bf16_pair(
-                                                        mids[b - mid_base][0],
-                                                        mids[b - mid_base][1],
-                                                    ),
-                                                )
-                                        else:
-                                            q0, q1, qs = quant_scaled(mids[b - mid_base][0], mids[b - mid_base][1])
-                                            st_f8(blk * 128 + lane * 2, q0, q1)
-                                            if lane == 0:
-                                                lds_st(
-                                                    misc,
-                                                    blk,
-                                                    qs * lds_ld(dnw, blk // (expert_inter // 128)),
-                                                )
-                    gpu.barrier()
-                    if const_expr(GROUPED_DN):
-                        if const_expr(S != 12):
+                        if const_expr(GROUPED_DN and S == 12):
+                            # keys/dnw are ready before mid payloads. Build in the disjoint red
+                            # arena now, so producer progress can overlap this scheduling work.
                             # Preserve the old contiguous sample partition of each row-group
                             # wave. Reorder only independent token columns, never one token's
                             # nonzero slot/K additions or its final wave-reduction position.
@@ -6405,143 +6965,321 @@ def build_glm5_monokernel(
                                                     dsg_address + 1,
                                                     fx.Int32(dsg_build_slot),
                                                 )
-                                                lds_st(
-                                                    dsg_dn_table,
-                                                    dsg_address + 2,
-                                                    dsg_mask,
-                                                )
+                                                lds_st(dsg_dn_table, dsg_address + 2, dsg_mask)
                                             dsg_count = dsg_count + 1
                                 if lane == 0:
                                     lds_st(dsg_dn_table, DN_COUNT_OFF + wave, dsg_count)
                             gpu.barrier()
-                        dsg_group_wave = wave % DN_WPR
-                        dsg_groups = _uniform(lds_ld(dsg_dn_table, DN_COUNT_OFF + dsg_group_wave))
-                        dsg_down_acc = fx.Vector.filled(4, 0.0, fx.Float32)
-                        DN_GROUP_BATCH = 2 if S == 12 else 1
-                        for dsg_batch_index in range((dsg_groups + DN_GROUP_BATCH - 1) // DN_GROUP_BATCH):
-                            dsg_units = []
-                            for dsg_part in range_constexpr(DN_GROUP_BATCH):
-                                group_index = dsg_batch_index
-                                if const_expr(DN_GROUP_BATCH > 1):
-                                    group_index = fx.min(
-                                        dsg_batch_index * DN_GROUP_BATCH + dsg_part,
-                                        dsg_groups - 1,
-                                    )
-                                dsg_address = (dsg_group_wave * DN_GROUP_MAX + group_index) * 3
-                                dsg_expert = _uniform(lds_ld(dsg_dn_table, dsg_address))
-                                dsg_route_slot = _uniform(lds_ld(dsg_dn_table, dsg_address + 1))
-                                dsg_token_mask = _uniform(lds_ld(dsg_dn_table, dsg_address + 2))
-                                if const_expr(DN_GROUP_BATCH > 1):
-                                    dsg_token_mask = (dsg_batch_index * DN_GROUP_BATCH + dsg_part < dsg_groups).select(
-                                        dsg_token_mask, fx.Int32(0)
-                                    )
-                                dsg_sn = n_sel()
-                                dsg_mid_row = dsg_sn * MOE_SLOTS + dsg_route_slot
-                                dsg_coefficient = (((dsg_token_mask >> dsg_sn) & 1) != 0).select(
-                                    lds_ld(dnw, dsg_mid_row), fx.Float32(0.0)
-                                )
-                                dsg_wb = _rsrc(w_dn + fx.Int64(dsg_expert) * fx.Int64(DN_W_BYTES))
-                                dsg_sb = _rsrc(s_dn + fx.Int64(dsg_expert) * fx.Int64(DN_S_BYTES))
-                                dsg_units.extend(
-                                    [
-                                        unit_native_mxfp4(
-                                            dsg_wb,
-                                            dsg_sb,
-                                            dn_rg + gu,
-                                            kc,
-                                            expert_inter,
-                                            dsg_mid_row * DN_X_ROW + kc * 32,
-                                            dsg_mid_row * DN_SCALE_ROW + kc * 4 + lane // 16,
-                                            dsg_coefficient,
-                                            dn_ln,
-                                        )
-                                        for kc in range(expert_inter // 128)
-                                    ]
-                                )
-                            dsg_down_acc = fx.Vector.from_elements(
-                                mma_units([dsg_down_acc[e] for e in range(4)], dsg_units),
-                                fx.Float32,
+                        if const_expr(S <= 4):
+                            pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]
+                        # Later output tasks read the same route, packed mid values,
+                        # and exponents. Their compute/reduction/TP bodies only read
+                        # xs/misc/keys/dnw, so keep those LDS inputs until down ends.
+                        if down_inputs_needed(t):
+                            hint_wait(
+                                N_UG,
+                                lambda k: (
+                                    mb("mid"),
+                                    (k // (MOE_SLOTS * I_PER_SLOT) * MOE_SLOTS + (k // I_PER_SLOT) % MOE_SLOTS)
+                                    * expert_inter
+                                    + (k % I_PER_SLOT) * UG_TILE
+                                    + UG_TILE
+                                    - 1,
+                                ),
+                                mark=("down", t),
                             )
-                        acc = [dsg_down_acc[e] for e in range(4)]
-                        # All waves must finish reading the schedule before reduce_rows
-                        # reuses red for per-wave accumulator stores.
-                        gpu.barrier()
-                    else:
-                        if const_expr(native_fp4_mfma and npes == 4 and S == 10 and expert_inter == 512):
-                            # Bound the unrolled body while preserving every wave's
-                            # slot/K order and two-batch software pipeline.
-                            DN_LOOP_UNITS = 10
-                            assert DN_UPW % DN_LOOP_UNITS == 0 and DN_LOOP_UNITS % DN_BATCH == 0
-                            dn_loop_acc = fx.Vector.filled(4, 0.0, fx.Float32)
-                            for dn_loop in range(DN_UPW // DN_LOOP_UNITS):
-                                dn_base = dn_loop * DN_LOOP_UNITS
-                                dn_cur = [u_dn(dn_base + cc) for cc in range(DN_BATCH)]
-                                for dn_begin in range_constexpr(0, DN_LOOP_UNITS, DN_BATCH):
-                                    dn_next = None
-                                    if const_expr(dn_begin + DN_BATCH < DN_LOOP_UNITS):
-                                        dn_next = [
-                                            u_dn(dn_base + cc)
-                                            for cc in range(
-                                                dn_begin + DN_BATCH,
-                                                dn_begin + 2 * DN_BATCH,
+                            if const_expr(GROUPED_UG):
+                                # Poll each tagged payload directly: no new global completion
+                                # flag or relaxed data-publication assumption is introduced.
+                                MID_PAIR_ROUNDS = (MIDQ_WORDS + 2 * THREADS - 1) // (2 * THREADS)
+                                for pack_base in range_constexpr(0, MID_PAIR_ROUNDS, 4):
+                                    packed = poll(
+                                        [
+                                            (
+                                                mb("ugp"),
+                                                fx.min((tid + j * THREADS) * 2, MIDQ_WORDS - 2),
+                                                2,
+                                            )
+                                            for j in range(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS))
+                                        ]
+                                    )
+                                    if const_expr(pack_base == 0):
+                                        stamp("down", t, 2)
+                                    for j in range_constexpr(pack_base, min(pack_base + 4, MID_PAIR_ROUNDS)):
+                                        word = (tid + j * THREADS) * 2
+                                        if word < MIDQ_WORDS:
+                                            target_word = word
+                                            if const_expr(GROUPED_DN):
+                                                target_word = (word // (expert_inter // 4)) * DN_X_ROW + word % (
+                                                    expert_inter // 4
+                                                )
+                                            lds_st(
+                                                xs,
+                                                target_word,
+                                                packed[j - pack_base][0].bitcast(fx.Float32),
+                                            )
+                                            lds_st(
+                                                xs,
+                                                target_word + 1,
+                                                packed[j - pack_base][1].bitcast(fx.Float32),
+                                            )
+                                for j in range_constexpr((MID_SCALE_WORDS + THREADS - 1) // THREADS):
+                                    index = tid + j * THREADS
+                                    mid_exponent = get(
+                                        mb("ugp"),
+                                        MIDQ_WORDS + fx.min(index, MID_SCALE_WORDS - 1),
+                                    )
+                                    if index < MID_SCALE_WORDS:
+                                        target_scale = index
+                                        if const_expr(GROUPED_DN):
+                                            target_scale = (index // (expert_inter // 32)) * DN_SCALE_ROW + index % (
+                                                expert_inter // 32
+                                            )
+                                        lds_st(misc, target_scale, mid_exponent.bitcast(fx.Float32))
+                            else:
+                                # TP4 with 12 rows has 54 wave-local groups. Quantize bounded batches
+                                # so the full set of mid values does not stay live in registers.
+                                N_MID_BLOCKS = (DN_BLK + WAVES - 1) // WAVES
+                                MID_BATCH = 8 if native_fp4_mfma and expert_inter > INTER and S == 12 else N_MID_BLOCKS
+                                for mid_base in range_constexpr(0, N_MID_BLOCKS, MID_BATCH):
+                                    mids = get2_many(
+                                        [
+                                            (
+                                                mb("mid"),
+                                                fx.min(wave + b * WAVES, DN_BLK - 1) * 128 + lane * 2,
+                                            )
+                                            for b in range(
+                                                mid_base,
+                                                min(mid_base + MID_BATCH, N_MID_BLOCKS),
                                             )
                                         ]
-                                    dn_loop_acc = fx.Vector.from_elements(
-                                        mma_units([dn_loop_acc[e] for e in range(4)], dn_cur),
-                                        fx.Float32,
                                     )
-                                    dn_cur = dn_next
-                            acc = [dn_loop_acc[e] for e in range(4)]
+                                    if const_expr(mid_base == 0):
+                                        stamp("down", t, 2)
+                                    for b in range_constexpr(mid_base, min(mid_base + MID_BATCH, N_MID_BLOCKS)):
+                                        blk = wave + b * WAVES
+                                        if blk < DN_BLK:
+                                            if const_expr(expert_mxfp4):
+                                                if const_expr(native_fp4_mfma):
+                                                    q0, q1, qs = quant_mxfp8(
+                                                        mids[b - mid_base][0],
+                                                        mids[b - mid_base][1],
+                                                    )
+                                                    st_mxfp8(blk * 128 + lane * 2, q0, q1)
+                                                    if lane % 16 == 0:
+                                                        lds_st(
+                                                            misc,
+                                                            blk * 4 + lane // 16,
+                                                            qs.bitcast(fx.Float32),
+                                                        )
+                                                else:
+                                                    lds_st(
+                                                        xs,
+                                                        blk * 64 + lane,
+                                                        bf16_pair(
+                                                            mids[b - mid_base][0],
+                                                            mids[b - mid_base][1],
+                                                        ),
+                                                    )
+                                            else:
+                                                q0, q1, qs = quant_scaled(mids[b - mid_base][0], mids[b - mid_base][1])
+                                                st_f8(blk * 128 + lane * 2, q0, q1)
+                                                if lane == 0:
+                                                    lds_st(
+                                                        misc,
+                                                        blk,
+                                                        qs * lds_ld(dnw, blk // (expert_inter // 128)),
+                                                    )
+                        gpu.barrier()
+                        if const_expr(GROUPED_DN):
+                            if const_expr(S != 12):
+                                # Preserve the old contiguous sample partition of each row-group
+                                # wave. Reorder only independent token columns, never one token's
+                                # nonzero slot/K additions or its final wave-reduction position.
+                                assert S % DN_WPR == 0
+                                DN_GROUP_SAMPLES = S // DN_WPR
+                                DN_GROUP_MAX = DN_GROUP_SAMPLES * MOE_SLOTS
+                                DN_COUNT_OFF = DN_WPR * DN_GROUP_MAX * 3
+                                assert DN_COUNT_OFF + DN_WPR <= RED_WORDS
+                                dsg_dn_table = fx.recast_iter(fx.Int32, red)
+                                dsg_count = fx.Int32(0)
+                                dsg_mask = fx.Int32(0)
+                                if wave < DN_WPR:
+                                    dsg_first_sample = wave * DN_GROUP_SAMPLES
+                                    for dsg_build_slot in range_constexpr(MOE_SLOTS):
+                                        dsg_experts = [
+                                            _uniform(
+                                                lds_ld(
+                                                    keys,
+                                                    (dsg_first_sample + j) * MOE_SLOTS + dsg_build_slot,
+                                                )
+                                            )
+                                            for j in range(DN_GROUP_SAMPLES)
+                                        ]
+                                        for j in range_constexpr(DN_GROUP_SAMPLES):
+                                            dsg_distinct = fx.Int32(1) == 1
+                                            for dsg_previous in range_constexpr(j):
+                                                dsg_distinct = dsg_distinct & (
+                                                    dsg_experts[j] != dsg_experts[dsg_previous]
+                                                )
+                                            if dsg_distinct:
+                                                dsg_mask = fx.Int32(0)
+                                                for dsg_member in range_constexpr(DN_GROUP_SAMPLES):
+                                                    dsg_mask = dsg_mask | (
+                                                        dsg_experts[j] == dsg_experts[dsg_member]
+                                                    ).select(
+                                                        fx.Int32(1) << (dsg_first_sample + dsg_member),
+                                                        fx.Int32(0),
+                                                    )
+                                                if lane == 0:
+                                                    dsg_address = (wave * DN_GROUP_MAX + dsg_count) * 3
+                                                    lds_st(
+                                                        dsg_dn_table,
+                                                        dsg_address,
+                                                        dsg_experts[j],
+                                                    )
+                                                    lds_st(
+                                                        dsg_dn_table,
+                                                        dsg_address + 1,
+                                                        fx.Int32(dsg_build_slot),
+                                                    )
+                                                    lds_st(
+                                                        dsg_dn_table,
+                                                        dsg_address + 2,
+                                                        dsg_mask,
+                                                    )
+                                                dsg_count = dsg_count + 1
+                                    if lane == 0:
+                                        lds_st(dsg_dn_table, DN_COUNT_OFF + wave, dsg_count)
+                                gpu.barrier()
+                            dsg_group_wave = wave % DN_WPR
+                            dsg_groups = _uniform(lds_ld(dsg_dn_table, DN_COUNT_OFF + dsg_group_wave))
+                            dsg_down_acc = fx.Vector.filled(4, 0.0, fx.Float32)
+                            DN_GROUP_BATCH = 2 if S == 12 else 1
+                            for dsg_batch_index in range((dsg_groups + DN_GROUP_BATCH - 1) // DN_GROUP_BATCH):
+                                dsg_units = []
+                                for dsg_part in range_constexpr(DN_GROUP_BATCH):
+                                    group_index = dsg_batch_index
+                                    if const_expr(DN_GROUP_BATCH > 1):
+                                        group_index = fx.min(
+                                            dsg_batch_index * DN_GROUP_BATCH + dsg_part,
+                                            dsg_groups - 1,
+                                        )
+                                    dsg_address = (dsg_group_wave * DN_GROUP_MAX + group_index) * 3
+                                    dsg_expert = _uniform(lds_ld(dsg_dn_table, dsg_address))
+                                    dsg_route_slot = _uniform(lds_ld(dsg_dn_table, dsg_address + 1))
+                                    dsg_token_mask = _uniform(lds_ld(dsg_dn_table, dsg_address + 2))
+                                    if const_expr(DN_GROUP_BATCH > 1):
+                                        dsg_token_mask = (
+                                            dsg_batch_index * DN_GROUP_BATCH + dsg_part < dsg_groups
+                                        ).select(dsg_token_mask, fx.Int32(0))
+                                    dsg_sn = n_sel()
+                                    dsg_mid_row = dsg_sn * MOE_SLOTS + dsg_route_slot
+                                    dsg_coefficient = (((dsg_token_mask >> dsg_sn) & 1) != 0).select(
+                                        lds_ld(dnw, dsg_mid_row), fx.Float32(0.0)
+                                    )
+                                    dsg_wb = _rsrc(w_dn + fx.Int64(dsg_expert) * fx.Int64(DN_W_BYTES))
+                                    dsg_sb = _rsrc(s_dn + fx.Int64(dsg_expert) * fx.Int64(DN_S_BYTES))
+                                    dsg_units.extend(
+                                        [
+                                            unit_native_mxfp4(
+                                                dsg_wb,
+                                                dsg_sb,
+                                                dn_rg + gu,
+                                                kc,
+                                                expert_inter,
+                                                dsg_mid_row * DN_X_ROW + kc * 32,
+                                                dsg_mid_row * DN_SCALE_ROW + kc * 4 + lane // 16,
+                                                dsg_coefficient,
+                                                dn_ln,
+                                            )
+                                            for kc in range(expert_inter // 128)
+                                        ]
+                                    )
+                                dsg_down_acc = fx.Vector.from_elements(
+                                    mma_units([dsg_down_acc[e] for e in range(4)], dsg_units),
+                                    fx.Float32,
+                                )
+                            acc = [dsg_down_acc[e] for e in range(4)]
+                            # All waves must finish reading the schedule before reduce_rows
+                            # reuses red for per-wave accumulator stores.
+                            gpu.barrier()
                         else:
-                            if const_expr(S > 4):
-                                pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]
-                            acc = run_units(u_dn, DN_UPW, DN_BATCH, pre)
+                            if const_expr(native_fp4_mfma and npes == 4 and S == 10 and expert_inter == 512):
+                                # Bound the unrolled body while preserving every wave's
+                                # slot/K order and two-batch software pipeline.
+                                DN_LOOP_UNITS = 10
+                                assert DN_UPW % DN_LOOP_UNITS == 0 and DN_LOOP_UNITS % DN_BATCH == 0
+                                dn_loop_acc = fx.Vector.filled(4, 0.0, fx.Float32)
+                                for dn_loop in range(DN_UPW // DN_LOOP_UNITS):
+                                    dn_base = dn_loop * DN_LOOP_UNITS
+                                    dn_cur = [u_dn(dn_base + cc) for cc in range(DN_BATCH)]
+                                    for dn_begin in range_constexpr(0, DN_LOOP_UNITS, DN_BATCH):
+                                        dn_next = None
+                                        if const_expr(dn_begin + DN_BATCH < DN_LOOP_UNITS):
+                                            dn_next = [
+                                                u_dn(dn_base + cc)
+                                                for cc in range(
+                                                    dn_begin + DN_BATCH,
+                                                    dn_begin + 2 * DN_BATCH,
+                                                )
+                                            ]
+                                        dn_loop_acc = fx.Vector.from_elements(
+                                            mma_units([dn_loop_acc[e] for e in range(4)], dn_cur),
+                                            fx.Float32,
+                                        )
+                                        dn_cur = dn_next
+                                acc = [dn_loop_acc[e] for e in range(4)]
+                            else:
+                                if const_expr(S > 4):
+                                    pre = [u_dn(cc) for cc in range(min(DN_BATCH, DN_UPW))]
+                                acc = run_units(u_dn, DN_UPW, DN_BATCH, pre)
 
-                    def emit_dn(rl, n, v):
-                        if (rl >= dn_off) & (rl < dn_off + DN_TILE):
-                            lds_st(outs, n * DN_TILE + rl - dn_off, v)
+                        def emit_dn(rl, n, v):
+                            if (rl >= dn_off) & (rl < dn_off + DN_TILE):
+                                lds_st(outs, n * DN_TILE + rl - dn_off, v)
 
-                    reduce_rows(DN_R, acc, emit_dn)
-                stamp("down", t, 3)
-                gpu.barrier()
+                        reduce_rows(DN_R, acc, emit_dn)
+                    stamp("down", t, 3)
+                    gpu.barrier()
 
-                def store_x(s, row, v0, v1):
-                    bo.buffer_store(
-                        fx.Vector.from_elements([v0, v1], fx.Float32).to(fx.BFloat16),
-                        _rsrc(x_out),
-                        s * HIDDEN + row,
-                    )
+                    def store_x(s, row, v0, v1):
+                        bo.buffer_store(
+                            fx.Vector.from_elements([v0, v1], fx.Float32).to(fx.BFloat16),
+                            _rsrc(x_out),
+                            s * HIDDEN + row,
+                        )
 
-                def residual_a(s, row):
-                    return bf2_f32(get(mb("a"), (s * HIDDEN + row) // 2))
+                    def residual_a(s, row):
+                        return bf2_f32(get(mb("a"), (s * HIDDEN + row) // 2))
 
-                if const_expr(
-                    native_fp4_mfma
-                    and atom_experts
-                    and npes == 4
-                    and S == 12
-                    and expert_inter == 512
-                    and not with_indexer
-                    and not indexer_cp
-                    and dcp_size == 1
-                ):
-                    if const_expr(DN_SPLIT_UNION_TAIL):
-                        if t >= DN_FULL_TASKS:
-                            ffn_owner_reduce(t + DN_FULL_TASKS, residual_a, store_x, tile=16)
+                    if const_expr(
+                        native_fp4_mfma
+                        and atom_experts
+                        and npes == 4
+                        and S == 12
+                        and expert_inter == 512
+                        and not with_indexer
+                        and not indexer_cp
+                        and dcp_size == 1
+                    ):
+                        if const_expr(DN_SPLIT_UNION_TAIL):
+                            if t >= DN_FULL_TASKS:
+                                ffn_owner_reduce(t + DN_FULL_TASKS, residual_a, store_x, tile=16)
+                            else:
+                                ffn_owner_reduce(t, residual_a, store_x)
                         else:
                             ffn_owner_reduce(t, residual_a, store_x)
                     else:
-                        ffn_owner_reduce(t, residual_a, store_x)
-                else:
-                    if const_expr(DN_SPLIT_UNION_TAIL):
-                        if t >= DN_FULL_TASKS:
-                            peer_reduce("ffn", t + DN_FULL_TASKS, residual_a, store_x, tile=16)
+                        if const_expr(DN_SPLIT_UNION_TAIL):
+                            if t >= DN_FULL_TASKS:
+                                peer_reduce("ffn", t + DN_FULL_TASKS, residual_a, store_x, tile=16)
+                            else:
+                                peer_reduce("ffn", t, residual_a, store_x, tile=DN_TILE)
                         else:
                             peer_reduce("ffn", t, residual_a, store_x, tile=DN_TILE)
-                    else:
-                        peer_reduce("ffn", t, residual_a, store_x, tile=DN_TILE)
-                gpu.barrier()
-                stamp("down", t, 4)
+                    gpu.barrier()
+                    stamp("down", t, 4)
 
             if const_expr(DEFER_OFF_CACHE):
                 if const_expr(not CACHE_READERS_JOINED):
@@ -6573,14 +7311,38 @@ def build_glm5_monokernel(
                     commit_owner = (commit_slot >= 0) & (overwritten_mask == 0)
                     if commit_owner:
                         committed_kv = getf(mb("kvnew"), bid * KV_LORA + tid)
-                        bo.buffer_store(committed_kv.to(fx.BFloat16), _rsrc(kv_cache), commit_slot * QK_DIM + tid)
+                        if const_expr(cache_fp8):
+                            kv_pair8 = fx.Int32(
+                                rocdl.cvt_pk_fp8_f32(T.i32, committed_kv, _xshfl(committed_kv, 1), fx.Int32(0), False)
+                            ) & fx.Int32(0xFFFF)
+                            kv_upper8 = bpermute_i32(fp8_kv_upper_pair_lane(lane) * 4, kv_pair8)
+                            if lane % 4 == 0:
+                                bo.buffer_store(
+                                    kv_pair8 | (kv_upper8 << 16),
+                                    _rsrc(kv_cache),
+                                    commit_slot * (QK_DIM // 4) + tid // 4,
+                                )
+                        else:
+                            bo.buffer_store(committed_kv.to(fx.BFloat16), _rsrc(kv_cache), commit_slot * QK_DIM + tid)
                         if tid < PE_DIM // 2:
                             committed_pe0, committed_pe1 = get2(mb("penew"), bid * PE_DIM + tid * 2)
-                            bo.buffer_store(
-                                fx.Vector.from_elements([committed_pe0, committed_pe1], fx.Float32).to(fx.BFloat16),
-                                _rsrc(pe_cache),
-                                commit_slot * QK_DIM + KV_LORA + tid * 2,
-                            )
+                            if const_expr(cache_fp8):
+                                pe_pair8 = fx.Int32(
+                                    rocdl.cvt_pk_fp8_f32(T.i32, committed_pe0, committed_pe1, fx.Int32(0), False)
+                                ) & fx.Int32(0xFFFF)
+                                pe_upper8 = bpermute_i32(fp8_pe_upper_pair_lane(lane) * 4, pe_pair8)
+                                if lane % 2 == 0:
+                                    bo.buffer_store(
+                                        pe_pair8 | (pe_upper8 << 16),
+                                        _rsrc(pe_cache),
+                                        commit_slot * (QK_DIM // 4) + KV_LORA // 4 + tid // 2,
+                                    )
+                            else:
+                                bo.buffer_store(
+                                    fx.Vector.from_elements([committed_pe0, committed_pe1], fx.Float32).to(fx.BFloat16),
+                                    _rsrc(pe_cache),
+                                    commit_slot * QK_DIM + KV_LORA + tid * 2,
+                                )
 
             if const_expr(ROW_TILES > 1 and not COHORT_ROW_TILES):
                 if row_tile + 1 < ROW_TILES:
