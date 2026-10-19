@@ -298,6 +298,13 @@ class RuntimeEnvManager(EnvManager):
         False,
         description=("Skip JIT compilation; only load AOT cache. " "Raise RuntimeError on cache miss."),
     )
+    llc_cache_mb = OptInt(
+        0,
+        min_value=0,
+        description=(
+            "Override the detected last-level (Infinity) cache size in MiB; " "0 defers to KFD topology sysfs detection"
+        ),
+    )
 
 
 class KtraceEnvManager(EnvManager):
