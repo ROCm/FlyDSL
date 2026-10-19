@@ -572,16 +572,14 @@ def build_glm5_monokernel(
                         a = _mxfp4_to_bf16x8(raw[sp], scales[sp])
                         if const_expr(fmt == "mxfp4"):
                             wh, ws = sp // 2, sp % 2
-                            bv = fx.Vector(fx.ptr_load(xs + (bw + wh * 16), result_type=v4f)).bitcast(fx.Int32)
+                            bv = fx.ptr_load(xs + (bw + wh * 16), result_type=v4f).bitcast(fx.Int32)
                             b = _fp8_to_bf16x8(bv[ws * 2], bv[ws * 2 + 1])
                         else:
                             b = fx.ptr_load(xs + (bw + sp * 16), result_type=v4f).bitcast(fx.BFloat16)
                         c = fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
                 if const_expr(fmt == "f8f8"):  # one FP8 x FP8 MFMA (E8M0 scales = 1)
                     a = fx.Vector.from_elements([wv[h][e] for h in range(2) for e in range(4)], fx.Int32)
-                    bv = [
-                        fx.Vector(fx.ptr_load(xs + (bw + h * 16), result_type=v4f)).bitcast(fx.Int32) for h in range(2)
-                    ]
+                    bv = [fx.ptr_load(xs + (bw + h * 16), result_type=v4f).bitcast(fx.Int32) for h in range(2)]
                     b = fx.Vector.from_elements([bv[h][e] for h in range(2) for e in range(4)], fx.Int32)
                     one = fx.Int32(127)
                     c = fx.Vector(
@@ -1860,13 +1858,11 @@ def build_glm5_monokernel(
                 r_wug = _rsrc(w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES))
                 r_sug = _rsrc(s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES))
             else:
-                r_wug = bo.create_buffer_resource_from_addr(
-                    w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES),
-                    num_records_bytes=live.select(fx.Int32(UG_W_BYTES), fx.Int32(0)),
+                r_wug = _rsrc(
+                    w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES), nbytes=live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                 )
-                r_sug = bo.create_buffer_resource_from_addr(
-                    s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES),
-                    num_records_bytes=live.select(fx.Int32(UG_S_BYTES), fx.Int32(0)),
+                r_sug = _rsrc(
+                    s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES), nbytes=live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
                 )
             gate_up = wave // (WAVES // 2)  # waves 0-3: gate rows, 4-7: up rows
 
@@ -1939,12 +1935,8 @@ def build_glm5_monokernel(
                 def u_ug8(cc, e, live=None):  # expert e's weights (loads return 0 unless live)
                     nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                     ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
-                    r_wug = bo.create_buffer_resource_from_addr(
-                        w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), num_records_bytes=nw
-                    )
-                    r_sug = bo.create_buffer_resource_from_addr(
-                        s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), num_records_bytes=ns
-                    )
+                    r_wug = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nbytes=nw)
+                    r_sug = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), nbytes=ns)
                     unit = wave * (UG8_CPW // 2) + cc
                     kc = unit * 2
                     if const_expr(expert_mxfp4):
@@ -2050,13 +2042,11 @@ def build_glm5_monokernel(
                     rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES))
                     rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES))
                 else:
-                    rw = bo.create_buffer_resource_from_addr(
-                        w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES),
-                        num_records_bytes=live.select(fx.Int32(UG_W_BYTES), fx.Int32(0)),
+                    rw = _rsrc(
+                        w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nbytes=live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                     )
-                    rs = bo.create_buffer_resource_from_addr(
-                        s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES),
-                        num_records_bytes=live.select(fx.Int32(UG_S_BYTES), fx.Int32(0)),
+                    rs = _rsrc(
+                        s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), nbytes=live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
                     )
                 sn = n_sel() if sample is None else fx.Int32(sample)
                 units = []
@@ -2166,9 +2156,7 @@ def build_glm5_monokernel(
                 else:
                     kbs = [wq * (UG_CPW // 2) + cc for cc in range(UG_CPW // 2)]
                     nrec = fx.Int32(UG_W_BYTES)
-                r_w = bo.create_buffer_resource_from_addr(
-                    w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES), num_records_bytes=nrec
-                )
+                r_w = _rsrc(w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES), nbytes=nrec)
                 r_s = _rsrc(s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES))
 
                 def mk(kb):
@@ -2318,13 +2306,13 @@ def build_glm5_monokernel(
                 slot_q = (q // DN_NKC) % MOE_SLOTS
                 kc = q % DN_NKC
                 e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
-                wb = bo.create_buffer_resource_from_addr(
+                wb = _rsrc(
                     w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
-                    num_records_bytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
+                    nbytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
                 )
-                sb = bo.create_buffer_resource_from_addr(
+                sb = _rsrc(
                     s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
-                    num_records_bytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
+                    nbytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
                 )
 
                 def coef():  # mid block scale * route weight, only in this sample's column

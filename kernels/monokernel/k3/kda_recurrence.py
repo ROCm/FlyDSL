@@ -264,27 +264,21 @@ def build_kimi_k3_kda_recurrence(
             for k_iter in range_constexpr(_K_ITERS):
                 k_base = k_lane * _VALUES_PER_THREAD + k_iter * _K_TILE
                 if const_expr(fuse_conv):
-                    q_vec = fx.Vector(
-                        fx.ptr_load(
-                            shared_query + k_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
+                    q_vec = fx.ptr_load(
+                        shared_query + k_base,
+                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                     ).to(fx.Float32)
-                    k_vec = fx.Vector(
-                        fx.ptr_load(
-                            shared_key + k_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
+                    k_vec = fx.ptr_load(
+                        shared_key + k_base,
+                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                     ).to(fx.Float32)
                 else:
                     q_vec = _load_bf16x4(query_rsrc, vector_base + k_base)
                     k_vec = _load_bf16x4(key_rsrc, vector_base + k_base)
                 if const_expr(fuse_gate_projection):
-                    gate_vec = fx.Vector(
-                        fx.ptr_load(
-                            shared_gate + k_base,
-                            result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
-                        )
+                    gate_vec = fx.ptr_load(
+                        shared_gate + k_base,
+                        result_type=fx.Vector.make_type(_VALUES_PER_THREAD, fx.BFloat16),
                     ).to(fx.Float32)
                 else:
                     gate_vec = _load_bf16x4(gate_rsrc, vector_base + k_base)
