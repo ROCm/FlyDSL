@@ -82,6 +82,7 @@ from kernels.monokernel.layout import (
     layout,
     stage_tasks,
 )
+from kernels.monokernel.ops import bpermute_i32, mem_realtime, write_lane_i32
 from kernels.monokernel.ops import (
     exp as _exp,
 )
@@ -94,7 +95,6 @@ from kernels.monokernel.ops import (
 from kernels.monokernel.ops import (
     fp8_to_bf16x8 as _fp8_to_bf16x8,
 )
-from kernels.monokernel.ops import mem_realtime, write_lane_i32
 from kernels.monokernel.ops import (
     mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
 )
@@ -902,7 +902,7 @@ def build_kimi_k3_mla_attention(
                 mv = write_lane_i32(m, k, mv)
             e = 255 - (mv & 255)
             src = (e % 64) * 4
-            got = [fx.Int32(rocdl.ds_bpermute(T.i32, src.ir_value(), r.bitcast(fx.Int32).ir_value())) for r in raws]
+            got = [bpermute_i32(src, r.bitcast(fx.Int32)) for r in raws]
             raw = got[0]
             for i in range_constexpr(1, N_EXPERTS // 64):
                 raw = (e // 64 == i).select(got[i], raw)
@@ -1780,8 +1780,8 @@ def build_kimi_k3_mla_attention(
                 def u_ug8(cc, e, live=None):  # expert e's weights (loads return 0 unless live)
                     nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                     ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
-                    r_wug = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nbytes=nw)
-                    r_sug = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), nbytes=ns)
+                    r_wug = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nw)
+                    r_sug = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), ns)
                     unit = wave * UG8_UNITS + cc
                     if const_expr(use_mxfp4_weight):
                         coefficients = None
@@ -1904,8 +1904,8 @@ def build_kimi_k3_mla_attention(
             def ug8_units(e, sample, live=None):
                 nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                 ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
-                rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nbytes=nw)
-                rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), nbytes=ns)
+                rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nw)
+                rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), ns)
                 sn = n_sel() if sample is None else fx.Int32(sample)
                 units = []
                 for cc in range_constexpr(UG8_UNITS):
@@ -2029,11 +2029,11 @@ def build_kimi_k3_mla_attention(
                 e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
                 wb = _rsrc(
                     w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
-                    nbytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
+                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
                 )
                 sb = _rsrc(
                     s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
-                    nbytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
+                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
                 )
 
                 if const_expr(use_mxfp4_weight):

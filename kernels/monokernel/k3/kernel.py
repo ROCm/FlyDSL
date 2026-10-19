@@ -1271,7 +1271,7 @@ def build_kimi_k3_monokernel(
                             x + (sample * _HIDDEN + k_base + k64_half * 64) // 4,
                             result_type=fx.Vector.make_type(4, fx.Float32),
                         ).bitcast(fx.Int32)
-                        activation_halves.append(valid_sample.select(loaded, fx.Vector.filled(4, 0, fx.Int32)))
+                        activation_halves.append(valid_sample.select(loaded, 0))
                     activation_fragment = fx.make_rmem_tensor(8, fx.Int32)
                     activation_fragment.store(activation_halves[0].shuffle(activation_halves[1], list(range(8))))
                     weight_halves = []

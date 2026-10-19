@@ -1859,10 +1859,10 @@ def build_glm5_monokernel(
                 r_sug = _rsrc(s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES))
             else:
                 r_wug = _rsrc(
-                    w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES), nbytes=live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
+                    w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES), live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                 )
                 r_sug = _rsrc(
-                    s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES), nbytes=live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
+                    s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES), live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
                 )
             gate_up = wave // (WAVES // 2)  # waves 0-3: gate rows, 4-7: up rows
 
@@ -1935,8 +1935,8 @@ def build_glm5_monokernel(
                 def u_ug8(cc, e, live=None):  # expert e's weights (loads return 0 unless live)
                     nw = None if live is None else live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                     ns = None if live is None else live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
-                    r_wug = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nbytes=nw)
-                    r_sug = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), nbytes=ns)
+                    r_wug = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nw)
+                    r_sug = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), ns)
                     unit = wave * (UG8_CPW // 2) + cc
                     kc = unit * 2
                     if const_expr(expert_mxfp4):
@@ -2043,10 +2043,10 @@ def build_glm5_monokernel(
                     rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES))
                 else:
                     rw = _rsrc(
-                        w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), nbytes=live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
+                        w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES), live.select(fx.Int32(UG_W_BYTES), fx.Int32(0))
                     )
                     rs = _rsrc(
-                        s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), nbytes=live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
+                        s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES), live.select(fx.Int32(UG_S_BYTES), fx.Int32(0))
                     )
                 sn = n_sel() if sample is None else fx.Int32(sample)
                 units = []
@@ -2156,7 +2156,7 @@ def build_glm5_monokernel(
                 else:
                     kbs = [wq * (UG_CPW // 2) + cc for cc in range(UG_CPW // 2)]
                     nrec = fx.Int32(UG_W_BYTES)
-                r_w = _rsrc(w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES), nbytes=nrec)
+                r_w = _rsrc(w_ug + fx.Int64(e_sel) * fx.Int64(UG_W_BYTES), nrec)
                 r_s = _rsrc(s_ug + fx.Int64(e_sel) * fx.Int64(UG_S_BYTES))
 
                 def mk(kb):
@@ -2308,11 +2308,11 @@ def build_glm5_monokernel(
                 e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
                 wb = _rsrc(
                     w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
-                    nbytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
+                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_W_BYTES), fx.Int32(0)),
                 )
                 sb = _rsrc(
                     s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
-                    nbytes=None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
+                    None if DN_NU % DN_WPR == 0 else live.select(fx.Int32(DN_S_BYTES), fx.Int32(0)),
                 )
 
                 def coef():  # mid block scale * route weight, only in this sample's column
