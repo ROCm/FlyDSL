@@ -541,7 +541,10 @@ FailureOr<Geometry> derive(const Request &request, function_ref<InFlightDiagnost
       continue;
     if (modeStride[i].isStatic && modeStride[i].value == 0)
       continue;
-    dims.push_back({1, {i}, modeStride[i]});
+    if (i == contiguousMode)
+      dims.insert(dims.begin(), {1, {i}, modeStride[i]});
+    else
+      dims.push_back({1, {i}, modeStride[i]});
   }
 
   // The lowering hardwires descriptor dim 0's stride to 1, so dim 0 must be the contiguous
